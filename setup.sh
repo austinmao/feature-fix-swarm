@@ -37,7 +37,7 @@ done
 
 # Copy scripts
 echo "Installing scripts..."
-for script in qa-swarm.sh feature-fix-swarm-retry.sh; do
+for script in qa-swarm.sh ralph-retry.sh; do
   mkdir -p scripts
   cp "$SCRIPT_DIR/scripts/$script" "scripts/$script"
   chmod +x "scripts/$script"
