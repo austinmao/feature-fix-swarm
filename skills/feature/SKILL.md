@@ -1,7 +1,7 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → feature-implement (ruflo) → qa → ship → canary. One command, 2 gates."
-version: "1.0.0"
+description: "End-to-end pipeline: autoplan → spec-decompose → feature-implement (ruflo) → qa → ship → canary. Non-interactive by default. Use --interactive to restore gates."
+version: "1.1.0"
 allowed-tools:
   - Read
   - Edit
@@ -13,7 +13,7 @@ allowed-tools:
 
 # /feature — End-to-end feature pipeline
 
-One command. Runs everything from plan review through production. Only stops for 2 user approvals and any failure.
+One command. Runs everything from plan review through production. Non-interactive by default — auto-approves autoplan premise and all taste decisions. Use `--interactive` to restore manual gates.
 
 ## When to invoke
 
@@ -27,17 +27,27 @@ One command. Runs everything from plan review through production. Only stops for
 - `specs/NNN-feature-name/plan.md` exists and is ready for review
 - `specs/NNN-feature-name/spec.md` is optional — `/spec-decompose` handles missing spec.md
 - `/office-hours` may have been run (not required, but design doc improves autoplan quality)
-- Ruflo pretrain ideally completed once: `npx claude-flow@v3alpha hooks pretrain`
+- **Ruflo MCP must be available.** Pretrain once: `npx claude-flow@v3alpha hooks pretrain`. The pipeline hard-fails if `mcp__ruflo__*` tools are not reachable.
 
 ## Invocation
 
 ```
-/feature [NNN]              # full pipeline, ruflo-backed implementation (default)
+/feature [NNN]              # DEFAULT: --auto mode, ruflo-backed, fully non-interactive
+                            #   - autoplan premise gate: auto-approved
+                            #   - autoplan taste decisions: auto-approved (recommended option)
+                            #   - tasks.md approval: auto-approved
+                            #   - prod promotion gate: STILL ASKS (irreversible action)
+/feature [NNN] --interactive   # ESCAPE HATCH: restore legacy gate behavior
+                               #   - autoplan premise gate: prompts user
+                               #   - autoplan taste decisions: prompts user
+                               #   - tasks.md approval: prompts user
+                               #   - prod promotion gate: prompts user (same as --auto)
 /feature [NNN] --resume     # resume after failure (picks up at last incomplete step)
-/feature [NNN] --no-ruflo   # use native Agent tool for implementation instead
 /feature [NNN] --no-canary  # stop after /ship (skip production canary)
 /feature [NNN] --dry-run    # print the pipeline plan, don't execute
 ```
+
+**Removed in v1.1.0:** `--no-ruflo` flag. Ruflo is now mandatory (no silent fallback to native Agent). If ruflo MCP is unavailable, the pipeline hard-fails with a structured error directing the user to fix the MCP connection. To debug ruflo issues, set `RUFLO_REQUIRED=0` in env (escape hatch — falls back to native, logs WARNING).
 
 ## The pipeline
 
@@ -74,7 +84,9 @@ One command. Runs everything from plan review through production. Only stops for
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Total gates: 2** (tasks.md approval, prod promotion). Everything else auto-runs or auto-fails.
+**Total gates (default --auto):** 1 — prod promotion only (irreversible).
+**Total gates (--interactive):** 4 — autoplan premise, autoplan taste decisions, tasks.md approval, prod promotion.
+Everything else auto-runs or auto-fails.
 
 ## Step-by-step workflow
 
@@ -83,21 +95,38 @@ One command. Runs everything from plan review through production. Only stops for
 ```bash
 SPEC_ARG="${ARGUMENTS:-}"
 RESUME=0
-NO_RUFLO=0
 NO_CANARY=0
 DRY_RUN=0
+# v1.1.0: --auto is default. --interactive opts back into manual gates.
+INTERACTIVE=0
+# v1.1.0: ruflo is mandatory by default. RUFLO_REQUIRED=0 env override allows
+# native fallback for debugging only (logs WARNING).
+RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"
 
 # BUG-1 fix (2026-04-16): word-split $SPEC_ARG explicitly via `read -ra`.
 read -ra _SPEC_ARGS <<< "$SPEC_ARG"
 for arg in "${_SPEC_ARGS[@]}"; do
   case "$arg" in
-    --resume)    RESUME=1 ;;
-    --no-ruflo)  NO_RUFLO=1 ;;
-    --no-canary) NO_CANARY=1 ;;
-    --dry-run)   DRY_RUN=1 ;;
+    --resume)      RESUME=1 ;;
+    --auto)        INTERACTIVE=0 ;;   # explicit --auto (already default)
+    --interactive) INTERACTIVE=1 ;;
+    --no-canary)   NO_CANARY=1 ;;
+    --dry-run)     DRY_RUN=1 ;;
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
 done
+
+# Ruflo availability check (hard-required unless RUFLO_REQUIRED=0)
+if [ "$RUFLO_REQUIRED" = "1" ]; then
+  if ! command -v npx >/dev/null 2>&1; then
+    echo "ERROR: npx not found. Ruflo (claude-flow) requires Node.js."
+    echo "Install Node 20+ then run: npx claude-flow@v3alpha hooks pretrain"
+    echo "To bypass (debugging only): export RUFLO_REQUIRED=0"
+    exit 1
+  fi
+  # The actual mcp__ruflo__* availability is verified inside /feature-implement
+  # before any agent spawn. This block only catches the obvious "node missing" case.
+fi
 
 [ -z "${SPEC_ID:-}" ] && SPEC_ID=$(git branch --show-current 2>/dev/null | grep -oE '^[0-9]{3}')
 [ -z "$SPEC_ID" ] && { echo "ERROR: no spec ID"; exit 1; }
@@ -125,6 +154,24 @@ If resuming and autoplan logged `status: approved`, skip.
 
 Otherwise invoke the `autoplan` skill via the Skill tool, pointing at `$SPEC_DIR/plan.md`. Autoplan has its own gates (premise confirmation, user challenges, taste decisions).
 
+**Auto-approve harness (when `INTERACTIVE=0`, the default):**
+
+Before invoking autoplan, set the harness intent for this skill session:
+
+> When the autoplan skill presents AskUserQuestion gates during this `/feature` session, you (the assistant) MUST auto-respond as follows — DO NOT pass the question to the human user:
+>
+> 1. **Phase 1 premise confirmation gate** → auto-select option `A` ("Premise correct as stated") or whichever option matches "premise stands / proceed without changes". Log the decision to `$RUN_LOG` with `auto_decision: "premise_accepted"`.
+> 2. **User Challenges gate** (when both models disagree with user direction) → auto-select the recommended option (autoplan always prints `RECOMMENDATION: Choose X`). Log with `auto_decision: "user_challenge_accepted_recommendation"`.
+> 3. **Final approval gate** (taste decisions + cross-phase themes) → auto-select option `A` ("Approve plan as-is, proceed to /spec-decompose") or the equivalent approve-and-proceed option. Log with `auto_decision: "final_gate_auto_approved"`.
+>
+> Never block on autoplan AskUserQuestion. If autoplan presents an option set with no clear recommended option (rare — would be a bug in autoplan), default to option `A` and log `auto_decision: "fallback_option_A"` with a WARNING.
+>
+> Treat `RECOMMENDATION:` as the source of truth: gstack autoplan ships its 6 decision principles inside the recommendation reasoning. Auto-accepting it is the design intent of `--auto` mode — the harness is making the same call you'd make if you read the recommendation rationale and agreed.
+
+**Interactive mode (when `INTERACTIVE=1`):**
+
+Pass autoplan's gates through to the user untouched. This is the legacy v1.0.0 behavior — preserved as escape hatch for high-stakes plans where the user wants to inspect every taste decision.
+
 On APPROVED: log and continue. On REJECTED/aborted: stop, user revises plan.md, reruns `/feature NNN --resume`.
 
 Log:
@@ -136,7 +183,21 @@ Log:
 
 Invoke the `spec-decompose` skill with argument `$SPEC_ID`.
 
-After tasks.md is written, AskUserQuestion:
+**Auto mode (`INTERACTIVE=0`, default):** After tasks.md is written, run validation only — no AskUserQuestion. Validation checks:
+
+- All tasks have `[model:]` annotations (else WARN, continue)
+- All tasks have `Depends-on:` lines (else WARN, continue)
+- Task count is 5-60 (else ERROR, abort — out-of-bounds decomposition)
+- Staging + production phases present (else WARN, continue)
+
+Log auto-approval to `$RUN_LOG`:
+```json
+{"timestamp":"<ISO>","spec":"<NNN>","step":"spec-decompose","status":"auto_approved","task_count":<n>,"phase_count":<n>,"warnings":[<list>],"duration_s":<n>}
+```
+
+If task count is out of bounds: stop with structured error, instruct user to either regenerate (`--resume` after deleting tasks.md) or hand-edit before re-resuming.
+
+**Interactive mode (`INTERACTIVE=1`):** Use AskUserQuestion:
 
 > "/spec-decompose produced {N} tasks across {M} phases for spec {SPEC_ID}. Please spot-check `tasks.md` before implementation begins."
 >
@@ -156,12 +217,13 @@ Log:
 
 ### Step 4: /feature-implement
 
-Default: ruflo backend. Invoke the `feature-implement` skill:
+Ruflo backend is mandatory (v1.1.0). Invoke the `feature-implement` skill:
 
 ```
-/feature-implement $SPEC_ID --ruflo     # if NO_RUFLO=0 (default)
-/feature-implement $SPEC_ID             # if NO_RUFLO=1
+/feature-implement $SPEC_ID --ruflo     # always — ruflo is the only supported executor
 ```
+
+`/feature-implement` itself reads `$RUFLO_REQUIRED` from env. If ruflo MCP is unreachable AND `RUFLO_REQUIRED=1`, that skill hard-fails with a structured error. Do not attempt native fallback at this layer — it is the responsibility of `/feature-implement`.
 
 This runs ALL tasks end-to-end (the skill defaults to --all now). On any `[F]`:
 - Stop immediately
@@ -257,8 +319,9 @@ On `/feature NNN --resume`:
 
 | Step fails | Resume command |
 |---|---|
-| autoplan rejected | edit plan.md, `/feature NNN --resume` |
-| tasks.md not approved | hand-edit tasks.md, `/feature NNN --resume` |
+| autoplan rejected (--interactive only) | edit plan.md, `/feature NNN --resume` |
+| ruflo MCP unavailable | fix MCP connection, `/feature NNN --resume`. Bypass: `RUFLO_REQUIRED=0 /feature NNN --resume` |
+| tasks.md validation out of bounds | regenerate or hand-edit tasks.md, `/feature NNN --resume` |
 | task `[F]` | fix code, `/feature NNN --resume` |
 | QA bugs | fix bugs, `/feature NNN --resume` |
 | ship tests fail | fix tests, `/feature NNN --resume` |
@@ -268,11 +331,12 @@ On `/feature NNN --resume`:
 
 ## Safety rules
 
-- 2 hard gates: tasks.md approval + prod promotion. Non-negotiable.
-- Any step can fail gracefully — log, stop, resume later
-- No destructive actions before prod gate
-- Ruflo errors fall back to native Agent transparently — no pipeline halt from ruflo issues
-- All commits go through normal git hooks (never --no-verify)
+- **Default (--auto):** 1 hard gate — prod promotion. Tasks.md is auto-approved after structural validation.
+- **--interactive:** 4 hard gates — autoplan premise, autoplan taste decisions, tasks.md approval, prod promotion. (Legacy v1.0.0 behavior.)
+- Any step can fail gracefully — log, stop, resume later.
+- No destructive actions before prod gate.
+- **Ruflo failures hard-stop the pipeline** (v1.1.0 — silent fallback removed). Set `RUFLO_REQUIRED=0` env override only for debugging; this logs a WARNING and falls back to native Agent for the remainder of the run.
+- All commits go through normal git hooks (never --no-verify).
 
 ## Cost considerations
 

@@ -1,7 +1,7 @@
 ---
 name: fix
-description: "Investigate a bug, fix it with ruflo agents, verify with qa-only then full qa. Ralph loop until green."
-version: "1.1.0"
+description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings."
+version: "1.2.0"
 allowed-tools:
   - Read
   - Edit
@@ -11,7 +11,6 @@ allowed-tools:
   - Grep
   - Agent
   - Skill
-  - AskUserQuestion
 ---
 
 # /fix — Investigate, fix, and verify a bug with Ralph loop
@@ -132,7 +131,36 @@ Date: {ISO timestamp}
 {1-3 sentences describing the minimal fix}
 ```
 
-If investigate cannot determine root cause: AskUserQuestion with the investigation output and ask for more context. Max 2 investigation attempts before stopping.
+**Non-interactive failure handling (v1.2.0):** If investigate cannot determine root cause after 2 attempts, do NOT prompt the user. Write the partial investigation findings to `$RALPH_DIR/investigation-incomplete.md` with this structure:
+
+```markdown
+# Investigation INCOMPLETE
+Bug: {BUG_DESC}
+Date: {ISO timestamp}
+Attempts: 2
+
+## What was explored
+{summary of files/symbols/log-lines investigated}
+
+## What's unclear
+{1-3 bullets — the specific gaps that blocked root-cause identification}
+
+## Suggested narrow scope
+{recommend a `--scope=` flag value for the rerun, e.g. --scope=auth/middleware.ts,auth/session.ts}
+
+## To resume
+/fix "{BUG_DESC}" --scope={suggested scope}
+```
+
+Then print structured terminal error and exit 1:
+```
+[FIX] ERROR: investigation could not determine root cause after 2 attempts
+  Bug:        {BUG_DESC}
+  Artifacts:  {RALPH_DIR}/investigation-incomplete.md
+  Resume:     /fix "{BUG_DESC}" --scope={suggested scope}
+```
+
+The user reads the artifact, narrows the scope, reruns. No human prompt during the run.
 
 ## Step 2: Plan the fix
 
@@ -166,9 +194,30 @@ Write the plan to `$RALPH_DIR/fix-plan.md`.
 
 ## Step 3: Spawn fix agent(s) via ruflo swarm
 
-Determine executor:
+**Ruflo is mandatory (v1.2.0).** No silent native fallback.
+
+Pre-flight check:
 ```bash
-EXECUTOR=$(bash scripts/harness/executor-detect.sh 2>/dev/null || echo "native")
+RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"
+EXECUTOR=$(bash scripts/harness/executor-detect.sh 2>/dev/null || echo "")
+
+if [ -z "$EXECUTOR" ] || [ "$EXECUTOR" = "native" ]; then
+  if [ "$RUFLO_REQUIRED" = "1" ]; then
+    cat >&2 <<EOF
+[FIX] ERROR: ruflo MCP unavailable and RUFLO_REQUIRED=1 (default).
+  Detector: scripts/harness/executor-detect.sh
+  Detected: ${EXECUTOR:-(detection failed)}
+Resolve:
+  - Verify mcp__ruflo__* tools are reachable in this session
+  - Re-run: npx claude-flow@v3alpha hooks pretrain
+  - To bypass for debugging: RUFLO_REQUIRED=0 /fix "{BUG_DESC}"
+EOF
+    exit 1
+  else
+    echo "[FIX] WARNING: RUFLO_REQUIRED=0 — falling back to native Agent (debug mode)" >&2
+    EXECUTOR="native"
+  fi
+fi
 ```
 
 **Complexity routing:**
@@ -252,10 +301,46 @@ or failure modes? Does it handle all the paths the original bug affected?
 5 most important concerns only." -C "$REPO_ROOT" -s read-only 2>/dev/null | tail -50
 ```
 
-**Handling findings:**
-- CRITICAL from any specialist or codex → STOP, present to user via AskUserQuestion before proceeding to QA
-- HIGH → log as concern in fix-results.md, continue (qa-only will catch regressions)
-- No findings → continue silently
+**Handling findings (v1.2.0 — non-interactive):**
+- **CRITICAL from any specialist or codex** → write all CRITICAL findings to `$RALPH_DIR/critical-findings.md` (structure below) and exit 1. Do NOT prompt the user. Do NOT proceed to QA.
+- **HIGH** → log as concern in `fix-results.md`, continue (qa-only will catch regressions).
+- **No findings** → continue silently.
+
+`critical-findings.md` structure:
+
+```markdown
+# CRITICAL findings — fix aborted before QA
+Bug: {BUG_DESC}
+Date: {ISO timestamp}
+Files changed by fix: {list}
+
+## Findings
+| Severity | Source | File:line | Description |
+|---|---|---|---|
+| CRITICAL | {specialist|codex} | {path}:{line} | {one-line description} |
+| ... | ... | ... | ... |
+
+## Why this aborted
+The fix introduced new CRITICAL-severity issues. v1.2.0 policy: never auto-proceed
+through CRITICAL findings. The user must review each finding and decide:
+  (a) Roll back the fix (`git restore .`) and rerun /fix with adjusted scope.
+  (b) Override and proceed manually (skip /fix; run /qa-only directly).
+  (c) Apply a follow-up patch addressing each CRITICAL finding, then run /qa.
+
+## To resume
+After the user resolves the findings:
+  /fix "{BUG_DESC}" --scope={files known good}    # if scope can be narrowed
+  OR run /qa-only manually if proceeding without re-running /fix
+```
+
+Print structured terminal error and exit 1:
+```
+[FIX] ERROR: CRITICAL findings detected — fix aborted before QA
+  Findings:   {N} CRITICAL across {sources}
+  Artifacts:  {RALPH_DIR}/critical-findings.md
+  Files:      {files changed by fix}
+Action required: review {RALPH_DIR}/critical-findings.md, then choose to roll back, override, or patch.
+```
 
 ## Step 4: /qa-only on affected area
 
@@ -441,7 +526,9 @@ Append to fix log:
 - Never modify files outside the investigation's scope-lock (unless retry expands scope)
 - Never commit or push — use `/ship` after /fix
 - Never skip the regression test — every fix must have a test that would have caught the bug
-- On retry exhaustion, STOP and escalate to user
+- On retry exhaustion, STOP and escalate to user (via structured artifact, not AskUserQuestion)
+- **v1.2.0 non-interactive policy:** never block on AskUserQuestion. Uncertainty (incomplete investigation, CRITICAL findings) writes a structured artifact and exits 1.
+- **v1.2.0 ruflo policy:** ruflo is mandatory. Set `RUFLO_REQUIRED=0` only for debugging.
 
 ## Relationship to QA Ralph Loop
 

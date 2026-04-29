@@ -1,7 +1,7 @@
 ---
 name: feature-implement
-description: "Execute tasks.md one task at a time via Agent tool, respecting [model:] and [agent:] annotations. Updates checkboxes on completion."
-version: "1.0.0"
+description: "Execute tasks.md via ruflo swarm (default, mandatory in v1.1.0), respecting [model:] [agent:] annotations. Updates checkboxes on completion. Native Agent fallback only via RUFLO_REQUIRED=0 env override (debugging only)."
+version: "1.1.0"
 allowed-tools:
   - Read
   - Edit
@@ -21,15 +21,21 @@ allowed-tools:
 ## Invocation
 
 ```
-/feature-implement [NNN]              # DEFAULT: execute ALL tasks until done or first failure
+/feature-implement [NNN]              # DEFAULT: ruflo swarm, run-all until done or first failure
 /feature-implement [NNN] --one        # execute only the next unchecked task (single task)
 /feature-implement [NNN] --dry-run    # print what would execute, don't spawn
 /feature-implement [NNN] --task T042  # execute a specific task ID only
-/feature-implement [NNN] --ruflo      # use ruflo swarm executor (parallel [P] groups, experimental)
+/feature-implement [NNN] --ruflo      # explicit (already default in v1.1.0+)
 /feature-implement [NNN] --no-qa-loop          # skip per-phase QA (faster, less safe)
 /feature-implement [NNN] --qa-skip e2e         # skip specific QA dimensions
 /feature-implement [NNN] --qa-only review,security  # run only these QA dimensions
 ```
+
+**v1.1.0 ruflo policy:**
+- Ruflo is the default and only supported executor.
+- If `mcp__ruflo__*` tools are unreachable AND `RUFLO_REQUIRED=1` (default): hard-fail with structured error. No silent fallback.
+- Escape hatch: `RUFLO_REQUIRED=0 /feature-implement NNN` falls back to native Agent for debugging. Logs WARNING on every spawn.
+- The `--no-ruflo` flag from v1.0.0 has been removed. To run native, use the env override above.
 
 **Default is run-all.** The skill loops through every `[ ]` task until either:
 - All tasks are `[X]` (success)
@@ -45,7 +51,10 @@ SPEC_ARG="${ARGUMENTS:-}"
 DRY_RUN=0
 LOOP_ALL=1           # DEFAULT: run all tasks
 ONE_TASK=0           # --one opts into single-task mode
-USE_RUFLO=0          # --ruflo opts into swarm executor
+# v1.1.0: ruflo is the default executor. RUFLO_REQUIRED=0 env var falls back
+# to native Agent (debugging only — logs WARNING every spawn).
+USE_RUFLO=1
+RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"
 SPECIFIC_TASK=""
 QA_LOOP=1
 QA_SKIP=""
@@ -69,6 +78,13 @@ for arg in "${_SPEC_ARGS[@]}"; do
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
 done
+
+# v1.1.0: respect RUFLO_REQUIRED=0 escape hatch. When set, switch executor to
+# native and emit a clear WARNING so the user sees the degraded mode every run.
+if [ "$RUFLO_REQUIRED" = "0" ]; then
+  USE_RUFLO=0
+  echo "[feature-implement] WARNING: RUFLO_REQUIRED=0 — running native Agent (debug mode). Hardened ruflo path is bypassed." >&2
+fi
 
 if [ -z "${SPEC_ID:-}" ]; then
   BRANCH=$(git branch --show-current 2>/dev/null)
@@ -194,9 +210,10 @@ If `--dry-run`, print the selected task and exit 0:
 
 ### Step 5: Spawn the sub-agent
 
-**Executor selection:**
-- **Default (native Agent tool):** one task at a time via Claude Code's Agent tool. Sequential even when tasks have `[P]`. Proven, low-risk.
-- **`--ruflo` flag:** spawn via ruflo MCP swarm. Supports parallel `[P]` groups via `mcp__ruflo__swarm_init` + `mcp__ruflo__task_create` + `mcp__ruflo__workflow_execute`. Experimental — requires `npx claude-flow@v3alpha hooks pretrain` to have been run at least once. Falls back to native Agent on ruflo unavailability.
+**Executor selection (v1.1.0):**
+- **Default (ruflo MCP swarm):** spawn via `mcp__ruflo__swarm_init` + `mcp__ruflo__task_create` + `mcp__ruflo__workflow_execute`. Supports parallel `[P]` groups. Requires `npx claude-flow@v3alpha hooks pretrain` to have been run at least once.
+- **Pre-flight check (v1.1.0 — REQUIRED):** Before spawning the first task, call `mcp__ruflo__swarm_status` (or any `mcp__ruflo__*` tool) once to verify the MCP server is reachable. If the call fails AND `RUFLO_REQUIRED=1` (default): print structured error and exit 1. **No silent fallback.**
+- **Native fallback (DEBUG ONLY):** Set `RUFLO_REQUIRED=0` in env. The skill will run native Agent sequentially (no `[P]` parallelism). Every task spawn emits a WARNING to stderr.
 
 **Native Agent path (default):**
 
@@ -234,7 +251,28 @@ mcp__ruflo__workflow_execute({workflow_id})
 # when each task completes: Edit tasks.md [ ] → [X] or [F]
 ```
 
-On any `mcp__ruflo__*` failure (auth, timeout, schema mismatch), log the error and fall back to native Agent tool for the remaining tasks. Do NOT abort — fallback is transparent.
+**v1.1.0 failure policy:** On any `mcp__ruflo__*` failure (auth, timeout, schema mismatch, MCP unreachable):
+
+1. Capture the failure detail (tool name, error message, current task ID, timestamp).
+2. Append a structured error log to `$LOG_FILE` (`.implement-log.jsonl`):
+   ```json
+   {"timestamp":"<ISO>","event":"ruflo_hard_fail","tool":"<mcp_name>","error":"<msg>","task_id":"<id|null>","ruflo_required":"1"}
+   ```
+3. Print the structured terminal error:
+   ```
+   [feature-implement] ERROR: ruflo MCP failure during {phase}
+     tool:    {mcp__ruflo__xxx}
+     error:   {message}
+     task:    {current task id}
+     log:     {LOG_FILE}
+   Resolve:
+     - Verify MCP server is running and reachable
+     - Re-run `npx claude-flow@v3alpha hooks pretrain` if pretrain state is corrupt
+     - Check ruflo version: `npx claude-flow@v3alpha --version`
+     - To bypass for debugging: `RUFLO_REQUIRED=0 /feature-implement {SPEC_ID} --resume`
+   Resume after fix: /feature-implement {SPEC_ID} --resume
+   ```
+4. **Exit 1.** Do NOT fall back to native Agent. The user must explicitly opt into degraded mode via `RUFLO_REQUIRED=0`.
 
 **Sub-agent prompt:**
 
@@ -446,6 +484,7 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 - Never push, deploy, or delete branches
 - Sub-agents inherit rules via CLAUDE.md
 - Destructive action requests re-surface to user (Agent tool respects Claude Code permissions)
+- **Ruflo failures hard-stop (v1.1.0).** No silent native fallback. Use `RUFLO_REQUIRED=0` env override for debugging only.
 
 ## Cost estimation
 
