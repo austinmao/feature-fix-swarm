@@ -22,15 +22,16 @@ command -v npx >/dev/null 2>&1 && echo "  npx: OK" || echo "  npx: NOT FOUND (ne
 echo ""
 
 # Copy skills
-echo "Installing skills to .claude/skills/..."
+SKILLS_DIR="$HOME/.claude/skills"
+echo "Installing skills to $SKILLS_DIR/..."
 for skill in fix feature-implement feature spec-decompose; do
-  TARGET=".claude/skills/$skill/SKILL.md"
+  TARGET="$SKILLS_DIR/$skill/SKILL.md"
   if [ -f "$TARGET" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
     echo
     [[ $REPLY =~ ^[Yy]$ ]] || continue
   fi
-  mkdir -p ".claude/skills/$skill"
+  mkdir -p "$SKILLS_DIR/$skill"
   cp "$SCRIPT_DIR/skills/$skill/SKILL.md" "$TARGET"
   echo "  Installed $TARGET"
 done
