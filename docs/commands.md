@@ -12,7 +12,7 @@ Quick reference for all available commands in the ralph agent harness.
 | `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one` |
 | `/feature NNN` | End-to-end: autoplan, decompose, implement, qa, ship, canary. 2 hard gates. |
 
-**Pipeline order:** `/office-hours` then `/autoplan` then `/spec-decompose` then `/feature-implement` then `/qa` then `/review` then `/ship` then `/land-and-deploy` then `/canary`
+**Pipeline order:** `/office-hours` then `/autoplan` then `/spec-decompose` then `/feature-implement` then `/qa` then `/review` then `/codex-gate` then `/ship` then `/land-and-deploy` then `/canary`
 
 ## QA + Testing
 
@@ -33,6 +33,7 @@ Quick reference for all available commands in the ralph agent harness.
 | `/plan-design-review` | UI/UX review (7 dimensions, interaction states, responsive) |
 | `/plan-devex-review` | Developer experience review (TTHW, error messages, CLI ergonomics) |
 | `/codex` | Run OpenAI Codex as outside voice for adversarial second opinion |
+| `/codex-gate` | Cross-model 3-pass review (general + adversarial + test-coverage gap) on the staged diff. Used by `/feature` Step 5.5 and `/fix` Step 5.5 before /ship. ~$2 + ~13 min. |
 
 ## Ship + Deploy
 
