@@ -1,7 +1,7 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → feature-implement (ruflo) → qa → ship → canary. Non-interactive by default. Use --interactive to restore gates."
-version: "1.1.0"
+description: "End-to-end pipeline: autoplan → spec-decompose → feature-implement (ruflo) → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates."
+version: "1.2.0"
 allowed-tools:
   - Read
   - Edit
@@ -44,6 +44,7 @@ One command. Runs everything from plan review through production. Non-interactiv
                                #   - prod promotion gate: prompts user (same as --auto)
 /feature [NNN] --resume     # resume after failure (picks up at last incomplete step)
 /feature [NNN] --no-canary  # stop after /ship (skip production canary)
+/feature [NNN] --no-codex-gate  # skip cross-model adversarial review (default-on, see Step 4.5)
 /feature [NNN] --dry-run    # print the pipeline plan, don't execute
 ```
 
@@ -72,6 +73,12 @@ One command. Runs everything from plan review through production. Non-interactiv
 │  Step 4: /qa (full-suite browser test after ALL phases)     │
 │    └─ Auto-stops if bugs found; user fixes, /feature --resume│
 │                                                             │
+│  Step 4.5: /codex-gate (cross-model adversarial review)     │
+│    └─ Codex GPT-5 in 3 passes: review + adversarial + gaps  │
+│    └─ Auto-stops on CRITICAL findings (writes artifact)     │
+│    └─ Skip with --no-codex-gate (opt out, NOT recommended)  │
+│    └─ Skip-gracefully if codex CLI absent (warn, continue)  │
+│                                                             │
 │  Step 5: /ship (creates PR, merges to staging branch)       │
 │    └─ Staging deploy via Vercel preview / Railway staging   │
 │    └─ Staging smoke test runs automatically                 │
@@ -84,7 +91,7 @@ One command. Runs everything from plan review through production. Non-interactiv
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Total gates (default --auto):** 1 — prod promotion only (irreversible).
+**Total gates (default --auto):** 1 — prod promotion only (irreversible). Codex-gate CRITICAL findings auto-stop the pipeline but produce structured artifacts (no human prompt) — user fixes and resumes.
 **Total gates (--interactive):** 4 — autoplan premise, autoplan taste decisions, tasks.md approval, prod promotion.
 Everything else auto-runs or auto-fails.
 
@@ -97,6 +104,8 @@ SPEC_ARG="${ARGUMENTS:-}"
 RESUME=0
 NO_CANARY=0
 DRY_RUN=0
+# v1.2.0: codex-gate is default-on. --no-codex-gate opts out.
+NO_CODEX_GATE=0
 # v1.1.0: --auto is default. --interactive opts back into manual gates.
 INTERACTIVE=0
 # v1.1.0: ruflo is mandatory by default. RUFLO_REQUIRED=0 env override allows
@@ -111,6 +120,7 @@ for arg in "${_SPEC_ARGS[@]}"; do
     --auto)        INTERACTIVE=0 ;;   # explicit --auto (already default)
     --interactive) INTERACTIVE=1 ;;
     --no-canary)   NO_CANARY=1 ;;
+    --no-codex-gate) NO_CODEX_GATE=1 ;;
     --dry-run)     DRY_RUN=1 ;;
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
@@ -247,6 +257,42 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"qa","status":"pass|fail","bugs_found":<n>,"duration_s":<n>}
 ```
 
+### Step 5.5: /codex-gate (cross-model adversarial review)
+
+Skip if `--no-codex-gate` flag was set OR `RESUME=1` and prior `step:"codex-gate"` log entry already has `status:"pass"`.
+
+**Why this step exists:** Single-model review has blind spots. Codex (OpenAI GPT-5) reads the same diff Claude wrote and runs 3 adversarial passes (general review + attacker mindset + test-coverage gap analysis). Documented to catch CRITICAL bugs that pass clean through Claude-only quality gates. Cost: ~$2 + ~13 min — cheap insurance vs hotfix-cycle days for any PR with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts, disaster-recovery).
+
+**Pre-flight:**
+```bash
+which codex >/dev/null 2>&1 && CODEX_AVAILABLE=1 || CODEX_AVAILABLE=0
+
+if [ "$CODEX_AVAILABLE" = "0" ]; then
+  echo "[FEATURE] WARNING: codex CLI not found — skipping codex-gate" >&2
+  echo "  Install: npm install -g @openai/codex && codex login" >&2
+  # Log skip and continue — do NOT hard-fail (codex is optional dependency).
+  printf '{"timestamp":"%s","spec":"%s","step":"codex-gate","status":"skipped","reason":"codex_not_installed","duration_s":0}\n' \
+    "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
+  # Continue to Step 6.
+else
+  : # Run gate.
+fi
+```
+
+**Invoke:** Call the `codex-gate` skill via the Skill tool. Codex-gate runs 3 passes against the staged diff (`git diff main...HEAD`), produces a findings report at `~/.gstack/projects/$SLUG/codex-gate-${SPEC_ID}-${DT}.md`.
+
+**Findings policy:**
+- **CRITICAL** → STOP. Write findings to `.ralph/feature-run-${SPEC_ID}-codex-critical.md`, log status:`failed`, exit 1. User fixes, reruns `/feature NNN --resume`.
+- **HIGH** → log as concern, continue (user reviews report before merging PR).
+- **MEDIUM/LOW or no findings** → continue silently.
+
+**Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent codex-gate run.
+
+Log:
+```json
+{"timestamp":"<ISO>","spec":"<NNN>","step":"codex-gate","status":"pass|failed|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
+```
+
 ### Step 6: /ship
 
 Invoke `ship`: full test suite, CHANGELOG, PR creation, merge to staging.
@@ -324,6 +370,7 @@ On `/feature NNN --resume`:
 | tasks.md validation out of bounds | regenerate or hand-edit tasks.md, `/feature NNN --resume` |
 | task `[F]` | fix code, `/feature NNN --resume` |
 | QA bugs | fix bugs, `/feature NNN --resume` |
+| codex-gate CRITICAL | fix flagged issues (see `.ralph/feature-run-${SPEC_ID}-codex-critical.md`), `/feature NNN --resume`. Bypass: `/feature NNN --resume --no-codex-gate` |
 | ship tests fail | fix tests, `/feature NNN --resume` |
 | staging smoke fail | fix, re-ship, `/feature NNN --resume` |
 | prod gate held | manual promotion OR `/feature NNN --resume` |
@@ -346,9 +393,10 @@ Typical 50-task feature:
 - feature-implement: $15-50 (depends on model distribution)
 - per-phase QA (--qa-loop): ~$0.15/phase × N phases = ~$0.75-$1.50
 - qa: ~$2
+- codex-gate: ~$2 (3 passes against final diff; skip with --no-codex-gate)
 - ship/canary: free
 
-**Estimated total: $20-55 per feature.** Show estimate after step 3 (tasks.md approved, cost computable from annotations).
+**Estimated total: $22-57 per feature.** Show estimate after step 3 (tasks.md approved, cost computable from annotations).
 
 ## Non-goals
 
@@ -364,5 +412,7 @@ Typical 50-task feature:
 - `/autoplan` — step 1
 - `/spec-decompose` — step 2
 - `/feature-implement` — step 3
-- `/qa`, `/ship`, `/canary` — steps 4-6
+- `/qa` — step 5
+- `/codex-gate` — step 5.5 (cross-model adversarial review, default-on)
+- `/ship`, `/canary` — steps 6+
 - `/investigate` — when resuming from failure

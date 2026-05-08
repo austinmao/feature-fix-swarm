@@ -98,12 +98,18 @@ Phase N tasks complete
 ### Optional
 
 - **[Codex CLI](https://github.com/openai/codex)** by OpenAI
-  Used for cross-model adversarial review in `/fix` Step 3.5. If not installed, feature-fix-swarm falls back to Claude-only review. Not required.
+  Used for cross-model adversarial review in two places:
+  - `/fix` Step 3.5 — quick adversarial pass on the fresh fix (5-question concern list)
+  - `/fix` Step 5.5 + `/feature` Step 5.5 — full `/codex-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) on the final post-QA diff before /ship
+
+  Default-on in both `/feature` and `/fix`. Skip with `--no-codex-gate`. Skip-gracefully if codex CLI is absent (warns, continues). Not strictly required but **strongly recommended** for any change with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts). ~$2 + ~13 min per gate run.
 
   ```bash
   npm install -g @openai/codex
   codex login
   ```
+
+  Also requires the `/codex-gate` skill (3-pass orchestrator). Sourced from the same harness that ships gstack — see [gstack docs](https://github.com/garryslist/gstack) for installation. If `/codex-gate` is not available in your skills, the gate step skips with a warning.
 
 ## Installation
 
@@ -207,6 +213,7 @@ mkdir -p specs/042-user-auth
 | `--one` | /feature-implement | Execute only the next task |
 | `--plan` | /fix | Use /plan-eng-review for complex bugs |
 | `--no-qa` | /fix | Skip full /qa, only run /qa-only |
+| `--no-codex-gate` | /fix, /feature | Skip cross-model adversarial review (default-on) |
 | `--scope=files` | /fix | Scope-lock investigation to specific files |
 
 ## The QA dimensions
