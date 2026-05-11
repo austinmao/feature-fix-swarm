@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+LIB="${HOME}/.claude/lib"
+export PYTHONPATH="${LIB}:${PYTHONPATH:-}"
+exec python3 -m run_state.cli "$@"

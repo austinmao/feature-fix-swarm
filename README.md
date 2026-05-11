@@ -1,8 +1,28 @@
 # feature-fix-swarm
 
-QA-per-phase enforcement for Claude Code agent harnesses.
+QA-per-phase enforcement for Claude Code agent harnesses, with persistent run-state and adversarial completion audit.
 
-Stop bugs from compounding. Test every phase before the next one starts. Fix bugs with an automated investigate-fix-verify loop.
+Stop bugs from compounding. Test every phase before the next one starts. Fix bugs with an automated investigate-fix-verify loop. **In v2.0:** runs survive Claude Code session resets via Stop-hook auto-continuation, and every completion is gated by a hostile cross-model audit (Codex GPT-5) that tries to prove the work is NOT done.
+
+## v2.0 — Persistent run-state
+
+`/feature` and `/fix` now maintain persistent state across Claude Code sessions via the [run_state](lib/run_state/README.md) library. Four new capabilities:
+
+1. **Stop-hook auto-continuation:** if Claude tries to stop mid-pipeline, the hook injects a continuation prompt. Long-running pipelines no longer die when context resets.
+2. **Adversarial completion audit:** before declaring done, spawn `codex` GPT-5 in a hostile prompt that tries to prove the work is NOT done. Three verdicts — pass / fail / error. Fail = back to active, loop continues.
+3. **Token budget tracking:** runs flip to `budget_limited` when used > budgeted; operator resumes manually.
+4. **Resume across sessions:** every long-running skill invocation is checkpointed to SQLite at `~/.claude/state/runs.db`.
+
+After `bash setup.sh`:
+
+```bash
+~/.claude/bin/run-state list                  # show all runs
+~/.claude/bin/run-state list --state active   # currently-active
+~/.claude/bin/run-state status <run_id>       # detailed status
+~/.claude/bin/run-state abort <run_id>        # kill a stuck run
+```
+
+Full details: [lib/run_state/README.md](lib/run_state/README.md).
 
 ## The problem
 

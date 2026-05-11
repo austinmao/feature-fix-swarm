@@ -1,7 +1,7 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → feature-implement (ruflo) → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates."
-version: "1.2.0"
+description: "End-to-end pipeline: autoplan → spec-decompose → feature-implement (ruflo) → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates. Persistent run-state via /run-state lib in v1.3.0."
+version: "1.3.0"
 allowed-tools:
   - Read
   - Edit
@@ -13,7 +13,44 @@ allowed-tools:
 
 # /feature — End-to-end feature pipeline
 
-One command. Runs everything from plan review through production. Non-interactive by default — auto-approves autoplan premise and all taste decisions. Use `--interactive` to restore manual gates.
+## Run-state lifecycle (mandatory)
+
+Every `/feature` invocation MUST:
+
+1. **Start a run** — capture run_id BEFORE autoplan:
+
+   ```bash
+   SPEC_ID="<the spec NNN-name passed by user>"
+   RUN_ID=$(~/.claude/bin/run-state start \
+     --skill feature \
+     --objective "ship $SPEC_ID through feature pipeline" \
+     --tokens "${FEATURE_TOKENS_BUDGET:-1500000}" \
+     --session-id "${CLAUDE_SESSION_ID:-}" \
+     --worktree "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
+     | jq -r .run_id)
+   echo "Run: $RUN_ID"
+   ```
+
+2. **Update phase at every pipeline boundary:**
+
+   ```bash
+   ~/.claude/bin/run-state update "$RUN_ID" --phase <stage>
+   # stages: autoplan | spec-decompose | implement | qa | audit | ship | canary
+   ```
+
+3. **Run spec-completion audit BEFORE the canary phase** (see Step 6).
+
+4. **Mark complete only after canary success.**
+
+Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. Override with `FEATURE_TOKENS_BUDGET` env or `--tokens` flag. Stop hook auto-continues if state=active.
+
+## Flags
+
+| Flag | Effect |
+|---|---|
+| `--tokens N` | Token budget. Default 1.5M. When exceeded → `budget_limited`; operator must `run-state resume`. |
+| `--interactive` | Restore manual gates (autoplan premise, taste decisions). Default = non-interactive. |
+| `--no-audit` | Skip spec-completion audit before canary. **NOT recommended.** |
 
 ## When to invoke
 
@@ -293,7 +330,38 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"codex-gate","status":"pass|failed|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
 ```
 
-### Step 6: /ship
+### Step 6 — Spec-completion audit (mandatory unless `--no-audit`)
+
+Before canary deploy, run a hostile audit that tries to prove the spec is NOT complete. Codex GPT-5 reads the spec and the diff.
+
+```bash
+SPEC_PATH="specs/${SPEC_ID}/plan.md"
+SPEC_CONTENT=$(cat "$SPEC_PATH")
+MODIFIED=$(git diff "origin/${BASE:-main}"...HEAD --name-only)
+
+~/.claude/bin/run-state audit "$RUN_ID" \
+  --kind feature \
+  --context "SPEC_PATH=$SPEC_PATH" \
+  --context "SPEC_CONTENT=$SPEC_CONTENT" \
+  --context "MODIFIED_FILES=$MODIFIED" \
+  --cwd "$(git rev-parse --show-toplevel)"
+```
+
+Decision rule:
+- `verdict=pass` → audit CLI auto-marks `complete` and clears marker. Override: re-set state to `active` before canary so the Stop hook continues until canary succeeds, then mark complete explicitly:
+
+  ```bash
+  ~/.claude/bin/run-state update "$RUN_ID" --state active
+  # ... run /canary ...
+  ~/.claude/bin/run-state complete "$RUN_ID"
+  ```
+
+- `verdict=fail` → re-enter implement phase with the auditor's `missing` list as the new TODO. Stop hook continues the loop.
+- `verdict=error` → retry once. Then mark `failed` if still error.
+
+Hard cap: 3 audit attempts → `failed`.
+
+### Step 7: /ship
 
 Invoke `ship`: full test suite, CHANGELOG, PR creation, merge to staging.
 
@@ -304,7 +372,7 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"ship","status":"merged_to_staging|failed","pr_url":"<url>","duration_s":<n>}
 ```
 
-### Step 7: Staging verification
+### Step 8: Staging verification
 
 1. Wait for Vercel/Railway staging deploy (10 min timeout)
 2. Run staging smoke test (per tasks.md Phase N+1)
@@ -312,7 +380,7 @@ Log:
 
 If staging fails: stop.
 
-### Step 8: Production promotion gate (2nd gate)
+### Step 9: Production promotion gate (2nd gate)
 
 AskUserQuestion:
 
@@ -327,7 +395,7 @@ Options:
 
 On A: merge to main, trigger prod deploy, continue to canary.
 
-### Step 9: /canary
+### Step 10: /canary
 
 Invoke `canary`: monitors prod for 1h, compares error rates/latency to baseline. Auto-rollback if SLO breached (error rate > 1%).
 
@@ -336,7 +404,7 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"canary","status":"pass|rolled_back","error_rate":<float>,"duration_s":<n>}
 ```
 
-### Step 10: Final report
+### Step 11: Final report
 
 ```
 ╔═══════════════════════════════════════════════════════════╗
