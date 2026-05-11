@@ -122,3 +122,76 @@ def test_audit_command_fail_keeps_run_active(tmp_path: Path) -> None:
     assert marker.exists()
     status = _run(["status", run_id], env_extra=env)
     assert json.loads(status.stdout)["state"] == "active"
+
+
+def test_update_state_active_recreates_marker(tmp_path: Path) -> None:
+    """codex-gate Pass 1 #1: --state active must recreate marker so Stop hook continues."""
+    db = tmp_path / "runs.db"
+    marker = tmp_path / ".active-run"
+    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    started = _run(["start", "--skill", "fix", "--objective", "x"], env_extra=env)
+    run_id = json.loads(started.stdout)["run_id"]
+    _run(["pause", run_id], env_extra=env)
+    assert not marker.exists()
+    _run(["update", run_id, "--state", "active"], env_extra=env)
+    assert marker.exists(), "update --state active must recreate marker"
+    assert marker.read_text().strip() == run_id
+
+
+def test_update_state_complete_clears_marker(tmp_path: Path) -> None:
+    db = tmp_path / "runs.db"
+    marker = tmp_path / ".active-run"
+    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    started = _run(["start", "--skill", "fix", "--objective", "x"], env_extra=env)
+    run_id = json.loads(started.stdout)["run_id"]
+    assert marker.exists()
+    _run(["update", run_id, "--state", "complete"], env_extra=env)
+    assert not marker.exists()
+
+
+def test_feature_audit_pass_keeps_marker_active(tmp_path: Path) -> None:
+    """codex-gate Pass 2 #2 CRITICAL: feature audit pass must NOT clear marker."""
+    db = tmp_path / "runs.db"
+    marker = tmp_path / ".active-run"
+    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    started = _run(["start", "--skill", "feature", "--objective", "spec-130"], env_extra=env)
+    run_id = json.loads(started.stdout)["run_id"]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "codex"
+    stub.write_text('#!/usr/bin/env bash\necho \'{"verdict":"pass","reasoning":"ok"}\'\n')
+    stub.chmod(0o755)
+
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    r = _run(["audit", run_id, "--kind", "feature",
+              "--context", "SPEC_PATH=specs/130/plan.md",
+              "--context", "SPEC_CONTENT=stub",
+              "--context", "MODIFIED_FILES=none"],
+             env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert marker.exists(), "feature audit pass must NOT clear marker (canary still pending)"
+    status = _run(["status", run_id], env_extra=env)
+    state = json.loads(status.stdout)["state"]
+    assert state == "active", f"feature audit pass must leave state=active, got {state}"
+
+
+def test_fix_audit_pass_clears_marker(tmp_path: Path) -> None:
+    db = tmp_path / "runs.db"
+    marker = tmp_path / ".active-run"
+    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    started = _run(["start", "--skill", "fix", "--objective", "bug"], env_extra=env)
+    run_id = json.loads(started.stdout)["run_id"]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "codex"
+    stub.write_text('#!/usr/bin/env bash\necho \'{"verdict":"pass","reasoning":"ok"}\'\n')
+    stub.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    r = _run(["audit", run_id, "--kind", "fix",
+              "--context", "BUG_DESCRIPTION=x",
+              "--context", "MODIFIED_FILES=none"], env_extra=env)
+    assert r.returncode == 0
+    assert not marker.exists()
+    status = _run(["status", run_id], env_extra=env)
+    assert json.loads(status.stdout)["state"] == "complete"

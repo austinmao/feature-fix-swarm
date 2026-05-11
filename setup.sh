@@ -69,6 +69,13 @@ done
 SETTINGS="$HOME/.claude/settings.json"
 if [ ! -f "$SETTINGS" ]; then
   echo "  WARN: $SETTINGS not found — create via Claude Code first, then re-run setup."
+elif ! command -v jq >/dev/null 2>&1; then
+  # FIX (codex-gate Pass 1 #2): without jq we cannot mutate settings.json
+  # safely. Don't pretend hooks were registered — exit so the operator
+  # installs jq and re-runs setup.
+  echo "  ERROR: jq is required to register hooks in $SETTINGS." >&2
+  echo "         Install jq (brew install jq | apt-get install jq), then re-run setup." >&2
+  exit 1
 else
   echo "Registering hooks in $SETTINGS..."
   TMP=$(mktemp)

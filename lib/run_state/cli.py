@@ -63,6 +63,14 @@ def cmd_update(args: argparse.Namespace) -> int:
         store.inc_tokens(args.run_id, args.tokens)
     if args.state:
         store.update_state(args.run_id, args.state)
+        # FIX (codex-gate Pass 1 #1): keep marker consistent with state so the
+        # Stop hook honors `update --state active` continuations and clears
+        # itself on terminal states.
+        if args.state == "active":
+            _marker().set(args.run_id)
+        elif args.state in ("complete", "aborted", "paused"):
+            _marker().clear()
+        # `budget_limited` and `pending_audit` leave marker untouched.
     return 0
 
 
@@ -191,8 +199,18 @@ def cmd_audit(args: argparse.Namespace) -> int:
         conn.close()
 
     if result.verdict == "pass":
-        store.update_state(args.run_id, "complete")
-        _marker().clear()
+        # FIX (codex-gate Pass 2 #2 CRITICAL): /feature pipeline still has
+        # canary work after the spec-completion audit. If we mark complete +
+        # clear marker here, the Stop hook stops protecting the run between
+        # this CLI return and the skill's follow-up `--state active` call.
+        # Solution: kind=fix completes on pass; kind=feature stays active
+        # so the Stop hook keeps the pipeline alive through canary. The
+        # /feature skill marks `complete` explicitly after canary succeeds.
+        if args.kind == "fix":
+            store.update_state(args.run_id, "complete")
+            _marker().clear()
+        else:  # feature — keep run alive, marker intact, for canary
+            store.update_state(args.run_id, "active")
     else:
         store.update_state(args.run_id, "active")
 
