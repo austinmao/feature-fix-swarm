@@ -8,6 +8,28 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v2.0.0 — Persistent run-state (2026-05-11)
+
+### Added
+
+- **`lib/run_state/` — new shared library** for `/feature` and `/fix` lifecycle persistence:
+  - SQLite-backed state machine: `active | paused | pending_audit | complete | budget_limited | failed | aborted`
+  - Marker file at `~/.claude/state/.active-run` (O(1) Stop-hook stat-check)
+  - Adversarial completion audit via `codex exec` subprocess (read-only sandbox, high reasoning effort)
+  - Token budget tracking with `budget_limited` auto-transition
+  - `~/.claude/bin/run-state` CLI: `start | status | update | audit | complete | abort | pause | resume | list`
+- **`scripts/hooks/run-state-session.py`** — SessionStart hook anchors `CLAUDE_SESSION_ID` to `~/.claude/state/session.env`
+- **`scripts/hooks/run-state-stop.py`** — Stop hook checks marker, blocks stop and injects continuation prompt if a run is active
+- **`lib/run_state/prompts/{fix,feature}_audit.txt`** — hostile auditor prompts (bug-still-exists vs spec-not-complete)
+- 28 tests in `lib/run_state/tests/` (state, marker, audit, CLI, stop hook). All green.
+
+### Changed
+
+- `skills/fix/SKILL.md` **v1.3.0 → v1.4.0**: added run-state lifecycle (start/update/audit/complete) + Step 4 adversarial audit + flags (`--tokens`, `--no-audit`)
+- `skills/feature/SKILL.md` **v1.2.0 → v1.3.0**: same lifecycle + Step 6 spec-completion audit before `/canary` + 1.5M token default budget
+- `setup.sh`: installs `lib/run_state/`, `bin/run-state`, `scripts/hooks/run-state-*.py`; registers Stop + SessionStart hooks in `~/.claude/settings.json`; checks for `python3`, `jq`, `codex` CLI prerequisites
+
+
 ## [Unreleased]
 
 ## 2026-05-08 — codex-gate cross-model adversarial review

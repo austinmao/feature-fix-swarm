@@ -1,7 +1,7 @@
 ---
 name: fix
-description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa, then run codex-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings."
-version: "1.3.0"
+description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa, then run codex-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. Persistent run-state via /run-state lib in v1.4.0."
+version: "1.4.0"
 allowed-tools:
   - Read
   - Edit
@@ -17,12 +17,51 @@ allowed-tools:
 
 One command. Takes a bug description or symptom, traces root cause, fixes it with ruflo agent swarm, verifies the fix, then verifies no regressions. Loops until green or max retries.
 
+## Run-state lifecycle (mandatory)
+
+Every `/fix` invocation MUST:
+
+1. **Start a run** — capture run_id BEFORE any investigation:
+
+   ```bash
+   RUN_ID=$(~/.claude/bin/run-state start \
+     --skill fix \
+     --objective "<bug description verbatim from user>" \
+     --tokens "${FIX_TOKENS_BUDGET:-300000}" \
+     --session-id "${CLAUDE_SESSION_ID:-}" \
+     --worktree "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
+     | jq -r .run_id)
+   echo "Run: $RUN_ID"
+   ```
+
+2. **Update phase as you progress:**
+
+   ```bash
+   ~/.claude/bin/run-state update "$RUN_ID" --phase <stage>
+   # stages: investigate | plan | implement | review | qa-only | qa | audit
+   ```
+
+3. **Run adversarial audit BEFORE declaring complete** (Step 4 of this skill).
+
+4. **Mark complete only after audit verdict=pass.**
+
+If the Stop hook fires while state=active, Claude will automatically continue the pipeline. Do NOT manually mark complete to bypass this. Audit failures revert to `active` and the loop continues.
+
 ## When to invoke
 
 - User reports a bug: "auth redirect is broken", "the form doesn't submit", "500 on /api/foo"
 - Claude discovers a bug during QA or code review
 - Production monitoring surfaces an issue
 - After `/qa` or `/qa-only` reports failures that need fixing
+
+## Flags
+
+| Flag | Effect |
+|---|---|
+| `--tokens N` | Token budget for this run. Default `300000`. When exceeded, run flips to `budget_limited`; operator must `run-state resume <id>` to continue. |
+| `--auto-fix` | Forwarded to ruflo agents and codex-gate auto-fix loop. |
+| `--interactive` | Restore manual gates between phases. Default = non-interactive. |
+| `--no-audit` | Skip adversarial audit at completion. **NOT recommended.** Use only for trivial typo-class fixes. |
 
 ## Invocation
 
@@ -464,6 +503,37 @@ Action required: review {RALPH_DIR}/codex-critical-findings.md, then patch/roll-
 Log:
 ```json
 {"timestamp":"<ISO>","bug":"<desc>","step":"codex-gate","status":"pass|failed|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
+```
+
+### Step 4 — Adversarial completion audit (mandatory unless `--no-audit`)
+
+Before declaring the fix complete, run a hostile cross-model audit that tries to prove the bug still exists. Codex GPT-5 runs in read-only sandbox; verdict drives state transition.
+
+```bash
+BUG_DESC=$(~/.claude/bin/run-state status "$RUN_ID" | jq -r '.objective // ""')
+MODIFIED=$(git diff "origin/${BASE:-main}"...HEAD --name-only | head -30)
+
+~/.claude/bin/run-state audit "$RUN_ID" \
+  --kind fix \
+  --context "BUG_DESCRIPTION=$BUG_DESC" \
+  --context "MODIFIED_FILES=$MODIFIED" \
+  --cwd "$(git rev-parse --show-toplevel)"
+```
+
+Decision rule:
+- `verdict=pass` → CLI auto-marks run `complete`, clears marker. Proceed to `/ship` or stop.
+- `verdict=fail` → CLI auto-reverts run to `active` and records repro/missing in events. Stop hook continues the loop; re-enter investigation with the auditor's repro as the new symptom.
+- `verdict=error` → CLI auto-reverts to `active`. Investigate why audit failed (timeout, codex auth, malformed output). Retry once. If still error, mark `failed` manually and escalate.
+
+Hard cap: 3 audit attempts. After 3 consecutive non-pass, mark `failed`:
+
+```bash
+ATTEMPTS=$(~/.claude/bin/run-state status "$RUN_ID" | jq -r .audit_attempts)
+if [ "$ATTEMPTS" -ge 3 ]; then
+  ~/.claude/bin/run-state update "$RUN_ID" --state failed
+  echo "FIX FAILED — 3 audit attempts exhausted. Run-id: $RUN_ID"
+  exit 1
+fi
 ```
 
 ## Step 6: Report
