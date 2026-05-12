@@ -1,28 +1,48 @@
 # feature-fix-swarm
 
-QA-per-phase enforcement for Claude Code agent harnesses, with persistent run-state and adversarial completion audit.
+QA-per-phase enforcement for Claude Code agent harnesses, with cross-model adversarial completion audit.
 
-Stop bugs from compounding. Test every phase before the next one starts. Fix bugs with an automated investigate-fix-verify loop. **In v2.0:** runs survive Claude Code session resets via Stop-hook auto-continuation, and every completion is gated by a hostile cross-model audit (Codex GPT-5) that tries to prove the work is NOT done.
+Stop bugs from compounding. Test every phase before the next one starts. Fix bugs with an automated investigate-fix-verify loop. Every completion is gated by a hostile cross-model audit (Codex GPT-5) that tries to prove the work is NOT done.
 
-## v2.0 — Persistent run-state
+## v3.0 — Native /goal integration
 
-`/feature` and `/fix` now maintain persistent state across Claude Code sessions via the [run_state](lib/run_state/README.md) library. Four new capabilities:
+Claude Code 2.1.139+ ships native `/goal` ([docs](https://code.claude.com/docs/en/goal)) which owns the continuation loop. v3.0 strips our Stop hook + marker file + continuation tracking — ~300 lines of dead code gone. We keep what native /goal doesn't do: cross-model adversarial audit + `/codex-gate`.
 
-1. **Stop-hook auto-continuation:** if Claude tries to stop mid-pipeline, the hook injects a continuation prompt. Long-running pipelines no longer die when context resets.
-2. **Adversarial completion audit:** before declaring done, spawn `codex` GPT-5 in a hostile prompt that tries to prove the work is NOT done. Three verdicts — pass / fail / error. Fail = back to active, loop continues.
-3. **Token budget tracking:** runs flip to `budget_limited` when used > budgeted; operator resumes manually.
-4. **Resume across sessions:** every long-running skill invocation is checkpointed to SQLite at `~/.claude/state/runs.db`.
+**New /feature pipeline:**
+
+```
+Operator: /goal "spec NNN done: every phase audit verdict=pass, codex-gate PASS, canary 200"
+Skill:    /autoplan → /spec-decompose
+          foreach wedge:
+            /feature-implement <wedge>
+            run-state audit --kind phase    → writes verdict to audits.jsonl
+          /qa
+          /codex-gate                       → cross-model review of full branch diff
+          /ship + /canary
+Native /goal: condition holds → auto-clears. Done.
+```
+
+**New /fix pipeline:**
+
+```
+Operator: /goal "bug fixed: latest run-state audit --kind fix verdict=pass AND qa green"
+Skill:    investigate → implement → qa-only → qa → /codex-gate
+          run-state audit --kind fix → writes verdict
+Native /goal: condition met → clears.
+```
 
 After `bash setup.sh`:
 
 ```bash
 ~/.claude/bin/run-state list                  # show all runs
-~/.claude/bin/run-state list --state active   # currently-active
 ~/.claude/bin/run-state status <run_id>       # detailed status
+~/.claude/bin/run-state audit <run_id> --kind <fix|feature|phase> --context K=V ...
 ~/.claude/bin/run-state abort <run_id>        # kill a stuck run
 ```
 
-Full details: [lib/run_state/README.md](lib/run_state/README.md).
+Full details: [lib/run_state/README.md](lib/run_state/README.md). Native /goal docs: https://code.claude.com/docs/en/goal.
+
+**Upgrading from v2.x?** Setup.sh no longer registers Stop / SessionStart hooks. To remove leftover v2.x hooks from `~/.claude/settings.json` manually, edit the file (or use `jq` to filter out entries with commands containing `run-state-stop` and `run-state-session`).
 
 ## The problem
 

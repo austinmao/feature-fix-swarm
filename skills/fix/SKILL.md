@@ -1,7 +1,7 @@
 ---
 name: fix
-description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa, then run codex-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. Persistent run-state via /run-state lib in v1.4.0."
-version: "1.4.0"
+description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa, then run codex-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. v2.0.0 integrates Claude native /goal for continuation; adversarial audit + /codex-gate remain mandatory."
+version: "2.0.0"
 allowed-tools:
   - Read
   - Edit
@@ -17,35 +17,23 @@ allowed-tools:
 
 One command. Takes a bug description or symptom, traces root cause, fixes it with ruflo agent swarm, verifies the fix, then verifies no regressions. Loops until green or max retries.
 
-## Run-state lifecycle (mandatory)
+## Native /goal entry (recommended)
 
-Every `/fix` invocation MUST:
+Before invoking `/fix`, set a native `/goal` condition so Claude auto-continues until the bug is verified fixed. Example:
 
-1. **Start a run** — capture run_id BEFORE any investigation:
+```
+/goal "bug fixed: latest run-state audit --kind fix verdict=pass on this issue AND /qa green AND /codex-gate PASS"
+```
 
-   ```bash
-   RUN_ID=$(~/.claude/bin/run-state start \
-     --skill fix \
-     --objective "<bug description verbatim from user>" \
-     --tokens "${FIX_TOKENS_BUDGET:-300000}" \
-     --session-id "${CLAUDE_SESSION_ID:-}" \
-     --worktree "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
-     | jq -r .run_id)
-   echo "Run: $RUN_ID"
-   ```
+Native `/goal` (Anthropic-maintained, Claude Code 2.1.139+):
+- Small/fast model checks the condition after every turn
+- Auto-continues if false; clears when met
+- One goal per session; `/goal clear` cancels
+- See https://code.claude.com/docs/en/goal
 
-2. **Update phase as you progress:**
+`/fix` writes the adversarial audit verdict to `~/.claude/state/audits.jsonl`. Your `/goal` condition can grep that file for the verdict + check `npx vitest run` exit code.
 
-   ```bash
-   ~/.claude/bin/run-state update "$RUN_ID" --phase <stage>
-   # stages: investigate | plan | implement | review | qa-only | qa | audit
-   ```
-
-3. **Run adversarial audit BEFORE declaring complete** (Step 4 of this skill).
-
-4. **Mark complete only after audit verdict=pass.**
-
-If the Stop hook fires while state=active, Claude will automatically continue the pipeline. Do NOT manually mark complete to bypass this. Audit failures revert to `active` and the loop continues.
+If you skip `/goal`, the pipeline runs but you advance it manually.
 
 ## When to invoke
 
@@ -58,10 +46,10 @@ If the Stop hook fires while state=active, Claude will automatically continue th
 
 | Flag | Effect |
 |---|---|
-| `--tokens N` | Token budget for this run. Default `300000`. When exceeded, run flips to `budget_limited`; operator must `run-state resume <id>` to continue. |
 | `--auto-fix` | Forwarded to ruflo agents and codex-gate auto-fix loop. |
 | `--interactive` | Restore manual gates between phases. Default = non-interactive. |
-| `--no-audit` | Skip adversarial audit at completion. **NOT recommended.** Use only for trivial typo-class fixes. |
+| `--no-audit` | **Operator-accepted-risk bypass** of the adversarial completion audit. Use only for trivial typo-class fixes. Not a "skip mandatory step" — the operator owns the risk. |
+| `--no-codex-gate` | **Operator-accepted-risk bypass** of cross-model adversarial review. Use only when blast radius is provably minimal (typo, comment, log-message). |
 
 ## Invocation
 
@@ -507,10 +495,17 @@ Log:
 
 ### Step 4 — Adversarial completion audit (mandatory unless `--no-audit`)
 
-Before declaring the fix complete, run a hostile cross-model audit that tries to prove the bug still exists. Codex GPT-5 runs in read-only sandbox; verdict drives state transition.
+Before declaring the fix complete, run a hostile cross-model audit that tries to prove the bug still exists. Codex GPT-5 runs in read-only sandbox; verdict is appended to `~/.claude/state/audits.jsonl` and drives the next-turn decision via native `/goal` (see "Native /goal entry" above).
+
+`run-state` is now invoked only to create an audit record — there is no prior lifecycle to extend.
 
 ```bash
-BUG_DESC=$(~/.claude/bin/run-state status "$RUN_ID" | jq -r '.objective // ""')
+# Create an ad-hoc audit record (no lifecycle pretense)
+RUN_ID=$(~/.claude/bin/run-state start \
+  --skill fix \
+  --objective "$BUG_DESC" \
+  | jq -r .run_id)
+
 MODIFIED=$(git diff "origin/${BASE:-main}"...HEAD --name-only | head -30)
 
 ~/.claude/bin/run-state audit "$RUN_ID" \
@@ -520,17 +515,16 @@ MODIFIED=$(git diff "origin/${BASE:-main}"...HEAD --name-only | head -30)
   --cwd "$(git rev-parse --show-toplevel)"
 ```
 
-Decision rule:
-- `verdict=pass` → CLI auto-marks run `complete`, clears marker. Proceed to `/ship` or stop.
-- `verdict=fail` → CLI auto-reverts run to `active` and records repro/missing in events. Stop hook continues the loop; re-enter investigation with the auditor's repro as the new symptom.
-- `verdict=error` → CLI auto-reverts to `active`. Investigate why audit failed (timeout, codex auth, malformed output). Retry once. If still error, mark `failed` manually and escalate.
+Decision rule (verdict appended to `~/.claude/state/audits.jsonl`, keyed by `$RUN_ID`):
+- `verdict=pass` → proceed to `/ship` or stop. If a native `/goal` is set, it clears.
+- `verdict=fail` → re-enter investigation with the auditor's repro as the new symptom. Native `/goal`, if set, auto-continues the loop.
+- `verdict=error` → investigate why audit failed (timeout, codex auth, malformed output). Retry once. If still error, escalate manually.
 
-Hard cap: 3 audit attempts. After 3 consecutive non-pass, mark `failed`:
+Hard cap: 3 audit attempts per bug. Grep the audit log to check:
 
 ```bash
-ATTEMPTS=$(~/.claude/bin/run-state status "$RUN_ID" | jq -r .audit_attempts)
+ATTEMPTS=$(grep -c "\"run_id\":\"$RUN_ID\"" ~/.claude/state/audits.jsonl 2>/dev/null || echo 0)
 if [ "$ATTEMPTS" -ge 3 ]; then
-  ~/.claude/bin/run-state update "$RUN_ID" --state failed
   echo "FIX FAILED — 3 audit attempts exhausted. Run-id: $RUN_ID"
   exit 1
 fi
@@ -678,6 +672,7 @@ Codex-gate adds ~$2 + ~13 min per fix. Disable with `--no-codex-gate` for trivia
 - **v1.2.0 non-interactive policy:** never block on AskUserQuestion. Uncertainty (incomplete investigation, CRITICAL findings) writes a structured artifact and exits 1.
 - **v1.2.0 ruflo policy:** ruflo is mandatory. Set `RUFLO_REQUIRED=0` only for debugging.
 - **v1.3.0 codex-gate policy:** codex-gate runs by default before Step 6 (report) on the final post-QA diff. Skip with `--no-codex-gate` only when blast radius is provably minimal (typo, comment, log-message). Skip-gracefully if codex CLI is not installed (warn, continue).
+- **v2.0.0 continuation policy:** continuation is delegated to native Claude `/goal`. `/fix` no longer manages a run-state lifecycle (no start/update/complete, no Stop-hook continuation, no token budget, no marker file). The adversarial audit + codex-gate are still mandatory bypasses-via-flag; `/goal` is what loops the pipeline until verdict=pass.
 
 ## Relationship to QA Ralph Loop
 

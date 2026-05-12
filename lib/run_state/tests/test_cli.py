@@ -22,21 +22,18 @@ def _run(args, env_extra=None):
 
 def test_start_command_emits_run_id(tmp_path: Path) -> None:
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
     r = _run(
         ["start", "--skill", "fix", "--objective", "test bug"],
-        env_extra={"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)},
+        env_extra={"RUN_STATE_DB": str(db)},
     )
     assert r.returncode == 0, r.stderr
     payload = json.loads(r.stdout)
     assert payload["run_id"]
-    assert marker.read_text().strip() == payload["run_id"]
 
 
 def test_status_command_returns_run_info(tmp_path: Path) -> None:
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "fix", "--objective", "test"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
     status = _run(["status", run_id], env_extra=env)
@@ -46,37 +43,20 @@ def test_status_command_returns_run_info(tmp_path: Path) -> None:
     assert payload["skill"] == "fix"
 
 
-def test_complete_command_clears_marker(tmp_path: Path) -> None:
+def test_complete_command_sets_state_complete(tmp_path: Path) -> None:
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "fix", "--objective", "test"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
     r = _run(["complete", run_id], env_extra=env)
     assert r.returncode == 0
-    assert not marker.exists()
     status = _run(["status", run_id], env_extra=env)
     assert json.loads(status.stdout)["state"] == "complete"
 
 
-def test_pause_resume_round_trip(tmp_path: Path) -> None:
-    db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
-    started = _run(["start", "--skill", "feature", "--objective", "test"], env_extra=env)
-    run_id = json.loads(started.stdout)["run_id"]
-    _run(["pause", run_id], env_extra=env)
-    assert not marker.exists()
-    _run(["resume", run_id], env_extra=env)
-    assert marker.exists()
-    status = json.loads(_run(["status", run_id], env_extra=env).stdout)
-    assert status["state"] == "active"
-
-
 def test_audit_command_passes_verdict_pass(tmp_path: Path) -> None:
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "fix", "--objective", "x"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
 
@@ -94,7 +74,6 @@ def test_audit_command_passes_verdict_pass(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     payload = json.loads(r.stdout)
     assert payload["verdict"] == "pass"
-    assert not marker.exists()
 
     status = _run(["status", run_id], env_extra=env)
     assert json.loads(status.stdout)["state"] == "complete"
@@ -102,8 +81,7 @@ def test_audit_command_passes_verdict_pass(tmp_path: Path) -> None:
 
 def test_audit_command_fail_keeps_run_active(tmp_path: Path) -> None:
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "fix", "--objective", "x"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
 
@@ -119,41 +97,24 @@ def test_audit_command_fail_keeps_run_active(tmp_path: Path) -> None:
               "--context", "MODIFIED_FILES=none"],
              env_extra=env)
     assert r.returncode == 1
-    assert marker.exists()
     status = _run(["status", run_id], env_extra=env)
     assert json.loads(status.stdout)["state"] == "active"
 
 
-def test_update_state_active_recreates_marker(tmp_path: Path) -> None:
-    """codex-gate Pass 1 #1: --state active must recreate marker so Stop hook continues."""
+def test_update_state_complete_sets_state(tmp_path: Path) -> None:
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "fix", "--objective", "x"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
-    _run(["pause", run_id], env_extra=env)
-    assert not marker.exists()
-    _run(["update", run_id, "--state", "active"], env_extra=env)
-    assert marker.exists(), "update --state active must recreate marker"
-    assert marker.read_text().strip() == run_id
-
-
-def test_update_state_complete_clears_marker(tmp_path: Path) -> None:
-    db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
-    started = _run(["start", "--skill", "fix", "--objective", "x"], env_extra=env)
-    run_id = json.loads(started.stdout)["run_id"]
-    assert marker.exists()
     _run(["update", run_id, "--state", "complete"], env_extra=env)
-    assert not marker.exists()
+    status = _run(["status", run_id], env_extra=env)
+    assert json.loads(status.stdout)["state"] == "complete"
 
 
-def test_feature_audit_pass_keeps_marker_active(tmp_path: Path) -> None:
-    """codex-gate Pass 2 #2 CRITICAL: feature audit pass must NOT clear marker."""
+def test_feature_audit_pass_keeps_state_active(tmp_path: Path) -> None:
+    """v3.0: feature audit pass keeps state=active (canary still pending)."""
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "feature", "--objective", "spec-130"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
 
@@ -170,16 +131,14 @@ def test_feature_audit_pass_keeps_marker_active(tmp_path: Path) -> None:
               "--context", "MODIFIED_FILES=none"],
              env_extra=env)
     assert r.returncode == 0, r.stderr
-    assert marker.exists(), "feature audit pass must NOT clear marker (canary still pending)"
     status = _run(["status", run_id], env_extra=env)
     state = json.loads(status.stdout)["state"]
     assert state == "active", f"feature audit pass must leave state=active, got {state}"
 
 
-def test_fix_audit_pass_clears_marker(tmp_path: Path) -> None:
+def test_fix_audit_pass_completes(tmp_path: Path) -> None:
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "fix", "--objective", "bug"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
     bin_dir = tmp_path / "bin"
@@ -192,7 +151,6 @@ def test_fix_audit_pass_clears_marker(tmp_path: Path) -> None:
               "--context", "BUG_DESCRIPTION=x",
               "--context", "MODIFIED_FILES=none"], env_extra=env)
     assert r.returncode == 0
-    assert not marker.exists()
     status = _run(["status", run_id], env_extra=env)
     assert json.loads(status.stdout)["state"] == "complete"
 
@@ -200,11 +158,10 @@ def test_fix_audit_pass_clears_marker(tmp_path: Path) -> None:
 # --- Group E: D1 phase audit -----------------------------------------------
 
 
-def test_phase_audit_pass_keeps_marker_and_active(tmp_path: Path) -> None:
-    """D1: --kind phase pass keeps state=active and marker — feature pipeline continues."""
+def test_phase_audit_pass_keeps_active(tmp_path: Path) -> None:
+    """D1: --kind phase pass keeps state=active — feature pipeline continues."""
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "feature", "--objective", "spec-130"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
 
@@ -220,7 +177,6 @@ def test_phase_audit_pass_keeps_marker_and_active(tmp_path: Path) -> None:
               "--context", "PHASE_SPEC=stub",
               "--context", "PHASE_DIFF=stub"], env_extra=env)
     assert r.returncode == 0, r.stderr
-    assert marker.exists(), "phase audit pass must NOT clear marker (more wedges may follow)"
     status = _run(["status", run_id], env_extra=env)
     assert json.loads(status.stdout)["state"] == "active"
 
@@ -228,8 +184,7 @@ def test_phase_audit_pass_keeps_marker_and_active(tmp_path: Path) -> None:
 def test_phase_audit_fail_reverts_active(tmp_path: Path) -> None:
     """D1: --kind phase fail leaves state=active with audit_attempts incremented."""
     db = tmp_path / "runs.db"
-    marker = tmp_path / ".active-run"
-    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    env = {"RUN_STATE_DB": str(db)}
     started = _run(["start", "--skill", "feature", "--objective", "spec"], env_extra=env)
     run_id = json.loads(started.stdout)["run_id"]
     bin_dir = tmp_path / "bin"
@@ -247,7 +202,6 @@ def test_phase_audit_fail_reverts_active(tmp_path: Path) -> None:
               "--context", "PHASE_SPEC=s",
               "--context", "PHASE_DIFF=d"], env_extra=env)
     assert r.returncode == 1
-    assert marker.exists()
     status = json.loads(_run(["status", run_id], env_extra=env).stdout)
     assert status["state"] == "active"
     assert status["audit_attempts"] >= 1

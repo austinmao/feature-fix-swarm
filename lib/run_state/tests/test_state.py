@@ -40,7 +40,6 @@ def test_create_run_persists(tmp_path: Path) -> None:
     assert run.objective == "ship spec 130"
     assert run.state == "active"
     assert run.tokens_used == 0
-    assert run.continuation_count == 0
 
 
 def test_create_run_rejects_invalid_skill(tmp_path: Path) -> None:
@@ -74,20 +73,11 @@ def test_inc_tokens_accumulates(tmp_path: Path) -> None:
     assert store.get_run(run_id).tokens_used == 500
 
 
-def test_inc_tokens_flips_to_budget_limited(tmp_path: Path) -> None:
+def test_inc_tokens_does_not_change_state(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs.db")
     run_id = store.create_run(skill="fix", objective="x", tokens_budget=500)
     store.inc_tokens(run_id, 600)
-    assert store.get_run(run_id).state == "budget_limited"
-
-
-def test_inc_continuation_caps_at_max(tmp_path: Path) -> None:
-    store = RunStore(tmp_path / "runs.db")
-    run_id = store.create_run(skill="fix", objective="x", max_continuations=3)
-    for _ in range(3):
-        assert store.inc_continuation(run_id) is True
-    assert store.inc_continuation(run_id) is False
-    assert store.get_run(run_id).state == "paused"
+    assert store.get_run(run_id).state == "active"
 
 
 def test_list_active_runs(tmp_path: Path) -> None:

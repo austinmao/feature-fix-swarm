@@ -13,10 +13,8 @@ DEFAULT_DB = Path.home() / ".claude" / "state" / "runs.db"
 
 VALID_STATES = (
     "active",
-    "paused",
     "pending_audit",
     "complete",
-    "budget_limited",
     "failed",
     "aborted",
 )
@@ -33,8 +31,6 @@ CREATE TABLE IF NOT EXISTS runs (
   current_phase TEXT,
   tokens_used INTEGER NOT NULL DEFAULT 0,
   tokens_budget INTEGER,
-  continuation_count INTEGER NOT NULL DEFAULT 0,
-  max_continuations INTEGER NOT NULL DEFAULT 500,
   audit_attempts INTEGER NOT NULL DEFAULT 0,
   last_audit_verdict TEXT,
   worktree TEXT,
@@ -82,8 +78,6 @@ class Run:
     current_phase: Optional[str]
     tokens_used: int
     tokens_budget: Optional[int]
-    continuation_count: int
-    max_continuations: int
     audit_attempts: int
     last_audit_verdict: Optional[str]
     worktree: Optional[str]
@@ -105,7 +99,6 @@ class RunStore:
         objective: str,
         session_id: Optional[str] = None,
         tokens_budget: Optional[int] = None,
-        max_continuations: int = 500,
         worktree: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> str:
@@ -118,13 +111,13 @@ class RunStore:
             conn.execute(
                 """
                 INSERT INTO runs (id, skill, objective, state, session_id,
-                  tokens_budget, max_continuations, worktree, metadata_json,
+                  tokens_budget, worktree, metadata_json,
                   created_at, updated_at)
-                VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id, skill, objective, session_id,
-                    tokens_budget, max_continuations, worktree,
+                    tokens_budget, worktree,
                     json.dumps(metadata or {}),
                     now, now,
                 ),
@@ -156,8 +149,6 @@ class RunStore:
             current_phase=row["current_phase"],
             tokens_used=row["tokens_used"],
             tokens_budget=row["tokens_budget"],
-            continuation_count=row["continuation_count"],
-            max_continuations=row["max_continuations"],
             audit_attempts=row["audit_attempts"],
             last_audit_verdict=row["last_audit_verdict"],
             worktree=row["worktree"],
@@ -213,51 +204,15 @@ class RunStore:
                 (delta, now, run_id),
             )
             row = conn.execute(
-                "SELECT tokens_used, tokens_budget, state FROM runs WHERE id = ?",
+                "SELECT tokens_used, tokens_budget FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
-            if row and row[1] is not None and row[0] >= row[1] and row[2] == "active":
-                conn.execute(
-                    "UPDATE runs SET state = 'budget_limited', updated_at = ? WHERE id = ?",
-                    (now, run_id),
-                )
+            if row and row[1] is not None and row[0] >= row[1]:
                 conn.execute(
                     "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'budget_limit_hit', ?, ?)",
                     (run_id, json.dumps({"tokens_used": row[0], "tokens_budget": row[1]}), now),
                 )
             conn.commit()
-        finally:
-            conn.close()
-
-    def inc_continuation(self, run_id: str) -> bool:
-        """Increment continuation_count. Return True if incremented; False if cap reached (run auto-paused)."""
-        now = _now()
-        conn = sqlite3.connect(self.db_path)
-        try:
-            row = conn.execute(
-                "SELECT continuation_count, max_continuations FROM runs WHERE id = ?",
-                (run_id,),
-            ).fetchone()
-            if row is None:
-                return False
-            count, cap = row
-            if count >= cap:
-                conn.execute(
-                    "UPDATE runs SET state = 'paused', updated_at = ? WHERE id = ?",
-                    (now, run_id),
-                )
-                conn.execute(
-                    "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'runaway_pause', ?, ?)",
-                    (run_id, json.dumps({"continuation_count": count, "cap": cap}), now),
-                )
-                conn.commit()
-                return False
-            conn.execute(
-                "UPDATE runs SET continuation_count = continuation_count + 1, updated_at = ? WHERE id = ?",
-                (now, run_id),
-            )
-            conn.commit()
-            return True
         finally:
             conn.close()
 
