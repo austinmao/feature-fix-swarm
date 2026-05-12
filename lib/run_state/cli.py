@@ -4,11 +4,37 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 from run_state.marker import MarkerFile
 from run_state.state import RunStore, DEFAULT_DB, VALID_STATES
+
+
+def _parse_tokens(value):
+    """Parse '250K' / '1.5M' / '1B' / '2T' / '250000' to int.
+
+    Accepts case-insensitive suffix. Returns int, or raises
+    argparse.ArgumentTypeError on invalid input.
+    """
+    if value is None:
+        return None
+    s = str(value).strip().upper()
+    m = re.match(r'^(\d+(?:\.\d+)?)\s*([KMBT]?)$', s)
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"invalid token count: {value!r} (expected '250000' or '250K'/'1.5M'/'1B'/'2T')"
+        )
+    num, suffix = m.group(1), m.group(2)
+    multipliers = {
+        "": 1,
+        "K": 1_000,
+        "M": 1_000_000,
+        "B": 1_000_000_000,
+        "T": 1_000_000_000_000,
+    }
+    return int(float(num) * multipliers[suffix])
 
 
 def _store() -> RunStore:
@@ -124,7 +150,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("start")
     s.add_argument("--skill", required=True, choices=["feature", "fix"])
     s.add_argument("--objective", required=True)
-    s.add_argument("--tokens", type=int, default=None)
+    s.add_argument("--tokens", type=_parse_tokens, default=None)
     s.add_argument("--worktree", default=None)
     s.add_argument("--session-id", default=None)
     s.set_defaults(func=cmd_start)
@@ -136,7 +162,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("update")
     s.add_argument("run_id")
     s.add_argument("--phase", default=None)
-    s.add_argument("--tokens", type=int, default=None, help="delta to add to tokens_used")
+    s.add_argument("--tokens", type=_parse_tokens, default=None, help="delta to add to tokens_used (accepts K/M/B/T suffix)")
     s.add_argument("--state", default=None, choices=list(VALID_STATES))
     s.set_defaults(func=cmd_update)
 
@@ -152,7 +178,7 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("audit")
     s.add_argument("run_id")
-    s.add_argument("--kind", required=True, choices=["fix", "feature"])
+    s.add_argument("--kind", required=True, choices=["fix", "feature", "phase"])
     s.add_argument("--context", action="append", help="KEY=VALUE for prompt substitution; repeat as needed")
     s.add_argument("--cwd", default=None)
     s.set_defaults(func=cmd_audit)
@@ -206,9 +232,19 @@ def cmd_audit(args: argparse.Namespace) -> int:
         # Solution: kind=fix completes on pass; kind=feature stays active
         # so the Stop hook keeps the pipeline alive through canary. The
         # /feature skill marks `complete` explicitly after canary succeeds.
+        #
+        # v2.1: kind=phase is per-wedge correctness inside /feature. A pass
+        # means THIS wedge is done, but the feature pipeline (more wedges +
+        # final feature audit + canary) is still running. Stay active, marker
+        # preserved. Caller (the skill) advances to the next wedge.
         if args.kind == "fix":
             store.update_state(args.run_id, "complete")
             _marker().clear()
+        elif args.kind == "phase":
+            # Per-phase audit pass: phase done, but feature pipeline still
+            # running. Stay active, marker preserved. Caller (the skill)
+            # advances to next wedge.
+            store.update_state(args.run_id, "active")
         else:  # feature — keep run alive, marker intact, for canary
             store.update_state(args.run_id, "active")
     else:
