@@ -8,7 +8,6 @@ import re
 import sys
 from pathlib import Path
 
-from run_state.marker import MarkerFile
 from run_state.state import RunStore, DEFAULT_DB, VALID_STATES
 
 
@@ -42,11 +41,6 @@ def _store() -> RunStore:
     return RunStore(db)
 
 
-def _marker() -> MarkerFile:
-    p = os.environ.get("RUN_STATE_MARKER")
-    return MarkerFile(Path(p)) if p else MarkerFile()
-
-
 def cmd_start(args: argparse.Namespace) -> int:
     store = _store()
     run_id = store.create_run(
@@ -56,7 +50,6 @@ def cmd_start(args: argparse.Namespace) -> int:
         tokens_budget=args.tokens,
         worktree=args.worktree,
     )
-    _marker().set(run_id)
     print(json.dumps({"run_id": run_id}))
     return 0
 
@@ -74,7 +67,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         "objective": run.objective,
         "tokens_used": run.tokens_used,
         "tokens_budget": run.tokens_budget,
-        "continuation_count": run.continuation_count,
         "audit_attempts": run.audit_attempts,
         "last_audit_verdict": run.last_audit_verdict,
     }))
@@ -89,46 +81,16 @@ def cmd_update(args: argparse.Namespace) -> int:
         store.inc_tokens(args.run_id, args.tokens)
     if args.state:
         store.update_state(args.run_id, args.state)
-        # FIX (codex-gate Pass 1 #1): keep marker consistent with state so the
-        # Stop hook honors `update --state active` continuations and clears
-        # itself on terminal states.
-        if args.state == "active":
-            _marker().set(args.run_id)
-        elif args.state in ("complete", "aborted", "paused"):
-            _marker().clear()
-        # `budget_limited` and `pending_audit` leave marker untouched.
     return 0
 
 
 def cmd_complete(args: argparse.Namespace) -> int:
     _store().update_state(args.run_id, "complete")
-    _marker().clear()
     return 0
 
 
 def cmd_abort(args: argparse.Namespace) -> int:
     _store().update_state(args.run_id, "aborted")
-    _marker().clear()
-    return 0
-
-
-def cmd_pause(args: argparse.Namespace) -> int:
-    _store().update_state(args.run_id, "paused")
-    _marker().clear()
-    return 0
-
-
-def cmd_resume(args: argparse.Namespace) -> int:
-    store = _store()
-    run = store.get_run(args.run_id)
-    if run is None:
-        print(json.dumps({"error": "not_found"}), file=sys.stderr)
-        return 1
-    if run.state not in ("paused", "budget_limited"):
-        print(json.dumps({"error": "invalid_state", "state": run.state}), file=sys.stderr)
-        return 1
-    store.update_state(args.run_id, "active")
-    _marker().set(args.run_id)
     return 0
 
 
@@ -166,8 +128,7 @@ def main(argv=None) -> int:
     s.add_argument("--state", default=None, choices=list(VALID_STATES))
     s.set_defaults(func=cmd_update)
 
-    for name, fn in (("complete", cmd_complete), ("abort", cmd_abort),
-                     ("pause", cmd_pause), ("resume", cmd_resume)):
+    for name, fn in (("complete", cmd_complete), ("abort", cmd_abort)):
         s = sub.add_parser(name)
         s.add_argument("run_id")
         s.set_defaults(func=fn)
@@ -224,28 +185,39 @@ def cmd_audit(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
+    # v3.0 codex-gate Pass 1 P2 fix: also append to ~/.claude/state/audits.jsonl
+    # so native `/goal` condition checker can grep audit history without
+    # needing to open SQLite. One line per audit; append-only; never rewritten.
+    audits_log = Path.home() / ".claude" / "state" / "audits.jsonl"
+    try:
+        audits_log.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        record = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "run_id": args.run_id,
+            "kind": args.kind,
+            "verdict": result.verdict,
+            "reasoning": result.reasoning[:500],
+            "missing": result.missing,
+        }
+        with audits_log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        # Best-effort log; SQLite remains source of truth.
+        pass
+
     if result.verdict == "pass":
-        # FIX (codex-gate Pass 2 #2 CRITICAL): /feature pipeline still has
-        # canary work after the spec-completion audit. If we mark complete +
-        # clear marker here, the Stop hook stops protecting the run between
-        # this CLI return and the skill's follow-up `--state active` call.
-        # Solution: kind=fix completes on pass; kind=feature stays active
-        # so the Stop hook keeps the pipeline alive through canary. The
-        # /feature skill marks `complete` explicitly after canary succeeds.
-        #
-        # v2.1: kind=phase is per-wedge correctness inside /feature. A pass
-        # means THIS wedge is done, but the feature pipeline (more wedges +
-        # final feature audit + canary) is still running. Stay active, marker
-        # preserved. Caller (the skill) advances to the next wedge.
+        # v3.0: native /goal handles continuation; no marker to manage.
+        # kind=fix → terminal complete. kind=phase / kind=feature stay
+        # active so the caller (the skill) advances to the next wedge or
+        # final canary stage.
         if args.kind == "fix":
             store.update_state(args.run_id, "complete")
-            _marker().clear()
         elif args.kind == "phase":
             # Per-phase audit pass: phase done, but feature pipeline still
-            # running. Stay active, marker preserved. Caller (the skill)
-            # advances to next wedge.
+            # running. Stay active; caller advances to next wedge.
             store.update_state(args.run_id, "active")
-        else:  # feature — keep run alive, marker intact, for canary
+        else:  # feature — keep run alive for canary
             store.update_state(args.run_id, "active")
     else:
         store.update_state(args.run_id, "active")

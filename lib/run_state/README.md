@@ -1,27 +1,33 @@
 # run_state
 
-Persistent run state for `/feature` and `/fix` skills.
+Adversarial audit recorder for `/feature` and `/fix` skills. v3.0.
 
-## What it adds
+## What it provides (v3.0)
 
-Four capabilities to long-running pipeline skills:
+**Cross-model adversarial audit** of work done by `/feature` and `/fix`. The native Claude `/goal` command ([docs](https://code.claude.com/docs/en/goal)) owns the continuation loop. This library owns the verification gate:
 
-1. **Persistent state** across Claude Code sessions (SQLite at `~/.claude/state/runs.db`).
-2. **Stop-hook auto-continuation:** when Claude tries to stop while a run is `active`, the hook injects a continuation prompt so the pipeline resumes.
-3. **Adversarial completion audit:** before declaring done, spawn `codex` GPT-5 in a hostile prompt that tries to prove the work is NOT done. Three verdicts: pass / fail / error.
-4. **Token budget tracking:** runs flip to `budget_limited` when used > budgeted; operator resumes manually.
+1. **Adversarial audit**: spawn `codex` GPT-5 in a hostile prompt that tries to prove the work is NOT done. Three verdicts: `pass` / `fail` / `error`.
+2. **Audit record**: persist verdict + missing[] to SQLite at `~/.claude/state/runs.db` so native `/goal` condition checker can grep audit history.
+3. **CLI** (`run-state`) to start/inspect/audit/complete runs.
+
+What v2.x had but v3.0 dropped (now handled by native `/goal`):
+- Stop hook with continuation prompt injection
+- `.active-run` marker file
+- continuation_count + max_continuations runaway guard
+- pause/resume (use `/goal clear` then re-issue `/goal`)
+- `budget_limited` auto-state-flip (events still emitted for analytics)
 
 ## States
 
 | state | meaning |
 |---|---|
-| `active` | Pipeline running; Stop hook injects continuation. |
-| `pending_audit` | Adversarial audit in progress. |
-| `paused` | Operator paused; marker cleared; resume manually. |
-| `budget_limited` | Token budget hit; Stop hook allows stop; resume manually. |
-| `complete` | Audit passed AND (for /feature) canary passed. |
-| `failed` | 3 audit attempts exhausted, or unrecoverable error. |
-| `aborted` | Operator killed via `run-state abort`. |
+| `active` | Pipeline running; native /goal loops |
+| `pending_audit` | Adversarial audit in progress |
+| `complete` | Audit passed (kind=fix); for kind=feature/phase, set by skill after canary |
+| `failed` | Operator-marked unrecoverable error |
+| `aborted` | Operator killed via `run-state abort` |
+
+(`paused` and `budget_limited` removed in v3.0.)
 
 ## CLI
 
@@ -30,51 +36,50 @@ run-state start --skill <feature|fix> --objective "<text>" [--tokens N] [--workt
 run-state status <run_id>
 run-state list [--state STATE]
 run-state update <run_id> --phase <name> | --tokens <delta> | --state <state>
-run-state audit <run_id> --kind <fix|feature> --context KEY=VALUE [--cwd PATH]
+run-state audit <run_id> --kind <fix|feature|phase> --context KEY=VALUE [--cwd PATH]
 run-state complete <run_id>
-run-state pause <run_id>
-run-state resume <run_id>
 run-state abort <run_id>
 ```
 
-## Hooks (auto-installed by setup.sh)
-
-`~/.claude/settings.json` registers:
-- `SessionStart`: `python3 ~/.claude/hooks/run-state-session.py` — writes `CLAUDE_SESSION_ID` to `~/.claude/state/session.env`
-- `Stop`: `python3 ~/.claude/hooks/run-state-stop.py` — checks marker, blocks stop and injects continuation if active
+`--tokens` accepts K/M/B/T suffix: `250K`, `1.5M`, `1B`, `2T`.
 
 ## Files
 
 | Path | Purpose |
 |---|---|
 | `~/.claude/state/runs.db` | SQLite database. Tables: `runs`, `events`. |
-| `~/.claude/state/.active-run` | Single-line text file with current run_id. O(1) stat-check by Stop hook. |
-| `~/.claude/state/session.env` | `CLAUDE_SESSION_ID=...` for skill subprocesses to source. |
-| `~/.claude/lib/run_state/prompts/{fix,feature}_audit.txt` | Adversarial audit prompt templates. |
+| `~/.claude/lib/run_state/prompts/{fix,feature,phase}_audit.txt` | Hostile audit prompt templates. |
 | `~/.claude/bin/run-state` | Bash shim → `python3 -m run_state.cli`. |
 
-## How /fix uses it
+## How /fix uses it (v3.0)
 
 ```bash
-RUN_ID=$(run-state start --skill fix --objective "$BUG_DESC" --tokens 300000 | jq -r .run_id)
-run-state update "$RUN_ID" --phase investigate
-run-state update "$RUN_ID" --phase implement
-run-state update "$RUN_ID" --phase qa
+# Operator first sets a native /goal:
+#   /goal "bug fixed: run-state audit verdict=pass on this issue AND qa green"
 
-# Before declaring complete: hostile audit
+# Skill records audit at end of pipeline:
+RUN_ID=$(run-state start --skill fix --objective "$BUG_DESC" | jq -r .run_id)
 run-state audit "$RUN_ID" --kind fix \
   --context "BUG_DESCRIPTION=$BUG_DESC" \
   --context "MODIFIED_FILES=$(git diff main...HEAD --name-only)"
-# Exit 0 (verdict=pass) → marker cleared, state=complete
-# Exit 1 (verdict=fail or error) → state=active, Stop hook continues loop
+# Exit 0 (pass) → state=complete; native /goal sees verdict=pass and clears
+# Exit 1 (fail) → state=active; native /goal continues loop
 ```
 
-## How /feature uses it
+## How /feature uses it (v3.0)
 
-Same lifecycle plus:
-- Higher default budget (1.5M vs 300K tokens — longer pipeline)
-- Audit kind = `feature` with spec content + diff
-- After audit pass, skill explicitly re-sets state to `active` (overriding audit's auto-complete) so the Stop hook continues through canary phase. Only after canary passes does the skill mark `complete`.
+```bash
+# Operator first sets a native /goal:
+#   /goal "spec NNN done: all phase audits pass, codex-gate PASS, canary 200"
+
+# Per-wedge audit between every implemented wedge:
+run-state audit "$RUN_ID" --kind phase \
+  --context "PHASE_NAME=backend-wedge" \
+  --context "PRIOR_PHASES=none" \
+  --context "PHASE_SPEC=$WEDGE_SPEC" \
+  --context "PHASE_DIFF=$WEDGE_DIFF"
+# kind=phase pass keeps state=active; advance to next wedge
+```
 
 ## Debugging
 
@@ -83,7 +88,6 @@ run-state list --state active
 sqlite3 ~/.claude/state/runs.db \
   "SELECT created_at, event_type, payload_json FROM events WHERE run_id = '<id>' ORDER BY created_at;"
 run-state abort <id>
-rm -f ~/.claude/state/.active-run
 ```
 
 ## Tests
@@ -91,10 +95,28 @@ rm -f ~/.claude/state/.active-run
 ```bash
 cd ~/Documents/Github/feature-fix-swarm/lib/run_state
 python3 -m pytest -v
+# 36 passed
 ```
+
+## Native /goal integration
+
+v3.0 assumes Claude Code 2.1.139+ with native `/goal`. To use:
+
+```
+/goal "<verifiable condition>"
+```
+
+Native /goal runs a small/fast model after each turn to check the condition. When true, /goal auto-clears. When false, Claude continues without operator prompt.
+
+Good conditions for our pipelines:
+
+- `/goal "specs/130 done: ~/.claude/state/audits.jsonl shows verdict=pass for every phase audit, codex-gate PASS, canary returns 200"`
+- `/goal "bug X fixed: latest run-state audit --kind fix verdict=pass, npx vitest run exits 0"`
+
+See https://code.claude.com/docs/en/goal for native /goal semantics.
 
 ## Edge cases
 
-- **Concurrent /feature and /fix:** Current marker holds only one run_id. If both run simultaneously, the second overwrites — first still queryable by id but Stop hook only continues the most recent. Documented as "one long-running skill per session" for now.
-- **codex CLI missing:** `audit` subcommand returns `verdict=error` with reasoning `"codex CLI not installed"`. Run state reverts to `active`; operator must install codex (`npm install -g @openai/codex`) or run with `--no-audit`.
-- **Audit false-pass risk:** codex may declare pass when bug still exists in untouched code path. Mitigation: aggressive prompt + 3-attempt hard cap. Track verdict accuracy in postmortem.
+- **Concurrent /feature and /fix**: no marker lock anymore. Each call creates its own `runs` row; SQLite handles concurrent writes via WAL. Operator must reference the right run_id in `/goal` conditions.
+- **codex CLI missing**: `audit` returns `verdict=error` with reasoning `"codex CLI not installed"`. State stays `active`; operator can install codex or use `--no-audit` on the skill.
+- **Audit false-pass risk**: codex may declare pass when a bug still exists in untouched code. Mitigation: aggressive prompt + 3-attempt cap (per skill convention). `/codex-gate` (Step 5.7 of /feature) is the final hard gate.

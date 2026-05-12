@@ -1,7 +1,7 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates. v1.4.0 brings per-phase adversarial audit between every wedge and a mandatory cross-model codex-gate before /ship (end-of-pipeline feature audit removed — covered by per-phase + codex-gate)."
-version: "1.4.0"
+description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates. v2.0.0 integrates Claude native /goal for continuation; per-phase audit + /codex-gate remain mandatory."
+version: "2.0.0"
 allowed-tools:
   - Read
   - Edit
@@ -13,44 +13,28 @@ allowed-tools:
 
 # /feature — End-to-end feature pipeline
 
-## Run-state lifecycle (mandatory)
+## Native /goal entry (recommended)
 
-Every `/feature` invocation MUST:
+Before invoking `/feature`, set a native `/goal` condition so Claude auto-continues until the pipeline finishes. Example:
 
-1. **Start a run** — capture run_id BEFORE autoplan:
+```
+/goal "spec NNN done: all per-wedge audits pass, /codex-gate PASS, /canary returns 200 for /api/health"
+```
 
-   ```bash
-   SPEC_ID="<the spec NNN-name passed by user>"
-   RUN_ID=$(~/.claude/bin/run-state start \
-     --skill feature \
-     --objective "ship $SPEC_ID through feature pipeline" \
-     --tokens "${FEATURE_TOKENS_BUDGET:-1500000}" \
-     --session-id "${CLAUDE_SESSION_ID:-}" \
-     --worktree "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
-     | jq -r .run_id)
-   echo "Run: $RUN_ID"
-   ```
+Native `/goal` (Anthropic-maintained, ships in Claude Code 2.1.139+):
+- Small/fast model checks the condition after every turn
+- Auto-continues if condition false; clears automatically when met
+- One goal per session; `/goal clear` cancels manually
+- See https://code.claude.com/docs/en/goal
 
-2. **Update phase at every pipeline boundary:**
+`/feature` writes audit verdicts to `~/.claude/state/audits.jsonl` (one line per audit) so your `/goal` condition can grep for "all phase audits verdict=pass" + codex-gate verdict.
 
-   ```bash
-   ~/.claude/bin/run-state update "$RUN_ID" --phase <stage>
-   # stages: autoplan | spec-decompose | implement-<wedge> | phase-audit-<wedge> | qa | codex-gate | ship | canary
-   ```
-
-3. **Run `run-state audit --kind phase` between EVERY implemented wedge** (see Step 4b). This is mandatory — the skill MUST call a per-phase adversarial audit after each `/feature-implement <wedge>` returns clean QA, before advancing to the next wedge. There is no longer an end-of-pipeline `--kind feature` spec-completion audit; per-phase audits plus `/codex-gate` cover that ground.
-
-4. **Run `/codex-gate` once before `/ship`** (see Step 5.7) — full-branch cross-model review.
-
-5. **Mark complete only after canary success.**
-
-Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. Override with `FEATURE_TOKENS_BUDGET` env or `--tokens` flag. Stop hook auto-continues if state=active.
+If you skip `/goal`, the pipeline still runs but you'll need to advance it manually between phases.
 
 ## Flags
 
 | Flag | Effect |
 |---|---|
-| `--tokens N` | Token budget. Default 1.5M. When exceeded → `budget_limited`; operator must `run-state resume`. |
 | `--interactive` | Restore manual gates (autoplan premise, taste decisions). Default = non-interactive. |
 | `--skip-codex-gate` | Emergency-merge fallback. Skip the mandatory cross-model `/codex-gate` review before `/ship`. **NOT recommended** — bypasses the strongest pre-prod safety net. Per-phase audits remain in force. |
 
@@ -95,6 +79,8 @@ Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. O
 ┌─────────────────────────────────────────────────────────────┐
 │  /feature NNN                                               │
 │                                                             │
+│  Native /goal condition (set by operator before invoking)   │
+│                                                             │
 │  Step 1: /autoplan on specs/NNN/plan.md                     │
 │    └─ /autoplan owns the planning-time Codex audit          │
 │    └─ GATE: user approves review (taste decisions, etc.)    │
@@ -131,8 +117,7 @@ Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. O
 │    └─ Merge to main → Vercel prod deploy                    │
 │    └─ 1h canary monitor (error rate < 1%)                   │
 │    └─ Auto-rollback if SLO breached                         │
-│    └─ On success: run-state complete (only mark-complete    │
-│       point — per-phase audits stay active by design)       │
+│    └─ On success: native /goal condition auto-clears        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -330,7 +315,15 @@ fi
 # pathspec separator or git treats it as a path, producing an empty diff.
 PHASE_DIFF=$(git diff "$(git merge-base HEAD origin/$BASE)..HEAD" --stat -- $WEDGE_FILES | head -50)
 
-~/.claude/bin/run-state update "$RUN_ID" --phase "phase-audit-$WEDGE_NAME"
+# v3.0 codex-gate Pass 1 P1 fix: `run-state audit` requires the run_id
+# positional argument. If a run was started for this /feature pipeline
+# (recommended — gives /goal something to grep), reuse its id; otherwise
+# create a one-shot ad-hoc run that records just this wedge's audit.
+if [ -z "${RUN_ID:-}" ]; then
+  RUN_ID=$(~/.claude/bin/run-state start --skill feature \
+    --objective "spec $SPEC_ID phase $WEDGE_NAME" 2>/dev/null | jq -r .run_id)
+fi
+
 ~/.claude/bin/run-state audit "$RUN_ID" \
   --kind phase \
   --context "PHASE_NAME=$WEDGE_NAME" \
@@ -341,8 +334,8 @@ PHASE_DIFF=$(git diff "$(git merge-base HEAD origin/$BASE)..HEAD" --stat -- $WED
 ```
 
 Decision rule:
-- `verdict=pass` (CLI exit 0) → wedge done. State stays `active`, marker preserved. Advance to next wedge.
-- `verdict=fail` (CLI exit 1) → CLI auto-reverts state to `active`. Auditor's `missing[]` is injected into the next Stop-hook continuation prompt (R2 feature). Re-enter `/feature-implement <wedge>` with the missing items as the new TODO list. Re-run phase audit when done.
+- `verdict=pass` (CLI exit 0) → wedge done. Advance to next wedge.
+- `verdict=fail` (CLI exit 1) → auditor's `missing[]` is the new TODO list. Re-enter `/feature-implement <wedge>` with the missing items. Re-run phase audit when done.
 - `verdict=error` → retry once. If still error, skip and proceed (per-phase audit is best-effort; codex-gate at end is the hard gate).
 
 Hard cap per wedge: 3 phase-audit attempts. After 3 fails, mark the run `failed` and escalate to operator with the residual `missing[]`.
@@ -364,28 +357,22 @@ Log:
 After per-wedge audits all pass and `/qa` is green, run `/codex-gate` for one final cross-model review against the full branch diff. Three Codex GPT-5 passes (review + adversarial-chaos + adversarial-test-gaps) catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
 
 ```bash
-# BUG-FIX (v2.1 codex-gate Pass 1 P2 / Pass 3 #2): --skip-codex-gate is parsed
-# into $SKIP_CODEX_GATE at flag time but Step 5.7 previously invoked /codex-gate
-# unconditionally, silently overriding the operator's opt-out. The skip path is
-# now a hard bypass — codex-gate is NOT invoked — and the bypass is recorded as
-# a run-state event so the audit trail shows operator-accepted risk.
+# --skip-codex-gate is a hard bypass — codex-gate is NOT invoked and the skip
+# is recorded in the local run log so the audit trail shows operator-accepted risk.
 if [ "${SKIP_CODEX_GATE:-0}" = "1" ]; then
   echo "[FEATURE] /codex-gate SKIPPED (--skip-codex-gate flag set). Operator accepted the risk; per-phase audits from Step 4b remain in force." >&2
-  ~/.claude/bin/run-state update "$RUN_ID" --phase codex-gate-skipped
   printf '{"timestamp":"%s","spec":"%s","step":"codex-gate","status":"skipped","reason":"skip_codex_gate_flag","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
   # Continue to Step 6 (/ship). Do NOT invoke the /codex-gate skill below.
 else
-  ~/.claude/bin/run-state update "$RUN_ID" --phase codex-gate
   # Skill: /codex-gate
+  :
 fi
 ```
 
 Decision rule (only applies when `--skip-codex-gate` was NOT set):
 - `CODEX-GATE PASS` (CRITICAL=0, HIGH≤2) → proceed to `/ship` + `/canary`.
 - `CODEX-GATE BLOCK` (CRITICAL≥1 unfixed) → STOP. Fix the CRITICAL inline via codex auto-fix, commit, re-run `/codex-gate`. Do NOT proceed to `/ship` until verdict is PASS.
-
-After canary succeeds, mark the run complete: `~/.claude/bin/run-state complete "$RUN_ID"`. This is the only place /feature explicitly marks complete — the per-phase audits stay active by design.
 
 Skip-gracefully behaviour (codex CLI absent — optional dependency):
 
@@ -401,7 +388,7 @@ if [ "$CODEX_AVAILABLE" = "0" ]; then
 fi
 ```
 
-`--skip-codex-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/codex-gate` is NOT invoked at all and the skip is written to both `$RUN_LOG` and run-state events (`phase=codex-gate-skipped`) so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
+`--skip-codex-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/codex-gate` is NOT invoked at all and the skip is written to `$RUN_LOG` so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
 
 **Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent codex-gate run.
 

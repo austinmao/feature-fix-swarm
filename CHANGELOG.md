@@ -8,6 +8,56 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.0.0 — Native /goal integration; strip Stop hook + marker (2026-05-12)
+
+**Breaking change.** Anthropic shipped native `/goal` in Claude Code 2.1.139+ ([docs](https://code.claude.com/docs/en/goal)). It owns the continuation loop — a small/fast model checks the goal condition after every turn and auto-continues. Our Stop hook, marker file, continuation-count tracking, pause/resume, and budget_limited state are now redundant. ~300 lines of dead code removed. Run-state lib retains adversarial audit (`run-state audit --kind {fix, phase, feature}`) + /codex-gate — those are the cross-model verification value-add native /goal does not provide.
+
+### Removed
+
+- **`scripts/hooks/run-state-stop.py`** — Stop hook with XML-escape continuation, missing[] injection, budget-summarize prompt. Native /goal replaces.
+- **`scripts/hooks/run-state-session.py`** — SessionStart hook anchoring CLAUDE_SESSION_ID. Native /goal tracks session state.
+- **`lib/run_state/marker.py`** — `.active-run` marker file. Native /goal indicator replaces.
+- **`lib/run_state/tests/{test_marker,test_stop_hook,test_session_hook}.py`** — 23 tests removed (coverage no longer applies).
+- **`state.py`:**
+  - `continuation_count` + `max_continuations` columns
+  - `paused` + `budget_limited` states from VALID_STATES
+  - `inc_continuation` method
+  - Auto-flip-to-budget_limited in `inc_tokens` (still emits `budget_limit_hit` event for analytics)
+- **`cli.py`:**
+  - `cmd_pause` + `cmd_resume` commands (replaced by `/goal clear`)
+  - All marker `set` / `clear` calls
+  - `MarkerFile` import
+- **`setup.sh`:** entire "Install Claude Code hooks" block + `~/.claude/settings.json` hook registration via `jq`.
+- **Skills:** "Run-state lifecycle (mandatory)" preamble removed from both `/feature` and `/fix` SKILL.md.
+
+### Changed
+
+- **`skills/feature/SKILL.md` v1.4.0 → v2.0.0** (major bump):
+  - New "Native /goal entry" section instructs operator to run `/goal "<condition>"` before invoking `/feature`
+  - Audit verdicts written to `~/.claude/state/audits.jsonl` so the `/goal` condition checker can grep "all audits pass + codex-gate PASS + canary green"
+  - Step 4b per-phase audit + Step 5.7 /codex-gate retained — only the run-state lifecycle wrapper is gone
+  - `--tokens` flag dropped (no enforcement layer remains); `--skip-codex-gate` kept as emergency bypass
+- **`skills/fix/SKILL.md` v1.4.0 → v2.0.0**: same restructure — native /goal entry + retained adversarial audit + retained codex-gate
+- **VALID_STATES**: `("active", "pending_audit", "complete", "failed", "aborted")` — 5 states (was 7)
+
+### Tests
+
+- 36 pytest tests in `lib/run_state/tests/` (was 59 in v2.1). 23 deleted (marker + stop_hook + session_hook + continuation/budget_limited cases); 4 modified (marker assertions removed). All green.
+
+### Migration
+
+Existing v2.x DBs at `~/.claude/state/runs.db` keep their extra columns and any rows in dropped states. SQLite tolerates extra columns on SELECT. `run-state list` will show stale `paused`/`budget_limited` rows; abort if desired. New `start` calls use the slim schema.
+
+If you had a v2.x session-pinned run that depended on the Stop hook to continue, manually set a native `/goal` before resuming work:
+
+```
+/goal "<condition that should hold when work is done>"
+```
+
+### Why major bump
+
+Lifecycle contract changed. Skills no longer require `run-state start` to anchor lifecycle. Any external script that grepped Stop-hook continuation prompts is broken.
+
 ## v2.1.0 — Per-phase audit + cross-model gate (2026-05-12)
 
 ### Changed
