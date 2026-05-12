@@ -195,3 +195,60 @@ def test_fix_audit_pass_clears_marker(tmp_path: Path) -> None:
     assert not marker.exists()
     status = _run(["status", run_id], env_extra=env)
     assert json.loads(status.stdout)["state"] == "complete"
+
+
+# --- Group E: D1 phase audit -----------------------------------------------
+
+
+def test_phase_audit_pass_keeps_marker_and_active(tmp_path: Path) -> None:
+    """D1: --kind phase pass keeps state=active and marker — feature pipeline continues."""
+    db = tmp_path / "runs.db"
+    marker = tmp_path / ".active-run"
+    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    started = _run(["start", "--skill", "feature", "--objective", "spec-130"], env_extra=env)
+    run_id = json.loads(started.stdout)["run_id"]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "codex"
+    stub.write_text('#!/usr/bin/env bash\necho \'{"verdict":"pass","reasoning":"wedge done"}\'\n')
+    stub.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    r = _run(["audit", run_id, "--kind", "phase",
+              "--context", "PHASE_NAME=backend-wedge",
+              "--context", "PRIOR_PHASES=none",
+              "--context", "PHASE_SPEC=stub",
+              "--context", "PHASE_DIFF=stub"], env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert marker.exists(), "phase audit pass must NOT clear marker (more wedges may follow)"
+    status = _run(["status", run_id], env_extra=env)
+    assert json.loads(status.stdout)["state"] == "active"
+
+
+def test_phase_audit_fail_reverts_active(tmp_path: Path) -> None:
+    """D1: --kind phase fail leaves state=active with audit_attempts incremented."""
+    db = tmp_path / "runs.db"
+    marker = tmp_path / ".active-run"
+    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    started = _run(["start", "--skill", "feature", "--objective", "spec"], env_extra=env)
+    run_id = json.loads(started.stdout)["run_id"]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "codex"
+    stub.write_text(
+        '#!/usr/bin/env bash\n'
+        'echo \'{"verdict":"fail","reasoning":"x","missing":["TODO-A"]}\'\n'
+    )
+    stub.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    r = _run(["audit", run_id, "--kind", "phase",
+              "--context", "PHASE_NAME=w",
+              "--context", "PRIOR_PHASES=none",
+              "--context", "PHASE_SPEC=s",
+              "--context", "PHASE_DIFF=d"], env_extra=env)
+    assert r.returncode == 1
+    assert marker.exists()
+    status = json.loads(_run(["status", run_id], env_extra=env).stdout)
+    assert status["state"] == "active"
+    assert status["audit_attempts"] >= 1
+    assert status["last_audit_verdict"] == "fail"

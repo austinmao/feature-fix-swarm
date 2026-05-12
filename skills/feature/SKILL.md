@@ -1,7 +1,7 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → feature-implement (ruflo) → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates. Persistent run-state via /run-state lib in v1.3.0."
-version: "1.3.0"
+description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates. v1.4.0 brings per-phase adversarial audit between every wedge and a mandatory cross-model codex-gate before /ship (end-of-pipeline feature audit removed — covered by per-phase + codex-gate)."
+version: "1.4.0"
 allowed-tools:
   - Read
   - Edit
@@ -35,12 +35,14 @@ Every `/feature` invocation MUST:
 
    ```bash
    ~/.claude/bin/run-state update "$RUN_ID" --phase <stage>
-   # stages: autoplan | spec-decompose | implement | qa | audit | ship | canary
+   # stages: autoplan | spec-decompose | implement-<wedge> | phase-audit-<wedge> | qa | codex-gate | ship | canary
    ```
 
-3. **Run spec-completion audit BEFORE the canary phase** (see Step 6).
+3. **Run `run-state audit --kind phase` between EVERY implemented wedge** (see Step 4b). This is mandatory — the skill MUST call a per-phase adversarial audit after each `/feature-implement <wedge>` returns clean QA, before advancing to the next wedge. There is no longer an end-of-pipeline `--kind feature` spec-completion audit; per-phase audits plus `/codex-gate` cover that ground.
 
-4. **Mark complete only after canary success.**
+4. **Run `/codex-gate` once before `/ship`** (see Step 5.7) — full-branch cross-model review.
+
+5. **Mark complete only after canary success.**
 
 Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. Override with `FEATURE_TOKENS_BUDGET` env or `--tokens` flag. Stop hook auto-continues if state=active.
 
@@ -50,7 +52,7 @@ Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. O
 |---|---|
 | `--tokens N` | Token budget. Default 1.5M. When exceeded → `budget_limited`; operator must `run-state resume`. |
 | `--interactive` | Restore manual gates (autoplan premise, taste decisions). Default = non-interactive. |
-| `--no-audit` | Skip spec-completion audit before canary. **NOT recommended.** |
+| `--skip-codex-gate` | Emergency-merge fallback. Skip the mandatory cross-model `/codex-gate` review before `/ship`. **NOT recommended** — bypasses the strongest pre-prod safety net. Per-phase audits remain in force. |
 
 ## When to invoke
 
@@ -81,7 +83,7 @@ Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. O
                                #   - prod promotion gate: prompts user (same as --auto)
 /feature [NNN] --resume     # resume after failure (picks up at last incomplete step)
 /feature [NNN] --no-canary  # stop after /ship (skip production canary)
-/feature [NNN] --no-codex-gate  # skip cross-model adversarial review (default-on, see Step 4.5)
+/feature [NNN] --skip-codex-gate  # emergency-merge: skip cross-model gate (see Step 5.7, NOT recommended)
 /feature [NNN] --dry-run    # print the pipeline plan, don't execute
 ```
 
@@ -94,41 +96,47 @@ Token budget default 1.5M (vs /fix's 300K) because /feature spans more phases. O
 │  /feature NNN                                               │
 │                                                             │
 │  Step 1: /autoplan on specs/NNN/plan.md                     │
+│    └─ /autoplan owns the planning-time Codex audit          │
 │    └─ GATE: user approves review (taste decisions, etc.)    │
 │                                                             │
-│  Step 2: /spec-decompose NNN                                │
+│  Step 2: /spec-decompose NNN → N wedges                     │
 │    └─ GATE: user approves tasks.md (spot-check quality)     │
 │                                                             │
-│  Step 3: /feature-implement NNN --ruflo (or --no-ruflo)     │
+│  Step 3: /feature-implement <wedge-1>                       │
 │    └─ Auto-stops on first task failure                      │
-│    └─ Runs ALL tasks end-to-end on success                  │
+│    └─ Per-phase QA hooks inside /feature-implement          │
 │                                                             │
-│  Step 3.5: Per-phase QA (inside /feature-implement)         │
-│    └─ 2 deterministic hooks (vitest/pytest) + 3 LLM agents  │
-│    └─ Investigate → fix → re-qa loop (max 3 retries)        │
+│  Step 3b: run-state audit --kind phase (wedge-1)            │
+│    └─ Codex GPT-5 hostile audit of THIS wedge only          │
+│    └─ verdict=fail → loop back into /feature-implement      │
 │                                                             │
-│  Step 4: /qa (full-suite browser test after ALL phases)     │
+│  Steps 3+3b repeat per wedge until all wedges complete      │
+│  (one wedge = one implement cycle + one phase audit)        │
+│                                                             │
+│  Step 5: /qa (full-suite browser test after ALL wedges)     │
 │    └─ Auto-stops if bugs found; user fixes, /feature --resume│
 │                                                             │
-│  Step 4.5: /codex-gate (cross-model adversarial review)     │
-│    └─ Codex GPT-5 in 3 passes: review + adversarial + gaps  │
-│    └─ Auto-stops on CRITICAL findings (writes artifact)     │
-│    └─ Skip with --no-codex-gate (opt out, NOT recommended)  │
+│  Step 5.7: /codex-gate (cross-model full-branch review)     │
+│    └─ 3 Codex GPT-5 passes: review + adversarial + gaps     │
+│    └─ Mandatory before /ship (same gate /fix uses)          │
 │    └─ Skip-gracefully if codex CLI absent (warn, continue)  │
+│    └─ Emergency opt-out: --skip-codex-gate (NOT recommended)│
 │                                                             │
-│  Step 5: /ship (creates PR, merges to staging branch)       │
+│  Step 6: /ship (creates PR, merges to staging branch)       │
 │    └─ Staging deploy via Vercel preview / Railway staging   │
 │    └─ Staging smoke test runs automatically                 │
 │                                                             │
-│  Step 6: /canary (production promotion)                     │
+│  Step 9: /canary (production promotion)                     │
 │    └─ FINAL GATE: user approves prod promotion              │
 │    └─ Merge to main → Vercel prod deploy                    │
 │    └─ 1h canary monitor (error rate < 1%)                   │
 │    └─ Auto-rollback if SLO breached                         │
+│    └─ On success: run-state complete (only mark-complete    │
+│       point — per-phase audits stay active by design)       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Total gates (default --auto):** 1 — prod promotion only (irreversible). Codex-gate CRITICAL findings auto-stop the pipeline but produce structured artifacts (no human prompt) — user fixes and resumes.
+**Total gates (default --auto):** 1 — prod promotion only (irreversible). Per-phase audits, codex-gate BLOCK verdicts, and other failure modes auto-stop the pipeline but produce structured artifacts (no human prompt) — user fixes and resumes.
 **Total gates (--interactive):** 4 — autoplan premise, autoplan taste decisions, tasks.md approval, prod promotion.
 Everything else auto-runs or auto-fails.
 
@@ -141,8 +149,9 @@ SPEC_ARG="${ARGUMENTS:-}"
 RESUME=0
 NO_CANARY=0
 DRY_RUN=0
-# v1.2.0: codex-gate is default-on. --no-codex-gate opts out.
-NO_CODEX_GATE=0
+# v1.4.0: codex-gate is mandatory before /ship. --skip-codex-gate is an
+# emergency-merge opt-out (NOT recommended; per-phase audits still run).
+SKIP_CODEX_GATE=0
 # v1.1.0: --auto is default. --interactive opts back into manual gates.
 INTERACTIVE=0
 # v1.1.0: ruflo is mandatory by default. RUFLO_REQUIRED=0 env override allows
@@ -157,7 +166,7 @@ for arg in "${_SPEC_ARGS[@]}"; do
     --auto)        INTERACTIVE=0 ;;   # explicit --auto (already default)
     --interactive) INTERACTIVE=1 ;;
     --no-canary)   NO_CANARY=1 ;;
-    --no-codex-gate) NO_CODEX_GATE=1 ;;
+    --skip-codex-gate) SKIP_CODEX_GATE=1 ;;
     --dry-run)     DRY_RUN=1 ;;
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
@@ -282,6 +291,62 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"feature-implement","status":"success|failed","executor":"ruflo|native","tasks_done":<n>,"tasks_failed":<n>,"tasks_total":<n>,"duration_s":<n>}
 ```
 
+### Step 4b — Per-phase adversarial audit (mandatory between every wedge)
+
+After each `/feature-implement <wedge>` returns clean QA, run a hostile cross-model audit on JUST this wedge before advancing to the next. Codex GPT-5 reads the wedge slice of the spec + the wedge's diff and tries to prove the wedge is NOT complete. This is distinct from `/codex-gate` (which runs once at end-of-pipeline against the full branch) and from `/autoplan`'s planning-time audit.
+
+```bash
+WEDGE_NAME="<the wedge id from spec-decompose, e.g., backend-wedge>"
+PRIOR_PHASES="<comma-separated names of previously-completed wedges, or 'none'>"
+
+# Extract spec slice for THIS wedge (header line + everything until next ## header).
+# BUG-FIX (v2.1 codex-gate Pass 1 P1): the previous one-liner
+#   awk "/^## $WEDGE_NAME/,/^## /"
+# collapsed because the start AND end patterns matched the SAME line, so only the
+# heading was captured. Replaced with an explicit state-machine that prints the
+# header, then every body line until the NEXT `## ` header.
+PHASE_SPEC=$(awk -v wedge="$WEDGE_NAME" '
+  BEGIN {in_section=0}
+  /^## / {
+    if (in_section) {exit}
+    if (index($0, wedge)) {in_section=1; print; next}
+  }
+  in_section {print}
+' "specs/$SPEC_ID/plan.md" | head -200)
+
+# Resolve the wedge file list. spec-decompose writes one file per wedge under
+# .context/feature/<spec>/wedges/<wedge>.files (newline-separated paths).
+# Fallback: every file touched in the current branch since origin/$BASE.
+# BUG-FIX (v2.1 codex-gate Pass 1 P1): previously $WEDGE_FILES was never
+# initialized — git diff received an empty pathspec, scoping to the whole tree.
+WEDGE_FILES_FILE=".context/feature/${SPEC_ID}/wedges/${WEDGE_NAME}.files"
+if [ -f "$WEDGE_FILES_FILE" ]; then
+  WEDGE_FILES=$(cat "$WEDGE_FILES_FILE")
+else
+  WEDGE_FILES=$(git log "origin/$BASE..HEAD" --name-only --pretty=format: | sort -u | tr '\n' ' ')
+fi
+
+# BUG-FIX (v2.1 codex-gate Pass 1 P1): `--stat` must come BEFORE the `--`
+# pathspec separator or git treats it as a path, producing an empty diff.
+PHASE_DIFF=$(git diff "$(git merge-base HEAD origin/$BASE)..HEAD" --stat -- $WEDGE_FILES | head -50)
+
+~/.claude/bin/run-state update "$RUN_ID" --phase "phase-audit-$WEDGE_NAME"
+~/.claude/bin/run-state audit "$RUN_ID" \
+  --kind phase \
+  --context "PHASE_NAME=$WEDGE_NAME" \
+  --context "PRIOR_PHASES=$PRIOR_PHASES" \
+  --context "PHASE_SPEC=$PHASE_SPEC" \
+  --context "PHASE_DIFF=$PHASE_DIFF" \
+  --cwd "$(git rev-parse --show-toplevel)"
+```
+
+Decision rule:
+- `verdict=pass` (CLI exit 0) → wedge done. State stays `active`, marker preserved. Advance to next wedge.
+- `verdict=fail` (CLI exit 1) → CLI auto-reverts state to `active`. Auditor's `missing[]` is injected into the next Stop-hook continuation prompt (R2 feature). Re-enter `/feature-implement <wedge>` with the missing items as the new TODO list. Re-run phase audit when done.
+- `verdict=error` → retry once. If still error, skip and proceed (per-phase audit is best-effort; codex-gate at end is the hard gate).
+
+Hard cap per wedge: 3 phase-audit attempts. After 3 fails, mark the run `failed` and escalate to operator with the residual `missing[]`.
+
 ### Step 5: /qa
 
 Invoke `qa`. Reads QA-tier phases from tasks.md (dev QA, integration, E2E) and runs via headless browser.
@@ -294,74 +359,58 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"qa","status":"pass|fail","bugs_found":<n>,"duration_s":<n>}
 ```
 
-### Step 5.5: /codex-gate (cross-model adversarial review)
+### Step 5.7 — /codex-gate cross-model review (mandatory)
 
-Skip if `--no-codex-gate` flag was set OR `RESUME=1` and prior `step:"codex-gate"` log entry already has `status:"pass"`.
+After per-wedge audits all pass and `/qa` is green, run `/codex-gate` for one final cross-model review against the full branch diff. Three Codex GPT-5 passes (review + adversarial-chaos + adversarial-test-gaps) catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
 
-**Why this step exists:** Single-model review has blind spots. Codex (OpenAI GPT-5) reads the same diff Claude wrote and runs 3 adversarial passes (general review + attacker mindset + test-coverage gap analysis). Documented to catch CRITICAL bugs that pass clean through Claude-only quality gates. Cost: ~$2 + ~13 min — cheap insurance vs hotfix-cycle days for any PR with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts, disaster-recovery).
+```bash
+# BUG-FIX (v2.1 codex-gate Pass 1 P2 / Pass 3 #2): --skip-codex-gate is parsed
+# into $SKIP_CODEX_GATE at flag time but Step 5.7 previously invoked /codex-gate
+# unconditionally, silently overriding the operator's opt-out. The skip path is
+# now a hard bypass — codex-gate is NOT invoked — and the bypass is recorded as
+# a run-state event so the audit trail shows operator-accepted risk.
+if [ "${SKIP_CODEX_GATE:-0}" = "1" ]; then
+  echo "[FEATURE] /codex-gate SKIPPED (--skip-codex-gate flag set). Operator accepted the risk; per-phase audits from Step 4b remain in force." >&2
+  ~/.claude/bin/run-state update "$RUN_ID" --phase codex-gate-skipped
+  printf '{"timestamp":"%s","spec":"%s","step":"codex-gate","status":"skipped","reason":"skip_codex_gate_flag","duration_s":0}\n' \
+    "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
+  # Continue to Step 6 (/ship). Do NOT invoke the /codex-gate skill below.
+else
+  ~/.claude/bin/run-state update "$RUN_ID" --phase codex-gate
+  # Skill: /codex-gate
+fi
+```
 
-**Pre-flight:**
+Decision rule (only applies when `--skip-codex-gate` was NOT set):
+- `CODEX-GATE PASS` (CRITICAL=0, HIGH≤2) → proceed to `/ship` + `/canary`.
+- `CODEX-GATE BLOCK` (CRITICAL≥1 unfixed) → STOP. Fix the CRITICAL inline via codex auto-fix, commit, re-run `/codex-gate`. Do NOT proceed to `/ship` until verdict is PASS.
+
+After canary succeeds, mark the run complete: `~/.claude/bin/run-state complete "$RUN_ID"`. This is the only place /feature explicitly marks complete — the per-phase audits stay active by design.
+
+Skip-gracefully behaviour (codex CLI absent — optional dependency):
+
 ```bash
 which codex >/dev/null 2>&1 && CODEX_AVAILABLE=1 || CODEX_AVAILABLE=0
 
 if [ "$CODEX_AVAILABLE" = "0" ]; then
   echo "[FEATURE] WARNING: codex CLI not found — skipping codex-gate" >&2
   echo "  Install: npm install -g @openai/codex && codex login" >&2
-  # Log skip and continue — do NOT hard-fail (codex is optional dependency).
   printf '{"timestamp":"%s","spec":"%s","step":"codex-gate","status":"skipped","reason":"codex_not_installed","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
-  # Continue to Step 6.
-else
-  : # Run gate.
+  # Continue to Step 6 (/ship).
 fi
 ```
 
-**Invoke:** Call the `codex-gate` skill via the Skill tool. Codex-gate runs 3 passes against the staged diff (`git diff main...HEAD`), produces a findings report at `~/.gstack/projects/$SLUG/codex-gate-${SPEC_ID}-${DT}.md`.
-
-**Findings policy:**
-- **CRITICAL** → STOP. Write findings to `.ralph/feature-run-${SPEC_ID}-codex-critical.md`, log status:`failed`, exit 1. User fixes, reruns `/feature NNN --resume`.
-- **HIGH** → log as concern, continue (user reviews report before merging PR).
-- **MEDIUM/LOW or no findings** → continue silently.
+`--skip-codex-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/codex-gate` is NOT invoked at all and the skip is written to both `$RUN_LOG` and run-state events (`phase=codex-gate-skipped`) so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
 
 **Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent codex-gate run.
 
 Log:
 ```json
-{"timestamp":"<ISO>","spec":"<NNN>","step":"codex-gate","status":"pass|failed|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
+{"timestamp":"<ISO>","spec":"<NNN>","step":"codex-gate","status":"pass|blocked|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
 ```
 
-### Step 6 — Spec-completion audit (mandatory unless `--no-audit`)
-
-Before canary deploy, run a hostile audit that tries to prove the spec is NOT complete. Codex GPT-5 reads the spec and the diff.
-
-```bash
-SPEC_PATH="specs/${SPEC_ID}/plan.md"
-SPEC_CONTENT=$(cat "$SPEC_PATH")
-MODIFIED=$(git diff "origin/${BASE:-main}"...HEAD --name-only)
-
-~/.claude/bin/run-state audit "$RUN_ID" \
-  --kind feature \
-  --context "SPEC_PATH=$SPEC_PATH" \
-  --context "SPEC_CONTENT=$SPEC_CONTENT" \
-  --context "MODIFIED_FILES=$MODIFIED" \
-  --cwd "$(git rev-parse --show-toplevel)"
-```
-
-Decision rule:
-- `verdict=pass` → audit CLI auto-marks `complete` and clears marker. Override: re-set state to `active` before canary so the Stop hook continues until canary succeeds, then mark complete explicitly:
-
-  ```bash
-  ~/.claude/bin/run-state update "$RUN_ID" --state active
-  # ... run /canary ...
-  ~/.claude/bin/run-state complete "$RUN_ID"
-  ```
-
-- `verdict=fail` → re-enter implement phase with the auditor's `missing` list as the new TODO. Stop hook continues the loop.
-- `verdict=error` → retry once. Then mark `failed` if still error.
-
-Hard cap: 3 audit attempts → `failed`.
-
-### Step 7: /ship
+### Step 6: /ship
 
 Invoke `ship`: full test suite, CHANGELOG, PR creation, merge to staging.
 
@@ -372,7 +421,7 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"ship","status":"merged_to_staging|failed","pr_url":"<url>","duration_s":<n>}
 ```
 
-### Step 8: Staging verification
+### Step 7: Staging verification
 
 1. Wait for Vercel/Railway staging deploy (10 min timeout)
 2. Run staging smoke test (per tasks.md Phase N+1)
@@ -380,7 +429,7 @@ Log:
 
 If staging fails: stop.
 
-### Step 9: Production promotion gate (2nd gate)
+### Step 8: Production promotion gate (2nd gate)
 
 AskUserQuestion:
 
@@ -395,7 +444,7 @@ Options:
 
 On A: merge to main, trigger prod deploy, continue to canary.
 
-### Step 10: /canary
+### Step 9: /canary
 
 Invoke `canary`: monitors prod for 1h, compares error rates/latency to baseline. Auto-rollback if SLO breached (error rate > 1%).
 
@@ -404,7 +453,7 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"canary","status":"pass|rolled_back","error_rate":<float>,"duration_s":<n>}
 ```
 
-### Step 11: Final report
+### Step 10: Final report
 
 ```
 ╔═══════════════════════════════════════════════════════════╗
@@ -412,7 +461,9 @@ Log:
 ╠═══════════════════════════════════════════════════════════╣
 ║ Total duration:      HH:MM:SS                             ║
 ║ Tasks executed:      N (all [X])                          ║
-║ Gates approved:      2 (tasks.md, prod promotion)         ║
+║ Wedges audited:      M / M passed (per-phase, Step 3b)    ║
+║ Codex-gate verdict:  PASS (Step 5.7)                      ║
+║ Gates approved:      1 (prod promotion)                   ║
 ║ Failures:            0                                    ║
 ║ Cost estimate:       $XX.XX                               ║
 ║ Production URL:      <prod URL>                           ║
@@ -438,7 +489,8 @@ On `/feature NNN --resume`:
 | tasks.md validation out of bounds | regenerate or hand-edit tasks.md, `/feature NNN --resume` |
 | task `[F]` | fix code, `/feature NNN --resume` |
 | QA bugs | fix bugs, `/feature NNN --resume` |
-| codex-gate CRITICAL | fix flagged issues (see `.ralph/feature-run-${SPEC_ID}-codex-critical.md`), `/feature NNN --resume`. Bypass: `/feature NNN --resume --no-codex-gate` |
+| codex-gate BLOCK (CRITICAL≥1) | fix flagged issues inline (codex auto-fix or manual), commit, `/feature NNN --resume`. Emergency bypass: `/feature NNN --resume --skip-codex-gate` (NOT recommended) |
+| per-phase audit fail (3 attempts) | inspect residual `missing[]` from auditor, hand-fix wedge or revise spec, `/feature NNN --resume` |
 | ship tests fail | fix tests, `/feature NNN --resume` |
 | staging smoke fail | fix, re-ship, `/feature NNN --resume` |
 | prod gate held | manual promotion OR `/feature NNN --resume` |
@@ -455,16 +507,17 @@ On `/feature NNN --resume`:
 
 ## Cost considerations
 
-Typical 50-task feature:
-- autoplan: ~$1 (dual voices)
+Typical 50-task feature (~5 wedges):
+- autoplan: ~$1 (dual voices; includes its own planning audit)
 - spec-decompose: ~$0.50
 - feature-implement: $15-50 (depends on model distribution)
 - per-phase QA (--qa-loop): ~$0.15/phase × N phases = ~$0.75-$1.50
+- per-phase adversarial audit: ~$0.30/wedge × N wedges = ~$1.50 (Step 4b)
 - qa: ~$2
-- codex-gate: ~$2 (3 passes against final diff; skip with --no-codex-gate)
+- codex-gate: ~$2 (3 passes against full branch diff; skip with --skip-codex-gate)
 - ship/canary: free
 
-**Estimated total: $22-57 per feature.** Show estimate after step 3 (tasks.md approved, cost computable from annotations).
+**Estimated total: $23-59 per feature.** Show estimate after step 3 (tasks.md approved, cost computable from annotations).
 
 ## Non-goals
 
@@ -477,10 +530,11 @@ Typical 50-task feature:
 ## Related skills
 
 - `/office-hours` — before /feature
-- `/autoplan` — step 1
+- `/autoplan` — step 1 (owns the planning-time Codex audit)
 - `/spec-decompose` — step 2
-- `/feature-implement` — step 3
+- `/feature-implement` — step 3 (one invocation per wedge)
+- `run-state audit --kind phase` — step 3b (per-wedge adversarial audit, mandatory between every wedge)
 - `/qa` — step 5
-- `/codex-gate` — step 5.5 (cross-model adversarial review, default-on)
+- `/codex-gate` — step 5.7 (cross-model full-branch review, mandatory before /ship)
 - `/ship`, `/canary` — steps 6+
 - `/investigate` — when resuming from failure

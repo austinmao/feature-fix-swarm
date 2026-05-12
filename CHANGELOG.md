@@ -8,6 +8,31 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v2.1.0 — Per-phase audit + cross-model gate (2026-05-12)
+
+### Changed
+
+- **`skills/feature/SKILL.md` v1.3.0 → v1.4.0** — pipeline restructure:
+  - REMOVED end-of-pipeline `--kind feature` spec-completion audit (duplicative with `/autoplan`'s planning-time audit)
+  - ADDED Step 4b — per-wedge adversarial audit via `run-state audit --kind phase` between every implemented wedge. Scope = THIS wedge only. Auditor's `missing[]` from a fail re-enters that wedge's implement loop.
+  - ADDED Step 5.7 — mandatory `/codex-gate` cross-model review before `/ship`. Three Codex GPT-5 passes (review + adversarial-chaos + adversarial-test-gaps) against the full branch. PASS = proceed; BLOCK = fix inline and re-run.
+  - Flags table: `--no-audit` removed (replaced by per-phase + codex-gate); `--skip-codex-gate` added for emergency-merge fallback
+
+### Added
+
+- **`lib/run_state/prompts/phase_audit.txt`** — hostile prompt template for per-wedge audit. Variables: `{{PHASE_NAME}}`, `{{PRIOR_PHASES}}`, `{{PHASE_SPEC}}`, `{{PHASE_DIFF}}`.
+- **`cli.py cmd_audit --kind phase`** — third audit mode. On pass: state stays `active`, marker preserved (more wedges may follow). On fail: state reverts to `active`, audit_attempts++, missing[] persisted to events.
+- **`cli.py _parse_tokens()`** — K/M/B/T suffix parsing for `--tokens` flag (`250K`, `1.5M`, `1B`, `2T`). Case-insensitive, decimal-friendly.
+- **`scripts/hooks/run-state-stop.py` v2.1 — three upgrades ported from balakumardev/claude-code-goal:**
+  - **R1 XML-escape objective** in `<untrusted_objective>...</untrusted_objective>` wrapper. Prompt-injection defense.
+  - **R2 `missing[]` injection** — when state=active AND last_audit_verdict=fail, the most recent `audit` event's `missing[]` is appended to the continuation prompt as explicit TODOs.
+  - **R3 budget-limited summarize prompt** — was: allow stop. Now: block + emit summarize/commit-WIP/resume-or-abort prompt.
+
+### Tests
+
+- 58 pytest tests in `lib/run_state/tests/` (was 43 in v2.0). 16 added; 1 contract-changed test deleted and replaced.
+- New `tests/test_token_parser.py` (10 cases); `test_stop_hook.py` extended (R1/R2/R3 coverage); `test_cli.py` extended (phase audit pass/fail).
+
 ## v2.0.0 — Persistent run-state (2026-05-11)
 
 ### Added
