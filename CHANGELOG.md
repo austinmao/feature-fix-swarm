@@ -8,6 +8,35 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.1.0 — /feature auto-sets native /goal (2026-05-12)
+
+### Changed
+
+- **`skills/feature/SKILL.md` v2.0.0 → v2.1.0** — skill now auto-invokes `/goal` at entry (new Step 0.5). Operator runs `/feature NNN` and the continuation loop is fully managed. Before v2.1.0 the operator had to manually `/goal "<condition>"` first; that was friction.
+
+### Added
+
+- **Step 0.5 — Create run-state record + auto-invoke `/goal`** inside `/feature` workflow:
+  1. `run-state start` captures a `run_id` for this pipeline run
+  2. Skill composes a `/goal` condition with the `run_id` baked in, referencing `~/.claude/state/audits.jsonl` for verdict grep, `/codex-gate` verdict in run events, and canary HTTP 200 (or `--no-canary` opt-out)
+  3. Claude invokes the native `/goal` via the `Skill` tool
+- **`--no-goal` flag** — opt out of skill-managed `/goal` invocation. Use when operator pre-set a custom `/goal` condition they want preserved, or running under `claude -p` where /goal is moot.
+
+### Why minor (not major)
+
+Adds a capability without breaking existing flow. The pre-v2.1.0 workflow (operator manually sets `/goal`) still works — they just add `--no-goal` and Claude won't touch their existing goal. Default behavior changes from "skill assumes operator set /goal" to "skill sets /goal automatically", but the runtime contract for `/feature NNN` semantics is unchanged.
+
+### Note on /fix
+
+`/fix` was NOT updated in this release. To get the same ergonomics for `/fix`, set the goal manually:
+
+```
+/goal "bug fixed: latest run-state audit --kind fix verdict=pass AND qa green"
+/fix "..."
+```
+
+If you want `/fix` to auto-invoke `/goal` too, file an issue.
+
 ## v3.0.0 — Native /goal integration; strip Stop hook + marker (2026-05-12)
 
 **Breaking change.** Anthropic shipped native `/goal` in Claude Code 2.1.139+ ([docs](https://code.claude.com/docs/en/goal)). It owns the continuation loop — a small/fast model checks the goal condition after every turn and auto-continues. Our Stop hook, marker file, continuation-count tracking, pause/resume, and budget_limited state are now redundant. ~300 lines of dead code removed. Run-state lib retains adversarial audit (`run-state audit --kind {fix, phase, feature}`) + /codex-gate — those are the cross-model verification value-add native /goal does not provide.

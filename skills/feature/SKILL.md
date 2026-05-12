@@ -1,7 +1,7 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. Use --interactive to restore gates. v2.0.0 integrates Claude native /goal for continuation; per-phase audit + /codex-gate remain mandatory."
-version: "2.0.0"
+description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. v2.1.0: skill auto-sets native /goal at entry — operator just runs `/feature NNN` and the continuation loop is managed automatically. Per-phase audit + /codex-gate remain mandatory."
+version: "2.1.0"
 allowed-tools:
   - Read
   - Edit
@@ -13,23 +13,38 @@ allowed-tools:
 
 # /feature — End-to-end feature pipeline
 
-## Native /goal entry (recommended)
+## Native /goal — auto-managed (v2.1.0+)
 
-Before invoking `/feature`, set a native `/goal` condition so Claude auto-continues until the pipeline finishes. Example:
+`/feature` automatically sets a native `/goal` condition at entry (Step 0.5 of the workflow). The operator just runs `/feature NNN` — no manual `/goal` setup required. The skill bakes the run_id into the condition so the goal checker grep matches the right audit records.
+
+The auto-generated condition has the shape:
 
 ```
-/goal "spec NNN done: all per-wedge audits pass, /codex-gate PASS, /canary returns 200 for /api/health"
+spec <NNN> done: ~/.claude/state/audits.jsonl shows verdict=pass for every phase audit
+with run_id=<RUN_ID> AND /codex-gate verdict for this branch is PASS AND /canary
+returns 200 (or --no-canary was set)
 ```
 
-Native `/goal` (Anthropic-maintained, ships in Claude Code 2.1.139+):
+Native `/goal` (Anthropic-maintained, Claude Code 2.1.139+):
 - Small/fast model checks the condition after every turn
 - Auto-continues if condition false; clears automatically when met
-- One goal per session; `/goal clear` cancels manually
+- One goal per session — `/feature` replaces any existing goal at entry
+- `/goal clear` cancels manually mid-run
 - See https://code.claude.com/docs/en/goal
 
-`/feature` writes audit verdicts to `~/.claude/state/audits.jsonl` (one line per audit) so your `/goal` condition can grep for "all phase audits verdict=pass" + codex-gate verdict.
+### Manual override
 
-If you skip `/goal`, the pipeline still runs but you'll need to advance it manually between phases.
+If an operator already set a custom `/goal` and wants to keep it, pass `--no-goal`:
+
+```bash
+/feature 130 --no-goal     # skill will NOT call /goal; existing goal preserved
+```
+
+### Skill output
+
+- `~/.claude/state/runs.db` — SQLite run record with `run_id` (captured in Step 0.5)
+- `~/.claude/state/audits.jsonl` — one line per phase audit + codex-gate result (greppable by /goal checker)
+- `.ralph/feature-run-<NNN>-<TS>.jsonl` — local pipeline event log
 
 ## Flags
 
@@ -37,6 +52,7 @@ If you skip `/goal`, the pipeline still runs but you'll need to advance it manua
 |---|---|
 | `--interactive` | Restore manual gates (autoplan premise, taste decisions). Default = non-interactive. |
 | `--skip-codex-gate` | Emergency-merge fallback. Skip the mandatory cross-model `/codex-gate` review before `/ship`. **NOT recommended** — bypasses the strongest pre-prod safety net. Per-phase audits remain in force. |
+| `--no-goal` | Skip auto-setting native `/goal` at entry. Use if operator pre-set a custom `/goal` condition they want preserved, or running under `claude -p` non-interactive mode where /goal is moot. |
 
 ## When to invoke
 
@@ -137,6 +153,8 @@ DRY_RUN=0
 # v1.4.0: codex-gate is mandatory before /ship. --skip-codex-gate is an
 # emergency-merge opt-out (NOT recommended; per-phase audits still run).
 SKIP_CODEX_GATE=0
+# v2.1.0: skill auto-sets native /goal at entry. --no-goal opts out.
+NO_GOAL=0
 # v1.1.0: --auto is default. --interactive opts back into manual gates.
 INTERACTIVE=0
 # v1.1.0: ruflo is mandatory by default. RUFLO_REQUIRED=0 env override allows
@@ -152,6 +170,7 @@ for arg in "${_SPEC_ARGS[@]}"; do
     --interactive) INTERACTIVE=1 ;;
     --no-canary)   NO_CANARY=1 ;;
     --skip-codex-gate) SKIP_CODEX_GATE=1 ;;
+    --no-goal)     NO_GOAL=1 ;;     # v2.1.0: opt out of skill-managed /goal
     --dry-run)     DRY_RUN=1 ;;
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
@@ -183,6 +202,64 @@ mkdir -p "$LOG_DIR"
 DT=$(date +%Y%m%d-%H%M%S)
 RUN_LOG=".ralph/feature-run-${SPEC_ID}-${DT}.jsonl"
 [ $RESUME -eq 1 ] && RUN_LOG=$(ls -t .ralph/feature-run-${SPEC_ID}-*.jsonl 2>/dev/null | head -1)
+```
+
+### Step 0.5 — Create run-state record + auto-invoke `/goal` (v2.1.0)
+
+Before any pipeline work, anchor a run-state row so audits attach to a known `run_id`, then auto-set native `/goal` so Claude loops the pipeline until the condition holds. Operator does NOT need to set `/goal` manually.
+
+```bash
+# Create the run; capture run_id for downstream audits + /goal condition
+RUN_ID=$(~/.claude/bin/run-state start \
+  --skill feature \
+  --objective "spec $SPEC_ID via /feature pipeline" \
+  --worktree "$(git rev-parse --show-toplevel)" \
+  --session-id "${CLAUDE_SESSION_ID:-unknown}" \
+  2>/dev/null | jq -r .run_id)
+
+if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+  echo "ERROR: failed to create run-state record. Is ~/.claude/bin/run-state installed?"
+  echo "  Run: bash <repo>/setup.sh"
+  exit 1
+fi
+
+# Build the /goal condition. References:
+#   - audits.jsonl run_id=$RUN_ID with verdict=pass for every audit row
+#   - /codex-gate verdict logged in run state events (event_type='codex_gate')
+#   - canary HTTP 200 (or --no-canary skipped — encoded in condition)
+CANARY_REQ='AND /canary returned 200'
+[ $NO_CANARY -eq 1 ] && CANARY_REQ='AND --no-canary was set'
+
+GOAL_COND="spec $SPEC_ID complete via /feature run $RUN_ID: every audit line in \
+~/.claude/state/audits.jsonl with run_id=$RUN_ID has verdict=pass, /codex-gate \
+verdict for this branch is PASS (or --skip-codex-gate logged in run events), \
+$CANARY_REQ"
+
+echo "[FEATURE] run_id=$RUN_ID; goal condition prepared"
+```
+
+Then invoke `/goal` via the Skill tool so the native continuation loop kicks in:
+
+> **Claude (skill instruction):** Use the `Skill` tool to invoke the built-in `/goal` command with the exact string in `$GOAL_COND` (NOT the variable name — substitute the literal value you just computed). Example invocation:
+>
+> ```
+> Skill { skill: "goal", args: "<contents of $GOAL_COND>" }
+> ```
+>
+> If `NO_GOAL=1`, skip this invocation — operator either pre-set a custom `/goal` they want preserved, or the skill is running under `claude -p` where /goal is moot.
+
+Log the goal:
+
+```bash
+if [ "$NO_GOAL" != "1" ]; then
+  printf '{"timestamp":"%s","spec":"%s","run_id":"%s","step":"goal-set","status":"set","condition":%s}\n' \
+    "$(date -u +%FT%TZ)" "$SPEC_ID" "$RUN_ID" \
+    "$(printf '%s' "$GOAL_COND" | jq -Rs .)" \
+    >> "$RUN_LOG"
+else
+  printf '{"timestamp":"%s","spec":"%s","run_id":"%s","step":"goal-set","status":"skipped","reason":"no_goal_flag"}\n' \
+    "$(date -u +%FT%TZ)" "$SPEC_ID" "$RUN_ID" >> "$RUN_LOG"
+fi
 ```
 
 ### Step 1: Dry run
