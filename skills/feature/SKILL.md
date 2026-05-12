@@ -208,34 +208,63 @@ RUN_LOG=".ralph/feature-run-${SPEC_ID}-${DT}.jsonl"
 
 Before any pipeline work, anchor a run-state row so audits attach to a known `run_id`, then auto-set native `/goal` so Claude loops the pipeline until the condition holds. Operator does NOT need to set `/goal` manually.
 
-```bash
-# Create the run; capture run_id for downstream audits + /goal condition
-RUN_ID=$(~/.claude/bin/run-state start \
-  --skill feature \
-  --objective "spec $SPEC_ID via /feature pipeline" \
-  --worktree "$(git rev-parse --show-toplevel)" \
-  --session-id "${CLAUDE_SESSION_ID:-unknown}" \
-  2>/dev/null | jq -r .run_id)
+**Guards (v3.1 codex-gate fixes):**
 
-if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-  echo "ERROR: failed to create run-state record. Is ~/.claude/bin/run-state installed?"
-  echo "  Run: bash <repo>/setup.sh"
-  exit 1
+- **`--dry-run`** → entire Step 0.5 is skipped. Preview must have zero side effects (no run-state row, no goal replacement).
+- **`--resume`** → reuse the original `run_id` from the existing `$RUN_LOG` (parsed from the `goal-set` event line). Starting a fresh run on resume would orphan all prior phase audits whose verdicts are attached to the old `run_id` — the new /goal would grep for the new id and skip them.
+
+```bash
+# v3.1 fix 1 (codex-gate Pass 1 P2): --dry-run must be side-effect-free.
+# Skip Step 0.5 entirely; dry-run preview runs in Step 1.
+if [ $DRY_RUN -eq 1 ]; then
+  echo "[FEATURE] --dry-run: skipping run-state + /goal setup"
+  RUN_ID=""
+elif [ $RESUME -eq 1 ] && [ -f "$RUN_LOG" ]; then
+  # v3.1 fix 2 (codex-gate Pass 1 P2): on resume reuse the original run_id
+  # so phase audits from the prior session remain visible to the /goal grep.
+  RUN_ID=$(jq -r 'select(.step=="goal-set") | .run_id' "$RUN_LOG" 2>/dev/null | head -1)
+  if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+    echo "WARN: --resume but no prior run_id in $RUN_LOG; starting fresh run."
+    RUN_ID=$(~/.claude/bin/run-state start \
+      --skill feature \
+      --objective "spec $SPEC_ID via /feature pipeline (resumed)" \
+      --worktree "$(git rev-parse --show-toplevel)" \
+      --session-id "${CLAUDE_SESSION_ID:-unknown}" \
+      2>/dev/null | jq -r .run_id)
+  else
+    echo "[FEATURE] --resume: reusing run_id=$RUN_ID from $RUN_LOG"
+  fi
+else
+  # Normal entry: create a fresh run.
+  RUN_ID=$(~/.claude/bin/run-state start \
+    --skill feature \
+    --objective "spec $SPEC_ID via /feature pipeline" \
+    --worktree "$(git rev-parse --show-toplevel)" \
+    --session-id "${CLAUDE_SESSION_ID:-unknown}" \
+    2>/dev/null | jq -r .run_id)
 fi
 
-# Build the /goal condition. References:
-#   - audits.jsonl run_id=$RUN_ID with verdict=pass for every audit row
-#   - /codex-gate verdict logged in run state events (event_type='codex_gate')
-#   - canary HTTP 200 (or --no-canary skipped — encoded in condition)
-CANARY_REQ='AND /canary returned 200'
-[ $NO_CANARY -eq 1 ] && CANARY_REQ='AND --no-canary was set'
+# Skip goal setup if dry-run OR no run id obtained (transient run-state failure).
+if [ $DRY_RUN -ne 1 ]; then
+  if [ -z "${RUN_ID:-}" ] || [ "$RUN_ID" = "null" ]; then
+    echo "ERROR: failed to create run-state record. Is ~/.claude/bin/run-state installed?"
+    echo "  Run: bash <repo>/setup.sh"
+    exit 1
+  fi
 
-GOAL_COND="spec $SPEC_ID complete via /feature run $RUN_ID: every audit line in \
-~/.claude/state/audits.jsonl with run_id=$RUN_ID has verdict=pass, /codex-gate \
-verdict for this branch is PASS (or --skip-codex-gate logged in run events), \
+  # v3.1 fix 3 (codex-gate Pass 1 P2): --skip-codex-gate is logged to $RUN_LOG
+  # only, NOT to run-state events. So the /goal condition must grep $RUN_LOG
+  # for the codex-gate row (PASS or skipped), not abstract "run events".
+  CANARY_REQ='AND /canary returned 200 in '"$RUN_LOG"
+  [ $NO_CANARY -eq 1 ] && CANARY_REQ='AND --no-canary was set'
+
+  GOAL_COND="spec $SPEC_ID complete via /feature run $RUN_ID: every audit line in \
+~/.claude/state/audits.jsonl with run_id=$RUN_ID has verdict=pass, AND \
+$RUN_LOG contains a codex-gate row with status in {PASS, skipped}, \
 $CANARY_REQ"
 
-echo "[FEATURE] run_id=$RUN_ID; goal condition prepared"
+  echo "[FEATURE] run_id=$RUN_ID; goal condition prepared"
+fi
 ```
 
 Then invoke `/goal` via the Skill tool so the native continuation loop kicks in:
@@ -248,10 +277,12 @@ Then invoke `/goal` via the Skill tool so the native continuation loop kicks in:
 >
 > If `NO_GOAL=1`, skip this invocation — operator either pre-set a custom `/goal` they want preserved, or the skill is running under `claude -p` where /goal is moot.
 
-Log the goal:
+Log the goal (skipped entirely on `--dry-run` — preview must have zero side effects):
 
 ```bash
-if [ "$NO_GOAL" != "1" ]; then
+if [ $DRY_RUN -eq 1 ]; then
+  : # Dry-run — no log write
+elif [ "$NO_GOAL" != "1" ]; then
   printf '{"timestamp":"%s","spec":"%s","run_id":"%s","step":"goal-set","status":"set","condition":%s}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" "$RUN_ID" \
     "$(printf '%s' "$GOAL_COND" | jq -Rs .)" \
