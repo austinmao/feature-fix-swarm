@@ -60,6 +60,40 @@ echo "  Installed $BIN_DIR/run-state"
 
 mkdir -p "$HOME/.claude/state"
 echo "  Ensured $HOME/.claude/state/"
+
+# v3.0 codex-gate Pass 2 #2 fix: actively remove stale v2.x Stop/SessionStart
+# hook registrations from ~/.claude/settings.json. Leaving them fights the new
+# native /goal lifecycle (Stop hook would still try to inject continuation
+# prompts from a hook file we just deleted). Also remove orphaned hook scripts.
+SETTINGS="$HOME/.claude/settings.json"
+if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+  if jq -e '.hooks // empty | (.Stop // []) + (.SessionStart // []) | map(.hooks[]?.command) | flatten | any(test("run-state-(stop|session)\\.py"))' "$SETTINGS" >/dev/null 2>&1; then
+    echo "  Detected stale v2.x run-state hooks in $SETTINGS — removing..."
+    TMP=$(mktemp)
+    jq '
+      .hooks.Stop |= (
+        if . == null then null
+        else map(select((.hooks // []) | map(.command // "") | any(test("run-state-stop\\.py")) | not))
+        end
+      ) |
+      .hooks.SessionStart |= (
+        if . == null then null
+        else map(select((.hooks // []) | map(.command // "") | any(test("run-state-session\\.py")) | not))
+        end
+      )
+    ' "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
+    echo "  Removed v2.x hook registrations"
+  fi
+fi
+# Remove orphaned hook script files left by v2.x install
+for old_hook in run-state-stop.py run-state-session.py; do
+  if [ -f "$HOME/.claude/hooks/$old_hook" ]; then
+    rm -f "$HOME/.claude/hooks/$old_hook"
+    echo "  Removed stale $HOME/.claude/hooks/$old_hook"
+  fi
+done
+# Remove orphaned marker file
+[ -f "$HOME/.claude/state/.active-run" ] && rm -f "$HOME/.claude/state/.active-run" && echo "  Removed stale .active-run marker"
 echo ""
 
 # Copy scripts

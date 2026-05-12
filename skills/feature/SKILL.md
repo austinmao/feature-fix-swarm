@@ -315,7 +315,16 @@ fi
 # pathspec separator or git treats it as a path, producing an empty diff.
 PHASE_DIFF=$(git diff "$(git merge-base HEAD origin/$BASE)..HEAD" --stat -- $WEDGE_FILES | head -50)
 
-~/.claude/bin/run-state audit \
+# v3.0 codex-gate Pass 1 P1 fix: `run-state audit` requires the run_id
+# positional argument. If a run was started for this /feature pipeline
+# (recommended — gives /goal something to grep), reuse its id; otherwise
+# create a one-shot ad-hoc run that records just this wedge's audit.
+if [ -z "${RUN_ID:-}" ]; then
+  RUN_ID=$(~/.claude/bin/run-state start --skill feature \
+    --objective "spec $SPEC_ID phase $WEDGE_NAME" 2>/dev/null | jq -r .run_id)
+fi
+
+~/.claude/bin/run-state audit "$RUN_ID" \
   --kind phase \
   --context "PHASE_NAME=$WEDGE_NAME" \
   --context "PRIOR_PHASES=$PRIOR_PHASES" \

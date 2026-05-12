@@ -206,3 +206,35 @@ def test_phase_audit_fail_reverts_active(tmp_path: Path) -> None:
     assert status["state"] == "active"
     assert status["audit_attempts"] >= 1
     assert status["last_audit_verdict"] == "fail"
+
+
+def test_audit_appends_jsonl_for_goal_grep(tmp_path: Path) -> None:
+    """v3.0 codex-gate Pass 1 P2: audit must append to ~/.claude/state/audits.jsonl
+    so native /goal condition checker can grep audit history."""
+    db = tmp_path / "runs.db"
+    fake_home = tmp_path / "fake-home"
+    env = {"RUN_STATE_DB": str(db), "HOME": str(fake_home)}
+    started = _run(["start", "--skill", "fix", "--objective", "x"], env_extra=env)
+    run_id = json.loads(started.stdout)["run_id"]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "codex"
+    stub.write_text('#!/usr/bin/env bash\necho \'{"verdict":"pass","reasoning":"audit ok","missing":[]}\'\n')
+    stub.chmod(0o755)
+
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    r = _run(["audit", run_id, "--kind", "fix",
+              "--context", "BUG_DESCRIPTION=x",
+              "--context", "MODIFIED_FILES=none"], env_extra=env)
+    assert r.returncode == 0
+
+    audits_log = fake_home / ".claude" / "state" / "audits.jsonl"
+    assert audits_log.exists(), "audits.jsonl must be created"
+    lines = [json.loads(l) for l in audits_log.read_text().splitlines() if l.strip()]
+    assert len(lines) == 1
+    record = lines[0]
+    assert record["run_id"] == run_id
+    assert record["verdict"] == "pass"
+    assert record["kind"] == "fix"
+    assert "ts" in record  # ISO-8601 timestamp

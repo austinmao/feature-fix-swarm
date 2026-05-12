@@ -185,6 +185,27 @@ def cmd_audit(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
+    # v3.0 codex-gate Pass 1 P2 fix: also append to ~/.claude/state/audits.jsonl
+    # so native `/goal` condition checker can grep audit history without
+    # needing to open SQLite. One line per audit; append-only; never rewritten.
+    audits_log = Path.home() / ".claude" / "state" / "audits.jsonl"
+    try:
+        audits_log.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        record = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "run_id": args.run_id,
+            "kind": args.kind,
+            "verdict": result.verdict,
+            "reasoning": result.reasoning[:500],
+            "missing": result.missing,
+        }
+        with audits_log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        # Best-effort log; SQLite remains source of truth.
+        pass
+
     if result.verdict == "pass":
         # v3.0: native /goal handles continuation; no marker to manage.
         # kind=fix → terminal complete. kind=phase / kind=feature stay
