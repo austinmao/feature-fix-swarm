@@ -1,7 +1,7 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. v2.1.0: skill auto-sets native /goal at entry — operator just runs `/feature NNN` and the continuation loop is managed automatically. Per-phase audit + /codex-gate remain mandatory."
-version: "2.1.0"
+description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. v2.1.1: skill PREPARES native /goal condition (with run_id baked in) and prints it for operator to paste — UI commands like /goal cannot be invoked via Skill tool, so auto-invoke is architecturally impossible. Per-phase audit + /codex-gate remain mandatory."
+version: "2.1.1"
 allowed-tools:
   - Read
   - Edit
@@ -13,38 +13,50 @@ allowed-tools:
 
 # /feature — End-to-end feature pipeline
 
-## Native /goal — auto-managed (v2.1.0+)
+## Native /goal — operator-set, skill-prepared (v2.1.1)
 
-`/feature` automatically sets a native `/goal` condition at entry (Step 0.5 of the workflow). The operator just runs `/feature NNN` — no manual `/goal` setup required. The skill bakes the run_id into the condition so the goal checker grep matches the right audit records.
+**Why not fully auto-managed?** UI commands like `/goal` cannot be invoked from a skill via the `Skill` tool — the runtime explicitly refuses with `"goal is a UI command, not a skill"`. v2.1.0 attempted to auto-invoke; that path is architecturally impossible. v2.1.1 changes the contract: the skill **prepares** the goal condition (bakes the `run_id` into it, references the right audit log paths) and **prints** it for the operator to paste.
 
-The auto-generated condition has the shape:
+### How to use
 
-```
-spec <NNN> done: ~/.claude/state/audits.jsonl shows verdict=pass for every phase audit
-with run_id=<RUN_ID> AND /codex-gate verdict for this branch is PASS AND /canary
-returns 200 (or --no-canary was set)
-```
+1. Run `/feature 130` (or whatever spec id)
+2. Step 0.5 prints a banner like:
+
+   ```
+   ┌─────────────────────────────────────────────────────────────────┐
+   │ COPY THIS AND PASTE AS YOUR NEXT MESSAGE TO ENABLE AUTO-LOOP:   │
+   ├─────────────────────────────────────────────────────────────────┤
+   │ /goal "spec 130 complete via /feature run a1b2c3: every audit   │
+   │ line in ~/.claude/state/audits.jsonl with run_id=a1b2c3 has     │
+   │ verdict=pass, AND .ralph/feature-run-130-20260512-160505.jsonl  │
+   │ contains a codex-gate row with status in {PASS, skipped}, AND   │
+   │ /canary returned 200 in .ralph/feature-run-130-..."             │
+   └─────────────────────────────────────────────────────────────────┘
+   ```
+
+3. Operator copies the `/goal "..."` line and pastes it as their next message
+4. Native `/goal` engages; Claude loops the pipeline until the condition holds
 
 Native `/goal` (Anthropic-maintained, Claude Code 2.1.139+):
 - Small/fast model checks the condition after every turn
 - Auto-continues if condition false; clears automatically when met
-- One goal per session — `/feature` replaces any existing goal at entry
+- One goal per session — pasting `/goal` replaces any existing goal
 - `/goal clear` cancels manually mid-run
 - See https://code.claude.com/docs/en/goal
 
-### Manual override
+### Skip the goal banner
 
-If an operator already set a custom `/goal` and wants to keep it, pass `--no-goal`:
+If operator pre-set a custom `/goal` and wants to keep it, or running under `claude -p` non-interactive where /goal is moot:
 
 ```bash
-/feature 130 --no-goal     # skill will NOT call /goal; existing goal preserved
+/feature 130 --no-goal     # skill skips the prepare-and-print step
 ```
 
 ### Skill output
 
 - `~/.claude/state/runs.db` — SQLite run record with `run_id` (captured in Step 0.5)
 - `~/.claude/state/audits.jsonl` — one line per phase audit + codex-gate result (greppable by /goal checker)
-- `.ralph/feature-run-<NNN>-<TS>.jsonl` — local pipeline event log
+- `.ralph/feature-run-<NNN>-<TS>.jsonl` — local pipeline event log (includes `goal-prepared` line)
 
 ## Flags
 
@@ -267,31 +279,36 @@ $CANARY_REQ"
 fi
 ```
 
-Then invoke `/goal` via the Skill tool so the native continuation loop kicks in:
-
-> **Claude (skill instruction):** Use the `Skill` tool to invoke the built-in `/goal` command with the exact string in `$GOAL_COND` (NOT the variable name — substitute the literal value you just computed). Example invocation:
->
-> ```
-> Skill { skill: "goal", args: "<contents of $GOAL_COND>" }
-> ```
->
-> If `NO_GOAL=1`, skip this invocation — operator either pre-set a custom `/goal` they want preserved, or the skill is running under `claude -p` where /goal is moot.
-
-Log the goal (skipped entirely on `--dry-run` — preview must have zero side effects):
+Then print the prepared goal as a copy-paste banner. **The skill MUST NOT attempt `Skill { skill: "goal", ... }`** — the runtime refuses ("/goal is a UI command, not a skill"). Operator pastes manually:
 
 ```bash
 if [ $DRY_RUN -eq 1 ]; then
-  : # Dry-run — no log write
+  :   # dry-run — no banner, no log
 elif [ "$NO_GOAL" != "1" ]; then
-  printf '{"timestamp":"%s","spec":"%s","run_id":"%s","step":"goal-set","status":"set","condition":%s}\n' \
+  cat <<BANNER
+
+================================================================
+COPY THIS AND PASTE AS YOUR NEXT MESSAGE TO ENABLE AUTO-LOOP:
+
+  /goal "$GOAL_COND"
+
+================================================================
+(Or pass --no-goal to skip this banner and manage /goal yourself.)
+
+BANNER
+
+  # Log that we prepared (not "set" — Claude can't set it directly)
+  printf '{"timestamp":"%s","spec":"%s","run_id":"%s","step":"goal-prepared","status":"awaiting-operator-paste","condition":%s}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" "$RUN_ID" \
     "$(printf '%s' "$GOAL_COND" | jq -Rs .)" \
     >> "$RUN_LOG"
 else
-  printf '{"timestamp":"%s","spec":"%s","run_id":"%s","step":"goal-set","status":"skipped","reason":"no_goal_flag"}\n' \
+  printf '{"timestamp":"%s","spec":"%s","run_id":"%s","step":"goal-prepared","status":"skipped","reason":"no_goal_flag"}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" "$RUN_ID" >> "$RUN_LOG"
 fi
 ```
+
+> **Claude (skill instruction):** After printing the banner, continue immediately to Step 1. Do NOT pause to wait for the operator to paste — the pipeline runs forward regardless. The operator's paste (or absence of paste) only affects whether native /goal will auto-continue Claude between phases; the work itself proceeds normally and writes verdicts to `~/.claude/state/audits.jsonl` either way.
 
 ### Step 1: Dry run
 
