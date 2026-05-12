@@ -8,6 +8,35 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.1.1 — Fix v3.1.0 architectural defect: /goal can't be invoked from skill (2026-05-12)
+
+### Discovered during dogfood QA
+
+v3.1.0 claimed `/feature` would auto-invoke native `/goal` via `Skill { skill: "goal", args: "..." }`. **That call path is architecturally impossible** — Claude Code's Skill tool refuses with `"goal is a UI command, not a skill. Ask the user to run /goal themselves — it cannot be invoked via the Skill tool."` UI commands like `/goal`, `/clear`, `/resume` are operator-typed input, never LLM-callable.
+
+### Changed
+
+- **`skills/feature/SKILL.md` v2.1.0 → v2.1.1** — Step 0.5 now PREPARES the goal condition (still bakes `run_id` into it for grep-correctness) and PRINTS a copy-paste banner. Operator pastes the `/goal "..."` line as their next message. Skill explicitly warns Claude NOT to attempt the Skill-tool invocation that v2.1.0 prescribed.
+- **Event renamed** in `$RUN_LOG`: `step: "goal-set"` → `step: "goal-prepared"`, `status: "set"` → `status: "awaiting-operator-paste"`.
+- **`Native /goal — auto-managed (v2.1.0+)`** section in SKILL.md renamed to **`Native /goal — operator-set, skill-prepared (v2.1.1)`**.
+
+### Not changed
+
+- Step 0 flag parsing (`--no-goal`, `--dry-run`, `--resume`, etc.)
+- Run-state record creation in Step 0.5
+- GOAL_COND composition with `run_id` baked in
+- `--dry-run` and `--resume` guards
+- Step 4b per-phase audit + Step 5.7 /codex-gate
+- Tests: 39/39 green (no test changes — banner is skill instruction text)
+
+### Why patch (not major)
+
+Internal mechanism fix. Operator-visible contract: same shape (paste `/goal "<prepared condition>"`) — only difference is operator types the paste manually instead of Claude doing it. Skill still does all the prep work that made v3.1 valuable.
+
+### Source
+
+QA dogfood subagent on macbook 2026-05-12 — failed at Step 0.5 with `"goal is a UI command, not a skill"` runtime error. Pipeline aborted before ruflo phase; ruflo MCP health probe succeeded so ruflo *would have been* callable but live verification deferred to re-run after this fix.
+
 ## v3.1.0 — /feature auto-sets native /goal (2026-05-12)
 
 ### Changed
