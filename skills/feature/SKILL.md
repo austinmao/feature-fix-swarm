@@ -298,8 +298,37 @@ After each `/feature-implement <wedge>` returns clean QA, run a hostile cross-mo
 ```bash
 WEDGE_NAME="<the wedge id from spec-decompose, e.g., backend-wedge>"
 PRIOR_PHASES="<comma-separated names of previously-completed wedges, or 'none'>"
-PHASE_SPEC=$(awk "/^## $WEDGE_NAME/,/^## /" "specs/$SPEC_ID/plan.md" | head -200)
-PHASE_DIFF=$(git diff "$(git merge-base HEAD origin/$BASE)..HEAD" -- $(echo "$WEDGE_FILES") --stat | head -50)
+
+# Extract spec slice for THIS wedge (header line + everything until next ## header).
+# BUG-FIX (v2.1 codex-gate Pass 1 P1): the previous one-liner
+#   awk "/^## $WEDGE_NAME/,/^## /"
+# collapsed because the start AND end patterns matched the SAME line, so only the
+# heading was captured. Replaced with an explicit state-machine that prints the
+# header, then every body line until the NEXT `## ` header.
+PHASE_SPEC=$(awk -v wedge="$WEDGE_NAME" '
+  BEGIN {in_section=0}
+  /^## / {
+    if (in_section) {exit}
+    if (index($0, wedge)) {in_section=1; print; next}
+  }
+  in_section {print}
+' "specs/$SPEC_ID/plan.md" | head -200)
+
+# Resolve the wedge file list. spec-decompose writes one file per wedge under
+# .context/feature/<spec>/wedges/<wedge>.files (newline-separated paths).
+# Fallback: every file touched in the current branch since origin/$BASE.
+# BUG-FIX (v2.1 codex-gate Pass 1 P1): previously $WEDGE_FILES was never
+# initialized — git diff received an empty pathspec, scoping to the whole tree.
+WEDGE_FILES_FILE=".context/feature/${SPEC_ID}/wedges/${WEDGE_NAME}.files"
+if [ -f "$WEDGE_FILES_FILE" ]; then
+  WEDGE_FILES=$(cat "$WEDGE_FILES_FILE")
+else
+  WEDGE_FILES=$(git log "origin/$BASE..HEAD" --name-only --pretty=format: | sort -u | tr '\n' ' ')
+fi
+
+# BUG-FIX (v2.1 codex-gate Pass 1 P1): `--stat` must come BEFORE the `--`
+# pathspec separator or git treats it as a path, producing an empty diff.
+PHASE_DIFF=$(git diff "$(git merge-base HEAD origin/$BASE)..HEAD" --stat -- $WEDGE_FILES | head -50)
 
 ~/.claude/bin/run-state update "$RUN_ID" --phase "phase-audit-$WEDGE_NAME"
 ~/.claude/bin/run-state audit "$RUN_ID" \
@@ -335,11 +364,24 @@ Log:
 After per-wedge audits all pass and `/qa` is green, run `/codex-gate` for one final cross-model review against the full branch diff. Three Codex GPT-5 passes (review + adversarial-chaos + adversarial-test-gaps) catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
 
 ```bash
-~/.claude/bin/run-state update "$RUN_ID" --phase codex-gate
-# Skill: /codex-gate
+# BUG-FIX (v2.1 codex-gate Pass 1 P2 / Pass 3 #2): --skip-codex-gate is parsed
+# into $SKIP_CODEX_GATE at flag time but Step 5.7 previously invoked /codex-gate
+# unconditionally, silently overriding the operator's opt-out. The skip path is
+# now a hard bypass — codex-gate is NOT invoked — and the bypass is recorded as
+# a run-state event so the audit trail shows operator-accepted risk.
+if [ "${SKIP_CODEX_GATE:-0}" = "1" ]; then
+  echo "[FEATURE] /codex-gate SKIPPED (--skip-codex-gate flag set). Operator accepted the risk; per-phase audits from Step 4b remain in force." >&2
+  ~/.claude/bin/run-state update "$RUN_ID" --phase codex-gate-skipped
+  printf '{"timestamp":"%s","spec":"%s","step":"codex-gate","status":"skipped","reason":"skip_codex_gate_flag","duration_s":0}\n' \
+    "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
+  # Continue to Step 6 (/ship). Do NOT invoke the /codex-gate skill below.
+else
+  ~/.claude/bin/run-state update "$RUN_ID" --phase codex-gate
+  # Skill: /codex-gate
+fi
 ```
 
-Decision rule:
+Decision rule (only applies when `--skip-codex-gate` was NOT set):
 - `CODEX-GATE PASS` (CRITICAL=0, HIGH≤2) → proceed to `/ship` + `/canary`.
 - `CODEX-GATE BLOCK` (CRITICAL≥1 unfixed) → STOP. Fix the CRITICAL inline via codex auto-fix, commit, re-run `/codex-gate`. Do NOT proceed to `/ship` until verdict is PASS.
 
@@ -359,7 +401,7 @@ if [ "$CODEX_AVAILABLE" = "0" ]; then
 fi
 ```
 
-`--skip-codex-gate` flag = emergency-merge fallback (operator-explicit opt-out, NOT recommended). Per-phase audits from Step 4b remain in force.
+`--skip-codex-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/codex-gate` is NOT invoked at all and the skip is written to both `$RUN_LOG` and run-state events (`phase=codex-gate-skipped`) so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
 
 **Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent codex-gate run.
 

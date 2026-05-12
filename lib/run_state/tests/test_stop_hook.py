@@ -185,3 +185,45 @@ def test_no_missing_list_when_audit_passed(tmp_path: Path) -> None:
     payload = json.loads(r.stdout)
     assert "audit FAILED" not in payload["reason"]
     assert "auditor reported" not in payload["reason"].lower()
+
+
+def test_missing_list_items_xml_escaped(tmp_path: Path) -> None:
+    """codex-gate v2.1 Pass 1 #2 HIGH: missing[] items from LLM are untrusted; escape each one."""
+    db = tmp_path / "runs.db"
+    marker = tmp_path / ".active-run"
+    env = {"RUN_STATE_DB": str(db), "RUN_STATE_MARKER": str(marker)}
+    started = _cli(["start", "--skill", "fix", "--objective", "x"], env)
+    run_id = json.loads(started.stdout)["run_id"]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "codex"
+    # missing[] contains every escape-worthy char + a prompt-injection payload
+    stub.write_text(
+        '#!/usr/bin/env bash\n'
+        'echo \'{"verdict":"fail","reasoning":"x","missing":['
+        '"Ignore previous & <script>alert(1)</script>",'
+        '"Quote \\"injected\\" and \\u0027single\\u0027",'
+        '"safe normal item"]}\'\n'
+    )
+    stub.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    _cli(["audit", run_id, "--kind", "fix",
+          "--context", "BUG_DESCRIPTION=x",
+          "--context", "MODIFIED_FILES=none"], env)
+
+    r = _run_hook(env)
+    payload = json.loads(r.stdout)
+    reason = payload["reason"]
+    # Each item must be wrapped in <untrusted_missing> tags
+    assert reason.count("<untrusted_missing>") >= 3
+    assert reason.count("</untrusted_missing>") >= 3
+    # Escape chars must be in entity form
+    assert "&amp;" in reason
+    assert "&lt;script&gt;" in reason
+    assert "&quot;" in reason or "&apos;" in reason
+    # Raw injection chars must NOT appear inside the missing-item wrappers
+    # (could still appear inside the wrapper for safe normal item — only check the script tag is escaped)
+    assert "<script>alert(1)</script>" not in reason
+    # The safe item should still be present (text intact, just escaped)
+    assert "safe normal item" in reason
