@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (default, mandatory in v1.1.0), respecting [model:] [agent:] annotations. Updates checkboxes on completion. Native Agent fallback only via RUFLO_REQUIRED=0 env override (debugging only)."
-version: "1.1.0"
+version: "1.2.0"
 allowed-tools:
   - Read
   - Edit
@@ -225,31 +225,108 @@ Agent tool invocation:
 
 **Ruflo path (`--ruflo` flag):**
 
-On first task in session:
+> v1.2.0 (2026-05-27): Aligned with actual ruflo MCP schemas. Earlier versions
+> referenced `task_create({model, agent_role, depends_on})` which doesn't exist —
+> ruflo `task_create` accepts only `{type, description, priority, assignTo, tags}`.
+> Model + dependencies are now plumbed through `agent_spawn` + tags + workflow steps.
+
+On first task in session, initialize the swarm with one agent per unique `[agent:]` role:
+
 ```
+# 1. Init the swarm
 mcp__ruflo__swarm_init({
-  topology: "hierarchical",  // deps between tasks → hierarchical makes sense
-  max_agents: {count unique [agent:] values in tasks.md, capped at 8},
-  consensus: "raft"
+  topology: "hierarchical",       // deps between tasks → hierarchical
+  maxAgents: {unique [agent:] count, capped at 8},
+  strategy: "specialized",
+  config: { consensus: "raft" }   // consensus rides in config, not top-level
 })
 ```
 
-For each task group (a `[P]` block or a single sequential task):
+Then, for each unique `[agent:]` value found in tasks.md, spawn one tracked agent
+that owns that role for the rest of the workflow:
+
 ```
-mcp__ruflo__task_create({
+# 2. Spawn one agent per role (model from the first task that needs it)
+for role in unique_agents:
+  mcp__ruflo__agent_spawn({
+    agentType: role,                                  // e.g. "engineering/backend-engineer"
+    model: {model from first task using this agent},  // "haiku" | "sonnet" | "opus"
+    task: {short brief — "Execute spec NNN tasks tagged [agent:{role}]"},
+    swarmId: {swarmId from step 1}
+  })
+  # capture agentId
+```
+
+For each task in tasks.md, create the task with metadata in `tags`, then assign to
+the matching agent:
+
+```
+# 3a. Create task (model + thinking + phase + US ride in tags)
+taskId = mcp__ruflo__task_create({
+  type: "feature",                            // "feature" | "bugfix" | "research" | "refactor"
   description: {task description},
-  model: {task's [model:] value},
-  agent_role: {task's [agent:] value},
-  depends_on: {list of task_ids from Depends-on:}
+  priority: {priority_map[task.priority] or "normal"},
+  // priority_map: P1 → "high", P2 → "normal", P3 → "low", P0/critical → "critical"
+  assignTo: [{agentId for task's [agent:] role}],
+  tags: [
+    "task_id:" + task.id,                     // e.g. "task_id:T015"
+    "model:" + task.model,
+    "thinking:" + task.thinking,
+    "phase:" + task.phase_n,
+    "us:" + (task.user_story or "none"),
+    "qa:" + ",".join(task.qa_dims),
+  ]
+})
+
+# 3b. Express dependencies through a workflow (task_create has no depends_on field)
+mcp__ruflo__workflow_create({
+  name: "spec-" + SPEC_ID + "-feature-implement",
+  description: "feature-implement orchestration for spec " + SPEC_ID,
+  steps: [
+    // One step per task in tasks.md, in topological order
+    // [P] tasks in the same phase become a single "parallel" step
+    { type: "task", name: "T001", config: { taskId: "<id from create>" } },
+    { type: "parallel", name: "phase-1-audits", config: {
+        children: [
+          { type: "task", name: "T002", config: { taskId: "..." } },
+          { type: "task", name: "T003", config: { taskId: "..." } },
+        ]
+      }
+    },
+    { type: "task", name: "T015", config: { taskId: "...", dependsOn: ["T019"] } },
+    // ... rest of phases
+  ]
 })
 ```
 
-Then:
+Then execute and poll:
+
 ```
-mcp__ruflo__workflow_execute({workflow_id})
-# poll mcp__ruflo__task_status per task
+# 4. Run + poll
+mcp__ruflo__workflow_execute({ workflowId: {id from workflow_create} })
+# poll mcp__ruflo__task_status({taskId}) for each task
 # when each task completes: Edit tasks.md [ ] → [X] or [F]
 ```
+
+**Annotation→ruflo field mapping cheat-sheet:**
+
+| tasks.md annotation     | ruflo destination                         |
+| ----------------------- | ----------------------------------------- |
+| `[P]` (same phase)      | Sibling under `parallel` step in workflow |
+| `[USn]`                 | Tag `us:USn` on `task_create`             |
+| `[model:X]`             | `model: X` on `agent_spawn` (per role)    |
+| `[thinking:Y]`          | Tag `thinking:Y` (passed into prompt)     |
+| `[agent:dept/role]`     | `agentType` for `agent_spawn`             |
+| `[qa:dim1,dim2]`        | Tag `qa:dim1,dim2` (read by QA gate)      |
+| `Depends-on: T###`      | `dependsOn` in workflow step `config`     |
+| Phase heading           | Tag `phase:N` + workflow step grouping    |
+
+**Single-model-per-agent constraint:** Because model selection happens at
+`agent_spawn` time (not per task), if two tasks share an `[agent:]` role but
+specify different `[model:]` values, the skill MUST spawn one agent per
+(role, model) tuple — agent IDs become `{role}-{model}` (e.g.
+`engineering-backend-engineer-haiku` vs `-sonnet`). The `assignTo` for each
+task picks the right tuple.
 
 **v1.1.0 failure policy:** On any `mcp__ruflo__*` failure (auth, timeout, schema mismatch, MCP unreachable):
 

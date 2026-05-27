@@ -8,6 +8,33 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.2.0 — feature-implement v1.2.0 ruflo schema alignment (2026-05-27)
+
+### Discovered during spec-137 dogfood
+
+`/feature-implement --ruflo` (v1.1.0) prescribed `mcp__ruflo__task_create({model, agent_role, depends_on})`. The actual ruflo MCP schema accepts only `{type, description, priority, assignTo, tags}` — no `model`, no `agent_role`, no `depends_on`. Per v1.1.0's own "hard-fail on schema mismatch" policy, every `--ruflo` run since the policy landed has been one tool-call away from `exit 1`.
+
+### Changed
+
+- **`skills/feature-implement/SKILL.md` v1.1.0 → v1.2.0** — Rewrote the "Ruflo path" block to match the live ruflo MCP schema:
+  - `swarm_init` uses `maxAgents` (camelCase) + `strategy: "specialized"` + `config: { consensus }` (not top-level `max_agents`/`consensus`)
+  - One `agent_spawn` per unique `[agent:dept/role]` (model selection happens here, NOT at task_create)
+  - Single-model-per-agent constraint: if two tasks share an agent role but specify different models, spawn one agent per (role, model) tuple
+  - `task_create` puts model/thinking/phase/US/qa metadata in `tags`, agent assignment in `assignTo`
+  - Dependencies expressed via `workflow_create` step graph with `dependsOn` in step `config`, plus `parallel` step type for `[P]` groups
+  - Added annotation→ruflo field mapping cheat-sheet
+
+### Not changed
+
+- Native Agent fallback path (`RUFLO_REQUIRED=0`)
+- tasks.md annotation format
+- Per-phase QA gate workflow
+- Cost estimation block
+
+### Why minor (not patch)
+
+Schema-breaking change to the ruflo orchestration contract. Consumers who memorized the old `task_create` shape need to update integrations.
+
 ## v3.1.1 — Fix v3.1.0 architectural defect: /goal can't be invoked from skill (2026-05-12)
 
 ### Discovered during dogfood QA
