@@ -1,7 +1,7 @@
 ---
 name: feature-implement
-description: "Execute tasks.md via ruflo swarm (default, mandatory in v1.1.0), respecting [model:] [agent:] annotations. Updates checkboxes on completion. Native Agent fallback only via RUFLO_REQUIRED=0 env override (debugging only)."
-version: "1.2.0"
+description: "Execute tasks.md via ruflo swarm + auto mode (both default in v1.3.0), respecting [model:] [agent:] annotations. Updates checkboxes on completion. --auto skips cost confirmation and runs without pauses. Native Agent fallback only via RUFLO_REQUIRED=0 env override (debugging only)."
+version: "1.3.0"
 allowed-tools:
   - Read
   - Edit
@@ -21,15 +21,21 @@ allowed-tools:
 ## Invocation
 
 ```
-/feature-implement [NNN]              # DEFAULT: ruflo swarm, run-all until done or first failure
+/feature-implement [NNN]              # DEFAULT: ruflo swarm + auto mode, run-all until done or first failure
 /feature-implement [NNN] --one        # execute only the next unchecked task (single task)
 /feature-implement [NNN] --dry-run    # print what would execute, don't spawn
 /feature-implement [NNN] --task T042  # execute a specific task ID only
-/feature-implement [NNN] --ruflo      # explicit (already default in v1.1.0+)
+/feature-implement [NNN] --ruflo      # no-op (already default in v1.1.0+, kept for explicitness)
+/feature-implement [NNN] --auto       # no-op (already default in v1.3.0+, kept for explicitness)
+/feature-implement [NNN] --no-auto    # disable auto mode: show cost estimate and prompt for confirmation
 /feature-implement [NNN] --no-qa-loop          # skip per-phase QA (faster, less safe)
 /feature-implement [NNN] --qa-skip e2e         # skip specific QA dimensions
 /feature-implement [NNN] --qa-only review,security  # run only these QA dimensions
 ```
+
+**v1.3.0 defaults:** Both `--ruflo` and `--auto` are on by default. You never need to pass them.
+- `--auto`: skip cost confirmation prompt, run all tasks without pausing. Opt out with `--no-auto`.
+- `--ruflo`: ruflo MCP swarm executor. Opt out with `RUFLO_REQUIRED=0` env override (debug only).
 
 **v1.1.0 ruflo policy:**
 - Ruflo is the default and only supported executor.
@@ -55,6 +61,9 @@ ONE_TASK=0           # --one opts into single-task mode
 # to native Agent (debugging only — logs WARNING every spawn).
 USE_RUFLO=1
 RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"
+# v1.3.0: auto mode is the default. Skips cost confirmation, runs without pauses.
+# Disable with --no-auto.
+AUTO_MODE=1
 SPECIFIC_TASK=""
 QA_LOOP=1
 QA_SKIP=""
@@ -69,7 +78,9 @@ for arg in "${_SPEC_ARGS[@]}"; do
     --dry-run)    DRY_RUN=1 ;;
     --one)        ONE_TASK=1; LOOP_ALL=0 ;;
     --all)        LOOP_ALL=1 ;;
-    --ruflo)      USE_RUFLO=1 ;;
+    --ruflo)      USE_RUFLO=1 ;;      # no-op; kept for explicitness
+    --auto)       AUTO_MODE=1 ;;      # no-op; kept for explicitness
+    --no-auto)    AUTO_MODE=0 ;;      # opt out: show cost estimate + confirm
     --task=*)     SPECIFIC_TASK="${arg#--task=}"; LOOP_ALL=0 ;;
     --qa-loop)    QA_LOOP=1 ;;
     --no-qa-loop) QA_LOOP=0 ;;
@@ -516,9 +527,10 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 
 ### Step 7: Loop or stop
 
-- `--all` + success + more todos → Step 3
-- `--all` + failure → stop, print summary, exit 1
-- Default (no `--all`) → stop after 1 task
+- Default (run-all + auto): success + more todos → Step 3
+- Default (run-all + auto): any `[F]` → stop, print summary, exit 1
+- `--one`: stop after 1 task regardless of outcome
+- `--task T###`: stop after that specific task
 
 ### Step 8: Final report
 
@@ -580,4 +592,4 @@ o=$(grep -c '\[model:opus' "$TASKS_FILE" || echo 0)
 echo "Estimated cost: \$$(python3 -c "print(f'{$h*0.02 + $sm*0.30 + $sh*0.60 + $o*2.00:.2f}')")"
 ```
 
-Display before spawning in `--all` mode. User confirms before proceeding.
+Display and prompt for confirmation only when `AUTO_MODE=0` (`--no-auto` flag). In default auto mode, print the estimate but proceed without waiting.
