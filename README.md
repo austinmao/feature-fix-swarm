@@ -183,6 +183,26 @@ Phase N tasks complete
 
   Configure as MCP server in the active runtime. See [ruflo docs](https://github.com/ruvnet/claude-flow#mcp-server) for MCP setup.
 
+- **[Spec Kit](https://github.com/github/spec-kit)** by GitHub
+  Provides the spec/plan/tasks bootstrap (`/speckit.specify`, `/speckit.plan`, `/speckit.tasks`) that feature-fix-swarm builds on.
+  Spec Kit is installed via `uv`:
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  uv tool install specify-cli --from git+https://github.com/github/spec-kit.git
+  specify version
+  ```
+
+- **[goal-wrap](https://github.com/austinmao/goal-wrap)** by austinmao
+  Provides the handoff/continuation layer for `/goal-wrap`.
+  It depends on the `prompt-master` and `handoff` skills.
+  Install it with the companion skills:
+  ```bash
+  npx skills add austinmao/goal-wrap --skill goal-wrap --skill handoff -g -a claude-code -a codex -y
+  npx skills add nidhinjs/prompt-master --skill prompt-master -g -a claude-code -a codex -y
+  ```
+
+  If either skill is missing, `bash setup.sh` will prompt to install the full prerequisite set.
+
 ### Optional
 
 - **[Codex CLI](https://github.com/openai/codex)** by OpenAI
@@ -210,6 +230,7 @@ bash setup.sh
 ```
 
 The installer copies skills, scripts, and prompts into your project. It checks prerequisites and warns if anything is missing.
+If you approve the prompt, it bootstraps the missing dependencies in one pass.
 
 ### Manual install
 

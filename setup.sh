@@ -5,24 +5,193 @@ echo "=== feature-fix-swarm setup ==="
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PATH="$HOME/.local/bin:$PATH"
 
-# Check prerequisites
+skill_installed() {
+  local skill="$1"
+  local candidates=(
+    "$HOME/.claude/skills/$skill/SKILL.md"
+    "$HOME/.codex/skills/$skill/SKILL.md"
+    "$HOME/.agents/skills/$skill/SKILL.md"
+  )
+  local path
+  for path in "${candidates[@]}"; do
+    [ -f "$path" ] && return 0
+  done
+  return 1
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local response=""
+  read -r -p "$prompt [y/N] " response || true
+  case "${response,,}" in
+    y|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_uv() {
+  if command -v uv >/dev/null 2>&1; then
+    echo "  uv: OK"
+    return 0
+  fi
+
+  echo "  uv: installing via Astral standalone installer"
+  if command -v curl >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- https://astral.sh/uv/install.sh | sh
+  else
+    echo "  uv: NOT FOUND (install manually; curl or wget is required for auto-install)"
+    return 1
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+}
+
+check_ruflo() {
+  if command -v ruflo >/dev/null 2>&1; then
+    echo "  ruflo CLI: OK"
+    return 0
+  fi
+  echo "  ruflo CLI: NOT FOUND"
+  return 1
+}
+
+install_ruflo() {
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "  ruflo CLI: NOT FOUND (npm required to install ruflo)"
+    return 1
+  fi
+  echo "  ruflo CLI: installing globally"
+  npm install -g ruflo
+}
+
+check_gstack() {
+  if skill_installed gstack; then
+    echo "  gstack: OK"
+    return 0
+  fi
+  echo "  gstack: NOT FOUND"
+  return 1
+}
+
+install_gstack() {
+  echo "  gstack: installing into ~/.claude/skills/gstack"
+  mkdir -p "$HOME/.claude/skills"
+  git clone https://github.com/garryslist/gstack.git "$HOME/.claude/skills/gstack"
+}
+
+install_skill_repo() {
+  local repo="$1"
+  shift
+  if ! command -v npx >/dev/null 2>&1; then
+    echo "  npx: NOT FOUND (required to install skills from $repo)"
+    return 1
+  fi
+  local args=(skills add "$repo" -g -a claude-code -a codex -y)
+  local skill
+  for skill in "$@"; do
+    args+=(--skill "$skill")
+  done
+  npx "${args[@]}"
+}
+
+check_spec_kit() {
+  if command -v specify >/dev/null 2>&1; then
+    echo "  Spec Kit CLI: OK"
+    return 0
+  fi
+  echo "  Spec Kit CLI: NOT FOUND"
+  return 1
+}
+
+install_spec_kit() {
+  if ! command -v uv >/dev/null 2>&1; then
+    install_uv || return 1
+  fi
+
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "  Spec Kit CLI: NOT FOUND (uv unavailable)"
+    return 1
+  fi
+
+  local spec_tag=""
+  if command -v gh >/dev/null 2>&1; then
+    spec_tag=$(gh api repos/github/spec-kit/releases/latest --jq .tag_name 2>/dev/null || true)
+  fi
+
+  if [ -n "$spec_tag" ]; then
+    echo "  Spec Kit CLI: installing latest release ${spec_tag}"
+    uv tool install specify-cli --from "git+https://github.com/github/spec-kit.git@${spec_tag}"
+  else
+    echo "  Spec Kit CLI: installing from spec-kit main"
+    uv tool install specify-cli --from git+https://github.com/github/spec-kit.git
+  fi
+}
+
+check_prompt_master() {
+  if skill_installed prompt-master; then
+    echo "  prompt-master: OK"
+    return 0
+  fi
+  echo "  prompt-master: NOT FOUND"
+  return 1
+}
+
+install_prompt_master() {
+  echo "  prompt-master: installing via npx skills"
+  install_skill_repo https://github.com/nidhinjs/prompt-master prompt-master
+}
+
+check_goal_wrap() {
+  if skill_installed goal-wrap && skill_installed handoff; then
+    echo "  goal-wrap/handoff: OK"
+    return 0
+  fi
+  echo "  goal-wrap/handoff: NOT FOUND"
+  return 1
+}
+
+install_goal_wrap() {
+  echo "  goal-wrap/handoff: installing via npx skills"
+  install_skill_repo https://github.com/austinmao/goal-wrap goal-wrap handoff
+}
+
+missing=()
+
 echo "Checking prerequisites..."
-command -v claude >/dev/null 2>&1 && echo "  Claude Code: OK" || echo "  Claude Code: NOT FOUND (required) — install from https://claude.ai/code"
-
-if [ -d "$HOME/.claude/skills/gstack" ]; then
-  echo "  gstack: OK"
-else
-  echo "  gstack: NOT FOUND (required for /investigate, /qa, /review, /ship)"
-  echo "    Install: https://github.com/garryslist/gstack"
-fi
-
-command -v npx >/dev/null 2>&1 && echo "  npx: OK" || echo "  npx: NOT FOUND (needed for ruflo)"
+command -v claude >/dev/null 2>&1 && echo "  Claude Code: OK" || { echo "  Claude Code: NOT FOUND (required) — install from https://claude.ai/code"; missing+=("Claude Code"); }
+check_gstack || missing+=("gstack")
+check_ruflo || missing+=("ruflo")
+command -v npx >/dev/null 2>&1 && echo "  npx: OK" || { echo "  npx: NOT FOUND (required for skill installs)"; missing+=("npx"); }
+command -v uv >/dev/null 2>&1 && echo "  uv: OK" || { echo "  uv: NOT FOUND (required for Spec Kit)"; missing+=("uv"); }
 command -v python3 >/dev/null 2>&1 && echo "  python3: OK" || echo "  python3: NOT FOUND (required for run-state)"
 command -v jq >/dev/null 2>&1 && echo "  jq: OK" || echo "  jq: NOT FOUND (optional, used by some run-state output formatting)"
 command -v codex >/dev/null 2>&1 && echo "  codex CLI: OK" || echo "  codex CLI: NOT FOUND (optional, for adversarial audit — 'npm install -g @openai/codex')"
+check_spec_kit || missing+=("spec-kit")
+check_prompt_master || missing+=("prompt-master")
+check_goal_wrap || missing+=("goal-wrap")
 
 echo ""
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "Missing dependencies detected:"
+  printf '  - %s\n' "${missing[@]}"
+  if prompt_yes_no "Install the missing dependencies now?" "N"; then
+    echo ""
+    echo "Bootstrapping missing dependencies..."
+    install_uv || true
+    install_gstack || true
+    install_ruflo || true
+    install_spec_kit || true
+    install_prompt_master || true
+    install_goal_wrap || true
+  else
+    echo "Skipping dependency installation. You can re-run setup.sh later."
+  fi
+  echo ""
+fi
 
 # Copy skills
 SKILLS_DIR="$HOME/.claude/skills"
