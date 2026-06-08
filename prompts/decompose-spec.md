@@ -1,6 +1,6 @@
 # Prompt: Decompose a Feature Spec into an Executable Task List
 
-Copy this prompt verbatim into your conversation, then reference `specs/NNN-feature-name/spec.md` and `specs/NNN-feature-name/plan.md`. Use Sonnet 4.6 for decomposition.
+Copy this prompt verbatim into your conversation, then reference `specs/NNN-feature-name/spec.md` and `specs/NNN-feature-name/plan.md`. Use the host-appropriate model ladder for decomposition: Claude Code emits `haiku` / `sonnet` / `opus`; Codex OAuth emits `gpt-5.3-codex-spark` / `gpt-5.4` / `gpt-5.5`.
 
 ---
 
@@ -9,6 +9,12 @@ Copy this prompt verbatim into your conversation, then reference `specs/NNN-feat
 You are a senior engineer decomposing an approved feature spec into an atomic, TDD-ordered, executable task list. Your output will be consumed by multiple implementing agents. Clarity, specificity, and correct ordering determine whether the implementation succeeds or drifts into tunnel vision.
 
 **You are not writing code.** You are producing `specs/NNN-feature-name/tasks.md` — a checklist that turns approved design into discrete, verifiable work units.
+
+## Host-aware model ladder
+
+- Claude Code: `haiku` / `sonnet` / `opus`
+- Codex OAuth: `gpt-5.3-codex-spark` / `gpt-5.4` / `gpt-5.5`
+- Emit the native identifiers for the host you are running in; do not translate between ladders.
 
 ## Inputs (read first, in order)
 
@@ -56,9 +62,9 @@ Components in order:
 | `T###` | yes | `T001`, `T042` | Sequential, zero-padded, execution order |
 | `[P]` | optional | `[P]` | Parallel-safe: different files, no deps on incomplete tasks |
 | `[USn]` | if user-story phase | `[US1]` | Ties to spec.md user story priority; NO story label for Setup/Foundational/Integration/QA phases |
-| `[model:X]` | yes | `[model:sonnet]` | `haiku` \| `sonnet` \| `opus` — tier for implementing agent |
+| `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus`; Codex: `gpt-5.3-codex-spark` \| `gpt-5.4` \| `gpt-5.5` |
 | `[thinking:Y]` | yes | `[thinking:med]` | `low` \| `med` \| `high` \| `max` — thinking budget for implementer |
-| `[agent:dept/role]` | yes | `[agent:engineering/backend-engineer]` | Routing hint for ruflo or sub-agent delegation |
+| `[agent:dept/role]` | yes | `[agent:engineering/backend-engineer]` | Human-readable routing hint; normalize to Ruflo roles when delegating |
 | Description | yes | `Implement POST /api/auth in `web/src/app/api/auth/route.ts`` | Concrete action + backticked file path from repo root |
 
 Append an optional second line for dependencies:
@@ -72,12 +78,12 @@ Two-space indent, `Depends-on:` prefix, comma-separated task IDs. Omit if no ups
 
 | Tier | Use for | Examples |
 |---|---|---|
-| `[model:haiku thinking:low]` | Boilerplate, migrations, renames, deps install | `Install shadcn/ui`, `Run migration 007`, `Rename service X to Y` |
-| `[model:sonnet thinking:med]` | Default — most logic, routes, tests, components | Writing a POST route, writing a unit test, building a React component |
-| `[model:sonnet thinking:high]` | Complex logic, edge cases, cross-module integration | Writing E2E tests with Playwright, solving race conditions, reconciling DB + cache |
-| `[model:opus thinking:max]` | Architecture decisions, complex debugging, ambiguous specs | Designing a new subsystem, investigating intermittent test failures, choosing between two fundamental approaches |
+| `[model:haiku thinking:low]` / `[model:gpt-5.3-codex-spark thinking:low]` | Boilerplate, migrations, renames, deps install | `Install shadcn/ui`, `Run migration 007`, `Rename service X to Y` |
+| `[model:sonnet thinking:med]` / `[model:gpt-5.4 thinking:med]` | Default — most logic, routes, tests, components | Writing a POST route, writing a unit test, building a React component |
+| `[model:sonnet thinking:high]` / `[model:gpt-5.4 thinking:high]` | Complex logic, edge cases, cross-module integration | Writing E2E tests with Playwright, solving race conditions, reconciling DB + cache |
+| `[model:opus thinking:max]` / `[model:gpt-5.5 thinking:max]` | Architecture decisions, complex debugging, ambiguous specs | Designing a new subsystem, investigating intermittent test failures, choosing between two fundamental approaches |
 
-**Default to `sonnet/med`.** Escalate only with justification (add a one-line comment above the task if escalating to opus or thinking:max).
+**Default to the middle tier for the current host** (`sonnet/med` on Claude Code, `gpt-5.4/med` on Codex). Escalate only with justification (add a one-line comment above the task if escalating to the highest tier or `thinking:max`).
 
 ## Agent routing (department/role)
 
@@ -90,6 +96,26 @@ Use routes that match existing `.claude/agents/` or your project's agent catalog
 - `marketing/copywriter`, `marketing/funnel-architect`
 
 If the task doesn't map cleanly, use `engineering/backend-engineer` as default.
+
+When routing through Ruflo, normalize `agent:` to this stable role set before spawning:
+
+- `coordinator`
+- `architect`
+- `researcher`
+- `coder`
+- `tester`
+- `reviewer`
+
+Prefer `architect` for cross-cutting design, `coder` for implementation, `tester` for QA and regression work, `reviewer` for diff/code-review work, `researcher` for evidence gathering, and `coordinator` when the task only sequences other agents.
+
+## Explicit E2E artifact policy
+
+Do not hide required end-to-end coverage behind generic "run QA" tasks.
+
+- Browser or other user-visible flows must include explicit Playwright-style `*.spec.ts` tasks that create or update the actual test file.
+- OpenClaw gateway, agent, or channel flows must include explicit `tests/scenarios.yaml` tasks when those surfaces are touched.
+- If the spec reaches a live OpenClaw or Telegram surface, include explicit tasks that wire the requested QA lane into the implementation plan rather than leaving it implied.
+- Prefer small, atomic test tasks that fail for the intended reason before the corresponding implementation task.
 
 ## Phase structure (required)
 

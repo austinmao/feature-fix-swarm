@@ -1,16 +1,16 @@
-# Claude Code Commands Reference
+# Feature Fix Swarm Commands Reference
 
-Quick reference for all available commands in the ralph agent harness.
+Quick reference for all available commands in the feature-fix-swarm harness across Claude Code and Codex runtimes.
 
 ## Feature Development Pipeline
 
 | Command | What it does |
 |---------|-------------|
 | `/office-hours` | Brainstorm product ideas, validate "is this worth building", structured problem statement |
-| `/autoplan` | Full review pipeline: CEO + Eng + DX dual voices with Codex, auto-decides taste decisions |
-| `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into `tasks.md` with `[model:]` `[agent:]` `[qa:]` annotations |
-| `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one` |
-| `/feature NNN` | End-to-end: autoplan, decompose, implement, qa, ship, canary. 2 hard gates. |
+| `/autoplan` | Full review pipeline: CEO + Eng + DX dual voices with Codex, auto-decides taste decisions; `--accept-all-recommendations` auto-selects every recommended answer |
+| `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations |
+| `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
+| `/feature NNN` | End-to-end: bootstrap spec if needed, autoplan, decompose, implement, qa, ship, canary. 2 hard gates. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` |
 
 **Pipeline order:** `/office-hours` then `/autoplan` then `/spec-decompose` then `/feature-implement` then `/qa` then `/review` then `/codex-gate` then `/ship` then `/land-and-deploy` then `/canary`
 
@@ -114,6 +114,8 @@ npx ruflo@latest memory search "query"   # Search what was learned
 | Check if similar task was done before | `mcp__ruflo__agentdb_pattern-search` |
 | Route task to right model tier | `mcp__ruflo__hooks_model-route` |
 | Store a reusable pattern | `mcp__ruflo__agentdb_pattern-store` |
+
+Ruflo routing is most reliable when task `agent:` values are normalized to a small canonical role set before spawning: `coordinator`, `architect`, `researcher`, `coder`, `tester`, `reviewer`.
 
 ## See Also
 

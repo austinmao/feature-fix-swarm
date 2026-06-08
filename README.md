@@ -1,8 +1,8 @@
 # feature-fix-swarm
 
-QA-per-phase enforcement for Claude Code agent harnesses, with cross-model adversarial completion audit.
+QA-per-phase enforcement for Claude Code and Codex harnesses, with cross-model adversarial completion audit.
 
-Stop bugs from compounding. Test every phase before the next one starts. Fix bugs with an automated investigate-fix-verify loop. Every completion is gated by a hostile cross-model audit (Codex GPT-5) that tries to prove the work is NOT done.
+Stop bugs from compounding. Test every phase before the next one starts. Fix bugs with an automated investigate-fix-verify loop. Every completion is gated by a hostile cross-model audit (Codex GPT-5) that tries to prove the work is NOT done. The shared workflow is host-neutral; Claude and Codex are runtime adapters over the same task state.
 
 ## v3.0 — Native /goal integration
 
@@ -61,6 +61,51 @@ By the time you find the bug, 47 tasks of context separate you from the root cau
 
 - **Fix mode** (`/fix "bug description"`): Post-ship remediation. Takes a bug report, searches prior fix patterns (learning system), investigates root cause with 5 Whys, spawns fix agents via ruflo swarm, verifies with focused QA, then runs full regression QA. Loops until green.
 
+## OSS contract
+
+The shared package contract is the same on every host:
+
+1. spec
+2. plan
+3. autoplan
+4. spec-decompose
+5. feature-implement
+6. qa
+7. fix
+8. ship
+9. canary
+10. goal-wrap when the session should hand off instead of continuing in-place
+
+The core workflow should not encode Claude-only or Codex-only behavior. Host-specific logic belongs in a thin adapter layer that renders the shared task graph for the active runtime.
+
+## Normalized task graph
+
+feature-fix-swarm treats `tasks.md` as a normalized intermediate representation, not just a text checklist.
+
+Shared task fields:
+- `model_tier`
+- `agent_role`
+- `qa_lanes`
+- `host`
+- `executor`
+- `isolation_state`
+
+Rationale:
+- `model_tier` lets the same task graph render different model ladders for Claude and Codex.
+- `agent_role` gives Ruflo a stable routing vocabulary instead of free-form names.
+- `qa_lanes` makes OpenClaw and Telegram lanes explicit rather than implied.
+- `host` and `executor` preserve runtime intent for resume and logging.
+- `isolation_state` keeps branch and worktree handling deterministic.
+
+The implementation layer renders those fields for the current host, but the task graph itself stays host-neutral.
+
+## Host-aware routing
+
+- Claude Code uses the Claude ladder: `haiku`, `sonnet`, `opus`
+- Codex OAuth uses the Codex ladder: `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.5`
+- Ruflo consumes normalized roles and task metadata, not host-specific model names
+- Ruflo should be treated as an orchestration backend, not the source of truth
+
 ## How it works
 
 ```
@@ -104,7 +149,10 @@ Phase N tasks complete
 ### Required
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (CLI, desktop app, or IDE extension)
-  The runtime that executes skills. feature-fix-swarm is a set of Claude Code skills.
+  One supported runtime. feature-fix-swarm adapts to Claude through `.claude/` skills and hooks.
+
+- **[Codex CLI](https://github.com/openai/codex)** by OpenAI
+  Second supported runtime. feature-fix-swarm adapts to Codex through `AGENTS.md` and shared state files.
 
 - **[gstack](https://github.com/garryslist/gstack)** by Garry Tan
   Provides the skills that feature-fix-swarm orchestrates:
@@ -123,7 +171,7 @@ Phase N tasks complete
   Intelligent agent orchestration via MCP. Provides:
   - Swarm management -- spawn parallel QA agents
   - Pattern memory -- store and search fix patterns across sessions
-  - Model routing -- pick haiku/sonnet/opus per task complexity
+  - Model routing -- pick the active host's ladder per task complexity
   - Autopilot -- persistent task completion
 
   Install ruflo:
@@ -133,12 +181,12 @@ Phase N tasks complete
   npx ruflo@latest system info
   ```
 
-  Configure as MCP server in Claude Code settings. See [ruflo docs](https://github.com/ruvnet/claude-flow#mcp-server) for MCP setup.
+  Configure as MCP server in the active runtime. See [ruflo docs](https://github.com/ruvnet/claude-flow#mcp-server) for MCP setup.
 
 ### Optional
 
 - **[Codex CLI](https://github.com/openai/codex)** by OpenAI
-  Used for cross-model adversarial review in two places:
+  Optional cross-host runtime. Used for cross-model adversarial review in two places:
   - `/fix` Step 3.5 — quick adversarial pass on the fresh fix (5-question concern list)
   - `/fix` Step 5.5 + `/feature` Step 5.5 — full `/codex-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) on the final post-QA diff before /ship
 
@@ -166,7 +214,7 @@ The installer copies skills, scripts, and prompts into your project. It checks p
 ### Manual install
 
 ```bash
-# Copy skills to your Claude Code project
+# Copy skills into the Claude-side skill directory
 cp -r skills/* .claude/skills/
 
 # Copy scripts to your project root
@@ -188,7 +236,7 @@ echo '.ralph/' >> .gitignore
 mkdir -p specs/042-user-auth
 # ... write specs/042-user-auth/plan.md
 
-# 2. Decompose into tasks
+# 2. Decompose into tasks (host-aware model labels are rendered automatically)
 /spec-decompose 042
 
 # 3. Review tasks.md, then implement with QA enforcement
@@ -199,6 +247,8 @@ mkdir -p specs/042-user-auth
 
 # 5. Skip e2e tests (backend-only feature)
 /feature-implement 042 --qa-skip e2e
+/feature-implement 042 --qa-openclaw
+/feature-implement 042 --qa-telegram
 
 # 6. Run only code review and security
 /feature-implement 042 --qa-only review,security
@@ -269,6 +319,8 @@ feature-fix-swarm runs 5 QA dimensions, 2 deterministic + 3 LLM:
 | security | LLM agent | sonnet | OWASP Top 10 scan on diff | no exploitable vulns |
 
 Unit and integration are free ($0). The 3 LLM agents cost ~$0.15/phase total.
+
+Those dimensions are rendered from the normalized task graph, so the active host can swap in the right model ladder without changing the workflow definition.
 
 ## The learning system
 

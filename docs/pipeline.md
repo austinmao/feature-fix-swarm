@@ -1,6 +1,6 @@
 # Agent Harness Pipeline
 
-End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo.
+End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo + host adapters.
 
 **Last updated:** 2026-04-16
 **Maintainer:** ralph contributors
@@ -26,7 +26,7 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo
 │    │              dual voices + Decision Audit Trail                   │
 │    ▼                                                                   │
 │   /spec-decompose  ──►  specs/NNN-name/tasks.md                        │
-│    │                    (Sonnet + prompts/decompose-spec.md)           │
+│    │                    (host-aware model ladder + prompts/decompose-spec.md) │
 │    │                    custom format: [model:] [agent:] [US] [P]      │
 │    │                    QA tiers: unit/int/E2E + dev/staging/prod      │
 │    │                    spec.md OPTIONAL — falls back to plan.md       │
@@ -40,7 +40,8 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo
 │   /feature-implement [NNN]                                             │
 │    │   iterates tasks.md; spawns Agent per [model:] annotation         │
 │    │   sequential execution, updates [ ] → [X] or [F] on completion    │
-│    │   --dry-run, --all, --task T042 flags supported                   │
+│    │   --dry-run, --all, --task T042, --qa-openclaw, --qa-telegram    │
+│    │   flags supported                                                  │
 │    │                                                                   │
 │    ▼                                                                   │
 │   /qa     (built INTO tasks.md phases — Dev QA per story)              │
@@ -54,14 +55,13 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo
 
 ## Key simplification (2026-04-16)
 
-**You do NOT need `/speckit.specify` or `/speckit.plan`** in the gstack-driven flow.
-
 - `/office-hours` produces the problem framing
-- You write `specs/NNN-feature-name/plan.md` directly (or use `/speckit.plan` as a scaffold if you prefer)
+- If no spec/plan context exists yet, `/speckit.specify` and `/speckit.plan` bootstrap it before `/autoplan`
 - `spec.md` is **optional** — `/spec-decompose` extracts user stories from plan.md or treats the whole feature as a single story when missing
 - `/autoplan` reviews the plan (works on any file path)
-- `/spec-decompose` produces tasks.md
+- `/spec-decompose` produces a normalized tasks.md with host-aware model labels
 - `/feature-implement` executes tasks one at a time with per-task model routing
+- The shared workflow is host-neutral; Claude and Codex only affect how the task graph is rendered and which model ladder is selected
 
 ## The user gates
 
@@ -76,7 +76,7 @@ At each gate, the user reviews the generated artifact and approves or iterates:
 | 5 | /feature-implement per task or --all | tasks done | tests pass, behavior verified? |
 | 6 | staging deploy | live URL | promote to prod? |
 
-**Optional `/speckit.specify`**: if you want user stories in a separate spec.md, run it after /office-hours. /spec-decompose will use it. If you skip it, /spec-decompose falls back to plan.md or treats the feature as a single user story.
+**Optional `/speckit.specify`**: if you want user stories in a separate spec.md, run it after /office-hours. If no spec/plan context exists yet, `/feature` bootstraps it first. /spec-decompose will use the spec.md when present; if you skip it, /spec-decompose falls back to plan.md or treats the feature as a single user story.
 
 ## Commands quick reference
 
@@ -88,18 +88,18 @@ At each gate, the user reviews the generated artifact and approves or iterates:
 | `/speckit.specify "X"` | Generate spec.md from natural language; creates branch | `specs/NNN-feature-name/spec.md` + git branch |
 | `/speckit.clarify` | Q&A to resolve spec ambiguities | mutates spec.md |
 | `/speckit.plan "tech stack"` | Generate plan.md + research.md + contracts | `specs/NNN/plan.md` + support files |
-| `/autoplan` | Dual-voice review (CEO + Eng + DX + optional Design) | mutates plan.md with Decision Audit Trail |
+| `/autoplan` | Dual-voice review (CEO + Eng + DX + optional Design); `--accept-all-recommendations` auto-selects every answer | mutates plan.md with Decision Audit Trail |
 | `/speckit.analyze` | Cross-artifact consistency check | report only |
-| `/spec-decompose [NNN]` | Generate tasks.md with Sonnet via canonical prompt | `specs/NNN/tasks.md` |
+| `/spec-decompose [NNN]` | Generate normalized tasks.md with host-aware model tiers via canonical prompt | `specs/NNN/tasks.md` |
 
 ### Execution layer
 
 | Command | Purpose | Status |
 |---------|---------|--------|
-| `/feature [NNN]` | **End-to-end pipeline**: autoplan → decompose → implement → qa → ship → canary. 2 gates. Default. | available |
+| `/feature [NNN]` | **End-to-end pipeline**: bootstrap spec if needed → autoplan → decompose → implement → qa → ship → canary. 2 gates. Default. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` | available |
 | `/feature [NNN] --resume` | Resume after any failure | available |
 | `/feature [NNN] --no-ruflo` | Use native Agent tool instead of ruflo swarm | available |
-| `/feature-implement [NNN]` | **Default: run ALL tasks**. Per-task model routing via `[model:]` annotation | available |
+| `/feature-implement [NNN]` | **Default: run ALL tasks**. Per-task model routing via `[model:]` annotation. `--qa-openclaw`, `--qa-telegram` | available |
 | `/feature-implement [NNN] --one` | Execute only the next unchecked task | available |
 | `/feature-implement [NNN] --ruflo` | Use ruflo swarm executor (parallel [P] groups, falls back to Agent on error) | available |
 | `/feature-implement [NNN] --dry-run` | Print next task without spawning | available |
