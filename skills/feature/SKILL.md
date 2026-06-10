@@ -622,7 +622,7 @@ On `/feature NNN --resume`:
 Typical 50-task feature (~5 wedges):
 - autoplan: ~$1 (dual voices; includes its own planning audit)
 - spec-decompose: ~$0.50
-- feature-implement: $15-50 (depends on model distribution)
+- feature-implement: $15-50 (depends on model distribution; fable tasks ~$5/ea — use sparingly)
 - per-phase QA (--qa-loop): ~$0.15/phase × N phases = ~$0.75-$1.50
 - per-phase adversarial audit: ~$0.30/wedge × N wedges = ~$1.50 (Step 4b)
 - qa: ~$2

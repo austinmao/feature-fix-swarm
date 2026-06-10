@@ -1,7 +1,7 @@
 ---
 name: feature-implement
-description: "Execute tasks.md via ruflo swarm + auto mode (both default in v1.3.0), respecting [model:] [agent:] annotations. Updates checkboxes on completion. --auto skips cost confirmation and runs without pauses. Native Agent fallback only via RUFLO_REQUIRED=0 env override (debugging only)."
-version: "1.3.0"
+description: "Execute tasks.md via ruflo swarm + auto mode (both default in v1.3.0), respecting [model:] [agent:] annotations. v1.4.0: Fable 5 support + provider-agnostic model routing (Anthropic/OpenAI) with full model IDs passed to Ruflo. Updates checkboxes on completion. --auto skips cost confirmation and runs without pauses. Native Agent fallback only via RUFLO_REQUIRED=0 env override (debugging only)."
+version: "1.4.0"
 allowed-tools:
   - Read
   - Edit
@@ -110,6 +110,33 @@ TASKS_FILE="$SPEC_DIR/tasks.md"
 [ -f "$TASKS_FILE" ] || { echo "ERROR: $TASKS_FILE missing. Run /spec-decompose first."; exit 1; }
 
 LOG_FILE="$SPEC_DIR/.implement-log.jsonl"
+
+# v1.2.0: Provider detection + full model ID resolution.
+# Priority: CLAUDE_MODEL_PROVIDER env > ANTHROPIC_API_KEY > OPENAI_API_KEY > default anthropic.
+PROVIDER="${CLAUDE_MODEL_PROVIDER:-}"
+if [ -z "$PROVIDER" ]; then
+  [ -n "${ANTHROPIC_API_KEY:-}" ] && PROVIDER="anthropic"
+  [ -n "${OPENAI_API_KEY:-}" ]    && PROVIDER="${PROVIDER:-openai}"
+  PROVIDER="${PROVIDER:-anthropic}"
+fi
+
+# resolve_model SHORTHAND → full model ID for the active provider.
+# Valid shorthands: haiku | sonnet | opus | fable
+resolve_model() {
+  local s="$1"
+  case "${PROVIDER}:${s}" in
+    anthropic:haiku)  echo "claude-haiku-4-5" ;;
+    anthropic:sonnet) echo "claude-sonnet-4-6" ;;
+    anthropic:opus)   echo "claude-opus-4-8" ;;
+    anthropic:fable)  echo "claude-fable-5" ;;
+    openai:haiku)     echo "gpt-4o-mini" ;;
+    openai:sonnet)    echo "gpt-4o" ;;
+    openai:opus)      echo "o1" ;;
+    openai:fable)     echo "gpt-5.4" ;;
+    *)                echo "claude-sonnet-4-6" ;;
+  esac
+}
+echo "[feature-implement] Provider: $PROVIDER"
 ```
 
 ### Step 2: Parse tasks.md
@@ -253,8 +280,16 @@ mcp__ruflo__swarm_init({
 })
 ```
 
+<<<<<<< HEAD
 Then, for each unique `[agent:]` value found in tasks.md, spawn one tracked agent
 that owns that role for the rest of the workflow:
+=======
+For each task group (a `[P]` block or a single sequential task):
+
+> v1.2.0: `task_create` tags now carry both `model:<shorthand>` and
+> `model_id:<full-id>` so `mcp__ruflo__hooks_model-route` can consume the
+> exact model string without needing to resolve shorthands itself.
+>>>>>>> 2a879bc (feat(model-routing): Fable 5 + provider-agnostic model routing v1.2.0/v1.1.0)
 
 ```
 # 2. Spawn one agent per role (model from the first task that needs it)
@@ -276,6 +311,7 @@ the matching agent:
 taskId = mcp__ruflo__task_create({
   type: "feature",                            // "feature" | "bugfix" | "research" | "refactor"
   description: {task description},
+<<<<<<< HEAD
   priority: {priority_map[task.priority] or "normal"},
   // priority_map: P1 → "high", P2 → "normal", P3 → "low", P0/critical → "critical"
   assignTo: [{agentId for task's [agent:] role}],
@@ -307,6 +343,12 @@ mcp__ruflo__workflow_create({
     { type: "task", name: "T015", config: { taskId: "...", dependsOn: ["T019"] } },
     // ... rest of phases
   ]
+=======
+  model: resolve_model({task's [model:] value}),   // full ID: "claude-fable-5" | "claude-opus-4-8" | "claude-sonnet-4-6" | "claude-haiku-4-5" | openai equivalents
+  agent_role: {task's [agent:] value},
+  depends_on: {list of task_ids from Depends-on:},
+  tags: ["model:" + task.model, "model_id:" + resolve_model(task.model), "provider:" + PROVIDER]
+>>>>>>> 2a879bc (feat(model-routing): Fable 5 + provider-agnostic model routing v1.2.0/v1.1.0)
 })
 ```
 
@@ -319,6 +361,7 @@ mcp__ruflo__workflow_execute({ workflowId: {id from workflow_create} })
 # when each task completes: Edit tasks.md [ ] → [X] or [F]
 ```
 
+<<<<<<< HEAD
 **Annotation→ruflo field mapping cheat-sheet:**
 
 | tasks.md annotation     | ruflo destination                         |
@@ -338,6 +381,19 @@ specify different `[model:]` values, the skill MUST spawn one agent per
 (role, model) tuple — agent IDs become `{role}-{model}` (e.g.
 `engineering-backend-engineer-haiku` vs `-sonnet`). The `assignTo` for each
 task picks the right tuple.
+=======
+**Annotation→ruflo field mapping cheat-sheet (v1.2.0):**
+
+| tasks.md annotation     | ruflo destination                                                     |
+| ----------------------- | --------------------------------------------------------------------- |
+| `[P]` (same phase)      | Parallel group in workflow                                            |
+| `[USn]`                 | Informational (pass in description)                                   |
+| `[model:X]`             | `model: resolve_model(X)` (full ID) on `task_create`; tag `model:X` (shorthand) + `model_id:<full-id>` for `hooks_model-route` |
+| `[thinking:Y]`          | Informational (pass in description / prompt)                          |
+| `[agent:dept/role]`     | `agent_role` on `task_create`                                         |
+| `[qa:dim1,dim2]`        | Informational (read by QA gate)                                       |
+| `Depends-on: T###`      | `depends_on` list on `task_create`                                    |
+>>>>>>> 2a879bc (feat(model-routing): Fable 5 + provider-agnostic model routing v1.2.0/v1.1.0)
 
 **v1.1.0 failure policy:** On any `mcp__ruflo__*` failure (auth, timeout, schema mismatch, MCP unreachable):
 
@@ -552,7 +608,7 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 
 ## Edge cases
 
-- **Malformed `[model:]`**: default sonnet/med, log warning in JSONL (`"warning":"annotation defaulted"`).
+- **Malformed `[model:]`**: default `sonnet`/`med`, log warning in JSONL (`"warning":"annotation defaulted"`). Valid shorthands: `haiku` | `sonnet` | `opus` | `fable`.
 - **Sub-agent timeout (>15 min)**: mark `[F]`, log `reason: "timeout"`.
 - **Depends-on cycle**: topological sort fails at parse; abort with `ERROR: cycle T042 → T043 → T042`.
 - **User interrupt mid-execution**: task stays `[ ]`. Next invocation picks up fresh.
@@ -578,10 +634,11 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 ## Cost estimation
 
 Per-task cost (values in USD, backticked to avoid markdown `$` expansion issues):
-- `[model:haiku thinking:low]`: `~$0.02`
-- `[model:sonnet thinking:med]`: `~$0.30`
+- `[model:haiku thinking:low]`: `~$0.02` (claude-haiku-4-5 / gpt-4o-mini)
+- `[model:sonnet thinking:med]`: `~$0.30` (claude-sonnet-4-6 / gpt-4o)
 - `[model:sonnet thinking:high]`: `~$0.60`
-- `[model:opus thinking:max]`: `~$2.00`
+- `[model:opus thinking:max]`: `~$2.00` (claude-opus-4-8 / o1)
+- `[model:fable thinking:max]`: `~$5.00` (claude-fable-5 / gpt-5.4 — highest capability, use sparingly)
 
 Before `--all` on a large spec, estimate:
 ```bash
@@ -589,7 +646,8 @@ h=$(grep -c '\[model:haiku' "$TASKS_FILE" || echo 0)
 sm=$(grep -c '\[model:sonnet thinking:med' "$TASKS_FILE" || echo 0)
 sh=$(grep -c '\[model:sonnet thinking:high' "$TASKS_FILE" || echo 0)
 o=$(grep -c '\[model:opus' "$TASKS_FILE" || echo 0)
-echo "Estimated cost: \$$(python3 -c "print(f'{$h*0.02 + $sm*0.30 + $sh*0.60 + $o*2.00:.2f}')")"
+f=$(grep -c '\[model:fable' "$TASKS_FILE" || echo 0)
+echo "Estimated cost: \$$(python3 -c "print(f'{$f*5.00 + $o*2.00 + $sh*0.60 + $sm*0.30 + $h*0.02:.2f}')")"
 ```
 
 Display and prompt for confirmation only when `AUTO_MODE=0` (`--no-auto` flag). In default auto mode, print the estimate but proceed without waiting.
