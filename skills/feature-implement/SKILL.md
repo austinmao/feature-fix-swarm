@@ -1,7 +1,7 @@
 ---
 name: feature-implement
-description: "Execute tasks.md via ruflo swarm + auto mode (both default in v1.3.0), respecting [model:] [agent:] annotations. Updates checkboxes on completion. --auto skips cost confirmation and runs without pauses. Native Agent fallback only via RUFLO_REQUIRED=0 env override (debugging only)."
-version: "1.3.0"
+description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path falls back to sonnet. RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
+version: "1.5.0"
 allowed-tools:
   - Read
   - Edit
@@ -60,7 +60,7 @@ ONE_TASK=0           # --one opts into single-task mode
 # v1.1.0: ruflo is the default executor. RUFLO_REQUIRED=0 env var falls back
 # to native Agent (debugging only — logs WARNING every spawn).
 USE_RUFLO=1
-RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"
+RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"   # "1"=strict (default): hard-fail if ruflo unreachable; "0"=force native; "auto"=graceful fallback
 # v1.3.0: auto mode is the default. Skips cost confirmation, runs without pauses.
 # Disable with --no-auto.
 AUTO_MODE=1
@@ -69,6 +69,8 @@ QA_LOOP=1
 QA_SKIP=""
 QA_ONLY=""
 RALPH_MAX_RETRIES="${RALPH_MAX_RETRIES:-3}"
+# v1.3.1: US acceptance criteria injection for RALPH fix sub-agents
+TASKS_JSON=""   # populated in Step 2; exported for sub-shells
 
 # BUG-1 fix (2026-04-16): $SPEC_ARG may arrive as a single quoted string.
 # Use `read -ra` to explicitly word-split into an array so the for-loop iterates.
@@ -86,16 +88,20 @@ for arg in "${_SPEC_ARGS[@]}"; do
     --no-qa-loop) QA_LOOP=0 ;;
     --qa-skip=*)  QA_SKIP="${arg#--qa-skip=}" ;;
     --qa-only=*)  QA_ONLY="${arg#--qa-only=}" ;;
+    --resume)     : ;;   # handled in session checkpoint block
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
 done
 
-# v1.1.0: respect RUFLO_REQUIRED=0 escape hatch. When set, switch executor to
-# native and emit a clear WARNING so the user sees the degraded mode every run.
+# RUFLO_REQUIRED controls executor selection:
+#   "auto" (default): pre-flight mcp__ruflo__swarm_status; if unreachable → auto-switch to native parallel
+#   "0"             : skip pre-flight, force native parallel Agent path immediately
+#   "1"             : hard-fail if ruflo unreachable (legacy strict mode)
 if [ "$RUFLO_REQUIRED" = "0" ]; then
   USE_RUFLO=0
-  echo "[feature-implement] WARNING: RUFLO_REQUIRED=0 — running native Agent (debug mode). Hardened ruflo path is bypassed." >&2
+  echo "[feature-implement] INFO: RUFLO_REQUIRED=0 — native parallel Agent path forced." >&2
 fi
+# "auto" pre-flight happens at Step 5 (first task spawn attempt)
 
 if [ -z "${SPEC_ID:-}" ]; then
   BRANCH=$(git branch --show-current 2>/dev/null)
@@ -110,6 +116,58 @@ TASKS_FILE="$SPEC_DIR/tasks.md"
 [ -f "$TASKS_FILE" ] || { echo "ERROR: $TASKS_FILE missing. Run /spec-decompose first."; exit 1; }
 
 LOG_FILE="$SPEC_DIR/.implement-log.jsonl"
+PATTERN_STORE_COUNT=0   # counter: triggers neural_train at 10
+PRIOR_CONTEXT=""        # populated by memory_search_unified below
+SESSION_ID_FILE="$SPEC_DIR/.implement-session-id"
+
+# Session checkpoint — survives Claude context resets (Ruflo persists it)
+SESSION_ID=$(mcp__ruflo__session_save({
+  name: "feature-implement-" + SPEC_ID,
+  metadata: { spec_id: SPEC_ID, tasks_file: TASKS_FILE, started_at: "<ISO timestamp>" }
+}) 2>/dev/null | jq -r '.sessionId // empty' 2>/dev/null || echo "")
+if [ -n "$SESSION_ID" ]; then
+  echo "$SESSION_ID" > "$SESSION_ID_FILE"
+  echo "[feature-implement] Session checkpoint: $SESSION_ID (resume: /feature-implement $SPEC_ID --resume)" >&2
+fi
+
+# On --resume: restore prior session state from Ruflo
+if echo "$SPEC_ARG" | grep -q -- '--resume'; then
+  _SAVED_ID=$(cat "$SESSION_ID_FILE" 2>/dev/null || echo "")
+  if [ -n "$_SAVED_ID" ]; then
+    mcp__ruflo__session_restore({ sessionId: "$_SAVED_ID" }) 2>/dev/null \
+      && echo "[feature-implement] Restored session $_SAVED_ID" >&2 \
+      || echo "[feature-implement] WARN: session restore failed — starting fresh" >&2
+  fi
+fi
+```
+
+### Step 1.5: Session prime (memory_search_unified)
+
+Before parsing tasks, pull everything Ruflo knows about this spec across all memory namespaces (patterns, tasks, feedback, claude-memories). Inject into every sub-agent prompt this session.
+
+```
+PRIOR_CONTEXT = mcp__ruflo__memory_search_unified({
+  query: "spec " + SPEC_ID + " implementation patterns approach"
+})
+# PRIOR_CONTEXT = top 3 results formatted as:
+# "Prior pattern [{i}]: {content}" joined by \n
+# Truncate to 800 chars total — context enrichment, not context flood
+# If mcp unavailable or returns empty: PRIOR_CONTEXT = ""
+
+# v1.5.0: Check if Ruflo model router has been pretrained.
+# hooks_model-route returns "opus" for every task until pretrained — without this
+# check, all sonnet-default tasks would be mis-routed to opus.
+statsResult = mcp__ruflo__hooks_model-stats() 2>/dev/null
+RUFLO_ROUTING_TRUSTED = (
+  statsResult != null
+  && statsResult.trained == true
+  && (statsResult.sampleCount || 0) > 20
+)
+if !RUFLO_ROUTING_TRUSTED:
+  echo "[feature-implement] WARN: Ruflo model router not pretrained — [model:] annotations used as-is."
+  echo "  Run once to enable intelligent routing: npx claude-flow@v3alpha hooks pretrain"
+  echo "  Until then: sonnet-default tasks stay sonnet (no dynamic upgrade/downgrade)."
+# RUFLO_ROUTING_TRUSTED is checked in Step 5 before every hooks_model-route call.
 ```
 
 ### Step 2: Parse tasks.md
@@ -186,6 +244,8 @@ for m in task_pattern.finditer(content):
 print(json.dumps(tasks, indent=2))
 PYEOF
 )
+# Export for RALPH context extraction in Step 5.5b
+export TASKS_JSON
 ```
 
 ### Step 3: Select next executable task
@@ -221,146 +281,264 @@ If `--dry-run`, print the selected task and exit 0:
 
 ### Step 5: Spawn the sub-agent
 
-**Executor selection (v1.1.0):**
-- **Default (ruflo MCP swarm):** spawn via `mcp__ruflo__swarm_init` + `mcp__ruflo__task_create` + `mcp__ruflo__workflow_execute`. Supports parallel `[P]` groups. Requires `npx claude-flow@v3alpha hooks pretrain` to have been run at least once.
-- **Pre-flight check (v1.1.0 — REQUIRED):** Before spawning the first task, call `mcp__ruflo__swarm_status` (or any `mcp__ruflo__*` tool) once to verify the MCP server is reachable. If the call fails AND `RUFLO_REQUIRED=1` (default): print structured error and exit 1. **No silent fallback.**
-- **Native fallback (DEBUG ONLY):** Set `RUFLO_REQUIRED=0` in env. The skill will run native Agent sequentially (no `[P]` parallelism). Every task spawn emits a WARNING to stderr.
+**Executor selection (v1.4.0):**
+- **Default (ruflo MCP swarm):** spawn via `mcp__ruflo__swarm_init` + `mcp__ruflo__task_create` + `mcp__ruflo__workflow_execute`. Supports parallel `[P]` groups, model-per-agent routing, and dependency-aware workflow steps.
+- **Pre-flight check (v1.4.0 — auto mode):** When `RUFLO_REQUIRED=auto` (default), call `mcp__ruflo__swarm_status` once before the first spawn. If it fails, log `ruflo_unavailable` and **auto-switch to native parallel** — no exit, no user prompt. If `RUFLO_REQUIRED=1`, hard-fail on unreachable (legacy strict mode).
+- **Native parallel fallback:** Active when ruflo is unavailable or `RUFLO_REQUIRED=0`. Runs [P] groups as concurrent Agent calls and respects `[model:]` annotations. See "Native Agent path" below.
 
-**Native Agent path (default):**
+**Native Agent path (parallel-capable):**
 
-Agent tool invocation:
-- `model`: task's `[model:]` annotation
-- `subagent_type`: `general-purpose` (v1; `[agent:]` is informational until mapped to specialized subagent_types in v2)
+Model mapping — `[model:]` annotation → Agent `model` param:
+| Annotation | Agent model param |
+|---|---|
+| `haiku` | `"haiku"` |
+| `sonnet` (default) | `"sonnet"` |
+| `opus` | `"opus"` |
+| `fable` | `"fable"` _(native Agent only — Ruflo model enum is `haiku\|sonnet\|opus\|inherit`; `[model:fable]` on the Ruflo path silently maps to `sonnet` via Step B)_ |
+
+Parallel group dispatch: tasks with `[P]` in the same phase that share no mutual dependencies are spawned as **concurrent Agent calls** (sent in one message, not sequentially). Tasks without `[P]`, or with unresolved dependencies, run sequentially.
+
+Algorithm per executable batch:
+1. Collect all `todo` tasks whose `depends_on` are all `done`.
+2. Split into `[P]` group (concurrent) and non-`[P]` singles (sequential).
+3. For `[P]` group: issue all Agent calls in a single response turn with `model=task.model` on each.
+4. For sequential tasks: issue one Agent call at a time, wait for completion, update checkbox, continue.
+
+Agent tool params per task:
+- `model`: task's `[model:]` annotation (haiku/sonnet/opus/fable)
+- `subagent_type`: `general-purpose` (v1; `[agent:]` is informational until mapped in v2)
 - `description`: task ID + first 3 description words
 - `prompt`: template below
 
-**Ruflo path (`--ruflo` flag):**
+**Ruflo path (canonical v1.4.0 pattern):**
 
-> v1.2.0 (2026-05-27): Aligned with actual ruflo MCP schemas. Earlier versions
-> referenced `task_create({model, agent_role, depends_on})` which doesn't exist —
-> ruflo `task_create` accepts only `{type, description, priority, assignTo, tags}`.
-> Model + dependencies are now plumbed through `agent_spawn` + tags + workflow steps.
+> v1.4.0 (2026-06-10): Rewrote Ruflo path to match actual canonical pattern from Ruflo docs.
+> Prior versions used `workflow_create/execute` which is NOT the canonical Ruflo orchestration
+> pattern. Ruflo orchestrates via `swarm_init` + `agent_spawn` + **concurrent native Task() calls**
+> + `SendMessage` for pipeline handoffs. `workflow_create/execute` is a secondary API surface.
+> `task_create` is for tracking only, not spawning.
 
-On first task in session, initialize the swarm with one agent per unique `[agent:]` role:
-
+**Step A — memory prime (MANDATORY before first spawn):**
 ```
-# 1. Init the swarm
-mcp__ruflo__swarm_init({
-  topology: "hierarchical",       // deps between tasks → hierarchical
-  maxAgents: {unique [agent:] count, capped at 8},
-  strategy: "specialized",
-  config: { consensus: "raft" }   // consensus rides in config, not top-level
+# Required per Ruflo docs: search for prior patterns before every task run
+priorPatterns = mcp__ruflo__memory_search({
+  query: "spec " + SPEC_ID + " feature implementation",
+  limit: 5
 })
+# Inject top match into sub-agent prompts as "Prior pattern: ..."
 ```
 
-Then, for each unique `[agent:]` value found in tasks.md, spawn one tracked agent
-that owns that role for the rest of the workflow:
-
+**Step B — init swarm + register roles:**
 ```
-# 2. Spawn one agent per role (model from the first task that needs it)
-for role in unique_agents:
-  mcp__ruflo__agent_spawn({
-    agentType: role,                                  // e.g. "engineering/backend-engineer"
-    model: {model from first task using this agent},  // "haiku" | "sonnet" | "opus"
-    task: {short brief — "Execute spec NNN tasks tagged [agent:{role}]"},
-    swarmId: {swarmId from step 1}
+# 1. Init coordination scaffolding
+swarmId = mcp__ruflo__swarm_init({
+  topology: "hierarchical",
+  maxAgents: min(unique_agent_roles, 8),
+  strategy: "specialized"
+})
+
+# 2. Register one agent per (role, model) tuple from tasks.md
+#    v1.5.0: hooks_model-route overrides sonnet-default annotations when pretrained.
+#    Explicit haiku/opus/fable annotations always win — only sonnet defaults get routed.
+#    fable not in Ruflo enum → use sonnet in Ruflo path (fable supported via native Agent).
+COGNITIVE_MAP = {
+  "engineering/backend-engineer":  "convergent",
+  "engineering/frontend-engineer": "convergent",
+  "engineering/full-stack":        "convergent",
+  "analysis-research":             "divergent",
+  "security":                      "critical",
+  "architecture":                  "systems",
+  "debugging":                     "lateral",
+  "documentation":                 "convergent",
+}
+for (role, annotatedModel) in unique_role_model_pairs:
+  // Resolve effective model: route only when annotation is default sonnet
+  if annotatedModel == "sonnet" && RUFLO_ROUTING_TRUSTED:
+    routeResult = mcp__ruflo__hooks_model-route({
+      task: "spec " + SPEC_ID + " [" + role + "] tasks",
+      preferCost: true
+    })
+    effectiveModel = (routeResult.confidence > 0.75) ? routeResult.model : "sonnet"
+  elif annotatedModel == "fable":
+    effectiveModel = "sonnet"  // Ruflo enum: haiku|sonnet|opus|inherit only
+  else:
+    effectiveModel = annotatedModel  // haiku/opus/explicit annotation: trust as-is
+
+  agentId = mcp__ruflo__agent_spawn({
+    agentType: role,
+    model: effectiveModel,
+    task: "Execute spec " + SPEC_ID + " tasks tagged [agent:" + role + "]",
+    swarmId: swarmId
   })
-  # capture agentId
+  # store agentId → (role, effectiveModel) map
 ```
 
-For each task in tasks.md, create the task with metadata in `tags`, then assign to
-the matching agent:
+**Step C — execute tasks (concurrent Task() + SendMessage):**
+
+Ruflo's canonical orchestration runs named agents concurrently via the native Task tool, then
+uses `SendMessage` for pipeline handoffs. This is the same mechanism the native parallel path
+uses — Ruflo adds tracking and memory on top.
+
+**Pre-spawn per task: effort correlation + DAA (v1.5.0)**
+
+Before spawning each task, resolve the effective model + thinking tier:
 
 ```
-# 3a. Create task (model + thinking + phase + US ride in tags)
-taskId = mcp__ruflo__task_create({
-  type: "feature",                            // "feature" | "bugfix" | "research" | "refactor"
-  description: {task description},
-  priority: {priority_map[task.priority] or "normal"},
-  // priority_map: P1 → "high", P2 → "normal", P3 → "low", P0/critical → "critical"
-  assignTo: [{agentId for task's [agent:] role}],
-  tags: [
-    "task_id:" + task.id,                     // e.g. "task_id:T015"
-    "model:" + task.model,
-    "thinking:" + task.thinking,
-    "phase:" + task.phase_n,
-    "us:" + (task.user_story or "none"),
-    "qa:" + ",".join(task.qa_dims),
-  ]
+# Look up effectiveModel registered for this task's role in Step B (roleModelMap built there)
+effectiveModel = roleModelMap[task.agent] || task.model
+
+# Effort correlation: align thinking budget with the resolved model tier.
+# Mismatched pairs waste cost or under-utilize capability.
+if effectiveModel == "opus" && task.thinking == "med":
+  effectiveThinking = "high"    # opus + med wastes capability; bump up
+elif effectiveModel == "haiku" && task.thinking in ["high", "max"]:
+  effectiveThinking = "med"     # haiku can't utilize max budget; cap down
+else:
+  effectiveThinking = task.thinking
+
+# DAA cognitive pattern — only for high-effort tasks (thinking:high or :max).
+# Uses COGNITIVE_MAP from Step B to select the richest cognitive context.
+# Skip silently if daa_agent_create is unavailable.
+daaAgentId = null
+if effectiveThinking in ["high", "max"]:
+  cogPattern = COGNITIVE_MAP[task.agent] || "convergent"
+  daaResult = mcp__ruflo__daa_agent_create({
+    cognitivePattern: cogPattern,
+    taskContext: "spec " + SPEC_ID + " task " + task.id,
+    model: effectiveModel
+  }) 2>/dev/null
+  daaAgentId = daaResult?.agentId || null
+# daaAgentId injected into sub_agent_prompt when non-null:
+#   "DAA cognitive context: {cogPattern} (id: {daaAgentId})"
+```
+
+Dispatch with the resolved pair (`effectiveModel`, `effectiveThinking`):
+
+```
+# For [P] task group: spawn all concurrently in ONE message turn
+Task({ prompt: sub_agent_prompt(task1, effectiveThinking1), model: effectiveModel1,
+       name: task1.id, run_in_background: true,
+       subagent_type: task1.agent or "general-purpose" })
+Task({ prompt: sub_agent_prompt(task2, effectiveThinking2), model: effectiveModel2,
+       name: task2.id, run_in_background: true,
+       subagent_type: task2.agent or "general-purpose" })
+# ... all [P] siblings in the same turn
+
+# For sequential tasks: one Task() at a time, wait, then next
+Task({ prompt: sub_agent_prompt(task, effectiveThinking), model: effectiveModel,
+       name: task.id, subagent_type: task.agent or "general-purpose" })
+
+# Pipeline handoffs: when a task completes, route to next stage
+SendMessage({ to: next_task_id, message: "Prior task complete. Proceed." })
+```
+
+**Step D — task tracking (optional but recommended):**
+```
+# Track tasks in Ruflo for status visibility (does NOT drive execution)
+mcp__ruflo__task_create({
+  type: "feature",
+  description: task.description,
+  priority: {P1→"high", P2→"normal", P3→"low"},
+  tags: ["task_id:" + task.id, "model:" + task.model,
+         "us:" + task.user_story, "phase:" + task.phase_n]
 })
+```
 
-# 3b. Express dependencies through a workflow (task_create has no depends_on field)
-mcp__ruflo__workflow_create({
-  name: "spec-" + SPEC_ID + "-feature-implement",
-  description: "feature-implement orchestration for spec " + SPEC_ID,
-  steps: [
-    // One step per task in tasks.md, in topological order
-    // [P] tasks in the same phase become a single "parallel" step
-    { type: "task", name: "T001", config: { taskId: "<id from create>" } },
-    { type: "parallel", name: "phase-1-audits", config: {
-        children: [
-          { type: "task", name: "T002", config: { taskId: "..." } },
-          { type: "task", name: "T003", config: { taskId: "..." } },
-        ]
-      }
-    },
-    { type: "task", name: "T015", config: { taskId: "...", dependsOn: ["T019"] } },
-    // ... rest of phases
-  ]
+**Step E — store successful patterns (MANDATORY after each success):**
+```
+# Required per Ruflo docs: store pattern after every successful task
+mcp__ruflo__memory_store({
+  content: "spec " + SPEC_ID + " " + task.id + ": " + task.description + " [SUCCESS]",
+  namespace: "patterns",
+  metadata: { spec: SPEC_ID, task: task.id, model: task.model, phase: task.phase_n }
 })
 ```
 
-Then execute and poll:
-
+**Simpler alternative — `task_orchestrate`:**
+For straightforward multi-agent coordination without full swarm scaffolding:
 ```
-# 4. Run + poll
-mcp__ruflo__workflow_execute({ workflowId: {id from workflow_create} })
-# poll mcp__ruflo__task_status({taskId}) for each task
-# when each task completes: Edit tasks.md [ ] → [X] or [F]
+mcp__ruflo__task_orchestrate({
+  tasks: [ { id: T.id, description: T.description, dependencies: T.depends_on,
+              parallel: T.parallel, model: T.model } for T in todo_tasks ],
+  strategy: "parallel"
+})
+# Handles batching, dependency ordering, and model routing internally
 ```
 
-**Annotation→ruflo field mapping cheat-sheet:**
+**Annotation→ruflo field mapping cheat-sheet (v1.4.0):**
 
-| tasks.md annotation     | ruflo destination                         |
-| ----------------------- | ----------------------------------------- |
-| `[P]` (same phase)      | Sibling under `parallel` step in workflow |
-| `[USn]`                 | Tag `us:USn` on `task_create`             |
-| `[model:X]`             | `model: X` on `agent_spawn` (per role)    |
-| `[thinking:Y]`          | Tag `thinking:Y` (passed into prompt)     |
-| `[agent:dept/role]`     | `agentType` for `agent_spawn`             |
-| `[qa:dim1,dim2]`        | Tag `qa:dim1,dim2` (read by QA gate)      |
-| `Depends-on: T###`      | `dependsOn` in workflow step `config`     |
-| Phase heading           | Tag `phase:N` + workflow step grouping    |
+| tasks.md annotation     | ruflo destination                                    |
+| ----------------------- | ---------------------------------------------------- |
+| `[P]` (same phase)      | Concurrent Task() calls in same message turn         |
+| `[USn]`                 | Tag `us:USn` on `task_create`; injected in prompt    |
+| `[model:X]`             | `model: X` on Task() + `agent_spawn` (per role)      |
+| `[model:fable]`         | Falls back to `sonnet` in Ruflo router               |
+| `[thinking:Y]`          | Injected into sub-agent prompt thinking budget line  |
+| `[agent:dept/role]`     | `agentType` on `agent_spawn`; `subagent_type` on Task|
+| `[qa:dim1,dim2]`        | Tag `qa:dim1,dim2` read by QA phase gate             |
+| `Depends-on: T###`      | Dependency ordering enforced before Task() spawn     |
+| Phase heading           | `SendMessage` pipeline stage boundary                |
 
-**Single-model-per-agent constraint:** Because model selection happens at
-`agent_spawn` time (not per task), if two tasks share an `[agent:]` role but
-specify different `[model:]` values, the skill MUST spawn one agent per
-(role, model) tuple — agent IDs become `{role}-{model}` (e.g.
-`engineering-backend-engineer-haiku` vs `-sonnet`). The `assignTo` for each
-task picks the right tuple.
+**Other Ruflo tools worth using:**
 
-**v1.1.0 failure policy:** On any `mcp__ruflo__*` failure (auth, timeout, schema mismatch, MCP unreachable):
+| Tool | When |
+|---|---|
+| `mcp__ruflo__memory_search` | Before EVERY task — reuse prior patterns |
+| `mcp__ruflo__memory_store` | After EVERY success — build knowledge base |
+| `mcp__ruflo__neural_train` | After 10+ stored patterns — improve model |
+| `mcp__ruflo__agentdb_pattern-search` | Find prior agent solutions by semantic query |
+| `mcp__ruflo__agentdb_pattern-store` | Store reusable agent patterns |
+| `mcp__ruflo__swarm_status` | Pre-flight availability check |
+| `mcp__ruflo__task_orchestrate` | Simple alternative to full swarm init |
+| `mcp__ruflo__hive-mind_init` | Byzantine fault-tolerant consensus (high-stakes tasks) |
+| `mcp__ruflo__memory_search_unified` | Cross-namespace search (patterns + tasks + feedback) |
 
-1. Capture the failure detail (tool name, error message, current task ID, timestamp).
-2. Append a structured error log to `$LOG_FILE` (`.implement-log.jsonl`):
+**v1.4.0 failure policy:** On any `mcp__ruflo__*` failure (auth, timeout, schema mismatch, MCP unreachable):
+
+**Pre-flight failure (RUFLO_REQUIRED=auto, default):**
+1. Log `ruflo_unavailable` to `$LOG_FILE`:
    ```json
-   {"timestamp":"<ISO>","event":"ruflo_hard_fail","tool":"<mcp_name>","error":"<msg>","task_id":"<id|null>","ruflo_required":"1"}
+   {"timestamp":"<ISO>","event":"ruflo_unavailable","tool":"mcp__ruflo__swarm_status","error":"<msg>","fallback":"native_parallel"}
    ```
-3. Print the structured terminal error:
+2. Print one-line notice: `[feature-implement] INFO: ruflo unreachable — switching to native parallel Agent path.`
+3. Set `USE_RUFLO=0` and continue. No exit.
+
+**Pre-flight failure (RUFLO_REQUIRED=1, strict):**
+1. Log `ruflo_hard_fail` to `$LOG_FILE`:
+   ```json
+   {"timestamp":"<ISO>","event":"ruflo_hard_fail","tool":"<mcp_name>","error":"<msg>","task_id":null,"ruflo_required":"1"}
    ```
-   [feature-implement] ERROR: ruflo MCP failure during {phase}
-     tool:    {mcp__ruflo__xxx}
+2. Print structured error:
+   ```
+   [feature-implement] ERROR: ruflo MCP unreachable (RUFLO_REQUIRED=1)
+     tool:    mcp__ruflo__swarm_status
      error:   {message}
-     task:    {current task id}
      log:     {LOG_FILE}
    Resolve:
-     - Verify MCP server is running and reachable
-     - Re-run `npx claude-flow@v3alpha hooks pretrain` if pretrain state is corrupt
-     - Check ruflo version: `npx claude-flow@v3alpha --version`
-     - To bypass for debugging: `RUFLO_REQUIRED=0 /feature-implement {SPEC_ID} --resume`
-   Resume after fix: /feature-implement {SPEC_ID} --resume
+     - Verify MCP server: `npx claude-flow@v3alpha --version`
+     - Re-run: `npx claude-flow@v3alpha hooks pretrain`
+     - Auto-fallback: unset RUFLO_REQUIRED (default is "auto")
+   Resume: /feature-implement {SPEC_ID} --resume
    ```
-4. **Exit 1.** Do NOT fall back to native Agent. The user must explicitly opt into degraded mode via `RUFLO_REQUIRED=0`.
+3. Exit 1.
+
+**Mid-run ruflo failure (task already started):**
+1. Log the failure with task context.
+2. Retry the task once via native Agent (single task, not the whole workflow).
+3. If retry fails: mark task `failed`, continue to next task (do not abort the run).
+
+**Pre-spawn: pattern search (both Ruflo + native paths)**
+
+Before constructing the sub-agent prompt, search for prior solutions:
+
+```
+TASK_PATTERN = mcp__ruflo__agentdb_pattern-search({
+  query: task.description[:80] + " spec " + SPEC_ID,
+  limit: 1
+})
+# If result found: TASK_PRIOR = "Prior solution: " + result.content[:400]
+# If no result or MCP unavailable: TASK_PRIOR = ""
+```
 
 **Sub-agent prompt:**
 
@@ -381,6 +559,11 @@ You are implementing a single task from a decomposed feature spec. You have no p
 4. `{repo_root}/specs/{spec_dir}/data-model.md` (if exists)
 5. `{repo_root}/specs/{spec_dir}/contracts/` (if exists)
 6. `{repo_root}/CLAUDE.md` — project conventions
+
+## Prior patterns from similar tasks
+{TASK_PRIOR or "(none — first time solving this type of task)"}
+
+{PRIOR_CONTEXT or ""}
 
 ## Dependencies (must already be done — verify in tasks.md)
 {depends_on_list or "(none)"}
@@ -405,6 +588,36 @@ Allocate {thinking} effort. {thinking_guidance}
 Begin by reading the context files.
 ```
 
+**Post-success: store patterns (both Ruflo + native paths)**
+
+After each task completes `[X]` and checkbox is updated:
+
+```
+# 1. Structured pattern graph (agentdb)
+mcp__ruflo__agentdb_pattern-store({
+  pattern: task.id + ": " + task.description[:120],
+  context: "spec:" + SPEC_ID + " phase:" + task.phase_n + " model:" + task.model,
+  outcome: "success",
+  metadata: { spec_id: SPEC_ID, task_id: task.id, user_story: task.user_story }
+})
+
+# 2. Vector search namespace (memory)
+mcp__ruflo__memory_store({
+  content: "SPEC " + SPEC_ID + " " + task.id + " SUCCESS: " + task.description[:150],
+  namespace: "patterns",
+  metadata: { spec: SPEC_ID, task: task.id, model: task.model, phase: task.phase_n }
+})
+
+# 3. Increment counter; trigger neural_train at threshold
+PATTERN_STORE_COUNT=$((PATTERN_STORE_COUNT + 1))
+if [ "$PATTERN_STORE_COUNT" -ge 10 ]; then
+  mcp__ruflo__neural_train({ focus: "patterns" }) 2>/dev/null || true
+  PATTERN_STORE_COUNT=0
+fi
+```
+
+Skip silently if either MCP tool is unavailable — pattern storage is enhancement, not gate.
+
 Where `thinking_guidance`:
 - `low`: "Execute directly. Don't deliberate on obvious choices."
 - `med`: "Think through the approach, consider 1-2 edge cases, implement carefully."
@@ -419,21 +632,52 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    - If vitest available: `npx vitest run --changed` on files modified this phase
    - If pytest available: `pytest -x` on changed Python files
 
-2. **LLM QA swarm** (3 agents via ruflo, ~$0.15/phase):
-   Run `bash scripts/qa-swarm.sh` with args:
-   - `--phase "$CURRENT_PHASE"` — which phase just completed
-   - `--diff "$(git diff --name-only HEAD~$TASKS_IN_PHASE)"` — changed files
-   - `--spec-dir "$SPEC_DIR"` — for user story context
-   - `--qa-skip "$QA_SKIP"` — dimensions to skip (from CLI flag)
-   - `--qa-only "$QA_ONLY"` — dimensions to run exclusively
-   - `--max-retries "$RALPH_MAX_RETRIES"` — retry budget
+2. **LLM QA swarm — hive-mind consensus** (~$0.15/phase):
 
-   The swarm spawns up to 3 LLM agents in parallel via ruflo:
+   Spawn 3 QA agents under Byzantine fault-tolerant consensus. If 1 of 3 agents is
+   confused or wrong, the consensus verdict still holds. Each dimension is an independent
+   broadcast; the hive aggregates verdicts across all agents before declaring pass/fail.
+
+   ```
+   # Init hive-mind for this phase's QA
+   hiveId = mcp__ruflo__hive-mind_init({
+     name: "qa-phase-" + CURRENT_PHASE + "-spec-" + SPEC_ID,
+     consensusThreshold: 0.67,    // 2-of-3 required
+     maxAgents: 3
+   })
+
+   # Spawn 3 named agents concurrently (one per dimension)
+   Task({ name: "qa-e2e",      model: "sonnet", run_in_background: true,
+          prompt: QA_E2E_PROMPT })
+   Task({ name: "qa-review",   model: "sonnet", run_in_background: true,
+          prompt: QA_REVIEW_PROMPT })
+   Task({ name: "qa-security", model: "sonnet", run_in_background: true,
+          prompt: QA_SECURITY_PROMPT })
+
+   # Broadcast the phase diff to all 3 agents
+   mcp__ruflo__hive-mind_broadcast({
+     hiveId: hiveId,
+     message: { phase: CURRENT_PHASE, diff: PHASE_DIFF_FILES, spec_dir: SPEC_DIR,
+                qa_skip: QA_SKIP, qa_only: QA_ONLY }
+   })
+
+   # Collect consensus verdict (waits for all 3)
+   verdict = mcp__ruflo__hive-mind_consensus({
+     hiveId: hiveId,
+     question: "Did all required QA dimensions pass?"
+   })
+   # verdict.result: "pass" | "fail" | "inconclusive"
+   # verdict.details: per-dimension breakdown
+   ```
+
+   Fallback to `bash scripts/qa-swarm.sh` if hive-mind MCP unavailable.
+
+   Dimensions (skip/only controlled by QA_SKIP / QA_ONLY):
    - **qa-e2e** (sonnet) — browser tests via $B if dev server detected (`curl -sf localhost:3000`)
    - **qa-review** (sonnet) — code review on the diff (CRITICAL/HIGH = fail)
    - **qa-security** (sonnet) — OWASP scan on the diff (CRITICAL = fail)
 
-3. **Aggregation**: ALL dimensions must pass. Any failure triggers:
+3. **Aggregation**: ALL dimensions must pass (or hive verdict = "pass"). Any failure triggers:
    - Capture artifacts to `.ralph/P{N}/` (logs, screenshots, diff)
    - Invoke `/investigate` with scope locked to changed files
    - Apply fix via sub-agent with investigation report
@@ -484,14 +728,73 @@ When `scripts/qa-swarm.sh` exits non-zero (any dimension failed):
    - Scope: only files changed in this phase (from `$PHASE_DIFF_FILES`)
    - The investigate skill uses 5 Whys methodology and produces a root cause report
 
-5. **Spawn fix sub-agent** with the investigation report:
+5. **Extract US acceptance criteria** for the failing task before spawning the fix agent:
+
+   ```bash
+   # Get the failing task's [USn] annotation
+   _FAIL_TASK_ID=$(grep -oP '(?<=task_id:)\S+' "$ARTIFACT_DIR/retry-state.json" 2>/dev/null | head -1 || echo "")
+   _FAIL_TASK_US=$(python3 -c "
+   import json, os
+   tasks = json.loads(os.environ.get('TASKS_JSON', '[]'))
+   tid = '$_FAIL_TASK_ID'
+   t = next((t for t in tasks if t['id'] == tid), {})
+   print(t.get('user_story') or '')
+   " 2>/dev/null || echo "")
+
+   # Pull acceptance criteria from spec.md for that US
+   _FIX_US_CRITERIA=""
+   if [ -n "$_FAIL_TASK_US" ] && [ -f "$SPEC_DIR/spec.md" ]; then
+     _US_NUM="${_FAIL_TASK_US#US}"
+     _FIX_US_CRITERIA=$(awk "/User Story $_US_NUM[^0-9]|^#{1,3} US$_US_NUM[^0-9]/,/^#{1,3} /" \
+       "$SPEC_DIR/spec.md" 2>/dev/null | head -50)
+   fi
+   ```
+
+6. **Search for prior fix patterns** before spawning fix agent:
+
+   ```
+   FIX_PRIOR = mcp__ruflo__agentdb_pattern-search({
+     query: "QA fix " + FAILED_DIMS + " " + _FAIL_TASK_ID + " " + task.description[:60],
+     limit: 1
+   })
+   # FIX_PRIOR_TEXT = result.content[:400] if found, else ""
+   ```
+
+7. **Spawn fix sub-agent** with the investigation report + spec context + prior fix pattern:
    - Same model as the original implementation sub-agent
-   - Prompt includes: root cause report, original task description, failed test output
-   - Sub-agent applies the minimal fix and reports SUCCESS/FAILURE
+   - Prompt includes: root cause report, original task description, failed test output, user story acceptance criteria, **and** prior fix pattern from agentdb
 
-6. **Write fixed-signal.txt** to let ralph-retry.sh re-run QA on failed dims only
+   **Fix sub-agent prompt addition** — append this section to the standard fix prompt:
 
-7. **Loop** until either:
+   ```
+   ## Prior fix pattern (from agentdb — similar past QA failures)
+   {FIX_PRIOR_TEXT or "(none found — no prior fix pattern for this failure type)"}
+
+   ## User Story Acceptance Criteria (from spec.md)
+   Task {task_id} belongs to {user_story}.
+   The fix must satisfy these acceptance criteria — not just make the test pass:
+
+   {_FIX_US_CRITERIA or "spec.md acceptance criteria unavailable — rely on task description only"}
+
+   ## What success looks like
+   The test was: {failed test name / assertion}
+   Root cause: {investigate report summary}
+   Fix scope: minimal — do not change behavior outside this US acceptance criterion.
+   ```
+
+8. **Store fix pattern after success** (so future RALPH retries learn from it):
+
+   ```
+   mcp__ruflo__agentdb_pattern-store({
+     pattern: "QA fix " + FAILED_DIMS + " for " + _FAIL_TASK_ID + ": " + fix_summary[:120],
+     context: "spec:" + SPEC_ID + " retry:" + current_retry,
+     outcome: "success"
+   })
+   ```
+
+9. **Write fixed-signal.txt** to let ralph-retry.sh re-run QA on failed dims only
+
+10. **Loop** until either:
    - All dimensions pass → continue to next phase
    - Max retries exhausted → mark remaining phase tasks `[F]`, print structured failure, stop
 
@@ -562,7 +865,7 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 
 ## Non-goals (v1)
 
-- Does NOT run `[P]` parallel groups in parallel — sequential only. v2 feature.
+- `[P]` parallel groups: Ruflo path runs them concurrently (concurrent Task() calls per group). Native fallback also dispatches `[P]` tasks concurrently (all `[P]` siblings in one message turn). Non-`[P]` tasks are always sequential.
 - Does NOT commit — use `/ship`.
 - With `--qa-loop` (default): validates correctness per phase via 2 deterministic hooks + 3 LLM agents. Without: assumes sub-agent self-report. Full-suite `/qa` still recommended before shipping.
 - Does NOT update Linear — `post-spec-write.sh` handles that on tasks.md save.
@@ -581,6 +884,7 @@ Per-task cost (values in USD, backticked to avoid markdown `$` expansion issues)
 - `[model:haiku thinking:low]`: `~$0.02`
 - `[model:sonnet thinking:med]`: `~$0.30`
 - `[model:sonnet thinking:high]`: `~$0.60`
+- `[model:fable thinking:med]`: `~$0.50` _(estimated; native Agent path only — Ruflo maps fable→sonnet)_
 - `[model:opus thinking:max]`: `~$2.00`
 
 Before `--all` on a large spec, estimate:

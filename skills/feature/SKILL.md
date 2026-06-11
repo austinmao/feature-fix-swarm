@@ -1,7 +1,7 @@
 ---
 name: feature
 description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. v2.1.1: skill PREPARES native /goal condition (with run_id baked in) and prints it for operator to paste — UI commands like /goal cannot be invoked via Skill tool, so auto-invoke is architecturally impossible. Per-phase audit + /codex-gate remain mandatory."
-version: "2.1.1"
+version: "2.3.0"
 allowed-tools:
   - Read
   - Edit
@@ -78,7 +78,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 - `specs/NNN-feature-name/plan.md` exists and is ready for review
 - `specs/NNN-feature-name/spec.md` is optional — `/spec-decompose` handles missing spec.md
 - `/office-hours` may have been run (not required, but design doc improves autoplan quality)
-- **Ruflo MCP must be available.** Pretrain once: `npx claude-flow@v3alpha hooks pretrain`. The pipeline hard-fails if `mcp__ruflo__*` tools are not reachable.
+- **Ruflo MCP must be available.** Pretrain once: `npx claude-flow@v3alpha hooks pretrain`. The pipeline hard-fails if `mcp__ruflo__*` tools are not reachable. Pretrain also enables intelligent model routing in `/feature-implement` — without it, `hooks_model-route` returns `opus` for every task (all tasks upgrade to opus cost, which is wrong).
 
 ## Invocation
 
@@ -115,6 +115,12 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 │                                                             │
 │  Step 2: /spec-decompose NNN → N wedges                     │
 │    └─ GATE: user approves tasks.md (spot-check quality)     │
+│                                                             │
+│  Step 2.5: speckit.analyze (read-only consistency check)    │
+│    └─ CRITICAL findings block; HIGH warn+continue           │
+│                                                             │
+│  Step 2.6: Task quality gate (Codex on tasks.md)            │
+│    └─ Score < 5 → abort. 5-6 → warn. ≥7 → proceed          │
 │                                                             │
 │  Step 3: /feature-implement <wedge-1>                       │
 │    └─ Auto-stops on first task failure                      │
@@ -214,6 +220,35 @@ mkdir -p "$LOG_DIR"
 DT=$(date +%Y%m%d-%H%M%S)
 RUN_LOG=".ralph/feature-run-${SPEC_ID}-${DT}.jsonl"
 [ $RESUME -eq 1 ] && RUN_LOG=$(ls -t .ralph/feature-run-${SPEC_ID}-*.jsonl 2>/dev/null | head -1)
+```
+
+### Step 0.1: Worktree isolation
+
+Skip if `--resume` (already running in the worktree from the initial invocation).
+
+```bash
+if [ $RESUME -eq 0 ]; then
+  _GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+  _GIT_COMMON=$(git rev-parse --git-common-dir 2>/dev/null)
+  _IS_SUBMODULE=$(git rev-parse --show-superproject-working-tree 2>/dev/null)
+
+  if [ "$_GIT_DIR" = "$_GIT_COMMON" ] && [ -z "$_IS_SUBMODULE" ]; then
+    WORKTREE_NAME="${SPEC_ID}-feature"
+    python scripts/worktree_manager.py \
+      --repo . \
+      --branch "${SPEC_ID}-feature" \
+      --name "$WORKTREE_NAME" \
+      --base-branch main
+    echo ""
+    echo "[FEATURE] Worktree created: .claude/worktrees/$WORKTREE_NAME"
+    echo "[FEATURE] Re-invoke from the worktree to continue:"
+    echo "  cd .claude/worktrees/$WORKTREE_NAME"
+    echo "  /feature $SPEC_ID"
+    exit 0
+  else
+    echo "[FEATURE] Isolation confirmed (worktree: $(git rev-parse --show-toplevel))"
+  fi
+fi
 ```
 
 ### Step 0.5 — Create run-state record + auto-invoke `/goal` (v2.1.0)
@@ -381,6 +416,94 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"spec-decompose","status":"approved","task_count":<n>,"phase_count":<n>,"duration_s":<n>}
 ```
 
+### Step 3.5: speckit.analyze consistency check
+
+Read `.claude/commands/speckit.analyze.md` using the Read tool, then follow its instructions against the current spec's artifacts. This is a **read-only** cross-artifact analysis — it produces a report, never modifies files.
+
+```bash
+# Verify the speckit.analyze command exists before attempting
+ANALYZE_CMD=".claude/commands/speckit.analyze.md"
+[ -f "$ANALYZE_CMD" ] || { echo "WARN: $ANALYZE_CMD missing — skipping analyze step"; }
+```
+
+**Severity gate:**
+- **CRITICAL findings** → stop pipeline. Log to `$RUN_LOG` with `step: "speckit-analyze"` and `status: "blocked"`. User must resolve before resuming. Instruct: fix the CRITICAL issues in spec.md / plan.md / tasks.md, then `/feature NNN --resume`.
+- **HIGH findings** → log as WARNING, continue. User may hand-inspect before implementation.
+- **MEDIUM/LOW** → log and continue.
+
+```json
+{"timestamp":"<ISO>","spec":"<NNN>","step":"speckit-analyze","status":"passed|warned|blocked","critical":<n>,"high":<n>,"medium":<n>,"low":<n>,"duration_s":<n>}
+```
+
+Skip step entirely (log `status: "skipped"`) when `--resume` AND `speckit-analyze` already shows `passed|warned` in `$RUN_LOG`.
+
+### Step 3.6: Pre-swarm task quality gate
+
+Run a focused Codex review on `tasks.md` before any agent is spawned. This catches wrong decomposition that autoplan (plan-time) and spec-decompose (output-time) cannot see — specifically: US coverage gaps, annotation completeness, and ordering contradictions.
+
+```bash
+_REPO_ROOT=$(git rev-parse --show-toplevel)
+_TASKS_PATH="$SPEC_DIR/tasks.md"
+_SPEC_PATH="$SPEC_DIR/spec.md"
+_US_LIST=$(grep -oE '\[US[0-9]+\]' "$_TASKS_PATH" | sort -u | tr '\n' ' ')
+_TASK_COUNT=$(grep -cE '^- \[' "$_TASKS_PATH" 2>/dev/null || echo 0)
+
+# Skip quality gate if codex not available (non-blocking — log and continue)
+if ! command -v codex >/dev/null 2>&1; then
+  echo "[FEATURE] WARN: codex CLI not found — skipping task quality gate (Step 3.6)"
+  printf '{"timestamp":"%s","spec":"%s","step":"task-quality-gate","status":"skipped","reason":"codex_not_installed"}\n' \
+    "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
+else
+  codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). Stay focused on repository code only.
+
+TASKS.MD QUALITY GATE — spec $SPEC_ID
+Files: tasks.md at $_TASKS_PATH | spec.md at $_SPEC_PATH
+
+Evaluate tasks.md against spec.md. Check:
+1. US COVERAGE: Does every user story in spec.md have at least one task tagged [USn]?
+   US tags found in tasks.md: $_US_LIST | Total tasks: $_TASK_COUNT
+2. ANNOTATION COMPLETENESS: Do all tasks have [model:], [thinking:], Depends-on: lines?
+   Missing any required annotation is a deduction.
+3. US CONSISTENCY: Do the [USn] numbers in tasks.md map 1:1 to user stories in spec.md?
+   Mis-numbered US tags (e.g. [US3] when spec only has 2 stories) = HIGH severity.
+4. TASK DISTRIBUTION: Any user story with 0 tasks = CRITICAL. Any with >20 = HIGH.
+5. DEPENDENCY CYCLES: Check Depends-on chains for circular references.
+
+Score 0-10 (10 = perfect, 7 = acceptable, 5-6 = warn, <5 = regenerate).
+Output format:
+SCORE: N/10
+ISSUES:
+- [CRITICAL|HIGH|MEDIUM|LOW] <one-line description>
+RECOMMENDATION: proceed | warn | abort-and-regenerate" \
+    -C "$_REPO_ROOT" -s read-only < /dev/null
+
+  _GATE_EXIT=$?
+  # Parse score from output (best-effort; default to warn if unparseable)
+  _GATE_SCORE=$(codex exec "..." 2>&1 | grep -oP '(?<=SCORE: )\d+' | head -1 || echo "7")
+
+  if [ "${_GATE_SCORE:-7}" -lt 5 ]; then
+    printf '{"timestamp":"%s","spec":"%s","step":"task-quality-gate","status":"abort","score":%s}\n' \
+      "$(date -u +%FT%TZ)" "$SPEC_ID" "${_GATE_SCORE:-0}" >> "$RUN_LOG"
+    echo "[FEATURE] ERROR: Task quality gate scored ${_GATE_SCORE}/10 — tasks.md needs regeneration."
+    echo "  Delete tasks.md and re-run: /feature $SPEC_ID --resume"
+    exit 1
+  elif [ "${_GATE_SCORE:-7}" -lt 7 ]; then
+    echo "[FEATURE] WARN: Task quality gate scored ${_GATE_SCORE}/10 — continuing with warnings."
+    printf '{"timestamp":"%s","spec":"%s","step":"task-quality-gate","status":"warned","score":%s}\n' \
+      "$(date -u +%FT%TZ)" "$SPEC_ID" "${_GATE_SCORE:-6}" >> "$RUN_LOG"
+  else
+    printf '{"timestamp":"%s","spec":"%s","step":"task-quality-gate","status":"passed","score":%s}\n' \
+      "$(date -u +%FT%TZ)" "$SPEC_ID" "${_GATE_SCORE:-10}" >> "$RUN_LOG"
+  fi
+fi
+```
+
+Skip step (log `status: "skipped"`) when `--resume` AND `task-quality-gate` already shows `passed|warned` in `$RUN_LOG`.
+
+```json
+{"timestamp":"<ISO>","spec":"<NNN>","step":"task-quality-gate","status":"passed|warned|abort|skipped","score":<n>,"duration_s":<n>}
+```
+
 ### Step 4: /feature-implement
 
 Ruflo backend is mandatory (v1.1.0). Invoke the `feature-implement` skill:
@@ -449,12 +572,65 @@ if [ -z "${RUN_ID:-}" ]; then
     --objective "spec $SPEC_ID phase $WEDGE_NAME" 2>/dev/null | jq -r .run_id)
 fi
 
+# Parse tasks.md directly (TASKS_JSON is only populated inside feature-implement, not here)
+TASKS_JSON=$(FILE="$SPEC_DIR/tasks.md" python3 - <<'PYEOF'
+import os, re, json
+fpath = os.environ.get("FILE", "")
+if not fpath or not os.path.exists(fpath):
+    print("[]"); raise SystemExit
+with open(fpath) as f:
+    content = f.read()
+phase_starts = [(m.start(), m.group()) for m in re.finditer(r'^## Phase [^\n]+', content, re.MULTILINE)]
+def phase_for(pos):
+    last = None
+    for start, h in phase_starts:
+        if start <= pos: last = h
+        else: break
+    return last or "(no phase)"
+tasks = []
+for m in re.finditer(r'^- \[[ XxFf]\] (T\d+)([^\n]*)', content, re.MULTILINE):
+    us = re.search(r'\[US(\d+)\]', m.group(2))
+    tasks.append({"id": m.group(1), "phase": phase_for(m.start()),
+                  "user_story": f"US{us.group(1)}" if us else None})
+print(json.dumps(tasks))
+PYEOF
+)
+export WEDGE_NAME TASKS_JSON
+
+# Extract US tags covered by this wedge
+WEDGE_US_TAGS=$(python3 - <<'PYEOF'
+import json, os
+tasks = json.loads(os.environ.get("TASKS_JSON", "[]"))
+wedge = os.environ.get("WEDGE_NAME", "")
+us_tags = sorted(set(
+    t.get("user_story") for t in tasks
+    if t.get("user_story") and wedge.lower() in (t.get("phase") or "").lower()
+) - {None})
+print(" ".join(us_tags))
+PYEOF
+)
+
+# Pull acceptance criteria from spec.md for each US covered by this wedge
+US_ACCEPTANCE=""
+if [ -n "$WEDGE_US_TAGS" ] && [ -f "$SPEC_DIR/spec.md" ]; then
+  for _us_tag in $WEDGE_US_TAGS; do
+    _us_num="${_us_tag#US}"
+    # Match "User Story N", "### USN", "## User Story N" header patterns
+    _section=$(awk "/User Story $_us_num[^0-9]|^#{1,3} US$_us_num[^0-9]/,/^#{1,3} /" \
+      "$SPEC_DIR/spec.md" 2>/dev/null | head -40)
+    [ -n "$_section" ] && US_ACCEPTANCE+="=== $_us_tag Acceptance Criteria ===
+$_section
+"
+  done
+fi
+
 ~/.claude/bin/run-state audit "$RUN_ID" \
   --kind phase \
   --context "PHASE_NAME=$WEDGE_NAME" \
   --context "PRIOR_PHASES=$PRIOR_PHASES" \
   --context "PHASE_SPEC=$PHASE_SPEC" \
   --context "PHASE_DIFF=$PHASE_DIFF" \
+  --context "US_ACCEPTANCE=${US_ACCEPTANCE:-none}" \
   --cwd "$(git rev-parse --show-toplevel)"
 ```
 
@@ -622,6 +798,8 @@ On `/feature NNN --resume`:
 Typical 50-task feature (~5 wedges):
 - autoplan: ~$1 (dual voices; includes its own planning audit)
 - spec-decompose: ~$0.50
+- speckit.analyze: ~$0 (read-only, no LLM)
+- task quality gate (codex): ~$0.20
 - feature-implement: $15-50 (depends on model distribution)
 - per-phase QA (--qa-loop): ~$0.15/phase × N phases = ~$0.75-$1.50
 - per-phase adversarial audit: ~$0.30/wedge × N wedges = ~$1.50 (Step 4b)
@@ -639,6 +817,14 @@ Typical 50-task feature (~5 wedges):
 - Does NOT support parallel pipelines — one feature at a time per session
 - Does NOT handle migrations across features
 
+After `/canary` merges to main, prune the worktree:
+
+```bash
+python scripts/worktree_cleanup.py --repo . --remove-merged --stale-days 0 2>/dev/null || git worktree prune
+```
+
+The post-merge git hook runs this automatically on `git merge`. Run explicitly here in case canary merged via API.
+
 ## Related skills
 
 - `/office-hours` — before /feature
@@ -649,4 +835,6 @@ Typical 50-task feature (~5 wedges):
 - `/qa` — step 5
 - `/codex-gate` — step 5.7 (cross-model full-branch review, mandatory before /ship)
 - `/ship`, `/canary` — steps 6+
+- `git-worktree-manager` — step 0.1 (worktree isolation + port allocation + env sync)
+- `superpowers:using-git-worktrees` — worktree detection and creation guidance
 - `/investigate` — when resuming from failure
