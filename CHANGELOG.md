@@ -8,6 +8,39 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.5.0 — Fable-mode operating disciplines (2026-06-13)
+
+Inspired by [Fable-mode](https://github.com/mrtooher/fable-mode), which encodes three
+behaviors that make agentic pipelines reliable: **decompose before acting, verify before
+advancing, self-critique before delivery.** feature-fix-swarm already enforces the middle
+one (QA-per-phase is *verify before advancing*). This release adds the bookends.
+
+### Changed
+
+- **`skills/feature/SKILL.md` v2.3.0 → v2.4.0**
+  - New **"Operating disciplines (Fable-mode)"** section: stage-map-first, verify-before-advancing
+    (credits the existing per-phase audit + `/codex-gate` as the embodiment), self-critique-before-delivery.
+  - New **Step 9.9: Self-critique before delivery** — re-read the run as a skeptic before the
+    final report; name ≥1 residual risk (audit-vs-self-report gaps, retry-only passes, happy-path-only
+    verification, downgraded codex-gate findings). Fix it or surface it.
+  - Final report gains a `Residual risk:` line so "all green" is never silent.
+- **`skills/feature-implement/SKILL.md` v1.5.0 → v1.6.0**
+  - New **"Operating disciplines (Fable-mode)"** section mapping the same three disciplines onto
+    task execution (stage-map = phase plan after Step 2; verify = `--qa-loop` phase gate; self-critique
+    before Step 8).
+  - **Delegation discipline** callout in Step 5: parallelize only on genuinely independent stages
+    (disjoint files, no shared mutable state, no ordering dep). When unsure, run sequentially.
+  - Step 8 gains a self-critique preamble + `Residual risk:` report line.
+
+### Not changed
+
+- No behavior is removed or gated differently — all additions are advisory disciplines layered on
+  the existing pipeline. The QA-per-phase enforcement, retry loop, and gates are untouched.
+
+### Why minor (not patch)
+
+Adds new workflow steps (self-critique) and new operator-visible report fields across two skills.
+
 ## v3.2.0 — feature-implement v1.2.0 ruflo schema alignment (2026-05-27)
 
 ### Discovered during spec-137 dogfood

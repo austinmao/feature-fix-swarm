@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path falls back to sonnet. RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.5.0"
+version: "1.6.0"
 allowed-tools:
   - Read
   - Edit
@@ -47,6 +47,14 @@ allowed-tools:
 - All tasks are `[X]` (success)
 - Any task returns `[F]` (failure — stop, report, user fixes and reruns)
 - A dependency cycle is detected (abort)
+
+## Operating disciplines (Fable-mode)
+
+Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) wrap task execution:
+
+1. **Stage map first.** After parsing tasks.md (Step 2), print the phase plan — phases in order, task count and `[P]` parallel groups per phase, expected exit per phase — before spawning anything. A wrong dependency read is cheap to fix before Step 5, expensive after.
+2. **Verify before advancing.** With `--qa-loop` (default) no phase advances on red: deterministic hooks + the LLM QA swarm gate every phase boundary (Step 5.5), and failures trigger the investigate-fix-retest loop (Step 5.5b) before the next phase starts. This is the package's reason to exist — do not disable it to go faster.
+3. **Self-critique before delivery.** Before the final report (Step 8), re-read the session as a skeptic: which `[X]` tasks are "done" only by self-report, which acceptance criteria are unproven by QA? Name at least one and surface it.
 
 ## Workflow
 
@@ -297,6 +305,8 @@ Model mapping — `[model:]` annotation → Agent `model` param:
 | `fable` | `"fable"` _(native Agent only — Ruflo model enum is `haiku\|sonnet\|opus\|inherit`; `[model:fable]` on the Ruflo path silently maps to `sonnet` via Step B)_ |
 
 Parallel group dispatch: tasks with `[P]` in the same phase that share no mutual dependencies are spawned as **concurrent Agent calls** (sent in one message, not sequentially). Tasks without `[P]`, or with unresolved dependencies, run sequentially.
+
+**Delegation discipline (Fable-mode):** parallelize only when stages are *genuinely* independent — disjoint file sets, no shared mutable state, no ordering dependency. Good signals: `[P]` tasks touching different files, independent verification, "build X while Y builds." Bad signal: splitting one coherent task across agents just to parallelize — handoff cost and merge ambiguity then exceed the speedup. When unsure whether two tasks are independent, run them sequentially; a wrong parallel split surfaces as a flaky merge, not a clean failure.
 
 Algorithm per executable batch:
 1. Collect all `todo` tasks whose `depends_on` are all `done`.
@@ -837,6 +847,8 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 
 ### Step 8: Final report
 
+**Self-critique first (Fable-mode discipline 3):** before printing the box, name at least one residual risk — a task marked `[X]` on self-report alone, an acceptance criterion not exercised by QA, or a fix that passed only on retry. Put it on the `Residual risk:` line; never emit a silent all-green.
+
 ```
 ╔═══════════════════════════════════════════════════════════╗
 ║ /feature-implement report — spec {NNN}                    ║
@@ -848,6 +860,7 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 ║   [X] done:    A / T (N%)                                 ║
 ║   [F] failed:  B                                          ║
 ║   [ ] todo:    C                                          ║
+║ Residual risk: <one-line from self-critique, or "none surfaced"> ║
 ║ Log: {LOG_FILE}                                           ║
 ║ Next: {next id} / "all done" / "blocked on X"             ║
 ╚═══════════════════════════════════════════════════════════╝

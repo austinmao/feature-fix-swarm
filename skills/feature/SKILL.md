@@ -1,7 +1,7 @@
 ---
 name: feature
 description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. v2.1.1: skill PREPARES native /goal condition (with run_id baked in) and prints it for operator to paste — UI commands like /goal cannot be invoked via Skill tool, so auto-invoke is architecturally impossible. Per-phase audit + /codex-gate remain mandatory."
-version: "2.3.0"
+version: "2.4.0"
 allowed-tools:
   - Read
   - Edit
@@ -100,6 +100,14 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 ```
 
 **Removed in v1.1.0:** `--no-ruflo` flag. Ruflo is now mandatory (no silent fallback to native Agent). If ruflo MCP is unavailable, the pipeline hard-fails with a structured error directing the user to fix the MCP connection. To debug ruflo issues, set `RUFLO_REQUIRED=0` in env (escape hatch — falls back to native, logs WARNING).
+
+## Operating disciplines (Fable-mode)
+
+Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) bracket the pipeline. They cost a few lines of output and save whole re-runs.
+
+1. **Stage map first.** Before executing, print the numbered pipeline below with a one-line expected output per step (spec id, branch, wedge count once known). Surfacing the plan up front is how you catch a wrong assumption at Step 2 instead of discovering it at Step 9. `--dry-run` already emits this; in a real run, emit it once at entry too.
+2. **Verify before advancing.** No step advances on red. The per-phase adversarial audit (Step 4b) and `/codex-gate` (Step 5.7) *are* this discipline — the pipeline's core, not an afterthought. Never skip an audit to "save time": a bug compounded across later wedges costs more than every audit combined.
+3. **Self-critique before delivery.** Before the final report, re-read the run as a skeptical reviewer (Step 9.9). Name at least one residual risk, gap, or untested path. Fix it or surface it in the report — never emit a silent "all green."
 
 ## The pipeline
 
@@ -741,6 +749,17 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"canary","status":"pass|rolled_back","error_rate":<float>,"duration_s":<n>}
 ```
 
+### Step 9.9: Self-critique before delivery
+
+Before emitting the final report, re-read the entire run as a skeptical reviewer would (Fable-mode discipline 3):
+
+- Which acceptance criteria passed by **audit** vs only by sub-agent **self-report**?
+- Any wedge that passed on attempt 2–3 — is the fix solid or papered-over?
+- Any happy-path-only verification? Were error paths exercised?
+- Did `/codex-gate` flag anything that got downgraded to "accepted risk"?
+
+Name **at least one** residual risk or limitation. If it is cheaply fixable, fix it and re-verify the affected wedge before continuing. Otherwise record it on the `Residual risk:` line of the report so the operator decides with eyes open. A silent "all green" is a review smell, not a success signal.
+
 ### Step 10: Final report
 
 ```
@@ -749,10 +768,11 @@ Log:
 ╠═══════════════════════════════════════════════════════════╣
 ║ Total duration:      HH:MM:SS                             ║
 ║ Tasks executed:      N (all [X])                          ║
-║ Wedges audited:      M / M passed (per-phase, Step 3b)    ║
+║ Wedges audited:      M / M passed (per-phase, Step 4b)    ║
 ║ Codex-gate verdict:  PASS (Step 5.7)                      ║
 ║ Gates approved:      1 (prod promotion)                   ║
 ║ Failures:            0                                    ║
+║ Residual risk:       <one-line from Step 9.9, or "none surfaced"> ║
 ║ Cost estimate:       $XX.XX                               ║
 ║ Production URL:      <prod URL>                           ║
 ║ Run log:             {RUN_LOG}                            ║
