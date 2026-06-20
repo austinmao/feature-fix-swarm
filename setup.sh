@@ -158,6 +158,34 @@ install_goal_wrap() {
   install_skill_repo https://github.com/austinmao/goal-wrap goal-wrap handoff
 }
 
+# Auto-install codex-gate if codex CLI is present. Non-blocking: never prompts user.
+# Silently skips if codex CLI not found; logs one-line install hint.
+install_codex_gate() {
+  local target="$HOME/.claude/skills/codex-gate/SKILL.md"
+
+  # Already installed — nothing to do
+  if skill_installed codex-gate; then
+    echo "  codex-gate: OK"
+    return 0
+  fi
+
+  # codex CLI required — skip without blocking if absent
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "  codex-gate: SKIPPED (codex CLI not found — install: npm install -g @openai/codex, then re-run setup.sh)"
+    return 0
+  fi
+
+  # Source skill file must be bundled in the repo
+  if [ ! -f "$SCRIPT_DIR/skills/codex-gate/SKILL.md" ]; then
+    echo "  codex-gate: SKIPPED (SKILL.md not found in repo — update feature-fix-swarm)"
+    return 0
+  fi
+
+  mkdir -p "$HOME/.claude/skills/codex-gate"
+  cp "$SCRIPT_DIR/skills/codex-gate/SKILL.md" "$target"
+  echo "  codex-gate: installed (codex CLI detected)"
+}
+
 missing=()
 
 echo "Checking prerequisites..."
@@ -168,7 +196,11 @@ command -v npx >/dev/null 2>&1 && echo "  npx: OK" || { echo "  npx: NOT FOUND (
 command -v uv >/dev/null 2>&1 && echo "  uv: OK" || { echo "  uv: NOT FOUND (required for Spec Kit)"; missing+=("uv"); }
 command -v python3 >/dev/null 2>&1 && echo "  python3: OK" || echo "  python3: NOT FOUND (required for run-state)"
 command -v jq >/dev/null 2>&1 && echo "  jq: OK" || echo "  jq: NOT FOUND (optional, used by some run-state output formatting)"
-command -v codex >/dev/null 2>&1 && echo "  codex CLI: OK" || echo "  codex CLI: NOT FOUND (optional, for adversarial audit — 'npm install -g @openai/codex')"
+if command -v codex >/dev/null 2>&1; then
+  echo "  codex CLI: OK (codex-gate will be installed)"
+else
+  echo "  codex CLI: NOT FOUND (optional — codex-gate skipped; install: npm install -g @openai/codex)"
+fi
 check_spec_kit || missing+=("spec-kit")
 check_prompt_master || missing+=("prompt-master")
 check_goal_wrap || missing+=("goal-wrap")
@@ -178,7 +210,7 @@ echo ""
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "Missing dependencies detected:"
   printf '  - %s\n' "${missing[@]}"
-  if prompt_yes_no "Install the missing dependencies now?" "N"; then
+  if prompt_yes_no "Install the missing dependencies now?"; then
     echo ""
     echo "Bootstrapping missing dependencies..."
     install_uv || true
@@ -193,7 +225,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo ""
 fi
 
-# Copy skills
+# Install skills
 SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
 for skill in fix feature-implement feature spec-decompose feature-spec; do
@@ -207,6 +239,9 @@ for skill in fix feature-implement feature spec-decompose feature-spec; do
   cp "$SCRIPT_DIR/skills/$skill/SKILL.md" "$TARGET"
   echo "  Installed $TARGET"
 done
+
+# codex-gate: auto-install if codex CLI present, no user prompt
+install_codex_gate
 
 # === v2.0: run-state library (global ~/.claude/) ===
 LIB_DIR="$HOME/.claude/lib"
@@ -231,9 +266,7 @@ mkdir -p "$HOME/.claude/state"
 echo "  Ensured $HOME/.claude/state/"
 
 # v3.0 codex-gate Pass 2 #2 fix: actively remove stale v2.x Stop/SessionStart
-# hook registrations from ~/.claude/settings.json. Leaving them fights the new
-# native /goal lifecycle (Stop hook would still try to inject continuation
-# prompts from a hook file we just deleted). Also remove orphaned hook scripts.
+# hook registrations from ~/.claude/settings.json.
 SETTINGS="$HOME/.claude/settings.json"
 if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
   if jq -e '.hooks // empty | (.Stop // []) + (.SessionStart // []) | map(.hooks[]?.command) | flatten | any(test("run-state-(stop|session)\\.py"))' "$SETTINGS" >/dev/null 2>&1; then
@@ -254,14 +287,12 @@ if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
     echo "  Removed v2.x hook registrations"
   fi
 fi
-# Remove orphaned hook script files left by v2.x install
 for old_hook in run-state-stop.py run-state-session.py; do
   if [ -f "$HOME/.claude/hooks/$old_hook" ]; then
     rm -f "$HOME/.claude/hooks/$old_hook"
     echo "  Removed stale $HOME/.claude/hooks/$old_hook"
   fi
 done
-# Remove orphaned marker file
 [ -f "$HOME/.claude/state/.active-run" ] && rm -f "$HOME/.claude/state/.active-run" && echo "  Removed stale .active-run marker"
 echo ""
 
@@ -316,6 +347,7 @@ echo "  /feature-spec NNN                             # spec + plan + clarify wi
 echo "  /feature-implement NNN --qa-loop --dry-run    # see the QA plan"
 echo "  /feature-implement NNN --qa-loop              # run with QA enforcement"
 echo '  /fix "description of the bug"                 # investigate + fix + verify'
+echo '  /codex-gate                                   # cross-model phase review (requires codex CLI)'
 echo ""
 echo "Run-state CLI:"
 echo "  ~/.claude/bin/run-state list                  # show all runs"
@@ -323,8 +355,6 @@ echo "  ~/.claude/bin/run-state list --state active   # currently-active"
 echo "  ~/.claude/bin/run-state status <run_id>       # detailed status"
 echo ""
 echo "v3.0 uses Claude's native /goal command for continuation loops."
-echo "  Start a long-running pipeline with:"
 echo '    /goal "<condition that should hold when work is done>"'
-echo "  See https://code.claude.com/docs/en/goal"
 echo ""
 echo "Docs: ./docs/ + ./lib/run_state/README.md"
