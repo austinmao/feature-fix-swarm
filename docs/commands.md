@@ -7,7 +7,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | Command | What it does |
 |---------|-------------|
 | `/office-hours` | Brainstorm product ideas, validate "is this worth building", structured problem statement |
-| `/feature-spec NNN` | **Spec-first pipeline:** speckit.specify → speckit.plan → speckit.clarify, each phase enforcing TDD unit tests, BDD Given/When/Then scenarios, and E2E Playwright stubs. Run this before `/autoplan`. |
+| `/feature-spec NNN` | **Spec-first pipeline:** speckit.specify → speckit.plan → speckit.clarify, each phase enforcing TDD unit test list, BDD Given/When/Then scenarios, and E2E Playwright stubs. Run before `/autoplan`. |
 | `/autoplan` | Full review pipeline: CEO + Eng + DX dual voices with Codex, auto-decides taste decisions; `--accept-all-recommendations` auto-selects every recommended answer |
 | `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations |
 | `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
@@ -30,7 +30,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/qa` | Full browser-based QA via `$B` (gstack browse). Finds bugs, takes screenshots, reports. |
 | `/qa-only` | Report-only QA. Tests but never fixes. Good for "just tell me what's broken." |
 | `/investigate` | Systematic root cause analysis (5 Whys). Scope-locks to affected module. |
-| `/tdd` | TDD workflow: write test first (RED), implement (GREEN), refactor |
+| `/tdd` | TDD workflow: write test first (RED), implement (GREEN), refactor — one atomic behavior per cycle |
 
 ## Code Review + Quality
 
@@ -126,8 +126,9 @@ npx ruflo@latest memory search "query"   # Search what was learned
 
 Ruflo routing is most reliable when task `agent:` values are normalized to a small canonical role set before spawning: `coordinator`, `architect`, `researcher`, `coder`, `tester`, `reviewer`.
 
-## See Also
+## Reference
 
-- [Pipeline overview](pipeline.md) - Full pipeline diagram with QA Ralph loop
-- [QA Ralph Loop](qa-ralph-loop.md) - Per-phase QA architecture and configuration
-- [Master context](../master-context.md) - Single-file reference for all integrated systems
+- [TDD & BDD Guide](tdd-bdd-guide.md) — Research-backed best practices (Fowler + MSR 2026), anti-patterns, agent over-mocking warning, Gherkin rules, test pyramid
+- [Pipeline overview](pipeline.md) — Full pipeline diagram with QA Ralph loop
+- [QA Ralph Loop](qa-ralph-loop.md) — Per-phase QA architecture and configuration
+- [Master context](../master-context.md) — Single-file reference for all integrated systems
