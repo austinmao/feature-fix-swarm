@@ -196,7 +196,7 @@ fi
 # Copy skills
 SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
-for skill in fix feature-implement feature spec-decompose; do
+for skill in fix feature-implement feature spec-decompose feature-spec; do
   TARGET="$SKILLS_DIR/$skill/SKILL.md"
   if [ -f "$TARGET" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
@@ -312,6 +312,7 @@ echo ""
 echo "=== feature-fix-swarm installed ==="
 echo ""
 echo "Try it:"
+echo "  /feature-spec NNN                             # spec + plan + clarify with TDD/BDD/E2E"
 echo "  /feature-implement NNN --qa-loop --dry-run    # see the QA plan"
 echo "  /feature-implement NNN --qa-loop              # run with QA enforcement"
 echo '  /fix "description of the bug"                 # investigate + fix + verify'

@@ -7,12 +7,21 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | Command | What it does |
 |---------|-------------|
 | `/office-hours` | Brainstorm product ideas, validate "is this worth building", structured problem statement |
+| `/feature-spec NNN` | **Spec-first pipeline:** speckit.specify → speckit.plan → speckit.clarify, each phase enforcing TDD unit tests, BDD Given/When/Then scenarios, and E2E Playwright stubs. Run this before `/autoplan`. |
 | `/autoplan` | Full review pipeline: CEO + Eng + DX dual voices with Codex, auto-decides taste decisions; `--accept-all-recommendations` auto-selects every recommended answer |
 | `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations |
 | `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
 | `/feature NNN` | End-to-end: bootstrap spec if needed, autoplan, decompose, implement, qa, ship, canary. 2 hard gates. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` |
 
-**Pipeline order:** `/office-hours` then `/autoplan` then `/spec-decompose` then `/feature-implement` then `/qa` then `/review` then `/codex-gate` then `/ship` then `/land-and-deploy` then `/canary`
+**Pipeline order:** `/office-hours` → `/feature-spec NNN` (TDD+BDD+E2E contracts) → `/autoplan` → `/spec-decompose` → `/feature-implement` → `/qa` → `/review` → `/codex-gate` → `/ship` → `/land-and-deploy` → `/canary`
+
+### /feature-spec flags
+
+| Flag | Effect |
+|------|--------|
+| (none) | Full pipeline: speckit.specify → speckit.plan → speckit.clarify |
+| `--no-clarify` | Stop after speckit.plan; skip clarify phase |
+| `--dry-run` | Preview what would be generated without writing files |
 
 ## QA + Testing
 
