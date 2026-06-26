@@ -187,6 +187,19 @@ If you omit a codex-gate task from any implementation phase, the decomposition i
 ## Step 7: Report
 After writing: total tasks, phases, codex-gate tasks per phase, [P] count, [US] count,
 model distribution, agent distribution, Depends-on lines, file path coverage %.
+
+## Step 8: /design-html task injection (MANDATORY for UI tasks)
+Scan every task in the output tasks.md. For any task that builds, designs, or creates
+a page, landing page, web UI, marketing page, or HTML view (phrases: "create page",
+"design page", "build landing", "implement UI", "design flow", "build page"), insert
+a `/design-html` task IMMEDIATELY AFTER it in the same phase:
+
+  - [ ] [model:sonnet] [agent:design/frontend] /design-html — generate production HTML for <page name>. Reads /plan-design-review context from autoplan. [qa:design-review] [P]
+    - Depends-on: <the page design task above>
+    - Run: /design-html
+    - Gate: HTML must pass /design-review in QA phase
+
+Do NOT add /design-html tasks after: API/backend/migration tasks, test tasks, or /codex-gate tasks.
 ```
 
 ### Step 5: Run comparison (if backup exists)
@@ -231,6 +244,7 @@ Run `bash scripts/harness-eval.sh $SPEC_ARG` to extract current metrics. Print a
 
 Warn if any of:
 - **FAIL: missing codex-gate** — any implementation phase has no `/codex-gate` task as its final item. Offer to patch missing gates automatically.
+- **WARN: missing /design-html** — any task that designs/creates a page lacks an immediately following `/design-html` task. Offer to auto-insert per the Step 8 format.
 - No `[model:]` annotations — sub-agent didn't follow prompt; offer to regenerate
 - No `Depends-on:` lines — TDD ordering likely broken
 - `[model:opus]` outside architecture/debugging phases — probable over-escalation
