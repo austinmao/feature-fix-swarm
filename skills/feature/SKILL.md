@@ -656,9 +656,15 @@ Invoke `qa`. Reads QA-tier phases from tasks.md (dev QA, integration, E2E) and r
 Bugs found → stop, link to bug report, user fixes, resume.
 Clean → continue.
 
+**Design review (when HTML designed):** After qa is clean, check for `/design-html` tasks:
+```bash
+DESIGN_HTML_COUNT=$(grep -c '/design-html' "$SPEC_DIR/tasks.md" 2>/dev/null || echo "0")
+```
+If `$DESIGN_HTML_COUNT > 0`: invoke `design-review` via the Skill tool to visually audit produced HTML before shipping. Bugs found → stop, user fixes, resume.
+
 Log:
 ```json
-{"timestamp":"<ISO>","spec":"<NNN>","step":"qa","status":"pass|fail","bugs_found":<n>,"duration_s":<n>}
+{"timestamp":"<ISO>","spec":"<NNN>","step":"qa","status":"pass|fail","bugs_found":<n>,"design_review_run":<bool>,"duration_s":<n>}
 ```
 
 ### Step 5.7 — /codex-gate cross-model review (mandatory)
