@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path falls back to sonnet. RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.6.0"
+version: "1.7.0"
 allowed-tools:
   - Read
   - Edit
@@ -290,7 +290,7 @@ If `--dry-run`, print the selected task and exit 0:
 ### Step 5: Spawn the sub-agent
 
 **Executor selection (v1.4.0):**
-- **Default (ruflo MCP swarm):** spawn via `mcp__ruflo__swarm_init` + `mcp__ruflo__task_create` + `mcp__ruflo__workflow_execute`. Supports parallel `[P]` groups, model-per-agent routing, and dependency-aware workflow steps.
+- **Default (ruflo MCP swarm):** `mcp__ruflo__swarm_init` + `mcp__ruflo__agent_spawn` (role registration) + native `Task()` calls (execution) + `SendMessage` (pipeline handoffs). Ruflo adds coordination, memory, and model routing on top of native Task execution. `workflow_execute` is NOT used — see v1.4.0 note below.
 - **Pre-flight check (v1.4.0 — auto mode):** When `RUFLO_REQUIRED=auto` (default), call `mcp__ruflo__swarm_status` once before the first spawn. If it fails, log `ruflo_unavailable` and **auto-switch to native parallel** — no exit, no user prompt. If `RUFLO_REQUIRED=1`, hard-fail on unreachable (legacy strict mode).
 - **Native parallel fallback:** Active when ruflo is unavailable or `RUFLO_REQUIRED=0`. Runs [P] groups as concurrent Agent calls and respects `[model:]` annotations. See "Native Agent path" below.
 
@@ -328,9 +328,12 @@ Agent tool params per task:
 > + `SendMessage` for pipeline handoffs. `workflow_create/execute` is a secondary API surface.
 > `task_create` is for tracking only, not spawning.
 
-**Step A — memory prime (MANDATORY before first spawn):**
+**Step A — session start + initial memory prime:**
 ```
-# Required per Ruflo docs: search for prior patterns before every task run
+# Fire session-start hook (background workers, intelligence init)
+mcp__ruflo__hooks_session-start({ context: "spec:" + SPEC_ID })
+
+# Initial broad search — injected into all sub-agent prompts this session
 priorPatterns = mcp__ruflo__memory_search({
   query: "spec " + SPEC_ID + " feature implementation",
   limit: 5
@@ -389,12 +392,27 @@ Ruflo's canonical orchestration runs named agents concurrently via the native Ta
 uses `SendMessage` for pipeline handoffs. This is the same mechanism the native parallel path
 uses — Ruflo adds tracking and memory on top.
 
-**Pre-spawn per task: effort correlation + DAA (v1.5.0)**
+**Pre-spawn per task: hooks + memory + effort + DAA (v1.5.0)**
 
-Before spawning each task, resolve the effective model + thinking tier:
+Before spawning each task:
 
 ```
-# Look up effectiveModel registered for this task's role in Step B (roleModelMap built there)
+# 1. Fire pre-task hook (automated learning, coverage routing, intelligence update)
+mcp__ruflo__hooks_pre-task({
+  taskId: task.id,
+  description: task.description,
+  phase: task.phase_n,
+  spec: SPEC_ID
+})
+
+# 2. Per-task memory search (docs: "before EVERY task" — not just session start)
+taskPatterns = mcp__ruflo__memory_search({
+  query: task.description + " spec:" + SPEC_ID,
+  limit: 3
+})
+# Merge with session-level priorPatterns; inject both into sub-agent prompt
+
+# 3. Resolve effective model + thinking tier
 effectiveModel = roleModelMap[task.agent] || task.model
 
 # Effort correlation: align thinking budget with the resolved model tier.
@@ -454,9 +472,18 @@ mcp__ruflo__task_create({
 })
 ```
 
-**Step E — store successful patterns (MANDATORY after each success):**
+**Step E — post-task hook + store successful patterns (MANDATORY after each success):**
 ```
-# Required per Ruflo docs: store pattern after every successful task
+# 1. Fire post-task hook (automated learning, background workers, intelligence update)
+mcp__ruflo__hooks_post-task({
+  taskId: task.id,
+  outcome: "success",
+  spec: SPEC_ID,
+  model: task.model,
+  phase: task.phase_n
+})
+
+# 2. Persist to memory + agentdb (hooks don't replace explicit storage — both run)
 mcp__ruflo__memory_store({
   content: "spec " + SPEC_ID + " " + task.id + ": " + task.description + " [SUCCESS]",
   namespace: "patterns",
@@ -493,7 +520,10 @@ mcp__ruflo__task_orchestrate({
 
 | Tool | When |
 |---|---|
-| `mcp__ruflo__memory_search` | Before EVERY task — reuse prior patterns |
+| `mcp__ruflo__hooks_session-start` | Once at session start — init background workers + intelligence |
+| `mcp__ruflo__hooks_pre-task` | Before EVERY task spawn — learning + coverage routing |
+| `mcp__ruflo__hooks_post-task` | After EVERY task completes — automated learning + pattern capture |
+| `mcp__ruflo__memory_search` | Before EVERY task — reuse prior patterns (per-task, not just session) |
 | `mcp__ruflo__memory_store` | After EVERY success — build knowledge base |
 | `mcp__ruflo__neural_train` | After 10+ stored patterns — improve model |
 | `mcp__ruflo__agentdb_pattern-search` | Find prior agent solutions by semantic query |
@@ -586,7 +616,8 @@ Allocate {thinking} effort. {thinking_guidance}
 2. Execute THIS task only — no scope creep, no "while I'm here" cleanups
 3. If the task involves tests, write them first (RED), then implement (GREEN), then verify
 4. Follow TDD rules from CLAUDE.md
-5. Report at the end: SUCCESS with a one-line summary, or FAILURE with what you tried and what blocked you
+5. If the task has a `Run: /skill-name` line, invoke that skill via the Skill tool (`Skill("skill-name")`) — do NOT try to reimplement the skill's logic manually
+6. Report at the end: SUCCESS with a one-line summary, or FAILURE with what you tried and what blocked you
 
 ## Absolute rules
 - Do NOT modify tasks.md (the orchestrator handles that)
@@ -649,14 +680,17 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    broadcast; the hive aggregates verdicts across all agents before declaring pass/fail.
 
    ```
-   # Init hive-mind for this phase's QA
+   # Detect /design-html tasks in this phase (before hive init)
+   PHASE_HAS_DESIGN_HTML=$(grep -A5 "^## Phase ${CURRENT_PHASE}" "$SPEC_DIR/tasks.md" 2>/dev/null | grep -c '/design-html' || echo "0")
+
+   # Init hive-mind for this phase's QA (3-agent core swarm; design review runs after, in orchestrator)
    hiveId = mcp__ruflo__hive-mind_init({
      name: "qa-phase-" + CURRENT_PHASE + "-spec-" + SPEC_ID,
      consensusThreshold: 0.67,    // 2-of-3 required
      maxAgents: 3
    })
 
-   # Spawn 3 named agents concurrently (one per dimension)
+   # Spawn 3 core QA agents concurrently
    Task({ name: "qa-e2e",      model: "sonnet", run_in_background: true,
           prompt: QA_E2E_PROMPT })
    Task({ name: "qa-review",   model: "sonnet", run_in_background: true,
@@ -678,6 +712,13 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    })
    # verdict.result: "pass" | "fail" | "inconclusive"
    # verdict.details: per-dimension breakdown
+
+   # qa-design: orchestrator-level (Skill tool not available inside ruflo agents)
+   # Runs AFTER hive consensus, only when this phase had /design-html tasks
+   if (PHASE_HAS_DESIGN_HTML > 0 && verdict.result === "pass") {
+     Skill("design-review")   // visual audit of HTML produced in this phase
+     // design-review failure → same RALPH retry loop as hive failure
+   }
    ```
 
    Fallback to `bash scripts/qa-swarm.sh` if hive-mind MCP unavailable.
@@ -686,6 +727,7 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    - **qa-e2e** (sonnet) — browser tests via $B if dev server detected (`curl -sf localhost:3000`)
    - **qa-review** (sonnet) — code review on the diff (CRITICAL/HIGH = fail)
    - **qa-security** (sonnet) — OWASP scan on the diff (CRITICAL = fail)
+   - **qa-design** (orchestrator Skill call) — `/design-review` on HTML from `/design-html` tasks; runs after hive consensus, only if phase has `/design-html` tasks (Skill tool not available inside ruflo agents)
 
 3. **Aggregation**: ALL dimensions must pass (or hive verdict = "pass"). Any failure triggers:
    - Capture artifacts to `.ralph/P{N}/` (logs, screenshots, diff)
