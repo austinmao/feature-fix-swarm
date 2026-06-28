@@ -59,7 +59,7 @@ By the time you find the bug, 47 tasks of context separate you from the root cau
 
 - **Build mode** (`/feature-implement --qa-loop`): After every phase of tasks completes, a QA swarm runs deterministic tests + LLM review agents. Bugs are caught at the phase boundary, not at the end. Failures trigger an automatic investigate-fix-retest loop (max 3 retries) before the next phase starts. No phase advances on red.
 
-- **Fix mode** (`/fix "bug description"`): Post-ship remediation. Takes a bug report, searches prior fix patterns (learning system), investigates root cause with 5 Whys, spawns fix agents via ruflo swarm, verifies with focused QA, then runs full regression QA. Loops until green.
+- **Fix mode** (`/fix "bug description"`): Post-ship remediation. Takes a bug report, searches prior fix patterns (learning system), investigates root cause with 5 Whys, coordinates fix agents through Ruflo, executes them through the active host CLI, verifies with focused QA, then runs full regression QA. Loops until green.
 
 ## OSS contract
 
@@ -103,8 +103,9 @@ The implementation layer renders those fields for the current host, but the task
 
 - Claude Code uses the Claude ladder: `haiku`, `sonnet`, `opus`
 - Codex OAuth uses the Codex ladder: `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.5`
-- Ruflo consumes normalized roles and task metadata, not host-specific model names
-- Ruflo should be treated as an orchestration backend, not the source of truth
+- Ruflo consumes normalized roles and task metadata, not host-specific model names.
+- Ruflo is the coordination backend, not the LLM provider. Do not configure OpenRouter, `RUFLO_PROVIDER`, or provider-key execution for feature tasks.
+- Task execution happens through the active host CLI: `codex exec` when invoked from Codex, `claude -p` when invoked from Claude.
 
 ## How it works
 
@@ -182,6 +183,14 @@ Phase N tasks complete
   ```
 
   Configure as MCP server in the active runtime. See [ruflo docs](https://github.com/ruvnet/claude-flow#mcp-server) for MCP setup.
+
+  Host initialization:
+  ```bash
+  npx ruflo@latest init --codex   # Codex-only install
+  npx ruflo@latest init --dual    # Claude + Codex install
+  ```
+
+  Execution rule: Ruflo registers swarms/agents and stores memory, but `scripts/harness/ruflo-host-executor.sh` performs feature work through the active CLI OAuth session. Do not use Ruflo `agent_execute` or OpenRouter for feature implementation.
 
 - **[Spec Kit](https://github.com/github/spec-kit)** by GitHub
   Provides the spec/plan/tasks bootstrap (`/speckit.specify`, `/speckit.plan`, `/speckit.tasks`) that feature-fix-swarm builds on.
@@ -294,6 +303,22 @@ mkdir -p specs/042-user-auth
 /fix "typo in error message" --no-qa
 ```
 
+### Ad-hoc task swarm (no spec required)
+
+```bash
+# Classify + execute multiple tasks inline
+/swarm "add unit tests for auth middleware" "fix lint errors in web/src/lib" "update RLS docs"
+
+# Dry run: classify + print plan, no agents spawned
+/swarm "write failing test for checkout" "bump version in package.json" --dry-run
+
+# Read tasks from a checklist file
+/swarm --tasks-file tasks.txt
+
+# Override all model assignments
+/swarm "fix all TypeScript errors" --model-override haiku
+```
+
 ### End-to-end pipeline
 
 ```bash
@@ -307,7 +332,7 @@ mkdir -p specs/042-user-auth
 |---------|---------|-------------|
 | `RALPH_MAX_RETRIES` | `3` | Max retry attempts per phase on QA failure |
 | `RALPH_AUTO_QA` | `1` | Set to `0` to disable PostToolUse auto-qa hook |
-| `RALPH_EXECUTOR` | auto | Force `ruflo` or `native` Agent executor |
+| `RALPH_EXECUTOR` | auto | Force `ruflo` coordination or direct `host-cli` execution |
 | `RALPH_DEBOUNCE_SECS` | `30` | Quiet window before auto-qa fires |
 
 ## Flags reference
@@ -318,14 +343,19 @@ mkdir -p specs/042-user-auth
 | `--no-qa-loop` | /feature-implement | Disable the QA loop entirely |
 | `--qa-skip e2e,security` | /feature-implement | Skip specific QA dimensions |
 | `--qa-only review` | /feature-implement | Run only these QA dimensions |
-| `--dry-run` | /feature-implement, /fix | Plan without executing |
+| `--dry-run` | /feature-implement, /fix, /swarm | Plan without executing |
 | `--resume` | /feature-implement | Pick up from last failure |
-| `--ruflo` | /feature-implement | Force ruflo swarm executor |
+| `--ruflo` | /feature-implement | Force Ruflo coordination with active host CLI execution |
 | `--one` | /feature-implement | Execute only the next task |
 | `--plan` | /fix | Use /plan-eng-review for complex bugs |
 | `--no-qa` | /fix | Skip full /qa, only run /qa-only |
 | `--no-codex-gate` | /fix, /feature | Skip cross-model adversarial review (default-on) |
 | `--scope=files` | /fix | Scope-lock investigation to specific files |
+| `--sequential` | /swarm | Disable parallel dispatch — all tasks serial |
+| `--model-override MODEL` | /swarm | Override all model assignments |
+| `--no-memory` | /swarm | Skip ruflo memory/agentdb calls |
+| `--tasks-file PATH` | /swarm | Read tasks from a file |
+| `--swarm-id ID` | /swarm | Resume an existing swarm run |
 
 ## The QA dimensions
 
@@ -371,20 +401,22 @@ The investigation starts with this context instead of from scratch. Fix times dr
 | Bug fix, trivial (1 file) | ~$0.10 |
 | Bug fix, moderate (2-5 files) | ~$0.50 |
 | Bug fix, complex (5+ files + eng review) | ~$2.00 |
+| Swarm, 5 tasks (mix haiku/sonnet) | ~$0.80 |
 
 ## What's in the box
 
 ```
 feature-fix-swarm/
-  skills/           4 Claude Code SKILL.md files
+  skills/           5 Claude Code SKILL.md files
     fix/              investigate + fix + verify loop
     feature-implement/  task executor with per-phase QA gates
     feature/          end-to-end pipeline (autoplan through canary)
     spec-decompose/   spec to tasks.md decomposition
-  scripts/          5 bash scripts
-    qa-swarm.sh       QA orchestrator (2 hooks + 3 LLM agents)
+    swarm/            ad-hoc task swarm — no spec dir required; classify + execute inline tasks
+  scripts/          7 bash scripts
+    qa-swarm.sh       QA manifest builder (2 hooks + 3 LLM agent prompts)
     ralph-retry.sh    investigate -> fix -> re-qa retry loop
-    harness/          executor detection (ruflo vs native)
+    harness/          executor detection + Ruflo host CLI adapter + artifacts
     hooks/            worktree GC + debounced auto-QA
   prompts/          4 LLM agent prompts
     qa-e2e.md         browser test agent

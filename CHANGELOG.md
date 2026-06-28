@@ -8,6 +8,51 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.7.0 — /swarm skill: ad-hoc task swarm executor (2026-06-28)
+
+### Added
+
+- **`skills/swarm/SKILL.md` v1.0.0** — new skill that accepts natural-language task
+  descriptions (inline args or `--tasks-file`), classifies them via a Sonnet sub-agent,
+  and executes them through Ruflo coordination + native `Task()` (Claude Code OAuth-only;
+  `mcp__ruflo__agent_execute` is never called).
+
+  Key features:
+  - **No spec directory required.** Unlike `/feature-implement`, you don't need a
+    `specs/NNN/tasks.md`. Pass tasks directly: `/swarm "write tests" "fix lint"`.
+  - **Classification agent** (Sonnet `Task()`) assigns `[model:haiku/sonnet/opus/fable]`,
+    `[agent:TYPE]`, `[thinking:low/med/high/max]`, and `[P]` (parallel-safe) annotations
+    using the same heuristics as `/spec-decompose`.
+  - **Parallel dispatch** — `[P]`-marked tasks fire as concurrent `Task()` calls with
+    `run_in_background: true` in a single message turn.
+  - **Ruflo coordination** — `swarm_init` + `agent_spawn` for metadata; `memory_*` +
+    `agentdb_*` + `hooks_*` for pattern learning. Ruflo pre-flight auto-fallback: if
+    `swarm_status()` fails, switches to native parallel path with no exit.
+  - **Thinking alignment** — opus+med→high, haiku+high/max→med (prevents cost mismatch).
+  - **Fable support** — fable tasks execute via native `Agent` path (not Ruflo, whose
+    model enum is `haiku|sonnet|opus|inherit` only).
+  - **Dry-run** (`--dry-run`): classify + print annotated plan + cost estimate, exit 0.
+  - **`--tasks-file PATH`**: read raw tasks from a markdown checklist or one-per-line file.
+  - **`--swarm-id ID`**: resume an existing run (skip classification if `tasks.md` exists).
+  - **Self-critique before report**: names tasks done by self-report only (no file artifact).
+  - **Run state**: `.context/swarm/<run_id>/tasks.md` + `run.log` (JSONL).
+
+  Flags: `--dry-run`, `--sequential`, `--model-override MODEL`, `--no-memory`, `--no-auto`,
+  `--tasks-file PATH`, `--swarm-id ID`.
+
+  Non-goals (v1): no QA loop, no codex-gate, no commit/push, no task-level retries.
+
+## v3.6.0 — feature-spec skill (2026-06-22)
+
+### Added
+
+- **`skills/feature-spec/SKILL.md` v1.0.0** — new skill that creates `specs/NNN/spec.md`
+  and `plan.md` from a GitHub issue URL, Linear ticket, or freeform description.
+  Fills the pipeline gap before `/spec-decompose` (which requires `plan.md`) and
+  `/feature` (which requires `plan.md`). Spawns two Sonnet sub-agents: one writes
+  the spec (user stories + acceptance criteria), one writes the plan (phases, tech
+  stack, risks). Handles GitHub issue ingestion via `gh issue view`.
+
 ## v3.5.0 — Fable-mode operating disciplines (2026-06-13)
 
 Inspired by [Fable-mode](https://github.com/mrtooher/fable-mode), which encodes three
