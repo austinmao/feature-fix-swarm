@@ -1,0 +1,6 @@
+interface:
+  display_name: "Feature Fix Swarm"
+  short_description: "Repo-specific patterns and workflows for feature-fix-swarm"
+  default_prompt: "Use the feature-fix-swarm repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
