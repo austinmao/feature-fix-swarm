@@ -195,63 +195,8 @@ Extract all tasks into structured data. Each has:
 Python parsing via Bash heredoc:
 
 ```bash
-TASKS_JSON=$(FILE="$TASKS_FILE" python3 <<'PYEOF'
-import os, re, json
-with open(os.environ["FILE"]) as f:
-    content = f.read()
-
-task_pattern = re.compile(
-    r'^- \[([ XxFfSs])\] (T\d+)([^\n]*)$(?:\n[ ]{2,}Depends-on:\s*([^\n]*))?',
-    re.MULTILINE
-)
-phase_pattern = re.compile(r'^## Phase [^\n]*$', re.MULTILINE)
-
-phase_starts = [(m.start(), m.group()) for m in phase_pattern.finditer(content)]
-
-def phase_for(pos):
-    last = None
-    for start, header in phase_starts:
-        if start <= pos: last = header
-        else: break
-    return last or "(no phase)"
-
-def parse_annotations(rest):
-    parallel = bool(re.search(r'\[P\]', rest))
-    us_match = re.search(r'\[US(\d+)\]', rest)
-    user_story = f"US{us_match.group(1)}" if us_match else None
-    model, thinking = "sonnet", "med"
-    m = re.search(r'\[model:([a-z]+)(?:\s+thinking:([a-z]+))?\]', rest)
-    if m:
-        model = m.group(1)
-        if m.group(2): thinking = m.group(2)
-    m2 = re.search(r'\[thinking:([a-z]+)\]', rest)
-    if m2: thinking = m2.group(1)
-    agent = "engineering/backend-engineer"
-    m = re.search(r'\[agent:([a-z/\-]+)\]', rest)
-    if m: agent = m.group(1)
-    qa_match = re.search(r'\[qa:([a-z,]+)\]', rest)
-    qa_dims = qa_match.group(1).split(",") if qa_match else ["e2e","review","security"]
-    desc = re.sub(r'\[(?:P|US\d+|model:[^\]]+|thinking:[^\]]+|agent:[^\]]+|qa:[^\]]+)\]', '', rest).strip()
-    return {"parallel": parallel, "user_story": user_story, "model": model,
-            "thinking": thinking, "agent": agent, "qa_dims": qa_dims, "description": desc}
-
-tasks = []
-status_map = {' ':'todo','X':'done','x':'done','F':'failed','f':'failed','S':'skipped','s':'skipped'}
-for m in task_pattern.finditer(content):
-    deps_raw = m.group(4) or ""
-    deps = [d.strip() for d in deps_raw.split(",") if d.strip().startswith("T")]
-    ann = parse_annotations(m.group(3))
-    tasks.append({
-        "id": m.group(2),
-        "status": status_map.get(m.group(1), "todo"),
-        "phase": phase_for(m.start()),
-        "depends_on": deps,
-        **ann,
-    })
-
-print(json.dumps(tasks, indent=2))
-PYEOF
-)
+DISPATCH="$(git rev-parse --show-toplevel)/packages/feature-fix-swarm/lib/dispatch.py"
+TASKS_JSON=$(FILE="$TASKS_FILE" python3 "$DISPATCH" parse "engineering/backend-engineer")
 # Export for RALPH context extraction in Step 5.5b
 export TASKS_JSON
 ```
@@ -948,7 +893,7 @@ h=$(grep -c '\[model:haiku' "$TASKS_FILE" || echo 0)
 sm=$(grep -c '\[model:sonnet thinking:med' "$TASKS_FILE" || echo 0)
 sh=$(grep -c '\[model:sonnet thinking:high' "$TASKS_FILE" || echo 0)
 o=$(grep -c '\[model:opus' "$TASKS_FILE" || echo 0)
-echo "Estimated cost: \$$(python3 -c "print(f'{$h*0.02 + $sm*0.30 + $sh*0.60 + $o*2.00:.2f}')")"
+echo "Estimated cost: \$$(FILE="$TASKS_FILE" python3 "$DISPATCH" cost)"
 ```
 
 Display and prompt for confirmation only when `AUTO_MODE=0` (`--no-auto` flag). In default auto mode, print the estimate but proceed without waiting.

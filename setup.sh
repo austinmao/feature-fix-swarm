@@ -158,34 +158,6 @@ install_goal_wrap() {
   install_skill_repo https://github.com/austinmao/goal-wrap goal-wrap handoff
 }
 
-# Auto-install codex-gate if codex CLI is present. Non-blocking: never prompts user.
-# Silently skips if codex CLI not found; logs one-line install hint.
-install_codex_gate() {
-  local target="$HOME/.claude/skills/codex-gate/SKILL.md"
-
-  # Already installed — nothing to do
-  if skill_installed codex-gate; then
-    echo "  codex-gate: OK"
-    return 0
-  fi
-
-  # codex CLI required — skip without blocking if absent
-  if ! command -v codex >/dev/null 2>&1; then
-    echo "  codex-gate: SKIPPED (codex CLI not found — install: npm install -g @openai/codex, then re-run setup.sh)"
-    return 0
-  fi
-
-  # Source skill file must be bundled in the repo
-  if [ ! -f "$SCRIPT_DIR/skills/codex-gate/SKILL.md" ]; then
-    echo "  codex-gate: SKIPPED (SKILL.md not found in repo — update feature-fix-swarm)"
-    return 0
-  fi
-
-  mkdir -p "$HOME/.claude/skills/codex-gate"
-  cp "$SCRIPT_DIR/skills/codex-gate/SKILL.md" "$target"
-  echo "  codex-gate: installed (codex CLI detected)"
-}
-
 missing=()
 
 echo "Checking prerequisites..."
@@ -196,11 +168,7 @@ command -v npx >/dev/null 2>&1 && echo "  npx: OK" || { echo "  npx: NOT FOUND (
 command -v uv >/dev/null 2>&1 && echo "  uv: OK" || { echo "  uv: NOT FOUND (required for Spec Kit)"; missing+=("uv"); }
 command -v python3 >/dev/null 2>&1 && echo "  python3: OK" || echo "  python3: NOT FOUND (required for run-state)"
 command -v jq >/dev/null 2>&1 && echo "  jq: OK" || echo "  jq: NOT FOUND (optional, used by some run-state output formatting)"
-if command -v codex >/dev/null 2>&1; then
-  echo "  codex CLI: OK (codex-gate will be installed)"
-else
-  echo "  codex CLI: NOT FOUND (optional — codex-gate skipped; install: npm install -g @openai/codex)"
-fi
+command -v codex >/dev/null 2>&1 && echo "  codex CLI: OK" || echo "  codex CLI: NOT FOUND (optional, for adversarial audit — 'npm install -g @openai/codex')"
 check_spec_kit || missing+=("spec-kit")
 check_prompt_master || missing+=("prompt-master")
 check_goal_wrap || missing+=("goal-wrap")
@@ -210,7 +178,7 @@ echo ""
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "Missing dependencies detected:"
   printf '  - %s\n' "${missing[@]}"
-  if prompt_yes_no "Install the missing dependencies now?"; then
+  if prompt_yes_no "Install the missing dependencies now?" "N"; then
     echo ""
     echo "Bootstrapping missing dependencies..."
     install_uv || true
@@ -225,10 +193,10 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo ""
 fi
 
-# Install skills
+# Copy skills
 SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
-for skill in fix feature-implement feature spec-decompose feature-spec; do
+for skill in fix feature-implement feature spec-decompose; do
   TARGET="$SKILLS_DIR/$skill/SKILL.md"
   if [ -f "$TARGET" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
@@ -240,8 +208,13 @@ for skill in fix feature-implement feature spec-decompose feature-spec; do
   echo "  Installed $TARGET"
 done
 
-# codex-gate: auto-install if codex CLI present, no user prompt
-install_codex_gate
+# swarm skill: symlink to package canonical (edits in one place propagate everywhere)
+SWARM_TARGET="$SKILLS_DIR/swarm/SKILL.md"
+SWARM_SOURCE="$SCRIPT_DIR/skills/swarm/SKILL.md"
+mkdir -p "$SKILLS_DIR/swarm"
+rm -f "$SWARM_TARGET"
+ln -s "$SWARM_SOURCE" "$SWARM_TARGET"
+echo "  Symlinked $SWARM_TARGET -> $SWARM_SOURCE"
 
 # === v2.0: run-state library (global ~/.claude/) ===
 LIB_DIR="$HOME/.claude/lib"
@@ -266,7 +239,9 @@ mkdir -p "$HOME/.claude/state"
 echo "  Ensured $HOME/.claude/state/"
 
 # v3.0 codex-gate Pass 2 #2 fix: actively remove stale v2.x Stop/SessionStart
-# hook registrations from ~/.claude/settings.json.
+# hook registrations from ~/.claude/settings.json. Leaving them fights the new
+# native /goal lifecycle (Stop hook would still try to inject continuation
+# prompts from a hook file we just deleted). Also remove orphaned hook scripts.
 SETTINGS="$HOME/.claude/settings.json"
 if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
   if jq -e '.hooks // empty | (.Stop // []) + (.SessionStart // []) | map(.hooks[]?.command) | flatten | any(test("run-state-(stop|session)\\.py"))' "$SETTINGS" >/dev/null 2>&1; then
@@ -287,12 +262,14 @@ if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
     echo "  Removed v2.x hook registrations"
   fi
 fi
+# Remove orphaned hook script files left by v2.x install
 for old_hook in run-state-stop.py run-state-session.py; do
   if [ -f "$HOME/.claude/hooks/$old_hook" ]; then
     rm -f "$HOME/.claude/hooks/$old_hook"
     echo "  Removed stale $HOME/.claude/hooks/$old_hook"
   fi
 done
+# Remove orphaned marker file
 [ -f "$HOME/.claude/state/.active-run" ] && rm -f "$HOME/.claude/state/.active-run" && echo "  Removed stale .active-run marker"
 echo ""
 
@@ -306,9 +283,11 @@ for script in qa-swarm.sh ralph-retry.sh; do
 done
 
 mkdir -p scripts/harness
-cp "$SCRIPT_DIR/scripts/harness/executor-detect.sh" "scripts/harness/executor-detect.sh"
-chmod +x "scripts/harness/executor-detect.sh"
-echo "  Installed scripts/harness/executor-detect.sh"
+for harness_script in executor-detect.sh ruflo-host-executor.sh ruflo-artifacts.sh; do
+  cp "$SCRIPT_DIR/scripts/harness/$harness_script" "scripts/harness/$harness_script"
+  chmod +x "scripts/harness/$harness_script"
+  echo "  Installed scripts/harness/$harness_script"
+done
 
 mkdir -p scripts/hooks
 for hook in worktree-gc.sh post-implement-batch.sh; do
@@ -343,11 +322,9 @@ echo ""
 echo "=== feature-fix-swarm installed ==="
 echo ""
 echo "Try it:"
-echo "  /feature-spec NNN                             # spec + plan + clarify with TDD/BDD/E2E"
 echo "  /feature-implement NNN --qa-loop --dry-run    # see the QA plan"
 echo "  /feature-implement NNN --qa-loop              # run with QA enforcement"
 echo '  /fix "description of the bug"                 # investigate + fix + verify'
-echo '  /codex-gate                                   # cross-model phase review (requires codex CLI)'
 echo ""
 echo "Run-state CLI:"
 echo "  ~/.claude/bin/run-state list                  # show all runs"
@@ -355,6 +332,8 @@ echo "  ~/.claude/bin/run-state list --state active   # currently-active"
 echo "  ~/.claude/bin/run-state status <run_id>       # detailed status"
 echo ""
 echo "v3.0 uses Claude's native /goal command for continuation loops."
+echo "  Start a long-running pipeline with:"
 echo '    /goal "<condition that should hold when work is done>"'
+echo "  See https://code.claude.com/docs/en/goal"
 echo ""
 echo "Docs: ./docs/ + ./lib/run_state/README.md"
