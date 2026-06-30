@@ -79,6 +79,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 - `specs/NNN-feature-name/spec.md` is optional — `/spec-decompose` handles missing spec.md
 - `/office-hours` may have been run (not required, but design doc improves autoplan quality)
 - **Ruflo MCP must be available.** Pretrain once: `npx claude-flow@v3alpha hooks pretrain`. The pipeline hard-fails if `mcp__ruflo__*` tools are not reachable. Pretrain also enables intelligent model routing in `/feature-implement` — without it, `hooks_model-route` returns `opus` for every task (all tasks upgrade to opus cost, which is wrong).
+- Ruflo coordinates swarms and memory only. Do not use `mcp__ruflo__agent_execute` or `mcp__ruflo__managed_agent_*` in this pipeline. Feature work runs through the active host CLI wrapper (`scripts/harness/ruflo-host-executor.sh`), which uses `codex exec` or `claude -p` under the user's logged-in session.
 
 ## Invocation
 

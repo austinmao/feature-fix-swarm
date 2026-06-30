@@ -42,6 +42,7 @@ allowed-tools:
 - If `mcp__ruflo__*` tools are unreachable AND `RUFLO_REQUIRED=1` (default): hard-fail with structured error. No silent fallback.
 - Escape hatch: `RUFLO_REQUIRED=0 /feature-implement NNN` falls back to native Agent for debugging. Logs WARNING on every spawn.
 - The `--no-ruflo` flag from v1.0.0 has been removed. To run native, use the env override above.
+- Do not use `mcp__ruflo__agent_execute` or `mcp__ruflo__managed_agent_*` for task execution. Those are API-backed paths. Ruflo coordinates; the active host CLI executes via `scripts/harness/ruflo-host-executor.sh`.
 
 **Default is run-all.** The skill loops through every `[ ]` task until either:
 - All tasks are `[X]` (success)
