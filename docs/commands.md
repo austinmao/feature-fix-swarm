@@ -13,7 +13,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
 | `/feature NNN` | End-to-end: bootstrap spec if needed, autoplan, decompose, implement, qa, ship, canary. 2 hard gates. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` |
 
-**Pipeline order:** `/office-hours` → `/feature-spec NNN` (TDD+BDD+E2E contracts) → `/autoplan` → `/spec-decompose` → `/feature-implement` → `/qa` → `/review` → `/codex-gate` → `/ship` → `/land-and-deploy` → `/canary`
+**Pipeline order:** `/office-hours` → `/feature-spec NNN` (TDD+BDD+E2E contracts) → `/autoplan` → `/spec-decompose` → `/feature-implement` → `/qa` → `/review` → `/review-gate` → `/ship` → `/land-and-deploy` → `/canary`
 
 ### /feature-spec flags
 
@@ -42,7 +42,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/plan-design-review` | UI/UX review (7 dimensions, interaction states, responsive) |
 | `/plan-devex-review` | Developer experience review (TTHW, error messages, CLI ergonomics) |
 | `/codex` | Run OpenAI Codex as outside voice for adversarial second opinion |
-| `/codex-gate` | Cross-model 3-pass review (general + adversarial + test-coverage gap) on the staged diff. Used by `/feature` Step 5.5 and `/fix` Step 5.5 before /ship. ~$2 + ~13 min. |
+| `/review-gate` | Cross-model 3-pass review (general + adversarial + test-coverage gap) on the staged diff. Canonical gate used by `/feature` Step 5.5 and `/fix` Step 5.5 before /ship. `/codex-gate` remains a compatibility alias. ~$2 + ~13 min. |
 
 ## Ship + Deploy
 

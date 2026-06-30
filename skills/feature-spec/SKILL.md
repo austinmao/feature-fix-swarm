@@ -319,6 +319,6 @@ Agent over-mocking check: verify no agent-generated test mocks the thing it's te
 See docs/tdd-bdd-guide.md for full TDD/BDD reference.
 
 Next:
-  /feature NNN           — full pipeline (autoplan → implement → qa → codex-gate → ship)
+  /feature NNN           — full pipeline (autoplan → implement → qa → review-gate → ship)
   /spec-decompose NNN    — break plan.md into tasks.md first
 ```

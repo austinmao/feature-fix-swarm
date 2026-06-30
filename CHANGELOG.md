@@ -8,6 +8,15 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.9.0 — review-gate becomes the canonical host-neutral review skill (2026-06-30)
+
+### Changed
+
+- **`skills/review-gate/SKILL.md`** — new canonical cross-host review gate. When invoked from Codex it uses Claude; when invoked from Claude it uses Codex. The gate keeps the same 3-pass structure and blocks on HIGH/CRITICAL findings.
+- **`skills/codex-gate/SKILL.md`** — compatibility alias retained for older task files and docs.
+- **`skills/feature/SKILL.md`**, **`skills/fix/SKILL.md`**, **`skills/spec-decompose/SKILL.md`**, **`skills/swarm/SKILL.md`** — active pipeline steps now route to `/review-gate`.
+- **Docs updated** to treat `/review-gate` as canonical and `/codex-gate` as an alias.
+
 ## v3.5.0 — Fable-mode operating disciplines (2026-06-13)
 
 Inspired by [Fable-mode](https://github.com/mrtooher/fable-mode), which encodes three

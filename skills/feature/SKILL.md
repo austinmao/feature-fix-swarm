@@ -1,6 +1,6 @@
 ---
 name: feature
-description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → codex-gate → ship → canary. Non-interactive by default. v2.1.1: skill PREPARES native /goal condition (with run_id baked in) and prints it for operator to paste — UI commands like /goal cannot be invoked via Skill tool, so auto-invoke is architecturally impossible. Per-phase audit + /codex-gate remain mandatory."
+description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → review-gate → ship → canary. Non-interactive by default. v2.1.1: skill PREPARES native /goal condition (with run_id baked in) and prints it for operator to paste — UI commands like /goal cannot be invoked via Skill tool, so auto-invoke is architecturally impossible. Per-phase audit + /review-gate remain mandatory."
 version: "2.4.0"
 allowed-tools:
   - Read
@@ -29,7 +29,7 @@ allowed-tools:
    │ /goal "spec 130 complete via /feature run a1b2c3: every audit   │
    │ line in ~/.claude/state/audits.jsonl with run_id=a1b2c3 has     │
    │ verdict=pass, AND .ralph/feature-run-130-20260512-160505.jsonl  │
-   │ contains a codex-gate row with status in {PASS, skipped}, AND   │
+   │ contains a review-gate row with status in {PASS, skipped}, AND  │
    │ /canary returned 200 in .ralph/feature-run-130-..."             │
    └─────────────────────────────────────────────────────────────────┘
    ```
@@ -55,7 +55,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 ### Skill output
 
 - `~/.claude/state/runs.db` — SQLite run record with `run_id` (captured in Step 0.5)
-- `~/.claude/state/audits.jsonl` — one line per phase audit + codex-gate result (greppable by /goal checker)
+  - `~/.claude/state/audits.jsonl` — one line per phase audit + review-gate result (greppable by /goal checker)
 - `.ralph/feature-run-<NNN>-<TS>.jsonl` — local pipeline event log (includes `goal-prepared` line)
 
 ## Flags
@@ -63,7 +63,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 | Flag | Effect |
 |---|---|
 | `--interactive` | Restore manual gates (autoplan premise, taste decisions). Default = non-interactive. |
-| `--skip-codex-gate` | Emergency-merge fallback. Skip the mandatory cross-model `/codex-gate` review before `/ship`. **NOT recommended** — bypasses the strongest pre-prod safety net. Per-phase audits remain in force. |
+| `--skip-codex-gate` | Emergency-merge fallback. Skip the mandatory cross-model `/review-gate` review before `/ship`. **NOT recommended** — bypasses the strongest pre-prod safety net. Per-phase audits remain in force. |
 | `--no-goal` | Skip auto-setting native `/goal` at entry. Use if operator pre-set a custom `/goal` condition they want preserved, or running under `claude -p` non-interactive mode where /goal is moot. |
 
 ## When to invoke
@@ -106,7 +106,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) bracket the pipeline. They cost a few lines of output and save whole re-runs.
 
 1. **Stage map first.** Before executing, print the numbered pipeline below with a one-line expected output per step (spec id, branch, wedge count once known). Surfacing the plan up front is how you catch a wrong assumption at Step 2 instead of discovering it at Step 9. `--dry-run` already emits this; in a real run, emit it once at entry too.
-2. **Verify before advancing.** No step advances on red. The per-phase adversarial audit (Step 4b) and `/codex-gate` (Step 5.7) *are* this discipline — the pipeline's core, not an afterthought. Never skip an audit to "save time": a bug compounded across later wedges costs more than every audit combined.
+2. **Verify before advancing.** No step advances on red. The per-phase adversarial audit (Step 4b) and `/review-gate` (Step 5.7) *are* this discipline — the pipeline's core, not an afterthought. Never skip an audit to "save time": a bug compounded across later wedges costs more than every audit combined.
 3. **Self-critique before delivery.** Before the final report, re-read the run as a skeptical reviewer (Step 9.9). Name at least one residual risk, gap, or untested path. Fix it or surface it in the report — never emit a silent "all green."
 
 ## The pipeline
@@ -144,7 +144,7 @@ Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) brac
 │  Step 5: /qa (full-suite browser test after ALL wedges)     │
 │    └─ Auto-stops if bugs found; user fixes, /feature --resume│
 │                                                             │
-│  Step 5.7: /codex-gate (cross-model full-branch review)     │
+│  Step 5.7: /review-gate (cross-model full-branch review)    │
 │    └─ 3 Codex GPT-5 passes: review + adversarial + gaps     │
 │    └─ Mandatory before /ship (same gate /fix uses)          │
 │    └─ Skip-gracefully if codex CLI absent (warn, continue)  │
@@ -163,7 +163,7 @@ Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) brac
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Total gates (default --auto):** 1 — prod promotion only (irreversible). Per-phase audits, codex-gate BLOCK verdicts, and other failure modes auto-stop the pipeline but produce structured artifacts (no human prompt) — user fixes and resumes.
+**Total gates (default --auto):** 1 — prod promotion only (irreversible). Per-phase audits, review-gate BLOCK verdicts, and other failure modes auto-stop the pipeline but produce structured artifacts (no human prompt) — user fixes and resumes.
 **Total gates (--interactive):** 4 — autoplan premise, autoplan taste decisions, tasks.md approval, prod promotion.
 Everything else auto-runs or auto-fails.
 
@@ -667,27 +667,27 @@ Log:
 {"timestamp":"<ISO>","spec":"<NNN>","step":"qa","status":"pass|fail","bugs_found":<n>,"design_review_run":<bool>,"duration_s":<n>}
 ```
 
-### Step 5.7 — /codex-gate cross-model review (mandatory)
+### Step 5.7 — /review-gate cross-model review (mandatory)
 
-After per-wedge audits all pass and `/qa` is green, run `/codex-gate` for one final cross-model review against the full branch diff. Three Codex GPT-5 passes (review + adversarial-chaos + adversarial-test-gaps) catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
+After per-wedge audits all pass and `/qa` is green, run `/review-gate` for one final cross-model review against the full branch diff. Three passes catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
 
 ```bash
-# --skip-codex-gate is a hard bypass — codex-gate is NOT invoked and the skip
+# --skip-codex-gate is a hard bypass — review-gate is NOT invoked and the skip
 # is recorded in the local run log so the audit trail shows operator-accepted risk.
 if [ "${SKIP_CODEX_GATE:-0}" = "1" ]; then
-  echo "[FEATURE] /codex-gate SKIPPED (--skip-codex-gate flag set). Operator accepted the risk; per-phase audits from Step 4b remain in force." >&2
-  printf '{"timestamp":"%s","spec":"%s","step":"codex-gate","status":"skipped","reason":"skip_codex_gate_flag","duration_s":0}\n' \
+  echo "[FEATURE] /review-gate SKIPPED (--skip-codex-gate flag set). Operator accepted the risk; per-phase audits from Step 4b remain in force." >&2
+  printf '{"timestamp":"%s","spec":"%s","step":"review-gate","status":"skipped","reason":"skip_codex_gate_flag","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
-  # Continue to Step 6 (/ship). Do NOT invoke the /codex-gate skill below.
+  # Continue to Step 6 (/ship). Do NOT invoke the /review-gate skill below.
 else
-  # Skill: /codex-gate
+  # Skill: /review-gate
   :
 fi
 ```
 
 Decision rule (only applies when `--skip-codex-gate` was NOT set):
-- `CODEX-GATE PASS` (CRITICAL=0, HIGH≤2) → proceed to `/ship` + `/canary`.
-- `CODEX-GATE BLOCK` (CRITICAL≥1 unfixed) → STOP. Fix the CRITICAL inline via codex auto-fix, commit, re-run `/codex-gate`. Do NOT proceed to `/ship` until verdict is PASS.
+- `REVIEW-GATE PASS` (CRITICAL=0, HIGH≤2) → proceed to `/ship` + `/canary`.
+- `REVIEW-GATE BLOCK` (CRITICAL≥1 unfixed) → STOP. Fix the CRITICAL inline via review auto-fix, commit, re-run `/review-gate`. Do NOT proceed to `/ship` until verdict is PASS.
 
 Skip-gracefully behaviour (codex CLI absent — optional dependency):
 
@@ -695,21 +695,21 @@ Skip-gracefully behaviour (codex CLI absent — optional dependency):
 which codex >/dev/null 2>&1 && CODEX_AVAILABLE=1 || CODEX_AVAILABLE=0
 
 if [ "$CODEX_AVAILABLE" = "0" ]; then
-  echo "[FEATURE] WARNING: codex CLI not found — skipping codex-gate" >&2
+  echo "[FEATURE] WARNING: reviewer CLI not found — skipping review-gate" >&2
   echo "  Install: npm install -g @openai/codex && codex login" >&2
-  printf '{"timestamp":"%s","spec":"%s","step":"codex-gate","status":"skipped","reason":"codex_not_installed","duration_s":0}\n' \
+  printf '{"timestamp":"%s","spec":"%s","step":"review-gate","status":"skipped","reason":"review_cli_not_installed","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
   # Continue to Step 6 (/ship).
 fi
 ```
 
-`--skip-codex-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/codex-gate` is NOT invoked at all and the skip is written to `$RUN_LOG` so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
+`--skip-codex-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/review-gate` is NOT invoked at all and the skip is written to `$RUN_LOG` so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
 
-**Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent codex-gate run.
+**Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent review-gate run.
 
 Log:
 ```json
-{"timestamp":"<ISO>","spec":"<NNN>","step":"codex-gate","status":"pass|blocked|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
+{"timestamp":"<ISO>","spec":"<NNN>","step":"review-gate","status":"pass|blocked|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
 ```
 
 ### Step 6: /ship
@@ -762,7 +762,7 @@ Before emitting the final report, re-read the entire run as a skeptical reviewer
 - Which acceptance criteria passed by **audit** vs only by sub-agent **self-report**?
 - Any wedge that passed on attempt 2–3 — is the fix solid or papered-over?
 - Any happy-path-only verification? Were error paths exercised?
-- Did `/codex-gate` flag anything that got downgraded to "accepted risk"?
+- Did `/review-gate` flag anything that got downgraded to "accepted risk"?
 
 Name **at least one** residual risk or limitation. If it is cheaply fixable, fix it and re-verify the affected wedge before continuing. Otherwise record it on the `Residual risk:` line of the report so the operator decides with eyes open. A silent "all green" is a review smell, not a success signal.
 
@@ -803,7 +803,7 @@ On `/feature NNN --resume`:
 | tasks.md validation out of bounds | regenerate or hand-edit tasks.md, `/feature NNN --resume` |
 | task `[F]` | fix code, `/feature NNN --resume` |
 | QA bugs | fix bugs, `/feature NNN --resume` |
-| codex-gate BLOCK (CRITICAL≥1) | fix flagged issues inline (codex auto-fix or manual), commit, `/feature NNN --resume`. Emergency bypass: `/feature NNN --resume --skip-codex-gate` (NOT recommended) |
+| review-gate BLOCK (CRITICAL≥1) | fix flagged issues inline (review auto-fix or manual), commit, `/feature NNN --resume`. Emergency bypass: `/feature NNN --resume --skip-codex-gate` (NOT recommended) |
 | per-phase audit fail (3 attempts) | inspect residual `missing[]` from auditor, hand-fix wedge or revise spec, `/feature NNN --resume` |
 | ship tests fail | fix tests, `/feature NNN --resume` |
 | staging smoke fail | fix, re-ship, `/feature NNN --resume` |
@@ -830,7 +830,7 @@ Typical 50-task feature (~5 wedges):
 - per-phase QA (--qa-loop): ~$0.15/phase × N phases = ~$0.75-$1.50
 - per-phase adversarial audit: ~$0.30/wedge × N wedges = ~$1.50 (Step 4b)
 - qa: ~$2
-- codex-gate: ~$2 (3 passes against full branch diff; skip with --skip-codex-gate)
+- review-gate: ~$2 (3 passes against full branch diff; skip with --skip-codex-gate)
 - ship/canary: free
 
 **Estimated total: $23-59 per feature.** Show estimate after step 3 (tasks.md approved, cost computable from annotations).
@@ -859,7 +859,7 @@ The post-merge git hook runs this automatically on `git merge`. Run explicitly h
 - `/feature-implement` — step 3 (one invocation per wedge)
 - `run-state audit --kind phase` — step 3b (per-wedge adversarial audit, mandatory between every wedge)
 - `/qa` — step 5
-- `/codex-gate` — step 5.7 (cross-model full-branch review, mandatory before /ship)
+- `/review-gate` — step 5.7 (cross-model full-branch review, mandatory before /ship)
 - `/ship`, `/canary` — steps 6+
 - `git-worktree-manager` — step 0.1 (worktree isolation + port allocation + env sync)
 - `superpowers:using-git-worktrees` — worktree detection and creation guidance

@@ -6,18 +6,18 @@ Stop bugs from compounding. Test every phase before the next one starts. Fix bug
 
 ## v3.0 — Native /goal integration
 
-Claude Code 2.1.139+ ships native `/goal` ([docs](https://code.claude.com/docs/en/goal)) which owns the continuation loop. v3.0 strips our Stop hook + marker file + continuation tracking — ~300 lines of dead code gone. We keep what native /goal doesn't do: cross-model adversarial audit + `/codex-gate`.
+Claude Code 2.1.139+ ships native `/goal` ([docs](https://code.claude.com/docs/en/goal)) which owns the continuation loop. v3.0 strips our Stop hook + marker file + continuation tracking — ~300 lines of dead code gone. We keep what native /goal doesn't do: cross-model adversarial audit + `/review-gate`.
 
 **New /feature pipeline:**
 
 ```
-Operator: /goal "spec NNN done: every phase audit verdict=pass, codex-gate PASS, canary 200"
+Operator: /goal "spec NNN done: every phase audit verdict=pass, review-gate PASS, canary 200"
 Skill:    /autoplan → /spec-decompose
           foreach wedge:
             /feature-implement <wedge>
             run-state audit --kind phase    → writes verdict to audits.jsonl
           /qa
-          /codex-gate                       → cross-model review of full branch diff
+          /review-gate                      → cross-model review of full branch diff
           /ship + /canary
 Native /goal: condition holds → auto-clears. Done.
 ```
@@ -26,7 +26,7 @@ Native /goal: condition holds → auto-clears. Done.
 
 ```
 Operator: /goal "bug fixed: latest run-state audit --kind fix verdict=pass AND qa green"
-Skill:    investigate → implement → qa-only → qa → /codex-gate
+Skill:    investigate → implement → qa-only → qa → /review-gate
           run-state audit --kind fix → writes verdict
 Native /goal: condition met → clears.
 ```
@@ -208,16 +208,16 @@ Phase N tasks complete
 - **[Codex CLI](https://github.com/openai/codex)** by OpenAI
   Optional cross-host runtime. Used for cross-model adversarial review in two places:
   - `/fix` Step 3.5 — quick adversarial pass on the fresh fix (5-question concern list)
-  - `/fix` Step 5.5 + `/feature` Step 5.5 — full `/codex-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) on the final post-QA diff before /ship
+  - `/fix` Step 5.5 + `/feature` Step 5.5 — full `/review-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) on the final post-QA diff before /ship
 
-  Default-on in both `/feature` and `/fix`. Skip with `--no-codex-gate`. Skip-gracefully if codex CLI is absent (warns, continues). Not strictly required but **strongly recommended** for any change with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts). ~$2 + ~13 min per gate run.
+  Default-on in both `/feature` and `/fix`. Skip with `--no-codex-gate`. Skip-gracefully if the opposite-harness CLI is absent (warns, continues). Not strictly required but **strongly recommended** for any change with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts). ~$2 + ~13 min per gate run.
 
   ```bash
   npm install -g @openai/codex
   codex login
   ```
 
-  Also requires the `/codex-gate` skill (3-pass orchestrator). Sourced from the same harness that ships gstack — see [gstack docs](https://github.com/garryslist/gstack) for installation. If `/codex-gate` is not available in your skills, the gate step skips with a warning.
+  Also requires the `/review-gate` skill (3-pass orchestrator). Sourced from the same harness that ships gstack — see [gstack docs](https://github.com/garryslist/gstack) for installation. If `/review-gate` is not available in your skills, the gate step skips with a warning. `/codex-gate` remains a compatibility alias.
 
 ## Installation
 

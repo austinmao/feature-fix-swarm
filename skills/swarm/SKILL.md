@@ -667,7 +667,7 @@ Recover:
 ## Non-goals (v1)
 
 - No QA loop — use `/qa` as a follow-up
-- No codex-gate — use `/codex-gate` as a follow-up
+- No review-gate — use `/review-gate` as a follow-up
 - No commit/push — use `/ship`
 - No task-level retries (blocked = failed; re-run or fix manually)
 - No persistent `specs/NNN/tasks.md` — use `/spec-decompose` for that

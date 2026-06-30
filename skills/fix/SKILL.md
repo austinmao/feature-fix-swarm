@@ -1,6 +1,6 @@
 ---
 name: fix
-description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa, then run codex-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. v2.0.0 integrates Claude native /goal for continuation; adversarial audit + /codex-gate remain mandatory."
+description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa, then run review-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. v2.0.0 integrates Claude native /goal for continuation; adversarial audit + /review-gate remain mandatory."
 version: "2.0.0"
 allowed-tools:
   - Read
@@ -22,7 +22,7 @@ One command. Takes a bug description or symptom, traces root cause, fixes it wit
 Before invoking `/fix`, set a native `/goal` condition so Claude auto-continues until the bug is verified fixed. Example:
 
 ```
-/goal "bug fixed: latest run-state audit --kind fix verdict=pass on this issue AND /qa green AND /codex-gate PASS"
+/goal "bug fixed: latest run-state audit --kind fix verdict=pass on this issue AND /qa green AND /review-gate PASS"
 ```
 
 Native `/goal` (Anthropic-maintained, Claude Code 2.1.139+):
@@ -46,7 +46,7 @@ If you skip `/goal`, the pipeline runs but you advance it manually.
 
 | Flag | Effect |
 |---|---|
-| `--auto-fix` | Forwarded to ruflo agents and codex-gate auto-fix loop. |
+| `--auto-fix` | Forwarded to ruflo agents and review-gate auto-fix loop. |
 | `--interactive` | Restore manual gates between phases. Default = non-interactive. |
 | `--no-audit` | **Operator-accepted-risk bypass** of the adversarial completion audit. Use only for trivial typo-class fixes. Not a "skip mandatory step" — the operator owns the risk. |
 | `--no-codex-gate` | **Operator-accepted-risk bypass** of cross-model adversarial review. Use only when blast radius is provably minimal (typo, comment, log-message). |
@@ -422,38 +422,38 @@ Invoke `/qa` via Skill tool. Full browser-based QA suite to verify the fix didn'
 - **Related** (file overlap with fix diff): feed back into Step 4b as additional context
 - **Unrelated** (different files, pre-existing): log as informational, continue to Step 5.5 with a note
 
-## Step 5.5: /codex-gate (cross-model adversarial review)
+## Step 5.5: /review-gate (cross-model adversarial review)
 
 Skip if `--no-codex-gate` flag was set.
 
-**Why this step exists:** Step 3.5 already runs codex *adversarial* on the fresh fix. Step 5.5 runs the full `/codex-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) against the *final post-QA diff* including any retry-loop changes. Single-model review has blind spots; cross-model adversarial review catches CRITICAL issues that pass Claude-only quality gates. Cost: ~$2 + ~13 min — cheap insurance for any fix landing in production blast radius (auth, payments, RLS, multi-tenant, cron).
+**Why this step exists:** Step 3.5 already runs codex *adversarial* on the fresh fix. Step 5.5 runs the full `/review-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) against the *final post-QA diff* including any retry-loop changes. Single-model review has blind spots; cross-model adversarial review catches CRITICAL issues that pass Claude-only quality gates. Cost: ~$2 + ~13 min — cheap insurance for any fix landing in production blast radius (auth, payments, RLS, multi-tenant, cron).
 
 **Pre-flight:**
 ```bash
 which codex >/dev/null 2>&1 && CODEX_AVAILABLE=1 || CODEX_AVAILABLE=0
 
 if [ "$CODEX_AVAILABLE" = "0" ]; then
-  echo "[FIX] WARNING: codex CLI not found — skipping codex-gate" >&2
+  echo "[FIX] WARNING: reviewer CLI not found — skipping review-gate" >&2
   echo "  Install: npm install -g @openai/codex && codex login" >&2
-  printf '{"timestamp":"%s","bug":"%s","step":"codex-gate","status":"skipped","reason":"codex_not_installed","duration_s":0}\n' \
+  printf '{"timestamp":"%s","bug":"%s","step":"review-gate","status":"skipped","reason":"review_cli_not_installed","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$BUG_DESC" >> "$LOG_FILE"
   # Continue to Step 6.
 fi
 ```
 
-**Invoke:** Call the `codex-gate` skill via the Skill tool. Codex-gate runs 3 passes against the staged diff, produces a findings report.
+**Invoke:** Call the `review-gate` skill via the Skill tool. Review-gate runs 3 passes against the staged diff, produces a findings report.
 
 **Findings policy:**
 - **CRITICAL** → STOP. Write findings to `$RALPH_DIR/codex-critical-findings.md`, exit 1. Do NOT prompt the user. Structured artifact directs the user to roll back, override, or patch (mirror Step 3.5 abort path).
 - **HIGH** → log as concern in `fix-results.md`, continue to Step 6 (user reviews report before merging PR).
 - **MEDIUM/LOW or no findings** → continue silently.
 
-**Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so subsequent `gh pr merge` does not warn about a missing recent codex-gate run.
+**Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so subsequent `gh pr merge` does not warn about a missing recent review-gate run.
 
 `codex-critical-findings.md` structure:
 
 ```markdown
-# CRITICAL findings — fix aborted at codex-gate (Step 5.5)
+# CRITICAL findings — fix aborted at review-gate (Step 5.5)
 Bug: {BUG_DESC}
 Date: {ISO timestamp}
 Files changed by fix (final): {list}
@@ -467,7 +467,7 @@ QA status before gate: PASS
 
 ## Why this aborted
 The fix passed all Claude-side QA but codex (cross-model) found CRITICAL issues.
-v1.3.0 policy: never auto-proceed through codex-gate CRITICAL findings.
+v1.3.0 policy: never auto-proceed through review-gate CRITICAL findings.
 The user must review each finding and decide:
   (a) Apply a follow-up patch addressing each CRITICAL finding, then rerun /fix.
   (b) Roll back the fix (`git restore .`) and rerun /fix with adjusted scope.
@@ -475,13 +475,13 @@ The user must review each finding and decide:
 
 ## To resume
 After the user resolves the findings:
-  /fix "{BUG_DESC}"                              # rerun full pipeline including codex-gate
+  /fix "{BUG_DESC}"                              # rerun full pipeline including review-gate
   /fix "{BUG_DESC}" --no-codex-gate              # skip gate (NOT recommended)
 ```
 
 Print structured terminal error and exit 1:
 ```
-[FIX] ERROR: codex-gate CRITICAL findings — fix aborted before report
+[FIX] ERROR: review-gate CRITICAL findings — fix aborted before report
   Findings:   {N} CRITICAL across {passes}
   Artifacts:  {RALPH_DIR}/codex-critical-findings.md
   Bypass:     /fix "{BUG_DESC}" --no-codex-gate (NOT recommended)
@@ -490,7 +490,7 @@ Action required: review {RALPH_DIR}/codex-critical-findings.md, then patch/roll-
 
 Log:
 ```json
-{"timestamp":"<ISO>","bug":"<desc>","step":"codex-gate","status":"pass|failed|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
+{"timestamp":"<ISO>","bug":"<desc>","step":"review-gate","status":"pass|failed|skipped","findings_critical":<n>,"findings_high":<n>,"report":"<path>","duration_s":<n>}
 ```
 
 ### Step 4 — Adversarial completion audit (mandatory unless `--no-audit`)
@@ -542,7 +542,7 @@ fi
 ║ Tests added:   {N} ({test file list})                         ║
 ║ QA-only:       PASS ({dimensions that ran})                   ║
 ║ Full QA:       PASS / SKIPPED (--no-qa)                       ║
-║ Codex-gate:    PASS / SKIPPED (--no-codex-gate / no codex)    ║
+║ Review-gate:   PASS / SKIPPED (--no-codex-gate / no reviewer) ║
 ║ Retries used:  {N}/{MAX}                                      ║
 ║ Artifacts:     {RALPH_DIR}/                                   ║
 ║ Duration:      {HH:MM:SS}                                    ║
@@ -649,7 +649,7 @@ Append to fix log:
 | `/plan-eng-review` | Step 2 — architectural fix review (with --plan) |
 | `/qa-only` | Step 4 — focused verification of fix |
 | `/qa` | Step 5 — full regression check |
-| `/codex-gate` | Step 5.5 — cross-model adversarial review (default-on; skip with --no-codex-gate or absent codex CLI) |
+| `/review-gate` | Step 5.5 — cross-model adversarial review (default-on; skip with --no-codex-gate or absent reviewer CLI) |
 | `scripts/harness/executor-detect.sh` | Step 3 — ruflo vs native decision |
 | `scripts/ralph-retry.sh` | Step 4b — retry loop orchestration |
 
@@ -657,11 +657,11 @@ Append to fix log:
 
 | Bug complexity | Typical cost |
 |---------------|-------------|
-| Trivial (1 file, <10 lines) | ~$0.10 (1 haiku agent + qa-only) — add ~$2 if codex-gate runs |
-| Moderate (2-5 files) | ~$0.50 (1 sonnet agent + qa-only + qa) — add ~$2 if codex-gate runs |
-| Complex (5+ files, --plan) | ~$2.00 (eng review + 2-3 sonnet agents + qa) — add ~$2 if codex-gate runs |
+| Trivial (1 file, <10 lines) | ~$0.10 (1 haiku agent + qa-only) — add ~$2 if review-gate runs |
+| Moderate (2-5 files) | ~$0.50 (1 sonnet agent + qa-only + qa) — add ~$2 if review-gate runs |
+| Complex (5+ files, --plan) | ~$2.00 (eng review + 2-3 sonnet agents + qa) — add ~$2 if review-gate runs |
 
-Codex-gate adds ~$2 + ~13 min per fix. Disable with `--no-codex-gate` for trivial fixes where blast radius is minimal (typo, log-message tweak, comment fix).
+Review-gate adds ~$2 + ~13 min per fix. Disable with `--no-codex-gate` for trivial fixes where blast radius is minimal (typo, log-message tweak, comment fix).
 
 ## Safety rules
 
@@ -671,8 +671,8 @@ Codex-gate adds ~$2 + ~13 min per fix. Disable with `--no-codex-gate` for trivia
 - On retry exhaustion, STOP and escalate to user (via structured artifact, not AskUserQuestion)
 - **v1.2.0 non-interactive policy:** never block on AskUserQuestion. Uncertainty (incomplete investigation, CRITICAL findings) writes a structured artifact and exits 1.
 - **v1.2.0 ruflo policy:** ruflo is mandatory. Set `RUFLO_REQUIRED=0` only for debugging.
-- **v1.3.0 codex-gate policy:** codex-gate runs by default before Step 6 (report) on the final post-QA diff. Skip with `--no-codex-gate` only when blast radius is provably minimal (typo, comment, log-message). Skip-gracefully if codex CLI is not installed (warn, continue).
-- **v2.0.0 continuation policy:** continuation is delegated to native Claude `/goal`. `/fix` no longer manages a run-state lifecycle (no start/update/complete, no Stop-hook continuation, no token budget, no marker file). The adversarial audit + codex-gate are still mandatory bypasses-via-flag; `/goal` is what loops the pipeline until verdict=pass.
+- **v1.3.0 codex-gate policy:** review-gate runs by default before Step 6 (report) on the final post-QA diff. Skip with `--no-codex-gate` only when blast radius is provably minimal (typo, comment, log-message). Skip-gracefully if the opposite-harness CLI is not installed (warn, continue).
+- **v2.0.0 continuation policy:** continuation is delegated to native Claude `/goal`. `/fix` no longer manages a run-state lifecycle (no start/update/complete, no Stop-hook continuation, no token budget, no marker file). The adversarial audit + review-gate are still mandatory bypasses-via-flag; `/goal` is what loops the pipeline until verdict=pass.
 
 ## Relationship to QA Ralph Loop
 
