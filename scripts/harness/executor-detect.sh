@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Executor Detection — decides whether to use ruflo swarm or native Agent()
-# Called by feature-implement to pick the right executor for QA swarm and task spawning
+# Executor Detection — decides whether to use Ruflo coordination or direct host CLI
+# Called by feature-implement to pick the coordination layer for QA and task spawning
 #
-# Output: one word on stdout: "ruflo" or "native"
+# Output: one word on stdout: "ruflo" or "host-cli"
 # Exit code: always 0
 
 set -euo pipefail
@@ -10,7 +10,7 @@ set -euo pipefail
 # Check 1: Are we nested? (CLAUDE_AGENT_DEPTH > 0 means we're inside a sub-agent)
 DEPTH="${CLAUDE_AGENT_DEPTH:-0}"
 if [ "$DEPTH" -gt 0 ]; then
-  # Nested context — Agent() won't work, must use ruflo
+  # Nested context — keep coordination out-of-band through Ruflo.
   echo "ruflo"
   exit 0
 fi
@@ -31,11 +31,11 @@ fi
 if [ "${RALPH_EXECUTOR:-}" = "ruflo" ]; then
   echo "ruflo"
   exit 0
-elif [ "${RALPH_EXECUTOR:-}" = "native" ]; then
-  echo "native"
+elif [ "${RALPH_EXECUTOR:-}" = "host-cli" ] || [ "${RALPH_EXECUTOR:-}" = "native" ]; then
+  echo "host-cli"
   exit 0
 fi
 
-# Default: native Agent() at top level (proven, low risk)
-echo "native"
+# Default: direct host CLI at top level; Ruflo remains opt-in/defaulted by skill policy.
+echo "host-cli"
 exit 0
