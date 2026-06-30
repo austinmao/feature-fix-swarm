@@ -92,7 +92,7 @@ Shared task fields:
 
 Rationale:
 - `model_tier` lets the same task graph render different model ladders for Claude and Codex.
-- `agent_role` gives Ruflo a stable routing vocabulary instead of free-form names.
+- `agent_role` gives Ruflo a stable routing vocabulary from the exact hybrid catalog instead of free-form names.
 - `qa_lanes` makes OpenClaw and Telegram lanes explicit rather than implied.
 - `host` and `executor` preserve runtime intent for resume and logging.
 - `isolation_state` keeps branch and worktree handling deterministic.
@@ -161,6 +161,10 @@ Phase N tasks complete
   - `/qa-only` -- report-only QA (no fixes)
   - `/review` -- pre-landing code review with specialist army
   - `/ship` -- automated PR creation with tests + review
+
+- **[ECC](https://github.com/affaan-m/ECC)** by affaan-m and **[wshobson/agents](https://github.com/wshobson/agents)** by wshobson
+  Provide the exact-agent catalog used by the decomposition and execution skills. `bash setup.sh`
+  checks whether both packs are on upstream `main` and refreshes them when they drift.
 
   Install gstack:
   ```bash

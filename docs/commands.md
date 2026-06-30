@@ -124,7 +124,7 @@ npx ruflo@latest memory search "query"   # Search what was learned
 | Route task to right model tier | `mcp__ruflo__hooks_model-route` |
 | Store a reusable pattern | `mcp__ruflo__agentdb_pattern-store` |
 
-Ruflo routing is most reliable when task `agent:` values are normalized to a small canonical role set before spawning: `coordinator`, `architect`, `researcher`, `coder`, `tester`, `reviewer`.
+Ruflo routing is most reliable when task `agent:` values use the hybrid exact-agent catalog before spawning: `ecc:tdd-guide`, `ecc:code-reviewer`, `ecc:architect`, `security-auditor`, `frontend-developer`, `backend-architect`, `python-pro`, `typescript-pro`, `database-architect`, `database-optimizer`, `test-automator`, `debugger`, `error-detective`, `deployment-engineer`, `observability-engineer`, `docs-architect`, `accessibility-expert`.
 
 ## Reference
 

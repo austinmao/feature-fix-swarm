@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
-description: "Decompose an approved feature spec into specs/NNN/tasks.md using Sonnet + the canonical decomposition prompt"
-version: "1.1.0"
+description: "Decompose an approved feature spec into specs/NNN/tasks.md using Sonnet + the exact-agent hybrid catalog prompt"
+version: "1.0.0"
 allowed-tools:
   - Read
   - Write
@@ -24,55 +24,8 @@ allowed-tools:
 2. Verifies `spec.md` and `plan.md` exist (hard requirements per `/speckit.tasks` contract)
 3. Spawns a Sonnet sub-agent with `prompts/decompose-spec.md` + the spec's design artifacts
 4. Sub-agent writes the decomposed task list to `specs/NNN/tasks.md`
-5. **Each phase ends with a `/review-gate` review task** — blocks the next phase if HIGH/CRITICAL findings
-6. If a prior baseline exists, runs `scripts/harness-eval.sh --compare NNN specs/NNN/tasks.md`
-7. Reports summary and flags anything suspicious
-
-## Codex-Gate Phase Gates (MANDATORY)
-
-Every phase in `tasks.md` **MUST** end with a review-gate task before the next phase begins.
-This is a hard requirement — the suspicious-output check in Step 7 will fail the decomposition if any phase is missing one.
-
-### Canonical review-gate task format
-
-```markdown
-- [ ] [model:sonnet] [agent:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL findings block Phase N+1. Address all CRITICAL, fix or defer HIGH. [qa:review-gate] [P]
-  - Depends-on: <last implementation task in this phase>
-  - Run: /review-gate
-  - Gate: no phase transition until exit code 0 (0 CRITICAL, 0 HIGH unaddressed)
-```
-
-### Where to place review-gate tasks
-
-- After every implementation phase (Setup, US1…USn, Integration)
-- NOT after read-only or planning phases (Research, Architecture Review)
-- NOT after Staging/Production/Rollback phases (those use canary/smoke, not review-gate)
-- Always the LAST task in the phase before phase boundary comment
-
-### Example tasks.md phase structure
-
-```markdown
-## Phase 1 — Setup
-
-- [ ] [model:haiku] Scaffold directory structure and install dependencies
-- [ ] [model:sonnet] Write failing unit tests for AuthService (RED — TDD step 1)
-- [ ] [model:sonnet] /review-gate — review Phase 1 diff. HIGH/CRITICAL block Phase 2. [qa:review-gate] [P]
-  - Depends-on: Write failing unit tests for AuthService
-
-## Phase 2 — US1: User login
-
-- [ ] [model:sonnet] Implement AuthService.login() to pass unit tests (GREEN — TDD step 2)
-- [ ] [model:sonnet] Refactor login flow for clarity (REFACTOR — TDD step 3)
-- [ ] [model:sonnet] /review-gate — review Phase 2 diff. HIGH/CRITICAL block Phase 3. [qa:review-gate] [P]
-  - Depends-on: Refactor login flow for clarity
-
-## Phase 3 — Integration
-
-- [ ] [model:sonnet] Wire AuthService to API route handler
-- [ ] [model:sonnet] Add integration test: POST /api/auth/login → 200 + session cookie
-- [ ] [model:sonnet] /review-gate — review Phase 3 diff. HIGH/CRITICAL block QA phase. [qa:review-gate] [P]
-  - Depends-on: Add integration test
-```
+5. If a prior baseline exists, runs `scripts/harness-eval.sh --compare NNN specs/NNN/tasks.md`
+6. Reports summary and flags anything suspicious
 
 ## Step-by-step workflow
 
@@ -162,44 +115,10 @@ DO NOT read `{SPEC_DIR}/tasks.md` if it exists. Produce your decomposition from 
 `{REPO_ROOT}/CLAUDE.md`
 
 ## Step 5: Produce output
-Follow the decompose-spec.md prompt at full depth. Write to: `{OUTPUT_PATH}`
+Follow the decompose-spec.md prompt at full depth, including the exact-agent hybrid catalog. Write to: `{OUTPUT_PATH}`
 
-## Step 6: MANDATORY — review-gate phase gates
-Every implementation phase MUST end with a /review-gate task as the final item before
-the next phase begins. Format:
-
-  - [ ] [model:sonnet] [agent:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL block Phase N+1. [qa:review-gate] [P]
-    - Depends-on: <last implementation task in this phase>
-    - Run: /review-gate
-    - Gate: no phase transition until exit code 0 (0 CRITICAL, 0 HIGH unaddressed)
-
-Place review-gate after:
-- Setup phase
-- Each user story phase (US1, US2, …)
-- Integration phase
-
-Do NOT place review-gate after:
-- Research/architecture-review phases (read-only, no diff)
-- Staging/Production/Rollback phases (use canary/smoke tests there instead)
-
-If you omit a review-gate task from any implementation phase, the decomposition is invalid.
-
-## Step 7: Report
-After writing: total tasks, phases, review-gate tasks per phase, [P] count, [US] count,
-model distribution, agent distribution, Depends-on lines, file path coverage %.
-
-## Step 8: /design-html task injection (MANDATORY for UI tasks)
-Scan every task in the output tasks.md. For any task that builds, designs, or creates
-a page, landing page, web UI, marketing page, or HTML view (phrases: "create page",
-"design page", "build landing", "implement UI", "design flow", "build page"), insert
-a `/design-html` task IMMEDIATELY AFTER it in the same phase:
-
-  - [ ] [model:sonnet] [agent:design/frontend] /design-html — generate production HTML for <page name>. Reads /plan-design-review context from autoplan. [qa:design-review] [P]
-    - Depends-on: <the page design task above>
-    - Run: /design-html
-    - Gate: HTML must pass /design-review in QA phase
-
-Do NOT add /design-html tasks after: API/backend/migration tasks, test tasks, or /review-gate tasks.
+## Step 6: Report
+After writing: total tasks, phases, [P] count, [US] count, model distribution, agent distribution, Depends-on lines, file path coverage %.
 ```
 
 ### Step 5: Run comparison (if backup exists)
@@ -223,7 +142,6 @@ Run `bash scripts/harness-eval.sh $SPEC_ARG` to extract current metrics. Print a
 ║ Total tasks:       XX                                         ║
 ║ Phases:            XX (Setup → Foundational → N user stories  ║
 ║                    → Integration → Staging → Prod → Rollback) ║
-║ Codex-gate tasks:  XX (one per implementation phase ✓/✗)      ║
 ║ Parallel markers:  XX                                         ║
 ║ User stories:      XX (US1..USn)                              ║
 ║ Model distribution:                                           ║
@@ -243,8 +161,6 @@ Run `bash scripts/harness-eval.sh $SPEC_ARG` to extract current metrics. Print a
 ### Step 7: Flag suspicious output
 
 Warn if any of:
-- **FAIL: missing review-gate** — any implementation phase has no `/review-gate` task as its final item. Offer to patch missing gates automatically.
-- **WARN: missing /design-html** — any task that designs/creates a page lacks an immediately following `/design-html` task. Offer to auto-insert per the Step 8 format.
 - No `[model:]` annotations — sub-agent didn't follow prompt; offer to regenerate
 - No `Depends-on:` lines — TDD ordering likely broken
 - `[model:opus]` outside architecture/debugging phases — probable over-escalation
@@ -253,18 +169,10 @@ Warn if any of:
 - More than 60 tasks — feature should be split into multiple specs
 - If `plan.md` Non-goals explicitly states "no tests" — suppress the "under-decomposed" warning
 - No `[qa:]` annotations — sub-agent didn't assign QA dimensions; defaults will apply (e2e, review, security)
-- review-gate tasks in Staging/Production/Rollback phases — those phases use canary/smoke, remove them
 
 ### Step 8: Next step
 
-Output:
-```
-Next: review `$SPEC_DIR/tasks.md`, then invoke `/feature-implement` or start executing tasks manually.
-
-Each implementation phase ends with /review-gate. HIGH/CRITICAL findings block the next phase.
-Run: /review-gate
-Docs: https://github.com/austinmao/feature-fix-swarm/blob/main/docs/commands.md#review-gate
-```
+Output: "Next: review `$SPEC_DIR/tasks.md`, then invoke `/feature-implement` or start executing tasks manually."
 
 ## Edge cases
 
@@ -273,7 +181,6 @@ Docs: https://github.com/austinmao/feature-fix-swarm/blob/main/docs/commands.md#
 - **plan.md lacks tech stack:** warn but proceed.
 - **Sub-agent timeout (>10 min):** abort, preserve partial output at `/tmp/spec-decompose-aborted.md`.
 - **prompts/decompose-spec.md missing:** fatal. Recover via `git checkout prompts/decompose-spec.md`.
-- **Sub-agent omits review-gate:** Step 7 catches this. Offer to auto-insert gates with correct `Depends-on:` pointing to the last task in each phase.
 
 ## Non-goals
 
@@ -281,7 +188,6 @@ Docs: https://github.com/austinmao/feature-fix-swarm/blob/main/docs/commands.md#
 - Does NOT generate spec.md or plan.md (use `/speckit.specify` / `/speckit.plan`)
 - Does NOT sync to Linear (handled by `post-spec-write.sh` after Write)
 - Does NOT review architecture (use `/autoplan`)
-- Does NOT run `/review-gate` itself — it only ensures the gate tasks exist in tasks.md so `/feature-implement` runs them at the right phase boundary
 
 ## Why a standalone skill, not a meta-skill
 

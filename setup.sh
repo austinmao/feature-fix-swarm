@@ -158,6 +158,125 @@ install_goal_wrap() {
   install_skill_repo https://github.com/austinmao/goal-wrap goal-wrap handoff
 }
 
+PACK_STATE_DIR="$HOME/.feature-fix-swarm/install-state"
+PACK_CACHE_DIR="$HOME/.feature-fix-swarm/install-cache"
+ECC_REPO="https://github.com/affaan-m/ECC.git"
+ECC_CACHE_DIR="$PACK_CACHE_DIR/ecc"
+ECC_STATE_FILE="$PACK_STATE_DIR/ecc-main.sha"
+WSH_REPO="https://github.com/wshobson/agents.git"
+WSH_CACHE_DIR="$PACK_CACHE_DIR/wshobson-agents"
+WSH_STATE_FILE="$PACK_STATE_DIR/wshobson-agents-main.sha"
+
+install_ecc_pack() {
+  local upstream_sha=""
+  if ! command -v git >/dev/null 2>&1; then
+    echo "  ECC: NOT FOUND (git required to clone upstream)"
+    return 1
+  fi
+
+  upstream_sha=$(git ls-remote "$ECC_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  if [ -z "$upstream_sha" ]; then
+    echo "  ECC: NOT FOUND (unable to resolve upstream main)"
+    return 1
+  fi
+
+  echo "  ECC: syncing upstream main $upstream_sha"
+  rm -rf "$ECC_CACHE_DIR"
+  git clone --depth 1 --branch main "$ECC_REPO" "$ECC_CACHE_DIR" >/dev/null
+  (
+    cd "$ECC_CACHE_DIR" &&
+    bash ./install.sh --profile minimal --target claude
+  )
+  mkdir -p "$PACK_STATE_DIR"
+  printf '%s\n' "$upstream_sha" > "$ECC_STATE_FILE"
+}
+
+install_wshobson_pack() {
+  local upstream_sha=""
+  if ! command -v git >/dev/null 2>&1; then
+    echo "  wshobson/agents: NOT FOUND (git required to resolve upstream)"
+    return 1
+  fi
+  if ! command -v npx >/dev/null 2>&1; then
+    echo "  wshobson/agents: NOT FOUND (npx required)"
+    return 1
+  fi
+
+  upstream_sha=$(git ls-remote "$WSH_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  if [ -z "$upstream_sha" ]; then
+    echo "  wshobson/agents: NOT FOUND (unable to resolve upstream main)"
+    return 1
+  fi
+
+  echo "  wshobson/agents: syncing upstream main $upstream_sha"
+  rm -rf "$WSH_CACHE_DIR"
+  mkdir -p "$WSH_CACHE_DIR"
+  (
+    cd "$WSH_CACHE_DIR" &&
+    npx codex-marketplace add wshobson/agents
+  )
+  mkdir -p "$PACK_STATE_DIR"
+  printf '%s\n' "$upstream_sha" > "$WSH_STATE_FILE"
+}
+
+check_ecc_pack() {
+  local upstream_sha=""
+  local recorded_sha=""
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "  ECC: NOT FOUND"
+    return 1
+  fi
+
+  upstream_sha=$(git ls-remote "$ECC_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  if [ -z "$upstream_sha" ]; then
+    echo "  ECC: NOT FOUND"
+    return 1
+  fi
+
+  if [ -f "$ECC_STATE_FILE" ]; then
+    recorded_sha=$(cat "$ECC_STATE_FILE" 2>/dev/null || true)
+    if [ "$recorded_sha" = "$upstream_sha" ] && skill_installed tdd-guide; then
+      echo "  ECC: OK (upstream main $upstream_sha)"
+      return 0
+    fi
+    echo "  ECC: OUTDATED (installed ${recorded_sha:-(unknown)}, upstream main $upstream_sha)"
+    return 1
+  fi
+
+  echo "  ECC: NOT FOUND"
+  return 1
+}
+
+check_wshobson_pack() {
+  local upstream_sha=""
+  local recorded_sha=""
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "  wshobson/agents: NOT FOUND"
+    return 1
+  fi
+
+  upstream_sha=$(git ls-remote "$WSH_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  if [ -z "$upstream_sha" ]; then
+    echo "  wshobson/agents: NOT FOUND"
+    return 1
+  fi
+
+  if [ -f "$WSH_STATE_FILE" ]; then
+    recorded_sha=$(cat "$WSH_STATE_FILE" 2>/dev/null || true)
+    if [ "$recorded_sha" = "$upstream_sha" ] && skill_installed backend-architect; then
+      echo "  wshobson/agents: OK (upstream main $upstream_sha)"
+      return 0
+    fi
+    echo "  wshobson/agents: OUTDATED (installed ${recorded_sha:-(unknown)}, upstream main $upstream_sha)"
+    return 1
+  fi
+
+  echo "  wshobson/agents: NOT FOUND"
+  return 1
+}
+
 missing=()
 
 echo "Checking prerequisites..."
@@ -172,6 +291,8 @@ command -v codex >/dev/null 2>&1 && echo "  codex CLI: OK" || echo "  codex CLI:
 check_spec_kit || missing+=("spec-kit")
 check_prompt_master || missing+=("prompt-master")
 check_goal_wrap || missing+=("goal-wrap")
+check_ecc_pack || missing+=("ECC")
+check_wshobson_pack || missing+=("wshobson/agents")
 
 echo ""
 
@@ -187,6 +308,8 @@ if [ "${#missing[@]}" -gt 0 ]; then
     install_spec_kit || true
     install_prompt_master || true
     install_goal_wrap || true
+    install_ecc_pack || true
+    install_wshobson_pack || true
   else
     echo "Skipping dependency installation. You can re-run setup.sh later."
   fi

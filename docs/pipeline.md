@@ -27,7 +27,7 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo
 │    ▼                                                                   │
 │   /spec-decompose  ──►  specs/NNN-name/tasks.md                        │
 │    │                    (host-aware model ladder + prompts/decompose-spec.md) │
-│    │                    custom format: [model:] [agent:] [US] [P]      │
+│    │                    custom format: [model:] [agent:exact-agent] [US] [P] │
 │    │                    QA tiers: unit/int/E2E + dev/staging/prod      │
 │    │                    spec.md OPTIONAL — falls back to plan.md       │
 │    ▼                                                                   │
@@ -139,7 +139,7 @@ At each gate, the user reviews the generated artifact and approves or iterates:
 
 Every task line:
 ```
-- [ ] T### [P?] [US?] [model:X thinking:Y] [agent:dept/role] Description with `file/path.ext`
+- [ ] T### [P?] [US?] [model:X thinking:Y] [agent:exact-agent] Description with `file/path.ext`
       Depends-on: T005, T012
 ```
 
@@ -149,7 +149,7 @@ Every task line:
 - `[P]` parallel-safe (optional)
 - `[USn]` user-story tag (required in story phases, forbidden in Setup/Integration)
 - `[model:X thinking:Y]` tier for implementing agent — `haiku/low`, `sonnet/med` (default), `sonnet/high`, `opus/max`
-- `[agent:dept/role]` routing hint for ruflo or sub-agent delegation
+- `[agent:exact-agent]` exact hybrid-catalog routing hint for ruflo or sub-agent delegation
 - Description ends with backticked path relative to repo root
 - `Depends-on:` line (indented 6 spaces) for task prerequisites
 

@@ -1,6 +1,6 @@
 ---
 name: feature-implement
-description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path falls back to sonnet. RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
+description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations. Exact agent delegation uses the hybrid ECC + wshobson catalog. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path falls back to sonnet. RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
 version: "1.7.0"
 allowed-tools:
   - Read
@@ -42,7 +42,6 @@ allowed-tools:
 - If `mcp__ruflo__*` tools are unreachable AND `RUFLO_REQUIRED=1` (default): hard-fail with structured error. No silent fallback.
 - Escape hatch: `RUFLO_REQUIRED=0 /feature-implement NNN` falls back to native Agent for debugging. Logs WARNING on every spawn.
 - The `--no-ruflo` flag from v1.0.0 has been removed. To run native, use the env override above.
-- Do not use `mcp__ruflo__agent_execute` or `mcp__ruflo__managed_agent_*` for task execution. Those are API-backed paths. Ruflo coordinates; the active host CLI executes via `scripts/harness/ruflo-host-executor.sh`.
 
 **Default is run-all.** The skill loops through every `[ ]` task until either:
 - All tasks are `[X]` (success)
@@ -188,7 +187,7 @@ Extract all tasks into structured data. Each has:
 - `user_story` (from `[USn]`)
 - `model` (from `[model:X]`; default `sonnet`)
 - `thinking` (from `[thinking:Y]`; default `med`)
-- `agent` (from `[agent:dept/role]`; default `engineering/backend-engineer`)
+- `agent` (from `[agent:exact-agent]`; default `general-purpose`)
 - `description` (trailing text + backticked paths)
 - `depends_on` (list from `Depends-on:` line)
 - `phase` (current `## Phase N:` heading)
@@ -196,8 +195,63 @@ Extract all tasks into structured data. Each has:
 Python parsing via Bash heredoc:
 
 ```bash
-DISPATCH="$(git rev-parse --show-toplevel)/packages/feature-fix-swarm/lib/dispatch.py"
-TASKS_JSON=$(FILE="$TASKS_FILE" python3 "$DISPATCH" parse "engineering/backend-engineer")
+TASKS_JSON=$(FILE="$TASKS_FILE" python3 <<'PYEOF'
+import os, re, json
+with open(os.environ["FILE"]) as f:
+    content = f.read()
+
+task_pattern = re.compile(
+    r'^- \[([ XxFfSs])\] (T\d+)([^\n]*)$(?:\n[ ]{2,}Depends-on:\s*([^\n]*))?',
+    re.MULTILINE
+)
+phase_pattern = re.compile(r'^## Phase [^\n]*$', re.MULTILINE)
+
+phase_starts = [(m.start(), m.group()) for m in phase_pattern.finditer(content)]
+
+def phase_for(pos):
+    last = None
+    for start, header in phase_starts:
+        if start <= pos: last = header
+        else: break
+    return last or "(no phase)"
+
+def parse_annotations(rest):
+    parallel = bool(re.search(r'\[P\]', rest))
+    us_match = re.search(r'\[US(\d+)\]', rest)
+    user_story = f"US{us_match.group(1)}" if us_match else None
+    model, thinking = "sonnet", "med"
+    m = re.search(r'\[model:([a-z]+)(?:\s+thinking:([a-z]+))?\]', rest)
+    if m:
+        model = m.group(1)
+        if m.group(2): thinking = m.group(2)
+    m2 = re.search(r'\[thinking:([a-z]+)\]', rest)
+    if m2: thinking = m2.group(1)
+    agent = "general-purpose"
+    m = re.search(r'\[agent:([^\]]+)\]', rest)
+    if m: agent = m.group(1)
+    qa_match = re.search(r'\[qa:([a-z,]+)\]', rest)
+    qa_dims = qa_match.group(1).split(",") if qa_match else ["e2e","review","security"]
+    desc = re.sub(r'\[(?:P|US\d+|model:[^\]]+|thinking:[^\]]+|agent:[^\]]+|qa:[^\]]+)\]', '', rest).strip()
+    return {"parallel": parallel, "user_story": user_story, "model": model,
+            "thinking": thinking, "agent": agent, "qa_dims": qa_dims, "description": desc}
+
+tasks = []
+status_map = {' ':'todo','X':'done','x':'done','F':'failed','f':'failed','S':'skipped','s':'skipped'}
+for m in task_pattern.finditer(content):
+    deps_raw = m.group(4) or ""
+    deps = [d.strip() for d in deps_raw.split(",") if d.strip().startswith("T")]
+    ann = parse_annotations(m.group(3))
+    tasks.append({
+        "id": m.group(2),
+        "status": status_map.get(m.group(1), "todo"),
+        "phase": phase_for(m.start()),
+        "depends_on": deps,
+        **ann,
+    })
+
+print(json.dumps(tasks, indent=2))
+PYEOF
+)
 # Export for RALPH context extraction in Step 5.5b
 export TASKS_JSON
 ```
@@ -226,7 +280,7 @@ If `--dry-run`, print the selected task and exit 0:
 ║ Task:     T042                                            ║
 ║ Phase:    Phase 3: User Story 1 — Launch Form             ║
 ║ Model:    sonnet / thinking: med                          ║
-║ Agent:    engineering/backend-engineer                    ║
+║ Agent:    backend-architect                               ║
 ║ US:       US1                                             ║
 ║ Depends:  T010, T011                                      ║
 ║ Desc:     Implement POST /api/onboarding/start in ...     ║
@@ -236,7 +290,7 @@ If `--dry-run`, print the selected task and exit 0:
 ### Step 5: Spawn the sub-agent
 
 **Executor selection (v1.4.0):**
-- **Default (ruflo MCP swarm):** `mcp__ruflo__swarm_init` + `mcp__ruflo__agent_spawn` (role registration) + native `Task()` calls (execution) + `SendMessage` (pipeline handoffs). Ruflo adds coordination, memory, and model routing on top of native Task execution. `workflow_execute` is NOT used — see v1.4.0 note below.
+- **Default (ruflo MCP swarm):** spawn via `mcp__ruflo__swarm_init` + `mcp__ruflo__task_create` + `mcp__ruflo__workflow_execute`. Supports parallel `[P]` groups, model-per-agent routing, and dependency-aware workflow steps.
 - **Pre-flight check (v1.4.0 — auto mode):** When `RUFLO_REQUIRED=auto` (default), call `mcp__ruflo__swarm_status` once before the first spawn. If it fails, log `ruflo_unavailable` and **auto-switch to native parallel** — no exit, no user prompt. If `RUFLO_REQUIRED=1`, hard-fail on unreachable (legacy strict mode).
 - **Native parallel fallback:** Active when ruflo is unavailable or `RUFLO_REQUIRED=0`. Runs [P] groups as concurrent Agent calls and respects `[model:]` annotations. See "Native Agent path" below.
 
@@ -262,7 +316,7 @@ Algorithm per executable batch:
 
 Agent tool params per task:
 - `model`: task's `[model:]` annotation (haiku/sonnet/opus/fable)
-- `subagent_type`: `general-purpose` (v1; `[agent:]` is informational until mapped in v2)
+- `subagent_type`: exact agent label when available, otherwise `general-purpose`
 - `description`: task ID + first 3 description words
 - `prompt`: template below
 
@@ -274,12 +328,9 @@ Agent tool params per task:
 > + `SendMessage` for pipeline handoffs. `workflow_create/execute` is a secondary API surface.
 > `task_create` is for tracking only, not spawning.
 
-**Step A — session start + initial memory prime:**
+**Step A — memory prime (MANDATORY before first spawn):**
 ```
-# Fire session-start hook (background workers, intelligence init)
-mcp__ruflo__hooks_session-start({ context: "spec:" + SPEC_ID })
-
-# Initial broad search — injected into all sub-agent prompts this session
+# Required per Ruflo docs: search for prior patterns before every task run
 priorPatterns = mcp__ruflo__memory_search({
   query: "spec " + SPEC_ID + " feature implementation",
   limit: 5
@@ -301,14 +352,72 @@ swarmId = mcp__ruflo__swarm_init({
 #    Explicit haiku/opus/fable annotations always win — only sonnet defaults get routed.
 #    fable not in Ruflo enum → use sonnet in Ruflo path (fable supported via native Agent).
 COGNITIVE_MAP = {
-  "engineering/backend-engineer":  "convergent",
-  "engineering/frontend-engineer": "convergent",
-  "engineering/full-stack":        "convergent",
-  "analysis-research":             "divergent",
-  "security":                      "critical",
-  "architecture":                  "systems",
-  "debugging":                     "lateral",
-  "documentation":                 "convergent",
+  "ecc:tdd-guide":                 "convergent",
+  "ecc:code-reviewer":             "critical",
+  "ecc:architect":                 "systems",
+  "ecc:spec-miner":                "divergent",
+  "ecc:doc-updater":               "convergent",
+  "ecc:build-error-resolver":      "lateral",
+  "ecc:silent-failure-hunter":     "lateral",
+  "ecc:refactor-cleaner":          "convergent",
+  "ecc:pr-test-analyzer":          "divergent",
+  "ecc:agent-evaluator":           "systems",
+  "ecc:comment-analyzer":          "divergent",
+  "ecc:conversation-analyzer":     "divergent",
+  "ecc:loop-operator":             "systems",
+  "ecc:harness-optimizer":         "systems",
+  "ecc:seo-specialist":            "convergent",
+  "backend-architect":             "systems",
+  "graphql-architect":             "systems",
+  "frontend-developer":            "convergent",
+  "ui-ux-designer":                "convergent",
+  "ui-designer":                   "convergent",
+  "accessibility-expert":          "critical",
+  "ui-visual-validator":           "convergent",
+  "test-automator":                "convergent",
+  "security-auditor":              "critical",
+  "backend-security-coder":        "critical",
+  "frontend-security-coder":       "critical",
+  "typescript-pro":                "convergent",
+  "javascript-pro":                "convergent",
+  "python-pro":                    "convergent",
+  "fastapi-pro":                   "convergent",
+  "django-pro":                    "convergent",
+  "java-pro":                      "convergent",
+  "golang-pro":                    "convergent",
+  "rust-pro":                      "convergent",
+  "csharp-pro":                    "convergent",
+  "php-pro":                       "convergent",
+  "sql-pro":                       "systems",
+  "database-architect":            "systems",
+  "database-optimizer":            "systems",
+  "database-admin":                "systems",
+  "performance-engineer":          "systems",
+  "debugger":                      "lateral",
+  "error-detective":               "lateral",
+  "incident-responder":            "critical",
+  "deployment-engineer":           "systems",
+  "cloud-architect":               "systems",
+  "kubernetes-architect":          "systems",
+  "terraform-specialist":          "systems",
+  "observability-engineer":        "systems",
+  "network-engineer":              "systems",
+  "docs-architect":                "convergent",
+  "api-documenter":                "convergent",
+  "reference-builder":             "convergent",
+  "reverse-engineer":              "divergent",
+  "context-manager":               "systems",
+  "prompt-engineer":               "divergent",
+  "business-analyst":              "divergent",
+  "sales-automator":               "convergent",
+  "customer-support":              "convergent",
+  "seo-meta-optimizer":            "convergent",
+  "mobile-developer":              "convergent",
+  "ios-developer":                 "convergent",
+  "flutter-expert":                "convergent",
+  "flutter-reviewer":              "critical",
+  "react-reviewer":                "critical",
+  "vue-reviewer":                  "critical",
 }
 for (role, annotatedModel) in unique_role_model_pairs:
   // Resolve effective model: route only when annotation is default sonnet
@@ -338,27 +447,12 @@ Ruflo's canonical orchestration runs named agents concurrently via the native Ta
 uses `SendMessage` for pipeline handoffs. This is the same mechanism the native parallel path
 uses — Ruflo adds tracking and memory on top.
 
-**Pre-spawn per task: hooks + memory + effort + DAA (v1.5.0)**
+**Pre-spawn per task: effort correlation + DAA (v1.5.0)**
 
-Before spawning each task:
+Before spawning each task, resolve the effective model + thinking tier:
 
 ```
-# 1. Fire pre-task hook (automated learning, coverage routing, intelligence update)
-mcp__ruflo__hooks_pre-task({
-  taskId: task.id,
-  description: task.description,
-  phase: task.phase_n,
-  spec: SPEC_ID
-})
-
-# 2. Per-task memory search (docs: "before EVERY task" — not just session start)
-taskPatterns = mcp__ruflo__memory_search({
-  query: task.description + " spec:" + SPEC_ID,
-  limit: 3
-})
-# Merge with session-level priorPatterns; inject both into sub-agent prompt
-
-# 3. Resolve effective model + thinking tier
+# Look up effectiveModel registered for this task's role in Step B (roleModelMap built there)
 effectiveModel = roleModelMap[task.agent] || task.model
 
 # Effort correlation: align thinking budget with the resolved model tier.
@@ -418,18 +512,9 @@ mcp__ruflo__task_create({
 })
 ```
 
-**Step E — post-task hook + store successful patterns (MANDATORY after each success):**
+**Step E — store successful patterns (MANDATORY after each success):**
 ```
-# 1. Fire post-task hook (automated learning, background workers, intelligence update)
-mcp__ruflo__hooks_post-task({
-  taskId: task.id,
-  outcome: "success",
-  spec: SPEC_ID,
-  model: task.model,
-  phase: task.phase_n
-})
-
-# 2. Persist to memory + agentdb (hooks don't replace explicit storage — both run)
+# Required per Ruflo docs: store pattern after every successful task
 mcp__ruflo__memory_store({
   content: "spec " + SPEC_ID + " " + task.id + ": " + task.description + " [SUCCESS]",
   namespace: "patterns",
@@ -457,7 +542,7 @@ mcp__ruflo__task_orchestrate({
 | `[model:X]`             | `model: X` on Task() + `agent_spawn` (per role)      |
 | `[model:fable]`         | Falls back to `sonnet` in Ruflo router               |
 | `[thinking:Y]`          | Injected into sub-agent prompt thinking budget line  |
-| `[agent:dept/role]`     | `agentType` on `agent_spawn`; `subagent_type` on Task|
+| `[agent:exact-agent]`   | `agentType` on `agent_spawn`; `subagent_type` on Task|
 | `[qa:dim1,dim2]`        | Tag `qa:dim1,dim2` read by QA phase gate             |
 | `Depends-on: T###`      | Dependency ordering enforced before Task() spawn     |
 | Phase heading           | `SendMessage` pipeline stage boundary                |
@@ -466,10 +551,7 @@ mcp__ruflo__task_orchestrate({
 
 | Tool | When |
 |---|---|
-| `mcp__ruflo__hooks_session-start` | Once at session start — init background workers + intelligence |
-| `mcp__ruflo__hooks_pre-task` | Before EVERY task spawn — learning + coverage routing |
-| `mcp__ruflo__hooks_post-task` | After EVERY task completes — automated learning + pattern capture |
-| `mcp__ruflo__memory_search` | Before EVERY task — reuse prior patterns (per-task, not just session) |
+| `mcp__ruflo__memory_search` | Before EVERY task — reuse prior patterns |
 | `mcp__ruflo__memory_store` | After EVERY success — build knowledge base |
 | `mcp__ruflo__neural_train` | After 10+ stored patterns — improve model |
 | `mcp__ruflo__agentdb_pattern-search` | Find prior agent solutions by semantic query |
@@ -562,8 +644,7 @@ Allocate {thinking} effort. {thinking_guidance}
 2. Execute THIS task only — no scope creep, no "while I'm here" cleanups
 3. If the task involves tests, write them first (RED), then implement (GREEN), then verify
 4. Follow TDD rules from CLAUDE.md
-5. If the task has a `Run: /skill-name` line, invoke that skill via the Skill tool (`Skill("skill-name")`) — do NOT try to reimplement the skill's logic manually
-6. Report at the end: SUCCESS with a one-line summary, or FAILURE with what you tried and what blocked you
+5. Report at the end: SUCCESS with a one-line summary, or FAILURE with what you tried and what blocked you
 
 ## Absolute rules
 - Do NOT modify tasks.md (the orchestrator handles that)
@@ -626,17 +707,14 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    broadcast; the hive aggregates verdicts across all agents before declaring pass/fail.
 
    ```
-   # Detect /design-html tasks in this phase (before hive init)
-   PHASE_HAS_DESIGN_HTML=$(grep -A5 "^## Phase ${CURRENT_PHASE}" "$SPEC_DIR/tasks.md" 2>/dev/null | grep -c '/design-html' || echo "0")
-
-   # Init hive-mind for this phase's QA (3-agent core swarm; design review runs after, in orchestrator)
+   # Init hive-mind for this phase's QA
    hiveId = mcp__ruflo__hive-mind_init({
      name: "qa-phase-" + CURRENT_PHASE + "-spec-" + SPEC_ID,
      consensusThreshold: 0.67,    // 2-of-3 required
      maxAgents: 3
    })
 
-   # Spawn 3 core QA agents concurrently
+   # Spawn 3 named agents concurrently (one per dimension)
    Task({ name: "qa-e2e",      model: "sonnet", run_in_background: true,
           prompt: QA_E2E_PROMPT })
    Task({ name: "qa-review",   model: "sonnet", run_in_background: true,
@@ -658,13 +736,6 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    })
    # verdict.result: "pass" | "fail" | "inconclusive"
    # verdict.details: per-dimension breakdown
-
-   # qa-design: orchestrator-level (Skill tool not available inside ruflo agents)
-   # Runs AFTER hive consensus, only when this phase had /design-html tasks
-   if (PHASE_HAS_DESIGN_HTML > 0 && verdict.result === "pass") {
-     Skill("design-review")   // visual audit of HTML produced in this phase
-     // design-review failure → same RALPH retry loop as hive failure
-   }
    ```
 
    Fallback to `bash scripts/qa-swarm.sh` if hive-mind MCP unavailable.
@@ -673,7 +744,6 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    - **qa-e2e** (sonnet) — browser tests via $B if dev server detected (`curl -sf localhost:3000`)
    - **qa-review** (sonnet) — code review on the diff (CRITICAL/HIGH = fail)
    - **qa-security** (sonnet) — OWASP scan on the diff (CRITICAL = fail)
-   - **qa-design** (orchestrator Skill call) — `/design-review` on HTML from `/design-html` tasks; runs after hive consensus, only if phase has `/design-html` tasks (Skill tool not available inside ruflo agents)
 
 3. **Aggregation**: ALL dimensions must pass (or hive verdict = "pass"). Any failure triggers:
    - Capture artifacts to `.ralph/P{N}/` (logs, screenshots, diff)
@@ -894,7 +964,7 @@ h=$(grep -c '\[model:haiku' "$TASKS_FILE" || echo 0)
 sm=$(grep -c '\[model:sonnet thinking:med' "$TASKS_FILE" || echo 0)
 sh=$(grep -c '\[model:sonnet thinking:high' "$TASKS_FILE" || echo 0)
 o=$(grep -c '\[model:opus' "$TASKS_FILE" || echo 0)
-echo "Estimated cost: \$$(FILE="$TASKS_FILE" python3 "$DISPATCH" cost)"
+echo "Estimated cost: \$$(python3 -c "print(f'{$h*0.02 + $sm*0.30 + $sh*0.60 + $o*2.00:.2f}')")"
 ```
 
 Display and prompt for confirmation only when `AUTO_MODE=0` (`--no-auto` flag). In default auto mode, print the estimate but proceed without waiting.

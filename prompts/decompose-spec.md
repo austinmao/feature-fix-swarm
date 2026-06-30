@@ -51,7 +51,7 @@ Single file: `specs/NNN-feature-name/tasks.md`
 ## Task line format (strict)
 
 ```
-- [ ] T### [P?] [US?] [model:X thinking:Y] [agent:dept/role] Description with `exact/file/path.ext`
+- [ ] T### [P?] [US?] [model:X thinking:Y] [agent:exact-agent] Description with `exact/file/path.ext`
 ```
 
 Components in order:
@@ -64,7 +64,7 @@ Components in order:
 | `[USn]` | if user-story phase | `[US1]` | Ties to spec.md user story priority; NO story label for Setup/Foundational/Integration/QA phases |
 | `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus`; Codex: `gpt-5.3-codex-spark` \| `gpt-5.4` \| `gpt-5.5` |
 | `[thinking:Y]` | yes | `[thinking:med]` | `low` \| `med` \| `high` \| `max` — thinking budget for implementer |
-| `[agent:dept/role]` | yes | `[agent:engineering/backend-engineer]` | Human-readable routing hint; normalize to Ruflo roles when delegating |
+| `[agent:exact-agent]` | yes | `[agent:ecc:tdd-guide]` | Exact label from the hybrid ECC + wshobson catalog; keep it stable |
 | Description | yes | `Implement POST /api/auth in `web/src/app/api/auth/route.ts`` | Concrete action + backticked file path from repo root |
 
 Append an optional second line for dependencies:
@@ -85,28 +85,69 @@ Two-space indent, `Depends-on:` prefix, comma-separated task IDs. Omit if no ups
 
 **Default to the middle tier for the current host** (`sonnet/med` on Claude Code, `gpt-5.4/med` on Codex). Escalate only with justification (add a one-line comment above the task if escalating to the highest tier or `thinking:max`).
 
-## Agent routing (department/role)
+## Agent routing (hybrid catalog)
 
-Use routes that match existing `.claude/agents/` or your project's agent catalog:
+Use the most specific exact agent label available. Prefer ECC for TDD, review, architecture, cleanup, and analysis; prefer wshobson specialists for implementation, debugging, UI/UX, infra, docs, and language-specific work.
 
-- `executive/cto`, `executive/ceo`
-- `engineering/backend-engineer`, `engineering/frontend-engineer`, `engineering/devops-engineer`
-- `quality/qa-engineer`, `quality/security-auditor`
-- `design/ui-designer`, `design/brand-designer`
-- `marketing/copywriter`, `marketing/funnel-architect`
+### Preferred mappings
 
-If the task doesn't map cleanly, use `engineering/backend-engineer` as default.
+| Need | Exact agent label | Use for |
+|---|---|---|
+| Test-first decomposition | `ecc:tdd-guide` | RED test tasks, TDD ordering, coverage work |
+| Code review / quality gate | `ecc:code-reviewer` | Diff review, lint/consistency review, refactor safety |
+| Broad architecture | `ecc:architect` | Cross-cutting design, system boundaries, coupling |
+| Spec extraction | `ecc:spec-miner` | Pulling user stories and requirements from sparse inputs |
+| Docs cleanup | `ecc:doc-updater` | Editing reference docs and release notes |
+| Build/test failure triage | `ecc:build-error-resolver` | CI breakage, toolchain failures |
+| Silent failures / flaky behavior | `ecc:silent-failure-hunter` | Intermittent or non-deterministic regressions |
+| Refactor / cleanup | `ecc:refactor-cleaner` | Mechanical cleanup after the main fix lands |
+| Backend API architecture | `backend-architect` | Service boundaries, backend module layout, API shape |
+| GraphQL APIs | `graphql-architect` | Schema design, resolvers, GraphQL boundaries |
+| Frontend implementation | `frontend-developer` | UI code, React components, page wiring |
+| UI/UX design | `ui-ux-designer` | Interaction design, flow polish, layout decisions |
+| Accessibility | `accessibility-expert` | WCAG, keyboard nav, screen-reader behavior |
+| Visual verification | `ui-visual-validator` | Pixel/visual regression and layout sanity checks |
+| Browser automation | `test-automator` | Playwright-style E2E and browser workflows |
+| Security review | `ecc:security-reviewer` | Secure-by-default review, auth/data-handling checks |
+| Security audit | `security-auditor` | Independent audit pass, threat modeling, security review |
+| Security-coded implementation | `backend-security-coder` | Safer backend changes in auth/data paths |
+| Frontend security-coded implementation | `frontend-security-coder` | Safer UI/input handling changes |
+| TypeScript | `typescript-pro` | TS services, app code, utility layers |
+| JavaScript | `javascript-pro` | JS glue, runtime scripts, lightweight app code |
+| Python | `python-pro` | Python scripts, automation, backend utilities |
+| FastAPI | `fastapi-pro` | FastAPI routes, dependencies, request/response models |
+| Django | `django-pro` | Django views, ORM, admin, middleware |
+| Java | `java-pro` | JVM services and tooling |
+| Go | `golang-pro` | Go services, CLIs, and platform code |
+| Rust | `rust-pro` | Rust systems code and performance-sensitive paths |
+| C# | `csharp-pro` | .NET services and tooling |
+| PHP | `php-pro` | PHP services and legacy app support |
+| SQL / data | `sql-pro` | Query design, schema-aware SQL, data work |
+| Database schema | `database-architect` | Schema changes, tables, relationships, migrations |
+| Query tuning | `database-optimizer` | Slow queries, indexing, execution plans |
+| Database admin | `database-admin` | Backups, permissions, maintenance, operational tasks |
+| Performance work | `performance-engineer` | Profiling, latency, throughput, resource use |
+| Debugging | `debugger` | Reproducing and isolating bugs fast |
+| Production incidents | `incident-responder` | Live incident triage and recovery |
+| Deep bug hunting | `error-detective` | Stack traces, heisenbugs, non-obvious regressions |
+| Deployment / release engineering | `deployment-engineer` | Ship pipeline, rollout logic, deployment scripts |
+| Cloud architecture | `cloud-architect` | Infra boundaries and cloud services |
+| Kubernetes | `kubernetes-architect` | K8s manifests, deployments, service topology |
+| Terraform | `terraform-specialist` | IaC, providers, state, modules |
+| Observability | `observability-engineer` | Logs, metrics, traces, alerting |
+| Networking | `network-engineer` | Routing, connectivity, proxies, DNS, transport |
+| Docs architecture | `docs-architect` | Doc site structure, docs IA, canonical narrative flow |
+| API docs | `api-documenter` | OpenAPI/spec docs, request/response examples |
+| Reference docs | `reference-builder` | Long-form references and canonical docs |
+| Reverse engineering | `reverse-engineer` | Understanding opaque or legacy code paths |
+| Context synthesis | `context-manager` | Cross-file summarization and context packing |
+| Prompting / delegation | `prompt-engineer` | Crafting prompts and agent instructions |
+| Business analysis | `business-analyst` | Requirements, tradeoffs, and priority framing |
+| Sales automation | `sales-automator` | Pipeline automation and outbound workflows |
+| Customer support | `customer-support` | User-facing support flows and replies |
+| SEO metadata | `seo-meta-optimizer` | Metadata, titles, descriptions, search snippets |
 
-When routing through Ruflo, normalize `agent:` to this stable role set before spawning:
-
-- `coordinator`
-- `architect`
-- `researcher`
-- `coder`
-- `tester`
-- `reviewer`
-
-Prefer `architect` for cross-cutting design, `coder` for implementation, `tester` for QA and regression work, `reviewer` for diff/code-review work, `researcher` for evidence gathering, and `coordinator` when the task only sequences other agents.
+If the task does not map cleanly, choose the nearest specialist above rather than a generic label. If you are unsure between two adjacent roles, prefer the one that matches the file type or artifact being changed.
 
 ## Explicit E2E artifact policy
 
@@ -138,15 +179,15 @@ For each user story phase, structure internally as:
 **Independent test:** <how you verify this story works standalone>
 
 ### Tests for User Story 1 (RED — write first, must fail)
-- [ ] T### [P] [US1] [model:sonnet thinking:med] [agent:quality/qa-engineer] Write unit test for...
-- [ ] T### [P] [US1] [model:sonnet thinking:med] [agent:quality/qa-engineer] Write integration test for...
+- [ ] T### [P] [US1] [model:sonnet thinking:med] [agent:ecc:tdd-guide] Write unit test for...
+- [ ] T### [P] [US1] [model:sonnet thinking:med] [agent:test-automator] Write integration test for...
 
 ### Implementation for User Story 1 (GREEN — make tests pass)
-- [ ] T### [US1] [model:sonnet thinking:med] [agent:engineering/backend-engineer] Implement...
+- [ ] T### [US1] [model:sonnet thinking:med] [agent:backend-architect] Implement...
       Depends-on: T### (the failing test)
 
 ### Dev QA for User Story 1
-- [ ] T### [US1] [model:sonnet thinking:high] [agent:quality/qa-engineer] Manual dogfood on localhost: happy path + 2 edge cases
+- [ ] T### [US1] [model:sonnet thinking:high] [agent:ui-visual-validator] Manual dogfood on localhost: happy path + 2 edge cases
 ```
 
 TDD is non-negotiable: tests come before implementation. Implementation tasks have `Depends-on:` line naming their test tasks.
