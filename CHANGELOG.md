@@ -8,6 +8,14 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.10.0 — Codex Ruflo discovery and live MCP pre-flight (2026-07-01)
+
+### Fixed
+
+- **`skills/feature-implement/SKILL.md`** — Ruflo pre-flight now uses `mcp__ruflo__mcp_status` instead of the stale `swarm_status` probe. Codex runs now explicitly lazy-load Ruflo tools via tool discovery before deciding Ruflo is unavailable.
+- **`skills/swarm/SKILL.md`** — ad-hoc swarms now document Codex lazy tool discovery before falling back away from Ruflo.
+- **`docs/commands.md`** — documents `mcp_status` as the Ruflo health check and calls out Codex lazy tool discovery.
+
 ## v3.6.0 — hybrid exact-agent routing and installer freshness checks (2026-06-30)
 
 ### Changed

@@ -71,6 +71,8 @@ No spec pipeline. No tasks.md prerequisite. No `specs/NNN/` directory.
 All LLM execution uses the native `Task()` tool (Claude Code OAuth — no per-token API cost).
 Ruflo tools used: `swarm_init`, `agent_spawn` (metadata only), `memory_*`, `agentdb_*`, `hooks_*`, `task_create` (tracking only), `neural_train`.
 
+In Codex sessions, Ruflo tools may be lazy-loaded. If `mcp__ruflo__swarm_init` or `mcp__ruflo__agent_spawn` is not visible, use tool discovery for `ruflo swarm_init agent_spawn mcp_status` before declaring Ruflo unavailable. A worktree without the project `.codex/config.toml` can also miss the Ruflo MCP registration; run from the repo root or copy the project MCP config into that worktree.
+
 ---
 
 ## Workflow
@@ -203,18 +205,20 @@ Default to sonnet when no clear signal.
 
 | Domain keyword signals                                                      | Agent type                  | Model note          |
 |-----------------------------------------------------------------------------|-----------------------------|---------------------|
-| test, TDD, spec, unit test, integration test, coverage, jest, pytest        | ecc:tdd-guide               | —                   |
-| TypeScript, TS, .tsx, React hook, type system, frontend component           | ecc:typescript-reviewer     | —                   |
-| Python, Django, FastAPI, async Python, .py file                             | ecc:python-reviewer         | —                   |
-| security, auth, OAuth, OWASP, vulnerability, CVE, pen test                  | ecc:security-reviewer       | FORCE opus          |
-| code review, PR review, quality, conventions, lint rules                    | ecc:code-reviewer           | —                   |
-| architecture, ADR, system design, data model, service boundary              | ecc:architect               | FORCE opus          |
-| cleanup, dead code, remove unused, simplify, rename, small refactor         | ecc:refactor-cleaner        | prefer haiku        |
-| build error, CI failure, dependency conflict, compile error                 | ecc:build-error-resolver    | prefer haiku        |
-| performance, latency, throughput, bottleneck, profiling, caching            | ecc:performance-optimizer   | —                   |
-| Next.js, React page, component, landing page, CSS, Tailwind, UI             | nextjs-frontend-engineer    | —                   |
+| test, TDD, spec, unit test, coverage, jest, pytest                         | openclaw-tdd-engineer       | —                   |
+| integration test, e2e, non-TDD test expansion                              | tester                      | —                   |
+| browser QA, email HTML QA, visual regression, accessibility                 | qa-engineer                 | —                   |
+| TypeScript, TS, .tsx, React hook, type system, frontend component           | frontend-engineer           | —                   |
+| Python, Django, FastAPI, async Python, .py file                             | python-reviewer             | —                   |
+| security, auth, OAuth, OWASP, vulnerability, CVE, pen test                  | security-reviewer           | FORCE opus          |
+| code review, PR review, quality, conventions, lint rules                    | reviewer                    | —                   |
+| architecture, ADR, system design, data model, service boundary              | system-architect            | FORCE opus          |
+| cleanup, dead code, remove unused, simplify, rename, small refactor         | refactor-cleaner            | prefer haiku        |
+| build error, CI failure, dependency conflict, compile error                 | build-error-resolver        | prefer haiku        |
+| performance, latency, throughput, bottleneck, profiling, caching            | performance-engineer        | —                   |
+| Next.js, React page, component, landing page, CSS, Tailwind, UI             | frontend-engineer           | —                   |
 | API route, server action, Prisma, backend endpoint, server-side             | nextjs-backend-engineer     | —                   |
-| SQL, migration, schema, query, index, PostgreSQL, Supabase, DB              | ecc:database-reviewer       | —                   |
+| SQL, migration, schema, query, index, PostgreSQL, Supabase, DB              | database-reviewer           | —                   |
 | (no domain match)                                                           | general-purpose             | —                   |
 
 "FORCE opus" = set [model:opus] regardless of complexity signals.
@@ -248,7 +252,7 @@ When in doubt, omit [P].
 ## After writing tasks.md
 
 Print exactly ONE JSON line to stdout (the caller parses this):
-CLASSIFY_RESULT: {"tasks":N,"parallel":K,"models":{"haiku":H,"sonnet":S,"opus":O,"fable":F},"agents":{"ecc:tdd-guide":N}}
+CLASSIFY_RESULT: {"tasks":N,"parallel":K,"models":{"haiku":H,"sonnet":S,"opus":O,"fable":F},"agents":{"openclaw-tdd-engineer":N}}
 
 Then stop.
 ```
@@ -326,7 +330,7 @@ fi
 # ── Pre-flight: check if Ruflo is available ───────────────────────────────────
 USE_RUFLO = True
 try:
-    mcp__ruflo__swarm_status()
+    mcp__ruflo__mcp_status()
 except Exception:
     USE_RUFLO = False
     log({"event": "ruflo_unavailable", "fallback": "native_parallel"})
@@ -612,18 +616,20 @@ Cost formula: `haiku×$0.02 + sonnet×$0.30 + opus×$2.00 + fable×$0.50`
 
 | Agent type | Domain | Default model |
 |---|---|---|
-| `ecc:tdd-guide` | test, TDD, coverage | sonnet |
-| `ecc:typescript-reviewer` | TypeScript, React, .tsx | sonnet |
-| `ecc:python-reviewer` | Python, Django, FastAPI | sonnet |
-| `ecc:security-reviewer` | security, auth, CVE | **opus** |
-| `ecc:code-reviewer` | PR review, quality | sonnet |
-| `ecc:architect` | architecture, ADR | **opus** |
-| `ecc:refactor-cleaner` | cleanup, dead code | haiku |
-| `ecc:build-error-resolver` | CI failures, build errors | haiku |
-| `ecc:performance-optimizer` | perf, profiling | sonnet |
+| `openclaw-tdd-engineer` | test, TDD, coverage | sonnet |
+| `tester` | integration, e2e, non-TDD test expansion | sonnet |
+| `qa-engineer` | browser/email QA, visual regression, accessibility | sonnet |
+| `frontend-engineer` | TypeScript, React, .tsx | sonnet |
+| `python-reviewer` | Python, Django, FastAPI | sonnet |
+| `security-reviewer` | security, auth, CVE | **opus** |
+| `reviewer` | PR review, quality | sonnet |
+| `system-architect` | architecture, ADR | **opus** |
+| `refactor-cleaner` | cleanup, dead code | haiku |
+| `build-error-resolver` | CI failures, build errors | haiku |
+| `performance-engineer` | perf, profiling | sonnet |
 | `nextjs-frontend-engineer` | Next.js, React UI | sonnet |
 | `nextjs-backend-engineer` | API routes, Prisma | sonnet |
-| `ecc:database-reviewer` | SQL, schema, migrations | sonnet |
+| `database-reviewer` | SQL, schema, migrations | sonnet |
 | `general-purpose` | catch-all | sonnet |
 
 ---

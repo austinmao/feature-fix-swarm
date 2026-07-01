@@ -102,7 +102,7 @@ for arg in "${_SPEC_ARGS[@]}"; do
 done
 
 # RUFLO_REQUIRED controls executor selection:
-#   "auto" (default): pre-flight mcp__ruflo__swarm_status; if unreachable → auto-switch to native parallel
+#   "auto" (default): pre-flight mcp__ruflo__mcp_status; if unreachable → auto-switch to native parallel
 #   "0"             : skip pre-flight, force native parallel Agent path immediately
 #   "1"             : hard-fail if ruflo unreachable (legacy strict mode)
 if [ "$RUFLO_REQUIRED" = "0" ]; then
@@ -290,8 +290,9 @@ If `--dry-run`, print the selected task and exit 0:
 ### Step 5: Spawn the sub-agent
 
 **Executor selection (v1.4.0):**
-- **Default (ruflo MCP swarm):** spawn via `mcp__ruflo__swarm_init` + `mcp__ruflo__task_create` + `mcp__ruflo__workflow_execute`. Supports parallel `[P]` groups, model-per-agent routing, and dependency-aware workflow steps.
-- **Pre-flight check (v1.4.0 — auto mode):** When `RUFLO_REQUIRED=auto` (default), call `mcp__ruflo__swarm_status` once before the first spawn. If it fails, log `ruflo_unavailable` and **auto-switch to native parallel** — no exit, no user prompt. If `RUFLO_REQUIRED=1`, hard-fail on unreachable (legacy strict mode).
+- **Default (ruflo MCP swarm):** `mcp__ruflo__swarm_init` + `mcp__ruflo__agent_spawn` (role registration) + native `Task()` calls (execution) + `SendMessage` (pipeline handoffs). Ruflo adds coordination, memory, and model routing on top of native Task execution. `workflow_execute` is NOT used — see v1.4.0 note below.
+- **Codex tool discovery:** If this is a Codex session and Ruflo tools are not visible, first use tool discovery for `ruflo swarm_init agent_spawn mcp_status`. Codex lazy-loads MCP tools; absence before discovery is not proof that Ruflo is unavailable.
+- **Pre-flight check (v1.4.1 — auto mode):** When `RUFLO_REQUIRED=auto` (default), call `mcp__ruflo__mcp_status` once before the first spawn. If it fails, log `ruflo_unavailable` and **auto-switch to native parallel** — no exit, no user prompt. If `RUFLO_REQUIRED=1`, hard-fail on unreachable (legacy strict mode). Do not probe `swarm_status`; current Ruflo exposes `mcp_status`, `swarm_init`, and `agent_spawn`.
 - **Native parallel fallback:** Active when ruflo is unavailable or `RUFLO_REQUIRED=0`. Runs [P] groups as concurrent Agent calls and respects `[model:]` annotations. See "Native Agent path" below.
 
 **Native Agent path (parallel-capable):**
@@ -556,7 +557,7 @@ mcp__ruflo__task_orchestrate({
 | `mcp__ruflo__neural_train` | After 10+ stored patterns — improve model |
 | `mcp__ruflo__agentdb_pattern-search` | Find prior agent solutions by semantic query |
 | `mcp__ruflo__agentdb_pattern-store` | Store reusable agent patterns |
-| `mcp__ruflo__swarm_status` | Pre-flight availability check |
+| `mcp__ruflo__mcp_status` | Pre-flight availability check |
 | `mcp__ruflo__task_orchestrate` | Simple alternative to full swarm init |
 | `mcp__ruflo__hive-mind_init` | Byzantine fault-tolerant consensus (high-stakes tasks) |
 | `mcp__ruflo__memory_search_unified` | Cross-namespace search (patterns + tasks + feedback) |
@@ -566,7 +567,7 @@ mcp__ruflo__task_orchestrate({
 **Pre-flight failure (RUFLO_REQUIRED=auto, default):**
 1. Log `ruflo_unavailable` to `$LOG_FILE`:
    ```json
-   {"timestamp":"<ISO>","event":"ruflo_unavailable","tool":"mcp__ruflo__swarm_status","error":"<msg>","fallback":"native_parallel"}
+   {"timestamp":"<ISO>","event":"ruflo_unavailable","tool":"mcp__ruflo__mcp_status","error":"<msg>","fallback":"native_parallel"}
    ```
 2. Print one-line notice: `[feature-implement] INFO: ruflo unreachable — switching to native parallel Agent path.`
 3. Set `USE_RUFLO=0` and continue. No exit.
@@ -579,7 +580,7 @@ mcp__ruflo__task_orchestrate({
 2. Print structured error:
    ```
    [feature-implement] ERROR: ruflo MCP unreachable (RUFLO_REQUIRED=1)
-     tool:    mcp__ruflo__swarm_status
+     tool:    mcp__ruflo__mcp_status
      error:   {message}
      log:     {LOG_FILE}
    Resolve:

@@ -119,12 +119,14 @@ npx ruflo@latest memory search "query"   # Search what was learned
 
 | Scenario | Use |
 |----------|-----|
+| Confirm Ruflo MCP is loaded | `mcp__ruflo__mcp_status` |
 | Spawning 3+ independent sub-agents | `mcp__ruflo__swarm_init` then `mcp__ruflo__agent_spawn` |
 | Check if similar task was done before | `mcp__ruflo__agentdb_pattern-search` |
 | Route task to right model tier | `mcp__ruflo__hooks_model-route` |
 | Store a reusable pattern | `mcp__ruflo__agentdb_pattern-store` |
 
 Ruflo routing is most reliable when task `agent:` values use the hybrid exact-agent catalog before spawning: `ecc:tdd-guide`, `ecc:code-reviewer`, `ecc:architect`, `security-auditor`, `frontend-developer`, `backend-architect`, `python-pro`, `typescript-pro`, `database-architect`, `database-optimizer`, `test-automator`, `debugger`, `error-detective`, `deployment-engineer`, `observability-engineer`, `docs-architect`, `accessibility-expert`.
+In Codex sessions, use tool discovery for `ruflo swarm_init agent_spawn mcp_status` before concluding Ruflo is unavailable; Ruflo tools are lazy-loaded.
 
 ## Reference
 
