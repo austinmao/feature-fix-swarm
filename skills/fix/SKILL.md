@@ -427,6 +427,7 @@ Invoke `/qa` via Skill tool. Full browser-based QA suite to verify the fix didn'
 Skip if `--no-codex-gate` flag was set.
 
 **Why this step exists:** Step 3.5 already runs codex *adversarial* on the fresh fix. Step 5.5 runs the full `/review-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) against the *final post-QA diff* including any retry-loop changes. Single-model review has blind spots; cross-model adversarial review catches CRITICAL issues that pass Claude-only quality gates. Cost: ~$2 + ~13 min — cheap insurance for any fix landing in production blast radius (auth, payments, RLS, multi-tenant, cron).
+The underlying Claude invocation must use the local CLI auth path, not `--bare`; `--bare` disables keychain/OAuth reads and produces a false "Not logged in" error on valid logged-in machines.
 
 **Pre-flight:**
 ```bash

@@ -153,7 +153,7 @@ Run the opposite CLI as the independent adversarial reviewer.
 
 ```bash
 if [ "$REVIEW_BIN" = "claude" ]; then
-  echo "$DIFF" | env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN timeout 480 "$REVIEW_BIN" -p --bare \
+  echo "$DIFF" | env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_API_KEY timeout 480 "$REVIEW_BIN" -p \
     --system "You are an adversarial security and correctness reviewer. Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only." \
     2>/dev/null || echo "[review-gate pass skipped — API error]"
 else

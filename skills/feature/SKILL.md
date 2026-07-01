@@ -671,6 +671,7 @@ Log:
 ### Step 5.7 — /review-gate cross-model review (mandatory)
 
 After per-wedge audits all pass and `/qa` is green, run `/review-gate` for one final cross-model review against the full branch diff. Three passes catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
+The underlying Claude invocation must use the local CLI auth path, not `--bare`; `--bare` disables keychain/OAuth reads and produces a false "Not logged in" error on valid logged-in machines.
 
 ```bash
 # --skip-codex-gate is a hard bypass — review-gate is NOT invoked and the skip
