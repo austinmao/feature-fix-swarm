@@ -672,6 +672,7 @@ Log:
 
 After per-wedge audits all pass and `/qa` is green, run `/review-gate` for one final cross-model review against the full branch diff. Three passes catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
 The underlying Claude invocation must use the local CLI auth path, not `--bare`; `--bare` disables keychain/OAuth reads and produces a false "Not logged in" error on valid logged-in machines.
+If `/review-gate` hangs or times out, the correct result is a structured blocked gate with a timeout reason. Do not narrate the failure in first person or say you "attempted" the adversarial review step.
 
 ```bash
 # --skip-codex-gate is a hard bypass — review-gate is NOT invoked and the skip
