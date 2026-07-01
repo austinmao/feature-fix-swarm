@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
-description: "Decompose an approved feature spec into specs/NNN/tasks.md using Sonnet + the exact-agent hybrid catalog prompt"
-version: "1.0.0"
+description: "Decompose an approved feature spec into specs/NNN/tasks.md using Sonnet + the exact-agent hybrid catalog prompt (haiku/sonnet/opus + optional Claude-Code-native fable)"
+version: "1.1.0"
 allowed-tools:
   - Read
   - Write
@@ -148,6 +148,7 @@ Run `bash scripts/harness-eval.sh $SPEC_ARG` to extract current metrics. Print a
 ║   haiku/low:       XX (boilerplate)                           ║
 ║   sonnet/med:      XX (default)                               ║
 ║   sonnet/high:     XX (complex)                               ║
+║   fable/high:      XX (multi-file narrative coherence, Claude only) ║
 ║   opus/max:        XX (architecture)                          ║
 ║ Depends-on lines:  XX                                         ║
 ║ File path coverage: XX%                                       ║
@@ -164,6 +165,7 @@ Warn if any of:
 - No `[model:]` annotations — sub-agent didn't follow prompt; offer to regenerate
 - No `Depends-on:` lines — TDD ordering likely broken
 - `[model:opus]` outside architecture/debugging phases — probable over-escalation
+- `[model:fable]` on anything but a multi-file narrative/voice-coherence task — probable over-escalation (most tasks belong on `sonnet`; `fable` also downgrades to `sonnet` on the Ruflo path, so it should never be load-bearing for correctness, and has no Codex equivalent)
 - Missing staging/prod/rollback phases — template not followed
 - Fewer than 5 tasks — probably under-decomposed (threshold dropped from 10 based on 2026-04-16 smoke test — 7-task specs are legitimate)
 - More than 60 tasks — feature should be split into multiple specs
