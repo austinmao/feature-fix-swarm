@@ -101,7 +101,12 @@ The implementation layer renders those fields for the current host, but the task
 
 ## Host-aware routing
 
-- Claude Code uses the Claude ladder: `haiku`, `sonnet`, `opus`
+- Claude Code uses the Claude ladder: `haiku`, `sonnet`, `opus`, plus the optional
+  `fable` 4th tier for multi-file narrative-coherence tasks (docs/voice passes
+  spanning several files). `fable` has no Codex equivalent and downgrades to
+  `sonnet` on the Ruflo-coordinated path (Ruflo's model enum is
+  `haiku`\|`sonnet`\|`opus`\|`inherit` only). `/spec-decompose` may emit it, and
+  `/swarm` + `/feature-implement` execute it on the native `Task()` path.
 - Codex OAuth uses the Codex ladder: `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.5`
 - Ruflo consumes normalized roles and task metadata, not host-specific model names
 - Ruflo should be treated as an orchestration backend, not the source of truth
