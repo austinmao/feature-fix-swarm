@@ -8,6 +8,22 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.11.0 — fable tier for multi-file narrative coherence (2026-07-01)
+
+### Added
+
+- **`prompts/decompose-spec.md`** documents `fable` as an optional 4th, Claude-Code-native
+  tier on the model ladder (`haiku` / `sonnet` / `opus` / `fable`), reserved for multi-file
+  narrative/voice-coherence tasks. No Codex equivalent; downgrades to `sonnet` on the
+  Ruflo-coordinated path.
+- **`skills/spec-decompose/SKILL.md`** report box and suspicious-output checks now cover
+  `fable` (distribution line + over-escalation flag, mirroring the existing `opus` check).
+- **`README.md`** Host-aware routing section documents the `fable` tier and its fallback
+  behavior.
+- **`skills/feature/SKILL.md`** and **`skills/fix/SKILL.md`** — `/review-gate` now has an
+  explicit note on the correct behavior when it hangs or times out (structured blocked
+  gate, no first-person narration of the failure).
+
 ## v3.10.0 — Codex Ruflo discovery and live MCP pre-flight (2026-07-01)
 
 ### Fixed
