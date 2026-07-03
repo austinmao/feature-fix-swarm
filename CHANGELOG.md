@@ -8,6 +8,29 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.13.1 — review-gate Pass 2 CLI-flag fix (2026-07-03)
+
+### Fixed
+
+- **`review-gate/SKILL.md` Pass 2 (adversarial, cross-model dispatch)**: both
+  the Claude and Codex branches used a bare `--system` flag that doesn't
+  exist on either CLI (verified against `codex` v0.142.5's and current
+  `claude`'s own `--help`) — the invocation was silently swallowed by its own
+  `|| echo "[...skipped]"` fallback, so Pass 2 has likely never actually run
+  against a current-generation CLI. Fixed:
+  - Claude branch: `--system` → `--system-prompt` (the actual flag name).
+  - Codex branch: `codex review` in this version is agentic against the live
+    repo (it runs its own `git diff` inside its sandbox) rather than a
+    pipe-diff-in/get-text-out tool, and `--base`/`--commit` can't combine
+    with a custom `PROMPT` on this CLI. Rewrote to hand it a natural-language
+    description of the diff scope instead of piping `$DIFF` directly.
+  - Also dropped `--model gpt-5.4` (not a valid `codex review` flag; model
+    override is `-c model=...` and gpt-4o-class models aren't supported on
+    ChatGPT-account plans) — left unset to use the account's default model.
+  - Verified end-to-end: ran the exact committed bash block against a real
+    test diff on both branches, clean exit 0, correct diff scoping, real
+    findings-format output.
+
 ## v3.13.0 — goal-wrap skill + codex-gate hardening (2026-07-03)
 
 ### Added
