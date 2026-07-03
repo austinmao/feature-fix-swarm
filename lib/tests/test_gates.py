@@ -666,3 +666,35 @@ def test_proof_blank_deferral_name_is_no_go(tmp_path) -> None:
                                    deferrals=[bad], residuals_text="")
         assert art["verdict"] == "no-go", f"blank deferral {bad!r} slipped through"
         assert bad in art["unrecorded_deferrals"]
+
+
+def test_proof_residual_for_current_run_must_be_echoed_in_deferrals(tmp_path) -> None:
+    """Codex v3.15 round 6 P1: a current-run residual NOT echoed via --defer
+    must surface (unechoed_residuals) and force no-go — the artifact may not
+    claim go while residuals.md records risk for this run."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    rec = "- [ ] 2026-07-03 live-send: no bot (run run-18)"
+    art = gates.proof_artifact(store, "run-18", ["T100"],
+                               deferrals=[], residuals_text=rec)
+    assert art["verdict"] == "no-go"
+    assert art["unechoed_residuals"] == ["live-send"]
+    ok = gates.proof_artifact(store, "run-18", ["T100"],
+                              deferrals=["live-send: no bot"], residuals_text=rec)
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_write_does_not_follow_symlink(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 6 P2: a pre-planted symlink at the default artifact
+    path must not redirect the write to an arbitrary target file."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    target = tmp_path / "victim.txt"
+    target.write_text("original")
+    link = tmp_path / "proof-run-19.json"
+    link.symlink_to(target)
+    rc = gates.main(["proof", "run-19", "T100"])
+    assert rc == 0
+    assert target.read_text() == "original"          # victim untouched
+    assert json.loads((tmp_path / "proof-run-19.json").read_text())["verdict"] == "go"

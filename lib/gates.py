@@ -377,11 +377,19 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
             # blank/degenerate names are invalid, not silently OK (round 5 P2)
             if not name or name not in recorded_names:
                 unrecorded.append(d)
+        # reverse direction (round 6 P1): a residual recorded for THIS run but
+        # not echoed via --defer would let the artifact claim go while
+        # residuals.md records live risk — surface it and fail the verdict.
+        argv_names = {d.split(":", 1)[0].strip() for d in deferrals or []}
+        unechoed = sorted(recorded_names - argv_names)
+    else:
+        unechoed = []
     # claims must be non-empty: all([]) is True, so an empty proof would
     # otherwise read as go (codex v3.15 round 1 P1).
     go = (bool(claims)
           and not missing
           and not unrecorded
+          and not unechoed
           and all(c["exit_code"] == 0 for c in claims)
           and (not strict or all(c["kind"] == "live" for c in claims)))
     return {
@@ -392,6 +400,7 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
         "missing": missing,
         "deferrals": list(deferrals or []),
         "unrecorded_deferrals": unrecorded,
+        "unechoed_residuals": unechoed,
     }
 
 
@@ -545,12 +554,24 @@ def main(argv: list[str]) -> int:
         safe_run = re.sub(r"[^A-Za-z0-9._-]", "_", run_id)
         out = Path(ns.out or store.parent / f"proof-{safe_run}.json")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(art, indent=2) + "\n")
+        # temp-file + rename: never follow a pre-planted symlink at the
+        # predictable artifact path (codex round 6 P2) — os.replace swaps the
+        # symlink itself, the target is never written through.
+        fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=".proof-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(art, indent=2) + "\n")
+            os.replace(tmp, out)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
         print(f"PROOF-{art['verdict'].upper()}: {out}")
         for d in art["deferrals"]:
             print(f"  DEFERRED: {d}")
         for d in art["unrecorded_deferrals"]:
             print(f"  DEFERRAL-UNRECORDED (add to {residuals_file}): {d}")
+        for d in art["unechoed_residuals"]:
+            print(f"  RESIDUAL-UNECHOED (pass --defer '{d}: …'): {d}")
         for m in art["missing"]:
             print(f"  MISSING-EVIDENCE: {m}")
         return 0 if art["verdict"] == "go" else 1
