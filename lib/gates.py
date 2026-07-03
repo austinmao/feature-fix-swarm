@@ -357,17 +357,25 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
     # round 2 P2). The deferral's name (text before ':') must appear there.
     unrecorded: list[str] = []
     if residuals_text is not None:
-        # only lines recorded for THIS run count — a stale residual from an
-        # earlier run must not satisfy the current run's record (round 4 P1)
-        run_lines = [ln for ln in residuals_text.splitlines()
-                     if f"(run {run_id})" in ln]
+        # Structural parse of the residual record format
+        #   - [ ] {date} {name}: {reason} (run {run_id})
+        # — free-form mentions of the name inside another record's reason must
+        # not count (round 5 P2), only entries for THIS run count (round 4 P1),
+        # and the name field is compared exactly, never by substring (round 3 P1).
+        recorded_names: set[str] = set()
+        for ln in residuals_text.splitlines():
+            m = re.match(r"^\s*-\s*\[[ xX]\]\s+(?P<field>[^:]+):.*\(run\s+"
+                         + re.escape(run_id) + r"\)\s*$", ln)
+            if not m:
+                continue
+            field = m.group("field").strip()
+            # optional leading date token
+            field = re.sub(r"^\d{4}-\d{2}-\d{2}\s+", "", field)
+            recorded_names.add(field)
         for d in deferrals or []:
             name = d.split(":", 1)[0].strip()
-            # exact-token match, not substring — 'live-send' must not count
-            # as recorded when only 'live-send-old' appears (codex round 3 P1)
-            pat = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
-            recorded = bool(name) and any(pat.search(ln) for ln in run_lines)
-            if name and not recorded:
+            # blank/degenerate names are invalid, not silently OK (round 5 P2)
+            if not name or name not in recorded_names:
                 unrecorded.append(d)
     # claims must be non-empty: all([]) is True, so an empty proof would
     # otherwise read as go (codex v3.15 round 1 P1).

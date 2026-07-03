@@ -637,3 +637,32 @@ def test_cli_proof_rejects_missing_run_id_and_unknown_flags(tmp_path, monkeypatc
     assert gates.main(["proof", "run-15", "T100", "--stric"]) == 2
     assert gates.main(["proof", "run-15", "-h"]) == 2
     assert not list(tmp_path.glob("proof-*.json"))
+
+
+def test_proof_residual_match_is_structural_not_freeform(tmp_path) -> None:
+    """Codex v3.15 round 5 P2: the deferral token appearing in another
+    record's REASON text must not count as a record for that name."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    spoof = "- [ ] 2026-07-03 note: live-send mentioned in passing (run run-16)"
+    art = gates.proof_artifact(store, "run-16", ["T100"],
+                               deferrals=["live-send: reason"],
+                               residuals_text=spoof)
+    assert art["verdict"] == "no-go"
+    real = "- [ ] 2026-07-03 live-send: reason (run run-16)"
+    ok = gates.proof_artifact(store, "run-16", ["T100"],
+                              deferrals=["live-send: reason"],
+                              residuals_text=real)
+    assert ok["verdict"] == "go"
+
+
+def test_proof_blank_deferral_name_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 5 P2: --defer '' / '   ' / ': reason' must be
+    invalid (no-go), not silently dropped."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    for bad in ["", "   ", ": reason"]:
+        art = gates.proof_artifact(store, "run-17", ["T100"],
+                                   deferrals=[bad], residuals_text="")
+        assert art["verdict"] == "no-go", f"blank deferral {bad!r} slipped through"
+        assert bad in art["unrecorded_deferrals"]
