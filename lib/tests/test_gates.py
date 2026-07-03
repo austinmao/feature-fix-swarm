@@ -246,3 +246,198 @@ def test_scan_tamper_flags_deleted_asserts_in_source_files() -> None:
     )
     findings = gates.scan_test_tampering(diff)
     assert any("assert" in f for f in findings), findings
+
+
+# ── v3.14: strict evidence provenance ────────────────────────────────────────
+
+def test_verify_done_strict_rejects_caller_recorded(tmp_path) -> None:
+    """record-gate evidence is trusted-caller; strict mode must reject it."""
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T020", exit_code=0, cmd="pytest -q")
+    assert gates.verify_done(store, "T020") is True          # lax: unchanged
+    assert gates.verify_done(store, "T020", strict=True) is False
+
+
+def test_verify_done_strict_accepts_runner_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    rc = gates.run_gate(store, "T021", ["python3", "-c", "print('ok')"])
+    assert rc == 0
+    assert gates.verify_done(store, "T021", strict=True) is True
+
+
+def test_record_gate_stamps_executed_by_caller(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T022", exit_code=0, cmd="pytest -q")
+    data = json.loads(store.read_text())
+    assert data["T022"]["gate"]["executed_by"] == "caller"
+
+
+def test_cli_record_gate_warns_and_strict_env_rejects(tmp_path) -> None:
+    """CLI: record-gate prints a runtime WARNING; GATES_STRICT=1 makes
+    verify-done reject caller-recorded evidence."""
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "record-gate", "T023",
+                 "--exit", "0", "--cmd", "pytest -q"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert "WARNING" in r.stderr and "run-gate" in r.stderr
+    # lax verify passes
+    r2 = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "verify-done", "T023"],
+                 capture_output=True, text=True, env=env)
+    assert r2.returncode == 0 and "executed_by=caller" in r2.stdout
+    # strict verify rejects
+    env_strict = dict(env, GATES_STRICT="1")
+    r3 = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "verify-done", "T023"],
+                 capture_output=True, text=True, env=env_strict)
+    assert r3.returncode == 1 and "runner" in r3.stdout
+
+
+# ── v3.14: phase truth score (wires previously-dead truth_score) ─────────────
+
+def test_classify_gate_cmd() -> None:
+    assert gates.classify_gate_cmd("pytest -q") == "tests"
+    assert gates.classify_gate_cmd("npx tsc --noEmit") == "typecheck"
+    assert gates.classify_gate_cmd("ruff check .") == "lint"
+    assert gates.classify_gate_cmd("go build ./...") == "compile"
+    assert gates.classify_gate_cmd("something-else") == "tests"  # default
+
+
+def test_phase_score_all_green_is_one(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T030", exit_code=0, cmd="pytest -q")
+    gates.record_gate_evidence(store, "T031", exit_code=0, cmd="ruff check .")
+    score, breakdown = gates.phase_score(store, ["T030", "T031"])
+    assert score == 1.0
+    assert breakdown == {"tests": True, "lint": True}
+
+
+def test_phase_score_failed_category_drops_score(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T032", exit_code=0, cmd="pytest -q")
+    gates.record_gate_evidence(store, "T033", exit_code=1, cmd="ruff check .")
+    score, breakdown = gates.phase_score(store, ["T032", "T033"])
+    assert breakdown == {"tests": True, "lint": False}
+    # normalized: tests .25 / (.25 + .20) ≈ 0.56 — well under threshold
+    assert score < gates.TRUTH_THRESHOLD
+
+
+def test_phase_score_missing_evidence_is_zero(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T034", exit_code=0, cmd="pytest -q")
+    score, breakdown = gates.phase_score(store, ["T034", "T035"])  # T035 has none
+    assert score == 0.0
+    assert "T035" in breakdown.get("missing", [])
+
+
+def test_cli_phase_score_exit_codes(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "record-gate", "T036",
+             "--exit", "0", "--cmd", "pytest -q"], capture_output=True, env=env)
+    r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "phase-score", "T036"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "TRUTH-SCORE 1.00" in r.stdout
+    _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "record-gate", "T037",
+             "--exit", "1", "--cmd", "npx tsc --noEmit"], capture_output=True, env=env)
+    r2 = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "phase-score",
+                  "T036", "T037"], capture_output=True, text=True, env=env)
+    assert r2.returncode == 1  # below 0.95 threshold → rollback signal
+
+
+# ── v3.14: no-progress wired into the store (note-failure) ───────────────────
+
+def test_note_failure_detects_stuck_loop(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_failure(store, "T040", "AssertionError foo.py:12") is False
+    assert gates.note_failure(store, "T040", "AssertionError foo.py:12") is True
+    # a DIFFERENT signature is progress again
+    assert gates.note_failure(store, "T040", "TypeError bar.py:9") is False
+
+
+def test_cli_note_failure_exit_codes(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    a = ["python3", str(DISPATCH_DIR / "gates.py"), "note-failure", "T041",
+         "--sig", "AssertionError foo.py:12"]
+    r1 = _sp.run(a, capture_output=True, text=True, env=env)
+    assert r1.returncode == 0 and "PROGRESS-OK" in r1.stdout
+    r2 = _sp.run(a, capture_output=True, text=True, env=env)
+    assert r2.returncode == 1 and "NO-PROGRESS" in r2.stdout
+
+
+def test_phase_score_strict_ignores_caller_evidence(tmp_path) -> None:
+    """Codex P1 (v3.14 gate round 1): phase-score is the rollback authority —
+    under strict it must not count caller-recorded (forgeable) evidence."""
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T050", exit_code=0, cmd="pytest -q")  # caller
+    score_lax, _ = gates.phase_score(store, ["T050"])
+    assert score_lax == 1.0
+    score_strict, breakdown = gates.phase_score(store, ["T050"], strict=True)
+    assert score_strict == 0.0
+    assert "T050" in breakdown.get("missing", [])
+    # runner evidence still counts under strict
+    gates.run_gate(store, "T051", ["python3", "-c", "print('ok')"])
+    score2, _ = gates.phase_score(store, ["T051"], strict=True)
+    assert score2 == 1.0
+
+
+def test_cli_phase_score_strict_env(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"), GATES_STRICT="1")
+    _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "record-gate", "T052",
+             "--exit", "0", "--cmd", "pytest -q"], capture_output=True, env=env)
+    r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "phase-score", "T052"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1  # caller evidence = unproven under strict
+
+
+def test_note_failure_ignores_blank_signatures(tmp_path) -> None:
+    """Codex round 2 P2: a blank signature must not count — two blanks in a
+    row would otherwise stop the loop with a false NO-PROGRESS."""
+    store = tmp_path / "evidence.json"
+    assert gates.note_failure(store, "T060", "") is False
+    assert gates.note_failure(store, "T060", "") is False   # two identical blanks: NOT stuck
+    assert gates.note_failure(store, "T060", "   ") is False # whitespace-only: same
+    # real signatures still work after blanks
+    assert gates.note_failure(store, "T060", "AssertionError x") is False
+    assert gates.note_failure(store, "T060", "AssertionError x") is True
+
+
+def test_run_gate_stores_failure_signature_lines(tmp_path) -> None:
+    """Codex round 2 P2: the retry key must be the failing lines, not the
+    final summary line (different failures share '1 failed in ...')."""
+    store = tmp_path / "evidence.json"
+    code = (
+        "import sys\n"
+        "print('collected 2 items')\n"
+        "print('FAILED test_a.py::test_x - AssertionError: boom')\n"
+        "print('1 failed, 1 passed in 0.01s')\n"
+        "sys.exit(1)\n"
+    )
+    rc = gates.run_gate(store, "T061", ["python3", "-c", code])
+    assert rc == 1
+    sig = json.loads(store.read_text())["T061"]["gate"].get("failure_sig", "")
+    assert "AssertionError: boom" in sig  # the discriminating line survives
+
+
+def test_run_gate_failure_sig_survives_long_output(tmp_path) -> None:
+    """Codex round 3 P2: markers must be scanned over the FULL output —
+    truncating to the last 2000 chars first drops early traceback lines."""
+    store = tmp_path / "evidence.json"
+    code = (
+        "import sys\n"
+        "print('FAILED test_a.py::test_x - AssertionError: needle')\n"
+        "print('filler line ' * 10 + '\\n' * 1 , end='')\n"
+        "print(('x' * 80 + '\\n') * 40, end='')\n"   # >3000 chars of filler AFTER the marker
+        "print('1 failed in 0.01s')\n"
+        "sys.exit(1)\n"
+    )
+    rc = gates.run_gate(store, "T062", ["python3", "-c", code])
+    assert rc == 1
+    sig = json.loads(store.read_text())["T062"]["gate"]["failure_sig"]
+    assert "needle" in sig

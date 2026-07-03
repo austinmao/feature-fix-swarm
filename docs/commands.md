@@ -150,10 +150,15 @@ Completion authority for autonomous runs — evidence, not agent self-report.
 | Command | What it does |
 |---------|-------------|
 | `gates.py record-gate T042 --exit N --cmd ... --before ... --after ...` | Record a task's test-gate outcome in the evidence store (`$GATES_STORE`, default `.feature-fix-swarm/evidence.json`) |
-| `gates.py verify-done T042` | Exit 0 iff passing gate evidence exists — the ONLY thing that legalizes an `[X]` flip |
-| `gates.py record-red T041 --exit N < log` | Store a RED proof; rejected unless the log shows a real failure |
+| `gates.py verify-done T042` | Exit 0 iff passing gate evidence exists — the ONLY thing that legalizes an `[X]` flip. Prints `executed_by` |
+| `gates.py verify-done T042 --strict` | (or `GATES_STRICT=1`) additionally reject caller-recorded evidence — only `run-gate` runner evidence passes. The loop runs strict (v3.14.0) |
+| `gates.py run-gate T042 -- CMD…` | PREFERRED: execute the gate and record the REAL exit code — evidence bound to the runner |
+| `gates.py run-red T041 -- CMD…` | PREFERRED: execute the RED test; proof stored only if it really failed |
+| `gates.py record-red T041 --exit N < log` | Store a RED proof; rejected unless the log shows a real failure. Prints a forgeability WARNING |
 | `gates.py check-red T041` | Exit 0 iff RED proven — blocks the paired GREEN task until then |
+| `gates.py phase-score T040 T041 …` | Truth score from stored evidence (compile .35 / tests .25 / lint .20 / typecheck .20, normalized over categories present; missing evidence → 0.0). Exit 1 below 0.95 → phase rollback (v3.14.0) |
+| `gates.py note-failure T042 --sig "…"` | Record a failure signature; exit 1 when the same signature repeats twice in a row → STOP, no-progress (v3.14.0) |
 | `gates.py scan-tamper < diff` | Flag reward-hacking moves: deleted asserts, added skips, `exit 0`, CI edits. Exit 1 on findings |
 | `gates.py analyze spec.md tasks.md` | Spec↔tasks coherence gate (spec-kit analyze analog); `/feature-implement` refuses to start on findings |
 
-Gate ladder (cheap→expensive, fail-fast): compile → typecheck → lint → unit → integration → e2e → LLM review. Truth score weights: compile .35 / tests .25 / lint .20 / typecheck .20; < 0.95 after max retries → rollback to phase checkpoint. LLM review rounds capped at 2/phase. Optional PreToolUse hook `hooks/tdd-gate.sh` blocks source writes with no matching test file.
+Gate ladder (cheap→expensive, fail-fast): compile → typecheck → lint → unit → integration → e2e → LLM review. Truth score is computed by `phase-score` at every phase gate; < 0.95 after max retries → rollback to phase checkpoint. No-progress is enforced by `note-failure` in the retry loop. LLM review rounds capped at 2/phase. `record-gate` still exists for humans but warns at runtime and is rejected under strict mode. Optional PreToolUse hook `hooks/tdd-gate.sh` blocks source writes with no matching test file.

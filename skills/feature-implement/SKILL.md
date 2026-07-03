@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.9.0"
+version: "1.10.0"
 allowed-tools:
   - Read
   - Edit
@@ -58,7 +58,7 @@ Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) wrap
 2. **Verify before advancing.** With `--qa-loop` (default) no phase advances on red: deterministic hooks + the LLM QA swarm gate every phase boundary (Step 5.5), and failures trigger the investigate-fix-retest loop (Step 5.5b) before the next phase starts. This is the package's reason to exist — do not disable it to go faster.
 3. **Self-critique before delivery.** Before the final report (Step 8), re-read the session as a skeptic: which `[X]` tasks are "done" only by self-report, which acceptance criteria are unproven by QA? Name at least one and surface it.
 
-## Machine gates (v1.9.0 — completion authority is never self-report)
+## Machine gates (v1.9.0/v1.10.0 — completion authority is never self-report)
 
 `lib/gates.py` (installed next to dispatch.py) is the run's ground truth. Six rules,
 all enforced in the loop below:
@@ -78,13 +78,20 @@ all enforced in the loop below:
    Findings (deleted asserts, added skips, `exit 0`, CI edits) = CRITICAL, phase blocked.
    Impl tasks may not touch test files (`check_test_separation`) — test edits belong to
    the paired test-author task.
-5. **No-progress stop.** Keep the last failure signature per task; if the same signature
-   repeats twice, STOP the loop and report instead of burning retries. Truth score
-   (`truth_score`, weights compile .35 / tests .25 / lint .20 / typecheck .20) below
-   0.95 after max retries → roll back to the phase-start checkpoint, do not limp forward.
+5. **No-progress stop (WIRED v1.10.0).** On every task failure, record the failure
+   signature: `gates.py note-failure "$TASK_ID" --sig "$SIG"` (SIG = last failing
+   line of the gate output). Exit 1 = same signature twice in a row → STOP the loop
+   and report instead of burning retries. Truth score is computed per phase:
+   `gates.py phase-score T040 T041 T042` (weights compile .35 / tests .25 / lint .20 /
+   typecheck .20); exit 1 (< 0.95) after max retries → roll back to the phase-start
+   checkpoint, do not limp forward.
 6. **Every gate outcome is a training signal.** After each task: `hooks_model-outcome`
    (success/fail) so the Thompson-sampling router learns; `agentdb_pattern-search`
    before non-trivial tasks, `agentdb_pattern-store` after novel successes.
+7. **Strict evidence provenance (v1.10.0).** The loop exports `GATES_STRICT=1`:
+   `verify-done` rejects caller-recorded evidence (`record-gate`) — only
+   runner-executed `run-gate` evidence can flip a checkbox. `record-gate`/`record-red`
+   now warn at runtime; they remain available for humans, never for the loop.
 
 ## Workflow
 
@@ -1047,6 +1054,20 @@ $_section
   # Hard cap: max 3 phase-audit attempts per phase (tracked via ralph retry counter)
 
 fi
+
+# 7. Phase truth score (v1.10.0 — wires the documented 0.95 rollback for real).
+# PHASE_TASK_IDS = the task IDs completed in this phase (from the stage map).
+# zsh-safe split: unquoted scalars do NOT word-split in zsh; command-substitution
+# output splits in both shells (same pattern as the arg loops elsewhere).
+# GATES_STRICT=1: caller-recorded evidence counts as missing here too.
+if ! GATES_STRICT=1 python3 "$GATES_PY" phase-score $(printf '%s\n' "$PHASE_TASK_IDS"); then
+  echo "[feature-implement] TRUTH-SCORE below 0.95 for $CURRENT_PHASE — rolling back" >&2
+  # Roll back to the phase-start checkpoint (recorded before the phase began):
+  #   git stash push -m "phase-rollback-$CURRENT_PHASE"  (preserves work for autopsy)
+  # then revert the phase's tasks.md flips [X] → [ ] and re-enter planning for
+  # this phase. Do NOT proceed to the next phase on a sub-threshold score.
+  exit 1
+fi
 ```
 
 ### Step 6: Capture result
@@ -1070,12 +1091,39 @@ Record start time. When Agent returns:
     exit 1
   fi
   # PREFERRED: let gates.py execute the gate itself so the exit code is real,
-  # not caller-supplied (an agent cannot fabricate evidence this way):
-  python3 "$GATES_PY" run-gate "$TASK_ID" -- $GATE_CMD
+  # not caller-supplied (an agent cannot fabricate evidence this way).
+  # zsh-safe: $GATE_CMD unquoted does not word-split in zsh — split via
+  # command substitution (pre-existing on main; fixed in the v3.14 gate round):
+  python3 "$GATES_PY" run-gate "$TASK_ID" -- $(printf '%s\n' "$GATE_CMD")
   # HARD STOP: no passing evidence → the checkbox MUST stay [ ]. Mark the task
   # [F] and enter the retry path — do NOT continue to the [X] flip.
-  python3 "$GATES_PY" verify-done "$TASK_ID" || {
-    echo "[feature-implement] BLOCK: no passing gate evidence for $TASK_ID"
+  # GATES_STRICT=1 (v1.10.0): caller-recorded evidence (record-gate) is rejected;
+  # only run-gate/run-red runner-executed evidence flips a checkbox.
+  GATES_STRICT=1 python3 "$GATES_PY" verify-done "$TASK_ID" || {
+    echo "[feature-implement] BLOCK: no runner-verified gate evidence for $TASK_ID"
+    # no-progress wiring (v1.10.0): same failure signature twice = stuck loop.
+    # Signature = the gate's stored failure_sig (the discriminating FAILED/
+    # Error lines run-gate extracted — NOT the final summary line, which
+    # different failures share). Fallback is nonempty; gates.py additionally
+    # ignores blank signatures. Never re-run anything here.
+    SIG=$(python3 - "$TASK_ID" <<'PY'
+import json, os, sys
+store = os.environ.get("GATES_STORE", ".feature-fix-swarm/evidence.json")
+try:
+    gate = json.load(open(store)).get(sys.argv[1], {}).get("gate", {})
+except Exception:
+    gate = {}
+# failure_sig only — tests_after is the generic summary footer shared by
+# unrelated failures (codex round 3 P3); missing sig → task-scoped sentinel.
+sig = (gate.get("failure_sig") or "").strip()
+print(sig[:400] or f"{sys.argv[1]} gate nonzero")
+PY
+)
+    if ! python3 "$GATES_PY" note-failure "$TASK_ID" --sig "$SIG"; then
+      echo "[feature-implement] NO-PROGRESS on $TASK_ID — stopping run for human review"
+      mark_task_failed "$TASK_ID"
+      break   # stop the whole loop: burning retries on an identical failure
+    fi
     mark_task_failed "$TASK_ID"   # [ ] → [F]; retries per RALPH_MAX_RETRIES
     continue
   }
@@ -1120,6 +1168,23 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 ║ Next: {next id} / "all done" / "blocked on X"             ║
 ╚═══════════════════════════════════════════════════════════╝
 ```
+
+### Step 9: Retro — consolidate learning (v1.10.0)
+
+Per-task signals (`hooks_model-outcome`, `agentdb_pattern-store`) fire during the run;
+this step consolidates them so the NEXT run starts smarter (ReasoningBank pattern —
+distill trajectories into reusable strategy, not just raw outcomes):
+
+1. Aggregate: tasks run, gate pass/fail counts per rung, retries used, phase scores,
+   any NO-PROGRESS stops (all read from `.feature-fix-swarm/evidence.json` +
+   `results.md` — never from memory of the session).
+2. Distill at most 3 patterns worth keeping (a failure mode + its fix, a routing
+   win, a gate that caught a real bug) → `mcp__ruflo__agentdb_pattern-store`, one
+   entry each, tagged with the spec ID.
+3. Append one summary line to `.feature-fix-swarm/results.md`:
+   `RUN {spec} done={X}/{T} retries={R} phase_scores={...} patterns_stored={N}`.
+4. If ruflo is unreachable, skip 2 silently (retro must never fail the run) — but
+   still write 3.
 
 ## Edge cases
 
