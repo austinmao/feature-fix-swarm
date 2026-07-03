@@ -350,7 +350,10 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
             "kind": "live" if live else "structural",
             "log_sha256": hashlib.sha256(log_material).hexdigest(),
         })
-    go = (not missing
+    # claims must be non-empty: all([]) is True, so an empty proof would
+    # otherwise read as go (codex v3.15 round 1 P1).
+    go = (bool(claims)
+          and not missing
           and all(c["exit_code"] == 0 for c in claims)
           and (not strict or all(c["kind"] == "live" for c in claims)))
     return {
@@ -489,13 +492,17 @@ def main(argv: list[str]) -> int:
     if cmd == "proof":
         run_id = args[0]
         deferrals = [args[i + 1] for i, a in enumerate(args) if a == "--defer"]
+        # value-taking flags must consume their value too — otherwise
+        # `--out /tmp/p.json` collects the path as a task id and forces a
+        # false no-go (codex v3.15 round 1 P2).
+        value_flags = {"--defer", "--out"}
         task_ids = []
         skip = False
         for a in args[1:]:
             if skip:
                 skip = False
                 continue
-            if a == "--defer":
+            if a in value_flags:
                 skip = True
             elif not a.startswith("--"):
                 task_ids.append(a)

@@ -1173,8 +1173,14 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 the box — one claim per phase task, live-vs-structural evidence kind, go/no-go:
 
 ```bash
-GATES_STRICT=1 python3 "$GATES_PY" proof "$RUN_ID" $(printf '%s\n' "$ALL_TASK_IDS") \
-  $(printf -- '--defer %q ' "${DEFERRALS[@]}")   # omit --defer args when none
+# Deferral reasons contain spaces — build argv as an ARRAY; command
+# substitution word-splits %q output and corrupts multi-word reasons
+# (codex v3.15 round 1 P2).
+PROOF_ARGS=("$RUN_ID")
+while IFS= read -r tid; do [ -n "$tid" ] && PROOF_ARGS+=("$tid"); done \
+  <<< "$(printf '%s\n' "$ALL_TASK_IDS" | tr ' ' '\n')"
+for d in "${DEFERRALS[@]}"; do PROOF_ARGS+=(--defer "$d"); done
+GATES_STRICT=1 python3 "$GATES_PY" proof "${PROOF_ARGS[@]}"
 # writes .feature-fix-swarm/proof-<run>.json; exit 1 = no-go (report FAILED, not done)
 ```
 

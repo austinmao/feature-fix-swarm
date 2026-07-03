@@ -515,3 +515,25 @@ def test_cli_proof_writes_artifact_and_exit_codes(tmp_path, capsys, monkeypatch)
     gates.run_gate(store, "T104", ["python3", "-c", "import sys; print('FAILED y'); sys.exit(1)"])
     rc = gates.main(["proof", "run-7", "T100", "T104"])
     assert rc == 1
+
+
+def test_proof_artifact_empty_task_ids_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 1 P1: all([]) is True — an empty proof must never
+    read as go."""
+    store = tmp_path / "evidence.json"
+    art = gates.proof_artifact(store, "run-8", [])
+    assert art["verdict"] == "no-go"
+
+
+def test_cli_proof_out_flag_value_not_treated_as_task_id(tmp_path, capsys, monkeypatch) -> None:
+    """Codex v3.15 round 1 P2: --out VALUE must be consumed as a flag value,
+    not collected as a task id (which forced a false no-go)."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    out = tmp_path / "custom-proof.json"
+    rc = gates.main(["proof", "run-9", "T100", "--out", str(out)])
+    assert rc == 0
+    data = json.loads(out.read_text())
+    assert data["verdict"] == "go"
+    assert data["missing"] == []
