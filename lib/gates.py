@@ -335,6 +335,12 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
     data = _load_store(store)
     claims: list[dict] = []
     missing: list[str] = []
+    # repeated ids overstate coverage (a wrapper can drop one task and
+    # duplicate another while the artifact still looks complete) — surface
+    # and fail (codex round 8 P2)
+    seen: set[str] = set()
+    duplicates = sorted({t for t in task_ids if t in seen or seen.add(t)})
+    task_ids = list(dict.fromkeys(task_ids))
     for task_id in task_ids:
         gate = data.get(task_id, {}).get("gate")
         if not gate:
@@ -390,6 +396,7 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
     # otherwise read as go (codex v3.15 round 1 P1).
     go = (bool(claims)
           and not missing
+          and not duplicates
           and not unrecorded
           and not unechoed
           and all(c["exit_code"] == 0 for c in claims)
@@ -400,6 +407,7 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
         "strict": strict,
         "claims": claims,
         "missing": missing,
+        "duplicate_task_ids": duplicates,
         "deferrals": list(deferrals or []),
         "unrecorded_deferrals": unrecorded,
         "unechoed_residuals": unechoed,

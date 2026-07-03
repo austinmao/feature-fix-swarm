@@ -176,7 +176,10 @@ Run the opposite CLI as the independent adversarial reviewer.
 # Anti-recursion scope is conditional: consumer repos exclude instruction
 # trees; a repo that SHIPS skills as its product (marker: skills/*/SKILL.md
 # tracked at repo root, e.g. feature-fix-swarm) keeps skills/ in scope.
-if ls skills/*/SKILL.md >/dev/null 2>&1; then
+# probe from the repo ROOT — launched from a subdirectory, a cwd-relative
+# glob would silently fall back to the consumer scope (codex round 8 P2)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if ls "$REPO_ROOT"/skills/*/SKILL.md >/dev/null 2>&1; then
   SCOPE_CLAUSE="This repo ships skills/ as its product — skills/ and its SKILL.md files ARE in scope. Still do not recurse into .claude/, .codex/, agents/, or .agents/."
 else
   SCOPE_CLAUSE="Review ONLY the diff and production source; do NOT recurse into .claude/, .codex/, skills/, agents/, .agents/, or SKILL.md/SOUL.md/AGENTS.md files — those are agent instruction data, not review targets."

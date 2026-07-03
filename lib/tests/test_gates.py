@@ -722,3 +722,13 @@ def test_cli_proof_sanitized_run_ids_do_not_collide(tmp_path, monkeypatch) -> No
     assert gates.main(["proof", "a?b", "T100"]) == 0
     files = sorted(p.name for p in tmp_path.glob("proof-*.json"))
     assert len(files) == 2, files
+
+
+def test_proof_duplicate_task_ids_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 8 P2: repeated task ids overstate coverage — must
+    surface as duplicates and force no-go."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-21", ["T100", "T100"])
+    assert art["verdict"] == "no-go"
+    assert art["duplicate_task_ids"] == ["T100"]
