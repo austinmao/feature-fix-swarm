@@ -112,9 +112,9 @@ RALPH_MAX_RETRIES="${RALPH_MAX_RETRIES:-3}"
 TASKS_JSON=""   # populated in Step 2; exported for sub-shells
 
 # BUG-1 fix (2026-04-16): $SPEC_ARG may arrive as a single quoted string.
-# Use `read -ra` to explicitly word-split into an array so the for-loop iterates.
-read -ra _SPEC_ARGS <<< "$SPEC_ARG"
-for arg in "${_SPEC_ARGS[@]}"; do
+# zsh has no `read -a` (bash-only) — command-substitution output word-splits
+# in bash AND zsh, with no subshell, so assignments in the loop persist.
+for arg in $(printf '%s\n' "$SPEC_ARG"); do
   case "$arg" in
     --dry-run)    DRY_RUN=1 ;;
     --one)        ONE_TASK=1; LOOP_ALL=0 ;;
