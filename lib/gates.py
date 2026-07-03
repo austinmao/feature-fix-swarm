@@ -323,7 +323,8 @@ def note_failure(store: Path, task_id: str, signature: str) -> bool:
 
 
 def proof_artifact(store: Path, run_id: str, task_ids: list[str],
-                   strict: bool = False, deferrals: list[str] | None = None) -> dict:
+                   strict: bool = False, deferrals: list[str] | None = None,
+                   residuals_text: str | None = None) -> dict:
     """Per-run proof artifact (ported from the openclaw evidence discipline):
     one claim per task with the evidence command, real exit code, a sha256 of
     the stored log material, and a live-vs-structural kind (runner-executed vs
@@ -350,10 +351,20 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
             "kind": "live" if live else "structural",
             "log_sha256": hashlib.sha256(log_material).hexdigest(),
         })
+    # A deferral named on argv but absent from residuals.md is a silent pass —
+    # verify the companion record when residuals_text is provided (codex v3.15
+    # round 2 P2). The deferral's name (text before ':') must appear there.
+    unrecorded: list[str] = []
+    if residuals_text is not None:
+        for d in deferrals or []:
+            name = d.split(":", 1)[0].strip()
+            if name and name not in residuals_text:
+                unrecorded.append(d)
     # claims must be non-empty: all([]) is True, so an empty proof would
     # otherwise read as go (codex v3.15 round 1 P1).
     go = (bool(claims)
           and not missing
+          and not unrecorded
           and all(c["exit_code"] == 0 for c in claims)
           and (not strict or all(c["kind"] == "live" for c in claims)))
     return {
@@ -363,6 +374,7 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
         "claims": claims,
         "missing": missing,
         "deferrals": list(deferrals or []),
+        "unrecorded_deferrals": unrecorded,
     }
 
 
@@ -491,11 +503,15 @@ def main(argv: list[str]) -> int:
         return 1 if stuck else 0
     if cmd == "proof":
         run_id = args[0]
-        deferrals = [args[i + 1] for i, a in enumerate(args) if a == "--defer"]
         # value-taking flags must consume their value too — otherwise
         # `--out /tmp/p.json` collects the path as a task id and forces a
-        # false no-go (codex v3.15 round 1 P2).
+        # false no-go (codex v3.15 round 1 P2). A trailing value-flag is a
+        # usage error, not an IndexError (round 2 P3) — fail before any write.
         value_flags = {"--defer", "--out"}
+        if args and args[-1] in value_flags:
+            print(f"usage error: {args[-1]} requires a value", file=sys.stderr)
+            return 2
+        deferrals = [args[i + 1] for i, a in enumerate(args) if a == "--defer"]
         task_ids = []
         skip = False
         for a in args[1:]:
@@ -507,13 +523,21 @@ def main(argv: list[str]) -> int:
             elif not a.startswith("--"):
                 task_ids.append(a)
         strict = "--strict" in args or os.environ.get("GATES_STRICT") == "1"
-        art = proof_artifact(store, run_id, task_ids, strict=strict, deferrals=deferrals)
-        out = Path(_flag(args, "--out") or store.parent / f"proof-{run_id}.json")
+        residuals_file = store.parent / "residuals.md"
+        residuals_text = residuals_file.read_text() if residuals_file.exists() else ""
+        art = proof_artifact(store, run_id, task_ids, strict=strict,
+                             deferrals=deferrals, residuals_text=residuals_text)
+        # run_id is argv-controlled: sanitize before composing the default
+        # artifact filename so '../x' can't escape the store dir (round 2 P2).
+        safe_run = re.sub(r"[^A-Za-z0-9._-]", "_", run_id)
+        out = Path(_flag(args, "--out") or store.parent / f"proof-{safe_run}.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(art, indent=2) + "\n")
         print(f"PROOF-{art['verdict'].upper()}: {out}")
         for d in art["deferrals"]:
             print(f"  DEFERRED: {d}")
+        for d in art["unrecorded_deferrals"]:
+            print(f"  DEFERRAL-UNRECORDED (add to {residuals_file}): {d}")
         for m in art["missing"]:
             print(f"  MISSING-EVIDENCE: {m}")
         return 0 if art["verdict"] == "go" else 1

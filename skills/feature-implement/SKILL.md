@@ -1188,7 +1188,10 @@ GATES_STRICT=1 python3 "$GATES_PY" proof "${PROOF_ARGS[@]}"
 (a live send, an operator-gated flip, an env the harness can't reach) MUST be
 a named deferral — passed via `--defer "name: reason"` above AND appended to
 `.feature-fix-swarm/residuals.md` as `- [ ] {date} {name}: {reason} (run {RUN_ID})`.
-A deferral that isn't named in both places is a silent pass — forbidden. The
+A deferral that isn't named in both places is a silent pass — forbidden, and
+enforced mechanically: `proof` reads `residuals.md` next to the evidence store
+and returns **no-go** (`DEFERRAL-UNRECORDED`) for any `--defer` whose name is
+absent from it. Append the residuals.md line BEFORE running `proof`. The
 final report's `Residual risk:` line references residuals.md when non-empty.
 
 ### Step 9: Retro — consolidate learning (v1.10.0)

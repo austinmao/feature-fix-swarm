@@ -19,7 +19,10 @@ all skills.
   intentionally not verified this run in the artifact; `feature-implement`
   v1.11.0 additionally requires appending each deferral to
   `.feature-fix-swarm/residuals.md` — a deferral not named in both places is
-  a silent pass, forbidden.
+  a silent pass, forbidden and enforced: `proof` no-goes any `--defer` whose
+  name is absent from residuals.md (`DEFERRAL-UNRECORDED`). Run-id is
+  sanitized before composing the default artifact path (no traversal);
+  trailing value-flags are a usage error (exit 2), never a crash.
 - **Review anti-recursion scope** baked into `review-gate` (and its
   `codex-gate` alias): reviewers must never recurse into `.claude/`,
   `.codex/`, `skills/`, `agents/`, `.agents/`, or SKILL.md/SOUL.md/AGENTS.md

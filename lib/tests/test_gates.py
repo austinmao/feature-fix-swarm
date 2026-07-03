@@ -537,3 +537,44 @@ def test_cli_proof_out_flag_value_not_treated_as_task_id(tmp_path, capsys, monke
     data = json.loads(out.read_text())
     assert data["verdict"] == "go"
     assert data["missing"] == []
+
+
+def test_cli_proof_run_id_path_traversal_sanitized(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 2 P2: run_id is argv-controlled — a '../' run id must
+    not escape the store dir when composing the default artifact path."""
+    store = tmp_path / "sub" / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    escape = tmp_path / "pwn.json"
+    rc = gates.main(["proof", "../pwn", "T100"])
+    assert rc == 0
+    assert not escape.exists()                      # nothing written outside
+    written = list((tmp_path / "sub").glob("proof-*.json"))
+    assert len(written) == 1                        # sanitized name, in store dir
+
+
+def test_proof_artifact_unrecorded_deferral_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 2 P2: a deferral named on argv but absent from
+    residuals.md is a silent pass — must force no-go."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-10", ["T100"],
+                               deferrals=["live-send: no bot"],
+                               residuals_text="")
+    assert art["verdict"] == "no-go"
+    assert art["unrecorded_deferrals"] == ["live-send: no bot"]
+    ok = gates.proof_artifact(store, "run-10", ["T100"],
+                              deferrals=["live-send: no bot"],
+                              residuals_text="- [ ] 2026-07-03 live-send: no bot (run run-10)")
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_trailing_defer_is_usage_error(tmp_path, capsys, monkeypatch) -> None:
+    """Codex v3.15 round 2 P3: trailing --defer must be a usage error (exit 2),
+    not an IndexError crash."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    rc = gates.main(["proof", "run-11", "T100", "--defer"])
+    assert rc == 2
+    assert not list(tmp_path.glob("proof-*.json"))  # nothing written
