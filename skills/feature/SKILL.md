@@ -1,7 +1,7 @@
 ---
 name: feature
 description: "End-to-end pipeline: autoplan → spec-decompose → per-wedge implement+phase-audit → qa → review-gate → ship → canary. Non-interactive by default. v2.1.1: skill PREPARES native /goal condition (with run_id baked in) and prints it for operator to paste — UI commands like /goal cannot be invoked via Skill tool, so auto-invoke is architecturally impossible. Per-phase audit + /review-gate remain mandatory."
-version: "2.4.0"
+version: "2.5.0"
 allowed-tools:
   - Read
   - Edit
@@ -55,7 +55,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 ### Skill output
 
 - `~/.claude/state/runs.db` — SQLite run record with `run_id` (captured in Step 0.5)
-  - `~/.claude/state/audits.jsonl` — one line per phase audit + review-gate result (greppable by /goal checker)
+- `~/.claude/state/audits.jsonl` — one line per phase audit + review-gate result (greppable by /goal checker)
 - `.ralph/feature-run-<NNN>-<TS>.jsonl` — local pipeline event log (includes `goal-prepared` line)
 
 ## Flags
@@ -146,9 +146,9 @@ Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) brac
 │    └─ Auto-stops if bugs found; user fixes, /feature --resume│
 │                                                             │
 │  Step 5.7: /review-gate (cross-model full-branch review)    │
-│    └─ 3 Codex GPT-5 passes: review + adversarial + gaps     │
+│    └─ 3 cross-model passes: review + adversarial + gaps     │
 │    └─ Mandatory before /ship (same gate /fix uses)          │
-│    └─ Skip-gracefully if codex CLI absent (warn, continue)  │
+│    └─ Skip-gracefully if review CLI absent (warn, continue) │
 │    └─ Emergency opt-out: --skip-codex-gate (NOT recommended)│
 │                                                             │
 │  Step 6: /ship (creates PR, merges to staging branch)       │
@@ -177,7 +177,7 @@ SPEC_ARG="${ARGUMENTS:-}"
 RESUME=0
 NO_CANARY=0
 DRY_RUN=0
-# v1.4.0: codex-gate is mandatory before /ship. --skip-codex-gate is an
+# v1.4.0: review-gate is mandatory before /ship. --skip-codex-gate is an
 # emergency-merge opt-out (NOT recommended; per-phase audits still run).
 SKIP_CODEX_GATE=0
 # v2.1.0: skill auto-sets native /goal at entry. --no-goal opts out.
@@ -308,15 +308,15 @@ if [ $DRY_RUN -ne 1 ]; then
     exit 1
   fi
 
-  # v3.1 fix 3 (codex-gate Pass 1 P2): --skip-codex-gate is logged to $RUN_LOG
+  # v3.1 fix 3 (review-gate Pass 1 P2): --skip-codex-gate is logged to $RUN_LOG
   # only, NOT to run-state events. So the /goal condition must grep $RUN_LOG
-  # for the codex-gate row (PASS or skipped), not abstract "run events".
+  # for the review-gate row (PASS or skipped), not abstract "run events".
   CANARY_REQ='AND /canary returned 200 in '"$RUN_LOG"
   [ $NO_CANARY -eq 1 ] && CANARY_REQ='AND --no-canary was set'
 
   GOAL_COND="spec $SPEC_ID complete via /feature run $RUN_ID: every audit line in \
 ~/.claude/state/audits.jsonl with run_id=$RUN_ID has verdict=pass, AND \
-$RUN_LOG contains a codex-gate row with status in {PASS, skipped}, \
+$RUN_LOG contains a review-gate row with status in {PASS, skipped}, \
 $CANARY_REQ"
 
   echo "[FEATURE] run_id=$RUN_ID; goal condition prepared"
@@ -535,7 +535,7 @@ Log:
 
 ### Step 4b — Per-phase adversarial audit (mandatory between every wedge)
 
-After each `/feature-implement <wedge>` returns clean QA, run a hostile cross-model audit on JUST this wedge before advancing to the next. Codex GPT-5 reads the wedge slice of the spec + the wedge's diff and tries to prove the wedge is NOT complete. This is distinct from `/codex-gate` (which runs once at end-of-pipeline against the full branch) and from `/autoplan`'s planning-time audit.
+After each `/feature-implement <wedge>` returns clean QA, run a hostile cross-model audit on JUST this wedge before advancing to the next. Codex GPT-5 reads the wedge slice of the spec + the wedge's diff and tries to prove the wedge is NOT complete. This is distinct from `/review-gate` (which runs once at end-of-pipeline against the full branch) and from `/autoplan`'s planning-time audit.
 
 ```bash
 WEDGE_NAME="<the wedge id from spec-decompose, e.g., backend-wedge>"
@@ -670,7 +670,7 @@ Log:
 
 ### Step 5.7 — /review-gate cross-model review (mandatory)
 
-After per-wedge audits all pass and `/qa` is green, run `/review-gate` for one final cross-model review against the full branch diff. Three passes catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
+After per-wedge audits all pass and `/qa` is green, run `/review-gate` for one final cross-model review against the full branch diff. Three passes (review + adversarial-chaos + adversarial-test-gaps) catch bugs that per-wedge audits miss because they only saw their slice. This is the same gate /fix uses.
 The underlying Claude invocation must use the local CLI auth path, not `--bare`; `--bare` disables keychain/OAuth reads and produces a false "Not logged in" error on valid logged-in machines.
 If `/review-gate` hangs or times out, the correct result is a structured blocked gate with a timeout reason. Do not narrate the failure in first person or say you "attempted" the adversarial review step.
 
@@ -692,14 +692,28 @@ Decision rule (only applies when `--skip-codex-gate` was NOT set):
 - `REVIEW-GATE PASS` (CRITICAL=0, HIGH≤2) → proceed to `/ship` + `/canary`.
 - `REVIEW-GATE BLOCK` (CRITICAL≥1 unfixed) → STOP. Fix the CRITICAL inline via review auto-fix, commit, re-run `/review-gate`. Do NOT proceed to `/ship` until verdict is PASS.
 
-Skip-gracefully behaviour (codex CLI absent — optional dependency):
+Skip-gracefully behaviour (review CLI absent — optional dependency):
 
 ```bash
-which codex >/dev/null 2>&1 && CODEX_AVAILABLE=1 || CODEX_AVAILABLE=0
+if [ -z "${REVIEW_BIN:-}" ]; then
+  if [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_HOME:-}" ] || [ -n "${CODEX_BIN:-}" ]; then
+    REVIEW_BIN="claude"
+  elif [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_AGENT_DEPTH:-}" ] || [ -n "${CLAUDECODE_SESSION_ID:-}" ]; then
+    REVIEW_BIN="codex"
+  else
+    REVIEW_BIN="claude"
+  fi
+fi
 
-if [ "$CODEX_AVAILABLE" = "0" ]; then
-  echo "[FEATURE] WARNING: reviewer CLI not found — skipping review-gate" >&2
-  echo "  Install: npm install -g @openai/codex && codex login" >&2
+command -v "$REVIEW_BIN" >/dev/null 2>&1 && REVIEW_GATE_AVAILABLE=1 || REVIEW_GATE_AVAILABLE=0
+
+if [ "$REVIEW_GATE_AVAILABLE" = "0" ]; then
+  echo "[FEATURE] WARNING: reviewer CLI ($REVIEW_BIN) not found — skipping review-gate" >&2
+  if [ "$REVIEW_BIN" = "codex" ]; then
+    echo "  Install: npm install -g @openai/codex && codex login" >&2
+  else
+    echo "  Install: see https://code.claude.com/docs/en/quickstart for the claude CLI" >&2
+  fi
   printf '{"timestamp":"%s","spec":"%s","step":"review-gate","status":"skipped","reason":"review_cli_not_installed","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
   # Continue to Step 6 (/ship).
@@ -778,7 +792,7 @@ Name **at least one** residual risk or limitation. If it is cheaply fixable, fix
 ║ Total duration:      HH:MM:SS                             ║
 ║ Tasks executed:      N (all [X])                          ║
 ║ Wedges audited:      M / M passed (per-phase, Step 4b)    ║
-║ Codex-gate verdict:  PASS (Step 5.7)                      ║
+║ Review-gate verdict: PASS (Step 5.7)                      ║
 ║ Gates approved:      1 (prod promotion)                   ║
 ║ Failures:            0                                    ║
 ║ Residual risk:       <one-line from Step 9.9, or "none surfaced"> ║

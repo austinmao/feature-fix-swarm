@@ -98,10 +98,10 @@ At each gate, the user reviews the generated artifact and approves or iterates:
 |---------|---------|--------|
 | `/feature [NNN]` | **End-to-end pipeline**: bootstrap spec if needed → autoplan → decompose → implement → qa → ship → canary. 2 gates. Default. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` | available |
 | `/feature [NNN] --resume` | Resume after any failure | available |
-| `/feature [NNN] --no-ruflo` | Use native Agent tool instead of ruflo swarm | available |
+| `/feature [NNN] --no-ruflo` | Use native Agent tool instead of ruflo swarm, executing directly through the active host CLI | available |
 | `/feature-implement [NNN]` | **Default: run ALL tasks**. Per-task model routing via `[model:]` annotation. `--qa-openclaw`, `--qa-telegram` | available |
 | `/feature-implement [NNN] --one` | Execute only the next unchecked task | available |
-| `/feature-implement [NNN] --ruflo` | Use ruflo swarm executor (parallel [P] groups, falls back to Agent on error) | available |
+| `/feature-implement [NNN] --ruflo` | Use ruflo swarm executor (parallel [P] groups, falls back to Agent on error) via the active host CLI | available |
 | `/feature-implement [NNN] --dry-run` | Print next task without spawning | available |
 | `/speckit.implement` | Upstream spec-kit executor (generic, ignores annotations) | available |
 

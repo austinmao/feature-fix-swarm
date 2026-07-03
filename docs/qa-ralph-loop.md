@@ -10,7 +10,7 @@ After every phase in tasks.md completes, the QA Ralph loop:
    - `vitest run` on changed TypeScript/JavaScript files
    - `pytest -x` on changed Python files
 
-2. **LLM QA agents** (~$0.15/phase, via ruflo swarm):
+2. **LLM QA agents** (~$0.15/phase, Ruflo-coordinated and host-CLI executed):
    - **qa-e2e** — browser tests user stories (skipped if no dev server)
    - **qa-review** — code review for logic errors, CRITICAL/HIGH only
    - **qa-security** — OWASP Top 10 scan, CRITICAL only
@@ -36,6 +36,7 @@ After every phase in tasks.md completes, the QA Ralph loop:
 
 Failure artifacts stored in `.ralph/` (gitignored):
 - Logs, screenshots, diffs per phase
+- Ruflo manifest and per-agent logs when available
 - Used by `/investigate` for root cause analysis
 
 ## Cost

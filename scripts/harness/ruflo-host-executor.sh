@@ -96,10 +96,10 @@ map_model() {
   local tier="$2"
 
   case "$host:$tier" in
-    codex:haiku|codex:simple|codex:low|codex:gpt-5.3-codex-spark) echo "gpt-5.3-codex-spark" ;;
+    codex:haiku|codex:simple|codex:low|codex:mini|codex:gpt-5.4-mini) echo "gpt-5.4-mini" ;;
     codex:sonnet|codex:standard|codex:med|codex:gpt-5.4) echo "gpt-5.4" ;;
     codex:opus|codex:extended|codex:high|codex:max|codex:gpt-5.5) echo "gpt-5.5" ;;
-    claude:gpt-5.3-codex-spark|claude:haiku|claude:simple|claude:low) echo "haiku" ;;
+    claude:gpt-5.4-mini|claude:haiku|claude:simple|claude:low|claude:mini) echo "haiku" ;;
     claude:gpt-5.4|claude:sonnet|claude:standard|claude:med) echo "sonnet" ;;
     claude:gpt-5.5|claude:opus|claude:extended|claude:high|claude:max) echo "opus" ;;
     *) echo "$tier" ;;

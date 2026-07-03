@@ -27,7 +27,19 @@ STATUS_MAP = {
     'F': 'failed', 'f': 'failed', 'S': 'skipped', 's': 'skipped',
 }
 
-COST_PER_TASK = {"haiku": 0.02, "sonnet": 0.30, "opus": 2.00, "fable": 0.50}
+LOW_TIER_MODELS = {"haiku", "gpt-5.4-mini"}
+MID_TIER_MODELS = {"sonnet", "gpt-5.4"}
+HIGH_TIER_MODELS = {"opus", "gpt-5.5"}
+
+COST_PER_TASK = {
+    "haiku": 0.02,
+    "sonnet": 0.30,
+    "opus": 2.00,
+    "fable": 0.50,
+    "gpt-5.4-mini": 0.05,
+    "gpt-5.4": 0.30,
+    "gpt-5.5": 2.00,
+}
 
 THINKING_GUIDANCE = {
     "low":  "Respond directly. No extended reasoning needed. Be concise.",
@@ -35,6 +47,63 @@ THINKING_GUIDANCE = {
     "high": "Explore alternatives. Consider edge cases. Verify assumptions before acting.",
     "max":  "Deep analysis required. Examine all tradeoffs. Verify security and correctness exhaustively.",
 }
+
+AGENT_ROUTING_RULES = [
+    # Testing and TDD first so explicit test work never falls through to a looser match.
+    (r"playwright|browser automation|test automation|e2e browser|visual regression", "test-automator"),
+    (r"test|tdd|\bspec\b|unit test|integration test|coverage|jest|pytest", "ecc:tdd-guide"),
+    # Review and gatekeeping remain ECC-first because the repo already treats those as core checks.
+    (r"code review|pr review|quality|conventions|lint rules|lint|review gate", "ecc:code-reviewer"),
+    (r"security audit|threat model|owasp compliance|vulnerability assessment|cve triage", "security-auditor"),
+    (r"backend security|csrf|api security|auth middleware|jwt|oauth|xss|csp|client-side security", "backend-security-coder"),
+    (r"frontend security|webview security|client-side attack|browser security", "frontend-security-coder"),
+    # Implementation-oriented domain specialists.
+    (r"wireframe|mockup|visual design|ui design|ux|user flow|design system", "ui-ux-designer"),
+    (r"accessibility|wcag|a11y", "accessibility-expert"),
+    (r"ui validation|visual regression|screenshot diff|pixel diff", "ui-visual-validator"),
+    (r"next\.js|react page|component|landing page|css|tailwind|frontend", "frontend-developer"),
+    (r"graphql", "graphql-architect"),
+    (r"backend architecture|microservice|service boundary|event sourcing|api design", "backend-architect"),
+    (r"api route|server action|prisma|backend endpoint|server-side", "backend-architect"),
+    (r"django", "django-pro"),
+    (r"fastapi", "fastapi-pro"),
+    (r"python|async python|\.py\b", "python-pro"),
+    (r"typescript|\bts\b|\.tsx|type system|generics|compiler", "typescript-pro"),
+    (r"javascript|\bjs\b|node\.js|async/await", "javascript-pro"),
+    (r"java|\bjvm\b|spring", "java-pro"),
+    (r"\bgo\b|golang", "golang-pro"),
+    (r"rust", "rust-pro"),
+    (r"c#|\.net|dotnet", "csharp-pro"),
+    (r"openapi|swagger|api docs|developer docs", "api-documenter"),
+    (r"docs|documentation|readme|tutorial|guide", "docs-architect"),
+    # Architecture, storage, and analysis.
+    (r"architecture|adr|system design|data model|service boundary", "ecc:architect"),
+    (r"database tuning|slow query|slow queries|index tuning|query optimization|queries and indexes|database performance|query tuning|index optimization", "database-optimizer"),
+    (r"database operations|backup|replication|restore|failover", "database-admin"),
+    (r"sql|migration|schema|postgresql|supabase|database design|er diagram", "database-architect"),
+    # Operational work and incident response.
+    (r"performance|latency|throughput|bottleneck|profiling|caching|optimi[sz]e", "performance-engineer"),
+    (r"debug|stack trace|crash|hang|flaky|intermittent|root cause", "error-detective"),
+    (r"incident|outage|production issue|on-call", "incident-responder"),
+    (r"deploy|release|rollout|vercel|cicd|container|deployment", "deployment-engineer"),
+    (r"cloud|aws|azure|gcp|infrastructure", "cloud-architect"),
+    (r"kubernetes|gitops|service mesh|mtls|istio|linkerd", "kubernetes-architect"),
+    (r"terraform|iac|state management", "terraform-specialist"),
+    (r"observability|metrics|tracing|logs|monitoring|sli|slo", "observability-engineer"),
+    (r"network|load balanc|traffic analysis|dns|routing", "network-engineer"),
+    # Documentation and knowledge work.
+    (r"reference|cheatsheet|lookup", "reference-builder"),
+    (r"mermaid|diagram|sequence diagram|flowchart|erd", "mermaid-expert"),
+    (r"reverse engineer|reverse engineering|code explorer", "reverse-engineer"),
+    (r"search specialist|research|find similar|look up", "search-specialist"),
+    (r"context management|context manager|swarm context", "context-manager"),
+    (r"prompt engineering|prompt", "prompt-engineer"),
+    # Product, business, and content.
+    (r"business|metrics|kpi|reporting", "business-analyst"),
+    (r"sales|cold email|follow-up|proposal", "sales-automator"),
+    (r"support|faq|customer communication", "customer-support"),
+    (r"seo|search engine|meta description|meta title|snippet", "seo-meta-optimizer"),
+]
 
 
 # ── Core functions ────────────────────────────────────────────────────────────
@@ -49,6 +118,15 @@ def phase_for(content: str, pos: int, phase_starts: list) -> str:
     return last or "(no phase)"
 
 
+def route_agent(description: str, default_agent: str = "general-purpose") -> str:
+    """Map a task description to the hybrid ECC + wshobson agent catalog when possible."""
+    desc = description.lower()
+    for pattern, agent in AGENT_ROUTING_RULES:
+        if re.search(pattern, desc):
+            return agent
+    return default_agent
+
+
 def parse_annotations(rest: str, default_agent: str = "general-purpose") -> dict:
     """Extract [model:X] [thinking:Y] [agent:Z] [P] [USn] [qa:dims] from annotation string."""
     parallel = bool(re.search(r'\[P\]', rest))
@@ -57,7 +135,7 @@ def parse_annotations(rest: str, default_agent: str = "general-purpose") -> dict
     user_story = f"US{us_match.group(1)}" if us_match else None
 
     model, thinking = "sonnet", "med"
-    m = re.search(r'\[model:([a-z]+)(?:\s+thinking:([a-z]+))?\]', rest)
+    m = re.search(r'\[model:([A-Za-z0-9._-]+)(?:\s+thinking:([a-z]+))?\]', rest)
     if m:
         model = m.group(1)
         if m.group(2):
@@ -66,16 +144,19 @@ def parse_annotations(rest: str, default_agent: str = "general-purpose") -> dict
     if m2:
         thinking = m2.group(1)
 
-    agent = default_agent
-    m3 = re.search(r'\[agent:([^\]]+)\]', rest)
-    if m3:
-        agent = m3.group(1)
-
     qa_match = re.search(r'\[qa:([a-z,]+)\]', rest)
     qa_dims = qa_match.group(1).split(",") if qa_match else ["e2e", "review", "security"]
 
     strip_pat = r'\[(?:P|US\d+|model:[^\]]+|thinking:[^\]]+|agent:[^\]]+|qa:[^\]]+)\]'
     desc = re.sub(strip_pat, '', rest).strip()
+    desc = re.sub(r'^T\d{3,}\b\s*', '', desc).strip()
+
+    agent = default_agent
+    m3 = re.search(r'\[agent:([^\]]+)\]', rest)
+    if m3:
+        agent = m3.group(1)
+    else:
+        agent = route_agent(desc, default_agent)
 
     return {
         "parallel": parallel,
@@ -115,9 +196,9 @@ def parse_tasks_md(content: str, default_agent: str = "general-purpose") -> list
 
 def resolve_thinking(model: str, thinking: str) -> str:
     """Align thinking budget with model tier to avoid waste or under-utilization."""
-    if model == "opus" and thinking == "med":
+    if model in HIGH_TIER_MODELS and thinking == "med":
         return "high"   # opus + med wastes capability
-    if model == "haiku" and thinking in ("high", "max"):
+    if model in LOW_TIER_MODELS and thinking in ("high", "max"):
         return "med"    # haiku can't utilize max budget
     return thinking
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# QA Swarm Orchestrator — spawns 3 LLM agents + 2 deterministic hooks per phase
+# QA Swarm Manifest Builder — queues 3 LLM QA prompts + runs 2 deterministic hooks per phase
 # Usage: bash scripts/qa-swarm.sh --phase "Phase 2" --diff "file1.ts file2.py" --spec-dir specs/082-foo [--qa-skip e2e] [--qa-only review,security] [--max-retries 3]
 
 PHASE=""
@@ -26,6 +26,7 @@ done
 
 [ -z "$PHASE" ] && { echo "ERROR: --phase required"; exit 1; }
 [ -z "$DIFF_FILES" ] && { echo "ERROR: --diff required"; exit 1; }
+: "$SPEC_DIR" "$MAX_RETRIES"
 
 PHASE_SLUG=$(echo "$PHASE" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
 ARTIFACT_DIR="${RALPH_DIR}/${PHASE_SLUG}"
@@ -111,11 +112,10 @@ else
   printf '{"integration":"skip"}' > "$ARTIFACT_DIR/integration-result.json"
 fi
 
-# --- LLM agents (via ruflo swarm) ---
+# --- LLM agents (Ruflo-coordinated, host-CLI executed by feature-implement) ---
 # These print their own [RALPH] status lines
 # Each reads its prompt from prompts/qa-*.md
 
-SWARM_RESULTS=""
 LLM_DIMS=("e2e" "review" "security")
 
 for dim in "${LLM_DIMS[@]}"; do
@@ -136,9 +136,11 @@ for dim in "${LLM_DIMS[@]}"; do
       fi
     fi
 
-    echo "[RALPH] Spawning qa-${dim} (LLM, sonnet)..."
-    # The actual ruflo spawn happens in the calling context (feature-implement)
-    # This script outputs the dimension name and prompt path for the orchestrator
+    echo "[RALPH] Queueing qa-${dim} (LLM, sonnet)..."
+    # The calling context registers Ruflo agents and executes each prompt through
+    # scripts/harness/ruflo-host-executor.sh. This script only writes the manifest.
+    # codex-gate: B1 - queued LLM checks must not disappear from aggregation.
+    printf '{"%s":"pending"}' "$dim" > "$ARTIFACT_DIR/${dim}-result.json"
     echo "SPAWN:${dim}:${PROMPT_FILE}:${ARTIFACT_DIR}" >> "$ARTIFACT_DIR/spawn-manifest.txt"
   else
     echo "[RALPH] qa-${dim}: SKIP (--qa-skip or --qa-only)"
@@ -157,7 +159,14 @@ for f in "$ARTIFACT_DIR"/*-result.json; do
   # Safe read — no eval
   STATUS=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(list(d.values())[0])" "$f" 2>/dev/null || echo "error")
   printf "  %-15s %s\n" "$DIM:" "$STATUS"
-  if [ "$STATUS" = "fail" ]; then
+  if [ "$STATUS" = "fail" ] || [ "$STATUS" = "pending" ] || [ "$STATUS" = "error" ]; then
+    OVERALL="fail"
+  fi
+done
+
+for dim in "unit" "integration" "${LLM_DIMS[@]}"; do
+  if should_run "$dim" && [ ! -f "$ARTIFACT_DIR/${dim}-result.json" ]; then
+    printf "  %-15s %s\n" "$dim:" "missing"
     OVERALL="fail"
   fi
 done

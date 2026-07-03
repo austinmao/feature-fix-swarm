@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc task swarm executor. Pass natural language tasks directly (or --tasks-file), get model/agent/thinking classification, then execute via Ruflo coordination + native Task() (OAuth-only — mcp__ruflo__agent_execute NEVER called). No spec directory required. RUFLO_REQUIRED=auto (graceful fallback to native parallel if ruflo unreachable)."
-version: "1.0.0"
+version: "1.1.0"
 permissions:
   filesystem: write
   network: false
@@ -70,6 +70,8 @@ No spec pipeline. No tasks.md prerequisite. No `specs/NNN/` directory.
 
 All LLM execution uses the native `Task()` tool (Claude Code OAuth — no per-token API cost).
 Ruflo tools used: `swarm_init`, `agent_spawn` (metadata only), `memory_*`, `agentdb_*`, `hooks_*`, `task_create` (tracking only), `neural_train`.
+
+If a run reports `No LLM provider configured`, the caller is on the wrong execution path. Fix the caller to use the host CLI wrapper (`scripts/harness/ruflo-host-executor.sh`) and native `Task()`, not `agent_execute`.
 
 In Codex sessions, Ruflo tools may be lazy-loaded. If `mcp__ruflo__swarm_init` or `mcp__ruflo__agent_spawn` is not visible, use tool discovery for `ruflo swarm_init agent_spawn mcp_status` before declaring Ruflo unavailable. A worktree without the project `.codex/config.toml` can also miss the Ruflo MCP registration; run from the repo root or copy the project MCP config into that worktree.
 
@@ -147,14 +149,14 @@ If `--swarm-id` was provided AND `$TASKS_FILE_OUT` exists: skip Step 1 (resume f
 
 ---
 
-### Step 1: Classification agent (Sonnet Task())
+### Step 1: Classification agent (host middle-tier Task())
 
-Spawn ONE `Task()` call (model: sonnet) to classify all raw tasks. The agent writes an annotated `tasks.md` to `$TASKS_FILE_OUT`.
+Spawn ONE `Task()` call using the active host's middle-tier model to classify all raw tasks. The agent writes an annotated `tasks.md` to `$TASKS_FILE_OUT`.
 
 ```
 Task({
-  model: "sonnet",
-  subagent_type: "general-purpose",
+  model: ACTIVE_HOST == "codex" ? "gpt-5.4" : "sonnet",
+  subagent_type: "planner",
   description: "swarm-classify-" + SWARM_RUN_ID,
   prompt: CLASSIFICATION_PROMPT   # see full text below
 })
@@ -191,7 +193,7 @@ Rules:
 ## Model assignment table
 
 | Tier   | Assign when                                                   | Keyword signals                                                   |
-|--------|---------------------------------------------------------------|-------------------------------------------------------------------|
+|--------|---------------------------------------------------------------|---------------------------------------------------------------------|
 | haiku  | Trivial/mechanical — single-file, no logic decisions          | lint, format, rename, move, delete, comment, typo, update docs, bump version, add blank line |
 | sonnet | Standard implementation — default tier                        | implement, build, create, add, refactor, test, write, migrate     |
 | opus   | Security-critical or deep analysis                            | security audit, threat model, auth, architecture decision, CVE, cryptographic, critical path |
@@ -199,26 +201,60 @@ Rules:
 
 Default to sonnet when no clear signal.
 
+## Host runtime mapping
+
+The emitted `tasks.md` stays canonical (`haiku` / `sonnet` / `opus` / `fable`).
+The active host maps those tiers at execution time:
+
+| Host runtime | haiku | sonnet | opus |
+|--------------|-------|--------|------|
+| Claude Code  | haiku | sonnet | opus |
+| Codex        | gpt-5.4-mini | gpt-5.4 | gpt-5.5 |
+
+`fable` has no host-runtime mapping — it only resolves on the native Claude Code `Task()` path (see the Ruflo enum note in Step 3). On the Ruflo coordination path it downgrades to `sonnet`.
+
 ---
 
 ## Agent type routing table
 
 | Domain keyword signals                                                      | Agent type                  | Model note          |
 |-----------------------------------------------------------------------------|-----------------------------|---------------------|
-| test, TDD, spec, unit test, coverage, jest, pytest                         | openclaw-tdd-engineer       | —                   |
-| integration test, e2e, non-TDD test expansion                              | tester                      | —                   |
-| browser QA, email HTML QA, visual regression, accessibility                 | qa-engineer                 | —                   |
-| TypeScript, TS, .tsx, React hook, type system, frontend component           | frontend-engineer           | —                   |
-| Python, Django, FastAPI, async Python, .py file                             | python-reviewer             | —                   |
-| security, auth, OAuth, OWASP, vulnerability, CVE, pen test                  | security-reviewer           | FORCE opus          |
-| code review, PR review, quality, conventions, lint rules                    | reviewer                    | —                   |
-| architecture, ADR, system design, data model, service boundary              | system-architect            | FORCE opus          |
-| cleanup, dead code, remove unused, simplify, rename, small refactor         | refactor-cleaner            | prefer haiku        |
-| build error, CI failure, dependency conflict, compile error                 | build-error-resolver        | prefer haiku        |
+| playwright, browser automation, test automation, visual regression          | test-automator              | —                   |
+| test, TDD, spec, unit test, integration test, coverage, jest, pytest        | ecc:tdd-guide               | —                   |
+| code review, PR review, quality, conventions, lint rules                    | ecc:code-reviewer           | —                   |
+| security audit, threat model, OWASP compliance, vulnerability assessment    | security-auditor            | FORCE opus          |
+| backend security, auth middleware, JWT, OAuth, CSRF, XSS, CSP              | backend-security-coder      | FORCE opus          |
+| frontend security, browser security, WebView security                       | frontend-security-coder     | FORCE opus          |
+| architecture, ADR, system design, data model, service boundary              | ecc:architect               | FORCE opus          |
+| backend architecture, microservice, event sourcing, API design              | backend-architect           | FORCE opus          |
+| TypeScript, TS, .tsx, type system, generics, compiler                        | typescript-pro              | —                   |
+| React, Next.js, component, landing page, CSS, Tailwind, UI                  | frontend-developer          | —                   |
+| UI/UX, wireframe, mockup, design system, user flow                          | ui-ux-designer              | —                   |
+| accessibility, WCAG, a11y                                                  | accessibility-expert        | —                   |
+| Python, async Python, .py file                                              | python-pro                  | —                   |
+| Django                                                                       | django-pro                  | —                   |
+| FastAPI                                                                      | fastapi-pro                 | —                   |
+| SQL, migration, schema, query, index, PostgreSQL, Supabase, DB              | database-architect          | —                   |
+| query optimization, slow query, index tuning, DB performance                | database-optimizer          | —                   |
+| cleanup, dead code, remove unused, simplify, rename, small refactor         | ecc:refactor-cleaner        | prefer haiku        |
+| build error, CI failure, dependency conflict, compile error                 | ecc:build-error-resolver    | prefer haiku        |
 | performance, latency, throughput, bottleneck, profiling, caching            | performance-engineer        | —                   |
-| Next.js, React page, component, landing page, CSS, Tailwind, UI             | frontend-engineer           | —                   |
-| API route, server action, Prisma, backend endpoint, server-side             | nextjs-backend-engineer     | —                   |
-| SQL, migration, schema, query, index, PostgreSQL, Supabase, DB              | database-reviewer           | —                   |
+| debugging, stack trace, crash, hang, intermittent failure                   | error-detective             | —                   |
+| deploy, release, rollout, CI/CD, containers, Vercel                         | deployment-engineer         | —                   |
+| cloud, AWS, Azure, GCP, infrastructure                                      | cloud-architect             | —                   |
+| Kubernetes, GitOps, service mesh, mTLS                                      | kubernetes-architect        | —                   |
+| Terraform, IaC, state management                                            | terraform-specialist        | —                   |
+| observability, metrics, tracing, logs, monitoring, SLOs                     | observability-engineer      | —                   |
+| docs, documentation, README, tutorial, guide                                | docs-architect              | —                   |
+| OpenAPI, Swagger, API docs                                                  | api-documenter              | —                   |
+| reference, cheat sheet, lookup                                              | reference-builder           | —                   |
+| code explorer, reverse engineer, search                                     | reverse-engineer            | —                   |
+| context management, swarm context                                           | context-manager             | —                   |
+| prompt engineering                                                          | prompt-engineer             | —                   |
+| business, metrics, KPI, reporting                                           | business-analyst            | —                   |
+| sales, cold email, follow-up, proposal                                      | sales-automator             | —                   |
+| support, FAQ, customer communication                                        | customer-support            | —                   |
+| SEO, search engine, meta description, meta title, snippet                   | seo-meta-optimizer          | —                   |
 | (no domain match)                                                           | general-purpose             | —                   |
 
 "FORCE opus" = set [model:opus] regardless of complexity signals.
@@ -252,7 +288,7 @@ When in doubt, omit [P].
 ## After writing tasks.md
 
 Print exactly ONE JSON line to stdout (the caller parses this):
-CLASSIFY_RESULT: {"tasks":N,"parallel":K,"models":{"haiku":H,"sonnet":S,"opus":O,"fable":F},"agents":{"openclaw-tdd-engineer":N}}
+CLASSIFY_RESULT: {"tasks":N,"parallel":K,"models":{"haiku":H,"sonnet":S,"opus":O,"fable":F},"agents":{"ecc:tdd-guide":N}}
 
 Then stop.
 ```
@@ -277,7 +313,18 @@ printf '{"timestamp":"%s","event":"classify_done","swarm_id":"%s","task_count":%
 Parse tasks.md into structured data via shared `lib/dispatch.py`:
 
 ```bash
-DISPATCH="$(git rev-parse --show-toplevel)/packages/feature-fix-swarm/lib/dispatch.py"
+# codex-gate (PR #11): resolve dispatch.py across all three install shapes.
+DISPATCH=""
+for _candidate in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/dispatch.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/dispatch.py" \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/lib/dispatch.py"; do
+  [ -f "$_candidate" ] && DISPATCH="$_candidate" && break
+done
+if [ -z "$DISPATCH" ]; then
+  echo "ERROR: dispatch.py not found. Run setup.sh to install feature-fix-swarm." >&2
+  exit 1
+fi
 TASKS_JSON=$(FILE="$TASKS_FILE_OUT" python3 "$DISPATCH" parse)
 ```
 
@@ -330,7 +377,7 @@ fi
 # ── Pre-flight: check if Ruflo is available ───────────────────────────────────
 USE_RUFLO = True
 try:
-    mcp__ruflo__mcp_status()
+    mcp__ruflo__swarm_status()
 except Exception:
     USE_RUFLO = False
     log({"event": "ruflo_unavailable", "fallback": "native_parallel"})
@@ -616,20 +663,51 @@ Cost formula: `haiku×$0.02 + sonnet×$0.30 + opus×$2.00 + fable×$0.50`
 
 | Agent type | Domain | Default model |
 |---|---|---|
-| `openclaw-tdd-engineer` | test, TDD, coverage | sonnet |
-| `tester` | integration, e2e, non-TDD test expansion | sonnet |
-| `qa-engineer` | browser/email QA, visual regression, accessibility | sonnet |
-| `frontend-engineer` | TypeScript, React, .tsx | sonnet |
-| `python-reviewer` | Python, Django, FastAPI | sonnet |
-| `security-reviewer` | security, auth, CVE | **opus** |
-| `reviewer` | PR review, quality | sonnet |
-| `system-architect` | architecture, ADR | **opus** |
-| `refactor-cleaner` | cleanup, dead code | haiku |
-| `build-error-resolver` | CI failures, build errors | haiku |
-| `performance-engineer` | perf, profiling | sonnet |
-| `nextjs-frontend-engineer` | Next.js, React UI | sonnet |
-| `nextjs-backend-engineer` | API routes, Prisma | sonnet |
-| `database-reviewer` | SQL, schema, migrations | sonnet |
+| `test-automator` | Playwright, browser automation | sonnet |
+| `ecc:tdd-guide` | test, TDD, coverage | sonnet |
+| `ecc:code-reviewer` | PR review, quality | sonnet |
+| `security-auditor` | security audits, threat models | **opus** |
+| `backend-security-coder` | auth, CSRF, XSS, API security | **opus** |
+| `frontend-security-coder` | client-side security, WebView hardening | **opus** |
+| `ecc:architect` | architecture, ADR | **opus** |
+| `backend-architect` | API design, microservices | **opus** |
+| `graphql-architect` | GraphQL schemas, resolvers | **opus** |
+| `frontend-developer` | React, Next.js, responsive UI | sonnet |
+| `ui-ux-designer` | wireframes, design systems, user flow | sonnet |
+| `ui-designer` | visual design, design systems | **opus** |
+| `accessibility-expert` | WCAG, a11y | **opus** |
+| `ui-visual-validator` | visual regression, screenshot diffs | sonnet |
+| `typescript-pro` | TypeScript, TSX, generics | sonnet |
+| `python-pro` | Python, async Python | sonnet |
+| `fastapi-pro` | FastAPI | sonnet |
+| `django-pro` | Django | sonnet |
+| `javascript-pro` | JavaScript, Node.js | sonnet |
+| `database-architect` | SQL, schema, migrations | **opus** |
+| `database-optimizer` | query tuning, indexes | sonnet |
+| `database-admin` | backup, replication, failover | sonnet |
+| `performance-engineer` | profiling, bottlenecks | **opus** |
+| `debugger` | stack traces, crashes | sonnet |
+| `error-detective` | intermittent failures, log analysis | sonnet |
+| `incident-responder` | outages, production incidents | **opus** |
+| `deployment-engineer` | deploy, release, rollout | sonnet |
+| `cloud-architect` | cloud infrastructure | **opus** |
+| `kubernetes-architect` | Kubernetes, GitOps | **opus** |
+| `terraform-specialist` | IaC, Terraform state | sonnet |
+| `observability-engineer` | tracing, logs, SLOs | **opus** |
+| `docs-architect` | docs, README, tutorials | **opus** |
+| `api-documenter` | OpenAPI, Swagger | sonnet |
+| `reference-builder` | concise technical references | haiku |
+| `reverse-engineer` | code exploration, unknown systems | sonnet |
+| `context-manager` | multi-agent context management | haiku |
+| `prompt-engineer` | prompt pipelines | **opus** |
+| `business-analyst` | metrics, KPI tracking | sonnet |
+| `sales-automator` | cold email, follow-ups | haiku |
+| `customer-support` | support tickets, FAQ responses | sonnet |
+| `seo-meta-optimizer` | metadata optimization | haiku |
+| `ecc:refactor-cleaner` | cleanup, dead code | haiku |
+| `ecc:build-error-resolver` | CI failures, build errors | haiku |
+| `ecc:performance-optimizer` | perf, profiling | sonnet |
+| `ecc:database-reviewer` | SQL, schema, migrations | sonnet |
 | `general-purpose` | catch-all | sonnet |
 
 ---

@@ -8,6 +8,89 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.13.0 — goal-wrap skill + codex-gate hardening (2026-07-03)
+
+### Added
+
+- **`skills/goal-wrap/SKILL.md`** — new skill, ported from the openclaw vendored
+  fork. Bundles current session state into a self-contained, anti-drift
+  `/goal "..."` prompt with tracked `DONE WHEN` proof commands and a research
+  pass. Adapted for standalone use: the original's hard dependencies on
+  `repowise`/`gbrain`/`/prompt-master` now have documented grep/git/inline
+  fallbacks (see the skill's own "Soft dependencies" table); `/handoff`
+  already degraded gracefully in the source. `setup.sh` now installs it.
+- `docs/commands.md` — added missing `/plan-decompose`, `/swarm`, and
+  `/goal-wrap` rows (all three were real, shipped skills with no doc entry).
+- `README.md` "What's in the box" — refreshed from a stale 5-skill/3-doc
+  inventory to the actual 10-skill/4-doc/lib tree.
+
+### Fixed (codex-gate 3-pass review of PR #11)
+
+- **CRITICAL** — `feature-implement/SKILL.md`, `swarm/SKILL.md`: `DISPATCH=`
+  hardcoded an openclaw-monorepo-only path
+  (`packages/feature-fix-swarm/lib/dispatch.py`); `setup.sh` never installed
+  `dispatch.py` anywhere, so every standalone install silently broke task
+  parsing. Fixed with a 3-way fallback (openclaw-vendored → installed at
+  `~/.claude/lib/feature-fix-swarm/` → standalone repo root); `setup.sh` now
+  installs `dispatch.py` alongside `run_state`.
+- **HIGH** — `lib/dispatch.py` `route_agent()`: `api-documenter` was
+  unreachable dead code (`docs-architect`'s bare `docs` keyword
+  substring-matched inside "api docs"/"developer docs"/"openapi docs" and was
+  checked first). Reordered; added regression coverage.
+- **HIGH** — `swarm/SKILL.md`: one non-goals line had regressed to legacy
+  `/codex-gate` naming while every sibling file in the same reconciliation
+  was renamed to `/review-gate`.
+- **HIGH** — `prompts/decompose-spec.md`, `spec-decompose/SKILL.md` (7
+  occurrences): the canonical `/review-gate` task template tagged `[P]`
+  while also carrying `Depends-on:` — self-contradictory with this doc's own
+  `[P]` definition. Dropped `[P]` from the template.
+- **MEDIUM** — stale `gpt-5.3-codex-spark` references in README.md and
+  `prompts/decompose-spec.md` (the tier was renamed to `gpt-5.4-mini` in
+  `ruflo-host-executor.sh` in the same PR); a swallowed `reset --hard`
+  failure in `setup.sh`'s pack-sync now falls back to a fresh clone.
+- **LOW** — redundant `re.IGNORECASE` in `route_agent()`; unanchored
+  `## Phase N` grep in `feature-implement/SKILL.md` (matched `Phase 10`,
+  `Phase 11`, etc. for `Phase 1`).
+
+Deferred (documented, not blocking): Pass 3 flagged 6 HIGH test-coverage
+gaps — most `AGENT_ROUTING_RULES` entries untested, zero test file for
+`setup.sh`, and the `qa-swarm.sh` aggregation fix landed without a
+regression test. Real technical debt, tracked as follow-up.
+
+## v3.12.0 — reconcile openclaw vendored fork with OSS canonical (2026-07-03)
+
+The openclaw vendored copy (`packages/feature-fix-swarm/`) and the OSS canonical
+repo diverged after v3.5.0 with no shared git history since. Both sides added
+real, independent entries. This release is a pure changelog reconciliation —
+no functional merge of the underlying skill files was performed here, only
+the historical record was unioned so no entry from either side is lost.
+
+**Merged in from the openclaw vendored fork (v3.6.0 → v3.8.1):**
+- `feature-spec` skill — new skill that creates `specs/NNN/spec.md` + `plan.md`
+  from a GitHub issue, Linear ticket, or freeform description
+- `/swarm` skill — ad-hoc, no-spec-directory task swarm executor with
+  classification, parallel dispatch, and Ruflo coordination
+- Canonical cross-host task format (`haiku`/`sonnet`/`opus` ladder) in
+  `prompts/decompose-spec.md`, shared by Claude Code and Codex
+- `setup.sh` upstream freshness checks for ECC and `wshobson/agents` packs
+
+**Merged in from the OSS canonical repo (v3.6.0 → v3.11.0, renumbered v3.9.0 → v3.11.0 below):**
+- Hybrid exact-agent routing — `[agent:exact-agent]` annotations against a
+  comprehensive ECC + wshobson catalog, replacing department/role fallback
+- Codex Ruflo discovery fix — pre-flight now uses `mcp__ruflo__mcp_status`
+  instead of the stale `swarm_status` probe, with lazy tool discovery
+- `fable` tier — optional 4th tier on the model ladder for multi-file
+  narrative/voice-coherence tasks, plus `/review-gate` hang/timeout guidance
+
+**Renumbering note:** both forks independently reused the version number
+`v3.6.0` for unrelated content (openclaw: *feature-spec skill*, 2026-06-22;
+OSS canonical: *hybrid exact-agent routing*, 2026-06-30). The vendored fork's
+`v3.6.0` keeps its original number below (it is chronologically first and
+matches the openclaw repo's on-disk history). The OSS canonical's colliding
+`v3.6.0` has been renumbered to `v3.9.0` in this merged history — content is
+otherwise unchanged. OSS canonical's `v3.10.0` and `v3.11.0` did not collide
+and are unchanged.
+
 ## v3.11.0 — fable tier for multi-file narrative coherence (2026-07-01)
 
 ### Added
@@ -32,7 +115,12 @@ all skills.
 - **`skills/swarm/SKILL.md`** — ad-hoc swarms now document Codex lazy tool discovery before falling back away from Ruflo.
 - **`docs/commands.md`** — documents `mcp_status` as the Ruflo health check and calls out Codex lazy tool discovery.
 
-## v3.6.0 — hybrid exact-agent routing and installer freshness checks (2026-06-30)
+## v3.9.0 — hybrid exact-agent routing and installer freshness checks (2026-06-30)
+
+> Renumbered from OSS canonical's `v3.6.0` during the 2026-07-03 changelog
+> reconciliation to resolve a version-number collision with the vendored
+> fork's own `v3.6.0` (feature-spec skill, 2026-06-22, unchanged below).
+> Content is otherwise identical to the OSS canonical entry.
 
 ### Changed
 
@@ -48,6 +136,76 @@ all skills.
 - **`setup.sh`** now checks the upstream `main` SHA for **ECC** and **wshobson/agents**
   and refreshes those packs when they drift, alongside the existing gstack/spec-kit
   bootstrap flow.
+
+## v3.8.1 — external agent pack freshness checks (2026-06-30)
+
+### Changed
+
+- **`setup.sh`** now checks ECC and `wshobson/agents` against their upstream
+  `main` HEAD, installs them when missing, and refreshes the local install when
+  the recorded commit drifts from upstream.
+- **`README.md`** now documents the ECC and `wshobson/agents` bootstrap check so
+  the agent-pack dependency behavior is discoverable.
+
+## v3.8.0 — canonical cross-host task format (2026-06-30)
+
+### Changed
+
+- **`prompts/decompose-spec.md`** now emits the shared canonical task ladder
+  (`haiku` / `sonnet` / `opus`) in `tasks.md` for both Claude Code and Codex.
+- **`skills/swarm/SKILL.md`** now classifies ad-hoc tasks into the canonical
+  ladder and resolves those tiers to the active host at execution time.
+- **`skills/spec-decompose/SKILL.md`** now treats host-specific model IDs as
+  executor aliases only; decomposition output stays host-neutral.
+- **Docs updated** to describe `tasks.md` as a canonical intermediate format
+  usable by either runtime, with Codex runtime IDs handled during execution.
+- **Parser regression coverage** now verifies both canonical tiers and legacy
+  Codex model IDs still parse for older hand-edited task files.
+
+## v3.7.0 — /swarm skill: ad-hoc task swarm executor (2026-06-28)
+
+### Added
+
+- **`skills/swarm/SKILL.md` v1.0.0** — new skill that accepts natural-language task
+  descriptions (inline args or `--tasks-file`), classifies them via a Sonnet sub-agent,
+  and executes them through Ruflo coordination + native `Task()` (Claude Code OAuth-only;
+  `mcp__ruflo__agent_execute` is never called).
+
+  Key features:
+  - **No spec directory required.** Unlike `/feature-implement`, you don't need a
+    `specs/NNN/tasks.md`. Pass tasks directly: `/swarm "write tests" "fix lint"`.
+  - **Classification agent** (Sonnet `Task()`) assigns `[model:haiku/sonnet/opus/fable]`,
+    `[agent:TYPE]`, `[thinking:low/med/high/max]`, and `[P]` (parallel-safe) annotations
+    using the same heuristics as `/spec-decompose`.
+  - **Parallel dispatch** — `[P]`-marked tasks fire as concurrent `Task()` calls with
+    `run_in_background: true` in a single message turn.
+  - **Ruflo coordination** — `swarm_init` + `agent_spawn` for metadata; `memory_*` +
+    `agentdb_*` + `hooks_*` for pattern learning. Ruflo pre-flight auto-fallback: if
+    `swarm_status()` fails, switches to native parallel path with no exit.
+  - **Thinking alignment** — opus+med→high, haiku+high/max→med (prevents cost mismatch).
+  - **Fable support** — fable tasks execute via native `Agent` path (not Ruflo, whose
+    model enum is `haiku|sonnet|opus|inherit` only).
+  - **Dry-run** (`--dry-run`): classify + print annotated plan + cost estimate, exit 0.
+  - **`--tasks-file PATH`**: read raw tasks from a markdown checklist or one-per-line file.
+  - **`--swarm-id ID`**: resume an existing run (skip classification if `tasks.md` exists).
+  - **Self-critique before report**: names tasks done by self-report only (no file artifact).
+  - **Run state**: `.context/swarm/<run_id>/tasks.md` + `run.log` (JSONL).
+
+  Flags: `--dry-run`, `--sequential`, `--model-override MODEL`, `--no-memory`, `--no-auto`,
+  `--tasks-file PATH`, `--swarm-id ID`.
+
+  Non-goals (v1): no QA loop, no codex-gate, no commit/push, no task-level retries.
+
+## v3.6.0 — feature-spec skill (2026-06-22)
+
+### Added
+
+- **`skills/feature-spec/SKILL.md` v1.0.0** — new skill that creates `specs/NNN/spec.md`
+  and `plan.md` from a GitHub issue URL, Linear ticket, or freeform description.
+  Fills the pipeline gap before `/spec-decompose` (which requires `plan.md`) and
+  `/feature` (which requires `plan.md`). Spawns two Sonnet sub-agents: one writes
+  the spec (user stories + acceptance criteria), one writes the plan (phases, tech
+  stack, risks). Handles GitHub issue ingestion via `gh issue view`.
 
 ## v3.5.0 — Fable-mode operating disciplines (2026-06-13)
 

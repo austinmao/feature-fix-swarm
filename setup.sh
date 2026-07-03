@@ -158,6 +158,7 @@ install_goal_wrap() {
   install_skill_repo https://github.com/austinmao/goal-wrap goal-wrap handoff
 }
 
+# === external agent pack freshness checks (ECC, wshobson/agents) ===
 PACK_STATE_DIR="$HOME/.feature-fix-swarm/install-state"
 PACK_CACHE_DIR="$HOME/.feature-fix-swarm/install-cache"
 ECC_REPO="https://github.com/affaan-m/ECC.git"
@@ -167,32 +168,57 @@ WSH_REPO="https://github.com/wshobson/agents.git"
 WSH_CACHE_DIR="$PACK_CACHE_DIR/wshobson-agents"
 WSH_STATE_FILE="$PACK_STATE_DIR/wshobson-agents-main.sha"
 
+remote_main_sha() {
+  local repo="$1"
+  git ls-remote --heads "$repo" main 2>/dev/null | awk 'NR==1 {print $1}'
+}
+
+read_trimmed_file() {
+  local path="$1"
+  if [ -f "$path" ]; then
+    tr -d '[:space:]' < "$path"
+  fi
+}
+
+write_state_file() {
+  local path="$1"
+  local value="$2"
+  mkdir -p "$(dirname "$path")"
+  printf '%s\n' "$value" > "$path"
+}
+
 install_ecc_pack() {
-  local upstream_sha=""
   if ! command -v git >/dev/null 2>&1; then
     echo "  ECC: NOT FOUND (git required to clone upstream)"
     return 1
   fi
 
-  upstream_sha=$(git ls-remote "$ECC_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  local upstream_sha
+  upstream_sha="$(remote_main_sha "$ECC_REPO")"
   if [ -z "$upstream_sha" ]; then
     echo "  ECC: NOT FOUND (unable to resolve upstream main)"
     return 1
   fi
 
   echo "  ECC: syncing upstream main $upstream_sha"
-  rm -rf "$ECC_CACHE_DIR"
-  git clone --depth 1 --branch main "$ECC_REPO" "$ECC_CACHE_DIR" >/dev/null
-  (
-    cd "$ECC_CACHE_DIR" &&
-    bash ./install.sh --profile minimal --target claude
-  )
-  mkdir -p "$PACK_STATE_DIR"
-  printf '%s\n' "$upstream_sha" > "$ECC_STATE_FILE"
+  mkdir -p "$PACK_CACHE_DIR"
+  if [ -d "$ECC_CACHE_DIR/.git" ] \
+     && git -C "$ECC_CACHE_DIR" fetch --depth 1 origin main >/dev/null 2>&1 \
+     && git -C "$ECC_CACHE_DIR" reset --hard FETCH_HEAD >/dev/null 2>&1; then
+    :
+  else
+    # codex-gate (PR #11): a failed reset was previously swallowed by `|| true`,
+    # leaving a stale/inconsistent working tree. Fall back to a fresh clone on
+    # ANY failure in the incremental path (missing .git, fetch failure, or reset failure).
+    rm -rf "$ECC_CACHE_DIR"
+    git clone --depth 1 --branch main "$ECC_REPO" "$ECC_CACHE_DIR" >/dev/null 2>&1
+  fi
+
+  (cd "$ECC_CACHE_DIR" && bash ./install.sh --profile minimal --target claude)
+  write_state_file "$ECC_STATE_FILE" "$upstream_sha"
 }
 
 install_wshobson_pack() {
-  local upstream_sha=""
   if ! command -v git >/dev/null 2>&1; then
     echo "  wshobson/agents: NOT FOUND (git required to resolve upstream)"
     return 1
@@ -202,78 +228,85 @@ install_wshobson_pack() {
     return 1
   fi
 
-  upstream_sha=$(git ls-remote "$WSH_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  local upstream_sha
+  upstream_sha="$(remote_main_sha "$WSH_REPO")"
   if [ -z "$upstream_sha" ]; then
     echo "  wshobson/agents: NOT FOUND (unable to resolve upstream main)"
     return 1
   fi
 
   echo "  wshobson/agents: syncing upstream main $upstream_sha"
-  rm -rf "$WSH_CACHE_DIR"
-  mkdir -p "$WSH_CACHE_DIR"
-  (
-    cd "$WSH_CACHE_DIR" &&
-    npx codex-marketplace add wshobson/agents
-  )
-  mkdir -p "$PACK_STATE_DIR"
-  printf '%s\n' "$upstream_sha" > "$WSH_STATE_FILE"
+  mkdir -p "$PACK_CACHE_DIR"
+  if [ -d "$WSH_CACHE_DIR/.git" ] \
+     && git -C "$WSH_CACHE_DIR" fetch --depth 1 origin main >/dev/null 2>&1 \
+     && git -C "$WSH_CACHE_DIR" reset --hard FETCH_HEAD >/dev/null 2>&1; then
+    :
+  else
+    # codex-gate (PR #11): fall back to a fresh clone on ANY failure in the
+    # incremental path (missing .git, fetch failure, or reset failure) —
+    # a failed reset was previously swallowed by `|| true`.
+    rm -rf "$WSH_CACHE_DIR"
+    git clone --depth 1 --branch main "$WSH_REPO" "$WSH_CACHE_DIR" >/dev/null 2>&1
+  fi
+
+  # Run the marketplace install from this cached clone (fetched/reset or freshly
+  # cloned above), not the caller's cwd, so it never writes stray project-relative
+  # files into whichever repo the user happened to be in when setup.sh ran.
+  (cd "$WSH_CACHE_DIR" && npx codex-marketplace add wshobson/agents)
+  write_state_file "$WSH_STATE_FILE" "$upstream_sha"
 }
 
 check_ecc_pack() {
-  local upstream_sha=""
-  local recorded_sha=""
-
   if ! command -v git >/dev/null 2>&1; then
     echo "  ECC: NOT FOUND"
     return 1
   fi
 
-  upstream_sha=$(git ls-remote "$ECC_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  local upstream_sha recorded_sha
+  upstream_sha="$(remote_main_sha "$ECC_REPO")"
   if [ -z "$upstream_sha" ]; then
     echo "  ECC: NOT FOUND"
     return 1
   fi
 
-  if [ -f "$ECC_STATE_FILE" ]; then
-    recorded_sha=$(cat "$ECC_STATE_FILE" 2>/dev/null || true)
-    if [ "$recorded_sha" = "$upstream_sha" ] && skill_installed tdd-guide; then
-      echo "  ECC: OK (upstream main $upstream_sha)"
-      return 0
-    fi
-    echo "  ECC: OUTDATED (installed ${recorded_sha:-(unknown)}, upstream main $upstream_sha)"
-    return 1
+  recorded_sha="$(read_trimmed_file "$ECC_STATE_FILE")"
+  if [ "$recorded_sha" = "$upstream_sha" ] && skill_installed tdd-guide; then
+    echo "  ECC: OK (upstream main $upstream_sha)"
+    return 0
   fi
 
-  echo "  ECC: NOT FOUND"
+  if [ -n "$recorded_sha" ]; then
+    echo "  ECC: OUTDATED (installed $recorded_sha, upstream main $upstream_sha)"
+  else
+    echo "  ECC: NOT FOUND"
+  fi
   return 1
 }
 
 check_wshobson_pack() {
-  local upstream_sha=""
-  local recorded_sha=""
-
   if ! command -v git >/dev/null 2>&1; then
     echo "  wshobson/agents: NOT FOUND"
     return 1
   fi
 
-  upstream_sha=$(git ls-remote "$WSH_REPO" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }')
+  local upstream_sha recorded_sha
+  upstream_sha="$(remote_main_sha "$WSH_REPO")"
   if [ -z "$upstream_sha" ]; then
     echo "  wshobson/agents: NOT FOUND"
     return 1
   fi
 
-  if [ -f "$WSH_STATE_FILE" ]; then
-    recorded_sha=$(cat "$WSH_STATE_FILE" 2>/dev/null || true)
-    if [ "$recorded_sha" = "$upstream_sha" ] && skill_installed backend-architect; then
-      echo "  wshobson/agents: OK (upstream main $upstream_sha)"
-      return 0
-    fi
-    echo "  wshobson/agents: OUTDATED (installed ${recorded_sha:-(unknown)}, upstream main $upstream_sha)"
-    return 1
+  recorded_sha="$(read_trimmed_file "$WSH_STATE_FILE")"
+  if [ "$recorded_sha" = "$upstream_sha" ] && skill_installed backend-architect; then
+    echo "  wshobson/agents: OK (upstream main $upstream_sha)"
+    return 0
   fi
 
-  echo "  wshobson/agents: NOT FOUND"
+  if [ -n "$recorded_sha" ]; then
+    echo "  wshobson/agents: OUTDATED (installed $recorded_sha, upstream main $upstream_sha)"
+  else
+    echo "  wshobson/agents: NOT FOUND"
+  fi
   return 1
 }
 
@@ -319,7 +352,7 @@ fi
 # Copy skills
 SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
-for skill in fix feature-implement feature spec-decompose; do
+for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose codex-gate review-gate goal-wrap; do
   TARGET="$SKILLS_DIR/$skill/SKILL.md"
   if [ -f "$TARGET" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
@@ -351,6 +384,15 @@ fi
 cp -R "$SCRIPT_DIR/lib/run_state" "$LIB_DIR/run_state"
 find "$LIB_DIR/run_state" -type d \( -name __pycache__ -o -name .pytest_cache \) -exec rm -rf {} + 2>/dev/null || true
 echo "  Installed $LIB_DIR/run_state/"
+
+# dispatch.py (task-parsing/routing/cost-estimate library used by feature-implement) —
+# codex-gate (PR #11): standalone installs never had this installed anywhere, so the
+# skill's hardcoded openclaw-monorepo path silently broke task parsing outside openclaw.
+echo ""
+echo "Installing dispatch.py to $LIB_DIR/feature-fix-swarm/..."
+mkdir -p "$LIB_DIR/feature-fix-swarm"
+cp "$SCRIPT_DIR/lib/dispatch.py" "$LIB_DIR/feature-fix-swarm/dispatch.py"
+echo "  Installed $LIB_DIR/feature-fix-swarm/dispatch.py"
 
 BIN_DIR="$HOME/.claude/bin"
 mkdir -p "$BIN_DIR"
