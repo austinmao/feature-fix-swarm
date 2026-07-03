@@ -423,3 +423,21 @@ def test_run_gate_stores_failure_signature_lines(tmp_path) -> None:
     assert rc == 1
     sig = json.loads(store.read_text())["T061"]["gate"].get("failure_sig", "")
     assert "AssertionError: boom" in sig  # the discriminating line survives
+
+
+def test_run_gate_failure_sig_survives_long_output(tmp_path) -> None:
+    """Codex round 3 P2: markers must be scanned over the FULL output —
+    truncating to the last 2000 chars first drops early traceback lines."""
+    store = tmp_path / "evidence.json"
+    code = (
+        "import sys\n"
+        "print('FAILED test_a.py::test_x - AssertionError: needle')\n"
+        "print('filler line ' * 10 + '\\n' * 1 , end='')\n"
+        "print(('x' * 80 + '\\n') * 40, end='')\n"   # >3000 chars of filler AFTER the marker
+        "print('1 failed in 0.01s')\n"
+        "sys.exit(1)\n"
+    )
+    rc = gates.run_gate(store, "T062", ["python3", "-c", code])
+    assert rc == 1
+    sig = json.loads(store.read_text())["T062"]["gate"]["failure_sig"]
+    assert "needle" in sig

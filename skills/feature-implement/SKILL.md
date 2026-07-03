@@ -1113,7 +1113,9 @@ try:
     gate = json.load(open(store)).get(sys.argv[1], {}).get("gate", {})
 except Exception:
     gate = {}
-sig = (gate.get("failure_sig") or gate.get("tests_after") or "").strip()
+# failure_sig only — tests_after is the generic summary footer shared by
+# unrelated failures (codex round 3 P3); missing sig → task-scoped sentinel.
+sig = (gate.get("failure_sig") or "").strip()
 print(sig[:400] or f"{sys.argv[1]} gate nonzero")
 PY
 )

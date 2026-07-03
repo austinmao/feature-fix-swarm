@@ -114,12 +114,14 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> 
     """Execute the gate command and record the REAL exit code (P1: evidence
     bound to the runner, not caller-supplied --exit). Returns the exit code."""
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    tail = (proc.stdout + proc.stderr)[-2000:]
+    full = proc.stdout + proc.stderr
+    tail = full[-2000:]
     lines = tail.splitlines()
     # Failure signature = the DISCRIMINATING failing lines, not the final
     # summary line — different failures share "1 failed in ..." (codex gate
-    # round 2, v3.14). Last 3 marker lines, else last line as fallback.
-    marker_lines = [ln for ln in lines if FAILURE_MARKERS.search(ln)]
+    # round 2, v3.14). Scan the FULL output (round 3: truncating first drops
+    # early traceback lines); last 3 marker lines, else last line as fallback.
+    marker_lines = [ln for ln in full.splitlines() if FAILURE_MARKERS.search(ln)]
     failure_sig = " | ".join(marker_lines[-3:])[:400] if proc.returncode != 0 else ""
     with _StoreLock(store):
         data = _load_store(store)
