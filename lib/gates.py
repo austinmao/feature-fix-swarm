@@ -212,15 +212,27 @@ def classify_gate_cmd(cmd: str) -> str:
     return "tests"
 
 
-def phase_score(store: Path, task_ids: list[str]) -> tuple[float, dict]:
+def phase_score(store: Path, task_ids: list[str], strict: bool = False) -> tuple[float, dict]:
     """Aggregate truth score over a phase's tasks from STORED evidence
     (wires the previously-dead truth_score into the pipeline).
     - each task's gate cmd is classified into a truth category
     - a category is OK iff every one of its gates exited 0
     - score = weights of OK categories / weights of categories present
-    - any task with NO gate evidence at all → 0.0 (unproven phase)"""
+    - any task with NO gate evidence at all → 0.0 (unproven phase)
+    - strict: caller-recorded evidence counts as MISSING — phase-score is the
+      rollback authority, so it must honor the same provenance boundary as
+      verify_done (codex gate round 1, v3.14)."""
     data = _load_store(store)
-    missing = [t for t in task_ids if not data.get(t, {}).get("gate")]
+
+    def _usable(t: str) -> bool:
+        gate = data.get(t, {}).get("gate")
+        if not gate:
+            return False
+        if strict and gate.get("executed_by") != "run_gate":
+            return False
+        return True
+
+    missing = [t for t in task_ids if not _usable(t)]
     if missing:
         return 0.0, {"missing": missing}
     cats: dict[str, bool] = {}
@@ -400,7 +412,8 @@ def main(argv: list[str]) -> int:
         return 1 if findings else 0
     if cmd == "phase-score":
         task_ids = [a for a in args if not a.startswith("--")]
-        score, breakdown = phase_score(store, task_ids)
+        strict = "--strict" in args or os.environ.get("GATES_STRICT") == "1"
+        score, breakdown = phase_score(store, task_ids, strict=strict)
         threshold = float(os.environ.get("TRUTH_THRESHOLD", TRUTH_THRESHOLD))
         for cat, val in breakdown.items():
             print(f"  {cat}: {'OK' if val is True else val if cat == 'missing' else 'FAIL'}")

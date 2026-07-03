@@ -1057,7 +1057,10 @@ fi
 
 # 7. Phase truth score (v1.10.0 — wires the documented 0.95 rollback for real).
 # PHASE_TASK_IDS = the task IDs completed in this phase (from the stage map).
-if ! python3 "$GATES_PY" phase-score $PHASE_TASK_IDS; then
+# zsh-safe split: unquoted scalars do NOT word-split in zsh; command-substitution
+# output splits in both shells (same pattern as the arg loops elsewhere).
+# GATES_STRICT=1: caller-recorded evidence counts as missing here too.
+if ! GATES_STRICT=1 python3 "$GATES_PY" phase-score $(printf '%s\n' "$PHASE_TASK_IDS"); then
   echo "[feature-implement] TRUTH-SCORE below 0.95 for $CURRENT_PHASE — rolling back" >&2
   # Roll back to the phase-start checkpoint (recorded before the phase began):
   #   git stash push -m "phase-rollback-$CURRENT_PHASE"  (preserves work for autopsy)
@@ -1088,8 +1091,10 @@ Record start time. When Agent returns:
     exit 1
   fi
   # PREFERRED: let gates.py execute the gate itself so the exit code is real,
-  # not caller-supplied (an agent cannot fabricate evidence this way):
-  python3 "$GATES_PY" run-gate "$TASK_ID" -- $GATE_CMD
+  # not caller-supplied (an agent cannot fabricate evidence this way).
+  # zsh-safe: $GATE_CMD unquoted does not word-split in zsh — split via
+  # command substitution (pre-existing on main; fixed in the v3.14 gate round):
+  python3 "$GATES_PY" run-gate "$TASK_ID" -- $(printf '%s\n' "$GATE_CMD")
   # HARD STOP: no passing evidence → the checkbox MUST stay [ ]. Mark the task
   # [F] and enter the retry path — do NOT continue to the [X] flip.
   # GATES_STRICT=1 (v1.10.0): caller-recorded evidence (record-gate) is rejected;

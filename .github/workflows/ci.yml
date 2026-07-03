@@ -33,11 +33,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run bats suites (if any)
+      - name: Run bats suites
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q bats
-          if compgen -G "tests/bats/*.bats" > /dev/null; then
-            bats tests/bats/
-          else
-            echo "no bats suites — skipping"
+          # discover every suite (the real coverage lives at
+          # scripts/harness/ruflo-host-executor.bats, not tests/bats/)
+          mapfile -t SUITES < <(find . -name '*.bats' -not -path './.git/*')
+          if [ "${#SUITES[@]}" -eq 0 ]; then
+            echo "no bats suites found"; exit 0
           fi
+          bats "${SUITES[@]}"

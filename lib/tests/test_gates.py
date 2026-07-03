@@ -367,3 +367,30 @@ def test_cli_note_failure_exit_codes(tmp_path) -> None:
     assert r1.returncode == 0 and "PROGRESS-OK" in r1.stdout
     r2 = _sp.run(a, capture_output=True, text=True, env=env)
     assert r2.returncode == 1 and "NO-PROGRESS" in r2.stdout
+
+
+def test_phase_score_strict_ignores_caller_evidence(tmp_path) -> None:
+    """Codex P1 (v3.14 gate round 1): phase-score is the rollback authority —
+    under strict it must not count caller-recorded (forgeable) evidence."""
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T050", exit_code=0, cmd="pytest -q")  # caller
+    score_lax, _ = gates.phase_score(store, ["T050"])
+    assert score_lax == 1.0
+    score_strict, breakdown = gates.phase_score(store, ["T050"], strict=True)
+    assert score_strict == 0.0
+    assert "T050" in breakdown.get("missing", [])
+    # runner evidence still counts under strict
+    gates.run_gate(store, "T051", ["python3", "-c", "print('ok')"])
+    score2, _ = gates.phase_score(store, ["T051"], strict=True)
+    assert score2 == 1.0
+
+
+def test_cli_phase_score_strict_env(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"), GATES_STRICT="1")
+    _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "record-gate", "T052",
+             "--exit", "0", "--cmd", "pytest -q"], capture_output=True, env=env)
+    r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "phase-score", "T052"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1  # caller evidence = unproven under strict
