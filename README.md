@@ -107,7 +107,7 @@ The implementation layer renders those fields for the current host, but the task
   `sonnet` on the Ruflo-coordinated path (Ruflo's model enum is
   `haiku`\|`sonnet`\|`opus`\|`inherit` only). `/spec-decompose` may emit it, and
   `/swarm` + `/feature-implement` execute it on the native `Task()` path.
-- Codex OAuth uses the Codex ladder: `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.5`
+- Codex OAuth uses the Codex ladder: `gpt-5.4-mini`, `gpt-5.4`, `gpt-5.5`
 - `/swarm` classifies ad-hoc tasks into the same canonical ladder and maps it
   to the active host at execution time.
 - Ruflo consumes normalized roles and task metadata, not host-specific model names.

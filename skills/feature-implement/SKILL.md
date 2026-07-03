@@ -199,7 +199,20 @@ Extract all tasks into structured data. Each has:
 Python parsing via Bash heredoc:
 
 ```bash
-DISPATCH="$(git rev-parse --show-toplevel)/packages/feature-fix-swarm/lib/dispatch.py"
+# codex-gate (PR #11): resolve dispatch.py across all three install shapes —
+# openclaw-monorepo vendored copy, standalone `setup.sh` install, and a plain
+# git clone of this repo run directly from its own root.
+DISPATCH=""
+for _candidate in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/dispatch.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/dispatch.py" \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/lib/dispatch.py"; do
+  [ -f "$_candidate" ] && DISPATCH="$_candidate" && break
+done
+if [ -z "$DISPATCH" ]; then
+  echo "ERROR: dispatch.py not found. Run setup.sh to install feature-fix-swarm." >&2
+  exit 1
+fi
 TASKS_JSON=$(FILE="$TASKS_FILE" python3 "$DISPATCH" parse)
 # Export for RALPH context extraction in Step 5.5b
 export TASKS_JSON
@@ -722,7 +735,7 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
 
    ```
    # Detect /design-html tasks in this phase (before hive init)
-   PHASE_HAS_DESIGN_HTML=$(grep -A5 "^## Phase ${CURRENT_PHASE}" "$SPEC_DIR/tasks.md" 2>/dev/null | grep -c '/design-html' || echo "0")
+   PHASE_HAS_DESIGN_HTML=$(grep -A5 "^## Phase ${CURRENT_PHASE}[^0-9]" "$SPEC_DIR/tasks.md" 2>/dev/null | grep -c '/design-html' || echo "0")
 
    # Init hive-mind for this phase's QA (3-agent core swarm; design review runs after, in orchestrator)
    hiveId = mcp__ruflo__hive-mind_init({

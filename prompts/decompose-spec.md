@@ -1,6 +1,6 @@
 # Prompt: Decompose a Feature Spec into an Executable Task List
 
-Copy this prompt verbatim into your conversation, then reference `specs/NNN-feature-name/spec.md` and `specs/NNN-feature-name/plan.md`. Use the host-appropriate model ladder for decomposition: Claude Code emits `haiku` / `sonnet` / `opus` (plus the optional Claude-Code-native `fable` tier); Codex OAuth emits `gpt-5.3-codex-spark` / `gpt-5.4` / `gpt-5.5`.
+Copy this prompt verbatim into your conversation, then reference `specs/NNN-feature-name/spec.md` and `specs/NNN-feature-name/plan.md`. Use the host-appropriate model ladder for decomposition: Claude Code emits `haiku` / `sonnet` / `opus` (plus the optional Claude-Code-native `fable` tier); Codex OAuth emits `gpt-5.4-mini` / `gpt-5.4` / `gpt-5.5`.
 
 ---
 
@@ -13,7 +13,7 @@ You are a senior engineer decomposing an approved feature spec into an atomic, T
 ## Host-aware model ladder
 
 - Claude Code: `haiku` / `sonnet` / `opus` / `fable` (optional 4th tier, see below)
-- Codex OAuth: `gpt-5.3-codex-spark` / `gpt-5.4` / `gpt-5.5`
+- Codex OAuth: `gpt-5.4-mini` / `gpt-5.4` / `gpt-5.5`
 - Emit the native identifiers for the host you are running in; do not translate between ladders.
 - `fable` is Claude-Code-native only — no Codex equivalent. Reserve it for tasks that need
   multi-file narrative coherence: reconciling voice/structure across several files in one
@@ -69,7 +69,7 @@ Components in order:
 | `T###` | yes | `T001`, `T042` | Sequential, zero-padded, execution order |
 | `[P]` | optional | `[P]` | Parallel-safe: different files, no deps on incomplete tasks |
 | `[USn]` | if user-story phase | `[US1]` | Ties to spec.md user story priority; NO story label for Setup/Foundational/Integration/QA phases |
-| `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus` \| `fable`; Codex: `gpt-5.3-codex-spark` \| `gpt-5.4` \| `gpt-5.5` (`fable` is Claude-only, downgrades to `sonnet` on the Ruflo path) |
+| `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus` \| `fable`; Codex: `gpt-5.4-mini` \| `gpt-5.4` \| `gpt-5.5` (`fable` is Claude-only, downgrades to `sonnet` on the Ruflo path) |
 | `[thinking:Y]` | yes | `[thinking:med]` | `low` \| `med` \| `high` \| `max` — thinking budget for implementer |
 | `[agent:exact-agent]` | yes | `[agent:ecc:tdd-guide]` | Exact label from the hybrid ECC + wshobson catalog; keep it stable |
 | Description | yes | `Implement POST /api/auth in `web/src/app/api/auth/route.ts`` | Concrete action + backticked file path from repo root |
@@ -85,7 +85,7 @@ Two-space indent, `Depends-on:` prefix, comma-separated task IDs. Omit if no ups
 
 | Tier | Use for | Examples |
 |---|---|---|
-| `[model:haiku thinking:low]` / `[model:gpt-5.3-codex-spark thinking:low]` | Boilerplate, migrations, renames, deps install | `Install shadcn/ui`, `Run migration 007`, `Rename service X to Y` |
+| `[model:haiku thinking:low]` / `[model:gpt-5.4-mini thinking:low]` | Boilerplate, migrations, renames, deps install | `Install shadcn/ui`, `Run migration 007`, `Rename service X to Y` |
 | `[model:sonnet thinking:med]` / `[model:gpt-5.4 thinking:med]` | Default — most logic, routes, tests, components | Writing a POST route, writing a unit test, building a React component |
 | `[model:sonnet thinking:high]` / `[model:gpt-5.4 thinking:high]` | Complex logic, edge cases, cross-module integration | Writing E2E tests with Playwright, solving race conditions, reconciling DB + cache |
 | `[model:opus thinking:max]` / `[model:gpt-5.5 thinking:max]` | Architecture decisions, complex debugging, ambiguous specs | Designing a new subsystem, investigating intermittent test failures, choosing between two fundamental approaches |
@@ -178,7 +178,7 @@ on Codex OAuth) — never `fable` or the top/bottom tiers — for the review-gat
 ### Canonical review-gate task format
 
 ```
-- [ ] T### [model:<host-middle-tier> thinking:med] [agent:ecc:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL findings block Phase N+1. Address all CRITICAL, fix or defer HIGH. [qa:review-gate] [P]
+- [ ] T### [model:<host-middle-tier> thinking:med] [agent:ecc:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL findings block Phase N+1. Address all CRITICAL, fix or defer HIGH. [qa:review-gate]
       Depends-on: T### (last implementation task in this phase)
 ```
 
@@ -230,7 +230,7 @@ For each user story phase, structure internally as:
 - [ ] T### [US1] [model:sonnet thinking:high] [agent:ui-visual-validator] Manual dogfood on localhost: happy path + 2 edge cases
 
 ### Review Gate for User Story 1
-- [ ] T### [US1] [model:sonnet thinking:med] [agent:ecc:code-reviewer] /review-gate — review Phase 3 diff. HIGH/CRITICAL findings block Phase 4. [qa:review-gate] [P]
+- [ ] T### [US1] [model:sonnet thinking:med] [agent:ecc:code-reviewer] /review-gate — review Phase 3 diff. HIGH/CRITICAL findings block Phase 4. [qa:review-gate]
       Depends-on: T### (Dev QA task above)
 ```
 

@@ -71,8 +71,14 @@ def test_route_agent_maps_specialist_tasks_to_wshobson_agents() -> None:
     assert dispatch.route_agent("Tune slow PostgreSQL queries and indexes") == "database-optimizer"
     assert dispatch.route_agent("Investigate an intermittent stack trace in production") == "error-detective"
     assert dispatch.route_agent("Create Playwright browser automation for the checkout flow") == "test-automator"
-    assert dispatch.route_agent("Write architecture docs and OpenAPI specs") == "docs-architect"
+    assert dispatch.route_agent("Write architecture docs and system design guides") == "docs-architect"
     assert dispatch.route_agent("Improve accessibility and WCAG compliance on the landing page") == "accessibility-expert"
+    # codex-gate (PR #11): api-documenter was unreachable dead code — docs-architect's
+    # bare "docs" keyword shadowed it via substring match on "api docs"/"developer docs"/
+    # "openapi docs". Regression coverage for the reorder fix.
+    assert dispatch.route_agent("Write OpenAPI docs for the auth endpoint") == "api-documenter"
+    assert dispatch.route_agent("developer docs for the API") == "api-documenter"
+    assert dispatch.route_agent("Review the Swagger schema") == "api-documenter"
 
 
 def test_parse_without_explicit_agent_routes_to_ecc_agent() -> None:

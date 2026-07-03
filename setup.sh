@@ -202,14 +202,14 @@ install_ecc_pack() {
 
   echo "  ECC: syncing upstream main $upstream_sha"
   mkdir -p "$PACK_CACHE_DIR"
-  if [ -d "$ECC_CACHE_DIR/.git" ]; then
-    if git -C "$ECC_CACHE_DIR" fetch --depth 1 origin main >/dev/null 2>&1; then
-      git -C "$ECC_CACHE_DIR" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
-    else
-      rm -rf "$ECC_CACHE_DIR"
-      git clone --depth 1 --branch main "$ECC_REPO" "$ECC_CACHE_DIR" >/dev/null 2>&1
-    fi
+  if [ -d "$ECC_CACHE_DIR/.git" ] \
+     && git -C "$ECC_CACHE_DIR" fetch --depth 1 origin main >/dev/null 2>&1 \
+     && git -C "$ECC_CACHE_DIR" reset --hard FETCH_HEAD >/dev/null 2>&1; then
+    :
   else
+    # codex-gate (PR #11): a failed reset was previously swallowed by `|| true`,
+    # leaving a stale/inconsistent working tree. Fall back to a fresh clone on
+    # ANY failure in the incremental path (missing .git, fetch failure, or reset failure).
     rm -rf "$ECC_CACHE_DIR"
     git clone --depth 1 --branch main "$ECC_REPO" "$ECC_CACHE_DIR" >/dev/null 2>&1
   fi
@@ -237,20 +237,21 @@ install_wshobson_pack() {
 
   echo "  wshobson/agents: syncing upstream main $upstream_sha"
   mkdir -p "$PACK_CACHE_DIR"
-  if [ -d "$WSH_CACHE_DIR/.git" ]; then
-    if git -C "$WSH_CACHE_DIR" fetch --depth 1 origin main >/dev/null 2>&1; then
-      git -C "$WSH_CACHE_DIR" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
-    else
-      rm -rf "$WSH_CACHE_DIR"
-      git clone --depth 1 --branch main "$WSH_REPO" "$WSH_CACHE_DIR" >/dev/null 2>&1
-    fi
+  if [ -d "$WSH_CACHE_DIR/.git" ] \
+     && git -C "$WSH_CACHE_DIR" fetch --depth 1 origin main >/dev/null 2>&1 \
+     && git -C "$WSH_CACHE_DIR" reset --hard FETCH_HEAD >/dev/null 2>&1; then
+    :
   else
+    # codex-gate (PR #11): fall back to a fresh clone on ANY failure in the
+    # incremental path (missing .git, fetch failure, or reset failure) —
+    # a failed reset was previously swallowed by `|| true`.
     rm -rf "$WSH_CACHE_DIR"
     git clone --depth 1 --branch main "$WSH_REPO" "$WSH_CACHE_DIR" >/dev/null 2>&1
   fi
 
-  # Run the marketplace install from an isolated scratch dir so it never
-  # writes stray project-relative files into the caller's cwd.
+  # Run the marketplace install from this cached clone (fetched/reset or freshly
+  # cloned above), not the caller's cwd, so it never writes stray project-relative
+  # files into whichever repo the user happened to be in when setup.sh ran.
   (cd "$WSH_CACHE_DIR" && npx codex-marketplace add wshobson/agents)
   write_state_file "$WSH_STATE_FILE" "$upstream_sha"
 }
@@ -383,6 +384,15 @@ fi
 cp -R "$SCRIPT_DIR/lib/run_state" "$LIB_DIR/run_state"
 find "$LIB_DIR/run_state" -type d \( -name __pycache__ -o -name .pytest_cache \) -exec rm -rf {} + 2>/dev/null || true
 echo "  Installed $LIB_DIR/run_state/"
+
+# dispatch.py (task-parsing/routing/cost-estimate library used by feature-implement) —
+# codex-gate (PR #11): standalone installs never had this installed anywhere, so the
+# skill's hardcoded openclaw-monorepo path silently broke task parsing outside openclaw.
+echo ""
+echo "Installing dispatch.py to $LIB_DIR/feature-fix-swarm/..."
+mkdir -p "$LIB_DIR/feature-fix-swarm"
+cp "$SCRIPT_DIR/lib/dispatch.py" "$LIB_DIR/feature-fix-swarm/dispatch.py"
+echo "  Installed $LIB_DIR/feature-fix-swarm/dispatch.py"
 
 BIN_DIR="$HOME/.claude/bin"
 mkdir -p "$BIN_DIR"

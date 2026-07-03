@@ -74,7 +74,8 @@ AGENT_ROUTING_RULES = [
     (r"\bgo\b|golang", "golang-pro"),
     (r"rust", "rust-pro"),
     (r"c#|\.net|dotnet", "csharp-pro"),
-    (r"docs|documentation|readme|tutorial|guide|openapi|swagger|api docs|developer docs", "docs-architect"),
+    (r"openapi|swagger|api docs|developer docs", "api-documenter"),
+    (r"docs|documentation|readme|tutorial|guide", "docs-architect"),
     # Architecture, storage, and analysis.
     (r"architecture|adr|system design|data model|service boundary", "ecc:architect"),
     (r"database tuning|slow query|slow queries|index tuning|query optimization|queries and indexes|database performance|query tuning|index optimization", "database-optimizer"),
@@ -91,7 +92,6 @@ AGENT_ROUTING_RULES = [
     (r"observability|metrics|tracing|logs|monitoring|sli|slo", "observability-engineer"),
     (r"network|load balanc|traffic analysis|dns|routing", "network-engineer"),
     # Documentation and knowledge work.
-    (r"openapi|swagger|api docs|developer docs", "api-documenter"),
     (r"reference|cheatsheet|lookup", "reference-builder"),
     (r"mermaid|diagram|sequence diagram|flowchart|erd", "mermaid-expert"),
     (r"reverse engineer|reverse engineering|code explorer", "reverse-engineer"),
@@ -122,7 +122,7 @@ def route_agent(description: str, default_agent: str = "general-purpose") -> str
     """Map a task description to the hybrid ECC + wshobson agent catalog when possible."""
     desc = description.lower()
     for pattern, agent in AGENT_ROUTING_RULES:
-        if re.search(pattern, desc, re.IGNORECASE):
+        if re.search(pattern, desc):
             return agent
     return default_agent
 

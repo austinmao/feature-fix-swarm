@@ -36,7 +36,7 @@ This is a hard requirement — the suspicious-output check in Step 7 will fail t
 ### Canonical review-gate task format
 
 ```markdown
-- [ ] [model:<host-middle-tier>] [agent:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL findings block Phase N+1. Address all CRITICAL, fix or defer HIGH. [qa:review-gate] [P]
+- [ ] [model:<host-middle-tier>] [agent:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL findings block Phase N+1. Address all CRITICAL, fix or defer HIGH. [qa:review-gate]
   - Depends-on: <last implementation task in this phase>
   - Run: /review-gate
   - Gate: no phase transition until exit code 0 (0 CRITICAL, 0 HIGH unaddressed)
@@ -56,21 +56,21 @@ This is a hard requirement — the suspicious-output check in Step 7 will fail t
 
 - [ ] [model:haiku] Scaffold directory structure and install dependencies
 - [ ] [model:<host-middle-tier>] Write failing unit tests for AuthService (RED — TDD step 1)
-- [ ] [model:<host-middle-tier>] /review-gate — review Phase 1 diff. HIGH/CRITICAL block Phase 2. [qa:review-gate] [P]
+- [ ] [model:<host-middle-tier>] /review-gate — review Phase 1 diff. HIGH/CRITICAL block Phase 2. [qa:review-gate]
   - Depends-on: Write failing unit tests for AuthService
 
 ## Phase 2 — US1: User login
 
 - [ ] [model:<host-middle-tier>] Implement AuthService.login() to pass unit tests (GREEN — TDD step 2)
 - [ ] [model:<host-middle-tier>] Refactor login flow for clarity (REFACTOR — TDD step 3)
-- [ ] [model:<host-middle-tier>] /review-gate — review Phase 2 diff. HIGH/CRITICAL block Phase 3. [qa:review-gate] [P]
+- [ ] [model:<host-middle-tier>] /review-gate — review Phase 2 diff. HIGH/CRITICAL block Phase 3. [qa:review-gate]
   - Depends-on: Refactor login flow for clarity
 
 ## Phase 3 — Integration
 
 - [ ] [model:<host-middle-tier>] Wire AuthService to API route handler
 - [ ] [model:<host-middle-tier>] Add integration test: POST /api/auth/login → 200 + session cookie
-- [ ] [model:<host-middle-tier>] /review-gate — review Phase 3 diff. HIGH/CRITICAL block QA phase. [qa:review-gate] [P]
+- [ ] [model:<host-middle-tier>] /review-gate — review Phase 3 diff. HIGH/CRITICAL block QA phase. [qa:review-gate]
   - Depends-on: Add integration test
 ```
 
@@ -172,7 +172,7 @@ Follow the decompose-spec.md prompt at full depth. Write to: `{OUTPUT_PATH}`
 Every implementation phase MUST end with a /review-gate task as the final item before
 the next phase begins. Format:
 
-  - [ ] [model:<host-middle-tier>] [agent:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL block Phase N+1. [qa:review-gate] [P]
+  - [ ] [model:<host-middle-tier>] [agent:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL block Phase N+1. [qa:review-gate]
     - Depends-on: <last implementation task in this phase>
     - Run: /review-gate
     - Gate: no phase transition until exit code 0 (0 CRITICAL, 0 HIGH unaddressed)

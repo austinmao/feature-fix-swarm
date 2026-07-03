@@ -313,7 +313,18 @@ printf '{"timestamp":"%s","event":"classify_done","swarm_id":"%s","task_count":%
 Parse tasks.md into structured data via shared `lib/dispatch.py`:
 
 ```bash
-DISPATCH="$(git rev-parse --show-toplevel)/packages/feature-fix-swarm/lib/dispatch.py"
+# codex-gate (PR #11): resolve dispatch.py across all three install shapes.
+DISPATCH=""
+for _candidate in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/dispatch.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/dispatch.py" \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/lib/dispatch.py"; do
+  [ -f "$_candidate" ] && DISPATCH="$_candidate" && break
+done
+if [ -z "$DISPATCH" ]; then
+  echo "ERROR: dispatch.py not found. Run setup.sh to install feature-fix-swarm." >&2
+  exit 1
+fi
 TASKS_JSON=$(FILE="$TASKS_FILE_OUT" python3 "$DISPATCH" parse)
 ```
 
@@ -740,7 +751,7 @@ Recover:
 ## Non-goals (v1)
 
 - No QA loop — use `/qa` as a follow-up
-- No codex-gate — use `/codex-gate` as a follow-up
+- No review-gate — use `/review-gate` as a follow-up
 - No commit/push — use `/ship`
 - No task-level retries (blocked = failed; re-run or fix manually)
 - No persistent `specs/NNN/tasks.md` — use `/spec-decompose` for that
