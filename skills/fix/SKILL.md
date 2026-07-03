@@ -1,7 +1,7 @@
 ---
 name: fix
-description: "Investigate a bug, fix it with ruflo agents (mandatory in v1.2.0), verify with qa-only then full qa, then run review-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. v2.0.0 integrates Claude native /goal for continuation; adversarial audit + /review-gate remain mandatory."
-version: "2.0.0"
+description: "Investigate a bug, coordinate fix agents with Ruflo (host CLI executes; no silent native fallback), verify with qa-only then full qa, then run review-gate cross-model adversarial review. Ralph loop until green. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. Integrates Claude native /goal for continuation; adversarial audit + /review-gate remain mandatory bypass-via-flag only. v2.1.0 uses Ruflo as coordinator, not provider."
+version: "2.1.0"
 allowed-tools:
   - Read
   - Edit
@@ -222,16 +222,16 @@ Write the plan to `$RALPH_DIR/fix-plan.md`.
   To apply: /fix "{BUG_DESC}" (without --dry-run)
 ```
 
-## Step 3: Spawn fix agent(s) via ruflo swarm
+## Step 3: Coordinate fix agent(s) via Ruflo + host CLI
 
-**Ruflo is mandatory (v1.2.0).** No silent native fallback.
+**Ruflo policy (v2.1.0):** Ruflo coordinates agents, memory, and artifacts. The active host CLI executes the fix. `RUFLO_REQUIRED=auto` falls back to direct host CLI, `RUFLO_REQUIRED=1` (default) hard-fails on MCP unavailability, and `RUFLO_REQUIRED=0` skips Ruflo coordination. No silent native fallback — `RUFLO_REQUIRED=0` must be an explicit operator choice for debugging.
 
 Pre-flight check:
 ```bash
 RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"
 EXECUTOR=$(bash scripts/harness/executor-detect.sh 2>/dev/null || echo "")
 
-if [ -z "$EXECUTOR" ] || [ "$EXECUTOR" = "native" ]; then
+if [ -z "$EXECUTOR" ] || [ "$EXECUTOR" = "host-cli" ] || [ "$EXECUTOR" = "native" ]; then
   if [ "$RUFLO_REQUIRED" = "1" ]; then
     cat >&2 <<EOF
 [FIX] ERROR: ruflo MCP unavailable and RUFLO_REQUIRED=1 (default).
@@ -244,8 +244,8 @@ Resolve:
 EOF
     exit 1
   else
-    echo "[FIX] WARNING: RUFLO_REQUIRED=0 — falling back to native Agent (debug mode)" >&2
-    EXECUTOR="native"
+    echo "[FIX] WARNING: RUFLO_REQUIRED=0 — direct host CLI path forced" >&2
+    EXECUTOR="host-cli"
   fi
 fi
 ```
@@ -253,7 +253,7 @@ fi
 **Complexity routing:**
 - Trivial (1 file, <10 lines change): single haiku agent
 - Moderate (2-5 files): single sonnet agent
-- Complex (5+ files): up to 3 sonnet agents via ruflo swarm, each owning a non-overlapping file subset
+- Complex (5+ files): up to 3 sonnet agents coordinated by Ruflo and executed through host CLI, each owning a non-overlapping file subset
 
 **Fix agent prompt:**
 
@@ -427,16 +427,26 @@ Invoke `/qa` via Skill tool. Full browser-based QA suite to verify the fix didn'
 Skip if `--no-codex-gate` flag was set.
 
 **Why this step exists:** Step 3.5 already runs codex *adversarial* on the fresh fix. Step 5.5 runs the full `/review-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) against the *final post-QA diff* including any retry-loop changes. Single-model review has blind spots; cross-model adversarial review catches CRITICAL issues that pass Claude-only quality gates. Cost: ~$2 + ~13 min — cheap insurance for any fix landing in production blast radius (auth, payments, RLS, multi-tenant, cron).
-The underlying Claude invocation must use the local CLI auth path, not `--bare`; `--bare` disables keychain/OAuth reads and produces a false "Not logged in" error on valid logged-in machines.
+The underlying Claude invocation must use the local CLI auth path, not `--bare`; `--bare` disables keychain/OAuth reads and produces a false "Not logged in" error on valid logged-in machines. Default Claude review-gate reviews route to Opus via `REVIEW_MODEL_OVERRIDE`; override only for cost-constrained runs.
 If `/review-gate` hangs or times out, emit a structured blocked gate with a timeout reason. Do not narrate the failure in first person or say you "attempted" the adversarial review step.
 
 **Pre-flight:**
 ```bash
-which codex >/dev/null 2>&1 && CODEX_AVAILABLE=1 || CODEX_AVAILABLE=0
+if [ -z "${REVIEW_BIN:-}" ]; then
+  if [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_HOME:-}" ] || [ -n "${CODEX_BIN:-}" ]; then
+    REVIEW_BIN="claude"
+  elif [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_AGENT_DEPTH:-}" ] || [ -n "${CLAUDECODE_SESSION_ID:-}" ]; then
+    REVIEW_BIN="codex"
+  else
+    REVIEW_BIN="claude"
+  fi
+fi
 
-if [ "$CODEX_AVAILABLE" = "0" ]; then
-  echo "[FIX] WARNING: reviewer CLI not found — skipping review-gate" >&2
-  echo "  Install: npm install -g @openai/codex && codex login" >&2
+command -v "$REVIEW_BIN" >/dev/null 2>&1 && REVIEW_AVAILABLE=1 || REVIEW_AVAILABLE=0
+
+if [ "$REVIEW_AVAILABLE" = "0" ]; then
+  echo "[FIX] WARNING: review CLI not found — skipping review-gate" >&2
+  echo "  Install the matching CLI first." >&2
   printf '{"timestamp":"%s","bug":"%s","step":"review-gate","status":"skipped","reason":"review_cli_not_installed","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$BUG_DESC" >> "$LOG_FILE"
   # Continue to Step 6.
@@ -468,7 +478,7 @@ QA status before gate: PASS
 | ... | ... | ... | ... |
 
 ## Why this aborted
-The fix passed all Claude-side QA but codex (cross-model) found CRITICAL issues.
+The fix passed all Claude-side QA but the cross-model review found CRITICAL issues.
 v1.3.0 policy: never auto-proceed through review-gate CRITICAL findings.
 The user must review each finding and decide:
   (a) Apply a follow-up patch addressing each CRITICAL finding, then rerun /fix.
@@ -544,7 +554,7 @@ fi
 ║ Tests added:   {N} ({test file list})                         ║
 ║ QA-only:       PASS ({dimensions that ran})                   ║
 ║ Full QA:       PASS / SKIPPED (--no-qa)                       ║
-║ Review-gate:   PASS / SKIPPED (--no-codex-gate / no reviewer) ║
+║ Review-gate:   PASS / SKIPPED (--no-codex-gate / no review)   ║
 ║ Retries used:  {N}/{MAX}                                      ║
 ║ Artifacts:     {RALPH_DIR}/                                   ║
 ║ Duration:      {HH:MM:SS}                                    ║
@@ -651,8 +661,8 @@ Append to fix log:
 | `/plan-eng-review` | Step 2 — architectural fix review (with --plan) |
 | `/qa-only` | Step 4 — focused verification of fix |
 | `/qa` | Step 5 — full regression check |
-| `/review-gate` | Step 5.5 — cross-model adversarial review (default-on; skip with --no-codex-gate or absent reviewer CLI) |
-| `scripts/harness/executor-detect.sh` | Step 3 — ruflo vs native decision |
+| `/review-gate` | Step 5.5 — cross-model adversarial review (default-on; skip with --no-codex-gate or absent review CLI) |
+| `scripts/harness/executor-detect.sh` | Step 3 — Ruflo coordination vs direct host CLI decision |
 | `scripts/ralph-retry.sh` | Step 4b — retry loop orchestration |
 
 ## Cost estimation
@@ -672,8 +682,8 @@ Review-gate adds ~$2 + ~13 min per fix. Disable with `--no-codex-gate` for trivi
 - Never skip the regression test — every fix must have a test that would have caught the bug
 - On retry exhaustion, STOP and escalate to user (via structured artifact, not AskUserQuestion)
 - **v1.2.0 non-interactive policy:** never block on AskUserQuestion. Uncertainty (incomplete investigation, CRITICAL findings) writes a structured artifact and exits 1.
-- **v1.2.0 ruflo policy:** ruflo is mandatory. Set `RUFLO_REQUIRED=0` only for debugging.
-- **v1.3.0 codex-gate policy:** review-gate runs by default before Step 6 (report) on the final post-QA diff. Skip with `--no-codex-gate` only when blast radius is provably minimal (typo, comment, log-message). Skip-gracefully if the opposite-harness CLI is not installed (warn, continue).
+- **v2.1.0 Ruflo policy:** Ruflo coordinates, host CLI executes. `RUFLO_REQUIRED=auto` falls back to direct host CLI, `1` (default) hard-fails, `0` skips coordination. No silent native fallback.
+- **v1.3.0 review-gate policy:** review-gate runs by default before Step 6 (report) on the final post-QA diff. Skip with `--no-codex-gate` only when blast radius is provably minimal (typo, comment, log-message). Skip-gracefully if the matching review CLI is not installed (warn, continue).
 - **v2.0.0 continuation policy:** continuation is delegated to native Claude `/goal`. `/fix` no longer manages a run-state lifecycle (no start/update/complete, no Stop-hook continuation, no token budget, no marker file). The adversarial audit + review-gate are still mandatory bypasses-via-flag; `/goal` is what loops the pipeline until verdict=pass.
 
 ## Relationship to QA Ralph Loop

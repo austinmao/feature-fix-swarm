@@ -166,15 +166,47 @@ Do not hide required end-to-end coverage behind generic "run QA" tasks.
 - If the spec reaches a live OpenClaw or Telegram surface, include explicit tasks that wire the requested QA lane into the implementation plan rather than leaving it implied.
 - Prefer small, atomic test tasks that fail for the intended reason before the corresponding implementation task.
 
+## Review-Gate Phase Gates (MANDATORY)
+
+Every implementation phase in `tasks.md` **MUST** end with a `/review-gate` task before the next
+phase begins. This is a hard requirement — a decomposition that omits one from any implementation
+phase is invalid.
+
+Use the current host's middle model tier from the ladder above (`sonnet` on Claude Code, `gpt-5.4`
+on Codex OAuth) — never `fable` or the top/bottom tiers — for the review-gate task itself.
+
+### Canonical review-gate task format
+
+```
+- [ ] T### [model:<host-middle-tier> thinking:med] [agent:ecc:code-reviewer] /review-gate — review Phase N diff. HIGH/CRITICAL findings block Phase N+1. Address all CRITICAL, fix or defer HIGH. [qa:review-gate] [P]
+      Depends-on: T### (last implementation task in this phase)
+```
+
+`[qa:review-gate]` is a reserved tag distinct from the general `[qa:review]` annotation used
+elsewhere in this doc (see QA Dimensions below) — it marks the one task per phase that gates the
+phase transition, not an ordinary code-review pass.
+
+### Where to place review-gate tasks
+
+- **After every implementation phase**: Setup, Foundational, each user story (US1…USn), and
+  Cross-Story Integration.
+- **NOT** after read-only or planning phases (Research, Architecture Review) — nothing to diff.
+- **NOT** after Staging Deploy & Soak, Production Promotion, or Rollback Plan phases — those use
+  staging smoke tests and canary monitoring instead of `/review-gate`.
+- Always the last task in the phase, with `Depends-on:` pointing at that phase's final
+  implementation (or Dev QA) task.
+
 ## Phase structure (required)
 
 Produce tasks.md in this exact phase sequence:
 
 ### Phase 1: Setup
 Migrations, dependency installs, scaffolding. No story label. Tasks typically `[P]` after T001.
+End the phase with a `/review-gate` task (see Review-Gate Phase Gates above).
 
 ### Phase 2: Foundational
 Blocking prerequisites for ALL user stories — shared models, middleware, auth, base utilities. Must complete before any user story phase starts. Most tasks `[P]` where files differ.
+End the phase with a `/review-gate` task before any user story phase may start.
 
 ### Phase 3 through N+2: One phase per user story (P1 first, then P2, P3...)
 
@@ -196,14 +228,19 @@ For each user story phase, structure internally as:
 
 ### Dev QA for User Story 1
 - [ ] T### [US1] [model:sonnet thinking:high] [agent:ui-visual-validator] Manual dogfood on localhost: happy path + 2 edge cases
+
+### Review Gate for User Story 1
+- [ ] T### [US1] [model:sonnet thinking:med] [agent:ecc:code-reviewer] /review-gate — review Phase 3 diff. HIGH/CRITICAL findings block Phase 4. [qa:review-gate] [P]
+      Depends-on: T### (Dev QA task above)
 ```
 
-TDD is non-negotiable: tests come before implementation. Implementation tasks have `Depends-on:` line naming their test tasks.
+TDD is non-negotiable: tests come before implementation. Implementation tasks have `Depends-on:` line naming their test tasks. Every user story phase closes with its own `/review-gate` task — do not let one story's phase open before the previous story's gate has passed.
 
 ### Phase N+1: Cross-Story Integration (E2E, dev env)
 - Full-flow E2E tests combining all user stories
 - Responsive/accessibility testing
 - Cross-browser smoke
+- Close the phase with a `/review-gate` task — this is the last implementation-phase gate before Staging
 
 ### Phase N+2: Staging Deploy & Soak
 - Deploy to staging env (Vercel preview, Railway staging, etc.)
@@ -231,6 +268,7 @@ TDD is non-negotiable: tests come before implementation. Implementation tasks ha
 5. **User stories are independently shippable** — User Story 1 alone should deliver MVP value. User Story 2 adds to MVP; doesn't require User Story 3 to exist.
 6. **No more than 50 tasks** for a reasonable feature. If you exceed 50, split the feature into multiple specs.
 7. **No duplicate work across stories** — shared infrastructure goes in Foundational (Phase 2).
+8. **Every implementation phase ends with a `/review-gate` task** — Setup, Foundational, each user story, and Cross-Story Integration. No exceptions (see Review-Gate Phase Gates).
 
 ## After writing the task list, produce these sections
 
@@ -254,6 +292,8 @@ TDD is non-negotiable: tests come before implementation. Implementation tasks ha
 **Staging gate (S004):** Blocks production promotion. Never skip.
 
 **Canary gate (P003):** Blocks next feature. Green for 1h before merging anything else.
+
+**Review-gate count:** report one `/review-gate` task per implementation phase (Setup, Foundational, each user story, Cross-Story Integration) — flag any phase missing one before declaring the decomposition done.
 ```
 
 ## QA Dimensions
@@ -271,6 +311,8 @@ Each task may include a `[qa:unit,integration,e2e,review,security]` annotation s
 
 **Do NOT add [qa:unit] or [qa:integration] explicitly** — these dimensions are handled by deterministic test runner hooks (vitest/pytest) that always run. The [qa:] annotation controls only the LLM-based QA agents.
 
+**`[qa:review-gate]` is reserved** for the one mandatory end-of-phase `/review-gate` task described in Review-Gate Phase Gates above. Do not attach it to any other task, and do not use `[qa:review]` as a substitute for it — `[qa:review]` marks ordinary code-review coverage on an implementation task, while `[qa:review-gate]` marks the phase-blocking gate itself.
+
 ## Self-check before declaring done
 
 - [ ] All user stories (P1, P2, P3...) mapped to at least one phase (if spec.md exists; otherwise single US1 phase is OK)
@@ -283,6 +325,8 @@ Each task may include a `[qa:unit,integration,e2e,review,security]` annotation s
 - [ ] Phase N+2 has an explicit staging gate
 - [ ] Phase N+3 has explicit canary monitoring + rollback
 - [ ] Phase N+4 rollback plan is executable (not aspirational)
+- [ ] Every implementation phase (Setup, Foundational, each user story, Cross-Story Integration) ends with a `/review-gate` task carrying `[agent:ecc:code-reviewer]`, `[qa:review-gate]`, and a `Depends-on:` line to that phase's last task
+- [ ] No `/review-gate` task placed after read-only/planning phases or after Staging/Production/Rollback phases
 
 ## Reference: gold-standard phase structure
 
@@ -308,5 +352,7 @@ Match its density and specificity. Do NOT match what it lacks: `[model:]`, `[thi
 6. **Dependencies in prose only** — "this depends on T012" in description instead of `Depends-on: T012` line
 7. **Using opus for boilerplate** — `[model:opus]` on a `CREATE TABLE` migration is waste
 8. **Forgetting rollback** — no Phase N+4 means no recovery plan
+9. **Missing a review-gate task** — ending an implementation phase without `/review-gate` lets HIGH/CRITICAL findings carry silently into the next phase; the decomposition is invalid until every implementation phase has one
+10. **Overusing `fable`** — reaching for the narrative-coherence tier on ordinary single-file work; reserve it for genuine multi-file voice/structure reconciliation
 
 Start by reading spec.md and plan.md. Then read 057/tasks.md to calibrate depth. Then produce the task list.

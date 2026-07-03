@@ -9,7 +9,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/office-hours` | Brainstorm product ideas, validate "is this worth building", structured problem statement |
 | `/feature-spec NNN` | **Spec-first pipeline:** speckit.specify → speckit.plan → speckit.clarify, each phase enforcing TDD unit test list, BDD Given/When/Then scenarios, and E2E Playwright stubs. Run before `/autoplan`. |
 | `/autoplan` | Full review pipeline: CEO + Eng + DX dual voices with Codex, auto-decides taste decisions; `--accept-all-recommendations` auto-selects every recommended answer |
-| `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations |
+| `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations usable on Claude or Codex |
 | `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
 | `/feature NNN` | End-to-end: bootstrap spec if needed, autoplan, decompose, implement, qa, ship, canary. 2 hard gates. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` |
 
@@ -98,7 +98,7 @@ These flags work with `/feature-implement`:
 | `--qa-only review` | Run only specified QA dimensions |
 | `--dry-run` | Print the execution plan without spawning agents |
 | `--resume` | Pick up from last failure point |
-| `--ruflo` | Use ruflo swarm executor instead of native Agent |
+| `--ruflo` | Use Ruflo swarm coordination plus active host CLI execution instead of native Agent execution |
 | `--one` | Execute only the next unchecked task |
 
 ## Environment Variables
@@ -120,12 +120,15 @@ npx ruflo@latest memory search "query"   # Search what was learned
 | Scenario | Use |
 |----------|-----|
 | Confirm Ruflo MCP is loaded | `mcp__ruflo__mcp_status` |
-| Spawning 3+ independent sub-agents | `mcp__ruflo__swarm_init` then `mcp__ruflo__agent_spawn` |
+| Spawning 3+ independent sub-agents | `mcp__ruflo__swarm_init` then `mcp__ruflo__agent_spawn`, with execution through `scripts/harness/ruflo-host-executor.sh` |
 | Check if similar task was done before | `mcp__ruflo__agentdb_pattern-search` |
 | Route task to right model tier | `mcp__ruflo__hooks_model-route` |
 | Store a reusable pattern | `mcp__ruflo__agentdb_pattern-store` |
 
 Ruflo routing is most reliable when task `agent:` values use the hybrid exact-agent catalog before spawning: `ecc:tdd-guide`, `ecc:code-reviewer`, `ecc:architect`, `security-auditor`, `frontend-developer`, `backend-architect`, `python-pro`, `typescript-pro`, `database-architect`, `database-optimizer`, `test-automator`, `debugger`, `error-detective`, `deployment-engineer`, `observability-engineer`, `docs-architect`, `accessibility-expert`.
+
+Do not use OpenRouter, `RUFLO_PROVIDER`, or Ruflo provider-key execution for feature tasks. Codex sessions execute through `codex exec`; Claude sessions execute through `claude -p`.
+
 In Codex sessions, use tool discovery for `ruflo swarm_init agent_spawn mcp_status` before concluding Ruflo is unavailable; Ruflo tools are lazy-loaded.
 
 ## Reference
