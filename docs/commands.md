@@ -10,8 +10,10 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/feature-spec NNN` | **Spec-first pipeline:** speckit.specify → speckit.plan → speckit.clarify, each phase enforcing TDD unit test list, BDD Given/When/Then scenarios, and E2E Playwright stubs. Run before `/autoplan`. |
 | `/autoplan` | Full review pipeline: CEO + Eng + DX dual voices with Codex, auto-decides taste decisions; `--accept-all-recommendations` auto-selects every recommended answer |
 | `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations usable on Claude or Codex |
+| `/plan-decompose "description"` | Turn a description or existing plan into `tasks.md` via autonomous eng review + `/review-gate` — no speckit interview. Faster path when a spec isn't warranted. |
 | `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
 | `/feature NNN` | End-to-end: bootstrap spec if needed, autoplan, decompose, implement, qa, ship, canary. 2 hard gates. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` |
+| `/swarm "task description"` | Ad-hoc task swarm — no spec dir required. Classifies the task (model/agent/thinking tier) and executes inline via `lib/dispatch.py` + `scripts/harness/ruflo-host-executor.sh`. |
 
 **Pipeline order:** `/office-hours` → `/feature-spec NNN` (TDD+BDD+E2E contracts) → `/autoplan` → `/spec-decompose` → `/feature-implement` → `/qa` → `/review` → `/review-gate` → `/ship` → `/land-and-deploy` → `/canary`
 
@@ -85,6 +87,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/retro` | Weekly retrospective of what shipped, what broke, what to improve |
 | `/checkpoint` | Save progress mid-session for resume later |
 | `/health` | Codebase quality check (dead code, test coverage, lint) |
+| `/goal-wrap [--gates] "objective"` | Bundle current work into a self-contained, anti-drift `/goal "..."` prompt with tracked DONE WHEN proof commands. Use before `/clear`, agent handoff, or switching machines. `--gates` reverts to ask-first behavior (default: full autonomy — commits/push/merge/deploy pre-approved). Degrades gracefully without repowise/gbrain/`/prompt-master`/`/handoff` — see the skill's own "Soft dependencies" table. |
 
 ## QA Ralph Loop Flags
 

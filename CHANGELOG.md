@@ -8,6 +8,55 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.13.0 — goal-wrap skill + codex-gate hardening (2026-07-03)
+
+### Added
+
+- **`skills/goal-wrap/SKILL.md`** — new skill, ported from the openclaw vendored
+  fork. Bundles current session state into a self-contained, anti-drift
+  `/goal "..."` prompt with tracked `DONE WHEN` proof commands and a research
+  pass. Adapted for standalone use: the original's hard dependencies on
+  `repowise`/`gbrain`/`/prompt-master` now have documented grep/git/inline
+  fallbacks (see the skill's own "Soft dependencies" table); `/handoff`
+  already degraded gracefully in the source. `setup.sh` now installs it.
+- `docs/commands.md` — added missing `/plan-decompose`, `/swarm`, and
+  `/goal-wrap` rows (all three were real, shipped skills with no doc entry).
+- `README.md` "What's in the box" — refreshed from a stale 5-skill/3-doc
+  inventory to the actual 10-skill/4-doc/lib tree.
+
+### Fixed (codex-gate 3-pass review of PR #11)
+
+- **CRITICAL** — `feature-implement/SKILL.md`, `swarm/SKILL.md`: `DISPATCH=`
+  hardcoded an openclaw-monorepo-only path
+  (`packages/feature-fix-swarm/lib/dispatch.py`); `setup.sh` never installed
+  `dispatch.py` anywhere, so every standalone install silently broke task
+  parsing. Fixed with a 3-way fallback (openclaw-vendored → installed at
+  `~/.claude/lib/feature-fix-swarm/` → standalone repo root); `setup.sh` now
+  installs `dispatch.py` alongside `run_state`.
+- **HIGH** — `lib/dispatch.py` `route_agent()`: `api-documenter` was
+  unreachable dead code (`docs-architect`'s bare `docs` keyword
+  substring-matched inside "api docs"/"developer docs"/"openapi docs" and was
+  checked first). Reordered; added regression coverage.
+- **HIGH** — `swarm/SKILL.md`: one non-goals line had regressed to legacy
+  `/codex-gate` naming while every sibling file in the same reconciliation
+  was renamed to `/review-gate`.
+- **HIGH** — `prompts/decompose-spec.md`, `spec-decompose/SKILL.md` (7
+  occurrences): the canonical `/review-gate` task template tagged `[P]`
+  while also carrying `Depends-on:` — self-contradictory with this doc's own
+  `[P]` definition. Dropped `[P]` from the template.
+- **MEDIUM** — stale `gpt-5.3-codex-spark` references in README.md and
+  `prompts/decompose-spec.md` (the tier was renamed to `gpt-5.4-mini` in
+  `ruflo-host-executor.sh` in the same PR); a swallowed `reset --hard`
+  failure in `setup.sh`'s pack-sync now falls back to a fresh clone.
+- **LOW** — redundant `re.IGNORECASE` in `route_agent()`; unanchored
+  `## Phase N` grep in `feature-implement/SKILL.md` (matched `Phase 10`,
+  `Phase 11`, etc. for `Phase 1`).
+
+Deferred (documented, not blocking): Pass 3 flagged 6 HIGH test-coverage
+gaps — most `AGENT_ROUTING_RULES` entries untested, zero test file for
+`setup.sh`, and the `qa-swarm.sh` aggregation fix landed without a
+regression test. Real technical debt, tracked as follow-up.
+
 ## v3.12.0 — reconcile openclaw vendored fork with OSS canonical (2026-07-03)
 
 The openclaw vendored copy (`packages/feature-fix-swarm/`) and the OSS canonical

@@ -352,7 +352,7 @@ fi
 # Copy skills
 SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
-for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose codex-gate review-gate; do
+for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose codex-gate review-gate goal-wrap; do
   TARGET="$SKILLS_DIR/$skill/SKILL.md"
   if [ -f "$TARGET" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r

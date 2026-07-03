@@ -397,13 +397,18 @@ The investigation starts with this context instead of from scratch. Fix times dr
 
 ```
 feature-fix-swarm/
-  skills/           5 Claude Code SKILL.md files
+  skills/           10 Claude Code SKILL.md files
     fix/              investigate + fix + verify loop
     feature-implement/  task executor with per-phase QA gates
     feature/          end-to-end pipeline (autoplan through canary)
-    spec-decompose/   spec to tasks.md decomposition
+    feature-spec/     spec-first pipeline (speckit.specify -> plan -> clarify, TDD/BDD/E2E)
+    spec-decompose/   spec to tasks.md decomposition (mandatory review-gate phase gates)
+    plan-decompose/   description/plan to tasks.md — no speckit interview
     swarm/            ad-hoc task swarm — no spec dir required; classify + execute inline tasks
-  scripts/          7 bash scripts
+    codex-gate/       compatibility alias for /review-gate
+    review-gate/      host-neutral cross-model pre-merge review gate (3 passes)
+    goal-wrap/        bundle current work into a tracked, anti-drift /goal prompt
+  scripts/          8 bash scripts
     qa-swarm.sh       QA manifest builder (2 hooks + 3 LLM agent prompts)
     ralph-retry.sh    investigate -> fix -> re-qa retry loop
     harness/          executor detection + Ruflo host CLI adapter + artifacts
@@ -412,8 +417,13 @@ feature-fix-swarm/
     qa-e2e.md         browser test agent
     qa-review.md      code review agent
     qa-security.md    OWASP security scan agent
-    decompose-spec.md canonical spec decomposition prompt
-  docs/             3 reference docs
+    decompose-spec.md canonical spec decomposition prompt (host-aware model ladder, review-gate mandate)
+  docs/             4 reference docs
+    commands.md       full command reference
+    pipeline.md       pipeline architecture + diff-scope classification
+    qa-ralph-loop.md  RALPH investigate-fix-retest loop
+    tdd-bdd-guide.md  research-backed TDD/BDD practices
+  lib/              shared Python library (dispatch.py: task parsing, model routing, cost estimation)
   examples/         synthetic test spec for dogfooding
 ```
 
