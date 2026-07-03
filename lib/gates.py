@@ -196,8 +196,12 @@ def scan_test_tampering(diff_text: str) -> list[str]:
                 findings.append(f"CI/workflow file edited: {path}")
             continue
         if line.startswith("-") and not line.startswith("---"):
-            if in_test_file and re.search(r"\bassert\b|expect\(", line):
-                findings.append(f"assert deleted from test file: {line.strip()}")
+            # deletions of asserts are suspicious everywhere: in tests they
+            # weaken the gate; in impl files they delete runtime invariants
+            # (codex-gate round 2, PR #13).
+            if re.search(r"\bassert\b|expect\(", line):
+                kind = "test" if in_test_file else "source"
+                findings.append(f"assert deleted from {kind} file: {line.strip()}")
         if line.startswith("+") and not line.startswith("+++"):
             if in_test_file and re.search(r"\bassert\s+(True|1)\b|expect\(\s*(true|1)\s*\)", line):
                 findings.append(f"always-true (weakened) assertion added: {line.strip()}")
@@ -253,7 +257,12 @@ def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
             continue
         if not any("[qa:review-gate]" in ln for ln in lines):
             findings.append(f"{phase}: no review-gate task (phase gate missing)")
-        if re.search(r"US\d+", phase) and not any(
+        # a story phase is one whose TASKS carry [USn] tags — header wording
+        # varies ("## Phase 3: User Story 1 — ..." has no USn token), so never
+        # key the e2e rule on the header (codex-gate round 2, PR #13).
+        is_story_phase = any(re.search(r"\[US\d+\]", ln) for ln in lines) or \
+            re.search(r"US\d+|User Story", phase)
+        if is_story_phase and not any(
                 re.search(r"\[qa:[a-z0-9,-]*e2e", ln) for ln in lines):
             findings.append(f"{phase}: story phase has no e2e smoke task")
     return findings

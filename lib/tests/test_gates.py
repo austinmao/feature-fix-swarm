@@ -219,3 +219,30 @@ def test_scan_tamper_flags_weakened_assertions() -> None:
     )
     findings = gates.scan_test_tampering(diff)
     assert any("always-true" in f or "weakened" in f for f in findings)
+
+
+# ── codex-gate round 2 (PR #13) ──────────────────────────────────────────────
+
+def test_analyze_detects_story_phase_from_task_tags_not_header() -> None:
+    """P1: documented header format is '## Phase 3: User Story 1 — ...' (no USn
+    token) — story detection must come from the [USn] tags on the phase's tasks."""
+    spec = "# Spec\n## US1 — login works\n"
+    tasks = (
+        "# Tasks\n"
+        "## Phase 3: User Story 1 — Login (Priority: P1) 🎯 MVP\n"
+        "- [ ] T001 [US1] [model:sonnet] [agent:ecc:code-reviewer] /review-gate — review Phase 3 [qa:review-gate]\n"
+    )
+    findings = gates.analyze_artifacts(spec, tasks)
+    assert any("e2e" in f for f in findings), findings
+
+
+def test_scan_tamper_flags_deleted_asserts_in_source_files() -> None:
+    """P1: deleting runtime asserts from impl files is a reward-hack too."""
+    diff = (
+        "--- a/lib/foo.py\n"
+        "+++ b/lib/foo.py\n"
+        "-    assert balance >= 0, 'invariant'\n"
+        "+    pass\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("assert" in f for f in findings), findings
