@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run python test suites
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest lib/ tests/ -q
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck shell surface
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          # warning level: the repo's heredoc-heavy SKILL snippets live in md
+          # (not linted); this covers the executable shell surface.
+          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/harness/*.sh
+
+  bats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bats suites (if any)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q bats
+          if compgen -G "tests/bats/*.bats" > /dev/null; then
+            bats tests/bats/
+          else
+            echo "no bats suites — skipping"
+          fi

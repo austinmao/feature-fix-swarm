@@ -1,48 +1,61 @@
 # Changelog
 
-## v3.12.0 — machine gates: human-out-of-loop hardening
-
-**Grammar fix (CRITICAL):** `[qa:]` parser char class could not match digits or
-hyphens — `[qa:e2e]` and the reserved `[qa:review-gate]` phase-gate tag silently
-fell back to default dims. Fixed (`[a-z0-9,-]`) + regression tests.
-
-**New `lib/gates.py`** (installed by setup.sh next to dispatch.py):
-- `record-gate`/`verify-done` — checkbox `[X]` flips now require recorded gate
-  evidence (exit 0 + test counts); agent self-report is never completion authority.
-- `record-red`/`check-red` — GREEN tasks blocked until a real failing-test RED
-  proof is stored (all-green logs rejected).
-- `scan-tamper` — reward-hacking guard: deleted asserts, added skips, `exit 0`,
-  CI-config edits flagged CRITICAL.
-- `analyze` — spec↔tasks coherence gate (spec-kit analyze analog): US coverage,
-  per-phase review-gate task, per-story e2e smoke task.
-- `truth_score` (compile .35/tests .25/lint .20/typecheck .20, 0.95 threshold →
-  checkpoint rollback), `no_progress` (repeated failure signature → stop),
-  `GATE_LADDER` (compile→…→e2e→review, fail-fast).
-
-**Emitter (decompose-spec):** RED-proof pairing mandatory (every impl task
-depends on a failing-test task); every story phase must end with an e2e smoke
-task derived from BDD scenarios; self-check now runs `gates.py analyze`.
-
-**review-gate:** refute-or-promote pass — HIGH/CRITICAL findings block only
-after surviving one adversarial refuter (false-positive control for autonomous
-runs); LLM review rounds capped at 2/phase.
-
-**Hooks:** optional `hooks/tdd-gate.sh` PreToolUse hook (block source writes
-with no matching test; `TDD_GATE_BYPASS=1` when authoring the test).
-
-**Portability:** zsh-safe argument loops in review-gate + feature-spec
-(command-substitution split — verified identical in bash and zsh).
-
-**Docs:** full 46-agent routing catalog in commands.md + silent
-general-purpose-fallback warning; gate-ladder section in qa-ralph-loop.md.
-
-All notable changes to feature-fix-swarm are documented here.
-
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
+
+## v3.14.0 — evidence provenance, phase truth score, no-progress wiring, CI (2026-07-03)
+
+### Added
+- **CI at last**: `.github/workflows/ci.yml` — pytest (`lib/` + `tests/`),
+  shellcheck (warning level) over the executable shell surface, bats (when
+  suites exist). Gate-integrity guarantees now enforced on every push/PR.
+- **Strict evidence provenance**: `verify-done --strict` (or `GATES_STRICT=1`)
+  rejects caller-recorded evidence — only runner-executed `run-gate` evidence
+  can flip a checkbox. All evidence entries carry `executed_by`
+  (`run_gate` | `run_red` | `caller`); `record-gate`/`record-red` print a
+  runtime WARNING naming themselves forgeable. feature-implement v1.10.0
+  exports `GATES_STRICT=1` in the Ralph loop. Decision: no HMAC/runner-token —
+  over-engineering for a local single-user store; the `executed_by` allowlist
+  is the same authority boundary.
+- **`gates.py phase-score`** — wires the previously-dead `truth_score` into the
+  pipeline: classifies each task's stored gate cmd into compile/tests/lint/
+  typecheck, scores the phase (weights .35/.25/.20/.20, normalized over
+  categories present; any task with no evidence → 0.0), exit 1 below the 0.95
+  threshold → phase rollback. feature-implement runs it at every phase gate.
+- **`gates.py note-failure`** — wires `no_progress` into the retry loop via the
+  evidence store: exit 1 when the same failure signature repeats twice in a
+  row → the loop STOPs for human review instead of burning retries.
+- **feature-implement Step 9 retro** — end-of-run learning consolidation:
+  aggregate gate outcomes from the evidence store, distill ≤3 reusable patterns
+  to agentdb, append a run-summary line to `results.md`.
+
+### Fixed
+- **CHANGELOG numbering**: two entries both claimed v3.12.0 (machine gates and
+  the openclaw-fork reconcile). The reconcile entry — changelog union, patch
+  scope — renumbered **v3.11.1**; machine gates keeps v3.12.0 (matches merged
+  PR #13 title). Entries re-sorted by version; missing PR #14 entry backfilled
+  as v3.13.2.
+- `scripts/ralph-retry.sh`: removed dead `QA_RERUN_EXIT` (shellcheck SC2034)
+  so the CI shellcheck job starts green.
+
+### Skills
+- feature-implement 1.9.0 → **1.10.0** (GATES_STRICT, phase-score rollback,
+  note-failure stop, Step 9 retro).
+
+## v3.13.2 — setup.sh non-interactive deploy + self-copy guards (2026-07-03)
+
+(Backfilled entry for PR #14, which shipped without one.)
+
+### Fixed
+- `setup.sh --yes` / `FFS_SETUP_YES=1` non-interactive mode — the overwrite
+  prompt exited 1 with no TTY, silently leaving old skill versions installed
+  (found by post-deploy canary).
+- `-ef` self-copy guards on the four CWD copy loops (scripts/, scripts/harness/,
+  scripts/hooks/, prompts/) — setup.sh from the repo root no longer dies on
+  `cp: … are identical`.
 
 ## v3.13.1 — review-gate Pass 2 CLI-flag fix (2026-07-03)
 
@@ -116,7 +129,45 @@ gaps — most `AGENT_ROUTING_RULES` entries untested, zero test file for
 `setup.sh`, and the `qa-swarm.sh` aggregation fix landed without a
 regression test. Real technical debt, tracked as follow-up.
 
-## v3.12.0 — reconcile openclaw vendored fork with OSS canonical (2026-07-03)
+## v3.12.0 — machine gates: human-out-of-loop hardening
+
+**Grammar fix (CRITICAL):** `[qa:]` parser char class could not match digits or
+hyphens — `[qa:e2e]` and the reserved `[qa:review-gate]` phase-gate tag silently
+fell back to default dims. Fixed (`[a-z0-9,-]`) + regression tests.
+
+**New `lib/gates.py`** (installed by setup.sh next to dispatch.py):
+- `record-gate`/`verify-done` — checkbox `[X]` flips now require recorded gate
+  evidence (exit 0 + test counts); agent self-report is never completion authority.
+- `record-red`/`check-red` — GREEN tasks blocked until a real failing-test RED
+  proof is stored (all-green logs rejected).
+- `scan-tamper` — reward-hacking guard: deleted asserts, added skips, `exit 0`,
+  CI-config edits flagged CRITICAL.
+- `analyze` — spec↔tasks coherence gate (spec-kit analyze analog): US coverage,
+  per-phase review-gate task, per-story e2e smoke task.
+- `truth_score` (compile .35/tests .25/lint .20/typecheck .20, 0.95 threshold →
+  checkpoint rollback), `no_progress` (repeated failure signature → stop),
+  `GATE_LADDER` (compile→…→e2e→review, fail-fast).
+
+**Emitter (decompose-spec):** RED-proof pairing mandatory (every impl task
+depends on a failing-test task); every story phase must end with an e2e smoke
+task derived from BDD scenarios; self-check now runs `gates.py analyze`.
+
+**review-gate:** refute-or-promote pass — HIGH/CRITICAL findings block only
+after surviving one adversarial refuter (false-positive control for autonomous
+runs); LLM review rounds capped at 2/phase.
+
+**Hooks:** optional `hooks/tdd-gate.sh` PreToolUse hook (block source writes
+with no matching test; `TDD_GATE_BYPASS=1` when authoring the test).
+
+**Portability:** zsh-safe argument loops in review-gate + feature-spec
+(command-substitution split — verified identical in bash and zsh).
+
+**Docs:** full 46-agent routing catalog in commands.md + silent
+general-purpose-fallback warning; gate-ladder section in qa-ralph-loop.md.
+
+All notable changes to feature-fix-swarm are documented here.
+
+## v3.11.1 — reconcile openclaw vendored fork with OSS canonical (2026-07-03)
 
 The openclaw vendored copy (`packages/feature-fix-swarm/`) and the OSS canonical
 repo diverged after v3.5.0 with no shared git history since. Both sides added

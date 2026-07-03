@@ -124,7 +124,6 @@ CTXEOF
   # Step 5: Re-run QA on failed dimensions only (qa-only scope)
   echo "[RALPH] Re-running QA on failed dimensions: $FAILED_DIMS"
 
-  QA_RERUN_EXIT=0
   if bash scripts/qa-swarm.sh \
     --phase "$PHASE" \
     --diff "$DIFF_FILES" \

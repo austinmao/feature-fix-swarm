@@ -14,6 +14,12 @@ Usage (inline heredoc in SKILL.md):
     python3 lib/gates.py record-gate  T042 --exit 0 --cmd "pytest -q" \
         --before "6 passed" --after "8 passed"   # trusted-caller only
     python3 lib/gates.py verify-done  T042        # exit 0 iff evidence OK
+    python3 lib/gates.py verify-done  T042 --strict   # also reject caller-recorded
+                                                  # evidence (or GATES_STRICT=1)
+    python3 lib/gates.py phase-score  T040 T041 T042  # truth score from evidence;
+                                                  # exit 1 if < 0.95 → rollback
+    python3 lib/gates.py note-failure T042 --sig "AssertionError foo.py:12"
+                                                  # exit 1 when stuck (same sig 2x)
     python3 lib/gates.py record-red   T041 --exit 1 < red-run.log
     python3 lib/gates.py check-red    T041        # exit 0 iff RED proven
     python3 lib/gates.py scan-tamper  < diff.txt  # exit 1 + findings if hacked
@@ -99,6 +105,7 @@ def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
             "cmd": cmd,
             "tests_before": tests_before,
             "tests_after": tests_after,
+            "executed_by": "caller",
         }
         _save_store(store, data)
 
@@ -138,10 +145,17 @@ def run_red(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> b
     return True
 
 
-def verify_done(store: Path, task_id: str) -> bool:
-    """A task is done ONLY if recorded gate evidence exists with exit 0."""
+def verify_done(store: Path, task_id: str, strict: bool = False) -> bool:
+    """A task is done ONLY if recorded gate evidence exists with exit 0.
+    strict=True additionally requires the evidence was produced by the
+    runner itself (run_gate) — caller-recorded evidence is rejected because
+    a shell-capable agent can fabricate `record-gate --exit 0`."""
     gate = _load_store(store).get(task_id, {}).get("gate")
-    return bool(gate) and gate.get("exit_code") == 0
+    if not (bool(gate) and gate.get("exit_code") == 0):
+        return False
+    if strict and gate.get("executed_by") != "run_gate":
+        return False
+    return True
 
 
 def append_result(log: Path, line: str) -> None:
@@ -179,6 +193,44 @@ def truth_score(compile_ok: bool, tests_ok: bool, lint_ok: bool, typecheck_ok: b
     score += TRUTH_WEIGHTS["lint"] if lint_ok else 0.0
     score += TRUTH_WEIGHTS["typecheck"] if typecheck_ok else 0.0
     return round(score, 2)
+
+
+# Gate-command → truth-score category. Order matters: specific tools first,
+# "tests" is the catch-all default (unknown gate = behavioral evidence).
+_CATEGORY_PATTERNS = [
+    ("typecheck", re.compile(r"\btsc\b|mypy|pyright|typecheck")),
+    ("lint", re.compile(r"\blint\b|ruff|eslint|flake8|shellcheck|clippy")),
+    ("compile", re.compile(r"\bbuild\b|\bcompile\b|\bmake\b")),
+    ("tests", re.compile(r"pytest|vitest|jest|go test|cargo test|bats|npm test")),
+]
+
+
+def classify_gate_cmd(cmd: str) -> str:
+    for cat, pat in _CATEGORY_PATTERNS:
+        if pat.search(cmd):
+            return cat
+    return "tests"
+
+
+def phase_score(store: Path, task_ids: list[str]) -> tuple[float, dict]:
+    """Aggregate truth score over a phase's tasks from STORED evidence
+    (wires the previously-dead truth_score into the pipeline).
+    - each task's gate cmd is classified into a truth category
+    - a category is OK iff every one of its gates exited 0
+    - score = weights of OK categories / weights of categories present
+    - any task with NO gate evidence at all → 0.0 (unproven phase)"""
+    data = _load_store(store)
+    missing = [t for t in task_ids if not data.get(t, {}).get("gate")]
+    if missing:
+        return 0.0, {"missing": missing}
+    cats: dict[str, bool] = {}
+    for t in task_ids:
+        gate = data[t]["gate"]
+        cat = classify_gate_cmd(gate.get("cmd", ""))
+        cats[cat] = cats.get(cat, True) and gate.get("exit_code") == 0
+    present = sum(TRUTH_WEIGHTS[c] for c in cats)
+    ok = sum(TRUTH_WEIGHTS[c] for c, is_ok in cats.items() if is_ok)
+    return (round(ok / present, 2) if present else 0.0), cats
 
 
 # ── Stream D: reward-hacking guards ──────────────────────────────────────────
@@ -226,6 +278,18 @@ def no_progress(failure_signatures: list[str]) -> bool:
     """True when the last two failure signatures are identical — the loop is
     stuck; stop and report instead of burning retries."""
     return len(failure_signatures) >= 2 and failure_signatures[-1] == failure_signatures[-2]
+
+
+def note_failure(store: Path, task_id: str, signature: str) -> bool:
+    """Append a failure signature to the task's history and report whether
+    the loop is stuck (same signature twice in a row). Wires no_progress
+    into the retry loop via the evidence store."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        sigs = data.setdefault(task_id, {}).setdefault("failure_sigs", [])
+        sigs.append(signature)
+        _save_store(store, data)
+    return no_progress(sigs)
 
 
 # ── Stream G: spec/tasks coherence ───────────────────────────────────────────
@@ -288,13 +352,25 @@ def main(argv: list[str]) -> int:
     cmd, args = argv[0], argv[1:]
     store = _store_path()
     if cmd == "record-gate":
+        print("WARNING: trusted-caller evidence (executed_by=caller); prefer "
+              "run-gate — exit codes recorded here are not runner-verified",
+              file=sys.stderr)
         record_gate_evidence(store, args[0], exit_code=int(_flag(args, "--exit", "1")),
                              cmd=_flag(args, "--cmd"), tests_before=_flag(args, "--before"),
                              tests_after=_flag(args, "--after"))
         return 0
     if cmd == "verify-done":
-        ok = verify_done(store, args[0])
-        print("DONE-VERIFIED" if ok else f"NOT-DONE: no passing gate evidence for {args[0]}")
+        strict = "--strict" in args or os.environ.get("GATES_STRICT") == "1"
+        gate = _load_store(store).get(args[0], {}).get("gate") or {}
+        by = gate.get("executed_by", "unknown")
+        ok = verify_done(store, args[0], strict=strict)
+        if ok:
+            print(f"DONE-VERIFIED (executed_by={by})")
+        elif strict and gate.get("exit_code") == 0:
+            print(f"NOT-DONE: evidence not runner-executed (executed_by={by}); "
+                  f"re-run the gate via run-gate for {args[0]}")
+        else:
+            print(f"NOT-DONE: no passing gate evidence for {args[0]}")
         return 0 if ok else 1
     if cmd == "run-gate":
         sep = args.index("--") if "--" in args else 1
@@ -307,6 +383,8 @@ def main(argv: list[str]) -> int:
         print("RED-RECORDED" if ok else "NOT-RED: command passed — not a failing test")
         return 0 if ok else 1
     if cmd == "record-red":
+        print("WARNING: trusted-caller RED proof; prefer run-red — the exit "
+              "code here is not runner-verified", file=sys.stderr)
         ok = record_red_proof(store, args[0], sys.stdin.read(),
                               exit_code=int(_flag(args, "--exit", "0")))
         print("RED-RECORDED" if ok else "NOT-RED: log shows no real failure")
@@ -320,6 +398,22 @@ def main(argv: list[str]) -> int:
         for f in findings:
             print(f"TAMPER: {f}")
         return 1 if findings else 0
+    if cmd == "phase-score":
+        task_ids = [a for a in args if not a.startswith("--")]
+        score, breakdown = phase_score(store, task_ids)
+        threshold = float(os.environ.get("TRUTH_THRESHOLD", TRUTH_THRESHOLD))
+        for cat, val in breakdown.items():
+            print(f"  {cat}: {'OK' if val is True else val if cat == 'missing' else 'FAIL'}")
+        print(f"TRUTH-SCORE {score:.2f} (threshold {threshold})")
+        if score < threshold:
+            print("BELOW-THRESHOLD: roll back to phase-start checkpoint and re-plan")
+            return 1
+        return 0
+    if cmd == "note-failure":
+        stuck = note_failure(store, args[0], _flag(args, "--sig"))
+        print("NO-PROGRESS: same failure signature twice in a row — stop and report"
+              if stuck else "PROGRESS-OK")
+        return 1 if stuck else 0
     if cmd == "analyze":
         with open(args[0]) as f:
             spec = f.read()
