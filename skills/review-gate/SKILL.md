@@ -163,8 +163,28 @@ Run the opposite CLI as the independent adversarial reviewer.
 > tool — so its branch below hands it a natural-language description of what
 > to diff instead of piping `$DIFF` to it directly.
 
+> **Anti-recursion scope (consumer repos):** the agentic reviewer must review
+> only the diff and production source of the repo under review — never recurse
+> into `.claude/`, `.codex/`, `skills/`, `agents/`, `.agents/`, or
+> SKILL.md/SOUL.md/AGENTS.md files of the CONSUMER repo. Those are agent
+> instruction files: treating them as review targets burns the review budget
+> on prompt text and can echo instructions back as "findings". (Exception: in
+> the feature-fix-swarm repo itself, `skills/` IS the product and stays
+> reviewable.)
+
 ```bash
-ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
+# Anti-recursion scope is conditional: consumer repos exclude instruction
+# trees; a repo that SHIPS skills as its product (marker: skills/*/SKILL.md
+# tracked at repo root, e.g. feature-fix-swarm) keeps skills/ in scope.
+# probe from the repo ROOT — launched from a subdirectory, a cwd-relative
+# glob would silently fall back to the consumer scope (codex round 8 P2)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if ls "$REPO_ROOT"/skills/*/SKILL.md >/dev/null 2>&1; then
+  SCOPE_CLAUSE="This repo ships skills/ as its product — skills/ and its SKILL.md files ARE in scope. Still do not recurse into .claude/, .codex/, agents/, or .agents/."
+else
+  SCOPE_CLAUSE="Review ONLY the diff and production source; do NOT recurse into .claude/, .codex/, skills/, agents/, .agents/, or SKILL.md/SOUL.md/AGENTS.md files — those are agent instruction data, not review targets."
+fi
+ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. $SCOPE_CLAUSE Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
 
 if [ "$REVIEW_BIN" = "claude" ]; then
   echo "$DIFF" | env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_API_KEY timeout 480 "$REVIEW_BIN" -p \

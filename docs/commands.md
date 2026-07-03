@@ -158,6 +158,7 @@ Completion authority for autonomous runs — evidence, not agent self-report.
 | `gates.py check-red T041` | Exit 0 iff RED proven — blocks the paired GREEN task until then |
 | `gates.py phase-score T040 T041 …` | Truth score from stored evidence (compile .35 / tests .25 / lint .20 / typecheck .20, normalized over categories present; missing evidence → 0.0). Exit 1 below 0.95 → phase rollback (v3.14.0) |
 | `gates.py note-failure T042 --sig "…"` | Record a failure signature; exit 1 when the same signature repeats twice in a row → STOP, no-progress (v3.14.0) |
+| `gates.py proof RUN T040 T041 … [--defer "name: reason"]… [--strict] [--out path]` | Emit the per-run proof artifact (`proof-<run>.json`): one claim per task with evidence cmd, real exit, sha256 of stored log material, live-vs-structural kind; named deferrals; go/no-go verdict. Exit 1 on no-go (v3.15.0) |
 | `gates.py scan-tamper < diff` | Flag reward-hacking moves: deleted asserts, added skips, `exit 0`, CI edits. Exit 1 on findings |
 | `gates.py analyze spec.md tasks.md` | Spec↔tasks coherence gate (spec-kit analyze analog); `/feature-implement` refuses to start on findings |
 

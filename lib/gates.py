@@ -20,6 +20,9 @@ Usage (inline heredoc in SKILL.md):
                                                   # exit 1 if < 0.95 → rollback
     python3 lib/gates.py note-failure T042 --sig "AssertionError foo.py:12"
                                                   # exit 1 when stuck (same sig 2x)
+    python3 lib/gates.py proof run-42 T040 T041 --defer "live-send: no bot" \
+                                                  # write proof-run-42.json;
+                                                  # exit 1 on no-go verdict
     python3 lib/gates.py record-red   T041 --exit 1 < red-run.log
     python3 lib/gates.py check-red    T041        # exit 0 iff RED proven
     python3 lib/gates.py scan-tamper  < diff.txt  # exit 1 + findings if hacked
@@ -29,7 +32,9 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 """
 from __future__ import annotations
 
+import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -318,6 +323,97 @@ def note_failure(store: Path, task_id: str, signature: str) -> bool:
     return no_progress(sigs)
 
 
+def proof_artifact(store: Path, run_id: str, task_ids: list[str],
+                   strict: bool = False, deferrals: list[str] | None = None,
+                   residuals_text: str | None = None) -> dict:
+    """Per-run proof artifact (ported from the openclaw evidence discipline):
+    one claim per task with the evidence command, real exit code, a sha256 of
+    the stored log material, and a live-vs-structural kind (runner-executed vs
+    caller-recorded). Verdict is go ONLY when every claim has exit 0 and — in
+    strict mode — is runner-proven. Deferrals are NAMED in the artifact, never
+    silently passed."""
+    data = _load_store(store)
+    claims: list[dict] = []
+    missing: list[str] = []
+    # repeated ids overstate coverage (a wrapper can drop one task and
+    # duplicate another while the artifact still looks complete) — surface
+    # and fail (codex round 8 P2)
+    seen: set[str] = set()
+    duplicates = sorted({t for t in task_ids if t in seen or seen.add(t)})
+    task_ids = list(dict.fromkeys(task_ids))
+    for task_id in task_ids:
+        gate = data.get(task_id, {}).get("gate")
+        if not gate:
+            missing.append(task_id)
+            continue
+        live = gate.get("executed_by") in ("run_gate", "run_red")
+        log_material = (gate.get("tests_after", "") + "\n" +
+                        gate.get("failure_sig", "")).encode()
+        claims.append({
+            "task_id": task_id,
+            "claim": f"gate passed for {task_id}" if gate.get("exit_code") == 0
+                     else f"gate FAILED for {task_id}",
+            "evidence_cmd": gate.get("cmd", ""),
+            "exit_code": gate.get("exit_code"),
+            "kind": "live" if live else "structural",
+            "log_sha256": hashlib.sha256(log_material).hexdigest(),
+        })
+    # A deferral named on argv but absent from residuals.md is a silent pass —
+    # verify the companion record when residuals_text is provided (codex v3.15
+    # round 2 P2). The deferral's name (text before ':') must appear there.
+    unrecorded: list[str] = []
+    if residuals_text is not None:
+        # Structural parse of the residual record format
+        #   - [ ] {date} {name}: {reason} (run {run_id})
+        # — free-form mentions of the name inside another record's reason must
+        # not count (round 5 P2), only entries for THIS run count (round 4 P1),
+        # and the name field is compared exactly, never by substring (round 3 P1).
+        recorded_names: set[str] = set()
+        for ln in residuals_text.splitlines():
+            # unchecked form only — a closed '- [x]' item is a RESOLVED
+            # residual, not a live deferral record (round 7 P2)
+            m = re.match(r"^\s*-\s*\[ \]\s+(?P<field>[^:]+):.*\(run\s+"
+                         + re.escape(run_id) + r"\)\s*$", ln)
+            if not m:
+                continue
+            field = m.group("field").strip()
+            # optional leading date token
+            field = re.sub(r"^\d{4}-\d{2}-\d{2}\s+", "", field)
+            recorded_names.add(field)
+        for d in deferrals or []:
+            name = d.split(":", 1)[0].strip()
+            # blank/degenerate names are invalid, not silently OK (round 5 P2)
+            if not name or name not in recorded_names:
+                unrecorded.append(d)
+        # reverse direction (round 6 P1): a residual recorded for THIS run but
+        # not echoed via --defer would let the artifact claim go while
+        # residuals.md records live risk — surface it and fail the verdict.
+        argv_names = {d.split(":", 1)[0].strip() for d in deferrals or []}
+        unechoed = sorted(recorded_names - argv_names)
+    else:
+        unechoed = []
+    # claims must be non-empty: all([]) is True, so an empty proof would
+    # otherwise read as go (codex v3.15 round 1 P1).
+    go = (bool(claims)
+          and not missing
+          and not duplicates
+          and not unrecorded
+          and not unechoed
+          and all(c["exit_code"] == 0 for c in claims)
+          and (not strict or all(c["kind"] == "live" for c in claims)))
+    return {
+        "run_id": run_id,
+        "verdict": "go" if go else "no-go",
+        "strict": strict,
+        "claims": claims,
+        "missing": missing,
+        "duplicate_task_ids": duplicates,
+        "deferrals": list(deferrals or []),
+        "unrecorded_deferrals": unrecorded,
+        "unechoed_residuals": unechoed,
+    }
+
+
 # ── Stream G: spec/tasks coherence ───────────────────────────────────────────
 
 def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
@@ -441,6 +537,59 @@ def main(argv: list[str]) -> int:
         print("NO-PROGRESS: same failure signature twice in a row — stop and report"
               if stuck else "PROGRESS-OK")
         return 1 if stuck else 0
+    if cmd == "proof":
+        # argparse fails closed on every malformed shape the hand parser kept
+        # leaking (codex rounds 1-4): missing run id, trailing/optionless
+        # --defer/--out, unknown flags (--stric typo, -h), option-as-value.
+        parser = argparse.ArgumentParser(prog="gates.py proof", add_help=False,
+                                         allow_abbrev=False)
+        parser.add_argument("run_id")
+        parser.add_argument("task_ids", nargs="*")
+        parser.add_argument("--defer", action="append", dest="deferrals",
+                            default=[], metavar="'name: reason'")
+        parser.add_argument("--out")
+        parser.add_argument("--strict", action="store_true")
+        try:
+            ns = parser.parse_args(args)
+        except SystemExit:
+            return 2
+        run_id, task_ids, deferrals = ns.run_id, ns.task_ids, ns.deferrals
+        strict = ns.strict or os.environ.get("GATES_STRICT") == "1"
+        residuals_file = store.parent / "residuals.md"
+        residuals_text = residuals_file.read_text() if residuals_file.exists() else ""
+        art = proof_artifact(store, run_id, task_ids, strict=strict,
+                             deferrals=deferrals, residuals_text=residuals_text)
+        # run_id is argv-controlled: sanitize before composing the default
+        # artifact filename so '../x' can't escape the store dir (round 2 P2).
+        # When sanitization changed the id, append a short hash of the ORIGINAL
+        # so distinct unsafe ids ('a/b' vs 'a?b') can't collapse onto one
+        # filename and silently overwrite each other (round 7 P2).
+        safe_run = re.sub(r"[^A-Za-z0-9._-]", "_", run_id)
+        if safe_run != run_id:
+            safe_run += "-" + hashlib.sha256(run_id.encode()).hexdigest()[:8]
+        out = Path(ns.out or store.parent / f"proof-{safe_run}.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # temp-file + rename: never follow a pre-planted symlink at the
+        # predictable artifact path (codex round 6 P2) — os.replace swaps the
+        # symlink itself, the target is never written through.
+        fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=".proof-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(art, indent=2) + "\n")
+            os.replace(tmp, out)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        print(f"PROOF-{art['verdict'].upper()}: {out}")
+        for d in art["deferrals"]:
+            print(f"  DEFERRED: {d}")
+        for d in art["unrecorded_deferrals"]:
+            print(f"  DEFERRAL-UNRECORDED (add to {residuals_file}): {d}")
+        for d in art["unechoed_residuals"]:
+            print(f"  RESIDUAL-UNECHOED (pass --defer '{d}: …'): {d}")
+        for m in art["missing"]:
+            print(f"  MISSING-EVIDENCE: {m}")
+        return 0 if art["verdict"] == "go" else 1
     if cmd == "analyze":
         with open(args[0]) as f:
             spec = f.read()

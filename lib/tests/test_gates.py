@@ -441,3 +441,294 @@ def test_run_gate_failure_sig_survives_long_output(tmp_path) -> None:
     assert rc == 1
     sig = json.loads(store.read_text())["T062"]["gate"]["failure_sig"]
     assert "needle" in sig
+
+
+# ── v3.15 Stream 2: proof artifact ──────────────────────────────────────────
+
+def _seed_green(store, task_id="T100"):
+    gates.run_gate(store, task_id, ["python3", "-c", "print('1 passed')"])
+
+
+def test_proof_artifact_all_green_is_go(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    _seed_green(store, "T101")
+    art = gates.proof_artifact(store, "run-1", ["T100", "T101"])
+    assert art["run_id"] == "run-1"
+    assert art["verdict"] == "go"
+    assert len(art["claims"]) == 2
+    for c in art["claims"]:
+        assert c["exit_code"] == 0
+        assert c["kind"] == "live"           # run_gate-executed evidence
+        assert len(c["log_sha256"]) == 64    # hex digest of stored log material
+        assert c["evidence_cmd"]
+
+
+def test_proof_artifact_failing_gate_is_no_go(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    gates.run_gate(store, "T102", ["python3", "-c", "import sys; print('FAILED x'); sys.exit(1)"])
+    art = gates.proof_artifact(store, "run-2", ["T100", "T102"])
+    assert art["verdict"] == "no-go"
+
+
+def test_proof_artifact_missing_evidence_is_no_go_and_named(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-3", ["T100", "T999"])
+    assert art["verdict"] == "no-go"
+    assert "T999" in art["missing"]
+
+
+def test_proof_artifact_caller_evidence_is_structural_and_strict_no_go(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T103", exit_code=0, cmd="pytest -q")
+    art = gates.proof_artifact(store, "run-4", ["T103"])
+    assert art["claims"][0]["kind"] == "structural"   # caller-recorded, not runner-proven
+    assert art["verdict"] == "go"                      # lax mode still accepts
+    strict_art = gates.proof_artifact(store, "run-4", ["T103"], strict=True)
+    assert strict_art["verdict"] == "no-go"            # strict rejects structural
+
+
+def test_proof_artifact_deferrals_named_never_silent(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-5", ["T100"],
+                               deferrals=["live-telegram-send: no staging bot this run"])
+    assert art["verdict"] == "go"
+    assert art["deferrals"] == ["live-telegram-send: no staging bot this run"]
+
+
+def test_cli_proof_writes_artifact_and_exit_codes(tmp_path, capsys, monkeypatch) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    rc = gates.main(["proof", "run-6", "T100"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    artifact = tmp_path / "proof-run-6.json"
+    assert artifact.exists()
+    assert str(artifact) in out
+    data = json.loads(artifact.read_text())
+    assert data["verdict"] == "go"
+    # no-go exits 1
+    gates.run_gate(store, "T104", ["python3", "-c", "import sys; print('FAILED y'); sys.exit(1)"])
+    rc = gates.main(["proof", "run-7", "T100", "T104"])
+    assert rc == 1
+
+
+def test_proof_artifact_empty_task_ids_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 1 P1: all([]) is True — an empty proof must never
+    read as go."""
+    store = tmp_path / "evidence.json"
+    art = gates.proof_artifact(store, "run-8", [])
+    assert art["verdict"] == "no-go"
+
+
+def test_cli_proof_out_flag_value_not_treated_as_task_id(tmp_path, capsys, monkeypatch) -> None:
+    """Codex v3.15 round 1 P2: --out VALUE must be consumed as a flag value,
+    not collected as a task id (which forced a false no-go)."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    out = tmp_path / "custom-proof.json"
+    rc = gates.main(["proof", "run-9", "T100", "--out", str(out)])
+    assert rc == 0
+    data = json.loads(out.read_text())
+    assert data["verdict"] == "go"
+    assert data["missing"] == []
+
+
+def test_cli_proof_run_id_path_traversal_sanitized(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 2 P2: run_id is argv-controlled — a '../' run id must
+    not escape the store dir when composing the default artifact path."""
+    store = tmp_path / "sub" / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    escape = tmp_path / "pwn.json"
+    rc = gates.main(["proof", "../pwn", "T100"])
+    assert rc == 0
+    assert not escape.exists()                      # nothing written outside
+    written = list((tmp_path / "sub").glob("proof-*.json"))
+    assert len(written) == 1                        # sanitized name, in store dir
+
+
+def test_proof_artifact_unrecorded_deferral_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 2 P2: a deferral named on argv but absent from
+    residuals.md is a silent pass — must force no-go."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-10", ["T100"],
+                               deferrals=["live-send: no bot"],
+                               residuals_text="")
+    assert art["verdict"] == "no-go"
+    assert art["unrecorded_deferrals"] == ["live-send: no bot"]
+    ok = gates.proof_artifact(store, "run-10", ["T100"],
+                              deferrals=["live-send: no bot"],
+                              residuals_text="- [ ] 2026-07-03 live-send: no bot (run run-10)")
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_trailing_defer_is_usage_error(tmp_path, capsys, monkeypatch) -> None:
+    """Codex v3.15 round 2 P3: trailing --defer must be a usage error (exit 2),
+    not an IndexError crash."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    rc = gates.main(["proof", "run-11", "T100", "--defer"])
+    assert rc == 2
+    assert not list(tmp_path.glob("proof-*.json"))  # nothing written
+
+
+def test_proof_deferral_name_match_is_exact_token_not_substring(tmp_path) -> None:
+    """Codex v3.15 round 3 P1: 'live-send' must NOT count as recorded when
+    residuals.md only mentions 'live-send-old'."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(
+        store, "run-12", ["T100"], deferrals=["live-send: reason"],
+        residuals_text="- [ ] 2026-07-03 live-send-old: reason (run run-12)")
+    assert art["verdict"] == "no-go"
+    assert art["unrecorded_deferrals"] == ["live-send: reason"]
+    # exact token still recorded
+    ok = gates.proof_artifact(
+        store, "run-12", ["T100"], deferrals=["live-send: reason"],
+        residuals_text="- [ ] 2026-07-03 live-send: reason (run run-12)")
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_flag_value_cannot_be_another_flag(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 3 P2: '--defer --strict' / '--out --strict' must be
+    usage errors, not silently consume the next flag as the value."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["proof", "run-13", "T100", "--defer", "--strict"]) == 2
+    assert gates.main(["proof", "run-13", "T100", "--out", "--strict"]) == 2
+    assert not list(tmp_path.glob("proof-*.json"))
+    assert not (tmp_path / "--strict").exists()
+
+
+def test_proof_deferral_must_match_current_run_id(tmp_path) -> None:
+    """Codex v3.15 round 4 P1: a stale residual from an EARLIER run must not
+    satisfy the current run's deferral record."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    stale = "- [ ] 2026-07-01 live-send: reason (run run-OLD)"
+    art = gates.proof_artifact(store, "run-14", ["T100"],
+                               deferrals=["live-send: reason"],
+                               residuals_text=stale)
+    assert art["verdict"] == "no-go"
+    current = stale + "\n- [ ] 2026-07-03 live-send: reason (run run-14)"
+    ok = gates.proof_artifact(store, "run-14", ["T100"],
+                              deferrals=["live-send: reason"],
+                              residuals_text=current)
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_rejects_missing_run_id_and_unknown_flags(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 4 P2s: no run id → exit 2 (not IndexError); unknown
+    options (--stric typo, -h) → exit 2, never silently ignored or collected
+    as task ids."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["proof"]) == 2
+    assert gates.main(["proof", "run-15", "T100", "--stric"]) == 2
+    assert gates.main(["proof", "run-15", "-h"]) == 2
+    assert not list(tmp_path.glob("proof-*.json"))
+
+
+def test_proof_residual_match_is_structural_not_freeform(tmp_path) -> None:
+    """Codex v3.15 round 5 P2: the deferral token appearing in another
+    record's REASON text must not count as a record for that name."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    spoof = "- [ ] 2026-07-03 note: live-send mentioned in passing (run run-16)"
+    art = gates.proof_artifact(store, "run-16", ["T100"],
+                               deferrals=["live-send: reason"],
+                               residuals_text=spoof)
+    assert art["verdict"] == "no-go"
+    real = "- [ ] 2026-07-03 live-send: reason (run run-16)"
+    ok = gates.proof_artifact(store, "run-16", ["T100"],
+                              deferrals=["live-send: reason"],
+                              residuals_text=real)
+    assert ok["verdict"] == "go"
+
+
+def test_proof_blank_deferral_name_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 5 P2: --defer '' / '   ' / ': reason' must be
+    invalid (no-go), not silently dropped."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    for bad in ["", "   ", ": reason"]:
+        art = gates.proof_artifact(store, "run-17", ["T100"],
+                                   deferrals=[bad], residuals_text="")
+        assert art["verdict"] == "no-go", f"blank deferral {bad!r} slipped through"
+        assert bad in art["unrecorded_deferrals"]
+
+
+def test_proof_residual_for_current_run_must_be_echoed_in_deferrals(tmp_path) -> None:
+    """Codex v3.15 round 6 P1: a current-run residual NOT echoed via --defer
+    must surface (unechoed_residuals) and force no-go — the artifact may not
+    claim go while residuals.md records risk for this run."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    rec = "- [ ] 2026-07-03 live-send: no bot (run run-18)"
+    art = gates.proof_artifact(store, "run-18", ["T100"],
+                               deferrals=[], residuals_text=rec)
+    assert art["verdict"] == "no-go"
+    assert art["unechoed_residuals"] == ["live-send"]
+    ok = gates.proof_artifact(store, "run-18", ["T100"],
+                              deferrals=["live-send: no bot"], residuals_text=rec)
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_write_does_not_follow_symlink(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 6 P2: a pre-planted symlink at the default artifact
+    path must not redirect the write to an arbitrary target file."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    target = tmp_path / "victim.txt"
+    target.write_text("original")
+    link = tmp_path / "proof-run-19.json"
+    link.symlink_to(target)
+    rc = gates.main(["proof", "run-19", "T100"])
+    assert rc == 0
+    assert target.read_text() == "original"          # victim untouched
+    assert json.loads((tmp_path / "proof-run-19.json").read_text())["verdict"] == "go"
+
+
+def test_proof_checked_residual_does_not_satisfy_live_deferral(tmp_path) -> None:
+    """Codex v3.15 round 7 P2: a CLOSED checklist item ('- [x]') is not a live
+    residual record — only the unchecked form counts."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    closed = "- [x] 2026-07-03 live-send: no bot (run run-20)"
+    art = gates.proof_artifact(store, "run-20", ["T100"],
+                               deferrals=["live-send: no bot"],
+                               residuals_text=closed)
+    assert art["verdict"] == "no-go"
+
+
+def test_cli_proof_sanitized_run_ids_do_not_collide(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 7 P2: distinct unsafe run ids ('a/b' vs 'a?b') must
+    not collapse to the same artifact filename."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["proof", "a/b", "T100"]) == 0
+    assert gates.main(["proof", "a?b", "T100"]) == 0
+    files = sorted(p.name for p in tmp_path.glob("proof-*.json"))
+    assert len(files) == 2, files
+
+
+def test_proof_duplicate_task_ids_is_no_go(tmp_path) -> None:
+    """Codex v3.15 round 8 P2: repeated task ids overstate coverage — must
+    surface as duplicates and force no-go."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-21", ["T100", "T100"])
+    assert art["verdict"] == "no-go"
+    assert art["duplicate_task_ids"] == ["T100"]
