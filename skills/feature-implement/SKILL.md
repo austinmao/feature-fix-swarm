@@ -1102,8 +1102,10 @@ Record start time. When Agent returns:
   GATES_STRICT=1 python3 "$GATES_PY" verify-done "$TASK_ID" || {
     echo "[feature-implement] BLOCK: no runner-verified gate evidence for $TASK_ID"
     # no-progress wiring (v1.10.0): same failure signature twice = stuck loop.
-    # Signature = the failing gate's stored output line (run-gate already wrote
-    # it to the evidence store) — never re-run anything here.
+    # Signature = the gate's stored failure_sig (the discriminating FAILED/
+    # Error lines run-gate extracted — NOT the final summary line, which
+    # different failures share). Fallback is nonempty; gates.py additionally
+    # ignores blank signatures. Never re-run anything here.
     SIG=$(python3 - "$TASK_ID" <<'PY'
 import json, os, sys
 store = os.environ.get("GATES_STORE", ".feature-fix-swarm/evidence.json")
@@ -1111,7 +1113,8 @@ try:
     gate = json.load(open(store)).get(sys.argv[1], {}).get("gate", {})
 except Exception:
     gate = {}
-print((gate.get("tests_after") or "gate nonzero").strip()[:200])
+sig = (gate.get("failure_sig") or gate.get("tests_after") or "").strip()
+print(sig[:400] or f"{sys.argv[1]} gate nonzero")
 PY
 )
     if ! python3 "$GATES_PY" note-failure "$TASK_ID" --sig "$SIG"; then

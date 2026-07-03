@@ -394,3 +394,32 @@ def test_cli_phase_score_strict_env(tmp_path) -> None:
     r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "phase-score", "T052"],
                 capture_output=True, text=True, env=env)
     assert r.returncode == 1  # caller evidence = unproven under strict
+
+
+def test_note_failure_ignores_blank_signatures(tmp_path) -> None:
+    """Codex round 2 P2: a blank signature must not count — two blanks in a
+    row would otherwise stop the loop with a false NO-PROGRESS."""
+    store = tmp_path / "evidence.json"
+    assert gates.note_failure(store, "T060", "") is False
+    assert gates.note_failure(store, "T060", "") is False   # two identical blanks: NOT stuck
+    assert gates.note_failure(store, "T060", "   ") is False # whitespace-only: same
+    # real signatures still work after blanks
+    assert gates.note_failure(store, "T060", "AssertionError x") is False
+    assert gates.note_failure(store, "T060", "AssertionError x") is True
+
+
+def test_run_gate_stores_failure_signature_lines(tmp_path) -> None:
+    """Codex round 2 P2: the retry key must be the failing lines, not the
+    final summary line (different failures share '1 failed in ...')."""
+    store = tmp_path / "evidence.json"
+    code = (
+        "import sys\n"
+        "print('collected 2 items')\n"
+        "print('FAILED test_a.py::test_x - AssertionError: boom')\n"
+        "print('1 failed, 1 passed in 0.01s')\n"
+        "sys.exit(1)\n"
+    )
+    rc = gates.run_gate(store, "T061", ["python3", "-c", code])
+    assert rc == 1
+    sig = json.loads(store.read_text())["T061"]["gate"].get("failure_sig", "")
+    assert "AssertionError: boom" in sig  # the discriminating line survives

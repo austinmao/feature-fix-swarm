@@ -115,6 +115,12 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> 
     bound to the runner, not caller-supplied --exit). Returns the exit code."""
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     tail = (proc.stdout + proc.stderr)[-2000:]
+    lines = tail.splitlines()
+    # Failure signature = the DISCRIMINATING failing lines, not the final
+    # summary line — different failures share "1 failed in ..." (codex gate
+    # round 2, v3.14). Last 3 marker lines, else last line as fallback.
+    marker_lines = [ln for ln in lines if FAILURE_MARKERS.search(ln)]
+    failure_sig = " | ".join(marker_lines[-3:])[:400] if proc.returncode != 0 else ""
     with _StoreLock(store):
         data = _load_store(store)
         entry = data.setdefault(task_id, {})
@@ -122,7 +128,8 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> 
             "exit_code": proc.returncode,
             "cmd": " ".join(cmd),
             "tests_before": "",
-            "tests_after": tail.splitlines()[-1] if tail.splitlines() else "",
+            "tests_after": lines[-1] if lines else "",
+            "failure_sig": failure_sig or (lines[-1] if lines and proc.returncode != 0 else ""),
             "executed_by": "run_gate",
         }
         _save_store(store, data)
@@ -295,7 +302,12 @@ def no_progress(failure_signatures: list[str]) -> bool:
 def note_failure(store: Path, task_id: str, signature: str) -> bool:
     """Append a failure signature to the task's history and report whether
     the loop is stuck (same signature twice in a row). Wires no_progress
-    into the retry loop via the evidence store."""
+    into the retry loop via the evidence store.
+    Blank/whitespace signatures are IGNORED (not recorded, never stuck) —
+    two empty captures would otherwise stop the loop with a false
+    NO-PROGRESS (codex gate round 2, v3.14)."""
+    if not signature or not signature.strip():
+        return False
     with _StoreLock(store):
         data = _load_store(store)
         sigs = data.setdefault(task_id, {}).setdefault("failure_sigs", [])
