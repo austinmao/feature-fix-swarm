@@ -698,3 +698,27 @@ def test_cli_proof_write_does_not_follow_symlink(tmp_path, monkeypatch) -> None:
     assert rc == 0
     assert target.read_text() == "original"          # victim untouched
     assert json.loads((tmp_path / "proof-run-19.json").read_text())["verdict"] == "go"
+
+
+def test_proof_checked_residual_does_not_satisfy_live_deferral(tmp_path) -> None:
+    """Codex v3.15 round 7 P2: a CLOSED checklist item ('- [x]') is not a live
+    residual record — only the unchecked form counts."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    closed = "- [x] 2026-07-03 live-send: no bot (run run-20)"
+    art = gates.proof_artifact(store, "run-20", ["T100"],
+                               deferrals=["live-send: no bot"],
+                               residuals_text=closed)
+    assert art["verdict"] == "no-go"
+
+
+def test_cli_proof_sanitized_run_ids_do_not_collide(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 7 P2: distinct unsafe run ids ('a/b' vs 'a?b') must
+    not collapse to the same artifact filename."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["proof", "a/b", "T100"]) == 0
+    assert gates.main(["proof", "a?b", "T100"]) == 0
+    files = sorted(p.name for p in tmp_path.glob("proof-*.json"))
+    assert len(files) == 2, files

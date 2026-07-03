@@ -364,7 +364,9 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
         # and the name field is compared exactly, never by substring (round 3 P1).
         recorded_names: set[str] = set()
         for ln in residuals_text.splitlines():
-            m = re.match(r"^\s*-\s*\[[ xX]\]\s+(?P<field>[^:]+):.*\(run\s+"
+            # unchecked form only — a closed '- [x]' item is a RESOLVED
+            # residual, not a live deferral record (round 7 P2)
+            m = re.match(r"^\s*-\s*\[ \]\s+(?P<field>[^:]+):.*\(run\s+"
                          + re.escape(run_id) + r"\)\s*$", ln)
             if not m:
                 continue
@@ -551,7 +553,12 @@ def main(argv: list[str]) -> int:
                              deferrals=deferrals, residuals_text=residuals_text)
         # run_id is argv-controlled: sanitize before composing the default
         # artifact filename so '../x' can't escape the store dir (round 2 P2).
+        # When sanitization changed the id, append a short hash of the ORIGINAL
+        # so distinct unsafe ids ('a/b' vs 'a?b') can't collapse onto one
+        # filename and silently overwrite each other (round 7 P2).
         safe_run = re.sub(r"[^A-Za-z0-9._-]", "_", run_id)
+        if safe_run != run_id:
+            safe_run += "-" + hashlib.sha256(run_id.encode()).hexdigest()[:8]
         out = Path(ns.out or store.parent / f"proof-{safe_run}.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         # temp-file + rename: never follow a pre-planted symlink at the
