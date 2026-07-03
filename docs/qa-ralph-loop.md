@@ -47,3 +47,19 @@ A 5-phase feature adds ~$0.75 in QA overhead.
 ## Disabling
 
 Set `RALPH_MAX_RETRIES=0` or pass `--no-qa-loop` to skip entirely.
+
+## Gate ladder (feature-implement v1.9.0)
+
+Per-phase QA runs as an ordered ladder, cheapest deterministic gates first:
+
+```
+compile/typecheck → lint → unit → integration → e2e smoke → LLM review dims
+```
+
+- A rung failure skips all later rungs and retries the task (fail-fast).
+- Deterministic rungs retry up to `RALPH_MAX_RETRIES`; LLM review rounds cap at 2.
+- Same failure signature twice in a row = no-progress → STOP and report.
+- Phase truth score < 0.95 after retries → rollback to phase-start checkpoint.
+- After each impl task: `gates.py scan-tamper` on the diff — deleted asserts,
+  added skips, `exit 0`, or CI edits are CRITICAL and block the phase.
+- Every gate outcome feeds `hooks_model-outcome` so the model router learns.

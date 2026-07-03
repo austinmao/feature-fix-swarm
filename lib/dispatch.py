@@ -144,7 +144,9 @@ def parse_annotations(rest: str, default_agent: str = "general-purpose") -> dict
     if m2:
         thinking = m2.group(1)
 
-    qa_match = re.search(r'\[qa:([a-z,]+)\]', rest)
+    # digits + hyphens required: [qa:e2e] and the reserved [qa:review-gate]
+    # phase-gate tag are legal emitter output (prompts/decompose-spec.md).
+    qa_match = re.search(r'\[qa:([a-z0-9,-]+)\]', rest)
     qa_dims = qa_match.group(1).split(",") if qa_match else ["e2e", "review", "security"]
 
     strip_pat = r'\[(?:P|US\d+|model:[^\]]+|thinking:[^\]]+|agent:[^\]]+|qa:[^\]]+)\]'

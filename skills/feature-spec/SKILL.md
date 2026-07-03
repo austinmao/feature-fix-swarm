@@ -238,7 +238,10 @@ NO_CLARIFY=0
 DRY_RUN=0
 SPEC_ID=""
 
-for arg in $SPEC_ARG; do
+# zsh-safe: parameter expansion does not word-split in zsh, but
+# command-substitution output does (bash + zsh + dash) — no subshell,
+# so assignments inside the loop persist.
+for arg in $(printf '%s\n' "${SPEC_ARG}"); do
   case "$arg" in
     --no-clarify) NO_CLARIFY=1 ;;
     --dry-run)    DRY_RUN=1 ;;

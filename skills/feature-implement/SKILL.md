@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.8.0"
+version: "1.9.0"
 allowed-tools:
   - Read
   - Edit
@@ -58,6 +58,34 @@ Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) wrap
 2. **Verify before advancing.** With `--qa-loop` (default) no phase advances on red: deterministic hooks + the LLM QA swarm gate every phase boundary (Step 5.5), and failures trigger the investigate-fix-retest loop (Step 5.5b) before the next phase starts. This is the package's reason to exist — do not disable it to go faster.
 3. **Self-critique before delivery.** Before the final report (Step 8), re-read the session as a skeptic: which `[X]` tasks are "done" only by self-report, which acceptance criteria are unproven by QA? Name at least one and surface it.
 
+## Machine gates (v1.9.0 — completion authority is never self-report)
+
+`lib/gates.py` (installed next to dispatch.py) is the run's ground truth. Six rules,
+all enforced in the loop below:
+
+1. **Evidence before checkbox.** `record-gate` + `verify-done` (exit 0) before any
+   `[X]` flip. Evidence store: `GATES_STORE` (default `.feature-fix-swarm/evidence.json`).
+   Append every outcome to `.feature-fix-swarm/results.md` — append-only, never rewrite.
+2. **RED proof before GREEN.** An implementation task whose sibling test task exists
+   must pass `check-red` first: the RED task pipes its failing run through
+   `record-red --exit $EXIT` (rejected if the log shows no real failure). GREEN task
+   blocked until `check-red` exits 0.
+3. **Gate ladder, cheap→expensive.** Per task/phase: compile/typecheck → lint → unit →
+   integration → e2e smoke → LLM review. A rung failure skips later rungs and retries
+   the task. LLM review rounds are capped at 2 per phase; deterministic rungs retry up
+   to `RALPH_MAX_RETRIES`.
+4. **Tamper scan.** After each impl task: `git diff | python3 gates.py scan-tamper`.
+   Findings (deleted asserts, added skips, `exit 0`, CI edits) = CRITICAL, phase blocked.
+   Impl tasks may not touch test files (`check_test_separation`) — test edits belong to
+   the paired test-author task.
+5. **No-progress stop.** Keep the last failure signature per task; if the same signature
+   repeats twice, STOP the loop and report instead of burning retries. Truth score
+   (`truth_score`, weights compile .35 / tests .25 / lint .20 / typecheck .20) below
+   0.95 after max retries → roll back to the phase-start checkpoint, do not limp forward.
+6. **Every gate outcome is a training signal.** After each task: `hooks_model-outcome`
+   (success/fail) so the Thompson-sampling router learns; `agentdb_pattern-search`
+   before non-trivial tasks, `agentdb_pattern-store` after novel successes.
+
 ## Workflow
 
 ### Step 1: Resolve spec directory
@@ -84,9 +112,9 @@ RALPH_MAX_RETRIES="${RALPH_MAX_RETRIES:-3}"
 TASKS_JSON=""   # populated in Step 2; exported for sub-shells
 
 # BUG-1 fix (2026-04-16): $SPEC_ARG may arrive as a single quoted string.
-# Use `read -ra` to explicitly word-split into an array so the for-loop iterates.
-read -ra _SPEC_ARGS <<< "$SPEC_ARG"
-for arg in "${_SPEC_ARGS[@]}"; do
+# zsh has no `read -a` (bash-only) — command-substitution output word-splits
+# in bash AND zsh, with no subshell, so assignments in the loop persist.
+for arg in $(printf '%s\n' "$SPEC_ARG"); do
   case "$arg" in
     --dry-run)    DRY_RUN=1 ;;
     --one)        ONE_TASK=1; LOOP_ALL=0 ;;
@@ -1024,7 +1052,37 @@ fi
 ### Step 6: Capture result
 
 Record start time. When Agent returns:
-- **SUCCESS**: Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id}`
+- **SUCCESS**: record machine evidence FIRST, then flip the checkbox. The checkbox
+  flip is only legal when `verify-done` exits 0 — agent self-report is never
+  completion authority:
+
+  ```bash
+# resolve gates.py across the three install shapes (same order as dispatch.py)
+  GATES_PY=""
+  for _cand in \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+    "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+    [ -f "$_cand" ] && GATES_PY="$_cand" && break
+  done
+  if [ -z "$GATES_PY" ]; then
+    echo "[gates] FATAL: gates.py not found — run setup.sh. Refusing to mark tasks done unverified."
+    exit 1
+  fi
+  # PREFERRED: let gates.py execute the gate itself so the exit code is real,
+  # not caller-supplied (an agent cannot fabricate evidence this way):
+  python3 "$GATES_PY" run-gate "$TASK_ID" -- $GATE_CMD
+  # HARD STOP: no passing evidence → the checkbox MUST stay [ ]. Mark the task
+  # [F] and enter the retry path — do NOT continue to the [X] flip.
+  python3 "$GATES_PY" verify-done "$TASK_ID" || {
+    echo "[feature-implement] BLOCK: no passing gate evidence for $TASK_ID"
+    mark_task_failed "$TASK_ID"   # [ ] → [F]; retries per RALPH_MAX_RETRIES
+    continue
+  }
+  echo "$TASK_ID gate exit=$GATE_EXIT $TESTS_BEFORE → $TESTS_AFTER" >> .feature-fix-swarm/results.md
+  ```
+
+  Then Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id}`
 - **FAILURE** (error, timeout, or sub-agent reported failure): Edit tasks.md `- [ ] {task_id}` → `- [F] {task_id}`
 
 Append to `.implement-log.jsonl`:

@@ -128,7 +128,9 @@ npx ruflo@latest memory search "query"   # Search what was learned
 | Route task to right model tier | `mcp__ruflo__hooks_model-route` |
 | Store a reusable pattern | `mcp__ruflo__agentdb_pattern-store` |
 
-Ruflo routing is most reliable when task `agent:` values use the hybrid exact-agent catalog before spawning: `ecc:tdd-guide`, `ecc:code-reviewer`, `ecc:architect`, `security-auditor`, `frontend-developer`, `backend-architect`, `python-pro`, `typescript-pro`, `database-architect`, `database-optimizer`, `test-automator`, `debugger`, `error-detective`, `deployment-engineer`, `observability-engineer`, `docs-architect`, `accessibility-expert`.
+Ruflo routing is most reliable when task `agent:` values use the hybrid exact-agent catalog before spawning. The full catalog `lib/dispatch.py` `AGENT_ROUTING_RULES` can emit (46 agents): `accessibility-expert`, `api-documenter`, `backend-architect`, `backend-security-coder`, `business-analyst`, `cloud-architect`, `context-manager`, `csharp-pro`, `customer-support`, `database-admin`, `database-architect`, `database-optimizer`, `deployment-engineer`, `django-pro`, `docs-architect`, `ecc:architect`, `ecc:code-reviewer`, `ecc:tdd-guide`, `error-detective`, `fastapi-pro`, `frontend-developer`, `frontend-security-coder`, `golang-pro`, `graphql-architect`, `incident-responder`, `java-pro`, `javascript-pro`, `kubernetes-architect`, `mermaid-expert`, `network-engineer`, `observability-engineer`, `performance-engineer`, `prompt-engineer`, `python-pro`, `reference-builder`, `reverse-engineer`, `rust-pro`, `sales-automator`, `search-specialist`, `security-auditor`, `seo-meta-optimizer`, `terraform-specialist`, `test-automator`, `typescript-pro`, `ui-ux-designer`, `ui-visual-validator`.
+
+**Fallback warning:** an `[agent:]` label (or routed agent) that is not installed at the run site silently falls back to `general-purpose` at spawn time. Verify availability with the host's agent list before relying on a specialist label; prefer `ecc:`-prefixed agents when the ECC plugin is installed.
 
 Do not use OpenRouter, `RUFLO_PROVIDER`, or Ruflo provider-key execution for feature tasks. Codex sessions execute through `codex exec`; Claude sessions execute through `claude -p`.
 
@@ -140,3 +142,18 @@ In Codex sessions, use tool discovery for `ruflo swarm_init agent_spawn mcp_stat
 - [Pipeline overview](pipeline.md) — Full pipeline diagram with QA Ralph loop
 - [QA Ralph Loop](qa-ralph-loop.md) — Per-phase QA architecture and configuration
 - [Master context](../master-context.md) — Single-file reference for all integrated systems
+
+## Machine gates (lib/gates.py)
+
+Completion authority for autonomous runs — evidence, not agent self-report.
+
+| Command | What it does |
+|---------|-------------|
+| `gates.py record-gate T042 --exit N --cmd ... --before ... --after ...` | Record a task's test-gate outcome in the evidence store (`$GATES_STORE`, default `.feature-fix-swarm/evidence.json`) |
+| `gates.py verify-done T042` | Exit 0 iff passing gate evidence exists — the ONLY thing that legalizes an `[X]` flip |
+| `gates.py record-red T041 --exit N < log` | Store a RED proof; rejected unless the log shows a real failure |
+| `gates.py check-red T041` | Exit 0 iff RED proven — blocks the paired GREEN task until then |
+| `gates.py scan-tamper < diff` | Flag reward-hacking moves: deleted asserts, added skips, `exit 0`, CI edits. Exit 1 on findings |
+| `gates.py analyze spec.md tasks.md` | Spec↔tasks coherence gate (spec-kit analyze analog); `/feature-implement` refuses to start on findings |
+
+Gate ladder (cheap→expensive, fail-fast): compile → typecheck → lint → unit → integration → e2e → LLM review. Truth score weights: compile .35 / tests .25 / lint .20 / typecheck .20; < 0.95 after max retries → rollback to phase checkpoint. LLM review rounds capped at 2/phase. Optional PreToolUse hook `hooks/tdd-gate.sh` blocks source writes with no matching test file.

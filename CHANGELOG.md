@@ -1,5 +1,41 @@
 # Changelog
 
+## v3.12.0 — machine gates: human-out-of-loop hardening
+
+**Grammar fix (CRITICAL):** `[qa:]` parser char class could not match digits or
+hyphens — `[qa:e2e]` and the reserved `[qa:review-gate]` phase-gate tag silently
+fell back to default dims. Fixed (`[a-z0-9,-]`) + regression tests.
+
+**New `lib/gates.py`** (installed by setup.sh next to dispatch.py):
+- `record-gate`/`verify-done` — checkbox `[X]` flips now require recorded gate
+  evidence (exit 0 + test counts); agent self-report is never completion authority.
+- `record-red`/`check-red` — GREEN tasks blocked until a real failing-test RED
+  proof is stored (all-green logs rejected).
+- `scan-tamper` — reward-hacking guard: deleted asserts, added skips, `exit 0`,
+  CI-config edits flagged CRITICAL.
+- `analyze` — spec↔tasks coherence gate (spec-kit analyze analog): US coverage,
+  per-phase review-gate task, per-story e2e smoke task.
+- `truth_score` (compile .35/tests .25/lint .20/typecheck .20, 0.95 threshold →
+  checkpoint rollback), `no_progress` (repeated failure signature → stop),
+  `GATE_LADDER` (compile→…→e2e→review, fail-fast).
+
+**Emitter (decompose-spec):** RED-proof pairing mandatory (every impl task
+depends on a failing-test task); every story phase must end with an e2e smoke
+task derived from BDD scenarios; self-check now runs `gates.py analyze`.
+
+**review-gate:** refute-or-promote pass — HIGH/CRITICAL findings block only
+after surviving one adversarial refuter (false-positive control for autonomous
+runs); LLM review rounds capped at 2/phase.
+
+**Hooks:** optional `hooks/tdd-gate.sh` PreToolUse hook (block source writes
+with no matching test; `TDD_GATE_BYPASS=1` when authoring the test).
+
+**Portability:** zsh-safe argument loops in review-gate + feature-spec
+(command-substitution split — verified identical in bash and zsh).
+
+**Docs:** full 46-agent routing catalog in commands.md + silent
+general-purpose-fallback warning; gate-ladder section in qa-ralph-loop.md.
+
 All notable changes to feature-fix-swarm are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).

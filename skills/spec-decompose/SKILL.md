@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into specs/NNN/tasks.md using the canonical shared model ladder (haiku/sonnet/opus, plus optional Claude-Code-native fable) + the exact-agent hybrid catalog decomposition prompt"
-version: "1.2.0"
+version: "1.3.0"
 allowed-tools:
   - Read
   - Write
@@ -292,3 +292,29 @@ Docs: https://github.com/austinmao/feature-fix-swarm/blob/main/docs/commands.md#
 ## Why a standalone skill, not a meta-skill
 
 Decomposition is self-contained and cacheable. A `/feature-start` meta-skill would be more convenient but locks in the full pipeline. Keeping decomposition standalone lets users regenerate tasks.md without redoing spec/plan, and lets Sonnet be invoked with fresh context per decomposition.
+
+
+## Coherence gate (before handing off to /feature-implement)
+
+```bash
+# resolve gates.py across the three install shapes (same order as dispatch.py)
+GATES_PY=""
+for _cand in \
+"$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+"$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+"$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+[ -f "$_cand" ] && GATES_PY="$_cand" && break
+done
+if [ -z "$GATES_PY" ]; then
+echo "[gates] FATAL: gates.py not found — run setup.sh. Refusing to mark tasks done unverified."
+exit 1
+fi
+python3 "$GATES_PY" analyze "specs/$SPEC_ID/spec.md" "specs/$SPEC_ID/tasks.md" || {
+  echo "[spec-decompose] ANALYZE-FAIL — fix the findings above before /feature-implement"
+  exit 1
+}
+```
+
+Machine analog of spec-kit's `/speckit.analyze`: FR/US coverage, per-phase
+review-gate presence, per-story e2e smoke presence. `/feature-implement` runs the
+same check at startup and refuses to start on findings.

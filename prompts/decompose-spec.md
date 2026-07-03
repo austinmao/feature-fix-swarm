@@ -196,6 +196,22 @@ phase transition, not an ordinary code-review pass.
 - Always the last task in the phase, with `Depends-on:` pointing at that phase's final
   implementation (or Dev QA) task.
 
+## RED-proof pairing (MANDATORY)
+
+Every implementation task MUST be preceded by a paired test-author task
+(`[agent:ecc:tdd-guide]`) that writes the failing test. The implementation task
+carries `Depends-on:` the test task. At run time the harness blocks the
+implementation task until the test task has recorded a RED proof
+(`gates.py check-red`) — a test run that actually failed. Decompose accordingly:
+never emit an implementation task with no failing-test predecessor.
+
+## Per-story e2e smoke task (MANDATORY)
+
+Every user-story phase MUST end with one e2e smoke task before its review-gate
+task: `[agent:test-automator] [qa:e2e]`, description derived from the spec's BDD
+Given/When/Then scenarios for that story. A story phase with no e2e task fails
+`gates.py analyze` and `/feature-implement` will refuse to start.
+
 ## Phase structure (required)
 
 Produce tasks.md in this exact phase sequence:
@@ -314,6 +330,16 @@ Each task may include a `[qa:unit,integration,e2e,review,security]` annotation s
 **`[qa:review-gate]` is reserved** for the one mandatory end-of-phase `/review-gate` task described in Review-Gate Phase Gates above. Do not attach it to any other task, and do not use `[qa:review]` as a substitute for it — `[qa:review]` marks ordinary code-review coverage on an implementation task, while `[qa:review-gate]` marks the phase-blocking gate itself.
 
 ## Self-check before declaring done
+
+Run the machine coherence gate yourself and fix findings before handing off:
+
+```bash
+python3 lib/gates.py analyze specs/NNN/spec.md specs/NNN/tasks.md
+```
+
+Checks: every spec US has tasks · every task US exists in the spec · every phase
+has a `[qa:review-gate]` task · every story phase has an e2e smoke task.
+
 
 - [ ] All user stories (P1, P2, P3...) mapped to at least one phase (if spec.md exists; otherwise single US1 phase is OK)
 - [ ] All functional requirements (FR-NNN) covered by at least one task (if spec.md exists)
