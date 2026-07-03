@@ -5,6 +5,12 @@ echo "=== feature-fix-swarm setup ==="
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Non-interactive mode: --yes flag or FFS_SETUP_YES=1 env. Overwrites existing
+# skill installs without prompting and skips the optional-deps prompt — needed
+# for autonomous/CI deploys where stdin is not a TTY (read otherwise exits 1).
+SETUP_YES="${FFS_SETUP_YES:-0}"
+for _a in "$@"; do [ "$_a" = "--yes" ] || [ "$_a" = "-y" ] && SETUP_YES=1; done
 export PATH="$HOME/.local/bin:$PATH"
 
 skill_installed() {
@@ -354,7 +360,7 @@ SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
 for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose codex-gate review-gate goal-wrap; do
   TARGET="$SKILLS_DIR/$skill/SKILL.md"
-  if [ -f "$TARGET" ]; then
+  if [ -f "$TARGET" ] && [ "$SETUP_YES" != "1" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
     echo
     [[ $REPLY =~ ^[Yy]$ ]] || continue
@@ -447,31 +453,49 @@ echo ""
 echo "Installing scripts..."
 for script in qa-swarm.sh ralph-retry.sh; do
   mkdir -p scripts
-  cp "$SCRIPT_DIR/scripts/$script" "scripts/$script"
-  chmod +x "scripts/$script"
-  echo "  Installed scripts/$script"
+  # self-copy guard: running setup.sh from the repo root makes source and
+  # target the same file — cp errors "are identical" and kills the script
+  if [ "$SCRIPT_DIR/scripts/$script" -ef "scripts/$script" ]; then
+    echo "  scripts/$script is the repo copy — skipping self-copy"
+  else
+    cp "$SCRIPT_DIR/scripts/$script" "scripts/$script"
+    chmod +x "scripts/$script"
+    echo "  Installed scripts/$script"
+  fi
 done
 
 mkdir -p scripts/harness
 for harness_script in executor-detect.sh ruflo-host-executor.sh ruflo-artifacts.sh; do
-  cp "$SCRIPT_DIR/scripts/harness/$harness_script" "scripts/harness/$harness_script"
-  chmod +x "scripts/harness/$harness_script"
-  echo "  Installed scripts/harness/$harness_script"
+  if [ "$SCRIPT_DIR/scripts/harness/$harness_script" -ef "scripts/harness/$harness_script" ]; then
+    echo "  scripts/harness/$harness_script is the repo copy — skipping self-copy"
+  else
+    cp "$SCRIPT_DIR/scripts/harness/$harness_script" "scripts/harness/$harness_script"
+    chmod +x "scripts/harness/$harness_script"
+    echo "  Installed scripts/harness/$harness_script"
+  fi
 done
 
 mkdir -p scripts/hooks
 for hook in worktree-gc.sh post-implement-batch.sh; do
-  cp "$SCRIPT_DIR/scripts/hooks/$hook" "scripts/hooks/$hook"
-  chmod +x "scripts/hooks/$hook"
-  echo "  Installed scripts/hooks/$hook"
+  if [ "$SCRIPT_DIR/scripts/hooks/$hook" -ef "scripts/hooks/$hook" ]; then
+    echo "  scripts/hooks/$hook is the repo copy — skipping self-copy"
+  else
+    cp "$SCRIPT_DIR/scripts/hooks/$hook" "scripts/hooks/$hook"
+    chmod +x "scripts/hooks/$hook"
+    echo "  Installed scripts/hooks/$hook"
+  fi
 done
 
 # Copy prompts
 echo "Installing prompts..."
 mkdir -p prompts
 for prompt in qa-e2e.md qa-review.md qa-security.md decompose-spec.md; do
-  cp "$SCRIPT_DIR/prompts/$prompt" "prompts/$prompt"
-  echo "  Installed prompts/$prompt"
+  if [ "$SCRIPT_DIR/prompts/$prompt" -ef "prompts/$prompt" ]; then
+    echo "  prompts/$prompt is the repo copy — skipping self-copy"
+  else
+    cp "$SCRIPT_DIR/prompts/$prompt" "prompts/$prompt"
+    echo "  Installed prompts/$prompt"
+  fi
 done
 
 # Update .gitignore
