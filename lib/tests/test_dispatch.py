@@ -106,3 +106,33 @@ def test_resolve_thinking_handles_codex_tiers() -> None:
     assert dispatch.resolve_thinking("gpt-5.5", "med") == "high"
     assert dispatch.resolve_thinking("gpt-5.4-mini", "high") == "med"
     assert dispatch.resolve_thinking("gpt-5.4", "high") == "high"
+
+
+def test_qa_dims_with_digits_and_hyphens_round_trip() -> None:
+    """[qa:] values containing digits (e2e) or hyphens (review-gate) must parse.
+
+    Regression: the char class [a-z,]+ silently dropped [qa:e2e] and the
+    reserved [qa:review-gate] phase-gate tag, falling back to defaults.
+    """
+    assert dispatch.parse_annotations("T001 [qa:e2e] browser flow")["qa_dims"] == ["e2e"]
+    assert dispatch.parse_annotations("T002 [qa:review-gate] gate task")["qa_dims"] == ["review-gate"]
+    assert dispatch.parse_annotations("T003 [qa:unit,integration,e2e] full stack")["qa_dims"] == [
+        "unit", "integration", "e2e",
+    ]
+    # scoped list without digits/hyphens must keep working
+    assert dispatch.parse_annotations("T004 [qa:review,security] auth")["qa_dims"] == ["review", "security"]
+
+
+def test_depends_on_round_trip() -> None:
+    """Depends-on: on the indented next line must populate depends_on."""
+    md = (
+        "## Phase 3\n"
+        "- [ ] T042 [model:opus thinking:high] [agent:ecc:security-reviewer] [US3] [P] [qa:review,security] harden auth\n"
+        "  Depends-on: T010, T011\n"
+        "- [ ] T043 [US1] [model:sonnet thinking:med] [agent:ecc:code-reviewer] /review-gate gate [qa:review-gate]\n"
+        "  Depends-on: T042\n"
+    )
+    tasks = dispatch.parse_tasks_md(md)
+    assert tasks[0]["depends_on"] == ["T010", "T011"]
+    assert tasks[1]["depends_on"] == ["T042"]
+    assert tasks[1]["qa_dims"] == ["review-gate"]
