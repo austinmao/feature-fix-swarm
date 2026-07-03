@@ -607,3 +607,33 @@ def test_cli_proof_flag_value_cannot_be_another_flag(tmp_path, monkeypatch) -> N
     assert gates.main(["proof", "run-13", "T100", "--out", "--strict"]) == 2
     assert not list(tmp_path.glob("proof-*.json"))
     assert not (tmp_path / "--strict").exists()
+
+
+def test_proof_deferral_must_match_current_run_id(tmp_path) -> None:
+    """Codex v3.15 round 4 P1: a stale residual from an EARLIER run must not
+    satisfy the current run's deferral record."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    stale = "- [ ] 2026-07-01 live-send: reason (run run-OLD)"
+    art = gates.proof_artifact(store, "run-14", ["T100"],
+                               deferrals=["live-send: reason"],
+                               residuals_text=stale)
+    assert art["verdict"] == "no-go"
+    current = stale + "\n- [ ] 2026-07-03 live-send: reason (run run-14)"
+    ok = gates.proof_artifact(store, "run-14", ["T100"],
+                              deferrals=["live-send: reason"],
+                              residuals_text=current)
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_rejects_missing_run_id_and_unknown_flags(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 4 P2s: no run id → exit 2 (not IndexError); unknown
+    options (--stric typo, -h) → exit 2, never silently ignored or collected
+    as task ids."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["proof"]) == 2
+    assert gates.main(["proof", "run-15", "T100", "--stric"]) == 2
+    assert gates.main(["proof", "run-15", "-h"]) == 2
+    assert not list(tmp_path.glob("proof-*.json"))

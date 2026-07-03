@@ -32,6 +32,7 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 """
 from __future__ import annotations
 
+import argparse
 import fcntl
 import hashlib
 import json
@@ -356,12 +357,16 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
     # round 2 P2). The deferral's name (text before ':') must appear there.
     unrecorded: list[str] = []
     if residuals_text is not None:
+        # only lines recorded for THIS run count — a stale residual from an
+        # earlier run must not satisfy the current run's record (round 4 P1)
+        run_lines = [ln for ln in residuals_text.splitlines()
+                     if f"(run {run_id})" in ln]
         for d in deferrals or []:
             name = d.split(":", 1)[0].strip()
             # exact-token match, not substring — 'live-send' must not count
             # as recorded when only 'live-send-old' appears (codex round 3 P1)
-            recorded = bool(name) and re.search(
-                rf"(?<![\w-]){re.escape(name)}(?![\w-])", residuals_text)
+            pat = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+            recorded = bool(name) and any(pat.search(ln) for ln in run_lines)
             if name and not recorded:
                 unrecorded.append(d)
     # claims must be non-empty: all([]) is True, so an empty proof would
@@ -506,32 +511,23 @@ def main(argv: list[str]) -> int:
               if stuck else "PROGRESS-OK")
         return 1 if stuck else 0
     if cmd == "proof":
-        run_id = args[0]
-        # value-taking flags must consume their value too — otherwise
-        # `--out /tmp/p.json` collects the path as a task id and forces a
-        # false no-go (codex v3.15 round 1 P2). A trailing value-flag is a
-        # usage error, not an IndexError (round 2 P3) — fail before any write.
-        value_flags = {"--defer", "--out"}
-        for i, a in enumerate(args):
-            # a value flag must be followed by a real value — trailing, or
-            # followed by another option token, is a usage error before any
-            # store/file write (codex rounds 2 P3 + 3 P2)
-            if a in value_flags and (i + 1 >= len(args)
-                                     or args[i + 1].startswith("--")):
-                print(f"usage error: {a} requires a value", file=sys.stderr)
-                return 2
-        deferrals = [args[i + 1] for i, a in enumerate(args) if a == "--defer"]
-        task_ids = []
-        skip = False
-        for a in args[1:]:
-            if skip:
-                skip = False
-                continue
-            if a in value_flags:
-                skip = True
-            elif not a.startswith("--"):
-                task_ids.append(a)
-        strict = "--strict" in args or os.environ.get("GATES_STRICT") == "1"
+        # argparse fails closed on every malformed shape the hand parser kept
+        # leaking (codex rounds 1-4): missing run id, trailing/optionless
+        # --defer/--out, unknown flags (--stric typo, -h), option-as-value.
+        parser = argparse.ArgumentParser(prog="gates.py proof", add_help=False,
+                                         allow_abbrev=False)
+        parser.add_argument("run_id")
+        parser.add_argument("task_ids", nargs="*")
+        parser.add_argument("--defer", action="append", dest="deferrals",
+                            default=[], metavar="'name: reason'")
+        parser.add_argument("--out")
+        parser.add_argument("--strict", action="store_true")
+        try:
+            ns = parser.parse_args(args)
+        except SystemExit:
+            return 2
+        run_id, task_ids, deferrals = ns.run_id, ns.task_ids, ns.deferrals
+        strict = ns.strict or os.environ.get("GATES_STRICT") == "1"
         residuals_file = store.parent / "residuals.md"
         residuals_text = residuals_file.read_text() if residuals_file.exists() else ""
         art = proof_artifact(store, run_id, task_ids, strict=strict,
@@ -539,7 +535,7 @@ def main(argv: list[str]) -> int:
         # run_id is argv-controlled: sanitize before composing the default
         # artifact filename so '../x' can't escape the store dir (round 2 P2).
         safe_run = re.sub(r"[^A-Za-z0-9._-]", "_", run_id)
-        out = Path(_flag(args, "--out") or store.parent / f"proof-{safe_run}.json")
+        out = Path(ns.out or store.parent / f"proof-{safe_run}.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(art, indent=2) + "\n")
         print(f"PROOF-{art['verdict'].upper()}: {out}")
