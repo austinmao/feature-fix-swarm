@@ -441,3 +441,77 @@ def test_run_gate_failure_sig_survives_long_output(tmp_path) -> None:
     assert rc == 1
     sig = json.loads(store.read_text())["T062"]["gate"]["failure_sig"]
     assert "needle" in sig
+
+
+# ── v3.15 Stream 2: proof artifact ──────────────────────────────────────────
+
+def _seed_green(store, task_id="T100"):
+    gates.run_gate(store, task_id, ["python3", "-c", "print('1 passed')"])
+
+
+def test_proof_artifact_all_green_is_go(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    _seed_green(store, "T101")
+    art = gates.proof_artifact(store, "run-1", ["T100", "T101"])
+    assert art["run_id"] == "run-1"
+    assert art["verdict"] == "go"
+    assert len(art["claims"]) == 2
+    for c in art["claims"]:
+        assert c["exit_code"] == 0
+        assert c["kind"] == "live"           # run_gate-executed evidence
+        assert len(c["log_sha256"]) == 64    # hex digest of stored log material
+        assert c["evidence_cmd"]
+
+
+def test_proof_artifact_failing_gate_is_no_go(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    gates.run_gate(store, "T102", ["python3", "-c", "import sys; print('FAILED x'); sys.exit(1)"])
+    art = gates.proof_artifact(store, "run-2", ["T100", "T102"])
+    assert art["verdict"] == "no-go"
+
+
+def test_proof_artifact_missing_evidence_is_no_go_and_named(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-3", ["T100", "T999"])
+    assert art["verdict"] == "no-go"
+    assert "T999" in art["missing"]
+
+
+def test_proof_artifact_caller_evidence_is_structural_and_strict_no_go(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T103", exit_code=0, cmd="pytest -q")
+    art = gates.proof_artifact(store, "run-4", ["T103"])
+    assert art["claims"][0]["kind"] == "structural"   # caller-recorded, not runner-proven
+    assert art["verdict"] == "go"                      # lax mode still accepts
+    strict_art = gates.proof_artifact(store, "run-4", ["T103"], strict=True)
+    assert strict_art["verdict"] == "no-go"            # strict rejects structural
+
+
+def test_proof_artifact_deferrals_named_never_silent(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(store, "run-5", ["T100"],
+                               deferrals=["live-telegram-send: no staging bot this run"])
+    assert art["verdict"] == "go"
+    assert art["deferrals"] == ["live-telegram-send: no staging bot this run"]
+
+
+def test_cli_proof_writes_artifact_and_exit_codes(tmp_path, capsys, monkeypatch) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    rc = gates.main(["proof", "run-6", "T100"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    artifact = tmp_path / "proof-run-6.json"
+    assert artifact.exists()
+    assert str(artifact) in out
+    data = json.loads(artifact.read_text())
+    assert data["verdict"] == "go"
+    # no-go exits 1
+    gates.run_gate(store, "T104", ["python3", "-c", "import sys; print('FAILED y'); sys.exit(1)"])
+    rc = gates.main(["proof", "run-7", "T100", "T104"])
+    assert rc == 1

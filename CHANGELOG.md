@@ -6,6 +6,31 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.15.0 — proof artifacts, named deferrals, review anti-recursion scope (2026-07-03)
+
+### Added
+- **`gates.py proof <run-id> <task-ids…>`**: per-run machine-readable proof
+  artifact written to `.feature-fix-swarm/proof-<run>.json` — one claim per
+  task with the evidence command, real exit code, sha256 of the stored log
+  material, and a live-vs-structural kind (runner-executed vs caller-recorded).
+  Go/no-go verdict (exit 1 on no-go); `--strict`/`GATES_STRICT=1` rejects
+  structural claims. Ported from the openclaw evidence discipline.
+- **Named deferrals**: `proof --defer "name: reason"` records anything
+  intentionally not verified this run in the artifact; `feature-implement`
+  v1.11.0 additionally requires appending each deferral to
+  `.feature-fix-swarm/residuals.md` — a deferral not named in both places is
+  a silent pass, forbidden.
+- **Review anti-recursion scope** baked into `review-gate` (and its
+  `codex-gate` alias): reviewers must never recurse into `.claude/`,
+  `.codex/`, `skills/`, `agents/`, `.agents/`, or SKILL.md/SOUL.md/AGENTS.md
+  of the CONSUMER repo — instruction files are data, not review targets.
+  In feature-fix-swarm itself `skills/` is the product and stays reviewable.
+
+### Deferred (named, per the new convention)
+- **mutation-smoke** (run pytest against mechanical mutations of changed impl
+  files to prove tests bite): not cheap to make deterministic this round;
+  recorded here as the residual instead of a half-built gate.
+
 ## v3.14.0 — evidence provenance, phase truth score, no-progress wiring, CI (2026-07-03)
 
 ### Added

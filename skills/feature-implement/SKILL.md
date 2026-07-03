@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.10.0"
+version: "1.11.0"
 allowed-tools:
   - Read
   - Edit
@@ -1168,6 +1168,22 @@ Note: `qa_results` only present on the LAST task in each phase (the one that tri
 ║ Next: {next id} / "all done" / "blocked on X"             ║
 ╚═══════════════════════════════════════════════════════════╝
 ```
+
+**Proof artifact (v1.11.0):** emit the machine-readable proof of the run before
+the box — one claim per phase task, live-vs-structural evidence kind, go/no-go:
+
+```bash
+GATES_STRICT=1 python3 "$GATES_PY" proof "$RUN_ID" $(printf '%s\n' "$ALL_TASK_IDS") \
+  $(printf -- '--defer %q ' "${DEFERRALS[@]}")   # omit --defer args when none
+# writes .feature-fix-swarm/proof-<run>.json; exit 1 = no-go (report FAILED, not done)
+```
+
+**Deferral records (v1.11.0):** anything intentionally NOT verified this run
+(a live send, an operator-gated flip, an env the harness can't reach) MUST be
+a named deferral — passed via `--defer "name: reason"` above AND appended to
+`.feature-fix-swarm/residuals.md` as `- [ ] {date} {name}: {reason} (run {RUN_ID})`.
+A deferral that isn't named in both places is a silent pass — forbidden. The
+final report's `Residual risk:` line references residuals.md when non-empty.
 
 ### Step 9: Retro — consolidate learning (v1.10.0)
 

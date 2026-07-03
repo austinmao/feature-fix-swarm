@@ -20,6 +20,9 @@ Usage (inline heredoc in SKILL.md):
                                                   # exit 1 if < 0.95 → rollback
     python3 lib/gates.py note-failure T042 --sig "AssertionError foo.py:12"
                                                   # exit 1 when stuck (same sig 2x)
+    python3 lib/gates.py proof run-42 T040 T041 --defer "live-send: no bot" \
+                                                  # write proof-run-42.json;
+                                                  # exit 1 on no-go verdict
     python3 lib/gates.py record-red   T041 --exit 1 < red-run.log
     python3 lib/gates.py check-red    T041        # exit 0 iff RED proven
     python3 lib/gates.py scan-tamper  < diff.txt  # exit 1 + findings if hacked
@@ -30,6 +33,7 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -318,6 +322,47 @@ def note_failure(store: Path, task_id: str, signature: str) -> bool:
     return no_progress(sigs)
 
 
+def proof_artifact(store: Path, run_id: str, task_ids: list[str],
+                   strict: bool = False, deferrals: list[str] | None = None) -> dict:
+    """Per-run proof artifact (ported from the openclaw evidence discipline):
+    one claim per task with the evidence command, real exit code, a sha256 of
+    the stored log material, and a live-vs-structural kind (runner-executed vs
+    caller-recorded). Verdict is go ONLY when every claim has exit 0 and — in
+    strict mode — is runner-proven. Deferrals are NAMED in the artifact, never
+    silently passed."""
+    data = _load_store(store)
+    claims: list[dict] = []
+    missing: list[str] = []
+    for task_id in task_ids:
+        gate = data.get(task_id, {}).get("gate")
+        if not gate:
+            missing.append(task_id)
+            continue
+        live = gate.get("executed_by") in ("run_gate", "run_red")
+        log_material = (gate.get("tests_after", "") + "\n" +
+                        gate.get("failure_sig", "")).encode()
+        claims.append({
+            "task_id": task_id,
+            "claim": f"gate passed for {task_id}" if gate.get("exit_code") == 0
+                     else f"gate FAILED for {task_id}",
+            "evidence_cmd": gate.get("cmd", ""),
+            "exit_code": gate.get("exit_code"),
+            "kind": "live" if live else "structural",
+            "log_sha256": hashlib.sha256(log_material).hexdigest(),
+        })
+    go = (not missing
+          and all(c["exit_code"] == 0 for c in claims)
+          and (not strict or all(c["kind"] == "live" for c in claims)))
+    return {
+        "run_id": run_id,
+        "verdict": "go" if go else "no-go",
+        "strict": strict,
+        "claims": claims,
+        "missing": missing,
+        "deferrals": list(deferrals or []),
+    }
+
+
 # ── Stream G: spec/tasks coherence ───────────────────────────────────────────
 
 def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
@@ -441,6 +486,30 @@ def main(argv: list[str]) -> int:
         print("NO-PROGRESS: same failure signature twice in a row — stop and report"
               if stuck else "PROGRESS-OK")
         return 1 if stuck else 0
+    if cmd == "proof":
+        run_id = args[0]
+        deferrals = [args[i + 1] for i, a in enumerate(args) if a == "--defer"]
+        task_ids = []
+        skip = False
+        for a in args[1:]:
+            if skip:
+                skip = False
+                continue
+            if a == "--defer":
+                skip = True
+            elif not a.startswith("--"):
+                task_ids.append(a)
+        strict = "--strict" in args or os.environ.get("GATES_STRICT") == "1"
+        art = proof_artifact(store, run_id, task_ids, strict=strict, deferrals=deferrals)
+        out = Path(_flag(args, "--out") or store.parent / f"proof-{run_id}.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(art, indent=2) + "\n")
+        print(f"PROOF-{art['verdict'].upper()}: {out}")
+        for d in art["deferrals"]:
+            print(f"  DEFERRED: {d}")
+        for m in art["missing"]:
+            print(f"  MISSING-EVIDENCE: {m}")
+        return 0 if art["verdict"] == "go" else 1
     if cmd == "analyze":
         with open(args[0]) as f:
             spec = f.read()

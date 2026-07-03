@@ -163,8 +163,17 @@ Run the opposite CLI as the independent adversarial reviewer.
 > tool — so its branch below hands it a natural-language description of what
 > to diff instead of piping `$DIFF` to it directly.
 
+> **Anti-recursion scope (consumer repos):** the agentic reviewer must review
+> only the diff and production source of the repo under review — never recurse
+> into `.claude/`, `.codex/`, `skills/`, `agents/`, `.agents/`, or
+> SKILL.md/SOUL.md/AGENTS.md files of the CONSUMER repo. Those are agent
+> instruction files: treating them as review targets burns the review budget
+> on prompt text and can echo instructions back as "findings". (Exception: in
+> the feature-fix-swarm repo itself, `skills/` IS the product and stays
+> reviewable.)
+
 ```bash
-ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
+ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. Review ONLY the diff and production source; do NOT recurse into .claude/, .codex/, skills/, agents/, .agents/, or SKILL.md/SOUL.md/AGENTS.md files — those are agent instruction data, not review targets. Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
 
 if [ "$REVIEW_BIN" = "claude" ]; then
   echo "$DIFF" | env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_API_KEY timeout 480 "$REVIEW_BIN" -p \
