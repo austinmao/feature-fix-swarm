@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.8.0"
+version: "1.9.0"
 allowed-tools:
   - Read
   - Edit
@@ -57,6 +57,34 @@ Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) wrap
 1. **Stage map first.** After parsing tasks.md (Step 2), print the phase plan — phases in order, task count and `[P]` parallel groups per phase, expected exit per phase — before spawning anything. A wrong dependency read is cheap to fix before Step 5, expensive after.
 2. **Verify before advancing.** With `--qa-loop` (default) no phase advances on red: deterministic hooks + the LLM QA swarm gate every phase boundary (Step 5.5), and failures trigger the investigate-fix-retest loop (Step 5.5b) before the next phase starts. This is the package's reason to exist — do not disable it to go faster.
 3. **Self-critique before delivery.** Before the final report (Step 8), re-read the session as a skeptic: which `[X]` tasks are "done" only by self-report, which acceptance criteria are unproven by QA? Name at least one and surface it.
+
+## Machine gates (v1.9.0 — completion authority is never self-report)
+
+`lib/gates.py` (installed next to dispatch.py) is the run's ground truth. Six rules,
+all enforced in the loop below:
+
+1. **Evidence before checkbox.** `record-gate` + `verify-done` (exit 0) before any
+   `[X]` flip. Evidence store: `GATES_STORE` (default `.feature-fix-swarm/evidence.json`).
+   Append every outcome to `.feature-fix-swarm/results.md` — append-only, never rewrite.
+2. **RED proof before GREEN.** An implementation task whose sibling test task exists
+   must pass `check-red` first: the RED task pipes its failing run through
+   `record-red --exit $EXIT` (rejected if the log shows no real failure). GREEN task
+   blocked until `check-red` exits 0.
+3. **Gate ladder, cheap→expensive.** Per task/phase: compile/typecheck → lint → unit →
+   integration → e2e smoke → LLM review. A rung failure skips later rungs and retries
+   the task. LLM review rounds are capped at 2 per phase; deterministic rungs retry up
+   to `RALPH_MAX_RETRIES`.
+4. **Tamper scan.** After each impl task: `git diff | python3 gates.py scan-tamper`.
+   Findings (deleted asserts, added skips, `exit 0`, CI edits) = CRITICAL, phase blocked.
+   Impl tasks may not touch test files (`check_test_separation`) — test edits belong to
+   the paired test-author task.
+5. **No-progress stop.** Keep the last failure signature per task; if the same signature
+   repeats twice, STOP the loop and report instead of burning retries. Truth score
+   (`truth_score`, weights compile .35 / tests .25 / lint .20 / typecheck .20) below
+   0.95 after max retries → roll back to the phase-start checkpoint, do not limp forward.
+6. **Every gate outcome is a training signal.** After each task: `hooks_model-outcome`
+   (success/fail) so the Thompson-sampling router learns; `agentdb_pattern-search`
+   before non-trivial tasks, `agentdb_pattern-store` after novel successes.
 
 ## Workflow
 
@@ -1024,7 +1052,22 @@ fi
 ### Step 6: Capture result
 
 Record start time. When Agent returns:
-- **SUCCESS**: Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id}`
+- **SUCCESS**: record machine evidence FIRST, then flip the checkbox. The checkbox
+  flip is only legal when `verify-done` exits 0 — agent self-report is never
+  completion authority:
+
+  ```bash
+  # after the task's test gate ran (capture its exit code + counts):
+  python3 "$DISPATCH_DIR/gates.py" record-gate "$TASK_ID" --exit "$GATE_EXIT" \
+    --cmd "$GATE_CMD" --before "$TESTS_BEFORE" --after "$TESTS_AFTER"
+  python3 "$DISPATCH_DIR/gates.py" verify-done "$TASK_ID" || {
+    echo "[feature-implement] BLOCK: no passing gate evidence for $TASK_ID — checkbox stays [ ]"
+    # treat as FAILED path below
+  }
+  echo "$TASK_ID gate exit=$GATE_EXIT $TESTS_BEFORE → $TESTS_AFTER" >> .feature-fix-swarm/results.md
+  ```
+
+  Then Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id}`
 - **FAILURE** (error, timeout, or sub-agent reported failure): Edit tasks.md `- [ ] {task_id}` → `- [F] {task_id}`
 
 Append to `.implement-log.jsonl`:

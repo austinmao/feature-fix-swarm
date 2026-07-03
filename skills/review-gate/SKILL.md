@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.0.1"
+version: "1.1.0"
 ---
 
 # /review-gate
@@ -99,7 +99,10 @@ ARGS="${ARGUMENTS:-}"
 DRY_RUN=0
 DIFF_TARGET="--staged"
 
-for arg in $ARGS; do
+# zsh-safe: parameter expansion does not word-split in zsh, but
+# command-substitution output does (bash + zsh + dash) — no subshell,
+# so assignments inside the loop persist.
+for arg in $(printf '%s\n' "${ARGS}"); do
   case "$arg" in
     --all)        DIFF_TARGET="main" ;;
     --dry-run)    DRY_RUN=1 ;;
@@ -204,6 +207,22 @@ For each gap output:
 
 Do not praise. Gaps only.
 ```
+
+### Refute-or-promote (false-positive control)
+
+Before a HIGH/CRITICAL finding is allowed to block the gate, give it one
+adversarial refuter pass: a sub-agent (or the opposite CLI) prompted to REFUTE
+the finding against the live repo — "prove this finding wrong; default to
+refuted if you cannot reproduce it." A finding blocks only if it survives
+refutation. LOW/MEDIUM findings skip this (they don't block anyway).
+
+Rationale: autonomous runs stall on false-positive gate failures; adversarial
+kill-mandates cut them without weakening the gate (cross-model refuter
+preferred).
+
+**Round cap:** at most 2 LLM review rounds per phase — empirically rounds 1-2
+capture ~75% of reachable improvement; further rounds burn budget without
+signal. Deterministic gates (tests/lint) are exempt from the cap.
 
 ### Merge and rank
 
