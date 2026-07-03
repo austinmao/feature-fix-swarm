@@ -9,8 +9,10 @@ Completion authority lives HERE, not in agent self-report:
 - spec/tasks coherence is checked before /feature-implement starts
 
 Usage (inline heredoc in SKILL.md):
+    python3 lib/gates.py run-gate     T042 -- pytest -q     # PREFERRED: executes
+    python3 lib/gates.py run-red      T041 -- pytest tests/test_new.py
     python3 lib/gates.py record-gate  T042 --exit 0 --cmd "pytest -q" \
-        --before "6 passed" --after "8 passed"
+        --before "6 passed" --after "8 passed"   # trusted-caller only
     python3 lib/gates.py verify-done  T042        # exit 0 iff evidence OK
     python3 lib/gates.py record-red   T041 --exit 1 < red-run.log
     python3 lib/gates.py check-red    T041        # exit 0 iff RED proven
@@ -21,10 +23,13 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Cheap deterministic gates run before expensive behavioral/LLM gates
@@ -35,7 +40,7 @@ GATE_LADDER = ["compile", "typecheck", "lint", "unit", "integration", "e2e", "re
 TRUTH_WEIGHTS = {"compile": 0.35, "tests": 0.25, "lint": 0.20, "typecheck": 0.20}
 TRUTH_THRESHOLD = 0.95  # strict mode: below this after max retries → rollback
 
-FAILURE_MARKERS = re.compile(r"\bfailed\b|\berror\b|\bFAILED\b|\bERROR\b|\bAssertionError\b")
+FAILURE_MARKERS = re.compile(r"\bfailed\b|\berror\b|\bFAIL(ED)?\b|\bERROR\b|\bAssertionError\b")
 
 TEST_FILE_PAT = re.compile(r"(^|/)(tests?/|test_[^/]+$|[^/]+[._-]test\.[a-z]+$|[^/]+\.spec\.[a-z]+$)")
 CI_FILE_PAT = re.compile(r"\.github/workflows/|\.gitlab-ci|Jenkinsfile|\.circleci/")
@@ -51,22 +56,86 @@ def _load_store(store: Path) -> dict:
 
 
 def _save_store(store: Path, data: dict) -> None:
-    Path(store).parent.mkdir(parents=True, exist_ok=True)
-    with open(store, "w") as f:
-        json.dump(data, f, indent=2)
+    # atomic: write a temp file in the same dir, then rename over the store —
+    # a crash or parallel reader never sees a torn file.
+    store = Path(store)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=store.parent, prefix=".evidence-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, store)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+class _StoreLock:
+    """Advisory flock serializing read-modify-write across parallel tasks."""
+
+    def __init__(self, store: Path):
+        self.path = Path(store).with_suffix(".lock")
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = open(self.path, "w")
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        self.fd.close()
 
 
 def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
                          tests_before: str = "", tests_after: str = "") -> None:
-    data = _load_store(store)
-    entry = data.setdefault(task_id, {})
-    entry["gate"] = {
-        "exit_code": exit_code,
-        "cmd": cmd,
-        "tests_before": tests_before,
-        "tests_after": tests_after,
-    }
-    _save_store(store, data)
+    """Trusted-caller write. Prefer run_gate(), which executes the command
+    itself and records the REAL exit code — an agent cannot fabricate it."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        entry = data.setdefault(task_id, {})
+        entry["gate"] = {
+            "exit_code": exit_code,
+            "cmd": cmd,
+            "tests_before": tests_before,
+            "tests_after": tests_after,
+        }
+        _save_store(store, data)
+
+
+def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> int:
+    """Execute the gate command and record the REAL exit code (P1: evidence
+    bound to the runner, not caller-supplied --exit). Returns the exit code."""
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    tail = (proc.stdout + proc.stderr)[-2000:]
+    with _StoreLock(store):
+        data = _load_store(store)
+        entry = data.setdefault(task_id, {})
+        entry["gate"] = {
+            "exit_code": proc.returncode,
+            "cmd": " ".join(cmd),
+            "tests_before": "",
+            "tests_after": tail.splitlines()[-1] if tail.splitlines() else "",
+            "executed_by": "run_gate",
+        }
+        _save_store(store, data)
+    return proc.returncode
+
+
+def run_red(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> bool:
+    """Execute the RED test command; store a proof only if it REALLY failed
+    (nonzero exit from the runner itself). Returns True iff RED proven."""
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode == 0:
+        return False
+    tail = (proc.stdout + proc.stderr)[-2000:]
+    with _StoreLock(store):
+        data = _load_store(store)
+        entry = data.setdefault(task_id, {})
+        entry["red_proof"] = {"exit_code": proc.returncode, "log_tail": tail,
+                              "executed_by": "run_red"}
+        _save_store(store, data)
+    return True
 
 
 def verify_done(store: Path, task_id: str) -> bool:
@@ -89,10 +158,11 @@ def record_red_proof(store: Path, task_id: str, log_text: str, *, exit_code: int
     failure markers in output). An all-green log is not a RED proof."""
     if exit_code == 0 or not FAILURE_MARKERS.search(log_text):
         return False
-    data = _load_store(store)
-    entry = data.setdefault(task_id, {})
-    entry["red_proof"] = {"exit_code": exit_code, "log_tail": log_text[-2000:]}
-    _save_store(store, data)
+    with _StoreLock(store):
+        data = _load_store(store)
+        entry = data.setdefault(task_id, {})
+        entry["red_proof"] = {"exit_code": exit_code, "log_tail": log_text[-2000:]}
+        _save_store(store, data)
     return True
 
 
@@ -129,6 +199,8 @@ def scan_test_tampering(diff_text: str) -> list[str]:
             if in_test_file and re.search(r"\bassert\b|expect\(", line):
                 findings.append(f"assert deleted from test file: {line.strip()}")
         if line.startswith("+") and not line.startswith("+++"):
+            if in_test_file and re.search(r"\bassert\s+(True|1)\b|expect\(\s*(true|1)\s*\)", line):
+                findings.append(f"always-true (weakened) assertion added: {line.strip()}")
             if re.search(r"\.skip\b|@pytest\.mark\.skip|\bxfail\b|@unittest\.skip", line):
                 findings.append(f"test skip added: {line.strip()}")
             if re.search(r"\bexit 0\b|sys\.exit\(0\)|process\.exit\(0\)", line):
@@ -214,6 +286,16 @@ def main(argv: list[str]) -> int:
     if cmd == "verify-done":
         ok = verify_done(store, args[0])
         print("DONE-VERIFIED" if ok else f"NOT-DONE: no passing gate evidence for {args[0]}")
+        return 0 if ok else 1
+    if cmd == "run-gate":
+        sep = args.index("--") if "--" in args else 1
+        rc = run_gate(store, args[0], args[sep + 1:] if "--" in args else args[1:])
+        print(f"GATE-EXIT {rc}")
+        return rc
+    if cmd == "run-red":
+        sep = args.index("--") if "--" in args else 1
+        ok = run_red(store, args[0], args[sep + 1:] if "--" in args else args[1:])
+        print("RED-RECORDED" if ok else "NOT-RED: command passed — not a failing test")
         return 0 if ok else 1
     if cmd == "record-red":
         ok = record_red_proof(store, args[0], sys.stdin.read(),

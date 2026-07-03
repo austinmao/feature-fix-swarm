@@ -1057,12 +1057,27 @@ Record start time. When Agent returns:
   completion authority:
 
   ```bash
-  # after the task's test gate ran (capture its exit code + counts):
-  python3 "$DISPATCH_DIR/gates.py" record-gate "$TASK_ID" --exit "$GATE_EXIT" \
-    --cmd "$GATE_CMD" --before "$TESTS_BEFORE" --after "$TESTS_AFTER"
-  python3 "$DISPATCH_DIR/gates.py" verify-done "$TASK_ID" || {
-    echo "[feature-implement] BLOCK: no passing gate evidence for $TASK_ID — checkbox stays [ ]"
-    # treat as FAILED path below
+# resolve gates.py across the three install shapes (same order as dispatch.py)
+  GATES_PY=""
+  for _cand in \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+    "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+    [ -f "$_cand" ] && GATES_PY="$_cand" && break
+  done
+  if [ -z "$GATES_PY" ]; then
+    echo "[gates] FATAL: gates.py not found — run setup.sh. Refusing to mark tasks done unverified."
+    exit 1
+  fi
+  # PREFERRED: let gates.py execute the gate itself so the exit code is real,
+  # not caller-supplied (an agent cannot fabricate evidence this way):
+  python3 "$GATES_PY" run-gate "$TASK_ID" -- $GATE_CMD
+  # HARD STOP: no passing evidence → the checkbox MUST stay [ ]. Mark the task
+  # [F] and enter the retry path — do NOT continue to the [X] flip.
+  python3 "$GATES_PY" verify-done "$TASK_ID" || {
+    echo "[feature-implement] BLOCK: no passing gate evidence for $TASK_ID"
+    mark_task_failed "$TASK_ID"   # [ ] → [F]; retries per RALPH_MAX_RETRIES
+    continue
   }
   echo "$TASK_ID gate exit=$GATE_EXIT $TESTS_BEFORE → $TESTS_AFTER" >> .feature-fix-swarm/results.md
   ```

@@ -169,3 +169,53 @@ def test_analyze_flags_orphan_story_missing_gate_and_e2e() -> None:
     assert "US1" in joined or "US2" in joined  # spec stories with no tasks
     assert "review-gate" in joined    # phase without gate task
     assert "e2e" in joined            # phase without e2e smoke task
+
+
+# ── codex-gate remediation round (PR #13) ────────────────────────────────────
+
+def test_run_gate_binds_evidence_to_real_execution(tmp_path) -> None:
+    """P1: evidence must come from the runner, not caller-supplied --exit."""
+    store = tmp_path / "evidence.json"
+    rc = gates.run_gate(store, "T050", ["python3", "-c", "raise SystemExit(0)"])
+    assert rc == 0 and gates.verify_done(store, "T050") is True
+    rc = gates.run_gate(store, "T051", ["python3", "-c", "raise SystemExit(3)"])
+    assert rc == 3 and gates.verify_done(store, "T051") is False
+
+
+def test_run_red_uses_real_exit_code(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    # passing command can never be a RED proof
+    assert gates.run_red(store, "T052", ["python3", "-c", "print('ok')"]) is False
+    assert gates.check_red(store, "T052") is False
+    # genuinely failing command is
+    assert gates.run_red(store, "T052", ["python3", "-c",
+                         "print('FAIL: boom'); raise SystemExit(1)"]) is True
+    assert gates.check_red(store, "T052") is True
+
+
+def test_red_markers_accept_bare_fail() -> None:
+    """P1: go test prints bare FAIL — must count as a failure marker."""
+    assert gates.FAILURE_MARKERS.search("FAIL\nexit status 1") is not None
+
+
+def test_store_write_is_atomic_no_partial_file(tmp_path) -> None:
+    """P1: writes go through tmp+rename — store is never truncated in place."""
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "T060", exit_code=0, cmd="x")
+    data = json.loads(store.read_text())
+    assert data["T060"]["gate"]["exit_code"] == 0
+    # no stray temp files left behind (the .lock file is an intentional artifact)
+    leftovers = [p for p in store.parent.iterdir()
+                 if p.name != "evidence.json" and p.suffix != ".lock"]
+    assert leftovers == []
+
+
+def test_scan_tamper_flags_weakened_assertions() -> None:
+    """P2: assert True / expect(true) neutering must be flagged."""
+    diff = (
+        "--- a/lib/tests/test_x.py\n"
+        "+++ b/lib/tests/test_x.py\n"
+        "+    assert True\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("always-true" in f or "weakened" in f for f in findings)

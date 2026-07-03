@@ -16,7 +16,10 @@ FILE=$(printf '%s' "$INPUT" | python3 -c "import json,sys; print(json.load(sys.s
 [ -z "$FILE" ] && exit 0
 
 case "$FILE" in
-  *test*|*spec*|*.md|*.json|*.yaml|*.yml|*.txt) exit 0 ;;   # tests/docs/config exempt
+  # ONLY real test paths are exempt — substring matches like contest.py or
+  # my_spec_helper.ts must NOT bypass the gate (codex-gate P2, PR #13)
+  */tests/*|*/test/*|*/__tests__/*|test_*|*_test.*|*.test.*|*.spec.*) exit 0 ;;
+  *.md|*.json|*.yaml|*.yml|*.txt) exit 0 ;;                 # docs/config exempt
   *.py|*.ts|*.tsx|*.js|*.jsx) ;;                            # gated languages
   *) exit 0 ;;
 esac

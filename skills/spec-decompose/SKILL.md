@@ -297,7 +297,19 @@ Decomposition is self-contained and cacheable. A `/feature-start` meta-skill wou
 ## Coherence gate (before handing off to /feature-implement)
 
 ```bash
-python3 "$DISPATCH_DIR/gates.py" analyze "specs/$SPEC_ID/spec.md" "specs/$SPEC_ID/tasks.md" || {
+# resolve gates.py across the three install shapes (same order as dispatch.py)
+GATES_PY=""
+for _cand in \
+"$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+"$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+"$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+[ -f "$_cand" ] && GATES_PY="$_cand" && break
+done
+if [ -z "$GATES_PY" ]; then
+echo "[gates] FATAL: gates.py not found — run setup.sh. Refusing to mark tasks done unverified."
+exit 1
+fi
+python3 "$GATES_PY" analyze "specs/$SPEC_ID/spec.md" "specs/$SPEC_ID/tasks.md" || {
   echo "[spec-decompose] ANALYZE-FAIL — fix the findings above before /feature-implement"
   exit 1
 }
