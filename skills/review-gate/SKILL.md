@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.0.0"
+version: "1.0.1"
 ---
 
 # /review-gate
@@ -151,15 +151,34 @@ Do not praise. Do not summarize. Findings only.
 
 Run the opposite CLI as the independent adversarial reviewer.
 
+> **CLI compatibility note:** verified against `codex` v0.142.5 and current `claude`.
+> Neither CLI has a bare `--system` flag (a stale assumption from an older API
+> shape) — `codex review` takes `-c model=...` for model override and a
+> positional `PROMPT`, mutually exclusive with `--base`/`--commit`; `claude -p`
+> uses `--system-prompt`. `codex review` is agentic against the live repo (it
+> runs its own `git diff` inside its sandbox), not a pipe-diff-in/get-text-out
+> tool — so its branch below hands it a natural-language description of what
+> to diff instead of piping `$DIFF` to it directly.
+
 ```bash
+ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
+
 if [ "$REVIEW_BIN" = "claude" ]; then
   echo "$DIFF" | env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_API_KEY timeout 480 "$REVIEW_BIN" -p \
-    --system "You are an adversarial security and correctness reviewer. Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only." \
+    --system-prompt "$ADVERSARIAL_PROMPT" \
     2>/dev/null || echo "[review-gate pass skipped — API error]"
 else
-  echo "$DIFF" | timeout 480 "$REVIEW_BIN" review \
-    --system "You are an adversarial security and correctness reviewer. Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only." \
-    --model gpt-5.4 \
+  # codex review computes its own diff from the live repo — describe the scope
+  # in the prompt instead of piping $DIFF; --base/--commit can't combine with
+  # a custom PROMPT on this CLI.
+  case "$DIFF_TARGET" in
+    --staged) DIFF_DESCRIPTION="the staged changes (run: git diff --staged; if empty, git diff HEAD)" ;;
+    main)     DIFF_DESCRIPTION="the changes on this branch vs main (run: git diff main...HEAD)" ;;
+    --file*)  DIFF_DESCRIPTION="the changes in ${DIFF_TARGET#--file}" ;;
+    *)        DIFF_DESCRIPTION="the current diff (run: git diff HEAD)" ;;
+  esac
+  timeout 480 "$REVIEW_BIN" review \
+    "Review $DIFF_DESCRIPTION. Run the git command yourself. $ADVERSARIAL_PROMPT" \
     2>/dev/null || echo "[review-gate pass skipped — API error]"
 fi
 ```
