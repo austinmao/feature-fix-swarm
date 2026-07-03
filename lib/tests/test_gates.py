@@ -578,3 +578,32 @@ def test_cli_proof_trailing_defer_is_usage_error(tmp_path, capsys, monkeypatch) 
     rc = gates.main(["proof", "run-11", "T100", "--defer"])
     assert rc == 2
     assert not list(tmp_path.glob("proof-*.json"))  # nothing written
+
+
+def test_proof_deferral_name_match_is_exact_token_not_substring(tmp_path) -> None:
+    """Codex v3.15 round 3 P1: 'live-send' must NOT count as recorded when
+    residuals.md only mentions 'live-send-old'."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    art = gates.proof_artifact(
+        store, "run-12", ["T100"], deferrals=["live-send: reason"],
+        residuals_text="- [ ] 2026-07-03 live-send-old: reason (run run-12)")
+    assert art["verdict"] == "no-go"
+    assert art["unrecorded_deferrals"] == ["live-send: reason"]
+    # exact token still recorded
+    ok = gates.proof_artifact(
+        store, "run-12", ["T100"], deferrals=["live-send: reason"],
+        residuals_text="- [ ] 2026-07-03 live-send: reason (run run-12)")
+    assert ok["verdict"] == "go"
+
+
+def test_cli_proof_flag_value_cannot_be_another_flag(tmp_path, monkeypatch) -> None:
+    """Codex v3.15 round 3 P2: '--defer --strict' / '--out --strict' must be
+    usage errors, not silently consume the next flag as the value."""
+    store = tmp_path / "evidence.json"
+    _seed_green(store, "T100")
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["proof", "run-13", "T100", "--defer", "--strict"]) == 2
+    assert gates.main(["proof", "run-13", "T100", "--out", "--strict"]) == 2
+    assert not list(tmp_path.glob("proof-*.json"))
+    assert not (tmp_path / "--strict").exists()

@@ -358,7 +358,11 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
     if residuals_text is not None:
         for d in deferrals or []:
             name = d.split(":", 1)[0].strip()
-            if name and name not in residuals_text:
+            # exact-token match, not substring — 'live-send' must not count
+            # as recorded when only 'live-send-old' appears (codex round 3 P1)
+            recorded = bool(name) and re.search(
+                rf"(?<![\w-]){re.escape(name)}(?![\w-])", residuals_text)
+            if name and not recorded:
                 unrecorded.append(d)
     # claims must be non-empty: all([]) is True, so an empty proof would
     # otherwise read as go (codex v3.15 round 1 P1).
@@ -508,9 +512,14 @@ def main(argv: list[str]) -> int:
         # false no-go (codex v3.15 round 1 P2). A trailing value-flag is a
         # usage error, not an IndexError (round 2 P3) — fail before any write.
         value_flags = {"--defer", "--out"}
-        if args and args[-1] in value_flags:
-            print(f"usage error: {args[-1]} requires a value", file=sys.stderr)
-            return 2
+        for i, a in enumerate(args):
+            # a value flag must be followed by a real value — trailing, or
+            # followed by another option token, is a usage error before any
+            # store/file write (codex rounds 2 P3 + 3 P2)
+            if a in value_flags and (i + 1 >= len(args)
+                                     or args[i + 1].startswith("--")):
+                print(f"usage error: {a} requires a value", file=sys.stderr)
+                return 2
         deferrals = [args[i + 1] for i, a in enumerate(args) if a == "--defer"]
         task_ids = []
         skip = False
