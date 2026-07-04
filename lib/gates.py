@@ -480,6 +480,17 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
 
 # ── Stream G: spec/tasks coherence ───────────────────────────────────────────
 
+# Web-surface file paths in task lines (codex round 3 H1). Conservative on
+# purpose: UI file extensions, UI directories in path position, framework
+# configs. Deliberately excludes bare app/ + api/ (prose-collision-prone;
+# API-only phases are covered by the [qa:e2e] rule, not browser proof).
+WEB_TASK_PATH_RE = re.compile(
+    r"\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)\b"
+    r"|(?:^|[\s(`'\"/])(?:pages|routes|components|emails|templates|public)/"
+    r"|(?:^|[\s(`'\"])(?:tailwind|next|nuxt|vite|astro|svelte)\.config\.",
+    re.MULTILINE)
+
+
 def analyze_artifacts(spec_text: str, tasks_text: str,
                       has_scenarios: bool = False) -> list[str]:
     """Cross-artifact consistency gate (spec-kit analyze analog).
@@ -533,6 +544,15 @@ def analyze_artifacts(spec_text: str, tasks_text: str,
     if not has_scenarios and re.search(r"\[qa:[a-z0-9,-]*browser", tasks_text):
         findings.append("tasks carry [qa:browser] but specs/NNN/scenarios.md "
                         "is missing — decompose must emit the BDD scenarios")
+    # codex round 3: a browser-touching plan that omits scenarios.md entirely
+    # must not slide through. Web-touch is detected from web-surface file
+    # paths named in the tasks themselves (UI extensions, UI dirs, framework
+    # configs — same signal family as scripts/browser-proof.sh WEB_RE).
+    # False positives just ask for scenarios.md, which is the safe direction.
+    if not has_scenarios and WEB_TASK_PATH_RE.search(tasks_text):
+        findings.append("tasks touch browser surfaces (web file paths) but "
+                        "specs/NNN/scenarios.md is missing — decompose must "
+                        "emit BDD scenarios + a [qa:browser] gate")
     return findings
 
 

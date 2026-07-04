@@ -81,7 +81,8 @@ no reachable app fails the phase**. Resolution order:
 
 ## BDD scenarios drive the runthroughs
 
-`/spec-decompose` writes `specs/NNN/scenarios.md` (`## US<N>-S<M>: <title>` +
+`/spec-decompose` writes `specs/NNN/scenarios.md` (`## US<N>-S<M> [functional|visual]: <title>`
+(kind tag optional — untagged = functional, the strict default) +
 Given/When/Then) covering functional flows — buttons, forms, auth,
 navigation, error states — not just page loads. The browser gate executes
 them 1:1; `lib/runtime_proof.py skeleton specs/NNN/scenarios.md --out

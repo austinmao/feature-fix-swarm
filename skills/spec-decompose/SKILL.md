@@ -222,7 +222,9 @@ writes `{OUTPUT_PATH}`. Merge contract (MANDATORY):
 - Apply review-gate placement (Step 6 of the template) + /design-html injection
   (Step 8 of the template).
 - **v1.5.0 — BDD scenarios + browser gates:** when any story is
-  browser-touchable, ALSO write `specs/NNN/scenarios.md` (`## US<N>-S<M>:`
+  browser-touchable, ALSO write `specs/NNN/scenarios.md`
+  (`## US<N>-S<M> [functional|visual]:` — kind tag optional, untagged =
+  functional;
   Given/When/Then per user-facing flow — functional behavior like buttons,
   forms, auth included, not just page loads) and inject the per-phase
   browser-proof gate task (`[qa:browser]`, gate =

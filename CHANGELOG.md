@@ -48,6 +48,15 @@ design QA verdicts are now evidence-backed at the script layer — an agent's
   spoofable substring; WEB_RE broadened (any `app/` file, `hooks/`,
   `stores/`, `styles/`, framework configs — browser logic in plain `.ts` no
   longer slips past) with `QA_FORCE_BROWSER=1` as the explicit force lever.
+- Codex gate round 3 (2 HIGH fixed pre-merge): `gates.py analyze` no longer
+  lets a browser-touching plan bypass the whole lane by omitting
+  scenarios.md — web-surface file paths in the tasks themselves
+  (`WEB_TASK_PATH_RE`: UI extensions, UI dirs, framework configs) now demand
+  scenarios.md + a `[qa:browser]` gate; scenario kind comes ONLY from an
+  explicit `[visual]`/`[functional]` heading tag (untagged = functional,
+  the strict default) — title-keyword inference could silently reclassify a
+  functional flow titled "visual polish…" out of the `--kind functional`
+  required set. 222 → 228 pytest.
 - `scripts/browser-proof.sh` — web-touch detection + base-url resolution
   (QA_BASE_URL authoritative; probe list fallback) + driver ladder
   (canary > playwright > agent, trust-descending). 12 bats.

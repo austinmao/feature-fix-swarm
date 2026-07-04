@@ -389,7 +389,7 @@ def test_cli_skeleton_emits_unfilled_template(tmp_path):
         "- When they submit valid credentials\n"
         "- Then they land on /dashboard and see 'Welcome'\n"
         "\n"
-        "## US2-S1: visual dashboard\n"
+        "## US2-S1 [visual]: visual dashboard\n"
         "- Given the dashboard page\n"
         "- Then it matches design intent\n")
     out = tmp_path / "proof.json"
@@ -479,7 +479,7 @@ SCEN_MD = """## US1-S1: login happy path
 ## US1-S2: bad password error state
 - Given a registered user
 
-## US2-S1: visual dashboard design
+## US2-S1 [visual]: visual dashboard design
 - Given the dashboard page
 """
 
@@ -509,7 +509,9 @@ def test_coverage_visual_not_required_in_functional_bundle(tmp_path):
 
 def test_coverage_visual_bundle_requires_visual_ids(tmp_path):
     md = tmp_path / "scenarios.md"
-    md.write_text(SCEN_MD + "\n## US2-S2: visual mobile breakpoint\n- Given 375px\n")
+    md.write_text(SCEN_MD +
+                  "\n## US2-S2 [visual]: visual mobile breakpoint\n"
+                  "- Given 375px\n")
     sc = good_scenario(tmp_path, id="US2-S1", kind="visual",
                        interactions=0, static=True)
     ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
@@ -611,3 +613,30 @@ def test_cli_kind_flag(tmp_path):
     p = good_proof(tmp_path, scenarios=scs)
     r = run_cli("verify", str(p), "--scenarios", str(md), "--kind", "functional")
     assert r.returncode == 0, r.stdout
+
+
+# codex round 3 H2: scenario kind must come from an explicit heading tag
+# ("## <ID> [visual]: <title>"), never from title-keyword inference — a
+# functional flow titled "visual polish ..." must NOT be reclassified out
+# of the --kind functional required set. Untagged defaults to functional.
+
+def test_kind_explicit_visual_tag_parsed():
+    parsed = rp._parse_scenarios_md(
+        "## US1-S1 [visual]: login happy path\n- Given x\n")
+    assert parsed == [("US1-S1", "login happy path", "visual")]
+
+
+def test_kind_explicit_functional_tag_wins_over_title():
+    parsed = rp._parse_scenarios_md(
+        "## US1-S1 [functional]: visual design of dashboard\n- x\n")
+    assert parsed[0][2] == "functional"
+
+
+def test_kind_title_keyword_does_not_reclassify(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text("## US1-S1: visual polish of the login flow\n- Given x\n")
+    sc = good_scenario(tmp_path, id="OTHER-1")
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
+                          scenarios_md=str(md), kind="functional")
+    assert not ok
+    assert any("US1-S1" in f for f in findings)

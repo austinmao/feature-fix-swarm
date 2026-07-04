@@ -306,20 +306,25 @@ def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
 
 # ---------------------------------------------------------------- skeleton
 
-SCENARIO_HEADING_RE = re.compile(r"^##\s+([A-Za-z0-9_-]+)\s*:\s*(.+)$")
+SCENARIO_HEADING_RE = re.compile(
+    r"^##\s+([A-Za-z0-9_-]+)(?:\s+\[(functional|visual)\])?\s*:\s*(.+)$")
 
 
 def _parse_scenarios_md(text):
-    """Parse '## <ID>: <title>' headings -> [(id, title, kind)]."""
+    """Parse '## <ID> [kind]: <title>' headings -> [(id, title, kind)].
+
+    Kind comes ONLY from the explicit [visual]/[functional] heading tag;
+    untagged defaults to functional (codex round 3 H2: title-keyword
+    inference let a functional flow titled "visual polish ..." drop out
+    of the --kind functional required set).
+    """
     out = []
     for line in text.splitlines():
         m = SCENARIO_HEADING_RE.match(line.strip())
         if not m:
             continue
-        sid, title = m.group(1), m.group(2).strip()
-        kind = ("visual" if re.search(r"\bvisual|design\b", title, re.I)
-                else "functional")
-        out.append((sid, title, kind))
+        sid, kind, title = m.group(1), m.group(2), m.group(3).strip()
+        out.append((sid, title, kind or "functional"))
     return out
 
 

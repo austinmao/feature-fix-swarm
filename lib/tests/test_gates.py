@@ -1078,3 +1078,40 @@ def test_analyze_browser_gate_substring_spoof_rejected() -> None:
     findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
                                        has_scenarios=True)
     assert any("runtime_proof" in f for f in findings)
+
+
+# codex round 3 H1: browser-touching tasks with NO scenarios.md must not
+# slide through analyze — bypass-by-omission hole. Web-touch is detected
+# from web-surface file paths in the tasks text itself.
+
+TASKS_WEB_TOUCH_NO_BROWSER = """# Tasks
+## Phase 3 — US1
+- [ ] T001 [US1] [model:sonnet] [agent:frontend-developer] build web/src/components/Nav.tsx
+- [ ] T002 [US1] [model:sonnet] [qa:e2e] [agent:test-automator] e2e smoke login
+- [ ] T003 [US1] [model:sonnet] [agent:ecc:code-reviewer] /review-gate — review Phase 3 [qa:review-gate]
+"""
+
+
+def test_analyze_web_paths_without_scenarios_flagged() -> None:
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY,
+                                       TASKS_WEB_TOUCH_NO_BROWSER,
+                                       has_scenarios=False)
+    assert any("scenarios.md" in f for f in findings)
+
+
+def test_analyze_web_paths_with_scenarios_and_gate_clean() -> None:
+    tasks = TASKS_BROWSER_OK + (
+        "- [ ] T009 [US1] [model:haiku] [agent:frontend-developer] "
+        "tweak web/src/components/Nav.tsx\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=True)
+    assert findings == []
+
+
+def test_analyze_non_web_tasks_without_scenarios_clean() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:haiku] [agent:ecc:python-reviewer] "
+        "refactor lib/gates.py internals\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert findings == []

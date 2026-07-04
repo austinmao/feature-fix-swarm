@@ -218,7 +218,9 @@ Given/When/Then scenarios for that story. A story phase with no e2e task fails
 
 ## BDD scenarios file (MANDATORY when any story is browser-touchable)
 
-Alongside tasks.md, write `specs/NNN/scenarios.md`: one `## US<N>-S<M>: <title>`
+Alongside tasks.md, write `specs/NNN/scenarios.md`: one
+`## US<N>-S<M> [functional|visual]: <title>` (kind tag optional; untagged =
+functional — kind comes ONLY from this explicit tag, never the title)
 section per scenario with Given/When/Then bullets, covering every user-facing
 flow — page loads AND functional behavior (buttons, forms, auth, navigation,
 error states). Stable IDs: `US1-S1`, `US1-S2`, `US2-S1`… The phase browser
