@@ -67,7 +67,11 @@ does the same end-to-end from a free-text instruction.
   the roster scan (HIGH), unclosed-frontmatter injection killed, `[agent:]` tag
   grammar rejects `..`/deep slashes, same-source collision warning (cross-source
   mirror dedup stays silent), spec-decompose always rescans the roster. Suite
-  92 → 114 tests.
+  92 → 114 tests. codex round 2 (MED, fixed): `RUN_ID` was assigned before the
+  branch-derived SPEC_ID fallback, so no-arg `/feature-implement` invocations
+  keyed the ledger as `spec-` — assignment moved below the fallback + guard
+  (feature-implement v1.12.2). Residual LOW: the always-rescan and
+  branch-derived-RUN_ID paths live in skill markdown, outside pytest reach.
 
 ## v3.18.0 — Autonomy grant ledger + preflight (2026-07-04)
 

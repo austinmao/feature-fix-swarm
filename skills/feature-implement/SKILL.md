@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.12.0"
+version: "1.12.2"
 allowed-tools:
   - Read
   - Edit
@@ -102,8 +102,9 @@ all enforced in the loop below:
 overnight run never stalls waiting for the operator. Two mechanical
 preconditions, both fail-closed:
 
-Both checks use the LEDGER run id `RUN_ID="spec-${SPEC_ID}"` (set right after
-flag parsing, Step 1) — the SAME key `/feature-spec` Step 5/6 and `/task-swarm`
+Both checks use the LEDGER run id `RUN_ID="spec-${SPEC_ID%%-*}"` (set in Step 1
+AFTER the branch-derived SPEC_ID fallback, so no-arg invocations still key
+correctly) — the SAME key `/feature-spec` Step 5/6 and `/task-swarm`
 Steps 2/3 wrote the preflight PASS + grants under. And both go through the
 resolved `$GATES_PY` (3-shape resolver, Step 6 block — run it BEFORE these
 checks in autonomous mode); a bare `lib/gates.py` breaks in the vendored
@@ -191,11 +192,6 @@ for arg in $(printf '%s\n' "$SPEC_ARG"); do
   esac
 done
 
-# v1.12.1: LEDGER run id — MUST equal what /feature-spec + /task-swarm used when
-# recording preflight + grants (gates.py keys everything on this). Distinct from
-# AUDIT_RUN_ID (run-state UUID for audits.jsonl) — do NOT overload.
-RUN_ID="spec-${SPEC_ID%%-*}"
-
 # RUFLO_REQUIRED controls executor selection (code default = "1", line above —
 # strict; fail FAST at start, not silently degraded mid-overnight-run):
 #   "1" (default)   : hard-fail if ruflo unreachable
@@ -212,6 +208,13 @@ if [ -z "${SPEC_ID:-}" ]; then
   SPEC_ID=$(echo "$BRANCH" | grep -oE '^[0-9]{3}' | head -1)
 fi
 [ -z "$SPEC_ID" ] && { echo "ERROR: no spec ID. Usage: /feature-implement NNN"; exit 1; }
+
+# v1.12.2: LEDGER run id — MUST equal what /feature-spec + /task-swarm used when
+# recording preflight + grants (gates.py keys everything on this). Distinct from
+# AUDIT_RUN_ID (run-state UUID for audits.jsonl) — do NOT overload. Set AFTER the
+# branch-derived SPEC_ID fallback above (codex round 2: assigning before it left
+# RUN_ID="spec-" on no-arg invocations, so ledger checks keyed the wrong run).
+RUN_ID="spec-${SPEC_ID%%-*}"
 
 SPEC_DIR=$(find specs -maxdepth 1 -type d -name "${SPEC_ID}-*" 2>/dev/null | head -1)
 [ -z "$SPEC_DIR" ] && { echo "ERROR: specs/${SPEC_ID}-* not found"; exit 1; }
