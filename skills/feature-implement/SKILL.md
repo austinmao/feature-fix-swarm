@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.13.0"
+version: "1.14.0"
 allowed-tools:
   - Read
   - Edit
@@ -1432,14 +1432,42 @@ gate() {  # gate <action> — 0=proceed, 1=stop this path (pending recorded)
 
 1. **Review gate:** invoke the `review-gate` skill (full-run diff). HIGH/CRITICAL
    findings block the tail — fix or stop. No ledger action needed (read-only).
-2. **Ship:** `gate "push:origin/<branch>"` (and `gate "merge:pr"` if the flow
+2. **OpenWiki update (v1.14.0, conditional — warn+continue, FR-013):** if the
+   consumer repo keeps `openwiki/` at repo root, refresh the affected wiki pages
+   from the run's diff BEFORE the ship commit so the wiki lands in the same
+   branch/PR. Repos without `openwiki/` skip silently.
+   - Affected pages: `git diff --name-only <base>...HEAD` → map changed paths to
+     wiki pages exactly as `/openwiki-update` does (spec-index + Reality refs);
+     refresh Reality claims + meta stamps for THIS run's changes only. The page
+     refresh itself is YOUR (LLM) work in this step — the bash block below does
+     NOT author content, it only stages whatever wiki edits exist mechanically.
+   - Then stage via the block below. **Any failure here warns and continues —
+     the wiki stage never blocks PR creation (EDGE-007/008).**
+
+<!-- openwiki-wiring:ship-stage:begin -->
+```bash
+# warn+continue: wiki staging must NEVER block the ship/PR path
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -d "$ROOT/openwiki" ] || exit 0   # consumer repo without a wiki: silent no-op
+if [ -n "$(git status --porcelain -- "$ROOT/openwiki" 2>/dev/null)" ]; then
+  if git add "$ROOT/openwiki" 2>/dev/null; then
+    echo "openwiki: staged wiki updates for the ship commit"
+  else
+    echo "openwiki: stage failed — continuing without wiki update" >&2
+  fi
+fi
+exit 0
+```
+<!-- openwiki-wiring:ship-stage:end -->
+
+3. **Ship:** `gate "push:origin/<branch>"` (and `gate "merge:pr"` if the flow
    merges) → invoke the `ship` skill. Not granted → STOP tail, everything stays
    local and committed-not-pushed; morning resume = grant + re-run tail.
-3. **Canary:** after ship lands, `gate "deploy:<target>"` if canary exercises a
+4. **Canary:** after ship lands, `gate "deploy:<target>"` if canary exercises a
    deploy; then invoke the `canary` skill. Failure → report FAILED loudly with the
    rollback line from the grant screen — never auto-rollback without a
    `rollback:` grant.
-4. Consumed grants + artifacts (commit sha, PR number, deploy URL) go in the final
+5. Consumed grants + artifacts (commit sha, PR number, deploy URL) go in the final
    report; the proof artifact already recorded the evidence chain.
 
 Hosts without `/ship`//`canary` installed (bare OSS consumers): print the manual

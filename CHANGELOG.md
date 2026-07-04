@@ -6,6 +6,30 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.21.0 — OpenWiki living-docs wiring: conditional wiki auto-update (2026-07-04)
+
+Consumer repos that keep a living wiki (`openwiki/` at repo root, reality/vision/gap
+page layers) now get documentation-as-code for free; repos without one are
+byte-identically unaffected (guard: `[ -d "$(git rev-parse --show-toplevel)/openwiki" ]`,
+silent exit-0 no-op).
+
+### Added
+
+- **feature-spec 1.4.0 — Step 4.5 OpenWiki planned-change note.** After decompose,
+  append a planned-change row (`- spec-<ID>: <title> — paths: … (noted <date>)`) to the
+  mapped wiki page; unmappable page falls back to `openwiki/quickstart.md`. Fail-soft:
+  any wiki error warns and continues — never blocks the spec pipeline.
+- **feature-implement 1.14.0 — Step 10 finish-tail wiki stage.** Between review-gate and
+  ship: refresh affected wiki pages from the run's diff (`git diff --name-only
+  <base>...HEAD` mapping) and `git add openwiki/` so wiki updates land in the SAME
+  branch/PR. Warn+continue on any failure — the wiki stage never blocks PR creation.
+- **Extractable wiring blocks.** Both steps carry fenced bash between stable
+  `<!-- openwiki-wiring:{spec-note,ship-stage}:{begin,end} -->` markers so consumer-repo
+  harnesses can execute the exact shipped logic against fixture repos (with/without
+  `openwiki/`) instead of trusting prose.
+- **fix — explicit non-applicability note.** `/fix` never creates PRs (that's `/ship`),
+  so it intentionally carries no wiki wiring; the note points to where the wiring lives.
+
 ## v3.20.0 — Runtime-proof phase QA: evidence-backed browser runthroughs + design review (2026-07-04)
 
 Kills the "agent says it 200s, browser shows a 404" failure class. Browser and
