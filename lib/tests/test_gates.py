@@ -1115,3 +1115,35 @@ def test_analyze_non_web_tasks_without_scenarios_clean() -> None:
     findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
                                        has_scenarios=False)
     assert findings == []
+
+
+# codex round 4: WEB_TASK_PATH_RE must match the browser-proof.sh WEB_RE
+# contract — hooks/stores/styles dirs and app/ api/ route files are
+# web-touch too; a plan naming only those paths must still demand
+# scenarios.md.
+
+def test_analyze_hooks_dir_path_without_scenarios_flagged() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:sonnet] [agent:frontend-developer] "
+        "add web/src/hooks/useCart.ts\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert any("scenarios.md" in f for f in findings)
+
+
+def test_analyze_app_api_route_path_without_scenarios_flagged() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:sonnet] [agent:nextjs-backend-engineer] "
+        "add web/src/app/api/cart/route.ts\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert any("scenarios.md" in f for f in findings)
+
+
+def test_analyze_api_prose_mention_not_a_path_clean() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:sonnet] [agent:ecc:python-reviewer] "
+        "document the api/ contract in prose\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert findings == []

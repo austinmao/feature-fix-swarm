@@ -56,7 +56,10 @@ design QA verdicts are now evidence-backed at the script layer — an agent's
   explicit `[visual]`/`[functional]` heading tag (untagged = functional,
   the strict default) — title-keyword inference could silently reclassify a
   functional flow titled "visual polish…" out of the `--kind functional`
-  required set. 222 → 228 pytest.
+  required set. 222 → 228 pytest. Round 4 (1 HIGH fixed): `WEB_TASK_PATH_RE`
+  aligned with browser-proof.sh `WEB_RE` — hooks/stores/styles dirs +
+  app/ api/ route files (path-with-extension anchored) count as web-touch
+  at plan time exactly as at QA time. 228 → 231 pytest.
 - `scripts/browser-proof.sh` — web-touch detection + base-url resolution
   (QA_BASE_URL authoritative; probe list fallback) + driver ladder
   (canary > playwright > agent, trust-descending). 12 bats.

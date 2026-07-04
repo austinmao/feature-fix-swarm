@@ -480,13 +480,16 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
 
 # ── Stream G: spec/tasks coherence ───────────────────────────────────────────
 
-# Web-surface file paths in task lines (codex round 3 H1). Conservative on
-# purpose: UI file extensions, UI directories in path position, framework
-# configs. Deliberately excludes bare app/ + api/ (prose-collision-prone;
-# API-only phases are covered by the [qa:e2e] rule, not browser proof).
+# Web-surface file paths in task lines (codex rounds 3+4). Must stay aligned
+# with scripts/browser-proof.sh WEB_RE — same web-touch contract at plan time
+# as at QA time, else a hooks/-only or route.ts-only phase demands browser
+# proof at QA with no scenarios.md to run. app/ + api/ are anchored to
+# path-with-extension so prose mentions ("the api/ contract") don't match.
 WEB_TASK_PATH_RE = re.compile(
     r"\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)\b"
-    r"|(?:^|[\s(`'\"/])(?:pages|routes|components|emails|templates|public)/"
+    r"|(?:^|[\s(`'\"/])(?:pages|routes|components|emails|templates|public"
+    r"|hooks|stores?|styles?)/"
+    r"|(?:^|[\s(`'\"/])(?:app|api)/\S*\.[a-z]+\b"
     r"|(?:^|[\s(`'\"])(?:tailwind|next|nuxt|vite|astro|svelte)\.config\.",
     re.MULTILINE)
 
