@@ -525,8 +525,16 @@ def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
 # resume (pending), and env/service requirements are proven reachable BEFORE
 # the run starts (preflight). Fail closed everywhere.
 
-ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S.*$")
+# Threat model (codex v3.18 round 1, CRITICAL — documented decision, same as
+# the v3.14 no-HMAC call): this ledger is an ANTI-ACCIDENT mechanism and an
+# intent record, not an anti-adversary boundary. check-grant does not CONFER
+# capability — an agent with shell access can already `git push` directly;
+# the gate lives in the agent's instructions. Cryptographic operator binding
+# for a local single-user store is over-engineering; strictness here is
+# validation (typed actions, bounded TTL, fail-closed expiry), not signatures.
+ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S+$")
 GRANT_DEFAULT_TTL_HOURS = 24.0
+GRANT_MAX_TTL_HOURS = 168.0  # 7 days — non-finite/zero/negative/huger rejected
 
 
 def _now() -> float:
@@ -540,8 +548,11 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
     """Record operator-approved actions for a run. Actions must be typed
     ('type:target', e.g. 'push:origin/main') — free prose never matches at
     run time, so it is rejected here rather than silently failing at 3am."""
+    import math
     if not actions or any(not ACTION_PAT.match(a) for a in actions):
         return False
+    if not math.isfinite(ttl_hours) or not 0 < ttl_hours <= GRANT_MAX_TTL_HOURS:
+        return False  # inf/0/negative/absurd TTL = effectively non-expiring
     granted_at = _now()
     with _StoreLock(store):
         data = _load_store(store)
@@ -571,9 +582,11 @@ def check_grant(store: Path, run_id: str, action: str,
     return (now if now is not None else _now()) < entry.get("expires_at", 0)
 
 
-def record_pending(store: Path, run_id: str, action: str, reason: str) -> None:
+def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
     """An unlisted gate hit mid-run: STOP, but leave a durable record so the
     morning resume is one `grant` command (long-run-continuity port)."""
+    if not ACTION_PAT.match(action):
+        return False
     with _StoreLock(store):
         data = _load_store(store)
         auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
@@ -583,6 +596,7 @@ def record_pending(store: Path, run_id: str, action: str, reason: str) -> None:
                             "reason": sanitize_reason(reason),
                             "recorded_at": _now()})
         _save_store(store, data)
+    return True
 
 
 def list_pending(store: Path, run_id: str) -> list[dict]:
@@ -633,7 +647,8 @@ def check_preflight(store: Path, run_id: str, *, max_age_hours: float = 24.0,
     if not pf or not pf.get("pass"):
         return False
     age = (now if now is not None else _now()) - pf.get("checked_at", 0)
-    return age < max_age_hours * 3600
+    # future-dated checked_at = corrupt/forged record, not "fresh" — fail closed
+    return 0 <= age < max_age_hours * 3600
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -804,10 +819,11 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "check-grant":
         run_id, action = args[0], _flag(args, "--action")
+        safe = sanitize_reason(action)
         if check_grant(store, run_id, action):
-            print(f"GRANTED: {action}")
+            print(f"GRANTED: {safe}")
             return 0
-        print(f"NOT-GRANTED: {action} (run {run_id}) — record with "
+        print(f"NOT-GRANTED: {safe} (run {run_id}) — record with "
               f"`gates.py pending {run_id} --action '{action}' --reason …`, "
               f"STOP, and wait for operator grant")
         return 1
@@ -815,12 +831,15 @@ def main(argv: list[str]) -> int:
         run_id = args[0]
         action = _flag(args, "--action")
         if action:
-            record_pending(store, run_id, action, _flag(args, "--reason"))
+            if not record_pending(store, run_id, action, _flag(args, "--reason")):
+                print("PENDING-REJECTED: action must be typed 'type:target'")
+                return 1
             print(f"PENDING-RECORDED: {action} (run {run_id})")
             return 0
         pend = list_pending(store, run_id)
         for p in pend:
-            print(f"PENDING: {p['action']} — {p['reason']}")
+            print(f"PENDING: {sanitize_reason(p['action'])} — "
+                  f"{sanitize_reason(p['reason'])}")
         print("NO-PENDING" if not pend else
               f"PENDING-COUNT: {len(pend)} — approve via `gates.py grant "
               f"{run_id} --action <action>` then resume")

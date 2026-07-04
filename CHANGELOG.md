@@ -31,6 +31,12 @@ Inspired by elias/fable-agent-orchestration `autonomous-finish-loop` +
   preflight PASS; checks the ledger at every operator gate; logs consumed
   grants + artifacts in the final report; pendings listed for resume.
 - setup.sh installs the two new skills (lever updated in same change).
+- Codex round-1 hardening: bounded finite TTL (0 < h <= 168), future-dated
+  preflight rejected (0 <= age), pending actions typed-validated, all
+  operator-visible action/reason echoes sanitized. Threat model documented:
+  the ledger is an anti-accident mechanism + intent record, not an
+  anti-adversary boundary (check-grant confers no capability a shell agent
+  lacks; same documented decision class as v3.14 no-HMAC).
 
 ## v3.17.0 — REFUTED outcome, verify-the-reviewer, WIP adoption (2026-07-04)
 
