@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.11.0"
+version: "1.12.2"
 allowed-tools:
   - Read
   - Edit
@@ -102,8 +102,16 @@ all enforced in the loop below:
 overnight run never stalls waiting for the operator. Two mechanical
 preconditions, both fail-closed:
 
+Both checks use the LEDGER run id `RUN_ID="spec-${SPEC_ID%%-*}"` (set in Step 1
+AFTER the branch-derived SPEC_ID fallback, so no-arg invocations still key
+correctly) — the SAME key `/feature-spec` Step 5/6 and `/task-swarm`
+Steps 2/3 wrote the preflight PASS + grants under. And both go through the
+resolved `$GATES_PY` (3-shape resolver, Step 6 block — run it BEFORE these
+checks in autonomous mode); a bare `lib/gates.py` breaks in the vendored
+`packages/feature-fix-swarm/` install shape.
+
 1. **Preflight proven.** Before the first spawn:
-   `python3 lib/gates.py check-preflight "$RUN_ID"` must exit 0 — a recorded
+   `python3 "$GATES_PY" check-preflight "$RUN_ID"` must exit 0 — a recorded
    PASSING `/preflight` run (< 24h old) covering the run's env vars + service
    probes. Exit 1 → REFUSE to start:
    `[feature-implement] ERROR: no fresh preflight for $RUN_ID — run /preflight first.`
@@ -114,10 +122,10 @@ preconditions, both fail-closed:
    vocabulary in `/autonomy-grant`):
 
    ```bash
-   if python3 lib/gates.py check-grant "$RUN_ID" --action "$ACTION"; then
+   if python3 "$GATES_PY" check-grant "$RUN_ID" --action "$ACTION"; then
      # proceed; log the consumed grant + its artifact (sha/URL/PR#) in the report
    else
-     python3 lib/gates.py pending "$RUN_ID" --action "$ACTION" \
+     python3 "$GATES_PY" pending "$RUN_ID" --action "$ACTION" \
        --reason "unlisted gate hit mid-run"
      # STOP this action path only — independent tasks continue; the final
      # report lists pendings so the morning resume is one `grant` command
@@ -147,6 +155,7 @@ ONE_TASK=0           # --one opts into single-task mode
 USE_RUFLO=1
 RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"   # "1"=strict (default): hard-fail if ruflo unreachable; "0"=force native; "auto"=graceful fallback
 AUTONOMOUS=0         # v3.18.0: --autonomous opts into ledger-gated unattended mode
+NO_FINISH=0          # v1.12.0: finish tail (review-gate→ship→canary) default ON; --no-finish skips
 # v1.3.0: auto mode is the default. Skips cost confirmation, runs without pauses.
 # Disable with --no-auto.
 AUTO_MODE=1
@@ -177,15 +186,17 @@ for arg in $(printf '%s\n' "$SPEC_ARG"); do
     --qa-skip=*)  QA_SKIP="${arg#--qa-skip=}" ;;
     --qa-only=*)  QA_ONLY="${arg#--qa-only=}" ;;
     --autonomous) AUTONOMOUS=1 ;;    # v3.18.0: unattended; ledger-checked gates
+    --no-finish)  NO_FINISH=1 ;;     # v1.12.0: skip Step 10 finish tail
     --resume)     : ;;   # handled in session checkpoint block
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
 done
 
-# RUFLO_REQUIRED controls executor selection:
-#   "auto" (default): pre-flight mcp__ruflo__mcp_status; if unreachable → auto-switch to native parallel
+# RUFLO_REQUIRED controls executor selection (code default = "1", line above —
+# strict; fail FAST at start, not silently degraded mid-overnight-run):
+#   "1" (default)   : hard-fail if ruflo unreachable
+#   "auto"          : pre-flight mcp__ruflo__mcp_status; if unreachable → auto-switch to native parallel
 #   "0"             : skip pre-flight, force native parallel Agent path immediately
-#   "1"             : hard-fail if ruflo unreachable (legacy strict mode)
 if [ "$RUFLO_REQUIRED" = "0" ]; then
   USE_RUFLO=0
   echo "[feature-implement] INFO: RUFLO_REQUIRED=0 — native parallel Agent path forced." >&2
@@ -197,6 +208,13 @@ if [ -z "${SPEC_ID:-}" ]; then
   SPEC_ID=$(echo "$BRANCH" | grep -oE '^[0-9]{3}' | head -1)
 fi
 [ -z "$SPEC_ID" ] && { echo "ERROR: no spec ID. Usage: /feature-implement NNN"; exit 1; }
+
+# v1.12.2: LEDGER run id — MUST equal what /feature-spec + /task-swarm used when
+# recording preflight + grants (gates.py keys everything on this). Distinct from
+# AUDIT_RUN_ID (run-state UUID for audits.jsonl) — do NOT overload. Set AFTER the
+# branch-derived SPEC_ID fallback above (codex round 2: assigning before it left
+# RUN_ID="spec-" on no-arg invocations, so ledger checks keyed the wrong run).
+RUN_ID="spec-${SPEC_ID%%-*}"
 
 SPEC_DIR=$(find specs -maxdepth 1 -type d -name "${SPEC_ID}-*" 2>/dev/null | head -1)
 [ -z "$SPEC_DIR" ] && { echo "ERROR: specs/${SPEC_ID}-* not found"; exit 1; }
@@ -1118,16 +1136,18 @@ $_section
     done <<< "$(echo "$PHASE_US_TAGS" | tr ' ' '\n')"
   fi
 
-  # 4. Ensure a run_id exists for audits.jsonl tracking
-  if [ -z "${RUN_ID:-}" ]; then
-    RUN_ID=$(~/.claude/bin/run-state start --skill feature-implement \
+  # 4. Ensure a run-state id exists for audits.jsonl tracking
+  # (v1.12.1: AUDIT_RUN_ID, NOT $RUN_ID — that is the gates.py ledger key spec-NNN;
+  # overloading them sent ledger lookups to a run-state UUID and stalled --autonomous)
+  if [ -z "${AUDIT_RUN_ID:-}" ]; then
+    AUDIT_RUN_ID=$(~/.claude/bin/run-state start --skill feature-implement \
       --objective "spec $SPEC_ID phase $CURRENT_PHASE" 2>/dev/null | jq -r .run_id 2>/dev/null || echo "")
   fi
 
   # 5. Run the hostile audit
   PHASE_AUDIT_EXIT=0
-  if [ -n "$RUN_ID" ]; then
-    ~/.claude/bin/run-state audit "$RUN_ID" \
+  if [ -n "$AUDIT_RUN_ID" ]; then
+    ~/.claude/bin/run-state audit "$AUDIT_RUN_ID" \
       --kind phase \
       --context "PHASE_NAME=$CURRENT_PHASE" \
       --context "PHASE_SPEC=${PHASE_SPEC:-none}" \
@@ -1149,7 +1169,7 @@ $_section
     # (ralph retry loop handles from here — same path as QA failure)
   elif [ "$PHASE_AUDIT_EXIT" -ge 2 ]; then
     echo "[feature-implement] WARNING: phase audit error (exit $PHASE_AUDIT_EXIT) — retrying once" >&2
-    ~/.claude/bin/run-state audit "$RUN_ID" --kind phase \
+    ~/.claude/bin/run-state audit "$AUDIT_RUN_ID" --kind phase \
       --context "PHASE_NAME=$CURRENT_PHASE" --context "retry=1" \
       --cwd "$(git rev-parse --show-toplevel)" 2>/dev/null \
       || echo "[feature-implement] WARNING: phase audit retry also failed — skipping (codex-gate remains the hard gate)" >&2
@@ -1315,6 +1335,56 @@ distill trajectories into reusable strategy, not just raw outcomes):
 4. If ruflo is unreachable, skip 2 silently (retro must never fail the run) — but
    still write 3.
 
+   **Optional durable recall (v1.12.0, fail-soft):** if `command -v gbrain` succeeds
+   and `env -u DATABASE_URL gbrain doctor` is healthy, also store the distilled
+   patterns durably: `env -u DATABASE_URL gbrain put spec/{NNN}-retro "<one-line
+   distilled pattern>"` then `env -u DATABASE_URL gbrain sync --no-pull --no-embed`.
+   gbrain absent/unhealthy → skip silently; agentdb + results.md remain the record.
+
+### Step 10: Finish tail — review-gate → ship → canary (v1.12.0)
+
+`/feature` is retired; this skill is now the terminal executor. After the final
+report shows a **go** proof artifact and QA green, run the finish tail. Mechanical
+entry check — all three must hold, else print the skip reason and END:
+`[ "$NO_FINISH" = "0" ]` AND zero `[ ]`/`[F]` tasks remain AND proof verdict = go
+(never ship a partial run).
+
+Each stage that takes an OUTWARD action is gated by the autonomy ledger in
+`--autonomous` mode, or by an operator prompt in attended mode:
+
+```bash
+gate() {  # gate <action> — 0=proceed, 1=stop this path (pending recorded)
+  local ACTION="$1"
+  if [ "$AUTONOMOUS" = "1" ]; then
+    if python3 "$GATES_PY" check-grant "$RUN_ID" --action "$ACTION"; then
+      return 0   # proceed; log consumed grant + artifact (sha/PR#/URL) in report
+    fi
+    python3 "$GATES_PY" pending "$RUN_ID" --action "$ACTION" \
+      --reason "finish-tail gate not granted"
+    echo "[finish-tail] STOP at $ACTION — recorded pending; resume after grant"
+    return 1
+  fi
+  # attended: ask the operator now (AskUserQuestion / prompt), record their yes
+  return 0  # only after explicit yes
+}
+```
+
+1. **Review gate:** invoke the `review-gate` skill (full-run diff). HIGH/CRITICAL
+   findings block the tail — fix or stop. No ledger action needed (read-only).
+2. **Ship:** `gate "push:origin/<branch>"` (and `gate "merge:pr"` if the flow
+   merges) → invoke the `ship` skill. Not granted → STOP tail, everything stays
+   local and committed-not-pushed; morning resume = grant + re-run tail.
+3. **Canary:** after ship lands, `gate "deploy:<target>"` if canary exercises a
+   deploy; then invoke the `canary` skill. Failure → report FAILED loudly with the
+   rollback line from the grant screen — never auto-rollback without a
+   `rollback:` grant.
+4. Consumed grants + artifacts (commit sha, PR number, deploy URL) go in the final
+   report; the proof artifact already recorded the evidence chain.
+
+Hosts without `/ship`//`canary` installed (bare OSS consumers): print the manual
+equivalent (`git push`, open PR, smoke command) and stop — never improvise an
+outward action a skill would have gated.
+
 ## Edge cases
 
 - **Malformed `[model:]`**: default sonnet/med, log warning in JSONL (`"warning":"annotation defaulted"`).
@@ -1328,17 +1398,25 @@ distill trajectories into reusable strategy, not just raw outcomes):
 ## Non-goals (v1)
 
 - `[P]` parallel groups: Ruflo path runs them concurrently (concurrent Task() calls per group). Native fallback also dispatches `[P]` tasks concurrently (all `[P]` siblings in one message turn). Non-`[P]` tasks are always sequential.
-- Does NOT commit — use `/ship`.
+- Task execution does NOT commit/push; outward actions happen ONLY in the Step 10
+  finish tail via the `ship`/`canary` child skills, each behind a `check-grant`
+  (autonomous) or explicit operator yes (attended). `--no-finish` restores the old
+  stop-at-QA behavior.
 - With `--qa-loop` (default): validates correctness per phase via 2 deterministic hooks + 3 LLM agents. Without: assumes sub-agent self-report. Full-suite `/qa` still recommended before shipping.
 - Does NOT update Linear — `post-spec-write.sh` handles that on tasks.md save.
 
 ## Safety rules
 
 - Never modify files outside the project directory
-- Never push, deploy, or delete branches
+- Never push, deploy, or delete branches DURING task execution — those actions are
+  legal only inside the Step 10 finish tail, through the ship/canary skills, after
+  their `gate()` check passes (v1.12.0)
 - Sub-agents inherit rules via CLAUDE.md
 - Destructive action requests re-surface to user (Agent tool respects Claude Code permissions)
-- **Ruflo failures hard-stop (v1.1.0).** No silent native fallback. Use `RUFLO_REQUIRED=0` env override for debugging only.
+- **Ruflo failures hard-stop under the default `RUFLO_REQUIRED=1`.** Fallback to
+  native happens ONLY via explicit opt-in: `RUFLO_REQUIRED=auto` (pre-flighted,
+  logged fallback) or `RUFLO_REQUIRED=0` (forced native, debugging). Never a
+  silent unrequested fallback (v1.12.1 — reconciled with the auto policy).
 
 ## Cost estimation
 

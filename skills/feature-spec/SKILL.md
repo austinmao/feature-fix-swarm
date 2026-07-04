@@ -1,7 +1,7 @@
 ---
 name: feature-spec
-description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify, each phase enforcing TDD unit tests, BDD Given/When/Then scenarios, and E2E test stubs before any implementation begins."
-version: 1.1.0
+description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
+version: 1.2.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -41,18 +41,35 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 │    ├─ Resolves ambiguities, captures edge cases                 │
 │    ├─ ENFORCED: E2E Playwright test stubs (one per PATH-NNN)    │
 │    └─ ENFORCED: Test contract summary (counts by layer)         │
+│                                                                 │
+│  Phase 4: /spec-decompose (v1.2.0 — swarm default)              │
+│    └─ Writes specs/NNN/tasks.md (roster [agent:] tags + gates)  │
+│                                                                 │
+│  Phase 5: preflight (v1.2.0 — DEFAULT)                          │
+│    └─ specs/NNN/preflight.json proven PASS while operator here  │
+│                                                                 │
+│  Phase 6: autonomy grant (v1.2.0 — DEFAULT)                     │
+│    └─ typed gate ledger recorded → --autonomous never stalls    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 > **Note on command naming:** speckit uses `speckit.specify` (not `speckit.spec`).
 > Invoke via the Skill tool with name `speckit.specify`.
 
+> **Optional recall (fail-soft):** before Phase 1, if `command -v gbrain` succeeds and
+> `env -u DATABASE_URL gbrain doctor` is healthy, run
+> `env -u DATABASE_URL gbrain query "<feature topic>"` and feed prior decisions into
+> specify/plan. Absent/unhealthy → `git log --oneline --grep="<topic>"` fallback; never block.
+
 ## Usage
 
 ```
-/feature-spec NNN              # full pipeline: specify + plan + clarify
-/feature-spec NNN --no-clarify # stop after plan (skip clarify phase)
-/feature-spec NNN --dry-run    # preview what would be generated, no writes
+/feature-spec NNN                # full pipeline through decompose + preflight + grant
+/feature-spec NNN --no-clarify   # skip clarify phase
+/feature-spec NNN --no-preflight # skip preflight (NOT recommended before --autonomous)
+/feature-spec NNN --no-grant     # skip grant ledger (attended runs)
+/feature-spec NNN --no-swarm     # single-planner decomposition
+/feature-spec NNN --dry-run      # preview what would be generated, no writes
 ```
 
 ---
@@ -236,6 +253,9 @@ TDD red-green-refactor → unit tests.
 SPEC_ARG="${ARGUMENTS:-}"
 NO_CLARIFY=0
 DRY_RUN=0
+NO_PREFLIGHT=0   # v1.2.0: preflight is DEFAULT-ON (--no-preflight to skip)
+NO_GRANT=0       # v1.2.0: autonomy-grant enumeration is DEFAULT-ON (--no-grant to skip)
+NO_SWARM=0       # v1.2.0: pass-through to /spec-decompose (swarm default-on there)
 SPEC_ID=""
 
 # zsh-safe: parameter expansion does not word-split in zsh, but
@@ -243,15 +263,18 @@ SPEC_ID=""
 # so assignments inside the loop persist.
 for arg in $(printf '%s\n' "${SPEC_ARG}"); do
   case "$arg" in
-    --no-clarify) NO_CLARIFY=1 ;;
-    --dry-run)    DRY_RUN=1 ;;
-    [0-9]*)       SPEC_ID="$arg" ;;
+    --no-clarify)   NO_CLARIFY=1 ;;
+    --no-preflight) NO_PREFLIGHT=1 ;;
+    --no-grant)     NO_GRANT=1 ;;
+    --no-swarm)     NO_SWARM=1 ;;
+    --dry-run)      DRY_RUN=1 ;;
+    [0-9]*)         SPEC_ID="$arg" ;;
   esac
 done
 
 if [ $DRY_RUN -eq 1 ]; then
-  echo "[feature-spec] --dry-run: would run speckit.specify → speckit.plan → speckit.clarify"
-  echo "[feature-spec] Spec: ${SPEC_ID:-<new>}"
+  echo "[feature-spec] --dry-run: would run speckit.specify → speckit.plan → speckit.clarify → spec-decompose → preflight → grant"
+  echo "[feature-spec] Spec: ${SPEC_ID:-<new>}  preflight=$((1-NO_PREFLIGHT)) grant=$((1-NO_GRANT)) swarm=$((1-NO_SWARM))"
   exit 0
 fi
 ```
@@ -300,6 +323,79 @@ After it completes, verify the spec contains:
 
 If any section is missing, **add it now**.
 
+### Step 4 — spec-decompose (v1.2.0)
+
+Invoke the `spec-decompose` skill via the Skill tool with `${SPEC_ID}` (append
+`--no-swarm` if `NO_SWARM=1`). It runs the roster-specialist swarm decomposition
+(orchestrator merge + `gates.py analyze` + `agents_manifest.py check` gates) and
+writes `specs/${SPEC_ID}/tasks.md`.
+
+If decompose fails its gates, STOP — fix the spec/plan and re-run. Do not hand a
+failing tasks.md to preflight/grant.
+
+### Step 5 — preflight (v1.2.0, DEFAULT — skip only with --no-preflight)
+
+Requirements are proven NOW, while the operator is present — never discovered at 3am.
+
+1. **Author the manifest** `specs/${SPEC_ID}/preflight.json` from the RUN's real
+   footprint: scan tasks.md + plan.md for env/secret NAMES the tasks read
+   (`process.env.*`, `os.environ`, `doppler secrets get` names) and every external
+   service touched (DB, gateway, deploy target, MCP server) as a cheap real probe.
+   Names only — a secret VALUE never enters the manifest. Format per the
+   `/preflight` skill:
+
+   ```json
+   [
+     {"kind": "env",   "name": "DATABASE_URL"},
+     {"kind": "probe", "name": "db-reachable",
+      "cmd": "psql \"$DATABASE_URL\" -c 'select 1' -qtA"}
+   ]
+   ```
+
+2. **Run it, fail closed** (resolver inlined — do not assume `$GATES_PY` exists):
+
+   ```bash
+   GATES_PY=""
+   for _cand in \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+     "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+     [ -f "$_cand" ] && GATES_PY="$_cand" && break
+   done
+   [ -z "$GATES_PY" ] && { echo "[feature-spec] FATAL: gates.py not found — run setup.sh"; exit 1; }
+   # ledger key convention: ALWAYS bare numeric spec id (spec-057, never
+   # spec-057-name) — feature-implement + task-swarm normalize the same way
+   RUN_ID="spec-${SPEC_ID%%-*}"
+   python3 "$GATES_PY" preflight "specs/${SPEC_ID}/preflight.json" --run "$RUN_ID" || {
+     echo "[feature-spec] PREFLIGHT-FAIL — fix while the operator is present, then re-run"
+     exit 1
+   }
+   ```
+
+   Missing var → fetch from the secret manager now. Dead service → start/re-auth now.
+   Re-run until `PREFLIGHT-PASS`. An unattended run later requires this recorded PASS
+   (<24h) via `check-preflight`.
+
+### Step 6 — autonomy grant (v1.2.0, DEFAULT — skip only with --no-grant)
+
+The whole point of the pipeline is `/feature-implement ${SPEC_ID} --autonomous` not
+stalling. Build the ledger NOW, one screen, one decision:
+
+1. Walk tasks.md + plan.md and enumerate EVERY operator-gated action the run will
+   perform, in typed `type:target` form (`push:origin/main`, `merge:pr`,
+   `deploy:vercel-web`, `flip:FLAG`, `restart:svc`, `secret-use:NAME`,
+   `migrate:desc`). Walk the artifacts — never enumerate from memory.
+2. Present the list to the operator with a one-line rollback per action. Wait for
+   explicit yes. (This is the ONE stop that buys the unattended night.)
+3. Record:
+
+   ```bash
+   python3 "$GATES_PY" grant "$RUN_ID" --action <a1> --action <a2> ... --ttl-hours 24
+   ```
+
+If the operator declines some actions, grant the rest — the run will stop+record
+`pending` only at the declined ones.
+
 ### Completion summary
 
 Print:
@@ -308,8 +404,11 @@ Print:
 ✓ /feature-spec complete for spec NNN
 
 Artifacts:
-  specs/NNN/spec.md  — requirements + BDD scenarios + acceptance criteria + E2E paths
-  specs/NNN/plan.md  — unit test list + TDD test map + integration tests + phase gates
+  specs/NNN/spec.md          — requirements + BDD scenarios + acceptance criteria + E2E paths
+  specs/NNN/plan.md          — unit test list + TDD test map + integration tests + phase gates
+  specs/NNN/tasks.md         — swarm-decomposed tasks with roster [agent:] tags + review-gates
+  specs/NNN/preflight.json   — env/service manifest, PREFLIGHT-PASS recorded for run spec-NNN
+  grant ledger               — N typed actions granted, TTL 24h (run spec-NNN)
 
 Test contracts baked in:
   BDD Scenarios:     N defined  (pass = feature ships; one happy + one error per story)
@@ -322,6 +421,8 @@ Agent over-mocking check: verify no agent-generated test mocks the thing it's te
 See docs/tdd-bdd-guide.md for full TDD/BDD reference.
 
 Next:
-  /feature NNN           — full pipeline (autoplan → implement → qa → review-gate → ship)
-  /spec-decompose NNN    — break plan.md into tasks.md first
+  /feature-implement NNN --autonomous   — unattended: swarm impl → QA → review-gate → ship → canary
+  /feature-implement NNN                — attended (operator prompts at gates)
 ```
+
+(`/feature` is deprecated — this skill + `/feature-implement` replaced it.)

@@ -358,7 +358,7 @@ fi
 # Copy skills
 SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
-for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant; do
+for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant agents-init task-swarm; do
   TARGET="$SKILLS_DIR/$skill/SKILL.md"
   if [ -f "$TARGET" ] && [ "$SETUP_YES" != "1" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
@@ -377,6 +377,23 @@ mkdir -p "$SKILLS_DIR/swarm"
 rm -f "$SWARM_TARGET"
 ln -s "$SWARM_SOURCE" "$SWARM_TARGET"
 echo "  Symlinked $SWARM_TARGET -> $SWARM_SOURCE"
+
+# v3.19: agent roster manifest — best-effort scan so a fresh install ships one.
+# Target repo = FFS_SCAN_REPO if set, else cwd (skipped when cwd is this repo
+# itself and has no roster — scan there is just the generic floor, not useful).
+if [ -f "$SCRIPT_DIR/lib/agents_manifest.py" ]; then
+  SCAN_REPO="${FFS_SCAN_REPO:-$PWD}"
+  if [ "$SCAN_REPO" != "$SCRIPT_DIR" ] || [ -d "$SCAN_REPO/.claude/agents" ]; then
+    if python3 "$SCRIPT_DIR/lib/agents_manifest.py" scan --repo "$SCAN_REPO" \
+        --out "$SCAN_REPO/.feature-fix-swarm/agents.json" >/dev/null 2>&1; then
+      echo "  Agent roster -> $SCAN_REPO/.feature-fix-swarm/agents.json (refresh anytime: /agents-init)"
+    else
+      echo "  Agent roster scan failed — run /agents-init in your target repo"
+    fi
+  else
+    echo "  Run /agents-init in your target repo to build the agent roster manifest"
+  fi
+fi
 
 # === v2.0: run-state library (global ~/.claude/) ===
 LIB_DIR="$HOME/.claude/lib"
@@ -401,6 +418,8 @@ cp "$SCRIPT_DIR/lib/dispatch.py" "$LIB_DIR/feature-fix-swarm/dispatch.py"
 echo "  Installed $LIB_DIR/feature-fix-swarm/dispatch.py"
 cp "$SCRIPT_DIR/lib/gates.py" "$LIB_DIR/feature-fix-swarm/gates.py"
 echo "  Installed $LIB_DIR/feature-fix-swarm/gates.py"
+cp "$SCRIPT_DIR/lib/agents_manifest.py" "$LIB_DIR/feature-fix-swarm/agents_manifest.py"
+echo "  Installed $LIB_DIR/feature-fix-swarm/agents_manifest.py (v3.19 agent roster)"
 cp "$SCRIPT_DIR/hooks/tdd-gate.sh" "$LIB_DIR/feature-fix-swarm/tdd-gate.sh"
 chmod +x "$LIB_DIR/feature-fix-swarm/tdd-gate.sh"
 echo "  Installed $LIB_DIR/feature-fix-swarm/tdd-gate.sh (opt-in PreToolUse hook — see hooks/tdd-gate.sh header)"

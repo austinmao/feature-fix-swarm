@@ -6,6 +6,73 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.19.0 — Swarm decomposition + agent roster + autonomous two-command pipeline (2026-07-04)
+
+The pipeline collapses to two commands with ONE operator stop:
+`/feature-spec NNN` → `/feature-implement NNN --autonomous`. New `/task-swarm`
+does the same end-to-end from a free-text instruction.
+
+- **Agent roster manifest** (`lib/agents_manifest.py` + `/agents-init` skill):
+  scans `.claude/agents/**` frontmatter + `.codex/agents/*.toml` + optional
+  seed file (`.feature-fix-swarm/agents.local.json` for plugin agents like
+  `ecc:*` that are valid subagent_types but not files) + ruflo builtins +
+  generic floor into `.feature-fix-swarm/agents.json` with domain buckets.
+  Kebab-case dedup (codex `Brand Designer` == claude `brand-designer`).
+  `check` subcommand validates every `[agent:X]` tag in a tasks.md against the
+  roster (bare + `dept/role` forms), fails closed. setup.sh ships the module
+  beside gates.py + best-effort scans at install. 16 tests, incl. real-repo
+  regressions (greedy `auth` keyword, Title Case dupes).
+- **spec-decompose v1.4.0 — swarm decomposition DEFAULT:** ruflo `swarm_init`
+  (hierarchical) + orchestrator + per-domain specialists drawn from the roster
+  propose task-subsets in parallel (native `Task()`, model-routed); a single
+  orchestrator merges under the canonical decompose-spec.md grammar contract
+  (dedup, cross-domain Depends-on, RED-before-GREEN, review-gates, roster
+  `[agent:]` tags). `--no-swarm` / empty roster / no ruflo (auto) → legacy
+  single-planner. Coherence gate now also runs `agents_manifest.py check`.
+- **feature-spec v1.2.0 — full front half:** speckit specify→plan→clarify →
+  spec-decompose → **preflight DEFAULT-ON** (`--no-preflight`) → **autonomy
+  grant DEFAULT-ON** (`--no-grant`; one screen, typed actions, TTL'd — the
+  `--autonomous` handoff never stalls ungranted). Prints the
+  `/feature-implement NNN --autonomous` handoff.
+- **feature-implement v1.12.0 — finish tail:** Step 10 review-gate → ship →
+  canary as the terminal executor (`--no-finish` opts out); every outward
+  action behind `check-grant` (autonomous) or explicit operator yes (attended);
+  ungranted → `pending` + STOP, work stays local. Safety rules updated: push/
+  deploy legal ONLY inside the gated tail. Step 9 retro optionally mirrors
+  patterns to gbrain (fail-soft).
+- **`/feature` RETIRED** → deprecated stub (3.0.0-deprecated) chaining
+  feature-spec + feature-implement; removal target v3.20.0.
+- **`/task-swarm` (new):** free-text task → plan-decompose (plan-eng-review +
+  codex gates + swarm decompose) → preflight → grant screen →
+  feature-implement --autonomous. session_save checkpoints per stage
+  (long-run-continuity). One operator stop by contract.
+- **gbrain optional integration** (`docs/gbrain-optional.md`): fail-soft
+  detection contract (`command -v gbrain` + `env -u DATABASE_URL gbrain
+  doctor`), per-phase usage (plan recall, decompose blast-radius via
+  code-refs, retro put) with git/grep fallbacks; `gbrain init --pglite`
+  quickstart for OSS consumers; gates.py stays gbrain-free.
+- **Ruflo curation** (`docs/ruflo-curation.md`): adopted set documented
+  (hooks_pre/post-task, model-route/outcome, session_save/restore, agentdb,
+  hive-mind QA) + explicit NOT-adopted line (daa_*, autopilot_*, neural_*,
+  workflow_execute, agent_execute) so future sessions don't cargo-cult.
+- **Independent-review remediation (pre-merge):** opus tester found a CRITICAL
+  RUN_ID seam break — feature-implement never set the ledger key and overloaded
+  `$RUN_ID` with a run-state UUID, so grants written by feature-spec/task-swarm
+  under `spec-NNN` were unreadable (autonomous runs refused to start or stalled
+  every ship/canary gate). Fixed: `RUN_ID="spec-${SPEC_ID%%-*}"` at flag-parse
+  (bare-numeric normalized in all three skills), run-state ids renamed
+  `AUDIT_RUN_ID`, autonomous checks routed through resolved `$GATES_PY`,
+  resolvers inlined in feature-spec/task-swarm, agents-init resolver gained the
+  setup.sh-installed path. codex round 1 (FAIL→fixed): symlink-escape refusal in
+  the roster scan (HIGH), unclosed-frontmatter injection killed, `[agent:]` tag
+  grammar rejects `..`/deep slashes, same-source collision warning (cross-source
+  mirror dedup stays silent), spec-decompose always rescans the roster. Suite
+  92 → 114 tests. codex round 2 (MED, fixed): `RUN_ID` was assigned before the
+  branch-derived SPEC_ID fallback, so no-arg `/feature-implement` invocations
+  keyed the ledger as `spec-` — assignment moved below the fallback + guard
+  (feature-implement v1.12.2). Residual LOW: the always-rescan and
+  branch-derived-RUN_ID paths live in skill markdown, outside pytest reach.
+
 ## v3.18.0 — Autonomy grant ledger + preflight (2026-07-04)
 
 Front-load run-time decisions to plan-time so unattended runs never stall.

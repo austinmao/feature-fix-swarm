@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
-description: "Decompose an approved feature spec into specs/NNN/tasks.md using the canonical shared model ladder (haiku/sonnet/opus, plus optional Claude-Code-native fable) + the exact-agent hybrid catalog decomposition prompt"
-version: "1.3.0"
+description: "Decompose an approved feature spec into specs/NNN/tasks.md via a ruflo specialist swarm (default: orchestrator + per-domain specialists drawn from the repo's agent roster) or single-planner fallback (--no-swarm), using the canonical shared model ladder (haiku/sonnet/opus, plus optional Claude-Code-native fable) + the exact-agent hybrid catalog decomposition prompt"
+version: "1.4.0"
 allowed-tools:
   - Read
   - Write
@@ -22,11 +22,11 @@ allowed-tools:
 
 1. Locates `specs/NNN-feature-name/` from CLI argument or current git branch
 2. Verifies `spec.md` and `plan.md` exist (hard requirements per `/speckit.tasks` contract)
-3. Spawns a host-appropriate decomposition sub-agent with `prompts/decompose-spec.md` + the spec's design artifacts
-4. Sub-agent writes the decomposed task list to `specs/NNN/tasks.md`
+3. Loads the repo agent roster (`.feature-fix-swarm/agents.json`; auto-scans via `agents_manifest.py` if missing)
+4. **Default (v1.4.0): swarm decomposition** — ruflo `swarm_init` + orchestrator + per-domain specialists (backend/frontend/database/security/testing) drawn from the roster propose their domain's task-subset in parallel; the orchestrator merges into ONE `specs/NNN/tasks.md`. `--no-swarm` (or ruflo unreachable with `RUFLO_REQUIRED=auto`, or empty roster) falls back to the legacy single-planner sub-agent
 5. **Each phase ends with a `/review-gate` review task** — blocks the next phase if HIGH/CRITICAL findings
-6. If a prior baseline exists, runs `scripts/harness-eval.sh --compare NNN specs/NNN/tasks.md`
-7. Reports summary and flags anything suspicious
+6. Validates every `[agent:]` tag against the roster (`agents_manifest.py check`) + runs the `gates.py analyze` coherence gate
+7. If a prior baseline exists, runs `scripts/harness-eval.sh --compare NNN specs/NNN/tasks.md`; reports summary and flags anything suspicious
 
 ## Review-Gate Phase Gates (MANDATORY)
 
@@ -135,13 +135,104 @@ If `$SPEC_DIR/tasks.md` already exists, ask via AskUserQuestion:
 
 Default recommendation: **B**. Existing work is preserved; new output can be diffed.
 
-### Step 4: Spawn the decomposition sub-agent
+### Step 3.5: Load the agent roster (v1.4.0)
+
+```bash
+# resolve agents_manifest.py across the three install shapes (same order as gates.py)
+MANIFEST_PY=""
+for _cand in \
+"$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/agents_manifest.py" \
+"$HOME/.claude/lib/feature-fix-swarm/agents_manifest.py" \
+"$(git rev-parse --show-toplevel 2>/dev/null)/lib/agents_manifest.py"; do
+  [ -f "$_cand" ] && MANIFEST_PY="$_cand" && break
+done
+MANIFEST=".feature-fix-swarm/agents.json"
+# ALWAYS rescan (codex v3.19 round 1 MED: only-if-missing left renamed/removed
+# agents validating against stale data) — scan is cheap + idempotent
+if [ -n "$MANIFEST_PY" ]; then
+  python3 "$MANIFEST_PY" scan --repo . --out "$MANIFEST" || true   # /agents-init inline
+fi
+```
+
+Parse `domains` from the manifest. If the manifest is missing/empty → single-planner
+fallback (Step 4b) with a WARN.
+
+**Optional gbrain blast-radius recall (fail-soft):** if `command -v gbrain` succeeds AND
+`env -u DATABASE_URL gbrain doctor` is healthy, run
+`env -u DATABASE_URL gbrain code-refs <key symbols from plan.md>` and pass the hit list to
+the specialists as blast-radius context. If gbrain is absent or unhealthy, skip silently —
+`git grep` of the key symbols is the fallback. NEVER hard-fail on gbrain.
+
+### Step 4: Swarm decomposition (DEFAULT) — orchestrator + roster specialists
+
+Flags: `--no-swarm` forces Step 4b. Ruflo unreachable + `RUFLO_REQUIRED=auto` → Step 4b
+with a WARN. Ruflo unreachable + `RUFLO_REQUIRED=1` → hard-fail (same policy as
+/feature-implement).
+
+**4.1 — Select domains.** From the manifest's `domains`, keep the buckets relevant to
+this spec (read plan.md's tech stack): mentions of UI/pages/components → `frontend`;
+API/routes/services → `backend`; schema/migrations/queries → `database`; auth/tokens/
+tenancy → `security`. ALWAYS include `testing`. Cap at 5 specialist domains. For each
+selected domain pick the FIRST roster agent in that bucket (it's sorted; repo-local
+agents beat generic roles because the generic floor only fills empty buckets).
+Orchestrator = first of `planning` bucket (usually `planner`), or `architect`.
+
+**4.2 — Init the swarm** (coordination metadata; execution stays native `Task()` — the
+`agent_execute`/`managed_agent_*` OAuth policy from /feature-implement applies verbatim):
+
+```
+swarmId = mcp__ruflo__swarm_init({ topology: "hierarchical",
+  maxAgents: min(n_domains + 1, 8), strategy: "specialized" })
+mcp__ruflo__agent_spawn({ agentType: <orchestrator>, model: "sonnet",
+  task: "merge domain task proposals for spec " + SPEC_ARG, swarmId })
+# one agent_spawn per selected specialist (metadata only)
+```
+
+Route each specialist's model via `mcp__ruflo__hooks_model-route` on its domain+spec
+summary; fall back to the host middle tier (`sonnet` / `gpt-5.4`) if routing is
+unpretrained (returns bare "opus") or unavailable.
+
+**4.3 — Fan out specialists (ONE message, parallel `Task()` calls).** Each specialist
+gets the shared prompt template below with this domain preamble prepended:
+
+```
+You are the {DOMAIN} specialist ({ROSTER_AGENT_NAME}) in a decomposition swarm.
+PROPOSE tasks for YOUR domain only. Return the proposed task list as markdown in
+your final message — do NOT write any file. Tag every task [agent:{ROSTER_AGENT_NAME}].
+Include RED test tasks before GREEN implementation tasks for your domain. List any
+dependency you have on another domain's work as "NEEDS(<domain>): <what>".
+Blast-radius context (may be empty): {GBRAIN_OR_GREP_HITS}
+```
+
+Spawn: `Task({ prompt, subagent_type: ROSTER_AGENT_NAME, model: routed_model })` —
+if the host rejects the roster name as a subagent_type, respawn as
+`general-purpose` with the role stated in the prompt (roster name still used for
+`[agent:]` tags).
+
+**4.4 — Orchestrator merge (single author).** One `Task({ subagent_type: <orchestrator>,
+model: "sonnet" })` receives ALL specialist proposals plus the shared prompt template and
+writes `{OUTPUT_PATH}`. Merge contract (MANDATORY):
+- Emit the canonical grammar from `prompts/decompose-spec.md` — `[model:X thinking:Y]
+  [agent:role] [US] [P]` annotations, phase structure, `[qa:]` tiers, Depends-on lines.
+- Dedup overlapping proposals (same file+intent = one task; keep the more specific).
+- Resolve `NEEDS()` declarations into cross-domain `Depends-on:` lines and phase
+  ordering; RED-before-GREEN preserved globally, not just per-domain.
+- Keep `[agent:]` tags exactly as proposed (roster names) — they drive
+  /feature-implement's specialist spawning.
+- Apply review-gate placement (Step 6 of the template) + /design-html injection
+  (Step 8 of the template).
+Specialists PROPOSE, the orchestrator DECIDES — exactly one author of tasks.md.
+
+**4.5 — Learning hooks (fail-soft):** `mcp__ruflo__hooks_post-task` after the merge;
+report routed-model outcomes via `mcp__ruflo__hooks_model-outcome` so the router learns.
+
+### Step 4b: Single-planner fallback (`--no-swarm` / no roster / no ruflo)
 
 Use the active host's middle-tier model and the planning sub-agent (`subagent_type: "planner"`):
 - Claude Code: `model: "sonnet"`
 - Codex: `model: "gpt-5.4"`
 
-Prompt template (substitute the bracketed values):
+Prompt template (shared by 4.3/4.4 above and this fallback; substitute the bracketed values):
 
 ```
 You are decomposing an approved feature spec into an executable task list. You have no prior context for this conversation.
@@ -313,6 +404,15 @@ python3 "$GATES_PY" analyze "specs/$SPEC_ID/spec.md" "specs/$SPEC_ID/tasks.md" |
   echo "[spec-decompose] ANALYZE-FAIL — fix the findings above before /feature-implement"
   exit 1
 }
+
+# v1.4.0: every [agent:] tag must resolve against the roster (kills tag drift —
+# an unknown agent silently becomes general-purpose at execution time)
+if [ -n "$MANIFEST_PY" ] && [ -f "$MANIFEST" ]; then
+  python3 "$MANIFEST_PY" check "specs/$SPEC_ID/tasks.md" --manifest "$MANIFEST" || {
+    echo "[spec-decompose] AGENTS-CHECK-FAIL — fix tags or run /agents-init, then re-check"
+    exit 1
+  }
+fi
 ```
 
 Machine analog of spec-kit's `/speckit.analyze`: FR/US coverage, per-phase
