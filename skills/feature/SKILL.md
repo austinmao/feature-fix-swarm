@@ -63,7 +63,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
 | Flag | Effect |
 |---|---|
 | `--interactive` | Restore manual gates (autoplan premise, taste decisions). Default = non-interactive. |
-| `--skip-codex-gate` | Emergency-merge fallback. Skip the mandatory cross-model `/review-gate` review before `/ship`. **NOT recommended** — bypasses the strongest pre-prod safety net. Per-phase audits remain in force. |
+| `--skip-review-gate` | Emergency-merge fallback. Skip the mandatory cross-model `/review-gate` review before `/ship`. **NOT recommended** — bypasses the strongest pre-prod safety net. Per-phase audits remain in force. |
 | `--no-goal` | Skip auto-setting native `/goal` at entry. Use if operator pre-set a custom `/goal` condition they want preserved, or running under `claude -p` non-interactive mode where /goal is moot. |
 
 ## When to invoke
@@ -96,7 +96,7 @@ If operator pre-set a custom `/goal` and wants to keep it, or running under `cla
                                #   - prod promotion gate: prompts user (same as --auto)
 /feature [NNN] --resume     # resume after failure (picks up at last incomplete step)
 /feature [NNN] --no-canary  # stop after /ship (skip production canary)
-/feature [NNN] --skip-codex-gate  # emergency-merge: skip cross-model gate (see Step 5.7, NOT recommended)
+/feature [NNN] --skip-review-gate  # emergency-merge: skip cross-model gate (see Step 5.7, NOT recommended)
 /feature [NNN] --dry-run    # print the pipeline plan, don't execute
 ```
 
@@ -149,7 +149,7 @@ Three disciplines from [Fable-mode](https://github.com/mrtooher/fable-mode) brac
 │    └─ 3 cross-model passes: review + adversarial + gaps     │
 │    └─ Mandatory before /ship (same gate /fix uses)          │
 │    └─ Skip-gracefully if review CLI absent (warn, continue) │
-│    └─ Emergency opt-out: --skip-codex-gate (NOT recommended)│
+│    └─ Emergency opt-out: --skip-review-gate (NOT recommended)│
 │                                                             │
 │  Step 6: /ship (creates PR, merges to staging branch)       │
 │    └─ Staging deploy via Vercel preview / Railway staging   │
@@ -177,9 +177,9 @@ SPEC_ARG="${ARGUMENTS:-}"
 RESUME=0
 NO_CANARY=0
 DRY_RUN=0
-# v1.4.0: review-gate is mandatory before /ship. --skip-codex-gate is an
+# v1.4.0: review-gate is mandatory before /ship. --skip-review-gate is an
 # emergency-merge opt-out (NOT recommended; per-phase audits still run).
-SKIP_CODEX_GATE=0
+SKIP_REVIEW_GATE=0
 # v2.1.0: skill auto-sets native /goal at entry. --no-goal opts out.
 NO_GOAL=0
 # v1.1.0: --auto is default. --interactive opts back into manual gates.
@@ -196,7 +196,7 @@ for arg in "${_SPEC_ARGS[@]}"; do
     --auto)        INTERACTIVE=0 ;;   # explicit --auto (already default)
     --interactive) INTERACTIVE=1 ;;
     --no-canary)   NO_CANARY=1 ;;
-    --skip-codex-gate) SKIP_CODEX_GATE=1 ;;
+    --skip-review-gate) SKIP_REVIEW_GATE=1 ;;
     --no-goal)     NO_GOAL=1 ;;     # v2.1.0: opt out of skill-managed /goal
     --dry-run)     DRY_RUN=1 ;;
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
@@ -308,7 +308,7 @@ if [ $DRY_RUN -ne 1 ]; then
     exit 1
   fi
 
-  # v3.1 fix 3 (review-gate Pass 1 P2): --skip-codex-gate is logged to $RUN_LOG
+  # v3.1 fix 3 (review-gate Pass 1 P2): --skip-review-gate is logged to $RUN_LOG
   # only, NOT to run-state events. So the /goal condition must grep $RUN_LOG
   # for the review-gate row (PASS or skipped), not abstract "run events".
   CANARY_REQ='AND /canary returned 200 in '"$RUN_LOG"
@@ -646,7 +646,7 @@ fi
 Decision rule:
 - `verdict=pass` (CLI exit 0) → wedge done. Advance to next wedge.
 - `verdict=fail` (CLI exit 1) → auditor's `missing[]` is the new TODO list. Re-enter `/feature-implement <wedge>` with the missing items. Re-run phase audit when done.
-- `verdict=error` → retry once. If still error, skip and proceed (per-phase audit is best-effort; codex-gate at end is the hard gate).
+- `verdict=error` → retry once. If still error, skip and proceed (per-phase audit is best-effort; review-gate at end is the hard gate).
 
 Hard cap per wedge: 3 phase-audit attempts. After 3 fails, mark the run `failed` and escalate to operator with the residual `missing[]`.
 
@@ -675,11 +675,11 @@ The underlying Claude invocation must use the local CLI auth path, not `--bare`;
 If `/review-gate` hangs or times out, the correct result is a structured blocked gate with a timeout reason. Do not narrate the failure in first person or say you "attempted" the adversarial review step.
 
 ```bash
-# --skip-codex-gate is a hard bypass — review-gate is NOT invoked and the skip
+# --skip-review-gate is a hard bypass — review-gate is NOT invoked and the skip
 # is recorded in the local run log so the audit trail shows operator-accepted risk.
-if [ "${SKIP_CODEX_GATE:-0}" = "1" ]; then
-  echo "[FEATURE] /review-gate SKIPPED (--skip-codex-gate flag set). Operator accepted the risk; per-phase audits from Step 4b remain in force." >&2
-  printf '{"timestamp":"%s","spec":"%s","step":"review-gate","status":"skipped","reason":"skip_codex_gate_flag","duration_s":0}\n' \
+if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then
+  echo "[FEATURE] /review-gate SKIPPED (--skip-review-gate flag set). Operator accepted the risk; per-phase audits from Step 4b remain in force." >&2
+  printf '{"timestamp":"%s","spec":"%s","step":"review-gate","status":"skipped","reason":"skip_review_gate_flag","duration_s":0}\n' \
     "$(date -u +%FT%TZ)" "$SPEC_ID" >> "$RUN_LOG"
   # Continue to Step 6 (/ship). Do NOT invoke the /review-gate skill below.
 else
@@ -688,7 +688,7 @@ else
 fi
 ```
 
-Decision rule (only applies when `--skip-codex-gate` was NOT set):
+Decision rule (only applies when `--skip-review-gate` was NOT set):
 - `REVIEW-GATE PASS` (CRITICAL=0, HIGH≤2) → proceed to `/ship` + `/canary`.
 - `REVIEW-GATE BLOCK` (CRITICAL≥1 unfixed) → STOP. Fix the CRITICAL inline via review auto-fix, commit, re-run `/review-gate`. Do NOT proceed to `/ship` until verdict is PASS.
 
@@ -720,9 +720,9 @@ if [ "$REVIEW_GATE_AVAILABLE" = "0" ]; then
 fi
 ```
 
-`--skip-codex-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/review-gate` is NOT invoked at all and the skip is written to `$RUN_LOG` so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
+`--skip-review-gate` flag = emergency-merge hard bypass (operator-explicit opt-out, NOT recommended). When set, `/review-gate` is NOT invoked at all and the skip is written to `$RUN_LOG` so audit reviewers can see the bypass. Per-phase audits from Step 4b still ran and remain in force.
 
-**Hook side-effect:** `scripts/hooks/codex-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent review-gate run.
+**Hook side-effect:** `scripts/hooks/review-gate-warn.sh` (if installed in user env) records the gate run timestamp keyed to current branch, so `gh pr merge` does not warn about a missing recent review-gate run.
 
 Log:
 ```json
@@ -820,7 +820,7 @@ On `/feature NNN --resume`:
 | tasks.md validation out of bounds | regenerate or hand-edit tasks.md, `/feature NNN --resume` |
 | task `[F]` | fix code, `/feature NNN --resume` |
 | QA bugs | fix bugs, `/feature NNN --resume` |
-| review-gate BLOCK (CRITICAL≥1) | fix flagged issues inline (review auto-fix or manual), commit, `/feature NNN --resume`. Emergency bypass: `/feature NNN --resume --skip-codex-gate` (NOT recommended) |
+| review-gate BLOCK (CRITICAL≥1) | fix flagged issues inline (review auto-fix or manual), commit, `/feature NNN --resume`. Emergency bypass: `/feature NNN --resume --skip-review-gate` (NOT recommended) |
 | per-phase audit fail (3 attempts) | inspect residual `missing[]` from auditor, hand-fix wedge or revise spec, `/feature NNN --resume` |
 | ship tests fail | fix tests, `/feature NNN --resume` |
 | staging smoke fail | fix, re-ship, `/feature NNN --resume` |
@@ -847,7 +847,7 @@ Typical 50-task feature (~5 wedges):
 - per-phase QA (--qa-loop): ~$0.15/phase × N phases = ~$0.75-$1.50
 - per-phase adversarial audit: ~$0.30/wedge × N wedges = ~$1.50 (Step 4b)
 - qa: ~$2
-- review-gate: ~$2 (3 passes against full branch diff; skip with --skip-codex-gate)
+- review-gate: ~$2 (3 passes against full branch diff; skip with --skip-review-gate)
 - ship/canary: free
 
 **Estimated total: $23-59 per feature.** Show estimate after step 3 (tasks.md approved, cost computable from annotations).

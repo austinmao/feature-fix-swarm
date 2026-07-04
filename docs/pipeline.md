@@ -45,8 +45,8 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo
 │    │                                                                   │
 │    ▼                                                                   │
 │   /qa     (built INTO tasks.md phases — Dev QA per story)              │
-│   /codex-gate ──►  cross-model 3-pass review (default-on)              │
-│                    skip with --no-codex-gate                           │
+│   /review-gate ──►  cross-model 3-pass review (default-on)              │
+│                    skip with --no-review-gate                           │
 │   /ship   ──►  PR + staging deploy                                     │
 │   /canary ──►  production monitor + rollback                           │
 │                                                                        │

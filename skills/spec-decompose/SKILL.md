@@ -46,7 +46,7 @@ This is a hard requirement — the suspicious-output check in Step 7 will fail t
 
 - After every implementation phase (Setup, US1…USn, Integration)
 - NOT after read-only or planning phases (Research, Architecture Review)
-- NOT after Staging/Production/Rollback phases (those use canary/smoke, not codex-gate)
+- NOT after Staging/Production/Rollback phases (those use canary/smoke, not review-gate)
 - Always the LAST task in the phase before phase boundary comment
 
 ### Example tasks.md phase structure
