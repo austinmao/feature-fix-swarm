@@ -147,7 +147,9 @@ for _cand in \
   [ -f "$_cand" ] && MANIFEST_PY="$_cand" && break
 done
 MANIFEST=".feature-fix-swarm/agents.json"
-if [ ! -f "$MANIFEST" ] && [ -n "$MANIFEST_PY" ]; then
+# ALWAYS rescan (codex v3.19 round 1 MED: only-if-missing left renamed/removed
+# agents validating against stale data) — scan is cheap + idempotent
+if [ -n "$MANIFEST_PY" ]; then
   python3 "$MANIFEST_PY" scan --repo . --out "$MANIFEST" || true   # /agents-init inline
 fi
 ```

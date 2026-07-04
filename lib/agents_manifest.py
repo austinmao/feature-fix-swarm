@@ -78,7 +78,10 @@ def classify(name: str, description: str = "") -> str:
 
 
 def _parse_frontmatter(path: Path) -> dict:
-    """Minimal frontmatter reader: name/description between the first two ---."""
+    """Minimal frontmatter reader: name/description between the first two ---.
+
+    An UNCLOSED block yields nothing (codex v3.19 round 1: without this, body
+    text `name: planner` in a fence-less file injects/shadows an agent)."""
     fields: dict[str, str] = {}
     try:
         lines = path.read_text(errors="replace").splitlines()
@@ -86,20 +89,31 @@ def _parse_frontmatter(path: Path) -> dict:
         return fields
     if not lines or lines[0].strip() != "---":
         return fields
+    closed = False
     for line in lines[1:200]:
         if line.strip() == "---":
+            closed = True
             break
         m = FRONTMATTER_FIELD.match(line)
         if m:
             fields[m.group(1)] = m.group(2).strip().strip('"').strip("'")
-    return fields
+    return fields if closed else {}
 
 
 def discover_local_agents(repo: Path) -> list[dict]:
     agents = []
     root = repo / ".claude" / "agents"
     if root.is_dir():
+        root_resolved = root.resolve()
         for f in sorted(root.rglob("*.md")):
+            # codex v3.19 round 1 (HIGH): rglob follows symlinks — refuse any
+            # entry that resolves outside the roster tree (pwn.md -> /etc/passwd)
+            try:
+                f.resolve().relative_to(root_resolved)
+            except ValueError:
+                print(f"WARNING: skipping {f} — resolves outside {root}",
+                      file=sys.stderr)
+                continue
             fm = _parse_frontmatter(f)
             if fm.get("name"):
                 agents.append({"name": fm["name"],
@@ -153,9 +167,23 @@ def build_manifest(repo: Path) -> dict:
 
     def add(name: str, description: str, source: str) -> None:
         name = normalize_name(name)
-        if name and name not in entries:
-            entries[name] = {"name": name, "description": description,
-                             "source": source}
+        if not name:
+            return
+        if name in entries:
+            # codex v3.19 round 1 (MED): dedup was silent first-wins. Same slug +
+            # same description = same agent mirrored across sources (fine, quiet).
+            # Differing descriptions = possible collision of DISTINCT agents —
+            # warn loudly; first source still wins (discovery order is the contract).
+            prior = entries[name]
+            if description and prior["description"] and \
+                    description.strip().lower() != prior["description"].strip().lower():
+                print(f"WARNING: roster collision on '{name}': keeping "
+                      f"{prior['source']} entry; {source} entry has a different "
+                      f"description — rename one if they are distinct agents",
+                      file=sys.stderr)
+            return
+        entries[name] = {"name": name, "description": description,
+                         "source": source}
 
     for a in discover_local_agents(repo):
         add(a["name"], a["description"], a["source"])
@@ -223,7 +251,10 @@ def check_tasks(manifest_path: Path, tasks_path: Path) -> tuple[bool, list[str]]
 
     unknown = []
     for tag in AGENT_TAG_PAT.findall(text):
-        if tag in known or tag.split("/")[-1] in known:
+        # codex v3.19 round 1 (MED): grammar allows at most ONE slash (dept/role);
+        # '..' or deeper paths must FAIL, never pass via last-segment match.
+        malformed = ".." in tag or tag.count("/") > 1
+        if not malformed and (tag in known or tag.split("/")[-1] in known):
             continue
         if tag not in unknown:
             unknown.append(tag)

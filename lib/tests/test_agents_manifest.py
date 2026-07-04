@@ -116,6 +116,68 @@ def test_manifest_deterministic_sorted(tmp_path):
     assert m1["all_agents"] == m2["all_agents"]
 
 
+# ------------------------------------------------- codex v3.19 round-1 hardening
+
+def test_scan_skips_symlinked_agent_files(tmp_path):
+    """codex HIGH: rglob follows symlinks — a crafted .claude/agents/pwn.md ->
+    /etc/passwd must NOT be read/ingested."""
+    target = tmp_path / "outside.md"
+    target.write_text("---\nname: evil-agent\ndescription: escaped\n---\n")
+    agents = tmp_path / ".claude/agents"
+    agents.mkdir(parents=True)
+    (agents / "pwn.md").symlink_to(target)
+    m = am.build_manifest(tmp_path)
+    assert "evil-agent" not in m["all_agents"]
+
+
+def test_scan_skips_symlinked_agent_dirs(tmp_path):
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "evil.md").write_text("---\nname: evil-dir-agent\ndescription: x\n---\n")
+    agents = tmp_path / ".claude/agents"
+    agents.mkdir(parents=True)
+    (agents / "sub").symlink_to(outside)
+    m = am.build_manifest(tmp_path)
+    assert "evil-dir-agent" not in m["all_agents"]
+
+
+def test_unclosed_frontmatter_rejected(tmp_path):
+    """codex MED: file with opening --- but no closing fence must not inject
+    body text as frontmatter."""
+    write(tmp_path / ".claude/agents/bad.md",
+          "---\nsome text\nmore body\nname: injected-agent\nno closing fence anywhere\n")
+    m = am.build_manifest(tmp_path)
+    assert "injected-agent" not in m["all_agents"]
+
+
+def test_check_rejects_dotdot_and_deep_slash_tags(tmp_path):
+    """codex MED: [agent:../../coder] must FAIL, not pass via last-segment match.
+    Grammar allows at most one slash (dept/role)."""
+    manifest = am.build_manifest(tmp_path)
+    mf = tmp_path / "agents.json"
+    mf.write_text(json.dumps(manifest))
+    tasks = tmp_path / "tasks.md"
+    tasks.write_text("- [ ] T001 [agent:../../coder] x\n"
+                     "- [ ] T002 [agent:a/b/coder] y\n")
+    ok, unknown = am.check_tasks(mf, tasks)
+    assert not ok
+    assert "../../coder" in unknown
+    assert "a/b/coder" in unknown
+
+
+def test_dedup_collision_warns_on_conflicting_description(tmp_path, capsys):
+    """codex MED: silent first-wins dedup — same slug from two sources with
+    DIFFERENT descriptions must emit a stderr warning (still dedupes)."""
+    write(tmp_path / ".claude/agents/a.md",
+          "---\nname: brand-designer\ndescription: visual identity work\n---\n")
+    write(tmp_path / ".codex/agents/a.toml",
+          'name = "Brand Designer"\ndescription = "completely different agent purpose"\n')
+    m = am.build_manifest(tmp_path)
+    assert m["all_agents"].count("brand-designer") == 1
+    err = capsys.readouterr().err
+    assert "brand-designer" in err and "collision" in err.lower()
+
+
 # ---------------------------------------------------------------- check
 
 def test_check_valid_tags_pass(tmp_path):
