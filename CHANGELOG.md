@@ -55,6 +55,19 @@ does the same end-to-end from a free-text instruction.
   (hooks_pre/post-task, model-route/outcome, session_save/restore, agentdb,
   hive-mind QA) + explicit NOT-adopted line (daa_*, autopilot_*, neural_*,
   workflow_execute, agent_execute) so future sessions don't cargo-cult.
+- **Independent-review remediation (pre-merge):** opus tester found a CRITICAL
+  RUN_ID seam break — feature-implement never set the ledger key and overloaded
+  `$RUN_ID` with a run-state UUID, so grants written by feature-spec/task-swarm
+  under `spec-NNN` were unreadable (autonomous runs refused to start or stalled
+  every ship/canary gate). Fixed: `RUN_ID="spec-${SPEC_ID%%-*}"` at flag-parse
+  (bare-numeric normalized in all three skills), run-state ids renamed
+  `AUDIT_RUN_ID`, autonomous checks routed through resolved `$GATES_PY`,
+  resolvers inlined in feature-spec/task-swarm, agents-init resolver gained the
+  setup.sh-installed path. codex round 1 (FAIL→fixed): symlink-escape refusal in
+  the roster scan (HIGH), unclosed-frontmatter injection killed, `[agent:]` tag
+  grammar rejects `..`/deep slashes, same-source collision warning (cross-source
+  mirror dedup stays silent), spec-decompose always rescans the roster. Suite
+  92 → 114 tests.
 
 ## v3.18.0 — Autonomy grant ledger + preflight (2026-07-04)
 
