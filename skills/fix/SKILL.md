@@ -279,6 +279,12 @@ Read the affected files listed in the fix plan, then read CLAUDE.md for project 
 4. Report SUCCESS with: files changed, test file path, one-line summary
    Or FAILURE with: what you tried, what blocked you
 
+## Return contract (build)
+Report <=20 lines: what changed (files + line ranges), what you ran to
+verify, pass/fail. Test output: failures only; passing is one line
+('N passed'). Never paste file contents — cite file:line. Your final
+message IS the report; a wall of raw output is a failed task.
+
 ## Absolute rules
 - Do NOT modify files outside your fix plan
 - Do NOT commit or push

@@ -136,3 +136,73 @@ def test_depends_on_round_trip() -> None:
     assert tasks[0]["depends_on"] == ["T010", "T011"]
     assert tasks[1]["depends_on"] == ["T042"]
     assert tasks[1]["qa_dims"] == ["review-gate"]
+
+
+# ── v3.16.0: return contracts + escalation ladder ────────────────────────────
+
+def test_parse_explicit_return_annotation() -> None:
+    content = """# Tasks
+
+## Phase 1: Setup
+
+- [ ] T001 [US1] [model:haiku] [return:deep] Audit config drift.
+"""
+    tasks = dispatch.parse_tasks_md(content)
+    assert tasks[0]["return_contract"] == "deep"
+    # annotation stripped from description
+    assert "[return:" not in tasks[0]["description"]
+
+
+def test_return_contract_defaults_derive_from_model_tier() -> None:
+    content = """# Tasks
+
+## Phase 1: Setup
+
+- [ ] T001 [model:haiku] Scout the repo.
+- [ ] T002 [model:sonnet] Implement route.
+      Depends-on: T001
+- [ ] T003 [model:opus] Deep security review.
+      Depends-on: T002
+- [ ] T004 [model:gpt-5.4-mini] Scout logs.
+- [ ] T005 [model:gpt-5.5] Deep audit.
+"""
+    tasks = dispatch.parse_tasks_md(content)
+    by_id = {t["id"]: t["return_contract"] for t in tasks}
+    assert by_id == {
+        "T001": "scout",
+        "T002": "build",
+        "T003": "deep",
+        "T004": "scout",
+        "T005": "deep",
+    }
+
+
+def test_return_contract_unknown_model_defaults_to_build() -> None:
+    content = """# Tasks
+
+## Phase 1: X
+
+- [ ] T001 [model:fable] Judge the tradeoff.
+"""
+    tasks = dispatch.parse_tasks_md(content)
+    assert tasks[0]["return_contract"] == "build"
+
+
+def test_return_contract_text_exists_for_all_kinds() -> None:
+    for kind in ("scout", "build", "deep"):
+        text = dispatch.RETURN_CONTRACTS[kind]
+        assert "line" in text.lower()          # names a line bound
+        assert "fail" in text.lower()          # failures-only rule present
+
+
+def test_escalate_model_walks_tiers_host_neutral() -> None:
+    # anthropic family
+    assert dispatch.escalate_model("haiku") == "sonnet"
+    assert dispatch.escalate_model("sonnet") == "opus"
+    assert dispatch.escalate_model("opus") is None      # top tier: no escalation
+    # codex family stays in-family
+    assert dispatch.escalate_model("gpt-5.4-mini") == "gpt-5.4"
+    assert dispatch.escalate_model("gpt-5.4") == "gpt-5.5"
+    assert dispatch.escalate_model("gpt-5.5") is None
+    # unknown model: no ladder
+    assert dispatch.escalate_model("fable") is None
