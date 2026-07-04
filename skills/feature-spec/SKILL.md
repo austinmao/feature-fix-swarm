@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 1.3.0
+version: 1.4.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -340,6 +340,50 @@ also emits `specs/${SPEC_ID}/scenarios.md` (BDD Given/When/Then with stable
 `specs/${SPEC_ID}/design-intent.md`. Verify both exist for browser-touchable
 specs — the phase QA gates (`[qa:browser]`/`[qa:design]`) consume them; a
 browser-touchable spec without scenarios.md ships un-runthrough-able tasks.
+
+### Step 4.5 — OpenWiki planned-change note (v1.4.0, conditional — fail-soft)
+
+If the consumer repo keeps a living wiki (`openwiki/` at repo root), record the
+spec's planned change on the affected wiki page so the wiki's Planned-change
+rows always mirror in-flight specs. Repos WITHOUT `openwiki/` are completely
+unaffected — the step is a silent exit-0 no-op (FR-012).
+
+1. **Map the spec to a page (LLM, best-effort):** from the spec title + the
+   plan's touched paths, pick the closest `openwiki/subsystems/<page>.md` (or
+   domain page). Export it as `WIKI_PAGE` (path relative to `openwiki/`). No
+   confident mapping → leave `WIKI_PAGE` empty; the block falls back to
+   `openwiki/quickstart.md`.
+2. **Run the note block** with `SPEC_ID`, `SPEC_TITLE`, `WIKI_PAGE`,
+   `CHANGED_PATHS` (space-separated plan paths) in the environment:
+
+<!-- openwiki-wiring:spec-note:begin -->
+```bash
+# fail-soft everywhere: wiki note-taking must NEVER block the spec pipeline
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -d "$ROOT/openwiki" ] || exit 0   # consumer repo without a wiki: silent no-op
+{
+  # sanitize the LLM-produced mapping: traversal/absolute paths are treated as
+  # unmappable — this block must never write outside openwiki/
+  case "${WIKI_PAGE:-}" in *..*|/*) WIKI_PAGE="" ;; esac
+  TARGET="$ROOT/openwiki/${WIKI_PAGE:-}"
+  if [ -z "${WIKI_PAGE:-}" ] || [ ! -f "$TARGET" ]; then
+    TARGET="$ROOT/openwiki/quickstart.md"   # unmappable page → quickstart fallback
+  fi
+  [ -f "$TARGET" ] || exit 0
+  grep -q '^## Planned changes' "$TARGET" 2>/dev/null \
+    || printf '\n## Planned changes\n\n' >> "$TARGET"
+  printf -- '- spec-%s: %s — paths: %s (noted %s)\n' \
+    "${SPEC_ID:-unknown}" "${SPEC_TITLE:-untitled}" \
+    "${CHANGED_PATHS:-tbd}" "$(date +%Y-%m-%d)" >> "$TARGET"
+  echo "openwiki: planned-change note -> ${TARGET#"$ROOT"/}"
+} 2>/dev/null || echo "openwiki: note skipped (write failed) — continuing" >&2
+exit 0
+```
+<!-- openwiki-wiring:spec-note:end -->
+
+The consumed row is later folded into Reality by `/openwiki-update` when the
+spec's PR merges. Never edit Vision/Gap layers here — this step only appends
+Planned-change rows.
 
 ### Step 5 — preflight (v1.2.0, DEFAULT — skip only with --no-preflight)
 

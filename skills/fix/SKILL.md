@@ -580,6 +580,12 @@ fi
 Next: /ship to create PR with the fix
 ```
 
+> **OpenWiki wiring — not applicable here (v3.21.0):** `/fix` never creates PRs
+> itself (PR creation is delegated to `/ship`, line above). The conditional
+> openwiki update/staging steps live where PRs are born — `feature-spec`
+> Step 4.5 (planned-change note) and `feature-implement` Step 10 item 2
+> (ship-stage) — so this skill intentionally carries none.
+
 ## Step 6b: Store fix pattern (learning system)
 
 After a successful fix, store the pattern so future similar bugs are resolved faster. This is the feedback loop that makes the system smarter over time.
