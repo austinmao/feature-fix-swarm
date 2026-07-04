@@ -216,6 +216,36 @@ task: `[agent:test-automator] [qa:e2e]`, description derived from the spec's BDD
 Given/When/Then scenarios for that story. A story phase with no e2e task fails
 `gates.py analyze` and `/feature-implement` will refuse to start.
 
+## BDD scenarios file (MANDATORY when any story is browser-touchable)
+
+Alongside tasks.md, write `specs/NNN/scenarios.md`: one `## US<N>-S<M>: <title>`
+section per scenario with Given/When/Then bullets, covering every user-facing
+flow — page loads AND functional behavior (buttons, forms, auth, navigation,
+error states). Stable IDs: `US1-S1`, `US1-S2`, `US2-S1`… The phase browser
+gate executes these scenarios 1:1 as recorded runthrough steps, and
+`lib/runtime_proof.py skeleton` derives its proof template from this file.
+Title containing "visual" or "design" marks a visual scenario.
+
+## Per-phase browser gate task (MANDATORY for web-touching phases, v3.20.0)
+
+Every phase whose tasks touch web surfaces (pages, components, CSS, API
+routes, emails) MUST include, after the e2e smoke task and before the
+review-gate task, a browser-proof gate task tagged `[qa:browser]`:
+
+```
+- [ ] T### [US1] [model:sonnet thinking:med] [agent:test-automator] Browser-proof gate — run US1 scenarios (specs/NNN/scenarios.md) in a real browser via the resolved driver; write .ralph/<phase>/proof.json. Gate: python3 lib/gates.py run-gate T### -- python3 lib/runtime_proof.py verify .ralph/<phase>/proof.json [qa:browser]
+```
+
+This is what prevents "it 200s" from counting as done: the checkbox can only
+flip when the proof bundle (rendered-DOM assertion, final URL, console read,
+interaction count, fresh screenshot) survives verification.
+
+Additionally, phases touching **visual** surfaces (components/pages/CSS/
+emails/templates) MUST tag their e2e smoke or browser gate task with
+`[qa:design]` so the design QA dimension runs — grading against
+`specs/NNN/design-intent.md` when the plan carried a design review
+(`/plan-design-review` report), else against the repo's DESIGN.md/tokens.
+
 ## Phase structure (required)
 
 Produce tasks.md in this exact phase sequence:
@@ -318,10 +348,11 @@ TDD is non-negotiable: tests come before implementation. Implementation tasks ha
 
 ## QA Dimensions
 
-Each task may include a `[qa:unit,integration,e2e,review,security]` annotation specifying which QA dimensions run after the phase containing that task completes. This is informational — the QA swarm reads it to decide what to check.
+Each task may include a `[qa:unit,integration,e2e,review,security,browser,design]` annotation specifying which QA dimensions run after the phase containing that task completes. This is informational — the QA swarm reads it to decide what to check. `browser` = evidence-backed real-browser runthrough of the story's scenarios (proof.json verified by `lib/runtime_proof.py`); `design` = visual review of changed surfaces against design-intent/tokens.
 
 **Defaults (when no [qa:] annotation):**
 - Tasks touching TypeScript/JavaScript/Python files: `[qa:e2e,review,security]` (unit + integration run automatically via deterministic hooks)
+- Tasks touching UI surfaces (components/pages/CSS/emails/templates): `[qa:e2e,browser,design,review]` (real-browser proof + visual review are NOT optional for UI work)
 - Tasks touching only config/docs/SKILL.md: `[qa:review]` (only code review, no tests)
 
 **When to customize:**

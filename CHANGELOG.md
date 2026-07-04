@@ -6,6 +6,74 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.20.0 — Runtime-proof phase QA: evidence-backed browser runthroughs + design review (2026-07-04)
+
+Kills the "agent says it 200s, browser shows a 404" failure class. Browser and
+design QA verdicts are now evidence-backed at the script layer — an agent's
+"pass" without a verified proof bundle is rejected. Full doc:
+`docs/browser-proof.md`.
+
+### Added
+- `lib/runtime_proof.py` — proof.json bundle verifier (completion authority
+  for browser QA). Checks defeat named anti-patterns: curl-200-as-proof
+  (content_assert + dom_excerpt required), soft-404 (marker scan on rendered
+  DOM), wrong-page screenshot (url_final vs expect_url), post-hydration death
+  (console_errors present + empty), static-frame-as-works (interactions >= 1
+  for functional scenarios), stale/absent artifacts (screenshot exists +
+  non-empty + fresh), self-report tier (`--strict` / `RUNTIME_PROOF_STRICT=1`
+  rejects driver=agent). Canary driver cross-checks the session
+  results.json. `skeleton` subcommand emits UNFILLED templates from
+  scenarios.md. 42 pytest, RED-first.
+- `scripts/browser-proof.sh` — web-touch detection + base-url resolution
+  (QA_BASE_URL authoritative; probe list fallback) + driver ladder
+  (canary > playwright > agent, trust-descending). 12 bats.
+- `prompts/qa-design.md` — design QA agent: visual review at 1440 + 375
+  against `specs/NNN/design-intent.md` (extracted from the plan's
+  /plan-design-review report) or DESIGN.md tokens; writes design-proof.json.
+- `specs/NNN/scenarios.md` contract (spec-decompose v1.5.0) — BDD
+  Given/When/Then with stable `US<N>-S<M>` IDs covering functional flows
+  (buttons, forms, auth, navigation), executed 1:1 by the phase browser gate.
+- Per-phase `[qa:browser]` gate task in the decompose grammar — checkbox only
+  flips on `gates.py run-gate T### -- python3 lib/runtime_proof.py verify`.
+- `[qa:design]` tag + UI-task QA default `[qa:e2e,browser,design,review]`.
+- `docs/browser-proof.md` — schema, driver ladder, anti-pattern table,
+  fail-not-skip semantics, OSS canary quickstart.
+
+### Changed
+- `scripts/qa-swarm.sh` — e2e dimension is now fail-not-skip: a web-touching
+  diff with no reachable app FAILS the phase (old behavior silently skipped
+  when :3000 didn't answer, letting UI phases pass QA with zero browser
+  verification). `QA_ALLOW_NO_SERVER=1` is the only waiver, explicit and
+  printed. New design dimension queued whenever the phase diff touches visual
+  surfaces (no longer gated on /design-html tasks only). New `--aggregate`
+  mode re-reads dim results without resetting them and REJECTS e2e/design
+  passes whose proof bundles fail verification. 10 bats.
+- `feature-implement` v1.13.0 — Step 5.5 rewired: browser-proof resolution
+  runs BEFORE the QA swarm; qa-design is a 4th hive agent on UI phases
+  (maker/checker: QA agents are fresh-context evaluators, never the
+  implementer); `qa-swarm.sh --aggregate` is MANDATORY after agent verdicts
+  in BOTH the hive and fallback paths (hive "pass" + aggregate exit 1 =
+  phase QA FAIL).
+- `spec-decompose` v1.5.0 — orchestrator merge contract emits scenarios.md +
+  per-phase browser gates + design-intent extraction from the plan's
+  GSTACK REVIEW REPORT.
+- `feature-spec` v1.3.0 — verifies scenarios.md/design-intent.md exist for
+  browser-touchable specs; preflight includes the qa-app-reachable probe when
+  tasks.md carries `[qa:browser]` (unattended runs never reach phase QA
+  without an app to verify against; prefer QA_BASE_URL = preview/prod build).
+- `prompts/qa-e2e.md` — rewritten as an evidence contract: BDD scenarios via
+  the resolved driver (canary sessions record trace/video/HAR/report.html),
+  observe-before-act, per-scenario url_final/content/console/interaction
+  capture, forbidden-moves list; silent scenario skips are FAILs.
+- `setup.sh` — installs browser-proof.sh, qa-design.md, runtime_proof.py.
+
+### Known limits
+- The orchestration seams (Step 5.5 markdown, decompose merge contract) are
+  outside pytest reach — pinned by the bats suites + skill-contract review.
+- Agent-driver evidence is only as honest as its captured fields; strict mode
+  (RUNTIME_PROOF_STRICT=1) is recommended for unattended runs where canary or
+  playwright is installed.
+
 ## v3.19.0 — Swarm decomposition + agent roster + autonomous two-command pipeline (2026-07-04)
 
 The pipeline collapses to two commands with ONE operator stop:

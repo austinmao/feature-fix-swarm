@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into specs/NNN/tasks.md via a ruflo specialist swarm (default: orchestrator + per-domain specialists drawn from the repo's agent roster) or single-planner fallback (--no-swarm), using the canonical shared model ladder (haiku/sonnet/opus, plus optional Claude-Code-native fable) + the exact-agent hybrid catalog decomposition prompt"
-version: "1.4.0"
+version: "1.5.0"
 allowed-tools:
   - Read
   - Write
@@ -221,6 +221,17 @@ writes `{OUTPUT_PATH}`. Merge contract (MANDATORY):
   /feature-implement's specialist spawning.
 - Apply review-gate placement (Step 6 of the template) + /design-html injection
   (Step 8 of the template).
+- **v1.5.0 — BDD scenarios + browser gates:** when any story is
+  browser-touchable, ALSO write `specs/NNN/scenarios.md` (`## US<N>-S<M>:`
+  Given/When/Then per user-facing flow — functional behavior like buttons,
+  forms, auth included, not just page loads) and inject the per-phase
+  browser-proof gate task (`[qa:browser]`, gate =
+  `python3 lib/gates.py run-gate T### -- python3 lib/runtime_proof.py verify
+  .ralph/<phase>/proof.json`) per `prompts/decompose-spec.md` § "Per-phase
+  browser gate task". Tag visual-surface phases `[qa:design]`; if the plan
+  carries a `/plan-design-review` report (grep plan.md for
+  `GSTACK REVIEW REPORT`), extract its checklist into
+  `specs/NNN/design-intent.md` so the design QA dimension grades against it.
 Specialists PROPOSE, the orchestrator DECIDES — exactly one author of tasks.md.
 
 **4.5 — Learning hooks (fail-soft):** `mcp__ruflo__hooks_post-task` after the merge;
