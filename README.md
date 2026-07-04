@@ -231,14 +231,14 @@ Phase N tasks complete
   - `/fix` Step 3.5 — quick adversarial pass on the fresh fix (5-question concern list)
   - `/fix` Step 5.5 + `/feature` Step 5.5 — full `/review-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) on the final post-QA diff before /ship
 
-  Default-on in both `/feature` and `/fix`. Skip with `--no-codex-gate`. Skip-gracefully if the opposite-harness CLI is absent (warns, continues). Not strictly required but **strongly recommended** for any change with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts). ~$2 + ~13 min per gate run.
+  Default-on in both `/feature` and `/fix`. Skip with `--no-review-gate`. Skip-gracefully if the opposite-harness CLI is absent (warns, continues). Not strictly required but **strongly recommended** for any change with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts). ~$2 + ~13 min per gate run.
 
   ```bash
   npm install -g @openai/codex
   codex login
   ```
 
-  Also requires the `/review-gate` skill (3-pass orchestrator). Sourced from the same harness that ships gstack — see [gstack docs](https://github.com/garryslist/gstack) for installation. If `/review-gate` is not available in your skills, the gate step skips with a warning. `/codex-gate` remains a compatibility alias.
+  Also requires the `/review-gate` skill (3-pass orchestrator). Sourced from the same harness that ships gstack — see [gstack docs](https://github.com/garryslist/gstack) for installation. If `/review-gate` is not available in your skills, the gate step skips with a warning. `/review-gate` remains a compatibility alias.
 
 ## Installation
 
@@ -345,7 +345,7 @@ mkdir -p specs/042-user-auth
 | `--one` | /feature-implement | Execute only the next task |
 | `--plan` | /fix | Use /plan-eng-review for complex bugs |
 | `--no-qa` | /fix | Skip full /qa, only run /qa-only |
-| `--no-codex-gate` | /fix, /feature | Skip cross-model adversarial review (default-on) |
+| `--no-review-gate` | /fix, /feature | Skip cross-model adversarial review (default-on) |
 | `--scope=files` | /fix | Scope-lock investigation to specific files |
 
 ## The QA dimensions
@@ -405,7 +405,6 @@ feature-fix-swarm/
     spec-decompose/   spec to tasks.md decomposition (mandatory review-gate phase gates)
     plan-decompose/   description/plan to tasks.md — no speckit interview
     swarm/            ad-hoc task swarm — no spec dir required; classify + execute inline tasks
-    codex-gate/       compatibility alias for /review-gate
     review-gate/      host-neutral cross-model pre-merge review gate (3 passes)
     goal-wrap/        bundle current work into a tracked, anti-drift /goal prompt
   scripts/          8 bash scripts

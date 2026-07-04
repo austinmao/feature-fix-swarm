@@ -6,6 +6,32 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.15.1 — remove codex-gate compat alias (2026-07-04)
+
+### Removed
+- **`skills/codex-gate/`** — the compatibility alias for `/review-gate`. It was
+  a pure 5-line stub (no logic of its own) that existed only so pre-v3.13
+  task files, docs, and muscle memory naming `/codex-gate` would not break.
+  `/review-gate` has been the canonical host-neutral gate since v3.13.0; the
+  alias is no longer needed and its continued presence was a source of "which
+  one do I run" confusion.
+
+### Changed
+- `--no-codex-gate` / `--skip-codex-gate` flags (and their `NO_CODEX_GATE` /
+  `SKIP_CODEX_GATE` shell variables) renamed to `--no-review-gate` /
+  `--skip-review-gate` (`NO_REVIEW_GATE` / `SKIP_REVIEW_GATE`) in `skills/fix`
+  and `skills/feature` to match the gate's actual name.
+- `scripts/hooks/codex-gate-warn.sh` renamed to `scripts/hooks/review-gate-warn.sh`
+  (referenced from `skills/feature/SKILL.md` and `skills/fix/SKILL.md`).
+- `setup.sh`'s skill-install list no longer installs `codex-gate`.
+- Docs (`README.md`, `docs/commands.md`, `docs/pipeline.md`, `lib/run_state/README.md`,
+  `skills/spec-decompose/SKILL.md`) updated to reference `/review-gate` only.
+
+Historical inline comments citing `codex-gate` findings by round/PR number
+(e.g. "codex-gate round 3, PR #13") are left as-is — they document what a
+past review pass actually found under its name at the time, same as
+CHANGELOG entries above this one.
+
 ## v3.15.0 — proof artifacts, named deferrals, review anti-recursion scope (2026-07-03)
 
 ### Added

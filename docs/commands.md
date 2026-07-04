@@ -44,7 +44,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/plan-design-review` | UI/UX review (7 dimensions, interaction states, responsive) |
 | `/plan-devex-review` | Developer experience review (TTHW, error messages, CLI ergonomics) |
 | `/codex` | Run OpenAI Codex as outside voice for adversarial second opinion |
-| `/review-gate` | Cross-model 3-pass review (general + adversarial + test-coverage gap) on the staged diff. Canonical gate used by `/feature` Step 5.5 and `/fix` Step 5.5 before /ship. `/codex-gate` remains a compatibility alias. ~$2 + ~13 min. |
+| `/review-gate` | Cross-model 3-pass review (general + adversarial + test-coverage gap) on the staged diff. Canonical gate used by `/feature` Step 5.5 and `/fix` Step 5.5 before /ship. `/review-gate` remains a compatibility alias. ~$2 + ~13 min. |
 
 ## Ship + Deploy
 

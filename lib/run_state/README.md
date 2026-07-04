@@ -70,7 +70,7 @@ run-state audit "$RUN_ID" --kind fix \
 
 ```bash
 # Operator first sets a native /goal:
-#   /goal "spec NNN done: all phase audits pass, codex-gate PASS, canary 200"
+#   /goal "spec NNN done: all phase audits pass, review-gate PASS, canary 200"
 
 # Per-wedge audit between every implemented wedge:
 run-state audit "$RUN_ID" --kind phase \
@@ -110,7 +110,7 @@ Native /goal runs a small/fast model after each turn to check the condition. Whe
 
 Good conditions for our pipelines:
 
-- `/goal "specs/130 done: ~/.claude/state/audits.jsonl shows verdict=pass for every phase audit, codex-gate PASS, canary returns 200"`
+- `/goal "specs/130 done: ~/.claude/state/audits.jsonl shows verdict=pass for every phase audit, review-gate PASS, canary returns 200"`
 - `/goal "bug X fixed: latest run-state audit --kind fix verdict=pass, npx vitest run exits 0"`
 
 See https://code.claude.com/docs/en/goal for native /goal semantics.
@@ -119,4 +119,4 @@ See https://code.claude.com/docs/en/goal for native /goal semantics.
 
 - **Concurrent /feature and /fix**: no marker lock anymore. Each call creates its own `runs` row; SQLite handles concurrent writes via WAL. Operator must reference the right run_id in `/goal` conditions.
 - **codex CLI missing**: `audit` returns `verdict=error` with reasoning `"codex CLI not installed"`. State stays `active`; operator can install codex or use `--no-audit` on the skill.
-- **Audit false-pass risk**: codex may declare pass when a bug still exists in untouched code. Mitigation: aggressive prompt + 3-attempt cap (per skill convention). `/codex-gate` (Step 5.7 of /feature) is the final hard gate.
+- **Audit false-pass risk**: codex may declare pass when a bug still exists in untouched code. Mitigation: aggressive prompt + 3-attempt cap (per skill convention). `/review-gate` (Step 5.7 of /feature) is the final hard gate.
