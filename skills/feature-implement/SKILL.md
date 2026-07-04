@@ -32,6 +32,9 @@ allowed-tools:
 /feature-implement [NNN] --no-phase-audit      # skip per-phase codex hostile audit (audit only; QA still runs)
 /feature-implement [NNN] --qa-skip e2e         # skip specific QA dimensions
 /feature-implement [NNN] --qa-only review,security  # run only these QA dimensions
+/feature-implement [NNN] --autonomous  # unattended mode (v3.18.0): requires a fresh
+                                       # preflight PASS + reads the autonomy-grant
+                                       # ledger at operator gates instead of asking
 ```
 
 **v1.3.0 defaults:** Both `--ruflo` and `--auto` are on by default. You never need to pass them.
@@ -93,6 +96,43 @@ all enforced in the loop below:
    runner-executed `run-gate` evidence can flip a checkbox. `record-gate`/`record-red`
    now warn at runtime; they remain available for humans, never for the loop.
 
+## Autonomous mode (v3.18.0 — unattended runs)
+
+`--autonomous` front-loads every run-time decision to plan-time so an
+overnight run never stalls waiting for the operator. Two mechanical
+preconditions, both fail-closed:
+
+1. **Preflight proven.** Before the first spawn:
+   `python3 lib/gates.py check-preflight "$RUN_ID"` must exit 0 — a recorded
+   PASSING `/preflight` run (< 24h old) covering the run's env vars + service
+   probes. Exit 1 → REFUSE to start:
+   `[feature-implement] ERROR: no fresh preflight for $RUN_ID — run /preflight first.`
+   Dying at 11pm while the operator is present beats stalling at 3am.
+
+2. **Gates read the ledger, never ask.** At every operator-gated action
+   (push, merge, deploy, flip, restart, secret-use, migrate — the typed
+   vocabulary in `/autonomy-grant`):
+
+   ```bash
+   if python3 lib/gates.py check-grant "$RUN_ID" --action "$ACTION"; then
+     # proceed; log the consumed grant + its artifact (sha/URL/PR#) in the report
+   else
+     python3 lib/gates.py pending "$RUN_ID" --action "$ACTION" \
+       --reason "unlisted gate hit mid-run"
+     # STOP this action path only — independent tasks continue; the final
+     # report lists pendings so the morning resume is one `grant` command
+   fi
+   ```
+
+   Never bypass with prose reasoning ("the operator clearly meant to allow
+   this") — an unlisted action is by definition unreviewed. Never re-ask for
+   a granted action — that is the interruption this mode exists to remove.
+
+Without `--autonomous`, behavior is unchanged: operator gates prompt as
+before. `SKIP_OPERATOR_GATES=1` (blanket, no floor) remains available for
+trusted CI but is NOT what this mode does — the ledger keeps the
+novel-action safety floor.
+
 ## Workflow
 
 ### Step 1: Resolve spec directory
@@ -106,6 +146,7 @@ ONE_TASK=0           # --one opts into single-task mode
 # to native Agent (debugging only — logs WARNING every spawn).
 USE_RUFLO=1
 RUFLO_REQUIRED="${RUFLO_REQUIRED:-1}"   # "1"=strict (default): hard-fail if ruflo unreachable; "0"=force native; "auto"=graceful fallback
+AUTONOMOUS=0         # v3.18.0: --autonomous opts into ledger-gated unattended mode
 # v1.3.0: auto mode is the default. Skips cost confirmation, runs without pauses.
 # Disable with --no-auto.
 AUTO_MODE=1
@@ -135,6 +176,7 @@ for arg in $(printf '%s\n' "$SPEC_ARG"); do
     --no-phase-audit)  PHASE_AUDIT=0 ;;
     --qa-skip=*)  QA_SKIP="${arg#--qa-skip=}" ;;
     --qa-only=*)  QA_ONLY="${arg#--qa-only=}" ;;
+    --autonomous) AUTONOMOUS=1 ;;    # v3.18.0: unattended; ledger-checked gates
     --resume)     : ;;   # handled in session checkpoint block
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac

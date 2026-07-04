@@ -27,6 +27,16 @@ Usage (inline heredoc in SKILL.md):
     python3 lib/gates.py proof run-42 T040 T041 --defer "live-send: no bot" \
                                                   # write proof-run-42.json;
                                                   # exit 1 on no-go verdict
+    python3 lib/gates.py grant run-42 --action push:origin/main \
+        --action merge:pr --ttl-hours 12   # operator pre-approval ledger
+    python3 lib/gates.py check-grant run-42 --action push:origin/main
+                                                  # exit 0 iff granted+unexpired
+    python3 lib/gates.py pending run-42 --action rotate:secret --reason "…"
+                                                  # unlisted gate → durable record
+    python3 lib/gates.py pending run-42           # list; exit 1 if any pending
+    python3 lib/gates.py preflight specs/NNN/preflight.json --run run-42
+                                                  # env+probe checks; fail closed
+    python3 lib/gates.py check-preflight run-42   # exit 0 iff recorded fresh pass
     python3 lib/gates.py record-red   T041 --exit 1 < red-run.log
     python3 lib/gates.py check-red    T041        # exit 0 iff RED proven
     python3 lib/gates.py scan-tamper  < diff.txt  # exit 1 + findings if hacked
@@ -508,6 +518,124 @@ def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
     return findings
 
 
+# ── Stream H: autonomy grant ledger + preflight (v3.18.0) ────────────────────
+# Front-load run-time decisions to plan-time so unattended runs never stall:
+# the operator approves a TYPED action list once (grant), the loop checks the
+# ledger mechanically (check-grant), unlisted gates are recorded for morning
+# resume (pending), and env/service requirements are proven reachable BEFORE
+# the run starts (preflight). Fail closed everywhere.
+
+ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S.*$")
+GRANT_DEFAULT_TTL_HOURS = 24.0
+
+
+def _now() -> float:
+    import time
+    return time.time()
+
+
+def grant_actions(store: Path, run_id: str, actions: list[str], *,
+                  ttl_hours: float = GRANT_DEFAULT_TTL_HOURS,
+                  granted_by: str = "operator") -> bool:
+    """Record operator-approved actions for a run. Actions must be typed
+    ('type:target', e.g. 'push:origin/main') — free prose never matches at
+    run time, so it is rejected here rather than silently failing at 3am."""
+    if not actions or any(not ACTION_PAT.match(a) for a in actions):
+        return False
+    granted_at = _now()
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        grants = auto.setdefault("grants", {})
+        for a in actions:
+            grants[a] = {
+                "granted_at": granted_at,
+                "expires_at": granted_at + ttl_hours * 3600,
+                "granted_by": granted_by,
+            }
+        # a grant resolves any matching pending record
+        auto["pending"] = [p for p in auto.get("pending", [])
+                           if p["action"] not in grants]
+        _save_store(store, data)
+    return True
+
+
+def check_grant(store: Path, run_id: str, action: str,
+                now: float | None = None) -> bool:
+    """Exit-code authority for the autonomous loop: True ONLY for an exact,
+    unexpired, run-bound grant. Everything else fails closed."""
+    entry = (_load_store(store).get("_autonomy", {})
+             .get(run_id, {}).get("grants", {}).get(action))
+    if not entry:
+        return False
+    return (now if now is not None else _now()) < entry.get("expires_at", 0)
+
+
+def record_pending(store: Path, run_id: str, action: str, reason: str) -> None:
+    """An unlisted gate hit mid-run: STOP, but leave a durable record so the
+    morning resume is one `grant` command (long-run-continuity port)."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        pending = auto.setdefault("pending", [])
+        if not any(p["action"] == action for p in pending):
+            pending.append({"action": action,
+                            "reason": sanitize_reason(reason),
+                            "recorded_at": _now()})
+        _save_store(store, data)
+
+
+def list_pending(store: Path, run_id: str) -> list[dict]:
+    return list(_load_store(store).get("_autonomy", {})
+                .get(run_id, {}).get("pending", []))
+
+
+def preflight_check(requirements: list[dict], timeout: int = 30) -> dict:
+    """Prove env vars present and services reachable BEFORE an unattended run.
+    Env checks report presence only — a secret value never enters the result.
+    Probes execute for real (exit 0 = reachable). Empty manifest fails: an
+    unattended run with nothing declared is undeclared, not requirement-free."""
+    results: list[dict] = []
+    for req in requirements:
+        kind, name = req.get("kind"), req.get("name", "")
+        if kind == "env":
+            ok = bool(os.environ.get(name))
+            detail = "present" if ok else "MISSING"
+        elif kind == "probe":
+            try:
+                proc = subprocess.run(req.get("cmd", "false"), shell=True,
+                                      capture_output=True, timeout=timeout)
+                ok = proc.returncode == 0
+                detail = f"exit {proc.returncode}"
+            except subprocess.TimeoutExpired:
+                ok, detail = False, f"timeout after {timeout}s"
+        else:
+            ok, detail = False, f"unknown kind: {kind}"
+        results.append({"kind": kind, "name": name, "ok": ok, "detail": detail})
+    return {"pass": bool(results) and all(r["ok"] for r in results),
+            "results": results, "checked_at": _now()}
+
+
+def record_preflight(store: Path, run_id: str, result: dict) -> None:
+    with _StoreLock(store):
+        data = _load_store(store)
+        data.setdefault("_autonomy", {}).setdefault(run_id, {})["preflight"] = {
+            "pass": result["pass"], "checked_at": result["checked_at"],
+            "results": result["results"]}
+        _save_store(store, data)
+
+
+def check_preflight(store: Path, run_id: str, *, max_age_hours: float = 24.0,
+                    now: float | None = None) -> bool:
+    """True ONLY for a recorded PASSING preflight fresh enough to trust."""
+    pf = (_load_store(store).get("_autonomy", {})
+          .get(run_id, {}).get("preflight"))
+    if not pf or not pf.get("pass"):
+        return False
+    age = (now if now is not None else _now()) - pf.get("checked_at", 0)
+    return age < max_age_hours * 3600
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _store_path() -> Path:
@@ -663,6 +791,62 @@ def main(argv: list[str]) -> int:
         for m in art["missing"]:
             print(f"  MISSING-EVIDENCE: {m}")
         return 0 if art["verdict"] == "go" else 1
+    if cmd == "grant":
+        run_id = args[0]
+        actions = [args[i + 1] for i, a in enumerate(args) if a == "--action"]
+        ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
+        if not grant_actions(store, run_id, actions, ttl_hours=ttl):
+            print("GRANT-REJECTED: actions must be typed 'type:target' "
+                  "(e.g. push:origin/main) and non-empty")
+            return 1
+        for a in actions:
+            print(f"GRANTED: {a} (run {run_id}, ttl {ttl}h)")
+        return 0
+    if cmd == "check-grant":
+        run_id, action = args[0], _flag(args, "--action")
+        if check_grant(store, run_id, action):
+            print(f"GRANTED: {action}")
+            return 0
+        print(f"NOT-GRANTED: {action} (run {run_id}) — record with "
+              f"`gates.py pending {run_id} --action '{action}' --reason …`, "
+              f"STOP, and wait for operator grant")
+        return 1
+    if cmd == "pending":
+        run_id = args[0]
+        action = _flag(args, "--action")
+        if action:
+            record_pending(store, run_id, action, _flag(args, "--reason"))
+            print(f"PENDING-RECORDED: {action} (run {run_id})")
+            return 0
+        pend = list_pending(store, run_id)
+        for p in pend:
+            print(f"PENDING: {p['action']} — {p['reason']}")
+        print("NO-PENDING" if not pend else
+              f"PENDING-COUNT: {len(pend)} — approve via `gates.py grant "
+              f"{run_id} --action <action>` then resume")
+        return 1 if pend else 0
+    if cmd == "preflight":
+        manifest = Path(args[0])
+        run_id = _flag(args, "--run", "default")
+        with open(manifest) as f:
+            requirements = json.load(f)
+        result = preflight_check(requirements)
+        record_preflight(store, run_id, result)
+        for r in result["results"]:
+            mark = "ok" if r["ok"] else "FAIL"
+            print(f"  [{mark}] {r['kind']}:{r['name']} — {r['detail']}")
+        print("PREFLIGHT-PASS" if result["pass"] else
+              "PREFLIGHT-FAIL: fix the failing requirements BEFORE starting "
+              "an unattended run")
+        return 0 if result["pass"] else 1
+    if cmd == "check-preflight":
+        run_id = args[0]
+        if check_preflight(store, run_id):
+            print(f"PREFLIGHT-OK: {run_id}")
+            return 0
+        print(f"PREFLIGHT-STALE-OR-FAILED: {run_id} — re-run "
+              f"`gates.py preflight <manifest> --run {run_id}`")
+        return 1
     if cmd == "analyze":
         with open(args[0]) as f:
             spec = f.read()

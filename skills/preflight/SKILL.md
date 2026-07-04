@@ -1,0 +1,73 @@
+---
+name: preflight
+description: "Prove every env var, secret, and service the run will need is present and reachable BEFORE starting an unattended or overnight run. Use at the planning stage — after decompose, before /feature-implement — so the run never stalls at 3am on a missing variable or dead endpoint."
+version: "1.0.0"
+---
+
+# /preflight
+
+An unattended run that stops on a missing env var wasted the whole night.
+Requirements are proven at plan time — while the operator is still present —
+never discovered at run time.
+
+## When to run
+
+- Before any `--auto` / `--autonomous` `/feature-implement` run.
+- Before an overnight or operator-absent run of any kind.
+- After decompose, when the task list makes the runtime footprint knowable.
+
+## Procedure
+
+1. **Author the manifest** — `specs/NNN/preflight.json`. Enumerate what the
+   RUN will touch, not what the repo could touch:
+   - every env var / secret name the tasks read (`process.env.*`,
+     `os.environ`, `doppler secrets get` names) — scan the diff-scope AND the
+     plan's deploy/QA steps;
+   - every external service the run must reach (DB, gateway, deploy target,
+     MCP server), each as a cheap real probe.
+
+   ```json
+   [
+     {"kind": "env",   "name": "DATABASE_URL"},
+     {"kind": "env",   "name": "N8N_WEBHOOK_HMAC_SECRET"},
+     {"kind": "probe", "name": "db-reachable",
+      "cmd": "psql \"$DATABASE_URL\" -c 'select 1' -qtA"},
+     {"kind": "probe", "name": "gateway-health",
+      "cmd": "curl -sf -m 10 http://127.0.0.1:18789/health -o /dev/null"},
+     {"kind": "probe", "name": "vercel-auth", "cmd": "vercel whoami"}
+   ]
+   ```
+
+2. **Run it, fail closed:**
+
+   ```bash
+   python3 lib/gates.py preflight specs/NNN/preflight.json --run "$RUN_ID"
+   ```
+
+   Exit 1 on ANY missing var / failed probe / empty manifest. Fix while the
+   operator is present (fetch from Doppler, start the service, re-auth), then
+   re-run until `PREFLIGHT-PASS`.
+
+3. **The loop verifies mechanically.** An unattended start requires
+   `gates.py check-preflight "$RUN_ID"` → exit 0 (recorded PASS, < 24h old).
+   No fresh pass, no unattended run.
+
+## Rules
+
+- **Env checks are presence-only.** A secret VALUE never appears in the
+  manifest, the output, or the evidence store — names only.
+- **Probes are real executions**, not greps. "The var is set" does not prove
+  the service answers; probe the service.
+- **Empty manifest fails.** A run with nothing declared is undeclared, not
+  requirement-free.
+- **Scan is additive, never authoritative.** Grepping the diff for env reads
+  seeds the manifest; the authored manifest is the contract.
+
+## Anti-patterns
+
+- Skipping preflight because "the last run worked" — env drifts between runs
+  (rotated secret, sleeping service, expired auth).
+- Probing with `echo $VAR` — leaks the value AND proves nothing about
+  reachability.
+- Declaring only the happy path. If the plan has a deploy step, the deploy
+  target's auth belongs in the manifest.

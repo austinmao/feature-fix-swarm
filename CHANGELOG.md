@@ -6,6 +6,32 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.18.0 — Autonomy grant ledger + preflight (2026-07-04)
+
+Front-load run-time decisions to plan-time so unattended runs never stall.
+Inspired by elias/fable-agent-orchestration `autonomous-finish-loop` +
+`long-run-continuity` (Apache-2.0).
+
+- **Autonomy grant ledger** (`gates.py grant` / `check-grant` / `pending`):
+  at plan approval the operator pre-approves the run's operator gates as
+  TYPED actions (`push:origin/main`, `deploy:vercel-web`, …). The loop checks
+  the ledger mechanically (exit code) instead of stopping to ask. Grants are
+  run-bound + TTL'd (default 24h), fail closed on expiry/mismatch. Unlisted
+  gates STOP and write a durable `pending` record so the morning resume is
+  one `grant` command. Free-prose actions rejected at grant time.
+- **Preflight** (`gates.py preflight` / `check-preflight` + `/preflight`
+  skill): prove env vars present (names only — secret values never enter the
+  store) and services reachable (real probes, not greps) BEFORE an unattended
+  run starts. Empty manifest fails. `check-preflight` requires a recorded
+  PASS < 24h old.
+- **`/autonomy-grant` skill**: gate enumeration → one-screen operator
+  approval → recorded grant → mechanical checks; typed action vocabulary;
+  novel-action safety floor kept (deliberately no wildcards).
+- **feature-implement `--autonomous`**: refuses to start without a fresh
+  preflight PASS; checks the ledger at every operator gate; logs consumed
+  grants + artifacts in the final report; pendings listed for resume.
+- setup.sh installs the two new skills (lever updated in same change).
+
 ## v3.17.0 — REFUTED outcome, verify-the-reviewer, WIP adoption (2026-07-04)
 
 Ported from elias/fable-agent-orchestration (git.wearein.space, Apache-2.0) —
