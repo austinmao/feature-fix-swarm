@@ -11,6 +11,8 @@ QA_SKIP=""
 QA_ONLY=""
 MAX_RETRIES=3
 RALPH_DIR=".ralph"
+AGGREGATE=0
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,6 +22,7 @@ while [[ $# -gt 0 ]]; do
     --qa-skip) QA_SKIP="$2"; shift 2 ;;
     --qa-only) QA_ONLY="$2"; shift 2 ;;
     --max-retries) MAX_RETRIES="$2"; shift 2 ;;
+    --aggregate) AGGREGATE=1; shift ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -44,6 +47,13 @@ should_run() {
 }
 
 RESULTS_FILE="$ARTIFACT_DIR/results.json"
+LLM_DIMS=("e2e" "review" "security" "design")
+
+# --aggregate: re-read existing ${dim}-result.json and enforce proof bundles,
+# WITHOUT re-running hooks or resetting LLM results back to "pending". The
+# orchestrator calls this after the QA agents have written their verdicts.
+if [ "$AGGREGATE" != "1" ]; then
+
 echo '{}' > "$RESULTS_FILE"
 
 # --- Deterministic hooks (no LLM, $0) ---
@@ -116,24 +126,53 @@ fi
 # These print their own [RALPH] status lines
 # Each reads its prompt from prompts/qa-*.md
 
-LLM_DIMS=("e2e" "review" "security")
+# qa-design trigger: only when the phase's diff touches visual surfaces.
+# (The old behavior gated design review on /design-html tasks only — ordinary
+# component/page/CSS work shipped with zero design review.)
+UI_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(emails|templates|styles?)/|(^|/)tailwind\.config\.'
+DESIGN_TRIGGER="no"
+for f in $DIFF_FILES; do
+  if echo "$f" | grep -qE "$UI_RE"; then DESIGN_TRIGGER="yes"; break; fi
+done
 
 for dim in "${LLM_DIMS[@]}"; do
   if should_run "$dim"; then
+    # qa-e2e: resolve browser context FIRST — a web-touching diff with no
+    # reachable app is a FAILURE, never a silent skip (v3.20.0).
+    if [ "$dim" = "e2e" ]; then
+      BP_RC=0
+      BP_OUT=$(bash "$SCRIPT_DIR/browser-proof.sh" --diff "$DIFF_FILES" 2>&1) || BP_RC=$?
+      echo "$BP_OUT" > "$ARTIFACT_DIR/browser-proof.txt"
+      if echo "$BP_OUT" | grep -q "BROWSER-PROOF: NOT-NEEDED"; then
+        echo "[RALPH] qa-e2e: SKIP (no web surfaces in diff)"
+        printf '{"e2e":"skip"}' > "$ARTIFACT_DIR/e2e-result.json"
+        continue
+      fi
+      if echo "$BP_OUT" | grep -q "BROWSER-PROOF: WAIVED"; then
+        echo "[RALPH] qa-e2e: SKIP — WAIVED explicitly (QA_ALLOW_NO_SERVER=1)"
+        printf '{"e2e":"skip"}' > "$ARTIFACT_DIR/e2e-result.json"
+        continue
+      fi
+      if [ "$BP_RC" -ne 0 ]; then
+        echo "[RALPH] qa-e2e: FAIL — web-touching diff, no reachable app (fail-not-skip)"
+        echo "$BP_OUT" | sed 's/^/[RALPH]   /'
+        printf '{"e2e":"fail"}' > "$ARTIFACT_DIR/e2e-result.json"
+        continue
+      fi
+    fi
+
+    # qa-design: only meaningful when visual surfaces changed
+    if [ "$dim" = "design" ] && [ "$DESIGN_TRIGGER" = "no" ]; then
+      echo "[RALPH] qa-design: SKIP (no visual surfaces in diff)"
+      printf '{"design":"skip"}' > "$ARTIFACT_DIR/design-result.json"
+      continue
+    fi
+
     PROMPT_FILE="prompts/qa-${dim}.md"
     if [ ! -f "$PROMPT_FILE" ]; then
       echo "[RALPH] qa-${dim}: SKIP (prompt file missing: $PROMPT_FILE)"
       printf '{"'$dim'":"skip"}' > "$ARTIFACT_DIR/${dim}-result.json"
       continue
-    fi
-
-    # qa-e2e: check dev server first
-    if [ "$dim" = "e2e" ]; then
-      if ! curl -sf http://localhost:3000 -o /dev/null 2>/dev/null; then
-        echo "[RALPH] qa-e2e: SKIP (no dev server at localhost:3000)"
-        printf '{"e2e":"skip"}' > "$ARTIFACT_DIR/e2e-result.json"
-        continue
-      fi
     fi
 
     echo "[RALPH] Queueing qa-${dim} (LLM, sonnet)..."
@@ -148,11 +187,53 @@ for dim in "${LLM_DIMS[@]}"; do
   fi
 done
 
+fi  # end of manifest-building (skipped under --aggregate)
+
 # --- Aggregate results ---
 echo ""
 echo "[RALPH] === Phase QA Summary: $PHASE ==="
 
 OVERALL="pass"
+
+# Browser/design "pass" verdicts are self-reports until the proof bundle
+# survives runtime_proof.py — an LLM agent claiming pass with no verified
+# evidence is REJECTED here (curl-200 / wrong-page / soft-404 defenses live
+# in the verifier, not in agent prose).
+# Resolution covers all three install shapes: canonical repo / vendored
+# packages/feature-fix-swarm (../lib), CWD lib/, and the ~/.claude install
+# (setup.sh puts runtime_proof.py under $HOME/.claude/lib/feature-fix-swarm/
+# while qa-swarm.sh lands in the project's scripts/ — ../lib doesn't exist).
+RP="$SCRIPT_DIR/../lib/runtime_proof.py"
+[ -f "$RP" ] || RP="lib/runtime_proof.py"
+[ -f "$RP" ] || RP="$HOME/.claude/lib/feature-fix-swarm/runtime_proof.py"
+VERIFY_ARGS=()
+# QA_SCENARIOS=specs/NNN/scenarios.md enforces coverage completeness — a
+# bundle proving one easy scenario while scenarios.md lists five is rejected.
+[ -n "${QA_SCENARIOS:-}" ] && VERIFY_ARGS+=(--scenarios "$QA_SCENARIOS")
+for dim in e2e design; do
+  rf="$ARTIFACT_DIR/${dim}-result.json"
+  [ -f "$rf" ] || continue
+  DSTATUS=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(list(d.values())[0])" "$rf" 2>/dev/null || echo "error")
+  if [ "$DSTATUS" = "pass" ]; then
+    PROOF="$ARTIFACT_DIR/proof.json"
+    KIND="functional"
+    if [ "$dim" = "design" ]; then
+      PROOF="$ARTIFACT_DIR/design-proof.json"
+      KIND="visual"
+    fi
+    # --kind pins the coverage requirement to SOURCE scenario kinds — a
+    # bundle self-declaring everything "visual" can't shrink what proof.json
+    # must cover (codex round, CRITICAL)
+    if ! python3 "$RP" verify "$PROOF" --kind "$KIND" \
+        ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"}; then
+      echo "[RALPH] qa-${dim}: self-reported pass REJECTED — proof bundle missing/invalid ($PROOF)"
+      # overwrite the result file itself — a stale {"dim":"pass"} must not
+      # survive for any downstream reader (adversarial round F5)
+      printf '{"%s":"fail"}' "$dim" > "$rf"
+      OVERALL="fail"
+    fi
+  fi
+done
 for f in "$ARTIFACT_DIR"/*-result.json; do
   [ -f "$f" ] || continue
   DIM=$(basename "$f" | sed 's/-result.json//')

@@ -480,10 +480,28 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
 
 # ── Stream G: spec/tasks coherence ───────────────────────────────────────────
 
-def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
+# Web-surface file paths in task lines (codex rounds 3+4). Must stay aligned
+# with scripts/browser-proof.sh WEB_RE — same web-touch contract at plan time
+# as at QA time, else a hooks/-only or route.ts-only phase demands browser
+# proof at QA with no scenarios.md to run. app/ + api/ are anchored to
+# path-with-extension so prose mentions ("the api/ contract") don't match.
+WEB_TASK_PATH_RE = re.compile(
+    r"\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)\b"
+    r"|(?:^|[\s(`'\"/])(?:pages|routes|components|emails|templates|public"
+    r"|hooks|stores?|styles?)/"
+    r"|(?:^|[\s(`'\"/])(?:app|api)/\S*\.[a-z]+\b"
+    r"|(?:^|[\s(`'\"])(?:tailwind|next|nuxt|vite|astro|svelte)\.config\.",
+    re.MULTILINE)
+
+
+def analyze_artifacts(spec_text: str, tasks_text: str,
+                      has_scenarios: bool = False) -> list[str]:
     """Cross-artifact consistency gate (spec-kit analyze analog).
     Every spec story needs tasks; every task story must exist in the spec;
-    every phase needs a review-gate task; every story phase needs an e2e task."""
+    every phase needs a review-gate task; every story phase needs an e2e task.
+    has_scenarios=True (specs/NNN/scenarios.md exists → browser-touchable
+    spec): every story phase must also carry a [qa:browser] runtime-proof
+    gate task — otherwise proof enforcement is opt-in prose (v3.20 F1)."""
     findings: list[str] = []
     spec_stories = set(re.findall(r"\bUS(\d+)\b", spec_text))
 
@@ -515,6 +533,29 @@ def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
         if is_story_phase and not any(
                 re.search(r"\[qa:[a-z0-9,-]*e2e", ln) for ln in lines):
             findings.append(f"{phase}: story phase has no e2e smoke task")
+        browser_lines = [ln for ln in lines
+                         if re.search(r"\[qa:[a-z0-9,-]*browser", ln)]
+        if has_scenarios and is_story_phase and not browser_lines:
+            findings.append(f"{phase}: browser-touchable spec (scenarios.md) "
+                            "but no [qa:browser] runtime-proof gate task")
+        for ln in browser_lines:
+            # substring "runtime_proof" is spoofable by a placeholder mention
+            # (codex round) — require the actual verify gate command
+            if not re.search(r"runtime_proof\.py\s+verify\b", ln):
+                findings.append(f"{phase}: [qa:browser] task lacks a "
+                                "runtime_proof.py verify gate command")
+    if not has_scenarios and re.search(r"\[qa:[a-z0-9,-]*browser", tasks_text):
+        findings.append("tasks carry [qa:browser] but specs/NNN/scenarios.md "
+                        "is missing — decompose must emit the BDD scenarios")
+    # codex round 3: a browser-touching plan that omits scenarios.md entirely
+    # must not slide through. Web-touch is detected from web-surface file
+    # paths named in the tasks themselves (UI extensions, UI dirs, framework
+    # configs — same signal family as scripts/browser-proof.sh WEB_RE).
+    # False positives just ask for scenarios.md, which is the safe direction.
+    if not has_scenarios and WEB_TASK_PATH_RE.search(tasks_text):
+        findings.append("tasks touch browser surfaces (web file paths) but "
+                        "specs/NNN/scenarios.md is missing — decompose must "
+                        "emit BDD scenarios + a [qa:browser] gate")
     return findings
 
 
@@ -871,7 +912,10 @@ def main(argv: list[str]) -> int:
             spec = f.read()
         with open(args[1]) as f:
             tasks = f.read()
-        findings = analyze_artifacts(spec, tasks)
+        # scenarios.md sibling of tasks.md marks the spec browser-touchable
+        has_scenarios = (
+            Path(args[1]).resolve().parent / "scenarios.md").is_file()
+        findings = analyze_artifacts(spec, tasks, has_scenarios=has_scenarios)
         for f in findings:
             print(f"ANALYZE: {f}")
         print("ANALYZE-PASS" if not findings else f"ANALYZE-FAIL: {len(findings)} findings")

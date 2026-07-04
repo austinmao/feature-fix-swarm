@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.12.2"
+version: "1.13.0"
 allowed-tools:
   - Read
   - Edit
@@ -874,63 +874,124 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    - If vitest available: `npx vitest run --changed` on files modified this phase
    - If pytest available: `pytest -x` on changed Python files
 
-2. **LLM QA swarm — hive-mind consensus** (~$0.15/phase):
+2. **Browser context resolution — BEFORE any LLM QA** (v3.20.0, $0):
 
-   Spawn 3 QA agents under Byzantine fault-tolerant consensus. If 1 of 3 agents is
-   confused or wrong, the consensus verdict still holds. Each dimension is an independent
-   broadcast; the hive aggregates verdicts across all agents before declaring pass/fail.
+   ```bash
+   mkdir -p ".ralph/${PHASE_SLUG}"
+   if ! bash scripts/browser-proof.sh --diff "$PHASE_DIFF_FILES" \
+        > ".ralph/${PHASE_SLUG}/browser-proof.txt" 2>&1; then
+     cat ".ralph/${PHASE_SLUG}/browser-proof.txt"
+     # NO-SERVER on a web-touching diff = phase QA FAIL (fail-not-skip).
+     # Enter the RALPH retry loop with dimension=e2e, finding="no reachable
+     # app". Fix = start the app or set QA_BASE_URL to a preview/prod URL
+     # (preview/prod preferred — dev servers mask build failures).
+     # QA_ALLOW_NO_SERVER=1 is the ONLY waiver, and it is recorded.
+   fi
+   # On success the file carries WEB-TOUCH:/DRIVER:/BASE-URL: directives that
+   # the QA agents read (canary > playwright > agent, trust-descending).
+   ```
+
+3. **LLM QA swarm — hive-mind consensus** (~$0.15-0.20/phase):
+
+   Spawn the QA agents under Byzantine fault-tolerant consensus. Each
+   dimension is an independent broadcast; the hive aggregates verdicts before
+   declaring pass/fail. **Maker/checker rule: QA agents are fresh-context
+   evaluators — never the agent that implemented the phase.**
 
    ```
-   # Detect /design-html tasks in this phase (before hive init)
-   PHASE_HAS_DESIGN_HTML=$(grep -A5 "^## Phase ${CURRENT_PHASE}[^0-9]" "$SPEC_DIR/tasks.md" 2>/dev/null | grep -c '/design-html' || echo "0")
+   # qa-design trigger: phase diff touches visual surfaces, OR the spec
+   # carries a design-intent contract extracted from the plan's
+   # /plan-design-review report (specs/NNN/design-intent.md)
+   UI_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(emails|templates)/'
+   PHASE_HAS_UI=$(echo "$PHASE_DIFF_FILES" | tr ' ' '\n' | grep -cE "$UI_RE" || echo "0")
 
-   # Init hive-mind for this phase's QA (3-agent core swarm; design review runs after, in orchestrator)
+   N_AGENTS=3; [ "$PHASE_HAS_UI" -gt 0 ] && N_AGENTS=4
+
    hiveId = mcp__ruflo__hive-mind_init({
      name: "qa-phase-" + CURRENT_PHASE + "-spec-" + SPEC_ID,
-     consensusThreshold: 0.67,    // 2-of-3 required
-     maxAgents: 3
+     consensusThreshold: 0.67,
+     maxAgents: N_AGENTS
    })
 
-   # Spawn 3 core QA agents concurrently
+   # Core QA agents (always)
    Task({ name: "qa-e2e",      model: "sonnet", run_in_background: true,
-          prompt: QA_E2E_PROMPT })
+          prompt: QA_E2E_PROMPT })      # prompts/qa-e2e.md — evidence-backed:
+                                        # writes .ralph/<phase>/proof.json
    Task({ name: "qa-review",   model: "sonnet", run_in_background: true,
           prompt: QA_REVIEW_PROMPT })
    Task({ name: "qa-security", model: "sonnet", run_in_background: true,
           prompt: QA_SECURITY_PROMPT })
+   # Design QA (when PHASE_HAS_UI) — prompts/qa-design.md drives the browser
+   # itself and writes .ralph/<phase>/design-proof.json; grades against
+   # specs/NNN/design-intent.md when present
+   if (PHASE_HAS_UI > 0)
+     Task({ name: "qa-design", model: "sonnet", run_in_background: true,
+            prompt: QA_DESIGN_PROMPT })
 
-   # Broadcast the phase diff to all 3 agents
+   # Broadcast the phase diff + resolved browser context to all agents
    mcp__ruflo__hive-mind_broadcast({
      hiveId: hiveId,
      message: { phase: CURRENT_PHASE, diff: PHASE_DIFF_FILES, spec_dir: SPEC_DIR,
+                browser_proof: ".ralph/" + PHASE_SLUG + "/browser-proof.txt",
+                scenarios: SPEC_DIR + "/scenarios.md",
                 qa_skip: QA_SKIP, qa_only: QA_ONLY }
    })
 
-   # Collect consensus verdict (waits for all 3)
    verdict = mcp__ruflo__hive-mind_consensus({
      hiveId: hiveId,
      question: "Did all required QA dimensions pass?"
    })
    # verdict.result: "pass" | "fail" | "inconclusive"
-   # verdict.details: per-dimension breakdown
 
-   # qa-design: orchestrator-level (Skill tool not available inside ruflo agents)
-   # Runs AFTER hive consensus, only when this phase had /design-html tasks
-   if (PHASE_HAS_DESIGN_HTML > 0 && verdict.result === "pass") {
-     Skill("design-review")   // visual audit of HTML produced in this phase
-     // design-review failure → same RALPH retry loop as hive failure
+   # Orchestrator-level gstack enhancement (Skill tool unavailable inside
+   # ruflo agents): when /design-review exists in this environment, ALSO run
+   # it on UI phases — its design-baseline.json artifacts strengthen the
+   # design-proof bundle. Optional; the qa-design agent is the portable path.
+   if (PHASE_HAS_UI > 0 && skillAvailable("design-review") && verdict.result === "pass") {
+     Skill("design-review")
    }
    ```
 
    Fallback to `bash scripts/qa-swarm.sh` if hive-mind MCP unavailable.
 
    Dimensions (skip/only controlled by QA_SKIP / QA_ONLY):
-   - **qa-e2e** (sonnet) — browser tests via $B if dev server detected (`curl -sf localhost:3000`)
+   - **qa-e2e** (sonnet) — REAL-browser runthroughs of `specs/NNN/scenarios.md`
+     BDD scenarios via the resolved driver (canary records trace/video/HAR;
+     playwright; agent-driven as last resort). Functional coverage — buttons,
+     forms, auth, navigation — not just page loads.
    - **qa-review** (sonnet) — code review on the diff (CRITICAL/HIGH = fail)
    - **qa-security** (sonnet) — OWASP scan on the diff (CRITICAL = fail)
-   - **qa-design** (orchestrator Skill call) — `/design-review` on HTML from `/design-html` tasks; runs after hive consensus, only if phase has `/design-html` tasks (Skill tool not available inside ruflo agents)
+   - **qa-design** (sonnet, UI phases) — visual review at 1440+375 against
+     `specs/NNN/design-intent.md` / DESIGN.md tokens (CRITICAL/HIGH = fail)
 
-3. **Aggregation**: ALL dimensions must pass (or hive verdict = "pass"). Any failure triggers:
+4. **Proof enforcement + aggregation** (MANDATORY, both paths): after the
+   agents report, run
+
+   ```bash
+   # --autonomous runs: export RUNTIME_PROOF_STRICT=1 first — unattended
+   # verification must reject driver=agent (self-reported evidence tier)
+   QA_SCENARIOS="$SPEC_DIR/scenarios.md" \
+   bash scripts/qa-swarm.sh --aggregate --phase "$CURRENT_PHASE" \
+     --diff "$PHASE_DIFF_FILES" --spec-dir "$SPEC_DIR"
+   ```
+
+   This re-reads `.ralph/<phase>/*-result.json` and REJECTS any e2e/design
+   "pass" whose proof bundle fails `python3 lib/runtime_proof.py verify` —
+   an agent claiming success without verified browser evidence (curl-200,
+   wrong-page screenshot, soft-404, unread console, zero interactions, stale
+   or non-image artifacts, a claimed driver that doesn't match the resolved
+   one, or a bundle covering fewer scenarios than scenarios.md defines)
+   fails here regardless of the hive verdict. A hive "pass" + aggregate
+   exit 1 = phase QA FAIL. Then record the browser gate into the evidence
+   ledger so the phase's `[qa:browser]` task checkbox is legal:
+
+   ```bash
+   python3 lib/gates.py run-gate T0XX -- \
+     python3 lib/runtime_proof.py verify ".ralph/${PHASE_SLUG}/proof.json" \
+       --scenarios "$SPEC_DIR/scenarios.md" --kind functional
+   ```
+
+   ALL dimensions must pass (hive verdict = "pass" AND aggregate exit 0). Any failure triggers:
    - Capture artifacts to `.ralph/P{N}/` (logs, screenshots, diff)
    - Invoke `/investigate` with scope locked to changed files
    - Apply fix via sub-agent with investigation report
@@ -938,7 +999,7 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    - Retry up to RALPH_MAX_RETRIES (default 3)
    - On final retry fail: mark all remaining phase tasks `[F]`, stop
 
-4. **Structured failure output** (printed to terminal on any QA fail):
+5. **Structured failure output** (printed to terminal on any QA fail):
    ```
    [RALPH] Phase {N} FAIL (retry {R}/{MAX})
      dimension: {dim}
@@ -948,7 +1009,7 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
      resume: /feature-implement {NNN} --resume
    ```
 
-5. **First-run banner** (shown once per session when QA_LOOP=1):
+6. **First-run banner** (shown once per session when QA_LOOP=1):
    ```
    [RALPH] QA loop enabled: 2 test hooks + 3 LLM agents run after each phase.
            Disable: --no-qa-loop | Skip dims: --qa-skip e2e,security

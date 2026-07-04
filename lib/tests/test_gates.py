@@ -1008,3 +1008,142 @@ def test_cli_grant_expiry_via_backdated_store(tmp_path) -> None:
     r = _sp.run(["python3", g, "check-grant", "r9", "--action", "push:x"],
                 capture_output=True, text=True, env=env)
     assert r.returncode == 1 and "NOT-GRANTED" in r.stdout
+
+
+# ── v3.20.0 adversarial round: F1 browser gate must be machine-required ─────
+
+TASKS_BROWSER_OK = """# Tasks
+## Phase 3 — US1
+- [ ] T001 [US1] [model:sonnet] [qa:e2e] [agent:test-automator] e2e smoke login
+- [ ] T002 [US1] [model:sonnet thinking:med] [agent:test-automator] Browser-proof gate — Gate: python3 lib/gates.py run-gate T002 -- python3 lib/runtime_proof.py verify .ralph/phase3/proof.json [qa:browser]
+- [ ] T003 [US1] [model:sonnet] [agent:ecc:code-reviewer] /review-gate — review Phase 3 [qa:review-gate]
+"""
+
+TASKS_NO_BROWSER_GATE = """# Tasks
+## Phase 3 — US1
+- [ ] T001 [US1] [model:sonnet] [qa:e2e] [agent:test-automator] e2e smoke login
+- [ ] T002 [US1] [model:sonnet] [agent:ecc:code-reviewer] /review-gate — review Phase 3 [qa:review-gate]
+"""
+
+TASKS_BROWSER_TAG_NO_VERIFY = """# Tasks
+## Phase 3 — US1
+- [ ] T001 [US1] [model:sonnet] [qa:e2e] [agent:test-automator] e2e smoke login
+- [ ] T002 [US1] [model:sonnet] [agent:test-automator] browser things [qa:browser]
+- [ ] T003 [US1] [model:sonnet] [agent:ecc:code-reviewer] /review-gate — review Phase 3 [qa:review-gate]
+"""
+
+SPEC_ONE_STORY = "# Spec\n## US1: login\n"
+
+
+def test_analyze_requires_browser_gate_when_scenarios_exist() -> None:
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, TASKS_NO_BROWSER_GATE,
+                                       has_scenarios=True)
+    assert any("qa:browser" in f for f in findings)
+
+
+def test_analyze_browser_gate_satisfies_rule() -> None:
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, TASKS_BROWSER_OK,
+                                       has_scenarios=True)
+    assert findings == []
+
+
+def test_analyze_browser_tag_without_runtime_proof_verify_flagged() -> None:
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY,
+                                       TASKS_BROWSER_TAG_NO_VERIFY,
+                                       has_scenarios=True)
+    assert any("runtime_proof" in f for f in findings)
+
+
+def test_analyze_browser_tag_without_scenarios_flagged() -> None:
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, TASKS_BROWSER_OK,
+                                       has_scenarios=False)
+    assert any("scenarios.md" in f for f in findings)
+
+
+def test_analyze_no_scenarios_no_browser_tasks_clean() -> None:
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, TASKS_NO_BROWSER_GATE,
+                                       has_scenarios=False)
+    assert findings == []
+
+
+def test_analyze_browser_gate_substring_spoof_rejected() -> None:
+    # codex round: bare "runtime_proof" substring must not satisfy the rule —
+    # the line must carry an actual runtime_proof.py verify gate command
+    tasks = """# Tasks
+## Phase 3 — US1
+- [ ] T001 [US1] [qa:e2e] e2e smoke login
+- [ ] T002 [US1] [qa:browser] browser stuff (runtime_proof later?)
+- [ ] T003 [US1] /review-gate [qa:review-gate]
+"""
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=True)
+    assert any("runtime_proof" in f for f in findings)
+
+
+# codex round 3 H1: browser-touching tasks with NO scenarios.md must not
+# slide through analyze — bypass-by-omission hole. Web-touch is detected
+# from web-surface file paths in the tasks text itself.
+
+TASKS_WEB_TOUCH_NO_BROWSER = """# Tasks
+## Phase 3 — US1
+- [ ] T001 [US1] [model:sonnet] [agent:frontend-developer] build web/src/components/Nav.tsx
+- [ ] T002 [US1] [model:sonnet] [qa:e2e] [agent:test-automator] e2e smoke login
+- [ ] T003 [US1] [model:sonnet] [agent:ecc:code-reviewer] /review-gate — review Phase 3 [qa:review-gate]
+"""
+
+
+def test_analyze_web_paths_without_scenarios_flagged() -> None:
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY,
+                                       TASKS_WEB_TOUCH_NO_BROWSER,
+                                       has_scenarios=False)
+    assert any("scenarios.md" in f for f in findings)
+
+
+def test_analyze_web_paths_with_scenarios_and_gate_clean() -> None:
+    tasks = TASKS_BROWSER_OK + (
+        "- [ ] T009 [US1] [model:haiku] [agent:frontend-developer] "
+        "tweak web/src/components/Nav.tsx\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=True)
+    assert findings == []
+
+
+def test_analyze_non_web_tasks_without_scenarios_clean() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:haiku] [agent:ecc:python-reviewer] "
+        "refactor lib/gates.py internals\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert findings == []
+
+
+# codex round 4: WEB_TASK_PATH_RE must match the browser-proof.sh WEB_RE
+# contract — hooks/stores/styles dirs and app/ api/ route files are
+# web-touch too; a plan naming only those paths must still demand
+# scenarios.md.
+
+def test_analyze_hooks_dir_path_without_scenarios_flagged() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:sonnet] [agent:frontend-developer] "
+        "add web/src/hooks/useCart.ts\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert any("scenarios.md" in f for f in findings)
+
+
+def test_analyze_app_api_route_path_without_scenarios_flagged() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:sonnet] [agent:nextjs-backend-engineer] "
+        "add web/src/app/api/cart/route.ts\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert any("scenarios.md" in f for f in findings)
+
+
+def test_analyze_api_prose_mention_not_a_path_clean() -> None:
+    tasks = TASKS_NO_BROWSER_GATE + (
+        "- [ ] T009 [US1] [model:sonnet] [agent:ecc:python-reviewer] "
+        "document the api/ contract in prose\n")
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=False)
+    assert findings == []

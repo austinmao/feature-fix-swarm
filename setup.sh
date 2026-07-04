@@ -419,6 +419,7 @@ echo "  Installed $LIB_DIR/feature-fix-swarm/dispatch.py"
 cp "$SCRIPT_DIR/lib/gates.py" "$LIB_DIR/feature-fix-swarm/gates.py"
 echo "  Installed $LIB_DIR/feature-fix-swarm/gates.py"
 cp "$SCRIPT_DIR/lib/agents_manifest.py" "$LIB_DIR/feature-fix-swarm/agents_manifest.py"
+cp "$SCRIPT_DIR/lib/runtime_proof.py" "$LIB_DIR/feature-fix-swarm/runtime_proof.py"
 echo "  Installed $LIB_DIR/feature-fix-swarm/agents_manifest.py (v3.19 agent roster)"
 cp "$SCRIPT_DIR/hooks/tdd-gate.sh" "$LIB_DIR/feature-fix-swarm/tdd-gate.sh"
 chmod +x "$LIB_DIR/feature-fix-swarm/tdd-gate.sh"
@@ -470,7 +471,7 @@ echo ""
 
 # Copy scripts
 echo "Installing scripts..."
-for script in qa-swarm.sh ralph-retry.sh; do
+for script in qa-swarm.sh ralph-retry.sh browser-proof.sh; do
   mkdir -p scripts
   # self-copy guard: running setup.sh from the repo root makes source and
   # target the same file — cp errors "are identical" and kills the script
@@ -508,7 +509,7 @@ done
 # Copy prompts
 echo "Installing prompts..."
 mkdir -p prompts
-for prompt in qa-e2e.md qa-review.md qa-security.md decompose-spec.md; do
+for prompt in qa-e2e.md qa-review.md qa-security.md qa-design.md decompose-spec.md; do
   if [ "$SCRIPT_DIR/prompts/$prompt" -ef "prompts/$prompt" ]; then
     echo "  prompts/$prompt is the repo copy — skipping self-copy"
   else

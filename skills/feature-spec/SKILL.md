@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 1.2.0
+version: 1.3.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -333,6 +333,14 @@ writes `specs/${SPEC_ID}/tasks.md`.
 If decompose fails its gates, STOP — fix the spec/plan and re-run. Do not hand a
 failing tasks.md to preflight/grant.
 
+**v1.3.0 — design intent + scenarios (browser-touchable specs):** decompose now
+also emits `specs/${SPEC_ID}/scenarios.md` (BDD Given/When/Then with stable
+`US<N>-S<M>` IDs) and, when the plan carries a `/plan-design-review` report
+(`GSTACK REVIEW REPORT` in plan.md) or the spec has UI stories,
+`specs/${SPEC_ID}/design-intent.md`. Verify both exist for browser-touchable
+specs — the phase QA gates (`[qa:browser]`/`[qa:design]`) consume them; a
+browser-touchable spec without scenarios.md ships un-runthrough-able tasks.
+
 ### Step 5 — preflight (v1.2.0, DEFAULT — skip only with --no-preflight)
 
 Requirements are proven NOW, while the operator is present — never discovered at 3am.
@@ -351,6 +359,19 @@ Requirements are proven NOW, while the operator is present — never discovered 
       "cmd": "psql \"$DATABASE_URL\" -c 'select 1' -qtA"}
    ]
    ```
+
+   **v1.3.0 — browser QA probe:** when tasks.md contains any `[qa:browser]`
+   task, ALSO include the app-reachability probe so an unattended run never
+   reaches phase QA without a verifiable app to point the browser at:
+
+   ```json
+   {"kind": "probe", "name": "qa-app-reachable",
+    "cmd": "bash scripts/browser-proof.sh --diff placeholder.tsx"}
+   ```
+
+   (The command exits 0 only when a server answers — QA_BASE_URL or a probed
+   dev port. Prefer setting QA_BASE_URL to a preview/prod build; dev servers
+   mask build failures.)
 
 2. **Run it, fail closed** (resolver inlined — do not assume `$GATES_PY` exists):
 
