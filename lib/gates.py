@@ -18,6 +18,8 @@ Usage (inline heredoc in SKILL.md):
                                                   # evidence (or GATES_STRICT=1)
     python3 lib/gates.py phase-score  T040 T041 T042  # truth score from evidence;
                                                   # exit 1 if < 0.95 → rollback
+    python3 lib/gates.py note-refuted T042 --reason "cause not reproducible at HEAD"
+                                                  # zero-diff close; skips escalation
     python3 lib/gates.py note-failure T042 --sig "AssertionError foo.py:12"
                                                   # exit 1 when stuck (same sig 2x)
     python3 lib/gates.py proof run-42 T040 T041 --defer "live-send: no bot" \
@@ -164,7 +166,14 @@ def verify_done(store: Path, task_id: str, strict: bool = False) -> bool:
     strict=True additionally requires the evidence was produced by the
     runner itself (run_gate) — caller-recorded evidence is rejected because
     a shell-capable agent can fabricate `record-gate --exit 0`."""
-    gate = _load_store(store).get(task_id, {}).get("gate")
+    entry = _load_store(store).get(task_id, {})
+    if entry.get("refuted"):
+        # REFUTED (v3.17.0): diagnosis proven wrong at HEAD — the task closes
+        # with a zero diff. Valid in strict mode too: a refutation is a
+        # judgment call adversarially checked at review-gate, not a gate the
+        # runner can execute. verify-done CLI surfaces it distinctly.
+        return True
+    gate = entry.get("gate")
     if not (bool(gate) and gate.get("exit_code") == 0):
         return False
     if strict and gate.get("executed_by") != "run_gate":
@@ -321,6 +330,23 @@ def note_failure(store: Path, task_id: str, signature: str) -> bool:
         sigs.append(signature)
         _save_store(store, data)
     return no_progress(sigs)
+
+
+def note_refuted(store: Path, task_id: str, reason: str) -> bool:
+    """Record a REFUTED outcome (v3.17.0, ported from the
+    fable-agent-orchestration result-state vocabulary): the task's diagnosis
+    was checked against current HEAD and found wrong, so NOTHING ships. This
+    is a result, not a failure — it does not enter the failure-signature
+    history and must NOT trigger the escalation ladder. A reason is
+    mandatory; a blank refutation is a dodge, not a finding."""
+    if not reason or not reason.strip():
+        return False
+    with _StoreLock(store):
+        data = _load_store(store)
+        data.setdefault(task_id, {})["refuted"] = {"reason": reason.strip(),
+                                                   "executed_by": "caller"}
+        _save_store(store, data)
+    return True
 
 
 def proof_artifact(store: Path, run_id: str, task_ids: list[str],
@@ -486,7 +512,10 @@ def main(argv: list[str]) -> int:
         gate = _load_store(store).get(args[0], {}).get("gate") or {}
         by = gate.get("executed_by", "unknown")
         ok = verify_done(store, args[0], strict=strict)
-        if ok:
+        refuted = _load_store(store).get(args[0], {}).get("refuted")
+        if ok and refuted:
+            print(f"DONE-REFUTED: zero-diff close ({refuted['reason']})")
+        elif ok:
             print(f"DONE-VERIFIED (executed_by={by})")
         elif strict and gate.get("exit_code") == 0:
             print(f"NOT-DONE: evidence not runner-executed (executed_by={by}); "
@@ -532,6 +561,12 @@ def main(argv: list[str]) -> int:
             print("BELOW-THRESHOLD: roll back to phase-start checkpoint and re-plan")
             return 1
         return 0
+    if cmd == "note-refuted":
+        ok = note_refuted(store, args[0], _flag(args, "--reason"))
+        print("REFUTED-RECORDED: task closes with zero diff; route the refutation "
+              "through review-gate before flipping the checkbox" if ok else
+              "NO-REASON: a refutation must name why the diagnosis is wrong")
+        return 0 if ok else 1
     if cmd == "note-failure":
         stuck = note_failure(store, args[0], _flag(args, "--sig"))
         print("NO-PROGRESS: same failure signature twice in a row — stop and report"

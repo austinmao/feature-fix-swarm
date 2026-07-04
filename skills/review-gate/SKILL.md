@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.1.0"
+version: "1.2.0"
 ---
 
 # /review-gate
@@ -218,6 +218,16 @@ You are a test coverage analyst. Review this diff for testing gaps:
 - Missing E2E tests for new user-facing flows
 - Edge cases not tested (nulls, empty inputs, max values, concurrency)
 
+Then act as a TEST-GATE CRITIC on the tests this diff ADDS or CHANGES
+(review the ruler, not just the coverage):
+- Would each changed/added test FAIL under the old broken behavior? A test
+  that passes either way proves nothing — flag it HIGH.
+- Does the test exercise the real production path, or a reimplementation
+  inside the test?
+- Was any existing gate weakened to turn green (loosened assert, added skip,
+  widened tolerance)?
+- Name the "easy fake pass" for this task and check the tests rule it out.
+
 For each gap output:
   SEVERITY: [HIGH|MEDIUM|LOW]  (no CRITICAL for coverage — only for missing security tests)
   FILE: <source file with gap>
@@ -243,6 +253,28 @@ preferred).
 **Round cap:** at most 2 LLM review rounds per phase — empirically rounds 1-2
 capture ~75% of reachable improvement; further rounds burn budget without
 signal. Deterministic gates (tests/lint) are exempt from the cap.
+
+### Verify-the-reviewer (v3.17.0)
+
+A review is a signal, not ground truth — reviewers read stale code, invent
+line numbers, and misread intent. Before ACTING on the merged verdict:
+
+1. List the verdict's load-bearing claims (the 1-3 findings that decide
+   block-vs-pass).
+2. Open the cited files at CURRENT HEAD (the code may have moved since the
+   reviewer ran).
+3. Classify each claim: `REAL_BLOCKER` (fix before merge) ·
+   `REAL_NON_BLOCKING` (land small follow-up or file it) · `STALE` (reviewer
+   read old code) · `WRONG` (claim does not match current code) ·
+   `CONFIRMED_PASS` (for a clean PASS, spot-check the 1-2 claims that would
+   hurt most if wrong).
+4. `STALE`/`WRONG` findings do not block — record WHY they were discarded in
+   the findings report so the discard is auditable.
+
+This composes with refute-or-promote: refute-or-promote kills false positives
+BEFORE they block; verify-the-reviewer catches stale/wrong claims (and false
+PASSes) at the moment of decision. The `/verify-review` skill is the
+standalone operator-invocable form.
 
 ### Merge and rank
 

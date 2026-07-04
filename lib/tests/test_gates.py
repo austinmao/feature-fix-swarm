@@ -732,3 +732,53 @@ def test_proof_duplicate_task_ids_is_no_go(tmp_path) -> None:
     art = gates.proof_artifact(store, "run-21", ["T100", "T100"])
     assert art["verdict"] == "no-go"
     assert art["duplicate_task_ids"] == ["T100"]
+
+
+# ── v3.17.0: REFUTED outcome (ported from fable-agent-orchestration
+#    investigate-before-fix / think-work-try result states) ──────────────────
+
+def test_note_refuted_records_reason(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_refuted(store, "T070", "premise wrong: field never null at HEAD") is True
+    data = json.loads(store.read_text())
+    assert data["T070"]["refuted"]["reason"].startswith("premise wrong")
+
+
+def test_note_refuted_rejects_blank_reason(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_refuted(store, "T070", "") is False
+    assert gates.note_refuted(store, "T070", "   ") is False
+    assert not store.exists() or "refuted" not in json.loads(store.read_text()).get("T070", {})
+
+
+def test_verify_done_accepts_refuted_as_completion(tmp_path) -> None:
+    """REFUTED = valid close-with-zero-diff outcome; checkbox may flip.
+    Adversarial check of the refutation itself lives at review-gate, not here."""
+    store = tmp_path / "evidence.json"
+    assert gates.verify_done(store, "T071") is False
+    gates.note_refuted(store, "T071", "diagnosis wrong")
+    assert gates.verify_done(store, "T071") is True
+    assert gates.verify_done(store, "T071", strict=True) is True
+
+
+def test_refuted_does_not_leak_into_gate_evidence(tmp_path) -> None:
+    """A refuted task has NO gate evidence — phase_score must not count it
+    as a passing gate (it contributes nothing, not a pass)."""
+    store = tmp_path / "evidence.json"
+    gates.note_refuted(store, "T072", "diagnosis wrong")
+    assert "gate" not in json.loads(store.read_text())["T072"]
+
+
+def test_cli_note_refuted_and_verify_done(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "note-refuted", "T073", "--reason", "cause not reproducible at HEAD"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "REFUTED-RECORDED" in r.stdout
+    r2 = _sp.run(["python3", g, "note-refuted", "T073", "--reason", ""],
+                 capture_output=True, text=True, env=env)
+    assert r2.returncode == 1
+    r3 = _sp.run(["python3", g, "verify-done", "T073"], capture_output=True, text=True, env=env)
+    assert r3.returncode == 0 and "REFUTED" in r3.stdout

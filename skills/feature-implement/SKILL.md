@@ -775,6 +775,16 @@ with `[return:scout|build|deep]`. Host-neutral — tiers, not model names.
 
 ### Task-failure escalation ladder (v3.16.0)
 
+> **REFUTED is NOT a failure (v3.17.0).** If the sub-agent reports REFUTED —
+> the task's premise/diagnosis checked against current HEAD is wrong — skip
+> this ladder entirely: run
+> `python3 lib/gates.py note-refuted {task_id} --reason "<evidence>"`, route
+> the refutation through review-gate's refute-or-promote (one adversarial
+> pass: "prove this refutation wrong"), and if it survives, flip the checkbox
+> `[X]` with a trailing `(REFUTED: <reason>)` annotation. Zero diff ships.
+> Retrying or escalating a refuted task burns budget forcing a fix onto a
+> wrong premise.
+
 When a task reports FAILURE (either path — ruflo or native):
 
 1. **First failure → retry once on the SAME model** with a tighter prompt:
@@ -986,6 +996,15 @@ When `scripts/qa-swarm.sh` exits non-zero (any dimension failed):
   Next: /feature-implement {NNN} --resume
 ```
 
+**Orphaned-WIP adoption (v3.17.0):** before rebuilding a task from scratch on
+resume, check whether a stalled parallel worktree already holds coherent
+uncommitted work for it: confirm the worktree is stale (mtimes, no live
+session), read the uncommitted diff, and assess coherence (compiles or
+plausibly compiles, uses existing APIs correctly, sound design). Adopt when
+coherent and faster than rebuilding — rebase onto current main, fill gaps, add
+the RED proof, and run the normal gates; the adopted diff gets NO gate
+discount. Rebuild when incoherent; wait when the session may still be active.
+
 **Resume semantics:** On `--resume` after a retry failure, the skill reads `.ralph/{phase-slug}/retry-state.json` to determine:
 - Which phase failed
 - Which dimensions were still failing
@@ -1169,6 +1188,7 @@ PY
 
   Then Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id}`
 - **FAILURE** (error, timeout, or sub-agent reported failure): Edit tasks.md `- [ ] {task_id}` → `- [F] {task_id}`
+- **REFUTED** (sub-agent proved the task's diagnosis wrong at HEAD): `gates.py note-refuted {task_id} --reason "..."` → adversarial check via review-gate refute-or-promote → if it survives, Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id} (REFUTED: <short reason>)`. `verify-done` accepts refuted evidence (prints `DONE-REFUTED`), so the checkbox-evidence hook passes. If the refutation is itself refuted, treat as a normal FAILURE (first rung of the escalation ladder).
 
 Append to `.implement-log.jsonl`:
 

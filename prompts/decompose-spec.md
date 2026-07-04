@@ -166,6 +166,8 @@ Do not hide required end-to-end coverage behind generic "run QA" tasks.
 - OpenClaw gateway, agent, or channel flows must include explicit `tests/scenarios.yaml` tasks when those surfaces are touched.
 - If the spec reaches a live OpenClaw or Telegram surface, include explicit tasks that wire the requested QA lane into the implementation plan rather than leaving it implied.
 - Prefer small, atomic test tasks that fail for the intended reason before the corresponding implementation task.
+- Every test task must be **fail-under-broken**: state (in the description) the task trajectory it exercises and confirm the test would FAIL under the old/broken behavior — a test that passes either way is not a gate. Where cheap, name the "easy fake pass" the test must rule out (e.g. mock instead of production path, assert on a constant).
+- REFUTED is a recognized run-time outcome: if implementation later proves a task's premise wrong at HEAD, the task closes with zero diff via `gates.py note-refuted` — decompose so each task's premise is checkable (cite the file/behavior the task assumes).
 
 ## Review-Gate Phase Gates (MANDATORY)
 
