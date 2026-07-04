@@ -1,6 +1,6 @@
 ---
 name: spec-decompose
-description: "Decompose an approved feature spec into specs/NNN/tasks.md via a ruflo specialist swarm (default: orchestrator + per-domain specialists drawn from the repo's agent roster) or single-planner fallback (--no-swarm), using the canonical shared model ladder + decomposition prompt"
+description: "Decompose an approved feature spec into specs/NNN/tasks.md via a ruflo specialist swarm (default: orchestrator + per-domain specialists drawn from the repo's agent roster) or single-planner fallback (--no-swarm), using the canonical shared model ladder (haiku/sonnet/opus, plus optional Claude-Code-native fable) + the exact-agent hybrid catalog decomposition prompt"
 version: "1.4.0"
 allowed-tools:
   - Read
