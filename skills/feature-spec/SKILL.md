@@ -352,11 +352,20 @@ Requirements are proven NOW, while the operator is present — never discovered 
    ]
    ```
 
-2. **Run it, fail closed** (resolve gates.py across the three install shapes, same
-   as spec-decompose's coherence gate):
+2. **Run it, fail closed** (resolver inlined — do not assume `$GATES_PY` exists):
 
    ```bash
-   RUN_ID="spec-${SPEC_ID}"
+   GATES_PY=""
+   for _cand in \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+     "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+     [ -f "$_cand" ] && GATES_PY="$_cand" && break
+   done
+   [ -z "$GATES_PY" ] && { echo "[feature-spec] FATAL: gates.py not found — run setup.sh"; exit 1; }
+   # ledger key convention: ALWAYS bare numeric spec id (spec-057, never
+   # spec-057-name) — feature-implement + task-swarm normalize the same way
+   RUN_ID="spec-${SPEC_ID%%-*}"
    python3 "$GATES_PY" preflight "specs/${SPEC_ID}/preflight.json" --run "$RUN_ID" || {
      echo "[feature-spec] PREFLIGHT-FAIL — fix while the operator is present, then re-run"
      exit 1

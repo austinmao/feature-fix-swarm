@@ -102,8 +102,15 @@ all enforced in the loop below:
 overnight run never stalls waiting for the operator. Two mechanical
 preconditions, both fail-closed:
 
+Both checks use the LEDGER run id `RUN_ID="spec-${SPEC_ID}"` (set right after
+flag parsing, Step 1) — the SAME key `/feature-spec` Step 5/6 and `/task-swarm`
+Steps 2/3 wrote the preflight PASS + grants under. And both go through the
+resolved `$GATES_PY` (3-shape resolver, Step 6 block — run it BEFORE these
+checks in autonomous mode); a bare `lib/gates.py` breaks in the vendored
+`packages/feature-fix-swarm/` install shape.
+
 1. **Preflight proven.** Before the first spawn:
-   `python3 lib/gates.py check-preflight "$RUN_ID"` must exit 0 — a recorded
+   `python3 "$GATES_PY" check-preflight "$RUN_ID"` must exit 0 — a recorded
    PASSING `/preflight` run (< 24h old) covering the run's env vars + service
    probes. Exit 1 → REFUSE to start:
    `[feature-implement] ERROR: no fresh preflight for $RUN_ID — run /preflight first.`
@@ -114,10 +121,10 @@ preconditions, both fail-closed:
    vocabulary in `/autonomy-grant`):
 
    ```bash
-   if python3 lib/gates.py check-grant "$RUN_ID" --action "$ACTION"; then
+   if python3 "$GATES_PY" check-grant "$RUN_ID" --action "$ACTION"; then
      # proceed; log the consumed grant + its artifact (sha/URL/PR#) in the report
    else
-     python3 lib/gates.py pending "$RUN_ID" --action "$ACTION" \
+     python3 "$GATES_PY" pending "$RUN_ID" --action "$ACTION" \
        --reason "unlisted gate hit mid-run"
      # STOP this action path only — independent tasks continue; the final
      # report lists pendings so the morning resume is one `grant` command
@@ -184,10 +191,16 @@ for arg in $(printf '%s\n' "$SPEC_ARG"); do
   esac
 done
 
-# RUFLO_REQUIRED controls executor selection:
-#   "auto" (default): pre-flight mcp__ruflo__mcp_status; if unreachable → auto-switch to native parallel
+# v1.12.1: LEDGER run id — MUST equal what /feature-spec + /task-swarm used when
+# recording preflight + grants (gates.py keys everything on this). Distinct from
+# AUDIT_RUN_ID (run-state UUID for audits.jsonl) — do NOT overload.
+RUN_ID="spec-${SPEC_ID%%-*}"
+
+# RUFLO_REQUIRED controls executor selection (code default = "1", line above —
+# strict; fail FAST at start, not silently degraded mid-overnight-run):
+#   "1" (default)   : hard-fail if ruflo unreachable
+#   "auto"          : pre-flight mcp__ruflo__mcp_status; if unreachable → auto-switch to native parallel
 #   "0"             : skip pre-flight, force native parallel Agent path immediately
-#   "1"             : hard-fail if ruflo unreachable (legacy strict mode)
 if [ "$RUFLO_REQUIRED" = "0" ]; then
   USE_RUFLO=0
   echo "[feature-implement] INFO: RUFLO_REQUIRED=0 — native parallel Agent path forced." >&2
@@ -1120,16 +1133,18 @@ $_section
     done <<< "$(echo "$PHASE_US_TAGS" | tr ' ' '\n')"
   fi
 
-  # 4. Ensure a run_id exists for audits.jsonl tracking
-  if [ -z "${RUN_ID:-}" ]; then
-    RUN_ID=$(~/.claude/bin/run-state start --skill feature-implement \
+  # 4. Ensure a run-state id exists for audits.jsonl tracking
+  # (v1.12.1: AUDIT_RUN_ID, NOT $RUN_ID — that is the gates.py ledger key spec-NNN;
+  # overloading them sent ledger lookups to a run-state UUID and stalled --autonomous)
+  if [ -z "${AUDIT_RUN_ID:-}" ]; then
+    AUDIT_RUN_ID=$(~/.claude/bin/run-state start --skill feature-implement \
       --objective "spec $SPEC_ID phase $CURRENT_PHASE" 2>/dev/null | jq -r .run_id 2>/dev/null || echo "")
   fi
 
   # 5. Run the hostile audit
   PHASE_AUDIT_EXIT=0
-  if [ -n "$RUN_ID" ]; then
-    ~/.claude/bin/run-state audit "$RUN_ID" \
+  if [ -n "$AUDIT_RUN_ID" ]; then
+    ~/.claude/bin/run-state audit "$AUDIT_RUN_ID" \
       --kind phase \
       --context "PHASE_NAME=$CURRENT_PHASE" \
       --context "PHASE_SPEC=${PHASE_SPEC:-none}" \
@@ -1151,7 +1166,7 @@ $_section
     # (ralph retry loop handles from here — same path as QA failure)
   elif [ "$PHASE_AUDIT_EXIT" -ge 2 ]; then
     echo "[feature-implement] WARNING: phase audit error (exit $PHASE_AUDIT_EXIT) — retrying once" >&2
-    ~/.claude/bin/run-state audit "$RUN_ID" --kind phase \
+    ~/.claude/bin/run-state audit "$AUDIT_RUN_ID" --kind phase \
       --context "PHASE_NAME=$CURRENT_PHASE" --context "retry=1" \
       --cwd "$(git rev-parse --show-toplevel)" 2>/dev/null \
       || echo "[feature-implement] WARNING: phase audit retry also failed — skipping (codex-gate remains the hard gate)" >&2
@@ -1326,8 +1341,10 @@ distill trajectories into reusable strategy, not just raw outcomes):
 ### Step 10: Finish tail — review-gate → ship → canary (v1.12.0)
 
 `/feature` is retired; this skill is now the terminal executor. After the final
-report shows a **go** proof artifact and QA green, run the finish tail unless
-`--no-finish` was passed (or tasks remain `[ ]`/`[F]` — never ship a partial run).
+report shows a **go** proof artifact and QA green, run the finish tail. Mechanical
+entry check — all three must hold, else print the skip reason and END:
+`[ "$NO_FINISH" = "0" ]` AND zero `[ ]`/`[F]` tasks remain AND proof verdict = go
+(never ship a partial run).
 
 Each stage that takes an OUTWARD action is gated by the autonomy ledger in
 `--autonomous` mode, or by an operator prompt in attended mode:
@@ -1393,7 +1410,10 @@ outward action a skill would have gated.
   their `gate()` check passes (v1.12.0)
 - Sub-agents inherit rules via CLAUDE.md
 - Destructive action requests re-surface to user (Agent tool respects Claude Code permissions)
-- **Ruflo failures hard-stop (v1.1.0).** No silent native fallback. Use `RUFLO_REQUIRED=0` env override for debugging only.
+- **Ruflo failures hard-stop under the default `RUFLO_REQUIRED=1`.** Fallback to
+  native happens ONLY via explicit opt-in: `RUFLO_REQUIRED=auto` (pre-flighted,
+  logged fallback) or `RUFLO_REQUIRED=0` (forced native, debugging). Never a
+  silent unrequested fallback (v1.12.1 — reconciled with the auto policy).
 
 ## Cost estimation
 

@@ -24,10 +24,13 @@ machine-readable agent manifest that `/spec-decompose` (specialist fan-out) and
 
    ```bash
    MANIFEST_PY=""
-   for c in lib/agents_manifest.py packages/feature-fix-swarm/lib/agents_manifest.py \
-            "$HOME/Documents/Github/feature-fix-swarm/lib/agents_manifest.py"; do
+   for c in \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/agents_manifest.py" \
+     "$HOME/.claude/lib/feature-fix-swarm/agents_manifest.py" \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/lib/agents_manifest.py"; do
      [ -f "$c" ] && MANIFEST_PY="$c" && break
    done
+   [ -z "$MANIFEST_PY" ] && { echo "[agents-init] FATAL: agents_manifest.py not found — run setup.sh"; exit 1; }
    ```
 
 2. **Scan:**

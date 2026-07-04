@@ -66,6 +66,17 @@ the RUN's real footprint (env/secret NAMES + service probes — never values),
 then:
 
 ```bash
+# NNN = BARE NUMERIC spec id plan-decompose just created (capture from Step 1's
+# output; strip any -name suffix — ledger convention is spec-057, never spec-057-name)
+NNN="<bare numeric spec id from Step 1>"
+GATES_PY=""
+for _cand in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+  [ -f "$_cand" ] && GATES_PY="$_cand" && break
+done
+[ -z "$GATES_PY" ] && { echo "[task-swarm] FATAL: gates.py not found — run setup.sh"; exit 1; }
 RUN_ID="spec-${NNN}"
 python3 "$GATES_PY" preflight "specs/${NNN}/preflight.json" --run "$RUN_ID"
 ```
@@ -100,7 +111,7 @@ feature-implement's proof artifact + final report are the record. Add this
 skill's wrapper line to `.feature-fix-swarm/results.md`:
 `TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed}`.
 Report `pending` actions (if any) with the exact resume command:
-`python3 lib/gates.py grant $RUN_ID --action <a> && /feature-implement NNN --autonomous`.
+`python3 "$GATES_PY" grant $RUN_ID --action <a>` then `/feature-implement NNN --autonomous`.
 `mcp__ruflo__hooks_post-task` closes the learning loop (fail-soft).
 
 ## Rules
