@@ -41,6 +41,59 @@ COST_PER_TASK = {
     "gpt-5.5": 2.00,
 }
 
+# ── Return contracts (v3.16.0) ───────────────────────────────────────────────
+# Bound what a sub-agent RETURNS, not what it does. Keyed off model tier by
+# default (low→scout, mid→build, high→deep); override per task with [return:X].
+# Host-neutral: tiers, not model names — works with or without fable.
+
+RETURN_CONTRACTS = {
+    "scout": (
+        "Return a SCOUT report: <=15 lines. Findings as file:line refs plus "
+        "one-sentence facts. NEVER paste file contents back — if a file "
+        "matters, say WHY and WHERE. Test/lint output: failures only; "
+        "passing is one line ('N passed')."
+    ),
+    "build": (
+        "Return a BUILD report: <=20 lines. What changed (files + line "
+        "ranges), what you ran to verify, pass/fail. Diffs only if <=30 "
+        "lines, otherwise summarize the diff. Test output: failures only; "
+        "passing is one line ('N passed'). Anything ambiguous: punt upward, "
+        "do not improvise."
+    ),
+    "deep": (
+        "Return a DEEP report: <=40 lines. Conclusion FIRST, then reasoning, "
+        "then evidence refs (file:line). No exploratory narration. Test "
+        "output: failures only. A wall of raw output is a failed task "
+        "regardless of correctness."
+    ),
+}
+
+# Escalation ladder (v3.16.0): fail once → retry with a tighter prompt on the
+# SAME model; fail twice → escalate ONE tier up, carrying the prior failure
+# evidence (gates.py failure signature) forward. Top tier fails → STOP
+# (no_progress path). In-family so Codex hosts never get an Anthropic model.
+_ESCALATION_LADDER = {
+    "haiku": "sonnet",
+    "sonnet": "opus",
+    "gpt-5.4-mini": "gpt-5.4",
+    "gpt-5.4": "gpt-5.5",
+}
+
+
+def default_return_contract(model: str) -> str:
+    """Derive the return-contract kind from the model tier."""
+    if model in LOW_TIER_MODELS:
+        return "scout"
+    if model in HIGH_TIER_MODELS:
+        return "deep"
+    return "build"  # mid-tier and unknown models
+
+
+def escalate_model(model: str) -> Optional[str]:
+    """Next tier up for a failed task, or None at top-of-ladder / unknown."""
+    return _ESCALATION_LADDER.get(model)
+
+
 THINKING_GUIDANCE = {
     "low":  "Respond directly. No extended reasoning needed. Be concise.",
     "med":  "Think through your approach before executing. One pass of analysis, then act.",
@@ -149,7 +202,11 @@ def parse_annotations(rest: str, default_agent: str = "general-purpose") -> dict
     qa_match = re.search(r'\[qa:([a-z0-9,-]+)\]', rest)
     qa_dims = qa_match.group(1).split(",") if qa_match else ["e2e", "review", "security"]
 
-    strip_pat = r'\[(?:P|US\d+|model:[^\]]+|thinking:[^\]]+|agent:[^\]]+|qa:[^\]]+)\]'
+    # [return:scout|build|deep] — explicit override; default derives from tier
+    ret_match = re.search(r'\[return:(scout|build|deep)\]', rest)
+    return_contract = ret_match.group(1) if ret_match else default_return_contract(model)
+
+    strip_pat = r'\[(?:P|US\d+|model:[^\]]+|thinking:[^\]]+|agent:[^\]]+|qa:[^\]]+|return:[^\]]+)\]'
     desc = re.sub(strip_pat, '', rest).strip()
     desc = re.sub(r'^T\d{3,}\b\s*', '', desc).strip()
 
@@ -167,6 +224,7 @@ def parse_annotations(rest: str, default_agent: str = "general-purpose") -> dict
         "thinking": thinking,
         "agent": agent,
         "qa_dims": qa_dims,
+        "return_contract": return_contract,
         "description": desc,
     }
 

@@ -6,6 +6,37 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.16.0 — return contracts + escalation ladder (token discipline) (2026-07-04)
+
+### Added
+- **`[return:scout|build|deep]` task annotation** (`lib/dispatch.py`,
+  `prompts/decompose-spec.md`). Bounds what a sub-agent RETURNS: scout =
+  ≤15-line facts report (file:line refs, never paste file contents), build =
+  ≤20-line change report (diffs only if ≤30 lines), deep = ≤40-line
+  conclusion-first report. Default derives from model tier (low→scout,
+  mid→build, high→deep) so existing tasks.md files need no changes; annotate
+  only to override. Host-neutral — keyed off tier sets, works with or without
+  fable, same on Codex (`gpt-5.4-mini`/`gpt-5.4`/`gpt-5.5`).
+- **Return-contract + context-discipline sections in sub-agent prompts**
+  (`skills/feature-implement/SKILL.md`, `skills/fix/SKILL.md`): failures-only
+  test output ("N passed" on green), grep-before-read, read ranges not files,
+  never re-read unchanged files, cite file:line instead of pasting contents.
+  "Your final message IS the report — orchestrator reads reports, not
+  transcripts."
+- **Task-failure escalation ladder** (`skills/feature-implement/SKILL.md`,
+  `dispatch.escalate_model()`): fail once → retry same tier with the failure
+  report appended; fail twice → escalate ONE tier up (haiku→sonnet→opus;
+  gpt-5.4-mini→gpt-5.4→gpt-5.5) carrying BOTH prior failure reports plus a
+  `gates.py note-failure` signature; top-tier failure → mark `failed` and
+  continue (no_progress STOP unchanged). In-family only — Codex hosts never
+  escalate into Anthropic models.
+
+### Rationale
+Part-2 ("token discipline") of the fable-mode-derived orchestration charter.
+FFS already had the Part-1 role charter (model routing, phase gates, evidence
+verification); this release adds the missing output-side discipline so
+sub-agents stop dumping raw transcripts into orchestrator context.
+
 ## v3.15.1 — remove codex-gate compat alias (2026-07-04)
 
 ### Removed

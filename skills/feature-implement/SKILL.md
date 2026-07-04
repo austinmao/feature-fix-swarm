@@ -602,6 +602,7 @@ mcp__ruflo__task_orchestrate({
 | `[thinking:Y]`          | Injected into sub-agent prompt thinking budget line  |
 | `[agent:exact-agent]`   | `agentType` on `agent_spawn`; `subagent_type` on Task|
 | `[qa:dim1,dim2]`        | Tag `qa:dim1,dim2` read by QA phase gate             |
+| `[return:X]`            | Return-contract section of sub-agent prompt (default derives from model tier) |
 | `Depends-on: T###`      | Dependency ordering enforced before Task() spawn     |
 | Phase heading           | `SendMessage` pipeline stage boundary                |
 
@@ -700,6 +701,19 @@ You are implementing a single task from a decomposed feature spec. You have no p
 ## Thinking budget
 Allocate {thinking} effort. {thinking_guidance}
 
+## Return contract ({return_contract})
+{return_contract_text}
+
+Your final message IS the report — the orchestrator reads reports, not
+transcripts. Exceeding the contract is a task failure even if the work is
+correct.
+
+## Context discipline
+- Grep before read. Never open a file to find something searchable.
+- Read ranges, not whole files: open the ~40 lines around the target.
+- Never re-read a file already in your context unless you edited it.
+- Never paste file contents into your report — cite file:line instead.
+
 ## Your job
 1. Read the context files
 2. Execute THIS task only — no scope creep, no "while I'm here" cleanups
@@ -753,6 +767,29 @@ Where `thinking_guidance`:
 - `med`: "Think through the approach, consider 1-2 edge cases, implement carefully."
 - `high`: "Think thoroughly. Consider edge cases, error paths, concurrency. Design before coding."
 - `max`: "Maximum deliberation. Explore alternatives, adversarially challenge your approach, consider failure modes before implementing."
+
+Where `{return_contract}` / `{return_contract_text}` come from `dispatch.py` parse
+output (`return_contract` field) and `RETURN_CONTRACTS[kind]`. Default derives
+from model tier (low→`scout`, mid→`build`, high→`deep`); a task can override
+with `[return:scout|build|deep]`. Host-neutral — tiers, not model names.
+
+### Task-failure escalation ladder (v3.16.0)
+
+When a task reports FAILURE (either path — ruflo or native):
+
+1. **First failure → retry once on the SAME model** with a tighter prompt:
+   append the failure report verbatim under `## Prior attempt (failed)` and
+   narrow the scope to what blocked it.
+2. **Second failure → escalate ONE tier up** (`python3 lib/dispatch.py` →
+   `escalate_model(model)`: haiku→sonnet→opus; gpt-5.4-mini→gpt-5.4→gpt-5.5).
+   The escalated prompt MUST carry BOTH prior failure reports forward — the
+   next model never rediscovers what already failed. Record the failure
+   signature via `gates.py note-failure` so `no_progress` sees the history.
+3. **Top-tier failure (escalate_model → None) → mark task `failed`**, log, and
+   continue to the next task (existing behavior). `no_progress` (same
+   signature twice) still STOPs the run regardless of tier.
+
+Never retry a third time on the same tier. Never skip the evidence carry-forward.
 
 ### Step 5.5: QA phase gate (when --qa-loop enabled)
 

@@ -72,6 +72,7 @@ Components in order:
 | `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus` \| `fable`; Codex: `gpt-5.4-mini` \| `gpt-5.4` \| `gpt-5.5` (`fable` is Claude-only, downgrades to `sonnet` on the Ruflo path) |
 | `[thinking:Y]` | yes | `[thinking:med]` | `low` \| `med` \| `high` \| `max` — thinking budget for implementer |
 | `[agent:exact-agent]` | yes | `[agent:ecc:tdd-guide]` | Exact label from the hybrid ECC + wshobson catalog; keep it stable |
+| `[return:X]` | optional | `[return:deep]` | Return contract: `scout` (≤15-line facts report) \| `build` (≤20-line change report) \| `deep` (≤40-line conclusion-first report). Omit to derive from model tier (low→scout, mid→build, high→deep). Annotate only when the tier default is wrong — e.g. a low-tier model doing an audit that must report deep |
 | Description | yes | `Implement POST /api/auth in `web/src/app/api/auth/route.ts`` | Concrete action + backticked file path from repo root |
 
 Append an optional second line for dependencies:
