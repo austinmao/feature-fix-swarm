@@ -38,6 +38,16 @@ design QA verdicts are now evidence-backed at the script layer — an agent's
   the dim result file to fail (no stale `"pass"` + inert `.rejected`
   sidecar), and runtime_proof.py resolves from
   `~/.claude/lib/feature-fix-swarm/` in the installed shape.
+- Codex gate round 2 (1 CRITICAL + 2 HIGH fixed pre-merge): coverage
+  requirement is now pinned by the CALLER via `--kind functional|visual|all`
+  and keyed on scenarios.md source kinds — a forged bundle self-declaring
+  everything "visual" can no longer shrink what proof.json must cover, and
+  bundle-vs-source kind mismatches are findings (marking a functional flow
+  "visual" to dodge the interactions check is caught); `gates.py analyze`
+  requires the literal `runtime_proof.py verify` gate command, not a
+  spoofable substring; WEB_RE broadened (any `app/` file, `hooks/`,
+  `stores/`, `styles/`, framework configs — browser logic in plain `.ts` no
+  longer slips past) with `QA_FORCE_BROWSER=1` as the explicit force lever.
 - `scripts/browser-proof.sh` — web-touch detection + base-url resolution
   (QA_BASE_URL authoritative; probe list fallback) + driver ladder
   (canary > playwright > agent, trust-descending). 12 bats.

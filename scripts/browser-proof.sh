@@ -36,12 +36,21 @@ done
 # UI extensions, page/route/component dirs, and API routes (auth/API breakage
 # manifests in the browser). The decompose [qa:browser] tag overrides in both
 # directions; this regex is the default when no tag is present.
-WEB_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(pages|routes|components|emails|templates|public)/|(^|/)app/.*(page|layout|route|template|error|not-found)\.|(^|/)api/'
+# Broad on purpose (codex round: a false negative = silent proof bypass; a
+# false positive = at worst a NO-SERVER fail the operator can waive). Any
+# file under app/, hooks/stores/styles dirs, and framework configs count —
+# browser-relevant logic in plain .ts (hooks/useCart.ts, tailwind.config.ts)
+# must not slip past. QA_FORCE_BROWSER=1 forces WEB-TOUCH:yes regardless.
+WEB_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(pages|routes|components|emails|templates|public|hooks|stores?|styles?)/|(^|/)app/|(^|/)api/|(^|/)(tailwind|next|nuxt|vite|astro|svelte)\.config\.'
 
 WEB_TOUCH="no"
-for f in $DIFF_FILES; do
-  if echo "$f" | grep -qE "$WEB_RE"; then WEB_TOUCH="yes"; break; fi
-done
+if [ "${QA_FORCE_BROWSER:-0}" = "1" ]; then
+  WEB_TOUCH="yes"
+else
+  for f in $DIFF_FILES; do
+    if echo "$f" | grep -qE "$WEB_RE"; then WEB_TOUCH="yes"; break; fi
+  done
+fi
 echo "WEB-TOUCH:$WEB_TOUCH"
 
 if [ "$WEB_TOUCH" = "no" ]; then

@@ -131,3 +131,35 @@ start_stub_server() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRIVER:agent"* ]]
 }
+
+# ------------------------------------------- codex round: WEB_RE broadening
+
+@test "plain .ts under hooks/ counts as web-touch" {
+  export QA_ALLOW_NO_SERVER=1
+  run bash "$SCRIPT" --diff "web/src/hooks/useCart.ts"
+  [[ "$output" == *"WEB-TOUCH:yes"* ]]
+}
+
+@test "tailwind.config.ts counts as web-touch" {
+  export QA_ALLOW_NO_SERVER=1
+  run bash "$SCRIPT" --diff "tailwind.config.ts"
+  [[ "$output" == *"WEB-TOUCH:yes"* ]]
+}
+
+@test "any file under app/ counts as web-touch" {
+  export QA_ALLOW_NO_SERVER=1
+  run bash "$SCRIPT" --diff "web/src/app/actions/cart.ts"
+  [[ "$output" == *"WEB-TOUCH:yes"* ]]
+}
+
+@test "QA_FORCE_BROWSER=1 forces web-touch on any diff" {
+  export QA_ALLOW_NO_SERVER=1 QA_FORCE_BROWSER=1
+  run bash "$SCRIPT" --diff "lib/gates.py"
+  [[ "$output" == *"WEB-TOUCH:yes"* ]]
+}
+
+@test "non-web diff still NOT-NEEDED after broadening" {
+  run bash "$SCRIPT" --diff "lib/gates.py scripts/foo.sh README.md docs/x.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WEB-TOUCH:no"* ]]
+}

@@ -1064,3 +1064,17 @@ def test_analyze_no_scenarios_no_browser_tasks_clean() -> None:
     findings = gates.analyze_artifacts(SPEC_ONE_STORY, TASKS_NO_BROWSER_GATE,
                                        has_scenarios=False)
     assert findings == []
+
+
+def test_analyze_browser_gate_substring_spoof_rejected() -> None:
+    # codex round: bare "runtime_proof" substring must not satisfy the rule —
+    # the line must carry an actual runtime_proof.py verify gate command
+    tasks = """# Tasks
+## Phase 3 — US1
+- [ ] T001 [US1] [qa:e2e] e2e smoke login
+- [ ] T002 [US1] [qa:browser] browser stuff (runtime_proof later?)
+- [ ] T003 [US1] /review-gate [qa:review-gate]
+"""
+    findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
+                                       has_scenarios=True)
+    assert any("runtime_proof" in f for f in findings)

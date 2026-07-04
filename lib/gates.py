@@ -525,7 +525,9 @@ def analyze_artifacts(spec_text: str, tasks_text: str,
             findings.append(f"{phase}: browser-touchable spec (scenarios.md) "
                             "but no [qa:browser] runtime-proof gate task")
         for ln in browser_lines:
-            if "runtime_proof" not in ln:
+            # substring "runtime_proof" is spoofable by a placeholder mention
+            # (codex round) — require the actual verify gate command
+            if not re.search(r"runtime_proof\.py\s+verify\b", ln):
                 findings.append(f"{phase}: [qa:browser] task lacks a "
                                 "runtime_proof.py verify gate command")
     if not has_scenarios and re.search(r"\[qa:[a-z0-9,-]*browser", tasks_text):

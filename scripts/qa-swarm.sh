@@ -129,7 +129,7 @@ fi
 # qa-design trigger: only when the phase's diff touches visual surfaces.
 # (The old behavior gated design review on /design-html tasks only — ordinary
 # component/page/CSS work shipped with zero design review.)
-UI_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(emails|templates)/'
+UI_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(emails|templates|styles?)/|(^|/)tailwind\.config\.'
 DESIGN_TRIGGER="no"
 for f in $DIFF_FILES; do
   if echo "$f" | grep -qE "$UI_RE"; then DESIGN_TRIGGER="yes"; break; fi
@@ -216,8 +216,16 @@ for dim in e2e design; do
   DSTATUS=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(list(d.values())[0])" "$rf" 2>/dev/null || echo "error")
   if [ "$DSTATUS" = "pass" ]; then
     PROOF="$ARTIFACT_DIR/proof.json"
-    [ "$dim" = "design" ] && PROOF="$ARTIFACT_DIR/design-proof.json"
-    if ! python3 "$RP" verify "$PROOF" ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"}; then
+    KIND="functional"
+    if [ "$dim" = "design" ]; then
+      PROOF="$ARTIFACT_DIR/design-proof.json"
+      KIND="visual"
+    fi
+    # --kind pins the coverage requirement to SOURCE scenario kinds — a
+    # bundle self-declaring everything "visual" can't shrink what proof.json
+    # must cover (codex round, CRITICAL)
+    if ! python3 "$RP" verify "$PROOF" --kind "$KIND" \
+        ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"}; then
       echo "[RALPH] qa-${dim}: self-reported pass REJECTED — proof bundle missing/invalid ($PROOF)"
       # overwrite the result file itself — a stale {"dim":"pass"} must not
       # survive for any downstream reader (adversarial round F5)

@@ -228,27 +228,40 @@ def _cross_check_driver(proof, proof_path, browser_proof, findings):
                         "resolved driver")
 
 
-def _check_coverage(proof, scenarios_md, findings):
-    """Every scenario ID in scenarios.md (of a kind this bundle carries)
-    must be present — proving one easy scenario must not pass the phase."""
+def _check_coverage(proof, scenarios_md, findings, kind="all"):
+    """Every scenario ID in scenarios.md whose SOURCE kind matches the
+    caller-requested kind must be present — proving one easy scenario must
+    not pass the phase. The requirement is keyed on the source file, never
+    on the bundle's self-declared kinds (codex round: a forged bundle
+    marking everything "visual" must not shrink the functional requirement).
+    Bundle scenarios matching a source ID must also agree on kind — marking
+    a functional flow "visual" to dodge the interactions check is caught."""
     try:
         text = Path(scenarios_md).expanduser().read_text()
     except OSError:
         findings.append(f"scenarios source not found: {scenarios_md}")
         return
-    required = _parse_scenarios_md(text)
-    bundle_ids = {sc.get("id") for sc in proof.get("scenarios", [])}
-    bundle_kinds = {sc.get("kind", "functional")
-                    for sc in proof.get("scenarios", [])}
-    missing = [sid for sid, _title, kind in required
-               if kind in bundle_kinds and sid not in bundle_ids]
+    source = _parse_scenarios_md(text)
+    source_kind = {sid: k for sid, _title, k in source}
+    bundle_ids = set()
+    for sc in proof.get("scenarios", []):
+        sid = sc.get("id")
+        bundle_ids.add(sid)
+        want = source_kind.get(sid)
+        if want and sc.get("kind", "functional") != want:
+            findings.append(f"{sid}: kind mismatch — scenarios.md says "
+                            f"{want!r}, bundle claims "
+                            f"{sc.get('kind', 'functional')!r}")
+    missing = [sid for sid, _title, k in source
+               if kind in ("all", k) and sid not in bundle_ids]
     if missing:
         findings.append("coverage incomplete — scenarios.md IDs missing from "
                         f"bundle: {', '.join(missing)}")
 
 
 def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
-                 allow_console=None, scenarios_md=None, browser_proof=None):
+                 allow_console=None, scenarios_md=None, browser_proof=None,
+                 kind="all"):
     """Verify a proof.json bundle. Returns (ok, findings)."""
     findings = []
     p = Path(path).expanduser()
@@ -286,7 +299,7 @@ def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
     # coverage: explicit arg wins; else the source the skeleton embedded
     md = scenarios_md or proof.get("scenarios_source")
     if md:
-        _check_coverage(proof, md, findings)
+        _check_coverage(proof, md, findings, kind=kind)
 
     return not findings, findings
 
@@ -364,6 +377,11 @@ def main(argv=None):
     v.add_argument("--browser-proof", default=None,
                    help="browser-proof.txt to cross-check the driver against "
                         "(auto-detected next to the bundle when omitted)")
+    v.add_argument("--kind", default="all",
+                   choices=("functional", "visual", "all"),
+                   help="which source scenario kinds this bundle must cover "
+                        "(functional for proof.json, visual for "
+                        "design-proof.json; default all)")
 
     s = sub.add_parser("skeleton", help="emit UNFILLED proof template from scenarios.md")
     s.add_argument("scenarios_md")
@@ -378,7 +396,8 @@ def main(argv=None):
                                     max_age_min=args.max_age_min,
                                     allow_console=args.allow_console,
                                     scenarios_md=args.scenarios,
-                                    browser_proof=args.browser_proof)
+                                    browser_proof=args.browser_proof,
+                                    kind=args.kind)
         for f in findings:
             print(f"  - {f}")
         print(f"RUNTIME-PROOF: {'PASS' if ok else 'FAIL'} ({args.proof})")

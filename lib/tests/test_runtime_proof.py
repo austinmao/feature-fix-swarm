@@ -495,12 +495,15 @@ def test_coverage_missing_functional_scenario_fails(tmp_path):
 
 
 def test_coverage_visual_not_required_in_functional_bundle(tmp_path):
+    # codex round: the caller pins the requirement via kind= — bundle
+    # self-declared kinds must never shrink it (default kind="all" would
+    # require the visual ID too)
     md = tmp_path / "scenarios.md"
     md.write_text(SCEN_MD)
     scs = [good_scenario(tmp_path, id="US1-S1", shot_name="a.png"),
            good_scenario(tmp_path, id="US1-S2", shot_name="b.png")]
     ok, findings = verify(good_proof(tmp_path, scenarios=scs),
-                          scenarios_md=str(md))
+                          scenarios_md=str(md), kind="functional")
     assert ok, findings  # US2-S1 is visual — lives in design-proof.json
 
 
@@ -550,3 +553,61 @@ def test_cli_scenarios_flag(tmp_path):
     r = run_cli("verify", str(p), "--scenarios", str(md))
     assert r.returncode == 1
     assert "US1-S2" in r.stdout
+
+
+# ------------------------------------------------- codex round: C1 kind gaming
+
+def test_forged_kind_mismatch_vs_source_fails(tmp_path):
+    # source says US1-S1 is functional; bundle marks it visual+static to
+    # dodge the interactions check — must be caught
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    sc = good_scenario(tmp_path, id="US1-S1", kind="visual",
+                       interactions=0, static=True)
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
+                          scenarios_md=str(md))
+    assert not ok
+    assert any("kind mismatch" in f for f in findings)
+
+
+def test_kind_functional_requires_ids_regardless_of_bundle_kinds(tmp_path):
+    # all-visual forged bundle must NOT shrink the functional requirement
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    sc = good_scenario(tmp_path, id="US2-S1", kind="visual",
+                       interactions=0, static=True)
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
+                          scenarios_md=str(md), kind="functional")
+    assert not ok
+    assert any("US1-S1" in f and "US1-S2" in f for f in findings)
+
+
+def test_kind_visual_requires_only_visual_ids(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    sc = good_scenario(tmp_path, id="US2-S1", kind="visual",
+                       interactions=0, static=True)
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
+                          scenarios_md=str(md), kind="visual")
+    assert ok, findings
+
+
+def test_kind_all_requires_everything(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    sc = good_scenario(tmp_path, id="US1-S1")
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
+                          scenarios_md=str(md), kind="all")
+    assert not ok
+    assert any("US1-S2" in f for f in findings)
+    assert any("US2-S1" in f for f in findings)
+
+
+def test_cli_kind_flag(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    scs = [good_scenario(tmp_path, id="US1-S1", shot_name="a.png"),
+           good_scenario(tmp_path, id="US1-S2", shot_name="b.png")]
+    p = good_proof(tmp_path, scenarios=scs)
+    r = run_cli("verify", str(p), "--scenarios", str(md), "--kind", "functional")
+    assert r.returncode == 0, r.stdout

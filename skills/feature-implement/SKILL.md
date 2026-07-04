@@ -988,7 +988,7 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    ```bash
    python3 lib/gates.py run-gate T0XX -- \
      python3 lib/runtime_proof.py verify ".ralph/${PHASE_SLUG}/proof.json" \
-       --scenarios "$SPEC_DIR/scenarios.md"
+       --scenarios "$SPEC_DIR/scenarios.md" --kind functional
    ```
 
    ALL dimensions must pass (hive verdict = "pass" AND aggregate exit 0). Any failure triggers:
