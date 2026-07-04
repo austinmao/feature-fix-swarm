@@ -6,6 +6,56 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.19.0 — Swarm decomposition + agent roster + autonomous two-command pipeline (2026-07-04)
+
+The pipeline collapses to two commands with ONE operator stop:
+`/feature-spec NNN` → `/feature-implement NNN --autonomous`. New `/task-swarm`
+does the same end-to-end from a free-text instruction.
+
+- **Agent roster manifest** (`lib/agents_manifest.py` + `/agents-init` skill):
+  scans `.claude/agents/**` frontmatter + `.codex/agents/*.toml` + optional
+  seed file (`.feature-fix-swarm/agents.local.json` for plugin agents like
+  `ecc:*` that are valid subagent_types but not files) + ruflo builtins +
+  generic floor into `.feature-fix-swarm/agents.json` with domain buckets.
+  Kebab-case dedup (codex `Brand Designer` == claude `brand-designer`).
+  `check` subcommand validates every `[agent:X]` tag in a tasks.md against the
+  roster (bare + `dept/role` forms), fails closed. setup.sh ships the module
+  beside gates.py + best-effort scans at install. 16 tests, incl. real-repo
+  regressions (greedy `auth` keyword, Title Case dupes).
+- **spec-decompose v1.4.0 — swarm decomposition DEFAULT:** ruflo `swarm_init`
+  (hierarchical) + orchestrator + per-domain specialists drawn from the roster
+  propose task-subsets in parallel (native `Task()`, model-routed); a single
+  orchestrator merges under the canonical decompose-spec.md grammar contract
+  (dedup, cross-domain Depends-on, RED-before-GREEN, review-gates, roster
+  `[agent:]` tags). `--no-swarm` / empty roster / no ruflo (auto) → legacy
+  single-planner. Coherence gate now also runs `agents_manifest.py check`.
+- **feature-spec v1.2.0 — full front half:** speckit specify→plan→clarify →
+  spec-decompose → **preflight DEFAULT-ON** (`--no-preflight`) → **autonomy
+  grant DEFAULT-ON** (`--no-grant`; one screen, typed actions, TTL'd — the
+  `--autonomous` handoff never stalls ungranted). Prints the
+  `/feature-implement NNN --autonomous` handoff.
+- **feature-implement v1.12.0 — finish tail:** Step 10 review-gate → ship →
+  canary as the terminal executor (`--no-finish` opts out); every outward
+  action behind `check-grant` (autonomous) or explicit operator yes (attended);
+  ungranted → `pending` + STOP, work stays local. Safety rules updated: push/
+  deploy legal ONLY inside the gated tail. Step 9 retro optionally mirrors
+  patterns to gbrain (fail-soft).
+- **`/feature` RETIRED** → deprecated stub (3.0.0-deprecated) chaining
+  feature-spec + feature-implement; removal target v3.20.0.
+- **`/task-swarm` (new):** free-text task → plan-decompose (plan-eng-review +
+  codex gates + swarm decompose) → preflight → grant screen →
+  feature-implement --autonomous. session_save checkpoints per stage
+  (long-run-continuity). One operator stop by contract.
+- **gbrain optional integration** (`docs/gbrain-optional.md`): fail-soft
+  detection contract (`command -v gbrain` + `env -u DATABASE_URL gbrain
+  doctor`), per-phase usage (plan recall, decompose blast-radius via
+  code-refs, retro put) with git/grep fallbacks; `gbrain init --pglite`
+  quickstart for OSS consumers; gates.py stays gbrain-free.
+- **Ruflo curation** (`docs/ruflo-curation.md`): adopted set documented
+  (hooks_pre/post-task, model-route/outcome, session_save/restore, agentdb,
+  hive-mind QA) + explicit NOT-adopted line (daa_*, autopilot_*, neural_*,
+  workflow_execute, agent_execute) so future sessions don't cargo-cult.
+
 ## v3.18.0 — Autonomy grant ledger + preflight (2026-07-04)
 
 Front-load run-time decisions to plan-time so unattended runs never stall.

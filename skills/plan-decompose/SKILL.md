@@ -105,6 +105,13 @@ PRIOR_PATTERNS = mcp__ruflo__agentdb_pattern-search({
 If prior patterns found, surface them in the Step 2 instructions so plan-eng-review
 can build on proven decomposition approaches for similar work.
 
+**Optional gbrain recall (v3.19, fail-soft):** if `command -v gbrain` succeeds and
+`env -u DATABASE_URL gbrain doctor` reports `[OK] connection`, also run
+`env -u DATABASE_URL gbrain query "<task topic>"` and feed prior decisions into
+Step 2 alongside the agentdb patterns. Absent/unhealthy → fallback
+`git log --oneline --grep="<topic>" | head -5`; never block (see
+`docs/gbrain-optional.md`).
+
 ### Step 2: Run plan-eng-review (autonomous)
 
 **Mechanism:** Invoke the `plan-eng-review` skill via the `Skill` tool. When invoked
