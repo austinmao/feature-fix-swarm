@@ -21,8 +21,13 @@ orphaned-wip-adopter, and two-critic test-gate-critic primitives.
   checkbox-evidence hook passes, and the escalation ladder is SKIPPED — a
   correct refutation is a result, not a failure to retry. The refutation
   itself is adversarially checked via review-gate refute-or-promote before
-  the checkbox flips. Residual: a refutation is caller-asserted (there is no
-  runner-provable refutation); the adversarial check is the control.
+  the checkbox flips via a two-step protocol: `note-refuted` records
+  (confirmed=false) → review-gate refute-or-promote → `confirm-refuted`
+  unlocks strict `verify-done` (`GATES_STRICT=1` fails CLOSED on an
+  unconfirmed refutation — codex gate CRITICAL fix). Printed reasons are
+  control-char sanitized (codex MEDIUM). Residual: `confirm-refuted` is still
+  caller-executed (no runner-provable refutation exists); the two-step split
+  makes skipping the adversarial check a distinct, auditable action.
 - **`/verify-review` skill** (new, `skills/verify-review/`). Operator-facing:
   before acting on ANY review verdict (review-gate, codex review, PR review),
   spot-check the load-bearing claims against current HEAD and classify

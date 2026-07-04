@@ -780,8 +780,13 @@ with `[return:scout|build|deep]`. Host-neutral — tiers, not model names.
 > this ladder entirely: run
 > `python3 lib/gates.py note-refuted {task_id} --reason "<evidence>"`, route
 > the refutation through review-gate's refute-or-promote (one adversarial
-> pass: "prove this refutation wrong"), and if it survives, flip the checkbox
-> `[X]` with a trailing `(REFUTED: <reason>)` annotation. Zero diff ships.
+> pass: "prove this refutation wrong"), and ONLY if it survives run
+> `python3 lib/gates.py confirm-refuted {task_id}` — strict `verify-done`
+> fails closed on an unconfirmed refutation, so the checkbox cannot flip
+> before the adversarial check. Then flip `[X]` with a trailing
+> `(REFUTED: <reason>)` annotation. Zero diff ships. If the refutation is
+> itself refuted, do NOT confirm — treat as a normal FAILURE (first rung of
+> the ladder).
 > Retrying or escalating a refuted task burns budget forcing a fix onto a
 > wrong premise.
 
@@ -1188,7 +1193,7 @@ PY
 
   Then Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id}`
 - **FAILURE** (error, timeout, or sub-agent reported failure): Edit tasks.md `- [ ] {task_id}` → `- [F] {task_id}`
-- **REFUTED** (sub-agent proved the task's diagnosis wrong at HEAD): `gates.py note-refuted {task_id} --reason "..."` → adversarial check via review-gate refute-or-promote → if it survives, Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id} (REFUTED: <short reason>)`. `verify-done` accepts refuted evidence (prints `DONE-REFUTED`), so the checkbox-evidence hook passes. If the refutation is itself refuted, treat as a normal FAILURE (first rung of the escalation ladder).
+- **REFUTED** (sub-agent proved the task's diagnosis wrong at HEAD): `gates.py note-refuted {task_id} --reason "..."` → adversarial check via review-gate refute-or-promote → if it survives, `gates.py confirm-refuted {task_id}` → Edit tasks.md `- [ ] {task_id}` → `- [X] {task_id} (REFUTED: <short reason>)`. `verify-done` accepts a refutation (prints `DONE-REFUTED`) — under `GATES_STRICT=1` only a CONFIRMED one — so the checkbox-evidence hook passes exactly when the protocol was followed. If the refutation is itself refuted, do NOT confirm; treat as a normal FAILURE (first rung of the escalation ladder).
 
 Append to `.implement-log.jsonl`:
 
