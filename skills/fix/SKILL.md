@@ -145,6 +145,14 @@ Capture the investigation output. Write a structured summary to `$RALPH_DIR/inve
 
 ```markdown
 # Investigation Report
+
+> **Refutation is a valid outcome (v3.17.0).** If investigation shows the
+> reported cause does not hold at current HEAD (value never null, path never
+> taken, behavior already correct), STOP: record it via
+> `python3 lib/gates.py note-refuted <task-id> --reason "<evidence>"`,
+> ship nothing, and report the finding. Do NOT retry or escalate — a
+> confirmed-wrong diagnosis is a result, not a failure. The most expensive
+> fixes are correct fixes to the wrong problem.
 Bug: {BUG_DESC}
 Date: {ISO timestamp}
 
@@ -278,6 +286,9 @@ Read the affected files listed in the fix plan, then read CLAUDE.md for project 
 3. Verify the regression test now passes
 4. Report SUCCESS with: files changed, test file path, one-line summary
    Or FAILURE with: what you tried, what blocked you
+   Or REFUTED with: why the diagnosed cause does not hold at current HEAD
+   (cite file:line evidence). A refutation ships ZERO diff — do not force a
+   fix onto a wrong premise.
 
 ## Return contract (build)
 Report <=20 lines: what changed (files + line ranges), what you ran to

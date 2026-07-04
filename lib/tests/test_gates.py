@@ -732,3 +732,98 @@ def test_proof_duplicate_task_ids_is_no_go(tmp_path) -> None:
     art = gates.proof_artifact(store, "run-21", ["T100", "T100"])
     assert art["verdict"] == "no-go"
     assert art["duplicate_task_ids"] == ["T100"]
+
+
+# ── v3.17.0: REFUTED outcome (ported from fable-agent-orchestration
+#    investigate-before-fix / think-work-try result states) ──────────────────
+
+def test_note_refuted_records_reason(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_refuted(store, "T070", "premise wrong: field never null at HEAD") is True
+    data = json.loads(store.read_text())
+    assert data["T070"]["refuted"]["reason"].startswith("premise wrong")
+
+
+def test_note_refuted_rejects_blank_reason(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_refuted(store, "T070", "") is False
+    assert gates.note_refuted(store, "T070", "   ") is False
+    assert not store.exists() or "refuted" not in json.loads(store.read_text()).get("T070", {})
+
+
+def test_verify_done_accepts_refuted_as_completion(tmp_path) -> None:
+    """REFUTED = valid close-with-zero-diff outcome; checkbox may flip.
+    Adversarial check of the refutation itself lives at review-gate, not here."""
+    store = tmp_path / "evidence.json"
+    assert gates.verify_done(store, "T071") is False
+    gates.note_refuted(store, "T071", "diagnosis wrong")
+    assert gates.verify_done(store, "T071") is True
+    # strict fails CLOSED on an unconfirmed refutation (codex v3.17 CRITICAL):
+    # a bare caller-asserted refuted must not satisfy GATES_STRICT=1
+    assert gates.verify_done(store, "T071", strict=True) is False
+    gates.confirm_refuted(store, "T071")
+    assert gates.verify_done(store, "T071", strict=True) is True
+
+
+def test_refuted_does_not_leak_into_gate_evidence(tmp_path) -> None:
+    """A refuted task has NO gate evidence — phase_score must not count it
+    as a passing gate (it contributes nothing, not a pass)."""
+    store = tmp_path / "evidence.json"
+    gates.note_refuted(store, "T072", "diagnosis wrong")
+    assert "gate" not in json.loads(store.read_text())["T072"]
+
+
+def test_cli_note_refuted_and_verify_done(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "note-refuted", "T073", "--reason", "cause not reproducible at HEAD"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "REFUTED-RECORDED" in r.stdout
+    r2 = _sp.run(["python3", g, "note-refuted", "T073", "--reason", ""],
+                 capture_output=True, text=True, env=env)
+    assert r2.returncode == 1
+    r3 = _sp.run(["python3", g, "verify-done", "T073"], capture_output=True, text=True, env=env)
+    assert r3.returncode == 0 and "REFUTED" in r3.stdout
+
+
+def test_confirm_refuted_requires_prior_note(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.confirm_refuted(store, "T074") is False   # nothing to confirm
+    gates.note_refuted(store, "T074", "diagnosis wrong")
+    assert gates.confirm_refuted(store, "T074") is True
+    assert json.loads(store.read_text())["T074"]["refuted"]["confirmed"] is True
+
+
+def test_refuted_reason_sanitized_on_print(tmp_path) -> None:
+    """Control chars / ANSI escapes in a stored reason must not reach stdout
+    verbatim (codex v3.17 MEDIUM: log spoofing)."""
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / 'evidence.json'))
+    g = str(DISPATCH_DIR / 'gates.py')
+    evil = 'ok' + chr(27) + '[32mFAKE' + chr(27) + '[0m' + chr(10) + 'DONE-VERIFIED (executed_by=run_gate)'
+    gates.note_refuted(tmp_path / 'evidence.json', 'T075', evil)
+    r = _sp.run(['python3', g, 'verify-done', 'T075'], capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert chr(27) not in r.stdout
+    # the spoof line must not appear at start-of-line
+    assert not any(l.startswith('DONE-VERIFIED') for l in r.stdout.splitlines())
+
+
+def test_cli_verify_done_strict_unconfirmed_refuted(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    gates.note_refuted(tmp_path / "evidence.json", "T076", "diagnosis wrong")
+    r = _sp.run(["python3", g, "verify-done", "T076", "--strict"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "unconfirmed" in r.stdout.lower()
+    r2 = _sp.run(["python3", g, "confirm-refuted", "T076"],
+                 capture_output=True, text=True, env=env)
+    assert r2.returncode == 0 and "CONFIRMED" in r2.stdout
+    r3 = _sp.run(["python3", g, "verify-done", "T076", "--strict"],
+                 capture_output=True, text=True, env=env)
+    assert r3.returncode == 0 and "DONE-REFUTED" in r3.stdout

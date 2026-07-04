@@ -6,6 +6,48 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.17.0 — REFUTED outcome, verify-the-reviewer, WIP adoption (2026-07-04)
+
+Ported from elias/fable-agent-orchestration (git.wearein.space, Apache-2.0) —
+the review-verifier, investigate-before-fix / think-work-try result states,
+orphaned-wip-adopter, and two-critic test-gate-critic primitives.
+
+### Added
+- **REFUTED as a first-class outcome** (`lib/gates.py note-refuted`,
+  `skills/fix`, `skills/feature-implement`, `prompts/decompose-spec.md`).
+  When a sub-agent proves the task's diagnosis wrong at current HEAD, the
+  task closes with ZERO diff: `note-refuted <task> --reason "<evidence>"`
+  records it, `verify-done` accepts it (prints `DONE-REFUTED`) so the
+  checkbox-evidence hook passes, and the escalation ladder is SKIPPED — a
+  correct refutation is a result, not a failure to retry. The refutation
+  itself is adversarially checked via review-gate refute-or-promote before
+  the checkbox flips via a two-step protocol: `note-refuted` records
+  (confirmed=false) → review-gate refute-or-promote → `confirm-refuted`
+  unlocks strict `verify-done` (`GATES_STRICT=1` fails CLOSED on an
+  unconfirmed refutation — codex gate CRITICAL fix). Printed reasons are
+  control-char sanitized (codex MEDIUM). Residual: `confirm-refuted` is still
+  caller-executed (no runner-provable refutation exists); the two-step split
+  makes skipping the adversarial check a distinct, auditable action.
+- **`/verify-review` skill** (new, `skills/verify-review/`). Operator-facing:
+  before acting on ANY review verdict (review-gate, codex review, PR review),
+  spot-check the load-bearing claims against current HEAD and classify
+  REAL_BLOCKER / REAL_NON_BLOCKING / STALE / WRONG / CONFIRMED_PASS. Never
+  forward unverified reviewer claims to a fixer agent.
+- **`/adopt-wip` skill** (new, `skills/adopt-wip/`). Salvage coherent
+  uncommitted work from stalled worktrees: confirm stale → read diff →
+  assess coherence → exercise the load-bearing claim → adopt/rebuild/wait.
+  Adopted diffs get NO gate discount. Also referenced from
+  feature-implement's resume semantics.
+- **Test-gate-critic questions in review-gate Pass 3** (two-critic split):
+  would each changed test FAIL under the old broken behavior; production
+  path vs reimplementation; was a gate weakened to turn green; name the
+  easy fake pass. Review-gate bumped to 1.2.0.
+- **Verify-the-reviewer step in review-gate** (post-verdict): stale/wrong
+  claims are discarded with recorded reasons; clean PASSes get their 1-2
+  highest-cost claims spot-checked.
+- **Fail-under-broken language in decompose-spec**: every test task states
+  its trajectory and must fail under old behavior; name the easy fake pass.
+
 ## v3.16.0 — return contracts + escalation ladder (token discipline) (2026-07-04)
 
 ### Added

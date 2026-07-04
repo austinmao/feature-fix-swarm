@@ -18,6 +18,10 @@ Usage (inline heredoc in SKILL.md):
                                                   # evidence (or GATES_STRICT=1)
     python3 lib/gates.py phase-score  T040 T041 T042  # truth score from evidence;
                                                   # exit 1 if < 0.95 → rollback
+    python3 lib/gates.py note-refuted T042 --reason "cause not reproducible at HEAD"
+                                                  # zero-diff close; skips escalation
+    python3 lib/gates.py confirm-refuted T042     # after review-gate refute-or-promote
+                                                  # survives; unlocks strict verify-done
     python3 lib/gates.py note-failure T042 --sig "AssertionError foo.py:12"
                                                   # exit 1 when stuck (same sig 2x)
     python3 lib/gates.py proof run-42 T040 T041 --defer "live-send: no bot" \
@@ -164,7 +168,17 @@ def verify_done(store: Path, task_id: str, strict: bool = False) -> bool:
     strict=True additionally requires the evidence was produced by the
     runner itself (run_gate) — caller-recorded evidence is rejected because
     a shell-capable agent can fabricate `record-gate --exit 0`."""
-    gate = _load_store(store).get(task_id, {}).get("gate")
+    entry = _load_store(store).get(task_id, {})
+    refuted = entry.get("refuted")
+    if refuted:
+        # REFUTED (v3.17.0): diagnosis proven wrong at HEAD — the task closes
+        # with a zero diff. A refutation is a judgment call the runner cannot
+        # execute, so under strict it must be CONFIRMED (confirm-refuted,
+        # recorded only after review-gate refute-or-promote survives) — a
+        # bare caller-asserted note must not satisfy GATES_STRICT=1
+        # (codex v3.17 gate, CRITICAL).
+        return bool(refuted.get("confirmed")) if strict else True
+    gate = entry.get("gate")
     if not (bool(gate) and gate.get("exit_code") == 0):
         return False
     if strict and gate.get("executed_by") != "run_gate":
@@ -321,6 +335,46 @@ def note_failure(store: Path, task_id: str, signature: str) -> bool:
         sigs.append(signature)
         _save_store(store, data)
     return no_progress(sigs)
+
+
+def note_refuted(store: Path, task_id: str, reason: str) -> bool:
+    """Record a REFUTED outcome (v3.17.0, ported from the
+    fable-agent-orchestration result-state vocabulary): the task's diagnosis
+    was checked against current HEAD and found wrong, so NOTHING ships. This
+    is a result, not a failure — it does not enter the failure-signature
+    history and must NOT trigger the escalation ladder. A reason is
+    mandatory; a blank refutation is a dodge, not a finding."""
+    if not reason or not reason.strip():
+        return False
+    with _StoreLock(store):
+        data = _load_store(store)
+        data.setdefault(task_id, {})["refuted"] = {"reason": reason.strip(),
+                                                   "executed_by": "caller",
+                                                   "confirmed": False}
+        _save_store(store, data)
+    return True
+
+
+def confirm_refuted(store: Path, task_id: str) -> bool:
+    """Second step of the refutation protocol: recorded ONLY after the
+    refutation survives review-gate refute-or-promote. Unlocks strict
+    verify-done. Still caller-executed (no runner-provable refutation
+    exists) — the two-step split makes skipping the adversarial check a
+    distinct, auditable action rather than the default path."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        refuted = data.get(task_id, {}).get("refuted")
+        if not refuted:
+            return False
+        refuted["confirmed"] = True
+        _save_store(store, data)
+    return True
+
+
+def sanitize_reason(reason: str) -> str:
+    """Strip control chars (ANSI escapes, newlines) so a crafted stored
+    reason cannot spoof gate output lines in logs (codex v3.17, MEDIUM)."""
+    return re.sub(r"[\x00-\x1f\x7f]", " ", reason)[:200]
 
 
 def proof_artifact(store: Path, run_id: str, task_ids: list[str],
@@ -486,7 +540,13 @@ def main(argv: list[str]) -> int:
         gate = _load_store(store).get(args[0], {}).get("gate") or {}
         by = gate.get("executed_by", "unknown")
         ok = verify_done(store, args[0], strict=strict)
-        if ok:
+        refuted = _load_store(store).get(args[0], {}).get("refuted")
+        if ok and refuted:
+            print(f"DONE-REFUTED: zero-diff close ({sanitize_reason(refuted['reason'])})")
+        elif refuted and strict and not refuted.get("confirmed"):
+            print(f"NOT-DONE: refutation unconfirmed for {args[0]} — run "
+                  "review-gate refute-or-promote, then gates.py confirm-refuted")
+        elif ok:
             print(f"DONE-VERIFIED (executed_by={by})")
         elif strict and gate.get("exit_code") == 0:
             print(f"NOT-DONE: evidence not runner-executed (executed_by={by}); "
@@ -532,6 +592,19 @@ def main(argv: list[str]) -> int:
             print("BELOW-THRESHOLD: roll back to phase-start checkpoint and re-plan")
             return 1
         return 0
+    if cmd == "note-refuted":
+        ok = note_refuted(store, args[0], _flag(args, "--reason"))
+        print("REFUTED-RECORDED: task closes with zero diff; route the refutation "
+              "through review-gate before flipping the checkbox" if ok else
+              "NO-REASON: a refutation must name why the diagnosis is wrong")
+        return 0 if ok else 1
+    if cmd == "confirm-refuted":
+        print("WARNING: trusted-caller confirmation — run this ONLY after the "
+              "refutation survived review-gate refute-or-promote", file=sys.stderr)
+        ok = confirm_refuted(store, args[0])
+        print("REFUTED-CONFIRMED: strict verify-done unlocked" if ok else
+              f"NO-REFUTATION: nothing recorded for {args[0]} — note-refuted first")
+        return 0 if ok else 1
     if cmd == "note-failure":
         stuck = note_failure(store, args[0], _flag(args, "--sig"))
         print("NO-PROGRESS: same failure signature twice in a row — stop and report"
