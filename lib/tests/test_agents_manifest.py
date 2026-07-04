@@ -165,17 +165,30 @@ def test_check_rejects_dotdot_and_deep_slash_tags(tmp_path):
     assert "a/b/coder" in unknown
 
 
-def test_dedup_collision_warns_on_conflicting_description(tmp_path, capsys):
-    """codex MED: silent first-wins dedup — same slug from two sources with
-    DIFFERENT descriptions must emit a stderr warning (still dedupes)."""
+def test_dedup_collision_warns_within_same_source(tmp_path, capsys):
+    """codex MED: silent first-wins dedup — the TRUE collision is the same slug
+    claimed by two different files in the SAME source (two .claude/agents files
+    both named brand-designer). Must warn to stderr, still dedupe."""
     write(tmp_path / ".claude/agents/a.md",
           "---\nname: brand-designer\ndescription: visual identity work\n---\n")
-    write(tmp_path / ".codex/agents/a.toml",
-          'name = "Brand Designer"\ndescription = "completely different agent purpose"\n')
+    write(tmp_path / ".claude/agents/sub/b.md",
+          "---\nname: Brand Designer\ndescription: completely different agent purpose\n---\n")
     m = am.build_manifest(tmp_path)
     assert m["all_agents"].count("brand-designer") == 1
     err = capsys.readouterr().err
     assert "brand-designer" in err and "collision" in err.lower()
+
+
+def test_dedup_cross_source_mirror_is_silent(tmp_path, capsys):
+    """Cross-source same-slug (claude file + its codex TOML mirror, or builtin
+    vs generic floor) is the DESIGNED fallback-tier dedup — no warning noise."""
+    write(tmp_path / ".claude/agents/a.md",
+          "---\nname: brand-designer\ndescription: visual identity work\n---\n")
+    write(tmp_path / ".codex/agents/a.toml",
+          'name = "Brand Designer"\ndescription = "codex mirror wording differs"\n')
+    m = am.build_manifest(tmp_path)
+    assert m["all_agents"].count("brand-designer") == 1
+    assert "collision" not in capsys.readouterr().err.lower()
 
 
 # ---------------------------------------------------------------- check

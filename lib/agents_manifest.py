@@ -170,16 +170,18 @@ def build_manifest(repo: Path) -> dict:
         if not name:
             return
         if name in entries:
-            # codex v3.19 round 1 (MED): dedup was silent first-wins. Same slug +
-            # same description = same agent mirrored across sources (fine, quiet).
-            # Differing descriptions = possible collision of DISTINCT agents —
-            # warn loudly; first source still wins (discovery order is the contract).
+            # codex v3.19 round 1 (MED): dedup was silent first-wins. CROSS-source
+            # same-slug is the designed fallback-tier dedup (claude file + its
+            # codex mirror, builtin vs generic floor) — stays quiet. The true
+            # collision is the same slug claimed twice WITHIN one source (two
+            # distinct agent files fighting over a name) — warn loudly; first
+            # wins (discovery order is the contract).
             prior = entries[name]
-            if description and prior["description"] and \
-                    description.strip().lower() != prior["description"].strip().lower():
-                print(f"WARNING: roster collision on '{name}': keeping "
-                      f"{prior['source']} entry; {source} entry has a different "
-                      f"description — rename one if they are distinct agents",
+            if source == prior["source"] and description and prior["description"] \
+                    and description.strip().lower() != prior["description"].strip().lower():
+                print(f"WARNING: roster collision on '{name}' within {source}: "
+                      f"two agents claim this name with different descriptions — "
+                      f"keeping the first; rename one if they are distinct agents",
                       file=sys.stderr)
             return
         entries[name] = {"name": name, "description": description,
