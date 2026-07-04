@@ -233,7 +233,7 @@ routes, emails) MUST include, after the e2e smoke task and before the
 review-gate task, a browser-proof gate task tagged `[qa:browser]`:
 
 ```
-- [ ] T### [US1] [model:sonnet thinking:med] [agent:test-automator] Browser-proof gate — run US1 scenarios (specs/NNN/scenarios.md) in a real browser via the resolved driver; write .ralph/<phase>/proof.json. Gate: python3 lib/gates.py run-gate T### -- python3 lib/runtime_proof.py verify .ralph/<phase>/proof.json [qa:browser]
+- [ ] T### [US1] [model:sonnet thinking:med] [agent:test-automator] Browser-proof gate — run US1 scenarios (specs/NNN/scenarios.md) in a real browser via the resolved driver; write .ralph/<phase>/proof.json. Gate: python3 lib/gates.py run-gate T### -- python3 lib/runtime_proof.py verify .ralph/<phase>/proof.json --scenarios specs/NNN/scenarios.md [qa:browser]
 ```
 
 This is what prevents "it 200s" from counting as done: the checkbox can only

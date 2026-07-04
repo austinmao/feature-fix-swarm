@@ -11,6 +11,10 @@ checks below. Each check defeats a named anti-pattern:
   console_errors must be present+empty  . post-hydration client death
   interactions >= 1 (functional)        . static frame passed off as "works"
   screenshot exists + non-empty + fresh . fabricated/stale artifacts
+  screenshot magic-byte image check     . `printf x > shot.png` forgeries
+  playwright needs fresh artifact file  . forged driver tier w/o a real run
+  driver vs browser-proof.txt match     . claiming a driver you didn't use
+  coverage vs scenarios.md (all IDs)    . proving one easy scenario, skipping rest
   --strict rejects driver=agent         . self-reported evidence tier
 
 Drivers (descending trust): canary (recorded trace/video/HAR session),
@@ -57,6 +61,9 @@ SOFT_404_PATTERNS = [
     r"unhandled runtime error",
 ]
 SOFT_404_RE = re.compile("|".join(SOFT_404_PATTERNS), re.IGNORECASE)
+
+# Real screenshots are PNG/JPEG/GIF/WebP — anything else is a forged artifact.
+IMAGE_MAGIC_PREFIXES = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF")
 
 
 def _check_scenario(sc, idx, now, max_age_min, allow_re):
@@ -126,6 +133,11 @@ def _check_scenario(sc, idx, now, max_age_min, allow_re):
         elif p.stat().st_size == 0:
             findings.append(f"{sid}: screenshot is empty: {shot}")
         else:
+            with open(p, "rb") as fh:
+                head = fh.read(8)
+            if not head.startswith(IMAGE_MAGIC_PREFIXES):
+                findings.append(f"{sid}: screenshot is not an image "
+                                f"(bad magic bytes): {shot}")
             age_min = (now - p.stat().st_mtime) / 60
             if age_min > max_age_min:
                 findings.append(f"{sid}: screenshot stale ({age_min:.0f}min old > "
@@ -159,8 +171,84 @@ def _cross_check_canary(proof, findings):
                             f"(status={step.get('status')!r})")
 
 
+def _cross_check_playwright(proof, findings, now, max_age_min):
+    """driver=playwright: a real run leaves artifacts (trace/results/report).
+
+    Without this, "driver": "playwright" is a free string that dodges the
+    strict-mode agent rejection without ever opening a browser.
+    """
+    art = proof.get("playwright_artifact")
+    if not art:
+        findings.append("playwright driver requires playwright_artifact "
+                        "(trace.zip / results.json / report file from the run)")
+        return
+    p = Path(art).expanduser()
+    if not p.is_file():
+        findings.append(f"playwright artifact not found: {art}")
+        return
+    if p.stat().st_size == 0:
+        findings.append(f"playwright artifact is empty: {art}")
+        return
+    age_min = (now - p.stat().st_mtime) / 60
+    if age_min > max_age_min:
+        findings.append(f"playwright artifact stale ({age_min:.0f}min old > "
+                        f"{max_age_min}min max) — evidence must come from this run")
+
+
+BROWSER_PROOF_DRIVER_RE = re.compile(r"^DRIVER:(\S+)", re.MULTILINE)
+
+
+def _cross_check_driver(proof, proof_path, browser_proof, findings):
+    """proof.driver must match the driver browser-proof.sh actually resolved.
+
+    Kills the forgery of claiming a higher-trust driver than the one
+    available (or the reverse: falling back to agent when a real driver
+    was installed). Auto-detects browser-proof.txt next to the bundle.
+    """
+    bp = browser_proof
+    if bp is None:
+        sibling = Path(proof_path).expanduser().parent / "browser-proof.txt"
+        if sibling.is_file():
+            bp = str(sibling)
+    if bp is None:
+        return
+    try:
+        text = Path(bp).expanduser().read_text()
+    except OSError as e:
+        findings.append(f"browser-proof file unreadable: {e}")
+        return
+    m = BROWSER_PROOF_DRIVER_RE.search(text)
+    if not m:
+        return
+    resolved = m.group(1)
+    claimed = proof.get("driver")
+    if resolved in VALID_DRIVERS and claimed != resolved:
+        findings.append(f"driver mismatch: proof claims {claimed!r} but "
+                        f"browser-proof resolved {resolved!r} — use the "
+                        "resolved driver")
+
+
+def _check_coverage(proof, scenarios_md, findings):
+    """Every scenario ID in scenarios.md (of a kind this bundle carries)
+    must be present — proving one easy scenario must not pass the phase."""
+    try:
+        text = Path(scenarios_md).expanduser().read_text()
+    except OSError:
+        findings.append(f"scenarios source not found: {scenarios_md}")
+        return
+    required = _parse_scenarios_md(text)
+    bundle_ids = {sc.get("id") for sc in proof.get("scenarios", [])}
+    bundle_kinds = {sc.get("kind", "functional")
+                    for sc in proof.get("scenarios", [])}
+    missing = [sid for sid, _title, kind in required
+               if kind in bundle_kinds and sid not in bundle_ids]
+    if missing:
+        findings.append("coverage incomplete — scenarios.md IDs missing from "
+                        f"bundle: {', '.join(missing)}")
+
+
 def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
-                 allow_console=None):
+                 allow_console=None, scenarios_md=None, browser_proof=None):
     """Verify a proof.json bundle. Returns (ok, findings)."""
     findings = []
     p = Path(path).expanduser()
@@ -190,6 +278,15 @@ def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
 
     if driver == "canary":
         _cross_check_canary(proof, findings)
+    elif driver == "playwright":
+        _cross_check_playwright(proof, findings, now, max_age_min)
+
+    _cross_check_driver(proof, p, browser_proof, findings)
+
+    # coverage: explicit arg wins; else the source the skeleton embedded
+    md = scenarios_md or proof.get("scenarios_source")
+    if md:
+        _check_coverage(proof, md, findings)
 
     return not findings, findings
 
@@ -197,6 +294,20 @@ def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
 # ---------------------------------------------------------------- skeleton
 
 SCENARIO_HEADING_RE = re.compile(r"^##\s+([A-Za-z0-9_-]+)\s*:\s*(.+)$")
+
+
+def _parse_scenarios_md(text):
+    """Parse '## <ID>: <title>' headings -> [(id, title, kind)]."""
+    out = []
+    for line in text.splitlines():
+        m = SCENARIO_HEADING_RE.match(line.strip())
+        if not m:
+            continue
+        sid, title = m.group(1), m.group(2).strip()
+        kind = ("visual" if re.search(r"\bvisual|design\b", title, re.I)
+                else "functional")
+        out.append((sid, title, kind))
+    return out
 
 
 def emit_skeleton(scenarios_md, out_path, base_url):
@@ -207,12 +318,7 @@ def emit_skeleton(scenarios_md, out_path, base_url):
     """
     text = Path(scenarios_md).read_text()
     scenarios = []
-    for line in text.splitlines():
-        m = SCENARIO_HEADING_RE.match(line.strip())
-        if not m:
-            continue
-        sid, title = m.group(1), m.group(2).strip()
-        kind = "visual" if re.search(r"\bvisual|design\b", title, re.I) else "functional"
+    for sid, title, kind in _parse_scenarios_md(text):
         scenarios.append({
             "id": sid,
             "title": title,
@@ -231,6 +337,7 @@ def emit_skeleton(scenarios_md, out_path, base_url):
         "version": 1,
         "driver": "agent",
         "base_url": base_url,
+        "scenarios_source": str(scenarios_md),
         "scenarios": scenarios,
     }
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -251,6 +358,12 @@ def main(argv=None):
     v.add_argument("--max-age-min", type=int, default=DEFAULT_MAX_AGE_MIN)
     v.add_argument("--allow-console", default=None,
                    help="regex for console errors to tolerate")
+    v.add_argument("--scenarios", default=None,
+                   help="scenarios.md to enforce coverage against "
+                        "(overrides the bundle's scenarios_source)")
+    v.add_argument("--browser-proof", default=None,
+                   help="browser-proof.txt to cross-check the driver against "
+                        "(auto-detected next to the bundle when omitted)")
 
     s = sub.add_parser("skeleton", help="emit UNFILLED proof template from scenarios.md")
     s.add_argument("scenarios_md")
@@ -263,7 +376,9 @@ def main(argv=None):
         strict = args.strict or os.environ.get("RUNTIME_PROOF_STRICT") == "1"
         ok, findings = verify_proof(args.proof, strict=strict,
                                     max_age_min=args.max_age_min,
-                                    allow_console=args.allow_console)
+                                    allow_console=args.allow_console,
+                                    scenarios_md=args.scenarios,
+                                    browser_proof=args.browser_proof)
         for f in findings:
             print(f"  - {f}")
         print(f"RUNTIME-PROOF: {'PASS' if ok else 'FAIL'} ({args.proof})")

@@ -480,10 +480,14 @@ def proof_artifact(store: Path, run_id: str, task_ids: list[str],
 
 # ── Stream G: spec/tasks coherence ───────────────────────────────────────────
 
-def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
+def analyze_artifacts(spec_text: str, tasks_text: str,
+                      has_scenarios: bool = False) -> list[str]:
     """Cross-artifact consistency gate (spec-kit analyze analog).
     Every spec story needs tasks; every task story must exist in the spec;
-    every phase needs a review-gate task; every story phase needs an e2e task."""
+    every phase needs a review-gate task; every story phase needs an e2e task.
+    has_scenarios=True (specs/NNN/scenarios.md exists → browser-touchable
+    spec): every story phase must also carry a [qa:browser] runtime-proof
+    gate task — otherwise proof enforcement is opt-in prose (v3.20 F1)."""
     findings: list[str] = []
     spec_stories = set(re.findall(r"\bUS(\d+)\b", spec_text))
 
@@ -515,6 +519,18 @@ def analyze_artifacts(spec_text: str, tasks_text: str) -> list[str]:
         if is_story_phase and not any(
                 re.search(r"\[qa:[a-z0-9,-]*e2e", ln) for ln in lines):
             findings.append(f"{phase}: story phase has no e2e smoke task")
+        browser_lines = [ln for ln in lines
+                         if re.search(r"\[qa:[a-z0-9,-]*browser", ln)]
+        if has_scenarios and is_story_phase and not browser_lines:
+            findings.append(f"{phase}: browser-touchable spec (scenarios.md) "
+                            "but no [qa:browser] runtime-proof gate task")
+        for ln in browser_lines:
+            if "runtime_proof" not in ln:
+                findings.append(f"{phase}: [qa:browser] task lacks a "
+                                "runtime_proof.py verify gate command")
+    if not has_scenarios and re.search(r"\[qa:[a-z0-9,-]*browser", tasks_text):
+        findings.append("tasks carry [qa:browser] but specs/NNN/scenarios.md "
+                        "is missing — decompose must emit the BDD scenarios")
     return findings
 
 
@@ -871,7 +887,10 @@ def main(argv: list[str]) -> int:
             spec = f.read()
         with open(args[1]) as f:
             tasks = f.read()
-        findings = analyze_artifacts(spec, tasks)
+        # scenarios.md sibling of tasks.md marks the spec browser-touchable
+        has_scenarios = (
+            Path(args[1]).resolve().parent / "scenarios.md").is_file()
+        findings = analyze_artifacts(spec, tasks, has_scenarios=has_scenarios)
         for f in findings:
             print(f"ANALYZE: {f}")
         print("ANALYZE-PASS" if not findings else f"ANALYZE-FAIL: {len(findings)} findings")

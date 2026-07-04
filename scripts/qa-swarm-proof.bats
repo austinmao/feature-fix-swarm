@@ -33,10 +33,14 @@ write_all_skip_results() {
 
 make_valid_proof() { # $1 = output proof path
   local shot="$WORK/shot.png"
-  printf 'PNGDATA' > "$shot"
-  python3 - "$1" "$shot" <<'EOF'
+  local art="$WORK/pw-results.json"
+  python3 - "$1" "$shot" "$art" <<'EOF'
 import json, sys
+# real PNG magic bytes — v3.20 hardening rejects non-image screenshots
+open(sys.argv[2], "wb").write(b"\x89PNG\r\n\x1a\nfake")
+open(sys.argv[3], "w").write('{"suites": []}')
 proof = {"version": 1, "driver": "playwright", "base_url": "http://x",
+         "playwright_artifact": sys.argv[3],
          "scenarios": [{"id": "S1", "kind": "functional", "status": "pass",
                         "url": "/", "url_final": "http://x/", "expect_url": "/",
                         "http_status": 200, "content_assert": "h1",
@@ -128,4 +132,42 @@ EOF
   [ "$status" -eq 1 ]
   # file untouched — aggregate mode never rewrites dim results
   grep -q '"review":"fail"' "$ART/review-result.json"
+}
+
+# ------------------------------------------- adversarial round (F4/F5/F9)
+
+@test "aggregate: rejection overwrites result file to fail (no stale pass)" {
+  write_all_skip_results
+  printf '{"e2e":"pass"}' > "$ART/e2e-result.json"
+  run bash "$SCRIPT" --phase "Phase 9" --diff "x" --spec-dir specs/999 --aggregate
+  [ "$status" -eq 1 ]
+  grep -q '"e2e":"fail"' "$ART/e2e-result.json"
+  [ ! -f "$ART/e2e-result.json.rejected" ]
+}
+
+@test "aggregate: installed shape resolves runtime_proof.py from ~/.claude/lib" {
+  # simulate ~/.claude install: qa-swarm.sh in scripts/ with NO ../lib,
+  # runtime_proof.py only under $HOME/.claude/lib/feature-fix-swarm/
+  mkdir -p "$WORK/inst/scripts" "$WORK/fakehome/.claude/lib/feature-fix-swarm"
+  cp "$SCRIPT" "$WORK/inst/scripts/qa-swarm.sh"
+  cp "$BATS_TEST_DIRNAME/../lib/runtime_proof.py" \
+     "$WORK/fakehome/.claude/lib/feature-fix-swarm/runtime_proof.py"
+  write_all_skip_results
+  printf '{"e2e":"pass"}' > "$ART/e2e-result.json"
+  make_valid_proof "$ART/proof.json"
+  HOME="$WORK/fakehome" run bash "$WORK/inst/scripts/qa-swarm.sh" \
+      --phase "Phase 9" --diff "x" --spec-dir specs/999 --aggregate
+  [ "$status" -eq 0 ]
+}
+
+@test "aggregate: QA_SCENARIOS enforces coverage completeness" {
+  write_all_skip_results
+  printf '{"e2e":"pass"}' > "$ART/e2e-result.json"
+  make_valid_proof "$ART/proof.json"
+  printf '## S1: home loads\n- Given\n\n## S2: login error state\n- Given\n' \
+    > "$WORK/scenarios.md"
+  QA_SCENARIOS="$WORK/scenarios.md" run bash "$SCRIPT" \
+      --phase "Phase 9" --diff "x" --spec-dir specs/999 --aggregate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"REJECTED"* ]]
 }

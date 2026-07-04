@@ -968,6 +968,9 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    agents report, run
 
    ```bash
+   # --autonomous runs: export RUNTIME_PROOF_STRICT=1 first — unattended
+   # verification must reject driver=agent (self-reported evidence tier)
+   QA_SCENARIOS="$SPEC_DIR/scenarios.md" \
    bash scripts/qa-swarm.sh --aggregate --phase "$CURRENT_PHASE" \
      --diff "$PHASE_DIFF_FILES" --spec-dir "$SPEC_DIR"
    ```
@@ -976,13 +979,16 @@ After ALL tasks in the current `## Phase N:` heading complete with `[X]`:
    "pass" whose proof bundle fails `python3 lib/runtime_proof.py verify` —
    an agent claiming success without verified browser evidence (curl-200,
    wrong-page screenshot, soft-404, unread console, zero interactions, stale
-   artifacts) fails here regardless of the hive verdict. A hive "pass" +
-   aggregate exit 1 = phase QA FAIL. Then record the browser gate into the
-   evidence ledger so the phase's `[qa:browser]` task checkbox is legal:
+   or non-image artifacts, a claimed driver that doesn't match the resolved
+   one, or a bundle covering fewer scenarios than scenarios.md defines)
+   fails here regardless of the hive verdict. A hive "pass" + aggregate
+   exit 1 = phase QA FAIL. Then record the browser gate into the evidence
+   ledger so the phase's `[qa:browser]` task checkbox is legal:
 
    ```bash
    python3 lib/gates.py run-gate T0XX -- \
-     python3 lib/runtime_proof.py verify ".ralph/${PHASE_SLUG}/proof.json"
+     python3 lib/runtime_proof.py verify ".ralph/${PHASE_SLUG}/proof.json" \
+       --scenarios "$SPEC_DIR/scenarios.md"
    ```
 
    ALL dimensions must pass (hive verdict = "pass" AND aggregate exit 0). Any failure triggers:

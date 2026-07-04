@@ -56,14 +56,21 @@ def good_scenario(tmp_path: Path, **over) -> dict:
 
 
 def good_proof(tmp_path: Path, scenarios=None, **over) -> Path:
+    # v3.20 hardening: driver=playwright requires a fresh run artifact
+    art = tmp_path / "pw-results.json"
+    if not art.exists():
+        art.write_text('{"suites": []}')
     proof = {
         "version": 1,
         "driver": "playwright",
         "base_url": "http://localhost:3000",
+        "playwright_artifact": str(art),
         "scenarios": scenarios if scenarios is not None
         else [good_scenario(tmp_path)],
     }
     proof.update(over)
+    if proof.get("playwright_artifact") is None:
+        del proof["playwright_artifact"]  # explicit None = omit (for tests)
     p = tmp_path / "proof.json"
     p.write_text(json.dumps(proof))
     return p
@@ -395,3 +402,151 @@ def test_cli_skeleton_emits_unfilled_template(tmp_path):
     assert all(s["status"] == "UNFILLED" for s in data["scenarios"])
     # skeleton must NOT verify — evidence has to be filled by a real run
     assert run_cli("verify", str(out)).returncode == 1
+
+
+# ---------------------------------------------------------- forgery hardening
+# (v3.20.0 adversarial round: F2 forgeable bundle, F9 coverage completeness)
+
+def make_pw_artifact(tmp_path: Path, name: str = "results.json",
+                     age_min: int = 0) -> Path:
+    p = tmp_path / name
+    p.write_text('{"suites": []}')
+    if age_min:
+        old = time.time() - age_min * 60
+        os.utime(p, (old, old))
+    return p
+
+
+def test_screenshot_must_be_an_image(tmp_path):
+    shot = tmp_path / "fake.png"
+    shot.write_text("x")  # printf x > shot.png forgery
+    sc = good_scenario(tmp_path, screenshot=str(shot))
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+    assert not ok
+    assert any("not an image" in f for f in findings)
+
+
+def test_playwright_driver_requires_artifact(tmp_path):
+    p = good_proof(tmp_path, playwright_artifact=None)
+    ok, findings = verify(p)
+    assert not ok
+    assert any("playwright_artifact" in f for f in findings)
+
+
+def test_playwright_artifact_must_exist(tmp_path):
+    p = good_proof(tmp_path, playwright_artifact=str(tmp_path / "nope.json"))
+    ok, findings = verify(p)
+    assert not ok
+    assert any("playwright" in f and "not found" in f for f in findings)
+
+
+def test_playwright_artifact_must_be_fresh(tmp_path):
+    art = make_pw_artifact(tmp_path, "old-results.json", age_min=600)
+    p = good_proof(tmp_path, playwright_artifact=str(art))
+    ok, findings = verify(p, max_age_min=240)
+    assert not ok
+    assert any("stale" in f for f in findings)
+
+
+def test_driver_cross_check_mismatch_fails(tmp_path):
+    bp = tmp_path / "bp.txt"
+    bp.write_text("WEB-TOUCH:yes\nDRIVER:canary\nBASE-URL:http://localhost:3000\n")
+    ok, findings = verify(good_proof(tmp_path), browser_proof=str(bp))
+    assert not ok
+    assert any("mismatch" in f for f in findings)
+
+
+def test_driver_cross_check_match_passes(tmp_path):
+    bp = tmp_path / "bp.txt"
+    bp.write_text("DRIVER:playwright\n")
+    ok, findings = verify(good_proof(tmp_path), browser_proof=str(bp))
+    assert ok, findings
+
+
+def test_driver_cross_check_auto_detects_sibling(tmp_path):
+    # browser-proof.txt next to proof.json is picked up without a flag
+    (tmp_path / "browser-proof.txt").write_text("DRIVER:canary\n")
+    ok, findings = verify(good_proof(tmp_path))
+    assert not ok
+    assert any("mismatch" in f for f in findings)
+
+
+# coverage completeness vs scenarios.md (F9)
+
+SCEN_MD = """## US1-S1: login happy path
+- Given a registered user
+
+## US1-S2: bad password error state
+- Given a registered user
+
+## US2-S1: visual dashboard design
+- Given the dashboard page
+"""
+
+
+def test_coverage_missing_functional_scenario_fails(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    sc = good_scenario(tmp_path, id="US1-S1")
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
+                          scenarios_md=str(md))
+    assert not ok
+    assert any("US1-S2" in f for f in findings)
+
+
+def test_coverage_visual_not_required_in_functional_bundle(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    scs = [good_scenario(tmp_path, id="US1-S1", shot_name="a.png"),
+           good_scenario(tmp_path, id="US1-S2", shot_name="b.png")]
+    ok, findings = verify(good_proof(tmp_path, scenarios=scs),
+                          scenarios_md=str(md))
+    assert ok, findings  # US2-S1 is visual — lives in design-proof.json
+
+
+def test_coverage_visual_bundle_requires_visual_ids(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD + "\n## US2-S2: visual mobile breakpoint\n- Given 375px\n")
+    sc = good_scenario(tmp_path, id="US2-S1", kind="visual",
+                       interactions=0, static=True)
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]),
+                          scenarios_md=str(md))
+    assert not ok
+    assert any("US2-S2" in f for f in findings)
+
+
+def test_scenarios_source_field_auto_loads(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    sc = good_scenario(tmp_path, id="US1-S1")
+    p = good_proof(tmp_path, scenarios=[sc], scenarios_source=str(md))
+    ok, findings = verify(p)
+    assert not ok
+    assert any("US1-S2" in f for f in findings)
+
+
+def test_scenarios_source_missing_file_fails(tmp_path):
+    p = good_proof(tmp_path, scenarios_source=str(tmp_path / "gone.md"))
+    ok, findings = verify(p)
+    assert not ok
+    assert any("scenarios" in f and ("not found" in f or "missing" in f)
+               for f in findings)
+
+
+def test_skeleton_embeds_scenarios_source(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    out = tmp_path / "proof.json"
+    rp.emit_skeleton(str(md), str(out), "http://localhost:3000")
+    data = json.loads(out.read_text())
+    assert data["scenarios_source"] == str(md)
+
+
+def test_cli_scenarios_flag(tmp_path):
+    md = tmp_path / "scenarios.md"
+    md.write_text(SCEN_MD)
+    sc = good_scenario(tmp_path, id="US1-S1")
+    p = good_proof(tmp_path, scenarios=[sc])
+    r = run_cli("verify", str(p), "--scenarios", str(md))
+    assert r.returncode == 1
+    assert "US1-S2" in r.stdout

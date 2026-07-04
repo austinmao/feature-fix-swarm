@@ -23,7 +23,21 @@ design QA verdicts are now evidence-backed at the script layer — an agent's
   non-empty + fresh), self-report tier (`--strict` / `RUNTIME_PROOF_STRICT=1`
   rejects driver=agent). Canary driver cross-checks the session
   results.json. `skeleton` subcommand emits UNFILLED templates from
-  scenarios.md. 42 pytest, RED-first.
+  scenarios.md. 56 pytest, RED-first.
+- Adversarial hardening round (opus review, 3 HIGH fixed pre-merge):
+  screenshot magic-byte image check (kills `printf x > shot.png`);
+  `playwright` driver requires a fresh `playwright_artifact` (a bare
+  `"driver": "playwright"` string no longer dodges strict mode);
+  `proof.driver` cross-checked against the `browser-proof.txt` the resolver
+  wrote (`--browser-proof` or auto-detected sibling); coverage completeness
+  vs scenarios.md (`--scenarios`, or the `scenarios_source` the skeleton now
+  embeds) — a bundle proving one easy scenario while the spec defines five
+  is rejected; `gates.py analyze` machine-requires a `[qa:browser]`
+  runtime-proof gate task in every story phase when scenarios.md exists
+  (enforcement was opt-in prose before). Aggregate rejection now overwrites
+  the dim result file to fail (no stale `"pass"` + inert `.rejected`
+  sidecar), and runtime_proof.py resolves from
+  `~/.claude/lib/feature-fix-swarm/` in the installed shape.
 - `scripts/browser-proof.sh` — web-touch detection + base-url resolution
   (QA_BASE_URL authoritative; probe list fallback) + driver ladder
   (canary > playwright > agent, trust-descending). 12 bats.

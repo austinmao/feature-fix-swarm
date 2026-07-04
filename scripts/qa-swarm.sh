@@ -199,8 +199,17 @@ OVERALL="pass"
 # survives runtime_proof.py — an LLM agent claiming pass with no verified
 # evidence is REJECTED here (curl-200 / wrong-page / soft-404 defenses live
 # in the verifier, not in agent prose).
+# Resolution covers all three install shapes: canonical repo / vendored
+# packages/feature-fix-swarm (../lib), CWD lib/, and the ~/.claude install
+# (setup.sh puts runtime_proof.py under $HOME/.claude/lib/feature-fix-swarm/
+# while qa-swarm.sh lands in the project's scripts/ — ../lib doesn't exist).
 RP="$SCRIPT_DIR/../lib/runtime_proof.py"
 [ -f "$RP" ] || RP="lib/runtime_proof.py"
+[ -f "$RP" ] || RP="$HOME/.claude/lib/feature-fix-swarm/runtime_proof.py"
+VERIFY_ARGS=()
+# QA_SCENARIOS=specs/NNN/scenarios.md enforces coverage completeness — a
+# bundle proving one easy scenario while scenarios.md lists five is rejected.
+[ -n "${QA_SCENARIOS:-}" ] && VERIFY_ARGS+=(--scenarios "$QA_SCENARIOS")
 for dim in e2e design; do
   rf="$ARTIFACT_DIR/${dim}-result.json"
   [ -f "$rf" ] || continue
@@ -208,9 +217,11 @@ for dim in e2e design; do
   if [ "$DSTATUS" = "pass" ]; then
     PROOF="$ARTIFACT_DIR/proof.json"
     [ "$dim" = "design" ] && PROOF="$ARTIFACT_DIR/design-proof.json"
-    if ! python3 "$RP" verify "$PROOF"; then
+    if ! python3 "$RP" verify "$PROOF" ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"}; then
       echo "[RALPH] qa-${dim}: self-reported pass REJECTED — proof bundle missing/invalid ($PROOF)"
-      printf '{"%s":"fail"}' "$dim" > "$rf.rejected"
+      # overwrite the result file itself — a stale {"dim":"pass"} must not
+      # survive for any downstream reader (adversarial round F5)
+      printf '{"%s":"fail"}' "$dim" > "$rf"
       OVERALL="fail"
     fi
   fi

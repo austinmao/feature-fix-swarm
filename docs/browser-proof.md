@@ -26,7 +26,23 @@ Each check defeats a named anti-pattern:
 | `console_errors` must be present AND empty | SSR looks fine, hydration throws, page is dead |
 | `interactions >= 1` for functional scenarios | static frame passed off as "works" (buttons/auth untested) |
 | screenshot exists + non-empty + fresh (mtime) | fabricated or recycled artifacts |
+| screenshot magic-byte image check | `printf x > shot.png` forgeries |
+| `playwright` driver requires a fresh `playwright_artifact` | claiming a driver tier without a real run |
+| `proof.driver` must match `browser-proof.txt` `DRIVER:` (auto-detected sibling or `--browser-proof`) | claiming a driver you didn't use / silently falling back to agent when a real driver was installed |
+| coverage vs `scenarios.md` (`--scenarios` or the `scenarios_source` the skeleton embeds) | proving one easy scenario, skipping auth/forms/error states |
 | `--strict` rejects `driver: agent` | self-reported evidence tier |
+
+`gates.py analyze` machine-requires the gate: when `specs/NNN/scenarios.md`
+exists, every story phase must carry a `[qa:browser]` task whose line invokes
+`runtime_proof.py verify` — a decompose that omits it fails analyze, so proof
+enforcement is never opt-in prose. Autonomous runs should also `export
+RUNTIME_PROOF_STRICT=1` so agent-tier evidence is rejected outright.
+
+Known limits: the forgery bar is anti-accident/anti-lazy, not cryptographic —
+an adversary controlling the filesystem can still fabricate coherent
+artifacts (consistent with the gates.py threat model). CSS-in-JS in plain
+`.ts` files and Tailwind config changes don't trigger the design dimension
+(UI_RE keys on markup/style extensions).
 
 Route the verify through the evidence ledger so the tasks.md checkbox flip is
 legal: `python3 lib/gates.py run-gate T0XX -- python3 lib/runtime_proof.py
