@@ -31,4 +31,4 @@ Plans:
 - [x] 01-03-PLAN.md
 - [x] 01-01: consent-check.sh + test (REQ-01)
 - [x] 01-02: state-phase.sh + test (REQ-02)
-- [ ] 01-03: gap closure — state-phase.sh parses the real gsd-core STATE.md body format (REQ-02)
+- [x] 01-03: gap closure — state-phase.sh parses the real gsd-core STATE.md body format (REQ-02)

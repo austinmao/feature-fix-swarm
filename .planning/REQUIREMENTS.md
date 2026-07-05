@@ -8,7 +8,7 @@
 
 ### STATE.md phase extraction
 
-- [ ] **REQ-02**: `scripts/gsd/state-phase.sh [state-file]` (default `.planning/STATE.md`) prints the completed-phases value derived from the STATE.md BODY checklist/progress section (NOT the frontmatter `percent`/`completed_phases` counters, which are known-unreliable) as a single integer on stdout; exits 2 if the file is missing.
+- [x] **REQ-02**: `scripts/gsd/state-phase.sh [state-file]` (default `.planning/STATE.md`) prints the completed-phases value derived from the STATE.md BODY checklist/progress section (NOT the frontmatter `percent`/`completed_phases` counters, which are known-unreliable) as a single integer on stdout; exits 2 if the file is missing.
 
 ## Out of Scope
 
