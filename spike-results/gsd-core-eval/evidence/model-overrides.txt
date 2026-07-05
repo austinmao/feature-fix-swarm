@@ -1,0 +1,59 @@
+# Criterion (b) — per-agent model_overrides honored — @opengsd/gsd-core@1.6.1
+
+VERDICT: PASS (3/3 core overrides APPLIED). Plan gate = ≥1 of opus/sonnet/haiku
+APPLIED; all three observed APPLIED. Non-gating for the hard gate (a∧c∧d) but
+now a confirmed live PASS, not INCONCLUSIVE.
+
+## Method (corrected re-run 2026-07-05T02:01Z)
+
+Prior run (INCONCLUSIVE) died on an account session-limit before any subagent
+spawned, and used the wrong seeder command (`/gsd-add-phase` — unknown; correct
+is `/gsd-phase`). Corrected harness (`$SB/run-overrides2.sh`):
+
+1. Seed phase 2 with `/gsd-phase` (verified exists: `.claude/commands/gsd-phase.md`).
+2. Per override: wipe phase-2 plan files, set
+   `config.model_overrides.gsd-planner = <model>`, SNAPSHOT the existing
+   `*/subagents/agent-*.jsonl` set, run `/gsd-plan-phase 2` under
+   `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` (env-fit requirement),
+   then DIFF the subagent-transcript set to isolate the NEW gsd-planner spawn and
+   grep its `message.model`.
+3. Observation = subagent transcript `message.model` (config contents do NOT
+   count as observation, per plan). Parent-last `subagent_type` confirmed
+   `gsd-planner` for every row.
+
+The drive process hit the 300s timeout each time (`drive-exit=124`) — expected,
+`/gsd-plan-phase` is long — but the gsd-planner subagent spawned and emitted its
+model-attributed turns BEFORE the timeout, which is the load-bearing observation.
+
+## Results — requested → observed → classification
+
+| requested             | observed message.model      | subagent_type | msgs | classification |
+|-----------------------|-----------------------------|---------------|------|----------------|
+| opus                  | claude-opus-4-8             | gsd-planner   | 20   | APPLIED        |
+| sonnet                | claude-sonnet-5             | gsd-planner   | 20   | APPLIED        |
+| haiku                 | claude-haiku-4-5-20251001   | gsd-planner   | 29   | APPLIED        |
+| claude-fable-5 (bonus)| <synthetic> (no real turn)  | gsd-planner   | 1    | INCONCLUSIVE   |
+
+Taxonomy: APPLIED (requested==observed) / WRONG-MODEL (spawn ok, requested!=observed)
+/ NO-SPAWN (spawn failed) / IGNORED (config accepted, default model observed).
+
+- opus/sonnet/haiku: requested == observed → APPLIED. The resolver honors
+  `config.model_overrides.gsd-planner` verbatim, including full IDs
+  (`claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5-20251001`).
+- fable-5 bonus: the gsd-planner subagent DID spawn (transcript exists,
+  subagent_type=gsd-planner) but only emitted a `<synthetic>` bootstrap message —
+  no real model-attributed assistant turn landed before the 300s drive timeout.
+  Not IGNORED (no default model observed), not clean NO-SPAWN (dir exists).
+  Classified INCONCLUSIVE. Bonus row, non-gating — does not affect criterion b.
+
+## Mechanism (source, @1.6.1 — corroborates but does not by itself pass)
+
+`model-resolver.cjs` `resolveModelInternal()` precedence layer 1 =
+`config.model_overrides[agentType]`, returned verbatim; documented in
+`references/model-profiles.md`. The live matrix above is the observation that
+converts this from config-reading to a proven PASS.
+
+## Raw
+
+`evidence/model-override-runs2.txt` — verbatim harness output (subagent paths,
+subagent_type, model counts per run).

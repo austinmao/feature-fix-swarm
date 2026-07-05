@@ -1,0 +1,26 @@
+# corrected override matrix 2026-07-05T02:01:51Z
+=== opus requested=opus drive-exit=124 ===
+  new-subagent: /Users/luminamao/.claude/projects/-private-tmp-gsd-spike-ebBd/235d1fa1-a852-41f8-86f7-8c013a6e8b1c/subagents/agent-aeb25ec704f63909c.jsonl
+    parent-last-subagent_type: "subagent_type":"gsd-planner"
+    observed message.model:
+        20 "model":"claude-opus-4-8"
+
+=== sonnet requested=sonnet drive-exit=124 ===
+  new-subagent: /Users/luminamao/.claude/projects/-private-tmp-gsd-spike-ebBd/8cdc7f40-01e1-4620-a586-a3e54735a653/subagents/agent-a7e7be9f8de520dcf.jsonl
+    parent-last-subagent_type: "subagent_type":"gsd-planner"
+    observed message.model:
+        20 "model":"claude-sonnet-5"
+
+=== haiku requested=haiku drive-exit=124 ===
+  new-subagent: /Users/luminamao/.claude/projects/-private-tmp-gsd-spike-ebBd/970d87d6-9914-48e4-99e1-ffcd8dbc5fb8/subagents/agent-aaee0c3f6e46960d9.jsonl
+    parent-last-subagent_type: "subagent_type":"gsd-planner"
+    observed message.model:
+        29 "model":"claude-haiku-4-5-20251001"
+
+=== fable requested=claude-fable-5 drive-exit=124 ===
+  new-subagent: /Users/luminamao/.claude/projects/-private-tmp-gsd-spike-ebBd/e37d4b70-78f2-49eb-a1a6-fb3b7792c6d5/subagents/agent-a01349c1c72b5c483.jsonl
+    parent-last-subagent_type: "subagent_type":"gsd-planner"
+    observed message.model:
+         1 "model":"<synthetic>"
+
+OVERRIDE-MATRIX-2-DONE

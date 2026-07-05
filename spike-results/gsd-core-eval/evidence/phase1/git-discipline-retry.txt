@@ -1,0 +1,5 @@
+== retry git add -A/./--all/push (want 0) ==
+NONE
+== push count ==
+0
+0

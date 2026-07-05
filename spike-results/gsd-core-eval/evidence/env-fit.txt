@@ -1,0 +1,13 @@
+# env-fit (criterion d) — captured 2026-07-05T01:22:12Z
+
+## gsd subagent spawns (from sandbox transcript JSONLs at /Users/luminamao/.claude/projects/-private-tmp-gsd-spike-ebBd)
+spawn: gsd-planner   — parent 22ab5c6f…jsonl, observed message.model=claude-fable-5 (27 msgs), 0 overflow errors
+spawn: gsd-roadmapper — parent de51f6ee…jsonl, observed message.model=claude-fable-5 (28 msgs), 0 overflow errors
+spawn: gsd-executor  — parent d956a264…jsonl, observed message.model=claude-sonnet-5 (76 msgs), 0 overflow errors, drive completed exit=0
+
+## known machine constraint (baseline)
+top-level headless claude -p under FULL user MCP config overflowed: see env-fit-toplevel-overflow.txt (verbatim: 'Prompt is too long', session 4c50fe76…jsonl)
+mitigation used for all gsd drives: --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+
+## verdict basis
+gsd subagents (gsd-planner/gsd-roadmapper/gsd-executor) use small dedicated agent defs — spawns COMPLETED on this ~190k-bootstrap machine when the driving session runs with empty MCP config.

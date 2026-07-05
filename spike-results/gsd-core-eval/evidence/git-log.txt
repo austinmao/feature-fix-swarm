@@ -1,0 +1,13 @@
+5b83095 docs(phase-01): evolve PROJECT.md after phase completion
+fecc53d docs(phase-01): complete phase execution
+a90c5cb docs(phase-01): update tracking after wave 1
+a5c60e9 chore: merge executor worktree (worktree-agent-ac819b64b1777995e)
+5cf0f9c docs(01-01): append self-check to summary
+40c82c0 docs(01-01): complete multiply plan
+b11e559 feat(01-01): implement multiply(a, b) test-first and wire into npm test
+ca94874 docs(01): create phase plan
+1c1d319 docs(01-multiply): create phase plan
+0740db8 docs: create roadmap (1 phase)
+8c38576 docs: define v1 requirements
+e553332 chore: add project config
+e13a970 docs: initialize project

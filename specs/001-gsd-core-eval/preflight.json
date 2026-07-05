@@ -1,0 +1,10 @@
+[
+  {"kind": "probe", "name": "node", "cmd": "node -v"},
+  {"kind": "probe", "name": "npx", "cmd": "npx -v"},
+  {"kind": "probe", "name": "git", "cmd": "git --version"},
+  {"kind": "probe", "name": "python3", "cmd": "python3 --version"},
+  {"kind": "probe", "name": "codex-cli", "cmd": "codex --version"},
+  {"kind": "probe", "name": "claude-cli", "cmd": "command -v claude"},
+  {"kind": "probe", "name": "npm-registry-gsd-core", "cmd": "npm view @opengsd/gsd-core version"},
+  {"kind": "probe", "name": "sandbox-tmp-writable", "cmd": "d=$(mktemp -d /private/tmp/gsd-preflight.XXXX) && rmdir \"$d\""}
+]
