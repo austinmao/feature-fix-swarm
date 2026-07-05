@@ -4,7 +4,7 @@
 
 ### Consent assertion
 
-- [ ] **REQ-01**: `scripts/gsd/consent-check.sh <capability-id>` exits 0 iff `gsd-tools capability list` (run via `node node_modules/.bin/gsd-tools`) reports the capability as active/consented on this machine; exits 1 with an actionable message otherwise; exits 2 on usage error. Fail-closed: if gsd-tools is missing or errors, exit 1.
+- [x] **REQ-01**: `scripts/gsd/consent-check.sh <capability-id>` exits 0 iff `gsd-tools capability list` (run via `node node_modules/.bin/gsd-tools`) reports the capability as active/consented on this machine; exits 1 with an actionable message otherwise; exits 2 on usage error. Fail-closed: if gsd-tools is missing or errors, exit 1.
 
 ### STATE.md phase extraction
 
