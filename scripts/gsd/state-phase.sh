@@ -24,12 +24,12 @@ BODY="$(awk '
   fm!=1{print}
 ' "$STATE_FILE")"
 
-PHASE_LINE="$(printf '%s\n' "$BODY" | grep -E '^Phase:[[:space:]]*[0-9]+[[:space:]]+of[[:space:]]+[0-9]+' | head -1)"
+PHASE_LINE="$(printf '%s\n' "$BODY" | grep -E '^Phase:[[:space:]]*[0-9]+' | head -1)"
 if [ -z "$PHASE_LINE" ]; then
-  echo "state-phase: no 'Phase: X of Y' line found in $STATE_FILE body" >&2
+  echo "state-phase: no 'Phase: <number>' line found in $STATE_FILE body" >&2
   exit 1
 fi
-CURRENT="$(printf '%s\n' "$PHASE_LINE" | sed -E 's/^Phase:[[:space:]]*([0-9]+).*/\1/')"
+CURRENT="$(printf '%s\n' "$PHASE_LINE" | sed -E 's/^Phase:[[:space:]]*0*([0-9]+).*/\1/')"
 
 STATUS_LINE="$(printf '%s\n' "$BODY" | grep -E '^Status:' | head -1)"
 if printf '%s' "$STATUS_LINE" | grep -qi 'phase complete'; then
