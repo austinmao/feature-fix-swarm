@@ -42,8 +42,8 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 │    ├─ ENFORCED: E2E Playwright test stubs (one per PATH-NNN)    │
 │    └─ ENFORCED: Test contract summary (counts by layer)         │
 │                                                                 │
-│  Phase 4: /spec-decompose (v1.2.0 — swarm default)              │
-│    └─ Writes specs/NNN/tasks.md (roster [agent:] tags + gates)  │
+│  Phase 4: /spec-decompose (v2.0.0 — gsd project seed)           │
+│    └─ Seeds .planning/ + drives /gsd-plan-phase (plan-checked)  │
 │                                                                 │
 │  Phase 5: preflight (v1.2.0 — DEFAULT)                          │
 │    └─ specs/NNN/preflight.json proven PASS while operator here  │
@@ -255,7 +255,7 @@ NO_CLARIFY=0
 DRY_RUN=0
 NO_PREFLIGHT=0   # v1.2.0: preflight is DEFAULT-ON (--no-preflight to skip)
 NO_GRANT=0       # v1.2.0: autonomy-grant enumeration is DEFAULT-ON (--no-grant to skip)
-NO_SWARM=0       # v1.2.0: pass-through to /spec-decompose (swarm default-on there)
+NO_SWARM=0       # legacy no-op (spec-decompose v2.0.0 is gsd-native; flag kept for compat)
 SPEC_ID=""
 
 # zsh-safe: parameter expansion does not word-split in zsh, but
@@ -390,7 +390,7 @@ Planned-change rows.
 Requirements are proven NOW, while the operator is present — never discovered at 3am.
 
 1. **Author the manifest** `specs/${SPEC_ID}/preflight.json` from the RUN's real
-   footprint: scan tasks.md + plan.md for env/secret NAMES the tasks read
+   footprint: scan the seeded `.planning/` plans + plan.md for env/secret NAMES the tasks read
    (`process.env.*`, `os.environ`, `doppler secrets get` names) and every external
    service touched (DB, gateway, deploy target, MCP server) as a cheap real probe.
    Names only — a secret VALUE never enters the manifest. Format per the
@@ -404,7 +404,7 @@ Requirements are proven NOW, while the operator is present — never discovered 
    ]
    ```
 
-   **v1.3.0 — browser QA probe:** when tasks.md contains any `[qa:browser]`
+   **v1.3.0 — browser QA probe:** when any seeded plan carries a browser-proof gate
    task, ALSO include the app-reachability probe so an unattended run never
    reaches phase QA without a verifiable app to point the browser at:
 
