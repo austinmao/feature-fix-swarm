@@ -143,3 +143,13 @@ None - no external service configuration required.
 ---
 *Phase: 01-support-scripts*
 *Completed: 2026-07-05*
+
+## Self-Check: PASSED
+
+- FOUND: scripts/gsd/consent-check.sh
+- FOUND: tests/consent-check.bats
+- FOUND: .planning/phases/01-support-scripts/01-01-SUMMARY.md
+- FOUND: 72acea7 (test)
+- FOUND: 46e1ead (feat)
+- FOUND: 8ad90dd (chore)
+- FOUND: 14d1da9 (docs)
