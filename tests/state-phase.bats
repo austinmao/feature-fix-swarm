@@ -91,7 +91,7 @@ Status: In progress
 EOF
   run bash "$SCRIPT" "$FIXTURE"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"no 'Phase: X of Y' line found"* ]]
+  [[ "$output" == *"no 'Phase: <number>'"* ]]
 }
 
 @test "zero args defaults to .planning/STATE.md" {
@@ -116,4 +116,44 @@ EOF
   run bash "$SCRIPT" a b
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage: state-phase.sh"* ]]
+}
+
+@test "real-template mid-phase body (frontmatter poisoned with 999s)" {
+  FIXTURE="$BATS_TEST_TMPDIR/STATE.md"
+  cat > "$FIXTURE" <<'EOF'
+---
+progress:
+  completed_phases: 999
+  percent: 999
+---
+## Current Position
+
+Phase: 01 (support-scripts) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 01
+Last activity: 2026-07-05 — Phase 01 execution started
+EOF
+  run bash "$SCRIPT" "$FIXTURE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+}
+
+@test "real-template phase-complete body with zero-padded Phase number" {
+  FIXTURE="$BATS_TEST_TMPDIR/STATE.md"
+  cat > "$FIXTURE" <<'EOF'
+---
+progress:
+  completed_phases: 999
+  percent: 999
+---
+## Current Position
+
+Phase: 02 (support-scripts) — EXECUTING
+Plan: 2 of 2
+Status: Phase complete — ready for verification
+Last activity: 2026-07-05 — Phase 01 execution started
+EOF
+  run bash "$SCRIPT" "$FIXTURE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
 }
