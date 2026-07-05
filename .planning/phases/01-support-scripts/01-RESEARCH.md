@@ -397,9 +397,10 @@ phase, but useful background for the planner).
 | A2 | "Completed phases" = current phase minus one, unless Status says "Phase complete" (then = current phase) | Common Pitfalls / Pattern 3 | Medium — REQ-02's wording is ambiguous ("BODY checklist/progress section" has no literal checklist in the actual template); if the intended semantics differ, the planner/user should confirm before locking test fixtures, since this interpretation is currently the researcher's best inference, not a value pinned by an existing example or spec |
 | A3 | It is acceptable (planner's discretion, not required) to add `scripts/gsd/*.sh` to `ci.yml`'s shellcheck glob | Common Pitfalls Pitfall 1 | Low — purely additive CI hygiene suggestion, not required by REQUIREMENTS.md or ROADMAP.md success criteria |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Exact semantics of "completed-phases value" for REQ-02**
+   - RESOLVED: locked via 01-02-PLAN.md Task 1 paired fixtures (mid-phase → `X-1`, phase-complete → `X`), per Assumption A2 adopted in the plan's must_haves.
    - What we know: the frontmatter `progress.completed_phases`/`percent` counters
      are explicitly forbidden (documented-unreliable per this repo's own
      upstream research); the only phase-progress signal in STATE.md's BODY is
@@ -414,6 +415,7 @@ phase, but useful background for the planner).
      plan-checker and executor cannot each independently guess.
 
 2. **Does `.planning/STATE.md` exist by the time success criterion #2 runs?**
+   - RESOLVED: handled in 01-02-PLAN.md `<verification>` — hermetic fixture STATE.md proves the integer path; the literal `.planning/STATE.md` invocation is a deferred end-of-phase re-run once the file exists (option b below).
    - What we know: it does not exist in this repo as of this research pass.
    - What's unclear: whether the phase's own execute-phase workflow will
      create it first (standard gsd lifecycle), making the literal

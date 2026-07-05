@@ -2,7 +2,7 @@
 phase: 1
 slug: support-scripts
 status: draft
-nyquist_compliant: false
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-07-05
 ---
@@ -59,17 +59,17 @@ created: 2026-07-05
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| shellcheck on `scripts/gsd/*.sh` in CI | REQ-01, REQ-02 | CI shellcheck job glob does not include `scripts/gsd/*.sh` | Run `shellcheck -S warning scripts/gsd/consent-check.sh scripts/gsd/state-phase.sh` locally; optional one-line CI glob fix at planner's discretion |
+| ~~shellcheck on `scripts/gsd/*.sh` in CI~~ | REQ-01, REQ-02 | SUPERSEDED — 01-01-PLAN.md Task 3 adds `scripts/gsd/*.sh` to the CI shellcheck glob, automating this check | No manual step remains |
 
 ---
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 60s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** plan-checker pass, 2026-07-05
