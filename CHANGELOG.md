@@ -6,6 +6,37 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.0.0 — GSD replaces ruflo as the orchestration engine (spec 002, 2026-07-06)
+
+**BREAKING.** The ruflo MCP swarm executor is removed from FFS. Orchestration now
+runs through the gsd-core loop (`@opengsd/gsd-core@1.6.1`, exact-pinned repo-local
+dep); `lib/gates.py` remains the sole completion authority.
+
+### Added
+- `scripts/gsd/gsd-run.sh` — trimmed-MCP, auth-scrubbed headless drive runner
+- `scripts/gsd/gates-test-command.sh` — gsd `workflow.test_command` target (run-gate + strict verify-done)
+- `scripts/gsd/review-gate-command.sh` — gsd `workflow.code_review_command` target: autonomy-grant wall (fail-closed `ship:gsd`) + codex adversarial review (line-anchored verdict)
+- `scripts/gsd/consent-check.sh` + `scripts/gsd/state-phase.sh` — deterministic gsd-state assertions (body-derived; frontmatter counters are known-unreliable upstream)
+- `scripts/hooks/gsd-phase-evidence-gate.sh` — PreToolUse hook: ROADMAP/STATE phase-complete flips require gates.py evidence (host-side `verify:post`; capability-native gates non-functional at 1.6.1, upstream #2004/#2009)
+- `templates/gsd-config.base.json` — base project config carrying both gate commands
+
+### Changed
+- `feature-implement` v2.0.0, `spec-decompose` v2.0.0, `fix` v3.0.0, `swarm` v2.0.0,
+  `task-swarm` v2.0.0 — rewritten as thin `/gsd-*` wrappers keeping FFS walls
+  (preflight, grant ledger, gates.py authority, review-gate); `feature-spec` chains
+  the gsd-native decompose
+- `setup.sh` — installs pinned gsd-core + gsd gate scripts (ruflo bootstrap removed)
+- `docs/commands.md` — ruflo orchestration section replaced with the gsd loop table
+
+### Removed
+- `scripts/harness/ruflo-host-executor.{sh,bats}`, `ruflo-artifacts.sh`, `executor-detect.sh`
+- `skills/agents-init/` (gsd install replaces roster scans)
+- All `mcp__ruflo__*` callsites and `RUFLO_REQUIRED` plumbing; `dispatch.py` `fable-warn`
+- `docs/ruflo-curation.md` content (superseded stub retained)
+
+Evidence: `spike-results/gsd-ruflo/` (research report, Phase A pilot verdict PASS,
+Phase B hooks note).
+
 ## v3.21.0 — OpenWiki living-docs wiring: conditional wiki auto-update (2026-07-04)
 
 Consumer repos that keep a living wiki (`openwiki/` at repo root, reality/vision/gap

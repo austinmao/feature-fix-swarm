@@ -268,11 +268,6 @@ def estimate_cost(tasks: list[dict]) -> float:
     return sum(COST_PER_TASK.get(t["model"], 0.30) for t in tasks)
 
 
-def fable_ruflo_warn(tasks: list[dict]) -> list[str]:
-    """Return task IDs with [model:fable] that will silently downgrade to sonnet on Ruflo path."""
-    return [t["id"] for t in tasks if t.get("model") == "fable"]
-
-
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 def cmd_parse(args: list[str]) -> None:
@@ -315,27 +310,10 @@ def cmd_cost(args: list[str]) -> None:
     print(f"{estimate_cost(tasks):.2f}")
 
 
-def cmd_fable_warn(args: list[str]) -> None:
-    """fable-warn FILE → print WARN line for any [model:fable] tasks (Ruflo downgrades to sonnet)."""
-    path = args[0] if args else os.environ.get("FILE")
-    if not path:
-        print("ERROR: pass file path or set FILE env var", file=sys.stderr)
-        sys.exit(1)
-    with open(path) as f:
-        content = f.read()
-    tasks = parse_tasks_md(content)
-    ids = fable_ruflo_warn(tasks)
-    if ids:
-        print(f"WARN: [model:fable] tasks {ids} will downgrade to sonnet on Ruflo path "
-              f"(Ruflo enum: haiku|sonnet|opus|inherit only). "
-              f"Use RUFLO_REQUIRED=0 for native Agent path to preserve fable routing.")
-
-
 COMMANDS = {
     "parse": cmd_parse,
     "resolve": cmd_resolve,
     "cost": cmd_cost,
-    "fable-warn": cmd_fable_warn,
 }
 
 if __name__ == "__main__":

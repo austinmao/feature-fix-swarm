@@ -13,8 +13,6 @@ allowed-tools:
   - Grep
   - Skill
   - Agent
-  - mcp__ruflo__agentdb_pattern-search
-  - mcp__ruflo__agentdb_pattern-store
 metadata:
   openclaw:
     requires:
@@ -91,26 +89,15 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 ```
 
-### Step 1: Check ruflo for prior decompositions
+### Step 1: Recall prior decompositions (fail-soft)
 
-```
-PRIOR_PATTERNS = mcp__ruflo__agentdb_pattern-search({
-  query: "plan decompose " + ARGUMENTS[:60],
-  limit: 3
-})
-# Log pattern IDs if found. Cap each result to 600 chars.
-# These inform the plan-eng-review instructions (Step 2).
-```
-
-If prior patterns found, surface them in the Step 2 instructions so plan-eng-review
-can build on proven decomposition approaches for similar work.
-
-**Optional gbrain recall (v3.19, fail-soft):** if `command -v gbrain` succeeds and
-`env -u DATABASE_URL gbrain doctor` reports `[OK] connection`, also run
+**gbrain recall:** if `command -v gbrain` succeeds and
+`env -u DATABASE_URL gbrain doctor` reports `[OK] connection`, run
 `env -u DATABASE_URL gbrain query "<task topic>"` and feed prior decisions into
-Step 2 alongside the agentdb patterns. Absent/unhealthy → fallback
+Step 2. Absent/unhealthy → fallback
 `git log --oneline --grep="<topic>" | head -5`; never block (see
-`docs/gbrain-optional.md`).
+`docs/gbrain-optional.md`). gsd's own learnings live in `.planning/` history +
+`/gsd-mempalace-recall` where enabled.
 
 ### Step 2: Run plan-eng-review (autonomous)
 
@@ -222,25 +209,13 @@ Score:
 
 Skip gracefully if `codex` CLI absent (`which codex` fails): log warning, continue. Non-blocking.
 
-### Step 7: Store pattern in ruflo agentdb
+### Step 7: Store the decision (fail-soft)
 
-```
-mcp__ruflo__agentdb_pattern-store({
-  pattern: "plan-decompose: " + SPEC_ID + " " + ARGUMENTS[:60],
-  context: JSON.stringify({
-    spec_id: SPEC_ID,
-    spec_dir: SPEC_DIR,
-    plan_path: SPEC_DIR + "/plan.md",
-    tasks_path: SPEC_DIR + "/tasks.md",
-    codex_plan_verdict: CODEX_PLAN_VERDICT,
-    tasks_score: TASKS_SCORE,
-    prior_pattern_ids: PRIOR_PATTERN_IDS
-  }),
-  outcome: "success"
-})
-```
-
-Skip silently if ruflo MCP unavailable — pattern storage is enhancement, not gate.
+If gbrain is healthy: `env -u DATABASE_URL gbrain put spec/<NNN>-decompose
+"<one-line outcome: verdict, score, plan path>"` then
+`env -u DATABASE_URL gbrain sync --no-pull --no-embed`. gsd captures its own
+phase learnings via `/gsd-extract-learnings`. Skip silently when absent —
+storage is enhancement, not gate.
 
 ### Step 8: Report
 

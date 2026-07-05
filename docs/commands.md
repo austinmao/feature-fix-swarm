@@ -110,29 +110,32 @@ These flags work with `/feature-implement`:
 |-----|---------|--------|
 | `RALPH_MAX_RETRIES` | `3` | Max retry attempts per phase on QA failure |
 | `RALPH_AUTO_QA` | `1` | Set to `0` to disable PostToolUse auto-qa hook |
-| `RALPH_EXECUTOR` | (auto) | Force `ruflo` or `native` executor |
+| `RALPH_EXECUTOR` | (auto) | Legacy; execution now flows through the gsd loop |
 | `RALPH_DEBOUNCE_SECS` | `30` | Quiet window before auto-qa fires |
 
-## Ruflo (Intelligent Orchestration)
+## gsd-core (Orchestration)
 
-```bash
-npx ruflo@latest progress summary       # What was done this session
-npx ruflo@latest memory search "query"   # Search what was learned
-```
+The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.6.1`.
+Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG package.
 
 | Scenario | Use |
 |----------|-----|
-| Confirm Ruflo MCP is loaded | `mcp__ruflo__mcp_status` |
-| Spawning 3+ independent sub-agents | `mcp__ruflo__swarm_init` then `mcp__ruflo__agent_spawn`, with execution through `scripts/harness/ruflo-host-executor.sh` |
-| Check if similar task was done before | `mcp__ruflo__agentdb_pattern-search` |
-| Route task to right model tier | `mcp__ruflo__hooks_model-route` |
-| Store a reusable pattern | `mcp__ruflo__agentdb_pattern-store` |
+| Seed a project from a spec | `/spec-decompose NNN` (writes `.planning/`, drives `/gsd-plan-phase`) |
+| Execute the current phase | `/feature-implement NNN` → `/gsd-execute-phase N` |
+| Unattended run | `/feature-implement NNN --autonomous` (preflight PASS + grant ledger required) |
+| Headless drive | `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-<cmd> ...` (trimmed-MCP, auth-scrubbed) |
+| Quick single-task fix | `/fix` → `/gsd-quick` |
+| Resume after context reset | `/gsd-resume-work` (STATE.md is the resume point) |
+| Verifier found gaps | `/gsd-plan-phase N --gaps` → `/gsd-execute-phase N --gaps-only` |
 
-Ruflo routing is most reliable when task `agent:` values use the hybrid exact-agent catalog before spawning. The full catalog `lib/dispatch.py` `AGENT_ROUTING_RULES` can emit (46 agents): `accessibility-expert`, `api-documenter`, `backend-architect`, `backend-security-coder`, `business-analyst`, `cloud-architect`, `context-manager`, `csharp-pro`, `customer-support`, `database-admin`, `database-architect`, `database-optimizer`, `deployment-engineer`, `django-pro`, `docs-architect`, `ecc:architect`, `ecc:code-reviewer`, `ecc:tdd-guide`, `error-detective`, `fastapi-pro`, `frontend-developer`, `frontend-security-coder`, `golang-pro`, `graphql-architect`, `incident-responder`, `java-pro`, `javascript-pro`, `kubernetes-architect`, `mermaid-expert`, `network-engineer`, `observability-engineer`, `performance-engineer`, `prompt-engineer`, `python-pro`, `reference-builder`, `reverse-engineer`, `rust-pro`, `sales-automator`, `search-specialist`, `security-auditor`, `seo-meta-optimizer`, `terraform-specialist`, `test-automator`, `typescript-pro`, `ui-ux-designer`, `ui-visual-validator`.
+Completion authority is gates.py, never gsd self-report: `workflow.test_command` =
+`scripts/gsd/gates-test-command.sh` (run-gate + strict verify-done),
+`workflow.code_review_command` = `scripts/gsd/review-gate-command.sh` (grant wall + codex),
+and the `gsd-phase-evidence-gate.sh` PreToolUse hook blocks ROADMAP/STATE phase flips
+without evidence.
 
-**Fallback warning:** an `[agent:]` label (or routed agent) that is not installed at the run site silently falls back to `general-purpose` at spawn time. Verify availability with the host's agent list before relying on a specialist label; prefer `ecc:`-prefixed agents when the ECC plugin is installed.
-
-Do not use OpenRouter, `RUFLO_PROVIDER`, or Ruflo provider-key execution for feature tasks. Codex sessions execute through `codex exec`; Claude sessions execute through `claude -p`.
+Do not use provider-key execution paths for feature tasks. Codex sessions execute
+through `codex exec`; Claude sessions execute through `claude -p`.
 
 In Codex sessions, use tool discovery for `ruflo swarm_init agent_spawn mcp_status` before concluding Ruflo is unavailable; Ruflo tools are lazy-loaded.
 

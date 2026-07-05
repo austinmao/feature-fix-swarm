@@ -55,22 +55,25 @@ install_uv() {
   export PATH="$HOME/.local/bin:$PATH"
 }
 
-check_ruflo() {
-  if command -v ruflo >/dev/null 2>&1; then
-    echo "  ruflo CLI: OK"
+check_gsd() {
+  if [ -x "node_modules/.bin/gsd-tools" ]; then
+    echo "  gsd-core: OK (node_modules/.bin/gsd-tools)"
     return 0
   fi
-  echo "  ruflo CLI: NOT FOUND"
+  echo "  gsd-core: NOT FOUND (pinned repo-local dep)"
   return 1
 }
 
-install_ruflo() {
+install_gsd() {
   if ! command -v npm >/dev/null 2>&1; then
-    echo "  ruflo CLI: NOT FOUND (npm required to install ruflo)"
+    echo "  gsd-core: NOT FOUND (npm required)"
     return 1
   fi
-  echo "  ruflo CLI: installing globally"
-  npm install -g ruflo
+  echo "  gsd-core: installing pinned repo-local dep"
+  # NEVER bare `npx gsd` — that resolves to the wrong package (gsd@0.0.3)
+  npm install --save-dev --save-exact @opengsd/gsd-core@1.6.1
+  node node_modules/.bin/gsd-core install --claude 2>/dev/null || \
+    echo "  gsd-core: commands/hooks install step failed — run 'node node_modules/.bin/gsd-core install' manually"
 }
 
 check_gstack() {
@@ -321,7 +324,7 @@ missing=()
 echo "Checking prerequisites..."
 command -v claude >/dev/null 2>&1 && echo "  Claude Code: OK" || { echo "  Claude Code: NOT FOUND (required) — install from https://claude.ai/code"; missing+=("Claude Code"); }
 check_gstack || missing+=("gstack")
-check_ruflo || missing+=("ruflo")
+check_gsd || missing+=("gsd-core")
 command -v npx >/dev/null 2>&1 && echo "  npx: OK" || { echo "  npx: NOT FOUND (required for skill installs)"; missing+=("npx"); }
 command -v uv >/dev/null 2>&1 && echo "  uv: OK" || { echo "  uv: NOT FOUND (required for Spec Kit)"; missing+=("uv"); }
 command -v python3 >/dev/null 2>&1 && echo "  python3: OK" || echo "  python3: NOT FOUND (required for run-state)"
@@ -343,7 +346,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
     echo "Bootstrapping missing dependencies..."
     install_uv || true
     install_gstack || true
-    install_ruflo || true
+    install_gsd || true
     install_spec_kit || true
     install_prompt_master || true
     install_goal_wrap || true
@@ -484,14 +487,14 @@ for script in qa-swarm.sh ralph-retry.sh browser-proof.sh; do
   fi
 done
 
-mkdir -p scripts/harness
-for harness_script in executor-detect.sh ruflo-host-executor.sh ruflo-artifacts.sh; do
-  if [ "$SCRIPT_DIR/scripts/harness/$harness_script" -ef "scripts/harness/$harness_script" ]; then
-    echo "  scripts/harness/$harness_script is the repo copy — skipping self-copy"
+mkdir -p scripts/gsd scripts/hooks
+for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-command.sh gsd/consent-check.sh gsd/state-phase.sh hooks/gsd-phase-evidence-gate.sh; do
+  if [ "$SCRIPT_DIR/scripts/$gsd_script" -ef "scripts/$gsd_script" ]; then
+    echo "  scripts/$gsd_script is the repo copy — skipping self-copy"
   else
-    cp "$SCRIPT_DIR/scripts/harness/$harness_script" "scripts/harness/$harness_script"
-    chmod +x "scripts/harness/$harness_script"
-    echo "  Installed scripts/harness/$harness_script"
+    cp "$SCRIPT_DIR/scripts/$gsd_script" "scripts/$gsd_script"
+    chmod +x "scripts/$gsd_script"
+    echo "  Installed scripts/$gsd_script"
   fi
 done
 

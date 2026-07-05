@@ -323,12 +323,12 @@ After it completes, verify the spec contains:
 
 If any section is missing, **add it now**.
 
-### Step 4 — spec-decompose (v1.2.0)
+### Step 4 — spec-decompose (v2.0.0, gsd-native)
 
-Invoke the `spec-decompose` skill via the Skill tool with `${SPEC_ID}` (append
-`--no-swarm` if `NO_SWARM=1`). It runs the roster-specialist swarm decomposition
-(orchestrator merge + `gates.py analyze` + `agents_manifest.py check` gates) and
-writes `specs/${SPEC_ID}/tasks.md`.
+Invoke the `spec-decompose` skill via the Skill tool with `${SPEC_ID}`. It seeds
+the gsd project (`.planning/PROJECT.md` + `REQUIREMENTS.md` + `ROADMAP.md` +
+gate-carrying `config.json`) from spec.md/plan.md and drives `/gsd-plan-phase`
+(research → wave-parallel plans → plan-checker).
 
 If decompose fails its gates, STOP — fix the spec/plan and re-run. Do not hand a
 failing tasks.md to preflight/grant.
