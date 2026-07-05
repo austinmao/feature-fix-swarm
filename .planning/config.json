@@ -39,7 +39,8 @@
     "plan_review_convergence": true,
     "security_enforcement": true,
     "security_asvs_level": 1,
-    "security_block_on": "high"
+    "security_block_on": "high",
+    "_auto_chain_active": false
   },
   "git": {
     "branching_strategy": "phase",
@@ -47,7 +48,9 @@
     "milestone_branch_template": "gsd/{milestone}-{slug}"
   },
   "review": {
-    "default_reviewers": ["codex"],
+    "default_reviewers": [
+      "codex"
+    ],
     "models": {
       "codex": null
     }
