@@ -22,10 +22,14 @@ CMD_STR="$*"
 
 CLAUDE_ARGS=(--strict-mcp-config --mcp-config '{"mcpServers":{}}' --dangerously-skip-permissions -p "$CMD_STR")
 
+# A shell-exported ANTHROPIC_API_KEY overrides the claude.ai OAuth login and
+# 401s headless drives — scrub auth env so the CLI uses its own login.
+RUN=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude)
+
 if command -v timeout >/dev/null 2>&1; then
-  timeout "$TIMEOUT_SECS" claude "${CLAUDE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+  timeout "$TIMEOUT_SECS" "${RUN[@]}" "${CLAUDE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
   exit "${PIPESTATUS[0]}"
 else
-  claude "${CLAUDE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+  "${RUN[@]}" "${CLAUDE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
   exit "${PIPESTATUS[0]}"
 fi
