@@ -22,13 +22,13 @@ tests, TDD, in parallel where possible.
   2. `bash scripts/gsd/state-phase.sh .planning/STATE.md` prints an integer and exits 0
   3. Both scripts shellcheck-clean; their tests pass; `python3 -m pytest lib/tests -q` still 190 passed
 
-**Plans**: 2/3 plans complete
+**Plans**: 3/3 plans complete
 
 Plans:
 
 - [x] 01-01-PLAN.md
 - [x] 01-02-PLAN.md
-- [ ] 01-03-PLAN.md
+- [x] 01-03-PLAN.md
 - [x] 01-01: consent-check.sh + test (REQ-01)
 - [x] 01-02: state-phase.sh + test (REQ-02)
 - [ ] 01-03: gap closure — state-phase.sh parses the real gsd-core STATE.md body format (REQ-02)
