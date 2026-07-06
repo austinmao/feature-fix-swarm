@@ -6,6 +6,36 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.0.1 — port two Option-A findings from the gsd-core-eval spike (2026-07-06)
+
+Reconciles `spike(001): gsd-core@1.6.1 adoption eval` (#25) against the shipped
+v4.0.0 full-replacement design: two genuinely additive capabilities ported
+onto their current file versions (both self-contained, no conflict with the
+gsd-core loop); the rest of that spike's uncommitted edits were superseded by
+what shipped or discarded as reintroducing ruflo.
+
+### Added
+- `skills/review-gate` (v1.3.0) — honest-verifier pass: spawns `gsd-verifier`
+  for goal-backward phase verification with an abstain disposition
+  (`insufficient_spec` → `human_needed`, never a false `passed`); composes
+  with the existing defect-count gate (FAIL/ABSTAIN blocks even at 0
+  CRITICAL/HIGH).
+- `skills/feature-spec` — prior-work + vendor-doc grounding note: fail-soft
+  `/openwiki-find` + `/cached-docs-find` lookups before Phase 1, grounding new
+  specs in already-mapped subsystems and pinned vendor docs instead of
+  guessing.
+
+### Not ported (see `spike-results/gsd-core-eval/incorporation-plan.md` history)
+- `lib/gates.py` `check-gsd` — designed for a "gsd optional, ruflo primary"
+  world that no longer exists; the honest-verifier port above uses a minimal
+  inline agent-presence check instead.
+- `skills/feature-implement` package-legitimacy/slopcheck gate — real
+  supply-chain-safety value, but its task-execution loop moved into
+  gsd-core's external executor in v4.0.0; needs a new home (hook or gsd-side
+  wiring), not a doc edit. Tracked as follow-up, not landed here.
+- `skills/spec-decompose` diff, `setup.sh` ruflo-reinstall path — both
+  conflict with the shipped gsd-native design; discarded.
+
 ## v4.0.0 — GSD replaces ruflo as the orchestration engine (spec 002, 2026-07-06)
 
 **BREAKING.** The ruflo MCP swarm executor is removed from FFS. Orchestration now

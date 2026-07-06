@@ -61,6 +61,18 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 > `env -u DATABASE_URL gbrain query "<feature topic>"` and feed prior decisions into
 > specify/plan. Absent/unhealthy → `git log --oneline --grep="<topic>"` fallback; never block.
 
+> **Prior-work + vendor-doc grounding (fail-soft):** before Phase 1, if the repo
+> has `openwiki/`, run `/openwiki-find "<feature topic>"` to surface the owning
+> subsystem page(s) — Reality/Vision/Gap + any `GAP-<PREFIX>-NNN` this feature
+> closes — and feed those refs into the spec's Context so it is grounded in what
+> is already mapped (a feature that closes a named gap MUST cite it). For every
+> third-party service/SDK/API the feature touches, run `/cached-docs-find <vendor>`
+> to pull the pinned `docs/cached-docs/*.md` API shape into plan.md's research
+> instead of guessing (Context7 for anything not cached). Both are read-only,
+> grep-first, fail-soft — a repo without `openwiki/`/`docs/cached-docs/` or
+> without those skills silently no-ops. Route the lookups to a `haiku` scout
+> subagent per the Delegation discipline section below.
+
 ## Usage
 
 ```
