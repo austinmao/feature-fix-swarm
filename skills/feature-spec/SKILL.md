@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 1.4.0
+version: 2.0.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -282,6 +282,52 @@ fi
 ---
 
 **Claude: execute these steps in sequence. Do not skip any step.**
+
+## Delegation discipline (host-model-aware, gsd-aligned, v2.0.0)
+
+The host running this skill is an ORCHESTRATOR, not the worker. When the session
+model is a scarce/premium tier — **Fable** or **Opus** — do NOT burn its context
+on read-only discovery. Offload every mechanical/parallel sub-task to `Agent`
+subagents on the cheapest tier that does the job, and reserve the premium host
+for what it is FOR: narrative coherence in `spec.md`/`plan.md` prose and
+cross-section consistency. (On a `sonnet`-default host, inline is fine —
+delegation is optional and this whole section is a no-op.)
+
+Tier ladder mirrors gsd's `dynamic_routing` (light/standard/heavy) + premium:
+
+| Sub-task (across all phases below) | Model | Return contract |
+|---|---|---|
+| grep / file-read / ref-resolution / "open `specs/NNN/X.md` and verify sections present" | `haiku` | **scout** (≤15 lines: `file:line` + pass/fail + missing-section list — NEVER the file body) |
+| codebase exploration ("where is X", blast radius) during specify/plan | `haiku`→`sonnet` on miss | **scout** |
+| research fan-out (speckit.plan Phase 0 unknowns, best-practices, vendor-doc reads) | `sonnet` | **build**/deep (conclusion first) |
+| architectural judgment (canonical-mechanism picks, security/auth tradeoffs, `[NEEDS CLARIFICATION]` resolution) | `opus` | **deep** |
+| adversarial spec critique before plan (optional, big specs) | `fable` if available, else `opus` | **deep** |
+
+**Premium fallback:** `fable` is an OAuth-subscription model that comes and
+goes. If a `fable` spawn errors (model unavailable), retry the SAME prompt on
+`opus` — same semantics as `scripts/gsd/model-fallback.sh` applies to
+`.planning/config.json` pins. Never stall a phase on a dead premium model.
+
+**Parallelize the recon, not the artifacts.** spec.md → plan.md → tasks.md is
+a real dependency chain (sequential). What IS parallel: dispatch the haiku
+scouts + sonnet researchers for a phase CONCURRENTLY (one message, multiple
+Agent calls) while the host synthesizes — e.g. during specify, codebase scouts
++ vendor-doc research run at the same time as spec drafting; their reports
+land before the section that needs them.
+
+Concretely:
+- The inter-phase **verification reads** in Steps 1–4 ("open the file and verify
+  `## X` exists") → dispatch a `haiku` scout that returns the pass/fail +
+  missing-section list, not the artifact body.
+- Any **codebase grep/explore** while authoring → `haiku` `Explore` subagent
+  returning `file:line` refs only.
+- **spec-decompose (Step 4)** seeds the gsd project; gsd's own planner/checker
+  ladder (fable/opus plan, sonnet research, opus verify — post model-fallback)
+  takes over from there. Do not duplicate its research inline.
+
+Fail-soft: no `Agent` tool available, or a solo host with no subagent runtime →
+do the read inline. Delegation is an optimization, never a gate — a phase never
+blocks because a subagent was unavailable.
 
 ### Step 1 — speckit.specify
 
