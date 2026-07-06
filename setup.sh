@@ -72,8 +72,10 @@ install_gsd() {
   echo "  gsd-core: installing pinned repo-local dep"
   # NEVER bare `npx gsd` — that resolves to the wrong package (gsd@0.0.3)
   npm install --save-dev --save-exact @opengsd/gsd-core@1.6.1
-  node node_modules/.bin/gsd-core install --claude 2>/dev/null || \
-    echo "  gsd-core: commands/hooks install step failed — run 'node node_modules/.bin/gsd-core install' manually"
+  # node_modules/.bin/gsd-core is a shell shim, not JS — `node <shim>` feeds
+  # bash syntax to the JS parser (SyntaxError). Exec it directly.
+  node_modules/.bin/gsd-core install --claude 2>/dev/null || \
+    echo "  gsd-core: commands/hooks install step failed — run 'node_modules/.bin/gsd-core install --claude' manually"
 }
 
 check_gstack() {
