@@ -27,7 +27,7 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           # warning level: the repo's heredoc-heavy SKILL snippets live in md
           # (not linted); this covers the executable shell surface.
-          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/harness/*.sh
+          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/harness/*.sh scripts/gsd/*.sh
 
   bats:
     runs-on: ubuntu-latest

@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 1.4.0
+version: 2.0.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -42,8 +42,8 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 │    ├─ ENFORCED: E2E Playwright test stubs (one per PATH-NNN)    │
 │    └─ ENFORCED: Test contract summary (counts by layer)         │
 │                                                                 │
-│  Phase 4: /spec-decompose (v1.2.0 — swarm default)              │
-│    └─ Writes specs/NNN/tasks.md (roster [agent:] tags + gates)  │
+│  Phase 4: /spec-decompose (v2.0.0 — gsd project seed)           │
+│    └─ Seeds .planning/ + drives /gsd-plan-phase (plan-checked)  │
 │                                                                 │
 │  Phase 5: preflight (v1.2.0 — DEFAULT)                          │
 │    └─ specs/NNN/preflight.json proven PASS while operator here  │
@@ -255,7 +255,7 @@ NO_CLARIFY=0
 DRY_RUN=0
 NO_PREFLIGHT=0   # v1.2.0: preflight is DEFAULT-ON (--no-preflight to skip)
 NO_GRANT=0       # v1.2.0: autonomy-grant enumeration is DEFAULT-ON (--no-grant to skip)
-NO_SWARM=0       # v1.2.0: pass-through to /spec-decompose (swarm default-on there)
+NO_SWARM=0       # legacy no-op (spec-decompose v2.0.0 is gsd-native; flag kept for compat)
 SPEC_ID=""
 
 # zsh-safe: parameter expansion does not word-split in zsh, but
@@ -282,6 +282,52 @@ fi
 ---
 
 **Claude: execute these steps in sequence. Do not skip any step.**
+
+## Delegation discipline (host-model-aware, gsd-aligned, v2.0.0)
+
+The host running this skill is an ORCHESTRATOR, not the worker. When the session
+model is a scarce/premium tier — **Fable** or **Opus** — do NOT burn its context
+on read-only discovery. Offload every mechanical/parallel sub-task to `Agent`
+subagents on the cheapest tier that does the job, and reserve the premium host
+for what it is FOR: narrative coherence in `spec.md`/`plan.md` prose and
+cross-section consistency. (On a `sonnet`-default host, inline is fine —
+delegation is optional and this whole section is a no-op.)
+
+Tier ladder mirrors gsd's `dynamic_routing` (light/standard/heavy) + premium:
+
+| Sub-task (across all phases below) | Model | Return contract |
+|---|---|---|
+| grep / file-read / ref-resolution / "open `specs/NNN/X.md` and verify sections present" | `haiku` | **scout** (≤15 lines: `file:line` + pass/fail + missing-section list — NEVER the file body) |
+| codebase exploration ("where is X", blast radius) during specify/plan | `haiku`→`sonnet` on miss | **scout** |
+| research fan-out (speckit.plan Phase 0 unknowns, best-practices, vendor-doc reads) | `sonnet` | **build**/deep (conclusion first) |
+| architectural judgment (canonical-mechanism picks, security/auth tradeoffs, `[NEEDS CLARIFICATION]` resolution) | `opus` | **deep** |
+| adversarial spec critique before plan (optional, big specs) | `fable` if available, else `opus` | **deep** |
+
+**Premium fallback:** `fable` is an OAuth-subscription model that comes and
+goes. If a `fable` spawn errors (model unavailable), retry the SAME prompt on
+`opus` — same semantics as `scripts/gsd/model-fallback.sh` applies to
+`.planning/config.json` pins. Never stall a phase on a dead premium model.
+
+**Parallelize the recon, not the artifacts.** spec.md → plan.md → tasks.md is
+a real dependency chain (sequential). What IS parallel: dispatch the haiku
+scouts + sonnet researchers for a phase CONCURRENTLY (one message, multiple
+Agent calls) while the host synthesizes — e.g. during specify, codebase scouts
++ vendor-doc research run at the same time as spec drafting; their reports
+land before the section that needs them.
+
+Concretely:
+- The inter-phase **verification reads** in Steps 1–4 ("open the file and verify
+  `## X` exists") → dispatch a `haiku` scout that returns the pass/fail +
+  missing-section list, not the artifact body.
+- Any **codebase grep/explore** while authoring → `haiku` `Explore` subagent
+  returning `file:line` refs only.
+- **spec-decompose (Step 4)** seeds the gsd project; gsd's own planner/checker
+  ladder (fable/opus plan, sonnet research, opus verify — post model-fallback)
+  takes over from there. Do not duplicate its research inline.
+
+Fail-soft: no `Agent` tool available, or a solo host with no subagent runtime →
+do the read inline. Delegation is an optimization, never a gate — a phase never
+blocks because a subagent was unavailable.
 
 ### Step 1 — speckit.specify
 
@@ -323,12 +369,12 @@ After it completes, verify the spec contains:
 
 If any section is missing, **add it now**.
 
-### Step 4 — spec-decompose (v1.2.0)
+### Step 4 — spec-decompose (v2.0.0, gsd-native)
 
-Invoke the `spec-decompose` skill via the Skill tool with `${SPEC_ID}` (append
-`--no-swarm` if `NO_SWARM=1`). It runs the roster-specialist swarm decomposition
-(orchestrator merge + `gates.py analyze` + `agents_manifest.py check` gates) and
-writes `specs/${SPEC_ID}/tasks.md`.
+Invoke the `spec-decompose` skill via the Skill tool with `${SPEC_ID}`. It seeds
+the gsd project (`.planning/PROJECT.md` + `REQUIREMENTS.md` + `ROADMAP.md` +
+gate-carrying `config.json`) from spec.md/plan.md and drives `/gsd-plan-phase`
+(research → wave-parallel plans → plan-checker).
 
 If decompose fails its gates, STOP — fix the spec/plan and re-run. Do not hand a
 failing tasks.md to preflight/grant.
@@ -390,7 +436,7 @@ Planned-change rows.
 Requirements are proven NOW, while the operator is present — never discovered at 3am.
 
 1. **Author the manifest** `specs/${SPEC_ID}/preflight.json` from the RUN's real
-   footprint: scan tasks.md + plan.md for env/secret NAMES the tasks read
+   footprint: scan the seeded `.planning/` plans + plan.md for env/secret NAMES the tasks read
    (`process.env.*`, `os.environ`, `doppler secrets get` names) and every external
    service touched (DB, gateway, deploy target, MCP server) as a cheap real probe.
    Names only — a secret VALUE never enters the manifest. Format per the
@@ -404,7 +450,7 @@ Requirements are proven NOW, while the operator is present — never discovered 
    ]
    ```
 
-   **v1.3.0 — browser QA probe:** when tasks.md contains any `[qa:browser]`
+   **v1.3.0 — browser QA probe:** when any seeded plan carries a browser-proof gate
    task, ALSO include the app-reachability probe so an unattended run never
    reaches phase QA without a verifiable app to point the browser at:
 

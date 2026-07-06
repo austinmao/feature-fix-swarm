@@ -176,8 +176,8 @@ for dim in "${LLM_DIMS[@]}"; do
     fi
 
     echo "[RALPH] Queueing qa-${dim} (LLM, sonnet)..."
-    # The calling context registers Ruflo agents and executes each prompt through
-    # scripts/harness/ruflo-host-executor.sh. This script only writes the manifest.
+    # The calling context executes each queued prompt via native Task() agents.
+    # This script only writes the manifest.
     # codex-gate: B1 - queued LLM checks must not disappear from aggregation.
     printf '{"%s":"pending"}' "$dim" > "$ARTIFACT_DIR/${dim}-result.json"
     echo "SPAWN:${dim}:${PROMPT_FILE}:${ARTIFACT_DIR}" >> "$ARTIFACT_DIR/spawn-manifest.txt"

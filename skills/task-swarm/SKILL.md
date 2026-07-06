@@ -1,7 +1,7 @@
 ---
 name: task-swarm
-description: "Take ANY task description end-to-end autonomously: plan-eng-review → codex gate → swarm spec-decompose → preflight → grant ledger → /feature-implement --autonomous (swarm impl → QA → review-gate → ship → canary). Use when the operator hands you next instructions and wants planning, task creation, and swarm execution without babysitting."
-version: "1.0.0"
+description: "Take ANY task description end-to-end autonomously: plan-eng-review → codex gate → gsd project seed (spec-decompose) → preflight → grant ledger → /feature-implement --autonomous (gsd execute-phase → QA → review-gate → ship → canary). Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
+version: "2.0.0"
 allowed-tools:
   - Read
   - Write
@@ -41,21 +41,18 @@ sequencing, the run-state, and the single operator stop (the grant screen).
 
 ### Step 0 — continuity + recall (fail-soft)
 
-- `mcp__ruflo__session_save` a checkpoint tag `task-swarm:<slug>` now and after
-  every stage — an overnight run must survive a context reset
-  (long-run-continuity: the durable save is the guarantee, not in-context notes).
-- `mcp__ruflo__hooks_pre-task` on the task description (learning context) and
-  `mcp__ruflo__agentdb_pattern-search` for prior similar runs. If gbrain is
-  present (`command -v gbrain` + `env -u DATABASE_URL gbrain doctor` healthy):
-  `env -u DATABASE_URL gbrain query "<task topic>"` for prior decisions. All
-  three are fail-soft — absence never blocks.
+- Continuity is gsd-native: `.planning/STATE.md` survives context resets;
+  resume with `/gsd-resume-work`. No external checkpoint call needed.
+- If gbrain is present (`command -v gbrain` + `env -u DATABASE_URL gbrain doctor`
+  healthy): `env -u DATABASE_URL gbrain query "<task topic>"` for prior
+  decisions. Fail-soft — absence never blocks.
 
 ### Step 1 — plan + decompose
 
-Invoke the `plan-decompose` skill with the task description (append `--no-swarm`
-if passed). It runs `/plan-eng-review` (autonomous mode), the codex plan gate,
-then `/spec-decompose` (roster swarm, v1.4.0) and its `gates.py analyze` +
-`agents_manifest.py check` gates. Output: `specs/NNN/tasks.md` with a spec ID.
+Invoke the `plan-decompose` skill with the task description. It runs
+`/plan-eng-review` (autonomous mode), the codex plan gate, then
+`/spec-decompose` (gsd project seed + `/gsd-plan-phase`). Output: a seeded
+`.planning/` project keyed to spec ID NNN.
 
 STOP on any gate failure — surface findings; do not push a broken plan forward.
 
@@ -84,6 +81,13 @@ python3 "$GATES_PY" preflight "specs/${NNN}/preflight.json" --run "$RUN_ID"
 Fail → fix now (fetch secret, start service, re-auth), re-run until
 `PREFLIGHT-PASS`. `--autonomous` later refuses to start without this.
 
+Model ladder comes from the seeded `.planning/config.json` (haiku=light /
+sonnet=standard / opus=heavy tiers + fable/opus pins for planner/verifier).
+`scripts/gsd/model-fallback.sh` already ran at seed time (spec-decompose Step 2)
+and runs again inside feature-implement's walls — unavailable premium pins
+(fable off OAuth) are rewritten to opus before any spawn. Nothing to do here;
+just don't hand-pin models in prompts.
+
 ### Step 3 — grant screen (skip with --attended)
 
 Walk tasks.md and enumerate every operator-gated action in typed form
@@ -100,10 +104,10 @@ there; everything else proceeds.
 
 ### Step 4 — autonomous implement + finish tail
 
-Invoke the `feature-implement` skill: `NNN --autonomous` (or `NNN --auto` when
-`--attended`). It enforces `check-preflight`, executes the roster swarm with the
-QA loop, then runs the Step 10 finish tail (review-gate → ship → canary), each
-outward action behind `check-grant`.
+Invoke the `feature-implement` skill: `NNN --autonomous` (or bare `NNN` when
+`--attended`). It enforces `check-preflight`, drives `/gsd-execute-phase` with
+gates.py as completion authority, then runs the finish tail (review-gate →
+ship → canary), each outward action behind `check-grant`.
 
 ### Step 5 — report + retro
 
@@ -112,7 +116,7 @@ skill's wrapper line to `.feature-fix-swarm/results.md`:
 `TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed}`.
 Report `pending` actions (if any) with the exact resume command:
 `python3 "$GATES_PY" grant $RUN_ID --action <a>` then `/feature-implement NNN --autonomous`.
-`mcp__ruflo__hooks_post-task` closes the learning loop (fail-soft).
+Close the loop with `/gsd-extract-learnings` (fail-soft).
 
 ## Rules
 

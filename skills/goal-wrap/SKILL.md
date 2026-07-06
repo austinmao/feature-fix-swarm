@@ -34,8 +34,8 @@ server (`repowise`), a cross-session memory store (`gbrain`), and two sibling
 skills (`/prompt-master`, `/handoff`). None of those are guaranteed to exist for
 a standalone `feature-fix-swarm` install. Check availability once at the top of
 Phase 0 and Step 4, then follow the stated fallback — never hard-block the whole
-skill on one missing tool, matching this package's existing `RUFLO_REQUIRED=auto`
-pattern for Ruflo elsewhere.
+skill on one missing tool (fail-soft is this package's standing pattern for
+optional tooling).
 
 | Tool | If present | If absent |
 |---|---|---|
