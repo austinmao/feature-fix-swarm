@@ -22,10 +22,19 @@ if [ -z "$GATES_PY" ]; then
   exit 1
 fi
 
-if [ -d "$REPO_ROOT/lib/tests" ]; then
+# Test command resolution: GSD_TEST_CMD env > .planning/gsd-test-command file
+# > repo lib/tests. NO vacuous fallback — a syntax-check-of-self used to record
+# verify-done evidence that unlocked phase flips without testing anything
+# (evidence laundering; caught in the 2026-07-06 fable review).
+if [ -n "${GSD_TEST_CMD:-}" ]; then
+  TEST_CMD=(bash -c "$GSD_TEST_CMD")
+elif [ -f "$REPO_ROOT/.planning/gsd-test-command" ]; then
+  TEST_CMD=(bash -c "$(cat "$REPO_ROOT/.planning/gsd-test-command")")
+elif [ -d "$REPO_ROOT/lib/tests" ]; then
   TEST_CMD=(python3 -m pytest lib/tests -q)
 else
-  TEST_CMD=(bash -n scripts/gsd/gates-test-command.sh)
+  echo "gates-test-command: no test command — set GSD_TEST_CMD or write one to .planning/gsd-test-command (refusing to record vacuous evidence)" >&2
+  exit 1
 fi
 
 # No GATES_STRICT on run-gate: it exports into the child test env, and 4

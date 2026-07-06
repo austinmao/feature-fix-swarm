@@ -15,7 +15,18 @@ DIFF="$(cat)"
 # lives here (day-1 wrapper; native ship:pre capability gate deferred — no
 # third-party gate evaluator at gsd-core 1.6.1, upstream #2004).
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-RUN_ID="${GSD_RUN_ID:-spec-002}"
+# RUN_ID: env (exported by feature-implement) > branch-derived spec-NNN.
+# No hardcoded default — a wrong ledger key silently checks another run's
+# grants. Underivable → fail-closed REVISE.
+RUN_ID="${GSD_RUN_ID:-}"
+if [ -z "$RUN_ID" ]; then
+  BRANCH_NNN="$(git branch --show-current 2>/dev/null | grep -oE '^[0-9]{3}' | head -1)"
+  [ -n "$BRANCH_NNN" ] && RUN_ID="spec-${BRANCH_NNN}"
+fi
+if [ -z "$RUN_ID" ]; then
+  echo '{"verdict":"REVISE","note":"BLOCKED: GSD_RUN_ID unset and branch has no NNN prefix — export GSD_RUN_ID=spec-NNN so the grant ledger keys correctly"}'
+  exit 1
+fi
 GATES_PY=""
 for candidate in \
   "$REPO_ROOT/packages/feature-fix-swarm/lib/gates.py" \

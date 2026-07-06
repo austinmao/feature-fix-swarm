@@ -24,7 +24,13 @@ LOG_FILE="$LOG_DIR/gsd-run-${TS}.log"
 
 CMD_STR="$*"
 
-CLAUDE_ARGS=(--strict-mcp-config --mcp-config '{"mcpServers":{}}' --dangerously-skip-permissions -p "$CMD_STR")
+# Lead model: the headless lead is mechanical orchestration (reads the gsd
+# workflow, spawns subagents) — sonnet-class. Running it on the session default
+# (often opus) cost $17.73 of a $51.54 spec-256 conformance run for zero
+# quality gain; subagent tiers come from .planning/config.json, not the lead.
+LEAD_MODEL="${GSD_LEAD_MODEL:-claude-sonnet-5}"
+
+CLAUDE_ARGS=(--strict-mcp-config --mcp-config '{"mcpServers":{}}' --dangerously-skip-permissions --model "$LEAD_MODEL" -p "$CMD_STR")
 
 # A shell-exported ANTHROPIC_API_KEY overrides the claude.ai OAuth login and
 # 401s headless drives — scrub auth env so the CLI uses its own login.

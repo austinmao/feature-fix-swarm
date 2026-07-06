@@ -50,6 +50,10 @@ Otherwise translate the FFS spec into gsd's planning inputs:
 - Then run `bash scripts/gsd/model-fallback.sh .planning` — probes premium-model
   availability (claude-fable-5 on OAuth comes and goes) and rewrites unavailable
   pins to their fallback (fable→opus) so spawns never error on a dead model.
+- Write `.planning/gsd-test-command` — ONE shell line running the repo's real
+  test suite for this spec (e.g. `bash scripts/tests/specNNN-*.test.sh && bats
+  tests/bats/specNNN-*.bats`). `gates-test-command.sh` refuses to run without
+  it in repos lacking `lib/tests` — vacuous evidence is worse than no evidence.
 
 Pilot-proven reference shapes: spec 002's `.planning/` on branch `002-gsd-replaces-ruflo`.
 

@@ -68,6 +68,9 @@ fi
 # Model availability wall (all modes): rewrite dead premium pins (fable→opus)
 # before any spawn — an overnight run must not die on an OAuth catalog change.
 [ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh .planning || true
+# Ledger key for gsd seams: review-gate-command.sh reads GSD_RUN_ID (no
+# hardcoded default) — export it so ship grants key to THIS run.
+export GSD_RUN_ID="$RUN_ID"
 ```
 
 At every operator-gated action mid-run (push, merge, deploy, flip, secret-use):
