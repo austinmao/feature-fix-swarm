@@ -488,7 +488,7 @@ for script in qa-swarm.sh ralph-retry.sh browser-proof.sh; do
 done
 
 mkdir -p scripts/gsd scripts/hooks
-for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-command.sh gsd/consent-check.sh gsd/state-phase.sh hooks/gsd-phase-evidence-gate.sh; do
+for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-command.sh gsd/consent-check.sh gsd/state-phase.sh gsd/mempalace hooks/gsd-phase-evidence-gate.sh; do
   if [ "$SCRIPT_DIR/scripts/$gsd_script" -ef "scripts/$gsd_script" ]; then
     echo "  scripts/$gsd_script is the repo copy — skipping self-copy"
   else

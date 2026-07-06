@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# mempalace — gbrain-backed shim for gsd-core's headless MemPalace CLI seam
+# (spec 002 Phase D). Upstream mempalace is pre-1.0; FFS's durable memory is
+# gbrain, so the gsd-mempalace-capture/-recall commands' headless calls land
+# here. Drawer key = mempalace/<wing>/<room>/<sha256-12 of content> — content
+# hashing gives the mine idempotency the capture contract requires.
+#
+# Subcommands (the ones gsd commands emit):
+#   mempalace mine <path> --wing W --room R    # file artifact verbatim
+#   mempalace search "<topic>" --wing W        # targeted recall
+#   mempalace wake-up --wing W                 # cheap wing summary
+#
+# Fail behavior: gbrain absent/unhealthy → exit 1 with "unavailable" (upstream
+# treats capture/recall as onError: skip — never fails a phase).
+set -uo pipefail
+
+usage() { echo "usage: mempalace {mine <path>|search <topic>|wake-up} --wing W [--room R]" >&2; exit 2; }
+
+[ $# -ge 1 ] || usage
+CMD="$1"; shift
+
+ARG=""
+WING=""
+ROOM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --wing) WING="${2:-}"; shift 2 ;;
+    --room) ROOM="${2:-}"; shift 2 ;;
+    *) ARG="$1"; shift ;;
+  esac
+done
+
+# gbrain wrapper: shell DATABASE_URL hijacks gbrain's configured engine —
+# always scrub it (memory-routing rule).
+gb() { env -u DATABASE_URL gbrain "$@"; }
+
+require_gbrain() {
+  if ! command -v gbrain >/dev/null 2>&1; then
+    echo "mempalace: gbrain unavailable — skipping (best-effort memory)" >&2
+    exit 1
+  fi
+}
+
+case "$CMD" in
+  mine)
+    require_gbrain
+    [ -n "$ARG" ] && [ -f "$ARG" ] || { echo "mempalace: artifact not found: ${ARG:-<missing>}" >&2; exit 1; }
+    [ -n "$WING" ] && [ -n "$ROOM" ] || usage
+    HASH=$(shasum -a 256 "$ARG" | cut -c1-12)
+    KEY="mempalace/${WING}/${ROOM}/${HASH}"
+    if ! gb put "$KEY" "$(cat "$ARG")"; then
+      echo "mempalace: gbrain unavailable — put failed" >&2
+      exit 1
+    fi
+    gb sync --no-pull --no-embed >/dev/null 2>&1 || true
+    echo "Filed $(basename "$ARG") → ${WING}/${ROOM} (${KEY})"
+    ;;
+  search)
+    require_gbrain
+    [ -n "$ARG" ] || usage
+    gb search "mempalace/${WING} ${ARG}" 2>/dev/null || {
+      echo "mempalace: gbrain unavailable — search failed" >&2; exit 1; }
+    ;;
+  wake-up)
+    require_gbrain
+    [ -n "$WING" ] || usage
+    gb search "mempalace/${WING}" 2>/dev/null | head -20 || {
+      echo "mempalace: gbrain unavailable — wake-up failed" >&2; exit 1; }
+    ;;
+  *) usage ;;
+esac

@@ -55,6 +55,14 @@
   "features": {
     "global_learnings": true
   },
+  "mempalace": {
+    "enabled": true,
+    "capture_artifacts": true,
+    "recall_on_discuss": true,
+    "recall_on_plan": true,
+    "memory_mode": "augment",
+    "mirror_kg": false
+  },
   "learnings": {
     "max_inject": 10
   },

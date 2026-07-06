@@ -12,6 +12,10 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT" || exit 1
 
+# gsd's mempalace commands call a bare `mempalace` binary in headless mode —
+# resolve to the repo's gbrain-backed shim (spec 002 Phase D).
+export PATH="$REPO_ROOT/scripts/gsd:$PATH"
+
 TIMEOUT_SECS="${TIMEOUT:-900}"
 LOG_DIR="$REPO_ROOT/.planning/logs"
 mkdir -p "$LOG_DIR"
