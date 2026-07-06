@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.2.0"
+version: "1.3.0"
 ---
 
 # /review-gate
@@ -238,6 +238,82 @@ For each gap output:
 Do not praise. Gaps only.
 ```
 
+### Honest-verifier pass (v1.3.0)
+
+The 3 passes above find DEFECTS in the diff. They do not answer "did this diff
+achieve the phase GOAL, and if the spec can't tell, do I abstain instead of
+false-passing?" That is `gsd-verifier`'s job — goal-backward verification with an
+**abstain** disposition: an unresolvable criterion routes to `human_needed`
+instead of a false `passed`.
+
+**Runs only when a spec is resolvable** (review-gate is otherwise spec-agnostic).
+`GSD_REQUIRED=0` skips this pass (prints `GSD-SKIP`, exit 0):
+
+```bash
+# resolve the spec for this diff (branch NNN → specs/NNN-*/spec.md)
+HV_SPEC=""
+_NNN=$(git branch --show-current 2>/dev/null | grep -oE '^[0-9]{3}' | head -1)
+[ -n "$_NNN" ] && HV_SPEC=$(find specs -maxdepth 2 -name spec.md -path "*${_NNN}-*" 2>/dev/null | head -1)
+
+VERIFIER_STATE="SKIPPED"
+if [ -z "$HV_SPEC" ]; then
+  echo "[review-gate] honest-verifier: no spec resolvable for this diff — skipped (diff-only passes stand)."
+elif [ "${GSD_REQUIRED:-1}" = "0" ]; then
+  echo "GSD-SKIP"
+else
+  # gsd-verifier is installed by gsd-core's `--claude` install step (spec 002)
+  if [ ! -f "$HOME/.claude/agents/gsd-verifier.md" ] && [ ! -f ".claude/agents/gsd-verifier.md" ]; then
+    echo "[review-gate] gsd-verifier agent not installed — run 'node_modules/.bin/gsd-core install --claude' or GSD_REQUIRED=0 to skip."
+    exit 1
+  fi
+  # spawn the verifier (below); capture its verdict line into VERIFIER_STATE
+fi
+```
+
+**Spawn with an override prompt** (gsd-verifier is gsd-`.planning`-native — same
+redirect posture as the plan-checker gate in spec-decompose):
+
+```
+Task({ subagent_type: "gsd-verifier", model: "sonnet", prompt: `
+You are verifying that executed work achieved the phase goal. This is a
+feature-fix-swarm repo, NOT a gsd .planning/ repo.
+
+DO NOT run gsd-tools.cjs / init.phase-op / verify.* queries. DO NOT read
+ROADMAP.md / PLAN.md / VERIFICATION.md — they do not exist here. Skip your
+gsd-tools loading steps.
+
+Inputs:
+- Goal + acceptance criteria (the truths to verify): ${HV_SPEC}
+- The work under review: the current git diff. Run it yourself:
+  '${DIFF_TARGET}' = '--staged' → git diff --staged (if empty, git diff HEAD);
+  '${DIFF_TARGET}' = 'main'     → git diff main...HEAD;
+  a --file target                → git diff for that path.
+
+Disposition:
+- INFERABLE criterion (determinable from the spec) → grade ✓ VERIFIED / ✗ FAILED
+  as usual. NEVER abstain on these (over-abstention guard).
+- NON-INFERABLE criterion — one whose correct answer is not derivable from the
+  spec text alone (merge semantics, grapheme-vs-codeunit, tie-breaking) — verify
+  ONLY if there is EXPLICIT evidence (a held-out/property test that passes, or a
+  behavior you directly observed in the diff). Symbol presence + wiring is NOT
+  explicit evidence. With no explicit evidence → ABSTAIN:
+  'ABSTAIN: <criterion> — insufficient_spec, held-out test recommended'.
+  NEVER emit passed for an abstained criterion.
+
+End with EXACTLY ONE of:
+  VERIFIER: PASS      — all inferable criteria VERIFIED, no unresolved abstains
+  VERIFIER: FAIL      — one or more criteria ✗ FAILED (list them)
+  VERIFIER: ABSTAIN   — N non-inferable criteria unverified (list them);
+                        route to human_needed, do NOT auto-pass
+` })
+```
+
+**Effect on the gate verdict:** capture the verifier's final line as
+`VERIFIER_STATE` (PASS | FAIL | ABSTAIN | SKIPPED). It composes with the defect
+counts below: **FAIL or ABSTAIN means the gate does NOT auto-PASS even at
+0 CRITICAL / 0 HIGH** — surface the abstained/failed criteria for the operator
+(`human_needed`).
+
 ### Refute-or-promote (false-positive control)
 
 Before a HIGH/CRITICAL finding is allowed to block the gate, give it one
@@ -304,6 +380,7 @@ Then:
 ```bash
 CRITICAL_COUNT=<count from findings>
 HIGH_COUNT=<count from findings>
+# VERIFIER_STATE set by the honest-verifier pass above: PASS | FAIL | ABSTAIN | SKIPPED
 
 if [ "$CRITICAL_COUNT" -gt 0 ] || [ "$HIGH_COUNT" -gt 0 ]; then
   echo ""
@@ -313,8 +390,15 @@ if [ "$CRITICAL_COUNT" -gt 0 ] || [ "$HIGH_COUNT" -gt 0 ]; then
   exit 1
 fi
 
+if [ "$VERIFIER_STATE" = "FAIL" ] || [ "$VERIFIER_STATE" = "ABSTAIN" ]; then
+  echo ""
+  echo "GATE: FAIL — honest-verifier: $VERIFIER_STATE (0 CRITICAL/HIGH, but goal not confirmed)"
+  echo "Route to human_needed — do not auto-pass on an abstained or failed criterion."
+  exit 1
+fi
+
 echo ""
-echo "GATE: PASS — 0 CRITICAL, 0 HIGH"
+echo "GATE: PASS — 0 CRITICAL, 0 HIGH, honest-verifier: ${VERIFIER_STATE:-SKIPPED}"
 echo "Proceed to next phase."
 exit 0
 ```
