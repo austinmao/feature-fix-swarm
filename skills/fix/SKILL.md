@@ -1,7 +1,7 @@
 ---
 name: fix
-description: "Investigate a bug, fix it through gsd-core's /gsd-quick loop (plan → execute → verify on a single quick task), verify with qa-only then full qa, then run review-gate cross-model adversarial review. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. Ruflo coordinator removed in v3.0.0 (spec 002)."
-version: "3.0.0"
+description: "Investigate a bug, fix it through gsd-core's /gsd-quick loop (plan → execute → verify on a single quick task), verify with qa-only then full qa, then run review-gate cross-model adversarial review. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. Ruflo coordinator removed in v3.0.0 (spec 002). Wires the fable→opus model-availability preflight (scripts/gsd/model-fallback.sh) before the gsd-quick loop in v3.1.0."
+version: "3.1.0"
 allowed-tools:
   - Read
   - Edit
@@ -44,8 +44,24 @@ finding as a one-paragraph statement with file:line refs before editing anything
 Invoke `/gsd-quick` with the root-cause statement as the task. gsd runs its
 plan → execute → verify loop on the single task; the repo config's
 `workflow.test_command` (`scripts/gsd/gates-test-command.sh`) gates completion —
-gates.py evidence, not self-report. Headless variant:
-`TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<root-cause task>"`.
+gates.py evidence, not self-report.
+
+Run the model-availability preflight first: gsd-quick's subagent tiers come from
+`.planning/config.json` (read by gsd-core's resolver at spawn time — `gsd-run.sh`
+launches only the sonnet-class lead), so a dead premium pin (Fable dropped off
+OAuth) would error the planner/plan-checker spawn. The same lever
+`/feature-implement` runs rewrites fable→opus before any spawn.
+
+Best-effort, not a hard gate: it stays fail-soft (`.planning/config.json` may not
+be seeded when it runs — same reason `feature-implement`'s call is fail-soft), but
+it must NOT no-op *silently* — warn on skip/failure so `gsd-run.sh` surfacing the
+real config error later isn't the first sign. Headless variant:
+
+```bash
+[ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh .planning \
+  || echo "[fix] model-availability preflight skipped/failed (best-effort) — gsd-run will surface any config error"
+TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<root-cause task>"
+```
 
 TDD applies: failing repro test first (RED), fix (GREEN); the gsd executor's
 commit trail must show both.

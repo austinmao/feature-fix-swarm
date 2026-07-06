@@ -6,6 +6,19 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.0.3 — fix: wire the fable→opus model-availability preflight into /fix (2026-07-06)
+
+The `/fix` skill drove gsd-core's `/gsd-quick` loop headless but never ran the
+model-availability preflight (`scripts/gsd/model-fallback.sh`) that
+`/feature-implement` runs before spawning. So a dead premium pin (Fable dropped
+off the OAuth subscription) would error the `gsd-planner`/`gsd-plan-checker`
+spawn at loop start instead of being rewritten fable→opus. The lever and its
+bats test already shipped (v4.0.2) — only the `/fix` call site was missing.
+
+Fixed by adding the same fail-soft preflight block `/feature-implement` uses,
+ahead of the `gsd-run.sh /gsd-quick` invocation. Best-effort, non-silent: it
+warns on skip/failure rather than no-op'ing quietly. `skills/fix` 3.0.0 → 3.1.0.
+
 ## v4.0.2 — fix: gsd-config template used full model IDs, breaking Claude Agent spawns (2026-07-06)
 
 `templates/gsd-config.base.json` shipped `model_overrides` (and
