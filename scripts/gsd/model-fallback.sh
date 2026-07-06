@@ -48,6 +48,7 @@ probe_model() {
   [ "$(cat "$cache")" = "ok" ]
 }
 
+# shellcheck disable=SC2086  # intentional word-split: CHAIN is a space-separated model list
 set -- $CHAIN
 while [ "$#" -ge 2 ]; do
   CANDIDATE="$1"; FALLBACK="$2"; shift 2

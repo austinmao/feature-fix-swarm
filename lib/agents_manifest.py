@@ -295,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"resolve against {args.manifest}")
             return 0
         print(f"AGENTS-CHECK-FAIL: unknown agents {unknown} — "
-              f"run /agents-init to refresh the roster or fix the tags")
+              f"refresh the roster (python3 lib/agents_manifest.py scan) or fix the tags")
         return 1
 
     return 2

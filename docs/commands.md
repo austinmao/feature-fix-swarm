@@ -13,7 +13,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/plan-decompose "description"` | Turn a description or existing plan into `tasks.md` via autonomous eng review + `/review-gate` — no speckit interview. Faster path when a spec isn't warranted. |
 | `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
 | `/feature NNN` | End-to-end: bootstrap spec if needed, autoplan, decompose, implement, qa, ship, canary. 2 hard gates. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` |
-| `/swarm "task description"` | Ad-hoc task swarm — no spec dir required. Classifies the task (model/agent/thinking tier) and executes inline via `lib/dispatch.py` + `scripts/harness/ruflo-host-executor.sh`. |
+| `/swarm "task description"` | Ad-hoc task swarm — no spec dir required. Classifies the task (model/agent/thinking tier) and executes via the gsd-core loop (see `/gsd-*` commands). |
 
 **Pipeline order:** `/office-hours` → `/feature-spec NNN` (TDD+BDD+E2E contracts) → `/autoplan` → `/spec-decompose` → `/feature-implement` → `/qa` → `/review` → `/review-gate` → `/ship` → `/land-and-deploy` → `/canary`
 
@@ -67,7 +67,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 
 | Command | What it does |
 |---------|-------------|
-| `/fix "bug description"` | Full loop: investigate (5 Whys) then fix (ruflo agents) then qa-only then full qa. Loops until green. |
+| `/fix "bug description"` | Full loop: investigate (5 Whys) then fix (gsd executors) then qa-only then full qa. Loops until green. |
 | `/fix "desc" --plan` | Use /plan-eng-review for complex bugs needing architectural review |
 | `/fix "desc" --no-qa` | Skip full /qa, only run /qa-only on affected area |
 | `/fix "desc" --dry-run` | Investigate + plan but don't apply the fix |
@@ -101,7 +101,6 @@ These flags work with `/feature-implement`:
 | `--qa-only review` | Run only specified QA dimensions |
 | `--dry-run` | Print the execution plan without spawning agents |
 | `--resume` | Pick up from last failure point |
-| `--ruflo` | Use Ruflo swarm coordination plus active host CLI execution instead of native Agent execution |
 | `--one` | Execute only the next unchecked task |
 
 ## Environment Variables
@@ -136,8 +135,6 @@ without evidence.
 
 Do not use provider-key execution paths for feature tasks. Codex sessions execute
 through `codex exec`; Claude sessions execute through `claude -p`.
-
-In Codex sessions, use tool discovery for `ruflo swarm_init agent_spawn mcp_status` before concluding Ruflo is unavailable; Ruflo tools are lazy-loaded.
 
 ## Reference
 

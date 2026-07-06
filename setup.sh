@@ -361,7 +361,7 @@ fi
 # Copy skills
 SKILLS_DIR="$HOME/.claude/skills"
 echo "Installing skills to $SKILLS_DIR/..."
-for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant agents-init task-swarm; do
+for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant task-swarm; do
   TARGET="$SKILLS_DIR/$skill/SKILL.md"
   if [ -f "$TARGET" ] && [ "$SETUP_YES" != "1" ]; then
     read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
@@ -389,12 +389,12 @@ if [ -f "$SCRIPT_DIR/lib/agents_manifest.py" ]; then
   if [ "$SCAN_REPO" != "$SCRIPT_DIR" ] || [ -d "$SCAN_REPO/.claude/agents" ]; then
     if python3 "$SCRIPT_DIR/lib/agents_manifest.py" scan --repo "$SCAN_REPO" \
         --out "$SCAN_REPO/.feature-fix-swarm/agents.json" >/dev/null 2>&1; then
-      echo "  Agent roster -> $SCAN_REPO/.feature-fix-swarm/agents.json (refresh anytime: /agents-init)"
+      echo "  Agent roster -> $SCAN_REPO/.feature-fix-swarm/agents.json (refresh: python3 lib/agents_manifest.py scan)"
     else
-      echo "  Agent roster scan failed — run /agents-init in your target repo"
+      echo "  Agent roster scan failed — rerun: python3 lib/agents_manifest.py scan --repo <repo> --out <repo>/.feature-fix-swarm/agents.json"
     fi
   else
-    echo "  Run /agents-init in your target repo to build the agent roster manifest"
+    echo "  Build the roster in your target repo: python3 lib/agents_manifest.py scan --repo . --out .feature-fix-swarm/agents.json"
   fi
 fi
 
