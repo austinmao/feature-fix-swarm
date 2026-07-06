@@ -47,6 +47,9 @@ Otherwise translate the FFS spec into gsd's planning inputs:
 - `.planning/config.json` — copy `templates/gsd-config.base.json`; MUST carry
   `workflow.test_command = bash scripts/gsd/gates-test-command.sh` and
   `workflow.code_review_command = bash scripts/gsd/review-gate-command.sh`
+- Then run `bash scripts/gsd/model-fallback.sh .planning` — probes premium-model
+  availability (claude-fable-5 on OAuth comes and goes) and rewrites unavailable
+  pins to their fallback (fable→opus) so spawns never error on a dead model.
 
 Pilot-proven reference shapes: spec 002's `.planning/` on branch `002-gsd-replaces-ruflo`.
 

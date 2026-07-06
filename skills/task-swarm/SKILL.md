@@ -81,6 +81,13 @@ python3 "$GATES_PY" preflight "specs/${NNN}/preflight.json" --run "$RUN_ID"
 Fail → fix now (fetch secret, start service, re-auth), re-run until
 `PREFLIGHT-PASS`. `--autonomous` later refuses to start without this.
 
+Model ladder comes from the seeded `.planning/config.json` (haiku=light /
+sonnet=standard / opus=heavy tiers + fable/opus pins for planner/verifier).
+`scripts/gsd/model-fallback.sh` already ran at seed time (spec-decompose Step 2)
+and runs again inside feature-implement's walls — unavailable premium pins
+(fable off OAuth) are rewritten to opus before any spawn. Nothing to do here;
+just don't hand-pin models in prompts.
+
 ### Step 3 — grant screen (skip with --attended)
 
 Walk tasks.md and enumerate every operator-gated action in typed form

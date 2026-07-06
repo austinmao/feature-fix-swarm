@@ -65,6 +65,9 @@ if [ "$AUTONOMOUS" = "1" ]; then
   python3 "$GATES_PY" check-preflight "$RUN_ID" || {
     echo "[feature-implement] ERROR: no fresh preflight for $RUN_ID — run /preflight first."; exit 1; }
 fi
+# Model availability wall (all modes): rewrite dead premium pins (fable→opus)
+# before any spawn — an overnight run must not die on an OAuth catalog change.
+[ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh .planning || true
 ```
 
 At every operator-gated action mid-run (push, merge, deploy, flip, secret-use):
