@@ -6,6 +6,27 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.0.2 — fix: gsd-config template used full model IDs, breaking Claude Agent spawns (2026-07-06)
+
+`templates/gsd-config.base.json` shipped `model_overrides` (and
+`dynamic_routing.tier_models`) as full Claude model IDs (`claude-sonnet-5`,
+`claude-fable-5`, `claude-opus-4-8`) plus `resolve_model_ids: true`. On the
+Claude runtime, gsd-core's `resolveModelInternal` returns a `model_overrides`
+value **verbatim** (no alias mapping — the `CLAUDE_POLICY_ID_TO_ALIAS` safety
+net exists only on the `model_policy` path, per gsd-core #1133/#1144), and the
+Claude Agent tool's `model=` accepts only aliases (`sonnet`/`opus`/`haiku`/
+`fable`). So every seeded gsd project spawned its subagents on the **parent
+session's** model instead of the configured one (observed: 10 `gsd-executor`
+agents running as the operator's session model, not `sonnet`). `resolve_model_ids:
+true` independently forced full-ID output for any agent not in the override list.
+
+Fixed by switching the template to bare aliases + `resolve_model_ids: false`
+(gsd-core's own system default). Verified end-to-end: `resolve-model` now returns
+`fable`/`sonnet`/`opus` for every override'd agent. Upstream gsd-core gap (docs
+say full IDs are valid in `model_overrides`, but the Claude step-1 path never
+maps them) filed separately — this template fix is alias-only and needs no
+gsd-core change.
+
 ## v4.0.1 — port two Option-A findings from the gsd-core-eval spike (2026-07-06)
 
 Reconciles `spike(001): gsd-core@1.6.1 adoption eval` (#25) against the shipped
