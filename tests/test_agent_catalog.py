@@ -56,29 +56,27 @@ def _read(relpath: str) -> str:
     return (REPO_ROOT / relpath).read_text(encoding="utf-8")
 
 
-def test_hybrid_catalog_is_defined_in_prompt_and_execution_skill() -> None:
+# The gsd migration (spec-002, gsd replaces ruflo) moved the execution SKILLs
+# (feature-implement, spec-decompose) and docs/commands.md to gsd-native model
+# routing (`model_profiles` in config.json), so they no longer restate the
+# exact-agent catalog. The catalog itself is still live: it is defined in the
+# decompose prompt and pipeline doc, advertised in the README, and installed by
+# setup.sh (ECC + wshobson packs). These tests guard the surfaces that still own it.
+def test_hybrid_catalog_is_defined_in_the_decompose_prompt() -> None:
     prompt = _read("prompts/decompose-spec.md")
-    skill = _read("skills/feature-implement/SKILL.md")
 
     assert "[agent:exact-agent]" in prompt
-    assert "[agent:exact-agent]" in skill
     assert "hybrid ECC + wshobson catalog" in prompt
-    assert "Exact agent delegation uses the hybrid ECC + wshobson catalog" in skill
 
     for label in CATALOG_LABELS:
         assert label in prompt, label
-        assert label in skill, label
 
 
 def test_supporting_docs_and_bootstrap_match_the_same_catalog() -> None:
-    spec_skill = _read("skills/spec-decompose/SKILL.md")
-    commands = _read("docs/commands.md")
     pipeline = _read("docs/pipeline.md")
     readme = _read("README.md")
     setup = _read("setup.sh")
 
-    assert "exact-agent hybrid catalog" in spec_skill
-    assert "hybrid exact-agent catalog" in commands
     assert "[agent:exact-agent]" in pipeline
     assert "exact hybrid catalog" in readme
     assert "ECC_REPO" in setup
