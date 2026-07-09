@@ -6,6 +6,30 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.2.0 — feat: orchestrator delegation discipline — trip-wire rule + histogram + delegation-audit lever (2026-07-09)
+
+Retro finding from a real long run: the review ladder routed correctly
+(opus/sonnet/haiku all landed on the right work) but the **orchestrator's own
+cost discipline** drifted — build spawns left unpinned inherited a premium
+host tier after a mid-run model switch, and the host drained several
+mechanical loops (`sed -i` restamps, `git rebase` conflict drains,
+doc-extraction loops) inline instead of delegating them.
+
+- **`feature-spec` SKILL.md (v2.1.0)** — new "Orchestrator self-discipline
+  (trip-wires)" paragraph in the Delegation discipline section: names the
+  trip-wires that must be delegated, the legitimately-inline exceptions, and
+  the mandatory `model` pin on every spawn.
+- **`task-swarm` (v2.2.0) / `feature-implement` (v2.2.0)** — results.md /
+  final-report lines now carry a `models={opus:N,sonnet:N,haiku:N,fable:N,
+  inline-mechanical:N}` histogram so drift is visible in the run record, not
+  just in retro.
+- **`lib/gates.py delegation-audit <transcript.jsonl> [--threshold N]`
+  (new, advisory, always exit 0)** — scans a Claude Code session transcript
+  for main-loop Agent/Task spawns (histogram by model pin, flags unpinned
+  build/rebase/prep spawns) and main-loop Bash trip-wires (rebase drains,
+  restamp/doc-extraction loops), excluding sub-agent sidechains and
+  legitimate CI-poll loops. `tests/bats/gates-delegation-audit.bats` (7/7).
+
 ## v4.1.0 — feat: Fable-5/pilotfish alignment — security model fence + anti-early-stop (2026-07-09)
 
 Three deltas from auditing FFS against the Fable-5 prompting guide and the

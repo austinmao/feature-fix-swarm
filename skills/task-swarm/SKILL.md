@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Take ANY task description end-to-end autonomously: plan-eng-review → codex gate → gsd project seed (spec-decompose) → preflight → grant ledger → /feature-implement --autonomous (gsd execute-phase → QA → review-gate → ship → canary). Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
-version: "2.1.0"
+version: "2.2.0"
 allowed-tools:
   - Read
   - Write
@@ -119,7 +119,11 @@ you are blocked on input only the user can provide.
 
 feature-implement's proof artifact + final report are the record. Add this
 skill's wrapper line to `.feature-fix-swarm/results.md`:
-`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed}`.
+`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed} models={opus:N,sonnet:N,haiku:N,fable:N,inline-mechanical:N}`.
+The `models=` histogram counts Task/Agent spawns by pinned model over the
+whole run (`inline-mechanical` = trip-wire work the host drained inline —
+see `feature-spec` SKILL.md § Orchestrator self-discipline; target 0).
+Cross-check with `python3 lib/gates.py delegation-audit <transcript>`.
 Report `pending` actions (if any) with the exact resume command:
 `python3 "$GATES_PY" grant $RUN_ID --action <a>` then `/feature-implement NNN --autonomous`.
 Close the loop with `/gsd-extract-learnings` (fail-soft).

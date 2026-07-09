@@ -40,6 +40,10 @@ Usage (inline heredoc in SKILL.md):
     python3 lib/gates.py record-red   T041 --exit 1 < red-run.log
     python3 lib/gates.py check-red    T041        # exit 0 iff RED proven
     python3 lib/gates.py scan-tamper  < diff.txt  # exit 1 + findings if hacked
+    python3 lib/gates.py delegation-audit TRANSCRIPT.jsonl [--threshold 3]
+                                                  # advisory (always exit 0):
+                                                  # spawn-model histogram +
+                                                  # UNPINNED-BUILD/INLINE-MECHANICAL
     python3 lib/gates.py analyze SPEC_FILE TASKS_FILE
 
 Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
@@ -698,6 +702,70 @@ def _store_path() -> Path:
     return Path(os.environ.get("GATES_STORE", ".feature-fix-swarm/evidence.json"))
 
 
+# ── delegation-audit: orchestrator discipline (advisory, never blocks) ───────
+# Build-type spawn descriptions — an Agent/Task spawn matching this with no
+# explicit model pin inherits the orchestrator tier (premium-cost bug).
+BUILD_DESC_PAT = re.compile(r"\b(rebase|adopt|prep|fix|implement|merge)\b", re.I)
+# Main-loop Bash commands the orchestrator must delegate, not run inline.
+TRIPWIRE_REBASE_PAT = re.compile(r"\bgit rebase\b|git checkout --(theirs|ours)")
+TRIPWIRE_LOOP_PAT = re.compile(r"\b(for|while)\b.*\bdo\b", re.S)
+TRIPWIRE_LOOP_BODY_PAT = re.compile(r"sed -i|git show[^\n]*>", re.S)
+# Legitimate inline loops: CI-watch / poll monitors are the orchestrator's job.
+POLL_PAT = re.compile(r"seen\.txt|gh (run|pr) (watch|checks)|--watch\b")
+
+
+def _is_tripwire(cmd: str) -> bool:
+    if TRIPWIRE_REBASE_PAT.search(cmd):
+        return True
+    return bool(TRIPWIRE_LOOP_PAT.search(cmd) and TRIPWIRE_LOOP_BODY_PAT.search(cmd))
+
+
+def delegation_audit(transcript_text: str) -> dict:
+    """Scan a Claude Code session transcript (JSONL) for delegation drift.
+
+    Counts main-loop Agent/Task spawns by model pin and main-loop Bash
+    trip-wires. Sidechain entries (agent sub-transcripts) are ignored —
+    a sub-agent running `git rebase` is delegation working as intended.
+    """
+    hist: dict[str, int] = {}
+    unpinned_build: list[str] = []
+    inline_mechanical: list[str] = []
+    for line in transcript_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("isSidechain"):
+            continue
+        msg = entry.get("message") or {}
+        if entry.get("type") != "assistant" or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name, inp = block.get("name", ""), block.get("input") or {}
+            if name in ("Agent", "Task"):
+                model = (inp.get("model") or "").strip().lower() or "inherit"
+                hist[model] = hist.get(model, 0) + 1
+                desc = inp.get("description") or ""
+                if model == "inherit" and BUILD_DESC_PAT.search(desc):
+                    unpinned_build.append(desc[:80])
+            elif name == "Bash":
+                cmd = inp.get("command") or ""
+                if POLL_PAT.search(cmd):
+                    continue
+                if _is_tripwire(cmd):
+                    inline_mechanical.append((inp.get("description") or cmd)[:80])
+    return {"histogram": hist, "unpinned_build": unpinned_build,
+            "inline_mechanical": inline_mechanical}
+
+
 def _flag(args: list[str], name: str, default: str = "") -> str:
     for i, a in enumerate(args):
         if a == name and i + 1 < len(args):
@@ -764,6 +832,37 @@ def main(argv: list[str]) -> int:
         for f in findings:
             print(f"TAMPER: {f}")
         return 1 if findings else 0
+    if cmd == "delegation-audit":
+        threshold = int(_flag(args, "--threshold", "3"))
+        pos, skip = [], False
+        for a in args:
+            if skip:
+                skip = False
+                continue
+            if a == "--threshold":
+                skip = True
+                continue
+            pos.append(a)
+        text = Path(pos[0]).read_text() if pos else sys.stdin.read()
+        res = delegation_audit(text)
+        total = sum(res["histogram"].values())
+        print(f"SPAWNS: {total}")
+        for m, n in sorted(res["histogram"].items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"  {m}: {n}")
+        for d in res["unpinned_build"]:
+            print(f"UNPINNED-BUILD: {sanitize_reason(d)}")
+        for d in res["inline_mechanical"]:
+            print(f"INLINE-MECHANICAL: {sanitize_reason(d)}")
+        nb, nm = len(res["unpinned_build"]), len(res["inline_mechanical"])
+        print(f"unpinned-build={nb} inline-mechanical={nm} threshold={threshold}")
+        if nb > 0 or nm > threshold:
+            print("DELEGATION-WARN: pin `model` on build spawns; delegate "
+                  "mechanical loops (see skills/feature-spec/SKILL.md § "
+                  "Delegation discipline). Advisory only — cost drift, not "
+                  "correctness.")
+        else:
+            print("DELEGATION-OK")
+        return 0  # advisory: never blocks
     if cmd == "phase-score":
         task_ids = [a for a in args if not a.startswith("--")]
         strict = "--strict" in args or os.environ.get("GATES_STRICT") == "1"

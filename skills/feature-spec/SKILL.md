@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.0.0
+version: 2.1.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -314,6 +314,19 @@ Tier ladder mirrors gsd's `dynamic_routing` (light/standard/heavy) + premium:
 | research fan-out (speckit.plan Phase 0 unknowns, best-practices, vendor-doc reads) | `sonnet` | **build**/deep (conclusion first) |
 | architectural judgment (canonical-mechanism picks, security/auth tradeoffs, `[NEEDS CLARIFICATION]` resolution) | `opus` | **deep** |
 | adversarial spec critique before plan (optional, big specs) | `fable` if available, else `opus` | **deep** |
+
+**Orchestrator self-discipline (trip-wires):** the host running this skill is
+bound by this section too, not just the sub-agents it spawns. Never run these
+inline — delegate instead: `sed -i`/iterative file-restamp loops, `git rebase`
++ conflict resolution (`git checkout --theirs/--ours` drains), doc-extraction
+loops (`for … git show … >`), batch-edit/batch-migration loops. Legitimately
+inline: grant-gated outward actions (merge/push/PR — authority stays in the
+host), ledger/evidence bookkeeping, CI-watch/poll-monitoring loops, single
+small edits (≤2 files). Every spawn carries an explicit `model` pin — an
+unpinned build/rebase/prep spawn silently inherits the host's tier, a real
+cost bug when the host is running Fable or Opus. Detection lever:
+`python3 lib/gates.py delegation-audit <session-transcript.jsonl>` (advisory
+histogram + UNPINNED-BUILD/INLINE-MECHANICAL findings, never blocks).
 
 **Premium fallback:** `fable` is an OAuth-subscription model that comes and
 goes. If a `fable` spawn errors (model unavailable), retry the SAME prompt on
