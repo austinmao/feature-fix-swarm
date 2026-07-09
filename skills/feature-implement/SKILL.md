@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. Ruflo executor removed in v2.0.0 (spec 002)."
-version: "2.1.0"
+version: "2.2.0"
 allowed-tools:
   - Read
   - Edit
@@ -131,7 +131,10 @@ gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
 ### Step 7: Report
 
 Phases executed, verifier verdicts, gap rounds, gate evidence ids, consumed grants,
-pendings (for one-command morning resume), files changed.
+pendings (for one-command morning resume), files changed. Include the delegation
+histogram `models={opus:N,sonnet:N,haiku:N,fable:N,inline-mechanical:N}` (spawns
+by pinned model; `inline-mechanical` = host trip-wire drains, target 0) — verify
+with `python3 lib/gates.py delegation-audit <session-transcript.jsonl>`.
 
 ## Removed in v2.0.0
 
