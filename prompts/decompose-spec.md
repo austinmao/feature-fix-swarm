@@ -1,5 +1,7 @@
 # Prompt: Decompose a Feature Spec into an Executable Task List
 
+> **LEGACY (v1 pipeline).** The `[model:]`/`[agent:]` task grammar and `tasks.md` output below were retired by `/spec-decompose` v2.0.0 — the live pipeline routes models via gsd `.planning/config.json` (`model_overrides` + `dynamic_routing.tier_models`, seeded from `templates/gsd-config.base.json`). Kept for reference and for the hybrid agent catalog.
+
 Copy this prompt verbatim into your conversation, then reference `specs/NNN-feature-name/spec.md` and `specs/NNN-feature-name/plan.md`. Use the host-appropriate model ladder for decomposition: Claude Code emits `haiku` / `sonnet` / `opus` (plus the optional Claude-Code-native `fable` tier); Codex OAuth emits `gpt-5.4-mini` / `gpt-5.4` / `gpt-5.5`.
 
 ---
@@ -69,7 +71,7 @@ Components in order:
 | `T###` | yes | `T001`, `T042` | Sequential, zero-padded, execution order |
 | `[P]` | optional | `[P]` | Parallel-safe: different files, no deps on incomplete tasks |
 | `[USn]` | if user-story phase | `[US1]` | Ties to spec.md user story priority; NO story label for Setup/Foundational/Integration/QA phases |
-| `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus` \| `fable`; Codex: `gpt-5.4-mini` \| `gpt-5.4` \| `gpt-5.5` (`fable` is Claude-only, downgrades to `sonnet` on the Ruflo path) |
+| `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus` \| `fable`; Codex: `gpt-5.4-mini` \| `gpt-5.4` \| `gpt-5.5` (`fable` is Claude-only) |
 | `[thinking:Y]` | yes | `[thinking:med]` | `low` \| `med` \| `high` \| `max` — thinking budget for implementer |
 | `[agent:exact-agent]` | yes | `[agent:ecc:tdd-guide]` | Exact label from the hybrid ECC + wshobson catalog; keep it stable |
 | `[return:X]` | optional | `[return:deep]` | Return contract: `scout` (≤15-line facts report) \| `build` (≤20-line change report) \| `deep` (≤40-line conclusion-first report). Omit to derive from model tier (low→scout, mid→build, high→deep). Annotate only when the tier default is wrong — e.g. a low-tier model doing an audit that must report deep |

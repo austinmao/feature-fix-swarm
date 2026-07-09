@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Take ANY task description end-to-end autonomously: plan-eng-review → codex gate → gsd project seed (spec-decompose) → preflight → grant ledger → /feature-implement --autonomous (gsd execute-phase → QA → review-gate → ship → canary). Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
-version: "2.0.0"
+version: "2.1.0"
 allowed-tools:
   - Read
   - Write
@@ -108,6 +108,12 @@ Invoke the `feature-implement` skill: `NNN --autonomous` (or bare `NNN` when
 `--attended`). It enforces `check-preflight`, drives `/gsd-execute-phase` with
 gates.py as completion authority, then runs the finish tail (review-gate →
 ship → canary), each outward action behind `check-grant`.
+
+**Anti-early-stop (hold every turn of the autonomous loop):** before ending
+your turn, check your last paragraph. If it is a plan, an analysis, a question,
+a list of next steps, or a promise about work you have not done ("I'll…"), do
+that work now with tool calls. End your turn only when the task is complete or
+you are blocked on input only the user can provide.
 
 ### Step 5 — report + retro
 
