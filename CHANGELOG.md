@@ -6,6 +6,31 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.1.0 — feat: Fable-5/pilotfish alignment — security model fence + anti-early-stop (2026-07-09)
+
+Three deltas from auditing FFS against the Fable-5 prompting guide and the
+pilotfish multi-model orchestration pattern (full rationale + the
+already-implemented inventory: `docs/fable-pilotfish-alignment.md`):
+
+- **`scripts/gsd/security-model-fence.sh` (new) + `tests/bats/security-model-fence.bats`.**
+  Security-touching specs (auth/RLS/payments/crypto keywords in the seeded
+  planning docs) force `gsd-planner`/`gsd-plan-checker` fable→opus even when
+  fable is available — Fable's classifiers can false-refuse benign
+  defensive-security work and stall an autonomous run silently. Handles both
+  the `fable` alias and the resolved `claude-fable-5` ID; fail-soft, never
+  silent; executor/verifier bindings untouched. Wired after `model-fallback.sh`
+  in `/spec-decompose` Step 2 and `/feature-implement` Step 2.
+- **Anti-early-stop reminder** ("check your last paragraph…") in the
+  autonomous orchestrator loops of `/feature-implement` and `/task-swarm` —
+  Fable's documented long-run early-stop mitigation. Orchestrator-level only;
+  per-sub-agent coverage would need a gsd-core change.
+- **`prompts/decompose-spec.md` marked LEGACY** (the `[model:]`/`[agent:]`
+  grammar was retired by spec-decompose v2.0.0; live routing is gsd
+  `.planning/config.json`) and the false "fable downgrades to sonnet on the
+  Ruflo path" clause removed.
+
+`spec-decompose` / `feature-implement` / `task-swarm` 2.0.0 → 2.1.0.
+
 ## v4.0.3 — fix: wire the fable→opus model-availability preflight into /fix (2026-07-06)
 
 The `/fix` skill drove gsd-core's `/gsd-quick` loop headless but never ran the

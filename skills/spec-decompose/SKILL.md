@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.0.0"
+version: "2.1.0"
 allowed-tools:
   - Read
   - Write
@@ -50,6 +50,10 @@ Otherwise translate the FFS spec into gsd's planning inputs:
 - Then run `bash scripts/gsd/model-fallback.sh .planning` — probes premium-model
   availability (claude-fable-5 on OAuth comes and goes) and rewrites unavailable
   pins to their fallback (fable→opus) so spawns never error on a dead model.
+- Then run `bash scripts/gsd/security-model-fence.sh .planning specs/NNN-*/spec.md specs/NNN-*/plan.md`
+  — security-touching specs (auth/RLS/payments/crypto/…) force the planning
+  roles fable→opus even when fable is available: Fable's classifiers can
+  false-refuse benign defensive-security work and stall the run silently.
 - Write `.planning/gsd-test-command` — ONE shell line running the repo's real
   test suite for this spec (e.g. `bash scripts/tests/specNNN-*.test.sh && bats
   tests/bats/specNNN-*.bats`). `gates-test-command.sh` refuses to run without

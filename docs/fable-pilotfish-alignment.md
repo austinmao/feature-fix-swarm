@@ -1,0 +1,63 @@
+# FFS × Fable-5 / pilotfish alignment (2026-07-09)
+
+Result of auditing feature-fix-swarm against two sources:
+
+- the **Claude Fable 5 prompting guide** (platform.claude.com — fresh-context
+  verifiers over self-critique, anti-early-stop guard, no reasoning-echo
+  instructions, security work off Fable, Fable-orchestrator/Sonnet-worker
+  topology benchmarked at 96% quality @ 46% cost);
+- **pilotfish** (github.com/Nanako0129/pilotfish — role↔model decoupling,
+  one-line rebinding, cheapest-role-first escalation, verifier gate before
+  done, security-executor deliberately off Fable).
+
+Verdict: the playbook was ~95% already implemented on the live gsd path.
+This doc records what was already true (so it isn't re-proposed), the three
+deltas shipped in v4.1.0, and what was deliberately deferred.
+
+## Already implemented (verified against source — do not re-propose)
+
+| Playbook item | Where it already lives |
+|---|---|
+| Fable-orchestrator / Sonnet-worker topology (96%@46%) | `templates/gsd-config.base.json` — planner/plan-checker=`fable`, executor=`sonnet`, verifier/reviewer=`opus`. The default, not an option. |
+| Fresh-context verification beats self-critique | `/review-gate` — opposite-CLI 3-pass + refute-or-promote + verify-the-reviewer; honest-verifier/goal-backward pass (v1.3.0); gsd-verifier goal-backward at `phase.complete`. |
+| No "echo/explain your reasoning" phrasing (`reasoning_extraction` refusal trap) | Zero occurrences package-wide; return contracts enforce the opposite ("Conclusion FIRST, no exploratory narration", `lib/dispatch.py`). |
+| Graceful degradation / fallback chain | `scripts/gsd/model-fallback.sh` — fable→opus when unavailable, 24h probe cache, invoked at seed + run wall. |
+| Role↔model one-line rebinding | gsd `.planning/config.json` `model_overrides` + `dynamic_routing.tier_models` — the single binding site; skills reference, never pin. |
+| Tight sub-agent return contracts | scout≤15 / build≤20 / deep≤40 lines (`lib/dispatch.py`, `.claude/rules` mirrors). |
+| Memory / lessons ("one lesson per file") | gsd `learnings.jsonl` + `/gsd-extract-learnings`. |
+
+## Shipped deltas (v4.1.0)
+
+1. **Security model fence** — `scripts/gsd/security-model-fence.sh` +
+   `tests/bats/security-model-fence.bats`. Gap: the base template pins
+   *planning* to Fable, and `model-fallback.sh` only rewrites when Fable is
+   unavailable — nothing kept security-touching planning off an *available*
+   Fable, whose classifiers can false-refuse benign defensive-security work
+   (auth/RLS/payments/crypto) and stall the run silently. The fence greps the
+   seeded planning docs (+ spec/plan files) for security keywords and forces
+   `gsd-planner`/`gsd-plan-checker` fable→opus (alias and full-ID spellings).
+   Executor/verifier already never run on Fable. Fail-soft, never silent.
+   Wired after `model-fallback.sh` in `/spec-decompose` Step 2 and
+   `/feature-implement` Step 2.
+2. **Anti-early-stop reminder** — Fable's verbatim "check your last
+   paragraph…" guard in the autonomous orchestrator loops
+   (`/feature-implement` Step 4, `/task-swarm` Step 4). Orchestrator-level
+   mitigation only: per-turn work runs in gsd-core sub-agents FFS does not
+   own; deeper coverage needs a gsd-core change.
+3. **Doc-drift fix** — `prompts/decompose-spec.md` banner'd LEGACY (its
+   `[model:]`/`[agent:]` grammar + tasks.md output were retired by
+   spec-decompose v2.0.0; live routing = gsd `.planning/config.json`), and
+   the false "fable downgrades to sonnet on the Ruflo path" clause removed
+   (ruflo is retired; no such downgrade exists in `dispatch.py`).
+
+## Deferred — with reasons (don't rebuild without new evidence)
+
+- **Fable/Sonnet routing preset** — already the default template; nothing to add.
+- **Interval mid-run verifier** — gsd already verifies goal-backward at
+  `phase.complete` and honestly at ship; an extra interval loop is machinery
+  for marginal gain. Revisit only if phases prove too large in practice.
+- **Prescriptiveness audit** of large advisory skills — only if a Fable run
+  shows measured degradation; machine gates stay verbatim regardless.
+- **Async long-lived sub-agents** (context-keeping) — architectural change to
+  the dispatch model; real win, big lift.
+- **Memory-lessons wiring** — covered by gsd learnings.

@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. Ruflo executor removed in v2.0.0 (spec 002)."
-version: "2.0.0"
+version: "2.1.0"
 allowed-tools:
   - Read
   - Edit
@@ -68,6 +68,9 @@ fi
 # Model availability wall (all modes): rewrite dead premium pins (fable→opus)
 # before any spawn — an overnight run must not die on an OAuth catalog change.
 [ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh .planning || true
+# Security fence (all modes): security-touching specs plan on opus, not fable —
+# Fable classifiers can false-refuse benign defensive-security work mid-run.
+[ -f scripts/gsd/security-model-fence.sh ] && bash scripts/gsd/security-model-fence.sh .planning specs/"$SPEC_ID"*/spec.md specs/"$SPEC_ID"*/plan.md || true
 # Ledger key for gsd seams: review-gate-command.sh reads GSD_RUN_ID (no
 # hardcoded default) — export it so ship grants key to THIS run.
 export GSD_RUN_ID="$RUN_ID"
@@ -98,6 +101,17 @@ Read `.planning/ROADMAP.md` for the first unchecked phase N.
 - Interactive session: invoke the `/gsd-execute-phase N` slash command directly.
 - `--autonomous` / headless: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N`
   (trimmed-MCP, auth-scrubbed runner — NEVER launch drives from a full-MCP session).
+
+**Anti-early-stop (autonomous orchestrator loop).** Fable early-stops long runs
+with text-only intent; hold this line every turn of the drive loop:
+
+> Before ending your turn, check your last paragraph. If it is a plan, an
+> analysis, a question, a list of next steps, or a promise about work you have
+> not done ("I'll…"), do that work now with tool calls. End your turn only when
+> the task is complete or you are blocked on input only the user can provide.
+
+(Orchestrator-level mitigation: per-turn work inside gsd-core sub-agents is
+gsd-core's to guard — deeper coverage needs a gsd-core change, out of scope.)
 
 On verifier gaps: `/gsd-plan-phase N --gaps` then `/gsd-execute-phase N --gaps-only`
 (same runner), max 2 gap rounds, then STOP and report.
