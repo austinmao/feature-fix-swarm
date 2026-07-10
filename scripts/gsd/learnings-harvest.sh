@@ -99,6 +99,12 @@ hash_of() {
 
 append_archive() {
   # $1 = file of valid entries, one JSON object per line
+  # A symlinked archive dir/file is an attacker redirect (write-through to an
+  # arbitrary path) — refuse to follow it. Skip the archive, still exit 0.
+  if [ -L "$ARCHIVE_DIR" ] || [ -L "$ARCHIVE_FILE" ]; then
+    echo "[learnings-harvest] WARN: archive path or its parent is a symlink — skipping archive" >&2
+    return 0
+  fi
   mkdir -p "$ARCHIVE_DIR"
   if command -v flock >/dev/null 2>&1; then
     ( flock -x 9; cat "$1" >> "$ARCHIVE_FILE"; ) 9>>"$ARCHIVE_FILE"

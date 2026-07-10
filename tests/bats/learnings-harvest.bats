@@ -3,6 +3,8 @@
 # Asserts: healthy-backend write, archive fallback (no gbrain / unreachable
 # gbrain), malformed-line skip+count (EDGE-006), empty/missing (AC-003).
 
+bats_require_minimum_version 1.5.0
+
 SCRIPT="scripts/gsd/learnings-harvest.sh"
 
 setup() {
@@ -119,6 +121,20 @@ EOF
   echo "$entry" | jq -e 'has("evil") | not'
   echo "$entry" | jq -e 'has("subagent_type") | not'
   echo "$entry" | jq -e '.note | length == 500'
+}
+
+@test "symlinked archive file is refused: warn, skip, exit 0, target untouched (finding 6)" {
+  seed_learnings "phase-01" '{"note":"a"}'
+  mkdir -p "$TMP/.feature-fix-swarm"
+  TARGET="$TMP/evil-target.jsonl"
+  : > "$TARGET"
+  ln -s "$TARGET" "$TMP/.feature-fix-swarm/learnings-archive.jsonl"
+  cd "$TMP"
+  PATH="$MINPATH" run --separate-stderr bash "$REPO_ROOT/$SCRIPT" "$TMP/planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 harvested"* ]]
+  [ -n "$stderr" ]
+  [ ! -s "$TARGET" ]
 }
 
 @test "zero entries / missing .planning: exit 0, 0 harvested" {
