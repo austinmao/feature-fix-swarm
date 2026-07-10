@@ -105,6 +105,95 @@ def test_json_schema_stable(tmp_path) -> None:
         assert set(finding.keys()) >= {"kind", "path", "detail"}
 
 
+def _clean_skill_repo(tmp_path):
+    """A home+repo pair with one matching-version skill (no drift/dangling)."""
+    home = tmp_path / "home"
+    installed_dir = home / ".claude" / "skills" / "sample-skill"
+    installed_dir.mkdir(parents=True)
+    (installed_dir / "SKILL.md").write_text(_skill_md("1.0.0"))
+    repo = tmp_path / "repo"
+    packaged_dir = repo / "skills" / "sample-skill"
+    packaged_dir.mkdir(parents=True)
+    (packaged_dir / "SKILL.md").write_text(_skill_md("1.0.0"))
+    return home, repo
+
+
+def test_fable_and_claude_id_pins_are_known(tmp_path) -> None:
+    # finding 8: fable + full claude-* ids are valid pins, not dead-pins.
+    home, repo = _clean_skill_repo(tmp_path)
+    (repo / ".planning").mkdir()
+    (repo / ".planning" / "config.json").write_text(json.dumps(
+        {"model_overrides": {"a": "fable", "b": "claude-opus-4-8", "c": "haiku"}}))
+
+    result = _run(repo, home)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert not any(f["kind"] == "dead-pin" for f in payload["findings"])
+
+
+def test_dead_pin_reported(tmp_path) -> None:
+    # finding 10: an unrecognized model pin surfaces a dead-pin finding.
+    home, repo = _clean_skill_repo(tmp_path)
+    (repo / ".planning").mkdir()
+    (repo / ".planning" / "config.json").write_text(json.dumps(
+        {"model_overrides": {"gsd-executor": "gpt-4-turbo"}}))
+
+    result = _run(repo, home)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert any(f["kind"] == "dead-pin" for f in payload["findings"])
+
+
+def test_unregistered_hook_reported(tmp_path) -> None:
+    # finding 10: a hook on disk absent from settings.json -> unregistered-hook.
+    home, repo = _clean_skill_repo(tmp_path)
+    hooks_dir = home / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "orphan.sh").write_text("#!/usr/bin/env bash\n")
+    (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))
+
+    result = _run(repo, home)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert any(f["kind"] == "unregistered-hook" for f in payload["findings"])
+
+
+def test_unregistered_hook_not_masked_by_substring(tmp_path) -> None:
+    # finding 9: `foo.sh` must NOT look registered just because it is a
+    # substring of some OTHER registered command (`.../xfoo.sh`).
+    home, repo = _clean_skill_repo(tmp_path)
+    hooks_dir = home / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "foo.sh").write_text("#!/usr/bin/env bash\n")
+    (home / ".claude" / "settings.json").write_text(json.dumps(
+        {"hooks": {"PreToolUse": [{"hooks": [
+            {"command": "bash $HOME/.claude/hooks/xfoo.sh"}]}]}}))
+
+    result = _run(repo, home)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert any(
+        f["kind"] == "unregistered-hook" and f["path"].endswith("foo.sh")
+        for f in payload["findings"]
+    )
+
+
+def test_registered_hook_not_flagged(tmp_path) -> None:
+    # finding 9: a genuinely registered hook (basename match) is NOT flagged.
+    home, repo = _clean_skill_repo(tmp_path)
+    hooks_dir = home / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "foo.sh").write_text("#!/usr/bin/env bash\n")
+    (home / ".claude" / "settings.json").write_text(json.dumps(
+        {"hooks": {"PreToolUse": [{"hooks": [
+            {"command": "bash $HOME/.claude/hooks/foo.sh --flag"}]}]}}))
+
+    result = _run(repo, home)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert not any(f["kind"] == "unregistered-hook" for f in payload["findings"])
+
+
 def test_no_harness_dir_is_not_drift(tmp_path) -> None:
     home = tmp_path / "empty-home"
     home.mkdir()  # exists but no .claude at all
