@@ -33,7 +33,7 @@ Three phases: (1) six independent testable levers, wave-parallel, RED-first;
 **Requirements**: REQ-03 (wiring half), REQ-04 (preamble half), REQ-07, REQ-08 (preflight half), REQ-09, REQ-10, REQ-11 (adopt-wip half)
 **Success Criteria** (what must be TRUE):
 
-  1. `bats tests/bats/` exits 0 including new INT-001..006 grep-pin tests
+  1. `bats tests/bats/` exits 0 including new INT-001/002/004/005/006 grep-pin tests (INT-003 setup.sh-install pin moves to Phase 3 with AC-013; spec plan.md's code-uplift-slop.bats row adjudicated stale — slop-only is prose-only, checker verdict 2026-07-10)
   2. `grep -q 'review-tier.sh' skills/review-gate/SKILL.md && grep -q 'learnings-harvest.sh' skills/feature-implement/SKILL.md && grep -q 'liveness-check.sh' skills/adopt-wip/SKILL.md && grep -q 'harness-audit.py' skills/preflight/SKILL.md && grep -q -- '--slop-only' skills/code-uplift/SKILL.md && grep -q 'gsd-debug' skills/fix/SKILL.md` exits 0
   3. `python3 -m pytest -q` ≥231 passed, 0 failed
 
