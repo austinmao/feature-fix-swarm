@@ -8,17 +8,23 @@
 # (cached 24h) and rewrites model_overrides + dynamic_routing.tier_models
 # BEFORE a run starts — then RESTORES them once fable comes back.
 #
-# Chain: claude-fable-5 -> [probe gpt-5.6-sol cross-vendor compensation, for
-# marker-mode only] -> claude-opus-4-8. Codex models can NEVER be Claude
-# subagent pins, so the actual config rewrite is always fable->opus; the
-# codex-sol probe only decides whether we record mode=codex-sol (cross-vendor
-# xhigh compensation available, e.g. via plan-adversary.sh) or mode=opus-only.
+# Chain: fable -> [probe gpt-5.6-sol cross-vendor compensation, for
+# marker-mode only] -> opus. Codex models can NEVER be Claude subagent pins,
+# so the actual config rewrite is always fable->opus; the codex-sol probe
+# only decides whether we record mode=codex-sol (cross-vendor xhigh
+# compensation available, e.g. via plan-adversary.sh) or mode=opus-only.
+#
+# Both value forms are matched and the substitution PRESERVES form — gsd-core
+# aliases ("fable" -> "opus", the form templates/gsd-config.base.json and real
+# consumer configs pin) and full IDs ("claude-fable-5" -> "claude-opus-4-8").
 #
 # Recovery: once fable is available again, restore ONLY the JSON paths this
-# lever itself rewrote (recorded in the .planning/fable-fallback.json marker)
-# back to fable. A blanket opus->fable substitution would incorrectly flip
-# intentional opus pins (gsd-verifier etc.) that were never fable to begin
-# with — this is the correctness crux, see tests/bats/model-fallback.bats.
+# lever itself rewrote — the marker (.planning/fable-fallback.json) records
+# each path's exact prior value: {"mode": ..., "paths": {"<json.path>":
+# "<original value>"}}, so mixed-form configs restore per-path. A blanket
+# opus->fable substitution would incorrectly flip intentional opus pins
+# (gsd-verifier etc.) that were never fable to begin with — this is the
+# correctness crux, see tests/bats/model-fallback.bats.
 #
 # Usage: model-fallback.sh [<planning-dir>]   (default .planning)
 #   GSD_MODEL_PROBE_CMD        override the claude probe command (tests)
@@ -81,8 +87,10 @@ probe_codex_model() {
   [ "$(cat "$cache")" = "ok" ]
 }
 
+# Match BOTH value forms: gsd-core alias "fable" and full ID "claude-fable-5"
+# (the alias grep is exact-quoted, so it does NOT match inside the full ID).
 HAS_FABLE_LITERAL=false
-if grep -q "\"$FABLE\"" "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
+if grep -qE '"(fable|claude-fable-5)"' "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
 
 if [ ! -f "$MARKER" ] && [ "$HAS_FABLE_LITERAL" = false ]; then
   echo "[model-fallback] $FABLE not present in config — no-op"
@@ -96,8 +104,8 @@ import json, os
 marker_path = os.environ["MARKER"]; config_path = os.environ["CONFIG"]
 marker = json.load(open(marker_path))
 cfg = json.load(open(config_path))
-original = marker["original"]
-for path in marker["paths"]:
+# paths: {"<json.path>": "<exact original value>"} — form-preserving restore
+for path, original in marker["paths"].items():
     keys = path.split(".")
     d = cfg
     for k in keys[:-1]:
@@ -105,7 +113,7 @@ for path in marker["paths"]:
     d[keys[-1]] = original
 json.dump(cfg, open(config_path, "w"), indent=2)
 os.remove(marker_path)
-print(f"restored {len(marker['paths'])} path(s) to {original} — marker deleted")
+print(f"restored {len(marker['paths'])} path(s) — marker deleted")
 EOF
 )"
     echo "[model-fallback] $FABLE available — $RESULT"
@@ -132,18 +140,20 @@ import json, os
 config_path = os.environ["CONFIG"]; fable = os.environ["FABLE"]; opus = os.environ["OPUS"]
 marker_path = os.environ["MARKER"]; mode = os.environ["MODE"]
 cfg = json.load(open(config_path))
-paths = []
+# Form-preserving substitution: alias stays alias, full ID stays full ID.
+forms = {"fable": "opus", fable: opus}
+paths = {}
 def sub(d, prefix=""):
     for k, v in d.items():
         p = f"{prefix}.{k}" if prefix else k
         if isinstance(v, dict):
             sub(v, p)
-        elif v == fable:
-            d[k] = opus
-            paths.append(p)
+        elif v in forms:
+            paths[p] = v
+            d[k] = forms[v]
 sub(cfg)
 json.dump(cfg, open(config_path, "w"), indent=2)
-marker = {"mode": mode, "original": fable, "substitute": opus, "paths": paths}
+marker = {"mode": mode, "paths": paths}
 json.dump(marker, open(marker_path, "w"), indent=2)
 print(f"{fable} UNAVAILABLE -> {opus} ({len(paths)} override(s) rewritten)")
 EOF

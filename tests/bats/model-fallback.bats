@@ -83,8 +83,8 @@ JSON
   [[ "$output" == *"UNAVAILABLE -> claude-opus-4-8 (2 override(s) rewritten)"* ]]
   [ -f "$TMP/.planning/fable-fallback.json" ]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['mode'])")" = "codex-sol" ]
-  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['original'])")" = "claude-fable-5" ]
-  [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/fable-fallback.json'))['paths']))")" = "['model_overrides.gsd-plan-checker', 'model_overrides.gsd-planner']" ]
+  # paths maps each rewritten JSON path to its exact prior value (form-preserving restore)
+  [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/fable-fallback.json'))['paths'].items()))")" = "[('model_overrides.gsd-plan-checker', 'claude-fable-5'), ('model_overrides.gsd-planner', 'claude-fable-5')]" ]
 }
 
 @test "FALLBACK-007: both fable and codex sol down -> opus substituted, marker mode=opus-only" {
@@ -103,7 +103,7 @@ JSON
   rm -f "$GSD_FALLBACK_CACHE/claude-fable-5.status"
   GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"restored 2 path(s) to claude-fable-5 — marker deleted"* ]]
+  [[ "$output" == *"restored 2 path(s) — marker deleted"* ]]
   [ ! -f "$TMP/.planning/fable-fallback.json" ]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-fable-5" ]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-fable-5" ]
@@ -118,4 +118,32 @@ JSON
   GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-fail.sh" run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
   [ ! -f "$TMP/.planning/fable-fallback.json" ]
+}
+
+@test "FALLBACK-010: alias-form config (template-shaped 'fable') -> substituted to 'opus', marker records path->'fable'" {
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "gsd-planner": "fable", "gsd-verifier": "opus" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(1 override(s) rewritten)"* ]]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "opus" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['paths']['model_overrides.gsd-planner'])")" = "fable" ]
+}
+
+@test "FALLBACK-011: mixed-form config -> both forms substituted, recovery restores exact form per path, opus pins untouched" {
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "gsd-planner": "fable", "gsd-plan-checker": "claude-fable-5", "gsd-verifier": "opus" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" bash "$LEVER" "$TMP/.planning" >/dev/null
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "opus" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-opus-4-8" ]
+
+  rm -f "$GSD_FALLBACK_CACHE/claude-fable-5.status"
+  GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/.planning/fable-fallback.json" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "fable" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-fable-5" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "opus" ]
 }
