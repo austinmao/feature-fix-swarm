@@ -115,7 +115,9 @@ phase and report the delta against Step 0's numbers.
 ### Step 4: Finish tail (default; `--no-finish` opts out)
 
 Identical to `/feature-implement` Step 6: canary-gate + qa-coverage-adversary
-(web-touch) → `/review-gate` → ship (grant-walled) → `/canary`.
+(web-touch) → `/review-gate` → ship (grant-walled) → `/canary`, including the
+fail-soft `scripts/gsd/learnings-harvest.sh` learnings step (always exits 0,
+never blocks ship — AC-003).
 
 ### Step 5: Report
 
