@@ -696,6 +696,68 @@ def check_preflight(store: Path, run_id: str, *, max_age_hours: float = 24.0,
     return 0 <= age < max_age_hours * 3600
 
 
+# ── Stream I: findings queue (REQ-06 / AC-006) ───────────────────────────────
+# Persistent review-findings queue: work ALL findings, dedup re-runs. Reuses
+# the existing store/lock/atomic-write machinery — one more top-level
+# namespace on evidence.json, like `_autonomy` (RESEARCH Pattern 3, plan.md
+# single-authority constraint). Additive only — never touches verify_done /
+# run_gate.
+
+def _normalize(s: str) -> str:
+    """Whitespace-collapse + lowercase ONLY — no stemming/synonym folding
+    (EDGE-004: dedup is exact-normalized, not fuzzy — documented limitation)."""
+    return " ".join(s.split()).lower()
+
+
+def _findings_ns(data: dict) -> list:
+    """Shape guard: the `findings` key must be a list or absent. A prior
+    task entry named `findings` (dict-shaped, like every other top-level
+    task-id record) must error, never be silently clobbered (adversary F7)."""
+    findings = data.setdefault("findings", [])
+    if not isinstance(findings, list):
+        raise SystemExit("findings-queue: store key 'findings' is not a list "
+                          "(schema conflict — refusing to overwrite)")
+    return findings
+
+
+def findings_add(store: Path, file: str, issue: str) -> tuple[str, bool]:
+    """Queue a review finding. Returns (sig, deduped) computed INSIDE the
+    store lock — the dedup outcome is atomic with the write, never a racy
+    pre-read (adversary F2). `file` is a free-text display/hash field only —
+    never opened or path-resolved (no traversal surface)."""
+    sig = hashlib.sha256(json.dumps([file, _normalize(issue)]).encode()).hexdigest()
+    with _StoreLock(store):
+        data = _load_store(store)
+        findings = _findings_ns(data)
+        deduped = any(f["sig"] == sig for f in findings)
+        if not deduped:
+            findings.append({"sig": sig, "file": file, "issue": issue,
+                             "resolved": False, "recorded_at": _now()})
+            _save_store(store, data)
+    return sig, deduped
+
+
+def findings_list(store: Path, unresolved: bool = False) -> list:
+    findings = _findings_ns(_load_store(store))
+    if unresolved:
+        return [f for f in findings if not f.get("resolved")]
+    return list(findings)
+
+
+def findings_resolve(store: Path, sig: str) -> bool:
+    """Marks the matching signature resolved. False when sig unknown — no
+    write happens on a miss (adversary F4)."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        findings = _findings_ns(data)
+        for f in findings:
+            if f["sig"] == sig:
+                f["resolved"] = True
+                _save_store(store, data)
+                return True
+    return False
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _store_path() -> Path:
@@ -1006,6 +1068,36 @@ def main(argv: list[str]) -> int:
         print(f"PREFLIGHT-STALE-OR-FAILED: {run_id} — re-run "
               f"`gates.py preflight <manifest> --run {run_id}`")
         return 1
+    if cmd == "findings-queue":
+        sub = args[0] if args else ""
+        rest = args[1:]
+        try:
+            if sub == "add":
+                if len(rest) < 2:
+                    print("usage: findings-queue add <file> <issue>", file=sys.stderr)
+                    return 2
+                sig, deduped = findings_add(store, rest[0], rest[1])
+                print(json.dumps({"sig": sig, "deduped": deduped}))
+                return 0
+            if sub == "list":
+                unresolved = "--unresolved" in rest
+                print(json.dumps(findings_list(store, unresolved=unresolved)))
+                return 0
+            if sub == "resolve":
+                if not rest:
+                    print("usage: findings-queue resolve <sig>", file=sys.stderr)
+                    return 2
+                sig = rest[0]
+                if findings_resolve(store, sig):
+                    print(json.dumps({"sig": sig, "resolved": True}))
+                    return 0
+                print(f"unknown signature: {sig}", file=sys.stderr)
+                return 1
+            print("usage: findings-queue add|list|resolve ...", file=sys.stderr)
+            return 2
+        except SystemExit as e:
+            print(str(e), file=sys.stderr)
+            return 3
     if cmd == "analyze":
         with open(args[0]) as f:
             spec = f.read()
