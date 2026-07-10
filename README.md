@@ -397,8 +397,10 @@ The investigation starts with this context instead of from scratch. Fix times dr
 
 ```
 feature-fix-swarm/
-  skills/           10 Claude Code SKILL.md files
+  skills/           16 Claude Code SKILL.md files
     fix/              investigate + fix + verify loop
+    code-uplift/      review + refactor + test-uplift for existing code (findings-driven)
+    testing-policy/   canonical testing doctrine — mock ladder, browser gate, coverage floor
     feature-implement/  task executor with per-phase QA gates
     feature/          end-to-end pipeline (autoplan through canary)
     feature-spec/     spec-first pipeline (speckit.specify -> plan -> clarify, TDD/BDD/E2E)

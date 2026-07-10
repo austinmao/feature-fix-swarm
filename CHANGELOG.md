@@ -6,6 +6,93 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.4.0 — feat: browser-QA gate, testing doctrine, code-uplift skill, host-aware adversaries, spec-time prior-art search (2026-07-10)
+
+Grounded on 2026 testing research (mock-drift/jsdom as the "green tests, broken
+browser" root causes), the Canary CLI's machine-readable `results.json`, and the
+GPT-5.6 model family release (`gpt-5.6-sol`/`-terra`/`-luna`, effort tiers now
+`none…xhigh|max` on all three).
+
+- **`scripts/gsd/canary-gate.sh` (new, fail-closed)** — browser-QA gate: web-touch
+  diffs (pattern shared with `browser-proof.sh`) require fresh headless Canary
+  results with `status=="passed"`, `consoleErrors==0`, `networkFailures==0`;
+  staleness-checked against HEAD. Wired into the `feature-implement` finish tail
+  (before `/review-gate`) and seeded as a literal ROADMAP gate command for
+  UI-touchable stories by `spec-decompose`. 10 bats cases.
+- **`skills/testing-policy/` (new, v1.0.0)** — single home for FFS testing
+  doctrine: mock-minimization ladder (boundary-only, never first-party module
+  mocks, don't-mock-what-you-don't-own), real-browser over jsdom for UI truth,
+  console/network tripwires, independent test authorship, BDD-as-Canary-step-input,
+  80% coverage floor, ≤60s smoke design. Other skills reference it (DRY).
+- **`skills/code-uplift/` (new, v1.0.0)** — findings-driven sibling of
+  feature-spec/feature-implement for code that already exists: cross-model review
+  sweep (opus + opposite-CLI adversary + test auditor + dead-code scout) →
+  REVIEW.md → gsd seed (fix-critical → refactor → test-uplift → e2e-smoke phases)
+  → same execute loop, coverage-floor + canary gates, review-gate finish tail.
+- **`scripts/gsd/adversary-host.sh` (new lib) + host-aware `plan-adversary.sh`** —
+  cross-model adversaries now detect the orchestrating CLI (review-gate's
+  convention: `CODEX_SESSION_ID`/`CODEX_HOME`/`CODEX_AGENT`) and pick the OPPOSITE
+  vendor: claude host → `codex exec` `gpt-5.6-sol` xhigh; codex host →
+  `claude -p --model opus` (API-key env scrubbed → OAuth). Codex-orchestrated FFS
+  runs now get genuinely cross-vendor plan review. 2 new bats cases.
+- **`scripts/gsd/qa-coverage-adversary.sh` (new, advisory)** — dual-CLI QA: after
+  the browser gate, the opposite-vendor model (default `gpt-5.6-terra` @ `high` —
+  gap-finder tier, not judge tier) reads the Canary step list + diff and emits
+  line-anchored `MISSED: <flow>` findings; wired into the finish tail as a
+  triage-before-ship step. 5+ bats cases.
+- **`feature-spec` v2.2.0 — spec-time prior-art search (fail-soft)** — parallel
+  haiku skill-scout (`/find-skills` + compiler CLI) + sonnet OSS researcher
+  (`gh search repos/code`, `PRIOR_ART_MIN_STARS` default 200, README+source
+  applicability verification) → `specs/NNN/prior-art.md`; opus adopt/port/wrap/
+  build adjudication only when a vindicated candidate exists; plan.md must cite
+  the decision.
+- **Effort-tier guidance** — GPT-5.6 family equivalences documented (sol↔opus/
+  fable, terra↔sonnet, luna↔haiku); `max` effort reserved for escalated disputes
+  on high-blast gates (`PLAN_ADVERSARY_EFFORT=max`).
+- `feature-implement` 2.2.0→2.3.0, `spec-decompose` 2.2.0→2.3.0,
+  `feature-spec` 2.1.0→2.2.0.
+- **Review-gate hardening round (claude pass1/pass3 + codex `gpt-5.6-sol` xhigh
+  adversarial):** every finding reproduced by a failing test before its fix —
+  canary-gate fail-open holes closed (unresolvable diff-base, GNU-stat garbage
+  mtime, incomplete/zero-total summaries, C-quoted filename evasion, `--diff-base`
+  no-value abort), adversary sandbox pinned `read-only` against prompt injection,
+  BSD/macOS `timeout` fallback, qa-coverage `--diff-base` hang, setup.sh installer
+  manifests extended (both new skills + all 4 gsd scripts, static-asserted by
+  `tests/bats/setup-install.bats`), code-uplift `--autonomous` now mandates the
+  feature-implement preflight/grant walls, prior-art researcher gained an
+  untrusted-content boundary. Recorded follow-up: canary evidence binds by
+  freshness only — revision/base-URL/scenario provenance binding stays with
+  `runtime_proof.py` (documented in canary-gate header).
+
+## v4.3.0 — feat: Fable-aligned routing rebalance + plan-stage cross-model adversary (2026-07-10)
+
+Grounded on the Anthropic "Prompting Claude Fable 5" guide, Ken Huang's Fable 5
+field notes, and jnuyens/gsd-plugin's model catalog (heavy→opus / standard→sonnet
+/ light→haiku with fable as a gated heavy-tier swap). Two changes:
+
+- **`templates/gsd-config.base.json` routing rebalance** — `gsd-plan-checker`
+  fable→**opus** (a checker on the same model as the planner is
+  near-self-critique; Fable's own guide says fresh-context verifiers beat
+  self-critique — model diversity is the point), `gsd-debugger` sonnet→**opus**
+  (root-cause is the highest-value reasoning; "start at the top of your
+  difficulty range"), `gsd-integration-checker`/`gsd-nyquist-auditor`
+  opus→**sonnet** and `gsd-research-synthesizer`/`gsd-codebase-mapper`
+  sonnet→**haiku** (mechanical audit/scout work; upstream gsd-plugin routes all
+  four light/standard). Roughly cost-neutral; opus moves to where adversarial
+  reasoning pays.
+- **`scripts/gsd/plan-adversary.sh` (new) + `workflow.plan_bounce` wiring** —
+  plan-stage cross-model adversarial review at gsd's native bounce seam
+  (`plan_bounce_script`, invoked per PLAN.md before execute-phase). High-blast
+  plans (auth/RLS/payments/migrations/…) get a pinned `gpt-5.6-sol` @ `xhigh`
+  review; findings are APPENDED to the plan (bounce is restore-on-nonzero, so
+  exit is always 0) and the opus plan-checker re-run adjudicates — GPT finds,
+  opus judges. Low-blast plans skip (zero cost); fail-soft without the codex
+  CLI; kill-switch `PLAN_ADVERSARY=off`; env overrides `PLAN_ADVERSARY_MODEL`
+  / `_EFFORT` / `_KEYWORDS` / `_BIN` / `_TIMEOUT`. Tests:
+  `tests/bats/plan-adversary.bats` (7/7). Skills: `spec-decompose` v2.2.0
+  (documents the seam), `plan-decompose` v1.1.0 (pins its existing codex plan
+  review to the same adversary tier).
+
 ## v4.2.0 — feat: orchestrator delegation discipline — trip-wire rule + histogram + delegation-audit lever (2026-07-09)
 
 Retro finding from a real long run: the review ladder routed correctly

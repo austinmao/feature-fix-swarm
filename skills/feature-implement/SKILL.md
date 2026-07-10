@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. Ruflo executor removed in v2.0.0 (spec 002)."
-version: "2.2.0"
+version: "2.3.0"
 allowed-tools:
   - Read
   - Edit
@@ -125,8 +125,20 @@ gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
 
 ### Step 6: Finish tail (default; `--no-finish` opts out)
 
-`/review-gate` → ship (grant-walled) → `/canary`. Consumed grants + artifacts
-(sha/PR#) go in the report.
+browser gate → `/review-gate` → ship (grant-walled) → `/canary`. In order:
+
+1. **Browser gate (fail-closed on web-touch):** `bash scripts/gsd/canary-gate.sh`
+   — diffs touching web surfaces require a fresh headless Canary session whose
+   `results.json` shows `status=="passed"`, `consoleErrors==0`,
+   `networkFailures==0` (testing-policy §2). Non-web diffs exit 0 (`NOT-NEEDED`).
+   If the spec carries browser-proof criteria, `lib/runtime_proof.py verify` too.
+2. **QA-coverage second opinion (advisory, cross-vendor):**
+   `bash scripts/gsd/qa-coverage-adversary.sh <results.json>` — opposite-CLI model
+   lists user-facing flows the QA session missed; triage `MISSED:` lines before ship
+   (fix or record as pendings — never silently drop).
+3. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke).
+
+Consumed grants + artifacts (sha/PR#) go in the report.
 
 ### Step 7: Report
 

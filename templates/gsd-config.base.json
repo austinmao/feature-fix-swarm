@@ -6,17 +6,17 @@
   "resolve_model_ids": false,
   "model_overrides": {
     "gsd-planner": "fable",
-    "gsd-plan-checker": "fable",
+    "gsd-plan-checker": "opus",
     "gsd-executor": "sonnet",
-    "gsd-debugger": "sonnet",
+    "gsd-debugger": "opus",
     "gsd-phase-researcher": "sonnet",
     "gsd-project-researcher": "sonnet",
-    "gsd-research-synthesizer": "sonnet",
-    "gsd-codebase-mapper": "sonnet",
+    "gsd-research-synthesizer": "haiku",
+    "gsd-codebase-mapper": "haiku",
     "gsd-verifier": "opus",
     "gsd-code-reviewer": "opus",
-    "gsd-integration-checker": "opus",
-    "gsd-nyquist-auditor": "opus"
+    "gsd-integration-checker": "sonnet",
+    "gsd-nyquist-auditor": "sonnet"
   },
   "dynamic_routing": {
     "enabled": true,
@@ -33,6 +33,9 @@
     "plan_check": true,
     "verifier": true,
     "tdd_mode": true,
+    "plan_bounce": true,
+    "plan_bounce_script": "scripts/gsd/plan-adversary.sh",
+    "plan_bounce_passes": 1,
     "test_command": "bash scripts/gsd/gates-test-command.sh",
     "code_review_command": "bash scripts/gsd/review-gate-command.sh",
     "context_guard_mode": "auto",
