@@ -134,3 +134,12 @@ None - no external service configuration required. This is a standalone advisory
 ---
 *Phase: 01-levers*
 *Completed: 2026-07-10*
+
+## Self-Check: PASSED
+
+- FOUND: scripts/harness-audit.py
+- FOUND: tests/test_harness_audit.py
+- FOUND: .planning/phases/01-levers/01-05-SUMMARY.md
+- FOUND commit: 728c4d1 (test)
+- FOUND commit: c974664 (feat)
+- FOUND commit: 7d604f4 (docs, this summary)
