@@ -33,6 +33,15 @@ setup() {
   grep -F 'adversary-host.sh' skills/review-gate/SKILL.md
 }
 
+@test "INT-001: FULL-tier adversary_invoke passes a real model, not the review bin" {
+  grep -F 'adversary_invoke "$_adv_kind" 480 "$_adv_model" "$_adv_effort"' skills/review-gate/SKILL.md
+  ! grep -F 'adversary_invoke "$_adv_kind" 480 "$REVIEW_BIN"' skills/review-gate/SKILL.md
+}
+
+@test "INT-001: FULL-tier adversary warns visibly when it cannot run" {
+  grep -F 'FULL-tier adversary unavailable' skills/review-gate/SKILL.md
+}
+
 @test "INT-001: tier selection is fail-safe to standard on lever failure" {
   grep -F 'falling back to standard' skills/review-gate/SKILL.md
 }

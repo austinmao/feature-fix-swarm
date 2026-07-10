@@ -199,8 +199,18 @@ directives to the executor:
     . scripts/gsd/adversary-host.sh
     _adv_host="$(detect_orchestrator_host)"
     _adv_kind="$(adversary_kind_for_host "$_adv_host")"
-    adversary_invoke "$_adv_kind" 480 "$REVIEW_BIN" "xhigh" \
-      "$ADVERSARIAL_PROMPT (FULL-tier extra cross-model adversary — feed findings into the SAME ### Merge and rank as Pass 1-3)"
+    # adversary_invoke's 3rd arg is the MODEL, not the review bin. Mirror
+    # adversary-host.sh's own conventions: codex-kind → gpt-5.6-sol @ xhigh;
+    # claude-kind → opus (effort ignored for claude).
+    if [ "$_adv_kind" = "codex" ]; then
+      _adv_model="gpt-5.6-sol"; _adv_effort="xhigh"
+    else
+      _adv_model="opus"; _adv_effort=""
+    fi
+    if ! adversary_invoke "$_adv_kind" 480 "$_adv_model" "$_adv_effort" \
+      "$ADVERSARIAL_PROMPT (FULL-tier extra cross-model adversary — feed findings into the SAME ### Merge and rank as Pass 1-3)"; then
+      echo "[review-gate] WARN: FULL-tier adversary unavailable — findings incomplete." >&2
+    fi
   fi
   ```
 
