@@ -12,7 +12,22 @@
 # Fail-soft + never silent (same convention as security-model-fence.sh):
 # WARN on stderr, exit 0 — a broken/absent/unreachable backend never blocks
 # a run.
+#
+# SECURITY — prompt-injection surface: the harvested JSONL is REPO-CONTROLLED
+# (any file matching .planning/**/learnings*.jsonl) and lands in the GLOBAL
+# gbrain, from which future agent runs recall it into prompts. Each entry is
+# therefore sanitized before storage: a strict field allowlist (unknown keys
+# dropped), every string value capped at 500 chars, and a provenance marker
+# ("_trust":"unverified-repo-content" + source path) prefixed onto every entry.
+# RESIDUAL RISK: sanitization limits blast radius but does not authenticate
+# content — consumers of recalled learnings MUST treat them as UNTRUSTED data,
+# never as instructions.
 set -uo pipefail
+
+# Allowlist of content-bearing keys kept from a learnings entry (everything
+# else is dropped as injection-hardening). `note` is the field the gsd
+# extract output uses; the rest are plausible distilled-learning fields.
+LEARNINGS_ALLOWED_KEYS="note lesson learning category phase spec tags summary title pattern context evidence severity"
 
 PLANNING_DIR="${1:-.planning}"
 ARCHIVE_DIR=".feature-fix-swarm"
@@ -22,12 +37,52 @@ ARCHIVE_FILE="$ARCHIVE_DIR/learnings-archive.jsonl"
 # always scrub it (memory-routing discipline, same as scripts/gsd/mempalace).
 gb() { env -u DATABASE_URL gbrain "$@"; }
 
-is_valid_json() {
-  if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$1" | jq -e . >/dev/null 2>&1
-  else
-    printf '%s' "$1" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' >/dev/null 2>&1
-  fi
+# sanitize_entry <raw-json-line> <source-path>
+# Validates + sanitizes one entry: must be a JSON object; keeps only
+# allowlisted keys; caps every string at 500 chars; prefixes provenance
+# markers. Prints the sanitized single-line JSON on success, nothing (rc=1)
+# for a non-object or invalid line. Never mutates the input file.
+sanitize_entry() {
+  ALLOWED="$LEARNINGS_ALLOWED_KEYS" python3 - "$1" "$2" <<'PY'
+import json, os, sys
+
+ALLOWED = set(os.environ.get("ALLOWED", "").split())
+CAP = 500
+raw, src = sys.argv[1], sys.argv[2]
+
+try:
+    obj = json.loads(raw)
+except Exception:
+    sys.exit(1)
+if not isinstance(obj, dict):
+    sys.exit(1)
+
+def cap(s):
+    return s[:CAP]
+
+out = {}
+for k, v in obj.items():
+    if k not in ALLOWED:
+        continue
+    if isinstance(v, str):
+        out[k] = cap(v)
+    elif isinstance(v, bool) or v is None or isinstance(v, (int, float)):
+        out[k] = v
+    elif isinstance(v, list):
+        clean = []
+        for el in v[:50]:
+            if isinstance(el, str):
+                clean.append(cap(el))
+            elif isinstance(el, bool) or el is None or isinstance(el, (int, float)):
+                clean.append(el)
+        out[k] = clean
+    # dicts / deeper nesting dropped — unexpected shape is an injection risk.
+
+# provenance: recalled memory is UNTRUSTED repo content.
+out["_provenance"] = cap(str(src))
+out["_trust"] = "unverified-repo-content"
+sys.stdout.write(json.dumps(out))
+PY
 }
 
 gbrain_healthy() {
@@ -73,10 +128,15 @@ MALFORMED_COUNT=0
 if [ -d "$PLANNING_DIR" ]; then
   while IFS= read -r f; do
     [ -f "$f" ] || continue
+    # sanitize_entry passes "$f" to python3 as a provenance STRING only — it
+    # never opens the file — so the read-and-write-same-file heuristic is a
+    # false positive here.
+    # shellcheck disable=SC2094
     while IFS= read -r line || [ -n "$line" ]; do
       [ -z "$line" ] && continue
-      if is_valid_json "$line"; then
-        printf '%s\n' "$line" >> "$VALID_TMP"
+      sanitized="$(sanitize_entry "$line" "$f")"
+      if [ -n "$sanitized" ]; then
+        printf '%s\n' "$sanitized" >> "$VALID_TMP"
         VALID_COUNT=$((VALID_COUNT + 1))
       else
         MALFORMED_COUNT=$((MALFORMED_COUNT + 1))
