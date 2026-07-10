@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.3.0"
+version: "1.4.0"
 ---
 
 # /review-gate
@@ -18,7 +18,7 @@ active harness so the reviewer is always an independent model family.
 - Before `/ship` on high-blast-radius PRs (multi-tenant, infra, auth, payments, RLS, cron)
 - Any time you want a second opinion from a different model family
 
-Cost: ~$2 · Time: ~13 min · Returns: structured findings list with severity
+Cost: ~$2 · Time: ~13 min at STANDARD (less at LIGHT, more at FULL) · Returns: structured findings list with severity
 
 ## Pipeline
 
@@ -28,6 +28,9 @@ Cost: ~$2 · Time: ~13 min · Returns: structured findings list with severity
 │                                                                 │
 │  Pre-check                                                      │
 │    └─ choose opposite CLI for the active harness               │
+│                                                                 │
+│  Tier selection (v1.4.0)                                        │
+│    └─ review-tier.sh sizes passes to diff risk (light/std/full) │
 │                                                                 │
 │  Pass 1 — General quality                                       │
 │    └─ bugs, naming, error handling, style, docs gaps            │
@@ -51,6 +54,8 @@ Cost: ~$2 · Time: ~13 min · Returns: structured findings list with severity
 /review-gate --file path # review a single file
 /review-gate --dry-run   # print what would be reviewed, no API calls
 ```
+
+`REVIEW_TIER=light|standard|full` overrides auto-tier-detection (see Tier selection below).
 
 ## Implementation
 
@@ -98,21 +103,36 @@ fi
 ARGS="${ARGUMENTS:-}"
 DRY_RUN=0
 DIFF_TARGET="--staged"
+FILE_PATH=""
+_next_is_file=0
 
 # zsh-safe: parameter expansion does not word-split in zsh, but
 # command-substitution output does (bash + zsh + dash) — no subshell,
 # so assignments inside the loop persist.
 for arg in $(printf '%s\n' "${ARGS}"); do
+  if [ "$_next_is_file" -eq 1 ]; then
+    FILE_PATH="$arg"
+    _next_is_file=0
+    continue
+  fi
   case "$arg" in
     --all)        DIFF_TARGET="main" ;;
     --dry-run)    DRY_RUN=1 ;;
-    --file*)      DIFF_TARGET="$arg" ;;
+    --file=*)     DIFF_TARGET="file"; FILE_PATH="${arg#--file=}" ;;
+    --file)       DIFF_TARGET="file"; _next_is_file=1 ;;
   esac
 done
 
+# Fixed --file parity (finding: the old `--file*` case retained the flag
+# itself as DIFF_TARGET and discarded the path, so `git diff --file...HEAD`
+# silently produced an empty diff and bypassed review). Both `--file <path>`
+# (two tokens, above) and `--file=<path>` are parsed into FILE_PATH; file
+# mode diffs via `git diff HEAD -- "$FILE_PATH"`.
 if [ "$DIFF_TARGET" = "--staged" ]; then
   DIFF=$(git diff --staged 2>/dev/null)
   [ -z "$DIFF" ] && DIFF=$(git diff HEAD 2>/dev/null)
+elif [ "$DIFF_TARGET" = "file" ]; then
+  DIFF=$(git diff HEAD -- "$FILE_PATH" 2>/dev/null)
 else
   DIFF=$(git diff "$DIFF_TARGET"...HEAD 2>/dev/null)
 fi
@@ -121,9 +141,131 @@ if [ -z "$DIFF" ]; then
   echo "review-gate: no diff found. Nothing to review."
   exit 0
 fi
+```
 
+### Tier selection (v1.4.0)
+
+`scripts/gsd/review-tier.sh` classifies the SAME diff this run is about to review as
+light/standard/full, so a 2-file docs diff doesn't pay a 40-file auth review. The mode
+passed MIRRORS `DIFF_TARGET` above and classifies the SAME bytes: `--staged` (default) /
+`--all` with `REVIEW_TIER_BASE=main` PINNED so its base matches the gate's hardcoded
+`main...HEAD` / `--file "$FILE_PATH"`.
+
+```bash
+case "$DIFF_TARGET" in
+  --staged)
+    TIER_LINE="$(scripts/gsd/review-tier.sh --staged 2>/dev/null)"
+    ;;
+  main)
+    TIER_LINE="$(REVIEW_TIER_BASE=main scripts/gsd/review-tier.sh --all 2>/dev/null)"
+    ;;
+  file)
+    TIER_LINE="$(scripts/gsd/review-tier.sh --file "$FILE_PATH" 2>/dev/null)"
+    ;;
+esac
+_tier_rc=$?
+
+TIER="standard"
+TIER_REASON="fail-safe"
+if [ "$_tier_rc" -eq 0 ] && [ -n "$TIER_LINE" ]; then
+  _tier_token="${TIER_LINE%% *}"
+  case "$_tier_token" in
+    light|standard|full)
+      TIER="$_tier_token"
+      TIER_REASON="${TIER_LINE#* }"
+      ;;
+    *)
+      echo "[review-gate] WARN: review-tier.sh returned an unrecognized tier token — falling back to standard (fail-safe: under-review beats over-trust)." >&2
+      ;;
+  esac
+else
+  echo "[review-gate] WARN: review-tier.sh missing, non-executable, or failed (incl. empty stdout) — falling back to standard (fail-safe: under-review beats over-trust)." >&2
+fi
+```
+
+Tier scopes the DEFECT passes (Pass 1-3 + the FULL extra adversary) ONLY, with IMPERATIVE
+gating — a prose table saying "LIGHT runs Pass 1" is not enough; these are literal SKIP
+directives to the executor:
+
+- **LIGHT**: run Pass 1 ONLY. SKIP Pass 2. SKIP Pass 3.
+- **STANDARD**: run Pass 1, Pass 2, Pass 3 (current default behavior).
+- **FULL**: run Pass 1, Pass 2, Pass 3, THEN a MANDATORY refute-or-promote round on EVERY
+  HIGH/CRITICAL finding (see "### Refute-or-promote" below), PLUS one extra cross-model
+  adversary sourced from `scripts/gsd/adversary-host.sh` — invoke it, do NOT hand-roll an
+  unsandboxed reviewer against attacker-influenceable diff/prompt text:
+
+  ```bash
+  if [ "$TIER" = "full" ]; then
+    . scripts/gsd/adversary-host.sh
+    _adv_host="$(detect_orchestrator_host)"
+    _adv_kind="$(adversary_kind_for_host "$_adv_host")"
+    adversary_invoke "$_adv_kind" 480 "$REVIEW_BIN" "xhigh" \
+      "$ADVERSARIAL_PROMPT (FULL-tier extra cross-model adversary — feed findings into the SAME ### Merge and rank as Pass 1-3)"
+  fi
+  ```
+
+| Tier | Pass 1 | Pass 2 | Pass 3 | Extra adversary (adversary-host.sh) |
+|------|--------|--------|--------|--------------------------------------|
+| light | run | SKIP | SKIP | — |
+| standard | run | run | run | — |
+| full | run | run | run | run (xhigh, read-only sandbox) |
+
+The honest-verifier pass below is NOT tier-scoped: tier selection sizes the DEFECT passes
+only and never suppresses an otherwise-eligible honest-verifier — its existing skip
+conditions (no spec resolvable, `GSD_REQUIRED=0`) are unchanged at every tier.
+
+### Findings queue: capability probe + resolved-sig consult
+
+`lib/gates.py findings-queue` persists every merged finding across runs so a fix round
+works the WHOLE queue instead of re-litigating what a prior run already resolved. Resolve
+GATES_PY via a CAPABILITY PROBE, not first-exists — an installed `~/.claude` copy of
+gates.py can lack findings-queue support and would win a naive first-exists loop:
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+GATES_PY=""
+DEGRADED_PERSISTENCE=0
+for candidate in \
+  "$REPO_ROOT/packages/feature-fix-swarm/lib/gates.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+  "$REPO_ROOT/lib/gates.py"; do
+  [ -f "$candidate" ] || continue
+  if (cd "$REPO_ROOT" && python3 "$candidate" findings-queue list >/dev/null 2>&1); then
+    GATES_PY="$candidate"
+    break
+  fi
+done
+
+RESOLVED_SIGS=""
+if [ -z "$GATES_PY" ]; then
+  echo "[review-gate] WARN: findings persistence unavailable — no gates.py candidate supports findings-queue." >&2
+  DEGRADED_PERSISTENCE=1
+else
+  _fq_list="$(cd "$REPO_ROOT" && python3 "$GATES_PY" findings-queue list 2>/dev/null)"
+  if [ $? -ne 0 ]; then
+    echo "[review-gate] WARN: findings-queue list failed — proceeding without a resolved-sig skip-list." >&2
+    DEGRADED_PERSISTENCE=1
+  else
+    RESOLVED_SIGS="$(printf '%s' "$_fq_list" | python3 -c 'import json,sys; print(" ".join(f["sig"] for f in json.load(sys.stdin) if f.get("resolved")))' 2>/dev/null)"
+  fi
+fi
+```
+
+RESOLVED_SIGS is built from the FULL queue (`findings-queue list`), never
+`list --unresolved` — that flag EXCLUDES exactly the resolved records this skip-list
+needs. A finding whose recorded sig lands in RESOLVED_SIGS is dropped after recording
+below (see "### Record findings") — resolved findings never re-enter ranking, no
+re-litigation. Capability-probe + best-effort: an unresolved/broken GATES_PY WARNs, sets
+`DEGRADED_PERSISTENCE=1`, and proceeds — recording NEVER blocks the verdict.
+
+```bash
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "[dry-run] Would review $(echo "$DIFF" | wc -l) lines of diff across 3 passes"
+  echo "[dry-run] Tier: $TIER ($TIER_REASON) — $(echo "$DIFF" | wc -l) lines of diff"
+  case "$TIER" in
+    light)    echo "[dry-run] Would run: Pass 1 only (SKIP Pass 2, SKIP Pass 3)" ;;
+    standard) echo "[dry-run] Would run: Pass 1, Pass 2, Pass 3" ;;
+    full)     echo "[dry-run] Would run: Pass 1, Pass 2, Pass 3 + refute-or-promote + adversary-host.sh adversary" ;;
+  esac
   exit 0
 fi
 ```
@@ -197,7 +339,7 @@ else
   case "$DIFF_TARGET" in
     --staged) DIFF_DESCRIPTION="the staged changes (run: git diff --staged; if empty, git diff HEAD)" ;;
     main)     DIFF_DESCRIPTION="the changes on this branch vs main (run: git diff main...HEAD)" ;;
-    --file*)  DIFF_DESCRIPTION="the changes in ${DIFF_TARGET#--file}" ;;
+    file)     DIFF_DESCRIPTION="the changes in ${FILE_PATH} (run: git diff HEAD -- '${FILE_PATH}')" ;;
     *)        DIFF_DESCRIPTION="the current diff (run: git diff HEAD)" ;;
   esac
   timeout 480 "$REVIEW_BIN" review \
@@ -287,7 +429,7 @@ Inputs:
 - The work under review: the current git diff. Run it yourself:
   '${DIFF_TARGET}' = '--staged' → git diff --staged (if empty, git diff HEAD);
   '${DIFF_TARGET}' = 'main'     → git diff main...HEAD;
-  a --file target                → git diff for that path.
+  '${DIFF_TARGET}' = 'file'     → git diff HEAD -- '${FILE_PATH}'.
 
 Disposition:
 - INFERABLE criterion (determinable from the spec) → grade ✓ VERIFIED / ✗ FAILED
@@ -354,12 +496,71 @@ standalone operator-invocable form.
 
 ### Merge and rank
 
-Collect all findings from passes 1-3. Deduplicate by (file, line, issue-text similarity). Rank:
+Collect all findings from passes 1-3 (+ the FULL-tier extra adversary, when it ran).
+Deduplicate by (file, line, issue-text similarity). Rank:
 
 1. CRITICAL (any pass)
 2. HIGH (any pass)
 3. MEDIUM
 4. LOW
+
+### Record findings (findings-queue)
+
+For EACH finding surviving "### Merge and rank" above, persist it so future runs (fix
+rounds, re-reviews) dedup against it instead of re-litigating:
+
+```bash
+DEDUPED_COUNT=0
+if [ -n "$GATES_PY" ]; then
+  # for each merged finding (FINDING_FILE, FINDING_ISSUE):
+  _fq_add_out="$(cd "$REPO_ROOT" && python3 "$GATES_PY" findings-queue add "$FINDING_FILE" "$FINDING_ISSUE" 2>/dev/null)"
+  if [ $? -ne 0 ]; then
+    echo "[review-gate] WARN: findings-queue add failed for $FINDING_FILE — proceeding without persistence for this finding." >&2
+    DEGRADED_PERSISTENCE=1
+  else
+    _sig="$(printf '%s' "$_fq_add_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])' 2>/dev/null)"
+    case " $RESOLVED_SIGS " in
+      *" $_sig "*)
+        # resolved in a prior run — DROP from ranking, never re-litigate.
+        DEDUPED_COUNT=$((DEDUPED_COUNT + 1))
+        ;;
+      *)
+        : # new or still-unresolved — keep in ranking.
+        ;;
+    esac
+  fi
+else
+  echo "[review-gate] WARN: findings-queue unavailable — this run's findings are NOT persisted." >&2
+fi
+echo "deduped: $DEDUPED_COUNT"
+```
+
+Invariants:
+- Capability-probe + best-effort: unresolved/broken GATES_PY → WARN, `DEGRADED_PERSISTENCE=1`,
+  proceed. Every add/list/resolve nonzero exit gets its own stderr warn + sets
+  `DEGRADED_PERSISTENCE=1` — recording is NEVER a block condition beyond the existing
+  CRITICAL/HIGH + honest-verifier logic.
+- `deduped: N` counts RESOLVED-SIG skips ONLY. `findings-queue add` also reports
+  `deduped:true` for an existing UNRESOLVED sig (add-idempotent — one entry, never
+  re-appended) but an unresolved re-add is NOT counted in `deduped: N`; only a
+  RESOLVED-sig match drops a finding from ranking.
+- EDGE-004: a reworded issue on the same file yields a DISTINCT signature — dedup is
+  exact-normalized (whitespace-collapse + lowercase), not fuzzy/semantic.
+- Additive telemetry only: recording does not change the CRITICAL/HIGH + honest-verifier
+  PASS/FAIL exit logic below.
+
+**Resolve lifecycle:** after a fix round, when a re-run's gate is green on a finding that
+was previously recorded (it no longer surfaces in this run's merged findings), mark it
+resolved so subsequent re-runs skip it:
+
+```bash
+if [ -n "$GATES_PY" ] && [ -n "${FIXED_FINDING_SIG:-}" ]; then
+  if ! (cd "$REPO_ROOT" && python3 "$GATES_PY" findings-queue resolve "$FIXED_FINDING_SIG" >/dev/null 2>&1); then
+    echo "[review-gate] WARN: findings-queue resolve failed for $FIXED_FINDING_SIG." >&2
+    DEGRADED_PERSISTENCE=1
+  fi
+fi
+```
 
 ### Output and exit
 
@@ -369,10 +570,21 @@ Print findings in severity order:
 ╔══════════════════════════════════════════════════════════════╗
 ║ review-gate — Phase review                                   ║
 ╠══════════════════════════════════════════════════════════════╣
+║ Tier: <tier> (<reason>)                                       ║
 ║ CRITICAL: N  HIGH: N  MEDIUM: N  LOW: N                      ║
+║ deduped: N (resolved-sig skips)                               ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Passes: general(Claude/Codex) · adversarial(opposite CLI) · tests ║
+║ Passes: <passes actually run for this tier — see the tier table> ║
 ╚══════════════════════════════════════════════════════════════╝
+```
+
+If `DEGRADED_PERSISTENCE=1`, print one more footer line — the verdict/exit logic below is
+otherwise UNCHANGED; this is additive telemetry only:
+
+```bash
+if [ "$DEGRADED_PERSISTENCE" -eq 1 ]; then
+  echo "findings persistence: DEGRADED"
+fi
 ```
 
 Then:
