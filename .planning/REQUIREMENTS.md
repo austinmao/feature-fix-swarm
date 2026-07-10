@@ -16,8 +16,8 @@ One REQ per acceptance criterion in `specs/003-orchestration-hardening/spec.md`
 
 ### Review tiers (US3)
 
-- [ ] **REQ-04**: `scripts/gsd/review-tier.sh` emits `light|standard|full` + reason: light = <5 files AND <200 lines AND no security-surface path; full = >20 files OR security-surface OR migration; else standard. Security patterns sourced from shared `scripts/gsd/security-surface.sh` (extracted from security-model-fence.sh, fence behavior unchanged). review-gate SKILL.md carries the tier preamble scoping its defect passes. [AC-004]
-- [ ] **REQ-05**: `REVIEW_TIER` env overrides detection; tier + reason printed in gate header. [AC-005]
+- [x] **REQ-04**: `scripts/gsd/review-tier.sh` emits `light|standard|full` + reason: light = <5 files AND <200 lines AND no security-surface path; full = >20 files OR security-surface OR migration; else standard. Security patterns sourced from shared `scripts/gsd/security-surface.sh` (extracted from security-model-fence.sh, fence behavior unchanged). review-gate SKILL.md carries the tier preamble scoping its defect passes. [AC-004]
+- [x] **REQ-05**: `REVIEW_TIER` env overrides detection; tier + reason printed in gate header. [AC-005]
 
 ### Findings queue (US4)
 

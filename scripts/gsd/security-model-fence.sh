@@ -29,7 +29,8 @@ if [ ! -f "$CONFIG" ]; then
   exit 0
 fi
 
-KEYWORDS='auth|rls|row[ _-]?level|payment|stripe|crypto|jwt|jwks|oauth|owasp|secret|credential|password'
+# shellcheck source=scripts/gsd/security-surface.sh
+. "$(dirname "${BASH_SOURCE[0]}")/security-surface.sh"
 
 SCAN_FILES=""
 for f in "$PLANNING_DIR/PROJECT.md" "$PLANNING_DIR/REQUIREMENTS.md" "$PLANNING_DIR/ROADMAP.md" "$@"; do
