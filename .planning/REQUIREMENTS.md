@@ -38,7 +38,7 @@ One REQ per acceptance criterion in `specs/003-orchestration-hardening/spec.md`
 
 ### Liveness guardrail (US8)
 
-- [ ] **REQ-11**: `scripts/gsd/liveness-check.sh`: ALIVE iff (pid alive) OR (run-state mtime within `LIVENESS_WINDOW_MIN`, default 30) OR (granted unconsumed ship action in flight); exit 0 alive / 1 dead; per-signal verdicts printed; adopt-wip consults it before abandonment. [AC-011]
+- [x] **REQ-11**: `scripts/gsd/liveness-check.sh`: ALIVE iff (pid alive) OR (run-state mtime within `LIVENESS_WINDOW_MIN`, default 30) OR (granted unconsumed ship action in flight); exit 0 alive / 1 dead; per-signal verdicts printed; adopt-wip consults it before abandonment. [AC-011]
 
 ### Quality + docs (cross-cutting)
 
