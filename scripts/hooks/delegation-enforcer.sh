@@ -9,14 +9,20 @@
 # report. Advisory only — never blocks a spawn, never crashes (fail-open,
 # mirrors gsd-phase-evidence-gate.sh's stdin/python3-heredoc pattern).
 #
-# Usage: registered as a PreToolUse hook for Agent|Task; reads the tool_use
-# JSON envelope on stdin, writes the (possibly modified) envelope to stdout.
+# PreToolUse hook contract (Claude Code): a mutation is signalled by a hook
+# RESPONSE on stdout —
+#   {"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{...}}}
+# where updatedInput is the replacement tool_input. Emitting NOTHING on stdout
+# means "no change" (passthrough). So: inject -> emit that envelope; every
+# passthrough path -> emit nothing, exit 0.
 #
-# Kill-switch: DELEGATION_ENFORCER=off passes stdin through unconditionally.
+# Usage: registered as a PreToolUse hook for Agent|Task; reads the tool_use
+# JSON envelope on stdin.
+#
+# Kill-switch: DELEGATION_ENFORCER=off -> unconditional passthrough (no output).
 set -euo pipefail
 
 if [ "${DELEGATION_ENFORCER:-}" = "off" ]; then
-  cat
   exit 0
 fi
 
@@ -28,21 +34,22 @@ from pathlib import Path
 
 raw = sys.argv[1]
 
+def passthrough():
+    # empty stdout = "no change" per the PreToolUse hook contract.
+    sys.exit(0)
+
 try:
     data = json.loads(raw)
 except Exception:
-    print(raw, end="")
-    sys.exit(0)
+    passthrough()
 
 if data.get("tool_name") not in ("Agent", "Task"):
-    print(raw, end="")
-    sys.exit(0)
+    passthrough()
 
 ti = data.get("tool_input", {}) or {}
 
 if ti.get("model"):
-    print(raw, end="")
-    sys.exit(0)
+    passthrough()
 
 subagent_type = ti.get("subagent_type")
 
@@ -51,25 +58,26 @@ try:
 except Exception:
     print("[delegation-enforcer] WARN: no readable .planning/config.json — passthrough unpinned",
           file=sys.stderr)
-    print(raw, end="")
-    sys.exit(0)
+    passthrough()
 
 overrides = config.get("model_overrides")
 if not overrides:
     print("[delegation-enforcer] WARN: config.json has no model_overrides — passthrough unpinned",
           file=sys.stderr)
-    print(raw, end="")
-    sys.exit(0)
+    passthrough()
 
 model = overrides.get(subagent_type)
 if not model:
     print(f"[delegation-enforcer] WARN: no model_overrides entry for subagent_type={subagent_type!r} — passthrough unpinned",
           file=sys.stderr)
-    print(raw, end="")
-    sys.exit(0)
+    passthrough()
 
 ti["model"] = model
-data["tool_input"] = ti
-print(json.dumps(data), end="")
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "updatedInput": ti,
+    }
+}), end="")
 sys.exit(0)
 PY

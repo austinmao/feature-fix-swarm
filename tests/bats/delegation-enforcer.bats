@@ -27,32 +27,34 @@ seed_config() {
 EOF
 }
 
-@test "PATH-001: unpinned Agent JSON + seeded config -> injects tool_input.model" {
+@test "PATH-001: unpinned Agent JSON + seeded config -> emits updatedInput hook response" {
   seed_config
   INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","description":"do work"}}'
   run bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.tool_input.model == "sonnet"'
+  echo "$output" | jq -e '.hookSpecificOutput.hookEventName == "PreToolUse"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.model == "sonnet"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.subagent_type == "gsd-executor"'
 }
 
-@test "already-pinned Agent JSON -> byte-identical passthrough" {
+@test "already-pinned Agent JSON -> empty passthrough (no change)" {
   seed_config
   INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","model":"opus","description":"do work"}}'
   run bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
-  [ "$output" = "$INPUT" ]
+  [ -z "$output" ]
 }
 
-@test "no .planning/config.json -> passthrough + non-empty stderr warn" {
+@test "no .planning/config.json -> empty passthrough + non-empty stderr warn" {
   rm -f "$SANDBOX/.planning/config.json"
   INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","description":"do work"}}'
   run --separate-stderr bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
-  [ "$output" = "$INPUT" ]
+  [ -z "$output" ]
   [ -n "$stderr" ]
 }
 
-@test "EDGE-002: config.json present but no model_overrides key -> passthrough + warn" {
+@test "EDGE-002: config.json present but no model_overrides key -> empty passthrough + warn" {
   cat > "$SANDBOX/.planning/config.json" <<'EOF'
 {
   "mode": "yolo"
@@ -61,30 +63,30 @@ EOF
   INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","description":"do work"}}'
   run --separate-stderr bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
-  [ "$output" = "$INPUT" ]
+  [ -z "$output" ]
   [ -n "$stderr" ]
 }
 
-@test "EDGE-001: non-Agent tool JSON (Bash) -> byte-identical passthrough" {
+@test "EDGE-001: non-Agent tool JSON (Bash) -> empty passthrough" {
   seed_config
   INPUT='{"tool_name":"Bash","tool_input":{"command":"git status"}}'
   run bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
-  [ "$output" = "$INPUT" ]
+  [ -z "$output" ]
 }
 
-@test "AC-002: DELEGATION_ENFORCER=off -> unconditional passthrough" {
+@test "AC-002: DELEGATION_ENFORCER=off -> unconditional empty passthrough" {
   seed_config
   INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","description":"do work"}}'
   run bash -c "DELEGATION_ENFORCER=off bash '$HOOK' <<<'$INPUT'"
   [ "$status" -eq 0 ]
-  [ "$output" = "$INPUT" ]
+  [ -z "$output" ]
 }
 
-@test "malformed JSON on stdin -> passthrough, never crash" {
+@test "malformed JSON on stdin -> empty passthrough, never crash" {
   seed_config
   INPUT='not-json garbage {{{'
   run bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
-  [ "$output" = "$INPUT" ]
+  [ -z "$output" ]
 }
