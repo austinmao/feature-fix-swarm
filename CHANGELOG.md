@@ -18,7 +18,7 @@ GPT-5.6 model family release (`gpt-5.6-sol`/`-terra`/`-luna`, effort tiers now
   results with `status=="passed"`, `consoleErrors==0`, `networkFailures==0`;
   staleness-checked against HEAD. Wired into the `feature-implement` finish tail
   (before `/review-gate`) and seeded as a literal ROADMAP gate command for
-  UI-touchable stories by `spec-decompose`. 10 bats cases.
+  UI-touchable stories by `spec-decompose`. 18 bats cases.
 - **`skills/testing-policy/` (new, v1.0.0)** — single home for FFS testing
   doctrine: mock-minimization ladder (boundary-only, never first-party module
   mocks, don't-mock-what-you-don't-own), real-browser over jsdom for UI truth,
@@ -34,7 +34,7 @@ GPT-5.6 model family release (`gpt-5.6-sol`/`-terra`/`-luna`, effort tiers now
   convention: `CODEX_SESSION_ID`/`CODEX_HOME`/`CODEX_AGENT`) and pick the OPPOSITE
   vendor: claude host → `codex exec` `gpt-5.6-sol` xhigh; codex host →
   `claude -p --model opus` (API-key env scrubbed → OAuth). Codex-orchestrated FFS
-  runs now get genuinely cross-vendor plan review. 2 new bats cases.
+  runs now get genuinely cross-vendor plan review. 8 new bats cases.
 - **`scripts/gsd/qa-coverage-adversary.sh` (new, advisory)** — dual-CLI QA: after
   the browser gate, the opposite-vendor model (default `gpt-5.6-terra` @ `high` —
   gap-finder tier, not judge tier) reads the Canary step list + diff and emits
