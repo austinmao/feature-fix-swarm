@@ -36,7 +36,13 @@ from pathlib import Path
 # guarding against fence-less body text injecting a fake `version:`.
 FRONTMATTER_FIELD = re.compile(r"^(name|version):\s*(.*)$")
 
-KNOWN_MODEL_ALIASES = {"opus", "sonnet", "haiku"}
+KNOWN_MODEL_ALIASES = {"opus", "sonnet", "haiku", "fable"}
+# Full model ids like claude-opus-4-8 / claude-sonnet-4-6 are also valid pins.
+KNOWN_MODEL_ID = re.compile(r"^claude-[a-z0-9-]+$")
+
+
+def _is_known_model(model: object) -> bool:
+    return model in KNOWN_MODEL_ALIASES or bool(KNOWN_MODEL_ID.match(str(model)))
 
 
 def _parse_frontmatter(path: Path) -> dict:
@@ -97,7 +103,7 @@ def check_dead_model_pins(config_path: Path) -> list[dict]:
     except (OSError, json.JSONDecodeError):
         return findings
     for agent, model in (config.get("model_overrides") or {}).items():
-        if model not in KNOWN_MODEL_ALIASES:
+        if not _is_known_model(model):
             findings.append({
                 "kind": "dead-pin", "path": str(config_path),
                 "detail": f"{agent} -> {model!r} not a recognized model alias",
@@ -115,14 +121,18 @@ def check_hook_drift(harness_dir: Path) -> list[dict]:
         settings = json.loads(settings_path.read_text())
     except (OSError, json.JSONDecodeError):
         return findings
-    registered = " ".join(
-        hook.get("command", "")
+    # Compare against parsed per-command basenames, NOT a substring of one
+    # joined string — otherwise `foo.sh` looks registered whenever it's a
+    # substring of some OTHER registered command (e.g. `.../xfoo.sh`).
+    registered_basenames = {
+        Path(token).name
         for entries in (settings.get("hooks") or {}).values()
         for entry in entries
         for hook in entry.get("hooks", [])
-    )
+        for token in hook.get("command", "").split()
+    }
     for hook_script in sorted(hooks_dir.glob("*.sh")) + sorted(hooks_dir.glob("*.py")):
-        if hook_script.name not in registered:
+        if hook_script.name not in registered_basenames:
             findings.append({
                 "kind": "unregistered-hook", "path": str(hook_script),
                 "detail": "on disk but not registered in settings.json hooks",
