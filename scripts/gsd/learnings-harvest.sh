@@ -115,6 +115,13 @@ append_archive() {
 
 write_gbrain() {
   # $1 = file of valid entries, one JSON object per line
+  #
+  # ALL-OR-NOTHING archive fallback (by design): this loop puts per-entry, but
+  # returns a single nonzero if ANY put fails. The caller then re-archives the
+  # WHOLE valid set — so entries that DID reach gbrain are also written to the
+  # archive, i.e. duplicated. This is acceptable for advisory memory: learnings
+  # are idempotent hints, dedup is a recall-time concern, and per-entry failure
+  # bookkeeping isn't worth the complexity for a fail-soft harvester.
   local entry hash ok=0
   while IFS= read -r entry || [ -n "$entry" ]; do
     [ -z "$entry" ] && continue
