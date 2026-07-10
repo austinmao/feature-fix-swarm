@@ -131,3 +131,14 @@ None - no external service configuration required.
 ---
 *Phase: 01-levers*
 *Completed: 2026-07-10*
+
+## Self-Check: PASSED
+
+- FOUND: scripts/gsd/liveness-check.sh
+- FOUND: tests/bats/liveness-check.bats
+- FOUND: .planning/phases/01-levers/01-03-SUMMARY.md
+- FOUND: 7ee7373 (RED commit)
+- FOUND: 7b1160e (GREEN commit)
+- FOUND: 6df2f3e (docs/summary commit)
+- Re-ran `bats tests/bats/liveness-check.bats`: 10/10 pass
+- Re-ran `shellcheck scripts/gsd/liveness-check.sh`: exit 0
