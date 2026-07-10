@@ -16,3 +16,11 @@ setup() {
 @test "code-uplift finish tail invokes learnings-harvest.sh" {
   grep -q 'learnings-harvest.sh' skills/code-uplift/SKILL.md
 }
+
+@test "code-uplift documents the --slop-only fast path" {
+  grep -q -- '--slop-only' skills/code-uplift/SKILL.md
+}
+
+@test "code-uplift --slop-only documents the green-baseline refusal wall" {
+  grep -q 'REFUSE' skills/code-uplift/SKILL.md
+}
