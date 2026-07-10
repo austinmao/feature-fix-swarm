@@ -133,3 +133,7 @@ None - no external service configuration required.
 ---
 *Phase: 01-levers*
 *Completed: 2026-07-10*
+
+## Self-Check: PASSED
+
+All created files found on disk (security-surface.sh, review-tier.sh, review-tier.bats, this SUMMARY). All 4 commit hashes (ec17e26, 52e6765, ddf57b6, 9211ebe) verified present in `git log --oneline --all`.
