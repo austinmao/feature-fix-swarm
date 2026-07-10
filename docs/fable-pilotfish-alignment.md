@@ -79,3 +79,33 @@ light tiers). Shipped:
   the plan is where Fable's planning strength makes an undetected error most
   expensive, and gsd already ships the seam (no new machinery). Mid-EXECUTION
   interval verification stays deferred.
+
+## Addendum 2026-07-10 (v4.4.0) — browser-QA gate + host symmetry + GPT-5.6 family
+
+Research pass: 2026 testing best practices (the "green tests, broken browser"
+failure decomposes into mock-shape drift, jsdom's silent omissions, no
+real-browser gate in the agent loop, same-author tests), Canary CLI 0.4.4
+(machine-gateable `results.json`), and the GPT-5.6 release (2026-07-09).
+
+**GPT-5.6 family + FFS tier equivalences** (developers.openai.com/api/docs/models):
+
+| OpenAI | $/1M in/out | Claude-side equivalent | FFS use |
+|---|---|---|---|
+| `gpt-5.6-sol` | $5/$30 | opus / fable | adversarial gates (plan-adversary, review-gate) @ `xhigh`; `max` for escalated disputes |
+| `gpt-5.6-terra` | $2.50/$15 | sonnet | qa-coverage-adversary @ `high` (gap-finder, not judge) |
+| `gpt-5.6-luna` | $1/$6 | haiku | cheap mechanical review passes (unused today) |
+
+Effort set is `none|low|medium|high|xhigh|max` on all three; no dated snapshots.
+Caveat: OpenAI's real-time cyber classifiers can pause/block legitimate
+security-adjacent prompts mid-stream — same failure class as Fable's
+`security-model-fence.sh`, now present on both vendors; adversary scripts stay
+fail-soft for exactly this reason.
+
+**Host symmetry**: `adversary-host.sh` makes every cross-model adversary detect
+the orchestrating CLI and pick the opposite vendor, closing the gap where a
+codex-orchestrated FFS run would have codex reviewing its own plans.
+
+**Browser gate**: `canary-gate.sh` (fail-closed) + `qa-coverage-adversary.sh`
+(advisory) + `testing-policy` skill + `code-uplift` skill — see CHANGELOG v4.4.0.
+Supersedes "browser QA absent from finish tail" (the tail is now
+canary-gate → qa-coverage → review-gate → ship → /canary).

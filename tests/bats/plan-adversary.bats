@@ -38,6 +38,15 @@ echo "MEDIUM: acceptance criteria for JWT rotation are unfalsifiable"
 echo "VERDICT: REVISE"
 EOF
   chmod +x "$STUB_DIR/fake-codex"
+  # Stub adversary CLI for the claude kind: `claude -p <prompt> --model opus`.
+  cat > "$STUB_DIR/fake-claude" <<'EOF'
+#!/usr/bin/env bash
+echo "echoing prompt: Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:."
+echo "HIGH: plan assumes withTenantRls exists on the read path but it does not"
+echo "MEDIUM: acceptance criteria for JWT rotation are unfalsifiable"
+echo "VERDICT: REVISE"
+EOF
+  chmod +x "$STUB_DIR/fake-claude"
   export PATH="$STUB_DIR:$PATH"
 }
 
@@ -99,4 +108,18 @@ EOF
 @test "missing arg is usage error exit 2" {
   run bash "$SCRIPT"
   [ "$status" -eq 2 ]
+}
+
+@test "PLAN_ADVERSARY_KIND=claude uses the claude adversary with a claude-labeled header" {
+  PLAN_ADVERSARY_KIND=claude PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: REVISE"* ]]
+  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
+  grep -q '^HIGH: plan assumes withTenantRls' "$HIGH"
+}
+
+@test "host-aware: CODEX_HOME set with no explicit kind auto-flips to claude adversary" {
+  CODEX_HOME="/tmp/x" PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
 }

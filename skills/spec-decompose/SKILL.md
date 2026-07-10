@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.2.0"
+version: "2.3.0"
 allowed-tools:
   - Read
   - Write
@@ -39,7 +39,10 @@ If `.planning/PROJECT.md` already exists for this feature, skip to Step 3.
 Otherwise translate the FFS spec into gsd's planning inputs:
 
 - `.planning/PROJECT.md` — what/why from `spec.md` intro + repo context + constraints
-  (worktree discipline, scoped `git add`, never push, shellcheck/bats/pytest conventions)
+  (worktree discipline, scoped `git add`, never push, shellcheck/bats/pytest conventions).
+  Include a **Testing Policy** constraints block referencing the `testing-policy` skill:
+  mock-minimization ladder (boundary-only mocks, never first-party module mocks),
+  real-browser over jsdom for UI truth, independent test authorship, coverage floor 80%.
 - `.planning/REQUIREMENTS.md` — one `REQ-NN` per user story / acceptance criterion
   from `spec.md` (verbatim ACs; testable phrasing)
 - `.planning/ROADMAP.md` — phases from `plan.md`'s phase breakdown; each phase lists
@@ -74,8 +77,11 @@ get a cross-model adversarial review (default `gpt-5.6-sol` @ `xhigh`, same adve
 tier as review-gate) appended as findings, which the opus plan-checker re-run
 adjudicates. Low-blast plans skip it (zero cost); kill-switch `PLAN_ADVERSARY=off`.
 Plans with
-UI-touchable stories must carry browser-proof success criteria
-(`runtime_proof.py verify` as a phase gate command) — inject into ROADMAP criteria at seed time.
+UI-touchable stories must carry browser-proof success criteria — inject into ROADMAP
+criteria at seed time as literal gate commands: `bash scripts/gsd/canary-gate.sh`
+(fail-closed headless browser QA; testing-policy §2) and, where the spec declares
+proof scenarios, `python3 lib/runtime_proof.py verify`. BDD scenarios from spec.md
+are the Canary step sources (testing-policy §4).
 
 ### Step 4: Coherence gate
 

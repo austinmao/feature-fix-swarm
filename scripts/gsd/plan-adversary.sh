@@ -16,7 +16,14 @@
 #
 # Cost guard: only high-blast plans (auth/RLS/payments/migrations/…) burn the
 # xhigh review; everything else no-ops. Kill-switch: PLAN_ADVERSARY=off.
+#
+# Host-aware: the adversary is always the OPPOSITE vendor CLI from whichever
+# harness is orchestrating (claude vs codex) — see adversary-host.sh.
 set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091 # dynamic path, resolved at runtime via BASH_SOURCE
+source "$SCRIPT_DIR/adversary-host.sh"
 
 PLAN_FILE="${1:-}"
 if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
@@ -42,14 +49,27 @@ if grep -q '^## Adversarial plan review' "$PLAN_FILE"; then
   exit 0
 fi
 
-ADVERSARY_BIN="${PLAN_ADVERSARY_BIN:-codex}"
-if ! command -v "$ADVERSARY_BIN" >/dev/null 2>&1; then
-  echo "[plan-adversary] $ADVERSARY_BIN CLI not found — skipped (fail-soft)"
+ADVERSARY_KIND="${PLAN_ADVERSARY_KIND:-$(adversary_kind_for_host "$(detect_orchestrator_host)")}"
+
+if [ "$ADVERSARY_KIND" = "codex" ]; then
+  ADVERSARY_BIN_CODEX="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
+  CHECK_BIN="$ADVERSARY_BIN_CODEX"
+  MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
+  EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
+  HEADER_LABEL="${MODEL} ${EFFORT}"
+else
+  ADVERSARY_BIN_CLAUDE="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
+  CHECK_BIN="$ADVERSARY_BIN_CLAUDE"
+  MODEL="${PLAN_ADVERSARY_CLAUDE_MODEL:-opus}"
+  EFFORT=""
+  HEADER_LABEL="claude ${MODEL}"
+fi
+export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
+
+if ! command -v "$CHECK_BIN" >/dev/null 2>&1; then
+  echo "[plan-adversary] $CHECK_BIN CLI not found — skipped (fail-soft)"
   exit 0
 fi
-
-MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
-EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
 
 PROMPT="You are a brutally honest principal engineer reviewing an execution PLAN before any code is written. Nothing is implemented yet — every finding here is 100x cheaper than the same finding in code review.
 
@@ -59,20 +79,10 @@ $(cat "$PLAN_FILE")
 
 Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, unstated assumptions, missing or unfalsifiable acceptance criteria, sequencing hazards (a later task invalidating an earlier one), and security holes in the approach itself. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
 
-# codex exec: prompt as arg, stdin MUST be /dev/null (hangs otherwise).
-if command -v timeout >/dev/null 2>&1; then
-  OUTPUT="$(timeout "${PLAN_ADVERSARY_TIMEOUT:-480}" "$ADVERSARY_BIN" exec \
-    -c "model=\"$MODEL\"" -c "model_reasoning_effort=\"$EFFORT\"" \
-    "$PROMPT" </dev/null 2>&1)"
-  rc=$?
-else
-  OUTPUT="$("$ADVERSARY_BIN" exec \
-    -c "model=\"$MODEL\"" -c "model_reasoning_effort=\"$EFFORT\"" \
-    "$PROMPT" </dev/null 2>&1)"
-  rc=$?
-fi
+OUTPUT="$(adversary_invoke "$ADVERSARY_KIND" "${PLAN_ADVERSARY_TIMEOUT:-480}" "$MODEL" "$EFFORT" "$PROMPT" 2>&1)"
+rc=$?
 if [ $rc -ne 0 ]; then
-  echo "[plan-adversary] $ADVERSARY_BIN exec failed (rc=$rc) — skipped (fail-soft)"
+  echo "[plan-adversary] $CHECK_BIN exec failed (rc=$rc) — skipped (fail-soft)"
   exit 0
 fi
 
@@ -86,7 +96,7 @@ N_FINDINGS=0
 
 {
   echo ""
-  echo "## Adversarial plan review (${MODEL} ${EFFORT})"
+  echo "## Adversarial plan review (${HEADER_LABEL})"
   echo ""
   echo "$VERDICT"
   if [ -n "$FINDINGS" ]; then

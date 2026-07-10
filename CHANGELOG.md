@@ -6,6 +6,52 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.4.0 — feat: browser-QA gate, testing doctrine, code-uplift skill, host-aware adversaries, spec-time prior-art search (2026-07-10)
+
+Grounded on 2026 testing research (mock-drift/jsdom as the "green tests, broken
+browser" root causes), the Canary CLI's machine-readable `results.json`, and the
+GPT-5.6 model family release (`gpt-5.6-sol`/`-terra`/`-luna`, effort tiers now
+`none…xhigh|max` on all three).
+
+- **`scripts/gsd/canary-gate.sh` (new, fail-closed)** — browser-QA gate: web-touch
+  diffs (pattern shared with `browser-proof.sh`) require fresh headless Canary
+  results with `status=="passed"`, `consoleErrors==0`, `networkFailures==0`;
+  staleness-checked against HEAD. Wired into the `feature-implement` finish tail
+  (before `/review-gate`) and seeded as a literal ROADMAP gate command for
+  UI-touchable stories by `spec-decompose`. 10 bats cases.
+- **`skills/testing-policy/` (new, v1.0.0)** — single home for FFS testing
+  doctrine: mock-minimization ladder (boundary-only, never first-party module
+  mocks, don't-mock-what-you-don't-own), real-browser over jsdom for UI truth,
+  console/network tripwires, independent test authorship, BDD-as-Canary-step-input,
+  80% coverage floor, ≤60s smoke design. Other skills reference it (DRY).
+- **`skills/code-uplift/` (new, v1.0.0)** — findings-driven sibling of
+  feature-spec/feature-implement for code that already exists: cross-model review
+  sweep (opus + opposite-CLI adversary + test auditor + dead-code scout) →
+  REVIEW.md → gsd seed (fix-critical → refactor → test-uplift → e2e-smoke phases)
+  → same execute loop, coverage-floor + canary gates, review-gate finish tail.
+- **`scripts/gsd/adversary-host.sh` (new lib) + host-aware `plan-adversary.sh`** —
+  cross-model adversaries now detect the orchestrating CLI (review-gate's
+  convention: `CODEX_SESSION_ID`/`CODEX_HOME`/`CODEX_AGENT`) and pick the OPPOSITE
+  vendor: claude host → `codex exec` `gpt-5.6-sol` xhigh; codex host →
+  `claude -p --model opus` (API-key env scrubbed → OAuth). Codex-orchestrated FFS
+  runs now get genuinely cross-vendor plan review. 2 new bats cases.
+- **`scripts/gsd/qa-coverage-adversary.sh` (new, advisory)** — dual-CLI QA: after
+  the browser gate, the opposite-vendor model (default `gpt-5.6-terra` @ `high` —
+  gap-finder tier, not judge tier) reads the Canary step list + diff and emits
+  line-anchored `MISSED: <flow>` findings; wired into the finish tail as a
+  triage-before-ship step. 5+ bats cases.
+- **`feature-spec` v2.2.0 — spec-time prior-art search (fail-soft)** — parallel
+  haiku skill-scout (`/find-skills` + compiler CLI) + sonnet OSS researcher
+  (`gh search repos/code`, `PRIOR_ART_MIN_STARS` default 200, README+source
+  applicability verification) → `specs/NNN/prior-art.md`; opus adopt/port/wrap/
+  build adjudication only when a vindicated candidate exists; plan.md must cite
+  the decision.
+- **Effort-tier guidance** — GPT-5.6 family equivalences documented (sol↔opus/
+  fable, terra↔sonnet, luna↔haiku); `max` effort reserved for escalated disputes
+  on high-blast gates (`PLAN_ADVERSARY_EFFORT=max`).
+- `feature-implement` 2.2.0→2.3.0, `spec-decompose` 2.2.0→2.3.0,
+  `feature-spec` 2.1.0→2.2.0.
+
 ## v4.3.0 — feat: Fable-aligned routing rebalance + plan-stage cross-model adversary (2026-07-10)
 
 Grounded on the Anthropic "Prompting Claude Fable 5" guide, Ken Huang's Fable 5
