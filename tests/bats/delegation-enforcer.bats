@@ -7,6 +7,8 @@
 # tool), AC-002 (DELEGATION_ENFORCER=off kill-switch), fail-open on
 # malformed JSON.
 
+bats_require_minimum_version 1.5.0
+
 HOOK="$BATS_TEST_DIRNAME/../../scripts/hooks/delegation-enforcer.sh"
 
 setup() {
@@ -44,13 +46,10 @@ EOF
 @test "no .planning/config.json -> passthrough + non-empty stderr warn" {
   rm -f "$SANDBOX/.planning/config.json"
   INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","description":"do work"}}'
-  run bash "$HOOK" <<<"$INPUT"
+  run --separate-stderr bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
   [ "$output" = "$INPUT" ]
-
-  run bash -c "bash '$HOOK' <<<'$INPUT' 2>&1 1>/dev/null"
-  [ "$status" -eq 0 ]
-  [ -n "$output" ]
+  [ -n "$stderr" ]
 }
 
 @test "EDGE-002: config.json present but no model_overrides key -> passthrough + warn" {
@@ -60,9 +59,10 @@ EOF
 }
 EOF
   INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","description":"do work"}}'
-  run bash "$HOOK" <<<"$INPUT"
+  run --separate-stderr bash "$HOOK" <<<"$INPUT"
   [ "$status" -eq 0 ]
   [ "$output" = "$INPUT" ]
+  [ -n "$stderr" ]
 }
 
 @test "EDGE-001: non-Agent tool JSON (Bash) -> byte-identical passthrough" {
