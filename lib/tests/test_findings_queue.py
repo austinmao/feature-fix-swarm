@@ -149,6 +149,39 @@ def test_dedup_flag_from_locked_operation_not_a_preread(tmp_path) -> None:
     assert deduped2 is True
 
 
+def test_concurrent_add_same_sig_exactly_one_not_deduped(tmp_path) -> None:
+    # finding 11: exercise the RACE, not sequential adds. Two threads add the
+    # same NEW sig at once (Barrier-synchronized). If dedup is computed inside
+    # the store lock (not a racy pre-read), exactly one add returns
+    # deduped=False and the store holds exactly one record for that sig.
+    store = tmp_path / "evidence.json"
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, bool]] = []
+    append_lock = threading.Lock()
+
+    def do_add():
+        barrier.wait()
+        r = gates.findings_add(store, "race.py", "same finding")
+        with append_lock:
+            results.append(r)
+
+    t1 = threading.Thread(target=do_add)
+    t2 = threading.Thread(target=do_add)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert len(results) == 2
+    sigs = {sig for sig, _ in results}
+    assert len(sigs) == 1  # identical sig
+    assert sorted(deduped for _, deduped in results) == [False, True]  # exactly one new
+
+    data = json.loads(store.read_text())
+    matching = [f for f in data["findings"] if f["sig"] == sigs.pop()]
+    assert len(matching) == 1  # no double-insert under the race
+
+
 # ── resolve unknown sig (adversary F4) ───────────────────────────────────────
 
 def test_findings_resolve_unknown_sig_returns_false(tmp_path) -> None:
