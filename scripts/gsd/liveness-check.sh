@@ -76,8 +76,14 @@ fi
 # Portable (bash-3.2-safe, no mapfile/declare -A): enumerate files with a
 # plain `find` (no timestamp flags — findutils/BSD find/bfs all agree on
 # that), then take the max mtime via whichever `stat` dialect exists.
+# GNU `-c %Y` is tried FIRST: GNU stat's `-f` is filesystem-info mode (not
+# "use this format string"), so on Linux `stat -f %m <file>` doesn't error —
+# it silently prints the mount point instead of the mtime, so the `||`
+# fallback to `-c %Y` never fires and the signal reads as permanently stale.
+# BSD/macOS stat has no `-c` flag, so it errors there and correctly falls
+# through to `-f %m`.
 _stat_mtime() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true
 }
 
 m_signal="stale"

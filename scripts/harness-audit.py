@@ -65,11 +65,17 @@ def _parse_frontmatter(path: Path) -> dict:
 
 
 def check_dangling_links(harness_dir: Path) -> list[dict]:
+    # Manual iterdir(), not glob("*/SKILL.md"): on Python <3.12, pathlib's
+    # glob() filters a literal trailing segment through path.exists() (which
+    # follows symlinks), so a dangling SKILL.md is silently excluded from the
+    # match set before is_symlink()/exists() below ever run on it. iterdir()
+    # + lstat-based is_symlink() sidesteps that glob-internal filter.
     findings = []
     skills_dir = harness_dir / "skills"
     if not skills_dir.is_dir():
         return findings
-    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+    for skill_dir in sorted(skills_dir.iterdir()):
+        skill_md = skill_dir / "SKILL.md"
         if skill_md.is_symlink() and not skill_md.exists():
             findings.append({"kind": "dangling", "path": str(skill_md),
                               "detail": "symlink target missing"})
