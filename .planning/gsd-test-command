@@ -1,0 +1,1 @@
+python3 -m pytest -q && bats tests/bats/

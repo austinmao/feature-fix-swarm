@@ -1,7 +1,7 @@
 ---
 name: fix
 description: "Investigate a bug, fix it through gsd-core's /gsd-quick loop (plan → execute → verify on a single quick task), verify with qa-only then full qa, then run review-gate cross-model adversarial review. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. Ruflo coordinator removed in v3.0.0 (spec 002). Wires the fable→opus model-availability preflight (scripts/gsd/model-fallback.sh) before the gsd-quick loop in v3.1.0."
-version: "3.1.0"
+version: "3.2.0"
 allowed-tools:
   - Read
   - Edit
@@ -38,6 +38,13 @@ gsd's quick loop, verifies the fix, then verifies no regressions.
 Invoke `/investigate` (or trace inline for small bugs): reproduce, grep every caller
 of the function to be touched, identify the shared root-cause site. Write the
 finding as a one-paragraph statement with file:line refs before editing anything.
+
+**Route to `/gsd-debug` when the reproduction is non-obvious** — explicit
+criteria: (no failing test yet) AND (no single-command repro exists). Invoke
+gsd's scientific-method hypothesis→experiment loop and consume its root-cause
+report before editing anything. When a failing test or a single-command
+repro already exists, stay on this `/investigate` + `/gsd-quick` path — do
+not route to `/gsd-debug`.
 
 ### Step 2: Fix via gsd-quick
 

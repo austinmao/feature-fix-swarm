@@ -1,7 +1,7 @@
 ---
 name: adopt-wip
 description: "Salvage coherent uncommitted work left in a stalled worktree or abandoned agent session. Use when resuming a run, when a parallel worktree contains valuable WIP, or when deciding whether to adopt, finish, and ship existing work instead of rebuilding from scratch."
-version: "1.0.0"
+version: "1.1.0"
 ---
 
 # /adopt-wip
@@ -26,6 +26,16 @@ Ported from the fable-agent-orchestration `orphaned-wip-adopter` skill
    - file mtimes (`find <worktree> -newer <ref> -type f` — anything touched in
      the last few minutes suggests a live session);
    - running processes / session status where observable;
+   - **composite liveness consult** — before declaring the WIP abandoned, run
+     `bash scripts/gsd/liveness-check.sh <pidfile> <state-dir>` (adds to, does
+     not replace, the checks above). It ANDs three signals — pid alive,
+     newest mtime under `<state-dir>` fresh within `LIVENESS_WINDOW_MIN`
+     (default 30), and an in-flight `ship:gsd` grant — and reports ALIVE
+     (exit 0) if ANY holds. Exit 1 (DEAD, all three signals false) → truly
+     abandoned, safe to adopt. Exit 0 (ALIVE) → WAIT, do not touch; one
+     transient failed probe must never kill a live overnight wave. Accepted
+     risk: a reused PID reads as alive (window-bounded false-alive, not
+     unbounded — mtime and grant signals bound the exposure).
    - when in doubt, WAIT.
 2. **Read the uncommitted diff** (`git -C <worktree> diff` + `status`). Whole
    thing, not a skim.

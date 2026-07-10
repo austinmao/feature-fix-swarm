@@ -1,7 +1,7 @@
 ---
 name: code-uplift
 description: "Review + refactor code that's already written — same gsd machinery as feature-spec/feature-implement but findings-driven instead of spec-driven. Adversarial cross-model review, refactor phases, test uplift to the coverage floor, smoke/e2e via canary-gate, review-gate finish tail."
-version: "1.0.0"
+version: "1.1.0"
 allowed-tools:
   - Read
   - Write
@@ -40,6 +40,7 @@ testing-policy       — the doctrine every test decision here follows (load it 
 /code-uplift <path> --no-refactor         # test uplift only (keep code shape)
 /code-uplift <path> --coverage-floor 90   # override the 80% default
 /code-uplift <path> --autonomous          # headless drive incl. finish tail
+/code-uplift <path> --slop-only <diff-base>  # deslop fast path, see Step 0b
 ```
 
 ## Workflow
@@ -56,6 +57,23 @@ git rev-parse HEAD                                  # base commit
 ```
 
 Log: `[code-uplift] baseline: <pass/fail counts> coverage=<N>% base=<sha>`.
+
+### Step 0b: --slop-only fast path (optional)
+
+`/code-uplift <path> --slop-only <diff-base>` — a green-baseline-walled,
+deletion-first, diff-scoped cleanup pass that runs BEFORE `/review-gate` sees
+the diff. Not a new script — a documented invocation mode of this skill.
+
+1. **Green-baseline WALL:** run the full suite first. If it is NOT green,
+   REFUSE to edit and report the failing baseline — do not attempt cleanup on
+   unproven code.
+2. **Deletion-first:** prefer removing dead/redundant code over rewriting it.
+3. **Diff-only scope:** limited to the files present in `git diff <diff-base>`
+   — never touch a file outside that diff.
+4. Re-run the full suite AFTER; report the net line delta (success = a
+   strictly smaller / non-positive delta).
+5. **EDGE-008:** `<diff-base>` == HEAD (empty diff) is a no-op success,
+   reporting `0 files in scope`.
 
 ### Step 1: Review sweep (parallel, cross-model)
 
@@ -115,7 +133,9 @@ phase and report the delta against Step 0's numbers.
 ### Step 4: Finish tail (default; `--no-finish` opts out)
 
 Identical to `/feature-implement` Step 6: canary-gate + qa-coverage-adversary
-(web-touch) → `/review-gate` → ship (grant-walled) → `/canary`.
+(web-touch) → `/review-gate` → ship (grant-walled) → `/canary`, including the
+fail-soft `scripts/gsd/learnings-harvest.sh` learnings step (always exits 0,
+never blocks ship — AC-003).
 
 ### Step 5: Report
 
