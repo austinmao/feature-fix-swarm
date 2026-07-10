@@ -1,0 +1,11 @@
+[
+  {"kind": "probe", "name": "bats-present", "cmd": "command -v bats"},
+  {"kind": "probe", "name": "shellcheck-present", "cmd": "command -v shellcheck"},
+  {"kind": "probe", "name": "jq-present", "cmd": "command -v jq"},
+  {"kind": "probe", "name": "python3-pytest", "cmd": "python3 -m pytest --version"},
+  {"kind": "probe", "name": "codex-cli-present", "cmd": "command -v codex"},
+  {"kind": "probe", "name": "gh-authed", "cmd": "gh auth status"},
+  {"kind": "probe", "name": "gsd-core-tools", "cmd": "test -f node_modules/.bin/gsd-tools || npm ls @opengsd/gsd-core"},
+  {"kind": "probe", "name": "suite-baseline-green", "cmd": "python3 -m pytest -q"},
+  {"kind": "probe", "name": "gsd-test-command-seeded", "cmd": "test -s .planning/gsd-test-command"}
+]

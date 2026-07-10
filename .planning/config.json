@@ -3,27 +3,27 @@
   "model_profile": "balanced",
   "granularity": "coarse",
   "parallelization": true,
-  "resolve_model_ids": true,
+  "resolve_model_ids": false,
   "model_overrides": {
-    "gsd-planner": "claude-fable-5",
-    "gsd-plan-checker": "claude-fable-5",
-    "gsd-executor": "claude-sonnet-5",
-    "gsd-debugger": "claude-sonnet-5",
-    "gsd-phase-researcher": "claude-sonnet-5",
-    "gsd-project-researcher": "claude-sonnet-5",
-    "gsd-research-synthesizer": "claude-sonnet-5",
-    "gsd-codebase-mapper": "claude-sonnet-5",
-    "gsd-verifier": "claude-opus-4-8",
-    "gsd-code-reviewer": "claude-opus-4-8",
-    "gsd-integration-checker": "claude-opus-4-8",
-    "gsd-nyquist-auditor": "claude-opus-4-8"
+    "gsd-planner": "opus",
+    "gsd-plan-checker": "opus",
+    "gsd-executor": "sonnet",
+    "gsd-debugger": "opus",
+    "gsd-phase-researcher": "sonnet",
+    "gsd-project-researcher": "sonnet",
+    "gsd-research-synthesizer": "haiku",
+    "gsd-codebase-mapper": "haiku",
+    "gsd-verifier": "opus",
+    "gsd-code-reviewer": "opus",
+    "gsd-integration-checker": "sonnet",
+    "gsd-nyquist-auditor": "sonnet"
   },
   "dynamic_routing": {
     "enabled": true,
     "tier_models": {
-      "light": "claude-haiku-4-5-20251001",
-      "standard": "claude-sonnet-5",
-      "heavy": "claude-opus-4-8"
+      "light": "haiku",
+      "standard": "sonnet",
+      "heavy": "opus"
     },
     "escalate_on_failure": true,
     "max_escalations": 2
@@ -33,14 +33,16 @@
     "plan_check": true,
     "verifier": true,
     "tdd_mode": true,
+    "plan_bounce": true,
+    "plan_bounce_script": "scripts/gsd/plan-adversary.sh",
+    "plan_bounce_passes": 1,
     "test_command": "bash scripts/gsd/gates-test-command.sh",
     "code_review_command": "bash scripts/gsd/review-gate-command.sh",
     "context_guard_mode": "auto",
     "plan_review_convergence": true,
     "security_enforcement": true,
     "security_asvs_level": 1,
-    "security_block_on": "high",
-    "_auto_chain_active": false
+    "security_block_on": "high"
   },
   "git": {
     "branching_strategy": "phase",
@@ -57,6 +59,14 @@
   },
   "features": {
     "global_learnings": true
+  },
+  "mempalace": {
+    "enabled": true,
+    "capture_artifacts": true,
+    "recall_on_discuss": true,
+    "recall_on_plan": true,
+    "memory_mode": "augment",
+    "mirror_kg": false
   },
   "learnings": {
     "max_inject": 10
