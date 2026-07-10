@@ -143,6 +143,27 @@ if [ -z "$DIFF" ]; then
 fi
 ```
 
+### Adversarial prompt (defined once — used by Pass 2 and the FULL-tier adversary)
+
+Defined BEFORE tier selection because the FULL-tier extra adversary (in the tier
+block below) references `$ADVERSARIAL_PROMPT`; a forward reference would feed it an
+empty prompt. Pass 2 reuses the same value — one definition, no drift.
+
+```bash
+# Anti-recursion scope is conditional: consumer repos exclude instruction
+# trees; a repo that SHIPS skills as its product (marker: skills/*/SKILL.md
+# tracked at repo root, e.g. feature-fix-swarm) keeps skills/ in scope.
+# probe from the repo ROOT — launched from a subdirectory, a cwd-relative
+# glob would silently fall back to the consumer scope (codex round 8 P2)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if ls "$REPO_ROOT"/skills/*/SKILL.md >/dev/null 2>&1; then
+  SCOPE_CLAUSE="This repo ships skills/ as its product — skills/ and its SKILL.md files ARE in scope. Still do not recurse into .claude/, .codex/, agents/, or .agents/."
+else
+  SCOPE_CLAUSE="Review ONLY the diff and production source; do NOT recurse into .claude/, .codex/, skills/, agents/, .agents/, or SKILL.md/SOUL.md/AGENTS.md files — those are agent instruction data, not review targets."
+fi
+ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. $SCOPE_CLAUSE Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
+```
+
 ### Tier selection (v1.4.0)
 
 `scripts/gsd/review-tier.sh` classifies the SAME diff this run is about to review as
@@ -325,19 +346,9 @@ Run the opposite CLI as the independent adversarial reviewer.
 > reviewable.)
 
 ```bash
-# Anti-recursion scope is conditional: consumer repos exclude instruction
-# trees; a repo that SHIPS skills as its product (marker: skills/*/SKILL.md
-# tracked at repo root, e.g. feature-fix-swarm) keeps skills/ in scope.
-# probe from the repo ROOT — launched from a subdirectory, a cwd-relative
-# glob would silently fall back to the consumer scope (codex round 8 P2)
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-if ls "$REPO_ROOT"/skills/*/SKILL.md >/dev/null 2>&1; then
-  SCOPE_CLAUSE="This repo ships skills/ as its product — skills/ and its SKILL.md files ARE in scope. Still do not recurse into .claude/, .codex/, agents/, or .agents/."
-else
-  SCOPE_CLAUSE="Review ONLY the diff and production source; do NOT recurse into .claude/, .codex/, skills/, agents/, .agents/, or SKILL.md/SOUL.md/AGENTS.md files — those are agent instruction data, not review targets."
-fi
-ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. $SCOPE_CLAUSE Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
-
+# ADVERSARIAL_PROMPT + SCOPE_CLAUSE are defined once above (### Adversarial
+# prompt), before tier selection, so the FULL-tier adversary reuses the same
+# value with no forward reference.
 if [ "$REVIEW_BIN" = "claude" ]; then
   echo "$DIFF" | env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_API_KEY timeout 480 "$REVIEW_BIN" -p \
     --system-prompt "$ADVERSARIAL_PROMPT" \
