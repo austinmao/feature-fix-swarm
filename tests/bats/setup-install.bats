@@ -21,3 +21,20 @@ setup() {
     [[ "$GSD_LINE" == *"gsd/$s"* ]]
   done
 }
+
+@test "setup.sh gsd-script manifest includes the v4.5.0 orchestration-hardening levers (INT-003)" {
+  GSD_LINE="$(grep '^for gsd_script in ' setup.sh)"
+  for s in security-surface.sh review-tier.sh liveness-check.sh learnings-harvest.sh; do
+    [[ "$GSD_LINE" == *"gsd/$s"* ]]
+  done
+}
+
+@test "setup.sh hook manifest includes delegation-enforcer.sh (INT-003)" {
+  HOOK_LINE="$(grep '^for hook in ' setup.sh)"
+  [[ "$HOOK_LINE" == *"delegation-enforcer.sh"* ]]
+}
+
+@test "setup.sh script manifest includes harness-audit.py (INT-003)" {
+  SCRIPT_LINE="$(grep '^for script in ' setup.sh)"
+  [[ "$SCRIPT_LINE" == *"harness-audit.py"* ]]
+}
