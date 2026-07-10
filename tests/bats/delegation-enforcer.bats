@@ -90,3 +90,15 @@ EOF
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "python3 absent on PATH -> empty passthrough, exit 0, never blocks (finding 4)" {
+  seed_config
+  SHIM="$BATS_TEST_TMPDIR/nopy"
+  mkdir -p "$SHIM"
+  ln -sf "$(command -v cat)" "$SHIM/cat"
+  INPUT='{"tool_name":"Agent","tool_input":{"subagent_type":"gsd-executor","description":"do work"}}'
+  run --separate-stderr env PATH="$SHIM" "$(command -v bash)" "$HOOK" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -n "$stderr" ]
+}

@@ -28,7 +28,11 @@ fi
 
 INPUT=$(cat)
 
-python3 - "$INPUT" <<'PY'
+# `set -e` + a here-doc python3 would BLOCK the spawn if python3 is missing or
+# killed (nonzero exit propagates). Guard it: any python3 failure -> WARN +
+# passthrough (empty stdout), never a block. The RHS runs only when python3
+# itself fails to run; a clean passthrough/mutation exits 0 above.
+python3 - "$INPUT" <<'PY' || { echo "[delegation-enforcer] WARN: python3 failed — passthrough unpinned" >&2; exit 0; }
 import json, sys
 from pathlib import Path
 
