@@ -61,3 +61,21 @@ deltas shipped in v4.1.0, and what was deliberately deferred.
 - **Async long-lived sub-agents** (context-keeping) — architectural change to
   the dispatch model; real win, big lift.
 - **Memory-lessons wiring** — covered by gsd learnings.
+
+## Addendum 2026-07-10 (v4.3.0) — routing rebalance + plan-stage adversary
+
+Second alignment pass, grounded on the same three sources plus
+jnuyens/gsd-plugin's `sdk/shared/model-catalog.json` (33 agents → heavy/standard/
+light tiers). Shipped:
+
+- `gsd-plan-checker` fable→opus (checker must not share the planner's model —
+  fresh-context-verifier principle), `gsd-debugger` sonnet→opus,
+  `gsd-integration-checker`/`gsd-nyquist-auditor` opus→sonnet,
+  `gsd-research-synthesizer`/`gsd-codebase-mapper` sonnet→haiku.
+- `scripts/gsd/plan-adversary.sh` at gsd's `workflow.plan_bounce_script` seam:
+  high-blast plans get a `gpt-5.6-sol` @ `xhigh` cross-model review appended;
+  the opus plan-checker re-run adjudicates. This supersedes the earlier
+  "interval mid-run verifier — deferred" disposition at the PLAN stage only:
+  the plan is where Fable's planning strength makes an undetected error most
+  expensive, and gsd already ships the seam (no new machinery). Mid-EXECUTION
+  interval verification stays deferred.

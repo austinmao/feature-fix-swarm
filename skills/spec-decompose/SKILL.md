@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.1.0"
+version: "2.2.0"
 allowed-tools:
   - Read
   - Write
@@ -67,7 +67,13 @@ Pilot-proven reference shapes: spec 002's `.planning/` on branch `002-gsd-replac
 - Headless: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-plan-phase <N>`.
 
 gsd runs research → writes `NN-*-PLAN.md` files (wave/`depends_on` annotations are the
-parallelism contract `/gsd-execute-phase` executes) → plan-checker verifies. Plans with
+parallelism contract `/gsd-execute-phase` executes) → plan-checker verifies. The seeded
+config also wires the plan-bounce seam (`workflow.plan_bounce_script =
+scripts/gsd/plan-adversary.sh`): high-blast plans (auth/RLS/payments/migrations/…)
+get a cross-model adversarial review (default `gpt-5.6-sol` @ `xhigh`, same adversary
+tier as review-gate) appended as findings, which the opus plan-checker re-run
+adjudicates. Low-blast plans skip it (zero cost); kill-switch `PLAN_ADVERSARY=off`.
+Plans with
 UI-touchable stories must carry browser-proof success criteria
 (`runtime_proof.py verify` as a phase gate command) — inject into ROADMAP criteria at seed time.
 

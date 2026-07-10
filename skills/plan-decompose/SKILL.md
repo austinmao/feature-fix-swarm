@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
 description: "Turn a description or existing plan into tasks.md via autonomous eng review + codex gate — no speckit interview"
-version: "1.0.0"
+version: "1.1.0"
 permissions:
   filesystem: write
   network: false
@@ -127,8 +127,11 @@ Write the plan output to `$SPEC_DIR/plan.md`.
 
 Skip entirely when `--no-codex` passed.
 
-Invoke `Skill: codex` (consult mode). Embed the full content of `plan.md` verbatim in
-the prompt:
+Invoke `Skill: codex` (consult mode). Pin the adversary tier when the codex skill
+exposes invocation-scoped overrides: `-c model="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"`
+`-c model_reasoning_effort="${PLAN_ADVERSARY_EFFORT:-xhigh}"` — same adversary tier
+as review-gate and `scripts/gsd/plan-adversary.sh`. Embed the full content of
+`plan.md` verbatim in the prompt:
 
 > "You are a brutally honest senior engineer. Review this engineering plan adversarially.
 > Find: logical gaps, unstated assumptions, missing error handling, overcomplexity,

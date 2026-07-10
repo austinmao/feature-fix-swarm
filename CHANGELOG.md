@@ -6,6 +6,35 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.3.0 — feat: Fable-aligned routing rebalance + plan-stage cross-model adversary (2026-07-10)
+
+Grounded on the Anthropic "Prompting Claude Fable 5" guide, Ken Huang's Fable 5
+field notes, and jnuyens/gsd-plugin's model catalog (heavy→opus / standard→sonnet
+/ light→haiku with fable as a gated heavy-tier swap). Two changes:
+
+- **`templates/gsd-config.base.json` routing rebalance** — `gsd-plan-checker`
+  fable→**opus** (a checker on the same model as the planner is
+  near-self-critique; Fable's own guide says fresh-context verifiers beat
+  self-critique — model diversity is the point), `gsd-debugger` sonnet→**opus**
+  (root-cause is the highest-value reasoning; "start at the top of your
+  difficulty range"), `gsd-integration-checker`/`gsd-nyquist-auditor`
+  opus→**sonnet** and `gsd-research-synthesizer`/`gsd-codebase-mapper`
+  sonnet→**haiku** (mechanical audit/scout work; upstream gsd-plugin routes all
+  four light/standard). Roughly cost-neutral; opus moves to where adversarial
+  reasoning pays.
+- **`scripts/gsd/plan-adversary.sh` (new) + `workflow.plan_bounce` wiring** —
+  plan-stage cross-model adversarial review at gsd's native bounce seam
+  (`plan_bounce_script`, invoked per PLAN.md before execute-phase). High-blast
+  plans (auth/RLS/payments/migrations/…) get a pinned `gpt-5.6-sol` @ `xhigh`
+  review; findings are APPENDED to the plan (bounce is restore-on-nonzero, so
+  exit is always 0) and the opus plan-checker re-run adjudicates — GPT finds,
+  opus judges. Low-blast plans skip (zero cost); fail-soft without the codex
+  CLI; kill-switch `PLAN_ADVERSARY=off`; env overrides `PLAN_ADVERSARY_MODEL`
+  / `_EFFORT` / `_KEYWORDS` / `_BIN` / `_TIMEOUT`. Tests:
+  `tests/bats/plan-adversary.bats` (7/7). Skills: `spec-decompose` v2.2.0
+  (documents the seam), `plan-decompose` v1.1.0 (pins its existing codex plan
+  review to the same adversary tier).
+
 ## v4.2.0 — feat: orchestrator delegation discipline — trip-wire rule + histogram + delegation-audit lever (2026-07-09)
 
 Retro finding from a real long run: the review ladder routed correctly
