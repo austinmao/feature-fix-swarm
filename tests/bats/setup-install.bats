@@ -34,6 +34,11 @@ setup() {
   [[ "$HOOK_LINE" == *"delegation-enforcer.sh"* ]]
 }
 
+@test "setup.sh gsd-script manifest includes model-equivalents.sh (spec 004 cross-vendor routing)" {
+  GSD_LINE="$(grep '^for gsd_script in ' setup.sh)"
+  [[ "$GSD_LINE" == *"gsd/model-equivalents.sh"* ]]
+}
+
 @test "setup.sh script manifest includes harness-audit.py (INT-003)" {
   SCRIPT_LINE="$(grep '^for script in ' setup.sh)"
   [[ "$SCRIPT_LINE" == *"harness-audit.py"* ]]

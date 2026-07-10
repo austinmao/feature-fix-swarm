@@ -6,6 +6,26 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.5.1 — feat: cross-vendor model equivalence + 3-leg fable fallback with recovery (spec 004, 2026-07-10)
+
+- **`scripts/gsd/model-equivalents.sh` (new)** — sourceable Claude<->Codex
+  model equivalence lib (`codex_equiv_model`/`codex_equiv_effort`/
+  `claude_equiv_model`), the executable home for the mapping table in
+  `docs/fable-pilotfish-alignment.md`; fail-soft on unknown input (echoes
+  input, returns 1). Also documents that codex CLI 0.144's `model_reasoning_effort`
+  enum is `none|minimal|low|medium|high|xhigh` — `ultra`/`max` are CLI-accepted
+  aliases, not enum members; canonical top is `xhigh`.
+- **`scripts/gsd/model-fallback.sh` (3-leg + recovery)** — the fable->opus
+  fallback is no longer sticky: a `gpt-5.6-sol` cross-vendor probe leg records
+  whether compensation is live (marker `.planning/fable-fallback.json`,
+  `mode: codex-sol|opus-only`), and once fable is available again the lever
+  restores ONLY the JSON paths it rewrote — never a blanket opus->fable
+  substitution, which would incorrectly flip intentional opus pins.
+- **`scripts/gsd/plan-adversary.sh`** — while a `mode: codex-sol` fallback
+  marker is present, the low-blast skip is disabled (every plan gets the
+  xhigh sol pass, since that pass is standing in for the missing fable
+  planning-tier review).
+
 ## v4.5.0 — feat: orchestration-hardening levers — delegation auto-pin, findings-queue dedup, composite liveness, harness scorer (spec 003, 2026-07-10)
 
 Eight enhancements from spec 003 (`specs/003-orchestration-hardening/`): six new
