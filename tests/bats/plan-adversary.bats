@@ -61,6 +61,20 @@ EOF
   [ "$(cat "$LOW")" = "$before" ]
 }
 
+@test "fable-fallback marker (mode=codex-sol) disables low-blast skip" {
+  ROOT="$(pwd)"
+  mkdir -p "$BATS_TEST_TMPDIR/.planning"
+  cat > "$BATS_TEST_TMPDIR/.planning/fable-fallback.json" <<'JSON'
+{"mode":"codex-sol","original":"claude-fable-5","substitute":"claude-opus-4-8","paths":["model_overrides.gsd-planner"]}
+JSON
+  cd "$BATS_TEST_TMPDIR"
+  PLAN_ADVERSARY_BIN=fake-codex run bash "$ROOT/$SCRIPT" "$LOW"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fable-fallback marker — low-blast skip disabled"* ]]
+  [[ "$output" != *"low-blast plan — skipped"* ]]
+  grep -q '^## Adversarial plan review' "$LOW"
+}
+
 @test "kill-switch PLAN_ADVERSARY=off skips" {
   PLAN_ADVERSARY=off run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]

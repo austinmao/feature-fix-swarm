@@ -45,7 +45,19 @@ fi
 
 # High-blast trigger: security-model-fence keyword set + infra blast extras.
 KEYWORDS="${PLAN_ADVERSARY_KEYWORDS:-auth|rls|row[ _-]?level|payment|stripe|crypto|jwt|jwks|oauth|owasp|secret|credential|password|migration|multi[ -]?tenant|deploy|provision}"
-if ! grep -Eiq "$KEYWORDS" "$PLAN_FILE"; then
+
+# When fable is down AND cross-vendor (sol) compensation is live (model-fallback.sh
+# marker mode=codex-sol), every plan is bounce-worthy — the xhigh sol pass IS the
+# compensation for the missing fable planning-tier review, so low-blast plans can't
+# skip it here.
+FABLE_MARKER="${PLAN_ADVERSARY_FABLE_MARKER:-.planning/fable-fallback.json}"
+LOW_BLAST_SKIP_DISABLED=false
+if [ -f "$FABLE_MARKER" ] && grep -q '"mode"[[:space:]]*:[[:space:]]*"codex-sol"' "$FABLE_MARKER"; then
+  LOW_BLAST_SKIP_DISABLED=true
+  echo "[plan-adversary] fable-fallback marker — low-blast skip disabled" >&2
+fi
+
+if [ "$LOW_BLAST_SKIP_DISABLED" = false ] && ! grep -Eiq "$KEYWORDS" "$PLAN_FILE"; then
   echo "[plan-adversary] low-blast plan — skipped"
   exit 0
 fi

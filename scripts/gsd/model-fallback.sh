@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# model-fallback.sh — substitute unavailable premium models in .planning/config.json
+# model-fallback.sh — 3-leg cross-vendor fallback for unavailable premium
+# models in .planning/config.json, WITH recovery.
 #
 # gsd-core's model_overrides are returned verbatim (model-resolver.cjs step 1) —
-# no availability check. When a pinned model (claude-fable-5) drops off the OAuth
-# subscription, every spawn of that agent errors. This lever probes availability
-# once (cached 24h) and rewrites model_overrides + dynamic_routing.tier_models to
-# the fallback BEFORE a run starts.
+# no availability check. When claude-fable-5 drops off the OAuth subscription,
+# every spawn of that agent errors. This lever probes availability once
+# (cached 24h) and rewrites model_overrides + dynamic_routing.tier_models
+# BEFORE a run starts — then RESTORES them once fable comes back.
+#
+# Chain: claude-fable-5 -> [probe gpt-5.6-sol cross-vendor compensation, for
+# marker-mode only] -> claude-opus-4-8. Codex models can NEVER be Claude
+# subagent pins, so the actual config rewrite is always fable->opus; the
+# codex-sol probe only decides whether we record mode=codex-sol (cross-vendor
+# xhigh compensation available, e.g. via plan-adversary.sh) or mode=opus-only.
+#
+# Recovery: once fable is available again, restore ONLY the JSON paths this
+# lever itself rewrote (recorded in the .planning/fable-fallback.json marker)
+# back to fable. A blanket opus->fable substitution would incorrectly flip
+# intentional opus pins (gsd-verifier etc.) that were never fable to begin
+# with — this is the correctness crux, see tests/bats/model-fallback.bats.
 #
 # Usage: model-fallback.sh [<planning-dir>]   (default .planning)
-#   GSD_MODEL_PROBE_CMD  override probe command (tests)
-#   GSD_FALLBACK_CACHE   override cache dir (tests; default ~/.cache/gsd-model-probe)
-#
-# Fallback chain (edit here when the catalog changes):
-#   claude-fable-5 -> claude-opus-4-8
+#   GSD_MODEL_PROBE_CMD        override the claude probe command (tests)
+#   GSD_MODEL_PROBE_CMD_CODEX  override the codex-sol probe command (tests)
+#   GSD_FALLBACK_CACHE         override cache dir (tests; default ~/.cache/gsd-model-probe)
 #
 # Fail-soft: if the probe MECHANISM breaks, config stays unchanged and we warn —
 # an unavailable model then fails loudly at first spawn, same as without this lever.
@@ -25,11 +36,13 @@ CONFIG="$PLANNING_DIR/config.json"
 CACHE_DIR="${GSD_FALLBACK_CACHE:-$HOME/.cache/gsd-model-probe}"
 mkdir -p "$CACHE_DIR"
 
-# chain: "candidate fallback" pairs
-CHAIN="claude-fable-5 claude-opus-4-8"
+MARKER="$PLANNING_DIR/fable-fallback.json"
+FABLE="claude-fable-5"
+OPUS="claude-opus-4-8"
+CODEX_SOL="gpt-5.6-sol"
 
-probe_model() {
-  # exit 0 = available, 1 = unavailable. 24h cache per model.
+probe_claude_model() {
+  # exit 0 = available, 1 = unavailable. 24h cache per model (cache file name).
   local model="$1" cache="$CACHE_DIR/$1.status"
   if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -1440 2>/dev/null)" ]; then
     [ "$(cat "$cache")" = "ok" ]; return
@@ -48,27 +61,92 @@ probe_model() {
   [ "$(cat "$cache")" = "ok" ]
 }
 
-# shellcheck disable=SC2086  # intentional word-split: CHAIN is a space-separated model list
-set -- $CHAIN
-while [ "$#" -ge 2 ]; do
-  CANDIDATE="$1"; FALLBACK="$2"; shift 2
-  grep -q "\"$CANDIDATE\"" "$CONFIG" || continue
-  if probe_model "$CANDIDATE"; then
-    echo "[model-fallback] $CANDIDATE available — config unchanged"
-    continue
+probe_codex_model() {
+  # Separate cache key from probe_claude_model (distinct cache filename per model).
+  local model="$1" cache="$CACHE_DIR/$1.status"
+  if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -1440 2>/dev/null)" ]; then
+    [ "$(cat "$cache")" = "ok" ]; return
   fi
-  CANDIDATE="$CANDIDATE" FALLBACK="$FALLBACK" CONFIG="$CONFIG" python3 - <<'EOF'
+  local cmd="${GSD_MODEL_PROBE_CMD_CODEX:-}"
+  if [ -n "$cmd" ]; then
+    if $cmd "$model" >/dev/null 2>&1; then echo ok > "$cache"; else echo fail > "$cache"; fi
+  else
+    if env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+        codex exec -c "model=\"$model\"" -c 'sandbox_mode="read-only"' "ok" </dev/null >/dev/null 2>&1; then
+      echo ok > "$cache"
+    else
+      echo fail > "$cache"
+    fi
+  fi
+  [ "$(cat "$cache")" = "ok" ]
+}
+
+HAS_FABLE_LITERAL=false
+if grep -q "\"$FABLE\"" "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
+
+if [ ! -f "$MARKER" ] && [ "$HAS_FABLE_LITERAL" = false ]; then
+  echo "[model-fallback] $FABLE not present in config — no-op"
+  exit 0
+fi
+
+if probe_claude_model "$FABLE"; then
+  if [ -f "$MARKER" ]; then
+    RESULT="$(MARKER="$MARKER" CONFIG="$CONFIG" python3 - <<'EOF'
 import json, os
-path = os.environ["CONFIG"]; cand = os.environ["CANDIDATE"]; fb = os.environ["FALLBACK"]
-cfg = json.load(open(path))
-n = 0
-def sub(d):
-    global n
-    for k, v in d.items():
-        if isinstance(v, dict): sub(v)
-        elif v == cand: d[k] = fb; n += 1
-sub(cfg)
-json.dump(cfg, open(path, "w"), indent=2)
-print(f"[model-fallback] {cand} UNAVAILABLE -> {fb} ({n} override(s) rewritten)")
+marker_path = os.environ["MARKER"]; config_path = os.environ["CONFIG"]
+marker = json.load(open(marker_path))
+cfg = json.load(open(config_path))
+original = marker["original"]
+for path in marker["paths"]:
+    keys = path.split(".")
+    d = cfg
+    for k in keys[:-1]:
+        d = d[k]
+    d[keys[-1]] = original
+json.dump(cfg, open(config_path, "w"), indent=2)
+os.remove(marker_path)
+print(f"restored {len(marker['paths'])} path(s) to {original} — marker deleted")
 EOF
-done
+)"
+    echo "[model-fallback] $FABLE available — $RESULT"
+  else
+    echo "[model-fallback] $FABLE available — config unchanged"
+  fi
+  exit 0
+fi
+
+# fable unavailable
+if [ "$HAS_FABLE_LITERAL" = false ]; then
+  echo "[model-fallback] $FABLE unavailable — already on fallback (marker present), nothing to rewrite"
+  exit 0
+fi
+
+if probe_codex_model "$CODEX_SOL"; then
+  MODE="codex-sol"
+else
+  MODE="opus-only"
+fi
+
+RESULT="$(FABLE="$FABLE" OPUS="$OPUS" CONFIG="$CONFIG" MARKER="$MARKER" MODE="$MODE" python3 - <<'EOF'
+import json, os
+config_path = os.environ["CONFIG"]; fable = os.environ["FABLE"]; opus = os.environ["OPUS"]
+marker_path = os.environ["MARKER"]; mode = os.environ["MODE"]
+cfg = json.load(open(config_path))
+paths = []
+def sub(d, prefix=""):
+    for k, v in d.items():
+        p = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            sub(v, p)
+        elif v == fable:
+            d[k] = opus
+            paths.append(p)
+sub(cfg)
+json.dump(cfg, open(config_path, "w"), indent=2)
+marker = {"mode": mode, "original": fable, "substitute": opus, "paths": paths}
+json.dump(marker, open(marker_path, "w"), indent=2)
+print(f"{fable} UNAVAILABLE -> {opus} ({len(paths)} override(s) rewritten)")
+EOF
+)"
+echo "[model-fallback] $RESULT"
+echo "[model-fallback] fallback mode: $MODE (marker: $MARKER)"

@@ -76,3 +76,46 @@ JSON
   [ "$status" -eq 1 ]
   [[ "$output" == *"not found"* ]]
 }
+
+@test "FALLBACK-006: fable down + codex sol up -> opus substituted, marker mode=codex-sol with correct paths" {
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UNAVAILABLE -> claude-opus-4-8 (2 override(s) rewritten)"* ]]
+  [ -f "$TMP/.planning/fable-fallback.json" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['mode'])")" = "codex-sol" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['original'])")" = "claude-fable-5" ]
+  [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/fable-fallback.json'))['paths']))")" = "['model_overrides.gsd-plan-checker', 'model_overrides.gsd-planner']" ]
+}
+
+@test "FALLBACK-007: both fable and codex sol down -> opus substituted, marker mode=opus-only" {
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-fail.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['mode'])")" = "opus-only" ]
+}
+
+@test "FALLBACK-008: fable back + marker -> restores only marker paths, intentional opus pins untouched, marker deleted" {
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" bash "$LEVER" "$TMP/.planning" >/dev/null
+  [ -f "$TMP/.planning/fable-fallback.json" ]
+  # gsd-verifier was an intentional pre-existing opus pin, not a fable rewrite
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "claude-opus-4-8" ]
+
+  # simulate the 24h cache expiring so the "fable is back" probe actually re-runs
+  rm -f "$GSD_FALLBACK_CACHE/claude-fable-5.status"
+  GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restored 2 path(s) to claude-fable-5 — marker deleted"* ]]
+  [ ! -f "$TMP/.planning/fable-fallback.json" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-fable-5" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-fable-5" ]
+  # intentional opus pin untouched by recovery — not blanket-flipped back to fable
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "claude-opus-4-8" ]
+}
+
+@test "FALLBACK-009: no-fable config -> still no marker written" {
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "gsd-verifier": "claude-opus-4-8" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-fail.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/.planning/fable-fallback.json" ]
+}

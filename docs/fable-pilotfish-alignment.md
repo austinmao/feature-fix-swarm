@@ -87,7 +87,11 @@ failure decomposes into mock-shape drift, jsdom's silent omissions, no
 real-browser gate in the agent loop, same-author tests), Canary CLI 0.4.4
 (machine-gateable `results.json`), and the GPT-5.6 release (2026-07-09).
 
-**GPT-5.6 family + FFS tier equivalences** (developers.openai.com/api/docs/models):
+**GPT-5.6 family + FFS tier equivalences** (developers.openai.com/api/docs/models).
+Executable home (v4.5.1): `scripts/gsd/model-equivalents.sh` — sourceable lib
+(`codex_equiv_model`/`codex_equiv_effort`/`claude_equiv_model`) that any
+consumer (model-fallback.sh's codex-sol probe leg included) should source
+rather than re-deriving this table by hand:
 
 | OpenAI | $/1M in/out | Claude-side equivalent | FFS use |
 |---|---|---|---|
@@ -95,7 +99,11 @@ real-browser gate in the agent loop, same-author tests), Canary CLI 0.4.4
 | `gpt-5.6-terra` | $2.50/$15 | sonnet | qa-coverage-adversary @ `high` (gap-finder, not judge) |
 | `gpt-5.6-luna` | $1/$6 | haiku | cheap mechanical review passes (unused today) |
 
-Effort set is `none|low|medium|high|xhigh|max` on all three; no dated snapshots.
+Correction (v4.5.1): the effort set stated here as `none|low|medium|high|xhigh|max`
+was imprecise. Codex CLI 0.144's API-validated `model_reasoning_effort` enum is
+`none|minimal|low|medium|high|xhigh` — `ultra`/`max` are CLI-accepted aliases
+that do NOT appear in the enum itself; the canonical top tier is `xhigh`
+(matches plan-adversary.sh's `EFFORT=xhigh` default). No dated snapshots.
 Caveat: OpenAI's real-time cyber classifiers can pause/block legitimate
 security-adjacent prompts mid-stream — same failure class as Fable's
 `security-model-fence.sh`, now present on both vendors; adversary scripts stay
