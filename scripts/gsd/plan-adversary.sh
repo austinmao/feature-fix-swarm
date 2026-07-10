@@ -14,6 +14,11 @@
 # and exiting 0 — the plan-checker re-run (opus) adjudicates them. The blocking
 # gate stays at ship (review-gate); this seam is advisory by design.
 #
+# PASSES ($2): the adversary runs ONCE per plan regardless of PASSES —
+# idempotent-by-design. The "already reviewed" check below makes extra passes
+# deliberate no-ops, so gsd's plan_bounce_passes>1 re-bounces never duplicate
+# review sections. Accepted for seam-contract compatibility; not consumed.
+#
 # Cost guard: only high-blast plans (auth/RLS/payments/migrations/…) burn the
 # xhigh review; everything else no-ops. Kill-switch: PLAN_ADVERSARY=off.
 #
@@ -26,6 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/adversary-host.sh"
 
 PLAN_FILE="${1:-}"
+# shellcheck disable=SC2034 # accepted for the gsd bounce seam; see PASSES note above
+PASSES="${2:-1}"
 if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
   echo "[plan-adversary] usage: plan-adversary.sh <PLAN_FILE> [passes]" >&2
   exit 2

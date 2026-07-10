@@ -103,10 +103,14 @@ substitutions:
 
 ### Step 3: Execute
 
-Same as `/feature-implement` Steps 4-5: `/gsd-plan-phase N` → `/gsd-execute-phase N`
-per phase (headless: `scripts/gsd/gsd-run.sh`), plan-bounce adversary fires on
-high-blast plans automatically, gates.py is completion authority. Re-run the FULL
-baseline suite after each phase and report the delta against Step 0's numbers.
+Same as `/feature-implement` — for `--autonomous`, FIRST reuse its complete
+Steps 1-3 setup verbatim (fresh `/preflight` PASS, `GSD_RUN_ID`
+derivation/export, autonomy-grant ledger checks); THEN its Steps 4-5 execute
+loop: `/gsd-plan-phase N` → `/gsd-execute-phase N` per phase (headless:
+`scripts/gsd/gsd-run.sh`), plan-bounce adversary fires on high-blast plans
+automatically, gates.py is completion authority. An unattended uplift without
+those walls is a policy violation. Re-run the FULL baseline suite after each
+phase and report the delta against Step 0's numbers.
 
 ### Step 4: Finish tail (default; `--no-finish` opts out)
 

@@ -61,3 +61,52 @@ EOF
   run bash "$SCRIPT"
   [ "$status" -eq 2 ]
 }
+
+@test "unknown flag is usage error exit 2" {
+  run bash "$SCRIPT" "$RESULTS" --bogus-flag
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage: qa-coverage-adversary.sh"* ]]
+}
+
+@test "missing adversary CLI is fail-soft exit 0" {
+  QA_COVERAGE_BIN=definitely-not-a-real-cli run bash "$SCRIPT" "$RESULTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLI not found — skipped (fail-soft)"* ]]
+}
+
+@test "adversary CLI exit 7 is fail-soft exit 0" {
+  cat > "$STUB_DIR/fake-codex-fail" <<'EOF'
+#!/usr/bin/env bash
+exit 7
+EOF
+  chmod +x "$STUB_DIR/fake-codex-fail"
+  QA_COVERAGE_BIN=fake-codex-fail run bash "$SCRIPT" "$RESULTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"exec failed (rc="* ]]
+}
+
+@test "stub output with neither MISSED nor ADEQUATE prints no-findings fallback" {
+  cat > "$STUB_DIR/fake-codex-blank" <<'EOF'
+#!/usr/bin/env bash
+echo "some unstructured commentary with no anchored tags"
+EOF
+  chmod +x "$STUB_DIR/fake-codex-blank"
+  QA_COVERAGE_BIN=fake-codex-blank run bash "$SCRIPT" "$RESULTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no parseable coverage findings"* ]]
+}
+
+@test "--diff-base as last arg (no value) is usage error exit 2, no hang" {
+  # timeout guards the suite: pre-fix this spins forever (shift 2 never consumes)
+  TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"
+  run "$TIMEOUT_BIN" 10 bash "$SCRIPT" "$RESULTS" --diff-base
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage: qa-coverage-adversary.sh"* ]]
+}
+
+@test "explicit --diff-base <sha> works" {
+  BASE_SHA="$(git rev-parse HEAD)"
+  QA_COVERAGE_BIN=fake-codex-adequate run bash "$SCRIPT" "$RESULTS" --diff-base "$BASE_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"COVERAGE: ADEQUATE"* ]]
+}

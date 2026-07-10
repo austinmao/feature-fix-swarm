@@ -21,7 +21,16 @@ shift || true
 DIFF_BASE="origin/main"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --diff-base) DIFF_BASE="${2:-origin/main}"; shift 2 ;;
+    --diff-base)
+      if [ $# -lt 2 ]; then
+        echo "[qa-coverage-adversary] usage: qa-coverage-adversary.sh <results.json> [--diff-base <ref>]" >&2
+        exit 2
+      fi
+      DIFF_BASE="$2"; shift 2 ;;
+    -*)
+      echo "[qa-coverage-adversary] usage: qa-coverage-adversary.sh <results.json> [--diff-base <ref>]" >&2
+      exit 2
+      ;;
     *) shift ;;
   esac
 done

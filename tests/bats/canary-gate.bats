@@ -124,3 +124,91 @@ EOF
   run bash "$SCRIPT" --bogus-flag
   [ "$status" -eq 2 ]
 }
+
+@test "unresolvable diff base FAILs closed (no origin/main, no --diff-base)" {
+  add_web_commit
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"canary-gate: FAIL — diff base 'origin/main' unresolvable (fetch it or pass --diff-base)"* ]]
+}
+
+@test "--diff-base with no value is usage error exit 2" {
+  run bash "$SCRIPT" --diff-base
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage: canary-gate.sh"* ]]
+}
+
+@test "CANARY_RESULTS env var resolves results with no positional arg" {
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  write_results "$RESULTS" passed 0 0
+  CANARY_RESULTS="$RESULTS" run bash "$SCRIPT" --diff-base "$BASE_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"canary-gate: PASS"* ]]
+}
+
+@test "garbage stat output FAILs closed (nonnumeric mtime)" {
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  write_results "$RESULTS" passed 0 0
+  STATSTUB="$BATS_TEST_TMPDIR/statstub"
+  mkdir -p "$STATSTUB"
+  cat > "$STATSTUB/stat" <<'EOF'
+#!/usr/bin/env bash
+echo "  File: whatever"
+echo "garbage multi-line output"
+EOF
+  chmod +x "$STATSTUB/stat"
+  PATH="$STATSTUB:$PATH" run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"canary-gate: FAIL"* ]]
+}
+
+@test "status-only results with no summary counts FAILs closed" {
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  echo '{"status":"passed"}' > "$RESULTS"
+  run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"canary-gate: FAIL"* ]]
+}
+
+@test "zero stepsTotal FAILs closed" {
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  cat > "$RESULTS" <<'EOF'
+{"status":"passed","summary":{"stepsTotal":0,"stepsPassed":0,"stepsFailed":0,"consoleErrors":0,"networkFailures":0},"steps":[]}
+EOF
+  run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"canary-gate: FAIL"* ]]
+}
+
+@test "non-ASCII web filename still detected as web-touch (quotePath)" {
+  # root-level so only the \.tsx$ anchor can match — C-quoted "\303\251.tsx"
+  # ends in a quote character and evades it without core.quotePath=false
+  echo "export default function Page(){}" > "é.tsx"
+  git add "é.tsx"
+  git commit -q -m "unicode web change"
+  run bash "$SCRIPT" --diff-base "$BASE_SHA" "$BATS_TEST_TMPDIR/does-not-exist.json"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"web-touch diff but no canary results"* ]]
+}
+
+@test "jq missing FAILs closed" {
+  MINPATH="$BATS_TEST_TMPDIR/no-jq-path"
+  mkdir -p "$MINPATH"
+  for bin in bash git grep cat stat sed; do
+    b="$(command -v "$bin" 2>/dev/null)"
+    [ -n "$b" ] && ln -sf "$b" "$MINPATH/$bin"
+  done
+  if PATH="$MINPATH" command -v jq >/dev/null 2>&1; then
+    skip "jq still resolvable with a minimal PATH on this machine — can't simulate absence cleanly"
+  fi
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  write_results "$RESULTS" passed 0 0
+  PATH="$MINPATH" run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"jq required to parse canary results"* ]]
+}

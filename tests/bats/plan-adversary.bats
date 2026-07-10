@@ -9,6 +9,9 @@ SCRIPT="scripts/gsd/plan-adversary.sh"
 
 setup() {
   cd "$BATS_TEST_DIRNAME/../.."
+  # Hermeticity: default-kind tests assume no host is detected. Unset so a
+  # real codex/claude session's env doesn't flip detect_orchestrator_host.
+  unset CODEX_SESSION_ID CODEX_HOME CODEX_AGENT CLAUDE_SESSION_ID CLAUDE_CODE
   HIGH="$BATS_TEST_TMPDIR/01-auth-PLAN.md"
   cat > "$HIGH" <<'EOF'
 ---
@@ -121,5 +124,77 @@ EOF
 @test "host-aware: CODEX_HOME set with no explicit kind auto-flips to claude adversary" {
   CODEX_HOME="/tmp/x" PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
+  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
+}
+
+@test "no host env detected emits stderr note, stdout stays clean, defaults to claude host" {
+  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"adversary-host: orchestrator undetected — defaulting to claude host"* ]]
+  # host defaulted to claude -> opposite adversary is codex (proves stdout
+  # capture of detect_orchestrator_host wasn't polluted by the stderr note).
+  grep -q '^## Adversarial plan review (gpt-5.6-sol xhigh)$' "$HIGH"
+}
+
+@test "second positional arg (PASSES=3) still yields exactly one section" {
+  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH" 3
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: REVISE"* ]]
+  [ "$(grep -c '^## Adversarial plan review' "$HIGH")" -eq 1 ]
+  grep -q 'idempotent-by-design' "$SCRIPT"
+}
+
+@test "stub with findings but no anchored VERDICT line appends VERDICT: UNPARSEABLE" {
+  cat > "$STUB_DIR/fake-codex" <<'EOF'
+#!/usr/bin/env bash
+echo "HIGH: something risky in the plan"
+echo "the model rambles about a verdict without anchoring it: REVISE maybe"
+EOF
+  chmod +x "$STUB_DIR/fake-codex"
+  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  grep -q '^VERDICT: UNPARSEABLE$' "$HIGH"
+}
+
+@test "codex invocation pins sandbox_mode=read-only (untrusted plan text)" {
+  ARGS_LOG="$BATS_TEST_TMPDIR/args.log"
+  cat > "$STUB_DIR/fake-codex" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$ARGS_LOG"
+echo "VERDICT: APPROVE"
+EOF
+  chmod +x "$STUB_DIR/fake-codex"
+  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  grep -q 'sandbox_mode="read-only"' "$ARGS_LOG"
+}
+
+@test "adversary_invoke falls back to gtimeout when timeout is absent (codex branch)" {
+  command -v gtimeout >/dev/null 2>&1 || skip "gtimeout not installed on this machine"
+  NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-path"
+  mkdir -p "$NO_TIMEOUT_DIR"
+  for bin in bash dirname grep cat wc head tail tr env; do
+    b="$(command -v "$bin" 2>/dev/null)"
+    [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
+  done
+  ln -sf "$(command -v gtimeout)" "$NO_TIMEOUT_DIR/gtimeout"
+  ln -sf "$STUB_DIR/fake-codex" "$NO_TIMEOUT_DIR/fake-codex"
+  PATH="$NO_TIMEOUT_DIR" PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: REVISE"* ]]
+  grep -q '^## Adversarial plan review (gpt-5.6-sol xhigh)$' "$HIGH"
+}
+
+@test "adversary_invoke runs unwrapped when neither timeout nor gtimeout is present (claude branch)" {
+  NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-no-gtimeout-path"
+  mkdir -p "$NO_TIMEOUT_DIR"
+  for bin in bash dirname grep cat wc head tail tr env; do
+    b="$(command -v "$bin" 2>/dev/null)"
+    [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
+  done
+  ln -sf "$STUB_DIR/fake-claude" "$NO_TIMEOUT_DIR/fake-claude"
+  PATH="$NO_TIMEOUT_DIR" PLAN_ADVERSARY_KIND=claude PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: REVISE"* ]]
   grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
 }

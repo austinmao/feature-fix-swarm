@@ -51,6 +51,18 @@ GPT-5.6 model family release (`gpt-5.6-sol`/`-terra`/`-luna`, effort tiers now
   on high-blast gates (`PLAN_ADVERSARY_EFFORT=max`).
 - `feature-implement` 2.2.0→2.3.0, `spec-decompose` 2.2.0→2.3.0,
   `feature-spec` 2.1.0→2.2.0.
+- **Review-gate hardening round (claude pass1/pass3 + codex `gpt-5.6-sol` xhigh
+  adversarial):** every finding reproduced by a failing test before its fix —
+  canary-gate fail-open holes closed (unresolvable diff-base, GNU-stat garbage
+  mtime, incomplete/zero-total summaries, C-quoted filename evasion, `--diff-base`
+  no-value abort), adversary sandbox pinned `read-only` against prompt injection,
+  BSD/macOS `timeout` fallback, qa-coverage `--diff-base` hang, setup.sh installer
+  manifests extended (both new skills + all 4 gsd scripts, static-asserted by
+  `tests/bats/setup-install.bats`), code-uplift `--autonomous` now mandates the
+  feature-implement preflight/grant walls, prior-art researcher gained an
+  untrusted-content boundary. Recorded follow-up: canary evidence binds by
+  freshness only — revision/base-URL/scenario provenance binding stays with
+  `runtime_proof.py` (documented in canary-gate header).
 
 ## v4.3.0 — feat: Fable-aligned routing rebalance + plan-stage cross-model adversary (2026-07-10)
 

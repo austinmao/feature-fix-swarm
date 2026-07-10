@@ -22,6 +22,11 @@
 #
 # WEB-TOUCH pattern reused VERBATIM from scripts/browser-proof.sh's WEB_RE
 # (v3.20.0 Stream B) so both gates agree on what counts as a web surface.
+#
+# Documented limitation: evidence is bound by FRESHNESS only — this gate does
+# NOT verify the results came from this revision/base-URL/scenario-set. That
+# binding lives in `python3 lib/runtime_proof.py verify` when a spec declares
+# proof scenarios; full provenance binding is a recorded follow-up.
 set -euo pipefail
 
 DIFF_BASE="${CANARY_DIFF_BASE:-origin/main}"
@@ -30,7 +35,11 @@ RESULTS_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --diff-base)
-      DIFF_BASE="${2:-}"
+      if [ $# -lt 2 ]; then
+        echo "canary-gate: usage: canary-gate.sh [--diff-base <ref>] [<results.json>]" >&2
+        exit 2
+      fi
+      DIFF_BASE="$2"
       shift 2
       ;;
     -*)
@@ -51,7 +60,15 @@ fi
 
 WEB_PATTERN="${CANARY_WEB_PATTERN:-\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(pages|routes|components|emails|templates|public|hooks|stores?|styles?)/|(^|/)app/|(^|/)api/|(^|/)(tailwind|next|nuxt|vite|astro|svelte)\.config\.}"
 
-DIFF_FILES="$(git diff --name-only "${DIFF_BASE}...HEAD" 2>/dev/null || true)"
+if ! git rev-parse --verify "${DIFF_BASE}^{commit}" >/dev/null 2>&1; then
+  echo "canary-gate: FAIL — diff base '${DIFF_BASE}' unresolvable (fetch it or pass --diff-base)" >&2
+  exit 1
+fi
+
+# quotePath=false: non-ASCII filenames arrive raw instead of C-quoted
+# ("\303\251.tsx"), which would evade the extension anchor. Limitation:
+# newline-in-filename remains pathological/unhandled by the line loop.
+DIFF_FILES="$(git -c core.quotePath=false diff --name-only "${DIFF_BASE}...HEAD" 2>/dev/null || true)"
 
 WEB_TOUCH="no"
 if [ -n "$DIFF_FILES" ]; then
@@ -81,8 +98,17 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # Staleness: results.json must be at least as new as HEAD's commit.
+# Platform-select stat: GNU takes -c %Y; BSD/macOS takes -f %m. GNU's -f is
+# "filesystem status" and treats %m as an operand — partial garbage output —
+# so try -c first, capture atomically, then validate numeric (fail-closed).
 HEAD_TIME="$(git log -1 --format=%ct 2>/dev/null || echo 0)"
-RESULTS_MTIME="$(stat -f %m "$RESULTS" 2>/dev/null || stat -c %Y "$RESULTS" 2>/dev/null || echo 0)"
+if ! RESULTS_MTIME="$(stat -c %Y "$RESULTS" 2>/dev/null)"; then
+  RESULTS_MTIME="$(stat -f %m "$RESULTS" 2>/dev/null || echo 0)"
+fi
+if ! [[ "$RESULTS_MTIME" =~ ^[0-9]+$ ]]; then
+  echo "canary-gate: FAIL — could not determine results mtime (stat output nonnumeric)" >&2
+  exit 1
+fi
 if [ "${CANARY_GATE_ALLOW_STALE:-0}" != "1" ] && [ "$RESULTS_MTIME" -lt "$HEAD_TIME" ]; then
   echo "canary-gate: FAIL — stale canary results (older than HEAD)" >&2
   exit 1
@@ -96,6 +122,24 @@ NETWORK_FAILURES="$(jq -r '.summary.networkFailures // 0' "$RESULTS" 2>/dev/null
 
 if [ "$STATUS" != "passed" ] || [ "$CONSOLE_ERRORS" != "0" ] || [ "$NETWORK_FAILURES" != "0" ]; then
   echo "canary-gate: FAIL — status=${STATUS:-unknown} consoleErrors=${CONSOLE_ERRORS} networkFailures=${NETWORK_FAILURES}" >&2
+  exit 1
+fi
+
+# Completeness (fail-closed): a bare {"status":"passed"} must not pass — all
+# summary counts must be present, numeric, with a nonzero total fully passed.
+if ! jq -e '
+  (.summary.stepsTotal | type == "number") and
+  (.summary.stepsPassed | type == "number") and
+  (.summary.stepsFailed | type == "number") and
+  (.summary.consoleErrors | type == "number") and
+  (.summary.networkFailures | type == "number") and
+  (.summary.stepsTotal > 0) and
+  (.summary.stepsPassed == .summary.stepsTotal) and
+  (.summary.stepsFailed == 0) and
+  (.summary.consoleErrors == 0) and
+  (.summary.networkFailures == 0)
+' "$RESULTS" >/dev/null 2>&1; then
+  echo "canary-gate: FAIL — incomplete or failing summary (need numeric stepsTotal>0, stepsPassed==stepsTotal, stepsFailed==0, consoleErrors==0, networkFailures==0)" >&2
   exit 1
 fi
 

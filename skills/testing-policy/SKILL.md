@@ -49,7 +49,7 @@ a headless Canary session over the affected flows, gated mechanically on
 with staleness check against HEAD. No canary results on a web-touch diff = FAIL.
 Zero console errors / zero failed network requests are the cheapest tripwires that
 catch most "obviously broken" states — never waive them to make a run green.
-Evidence ledger: `lib/runtime_proof.py verify` where a spec carries browser-proof
+Evidence ledger: `python3 lib/runtime_proof.py verify <bundle>` where a spec carries browser-proof
 success criteria. Coverage second opinion: `scripts/gsd/qa-coverage-adversary.sh`
 (cross-vendor, advisory) lists user-facing flows the QA session missed.
 
