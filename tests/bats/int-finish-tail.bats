@@ -10,11 +10,13 @@ setup() {
 }
 
 @test "feature-implement finish tail invokes learnings-harvest.sh" {
-  grep -q 'learnings-harvest.sh' skills/feature-implement/SKILL.md
+  # pin the actual invocation command, not a bare substring a comment could satisfy
+  grep -qF 'bash scripts/gsd/learnings-harvest.sh' skills/feature-implement/SKILL.md
 }
 
 @test "code-uplift finish tail invokes learnings-harvest.sh" {
-  grep -q 'learnings-harvest.sh' skills/code-uplift/SKILL.md
+  # code-uplift phrases it as "`scripts/gsd/learnings-harvest.sh` learnings step"
+  grep -qF 'scripts/gsd/learnings-harvest.sh` learnings step' skills/code-uplift/SKILL.md
 }
 
 @test "code-uplift documents the --slop-only fast path" {

@@ -9,11 +9,12 @@ setup() {
 }
 
 @test "adopt-wip SKILL.md consults liveness-check.sh (INT-005)" {
-  grep -q 'liveness-check.sh' skills/adopt-wip/SKILL.md
+  # pin the actual invocation command, not a bare substring a comment could satisfy
+  grep -qF 'bash scripts/gsd/liveness-check.sh' skills/adopt-wip/SKILL.md
 }
 
 @test "preflight SKILL.md invokes harness-audit.py" {
-  grep -q 'harness-audit.py' skills/preflight/SKILL.md
+  grep -qF 'python3 scripts/harness-audit.py' skills/preflight/SKILL.md
 }
 
 @test "preflight harness-audit section is documented advisory, never-blocks" {
