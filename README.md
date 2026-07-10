@@ -409,11 +409,13 @@ feature-fix-swarm/
     swarm/            ad-hoc task swarm — no spec dir required; classify + execute inline tasks
     review-gate/      host-neutral cross-model pre-merge review gate (3 passes)
     goal-wrap/        bundle current work into a tracked, anti-drift /goal prompt
-  scripts/          8 bash scripts
+  scripts/          22 scripts (bash + harness-audit.py)
     qa-swarm.sh       QA manifest builder (2 hooks + 3 LLM agent prompts)
     ralph-retry.sh    investigate -> fix -> re-qa retry loop
-    harness/          executor detection + Ruflo host CLI adapter + artifacts
-    hooks/            worktree GC + debounced auto-QA
+    browser-proof.sh  browser-QA evidence gate
+    harness-audit.py  0-100 installed-harness scorer (dangling symlinks, drift)
+    gsd/              gsd-run lifecycle + adversary/canary/liveness/security levers
+    hooks/            worktree GC, debounced auto-QA, delegation-enforcer auto-pin
   prompts/          4 LLM agent prompts
     qa-e2e.md         browser test agent
     qa-review.md      code review agent

@@ -6,6 +6,44 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.5.0 — feat: orchestration-hardening levers — delegation auto-pin, findings-queue dedup, composite liveness, harness scorer (spec 003, 2026-07-10)
+
+Eight enhancements from spec 003 (`specs/003-orchestration-hardening/`): six new
+levers plus their skill wiring. `setup.sh` installer manifests are extended to
+ship all six to consumer repos (INT-003), static-asserted by
+`tests/bats/setup-install.bats`.
+
+- **`scripts/hooks/delegation-enforcer.sh` (new, fail-open)** — PreToolUse
+  hook that auto-pins unpinned Agent/Task spawns to the model resolved from
+  `.planning/config.json` `model_overrides[subagent_type]`, so unpinned
+  sub-agent spawns stop silently drifting to a premium default tier.
+- **`scripts/gsd/security-surface.sh` + `scripts/gsd/review-tier.sh` (new)** —
+  shared security-surface keyword extraction, and a diff risk-tier detector
+  (light/standard/full) so review-gate sizes its pipeline to actual risk
+  instead of paying a 40-file auth review for a 2-file docs change.
+- **`scripts/gsd/liveness-check.sh` (new)** — AND-of-death 3-signal composite
+  liveness probe (pid/mtime/ship-grant); an autonomous run is only declared
+  DEAD when all three signals agree, so one transient failed probe never
+  kills an overnight wave.
+- **`scripts/gsd/learnings-harvest.sh` (new, fail-soft)** — gbrain-or-archive
+  learnings harvester: writes finished-run `learnings*.jsonl` entries to
+  gbrain when healthy, else atomically appends to
+  `.feature-fix-swarm/learnings-archive.jsonl`; always exits 0.
+- **`scripts/harness-audit.py` (new, advisory)** — stdlib-only 0-100 scorer
+  for the installed `~/.claude` harness itself (dangling skill symlinks,
+  vendored-copy drift, dead model pins, unregistered hooks), wired into
+  `preflight`.
+- **`findings-queue` in `lib/gates.py` (new)** — `add|list|resolve` with
+  full-sha256 structured signatures over `[file, normalized_issue]`, atomic
+  dedup under the existing store lock; wired into `review-gate`'s tier
+  gating.
+- **`code-uplift` gains `--slop-only <diff-base>`** — deslop fast path with a
+  green-baseline refusal wall, and `--autonomous` now mandates the
+  feature-implement preflight/grant walls.
+- **Consult-lever skill wiring** — `adopt-wip` calls `liveness-check.sh`,
+  `preflight` calls `harness-audit.py`, `fix` routes through `/gsd-debug`;
+  all RED-first via `tests/bats/int-consult-levers.bats`.
+
 ## v4.4.0 — feat: browser-QA gate, testing doctrine, code-uplift skill, host-aware adversaries, spec-time prior-art search (2026-07-10)
 
 Grounded on 2026 testing research (mock-drift/jsdom as the "green tests, broken
