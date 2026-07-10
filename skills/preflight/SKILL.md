@@ -1,7 +1,7 @@
 ---
 name: preflight
 description: "Prove every env var, secret, and service the run will need is present and reachable BEFORE starting an unattended or overnight run. Use at the planning stage — after decompose, before /feature-implement — so the run never stalls at 3am on a missing variable or dead endpoint."
-version: "1.0.0"
+version: "1.1.0"
 ---
 
 # /preflight
@@ -51,6 +51,20 @@ never discovered at run time.
 3. **The loop verifies mechanically.** An unattended start requires
    `gates.py check-preflight "$RUN_ID"` → exit 0 (recorded PASS, < 24h old).
    No fresh pass, no unattended run.
+
+### Harness audit (advisory)
+
+Separate from the run manifest: `python3 scripts/harness-audit.py [--json]`
+scores the `~/.claude` harness itself 0-100 (dangling skill symlinks,
+vendored-copy version drift, dead model pins in `.planning/config.json`,
+unregistered hooks). Run it alongside step 2 and surface a low score as an
+advisory finding in the preflight report.
+
+This section is advisory only — it NEVER blocks preflight. The script always
+exits 0; a low score is a heads-up, not a `PREFLIGHT-PASS` gate, and a
+machine without `~/.claude/skills` scores 100 with a skip-note (absence is
+not drift). Do not wire its exit code or score into `gates.py preflight` —
+that gate stays fail-closed on the manifest only.
 
 ## Rules
 
