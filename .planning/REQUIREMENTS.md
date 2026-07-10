@@ -7,8 +7,8 @@ One REQ per acceptance criterion in `specs/003-orchestration-hardening/spec.md`
 
 ### Delegation enforcer (US1)
 
-- [ ] **REQ-01**: `scripts/hooks/delegation-enforcer.sh` reads PreToolUse JSON on stdin; Agent/Task input without `model` → same JSON with `model` injected from `.planning/config.json` resolution; with `model` present → byte-identical passthrough; no/invalid config → passthrough + stderr warn; exit 0 in all non-usage cases. [AC-001]
-- [ ] **REQ-02**: `DELEGATION_ENFORCER=off` → unconditional passthrough. [AC-002]
+- [x] **REQ-01**: `scripts/hooks/delegation-enforcer.sh` reads PreToolUse JSON on stdin; Agent/Task input without `model` → same JSON with `model` injected from `.planning/config.json` resolution; with `model` present → byte-identical passthrough; no/invalid config → passthrough + stderr warn; exit 0 in all non-usage cases. [AC-001]
+- [x] **REQ-02**: `DELEGATION_ENFORCER=off` → unconditional passthrough. [AC-002]
 
 ### Learnings harvest (US2)
 
