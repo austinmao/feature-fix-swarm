@@ -7,7 +7,7 @@ Three phases: (1) six independent testable levers, wave-parallel, RED-first;
 
 ## Phases
 
-- [ ] **Phase 1: Levers** — delegation-enforcer, security-surface + review-tier, liveness-check, learnings-harvest, harness-audit, gates.py findings-queue
+- [x] **Phase 1: Levers** — delegation-enforcer, security-surface + review-tier, liveness-check, learnings-harvest, harness-audit, gates.py findings-queue (completed 2026-07-10)
 - [ ] **Phase 2: Skill wiring** — review-gate tiers + findings recording, finish-tail learnings, code-uplift --slop-only, fix→gsd-debug, adopt-wip liveness, preflight harness-audit
 - [ ] **Phase 3: Docs + install + ship** — setup.sh, CHANGELOG v4.5.0, README, full gate, review-gate, PR
 
