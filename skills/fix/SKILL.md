@@ -1,7 +1,7 @@
 ---
 name: fix
-description: "Investigate a bug, fix it through gsd-core's /gsd-quick loop (plan → execute → verify on a single quick task), verify with qa-only then full qa, then run review-gate cross-model adversarial review. Non-interactive — aborts with structured artifacts on uncertainty or CRITICAL findings. Ruflo coordinator removed in v3.0.0 (spec 002). Wires the fable→opus model-availability preflight (scripts/gsd/model-fallback.sh) before the gsd-quick loop in v3.1.0."
-version: "3.2.0"
+description: "Investigate a bug (root cause, not symptom — routes to /gsd-debug when no repro exists), then fix it through /feature-implement --adhoc: the same walls, gsd-quick loop, finish tail (review-gate, grant-walled ship), and delegation discipline as every spec run. v4.0.0: /fix is a thin front-end — all execution machinery lives in feature-implement."
+version: "4.0.0"
 allowed-tools:
   - Read
   - Edit
@@ -12,10 +12,13 @@ allowed-tools:
   - Skill
 ---
 
-# /fix — Investigate, fix, and verify a bug via gsd-quick
+# /fix — Investigate, then fix via feature-implement --adhoc
 
-One command. Takes a bug description or symptom, traces root cause, fixes it through
-gsd's quick loop, verifies the fix, then verifies no regressions.
+One command. Takes a bug description or symptom, traces root cause, then hands the
+fix to `/feature-implement --adhoc` — the ONE home for walls (model-fallback,
+security fence, preflight/grant checks), the gsd execution loop, the finish tail
+(review-gate → grant-walled ship), and the delegation report. This skill owns only
+the investigation and the fix-specific QA loop.
 
 ## When to invoke
 
@@ -28,8 +31,8 @@ gsd's quick loop, verifies the fix, then verifies no regressions.
 | Flag | Effect |
 |---|---|
 | `--interactive` | Restore manual gates between phases. Default = non-interactive. |
-| `--no-audit` | **Operator-accepted-risk bypass** of the adversarial completion audit. Trivial typo-class fixes only. |
-| `--no-review-gate` | **Operator-accepted-risk bypass** of cross-model adversarial review. Provably minimal blast radius only. |
+| `--autonomous` | Pass through to `/feature-implement --adhoc --autonomous` (fail-closed walls: fresh preflight + grant ledger required). |
+| `--no-finish` | Pass through — skip the finish tail (review-gate/ship). **Operator-accepted-risk**; provably minimal blast radius only. Replaces v3.x `--no-review-gate`/`--no-audit` (retired). |
 
 ## Workflow
 
@@ -43,50 +46,43 @@ finding as a one-paragraph statement with file:line refs before editing anything
 criteria: (no failing test yet) AND (no single-command repro exists). Invoke
 gsd's scientific-method hypothesis→experiment loop and consume its root-cause
 report before editing anything. When a failing test or a single-command
-repro already exists, stay on this `/investigate` + `/gsd-quick` path — do
-not route to `/gsd-debug`.
+repro already exists, stay on this `/investigate` path — do not route to
+`/gsd-debug`.
 
-### Step 2: Fix via gsd-quick
+### Step 2: Fix via feature-implement --adhoc
 
-Invoke `/gsd-quick` with the root-cause statement as the task. gsd runs its
-plan → execute → verify loop on the single task; the repo config's
-`workflow.test_command` (`scripts/gsd/gates-test-command.sh`) gates completion —
-gates.py evidence, not self-report.
+Invoke the `feature-implement` skill with the root-cause statement as the task:
 
-Run the model-availability preflight first: gsd-quick's subagent tiers come from
-`.planning/config.json` (read by gsd-core's resolver at spawn time — `gsd-run.sh`
-launches only the sonnet-class lead), so a dead premium pin (Fable dropped off
-OAuth) would error the planner/plan-checker spawn. The same lever
-`/feature-implement` runs rewrites fable→opus before any spawn.
-
-Best-effort, not a hard gate: it stays fail-soft (`.planning/config.json` may not
-be seeded when it runs — same reason `feature-implement`'s call is fail-soft), but
-it must NOT no-op *silently* — warn on skip/failure so `gsd-run.sh` surfacing the
-real config error later isn't the first sign. Headless variant:
-
-```bash
-[ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh .planning \
-  || echo "[fix] model-availability preflight skipped/failed (best-effort) — gsd-run will surface any config error"
-TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<root-cause task>"
+```
+/feature-implement --adhoc "<root-cause statement with file:line refs>" [--autonomous] [--no-finish]
 ```
 
-TDD applies: failing repro test first (RED), fix (GREEN); the gsd executor's
-commit trail must show both.
+That skill owns everything from here: the model-availability + security-fence
+walls, the gsd-quick plan→execute→verify loop (TDD RED/GREEN commit trail
+required), the `workflow.test_command` completion authority, the finish tail
+(browser gate → review-gate → grant-walled ship → merge backstop → learnings
+harvest), and the delegation histogram. Do NOT reimplement any of it here —
+drift between /fix and the spec pipeline is the defect this version removed.
 
-### Step 3: Verify
+### Step 3: Fix-specific QA loop
 
-1. `/qa-only` on the affected surface — fail → back to Step 2 (max 2 loops, then STOP + report).
-2. Full `/qa` when browser-touchable.
-3. `/review-gate` (unless `--no-review-gate`): HIGH/CRITICAL findings block done —
-   fix or explicitly defer with operator sign-off.
+After the adhoc run returns:
+
+1. `/qa-only` on the affected surface — fail → back to Step 2 with the failure
+   report appended to the task (max 2 loops, then STOP + report).
+2. Full `/qa` when browser-touchable (the tail's canary-gate covers headless
+   browser proof; full `/qa` covers the interactive surface).
 
 ### Step 4: Report
 
-Root cause, diff summary, gate evidence id, QA results, review-gate verdict.
+Root cause, diff summary, and the feature-implement report (gate evidence id,
+review-gate verdict, consumed grants, delegation histogram) — one report, not two.
 On abort: structured artifact (what was tried, failing signature, next hypothesis).
 
-## Removed in v3.0.0
+## Removed in v4.0.0
 
-Ruflo swarm coordination (swarm_init/agent_spawn), Ralph retry loop
-(gsd-quick's own verify loop + the 2-loop QA cap replaces it), audits.jsonl
+Inline model-fallback preflight, inline gsd-run/gsd-quick invocation, inline
+review-gate step, `--no-audit` + `--no-review-gate` flags — all superseded by
+`/feature-implement --adhoc` (v2.6.0), which /task-swarm also fronts. Earlier
+removals (v3.0.0): Ruflo swarm coordination, Ralph retry loop, audits.jsonl
 run-state coupling, `--auto-fix` forwarding.

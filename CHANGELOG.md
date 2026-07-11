@@ -6,6 +6,37 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.8.0 — refactor: /fix and /task-swarm become thin front-ends over /feature-implement (2026-07-11)
+
+Operator ask: one home for the delegation machinery. `/fix` had drifted into a
+parallel pipeline — its own inline model-fallback wall, its own gsd-run
+invocation, its own verify/review-gate tail, no grant ledger, no delegation
+histogram. `/task-swarm` inlined the preflight + grant bash that `/preflight`
+and `/autonomy-grant` already own. This release makes `/feature-implement` the
+single execution engine; the two front-ends carry only what is unique to them.
+
+- **feature-implement v2.6.0 — `--adhoc "<task>"` mode.** No spec/plan needed:
+  same walls (check-preflight for `--autonomous`, model-fallback, security
+  fence, `GSD_RUN_ID` export — ledger key `adhoc-<slug>`), execution via
+  `/gsd-quick` (TDD RED/GREEN commit trail), completion authority =
+  `workflow.test_command` gate, and the SAME finish tail (browser gate →
+  qa-coverage adversary → review-gate → grant-walled ship → merge backstop →
+  learnings harvest) + delegation-histogram report as spec runs.
+- **fix v4.0.0 — thin front-end.** Keeps its unique value: root-cause
+  investigation with the `/gsd-debug` routing criteria, and the fix-specific
+  `/qa-only` loop (max 2). Everything else routes to
+  `/feature-implement --adhoc`. Removed: inline model-fallback block, inline
+  gsd-run/gsd-quick invocation, inline review-gate step, `--no-audit` +
+  `--no-review-gate` flags (use `--no-finish` passthrough).
+- **task-swarm v3.0.0 — pure sequencing.** Steps 2–3 now invoke the
+  `preflight` and `autonomy-grant` skills instead of restating their bash
+  (gates.py resolver block deleted; the invoked skills carry the commands).
+  Framed as the with-planning sibling of `/fix`: plan-decompose → preflight →
+  grant → `/feature-implement NNN --autonomous`.
+- No `lib/gates.py` or `scripts/gsd/*` changes — run ids were already
+  free-form (`adhoc-<slug>` keys the same grant/pending/preflight ledger), and
+  `review-gate-command.sh` already reads exported `GSD_RUN_ID`.
+
 ## v4.7.0 — feat: MAX-AUTH auto-grant default — authorization moves to launch (2026-07-11)
 
 Operator pain: the grant screen fired at the END of `/feature-spec` (hours
