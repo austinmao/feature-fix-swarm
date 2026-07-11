@@ -581,6 +581,17 @@ ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S+$")
 GRANT_DEFAULT_TTL_HOURS = 24.0
 GRANT_MAX_TTL_HOURS = 168.0  # 7 days — non-finite/zero/negative/huger rejected
 
+# Artifact identity (spec-295 EDGE-006): an immutable OCI digest reference
+# (name[:tag]@sha256:<64hex> — tag optional, digest mandatory and
+# authoritative) or a 40-hex commit sha. A mutable tag WITHOUT a digest
+# (`img:latest`) is never valid. re.fullmatch (not .match + $) — with
+# .match, a trailing "$" still matches just before a trailing newline,
+# letting a crafted "artifact\n" slip through (adversary HIGH #4).
+ARTIFACT_DIGEST_PAT = re.compile(
+    r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[A-Za-z0-9_][A-Za-z0-9._-]*)?"
+    r"@sha256:[0-9a-f]{64}$")
+ARTIFACT_SHA_PAT = re.compile(r"^[0-9a-f]{40}$")
+
 
 def _now() -> float:
     import time
@@ -625,6 +636,90 @@ def check_grant(store: Path, run_id: str, action: str,
     if not entry:
         return False
     return (now if now is not None else _now()) < entry.get("expires_at", 0)
+
+
+def _valid_artifact(artifact) -> bool:
+    """True iff artifact is a str fullmatch of an immutable digest reference
+    or a bare 40-hex commit sha (EDGE-006). Comparison downstream is
+    exact-string on the whole recorded artifact — this function only proves
+    the SHAPE is immutable, not that any two artifacts are equal."""
+    if not isinstance(artifact, str):
+        return False
+    return bool(ARTIFACT_DIGEST_PAT.fullmatch(artifact)
+                or ARTIFACT_SHA_PAT.fullmatch(artifact))
+
+
+def _evidence_resolves(data: dict, evidence_ids: list[str]) -> bool:
+    """True iff EVERY evidence_id names a top-level store key carrying a
+    SUCCESSFUL gate (adversary CRITICAL #1) — binds promote proof to real
+    recorded staging evidence, not caller-asserted strings. Schema ceiling:
+    the gate record has no artifact/surface field, so this proves
+    existence+success only, never that the gate ran against THIS artifact."""
+    if not evidence_ids:
+        return False
+    for eid in evidence_ids:
+        if data.get(eid, {}).get("gate", {}).get("exit_code") != 0:
+            return False
+    return True
+
+
+def _promotions_ns(data: dict, run_id: str) -> list:
+    """Shape guard for the `_promotions` store namespace (adversary HIGH #5,
+    ports the `_findings_ns` idiom): `_promotions` must be a dict-of-lists or
+    absent; a per-run entry must be a list or absent. Either violation raises
+    SystemExit rather than silently clobbering or appending to the wrong
+    shape — an ordinary task-id record is dict-shaped too, so a bare
+    isinstance(dict) check on `_promotions` alone would not be enough to
+    prevent misinterpreting an unrelated record."""
+    promotions = data.setdefault("_promotions", {})
+    if not isinstance(promotions, dict):
+        raise SystemExit("record-promotion: store key '_promotions' is not a "
+                          "dict (schema conflict — refusing to overwrite)")
+    run_entry = promotions.setdefault(run_id, [])
+    if not isinstance(run_entry, list):
+        raise SystemExit(f"record-promotion: '_promotions[{run_id}]' is not "
+                          "a list (schema conflict — refusing to overwrite)")
+    return run_entry
+
+
+def record_promotion(store: Path, run_id: str, *, from_env: str, to_env: str,
+                     surface: str, artifact, evidence_ids,
+                     ttl_hours: float = GRANT_DEFAULT_TTL_HOURS) -> bool:
+    """Record validated proof that `artifact` passed `from_env` staging,
+    ONLY if the artifact identity is immutable and every evidence_id
+    resolves to a real recorded successful gate. Returns False (no write)
+    on ANY validation failure — mirrors grant_actions' fail-closed posture."""
+    import math
+    if not _valid_artifact(artifact):
+        return False
+    if isinstance(evidence_ids, str):
+        return False
+    try:
+        evidence_ids = list(evidence_ids)
+    except TypeError:
+        return False
+    if not evidence_ids or any(not isinstance(e, str) or not e for e in evidence_ids):
+        return False
+    if (not isinstance(ttl_hours, (int, float))
+            or not math.isfinite(ttl_hours)
+            or not 0 < ttl_hours <= GRANT_MAX_TTL_HOURS):
+        return False
+    recorded_at = _now()
+    with _StoreLock(store):
+        data = _load_store(store)
+        if not _evidence_resolves(data, evidence_ids):
+            return False
+        _promotions_ns(data, run_id).append({
+            "from_env": from_env,
+            "to_env": to_env,
+            "surface": surface,
+            "artifact": artifact,
+            "evidence_ids": evidence_ids,
+            "recorded_at": recorded_at,
+            "expires_at": recorded_at + ttl_hours * 3600,
+        })
+        _save_store(store, data)
+    return True
 
 
 def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:

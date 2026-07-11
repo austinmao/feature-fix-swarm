@@ -1168,3 +1168,158 @@ def test_backward_compat_non_prod_action_no_promotions(tmp_path) -> None:
     assert gates.list_pending(store, "run-1") == []
     assert "_promotions" not in json.loads(store.read_text())
     assert gates.check_grant(store, "run-1", "push:origin/main") is True
+
+
+# ── spec-295 Phase 1: record_promotion (RED → GREEN) ─────────────────────────
+
+_GOOD_ARTIFACT = "myapp@sha256:" + "f" * 64
+
+
+def _seed_success(store: Path, task_id: str = "stg-web") -> None:
+    gates.record_gate_evidence(store, task_id, exit_code=0, cmd="pytest -q")
+
+
+def test_record_promotion_persists_with_resolving_evidence_and_digest_artifact(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=_GOOD_ARTIFACT,
+                                evidence_ids=["stg-web"])
+    assert ok is True
+    data = json.loads(store.read_text())
+    assert isinstance(data["_promotions"]["run-1"], list)
+    rec = data["_promotions"]["run-1"][0]
+    assert rec["from_env"] == "staging" and rec["to_env"] == "prod"
+    assert rec["surface"] == "web" and rec["artifact"] == _GOOD_ARTIFACT
+    assert rec["evidence_ids"] == ["stg-web"]
+    assert isinstance(rec["recorded_at"], float) and isinstance(rec["expires_at"], float)
+
+
+def test_record_promotion_rejects_unresolved_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=_GOOD_ARTIFACT,
+                                evidence_ids=["never-ran"])
+    assert ok is False
+    assert not store.exists() or "_promotions" not in json.loads(store.read_text())
+
+
+def test_record_promotion_rejects_failed_gate_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "stg-web", exit_code=1, cmd="pytest -q")
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=_GOOD_ARTIFACT,
+                                evidence_ids=["stg-web"])
+    assert ok is False
+    assert "_promotions" not in json.loads(store.read_text())
+
+
+def test_record_promotion_persists_bare_commit_sha(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    sha = "d" * 40
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=sha, evidence_ids=["stg-web"])
+    assert ok is True
+
+
+def test_record_promotion_persists_digest_pinned_tag(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    artifact = "myapp:v1.2.3@sha256:" + "e" * 64
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=artifact, evidence_ids=["stg-web"])
+    assert ok is True
+
+
+def test_record_promotion_rejects_malformed_inputs(tmp_path) -> None:
+    cases = [
+        dict(evidence_ids=["never-ran"]),
+        dict(evidence_ids="e1"),
+        dict(evidence_ids=[]),
+        dict(evidence_ids=["", "e2"]),
+        dict(evidence_ids=(x for x in [])),
+        dict(artifact="img:latest"),
+        dict(artifact="img:main"),
+        dict(artifact="myapp@sha256:xyz"),
+        dict(artifact="g" * 39),
+        dict(artifact=_GOOD_ARTIFACT + "\n"),
+        dict(artifact=12345),
+        dict(ttl_hours="24"),
+        dict(ttl_hours=0),
+        dict(ttl_hours=-1),
+        dict(ttl_hours=float("inf")),
+        dict(ttl_hours=gates.GRANT_MAX_TTL_HOURS + 1),
+    ]
+    for i, overrides in enumerate(cases):
+        store = tmp_path / f"case-{i}.json"
+        _seed_success(store)
+        kwargs = dict(from_env="staging", to_env="prod", surface="web",
+                     artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"])
+        kwargs.update(overrides)
+        ok = gates.record_promotion(store, "run-1", **kwargs)
+        assert ok is False, f"case {i} {overrides} should be rejected"
+        data = json.loads(store.read_text())
+        assert not data.get("_promotions", {}).get("run-1"), \
+            f"case {i} {overrides} wrote a record"
+
+
+def test_record_promotion_concurrency_survives_with_grant(tmp_path) -> None:
+    import threading
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    n = 5
+    barrier = threading.Barrier(n + 1)
+    results: list[bool] = []
+    append_lock = threading.Lock()
+
+    def do_promote(i: int) -> None:
+        barrier.wait()
+        artifact = f"myapp@sha256:{i:064x}"
+        ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                    surface="web", artifact=artifact,
+                                    evidence_ids=["stg-web"])
+        with append_lock:
+            results.append(ok)
+
+    def do_grant() -> None:
+        barrier.wait()
+        gates.grant_actions(store, "run-1", ["push:origin/main"])
+
+    threads = [threading.Thread(target=do_promote, args=(i,)) for i in range(n)]
+    threads.append(threading.Thread(target=do_grant))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(results)
+    data = json.loads(store.read_text())
+    assert len(data["_promotions"]["run-1"]) == n
+    assert gates.check_grant(store, "run-1", "push:origin/main") is True
+
+
+def test_record_promotion_nondict_promotions_raises(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"_promotions": "not-a-dict"}))
+    _seed_success(store)
+    try:
+        gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                               surface="web", artifact=_GOOD_ARTIFACT,
+                               evidence_ids=["stg-web"])
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+
+
+def test_record_promotion_nonlist_run_entry_raises(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"_promotions": {"run-1": "not-a-list"}}))
+    _seed_success(store)
+    try:
+        gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                               surface="web", artifact=_GOOD_ARTIFACT,
+                               evidence_ids=["stg-web"])
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
