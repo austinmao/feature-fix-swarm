@@ -1566,3 +1566,163 @@ def test_check_grant_prod_byte_identical_for_non_prod_action(tmp_path) -> None:
     assert store.read_bytes() == before
     assert gates.check_grant_prod(store, "run-1", "push:origin/main", None) is True
     assert store.read_bytes() == before
+
+
+# ── spec-295 Phase 1 Plan 02: CLI promote + check-grant --artifact (RED→GREEN) ──
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k "cli_promote or cli_check_grant" -q
+# failed: `promote` was an unrecognized dispatch command ("unknown command:
+# promote", exit 2) and `check-grant --artifact` on a prod action fell
+# through to the unmodified non-prod branch (printed GRANTED with no promote
+# check at all), so every subprocess returncode/stdout assertion below
+# failed. GREEN run after implementation: same command, all passed.
+
+def _seed_success_cli(env, task_id: str = "stg-web") -> None:
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "run-gate", task_id, "--", "true"],
+            capture_output=True, text=True, env=env)
+
+
+def test_cli_promote_records_validated_evidence(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env)
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "stg-web"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "PROMOTED" in r.stdout
+
+
+def test_cli_promote_collects_repeatable_evidence(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env, "stg-web")
+    _seed_success_cli(env, "stg-web-2")
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "stg-web", "--evidence", "stg-web-2"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "PROMOTED" in r.stdout
+    data = json.loads((tmp_path / "evidence.json").read_text())
+    assert data["_promotions"]["run-9"][0]["evidence_ids"] == ["stg-web", "stg-web-2"]
+
+
+def test_cli_promote_rejects_malformed_artifact(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env)
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", "img:latest",
+                 "--evidence", "stg-web"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "PROMOTE-REJECTED" in r.stderr
+
+
+def test_cli_promote_rejects_unresolved_evidence(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "never-ran"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "PROMOTE-REJECTED" in r.stderr
+
+
+def test_cli_promote_rejects_bad_ttl(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env)
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "stg-web", "--ttl-hours", "not-a-number"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "PROMOTE-REJECTED" in r.stderr
+
+
+def test_cli_check_grant_prod_no_promote_refuses_with_hint(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web",
+                 "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "NOT-GRANTED" in r.stdout
+    assert "promote" in r.stdout.lower()
+
+
+def test_cli_check_grant_prod_round_trip_passes(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _seed_success_cli(env)
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+             "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web",
+                 "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+
+
+def test_cli_check_grant_prod_missing_artifact_refuses(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _seed_success_cli(env)
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+             "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1
+
+
+def test_cli_check_grant_prod_rebuild_invalidation(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _seed_success_cli(env)
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+             "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+            capture_output=True, text=True, env=env)
+    other = "myapp@sha256:" + "9" * 64
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web",
+                 "--artifact", other],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "NOT-GRANTED" in r.stdout
+
+
+def test_cli_check_grant_non_prod_action_unchanged(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "push:origin/main"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "push:origin/main"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "GRANTED" in r.stdout

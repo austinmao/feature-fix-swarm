@@ -31,6 +31,17 @@ Usage (inline heredoc in SKILL.md):
         --action merge:pr --ttl-hours 12   # operator pre-approval ledger
     python3 lib/gates.py check-grant run-42 --action push:origin/main
                                                   # exit 0 iff granted+unexpired
+    python3 lib/gates.py promote run-42 --from staging --to prod --surface web \
+        --artifact name@sha256:<64hex> --evidence gate-id [--evidence gate-id2]
+                                                  # record promote proof binding
+                                                  # artifact identity to real
+                                                  # recorded staging gate evidence
+    python3 lib/gates.py check-grant run-42 --action deploy:prod-web \
+        --artifact name@sha256:<64hex> [--manifest parity.json]
+                                                  # prod actions (deploy/flip/
+                                                  # migrate:prod-*) ALSO require
+                                                  # a fresh staging->prod promote
+                                                  # record for this artifact
     python3 lib/gates.py pending run-42 --action rotate:secret --reason "…"
                                                   # unlisted gate → durable record
     python3 lib/gates.py pending run-42           # list; exit 1 if any pending
@@ -1079,6 +1090,21 @@ def delegation_audit(transcript_text: str) -> dict:
             "inline_mechanical": inline_mechanical}
 
 
+def _load_manifest(path: str) -> dict:
+    """Load a fixture staging-parity manifest for check-grant --manifest.
+    JSON only (stdlib, zero new install — real config/parity-manifest.yaml
+    format lands Phase 4). Raises ValueError on anything that doesn't parse
+    to a dict, so the caller can fail the CLI closed with a clear message."""
+    text = Path(path).read_text()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("manifest must parse to a JSON object")
+    return data
+
+
 def _flag(args: list[str], name: str, default: str = "") -> str:
     for i, a in enumerate(args):
         if a == name and i + 1 < len(args):
@@ -1270,9 +1296,51 @@ def main(argv: list[str]) -> int:
         for a in actions:
             print(f"GRANTED: {a} (run {run_id}, ttl {ttl}h)")
         return 0
+    if cmd == "promote":
+        run_id = args[0]
+        from_env, to_env = _flag(args, "--from"), _flag(args, "--to")
+        surface, artifact = _flag(args, "--surface"), _flag(args, "--artifact")
+        evidence_ids = [args[i + 1] for i, a in enumerate(args) if a == "--evidence"]
+        try:
+            ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
+        except ValueError:
+            print("PROMOTE-REJECTED: --ttl-hours must be numeric", file=sys.stderr)
+            return 1
+        if not record_promotion(store, run_id, from_env=from_env, to_env=to_env,
+                                surface=surface, artifact=artifact,
+                                evidence_ids=evidence_ids, ttl_hours=ttl):
+            print(f"PROMOTE-REJECTED: {sanitize_reason(surface)}@"
+                  f"{sanitize_reason(str(artifact))} failed validation "
+                  "(malformed artifact identity, empty/unresolved evidence, "
+                  "or out-of-bounds --ttl-hours)", file=sys.stderr)
+            return 1
+        print(f"PROMOTED: {sanitize_reason(surface)}@{sanitize_reason(str(artifact))} "
+              f"({sanitize_reason(from_env)}->{sanitize_reason(to_env)}, run {run_id})")
+        return 0
     if cmd == "check-grant":
         run_id, action = args[0], _flag(args, "--action")
         safe = sanitize_reason(action)
+        prod_surface = _prod_surface(action)
+        if prod_surface is not None:
+            artifact = _flag(args, "--artifact") or None
+            manifest_path = _flag(args, "--manifest")
+            manifest = None
+            if manifest_path:
+                try:
+                    manifest = _load_manifest(manifest_path)
+                except (OSError, ValueError) as exc:
+                    print(f"CHECK-GRANT-REJECTED: cannot load manifest "
+                          f"{manifest_path}: {exc}", file=sys.stderr)
+                    return 1
+            if check_grant_prod(store, run_id, action, artifact, manifest=manifest):
+                print(f"GRANTED: {safe}")
+                return 0
+            print(f"NOT-GRANTED: {safe} (run {run_id}) — record promote "
+                  f"evidence via `gates.py promote {run_id} --from staging "
+                  f"--to prod --surface {prod_surface} --artifact <digest> "
+                  f"--evidence <id>`, then `gates.py grant {run_id} --action "
+                  f"'{action}'`, STOP, and wait for operator")
+            return 1
         if check_grant(store, run_id, action):
             print(f"GRANTED: {safe}")
             return 0
