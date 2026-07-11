@@ -757,6 +757,127 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
     return False
 
 
+# ── Stream H.2: prod-action precondition (spec-295 GAP-1) ───────────────────
+# Wires check_promotion (Plan 01) into check-grant: a deploy:prod-* /
+# flip:prod-* / migrate:prod-* action ADDITIONALLY requires a fresh
+# staging->prod promote record for the EXACT artifact before it is
+# authorized. Every other action type is untouched — check_grant_prod
+# delegates straight to check_grant with zero side effects (REQ-05
+# byte-identical guard).
+
+# MAINTENANCE OBLIGATION (spec.md § Risks #2, A-002): this is a closed
+# prefix list — it cannot code-enforce its own completeness. Any NEW
+# prod-mutating action TYPE must be added here or it silently bypasses the
+# precondition (fail-open by omission). Accepted, documented design risk —
+# see the threat register (T-01-03), not a bug to "fix" here.
+PROD_ACTION_PREFIXES = ("deploy:prod-", "flip:prod-", "migrate:prod-")
+
+
+def _prod_surface(action: str) -> str | None:
+    """Single source of truth for prod-surface extraction — every prod verb
+    (deploy/flip/migrate) routes through this one function (RESEARCH Pitfall
+    3). Returns the surface substring after the matched prefix, or None when
+    `action` is not a prod-mutating action at all (non-prod fast path)."""
+    for prefix in PROD_ACTION_PREFIXES:
+        if action.startswith(prefix):
+            return action[len(prefix):]
+    return None
+
+
+def _surface_has_staging(surface: str, manifest: dict | None) -> bool:
+    """True unless `manifest` explicitly declares `surface` with staging ==
+    'none' (EDGE-003). manifest=None skips this check entirely — real
+    config/parity-manifest.yaml wiring lands Phase 4, so the absence of a
+    manifest here must never fabricate a pass OR a refusal."""
+    if manifest is None:
+        return True
+    entry = manifest.get(surface)
+    if not isinstance(entry, dict):
+        return True
+    return entry.get("staging") not in (None, "none")
+
+
+def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
+                         now: float | None = None) -> str:
+    """Classify why check_promotion returned False for this surface+artifact,
+    distinguishing the three read-path typed reasons. Only staging->prod
+    records for this surface count as 'a promote exists' — a dev->prod or
+    prod->prod record is invisible here too (adversary CRITICAL #2, mirrors
+    check_promotion's own from_env guard), so it always falls through to
+    NO-PROMOTE-EVIDENCE rather than being misread as a mismatch/expiry."""
+    import math
+    promotions = _load_store(store).get("_promotions")
+    if not isinstance(promotions, dict):
+        return "NO-PROMOTE-EVIDENCE"
+    records = promotions.get(run_id)
+    if not isinstance(records, list):
+        return "NO-PROMOTE-EVIDENCE"
+    effective_now = now if now is not None else _now()
+    surface_matches = False
+    artifact_match_expired = False
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("to_env") != "prod" or rec.get("from_env") != "staging":
+            continue
+        if rec.get("surface") != surface:
+            continue
+        surface_matches = True
+        if rec.get("artifact") != artifact:
+            continue
+        exp = rec.get("expires_at")
+        if not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            continue
+        if effective_now >= exp:
+            artifact_match_expired = True
+    if artifact_match_expired:
+        return "PROMOTE-EXPIRED"
+    if surface_matches:
+        return "PROMOTE-ARTIFACT-MISMATCH"
+    return "NO-PROMOTE-EVIDENCE"
+
+
+def check_grant_prod(store: Path, run_id: str, action: str, artifact,
+                     *, manifest: dict | None = None,
+                     now: float | None = None) -> bool:
+    """Fail-closed prod-action precondition: a deploy:prod-* / flip:prod-* /
+    migrate:prod-* action additionally requires a fresh staging->prod promote
+    record proving `artifact` passed staging on this surface, on top of the
+    ordinary grant. Every non-prod action returns check_grant(...) UNCHANGED
+    with zero side effects (REQ-05). record_pending fires ONLY on this prod
+    path — check_grant itself stays pure (RESEARCH Pitfall 1)."""
+    surface = _prod_surface(action)
+    if surface is None:
+        return check_grant(store, run_id, action, now=now)
+
+    if not artifact:
+        record_pending(store, run_id, action,
+                       "NO-PROMOTE-EVIDENCE: --artifact is required for a "
+                       "prod-targeting action")
+        return False
+
+    if manifest is not None and not _surface_has_staging(surface, manifest):
+        record_pending(store, run_id, action,
+                       f"NO-STAGING-COUNTERPART: surface '{surface}' has no "
+                       "staging counterpart per the parity manifest")
+        return False
+
+    if not check_grant(store, run_id, action, now=now):
+        record_pending(store, run_id, action,
+                       "needs operator grant for this prod action (a promote "
+                       "record confers no authority on its own)")
+        return False
+
+    if check_promotion(store, run_id, "prod", surface, artifact, now=now):
+        return True
+
+    reason = _promote_miss_reason(store, run_id, surface, artifact, now=now)
+    record_pending(store, run_id, action,
+                   f"{reason}: no fresh staging->prod promote record matches "
+                   f"artifact {artifact} for surface '{surface}'")
+    return False
+
+
 def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
     """An unlisted gate hit mid-run: STOP, but leave a durable record so the
     morning resume is one `grant` command (long-run-continuity port)."""

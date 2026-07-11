@@ -1430,3 +1430,139 @@ def test_check_promotion_false_no_record_for_run_id(tmp_path) -> None:
                            evidence_ids=["stg-web"])
     assert gates.check_promotion(store, "run-none", "prod", "web",
                                  _GOOD_ARTIFACT) is False
+
+
+# ── spec-295 Phase 1 Plan 02: check_grant_prod precondition (RED → GREEN) ────
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k check_grant_prod -q
+# failed with:
+#   AttributeError: module 'gates' has no attribute 'check_grant_prod'
+# (10 tests errored). GREEN run after implementation: same command, 10 passed.
+
+def test_check_grant_prod_no_promote_refuses_with_no_promote_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-PROMOTE-EVIDENCE" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_artifact_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact="other@sha256:" + "a" * 64,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("PROMOTE-ARTIFACT-MISMATCH" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_expired_promote_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"], ttl_hours=1.0)
+    import time as _t
+    now = _t.time()
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT,
+                                  now=now + 3601) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("PROMOTE-EXPIRED" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_dev_to_prod_source_refuses_as_no_promote_evidence(tmp_path) -> None:
+    # adversary CRITICAL #2: a dev->prod matching-artifact promote never
+    # satisfies the precondition — check_promotion's from_env guard rejects
+    # it, and it must not be misclassified as a mismatch/expiry either.
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="dev", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-PROMOTE-EVIDENCE" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_fresh_matching_promote_passes(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is True
+
+
+def test_check_grant_prod_promote_without_grant_refuses(tmp_path) -> None:
+    # promote confers no authority — a fresh matching promote with NO grant
+    # still refuses.
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+
+
+def test_check_grant_prod_missing_artifact_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", None) is False
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", "") is False
+
+
+def test_check_grant_prod_flip_and_migrate_prefixes_route_same_precondition(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    for action, surface in (("flip:prod-blue", "blue"), ("migrate:prod-db", "db"),
+                            ("deploy:prod-fleet-1", "fleet-1")):
+        gates.grant_actions(store, "run-1", [action])
+        assert gates.check_grant_prod(store, "run-1", action, _GOOD_ARTIFACT) is False  # no promote yet
+        gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                               surface=surface, artifact=_GOOD_ARTIFACT,
+                               evidence_ids=["stg-web"])
+        assert gates.check_grant_prod(store, "run-1", action, _GOOD_ARTIFACT) is True
+
+
+def test_check_grant_prod_manifest_staging_none_refuses_no_staging_counterpart(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-n8n"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="n8n", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    manifest = {"n8n": {"staging": "none"}}
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-n8n", _GOOD_ARTIFACT,
+                                  manifest=manifest) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-STAGING-COUNTERPART" in p["reason"] for p in pend)
+    # manifest absent (None) never fabricates a refusal — same fixture passes
+    store2 = tmp_path / "evidence2.json"
+    _seed_success(store2)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-n8n"])
+    gates.record_promotion(store2, "run-1", from_env="staging", to_env="prod",
+                           surface="n8n", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store2, "run-1", "deploy:prod-n8n", _GOOD_ARTIFACT) is True
+
+
+def test_check_grant_prod_byte_identical_for_non_prod_action(tmp_path) -> None:
+    # adversary MEDIUM #7: a non-prod action routes through check_grant_prod
+    # with ZERO side effects — exact byte-identical store snapshot.
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["push:origin/main"])
+    before = store.read_bytes()
+    assert gates.check_grant_prod(store, "run-1", "push:origin/other", None) is False
+    assert store.read_bytes() == before
+    assert gates.check_grant_prod(store, "run-1", "push:origin/main", None) is True
+    assert store.read_bytes() == before
