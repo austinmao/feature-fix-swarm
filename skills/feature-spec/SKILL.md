@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.2.0
+version: 2.3.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -432,6 +432,16 @@ After it completes, open `specs/${SPEC_ID}/plan.md` and verify:
 - Prior-art decision (adopt/port/wrap/build-fresh) cited, referencing `specs/${SPEC_ID}/prior-art.md`
 
 If any section is missing, **add it now** before proceeding to Step 3.
+
+### Step 2.5 — plan-review gauntlet (fail-soft)
+
+If an `/autoplan` skill is available in this session, invoke it on the fresh
+plan now — it runs the CEO → design → eng → DX review chain with encoded
+auto-decisions and surfaces only taste calls to the operator. Fold its
+accepted decisions back into `specs/${SPEC_ID}/plan.md` before clarify.
+No `/autoplan` in this session → skip silently (same fail-soft posture as the
+openwiki/cached-docs lookups above). This mirrors the canonical pipeline
+order: plan → review gauntlet → decompose.
 
 ### Step 3 — speckit.clarify
 

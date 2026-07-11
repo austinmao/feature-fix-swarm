@@ -6,6 +6,32 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.6.0 — feat: provenance review contract + merge terminal-state backstop + pipeline-skill wiring (spec 005, 2026-07-11)
+
+- **review-gate v1.5.0 — provenance finding contract** (adapted from
+  steipete/agent-scripts `github-deep-review`): pass 1+2 findings now carry
+  `CAUSE` (root cause, not symptom), `PROVENANCE` (introduced-by-diff vs
+  pre-existing, confidence `clear|likely|unknown`), and `PROOF` (how to verify
+  the fix). Verify-the-reviewer checks `unknown`-confidence claims FIRST —
+  they are the likeliest to be stale/wrong.
+- **`scripts/gsd/assert-merged.sh` (new lever)** — terminal-state assertion
+  after any PR merge (pattern: agent-scripts `landpr` "state==MERGED, never
+  CLOSED"): exit 0 MERGED / 1 CLOSED-without-merge (loud) / 2 still OPEN /
+  3 gh error. feature-implement's finish tail (v2.5.0) requires exit 0 before
+  a `merge:pr` grant is recorded consumed.
+- **feature-implement v2.5.0 — finish-tail merge step**: fail-soft ladder —
+  `/land-and-deploy` when available in the session (merge → CI/deploy wait →
+  prod verify), else bare `gh pr merge`; either path backstopped by
+  assert-merged.sh. Optional `/landing-report` queue snapshot after ship.
+- **feature-spec v2.3.0 — Step 2.5 plan-review gauntlet (fail-soft)**: if an
+  `/autoplan` skill is available, run it on the fresh plan (CEO → design →
+  eng → DX auto-review) between speckit.plan and clarify; absent → silent skip.
+- **setup.sh installer-completeness fix**: `gsd/model-fallback.sh` and
+  `gsd/security-model-fence.sh` were invoked by feature-implement Step 2 but
+  never in the install manifest — consumer repos silently no-op'd both. Added,
+  plus `gsd/assert-merged.sh`; all three static-asserted in
+  `tests/bats/setup-install.bats`.
+
 ## v4.5.1 — feat: cross-vendor model equivalence + 3-leg fable fallback with recovery (spec 004, 2026-07-10)
 
 - **`scripts/gsd/model-equivalents.sh` (new)** — sourceable Claude<->Codex

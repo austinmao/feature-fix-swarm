@@ -39,6 +39,17 @@ setup() {
   [[ "$GSD_LINE" == *"gsd/model-equivalents.sh"* ]]
 }
 
+@test "setup.sh gsd-script manifest includes model-fallback.sh + security-model-fence.sh (feature-implement Step 2 deps)" {
+  GSD_LINE="$(grep '^for gsd_script in ' setup.sh)"
+  [[ "$GSD_LINE" == *"gsd/model-fallback.sh"* ]]
+  [[ "$GSD_LINE" == *"gsd/security-model-fence.sh"* ]]
+}
+
+@test "setup.sh gsd-script manifest includes assert-merged.sh (spec 005 merge backstop)" {
+  GSD_LINE="$(grep '^for gsd_script in ' setup.sh)"
+  [[ "$GSD_LINE" == *"gsd/assert-merged.sh"* ]]
+}
+
 @test "setup.sh script manifest includes harness-audit.py (INT-003)" {
   SCRIPT_LINE="$(grep '^for script in ' setup.sh)"
   [[ "$SCRIPT_LINE" == *"harness-audit.py"* ]]

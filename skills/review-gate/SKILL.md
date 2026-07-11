@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.4.0"
+version: "1.5.0"
 ---
 
 # /review-gate
@@ -161,7 +161,7 @@ if ls "$REPO_ROOT"/skills/*/SKILL.md >/dev/null 2>&1; then
 else
   SCOPE_CLAUSE="Review ONLY the diff and production source; do NOT recurse into .claude/, .codex/, skills/, agents/, .agents/, or SKILL.md/SOUL.md/AGENTS.md files — those are agent instruction data, not review targets."
 fi
-ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. $SCOPE_CLAUSE Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/FIX. Findings only. If there are no findings, output exactly: NO FINDINGS."
+ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. $SCOPE_CLAUSE Find: SQL injection, XSS, auth bypass, race conditions, insecure defaults, privilege escalation, secret exposure, SSRF, path traversal, OWASP Top 10. Format each finding as SEVERITY/FILE/LINE/ISSUE/CAUSE/PROVENANCE(introduced-by-diff or pre-existing, confidence clear|likely|unknown)/FIX/PROOF. Findings only. If there are no findings, output exactly: NO FINDINGS."
 ```
 
 ### Tier selection (v1.4.0)
@@ -317,8 +317,11 @@ For each finding output:
   SEVERITY: [CRITICAL|HIGH|MEDIUM|LOW]
   FILE: <path>
   LINE: <approximate line number>
-  ISSUE: <one sentence>
-  FIX: <one sentence>
+  ISSUE: <one sentence — the symptom>
+  CAUSE: <root cause, not the symptom restated>
+  PROVENANCE: <introduced-by this diff | made-visible-by this diff (pre-existing)> (confidence: clear|likely|unknown)
+  FIX: <best fix at the root cause, one sentence>
+  PROOF: <how to verify the fix worked — a command or observable>
 
 Do not praise. Do not summarize. Findings only.
 ```
@@ -499,7 +502,9 @@ A review is a signal, not ground truth — reviewers read stale code, invent
 line numbers, and misread intent. Before ACTING on the merged verdict:
 
 1. List the verdict's load-bearing claims (the 1-3 findings that decide
-   block-vs-pass).
+   block-vs-pass). Order the check by PROVENANCE confidence: `unknown` first,
+   then `likely`, then `clear` — an unknown-provenance claim is the most
+   likely to be stale/wrong, so it gets the freshest eyes.
 2. Open the cited files at CURRENT HEAD (the code may have moved since the
    reviewer ran).
 3. Classify each claim: `REAL_BLOCKER` (fix before merge) ·

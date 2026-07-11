@@ -58,8 +58,18 @@ setup() {
   grep -F 'never suppresses an otherwise-eligible honest-verifier' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: version bumped to 1.4.0" {
-  grep -F 'version: "1.4.0"' skills/review-gate/SKILL.md
+@test "INT-001: version bumped to 1.5.0" {
+  grep -F 'version: "1.5.0"' skills/review-gate/SKILL.md
+}
+
+@test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {
+  grep -F 'CAUSE: <root cause' skills/review-gate/SKILL.md
+  grep -F 'confidence: clear|likely|unknown' skills/review-gate/SKILL.md
+  grep -F 'PROOF: <how to verify' skills/review-gate/SKILL.md
+}
+
+@test "spec 005: adversarial prompt requests provenance fields" {
+  grep -F 'SEVERITY/FILE/LINE/ISSUE/CAUSE/PROVENANCE' skills/review-gate/SKILL.md
 }
 
 @test "INT-001: ORDER — Tier selection section precedes Pass 1" {

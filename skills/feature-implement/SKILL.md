@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. Ruflo executor removed in v2.0.0 (spec 002)."
-version: "2.4.0"
+version: "2.5.0"
 allowed-tools:
   - Read
   - Edit
@@ -137,7 +137,16 @@ browser gate → `/review-gate` → ship (grant-walled) → `/canary`. In order:
    lists user-facing flows the QA session missed; triage `MISSED:` lines before ship
    (fix or record as pendings — never silently drop).
 3. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke).
-4. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
+4. **Merge execution (only with a `merge:pr` grant):** if a `/land-and-deploy`
+   skill is available in this session, use it to execute the granted merge
+   (merge → CI/deploy wait → prod verify); else `gh pr merge` directly. EITHER
+   path then runs `bash scripts/gsd/assert-merged.sh <pr-number>` as the
+   machine backstop — exit 0 (MERGED) required before the merge grant is
+   recorded consumed; exit 1 means the PR closed WITHOUT merging (work not
+   landed — stop, report). After ship/merge completes: if a `/landing-report`
+   skill is available, run it (read-only queue snapshot). Both skill references
+   are fail-soft — sessions without them use the bare-`gh` path silently.
+5. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
    persists this run's `.planning/**/learnings*.jsonl` to gbrain-or-archive and
    prints `<N> harvested`. ALWAYS exits 0 — a broken/unreachable memory backend
    never blocks ship (AC-003). Its harvested count belongs in the Step 7 report.
