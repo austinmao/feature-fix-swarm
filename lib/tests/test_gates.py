@@ -1726,3 +1726,61 @@ def test_cli_check_grant_non_prod_action_unchanged(tmp_path) -> None:
     r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "push:origin/main"],
                 capture_output=True, text=True, env=env)
     assert r.returncode == 0 and "GRANTED" in r.stdout
+
+
+# ── spec-295 Phase 1 Plan 03 Task 1: grant reason (additive) + grant --reason ──
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k grant_reason -q
+# failed with: TypeError: grant_actions() got an unexpected keyword argument
+# 'reason' (function-level tests) and the CLI `--reason` flag was silently
+# ignored — no `reason` key ever landed in the stored grant entry (CLI
+# subprocess tests). GREEN run after implementation: same command, 5 passed.
+
+def test_grant_reason_stored_sanitized(tmp_path) -> None:
+    s = tmp_path / "evidence.json"
+    assert gates.grant_actions(s, "run-1", ["hotfix:prod-cp"], reason="db is down")
+    data = json.loads(s.read_text())
+    assert data["_autonomy"]["run-1"]["grants"]["hotfix:prod-cp"]["reason"] == "db is down"
+
+
+def test_grant_no_reason_byte_identical_entry_shape(tmp_path) -> None:
+    s = tmp_path / "evidence.json"
+    assert gates.grant_actions(s, "run-1", ["push:origin/main"])
+    data = json.loads(s.read_text())
+    entry = data["_autonomy"]["run-1"]["grants"]["push:origin/main"]
+    # byte-identical to the pre-reason shape: no `reason` key at all
+    assert set(entry.keys()) == {"granted_at", "expires_at", "granted_by"}
+
+
+def test_grant_reason_sanitized_strips_control_chars(tmp_path) -> None:
+    s = tmp_path / "evidence.json"
+    gates.grant_actions(s, "run-1", ["hotfix:prod-cp"],
+                        reason="db down\x1b[31mFAKE-BANNER\x1b[0m")
+    data = json.loads(s.read_text())
+    reason = data["_autonomy"]["run-1"]["grants"]["hotfix:prod-cp"]["reason"]
+    assert "\x1b" not in reason
+
+
+def test_cli_grant_reason_flag_records_reason(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "grant", "run-9", "--action", "hotfix:prod-cp",
+                 "--reason", "db down"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+    data = json.loads((tmp_path / "evidence.json").read_text())
+    assert data["_autonomy"]["run-9"]["grants"]["hotfix:prod-cp"]["reason"] == "db down"
+
+
+def test_cli_grant_no_reason_flag_records_no_reason(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "push:origin/main"],
+            capture_output=True, text=True, env=env)
+    data = json.loads((tmp_path / "evidence.json").read_text())
+    entry = data["_autonomy"]["run-9"]["grants"]["push:origin/main"]
+    assert "reason" not in entry

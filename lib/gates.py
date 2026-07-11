@@ -611,10 +611,15 @@ def _now() -> float:
 
 def grant_actions(store: Path, run_id: str, actions: list[str], *,
                   ttl_hours: float = GRANT_DEFAULT_TTL_HOURS,
-                  granted_by: str = "operator") -> bool:
+                  granted_by: str = "operator",
+                  reason: str | None = None) -> bool:
     """Record operator-approved actions for a run. Actions must be typed
     ('type:target', e.g. 'push:origin/main') — free prose never matches at
-    run time, so it is rejected here rather than silently failing at 3am."""
+    run time, so it is rejected here rather than silently failing at 3am.
+    `reason` is additive (spec-295 REQ-07): when truthy it is sanitized and
+    stored on each grant entry; omitted, every entry stays byte-identical to
+    the pre-reason shape (no `reason` key at all) — the hotfix:prod-* escape
+    reads this field, ordinary grants never set it."""
     import math
     if not actions or any(not ACTION_PAT.match(a) for a in actions):
         return False
@@ -626,11 +631,14 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
         auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
         grants = auto.setdefault("grants", {})
         for a in actions:
-            grants[a] = {
+            entry = {
                 "granted_at": granted_at,
                 "expires_at": granted_at + ttl_hours * 3600,
                 "granted_by": granted_by,
             }
+            if reason:
+                entry["reason"] = sanitize_reason(reason)
+            grants[a] = entry
         # a grant resolves any matching pending record
         auto["pending"] = [p for p in auto.get("pending", [])
                            if p["action"] not in grants]
@@ -1289,7 +1297,8 @@ def main(argv: list[str]) -> int:
         run_id = args[0]
         actions = [args[i + 1] for i, a in enumerate(args) if a == "--action"]
         ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
-        if not grant_actions(store, run_id, actions, ttl_hours=ttl):
+        reason = _flag(args, "--reason") or None
+        if not grant_actions(store, run_id, actions, ttl_hours=ttl, reason=reason):
             print("GRANT-REJECTED: actions must be typed 'type:target' "
                   "(e.g. push:origin/main) and non-empty")
             return 1
