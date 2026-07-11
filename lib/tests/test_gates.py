@@ -1147,3 +1147,24 @@ def test_analyze_api_prose_mention_not_a_path_clean() -> None:
     findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
                                        has_scenarios=False)
     assert findings == []
+
+
+# ── spec-295 Phase 1: REQ-05 backward-compat regression (RED-first) ─────────
+# This is the standing guard that protects every other spec: it goes green
+# immediately on current (unmodified) code and MUST go RED the instant a
+# future change adds an unconditional record_pending or any other non-prod
+# check_grant store mutation. Written and green BEFORE any gates.py edit.
+
+def test_backward_compat_non_prod_action_no_promotions(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.grant_actions(store, "run-1", ["push:origin/main"])
+    # LOAD-BEARING assertion (adversary MEDIUM #7): exact byte-identical
+    # snapshot around a non-prod refusal — catches ANY rewrite or mutation,
+    # not just an added pending record.
+    before = store.read_bytes()
+    assert gates.check_grant(store, "run-1", "push:origin/other") is False
+    assert store.read_bytes() == before
+    # supplementary assertions
+    assert gates.list_pending(store, "run-1") == []
+    assert "_promotions" not in json.loads(store.read_text())
+    assert gates.check_grant(store, "run-1", "push:origin/main") is True
