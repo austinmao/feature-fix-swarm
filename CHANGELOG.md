@@ -6,6 +6,30 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.9.0 — review-gate v1.6.0: concurrent defect passes + reviewer context contract (2026-07-11)
+
+- **Concurrent passes:** Pass 1/2/3 + FULL-tier extra adversary are independent
+  (same `$DIFF`, no cross-reads) and now dispatch in parallel — Agent calls in
+  one message + `run_in_background` bash. STANDARD wall-clock ~13–20 min serial
+  → ~8 min (slowest-pass = 480s adversary timeout). Merge-and-rank and
+  refute-or-promote stay sequential (consume the merged finding set).
+- **Reviewer context contract (evidence-backed):** reviewers run FRESH — fed the
+  artifact (diff + read-only repo) and the fixed pass prompt, never the author's
+  reasoning trail. Cross-context review F1 28.6% vs 23.8% context-aware vs 24.6%
+  same-session self-review (arxiv 2603.12123): showing the reviewer the
+  production context makes it statistically indistinguishable from self-review.
+  Forbidden both ways: leaking author rationale into dispatch prompts, AND
+  starving the reviewer of the artifact — fresh ≠ less artifact.
+- **plan-decompose v1.2.0 — guarded codex invocation (hang prevention):** Steps
+  3 + 6 now mandate `timeout 540 codex exec … </dev/null >"$OUT_FILE"` with a
+  bare exit code (never `| tail`). Root cause of an observed 30+ min "review"
+  of a ~120-line plan: bare `codex exec` with stdin open blocks forever on
+  "Reading additional input from stdin…" — the run never started reasoning
+  (2-line session file, no agent message); the guarded retry finished in <9 min.
+  `RC=124` is fail-soft advisory-skip (downstream opus plan-checker still
+  gates). Prompt gains a scope line (no repo-tree/skill reads — plan text only),
+  killing the other big review-time multiplier: repo-wandering.
+
 ## v4.8.0 — refactor: /fix and /task-swarm become thin front-ends over /feature-implement (2026-07-11)
 
 Operator ask: one home for the delegation machinery. `/fix` had drifted into a

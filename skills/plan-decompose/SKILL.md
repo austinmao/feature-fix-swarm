@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
 description: "Turn a description or existing plan into tasks.md via autonomous eng review + codex gate — no speckit interview"
-version: "1.1.0"
+version: "1.2.0"
 permissions:
   filesystem: write
   network: false
@@ -127,16 +127,35 @@ Write the plan output to `$SPEC_DIR/plan.md`.
 
 Skip entirely when `--no-codex` passed.
 
-Invoke `Skill: codex` (consult mode). Pin the adversary tier when the codex skill
-exposes invocation-scoped overrides: `-c model="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"`
-`-c model_reasoning_effort="${PLAN_ADVERSARY_EFFORT:-xhigh}"` — same adversary tier
-as review-gate and `scripts/gsd/plan-adversary.sh`. Embed the full content of
-`plan.md` verbatim in the prompt:
+**Guarded direct invocation (v1.2.0, MANDATORY — hang prevention).** Do NOT
+invoke codex bare or via a consult-skill wrapper. A bare `codex exec` with stdin
+open blocks forever on "Reading additional input from stdin..." — observed as a
+30+ min silent hang on a ~120-line plan (the run left a 2-line session file with
+no agent message; the guarded retry finished in <9 min). Contract:
+
+```bash
+timeout 540 codex exec --sandbox read-only \
+  -c model="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}" \
+  -c model_reasoning_effort="${PLAN_ADVERSARY_EFFORT:-xhigh}" \
+  "$PROMPT" </dev/null >"$OUT_FILE" 2>&1
+RC=$?   # bare exit code — NEVER pipe the live call (`| tail` masks the timeout kill)
+```
+
+- `</dev/null` is load-bearing (stdin-wait hang); `timeout 540` caps the call
+  (`gtimeout` on macOS without coreutils `timeout`).
+- `RC=124` → fail-soft: log `[plan-decompose] codex plan review TIMEOUT — advisory
+  skipped` and continue; downstream gates (opus plan-checker, review-gate) still hold.
+- Read findings/verdict from `$OUT_FILE` after exit — never stream-parse the live run.
+
+Embed the full content of `plan.md` verbatim in the prompt (the scope line
+prevents repo-wandering, the other major review-time multiplier):
 
 > "You are a brutally honest senior engineer. Review this engineering plan adversarially.
 > Find: logical gaps, unstated assumptions, missing error handling, overcomplexity,
 > missing edge cases, unclear ownership, contradictions. Score each finding:
 > CRITICAL / HIGH / MEDIUM / LOW.
+> Do NOT read repository trees (.claude/, .codex/, skills/, agents/) or invoke
+> any review skill — review ONLY the plan text below.
 >
 > THE PLAN:
 > <plan.md content verbatim>
@@ -196,7 +215,9 @@ This writes `$SPEC_DIR/tasks.md` with annotated task list.
 
 Skip entirely when `--no-codex` passed.
 
-Mirrors `/feature` Step 3.6 exactly. Run `codex exec` on `tasks.md` vs `spec.md`:
+Mirrors `/feature` Step 3.6 exactly. Run `codex exec` on `tasks.md` vs `spec.md`
+under the same guarded invocation contract as Step 3 (`timeout 540`, `</dev/null`,
+output file, bare exit code):
 
 Check:
 - US coverage (every spec.md US has at least 1 task)
