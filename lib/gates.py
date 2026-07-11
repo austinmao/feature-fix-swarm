@@ -722,6 +722,41 @@ def record_promotion(store: Path, run_id: str, *, from_env: str, to_env: str,
     return True
 
 
+def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
+                    artifact, now: float | None = None) -> bool:
+    """Fail-closed read (mirrors check_grant): True ONLY for an exact,
+    unexpired, from_env=='staging' (when to_env=='prod'), to_env, surface,
+    and artifact match. A missing OR malformed `_promotions` namespace
+    (non-dict top level, non-list run entry, non-dict record, missing/
+    non-numeric/non-finite expiry) returns False without raising, crashing,
+    or writing — pure read, same posture as check_grant/check_preflight."""
+    import math
+    promotions = _load_store(store).get("_promotions")
+    if not isinstance(promotions, dict):
+        return False
+    records = promotions.get(run_id)
+    if not isinstance(records, list):
+        return False
+    effective_now = now if now is not None else _now()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("to_env") != to_env:
+            continue
+        if to_env == "prod" and rec.get("from_env") != "staging":
+            continue
+        if rec.get("surface") != surface:
+            continue
+        if rec.get("artifact") != artifact:
+            continue
+        exp = rec.get("expires_at")
+        if not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            continue
+        if effective_now < exp:
+            return True
+    return False
+
+
 def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
     """An unlisted gate hit mid-run: STOP, but leave a durable record so the
     morning resume is one `grant` command (long-run-continuity port)."""

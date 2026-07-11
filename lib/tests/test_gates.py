@@ -1323,3 +1323,110 @@ def test_record_promotion_nonlist_run_entry_raises(tmp_path) -> None:
         assert False, "expected SystemExit"
     except SystemExit:
         pass
+
+
+# ── spec-295 Phase 1: check_promotion — fail-closed read (RED → GREEN) ──────
+
+def test_check_promotion_true_for_fresh_exact_match(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    import time as _t
+    t = _t.time()
+    assert gates.check_promotion(store, "run-1", "prod", "web", _GOOD_ARTIFACT,
+                                 now=t) is True
+
+
+def test_check_promotion_false_after_expiry(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    import time as _t
+    now = _t.time()
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"], ttl_hours=1.0)
+    assert gates.check_promotion(store, "run-1", "prod", "web", _GOOD_ARTIFACT,
+                                 now=now) is True
+    assert gates.check_promotion(store, "run-1", "prod", "web", _GOOD_ARTIFACT,
+                                 now=now + 3601) is False
+
+
+def test_check_promotion_false_on_artifact_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    other = "myapp@sha256:" + "9" * 64
+    assert gates.check_promotion(store, "run-1", "prod", "web", other) is False
+
+
+def test_check_promotion_false_on_surface_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-1", "prod", "cp", _GOOD_ARTIFACT) is False
+
+
+def test_check_promotion_false_on_to_env_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-1", "staging", "web",
+                                 _GOOD_ARTIFACT) is False
+
+
+def test_check_promotion_requires_from_env_staging_for_prod(tmp_path) -> None:
+    # adversary CRITICAL #2: only a staging->prod record satisfies a
+    # to_env=="prod" precondition — dev->prod / prod->prod never count.
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="dev", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-1", "prod", "web",
+                                 _GOOD_ARTIFACT) is False
+
+
+def test_check_promotion_malformed_ledger_fails_closed(tmp_path) -> None:
+    good_rec = {"from_env": "staging", "to_env": "prod", "surface": "web",
+               "artifact": _GOOD_ARTIFACT, "evidence_ids": ["stg-web"]}
+    cases = [
+        {"_promotions": "not-a-dict"},
+        {"_promotions": {"run-1": "not-a-list"}},
+        {"_promotions": {"run-1": [{**good_rec, "recorded_at": 1.0}]}},          # missing expires_at
+        {"_promotions": {"run-1": [{**good_rec, "recorded_at": 1.0,
+                                    "expires_at": "soon"}]}},                     # non-numeric
+        {"_promotions": {"run-1": [{**good_rec, "recorded_at": 1.0,
+                                    "expires_at": float("inf")}]}},               # infinite
+    ]
+    for i, seeded in enumerate(cases):
+        store = tmp_path / f"malformed-{i}.json"
+        store.write_text(json.dumps(seeded))
+        assert gates.check_promotion(store, "run-1", "prod", "web",
+                                     _GOOD_ARTIFACT) is False, f"case {i}"
+
+
+def test_check_promotion_false_when_promotions_key_missing(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    before = store.read_bytes()
+    assert gates.check_promotion(store, "run-1", "prod", "web",
+                                 _GOOD_ARTIFACT) is False
+    assert store.read_bytes() == before  # pure read — never migrates the store
+
+
+def test_check_promotion_false_no_record_for_run_id(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-none", "prod", "web",
+                                 _GOOD_ARTIFACT) is False
