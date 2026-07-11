@@ -1784,3 +1784,90 @@ def test_cli_grant_no_reason_flag_records_no_reason(tmp_path) -> None:
     data = json.loads((tmp_path / "evidence.json").read_text())
     entry = data["_autonomy"]["run-9"]["grants"]["push:origin/main"]
     assert "reason" not in entry
+
+
+# ── spec-295 Phase 1 Plan 03 Task 2: hotfix:prod-* bypass (RED → GREEN) ──────
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k hotfix -q
+# failed: a granted+reasoned hotfix:prod-* action fell through to check_grant's
+# ordinary (non-prod) True path with NO bypass record written at all — the
+# `_autonomy[run]["hotfix_bypasses"]` KeyError below, and the CLI printed a
+# plain `GRANTED:` line containing no `EMERGENCY` token. GREEN run after
+# implementation: same command, 8 passed.
+
+def test_hotfix_granted_with_reason_bypasses_promote_and_records(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="db is down")
+    # no promote record present at all — the bypass is authorized anyway
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
+    data = json.loads(store.read_text())
+    bypasses = data["_autonomy"]["run-1"]["hotfix_bypasses"]
+    assert len(bypasses) == 1
+    assert bypasses[0]["action"] == "hotfix:prod-cp"
+    assert bypasses[0]["reason"] == "db is down"
+
+
+def test_hotfix_granted_without_reason_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"])  # no reason
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-HOTFIX-GRANT" in p["reason"] for p in pend)
+
+
+def test_hotfix_no_grant_refuses_and_records_pending(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-HOTFIX-GRANT" in p["reason"] for p in pend)
+
+
+def test_hotfix_reason_sanitized_in_bypass_record(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"],
+                        reason="db down\x1b[31mFAKE-BANNER\x1b[0m")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
+    data = json.loads(store.read_text())
+    reason = data["_autonomy"]["run-1"]["hotfix_bypasses"][0]["reason"]
+    assert "\x1b" not in reason
+
+
+def test_hotfix_does_not_require_promote_evidence(tmp_path) -> None:
+    # no --artifact given at all, no promote record anywhere — hotfix is the
+    # sanctioned bypass of check_promotion, not a variant of it.
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="db down")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
+
+
+def test_non_hotfix_prod_action_still_requires_promote(tmp_path) -> None:
+    # Plan 02 behavior intact: an ordinary prod verb is unaffected by the
+    # hotfix branch and still needs a promote record.
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+
+
+def test_cli_check_grant_hotfix_emergency_banner(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "hotfix:prod-cp",
+             "--reason", "db down"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "hotfix:prod-cp"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert "EMERGENCY" in r.stdout
+    assert "hotfix:prod-cp" in r.stdout
+
+
+def test_cli_check_grant_hotfix_without_grant_refuses(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "hotfix:prod-cp"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1

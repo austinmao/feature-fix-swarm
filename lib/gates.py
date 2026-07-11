@@ -856,6 +856,50 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
     return "NO-PROMOTE-EVIDENCE"
 
 
+def _check_hotfix_bypass(store: Path, run_id: str, action: str,
+                         *, now: float | None = None) -> bool:
+    """The ONE sanctioned promote-precondition escape (REQ-07/EDGE-004): a
+    hotfix:prod-* action authorizes ONLY on an operator grant carrying a
+    non-empty reason — deliberately does NOT call check_promotion, since
+    bypassing the promote requirement is the entire point of the escape.
+    No autonomous code path may call grant_actions on a hotfix:prod- action
+    (process control, V4 access control) — the only way a hotfix grant
+    exists is an explicit operator `grant ... --reason`."""
+    if not check_grant(store, run_id, action, now=now):
+        record_pending(store, run_id, action,
+                       "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
+                       "grant carrying a non-empty --reason")
+        return False
+    entry = (_load_store(store).get("_autonomy", {})
+             .get(run_id, {}).get("grants", {}).get(action)) or {}
+    reason = entry.get("reason")
+    if not reason:
+        record_pending(store, run_id, action,
+                       "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
+                       "grant carrying a non-empty --reason")
+        return False
+    record_hotfix_bypass(store, run_id, action, reason)
+    return True
+
+
+def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> bool:
+    """Durable audit record for a hotfix:prod-* bypass (REQ-07/EDGE-004) —
+    mirrors record_pending's lock/save shape. Append-only: each bypass
+    (even a repeat during the same incident) gets its own entry, unlike
+    record_pending's dedup — every use of the escape is individually
+    auditable."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        auto.setdefault("hotfix_bypasses", []).append({
+            "action": action,
+            "reason": sanitize_reason(reason),
+            "recorded_at": _now(),
+        })
+        _save_store(store, data)
+    return True
+
+
 def check_grant_prod(store: Path, run_id: str, action: str, artifact,
                      *, manifest: dict | None = None,
                      now: float | None = None) -> bool:
@@ -864,7 +908,15 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
     record proving `artifact` passed staging on this surface, on top of the
     ordinary grant. Every non-prod action returns check_grant(...) UNCHANGED
     with zero side effects (REQ-05). record_pending fires ONLY on this prod
-    path — check_grant itself stays pure (RESEARCH Pitfall 1)."""
+    path — check_grant itself stays pure (RESEARCH Pitfall 1).
+
+    hotfix:prod-* is the ONE sanctioned bypass of this entire precondition
+    (REQ-07/EDGE-004) — routed to _check_hotfix_bypass BEFORE the ordinary
+    prod-prefix dispatch, since 'hotfix:prod-' is not in PROD_ACTION_PREFIXES
+    and never requires promote evidence."""
+    if action.startswith("hotfix:prod-"):
+        return _check_hotfix_bypass(store, run_id, action, now=now)
+
     surface = _prod_surface(action)
     if surface is None:
         return check_grant(store, run_id, action, now=now)
@@ -1329,6 +1381,19 @@ def main(argv: list[str]) -> int:
     if cmd == "check-grant":
         run_id, action = args[0], _flag(args, "--action")
         safe = sanitize_reason(action)
+        if action.startswith("hotfix:prod-"):
+            if check_grant_prod(store, run_id, action, None):
+                entry = (_load_store(store).get("_autonomy", {})
+                        .get(run_id, {}).get("grants", {}).get(action)) or {}
+                reason = sanitize_reason(entry.get("reason", ""))
+                print(f"EMERGENCY BYPASS: {safe} authorized WITHOUT promote "
+                      f"evidence (run {run_id}) — reason: {reason}")
+                return 0
+            print(f"NOT-GRANTED: {safe} (run {run_id}) — hotfix:prod-* is the "
+                  "sanctioned emergency escape and requires an operator "
+                  f"`gates.py grant {run_id} --action '{action}' --reason "
+                  "\"...\"`, STOP, and wait for operator")
+            return 1
         prod_surface = _prod_surface(action)
         if prod_surface is not None:
             artifact = _flag(args, "--artifact") or None
