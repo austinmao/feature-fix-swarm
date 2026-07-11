@@ -1,7 +1,7 @@
 ---
 name: feature-implement
-description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. Ruflo executor removed in v2.0.0 (spec 002)."
-version: "2.5.0"
+description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. v2.6.0 adds --adhoc \"<task>\": same walls + finish tail over gsd-quick, no seeded spec/plan required — /fix and /task-swarm are thin front-ends over this skill."
+version: "2.6.0"
 allowed-tools:
   - Read
   - Edit
@@ -17,14 +17,19 @@ allowed-tools:
 - After `/feature-spec` or `/spec-decompose` produced a seeded gsd project (`.planning/`)
   or a legacy `specs/NNN/tasks.md`
 - "implement NNN", "run tasks for NNN", "execute feature NNN"
+- **Adhoc (v2.6.0):** a bounded task with NO spec/plan — `--adhoc "<task>"` runs the
+  same walls + gsd loop + finish tail over `/gsd-quick`. `/fix` and `/task-swarm`
+  route here; the delegation machinery lives ONLY in this skill.
 - Resumes gracefully — gsd `STATE.md` is the resume point (`/gsd-resume-work`)
 
 ## Invocation
 
 ```
-/feature-implement [NNN]               # execute the current gsd phase for spec NNN
-/feature-implement [NNN] --autonomous  # unattended: preflight PASS + grant ledger required
-/feature-implement [NNN] --dry-run     # print resolved phase + gates, don't execute
+/feature-implement [NNN]                    # execute the current gsd phase for spec NNN
+/feature-implement [NNN] --autonomous       # unattended: preflight PASS + grant ledger required
+/feature-implement [NNN] --dry-run          # print resolved phase + gates, don't execute
+/feature-implement --adhoc "<task>"         # v2.6.0: no spec/plan — gsd-quick + walls + finish tail
+/feature-implement --adhoc "<task>" --autonomous   # unattended adhoc (same fail-closed walls)
 ```
 
 ## Workflow
@@ -33,19 +38,29 @@ allowed-tools:
 
 ```bash
 SPEC_ARG="${ARGUMENTS:-}"
-AUTONOMOUS=0; DRY_RUN=0
+AUTONOMOUS=0; DRY_RUN=0; ADHOC=0; ADHOC_TASK=""
 for arg in $(printf '%s\n' "$SPEC_ARG"); do
   case "$arg" in
     --autonomous) AUTONOMOUS=1 ;;
     --dry-run)    DRY_RUN=1 ;;
+    --adhoc)      ADHOC=1 ;;   # the quoted task text follows; capture it whole, not word-split
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
   esac
 done
-if [ -z "${SPEC_ID:-}" ]; then
-  SPEC_ID=$(git branch --show-current 2>/dev/null | grep -oE '^[0-9]{3}' | head -1)
+if [ $ADHOC -eq 1 ]; then
+  # ADHOC_TASK = everything after --adhoc except trailing flags (Claude: extract
+  # the quoted task from the invocation — it is the gsd-quick task verbatim).
+  # Ledger key: kebab slug of the first ~4 task words, prefixed adhoc-.
+  ADHOC_SLUG=$(printf '%s' "$ADHOC_TASK" | tr '[:upper:]' '[:lower:]' \
+    | tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-//;s/-$//')
+  RUN_ID="adhoc-${ADHOC_SLUG:-task}"
+else
+  if [ -z "${SPEC_ID:-}" ]; then
+    SPEC_ID=$(git branch --show-current 2>/dev/null | grep -oE '^[0-9]{3}' | head -1)
+  fi
+  [ -z "$SPEC_ID" ] && { echo "ERROR: no spec ID. Usage: /feature-implement NNN | --adhoc \"<task>\""; exit 1; }
+  RUN_ID="spec-${SPEC_ID%%-*}"   # ledger key — same as /feature-spec + /task-swarm
 fi
-[ -z "$SPEC_ID" ] && { echo "ERROR: no spec ID. Usage: /feature-implement NNN"; exit 1; }
-RUN_ID="spec-${SPEC_ID%%-*}"   # ledger key — same as /feature-spec + /task-swarm
 
 # gates.py resolver (3 install shapes)
 GATES_PY=""
@@ -82,10 +97,16 @@ At every operator-gated action mid-run (push, merge, deploy, flip, secret-use):
 granted action. (Ship itself is walled inside gsd's `code_review_command` —
 `scripts/gsd/review-gate-command.sh` REVISEs without a `ship:gsd` grant.)
 
-### Step 3: Ensure gsd project
+### Step 3: Ensure gsd project (spec mode) / skip (adhoc mode)
 
-If `.planning/ROADMAP.md` is missing, the spec was never seeded — run `/feature-spec NNN`
-(or `/spec-decompose NNN`) first; ERROR out, do not improvise a project.
+**Adhoc mode skips this step** — no seeded project is required; `/gsd-quick` plans,
+executes, and verifies the single task itself. If `.planning/config.json` exists its
+gate seams apply as below; if not, gsd-quick runs on gsd defaults (the test-command
+gate in Step 5 still holds).
+
+Spec mode: if `.planning/ROADMAP.md` is missing, the spec was never seeded — run
+`/feature-spec NNN` (or `/spec-decompose NNN`) first; ERROR out, do not improvise
+a project.
 
 Config contract (seeded by `/feature-spec` from `templates/gsd-config.base.json`):
 `workflow.test_command = bash scripts/gsd/gates-test-command.sh`,
@@ -95,7 +116,14 @@ without them gsd runs ungated.
 
 ### Step 4: Execute
 
-Read `.planning/ROADMAP.md` for the first unchecked phase N.
+**Adhoc mode:** run the single task through gsd-quick (plan → execute → verify on
+one quick task). TDD applies: failing repro/behavior test first (RED), then the
+change (GREEN) — the gsd executor's commit trail must show both.
+
+- Interactive session: invoke the `/gsd-quick "<task>"` slash command directly.
+- `--autonomous` / headless: `TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<task>"`
+
+**Spec mode:** read `.planning/ROADMAP.md` for the first unchecked phase N.
 
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive session: invoke the `/gsd-execute-phase N` slash command directly.
@@ -123,9 +151,16 @@ gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
 - the `gsd-phase-evidence-gate.sh` PreToolUse hook blocks ROADMAP/STATE
   phase-complete flips without that evidence (`GATES_BYPASS=1` = operator only)
 
+**Adhoc mode:** there is no phase evidence — the completion authority is the
+`workflow.test_command` gate (`scripts/gsd/gates-test-command.sh`) that gsd-quick's
+verify step runs: gates.py evidence, not self-report. A quick task whose test
+gate did not run is NOT done.
+
 ### Step 6: Finish tail (default; `--no-finish` opts out)
 
-browser gate → `/review-gate` → ship (grant-walled) → `/canary`. In order:
+browser gate → `/review-gate` → ship (grant-walled) → `/canary`. Applies to BOTH
+modes — an adhoc fix gets the same review-gate + grant-walled ship as a spec run
+(this is where `/fix`'s old inline verify/review steps now live). In order:
 
 1. **Browser gate (fail-closed on web-touch):** `bash scripts/gsd/canary-gate.sh`
    — diffs touching web surfaces require a fresh headless Canary session whose

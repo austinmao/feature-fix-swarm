@@ -1,7 +1,7 @@
 ---
 name: task-swarm
-description: "Take ANY task description end-to-end autonomously: plan-eng-review → codex gate → gsd project seed (spec-decompose) → preflight → grant ledger → /feature-implement --autonomous (gsd execute-phase → QA → review-gate → ship → canary). Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
-version: "2.3.0"
+description: "Take ANY task description end-to-end autonomously: plan-decompose → /preflight → /autonomy-grant (MAX-AUTH) → /feature-implement --autonomous. v3.0.0: pure sequencing front-end over feature-implement — like /fix but with full planning; zero machinery of its own. Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
+version: "3.0.0"
 allowed-tools:
   - Read
   - Write
@@ -13,10 +13,13 @@ allowed-tools:
 
 # /task-swarm "<task description>"
 
-One command from free-text instruction to shipped, canaried change. Thin
-orchestrator — every stage is an existing skill; this skill owns only the
-sequencing, the run-state, and the grant ledger (v2.3.0: MAX-AUTH auto-grant
-by default — zero planned stops; `--gated` restores the review stop).
+One command from free-text instruction to shipped, canaried change. Pure
+sequencing front-end — every stage IS an existing skill (`plan-decompose`,
+`preflight`, `autonomy-grant`, `feature-implement`); this skill owns only the
+ordering, the spec-id capture, and the results.md wrapper line. `/fix` is the
+sibling front-end for the no-planning case (`/feature-implement --adhoc`).
+MAX-AUTH auto-grant by default — zero planned stops; `--gated` restores the
+review stop.
 
 ```
 /task-swarm "add rate limiting to the webhook endpoints"
@@ -33,8 +36,8 @@ by default — zero planned stops; `--gated` restores the review stop).
 ## Flags
 
 ```
-/task-swarm "<task>"                 # full autonomous run (ZERO stops — MAX-AUTH auto-grant, v2.3.0)
-/task-swarm "<task>" --gated         # review + approve the gate list at Step 3 (pre-v2.3.0 behavior)
+/task-swarm "<task>"                 # full autonomous run (ZERO stops — MAX-AUTH auto-grant)
+/task-swarm "<task>" --gated         # review + approve the gate list at Step 3
 /task-swarm "<task>" --attended     # skip grant; gates prompt during implement
 /task-swarm "<task>" --no-swarm     # single-planner decomposition passthrough
 /task-swarm "<task>" --dry-run     # print the stage plan, execute nothing
@@ -61,53 +64,28 @@ STOP on any gate failure — surface findings; do not push a broken plan forward
 
 ### Step 2 — preflight (always; while the operator is still around)
 
-Same contract as `/feature-spec` Step 5: author `specs/NNN/preflight.json` from
-the RUN's real footprint (env/secret NAMES + service probes — never values),
-then:
+Capture the spec id from Step 1's output: `NNN` = BARE NUMERIC id (strip any
+`-name` suffix — ledger convention is `spec-057`, never `spec-057-name`);
+`RUN_ID="spec-${NNN}"`.
 
-```bash
-# NNN = BARE NUMERIC spec id plan-decompose just created (capture from Step 1's
-# output; strip any -name suffix — ledger convention is spec-057, never spec-057-name)
-NNN="<bare numeric spec id from Step 1>"
-GATES_PY=""
-for _cand in \
-  "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
-  "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
-  "$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
-  [ -f "$_cand" ] && GATES_PY="$_cand" && break
-done
-[ -z "$GATES_PY" ] && { echo "[task-swarm] FATAL: gates.py not found — run setup.sh"; exit 1; }
-RUN_ID="spec-${NNN}"
-python3 "$GATES_PY" preflight "specs/${NNN}/preflight.json" --run "$RUN_ID"
-```
+Then invoke the `preflight` skill for `RUN_ID` — it owns the whole contract
+(author `specs/NNN/preflight.json` from the RUN's real footprint, env/secret
+NAMES + real probes — never values; `gates.py preflight` fail-closed). Fail →
+fix now (fetch secret, start service, re-auth), re-run until `PREFLIGHT-PASS`.
+`--autonomous` later refuses to start without this.
 
-Fail → fix now (fetch secret, start service, re-auth), re-run until
-`PREFLIGHT-PASS`. `--autonomous` later refuses to start without this.
+Model ladder comes from the seeded `.planning/config.json`; feature-implement's
+walls re-run `model-fallback.sh` before any spawn. Nothing to do here — just
+don't hand-pin models in prompts.
 
-Model ladder comes from the seeded `.planning/config.json` (haiku=light /
-sonnet=standard / opus=heavy tiers + fable/opus pins for planner/verifier).
-`scripts/gsd/model-fallback.sh` already ran at seed time (spec-decompose Step 2)
-and runs again inside feature-implement's walls — unavailable premium pins
-(fable off OAuth) are rewritten to opus before any spawn. Nothing to do here;
-just don't hand-pin models in prompts.
+### Step 3 — grant ledger (MAX-AUTH auto-grant DEFAULT; --gated to review; skip with --attended)
 
-### Step 3 — grant ledger (v2.3.0: MAX-AUTH auto-grant DEFAULT; --gated to review; skip with --attended)
-
-Walk tasks.md and enumerate every operator-gated action in typed form
-(`push:origin/<branch>`, `merge:pr`, `deploy:<target>`, `flip:<FLAG>`,
-`restart:<svc>`, `secret-use:<NAME>`, `migrate:<desc>`), each with a one-line
-rollback. **Default (MAX-AUTH):** record ALL of them immediately — launching
-without `--gated` is the approval; the list + rollbacks go in the Step 5
-report. **`--gated`:** present ONE screen and record on explicit yes:
-
-```bash
-python3 "$GATES_PY" grant "$RUN_ID" --action <a1> --action <a2> ... --ttl-hours 24
-```
-
-Declined actions (under `--gated`) are simply not granted — the run
-stops+records `pending` only there; everything else proceeds. In BOTH modes
-the safety floor holds: entries are exact typed actions walked from tasks.md,
-and an action not enumerated still stops + records `pending`.
+Invoke the `autonomy-grant` skill for `RUN_ID` — it owns enumeration (typed
+`type:target` actions walked from the plan, each with a one-line rollback),
+MAX-AUTH mode (default here: record ALL immediately, list + rollbacks go in the
+Step 5 report), the `--gated` review screen, and the recording command. In BOTH
+modes the safety floor holds: entries are exact typed actions, and an action
+not enumerated still stops + records `pending`.
 
 ### Step 4 — autonomous implement + finish tail
 
@@ -132,7 +110,8 @@ whole run (`inline-mechanical` = trip-wire work the host drained inline —
 see `feature-spec` SKILL.md § Orchestrator self-discipline; target 0).
 Cross-check with `python3 lib/gates.py delegation-audit <transcript>`.
 Report `pending` actions (if any) with the exact resume command:
-`python3 "$GATES_PY" grant $RUN_ID --action <a>` then `/feature-implement NNN --autonomous`.
+`python3 lib/gates.py grant $RUN_ID --action <a>` (resolve gates.py per
+feature-implement Step 1's 3 install shapes) then `/feature-implement NNN --autonomous`.
 Close the loop with `/gsd-extract-learnings` (fail-soft).
 
 ## Rules
