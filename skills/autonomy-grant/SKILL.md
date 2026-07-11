@@ -1,7 +1,7 @@
 ---
 name: autonomy-grant
 description: "Pre-approve the operator gates an unattended run will hit — prod push, deploy, merge, DNS — so the run proceeds through them without stopping. Use at plan approval, while the operator is present, to build the typed approval ledger that /feature-implement --autonomous checks mechanically."
-version: "1.0.0"
+version: "1.1.0"
 ---
 
 # /autonomy-grant
@@ -38,6 +38,15 @@ unapproved external gates.
 
 2. **Present the list to the operator** — one screen, one decision. Include
    the rollback for each action. Wait for explicit yes.
+
+   **MAX-AUTH mode (v1.1.0 — the /feature-spec and /task-swarm default):**
+   when the operator pre-authorized at launch (ran the pipeline without
+   `--gated`), skip this stop — record the full enumerated list immediately
+   and put the list + rollbacks in the completion report instead of a
+   blocking screen. This is NOT a wildcard: the ledger still holds exact
+   typed entries walked from the plan, and an action not enumerated still
+   stops. The launch flag moves the approval MOMENT to minute 1; it does not
+   remove the floor.
 
 3. **Record the grant:**
 
@@ -82,6 +91,8 @@ unapproved external gates.
 
 - Blanket grants (`push:*`) — that is `SKIP_OPERATOR_GATES=1` with extra
   steps; if you want no floor, set that env var and accept its blast radius.
+  (MAX-AUTH mode is not this: it pre-approves an enumerated list at launch —
+  the recorded entries stay exact and unlisted actions still stop.)
 - Granting mid-run over chat ("yes push it") without recording — the next
   gate check still fails and the run stalls again; record via `grant`.
 - Enumerating gates from memory instead of the plan — walk the tasks; a

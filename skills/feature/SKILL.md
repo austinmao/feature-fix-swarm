@@ -22,15 +22,16 @@ allowed-tools:
 /feature-implement NNN --autonomous    # swarm implement → QA → review-gate → ship → canary (ledger-gated)
 ```
 
-One operator stop total: the grant screen at the end of `/feature-spec`.
+Zero planned stops by default (v4.7.0 MAX-AUTH: gates auto-granted at the end
+of `/feature-spec`; pass `--gated` there to review the list first).
 
 ## Back-compat behavior (this release only)
 
 When invoked, print the deprecation banner above, then chain the replacements:
 
 1. If `specs/NNN/tasks.md` is missing → invoke the `feature-spec` skill with
-   `$ARGUMENTS` (it ends at the grant screen — the operator is present by
-   definition when calling /feature interactively).
+   `$ARGUMENTS` (it ends at the grant ledger — auto-granted by default; the
+   operator is present by definition when calling /feature interactively).
 2. Then invoke the `feature-implement` skill with `NNN --auto` (attended mode —
    the operator invoked /feature, so gates prompt normally; pass `--autonomous`
    yourself if a fresh preflight + grants exist).

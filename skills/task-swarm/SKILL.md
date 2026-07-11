@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Take ANY task description end-to-end autonomously: plan-eng-review → codex gate → gsd project seed (spec-decompose) → preflight → grant ledger → /feature-implement --autonomous (gsd execute-phase → QA → review-gate → ship → canary). Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
-version: "2.2.0"
+version: "2.3.0"
 allowed-tools:
   - Read
   - Write
@@ -15,7 +15,8 @@ allowed-tools:
 
 One command from free-text instruction to shipped, canaried change. Thin
 orchestrator — every stage is an existing skill; this skill owns only the
-sequencing, the run-state, and the single operator stop (the grant screen).
+sequencing, the run-state, and the grant ledger (v2.3.0: MAX-AUTH auto-grant
+by default — zero planned stops; `--gated` restores the review stop).
 
 ```
 /task-swarm "add rate limiting to the webhook endpoints"
@@ -23,7 +24,8 @@ sequencing, the run-state, and the single operator stop (the grant screen).
      ├─ 1. /plan-decompose  (plan-eng-review → codex plan gate → swarm
      │      spec-decompose → specs/NNN/tasks.md → codex score gate)
      ├─ 2. preflight        (emit specs/NNN/preflight.json → gates.py preflight → PASS)
-     ├─ 3. grant screen     (enumerate typed gates from tasks.md → operator yes → ledger)
+     ├─ 3. grant ledger     (enumerate typed gates from tasks.md → AUTO-GRANT
+     │                       [--gated: operator yes first] → ledger)
      └─ 4. /feature-implement NNN --autonomous
             (roster swarm impl → QA loop → review-gate → ship → canary, ledger-gated)
 ```
@@ -31,7 +33,8 @@ sequencing, the run-state, and the single operator stop (the grant screen).
 ## Flags
 
 ```
-/task-swarm "<task>"                 # full autonomous run (one stop: grant screen)
+/task-swarm "<task>"                 # full autonomous run (ZERO stops — MAX-AUTH auto-grant, v2.3.0)
+/task-swarm "<task>" --gated         # review + approve the gate list at Step 3 (pre-v2.3.0 behavior)
 /task-swarm "<task>" --attended     # skip grant; gates prompt during implement
 /task-swarm "<task>" --no-swarm     # single-planner decomposition passthrough
 /task-swarm "<task>" --dry-run     # print the stage plan, execute nothing
@@ -88,19 +91,23 @@ and runs again inside feature-implement's walls — unavailable premium pins
 (fable off OAuth) are rewritten to opus before any spawn. Nothing to do here;
 just don't hand-pin models in prompts.
 
-### Step 3 — grant screen (skip with --attended)
+### Step 3 — grant ledger (v2.3.0: MAX-AUTH auto-grant DEFAULT; --gated to review; skip with --attended)
 
 Walk tasks.md and enumerate every operator-gated action in typed form
 (`push:origin/<branch>`, `merge:pr`, `deploy:<target>`, `flip:<FLAG>`,
 `restart:<svc>`, `secret-use:<NAME>`, `migrate:<desc>`), each with a one-line
-rollback. Present ONE screen. On explicit yes:
+rollback. **Default (MAX-AUTH):** record ALL of them immediately — launching
+without `--gated` is the approval; the list + rollbacks go in the Step 5
+report. **`--gated`:** present ONE screen and record on explicit yes:
 
 ```bash
 python3 "$GATES_PY" grant "$RUN_ID" --action <a1> --action <a2> ... --ttl-hours 24
 ```
 
-Declined actions are simply not granted — the run stops+records `pending` only
-there; everything else proceeds.
+Declined actions (under `--gated`) are simply not granted — the run
+stops+records `pending` only there; everything else proceeds. In BOTH modes
+the safety floor holds: entries are exact typed actions walked from tasks.md,
+and an action not enumerated still stops + records `pending`.
 
 ### Step 4 — autonomous implement + finish tail
 
@@ -130,9 +137,9 @@ Close the loop with `/gsd-extract-learnings` (fail-soft).
 
 ## Rules
 
-- **One operator stop.** The grant screen is the only planned interruption; a
-  second stop means either preflight was skipped or a gate wasn't enumerated —
-  both are defects, name them in the report.
+- **Zero planned stops (MAX-AUTH default); one with `--gated`.** Any
+  unplanned stop means either preflight was skipped or a gate wasn't
+  enumerated — both are defects, name them in the report.
 - **Never bypass a child skill's gate.** This skill sequences; it holds no
   authority of its own. `SKIP_OPERATOR_GATES=1` is not this skill's business.
 - **Stops are cheap, silent failure is not.** An ungranted gate stops that path
@@ -145,4 +152,4 @@ Close the loop with `/gsd-extract-learnings` (fail-soft).
 - Granting `push:*` style blankets — typed exact actions only (ledger rejects
   wildcards by design).
 - Running with `--attended` overnight — that's just an unattended stall with
-  extra steps; use the grant screen.
+  extra steps; use the grant ledger (default auto-grant, or `--gated`).

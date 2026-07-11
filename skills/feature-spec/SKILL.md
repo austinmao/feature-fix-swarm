@@ -1,7 +1,7 @@
 ---
 name: feature-spec
-description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.3.0
+description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
+version: 2.4.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -48,8 +48,8 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 │  Phase 5: preflight (v1.2.0 — DEFAULT)                          │
 │    └─ specs/NNN/preflight.json proven PASS while operator here  │
 │                                                                 │
-│  Phase 6: autonomy grant (v1.2.0 — DEFAULT)                     │
-│    └─ typed gate ledger recorded → --autonomous never stalls    │
+│  Phase 6: autonomy grant (v2.4.0 — MAX-AUTH: auto-granted)      │
+│    └─ typed ledger auto-recorded; --gated to review the list    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -123,10 +123,11 @@ continue. This step NEVER blocks the spec.
 ## Usage
 
 ```
-/feature-spec NNN                # full pipeline through decompose + preflight + grant
+/feature-spec NNN                # full pipeline; every enumerated gate AUTO-GRANTED (MAX-AUTH default, v2.4.0)
+/feature-spec NNN --gated        # review + approve the enumerated gate list at Step 6 (pre-v2.4.0 behavior)
 /feature-spec NNN --no-clarify   # skip clarify phase
 /feature-spec NNN --no-preflight # skip preflight (NOT recommended before --autonomous)
-/feature-spec NNN --no-grant     # skip grant ledger (attended runs)
+/feature-spec NNN --no-grant     # skip grant ledger entirely (attended runs)
 /feature-spec NNN --no-swarm     # single-planner decomposition
 /feature-spec NNN --dry-run      # preview what would be generated, no writes
 ```
@@ -318,6 +319,7 @@ NO_CLARIFY=0
 DRY_RUN=0
 NO_PREFLIGHT=0   # v1.2.0: preflight is DEFAULT-ON (--no-preflight to skip)
 NO_GRANT=0       # v1.2.0: autonomy-grant enumeration is DEFAULT-ON (--no-grant to skip)
+GATED=0          # v2.4.0: MAX-AUTH is DEFAULT — Step 6 auto-grants every enumerated gate; --gated restores the review stop
 NO_SWARM=0       # legacy no-op (spec-decompose v2.0.0 is gsd-native; flag kept for compat)
 SPEC_ID=""
 
@@ -329,6 +331,7 @@ for arg in $(printf '%s\n' "${SPEC_ARG}"); do
     --no-clarify)   NO_CLARIFY=1 ;;
     --no-preflight) NO_PREFLIGHT=1 ;;
     --no-grant)     NO_GRANT=1 ;;
+    --gated)        GATED=1 ;;
     --no-swarm)     NO_SWARM=1 ;;
     --dry-run)      DRY_RUN=1 ;;
     [0-9]*)         SPEC_ID="$arg" ;;
@@ -337,8 +340,15 @@ done
 
 if [ $DRY_RUN -eq 1 ]; then
   echo "[feature-spec] --dry-run: would run speckit.specify → speckit.plan → speckit.clarify → spec-decompose → preflight → grant"
-  echo "[feature-spec] Spec: ${SPEC_ID:-<new>}  preflight=$((1-NO_PREFLIGHT)) grant=$((1-NO_GRANT)) swarm=$((1-NO_SWARM))"
+  echo "[feature-spec] Spec: ${SPEC_ID:-<new>}  preflight=$((1-NO_PREFLIGHT)) grant=$((1-NO_GRANT)) gated=$GATED swarm=$((1-NO_SWARM))"
   exit 0
+fi
+
+# v2.4.0 launch notice — the authorization moment is HERE, not hours later at
+# Step 6. Running without --gated IS the operator's max-auth approval.
+if [ $GATED -eq 0 ] && [ $NO_GRANT -eq 0 ]; then
+  echo "[feature-spec] MAX-AUTH (default): every operator gate enumerated at Step 6 will be auto-granted (TTL 24h)."
+  echo "[feature-spec] Pass --gated to review the list before it is recorded, or --no-grant to skip the ledger."
 fi
 ```
 
@@ -574,25 +584,36 @@ Requirements are proven NOW, while the operator is present — never discovered 
    Re-run until `PREFLIGHT-PASS`. An unattended run later requires this recorded PASS
    (<24h) via `check-preflight`.
 
-### Step 6 — autonomy grant (v1.2.0, DEFAULT — skip only with --no-grant)
+### Step 6 — autonomy grant (v2.4.0: MAX-AUTH auto-grant DEFAULT; --gated to review; --no-grant to skip)
 
 The whole point of the pipeline is `/feature-implement ${SPEC_ID} --autonomous` not
-stalling. Build the ledger NOW, one screen, one decision:
+stalling. Build the ledger NOW — by default with zero stops:
 
 1. Walk tasks.md + plan.md and enumerate EVERY operator-gated action the run will
    perform, in typed `type:target` form (`push:origin/main`, `merge:pr`,
    `deploy:vercel-web`, `flip:FLAG`, `restart:svc`, `secret-use:NAME`,
    `migrate:desc`). Walk the artifacts — never enumerate from memory.
-2. Present the list to the operator with a one-line rollback per action. Wait for
-   explicit yes. (This is the ONE stop that buys the unattended night.)
+2. **Default (MAX-AUTH):** record ALL enumerated actions immediately — no stop.
+   Launching without `--gated` IS the approval (the launch notice announced it
+   at minute 1, while the operator was present); the enumerated list with a
+   one-line rollback per action goes into the completion summary instead of a
+   blocking screen.
+   **`--gated`:** present the list with a one-line rollback per action and wait
+   for explicit yes before recording (pre-v2.4.0 behavior). If the operator
+   declines some actions, grant the rest — the run will stop+record `pending`
+   only at the declined ones.
 3. Record:
 
    ```bash
    python3 "$GATES_PY" grant "$RUN_ID" --action <a1> --action <a2> ... --ttl-hours 24
    ```
 
-If the operator declines some actions, grant the rest — the run will stop+record
-`pending` only at the declined ones.
+**The safety floor is identical in both modes.** Grants are exact typed entries
+walked from the plan — MAX-AUTH is not `push:*`. An action the plan did NOT
+enumerate (a novel mid-run discovery) still stops and records `pending`.
+Max-auth widens what is foreseen-and-approved, never what is allowed unforeseen.
+Grants stay run-bound + TTL'd; if an auto-granted action should NOT run, stop
+before `/feature-implement` and rebuild the ledger with `--gated`.
 
 ### Completion summary
 
@@ -606,7 +627,10 @@ Artifacts:
   specs/NNN/plan.md          — unit test list + TDD test map + integration tests + phase gates
   specs/NNN/tasks.md         — swarm-decomposed tasks with roster [agent:] tags + review-gates
   specs/NNN/preflight.json   — env/service manifest, PREFLIGHT-PASS recorded for run spec-NNN
-  grant ledger               — N typed actions granted, TTL 24h (run spec-NNN)
+  grant ledger               — N typed actions granted (MAX-AUTH auto | --gated reviewed), TTL 24h (run spec-NNN)
+
+Granted gates (MAX-AUTH default — review here; rebuild with --gated if any should not run):
+  <type:target> — rollback: <one line>        (one row per granted action)
 
 Test contracts baked in:
   BDD Scenarios:     N defined  (pass = feature ships; one happy + one error per story)

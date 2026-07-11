@@ -6,6 +6,34 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.7.0 — feat: MAX-AUTH auto-grant default — authorization moves to launch (2026-07-11)
+
+Operator pain: the grant screen fired at the END of `/feature-spec` (hours
+after launch, after specify→plan→clarify→decompose), stalling the pipeline
+until the operator returned. The *enumeration* of gates genuinely needs the
+finished plan — but the *approval* never did. This release moves the approval
+moment to minute 1 and makes maximum authorization the default.
+
+- **feature-spec v2.4.0 — MAX-AUTH default + `--gated` opt-out.** Launching
+  without `--gated` IS the approval: a launch notice announces it, and Step 6
+  then auto-records every gate enumerated from plan.md/tasks.md — no blocking
+  screen. The granted list + one-line rollback per action lands in the
+  completion summary for review. `--gated` restores the pre-v2.4.0
+  present-and-wait screen; `--no-grant` still skips the ledger entirely.
+- **task-swarm v2.3.0 — zero planned stops.** Step 3 auto-grants by default;
+  `--gated` passes through to the review screen. Rules/diagram updated from
+  "one operator stop" to "zero planned stops".
+- **autonomy-grant v1.1.0 — MAX-AUTH mode documented.** Distinct from the
+  banned `push:*` wildcard: the ledger still holds exact typed entries walked
+  from the plan, TTL'd and run-bound, and an action NOT enumerated still
+  stops + records `pending`. The safety floor is unchanged in both modes —
+  max-auth widens what is foreseen-and-approved, never what is allowed
+  unforeseen.
+- **feature stub** — wording updated to match.
+
+No `lib/gates.py` changes: grant/check-grant/pending mechanics are identical;
+only the moment the operator says yes moved.
+
 ## v4.6.0 — feat: provenance review contract + merge terminal-state backstop + pipeline-skill wiring (spec 005, 2026-07-11)
 
 - **review-gate v1.5.0 — provenance finding contract** (adapted from
