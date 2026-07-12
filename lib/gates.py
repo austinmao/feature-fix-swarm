@@ -971,7 +971,8 @@ def list_pending(store: Path, run_id: str) -> list[dict]:
                 .get(run_id, {}).get("pending", []))
 
 
-def preflight_check(requirements: list[dict], timeout: int = 30) -> dict:
+def preflight_check(requirements: list[dict], timeout: int = 30, *,
+                    store: Path | None = None, run_id: str | None = None) -> dict:
     """Prove env vars present and services reachable BEFORE an unattended run.
     Env checks report presence only — a secret value never enters the result.
     Probes execute for real (exit 0 = reachable). Empty manifest fails: an
@@ -990,6 +991,13 @@ def preflight_check(requirements: list[dict], timeout: int = 30) -> dict:
                 detail = f"exit {proc.returncode}"
             except subprocess.TimeoutExpired:
                 ok, detail = False, f"timeout after {timeout}s"
+        elif kind == "staging-proof":
+            artifact = req.get("artifact")
+            if store is None or run_id is None:
+                ok, detail = False, "NO-STORE-AVAILABLE: no store/run_id to check the promote ledger"
+            else:
+                ok = check_promotion(store, run_id, "prod", name, artifact)
+                detail = "promoted" if ok else "NO-PROMOTE-EVIDENCE: no fresh staging->prod promote record"
         else:
             ok, detail = False, f"unknown kind: {kind}"
         results.append({"kind": kind, "name": name, "ok": ok, "detail": detail})
@@ -1444,7 +1452,7 @@ def main(argv: list[str]) -> int:
         run_id = _flag(args, "--run", "default")
         with open(manifest) as f:
             requirements = json.load(f)
-        result = preflight_check(requirements)
+        result = preflight_check(requirements, store=store, run_id=run_id)
         record_preflight(store, run_id, result)
         for r in result["results"]:
             mark = "ok" if r["ok"] else "FAIL"
