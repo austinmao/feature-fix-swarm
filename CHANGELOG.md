@@ -6,6 +6,27 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.11.0 — re-port the dropped OpenWiki finish-tail ship-stage (2026-07-12)
+
+The v3.21.0 conditional OpenWiki ship-stage (refresh + `git add openwiki/`
+before the ship commit, warn+continue, silent no-op in repos without
+`openwiki/`) was silently dropped in the v4.0 finish-tail rewrite and stayed
+missing through v4.5 — every consumer ship since was wiki-blind unless the
+spec author touched the wiki by hand (openclaw handoff
+`2026-07-12-ffs-openwiki-ship-tail-handoff.md`).
+
+### Added
+- `skills/feature-implement/SKILL.md` (v2.7.0): finish-tail item 3 — OpenWiki
+  ship-stage between the QA gates and `/review-gate` → ship, restoring the
+  v3.21.0 semantics verbatim: diff-to-page mapping is LLM work, the marked
+  bash block only stages; **best-effort by design** (FR-013/EDGE-007/008 —
+  the wiki stage never blocks PR creation). Same
+  `<!-- openwiki-wiring:ship-stage:begin/end -->` marker convention.
+- `tests/bats/openwiki-ship-stage.bats` (OWS-001..003): drop-guard — markers
+  present, block is warn+continue and stages `openwiki/`, stage ordered
+  before ship. A future finish-tail rewrite that drops the stage now fails CI
+  instead of drifting silently.
+
 ## v4.10.0 — dead-CLI hang guards: run-bounded lib + cli-hang-guard hook (2026-07-12)
 
 A spec-298 "30-minute adversarial review" was a dead-process wait, not review
