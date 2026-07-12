@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.5.0"
+version: "1.6.0"
 ---
 
 # /review-gate
@@ -12,13 +12,25 @@ active harness so the reviewer is always an independent model family.
 > **Harness rule:** if you are already in Codex, `review-gate` runs with `claude`.
 > If you are already in Claude, `review-gate` runs with `codex`.
 
+> **Reviewer context contract (v1.6.0):** every reviewer runs FRESH — a new
+> process/sub-agent fed the artifact (diff, and where the reviewer is agentic, a
+> read-only repo) plus the fixed pass prompt, NEVER the author's reasoning,
+> conversation history, or plan rationale. This is evidence-backed, not vibes:
+> fresh cross-context review F1 28.6% vs 23.8% when the reviewer is shown the
+> production context, vs 24.6% same-session self-review (arxiv 2603.12123 — the
+> context-aware reviewer is statistically indistinguishable from self-review).
+> Two failure modes, both forbidden: leaking author context into a reviewer
+> dispatch prompt (anchors the reviewer to the author's blind spots), and
+> starving the reviewer of the ARTIFACT (diff/spec/code) in the name of "low
+> context" — fresh means no reasoning trail, not less artifact.
+
 ## When to run
 
 - End of every implementation phase
 - Before `/ship` on high-blast-radius PRs (multi-tenant, infra, auth, payments, RLS, cron)
 - Any time you want a second opinion from a different model family
 
-Cost: ~$2 · Time: ~13 min at STANDARD (less at LIGHT, more at FULL) · Returns: structured findings list with severity
+Cost: ~$2 · Time: ~8 min at STANDARD with concurrent passes (v1.6.0; was ~13 min serial — less at LIGHT, more at FULL) · Returns: structured findings list with severity
 
 ## Pipeline
 
@@ -244,6 +256,17 @@ directives to the executor:
 The honest-verifier pass below is NOT tier-scoped: tier selection sizes the DEFECT passes
 only and never suppresses an otherwise-eligible honest-verifier — its existing skip
 conditions (no spec resolvable, `GSD_REQUIRED=0`) are unchanged at every tier.
+
+### Run the defect passes CONCURRENTLY (v1.6.0)
+
+Pass 1, Pass 2, Pass 3, and the FULL-tier extra adversary are independent — each
+consumes the same `$DIFF` and none reads another's output (merge happens after
+all complete). Do NOT run them serially. Dispatch: Pass 1 + Pass 3 as parallel
+Agent calls in ONE message; Pass 2 (and the FULL-tier adversary) as
+`run_in_background` bash in the same turn. Wall-clock drops from sum-of-passes
+(~13–20+ min serial) to slowest-single-pass (the 480s adversary timeout cap).
+Only Merge-and-rank and the FULL-tier refute-or-promote round wait on all
+passes — those stay sequential by design (they consume the merged finding set).
 
 ### Findings queue: capability probe + resolved-sig consult
 

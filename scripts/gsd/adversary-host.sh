@@ -13,6 +13,12 @@
 # hostile prompt can't drive writes/exec; claude -p runs non-interactive,
 # where tool permission prompts auto-deny.
 
+# Wall-clock bounding: run_bounded (timeout -> gtimeout -> python3 -> refuse
+# rc-124). NEVER run the CLI unwrapped — an unbounded hang is a silent forever
+# block (2026-07-12 dead-codex forensics); a refused/timed-out call returns
+# 124 and the callers' existing fail-open paths fire.
+. "$(dirname "${BASH_SOURCE[0]}")/run-bounded.sh"
+
 detect_orchestrator_host() {
   if [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_HOME:-}" ] || [ -n "${CODEX_AGENT:-}" ]; then
     echo "codex"
@@ -39,43 +45,23 @@ adversary_kind_for_host() {
 # resolved bin is absent (fail-soft signal to the caller).
 adversary_invoke() {
   local kind="$1" timeout_s="$2" model="$3" effort="$4" prompt="$5"
-  # BSD/macOS ships no `timeout` binary — guard it same as review-gate-command.sh,
-  # fall back to coreutils `gtimeout`, else run unwrapped rather than hard-fail.
-  local timeout_cmd=""
-  if command -v timeout >/dev/null 2>&1; then
-    timeout_cmd="timeout"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    timeout_cmd="gtimeout"
-  fi
   if [ "$kind" = "codex" ]; then
     local bin="${ADVERSARY_BIN_CODEX:-codex}"
     if ! command -v "$bin" >/dev/null 2>&1; then
       return 127
     fi
-    if [ -n "$timeout_cmd" ]; then
-      "$timeout_cmd" "$timeout_s" "$bin" exec \
-        -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
-        -c 'sandbox_mode="read-only"' \
-        "$prompt" </dev/null
-    else
-      "$bin" exec \
-        -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
-        -c 'sandbox_mode="read-only"' \
-        "$prompt" </dev/null
-    fi
+    run_bounded "$timeout_s" "$bin" exec \
+      -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
+      -c 'sandbox_mode="read-only"' \
+      "$prompt" </dev/null
     return $?
   else
     local bin="${ADVERSARY_BIN_CLAUDE:-claude}"
     if ! command -v "$bin" >/dev/null 2>&1; then
       return 127
     fi
-    if [ -n "$timeout_cmd" ]; then
-      env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
-        "$timeout_cmd" "$timeout_s" "$bin" -p "$prompt" --model "$model" </dev/null
-    else
-      env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
-        "$bin" -p "$prompt" --model "$model" </dev/null
-    fi
+    run_bounded "$timeout_s" env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+      "$bin" -p "$prompt" --model "$model" </dev/null
     return $?
   fi
 }

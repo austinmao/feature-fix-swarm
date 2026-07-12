@@ -199,10 +199,13 @@ EOF
   grep -q '^## Adversarial plan review (gpt-5.6-sol xhigh)$' "$HIGH"
 }
 
-@test "adversary_invoke runs unwrapped when neither timeout nor gtimeout is present (claude branch)" {
+@test "adversary_invoke stays bounded via python3 rung when neither timeout nor gtimeout is present (claude branch)" {
+  # pre-v4.10.0 this asserted the "runs unwrapped" fallback — that branch was
+  # the dead-codex unbounded-hang bug and is gone; run-bounded.sh now takes
+  # the python3 rung (fast stub completes normally, hung CLI would be reaped).
   NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-no-gtimeout-path"
   mkdir -p "$NO_TIMEOUT_DIR"
-  for bin in bash dirname grep cat wc head tail tr env; do
+  for bin in bash dirname grep cat wc head tail tr env python3; do
     b="$(command -v "$bin" 2>/dev/null)"
     [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
   done

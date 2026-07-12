@@ -147,3 +147,22 @@ JSON
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-fable-5" ]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "opus" ]
 }
+
+@test "FALLBACK-012: real-CLI probes are wall-clock bounded (dead-CLI hang guard)" {
+  # No GSD_MODEL_PROBE_CMD override -> the lever hits its real-CLI branch.
+  # Shim claude/codex hang (sleep 30); GSD_MODEL_PROBE_TIMEOUT=1 must reap them
+  # and read the probes as "unavailable" (fallback applied), never block.
+  # This wall runs at the top of /feature-implement — pre-fix it had NO timeout
+  # on any branch (2026-07-12 dead-codex forensics).
+  mkdir -p "$TMP/shim"
+  cat > "$TMP/shim/claude" <<'SH'
+#!/bin/sh
+sleep 30
+SH
+  cp "$TMP/shim/claude" "$TMP/shim/codex"
+  chmod +x "$TMP/shim/claude" "$TMP/shim/codex"
+  run env PATH="$TMP/shim:$PATH" GSD_MODEL_PROBE_TIMEOUT=1 bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UNAVAILABLE"* ]]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-4-8" ]
+}

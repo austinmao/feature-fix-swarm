@@ -42,6 +42,14 @@ CONFIG="$PLANNING_DIR/config.json"
 CACHE_DIR="${GSD_FALLBACK_CACHE:-$HOME/.cache/gsd-model-probe}"
 mkdir -p "$CACHE_DIR"
 
+# Wall-clock bound for the real-CLI probes. This lever runs as a WALL at the
+# top of /feature-implement — an unbounded probe hang stalls the run before
+# phase 1 (2026-07-12 dead-codex forensics: this was the only site with no
+# timeout on ANY branch). A bounded/refused probe reads as "unavailable",
+# which is the lever's existing fail-soft direction.
+. "$(dirname "${BASH_SOURCE[0]}")/run-bounded.sh"
+PROBE_TIMEOUT="${GSD_MODEL_PROBE_TIMEOUT:-120}"
+
 MARKER="$PLANNING_DIR/fable-fallback.json"
 FABLE="claude-fable-5"
 OPUS="claude-opus-4-8"
@@ -57,8 +65,8 @@ probe_claude_model() {
   if [ -n "$cmd" ]; then
     if $cmd "$model" >/dev/null 2>&1; then echo ok > "$cache"; else echo fail > "$cache"; fi
   else
-    if env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
-        claude -p "ok" --model "$model" --max-turns 1 >/dev/null 2>&1; then
+    if run_bounded "$PROBE_TIMEOUT" env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+        claude -p "ok" --model "$model" --max-turns 1 </dev/null >/dev/null 2>&1; then
       echo ok > "$cache"
     else
       echo fail > "$cache"
@@ -77,7 +85,7 @@ probe_codex_model() {
   if [ -n "$cmd" ]; then
     if $cmd "$model" >/dev/null 2>&1; then echo ok > "$cache"; else echo fail > "$cache"; fi
   else
-    if env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    if run_bounded "$PROBE_TIMEOUT" env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
         codex exec -c "model=\"$model\"" -c 'sandbox_mode="read-only"' "ok" </dev/null >/dev/null 2>&1; then
       echo ok > "$cache"
     else
