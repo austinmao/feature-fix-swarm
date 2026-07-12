@@ -1563,6 +1563,24 @@ def test_check_grant_prod_manifest_staging_none_refuses_no_staging_counterpart(t
     assert gates.check_grant_prod(store2, "run-1", "deploy:prod-n8n", _GOOD_ARTIFACT) is True
 
 
+def test_load_manifest_accepts_committed_parity_yaml_shape(tmp_path) -> None:
+    manifest_path = tmp_path / "parity-manifest.yaml"
+    manifest_path.write_text(
+        "surfaces:\n"
+        "  - surface: n8n\n"
+        "    staging_instance: \"none\"\n"
+        "    prod_instance: \"prod-n8n\"\n"
+        "    staging_artifact: \"n/a\"\n"
+        "    prod_artifact: \"n/a\"\n"
+        "    staging_migration_head: \"n/a\"\n"
+        "    prod_migration_head: \"n/a\"\n"
+    )
+
+    assert gates._load_manifest(str(manifest_path)) == {
+        "n8n": {"staging": "none"},
+    }
+
+
 def test_check_grant_prod_byte_identical_for_non_prod_action(tmp_path) -> None:
     # adversary MEDIUM #7: a non-prod action routes through check_grant_prod
     # with ZERO side effects — exact byte-identical store snapshot.
