@@ -812,8 +812,9 @@ def _prod_surface(action: str) -> str | None:
     (deploy/flip/migrate) routes through this one function (RESEARCH Pitfall
     3). Returns the surface substring after the matched prefix, or None when
     `action` is not a prod-mutating action at all (non-prod fast path)."""
+    folded_action = action.casefold()
     for prefix in PROD_ACTION_PREFIXES:
-        if action.startswith(prefix):
+        if folded_action.startswith(prefix):
             return action[len(prefix):]
     # Fail closed on common spelling variants of the same production target.
     # These aliases are not the canonical vocabulary, but routing them through
@@ -825,13 +826,14 @@ def _prod_surface(action: str) -> str | None:
         if not action.startswith(marker):
             continue
         target = action[len(marker):]
-        if target == "prod":
+        folded_target = target.casefold()
+        if folded_target == "prod":
             return ""  # invalid empty surface; promotion recording rejects it
-        if target.startswith("prod_"):
+        if folded_target.startswith("prod_"):
             return target[len("prod_"):]
-        if target == "production":
+        if folded_target == "production":
             return ""
-        if target.startswith(("production-", "production_")):
+        if folded_target.startswith(("production-", "production_")):
             return target[len("production-"):].lstrip("_")
     return None
 
