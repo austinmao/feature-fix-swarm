@@ -44,7 +44,10 @@ def test_prod_deploy_without_promote_evidence_is_refused(tmp_path) -> None:
 
 def test_prod_deploy_with_fresh_matching_promote_is_allowed(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    gates.record_gate_evidence(store, "stg-web", exit_code=0, cmd="pytest -q")
+    assert gates.run_gate(
+        store, "stg-web", ["python3", "-c", "raise SystemExit(0)"],
+        artifact=_GOOD_ARTIFACT,
+    ) == 0
     gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
     gates.record_promotion(
         store, "run-1", from_env="staging", to_env="prod",
@@ -56,7 +59,10 @@ def test_prod_deploy_with_fresh_matching_promote_is_allowed(tmp_path) -> None:
 
 def test_prod_deploy_with_stale_dev_source_promote_is_refused(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    gates.record_gate_evidence(store, "stg-web", exit_code=0, cmd="pytest -q")
+    assert gates.run_gate(
+        store, "stg-web", ["python3", "-c", "raise SystemExit(0)"],
+        artifact=_GOOD_ARTIFACT,
+    ) == 0
     gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
     # A dev->prod promote never satisfies the staging precondition, even with a
     # matching artifact — the from_env guard rejects it.

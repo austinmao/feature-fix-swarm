@@ -10,8 +10,9 @@ all skills.
 
 - **`lib/gates.py` promotion ledger:** adds validated, TTL-bounded `promote`
   records that bind an immutable artifact identity and staging evidence to an
-  environment transition. Mutable tags, empty evidence, and malformed or
-  expired records fail closed.
+  environment transition. Promotion evidence must come from `run-gate` and be
+  bound to the same immutable artifact; caller-recorded exit codes, mutable
+  tags, empty evidence, and malformed or expired records fail closed.
 - **Production grant precondition:** `deploy:prod-*`, `flip:prod-*`, and
   `migrate:prod-*` actions now require both their normal operator grant and a
   fresh artifact-matching promotion record. Refusals record typed reasons for

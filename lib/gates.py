@@ -10,6 +10,8 @@ Completion authority lives HERE, not in agent self-report:
 
 Usage (inline heredoc in SKILL.md):
     python3 lib/gates.py run-gate     T042 -- pytest -q     # PREFERRED: executes
+    python3 lib/gates.py run-gate stg-web --artifact name@sha256:<64hex> -- pytest -q
+                                                  # staging gate bound to artifact
     python3 lib/gates.py run-red      T041 -- pytest tests/test_new.py
     python3 lib/gates.py record-gate  T042 --exit 0 --cmd "pytest -q" \
         --before "6 passed" --after "8 passed"   # trusted-caller only
@@ -144,9 +146,14 @@ def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
         _save_store(store, data)
 
 
-def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> int:
+def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800, *,
+             artifact: str | None = None) -> int:
     """Execute the gate command and record the REAL exit code (P1: evidence
-    bound to the runner, not caller-supplied --exit). Returns the exit code."""
+    bound to the runner, not caller-supplied --exit). When `artifact` is
+    supplied, bind the runner-produced evidence to that immutable identity so
+    it can later satisfy a promotion check. Returns the exit code."""
+    if artifact is not None and not _valid_artifact(artifact):
+        raise ValueError("run-gate artifact must be an immutable digest or commit sha")
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     full = proc.stdout + proc.stderr
     tail = full[-2000:]
@@ -160,7 +167,7 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> 
     with _StoreLock(store):
         data = _load_store(store)
         entry = data.setdefault(task_id, {})
-        entry["gate"] = {
+        gate = {
             "exit_code": proc.returncode,
             "cmd": " ".join(cmd),
             "tests_before": "",
@@ -168,6 +175,9 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> 
             "failure_sig": failure_sig or (lines[-1] if lines and proc.returncode != 0 else ""),
             "executed_by": "run_gate",
         }
+        if artifact is not None:
+            gate["artifact"] = artifact
+        entry["gate"] = gate
         _save_store(store, data)
     return proc.returncode
 
@@ -668,16 +678,18 @@ def _valid_artifact(artifact) -> bool:
                 or ARTIFACT_SHA_PAT.fullmatch(artifact))
 
 
-def _evidence_resolves(data: dict, evidence_ids: list[str]) -> bool:
+def _evidence_resolves(data: dict, evidence_ids: list[str], artifact: str) -> bool:
     """True iff EVERY evidence_id names a top-level store key carrying a
-    SUCCESSFUL gate (adversary CRITICAL #1) — binds promote proof to real
-    recorded staging evidence, not caller-asserted strings. Schema ceiling:
-    the gate record has no artifact/surface field, so this proves
-    existence+success only, never that the gate ran against THIS artifact."""
+    successful runner-executed gate bound to this exact immutable artifact.
+    Caller-recorded `record-gate --exit 0` evidence is deliberately rejected:
+    a shell-capable agent can fabricate it, just as strict verify_done does."""
     if not evidence_ids:
         return False
     for eid in evidence_ids:
-        if data.get(eid, {}).get("gate", {}).get("exit_code") != 0:
+        gate = data.get(eid, {}).get("gate", {})
+        if (gate.get("exit_code") != 0
+                or gate.get("executed_by") != "run_gate"
+                or gate.get("artifact") != artifact):
             return False
     return True
 
@@ -726,7 +738,9 @@ def record_promotion(store: Path, run_id: str, *, from_env: str, to_env: str,
     recorded_at = _now()
     with _StoreLock(store):
         data = _load_store(store)
-        if not _evidence_resolves(data, evidence_ids):
+        if (not all(isinstance(value, str) and value.strip()
+                    for value in (from_env, to_env, surface))
+                or not _evidence_resolves(data, evidence_ids, artifact)):
             return False
         _promotions_ns(data, run_id).append({
             "from_env": from_env,
@@ -790,6 +804,7 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
 # precondition (fail-open by omission). Accepted, documented design risk —
 # see the threat register (T-01-03), not a bug to "fix" here.
 PROD_ACTION_PREFIXES = ("deploy:prod-", "flip:prod-", "migrate:prod-")
+PROD_ACTION_TYPES = ("deploy", "flip", "migrate")
 
 
 def _prod_surface(action: str) -> str | None:
@@ -800,6 +815,24 @@ def _prod_surface(action: str) -> str | None:
     for prefix in PROD_ACTION_PREFIXES:
         if action.startswith(prefix):
             return action[len(prefix):]
+    # Fail closed on common spelling variants of the same production target.
+    # These aliases are not the canonical vocabulary, but routing them through
+    # the promotion gate prevents a granted `deploy:prod` / `flip:prod_api` /
+    # `migrate:production-db` action from silently falling through to the
+    # ordinary non-production check_grant path.
+    for action_type in PROD_ACTION_TYPES:
+        marker = f"{action_type}:"
+        if not action.startswith(marker):
+            continue
+        target = action[len(marker):]
+        if target == "prod":
+            return ""  # invalid empty surface; promotion recording rejects it
+        if target.startswith("prod_"):
+            return target[len("prod_"):]
+        if target == "production":
+            return ""
+        if target.startswith(("production-", "production_")):
+            return target[len("production-"):].lstrip("_")
     return None
 
 
@@ -1215,7 +1248,19 @@ def main(argv: list[str]) -> int:
         return 0 if ok else 1
     if cmd == "run-gate":
         sep = args.index("--") if "--" in args else 1
-        rc = run_gate(store, args[0], args[sep + 1:] if "--" in args else args[1:])
+        gate_args = args[1:sep]
+        artifact = _flag(gate_args, "--artifact") or None
+        if "--artifact" in gate_args and artifact is None:
+            print("GATE-REJECTED: --artifact requires a value", file=sys.stderr)
+            return 1
+        try:
+            rc = run_gate(
+                store, args[0], args[sep + 1:] if "--" in args else args[1:],
+                artifact=artifact,
+            )
+        except ValueError as exc:
+            print(f"GATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
         print(f"GATE-EXIT {rc}")
         return rc
     if cmd == "run-red":
@@ -1369,7 +1414,12 @@ def main(argv: list[str]) -> int:
         run_id = args[0]
         from_env, to_env = _flag(args, "--from"), _flag(args, "--to")
         surface, artifact = _flag(args, "--surface"), _flag(args, "--artifact")
-        evidence_ids = [args[i + 1] for i, a in enumerate(args) if a == "--evidence"]
+        try:
+            evidence_ids = [args[i + 1] for i, a in enumerate(args)
+                            if a == "--evidence"]
+        except IndexError:
+            print("PROMOTE-REJECTED: --evidence requires a value", file=sys.stderr)
+            return 1
         try:
             ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
         except ValueError:

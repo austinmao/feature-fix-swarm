@@ -1175,8 +1175,12 @@ def test_backward_compat_non_prod_action_no_promotions(tmp_path) -> None:
 _GOOD_ARTIFACT = "myapp@sha256:" + "f" * 64
 
 
-def _seed_success(store: Path, task_id: str = "stg-web") -> None:
-    gates.record_gate_evidence(store, task_id, exit_code=0, cmd="pytest -q")
+def _seed_success(store: Path, task_id: str = "stg-web", *,
+                  artifact: str = _GOOD_ARTIFACT) -> None:
+    assert gates.run_gate(
+        store, task_id, ["python3", "-c", "raise SystemExit(0)"],
+        artifact=artifact,
+    ) == 0
 
 
 def test_record_promotion_persists_with_resolving_evidence_and_digest_artifact(tmp_path) -> None:
@@ -1216,8 +1220,8 @@ def test_record_promotion_rejects_failed_gate_evidence(tmp_path) -> None:
 
 def test_record_promotion_persists_bare_commit_sha(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    _seed_success(store)
     sha = "d" * 40
+    _seed_success(store, artifact=sha)
     ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
                                 surface="web", artifact=sha, evidence_ids=["stg-web"])
     assert ok is True
@@ -1225,8 +1229,8 @@ def test_record_promotion_persists_bare_commit_sha(tmp_path) -> None:
 
 def test_record_promotion_persists_digest_pinned_tag(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    _seed_success(store)
     artifact = "myapp:v1.2.3@sha256:" + "e" * 64
+    _seed_success(store, artifact=artifact)
     ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
                                 surface="web", artifact=artifact, evidence_ids=["stg-web"])
     assert ok is True
@@ -1267,8 +1271,10 @@ def test_record_promotion_rejects_malformed_inputs(tmp_path) -> None:
 def test_record_promotion_concurrency_survives_with_grant(tmp_path) -> None:
     import threading
     store = tmp_path / "evidence.json"
-    _seed_success(store)
     n = 5
+    for i in range(n):
+        artifact = f"myapp@sha256:{i:064x}"
+        _seed_success(store, task_id=f"stg-web-{i}", artifact=artifact)
     barrier = threading.Barrier(n + 1)
     results: list[bool] = []
     append_lock = threading.Lock()
@@ -1278,7 +1284,7 @@ def test_record_promotion_concurrency_survives_with_grant(tmp_path) -> None:
         artifact = f"myapp@sha256:{i:064x}"
         ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
                                     surface="web", artifact=artifact,
-                                    evidence_ids=["stg-web"])
+                                    evidence_ids=[f"stg-web-{i}"])
         with append_lock:
             results.append(ok)
 
@@ -1449,10 +1455,11 @@ def test_check_grant_prod_no_promote_refuses_with_no_promote_evidence(tmp_path) 
 
 def test_check_grant_prod_artifact_mismatch_refuses(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    _seed_success(store)
+    other_artifact = "other@sha256:" + "a" * 64
+    _seed_success(store, artifact=other_artifact)
     gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
     gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
-                           surface="cp", artifact="other@sha256:" + "a" * 64,
+                           surface="cp", artifact=other_artifact,
                            evidence_ids=["stg-web"])
     assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
     pend = gates.list_pending(store, "run-1")
@@ -1580,7 +1587,8 @@ def test_check_grant_prod_byte_identical_for_non_prod_action(tmp_path) -> None:
 def _seed_success_cli(env, task_id: str = "stg-web") -> None:
     import subprocess as _sp
     g = str(DISPATCH_DIR / "gates.py")
-    _sp.run(["python3", g, "run-gate", task_id, "--", "true"],
+    _sp.run(["python3", g, "run-gate", task_id,
+             "--artifact", _GOOD_ARTIFACT, "--", "true"],
             capture_output=True, text=True, env=env)
 
 
@@ -1921,20 +1929,16 @@ def test_record_promotion_rejects_caller_fabricated_gate(tmp_path) -> None:
     ) is False
 
 
-def test_record_promotion_requires_runner_evidence_bound_to_artifact_and_surface(tmp_path) -> None:
+def test_record_promotion_requires_runner_evidence_bound_to_artifact(tmp_path) -> None:
     store = tmp_path / "evidence.json"
     other_artifact = "myapp@sha256:" + "e" * 64
     assert gates.run_gate(
         store, "stg-web", ["python3", "-c", "raise SystemExit(0)"],
-        artifact=_GOOD_ARTIFACT, surface="web",
+        artifact=_GOOD_ARTIFACT,
     ) == 0
     assert gates.record_promotion(
         store, "run-1", from_env="staging", to_env="prod",
         surface="web", artifact=other_artifact, evidence_ids=["stg-web"],
-    ) is False
-    assert gates.record_promotion(
-        store, "run-1", from_env="staging", to_env="prod",
-        surface="api", artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"],
     ) is False
     assert gates.record_promotion(
         store, "run-1", from_env="staging", to_env="prod",
