@@ -490,7 +490,7 @@ for script in qa-swarm.sh ralph-retry.sh browser-proof.sh harness-audit.py; do
 done
 
 mkdir -p scripts/gsd scripts/hooks
-for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-command.sh gsd/consent-check.sh gsd/state-phase.sh gsd/mempalace gsd/plan-adversary.sh gsd/canary-gate.sh gsd/qa-coverage-adversary.sh gsd/adversary-host.sh gsd/security-surface.sh gsd/review-tier.sh gsd/liveness-check.sh gsd/learnings-harvest.sh gsd/model-equivalents.sh gsd/model-fallback.sh gsd/security-model-fence.sh gsd/assert-merged.sh hooks/gsd-phase-evidence-gate.sh; do
+for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-command.sh gsd/consent-check.sh gsd/state-phase.sh gsd/mempalace gsd/plan-adversary.sh gsd/canary-gate.sh gsd/qa-coverage-adversary.sh gsd/adversary-host.sh gsd/run-bounded.sh gsd/security-surface.sh gsd/review-tier.sh gsd/liveness-check.sh gsd/learnings-harvest.sh gsd/model-equivalents.sh gsd/model-fallback.sh gsd/security-model-fence.sh gsd/assert-merged.sh hooks/gsd-phase-evidence-gate.sh; do
   if [ "$SCRIPT_DIR/scripts/$gsd_script" -ef "scripts/$gsd_script" ]; then
     echo "  scripts/$gsd_script is the repo copy — skipping self-copy"
   else
@@ -501,7 +501,7 @@ for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-comma
 done
 
 mkdir -p scripts/hooks
-for hook in worktree-gc.sh post-implement-batch.sh delegation-enforcer.sh; do
+for hook in worktree-gc.sh post-implement-batch.sh delegation-enforcer.sh cli-hang-guard.sh; do
   if [ "$SCRIPT_DIR/scripts/hooks/$hook" -ef "scripts/hooks/$hook" ]; then
     echo "  scripts/hooks/$hook is the repo copy — skipping self-copy"
   else

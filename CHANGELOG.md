@@ -6,6 +6,60 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.10.0 — dead-CLI hang guards: run-bounded lib + cli-hang-guard hook (2026-07-12)
+
+A spec-298 "30-minute adversarial review" was a dead-process wait, not review
+time: a `codex` subprocess hung and the orchestrator blocked on it forever.
+Two independent defects fixed (forensics: the 2026-07-12 dead-codex handoff).
+
+### Added
+
+- **`scripts/gsd/run-bounded.sh`** — sourceable wall-clock bound primitive:
+  `run_bounded <secs> <cmd...>` resolves `timeout` → `gtimeout` → a portable
+  `python3 subprocess.run(timeout=)` rung (exits 124 on expiry, kills the
+  child) → REFUSES with rc 124 without running the command. External CLIs are
+  never executed unbounded, on any host shape. rc 124 feeds the callers'
+  existing timeout/fail-open paths, so a refused call degrades to a logged
+  skip instead of a silent forever-block. Installed into consumer repos by
+  setup.sh alongside the levers that source it.
+- **`scripts/hooks/cli-hang-guard.sh`** — PreToolUse (Bash) enforcement for
+  the defect that actually bit: the ORCHESTRATOR invoking codex ad-hoc from
+  its Bash tool, bypassing every lever guard. Blocks (exit 2) hang-prone
+  execution forms (`codex exec|review`, `claude -p/--print`) that carry no
+  visible bound and aren't a sanctioned lever invocation; version/status
+  probes pass. Fail-open on unparseable input; kill-switch
+  `CLI_HANG_GUARD=off`. Sibling of delegation-enforcer.sh; consumer repos
+  register it on PreToolUse `Bash`.
+- **Bats:** `run-bounded.bats` (per-rung ladder incl. refusal-without-running
+  + adversary/ship-gate integration), `cli-hang-guard.bats` (block/pass/
+  kill-switch/fail-open matrix), `model-fallback.bats` FALLBACK-012 (real-CLI
+  probe branch is bounded).
+
+### Changed
+
+- **`adversary-host.sh::adversary_invoke`** — the deliberate "run unwrapped
+  rather than hard-fail" branch (hit when neither `timeout` nor `gtimeout`
+  exists, i.e. every stock macOS/BSD host) is GONE; all invocations route
+  through `run_bounded`. The plan-adversary.bats test asserting unwrapped
+  execution now asserts the bounded python3 rung.
+- **`review-gate-command.sh`** — same: no-timeout branch removed; bound is
+  `GSD_REVIEW_TIMEOUT` (default 600s). A hung codex now yields the fail-soft
+  `APPROVED (fail-soft)` verdict instead of stalling the SHIP gate forever.
+- **`model-fallback.sh`** — the worst site (no timeout on ANY branch, runs as
+  a wall at the top of `/feature-implement`): both real-CLI probes now run
+  under `run_bounded "${GSD_MODEL_PROBE_TIMEOUT:-120}"` with `</dev/null`;
+  a reaped probe reads as "unavailable" (the lever's existing fail-soft
+  direction).
+
+### Open decision (surfaced, not silently chosen)
+
+On a coreutils-less host the refusal rung means the adversary is SKIPPED
+(logged, fail-open) — consistent with every caller's existing degrade
+philosophy. But the plan-adversary bounce is MANDATORY on high-blast plans
+(auth/RLS/payments): if skip-and-warn is the wrong default there, gate on
+rc 124 at the caller (plan-adversary.sh) and hard-stop with "install
+coreutils". run-bounded.sh stays a pure bounding primitive either way.
+
 ## v4.9.0 — review-gate v1.6.0: concurrent defect passes + reviewer context contract (2026-07-11)
 
 - **Concurrent passes:** Pass 1/2/3 + FULL-tier extra adversary are independent

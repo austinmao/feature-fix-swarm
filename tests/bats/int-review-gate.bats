@@ -58,8 +58,8 @@ setup() {
   grep -F 'never suppresses an otherwise-eligible honest-verifier' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: version bumped to 1.5.0" {
-  grep -F 'version: "1.5.0"' skills/review-gate/SKILL.md
+@test "INT-001: version bumped to 1.6.0" {
+  grep -F 'version: "1.6.0"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

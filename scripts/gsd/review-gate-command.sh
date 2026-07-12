@@ -60,13 +60,12 @@ PROMPT="Review this diff. Report ONLY CRITICAL or HIGH severity findings (securi
 ${DIFF}
 --- DIFF END ---"
 
-if command -v timeout >/dev/null 2>&1; then
-  OUTPUT="$(timeout 600 codex exec "$PROMPT" </dev/null 2>&1)"
-  rc=$?
-else
-  OUTPUT="$(codex exec "$PROMPT" </dev/null 2>&1)"
-  rc=$?
-fi
+# run_bounded: timeout -> gtimeout -> python3 -> refuse rc-124. Never
+# unwrapped — an unbounded hang here stalls the SHIP gate forever; rc!=0
+# degrades to the fail-soft APPROVED below (logged, not silent).
+. "$(dirname "${BASH_SOURCE[0]}")/run-bounded.sh"
+OUTPUT="$(run_bounded "${GSD_REVIEW_TIMEOUT:-600}" codex exec "$PROMPT" </dev/null 2>&1)"
+rc=$?
 
 if [ $rc -ne 0 ]; then
   echo '{"verdict":"APPROVED","note":"codex exec failed, fail-soft"}'
