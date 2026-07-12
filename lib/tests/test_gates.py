@@ -1871,3 +1871,40 @@ def test_cli_check_grant_hotfix_without_grant_refuses(tmp_path) -> None:
     r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "hotfix:prod-cp"],
                 capture_output=True, text=True, env=env)
     assert r.returncode == 1
+
+
+# ── spec-295 Phase 2: preflight staging-proof kind (RED → GREEN) ────────────
+
+def test_preflight_staging_proof_empty_ledger_fails(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    res = gates.preflight_check(
+        [{"kind": "staging-proof", "name": "web", "artifact": _GOOD_ARTIFACT}],
+        store=store, run_id="run-1")
+    assert res["pass"] is False
+    assert res["results"][0]["ok"] is False
+
+
+def test_preflight_staging_proof_ok_after_promote(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    res = gates.preflight_check(
+        [{"kind": "staging-proof", "name": "web", "artifact": _GOOD_ARTIFACT}],
+        store=store, run_id="run-1")
+    assert res["pass"] is True
+    assert res["results"][0]["ok"] is True
+
+
+def test_preflight_staging_proof_no_store_fails_closed(tmp_path) -> None:
+    res = gates.preflight_check(
+        [{"kind": "staging-proof", "name": "web", "artifact": _GOOD_ARTIFACT}])
+    assert res["pass"] is False
+    assert res["results"][0]["ok"] is False
+
+
+def test_preflight_unknown_kind_fails_closed(tmp_path) -> None:
+    res = gates.preflight_check([{"kind": "bogus", "name": "whatever"}])
+    assert res["pass"] is False
+    assert res["results"][0]["ok"] is False
