@@ -1908,3 +1908,52 @@ def test_preflight_unknown_kind_fails_closed(tmp_path) -> None:
     res = gates.preflight_check([{"kind": "bogus", "name": "whatever"}])
     assert res["pass"] is False
     assert res["results"][0]["ok"] is False
+
+
+# ── spec-295 review-gate hardening (RED → GREEN) ───────────────────────────
+
+def test_record_promotion_rejects_caller_fabricated_gate(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "stg-web", exit_code=0, cmd="pytest -q")
+    assert gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="web", artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"],
+    ) is False
+
+
+def test_record_promotion_requires_runner_evidence_bound_to_artifact_and_surface(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    other_artifact = "myapp@sha256:" + "e" * 64
+    assert gates.run_gate(
+        store, "stg-web", ["python3", "-c", "raise SystemExit(0)"],
+        artifact=_GOOD_ARTIFACT, surface="web",
+    ) == 0
+    assert gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="web", artifact=other_artifact, evidence_ids=["stg-web"],
+    ) is False
+    assert gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="api", artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"],
+    ) is False
+    assert gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="web", artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"],
+    ) is True
+
+
+def test_prod_action_spelling_variants_never_fall_through_to_plain_grant(tmp_path) -> None:
+    for action in ("deploy:prod", "flip:prod_api", "migrate:production-db"):
+        store = tmp_path / f"{action.replace(':', '-')}.json"
+        assert gates.grant_actions(store, "run-1", [action])
+        assert gates.check_grant_prod(store, "run-1", action, _GOOD_ARTIFACT) is False
+        assert gates.list_pending(store, "run-1")
+
+
+def test_cli_promote_trailing_evidence_flag_returns_typed_rejection(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main([
+        "promote", "run-1", "--from", "staging", "--to", "prod",
+        "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence",
+    ])
+    assert rc == 1
