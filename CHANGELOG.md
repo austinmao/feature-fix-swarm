@@ -6,6 +6,30 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.12.0 — promotion evidence and fail-closed production-action gates (2026-07-12)
+
+- **`lib/gates.py` promotion ledger:** adds validated, TTL-bounded `promote`
+  records that bind an immutable artifact identity and staging evidence to an
+  environment transition. Mutable tags, empty evidence, and malformed or
+  expired records fail closed.
+- **Production grant precondition:** `deploy:prod-*`, `flip:prod-*`, and
+  `migrate:prod-*` actions now require both their normal operator grant and a
+  fresh artifact-matching promotion record. Refusals record typed reasons for
+  missing evidence, artifact mismatch, expiry, and missing staging
+  counterparts; non-production grant behavior remains unchanged.
+- **Auditable hotfix escape:** `hotfix:prod-*` remains operator-granted,
+  requires a non-empty reason, emits a loud emergency banner, and writes a
+  durable bypass record instead of relying on an environment kill switch.
+- **Preflight staging proof:** `kind: staging-proof` requirements read the
+  promotion ledger and refuse empty, stale, or non-matching evidence.
+- **Protocol documentation:** adds the vendor-neutral 12-rule promotion
+  protocol and links it from `review-gate`, `preflight`, and
+  `feature-implement`.
+- **Acceptance coverage:** adds RED→GREEN unit and public acceptance tests for
+  promotion recording, production refusal/approval, typed failures, hotfix
+  auditing, staging-proof preflight, legacy-ledger compatibility, and protocol
+  shape.
+
 ## v4.11.0 — re-port the dropped OpenWiki finish-tail ship-stage (2026-07-12)
 
 The v3.21.0 conditional OpenWiki ship-stage (refresh + `git add openwiki/`
