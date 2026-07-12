@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. v2.6.0 adds --adhoc \"<task>\": same walls + finish tail over gsd-quick, no seeded spec/plan required — /fix and /task-swarm are thin front-ends over this skill."
-version: "2.6.0"
+version: "2.7.0"
 allowed-tools:
   - Read
   - Edit
@@ -158,7 +158,7 @@ gate did not run is NOT done.
 
 ### Step 6: Finish tail (default; `--no-finish` opts out)
 
-browser gate → `/review-gate` → ship (grant-walled) → `/canary`. Applies to BOTH
+browser gate → openwiki stage → `/review-gate` → ship (grant-walled) → `/canary`. Applies to BOTH
 modes — an adhoc fix gets the same review-gate + grant-walled ship as a spec run
 (this is where `/fix`'s old inline verify/review steps now live). In order:
 
@@ -171,8 +171,37 @@ modes — an adhoc fix gets the same review-gate + grant-walled ship as a spec r
    `bash scripts/gsd/qa-coverage-adversary.sh <results.json>` — opposite-CLI model
    lists user-facing flows the QA session missed; triage `MISSED:` lines before ship
    (fix or record as pendings — never silently drop).
-3. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke).
-4. **Merge execution (only with a `merge:pr` grant):** if a `/land-and-deploy`
+3. **OpenWiki ship-stage (conditional — warn+continue, re-ported from v3.21.0
+   after being dropped in the v4.0 rewrite):** if the consumer repo keeps
+   `openwiki/` at repo root, refresh the affected wiki pages from the run's
+   diff BEFORE the ship commit so the wiki lands in the same branch/PR. Repos
+   without `openwiki/` skip silently.
+   - Affected pages: `git diff --name-only <base>...HEAD` → map changed paths
+     to wiki pages exactly as `/openwiki-update` does (spec-index + Reality
+     refs); refresh Reality claims + meta stamps for THIS run's changes only.
+     The page refresh itself is YOUR (LLM) work in this step — the bash block
+     below does NOT author content, it only stages whatever wiki edits exist.
+   - Then stage via the block below. **Any failure here warns and continues —
+     the wiki stage never blocks PR creation (EDGE-007/008).**
+
+<!-- openwiki-wiring:ship-stage:begin -->
+```bash
+# warn+continue: wiki staging must NEVER block the ship/PR path
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -d "$ROOT/openwiki" ] || exit 0   # consumer repo without a wiki: silent no-op
+if [ -n "$(git status --porcelain -- "$ROOT/openwiki" 2>/dev/null)" ]; then
+  if git add "$ROOT/openwiki" 2>/dev/null; then
+    echo "openwiki: staged wiki updates for the ship commit"
+  else
+    echo "openwiki: stage failed — continuing without wiki update" >&2
+  fi
+fi
+exit 0
+```
+<!-- openwiki-wiring:ship-stage:end -->
+
+4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke).
+5. **Merge execution (only with a `merge:pr` grant):** if a `/land-and-deploy`
    skill is available in this session, use it to execute the granted merge
    (merge → CI/deploy wait → prod verify); else `gh pr merge` directly. EITHER
    path then runs `bash scripts/gsd/assert-merged.sh <pr-number>` as the
@@ -181,7 +210,7 @@ modes — an adhoc fix gets the same review-gate + grant-walled ship as a spec r
    landed — stop, report). After ship/merge completes: if a `/landing-report`
    skill is available, run it (read-only queue snapshot). Both skill references
    are fail-soft — sessions without them use the bare-`gh` path silently.
-5. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
+6. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
    persists this run's `.planning/**/learnings*.jsonl` to gbrain-or-archive and
    prints `<N> harvested`. ALWAYS exits 0 — a broken/unreachable memory backend
    never blocks ship (AC-003). Its harvested count belongs in the Step 7 report.
