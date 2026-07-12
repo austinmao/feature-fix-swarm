@@ -1947,7 +1947,10 @@ def test_record_promotion_requires_runner_evidence_bound_to_artifact(tmp_path) -
 
 
 def test_prod_action_spelling_variants_never_fall_through_to_plain_grant(tmp_path) -> None:
-    for action in ("deploy:prod", "flip:prod_api", "migrate:production-db"):
+    for action in (
+        "deploy:prod", "flip:prod_api", "migrate:production-db",
+        "deploy:PROD-web", "flip:Prod_api", "migrate:Production-db",
+    ):
         store = tmp_path / f"{action.replace(':', '-')}.json"
         assert gates.grant_actions(store, "run-1", [action])
         assert gates.check_grant_prod(store, "run-1", action, _GOOD_ARTIFACT) is False
