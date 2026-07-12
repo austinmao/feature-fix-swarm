@@ -21,8 +21,12 @@ all skills.
 - **Auditable hotfix escape:** `hotfix:prod-*` remains operator-granted,
   requires a non-empty reason, emits a loud emergency banner, and writes a
   durable bypass record instead of relying on an environment kill switch.
-- **Preflight staging proof:** `kind: staging-proof` requirements read the
-  promotion ledger and refuse empty, stale, or non-matching evidence.
+  - **Preflight staging proof:** `kind: staging-proof` requirements read the
+    promotion ledger and refuse empty, stale, or non-matching evidence.
+  - **Parity-manifest wiring:** `check-grant --manifest` accepts both the legacy
+    JSON map and the committed `surfaces:` YAML row shape without adding a
+    runtime dependency, so `staging_instance: none` reaches the fail-closed
+    `NO-STAGING-COUNTERPART` decision instead of failing at parse time.
 - **Protocol documentation:** adds the vendor-neutral 12-rule promotion
   protocol and links it from `review-gate`, `preflight`, and
   `feature-implement`.

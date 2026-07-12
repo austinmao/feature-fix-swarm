@@ -39,7 +39,7 @@ Usage (inline heredoc in SKILL.md):
                                                   # artifact identity to real
                                                   # recorded staging gate evidence
     python3 lib/gates.py check-grant run-42 --action deploy:prod-web \
-        --artifact name@sha256:<64hex> [--manifest parity.json]
+        --artifact name@sha256:<64hex> [--manifest parity.json|parity.yaml]
                                                   # prod actions (deploy/flip/
                                                   # migrate:prod-*) ALSO require
                                                   # a fresh staging->prod promote
@@ -1193,19 +1193,110 @@ def delegation_audit(transcript_text: str) -> dict:
             "inline_mechanical": inline_mechanical}
 
 
+def _manifest_scalar(raw: str, *, line_no: int) -> str:
+    """Parse the scalar subset used by the parity-manifest contract."""
+    value = raw.strip()
+    if not value:
+        raise ValueError(f"empty manifest scalar at line {line_no}")
+    if value.startswith('"'):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid quoted manifest scalar at line {line_no}") from exc
+        if not isinstance(parsed, str):
+            raise ValueError(f"manifest scalar must be text at line {line_no}")
+        return parsed
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            raise ValueError(f"invalid quoted manifest scalar at line {line_no}")
+        return value[1:-1].replace("''", "'")
+    # Inline comments begin only after whitespace, matching the simple scalar
+    # shape of the committed parity manifest without pretending to parse all YAML.
+    value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+    if not value:
+        raise ValueError(f"empty manifest scalar at line {line_no}")
+    return value
+
+
+def _normalize_manifest(data: dict) -> dict:
+    """Normalize legacy JSON maps and the committed `surfaces:` row shape."""
+    if "surfaces" not in data:
+        return data
+    rows = data.get("surfaces")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("manifest surfaces must be a non-empty list")
+    normalized: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("each manifest surface must be an object")
+        surface = row.get("surface")
+        staging = row.get("staging_instance", row.get("staging"))
+        if not isinstance(surface, str) or not surface.strip():
+            raise ValueError("each manifest surface needs a non-empty surface name")
+        if not isinstance(staging, str) or not staging.strip():
+            raise ValueError(f"manifest surface {surface!r} needs staging_instance")
+        if surface in normalized:
+            raise ValueError(f"duplicate manifest surface: {surface}")
+        normalized[surface] = {"staging": staging}
+    return normalized
+
+
+def _parse_parity_manifest_yaml(text: str) -> dict:
+    """Parse only the dependency-free YAML subset used by parity-manifest.yaml.
+
+    check-grant needs two fields: `surface` and `staging_instance`. Restricting
+    the parser to those flat rows keeps gates.py zero-install while malformed,
+    empty, and duplicate rows still fail closed.
+    """
+    in_surfaces = False
+    rows: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if not in_surfaces:
+            if stripped == "surfaces:":
+                in_surfaces = True
+            continue
+        if indent == 0:
+            break
+        surface_match = re.fullmatch(r"-\s+surface:\s*(.+)", stripped)
+        if surface_match:
+            if current is not None:
+                rows.append(current)
+            current = {
+                "surface": _manifest_scalar(surface_match.group(1), line_no=line_no),
+            }
+            continue
+        field_match = re.fullmatch(r"(staging_instance|staging):\s*(.+)", stripped)
+        if current is not None and field_match:
+            current["staging_instance"] = _manifest_scalar(
+                field_match.group(2), line_no=line_no,
+            )
+    if current is not None:
+        rows.append(current)
+    if not in_surfaces:
+        raise ValueError("YAML manifest must contain a top-level surfaces list")
+    return _normalize_manifest({"surfaces": rows})
+
+
 def _load_manifest(path: str) -> dict:
-    """Load a fixture staging-parity manifest for check-grant --manifest.
-    JSON only (stdlib, zero new install — real config/parity-manifest.yaml
-    format lands Phase 4). Raises ValueError on anything that doesn't parse
-    to a dict, so the caller can fail the CLI closed with a clear message."""
+    """Load a JSON or constrained YAML staging-parity manifest.
+
+    Legacy JSON maps remain accepted. The committed YAML row shape is
+    normalized to the `{surface: {staging: value}}` form consumed by the prod
+    grant precondition. Invalid input raises ValueError so the CLI fails closed.
+    """
     text = Path(path).read_text()
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"not valid JSON: {exc}") from exc
+    except json.JSONDecodeError:
+        return _parse_parity_manifest_yaml(text)
     if not isinstance(data, dict):
-        raise ValueError("manifest must parse to a JSON object")
-    return data
+        raise ValueError("manifest must parse to an object")
+    return _normalize_manifest(data)
 
 
 def _flag(args: list[str], name: str, default: str = "") -> str:
