@@ -1147,3 +1147,838 @@ def test_analyze_api_prose_mention_not_a_path_clean() -> None:
     findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
                                        has_scenarios=False)
     assert findings == []
+
+
+# ── spec-295 Phase 1: REQ-05 backward-compat regression (RED-first) ─────────
+# This is the standing guard that protects every other spec: it goes green
+# immediately on current (unmodified) code and MUST go RED the instant a
+# future change adds an unconditional record_pending or any other non-prod
+# check_grant store mutation. Written and green BEFORE any gates.py edit.
+
+def test_backward_compat_non_prod_action_no_promotions(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.grant_actions(store, "run-1", ["push:origin/main"])
+    # LOAD-BEARING assertion (adversary MEDIUM #7): exact byte-identical
+    # snapshot around a non-prod refusal — catches ANY rewrite or mutation,
+    # not just an added pending record.
+    before = store.read_bytes()
+    assert gates.check_grant(store, "run-1", "push:origin/other") is False
+    assert store.read_bytes() == before
+    # supplementary assertions
+    assert gates.list_pending(store, "run-1") == []
+    assert "_promotions" not in json.loads(store.read_text())
+    assert gates.check_grant(store, "run-1", "push:origin/main") is True
+
+
+# ── spec-295 Phase 1: record_promotion (RED → GREEN) ─────────────────────────
+
+_GOOD_ARTIFACT = "myapp@sha256:" + "f" * 64
+
+
+def _seed_success(store: Path, task_id: str = "stg-web", *,
+                  artifact: str = _GOOD_ARTIFACT) -> None:
+    assert gates.run_gate(
+        store, task_id, ["python3", "-c", "raise SystemExit(0)"],
+        artifact=artifact,
+    ) == 0
+
+
+def test_record_promotion_persists_with_resolving_evidence_and_digest_artifact(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=_GOOD_ARTIFACT,
+                                evidence_ids=["stg-web"])
+    assert ok is True
+    data = json.loads(store.read_text())
+    assert isinstance(data["_promotions"]["run-1"], list)
+    rec = data["_promotions"]["run-1"][0]
+    assert rec["from_env"] == "staging" and rec["to_env"] == "prod"
+    assert rec["surface"] == "web" and rec["artifact"] == _GOOD_ARTIFACT
+    assert rec["evidence_ids"] == ["stg-web"]
+    assert isinstance(rec["recorded_at"], float) and isinstance(rec["expires_at"], float)
+
+
+def test_record_promotion_rejects_unresolved_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=_GOOD_ARTIFACT,
+                                evidence_ids=["never-ran"])
+    assert ok is False
+    assert not store.exists() or "_promotions" not in json.loads(store.read_text())
+
+
+def test_record_promotion_rejects_failed_gate_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "stg-web", exit_code=1, cmd="pytest -q")
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=_GOOD_ARTIFACT,
+                                evidence_ids=["stg-web"])
+    assert ok is False
+    assert "_promotions" not in json.loads(store.read_text())
+
+
+def test_record_promotion_persists_bare_commit_sha(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sha = "d" * 40
+    _seed_success(store, artifact=sha)
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=sha, evidence_ids=["stg-web"])
+    assert ok is True
+
+
+def test_record_promotion_persists_digest_pinned_tag(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    artifact = "myapp:v1.2.3@sha256:" + "e" * 64
+    _seed_success(store, artifact=artifact)
+    ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                surface="web", artifact=artifact, evidence_ids=["stg-web"])
+    assert ok is True
+
+
+def test_record_promotion_rejects_malformed_inputs(tmp_path) -> None:
+    cases = [
+        dict(evidence_ids=["never-ran"]),
+        dict(evidence_ids="e1"),
+        dict(evidence_ids=[]),
+        dict(evidence_ids=["", "e2"]),
+        dict(evidence_ids=(x for x in [])),
+        dict(artifact="img:latest"),
+        dict(artifact="img:main"),
+        dict(artifact="myapp@sha256:xyz"),
+        dict(artifact="g" * 39),
+        dict(artifact=_GOOD_ARTIFACT + "\n"),
+        dict(artifact=12345),
+        dict(ttl_hours="24"),
+        dict(ttl_hours=0),
+        dict(ttl_hours=-1),
+        dict(ttl_hours=float("inf")),
+        dict(ttl_hours=gates.GRANT_MAX_TTL_HOURS + 1),
+    ]
+    for i, overrides in enumerate(cases):
+        store = tmp_path / f"case-{i}.json"
+        _seed_success(store)
+        kwargs = dict(from_env="staging", to_env="prod", surface="web",
+                     artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"])
+        kwargs.update(overrides)
+        ok = gates.record_promotion(store, "run-1", **kwargs)
+        assert ok is False, f"case {i} {overrides} should be rejected"
+        data = json.loads(store.read_text())
+        assert not data.get("_promotions", {}).get("run-1"), \
+            f"case {i} {overrides} wrote a record"
+
+
+def test_record_promotion_concurrency_survives_with_grant(tmp_path) -> None:
+    import threading
+    store = tmp_path / "evidence.json"
+    n = 5
+    for i in range(n):
+        artifact = f"myapp@sha256:{i:064x}"
+        _seed_success(store, task_id=f"stg-web-{i}", artifact=artifact)
+    barrier = threading.Barrier(n + 1)
+    results: list[bool] = []
+    append_lock = threading.Lock()
+
+    def do_promote(i: int) -> None:
+        barrier.wait()
+        artifact = f"myapp@sha256:{i:064x}"
+        ok = gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                                    surface="web", artifact=artifact,
+                                    evidence_ids=[f"stg-web-{i}"])
+        with append_lock:
+            results.append(ok)
+
+    def do_grant() -> None:
+        barrier.wait()
+        gates.grant_actions(store, "run-1", ["push:origin/main"])
+
+    threads = [threading.Thread(target=do_promote, args=(i,)) for i in range(n)]
+    threads.append(threading.Thread(target=do_grant))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(results)
+    data = json.loads(store.read_text())
+    assert len(data["_promotions"]["run-1"]) == n
+    assert gates.check_grant(store, "run-1", "push:origin/main") is True
+
+
+def test_record_promotion_nondict_promotions_raises(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"_promotions": "not-a-dict"}))
+    _seed_success(store)
+    try:
+        gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                               surface="web", artifact=_GOOD_ARTIFACT,
+                               evidence_ids=["stg-web"])
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+
+
+def test_record_promotion_nonlist_run_entry_raises(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"_promotions": {"run-1": "not-a-list"}}))
+    _seed_success(store)
+    try:
+        gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                               surface="web", artifact=_GOOD_ARTIFACT,
+                               evidence_ids=["stg-web"])
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+
+
+# ── spec-295 Phase 1: check_promotion — fail-closed read (RED → GREEN) ──────
+
+def test_check_promotion_true_for_fresh_exact_match(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    import time as _t
+    t = _t.time()
+    assert gates.check_promotion(store, "run-1", "prod", "web", _GOOD_ARTIFACT,
+                                 now=t) is True
+
+
+def test_check_promotion_false_after_expiry(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    import time as _t
+    now = _t.time()
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"], ttl_hours=1.0)
+    assert gates.check_promotion(store, "run-1", "prod", "web", _GOOD_ARTIFACT,
+                                 now=now) is True
+    assert gates.check_promotion(store, "run-1", "prod", "web", _GOOD_ARTIFACT,
+                                 now=now + 3601) is False
+
+
+def test_check_promotion_false_on_artifact_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    other = "myapp@sha256:" + "9" * 64
+    assert gates.check_promotion(store, "run-1", "prod", "web", other) is False
+
+
+def test_check_promotion_false_on_surface_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-1", "prod", "cp", _GOOD_ARTIFACT) is False
+
+
+def test_check_promotion_false_on_to_env_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-1", "staging", "web",
+                                 _GOOD_ARTIFACT) is False
+
+
+def test_check_promotion_requires_from_env_staging_for_prod(tmp_path) -> None:
+    # adversary CRITICAL #2: only a staging->prod record satisfies a
+    # to_env=="prod" precondition — dev->prod / prod->prod never count.
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="dev", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-1", "prod", "web",
+                                 _GOOD_ARTIFACT) is False
+
+
+def test_check_promotion_malformed_ledger_fails_closed(tmp_path) -> None:
+    good_rec = {"from_env": "staging", "to_env": "prod", "surface": "web",
+               "artifact": _GOOD_ARTIFACT, "evidence_ids": ["stg-web"]}
+    cases = [
+        {"_promotions": "not-a-dict"},
+        {"_promotions": {"run-1": "not-a-list"}},
+        {"_promotions": {"run-1": [{**good_rec, "recorded_at": 1.0}]}},          # missing expires_at
+        {"_promotions": {"run-1": [{**good_rec, "recorded_at": 1.0,
+                                    "expires_at": "soon"}]}},                     # non-numeric
+        {"_promotions": {"run-1": [{**good_rec, "recorded_at": 1.0,
+                                    "expires_at": float("inf")}]}},               # infinite
+    ]
+    for i, seeded in enumerate(cases):
+        store = tmp_path / f"malformed-{i}.json"
+        store.write_text(json.dumps(seeded))
+        assert gates.check_promotion(store, "run-1", "prod", "web",
+                                     _GOOD_ARTIFACT) is False, f"case {i}"
+
+
+def test_check_promotion_false_when_promotions_key_missing(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    before = store.read_bytes()
+    assert gates.check_promotion(store, "run-1", "prod", "web",
+                                 _GOOD_ARTIFACT) is False
+    assert store.read_bytes() == before  # pure read — never migrates the store
+
+
+def test_check_promotion_false_no_record_for_run_id(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_promotion(store, "run-none", "prod", "web",
+                                 _GOOD_ARTIFACT) is False
+
+
+# ── spec-295 Phase 1 Plan 02: check_grant_prod precondition (RED → GREEN) ────
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k check_grant_prod -q
+# failed with:
+#   AttributeError: module 'gates' has no attribute 'check_grant_prod'
+# (10 tests errored). GREEN run after implementation: same command, 10 passed.
+
+def test_check_grant_prod_no_promote_refuses_with_no_promote_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-PROMOTE-EVIDENCE" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_artifact_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    other_artifact = "other@sha256:" + "a" * 64
+    _seed_success(store, artifact=other_artifact)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=other_artifact,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("PROMOTE-ARTIFACT-MISMATCH" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_expired_promote_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"], ttl_hours=1.0)
+    import time as _t
+    now = _t.time()
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT,
+                                  now=now + 3601) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("PROMOTE-EXPIRED" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_dev_to_prod_source_refuses_as_no_promote_evidence(tmp_path) -> None:
+    # adversary CRITICAL #2: a dev->prod matching-artifact promote never
+    # satisfies the precondition — check_promotion's from_env guard rejects
+    # it, and it must not be misclassified as a mismatch/expiry either.
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="dev", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-PROMOTE-EVIDENCE" in p["reason"] for p in pend)
+
+
+def test_check_grant_prod_fresh_matching_promote_passes(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is True
+
+
+def test_check_grant_prod_promote_without_grant_refuses(tmp_path) -> None:
+    # promote confers no authority — a fresh matching promote with NO grant
+    # still refuses.
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+
+
+def test_check_grant_prod_missing_artifact_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="cp", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", None) is False
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", "") is False
+
+
+def test_check_grant_prod_flip_and_migrate_prefixes_route_same_precondition(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    for action, surface in (("flip:prod-blue", "blue"), ("migrate:prod-db", "db"),
+                            ("deploy:prod-fleet-1", "fleet-1")):
+        gates.grant_actions(store, "run-1", [action])
+        assert gates.check_grant_prod(store, "run-1", action, _GOOD_ARTIFACT) is False  # no promote yet
+        gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                               surface=surface, artifact=_GOOD_ARTIFACT,
+                               evidence_ids=["stg-web"])
+        assert gates.check_grant_prod(store, "run-1", action, _GOOD_ARTIFACT) is True
+
+
+def test_check_grant_prod_manifest_staging_none_refuses_no_staging_counterpart(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-n8n"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="n8n", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    manifest = {"n8n": {"staging": "none"}}
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-n8n", _GOOD_ARTIFACT,
+                                  manifest=manifest) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-STAGING-COUNTERPART" in p["reason"] for p in pend)
+    # manifest absent (None) never fabricates a refusal — same fixture passes
+    store2 = tmp_path / "evidence2.json"
+    _seed_success(store2)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-n8n"])
+    gates.record_promotion(store2, "run-1", from_env="staging", to_env="prod",
+                           surface="n8n", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(store2, "run-1", "deploy:prod-n8n", _GOOD_ARTIFACT) is True
+
+
+def test_load_manifest_accepts_committed_parity_yaml_shape(tmp_path) -> None:
+    manifest_path = tmp_path / "parity-manifest.yaml"
+    manifest_path.write_text(
+        "surfaces:\n"
+        "  - surface: n8n\n"
+        "    staging_instance: \"none\"\n"
+        "    prod_instance: \"prod-n8n\"\n"
+        "    staging_artifact: \"n/a\"\n"
+        "    prod_artifact: \"n/a\"\n"
+        "    staging_migration_head: \"n/a\"\n"
+        "    prod_migration_head: \"n/a\"\n"
+    )
+
+    assert gates._load_manifest(str(manifest_path)) == {
+        "n8n": {"staging": "none"},
+    }
+
+
+def test_check_grant_prod_byte_identical_for_non_prod_action(tmp_path) -> None:
+    # adversary MEDIUM #7: a non-prod action routes through check_grant_prod
+    # with ZERO side effects — exact byte-identical store snapshot.
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["push:origin/main"])
+    before = store.read_bytes()
+    assert gates.check_grant_prod(store, "run-1", "push:origin/other", None) is False
+    assert store.read_bytes() == before
+    assert gates.check_grant_prod(store, "run-1", "push:origin/main", None) is True
+    assert store.read_bytes() == before
+
+
+# ── spec-295 Phase 1 Plan 02: CLI promote + check-grant --artifact (RED→GREEN) ──
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k "cli_promote or cli_check_grant" -q
+# failed: `promote` was an unrecognized dispatch command ("unknown command:
+# promote", exit 2) and `check-grant --artifact` on a prod action fell
+# through to the unmodified non-prod branch (printed GRANTED with no promote
+# check at all), so every subprocess returncode/stdout assertion below
+# failed. GREEN run after implementation: same command, all passed.
+
+def _seed_success_cli(env, task_id: str = "stg-web") -> None:
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "run-gate", task_id,
+             "--artifact", _GOOD_ARTIFACT, "--", "true"],
+            capture_output=True, text=True, env=env)
+
+
+def test_cli_promote_records_validated_evidence(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env)
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "stg-web"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "PROMOTED" in r.stdout
+
+
+def test_cli_promote_collects_repeatable_evidence(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env, "stg-web")
+    _seed_success_cli(env, "stg-web-2")
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "stg-web", "--evidence", "stg-web-2"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "PROMOTED" in r.stdout
+    data = json.loads((tmp_path / "evidence.json").read_text())
+    assert data["_promotions"]["run-9"][0]["evidence_ids"] == ["stg-web", "stg-web-2"]
+
+
+def test_cli_promote_rejects_malformed_artifact(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env)
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", "img:latest",
+                 "--evidence", "stg-web"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "PROMOTE-REJECTED" in r.stderr
+
+
+def test_cli_promote_rejects_unresolved_evidence(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "never-ran"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "PROMOTE-REJECTED" in r.stderr
+
+
+def test_cli_promote_rejects_bad_ttl(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    _seed_success_cli(env)
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+                 "--surface", "web", "--artifact", _GOOD_ARTIFACT,
+                 "--evidence", "stg-web", "--ttl-hours", "not-a-number"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "PROMOTE-REJECTED" in r.stderr
+
+
+def test_cli_check_grant_prod_no_promote_refuses_with_hint(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web",
+                 "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "NOT-GRANTED" in r.stdout
+    assert "promote" in r.stdout.lower()
+
+
+def test_cli_check_grant_prod_round_trip_passes(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _seed_success_cli(env)
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+             "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web",
+                 "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+
+
+def test_cli_check_grant_prod_missing_artifact_refuses(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _seed_success_cli(env)
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+             "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1
+
+
+def test_cli_check_grant_prod_rebuild_invalidation(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _seed_success_cli(env)
+    _sp.run(["python3", g, "grant", "run-9", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env)
+    _sp.run(["python3", g, "promote", "run-9", "--from", "staging", "--to", "prod",
+             "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+            capture_output=True, text=True, env=env)
+    other = "myapp@sha256:" + "9" * 64
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "deploy:prod-web",
+                 "--artifact", other],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "NOT-GRANTED" in r.stdout
+
+
+def test_cli_check_grant_non_prod_action_unchanged(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "push:origin/main"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "push:origin/main"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+
+
+# ── spec-295 Phase 1 Plan 03 Task 1: grant reason (additive) + grant --reason ──
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k grant_reason -q
+# failed with: TypeError: grant_actions() got an unexpected keyword argument
+# 'reason' (function-level tests) and the CLI `--reason` flag was silently
+# ignored — no `reason` key ever landed in the stored grant entry (CLI
+# subprocess tests). GREEN run after implementation: same command, 5 passed.
+
+def test_grant_reason_stored_sanitized(tmp_path) -> None:
+    s = tmp_path / "evidence.json"
+    assert gates.grant_actions(s, "run-1", ["hotfix:prod-cp"], reason="db is down")
+    data = json.loads(s.read_text())
+    assert data["_autonomy"]["run-1"]["grants"]["hotfix:prod-cp"]["reason"] == "db is down"
+
+
+def test_grant_no_reason_byte_identical_entry_shape(tmp_path) -> None:
+    s = tmp_path / "evidence.json"
+    assert gates.grant_actions(s, "run-1", ["push:origin/main"])
+    data = json.loads(s.read_text())
+    entry = data["_autonomy"]["run-1"]["grants"]["push:origin/main"]
+    # byte-identical to the pre-reason shape: no `reason` key at all
+    assert set(entry.keys()) == {"granted_at", "expires_at", "granted_by"}
+
+
+def test_grant_reason_sanitized_strips_control_chars(tmp_path) -> None:
+    s = tmp_path / "evidence.json"
+    gates.grant_actions(s, "run-1", ["hotfix:prod-cp"],
+                        reason="db down\x1b[31mFAKE-BANNER\x1b[0m")
+    data = json.loads(s.read_text())
+    reason = data["_autonomy"]["run-1"]["grants"]["hotfix:prod-cp"]["reason"]
+    assert "\x1b" not in reason
+
+
+def test_cli_grant_reason_flag_records_reason(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "grant", "run-9", "--action", "hotfix:prod-cp",
+                 "--reason", "db down"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+    data = json.loads((tmp_path / "evidence.json").read_text())
+    assert data["_autonomy"]["run-9"]["grants"]["hotfix:prod-cp"]["reason"] == "db down"
+
+
+def test_cli_grant_no_reason_flag_records_no_reason(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "push:origin/main"],
+            capture_output=True, text=True, env=env)
+    data = json.loads((tmp_path / "evidence.json").read_text())
+    entry = data["_autonomy"]["run-9"]["grants"]["push:origin/main"]
+    assert "reason" not in entry
+
+
+# ── spec-295 Phase 1 Plan 03 Task 2: hotfix:prod-* bypass (RED → GREEN) ──────
+# RED-FIRST CAPTURE (adversary MEDIUM #9): before gates.py was edited,
+#   cd packages/feature-fix-swarm && python3 -m pytest lib/tests/test_gates.py -k hotfix -q
+# failed: a granted+reasoned hotfix:prod-* action fell through to check_grant's
+# ordinary (non-prod) True path with NO bypass record written at all — the
+# `_autonomy[run]["hotfix_bypasses"]` KeyError below, and the CLI printed a
+# plain `GRANTED:` line containing no `EMERGENCY` token. GREEN run after
+# implementation: same command, 8 passed.
+
+def test_hotfix_granted_with_reason_bypasses_promote_and_records(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="db is down")
+    # no promote record present at all — the bypass is authorized anyway
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
+    data = json.loads(store.read_text())
+    bypasses = data["_autonomy"]["run-1"]["hotfix_bypasses"]
+    assert len(bypasses) == 1
+    assert bypasses[0]["action"] == "hotfix:prod-cp"
+    assert bypasses[0]["reason"] == "db is down"
+
+
+def test_hotfix_granted_without_reason_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"])  # no reason
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-HOTFIX-GRANT" in p["reason"] for p in pend)
+
+
+def test_hotfix_no_grant_refuses_and_records_pending(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-HOTFIX-GRANT" in p["reason"] for p in pend)
+
+
+def test_hotfix_reason_sanitized_in_bypass_record(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"],
+                        reason="db down\x1b[31mFAKE-BANNER\x1b[0m")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
+    data = json.loads(store.read_text())
+    reason = data["_autonomy"]["run-1"]["hotfix_bypasses"][0]["reason"]
+    assert "\x1b" not in reason
+
+
+def test_hotfix_does_not_require_promote_evidence(tmp_path) -> None:
+    # no --artifact given at all, no promote record anywhere — hotfix is the
+    # sanctioned bypass of check_promotion, not a variant of it.
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="db down")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
+
+
+def test_non_hotfix_prod_action_still_requires_promote(tmp_path) -> None:
+    # Plan 02 behavior intact: an ordinary prod verb is unaffected by the
+    # hotfix branch and still needs a promote record.
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp", _GOOD_ARTIFACT) is False
+
+
+def test_cli_check_grant_hotfix_emergency_banner(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-9", "--action", "hotfix:prod-cp",
+             "--reason", "db down"],
+            capture_output=True, text=True, env=env)
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "hotfix:prod-cp"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert "EMERGENCY" in r.stdout
+    assert "hotfix:prod-cp" in r.stdout
+
+
+def test_cli_check_grant_hotfix_without_grant_refuses(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-9", "--action", "hotfix:prod-cp"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 1
+
+
+# ── spec-295 Phase 2: preflight staging-proof kind (RED → GREEN) ────────────
+
+def test_preflight_staging_proof_empty_ledger_fails(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    res = gates.preflight_check(
+        [{"kind": "staging-proof", "name": "web", "artifact": _GOOD_ARTIFACT}],
+        store=store, run_id="run-1")
+    assert res["pass"] is False
+    assert res["results"][0]["ok"] is False
+
+
+def test_preflight_staging_proof_ok_after_promote(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    res = gates.preflight_check(
+        [{"kind": "staging-proof", "name": "web", "artifact": _GOOD_ARTIFACT}],
+        store=store, run_id="run-1")
+    assert res["pass"] is True
+    assert res["results"][0]["ok"] is True
+
+
+def test_preflight_staging_proof_no_store_fails_closed(tmp_path) -> None:
+    res = gates.preflight_check(
+        [{"kind": "staging-proof", "name": "web", "artifact": _GOOD_ARTIFACT}])
+    assert res["pass"] is False
+    assert res["results"][0]["ok"] is False
+
+
+def test_preflight_unknown_kind_fails_closed(tmp_path) -> None:
+    res = gates.preflight_check([{"kind": "bogus", "name": "whatever"}])
+    assert res["pass"] is False
+    assert res["results"][0]["ok"] is False
+
+
+# ── spec-295 review-gate hardening (RED → GREEN) ───────────────────────────
+
+def test_record_promotion_rejects_caller_fabricated_gate(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_gate_evidence(store, "stg-web", exit_code=0, cmd="pytest -q")
+    assert gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="web", artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"],
+    ) is False
+
+
+def test_record_promotion_requires_runner_evidence_bound_to_artifact(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    other_artifact = "myapp@sha256:" + "e" * 64
+    assert gates.run_gate(
+        store, "stg-web", ["python3", "-c", "raise SystemExit(0)"],
+        artifact=_GOOD_ARTIFACT,
+    ) == 0
+    assert gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="web", artifact=other_artifact, evidence_ids=["stg-web"],
+    ) is False
+    assert gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="web", artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"],
+    ) is True
+
+
+def test_prod_action_spelling_variants_never_fall_through_to_plain_grant(tmp_path) -> None:
+    for action in (
+        "deploy:prod", "flip:prod_api", "migrate:production-db",
+        "deploy:PROD-web", "flip:Prod_api", "migrate:Production-db",
+    ):
+        store = tmp_path / f"{action.replace(':', '-')}.json"
+        assert gates.grant_actions(store, "run-1", [action])
+        assert gates.check_grant_prod(store, "run-1", action, _GOOD_ARTIFACT) is False
+        assert gates.list_pending(store, "run-1")
+
+
+def test_cli_promote_trailing_evidence_flag_returns_typed_rejection(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main([
+        "promote", "run-1", "--from", "staging", "--to", "prod",
+        "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence",
+    ])
+    assert rc == 1

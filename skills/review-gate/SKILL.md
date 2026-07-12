@@ -24,6 +24,9 @@ active harness so the reviewer is always an independent model family.
 > starving the reviewer of the ARTIFACT (diff/spec/code) in the name of "low
 > context" — fresh means no reasoning trail, not less artifact.
 
+See `docs/promotion-protocol.md` for the full 12-rule dev→staging→production
+promotion protocol this gate helps enforce.
+
 ## When to run
 
 - End of every implementation phase

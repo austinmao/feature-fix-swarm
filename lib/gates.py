@@ -10,6 +10,8 @@ Completion authority lives HERE, not in agent self-report:
 
 Usage (inline heredoc in SKILL.md):
     python3 lib/gates.py run-gate     T042 -- pytest -q     # PREFERRED: executes
+    python3 lib/gates.py run-gate stg-web --artifact name@sha256:<64hex> -- pytest -q
+                                                  # staging gate bound to artifact
     python3 lib/gates.py run-red      T041 -- pytest tests/test_new.py
     python3 lib/gates.py record-gate  T042 --exit 0 --cmd "pytest -q" \
         --before "6 passed" --after "8 passed"   # trusted-caller only
@@ -31,6 +33,17 @@ Usage (inline heredoc in SKILL.md):
         --action merge:pr --ttl-hours 12   # operator pre-approval ledger
     python3 lib/gates.py check-grant run-42 --action push:origin/main
                                                   # exit 0 iff granted+unexpired
+    python3 lib/gates.py promote run-42 --from staging --to prod --surface web \
+        --artifact name@sha256:<64hex> --evidence gate-id [--evidence gate-id2]
+                                                  # record promote proof binding
+                                                  # artifact identity to real
+                                                  # recorded staging gate evidence
+    python3 lib/gates.py check-grant run-42 --action deploy:prod-web \
+        --artifact name@sha256:<64hex> [--manifest parity.json|parity.yaml]
+                                                  # prod actions (deploy/flip/
+                                                  # migrate:prod-*) ALSO require
+                                                  # a fresh staging->prod promote
+                                                  # record for this artifact
     python3 lib/gates.py pending run-42 --action rotate:secret --reason "…"
                                                   # unlisted gate → durable record
     python3 lib/gates.py pending run-42           # list; exit 1 if any pending
@@ -133,9 +146,14 @@ def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
         _save_store(store, data)
 
 
-def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> int:
+def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800, *,
+             artifact: str | None = None) -> int:
     """Execute the gate command and record the REAL exit code (P1: evidence
-    bound to the runner, not caller-supplied --exit). Returns the exit code."""
+    bound to the runner, not caller-supplied --exit). When `artifact` is
+    supplied, bind the runner-produced evidence to that immutable identity so
+    it can later satisfy a promotion check. Returns the exit code."""
+    if artifact is not None and not _valid_artifact(artifact):
+        raise ValueError("run-gate artifact must be an immutable digest or commit sha")
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     full = proc.stdout + proc.stderr
     tail = full[-2000:]
@@ -149,7 +167,7 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> 
     with _StoreLock(store):
         data = _load_store(store)
         entry = data.setdefault(task_id, {})
-        entry["gate"] = {
+        gate = {
             "exit_code": proc.returncode,
             "cmd": " ".join(cmd),
             "tests_before": "",
@@ -157,6 +175,9 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> 
             "failure_sig": failure_sig or (lines[-1] if lines and proc.returncode != 0 else ""),
             "executed_by": "run_gate",
         }
+        if artifact is not None:
+            gate["artifact"] = artifact
+        entry["gate"] = gate
         _save_store(store, data)
     return proc.returncode
 
@@ -581,6 +602,17 @@ ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S+$")
 GRANT_DEFAULT_TTL_HOURS = 24.0
 GRANT_MAX_TTL_HOURS = 168.0  # 7 days — non-finite/zero/negative/huger rejected
 
+# Artifact identity (spec-295 EDGE-006): an immutable OCI digest reference
+# (name[:tag]@sha256:<64hex> — tag optional, digest mandatory and
+# authoritative) or a 40-hex commit sha. A mutable tag WITHOUT a digest
+# (`img:latest`) is never valid. re.fullmatch (not .match + $) — with
+# .match, a trailing "$" still matches just before a trailing newline,
+# letting a crafted "artifact\n" slip through (adversary HIGH #4).
+ARTIFACT_DIGEST_PAT = re.compile(
+    r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[A-Za-z0-9_][A-Za-z0-9._-]*)?"
+    r"@sha256:[0-9a-f]{64}$")
+ARTIFACT_SHA_PAT = re.compile(r"^[0-9a-f]{40}$")
+
 
 def _now() -> float:
     import time
@@ -589,10 +621,15 @@ def _now() -> float:
 
 def grant_actions(store: Path, run_id: str, actions: list[str], *,
                   ttl_hours: float = GRANT_DEFAULT_TTL_HOURS,
-                  granted_by: str = "operator") -> bool:
+                  granted_by: str = "operator",
+                  reason: str | None = None) -> bool:
     """Record operator-approved actions for a run. Actions must be typed
     ('type:target', e.g. 'push:origin/main') — free prose never matches at
-    run time, so it is rejected here rather than silently failing at 3am."""
+    run time, so it is rejected here rather than silently failing at 3am.
+    `reason` is additive (spec-295 REQ-07): when truthy it is sanitized and
+    stored on each grant entry; omitted, every entry stays byte-identical to
+    the pre-reason shape (no `reason` key at all) — the hotfix:prod-* escape
+    reads this field, ordinary grants never set it."""
     import math
     if not actions or any(not ACTION_PAT.match(a) for a in actions):
         return False
@@ -604,11 +641,14 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
         auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
         grants = auto.setdefault("grants", {})
         for a in actions:
-            grants[a] = {
+            entry = {
                 "granted_at": granted_at,
                 "expires_at": granted_at + ttl_hours * 3600,
                 "granted_by": granted_by,
             }
+            if reason:
+                entry["reason"] = sanitize_reason(reason)
+            grants[a] = entry
         # a grant resolves any matching pending record
         auto["pending"] = [p for p in auto.get("pending", [])
                            if p["action"] not in grants]
@@ -625,6 +665,323 @@ def check_grant(store: Path, run_id: str, action: str,
     if not entry:
         return False
     return (now if now is not None else _now()) < entry.get("expires_at", 0)
+
+
+def _valid_artifact(artifact) -> bool:
+    """True iff artifact is a str fullmatch of an immutable digest reference
+    or a bare 40-hex commit sha (EDGE-006). Comparison downstream is
+    exact-string on the whole recorded artifact — this function only proves
+    the SHAPE is immutable, not that any two artifacts are equal."""
+    if not isinstance(artifact, str):
+        return False
+    return bool(ARTIFACT_DIGEST_PAT.fullmatch(artifact)
+                or ARTIFACT_SHA_PAT.fullmatch(artifact))
+
+
+def _evidence_resolves(data: dict, evidence_ids: list[str], artifact: str) -> bool:
+    """True iff EVERY evidence_id names a top-level store key carrying a
+    successful runner-executed gate bound to this exact immutable artifact.
+    Caller-recorded `record-gate --exit 0` evidence is deliberately rejected:
+    a shell-capable agent can fabricate it, just as strict verify_done does."""
+    if not evidence_ids:
+        return False
+    for eid in evidence_ids:
+        gate = data.get(eid, {}).get("gate", {})
+        if (gate.get("exit_code") != 0
+                or gate.get("executed_by") != "run_gate"
+                or gate.get("artifact") != artifact):
+            return False
+    return True
+
+
+def _promotions_ns(data: dict, run_id: str) -> list:
+    """Shape guard for the `_promotions` store namespace (adversary HIGH #5,
+    ports the `_findings_ns` idiom): `_promotions` must be a dict-of-lists or
+    absent; a per-run entry must be a list or absent. Either violation raises
+    SystemExit rather than silently clobbering or appending to the wrong
+    shape — an ordinary task-id record is dict-shaped too, so a bare
+    isinstance(dict) check on `_promotions` alone would not be enough to
+    prevent misinterpreting an unrelated record."""
+    promotions = data.setdefault("_promotions", {})
+    if not isinstance(promotions, dict):
+        raise SystemExit("record-promotion: store key '_promotions' is not a "
+                          "dict (schema conflict — refusing to overwrite)")
+    run_entry = promotions.setdefault(run_id, [])
+    if not isinstance(run_entry, list):
+        raise SystemExit(f"record-promotion: '_promotions[{run_id}]' is not "
+                          "a list (schema conflict — refusing to overwrite)")
+    return run_entry
+
+
+def record_promotion(store: Path, run_id: str, *, from_env: str, to_env: str,
+                     surface: str, artifact, evidence_ids,
+                     ttl_hours: float = GRANT_DEFAULT_TTL_HOURS) -> bool:
+    """Record validated proof that `artifact` passed `from_env` staging,
+    ONLY if the artifact identity is immutable and every evidence_id
+    resolves to a real recorded successful gate. Returns False (no write)
+    on ANY validation failure — mirrors grant_actions' fail-closed posture."""
+    import math
+    if not _valid_artifact(artifact):
+        return False
+    if isinstance(evidence_ids, str):
+        return False
+    try:
+        evidence_ids = list(evidence_ids)
+    except TypeError:
+        return False
+    if not evidence_ids or any(not isinstance(e, str) or not e for e in evidence_ids):
+        return False
+    if (not isinstance(ttl_hours, (int, float))
+            or not math.isfinite(ttl_hours)
+            or not 0 < ttl_hours <= GRANT_MAX_TTL_HOURS):
+        return False
+    recorded_at = _now()
+    with _StoreLock(store):
+        data = _load_store(store)
+        if (not all(isinstance(value, str) and value.strip()
+                    for value in (from_env, to_env, surface))
+                or not _evidence_resolves(data, evidence_ids, artifact)):
+            return False
+        _promotions_ns(data, run_id).append({
+            "from_env": from_env,
+            "to_env": to_env,
+            "surface": surface,
+            "artifact": artifact,
+            "evidence_ids": evidence_ids,
+            "recorded_at": recorded_at,
+            "expires_at": recorded_at + ttl_hours * 3600,
+        })
+        _save_store(store, data)
+    return True
+
+
+def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
+                    artifact, now: float | None = None) -> bool:
+    """Fail-closed read (mirrors check_grant): True ONLY for an exact,
+    unexpired, from_env=='staging' (when to_env=='prod'), to_env, surface,
+    and artifact match. A missing OR malformed `_promotions` namespace
+    (non-dict top level, non-list run entry, non-dict record, missing/
+    non-numeric/non-finite expiry) returns False without raising, crashing,
+    or writing — pure read, same posture as check_grant/check_preflight."""
+    import math
+    promotions = _load_store(store).get("_promotions")
+    if not isinstance(promotions, dict):
+        return False
+    records = promotions.get(run_id)
+    if not isinstance(records, list):
+        return False
+    effective_now = now if now is not None else _now()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("to_env") != to_env:
+            continue
+        if to_env == "prod" and rec.get("from_env") != "staging":
+            continue
+        if rec.get("surface") != surface:
+            continue
+        if rec.get("artifact") != artifact:
+            continue
+        exp = rec.get("expires_at")
+        if not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            continue
+        if effective_now < exp:
+            return True
+    return False
+
+
+# ── Stream H.2: prod-action precondition (spec-295 GAP-1) ───────────────────
+# Wires check_promotion (Plan 01) into check-grant: a deploy:prod-* /
+# flip:prod-* / migrate:prod-* action ADDITIONALLY requires a fresh
+# staging->prod promote record for the EXACT artifact before it is
+# authorized. Every other action type is untouched — check_grant_prod
+# delegates straight to check_grant with zero side effects (REQ-05
+# byte-identical guard).
+
+# MAINTENANCE OBLIGATION (spec.md § Risks #2, A-002): this is a closed
+# prefix list — it cannot code-enforce its own completeness. Any NEW
+# prod-mutating action TYPE must be added here or it silently bypasses the
+# precondition (fail-open by omission). Accepted, documented design risk —
+# see the threat register (T-01-03), not a bug to "fix" here.
+PROD_ACTION_PREFIXES = ("deploy:prod-", "flip:prod-", "migrate:prod-")
+PROD_ACTION_TYPES = ("deploy", "flip", "migrate")
+
+
+def _prod_surface(action: str) -> str | None:
+    """Single source of truth for prod-surface extraction — every prod verb
+    (deploy/flip/migrate) routes through this one function (RESEARCH Pitfall
+    3). Returns the surface substring after the matched prefix, or None when
+    `action` is not a prod-mutating action at all (non-prod fast path)."""
+    folded_action = action.casefold()
+    for prefix in PROD_ACTION_PREFIXES:
+        if folded_action.startswith(prefix):
+            return action[len(prefix):]
+    # Fail closed on common spelling variants of the same production target.
+    # These aliases are not the canonical vocabulary, but routing them through
+    # the promotion gate prevents a granted `deploy:prod` / `flip:prod_api` /
+    # `migrate:production-db` action from silently falling through to the
+    # ordinary non-production check_grant path.
+    for action_type in PROD_ACTION_TYPES:
+        marker = f"{action_type}:"
+        if not action.startswith(marker):
+            continue
+        target = action[len(marker):]
+        folded_target = target.casefold()
+        if folded_target == "prod":
+            return ""  # invalid empty surface; promotion recording rejects it
+        if folded_target.startswith("prod_"):
+            return target[len("prod_"):]
+        if folded_target == "production":
+            return ""
+        if folded_target.startswith(("production-", "production_")):
+            return target[len("production-"):].lstrip("_")
+    return None
+
+
+def _surface_has_staging(surface: str, manifest: dict | None) -> bool:
+    """True unless `manifest` explicitly declares `surface` with staging ==
+    'none' (EDGE-003). manifest=None skips this check entirely — real
+    config/parity-manifest.yaml wiring lands Phase 4, so the absence of a
+    manifest here must never fabricate a pass OR a refusal."""
+    if manifest is None:
+        return True
+    entry = manifest.get(surface)
+    if not isinstance(entry, dict):
+        return True
+    return entry.get("staging") not in (None, "none")
+
+
+def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
+                         now: float | None = None) -> str:
+    """Classify why check_promotion returned False for this surface+artifact,
+    distinguishing the three read-path typed reasons. Only staging->prod
+    records for this surface count as 'a promote exists' — a dev->prod or
+    prod->prod record is invisible here too (adversary CRITICAL #2, mirrors
+    check_promotion's own from_env guard), so it always falls through to
+    NO-PROMOTE-EVIDENCE rather than being misread as a mismatch/expiry."""
+    import math
+    promotions = _load_store(store).get("_promotions")
+    if not isinstance(promotions, dict):
+        return "NO-PROMOTE-EVIDENCE"
+    records = promotions.get(run_id)
+    if not isinstance(records, list):
+        return "NO-PROMOTE-EVIDENCE"
+    effective_now = now if now is not None else _now()
+    surface_matches = False
+    artifact_match_expired = False
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("to_env") != "prod" or rec.get("from_env") != "staging":
+            continue
+        if rec.get("surface") != surface:
+            continue
+        surface_matches = True
+        if rec.get("artifact") != artifact:
+            continue
+        exp = rec.get("expires_at")
+        if not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            continue
+        if effective_now >= exp:
+            artifact_match_expired = True
+    if artifact_match_expired:
+        return "PROMOTE-EXPIRED"
+    if surface_matches:
+        return "PROMOTE-ARTIFACT-MISMATCH"
+    return "NO-PROMOTE-EVIDENCE"
+
+
+def _check_hotfix_bypass(store: Path, run_id: str, action: str,
+                         *, now: float | None = None) -> bool:
+    """The ONE sanctioned promote-precondition escape (REQ-07/EDGE-004): a
+    hotfix:prod-* action authorizes ONLY on an operator grant carrying a
+    non-empty reason — deliberately does NOT call check_promotion, since
+    bypassing the promote requirement is the entire point of the escape.
+    No autonomous code path may call grant_actions on a hotfix:prod- action
+    (process control, V4 access control) — the only way a hotfix grant
+    exists is an explicit operator `grant ... --reason`."""
+    if not check_grant(store, run_id, action, now=now):
+        record_pending(store, run_id, action,
+                       "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
+                       "grant carrying a non-empty --reason")
+        return False
+    entry = (_load_store(store).get("_autonomy", {})
+             .get(run_id, {}).get("grants", {}).get(action)) or {}
+    reason = entry.get("reason")
+    if not reason:
+        record_pending(store, run_id, action,
+                       "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
+                       "grant carrying a non-empty --reason")
+        return False
+    record_hotfix_bypass(store, run_id, action, reason)
+    return True
+
+
+def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> bool:
+    """Durable audit record for a hotfix:prod-* bypass (REQ-07/EDGE-004) —
+    mirrors record_pending's lock/save shape. Append-only: each bypass
+    (even a repeat during the same incident) gets its own entry, unlike
+    record_pending's dedup — every use of the escape is individually
+    auditable."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        auto.setdefault("hotfix_bypasses", []).append({
+            "action": action,
+            "reason": sanitize_reason(reason),
+            "recorded_at": _now(),
+        })
+        _save_store(store, data)
+    return True
+
+
+def check_grant_prod(store: Path, run_id: str, action: str, artifact,
+                     *, manifest: dict | None = None,
+                     now: float | None = None) -> bool:
+    """Fail-closed prod-action precondition: a deploy:prod-* / flip:prod-* /
+    migrate:prod-* action additionally requires a fresh staging->prod promote
+    record proving `artifact` passed staging on this surface, on top of the
+    ordinary grant. Every non-prod action returns check_grant(...) UNCHANGED
+    with zero side effects (REQ-05). record_pending fires ONLY on this prod
+    path — check_grant itself stays pure (RESEARCH Pitfall 1).
+
+    hotfix:prod-* is the ONE sanctioned bypass of this entire precondition
+    (REQ-07/EDGE-004) — routed to _check_hotfix_bypass BEFORE the ordinary
+    prod-prefix dispatch, since 'hotfix:prod-' is not in PROD_ACTION_PREFIXES
+    and never requires promote evidence."""
+    if action.startswith("hotfix:prod-"):
+        return _check_hotfix_bypass(store, run_id, action, now=now)
+
+    surface = _prod_surface(action)
+    if surface is None:
+        return check_grant(store, run_id, action, now=now)
+
+    if not artifact:
+        record_pending(store, run_id, action,
+                       "NO-PROMOTE-EVIDENCE: --artifact is required for a "
+                       "prod-targeting action")
+        return False
+
+    if manifest is not None and not _surface_has_staging(surface, manifest):
+        record_pending(store, run_id, action,
+                       f"NO-STAGING-COUNTERPART: surface '{surface}' has no "
+                       "staging counterpart per the parity manifest")
+        return False
+
+    if not check_grant(store, run_id, action, now=now):
+        record_pending(store, run_id, action,
+                       "needs operator grant for this prod action (a promote "
+                       "record confers no authority on its own)")
+        return False
+
+    if check_promotion(store, run_id, "prod", surface, artifact, now=now):
+        return True
+
+    reason = _promote_miss_reason(store, run_id, surface, artifact, now=now)
+    record_pending(store, run_id, action,
+                   f"{reason}: no fresh staging->prod promote record matches "
+                   f"artifact {artifact} for surface '{surface}'")
+    return False
 
 
 def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
@@ -649,7 +1006,8 @@ def list_pending(store: Path, run_id: str) -> list[dict]:
                 .get(run_id, {}).get("pending", []))
 
 
-def preflight_check(requirements: list[dict], timeout: int = 30) -> dict:
+def preflight_check(requirements: list[dict], timeout: int = 30, *,
+                    store: Path | None = None, run_id: str | None = None) -> dict:
     """Prove env vars present and services reachable BEFORE an unattended run.
     Env checks report presence only — a secret value never enters the result.
     Probes execute for real (exit 0 = reachable). Empty manifest fails: an
@@ -668,6 +1026,13 @@ def preflight_check(requirements: list[dict], timeout: int = 30) -> dict:
                 detail = f"exit {proc.returncode}"
             except subprocess.TimeoutExpired:
                 ok, detail = False, f"timeout after {timeout}s"
+        elif kind == "staging-proof":
+            artifact = req.get("artifact")
+            if store is None or run_id is None:
+                ok, detail = False, "NO-STORE-AVAILABLE: no store/run_id to check the promote ledger"
+            else:
+                ok = check_promotion(store, run_id, "prod", name, artifact)
+                detail = "promoted" if ok else "NO-PROMOTE-EVIDENCE: no fresh staging->prod promote record"
         else:
             ok, detail = False, f"unknown kind: {kind}"
         results.append({"kind": kind, "name": name, "ok": ok, "detail": detail})
@@ -828,6 +1193,112 @@ def delegation_audit(transcript_text: str) -> dict:
             "inline_mechanical": inline_mechanical}
 
 
+def _manifest_scalar(raw: str, *, line_no: int) -> str:
+    """Parse the scalar subset used by the parity-manifest contract."""
+    value = raw.strip()
+    if not value:
+        raise ValueError(f"empty manifest scalar at line {line_no}")
+    if value.startswith('"'):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid quoted manifest scalar at line {line_no}") from exc
+        if not isinstance(parsed, str):
+            raise ValueError(f"manifest scalar must be text at line {line_no}")
+        return parsed
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            raise ValueError(f"invalid quoted manifest scalar at line {line_no}")
+        return value[1:-1].replace("''", "'")
+    # Inline comments begin only after whitespace, matching the simple scalar
+    # shape of the committed parity manifest without pretending to parse all YAML.
+    value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+    if not value:
+        raise ValueError(f"empty manifest scalar at line {line_no}")
+    return value
+
+
+def _normalize_manifest(data: dict) -> dict:
+    """Normalize legacy JSON maps and the committed `surfaces:` row shape."""
+    if "surfaces" not in data:
+        return data
+    rows = data.get("surfaces")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("manifest surfaces must be a non-empty list")
+    normalized: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("each manifest surface must be an object")
+        surface = row.get("surface")
+        staging = row.get("staging_instance", row.get("staging"))
+        if not isinstance(surface, str) or not surface.strip():
+            raise ValueError("each manifest surface needs a non-empty surface name")
+        if not isinstance(staging, str) or not staging.strip():
+            raise ValueError(f"manifest surface {surface!r} needs staging_instance")
+        if surface in normalized:
+            raise ValueError(f"duplicate manifest surface: {surface}")
+        normalized[surface] = {"staging": staging}
+    return normalized
+
+
+def _parse_parity_manifest_yaml(text: str) -> dict:
+    """Parse only the dependency-free YAML subset used by parity-manifest.yaml.
+
+    check-grant needs two fields: `surface` and `staging_instance`. Restricting
+    the parser to those flat rows keeps gates.py zero-install while malformed,
+    empty, and duplicate rows still fail closed.
+    """
+    in_surfaces = False
+    rows: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if not in_surfaces:
+            if stripped == "surfaces:":
+                in_surfaces = True
+            continue
+        if indent == 0:
+            break
+        surface_match = re.fullmatch(r"-\s+surface:\s*(.+)", stripped)
+        if surface_match:
+            if current is not None:
+                rows.append(current)
+            current = {
+                "surface": _manifest_scalar(surface_match.group(1), line_no=line_no),
+            }
+            continue
+        field_match = re.fullmatch(r"(staging_instance|staging):\s*(.+)", stripped)
+        if current is not None and field_match:
+            current["staging_instance"] = _manifest_scalar(
+                field_match.group(2), line_no=line_no,
+            )
+    if current is not None:
+        rows.append(current)
+    if not in_surfaces:
+        raise ValueError("YAML manifest must contain a top-level surfaces list")
+    return _normalize_manifest({"surfaces": rows})
+
+
+def _load_manifest(path: str) -> dict:
+    """Load a JSON or constrained YAML staging-parity manifest.
+
+    Legacy JSON maps remain accepted. The committed YAML row shape is
+    normalized to the `{surface: {staging: value}}` form consumed by the prod
+    grant precondition. Invalid input raises ValueError so the CLI fails closed.
+    """
+    text = Path(path).read_text()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return _parse_parity_manifest_yaml(text)
+    if not isinstance(data, dict):
+        raise ValueError("manifest must parse to an object")
+    return _normalize_manifest(data)
+
+
 def _flag(args: list[str], name: str, default: str = "") -> str:
     for i, a in enumerate(args):
         if a == name and i + 1 < len(args):
@@ -870,7 +1341,19 @@ def main(argv: list[str]) -> int:
         return 0 if ok else 1
     if cmd == "run-gate":
         sep = args.index("--") if "--" in args else 1
-        rc = run_gate(store, args[0], args[sep + 1:] if "--" in args else args[1:])
+        gate_args = args[1:sep]
+        artifact = _flag(gate_args, "--artifact") or None
+        if "--artifact" in gate_args and artifact is None:
+            print("GATE-REJECTED: --artifact requires a value", file=sys.stderr)
+            return 1
+        try:
+            rc = run_gate(
+                store, args[0], args[sep + 1:] if "--" in args else args[1:],
+                artifact=artifact,
+            )
+        except ValueError as exc:
+            print(f"GATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
         print(f"GATE-EXIT {rc}")
         return rc
     if cmd == "run-red":
@@ -1012,16 +1495,77 @@ def main(argv: list[str]) -> int:
         run_id = args[0]
         actions = [args[i + 1] for i, a in enumerate(args) if a == "--action"]
         ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
-        if not grant_actions(store, run_id, actions, ttl_hours=ttl):
+        reason = _flag(args, "--reason") or None
+        if not grant_actions(store, run_id, actions, ttl_hours=ttl, reason=reason):
             print("GRANT-REJECTED: actions must be typed 'type:target' "
                   "(e.g. push:origin/main) and non-empty")
             return 1
         for a in actions:
             print(f"GRANTED: {a} (run {run_id}, ttl {ttl}h)")
         return 0
+    if cmd == "promote":
+        run_id = args[0]
+        from_env, to_env = _flag(args, "--from"), _flag(args, "--to")
+        surface, artifact = _flag(args, "--surface"), _flag(args, "--artifact")
+        try:
+            evidence_ids = [args[i + 1] for i, a in enumerate(args)
+                            if a == "--evidence"]
+        except IndexError:
+            print("PROMOTE-REJECTED: --evidence requires a value", file=sys.stderr)
+            return 1
+        try:
+            ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
+        except ValueError:
+            print("PROMOTE-REJECTED: --ttl-hours must be numeric", file=sys.stderr)
+            return 1
+        if not record_promotion(store, run_id, from_env=from_env, to_env=to_env,
+                                surface=surface, artifact=artifact,
+                                evidence_ids=evidence_ids, ttl_hours=ttl):
+            print(f"PROMOTE-REJECTED: {sanitize_reason(surface)}@"
+                  f"{sanitize_reason(str(artifact))} failed validation "
+                  "(malformed artifact identity, empty/unresolved evidence, "
+                  "or out-of-bounds --ttl-hours)", file=sys.stderr)
+            return 1
+        print(f"PROMOTED: {sanitize_reason(surface)}@{sanitize_reason(str(artifact))} "
+              f"({sanitize_reason(from_env)}->{sanitize_reason(to_env)}, run {run_id})")
+        return 0
     if cmd == "check-grant":
         run_id, action = args[0], _flag(args, "--action")
         safe = sanitize_reason(action)
+        if action.startswith("hotfix:prod-"):
+            if check_grant_prod(store, run_id, action, None):
+                entry = (_load_store(store).get("_autonomy", {})
+                        .get(run_id, {}).get("grants", {}).get(action)) or {}
+                reason = sanitize_reason(entry.get("reason", ""))
+                print(f"EMERGENCY BYPASS: {safe} authorized WITHOUT promote "
+                      f"evidence (run {run_id}) — reason: {reason}")
+                return 0
+            print(f"NOT-GRANTED: {safe} (run {run_id}) — hotfix:prod-* is the "
+                  "sanctioned emergency escape and requires an operator "
+                  f"`gates.py grant {run_id} --action '{action}' --reason "
+                  "\"...\"`, STOP, and wait for operator")
+            return 1
+        prod_surface = _prod_surface(action)
+        if prod_surface is not None:
+            artifact = _flag(args, "--artifact") or None
+            manifest_path = _flag(args, "--manifest")
+            manifest = None
+            if manifest_path:
+                try:
+                    manifest = _load_manifest(manifest_path)
+                except (OSError, ValueError) as exc:
+                    print(f"CHECK-GRANT-REJECTED: cannot load manifest "
+                          f"{manifest_path}: {exc}", file=sys.stderr)
+                    return 1
+            if check_grant_prod(store, run_id, action, artifact, manifest=manifest):
+                print(f"GRANTED: {safe}")
+                return 0
+            print(f"NOT-GRANTED: {safe} (run {run_id}) — record promote "
+                  f"evidence via `gates.py promote {run_id} --from staging "
+                  f"--to prod --surface {prod_surface} --artifact <digest> "
+                  f"--evidence <id>`, then `gates.py grant {run_id} --action "
+                  f"'{action}'`, STOP, and wait for operator")
+            return 1
         if check_grant(store, run_id, action):
             print(f"GRANTED: {safe}")
             return 0
@@ -1051,7 +1595,7 @@ def main(argv: list[str]) -> int:
         run_id = _flag(args, "--run", "default")
         with open(manifest) as f:
             requirements = json.load(f)
-        result = preflight_check(requirements)
+        result = preflight_check(requirements, store=store, run_id=run_id)
         record_preflight(store, run_id, result)
         for r in result["results"]:
             mark = "ok" if r["ok"] else "FAIL"
