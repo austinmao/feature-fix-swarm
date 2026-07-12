@@ -68,6 +68,9 @@ that gate stays fail-closed on the manifest only.
 
 ## Rules
 
+See `docs/promotion-protocol.md` for the full 12-rule dev→staging→production
+promotion protocol; staging-proof preflight checks are one of its enforcement points.
+
 - **Env checks are presence-only.** A secret VALUE never appears in the
   manifest, the output, or the evidence store — names only.
 - **Probes are real executions**, not greps. "The var is set" does not prove

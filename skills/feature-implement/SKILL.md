@@ -146,6 +146,9 @@ On verifier gaps: `/gsd-plan-phase N --gaps` then `/gsd-execute-phase N --gaps-o
 
 ### Step 5: Completion authority
 
+See `docs/promotion-protocol.md` for the full 12-rule dev→staging→production
+promotion protocol; the completion authority below enforces rules 7, 8, and 12 of it.
+
 gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
 - `GATES_STRICT=1 python3 "$GATES_PY" verify-done gsd-phase` must exit 0
 - the `gsd-phase-evidence-gate.sh` PreToolUse hook blocks ROADMAP/STATE
