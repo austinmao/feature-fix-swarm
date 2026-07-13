@@ -32,6 +32,7 @@ setup() {
 @test "setup.sh hook manifest includes delegation-enforcer.sh (INT-003)" {
   HOOK_LINE="$(grep '^for hook in ' setup.sh)"
   [[ "$HOOK_LINE" == *"delegation-enforcer.sh"* ]]
+  [[ "$HOOK_LINE" == *"credential-output-guard.sh"* ]]
 }
 
 @test "setup.sh gsd-script manifest includes model-equivalents.sh (spec 004 cross-vendor routing)" {
@@ -82,8 +83,8 @@ setup() {
   printf 'legacy runner\n' > "$TARGET/scripts/gsd/gsd-run.sh"
   printf 'legacy adversary\n' > "$TARGET/scripts/gsd/adversary-host.sh"
   printf 'legacy ownership gate\n' > "$TARGET/scripts/gsd/requirement-ownership-gate.sh"
-  printf '{}\n' > "$TARGET/.claude/settings.json"
-  printf '{}\n' > "$TARGET/.codex/hooks.json"
+  printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"false # credential-output-guard.sh","timeout":999}]}]}}\n' > "$TARGET/.claude/settings.json"
+  printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"false # credential-output-guard.sh","timeout":999}]}]}}\n' > "$TARGET/.codex/hooks.json"
 
   run env HOME="$BATS_TEST_TMPDIR/home" bash setup.sh --reconcile-consumer "$TARGET"
 
@@ -93,6 +94,7 @@ setup() {
   cmp -s scripts/gsd/run-bounded.sh "$TARGET/scripts/gsd/run-bounded.sh"
   cmp -s scripts/gsd/requirement-ownership-gate.sh "$TARGET/scripts/gsd/requirement-ownership-gate.sh"
   cmp -s scripts/hooks/cli-hang-guard.sh "$TARGET/scripts/hooks/cli-hang-guard.sh"
+  cmp -s scripts/hooks/credential-output-guard.sh "$TARGET/scripts/hooks/credential-output-guard.sh"
   python3 - "$TARGET" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -101,6 +103,12 @@ for path in (root / ".claude/settings.json", root / ".codex/hooks.json"):
     hooks = data["hooks"]["PreToolUse"]
     assert any(entry.get("matcher") == "Bash" and any(
         "cli-hang-guard.sh" in hook.get("command", "")
+        for hook in entry.get("hooks", [])
+    ) for entry in hooks), path
+    assert any(entry.get("matcher") == "Bash" and any(
+        "credential-output-guard.sh" in hook.get("command", "")
+        and not hook.get("command", "").startswith("false")
+        and hook.get("timeout") == 10
         for hook in entry.get("hooks", [])
     ) for entry in hooks), path
 PY

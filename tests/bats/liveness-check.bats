@@ -40,7 +40,7 @@ setup() {
 }
 
 alive_pid_into() { # $1 = pidfile path — bats' own subshell pid, alive for the test's duration
-  echo "$$" > "$1"
+  printf '%s\nmachine=test-host\n' "$$" > "$1"
 }
 
 dead_pid_into() { # $1 = pidfile path

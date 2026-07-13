@@ -23,16 +23,17 @@ for ((_i=0; _i<${#_setup_args[@]}; _i++)); do
 done
 export PATH="$HOME/.local/bin:$PATH"
 
-register_cli_hang_guard() {
-  local config_path="$1" command_text="$2"
+register_pretool_guard() {
+  local config_path="$1" command_text="$2" guard_name="$3"
   mkdir -p "$(dirname "$config_path")"
-  python3 - "$config_path" "$command_text" <<'PY'
+  python3 - "$config_path" "$command_text" "$guard_name" <<'PY'
 import json
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
 command = sys.argv[2]
+guard_name = sys.argv[3]
 if path.exists():
     try:
         data = json.loads(path.read_text())
@@ -42,23 +43,38 @@ else:
     data = {}
 hooks = data.setdefault("hooks", {})
 entries = hooks.setdefault("PreToolUse", [])
+for item in entries:
+    if item.get("matcher") == "Bash":
+        item["hooks"] = [
+            hook for hook in item.get("hooks", [])
+            if guard_name not in hook.get("command", "")
+        ]
 entry = next((item for item in entries if item.get("matcher") == "Bash"), None)
 if entry is None:
     entry = {"matcher": "Bash", "hooks": []}
     entries.append(entry)
 commands = entry.setdefault("hooks", [])
-if not any("cli-hang-guard.sh" in hook.get("command", "") for hook in commands):
-    commands.append({"type": "command", "command": command, "timeout": 10})
+commands.append({"type": "command", "command": command, "timeout": 10})
+installed = [
+    hook for item in entries if item.get("matcher") == "Bash"
+    for hook in item.get("hooks", [])
+    if guard_name in hook.get("command", "")
+]
+if installed != [{"type": "command", "command": command, "timeout": 10}]:
+    raise SystemExit(f"failed to reconcile exact {guard_name} hook in {path}")
 path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
 
 register_consumer_hooks() {
   local target="$1"
-  register_cli_hang_guard "$target/.claude/settings.json" \
-    'bash "$CLAUDE_PROJECT_DIR"/scripts/hooks/cli-hang-guard.sh'
-  register_cli_hang_guard "$target/.codex/hooks.json" \
-    'bash "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/hooks/cli-hang-guard.sh"'
+  local guard
+  for guard in cli-hang-guard.sh credential-output-guard.sh; do
+    register_pretool_guard "$target/.claude/settings.json" \
+      "bash \"\$CLAUDE_PROJECT_DIR\"/scripts/hooks/$guard" "$guard"
+    register_pretool_guard "$target/.codex/hooks.json" \
+      "bash \"\$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/hooks/$guard\"" "$guard"
+  done
 }
 
 verify_consumer_runtime() {
@@ -68,7 +84,8 @@ verify_consumer_runtime() {
     scripts/gsd/requirement-ownership-gate.sh \
     scripts/gsd/adversary-host.sh \
     scripts/gsd/run-bounded.sh \
-    scripts/hooks/cli-hang-guard.sh; do
+    scripts/hooks/cli-hang-guard.sh \
+    scripts/hooks/credential-output-guard.sh; do
     cmp -s "$SCRIPT_DIR/$rel" "$target/$rel" || {
       echo "ERROR: consumer runtime drift remains after setup: $rel" >&2
       return 1
@@ -88,7 +105,8 @@ reconcile_consumer_runtime() {
     scripts/gsd/model-equivalents.sh \
     scripts/gsd/codex-model-sync.sh \
     scripts/gsd/review-gate-command.sh \
-    scripts/hooks/cli-hang-guard.sh; do
+    scripts/hooks/cli-hang-guard.sh \
+    scripts/hooks/credential-output-guard.sh; do
     mkdir -p "$target/$(dirname "$rel")"
     if [ ! "$SCRIPT_DIR/$rel" -ef "$target/$rel" ]; then
       cp "$SCRIPT_DIR/$rel" "$target/$rel"
@@ -633,7 +651,7 @@ for gsd_script in gsd/gsd-run.sh gsd/requirement-ownership-gate.sh gsd/gates-tes
 done
 
 mkdir -p scripts/hooks
-for hook in worktree-gc.sh post-implement-batch.sh delegation-enforcer.sh cli-hang-guard.sh; do
+for hook in worktree-gc.sh post-implement-batch.sh delegation-enforcer.sh cli-hang-guard.sh credential-output-guard.sh; do
   if [ "$SCRIPT_DIR/scripts/hooks/$hook" -ef "scripts/hooks/$hook" ]; then
     echo "  scripts/hooks/$hook is the repo copy — skipping self-copy"
   else
