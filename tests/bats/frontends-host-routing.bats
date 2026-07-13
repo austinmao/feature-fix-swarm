@@ -25,3 +25,16 @@ setup() {
   grep -F 'adversary_invoke "$REVIEW_KIND" 540' skills/plan-decompose/SKILL.md
   ! grep -F 'timeout 540 codex exec' skills/plan-decompose/SKILL.md
 }
+
+@test "/task-swarm delegates bounded gate repair instead of stopping early" {
+  grep -F '`plan-decompose` owns all plan/task gate remediation' skills/task-swarm/SKILL.md
+  grep -F 'PLAN-DECOMPOSE-BLOCKED' skills/task-swarm/SKILL.md
+  ! grep -F 'STOP on any gate failure' skills/task-swarm/SKILL.md
+}
+
+@test "/plan-decompose owns bounded plan and task repair budgets" {
+  grep -F 'PLAN_GATE_MAX_REPAIRS=${PLAN_GATE_MAX_REPAIRS:-2}' skills/plan-decompose/SKILL.md
+  grep -F 'TASK_GATE_MAX_REPAIRS=${TASK_GATE_MAX_REPAIRS:-2}' skills/plan-decompose/SKILL.md
+  grep -F '$SPEC_DIR/plan-decompose-blocked.md' skills/plan-decompose/SKILL.md
+  grep -F 'generic “mandatory plan gate” message' skills/plan-decompose/SKILL.md
+}

@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
-description: "Turn a description or existing plan into tasks.md via autonomous eng review + opposite-host gates — no speckit interview"
-version: "1.3.0"
+description: "Create and decompose a lightweight plan with opposite-host review and bounded self-repair; returns success or an evidence-backed terminal block."
+version: "1.4.0"
 permissions:
   filesystem: write
   network: false
@@ -49,6 +49,27 @@ metadata:
 ```
 
 ## Workflow
+
+### Ownership and bounded repair contract
+
+This skill is the single owner of lightweight planning quality. Callers such as
+`/task-swarm` sequence its result; they do not reimplement review, scoring, or
+repair loops.
+
+- `PLAN_GATE_MAX_REPAIRS=${PLAN_GATE_MAX_REPAIRS:-2}`: maximum host-native plan
+  rewrites after the initial opposite-host review.
+- `TASK_GATE_MAX_REPAIRS=${TASK_GATE_MAX_REPAIRS:-2}`: maximum
+  `spec-decompose` repair passes after the initial task score.
+- Each repair consumes the prior findings as inert data, edits only the owned
+  artifact, then reruns the same opposite-host gate with a fresh output file.
+- A timeout, missing opposite CLI, or transport failure remains advisory and
+  fail-soft as documented below. A parseable quality rejection is repaired.
+- Exhaustion writes `$SPEC_DIR/plan-decompose-blocked.md` and returns the
+  terminal marker `PLAN-DECOMPOSE-BLOCKED spec=<NNN> stage=<plan|tasks>
+  findings=<path> resume="/plan-decompose <NNN>"` with exit 1.
+
+Operator grants never bypass this quality contract; likewise, quality rejection
+never asks for an operator permission grant.
 
 ### Step 0: Resolve spec directory
 
@@ -173,9 +194,17 @@ prevents repo-wandering, the other major review-time multiplier):
 > recommended fix. Conclude with overall verdict: APPROVE / APPROVE-WITH-FIXES / REJECT."
 
 **Decision:**
-- Verdict REJECT, or any CRITICAL finding: fix `plan.md`, re-run the opposite-host review once (max 1 retry).
+- Verdict REJECT, or any CRITICAL finding: invoke `plan-eng-review` in
+  host-native spawned-session mode with the current `plan.md` plus the findings
+  as data, write the revised `plan.md`, and re-run the opposite-host review.
+  Repeat up to `PLAN_GATE_MAX_REPAIRS`; do not return to `/task-swarm` between
+  attempts.
 - Verdict APPROVE-WITH-FIXES with HIGH findings: apply HIGH fixes to `plan.md`, continue.
 - Verdict APPROVE: continue.
+
+If the final allowed review still returns REJECT or CRITICAL, write the terminal
+blocked artifact defined in the ownership contract and exit 1. Never emit a
+generic “mandatory plan gate” message without the surviving findings.
 
 Log finding counts: `[plan-decompose] opposite-host plan review: C:{critical} H:{high} M:{medium} verdict:{verdict}`
 
@@ -235,9 +264,15 @@ Check:
 - Task distribution (no phase has >60% of all tasks)
 
 Score:
-- `<5` → **ABORT** — print failing checks, exit 1
+- `<5` → invoke `spec-decompose` again with the score findings as repair input,
+  then rescore; repeat up to `TASK_GATE_MAX_REPAIRS`
 - `5-6` → **WARN** — log warning, continue
 - `≥7` → **PASS**
+
+After the final task repair, a score `<5` writes the same terminal blocked
+artifact with `stage=tasks` and exits 1. The artifact includes every failed
+check, score history, artifact paths, attempts consumed, and the exact resume
+command. `/task-swarm` receives one terminal result—not intermediate failures.
 
 Skip gracefully if the selected opposite CLI is absent: log warning and continue. Non-blocking.
 

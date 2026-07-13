@@ -6,6 +6,20 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.13.1 — self-healing lightweight task pipeline (2026-07-13)
+
+- **Task Swarm now completes its own planning loop:** `/task-swarm` remains a
+  DRY sequencer while `/plan-decompose` owns plan creation, task decomposition,
+  opposite-host review, scoring, and bounded automatic repair.
+- **No first-gate deadlock:** rejected plans and low-scoring decompositions are
+  repaired and rechecked up to two times before the pipeline can stop.
+- **Actionable terminal blocks:** exhausted repair budgets produce a findings
+  artifact with score history and an exact resume command instead of the vague
+  “mandatory plan gate” message.
+- **Feature-pipeline parity without ceremony:** the lightweight path still uses
+  the shared preflight, MAX-AUTH grant ledger, autonomous implementation,
+  review, ship, and canary stages from the full feature pipeline.
+
 ## v4.13.0 — host-native GSD and symmetric cross-host review (2026-07-13)
 
 - **Host-native GSD runner:** `scripts/gsd/gsd-run.sh` now detects the invoking
