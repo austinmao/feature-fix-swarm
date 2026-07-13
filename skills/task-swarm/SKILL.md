@@ -1,7 +1,7 @@
 ---
 name: task-swarm
-description: "Take ANY task description end-to-end autonomously: plan-decompose → /preflight → /autonomy-grant (MAX-AUTH) → /feature-implement --autonomous. v3.0.0: pure sequencing front-end over feature-implement — like /fix but with full planning; zero machinery of its own. Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
-version: "3.1.0"
+description: "Lightweight autonomous feature pipeline: self-healing plan-decompose → preflight → autonomy-grant → feature-implement --autonomous. DRY sequencing only; child skills own all machinery."
+version: "3.2.0"
 allowed-tools:
   - Read
   - Write
@@ -13,8 +13,10 @@ allowed-tools:
 
 # /task-swarm "<task description>"
 
-One command from free-text instruction to shipped, canaried change. Pure
-sequencing front-end — every stage IS an existing skill (`plan-decompose`,
+One command from free-text instruction to shipped, canaried change. It is the
+lightweight sibling of `/feature-spec`: no speckit specify/plan/clarify ceremony,
+but the same operational spine after planning. Pure sequencing front-end —
+every stage IS an existing skill (`plan-decompose`,
 `preflight`, `autonomy-grant`, `feature-implement`); this skill owns only the
 ordering, the spec-id capture, and the results.md wrapper line. `/fix` is the
 sibling front-end for the no-planning case (`/feature-implement --adhoc`).
@@ -24,8 +26,8 @@ review stop.
 ```
 /task-swarm "add rate limiting to the webhook endpoints"
      │
-     ├─ 1. /plan-decompose  (plan-eng-review → opposite-host plan gate →
-     │      spec-decompose → specs/NNN/tasks.md → opposite-host score gate)
+     ├─ 1. /plan-decompose  (create → review → bounded self-repair →
+     │      spec-decompose → score → bounded self-repair)
      ├─ 2. preflight        (emit specs/NNN/preflight.json → gates.py preflight → PASS)
      ├─ 3. grant ledger     (enumerate typed gates from tasks.md → AUTO-GRANT
      │                       [--gated: operator yes first] → ledger)
@@ -61,7 +63,16 @@ Invoke the `plan-decompose` skill with the task description. It runs
 `/spec-decompose` (gsd project seed + `/gsd-plan-phase`). Output: a seeded
 `.planning/` project keyed to spec ID NNN.
 
-STOP on any gate failure — surface findings; do not push a broken plan forward.
+`plan-decompose` owns all plan/task gate remediation. It automatically repairs
+and rechecks rejected plans and under-scoring task decompositions within its
+bounded retry budget. `/task-swarm` MUST NOT duplicate that loop or stop on the
+first gate failure. Continue when the child returns PASS/WARN; stop only on its
+terminal `PLAN-DECOMPOSE-BLOCKED` result after the repair budget is exhausted,
+and surface the concrete findings artifact and exact resume command.
+
+Operator authorization and quality are separate: MAX-AUTH covers outward
+actions later in the pipeline, while plan quality is satisfied through bounded
+self-repair—not bypassed and not turned into a planned operator stop.
 
 ### Step 2 — preflight (always; while the operator is still around)
 
@@ -133,6 +144,8 @@ cross to the opposite family.
 ## Anti-patterns
 
 - Re-implementing planning/decompose/implement logic inline — invoke the skills.
+- Stopping on the first plan/task review failure — `plan-decompose` owns bounded
+  repair and returns only success or a terminal evidence-backed block.
 - Granting `push:*` style blankets — typed exact actions only (ledger rejects
   wildcards by design).
 - Running with `--attended` overnight — that's just an unattended stall with
