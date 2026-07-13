@@ -319,3 +319,34 @@ EOF
   grep -Fq 'marker: project-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
   ! grep -Fq 'marker: global-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
 }
+
+@test "requirement ownership mismatch blocks execute-phase before any host probe" {
+  REPO="$BATS_TEST_TMPDIR/unsafe-plan"
+  PHASE_DIR="$REPO/.planning/phases/02-example"
+  mkdir -p "$PHASE_DIR"
+  cat > "$REPO/.planning/ROADMAP.md" <<'EOF'
+# Roadmap
+
+## Phase 2: Example
+**Requirements:** FR-001
+EOF
+  for plan in 01 02; do
+    cat > "$PHASE_DIR/02-${plan}-PLAN.md" <<EOF
+---
+phase: 02-example
+plan: "${plan}"
+requirements: [FR-001]
+---
+EOF
+  done
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 2"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"FR-001 is owned by multiple plans"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
