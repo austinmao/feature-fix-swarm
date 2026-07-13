@@ -7,6 +7,7 @@ SCRIPT="scripts/gsd/qa-coverage-adversary.sh"
 
 setup() {
   cd "$BATS_TEST_DIRNAME/../.."
+  export FFS_ADVERSARY_MODEL_PROBE=off
   RESULTS="$BATS_TEST_TMPDIR/results.json"
   cat > "$RESULTS" <<'EOF'
 {"steps": [{"name": "login flow"}, {"name": "checkout"}]}
