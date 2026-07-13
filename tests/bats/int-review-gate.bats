@@ -40,8 +40,14 @@ setup() {
 
 @test "Pass 2 pins Codex Sol and Claude Opus on the opposite host" {
   grep -F 'gpt-5.6-sol' skills/review-gate/SKILL.md
-  grep -F 'model_reasoning_effort="xhigh"' skills/review-gate/SKILL.md
-  grep -F -- '--model opus' skills/review-gate/SKILL.md
+  grep -F 'REVIEW_EFFORT="xhigh"' skills/review-gate/SKILL.md
+  grep -F 'REVIEW_MODEL="opus"' skills/review-gate/SKILL.md
+}
+
+@test "Pass 2 uses the shared bounded opposite-host adapter with one active-host fallback" {
+  grep -F 'adversary_invoke "$REVIEW_KIND" 480 "$REVIEW_MODEL" "$REVIEW_EFFORT"' skills/review-gate/SKILL.md
+  grep -F 'falls back once to the active host' skills/review-gate/SKILL.md
+  ! grep -F 'ERROR: $REVIEW_BIN CLI not found' skills/review-gate/SKILL.md
 }
 
 @test "honest verifier is also opposite-host and has no Claude-only Task primitive" {
@@ -74,8 +80,8 @@ setup() {
   grep -F 'never suppresses an otherwise-eligible honest-verifier' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: version bumped to 1.7.0" {
-  grep -F 'version: "1.7.0"' skills/review-gate/SKILL.md
+@test "INT-001: version bumped to 1.8.0" {
+  grep -F 'version: "1.8.0"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

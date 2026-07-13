@@ -72,23 +72,20 @@ ADVERSARY_KIND="${PLAN_ADVERSARY_KIND:-$(adversary_kind_for_host "$(detect_orche
 
 if [ "$ADVERSARY_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  CHECK_BIN="$ADVERSARY_BIN_CODEX"
+  [ -z "${PLAN_ADVERSARY_FALLBACK_BIN:-}" ] \
+    || ADVERSARY_BIN_CLAUDE="$PLAN_ADVERSARY_FALLBACK_BIN"
   MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
   EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
   HEADER_LABEL="${MODEL} ${EFFORT}"
 else
   ADVERSARY_BIN_CLAUDE="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  CHECK_BIN="$ADVERSARY_BIN_CLAUDE"
+  [ -z "${PLAN_ADVERSARY_FALLBACK_BIN:-}" ] \
+    || ADVERSARY_BIN_CODEX="$PLAN_ADVERSARY_FALLBACK_BIN"
   MODEL="${PLAN_ADVERSARY_CLAUDE_MODEL:-opus}"
   EFFORT=""
   HEADER_LABEL="claude ${MODEL}"
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
-
-if ! command -v "$CHECK_BIN" >/dev/null 2>&1; then
-  echo "[plan-adversary] $CHECK_BIN CLI not found — skipped (fail-soft)"
-  exit 0
-fi
 
 PROMPT="You are a brutally honest principal engineer reviewing an execution PLAN before any code is written. Nothing is implemented yet — every finding here is 100x cheaper than the same finding in code review.
 
@@ -101,8 +98,16 @@ Hunt for: claims about the codebase or its APIs that could be wrong, logical gap
 OUTPUT="$(adversary_invoke "$ADVERSARY_KIND" "${PLAN_ADVERSARY_TIMEOUT:-480}" "$MODEL" "$EFFORT" "$PROMPT" 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
-  echo "[plan-adversary] $CHECK_BIN exec failed (rc=$rc) — skipped (fail-soft)"
+  echo "[plan-adversary] both bounded vendor attempts failed (rc=$rc) — skipped (fail-soft)"
   exit 0
+fi
+
+if printf '%s\n' "$OUTPUT" | grep -q 'falling back once to claude'; then
+  printf '%s\n' "$OUTPUT" | grep 'falling back once to claude' | tail -1 >&2
+  HEADER_LABEL="claude $(claude_equiv_model "$MODEL" 2>/dev/null || echo opus)"
+elif printf '%s\n' "$OUTPUT" | grep -q 'falling back once to codex'; then
+  printf '%s\n' "$OUTPUT" | grep 'falling back once to codex' | tail -1 >&2
+  HEADER_LABEL="$(codex_equiv_model "$MODEL" 2>/dev/null || echo gpt-5.6-sol) $(codex_equiv_effort "$MODEL" 2>/dev/null || echo xhigh)"
 fi
 
 # codex echoes the prompt into its transcript — only line-anchored tags count,

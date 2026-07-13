@@ -1,7 +1,7 @@
 ---
 name: feature-implement
-description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. v2.6.0 adds --adhoc \"<task>\": same walls + finish tail over gsd-quick, no seeded spec/plan required — /fix and /task-swarm are thin front-ends over this skill."
-version: "2.8.0"
+description: "Execute a decomposed feature via the host-native gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. Codex invokes Codex models; Claude invokes Claude models; bounded availability failures fall back once across vendors without waiting."
+version: "2.9.0"
 allowed-tools:
   - Read
   - Edit
@@ -130,6 +130,17 @@ change (GREEN) — the gsd executor's commit trail must show both.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.
 - Interactive Codex session: invoke `$gsd-execute-phase N` directly.
 - `--autonomous` / headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` (the runner preserves the invoking host; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface).
+
+**Host-native availability contract:** the runner always tries the invoking
+host first (Codex → Codex/Terra; Claude → Claude/Sonnet) with a bounded,
+read-only, no-tools model probe. If that probe fails for any reason, the runner
+probes the equivalent tier on the other vendor exactly once. Only after a probe
+passes does it launch the mutating GSD drive—and it launches exactly one.
+Every post-launch failure (ordinary executor/test error, exit 126/127, timeout,
+or provider error) keeps its original exit code and NEVER crosses vendors;
+resume from durable phase/gate state instead. Read-only review timeouts may
+safely fall back once. Every call uses `run_bounded`; there is no wait-for-quota
+loop. Set `FFS_CROSS_VENDOR_FALLBACK=off` only for forensic isolation.
 
 **Anti-early-stop (autonomous orchestrator loop).** Fable early-stops long runs
 with text-only intent; hold this line every turn of the drive loop:
