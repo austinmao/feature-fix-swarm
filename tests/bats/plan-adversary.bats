@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # plan-adversary.sh — plan-stage cross-model adversarial review lever.
-# Asserts: high-blast keyword gating, fail-soft on missing CLI, kill-switch,
-# findings appended with frontmatter intact, idempotency, usage error.
+# Asserts: high-blast keyword gating, bounded cross-host fallback/fail-closed
+# review, findings appended with frontmatter intact, idempotency, usage error.
 # Callers: gsd plan-phase bounce step via templates/gsd-config.base.json
 # workflow.plan_bounce_script.
 
@@ -83,19 +83,21 @@ JSON
   [[ "$output" == *"disabled"* ]]
 }
 
-@test "missing adversary CLI is fail-soft" {
+@test "both adversary CLIs unavailable fails closed without stalling" {
   PLAN_ADVERSARY_BIN=definitely-not-a-real-cli \
     PLAN_ADVERSARY_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$HIGH"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"both bounded vendor attempts failed"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"both review hosts unavailable"* ]]
+  [ ! -e "$HIGH.reviewing" ]
 }
 
-@test "missing primary adversary falls back once and labels the actual reviewer" {
+@test "missing preferred adversary falls back once to the active host" {
   PLAN_ADVERSARY_BIN=definitely-not-a-real-cli \
     PLAN_ADVERSARY_FALLBACK_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"falling back once to claude"* ]]
-  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
+  [[ "$output" == *"DEGRADED"* ]]
+  [[ "$output" == *"VERDICT: REVISE"* ]]
+  grep -q '^## Adversarial plan review (claude opus, degraded fallback)$' "$HIGH"
 }
 
 @test "high-blast plan gets findings appended, frontmatter intact" {
@@ -120,17 +122,17 @@ JSON
   [ "$(grep -c '^## Adversarial plan review' "$HIGH")" -eq 1 ]
 }
 
-@test "adversary CLI failure is fail-soft, file unchanged" {
+@test "both plan-review executions failing blocks with file unchanged" {
   cat > "$STUB_DIR/fake-codex" <<'EOF'
 #!/usr/bin/env bash
 exit 7
 EOF
   chmod +x "$STUB_DIR/fake-codex"
   before="$(cat "$HIGH")"
-  PLAN_ADVERSARY_BIN=fake-codex \
-    PLAN_ADVERSARY_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$HIGH"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"both bounded vendor attempts failed (rc="* ]]
+  PLAN_ADVERSARY_BIN=fake-codex PLAN_ADVERSARY_FALLBACK_BIN=definitely-missing \
+    run bash "$SCRIPT" "$HIGH"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"both review hosts unavailable"* ]]
   [ "$(cat "$HIGH")" = "$before" ]
 }
 
@@ -171,7 +173,8 @@ EOF
   grep -q 'idempotent-by-design' "$SCRIPT"
 }
 
-@test "stub with findings but no anchored VERDICT line appends VERDICT: UNPARSEABLE" {
+@test "stub with findings but no anchored VERDICT line blocks with plan unchanged" {
+  before="$(cat "$HIGH")"
   cat > "$STUB_DIR/fake-codex" <<'EOF'
 #!/usr/bin/env bash
 echo "HIGH: something risky in the plan"
@@ -179,11 +182,25 @@ echo "the model rambles about a verdict without anchoring it: REVISE maybe"
 EOF
   chmod +x "$STUB_DIR/fake-codex"
   PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
-  [ "$status" -eq 0 ]
-  grep -q '^VERDICT: UNPARSEABLE$' "$HIGH"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing or conflicting anchored verdict"* ]]
+  [ "$(cat "$HIGH")" = "$before" ]
 }
 
-@test "codex invocation pins sandbox_mode=read-only (untrusted plan text)" {
+@test "multiple conflicting anchored verdicts block with plan unchanged" {
+  before="$(cat "$HIGH")"
+  cat > "$STUB_DIR/fake-codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'VERDICT: REVISE\nVERDICT: APPROVE\n'
+EOF
+  chmod +x "$STUB_DIR/fake-codex"
+  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing or conflicting anchored verdict"* ]]
+  [ "$(cat "$HIGH")" = "$before" ]
+}
+
+@test "codex invocation is ephemeral and pins the official read-only surface" {
   ARGS_LOG="$BATS_TEST_TMPDIR/args.log"
   cat > "$STUB_DIR/fake-codex" <<EOF
 #!/usr/bin/env bash
@@ -193,7 +210,11 @@ EOF
   chmod +x "$STUB_DIR/fake-codex"
   PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
-  grep -q 'sandbox_mode="read-only"' "$ARGS_LOG"
+  grep -q -- '--sandbox read-only' "$ARGS_LOG"
+  grep -q -- '--ephemeral' "$ARGS_LOG"
+  grep -q -- '--ignore-user-config' "$ARGS_LOG"
+  grep -q -- '--ignore-rules' "$ARGS_LOG"
+  grep -q -- '--output-last-message' "$ARGS_LOG"
 }
 
 @test "adversary_invoke falls back to gtimeout when timeout is absent (codex branch)" {
@@ -218,7 +239,7 @@ EOF
   # the python3 rung (fast stub completes normally, hung CLI would be reaped).
   NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-no-gtimeout-path"
   mkdir -p "$NO_TIMEOUT_DIR"
-  for bin in bash dirname grep cat wc head tail tr env python3 mktemp rm; do
+  for bin in bash dirname grep cat wc head tail tr env python3; do
     b="$(command -v "$bin" 2>/dev/null)"
     [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
   done

@@ -1,7 +1,7 @@
 ---
 name: feature-implement
-description: "Execute a decomposed feature via the host-native gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. Codex invokes Codex models; Claude invokes Claude models; bounded availability failures fall back once across vendors without waiting."
-version: "2.9.0"
+description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
+version: "2.9.1"
 allowed-tools:
   - Read
   - Edit
@@ -122,25 +122,25 @@ change (GREEN) — the gsd executor's commit trail must show both.
 
 - Interactive Claude session: invoke `/gsd-quick "<task>"` directly.
 - Interactive Codex session: invoke `$gsd-quick "<task>"` directly.
-- `--autonomous` / headless on either host: `TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<task>"` (the runner preserves the invoking host).
+- `--autonomous` / headless on either host: `TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<task>"` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch).
+
+The headless runner performs a fixed read-only CLI/model/quota probe before it
+starts the stateful drive. It prefers the invoking host and may select the other
+host only at that pre-launch boundary. Once `/gsd-quick` starts, a nonzero exit
+or timeout is returned with a resume command for that host; FFS never mines task
+output for phrases such as “API error” and never replays a partially-started
+drive across vendors.
 
 **Spec mode:** read `.planning/ROADMAP.md` for the first unchecked phase N.
 
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.
 - Interactive Codex session: invoke `$gsd-execute-phase N` directly.
-- `--autonomous` / headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` (the runner preserves the invoking host; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface).
+- `--autonomous` / headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface).
 
-**Host-native availability contract:** the runner always tries the invoking
-host first (Codex → Codex/Terra; Claude → Claude/Sonnet) with a bounded,
-read-only, no-tools model probe. If that probe fails for any reason, the runner
-probes the equivalent tier on the other vendor exactly once. Only after a probe
-passes does it launch the mutating GSD drive—and it launches exactly one.
-Every post-launch failure (ordinary executor/test error, exit 126/127, timeout,
-or provider error) keeps its original exit code and NEVER crosses vendors;
-resume from durable phase/gate state instead. Read-only review timeouts may
-safely fall back once. Every call uses `run_bounded`; there is no wait-for-quota
-loop. Set `FFS_CROSS_VENDOR_FALLBACK=off` only for forensic isolation.
+The same pre-launch-only selection applies in spec mode. Cross-vendor replay
+after the stateful boundary is forbidden because a phase may already have
+changed the worktree, evidence ledger, or `.planning` resume state.
 
 **Anti-early-stop (autonomous orchestrator loop).** Fable early-stops long runs
 with text-only intent; hold this line every turn of the drive loop:

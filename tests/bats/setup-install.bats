@@ -69,3 +69,31 @@ setup() {
   SCRIPT_LINE="$(grep '^for script in ' setup.sh)"
   [[ "$SCRIPT_LINE" == *"harness-audit.py"* ]]
 }
+
+@test "setup reconciliation overwrites legacy consumer runtime with exact host-native files" {
+  TARGET="$BATS_TEST_TMPDIR/consumer"
+  mkdir -p "$TARGET/scripts/gsd" "$TARGET/.claude" "$TARGET/.codex"
+  printf 'legacy runner\n' > "$TARGET/scripts/gsd/gsd-run.sh"
+  printf 'legacy adversary\n' > "$TARGET/scripts/gsd/adversary-host.sh"
+  printf '{}\n' > "$TARGET/.claude/settings.json"
+  printf '{}\n' > "$TARGET/.codex/hooks.json"
+
+  run env HOME="$BATS_TEST_TMPDIR/home" bash setup.sh --reconcile-consumer "$TARGET"
+
+  [ "$status" -eq 0 ]
+  cmp -s scripts/gsd/gsd-run.sh "$TARGET/scripts/gsd/gsd-run.sh"
+  cmp -s scripts/gsd/adversary-host.sh "$TARGET/scripts/gsd/adversary-host.sh"
+  cmp -s scripts/gsd/run-bounded.sh "$TARGET/scripts/gsd/run-bounded.sh"
+  cmp -s scripts/hooks/cli-hang-guard.sh "$TARGET/scripts/hooks/cli-hang-guard.sh"
+  python3 - "$TARGET" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for path in (root / ".claude/settings.json", root / ".codex/hooks.json"):
+    data = json.loads(path.read_text())
+    hooks = data["hooks"]["PreToolUse"]
+    assert any(entry.get("matcher") == "Bash" and any(
+        "cli-hang-guard.sh" in hook.get("command", "")
+        for hook in entry.get("hooks", [])
+    ) for entry in hooks), path
+PY
+}

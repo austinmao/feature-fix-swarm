@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Lightweight autonomous feature pipeline: self-healing plan-decompose → preflight → autonomy-grant → feature-implement --autonomous. DRY sequencing only; child skills own all machinery."
-version: "3.2.0"
+version: "3.2.2"
 allowed-tools:
   - Read
   - Write
@@ -126,9 +126,10 @@ Report `pending` actions (if any) with the exact resume command:
 feature-implement Step 1's 3 install shapes) then `/feature-implement NNN --autonomous`.
 Close the loop with GSD extract-learnings (fail-soft). Use Claude
 `/gsd-extract-learnings` or Codex `$gsd-extract-learnings`; a headless call goes
-through `scripts/gsd/gsd-run.sh` and stays on the invoking host. All ordinary
-planning and implementation use that host's model family; only review gates
-cross to the opposite family.
+through `scripts/gsd/gsd-run.sh`: a fixed pre-launch probe prefers the invoking
+host and may select the other host before work begins. A started drive is never
+replayed across vendors. Review gates try the opposite family first and may use
+one explicitly degraded, read-only active-host fallback.
 
 ## Rules
 

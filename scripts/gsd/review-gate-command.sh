@@ -59,34 +59,61 @@ ${DIFF}
 --- DIFF END ---"
 
 ACTIVE_HOST="$(detect_orchestrator_host)" || {
-  echo '{"verdict":"APPROVED","note":"review host detection failed, fail-soft"}'
-  exit 0
+  echo '{"verdict":"REVISE","note":"BLOCKED: review host detection failed"}'
+  exit 1
 }
 REVIEW_KIND="$(adversary_kind_for_host "$ACTIVE_HOST")"
-if [ "$REVIEW_KIND" = "codex" ]; then
-  REVIEW_MODEL="gpt-5.6-sol"
-  REVIEW_EFFORT="xhigh"
-else
-  REVIEW_MODEL="opus"
-  REVIEW_EFFORT=""
-fi
 
-OUTPUT="$(adversary_invoke "$REVIEW_KIND" "${GSD_REVIEW_TIMEOUT:-600}" \
-  "$REVIEW_MODEL" "$REVIEW_EFFORT" "$PROMPT" 2>&1)"
+review_model_for_kind() {
+  if [ "$1" = "codex" ]; then
+    REVIEW_MODEL="gpt-5.6-sol"
+    REVIEW_EFFORT="xhigh"
+  else
+    REVIEW_MODEL="opus"
+    REVIEW_EFFORT=""
+  fi
+}
+
+# Reviews are read-only, so one fallback to the active host is safe. The shared
+# helper gives both attempts one overall deadline and never feeds the failed
+# transcript to the fallback reviewer.
+review_model_for_kind "$REVIEW_KIND"
+PREFERRED_MODEL="$REVIEW_MODEL"
+PREFERRED_EFFORT="$REVIEW_EFFORT"
+FALLBACK_KIND="$ACTIVE_HOST"
+review_model_for_kind "$FALLBACK_KIND"
+FALLBACK_MODEL="$REVIEW_MODEL"
+FALLBACK_EFFORT="$REVIEW_EFFORT"
+OUTPUT="$(adversary_invoke_with_fallback "$REVIEW_KIND" "$FALLBACK_KIND" \
+  "${GSD_REVIEW_TIMEOUT:-600}" "$PREFERRED_MODEL" "$PREFERRED_EFFORT" \
+  "$FALLBACK_MODEL" "$FALLBACK_EFFORT" "$PROMPT" 2>&1)"
 rc=$?
-
-if [ $rc -ne 0 ]; then
-  echo '{"verdict":"APPROVED","note":"opposite-host review failed, fail-soft"}'
-  exit 0
+if [ "$rc" -ne 0 ]; then
+  echo '{"verdict":"REVISE","note":"BLOCKED: both review hosts unavailable; no review verdict"}'
+  exit 1
 fi
+DEGRADED=0
+printf '%s\n' "$OUTPUT" | grep -q '^adversary-host: DEGRADED ' && DEGRADED=1
 
-# codex echoes the prompt (which names both verdicts) into its transcript —
-# only the LAST line-anchored verdict counts, not any substring match.
-FINAL_VERDICT="$(printf '%s\n' "$OUTPUT" | grep -E '^VERDICT: (PASS|BLOCK)[[:space:]]*$' | tail -1)"
-if [ "$FINAL_VERDICT" = "VERDICT: BLOCK" ]; then
-  printf '{"verdict":"REVISE","findings":%s}\n' "$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+# Exactly one line-anchored verdict is accepted. It need not be the physical
+# final line because vendor CLIs may append usage diagnostics after assistant
+# output. This still rejects prompt echo, duplicates, and prose substrings.
+CLEAN_OUTPUT="$(printf '%s\n' "$OUTPUT" | tr -d '\r')"
+VERDICT_COUNT="$(printf '%s\n' "$CLEAN_OUTPUT" | grep -Ec '^VERDICT: (PASS|BLOCK)[[:space:]]*$' || true)"
+FINAL_VERDICT="$(printf '%s\n' "$CLEAN_OUTPUT" | grep -E '^VERDICT: (PASS|BLOCK)[[:space:]]*$' || true)"
+if [ "$VERDICT_COUNT" -ne 1 ]; then
+  echo '{"verdict":"REVISE","note":"BLOCKED: reviewer returned rc=0 but missing final anchored verdict (or returned multiple verdicts)"}'
   exit 1
 fi
 
-echo '{"verdict":"APPROVED"}'
+if printf '%s\n' "$FINAL_VERDICT" | grep -Eq '^VERDICT: BLOCK[[:space:]]*$'; then
+  printf '{"verdict":"REVISE","findings":%s}\n' "$(printf '%s' "$CLEAN_OUTPUT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+  exit 1
+fi
+
+if [ "$DEGRADED" -eq 1 ]; then
+  echo '{"verdict":"APPROVED","note":"DEGRADED: opposite-host unavailable; active-host fallback returned one anchored PASS"}'
+else
+  echo '{"verdict":"APPROVED"}'
+fi
 exit 0

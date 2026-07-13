@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
-description: "Create and decompose a lightweight plan with opposite-host review and bounded self-repair; returns success or an evidence-backed terminal block."
-version: "1.4.0"
+description: "Create and decompose a lightweight plan with opposite-first review, one bounded read-only active-host fallback, and bounded self-repair; returns success or an evidence-backed terminal block."
+version: "1.5.1"
 permissions:
   filesystem: write
   network: false
@@ -61,9 +61,10 @@ repair loops.
 - `TASK_GATE_MAX_REPAIRS=${TASK_GATE_MAX_REPAIRS:-2}`: maximum
   `spec-decompose` repair passes after the initial task score.
 - Each repair consumes the prior findings as inert data, edits only the owned
-  artifact, then reruns the same opposite-host gate with a fresh output file.
-- A timeout, missing opposite CLI, or transport failure remains advisory and
-  fail-soft as documented below. A parseable quality rejection is repaired.
+  artifact, then reruns the same opposite-first gate with a fresh output file.
+- A timeout, missing model, or transport failure gets one bounded read-only
+  active-host fallback. Both hosts unavailable is a terminal evidence-backed
+  block; a parseable quality rejection is repaired.
 - Exhaustion writes `$SPEC_DIR/plan-decompose-blocked.md` and returns the
   terminal marker `PLAN-DECOMPOSE-BLOCKED spec=<NNN> stage=<plan|tasks>
   findings=<path> resume="/plan-decompose <NNN>"` with exit 1.
@@ -160,6 +161,7 @@ handling, including process-group cleanup on macOS:
 . scripts/gsd/adversary-host.sh
 HOST_KIND="$(detect_orchestrator_host)"
 REVIEW_KIND="$(adversary_kind_for_host "$HOST_KIND")"
+FALLBACK_KIND="$HOST_KIND"
 if [ "$REVIEW_KIND" = codex ]; then
   REVIEW_MODEL="${PLAN_ADVERSARY_MODEL_CODEX:-gpt-5.6-sol}"
   REVIEW_EFFORT="${PLAN_ADVERSARY_EFFORT_CODEX:-xhigh}"
@@ -167,14 +169,23 @@ else
   REVIEW_MODEL="${PLAN_ADVERSARY_MODEL_CLAUDE:-opus}"
   REVIEW_EFFORT=""
 fi
-adversary_invoke "$REVIEW_KIND" 540 "$REVIEW_MODEL" "$REVIEW_EFFORT" \
+if [ "$FALLBACK_KIND" = codex ]; then
+  FALLBACK_MODEL="${PLAN_ADVERSARY_MODEL_CODEX:-gpt-5.6-sol}"
+  FALLBACK_EFFORT="${PLAN_ADVERSARY_EFFORT_CODEX:-xhigh}"
+else
+  FALLBACK_MODEL="${PLAN_ADVERSARY_MODEL_CLAUDE:-opus}"
+  FALLBACK_EFFORT=""
+fi
+adversary_invoke_with_fallback "$REVIEW_KIND" "$FALLBACK_KIND" 540 \
+  "$REVIEW_MODEL" "$REVIEW_EFFORT" "$FALLBACK_MODEL" "$FALLBACK_EFFORT" \
   "$PROMPT" >"$OUT_FILE" 2>&1
 RC=$?   # bare exit code — NEVER pipe the live call (`| tail` masks the timeout kill)
 ```
 
-- `RC=124` → fail-soft: log `[plan-decompose] opposite-host plan review TIMEOUT — advisory
-  skipped` and continue; downstream gates (the host-native strongest
-  plan-checker and opposite-host review-gate) still hold.
+- A preferred-host failure prints `DEGRADED` and makes one active-host attempt.
+- Any nonzero `RC` after that bounded fallback writes
+  `PLAN-DECOMPOSE-BLOCKED` with the exact resume command and stops the mandatory
+  gate; unavailable review is never converted into an advisory PASS.
 - Read findings/verdict from `$OUT_FILE` after exit — never stream-parse the live run.
 
 Embed the full content of `plan.md` verbatim in the prompt (the scope line
@@ -191,9 +202,15 @@ prevents repo-wandering, the other major review-time multiplier):
 > <plan.md content verbatim>
 >
 > Return: numbered list of findings with severity, specific location in plan, and
-> recommended fix. Conclude with overall verdict: APPROVE / APPROVE-WITH-FIXES / REJECT."
+> recommended fix. End with exactly one anchored line:
+> `VERDICT: APPROVE`, `VERDICT: APPROVE-WITH-FIXES`, or `VERDICT: REJECT`."
 
 **Decision:**
+- Parse exactly one anchored `VERDICT:` line after the bounded call exits.
+  Missing, duplicate, or conflicting verdict lines are a failed mandatory
+  review: consume one repair attempt, then write `PLAN-DECOMPOSE-BLOCKED` and
+  exit 1 if the last allowed attempt is still unparseable. Never infer approval
+  from process exit 0 or from prose mentioning a verdict.
 - Verdict REJECT, or any CRITICAL finding: invoke `plan-eng-review` in
   host-native spawned-session mode with the current `plan.md` plus the findings
   as data, write the revised `plan.md`, and re-run the opposite-host review.
@@ -253,7 +270,8 @@ This writes `$SPEC_DIR/tasks.md` with annotated task list.
 
 Skip entirely when `--no-review` (or deprecated `--no-codex`) is passed.
 
-Run the same `adversary_invoke` contract from Step 3 on `tasks.md` vs `spec.md`,
+Run the same `adversary_invoke_with_fallback` contract from Step 3 on
+`tasks.md` vs `spec.md`,
 preserving producer≠reviewer across both Claude and Codex hosts:
 
 Check:
@@ -274,7 +292,10 @@ artifact with `stage=tasks` and exits 1. The artifact includes every failed
 check, score history, artifact paths, attempts consumed, and the exact resume
 command. `/task-swarm` receives one terminal result—not intermediate failures.
 
-Skip gracefully if the selected opposite CLI is absent: log warning and continue. Non-blocking.
+The opposite host is preferred and the active host is the one bounded fallback.
+If both are unavailable, or the score response is missing/duplicate/conflicting,
+write the terminal blocked artifact with `stage=tasks` and exit 1. This score
+gate is mandatory; reviewer absence is never converted into a warning or PASS.
 
 ### Step 7: Store the decision (fail-soft)
 

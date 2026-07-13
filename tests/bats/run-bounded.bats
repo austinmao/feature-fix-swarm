@@ -10,7 +10,12 @@ setup() {
   TMP="$(mktemp -d)"
 }
 
-teardown() { rm -rf "$TMP"; }
+teardown() {
+  if [ -s "$TMP/grandchild.pid" ]; then
+    kill -KILL "$(cat "$TMP/grandchild.pid")" 2>/dev/null || true
+  fi
+  rm -rf "$TMP"
+}
 
 # Build a PATH dir holding ONLY the named system binaries (symlinks), so the
 # resolution ladder can be exercised per-rung.
@@ -55,47 +60,73 @@ make_shim_path() {
   [[ "$output" == *"refusing unbounded"* ]]
 }
 
-@test "RB-006: adversary_invoke bounds a hung primary then falls back" {
+@test "RB-006: adversary_invoke stays bounded on a coreutils-less host" {
   # regression for the old "run unwrapped rather than hard-fail" branch:
-  # no timeout/gtimeout on PATH, hanging fake codex -> bounded python3 rung,
-  # then one successful Claude attempt instead of waiting forever.
-  make_shim_path "$TMP/shim" python3 bash dirname sleep mktemp cat rm grep env
+  # no timeout/gtimeout on PATH, hanging fake codex -> rc 124 at ~1s, not a block
+  make_shim_path "$TMP/shim" python3 bash dirname sleep mktemp cat rm
   cat > "$TMP/codex-hang" <<'SH'
 #!/bin/sh
 sleep 30
 SH
-  cat > "$TMP/claude-pass" <<'SH'
-#!/bin/sh
-echo 'VERDICT: PASS'
-SH
-  chmod +x "$TMP/codex-hang" "$TMP/claude-pass"
-  run env PATH="$TMP/shim" ADVERSARY_BIN_CODEX="$TMP/codex-hang" \
-    ADVERSARY_BIN_CLAUDE="$TMP/claude-pass" /bin/bash -c \
+  chmod +x "$TMP/codex-hang"
+  run env PATH="$TMP/shim" ADVERSARY_BIN_CODEX="$TMP/codex-hang" /bin/bash -c \
     ". '$ADVERSARY_HOST'; adversary_invoke codex 1 some-model high 'hi'"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"falling back once to claude"* ]]
-  [[ "$output" == *"VERDICT: PASS"* ]]
+  [ "$status" -eq 124 ]
 }
 
-@test "RB-007: review-gate ship gate falls back instead of hanging on codex" {
+@test "RB-007: review-gate ship gate fails closed (never hangs) on a hung codex" {
   # hung codex shadowed onto PATH; GSD_REVIEW_TIMEOUT bounds at 1s; the gate
-  # must return APPROVED fail-soft instead of blocking the ship forever
+  # must return REVISE instead of blocking forever or fail-opening the ship
   mkdir -p "$TMP/shim" "$TMP/cwd"
   cat > "$TMP/shim/codex" <<'SH'
 #!/bin/sh
 sleep 30
 SH
-  cat > "$TMP/shim/claude-pass" <<'SH'
-#!/bin/sh
-echo 'VERDICT: PASS'
-SH
-  chmod +x "$TMP/shim/codex" "$TMP/shim/claude-pass"
+  chmod +x "$TMP/shim/codex"
   # HOME override: keeps a real ~/.claude/lib/feature-fix-swarm/gates.py from
   # engaging the grant wall (REVISE) before the codex call under test
-  run env PATH="$TMP/shim:$PATH" HOME="$TMP" FFS_HOST=claude GSD_RUN_ID=spec-000 GSD_REVIEW_TIMEOUT=1 \
-    ADVERSARY_BIN_CODEX=codex ADVERSARY_BIN_CLAUDE=claude-pass \
+  run env PATH="$TMP/shim:$PATH" HOME="$TMP" GSD_RUN_ID=spec-000 GSD_REVIEW_TIMEOUT=1 \
     /bin/bash -c "cd '$TMP/cwd' && echo 'diff --git a b' | /bin/bash '$REPO_ROOT/scripts/gsd/review-gate-command.sh'"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'"verdict":"APPROVED"'* ]]
-  [[ "$output" != *'fail-soft'* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'"verdict":"REVISE"'* ]]
+}
+
+@test "RB-008: TERM-ignoring process is hard-killed after the wall" {
+  start="$(date +%s)"
+  run env RUN_BOUNDED_KILL_AFTER=1 bash -c \
+    ". '$LIB'; run_bounded 1 bash -c 'trap \"\" TERM; while :; do sleep 1; done'"
+  elapsed=$(( $(date +%s) - start ))
+
+  [ "$status" -eq 124 ]
+  [ "$elapsed" -lt 6 ]
+}
+
+@test "RB-009: timeout reaps a TERM-ignoring grandchild process group" {
+  cat > "$TMP/term-tree.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+(
+  trap '' TERM
+  (
+    trap '' TERM
+    printf '%s\n' "$BASHPID" > "$PID_FILE"
+    while :; do sleep 1; done
+  ) &
+  wait
+) &
+wait
+SH
+  chmod +x "$TMP/term-tree.sh"
+
+  run env RUN_BOUNDED_KILL_AFTER=1 bash -c \
+    ". '$LIB'; export PID_FILE='$TMP/grandchild.pid'; run_bounded 1 '$TMP/term-tree.sh'"
+  [ "$status" -eq 124 ]
+  [ -s "$TMP/grandchild.pid" ]
+
+  grandchild="$(cat "$TMP/grandchild.pid")"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$grandchild" 2>/dev/null || break
+    sleep 0.1
+  done
+  ! kill -0 "$grandchild" 2>/dev/null
 }

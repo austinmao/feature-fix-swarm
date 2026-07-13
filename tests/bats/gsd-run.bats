@@ -6,45 +6,50 @@ setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   SCRIPT="$ROOT/scripts/gsd/gsd-run.sh"
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
-  mkdir -p "$STUB_DIR" "$BATS_TEST_TMPDIR/codex-root"
+  CODEX_SOURCE_ROOT="$BATS_TEST_TMPDIR/codex-root"
+  CLAUDE_SKILLS_ROOT="$BATS_TEST_TMPDIR/claude-skills"
+  mkdir -p "$STUB_DIR" \
+    "$CODEX_SOURCE_ROOT/skills/gsd-quick" "$CODEX_SOURCE_ROOT/agents" \
+    "$CLAUDE_SKILLS_ROOT/gsd-quick"
+  printf '%s\n' '---' 'name: gsd-quick' '---' > "$CODEX_SOURCE_ROOT/skills/gsd-quick/SKILL.md"
+  printf '%s\n' 'name = "gsd-executor"' 'model = "sonnet"' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml"
+  printf '%s\n' '---' 'name: gsd-quick' '---' > "$CLAUDE_SKILLS_ROOT/gsd-quick/SKILL.md"
 
   cat > "$STUB_DIR/fake-codex" <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
-if printf '%s\n' "\$@" | grep -q 'sandbox_mode="read-only"'; then
-  case "\${FAKE_CODEX_MODE:-ok}" in
-    usage) echo "You've hit your usage limit" >&2; exit 1 ;;
-    bad_probe) echo "unexpected preflight response"; exit 0 ;;
-    *) echo FFS-GSD-PREFLIGHT-OK; exit 0 ;;
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
+  touch "$BATS_TEST_TMPDIR/codex.probed"
+  case "\${FAKE_CODEX_PROBE_MODE:-ok}" in
+    bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
+    fail) echo 'native quota exhausted API_TOKEN=super-secret-value-123456789' >&2; exit 69 ;;
   esac
+  echo FFS_HOST_PROBE_READY
+  exit 0
 fi
-touch "$BATS_TEST_TMPDIR/codex-executed"
-case "\${FAKE_CODEX_MODE:-ok}" in
-  task) echo "executor task failed"; exit 42 ;;
-  task_availability_text) echo "integration test failed: connection refused"; exit 42 ;;
-  task_127) touch "$BATS_TEST_TMPDIR/codex-mutated-127"; echo "partial executor output"; exit 127 ;;
-  timeout) touch "$BATS_TEST_TMPDIR/codex-mutated"; sleep 30 ;;
-  *) echo CODEX_OK ;;
-esac
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
+printf '%s\n' "\${CODEX_HOME:-}" > "$BATS_TEST_TMPDIR/codex.home"
+printf '%s\n' "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skills"
+cat "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skill-content"
+echo CODEX_OK
 EOF
   cat > "$STUB_DIR/fake-claude" <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/claude.args"
-if printf '%s\n' "\$@" | grep -q -- '--safe-mode'; then
-  case "\${FAKE_CLAUDE_MODE:-ok}" in
-    usage) echo "You've hit your session limit" >&2; exit 1 ;;
-    *) echo FFS-GSD-PREFLIGHT-OK; exit 0 ;;
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
+  touch "$BATS_TEST_TMPDIR/claude.probed"
+  case "\${FAKE_CLAUDE_PROBE_MODE:-ok}" in
+    bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
+    fail) echo 'alternate model unavailable' >&2; exit 69 ;;
   esac
+  echo FFS_HOST_PROBE_READY
+  exit 0
 fi
-touch "$BATS_TEST_TMPDIR/claude-executed"
-case "\${FAKE_CLAUDE_MODE:-ok}" in
-  task) echo "executor task failed"; exit 42 ;;
-  *) echo CLAUDE_OK ;;
-esac
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/claude.args"
+echo CLAUDE_OK
 EOF
   chmod +x "$STUB_DIR/fake-codex" "$STUB_DIR/fake-claude"
   export PATH="$STUB_DIR:$PATH"
-  export GSD_CODEX_CONFIG_ROOT="$BATS_TEST_TMPDIR/codex-root"
+  export GSD_CODEX_CONFIG_ROOT="$CODEX_SOURCE_ROOT"
+  export GSD_CLAUDE_SKILLS_ROOT="$CLAUDE_SKILLS_ROOT"
 }
 
 @test "Codex host runs Codex with the Sonnet-equivalent Terra lead" {
@@ -59,6 +64,8 @@ EOF
   grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="high"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '$gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F '/skills/gsd-quick/SKILL.md' "$BATS_TEST_TMPDIR/codex.skills"
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/codex.skills" | tr -d ' ')" -eq 1 ]
 }
 
 @test "Claude host runs Claude with the Sonnet lead" {
@@ -74,150 +81,229 @@ EOF
   grep -F '/gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/claude.args"
 }
 
-@test "missing native Codex CLI falls back once to Claude" {
+@test "missing native Codex CLI is detected before launch and selects Claude" {
   FFS_HOST=codex CODEX_BIN=definitely-missing-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Codex CLI not found"* ]]
-  [[ "$output" == *"falling back from codex to claude"* ]]
-  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
-}
-
-@test "Codex usage limit falls back to Claude without waiting for reset" {
-  FFS_HOST=codex FAKE_CODEX_MODE=usage CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
-
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"usage limit"* ]]
-  [[ "$output" == *"falling back from codex to claude"* ]]
+  [[ "$output" == *"native Codex unavailable before launch"* ]]
   [[ "$output" == *"CLAUDE_OK"* ]]
-  [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
-@test "Claude session limit falls back to Codex without waiting for reset" {
-  FFS_HOST=claude FAKE_CLAUDE_MODE=usage CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+@test "native task failure mentioning API error never replays on alternate host" {
+  cat > "$STUB_DIR/native-fails" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
+  echo FFS_HOST_PROBE_READY
+  exit 0
+fi
+touch "$BATS_TEST_TMPDIR/native-started"
+echo 'API error while executing the task'
+exit 42
+EOF
+  cat > "$STUB_DIR/alternate-must-not-run" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/alternate-ran"
+echo FFS_HOST_PROBE_READY
+EOF
+  chmod +x "$STUB_DIR/native-fails" "$STUB_DIR/alternate-must-not-run"
 
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"session limit"* ]]
-  [[ "$output" == *"falling back from claude to codex"* ]]
-  [[ "$output" == *"CODEX_OK"* ]]
-}
-
-@test "both failed model preflights launch no mutating drive" {
-  FFS_HOST=codex FAKE_CODEX_MODE=usage FAKE_CLAUDE_MODE=usage \
-    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
-
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"both bounded model preflights failed; no mutating drive launched"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/codex-executed" ]
-  [ ! -f "$BATS_TEST_TMPDIR/claude-executed" ]
-}
-
-@test "fallback kill-switch fails after native preflight without crossing vendors" {
-  FFS_HOST=codex FFS_CROSS_VENDOR_FALLBACK=off FAKE_CODEX_MODE=usage \
-    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
-
-  [ "$status" -eq 1 ]
-  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  [ ! -f "$BATS_TEST_TMPDIR/codex-executed" ]
-}
-
-@test "unacknowledged native preflight falls back before execution" {
-  FFS_HOST=codex FAKE_CODEX_MODE=bad_probe CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
-
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"model preflight returned no valid acknowledgement"* ]]
-  [[ "$output" == *"falling back from codex to claude before execution"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/codex-executed" ]
-  [ -f "$BATS_TEST_TMPDIR/claude-executed" ]
-}
-
-@test "ordinary executor failure does not cross vendors and duplicate work" {
-  FFS_HOST=codex FAKE_CODEX_MODE=task CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  FFS_HOST=codex CODEX_BIN=native-fails CLAUDE_BIN=alternate-must-not-run \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 42 ]
-  [[ "$output" == *"executor task failed"* ]]
-  [[ "$output" != *"falling back"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ -f "$BATS_TEST_TMPDIR/native-started" ]
+  [ ! -f "$BATS_TEST_TMPDIR/alternate-ran" ]
+  [[ "$output" == *"API error"* ]]
+  [[ "$output" == *"resume on codex"* ]]
 }
 
-@test "task output containing availability prose does not manufacture fallback" {
-  FFS_HOST=codex FAKE_CODEX_MODE=task_availability_text CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+@test "timeout after native drive starts never replays on alternate host" {
+  cat > "$STUB_DIR/native-times-out" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
+  echo FFS_HOST_PROBE_READY
+  exit 0
+fi
+touch "$BATS_TEST_TMPDIR/native-started"
+sleep 30
+EOF
+  cat > "$STUB_DIR/alternate-must-not-run" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/alternate-ran"
+echo FFS_HOST_PROBE_READY
+EOF
+  chmod +x "$STUB_DIR/native-times-out" "$STUB_DIR/alternate-must-not-run"
 
-  [ "$status" -eq 42 ]
-  [[ "$output" == *"connection refused"* ]]
-  [[ "$output" != *"falling back"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-}
-
-@test "mutating exit 127 after partial execution is never replayed" {
-  FFS_HOST=codex FAKE_CODEX_MODE=task_127 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    run -127 bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
-
-  [ "$status" -eq 127 ]
-  [ -f "$BATS_TEST_TMPDIR/codex-mutated-127" ]
-  [[ "$output" == *"partial executor output"* ]]
-  [[ "$output" != *"falling back"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-}
-
-@test "mutating timeout fails promptly without ambiguous cross-vendor replay" {
-  FFS_HOST=codex TIMEOUT=1 FAKE_CODEX_MODE=timeout CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  FFS_HOST=codex CODEX_BIN=native-times-out CLAUDE_BIN=alternate-must-not-run TIMEOUT=1 \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 124 ]
-  [ -f "$BATS_TEST_TMPDIR/codex-mutated" ]
-  [[ "$output" == *"cross-vendor replay suppressed because execution state is ambiguous"* ]]
+  [ -f "$BATS_TEST_TMPDIR/native-started" ]
+  [ ! -f "$BATS_TEST_TMPDIR/alternate-ran" ]
+  [[ "$output" == *"resume on codex"* ]]
+}
+
+@test "native preflight failure selects available alternate before the stateful drive" {
+  cat > "$STUB_DIR/native-unavailable" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/native-probed"
+exit 69
+EOF
+  cat > "$STUB_DIR/alternate-available" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
+  touch "$BATS_TEST_TMPDIR/alternate-probed"
+  echo FFS_HOST_PROBE_READY
+  exit 0
+fi
+touch "$BATS_TEST_TMPDIR/alternate-drive"
+echo ALTERNATE_OK
+EOF
+  chmod +x "$STUB_DIR/native-unavailable" "$STUB_DIR/alternate-available"
+
+  FFS_HOST=codex CODEX_BIN=native-unavailable CLAUDE_BIN=alternate-available \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/native-probed" ]
+  [ -f "$BATS_TEST_TMPDIR/alternate-probed" ]
+  [ -f "$BATS_TEST_TMPDIR/alternate-drive" ]
+  [[ "$output" == *"ALTERNATE_OK"* ]]
+  [[ "$output" == *"selected Claude before launch"* ]]
+}
+
+@test "forensic opt-out stops after native probe failure without touching alternate" {
+  FFS_HOST=codex FFS_CROSS_VENDOR_FALLBACK=off \
+    FAKE_CODEX_PROBE_MODE=fail CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 69 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [[ "$output" == *"cross-vendor fallback disabled"* ]]
 }
 
-@test "project Codex agents without GSD roles do not shadow the global GSD config" {
-  unset GSD_CODEX_CONFIG_ROOT
-  REPO="$BATS_TEST_TMPDIR/repo"
-  HOME_DIR="$BATS_TEST_TMPDIR/home"
-  mkdir -p "$REPO/.codex/agents" "$REPO/.planning" "$HOME_DIR/.codex/agents"
-  printf 'name = "unrelated"\n' > "$REPO/.codex/agents/unrelated.toml"
-  cat > "$HOME_DIR/.codex/agents/gsd-executor.toml" <<'EOF'
-name = "gsd-executor"
-developer_instructions = '''instructions'''
-EOF
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"sonnet"}}' > "$REPO/.planning/config.json"
+@test "bad native acknowledgement is diagnosed then alternate is selected before launch" {
+  FFS_HOST=codex FAKE_CODEX_PROBE_MODE=bad_ack \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
-  HOME="$HOME_DIR" FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [[ "$output" == *"missing acknowledgement"* ]]
+  [[ "$output" == *"selected Claude before launch"* ]]
+}
+
+@test "both failed probes emit redacted diagnostics and launch no stateful drive" {
+  FFS_HOST=codex FAKE_CODEX_PROBE_MODE=fail FAKE_CLAUDE_PROBE_MODE=fail \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 69 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [[ "$output" == *"native quota exhausted"* ]]
+  [[ "$output" != *"super-secret-value"* ]]
+  [[ "$output" == *"no usable host before launch"* ]]
+  grep -Fq 'native quota exhausted' "$BATS_TEST_TMPDIR/.planning/logs/"*.log
+  ! grep -Fq 'super-secret-value' "$BATS_TEST_TMPDIR/.planning/logs/"*.log
+}
+
+@test "operator TERM during a hanging native probe exits without probing or driving the alternate" {
+  cat > "$STUB_DIR/native-probe-hangs" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/native-probe-started"
+sleep 30
+EOF
+  cat > "$STUB_DIR/alternate-must-not-start" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/alternate-started"
+echo FFS_HOST_PROBE_READY
+EOF
+  chmod +x "$STUB_DIR/native-probe-hangs" "$STUB_DIR/alternate-must-not-start"
+
+  run env FFS_HOST=codex CODEX_BIN=native-probe-hangs \
+    CLAUDE_BIN=alternate-must-not-start GSD_HOST_PROBE_TIMEOUT=2 \
+    bash -c '
+      bash "$1" /gsd-quick test >"$2/runner.log" 2>&1 &
+      runner_pid=$!
+      i=0
+      while [ ! -f "$2/native-probe-started" ] && [ "$i" -lt 100 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      kill -TERM "$runner_pid"
+      wait "$runner_pid"
+    ' _ "$SCRIPT" "$BATS_TEST_TMPDIR"
+
+  [ "$status" -eq 143 ]
+  [ -f "$BATS_TEST_TMPDIR/native-probe-started" ]
+  [ ! -f "$BATS_TEST_TMPDIR/alternate-started" ]
+}
+
+@test "model probe passes but missing exact Codex GSD skill selects Claude before launch" {
+  MISSING_ROOT="$BATS_TEST_TMPDIR/codex-without-requested-skill"
+  mkdir -p "$MISSING_ROOT/skills" "$MISSING_ROOT/agents" \
+    "$CLAUDE_SKILLS_ROOT/gsd-plan-phase"
+  printf '%s\n' '---' 'name: gsd-plan-phase' '---' \
+    > "$CLAUDE_SKILLS_ROOT/gsd-plan-phase/SKILL.md"
+
+  FFS_HOST=codex GSD_CODEX_CONFIG_ROOT="$MISSING_ROOT" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-plan-phase 2 --auto"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [[ "$output" == *"exact gsd-plan-phase surface unavailable"* ]]
+  [[ "$output" == *"selected Claude before launch"* ]]
+}
+
+@test "unrelated project Codex agents do not shadow the global exact GSD surface" {
+  unset GSD_CODEX_CONFIG_ROOT
+  REPO="$BATS_TEST_TMPDIR/unrelated-project"
+  GLOBAL="$BATS_TEST_TMPDIR/global-codex"
+  mkdir -p "$REPO/.codex/agents" "$GLOBAL/skills/gsd-quick" "$GLOBAL/agents"
+  printf '%s\n' 'name = "unrelated"' > "$REPO/.codex/agents/unrelated.toml"
+  printf '%s\n' '---' 'name: gsd-quick' 'marker: global-surface' '---' \
+    > "$GLOBAL/skills/gsd-quick/SKILL.md"
+  printf '%s\n' 'name = "gsd-executor"' > "$GLOBAL/agents/gsd-executor.toml"
+
+  FFS_HOST=codex CODEX_HOME="$GLOBAL" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 0 ]
-  grep -F 'model = "gpt-5.6-terra"' "$HOME_DIR/.codex/agents/gsd-executor.toml"
-  [ ! -f "$REPO/.codex/agents/gsd-executor.toml" ]
+  grep -Fq 'marker: global-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
 }
 
-@test "project-local GSD roles select the project Codex config root" {
+@test "project-local exact GSD skill and roles select the project Codex surface" {
   unset GSD_CODEX_CONFIG_ROOT
-  REPO="$BATS_TEST_TMPDIR/project-repo"
-  HOME_DIR="$BATS_TEST_TMPDIR/project-home"
-  mkdir -p "$REPO/.codex/agents" "$REPO/.planning" "$HOME_DIR/.codex/agents"
-  cat > "$REPO/.codex/agents/gsd-executor.toml" <<'EOF'
-name = "gsd-executor"
-developer_instructions = '''project instructions'''
-EOF
-  cat > "$HOME_DIR/.codex/agents/gsd-executor.toml" <<'EOF'
-name = "gsd-executor"
-developer_instructions = '''global instructions'''
-EOF
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"sonnet"}}' > "$REPO/.planning/config.json"
+  REPO="$BATS_TEST_TMPDIR/gsd-project"
+  GLOBAL="$BATS_TEST_TMPDIR/global-codex"
+  mkdir -p "$REPO/.codex/skills/gsd-quick" "$REPO/.codex/agents" \
+    "$GLOBAL/skills/gsd-quick" "$GLOBAL/agents"
+  printf '%s\n' '---' 'name: gsd-quick' 'marker: project-surface' '---' \
+    > "$REPO/.codex/skills/gsd-quick/SKILL.md"
+  printf '%s\n' 'name = "gsd-executor"' > "$REPO/.codex/agents/gsd-executor.toml"
+  printf '%s\n' '---' 'name: gsd-quick' 'marker: global-surface' '---' \
+    > "$GLOBAL/skills/gsd-quick/SKILL.md"
+  printf '%s\n' 'name = "gsd-executor"' > "$GLOBAL/agents/gsd-executor.toml"
 
-  HOME="$HOME_DIR" FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  FFS_HOST=codex CODEX_HOME="$GLOBAL" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 0 ]
-  grep -F 'model = "gpt-5.6-terra"' "$REPO/.codex/agents/gsd-executor.toml"
-  ! grep -F 'model = ' "$HOME_DIR/.codex/agents/gsd-executor.toml"
+  grep -Fq 'marker: project-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
+  ! grep -Fq 'marker: global-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
 }

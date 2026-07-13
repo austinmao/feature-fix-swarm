@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   LIB="$ROOT/scripts/gsd/adversary-host.sh"
@@ -34,66 +36,130 @@ setup() {
   [ "$output" = "claude" ]
 }
 
-@test "availability classifier accepts exact provider diagnostics but rejects task prose" {
-  diagnostics="$BATS_TEST_TMPDIR/provider.stderr"
-  task_output="$BATS_TEST_TMPDIR/task.stdout"
+@test "two hung read-only reviewers share one overall fallback deadline" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/hung-codex" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/codex-started"
+sleep 30
+EOF
+  cat > "$STUB_DIR/hung-claude" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/claude-started"
+sleep 30
+EOF
+  chmod +x "$STUB_DIR/hung-codex" "$STUB_DIR/hung-claude"
+  export PATH="$STUB_DIR:$PATH"
 
-  for message in \
-    "You've hit your usage limit" \
-    "Error: 429 rate limit exceeded" \
-    "request failed: ECONNRESET" \
-    "OAuth token has expired" \
-    "stream disconnected before response"; do
-    printf '%s\n' "$message" > "$diagnostics"
-    run bash -c ". '$LIB'; vendor_failure_is_unavailable 1 '$diagnostics' mutating"
-    [ "$status" -eq 0 ]
-  done
+  start="$(date +%s)"
+  run env ADVERSARY_BIN_CODEX=hung-codex ADVERSARY_BIN_CLAUDE=hung-claude \
+    RUN_BOUNDED_KILL_AFTER=1 bash -c \
+    ". '$LIB'; adversary_invoke_with_fallback codex claude 4 sol xhigh opus '' review"
+  elapsed=$(( $(date +%s) - start ))
 
-  printf '%s\n' "integration test failed: connection refused" > "$task_output"
-  run bash -c ". '$LIB'; vendor_failure_is_unavailable 42 '$task_output' mutating"
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 124 ]
+  [ -f "$BATS_TEST_TMPDIR/codex-started" ]
+  [ -f "$BATS_TEST_TMPDIR/claude-started" ]
+  [ "$elapsed" -lt 7 ]
+  [[ "$output" == *"DEGRADED"* ]]
 }
 
-@test "large review prompt is streamed through stdin instead of one argv entry" {
-  fake="$BATS_TEST_TMPDIR/fake-codex"
-  args="$BATS_TEST_TMPDIR/codex.args"
-  cat > "$fake" <<EOF
+@test "Codex review returns only the official last-message payload" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/codex-transcript" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "\$@" > "$args"
-bytes="\$(wc -c | tr -d '[:space:]')"
-echo "BYTES: \$bytes"
-echo "VERDICT: PASS"
+last_message=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|--output-last-message)
+      last_message="$2"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+printf 'VERDICT: PASS\nhook: Stop\nVERDICT: PASS\ntokens used\n42\n'
+if [ -n "$last_message" ]; then
+  printf 'VERDICT: PASS\n' > "$last_message"
+fi
 EOF
-  chmod +x "$fake"
+  chmod +x "$STUB_DIR/codex-transcript"
 
-  ADVERSARY_BIN_CODEX="$fake" run bash -c \
-    ". '$LIB'; prompt=\$(python3 -c 'print(\"x\" * 1200000)'); adversary_invoke codex 30 gpt-5.6-sol xhigh \"\$prompt\""
+  run env ADVERSARY_BIN_CODEX=codex-transcript PATH="$STUB_DIR:$PATH" \
+    bash -c ". '$LIB'; adversary_invoke codex 10 sol xhigh review"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"BYTES: 1200000"* ]]
-  grep -Fx -- '-' "$args"
-  [ "$(wc -c < "$args" | tr -d ' ')" -lt 1000 ]
+  [ "$output" = "VERDICT: PASS" ]
 }
 
-@test "Claude review disables model tools, MCP, ordinary customizations, and persistence" {
-  fake="$BATS_TEST_TMPDIR/fake-claude"
-  args="$BATS_TEST_TMPDIR/claude.args"
-  cat > "$fake" <<EOF
+@test "review prompts stream on stdin instead of consuming one argv entry" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/stream-codex" <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "\$@" > "$args"
-cat >/dev/null
-echo 'VERDICT: PASS'
+last_message=""
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o|--output-last-message)
+      last_message="\$2"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+printf 'VERDICT: PASS\n' > "\$last_message"
 EOF
-  chmod +x "$fake"
+  cat > "$STUB_DIR/stream-claude" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/claude.args"
+cat > "$BATS_TEST_TMPDIR/claude.stdin"
+printf 'VERDICT: PASS\n'
+EOF
+  chmod +x "$STUB_DIR/stream-codex" "$STUB_DIR/stream-claude"
+  prompt_file="$BATS_TEST_TMPDIR/large-review-prompt.txt"
+  dd if=/dev/zero bs=1200000 count=1 2>/dev/null | tr '\0' 'p' > "$prompt_file"
+  printf '\nPROMPT_ONLY_ON_STDIN_ffs_47' >> "$prompt_file"
 
-  ADVERSARY_BIN_CLAUDE="$fake" run bash -c \
-    ". '$LIB'; adversary_invoke claude 30 opus '' 'review data'"
-
+  run env ADVERSARY_BIN_CODEX=stream-codex PATH="$STUB_DIR:$PATH" \
+    bash -c '. "$1"; prompt="$(cat "$2")"; adversary_invoke codex 10 sol xhigh "$prompt"' \
+    _ "$LIB" "$prompt_file"
   [ "$status" -eq 0 ]
-  grep -Fx -- '--safe-mode' "$args"
-  grep -Fx -- '--strict-mcp-config' "$args"
-  grep -Fx -- '--tools' "$args"
-  grep -Fx -- 'dontAsk' "$args"
-  grep -Fx -- '--no-session-persistence' "$args"
-  awk 'previous == "--tools" { found=(length($0) == 0); exit } { previous=$0 } END { exit (found ? 0 : 1) }' "$args"
+  [ "$output" = "VERDICT: PASS" ]
+  cmp -s "$prompt_file" "$BATS_TEST_TMPDIR/codex.stdin"
+  ! grep -Fq 'PROMPT_ONLY_ON_STDIN_ffs_47' "$BATS_TEST_TMPDIR/codex.args"
+
+  run env ADVERSARY_BIN_CLAUDE=stream-claude PATH="$STUB_DIR:$PATH" \
+    bash -c '. "$1"; prompt="$(cat "$2")"; adversary_invoke claude 10 opus "" "$prompt"' \
+    _ "$LIB" "$prompt_file"
+  [ "$status" -eq 0 ]
+  [ "$output" = "VERDICT: PASS" ]
+  cmp -s "$prompt_file" "$BATS_TEST_TMPDIR/claude.stdin"
+  ! grep -Fq 'PROMPT_ONLY_ON_STDIN_ffs_47' "$BATS_TEST_TMPDIR/claude.args"
+}
+
+@test "forensic opt-out returns the preferred failure without starting fallback" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/preferred-fails" <<'EOF'
+#!/usr/bin/env bash
+exit 127
+EOF
+  cat > "$STUB_DIR/fallback-must-not-start" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/fallback-started"
+printf 'VERDICT: PASS\n'
+EOF
+  chmod +x "$STUB_DIR/preferred-fails" "$STUB_DIR/fallback-must-not-start"
+
+  run -127 env FFS_CROSS_VENDOR_FALLBACK=off \
+    ADVERSARY_BIN_CODEX=preferred-fails \
+    ADVERSARY_BIN_CLAUDE=fallback-must-not-start PATH="$STUB_DIR:$PATH" \
+    bash -c ". '$LIB'; adversary_invoke_with_fallback codex claude 10 sol xhigh opus '' review"
+
+  [ "$status" -eq 127 ]
+  [ ! -f "$BATS_TEST_TMPDIR/fallback-started" ]
 }
