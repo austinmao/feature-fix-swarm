@@ -101,18 +101,19 @@ The implementation layer renders those fields for the current host, but the task
 
 ## Host-aware routing
 
-- Claude Code uses the Claude ladder: `haiku`, `sonnet`, `opus`, plus the optional
-  `fable` 4th tier for multi-file narrative-coherence tasks (docs/voice passes
-  spanning several files). `fable` has no Codex equivalent and downgrades to
-  `sonnet` on the Ruflo-coordinated path (Ruflo's model enum is
-  `haiku`\|`sonnet`\|`opus`\|`inherit` only). `/spec-decompose` may emit it, and
-  `/swarm` + `/feature-implement` execute it on the native `Task()` path.
-- Codex OAuth uses the Codex ladder: `gpt-5.4-mini`, `gpt-5.4`, `gpt-5.5`
-- `/swarm` classifies ad-hoc tasks into the same canonical ladder and maps it
-  to the active host at execution time.
-- Ruflo consumes normalized roles and task metadata, not host-specific model names.
-- Ruflo is the coordination backend, not the LLM provider or the source of truth. Do not configure OpenRouter, `RUFLO_PROVIDER`, or provider-key execution for feature tasks.
-- Task execution happens through the active host CLI: `codex exec` when invoked from Codex, `claude -p` when invoked from Claude.
+- Claude Code uses `fable` for orchestration/planning, `opus` for architecture
+  and verification, `sonnet` for main development, and `haiku` for mechanical
+  work.
+- Codex uses the researched equivalent ladder from
+  `scripts/gsd/model-equivalents.sh`: Fable/Opus → `gpt-5.6-sol`, Sonnet →
+  `gpt-5.6-terra`, Haiku → `gpt-5.6-luna`.
+- GSD is the coordination engine. Its Claude and Codex runtime surfaces are
+  installed separately; explicit Claude aliases in generated Codex agent TOMLs
+  are materialized by `scripts/gsd/codex-model-sync.sh`.
+- Ordinary GSD task execution stays on the invoking host (`codex exec` from
+  Codex, `claude -p` from Claude). `/review-gate` deliberately chooses the
+  opposite host: Codex Sol/xhigh for Claude-produced work, Claude Opus for
+  Codex-produced work.
 
 ## How it works
 
@@ -156,11 +157,9 @@ Phase N tasks complete
 
 ### Required
 
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (CLI, desktop app, or IDE extension)
-  One supported runtime. feature-fix-swarm adapts to Claude through `.claude/` skills and hooks.
-
-- **[Codex CLI](https://github.com/openai/codex)** by OpenAI
-  Second supported runtime. feature-fix-swarm adapts to Codex through `AGENTS.md` and shared state files.
+- At least one supported host: **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)**
+  or **[Codex CLI](https://github.com/openai/codex)**. Install both to enable
+  the opposite-host review gate in either direction.
 
 - **[gstack](https://github.com/garryslist/gstack)** by Garry Tan
   Provides the skills that feature-fix-swarm orchestrates:
@@ -180,29 +179,9 @@ Phase N tasks complete
   checks both upstream repos against their current `main` HEAD, installs them if they are missing,
   and refreshes them when the recorded commit drifts from upstream.
 
-- **[ruflo](https://github.com/ruvnet/claude-flow)** (claude-flow)
-  Intelligent agent orchestration via MCP. Provides:
-  - Swarm management -- spawn parallel QA agents
-  - Pattern memory -- store and search fix patterns across sessions
-  - Model routing -- pick the active host's ladder per task complexity
-  - Autopilot -- persistent task completion
-
-  Install ruflo:
-  ```bash
-  npm install -g ruflo
-  # Or use npx (no install needed):
-  npx ruflo@latest system info
-  ```
-
-  Configure as MCP server in the active runtime. See [ruflo docs](https://github.com/ruvnet/claude-flow#mcp-server) for MCP setup.
-
-  Host initialization:
-  ```bash
-  npx ruflo@latest init --codex   # Codex-only install
-  npx ruflo@latest init --dual    # Claude + Codex install
-  ```
-
-  Execution rule: Ruflo registers swarms/agents and stores memory, but `scripts/harness/ruflo-host-executor.sh` performs feature work through the active CLI OAuth session. Do not use Ruflo `agent_execute` or OpenRouter for feature implementation.
+- **[Open GSD Core](https://github.com/open-gsd/gsd-core)** — exact-pinned by
+  this package and installed by `setup.sh` for every available host runtime.
+  GSD owns plan/execute/verify orchestration; Ruflo is retired.
 
 - **[Spec Kit](https://github.com/github/spec-kit)** by GitHub
   Provides the spec/plan/tasks bootstrap (`/speckit.specify`, `/speckit.plan`, `/speckit.tasks`) that feature-fix-swarm builds on.
@@ -224,14 +203,15 @@ Phase N tasks complete
 
   If either skill is missing, `bash setup.sh` will prompt to install the full prerequisite set.
 
-### Optional
+### Opposite-host review runtime
 
-- **[Codex CLI](https://github.com/openai/codex)** by OpenAI
-  Optional cross-host runtime. Used for cross-model adversarial review in two places:
-  - `/fix` Step 3.5 — quick adversarial pass on the fresh fix (5-question concern list)
-  - `/fix` Step 5.5 + `/feature` Step 5.5 — full `/review-gate` skill (3 passes — review + adversarial + test-coverage gap analysis) on the final post-QA diff before /ship
+- Install the other host CLI to enable cross-vendor adversarial review in
+  `/review-gate` and GSD's ship review seam.
 
-  Default-on in both `/feature` and `/fix`. Skip with `--no-review-gate`. Skip-gracefully if the opposite-harness CLI is absent (warns, continues). Not strictly required but **strongly recommended** for any change with production blast radius (auth, payments, RLS, multi-tenant, cron, infra scripts). ~$2 + ~13 min per gate run.
+  The review gate is part of the default finish tail for `/feature-implement`
+  and `/fix`; `--no-finish` is the explicit accepted-risk opt-out. Direct
+  `/review-gate` fails clearly when the opposite CLI is unavailable, while the
+  GSD ship seam records a bounded fail-soft diagnostic. ~$2 + ~13 min per gate.
 
   ```bash
   npm install -g @openai/codex

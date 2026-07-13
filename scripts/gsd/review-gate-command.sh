@@ -8,6 +8,9 @@
 # overriding the file-paths assumption in the original task brief.
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/adversary-host.sh"
+
 DIFF="$(cat)"
 
 # Autonomy-grant wall (fail-closed): ship is an operator-gated action. This seam
@@ -44,11 +47,6 @@ if [ -n "$GATES_PY" ]; then
   fi
 fi
 
-if ! command -v codex >/dev/null 2>&1; then
-  echo '{"verdict":"APPROVED","note":"codex CLI not found; review skipped (fail-soft)"}'
-  exit 0
-fi
-
 if [ -z "$DIFF" ]; then
   echo '{"verdict":"APPROVED","note":"empty diff"}'
   exit 0
@@ -60,15 +58,25 @@ PROMPT="Review this diff. Report ONLY CRITICAL or HIGH severity findings (securi
 ${DIFF}
 --- DIFF END ---"
 
-# run_bounded: timeout -> gtimeout -> python3 -> refuse rc-124. Never
-# unwrapped — an unbounded hang here stalls the SHIP gate forever; rc!=0
-# degrades to the fail-soft APPROVED below (logged, not silent).
-. "$(dirname "${BASH_SOURCE[0]}")/run-bounded.sh"
-OUTPUT="$(run_bounded "${GSD_REVIEW_TIMEOUT:-600}" codex exec "$PROMPT" </dev/null 2>&1)"
+ACTIVE_HOST="$(detect_orchestrator_host)" || {
+  echo '{"verdict":"APPROVED","note":"review host detection failed, fail-soft"}'
+  exit 0
+}
+REVIEW_KIND="$(adversary_kind_for_host "$ACTIVE_HOST")"
+if [ "$REVIEW_KIND" = "codex" ]; then
+  REVIEW_MODEL="gpt-5.6-sol"
+  REVIEW_EFFORT="xhigh"
+else
+  REVIEW_MODEL="opus"
+  REVIEW_EFFORT=""
+fi
+
+OUTPUT="$(adversary_invoke "$REVIEW_KIND" "${GSD_REVIEW_TIMEOUT:-600}" \
+  "$REVIEW_MODEL" "$REVIEW_EFFORT" "$PROMPT" 2>&1)"
 rc=$?
 
 if [ $rc -ne 0 ]; then
-  echo '{"verdict":"APPROVED","note":"codex exec failed, fail-soft"}'
+  echo '{"verdict":"APPROVED","note":"opposite-host review failed, fail-soft"}'
   exit 0
 fi
 

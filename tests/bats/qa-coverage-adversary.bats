@@ -29,6 +29,7 @@ echo "COVERAGE: ADEQUATE"
 EOF
   chmod +x "$STUB_DIR/fake-codex-adequate"
   export PATH="$STUB_DIR:$PATH"
+  export FFS_HOST=claude
 }
 
 @test "kill-switch QA_COVERAGE=off skips" {

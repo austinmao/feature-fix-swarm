@@ -20,9 +20,44 @@
 . "$(dirname "${BASH_SOURCE[0]}")/run-bounded.sh"
 
 detect_orchestrator_host() {
-  if [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_HOME:-}" ] || [ -n "${CODEX_AGENT:-}" ]; then
+  case "${FFS_HOST:-}" in
+    codex|claude)
+      echo "$FFS_HOST"
+      return 0
+      ;;
+    "") ;;
+    *)
+      echo "adversary-host: ignoring invalid FFS_HOST=$FFS_HOST (expected claude or codex)" >&2
+      ;;
+  esac
+
+  # Session/thread markers prove the active harness. Config-directory env vars
+  # are deliberately excluded: users commonly export them in every shell, so
+  # they do not identify the process invoking FFS.
+  if [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ] \
+     || [ -n "${CODEX_AGENT:-}" ] || [ -n "${CODEX_CI:-}" ]; then
     echo "codex"
   elif [ -n "${CLAUDE_SESSION_ID:-}" ] || [ -n "${CLAUDE_CODE:-}" ]; then
+    echo "claude"
+  elif [ "${FFS_HOST_PROCESS_DETECT:-on}" != "off" ] && command -v ps >/dev/null 2>&1; then
+    # ponytail: bounded naive PPID walk (six hops); session markers above are
+    # the primary signal. Inspect executable names, not full arguments, because
+    # task data can itself contain the words "codex" or "claude".
+    local pid="${PPID:-}" depth=0 line exe parent
+    while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && [ "$depth" -lt 6 ]; do
+      line="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+      exe="${line%% *}"
+      exe="${exe##*/}"
+      case "$exe" in
+        codex|codex-*) echo "codex"; return 0 ;;
+        claude|claude-*) echo "claude"; return 0 ;;
+      esac
+      parent="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+      [ -n "$parent" ] || break
+      pid="$parent"
+      depth=$((depth + 1))
+    done
+    echo "adversary-host: orchestrator undetected — defaulting to claude host" >&2
     echo "claude"
   else
     # stdout stays clean (callers capture stdout via $()) — note goes to stderr only.

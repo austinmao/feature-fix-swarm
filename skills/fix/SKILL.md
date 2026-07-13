@@ -1,7 +1,7 @@
 ---
 name: fix
-description: "Investigate a bug (root cause, not symptom — routes to /gsd-debug when no repro exists), then fix it through /feature-implement --adhoc: the same walls, gsd-quick loop, finish tail (review-gate, grant-walled ship), and delegation discipline as every spec run. v4.0.0: /fix is a thin front-end — all execution machinery lives in feature-implement."
-version: "4.0.0"
+description: "Investigate a bug (root cause, not symptom), then fix it through host-native /feature-implement --adhoc; only review gates cross to the opposite model family."
+version: "4.1.0"
 allowed-tools:
   - Read
   - Edit
@@ -42,12 +42,15 @@ Invoke `/investigate` (or trace inline for small bugs): reproduce, grep every ca
 of the function to be touched, identify the shared root-cause site. Write the
 finding as a one-paragraph statement with file:line refs before editing anything.
 
-**Route to `/gsd-debug` when the reproduction is non-obvious** — explicit
+**Route to GSD debug when the reproduction is non-obvious** — explicit
 criteria: (no failing test yet) AND (no single-command repro exists). Invoke
 gsd's scientific-method hypothesis→experiment loop and consume its root-cause
 report before editing anything. When a failing test or a single-command
-repro already exists, stay on this `/investigate` path — do not route to
-`/gsd-debug`.
+repro already exists, stay on this `/investigate` path — do not route to GSD
+debug. Use the invoking host's native command surface: Claude `/gsd-debug`,
+Codex `$gsd-debug`; for headless execution use
+`TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-debug <args>`. Ordinary debug
+work never crosses vendors; only the downstream review gate does.
 
 ### Step 2: Fix via feature-implement --adhoc
 
@@ -63,6 +66,8 @@ required), the `workflow.test_command` completion authority, the finish tail
 (browser gate → review-gate → grant-walled ship → merge backstop → learnings
 harvest), and the delegation histogram. Do NOT reimplement any of it here —
 drift between /fix and the spec pipeline is the defect this version removed.
+The delegated run preserves the invoking host: Claude uses Claude models, Codex
+uses the mapped Codex ladder. Its review gate deliberately uses the opposite host.
 
 ### Step 3: Fix-specific QA loop
 

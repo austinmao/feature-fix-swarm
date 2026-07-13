@@ -11,7 +11,9 @@ setup() {
   cd "$BATS_TEST_DIRNAME/../.."
   # Hermeticity: default-kind tests assume no host is detected. Unset so a
   # real codex/claude session's env doesn't flip detect_orchestrator_host.
-  unset CODEX_SESSION_ID CODEX_HOME CODEX_AGENT CLAUDE_SESSION_ID CLAUDE_CODE
+  unset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_HOME CODEX_AGENT CODEX_CI
+  unset CLAUDE_SESSION_ID CLAUDE_CODE
+  export FFS_HOST=claude
   HIGH="$BATS_TEST_TMPDIR/01-auth-PLAN.md"
   cat > "$HIGH" <<'EOF'
 ---
@@ -135,14 +137,15 @@ EOF
   grep -q '^HIGH: plan assumes withTenantRls' "$HIGH"
 }
 
-@test "host-aware: CODEX_HOME set with no explicit kind auto-flips to claude adversary" {
-  CODEX_HOME="/tmp/x" PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
+@test "host-aware: explicit Codex host auto-flips to claude adversary" {
+  FFS_HOST=codex PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
 }
 
 @test "no host env detected emits stderr note, stdout stays clean, defaults to claude host" {
-  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  unset FFS_HOST
+  FFS_HOST_PROCESS_DETECT=off PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"adversary-host: orchestrator undetected — defaulting to claude host"* ]]
   # host defaulted to claude -> opposite adversary is codex (proves stdout
