@@ -110,16 +110,16 @@ The implementation layer renders those fields for the current host, but the task
 - GSD is the coordination engine. Its Claude and Codex runtime surfaces are
   installed separately; explicit Claude aliases in generated Codex agent TOMLs
   are materialized by `scripts/gsd/codex-model-sync.sh`.
-- Ordinary GSD task execution stays on the invoking host (`codex exec` from
-  Codex, `claude -p` from Claude). `/review-gate` deliberately chooses the
-  opposite host: Codex Sol/xhigh for Claude-produced work, Claude Opus for
-  Codex-produced work.
-- Every external CLI call is bounded. Before a mutating GSD drive, a read-only
-  native-model probe runs; if it fails, the equivalent tier on the other vendor
-  is probed once—there is no wait-for-reset loop. After selection, exactly one
-  mutating drive launches, and no post-launch failure or timeout is replayed.
-  Read-only reviews may safely fall back once. `FFS_CROSS_VENDOR_FALLBACK=off`
-  disables preflight/review fallback only for forensics.
+- A fixed read-only capability probe prefers the invoking host for ordinary
+  GSD execution (`codex exec` from Codex, `claude -p` from Claude). If that
+  CLI/model/quota is unavailable, the other host may be selected before launch.
+  A started or timed-out stateful drive is never replayed across vendors; its
+  bounded failure includes host-specific resume guidance.
+- `/review-gate` deliberately tries the opposite host first: Codex Sol/xhigh
+  for Claude-produced work, Claude Opus for Codex-produced work. Read-only
+  reviews may make one bounded active-host fallback. The degradation is
+  explicit, and mandatory review fails closed if neither host returns evidence.
+  Set `FFS_CROSS_VENDOR_FALLBACK=off` only for forensic isolation.
 
 ## How it works
 
@@ -216,13 +216,10 @@ Phase N tasks complete
 
   The review gate is part of the default finish tail for `/feature-implement`
   and `/fix`; `--no-finish` is the explicit accepted-risk opt-out. Direct
-  `/review-gate` and the GSD ship seam both try the opposite host first. If that
-  CLI/model is unavailable, they fall back once to a fresh process on the
-  active host; if both bounded attempts fail, the missing pass is reported
-  without stalling. Codex is sandboxed read-only; Claude runs with model tools,
-  MCP, ordinary hooks/customizations, and session persistence disabled.
-  Administrator-managed policy remains in force as the trusted host boundary.
-  ~$2 + ~13 min per gate.
+  When the opposite CLI is unavailable, review tries the active host once and
+  labels the result `DEGRADED`; both unavailable, an unparseable reviewer, or a
+  ship reviewer without exactly one line-anchored verdict returns `REVISE`.
+  No mandatory ship review fail-opens. ~$2 + ~13 min per gate.
 
   ```bash
   npm install -g @openai/codex
@@ -243,6 +240,10 @@ bash setup.sh
 
 The installer copies skills, scripts, and prompts into your project. It checks prerequisites and warns if anything is missing.
 If you approve the prompt, it bootstraps the missing dependencies in one pass.
+It also verifies the installed runner, adversary adapter, hard-bound helper,
+and hang guard byte-for-byte and registers the guard for both Claude and Codex.
+To reconcile only those runtime levers in an existing consumer repo, run
+`bash setup.sh --reconcile-consumer /absolute/path/to/repo`.
 
 ### Manual install
 

@@ -63,3 +63,40 @@ envelope() {
   run bash -c "$(declare -f envelope); envelope 'git status && ls -la' | bash '$HOOK'"
   [ "$status" -eq 0 ]
 }
+
+@test "HG-010: timeout substring in unrelated command does not bypass guard" {
+  run bash -c "$(declare -f envelope); envelope 'echo timeout ready && codex exec \"hi\"' | bash '$HOOK'"
+  [ "$status" -eq 2 ]
+}
+
+@test "HG-011: sanctioned-lever path substring does not bypass guard" {
+  run bash -c "$(declare -f envelope); envelope 'echo /tmp/not-gsd-run.sh.txt; codex review' | bash '$HOOK'"
+  [ "$status" -eq 2 ]
+}
+
+@test "HG-012: timeout in an environment variable does not bypass guard" {
+  run bash -c "$(declare -f envelope); envelope 'BOUND_NAME=timeout codex exec \"hi\"' | bash '$HOOK'"
+  [ "$status" -eq 2 ]
+}
+
+@test "HG-013: nested bare CLI execution is blocked but an outer hard bound passes" {
+  run bash -c "$(declare -f envelope); envelope 'bash -c '\''codex exec \"hi\"'\''' | bash '$HOOK'"
+  [ "$status" -eq 2 ]
+  run bash -c "$(declare -f envelope); envelope 'timeout -k 2 10 bash -c '\''codex exec \"hi\"'\''' | bash '$HOOK'"
+  [ "$status" -eq 0 ]
+}
+
+@test "HG-014: vendor executable environment-variable forms are blocked" {
+  run bash -c "$(declare -f envelope); envelope '\$CODEX_BIN exec \"hi\"' | bash '$HOOK'"
+  [ "$status" -eq 2 ]
+  run bash -c "$(declare -f envelope); envelope '\${CODEX_BIN} review' | bash '$HOOK'"
+  [ "$status" -eq 2 ]
+  run bash -c "$(declare -f envelope); envelope '\$CLAUDE_BIN -p \"hi\"' | bash '$HOOK'"
+  [ "$status" -eq 2 ]
+}
+
+@test "HG-015: vendor variable inside nested shell payload is blocked" {
+  envelope 'env CODEX_BIN=/tmp/codex sh -c "$CODEX_BIN exec hi"' > "$BATS_TEST_TMPDIR/hook-envelope.json"
+  run bash "$HOOK" < "$BATS_TEST_TMPDIR/hook-envelope.json"
+  [ "$status" -eq 2 ]
+}

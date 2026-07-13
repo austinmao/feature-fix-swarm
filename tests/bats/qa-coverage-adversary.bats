@@ -28,6 +28,11 @@ echo "echoing prompt: List user-facing flows the QA MISSED"
 echo "COVERAGE: ADEQUATE"
 EOF
   chmod +x "$STUB_DIR/fake-codex-adequate"
+  cat > "$STUB_DIR/fake-claude-adequate" <<'EOF'
+#!/usr/bin/env bash
+echo "COVERAGE: ADEQUATE"
+EOF
+  chmod +x "$STUB_DIR/fake-claude-adequate"
   export PATH="$STUB_DIR:$PATH"
   export FFS_HOST=claude
 }
@@ -73,7 +78,15 @@ EOF
   QA_COVERAGE_BIN=definitely-not-a-real-cli \
     QA_COVERAGE_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$RESULTS"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"both bounded vendor attempts failed"* ]]
+  [[ "$output" == *"both review hosts unavailable — skipped (advisory)"* ]]
+}
+
+@test "missing preferred QA reviewer falls back once to active host" {
+  QA_COVERAGE_BIN=definitely-not-a-real-cli \
+    QA_COVERAGE_FALLBACK_BIN=fake-claude-adequate run bash "$SCRIPT" "$RESULTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DEGRADED"* ]]
+  [[ "$output" == *"COVERAGE: ADEQUATE"* ]]
 }
 
 @test "adversary CLI exit 7 is fail-soft exit 0" {
@@ -82,10 +95,10 @@ EOF
 exit 7
 EOF
   chmod +x "$STUB_DIR/fake-codex-fail"
-  QA_COVERAGE_BIN=fake-codex-fail \
-    QA_COVERAGE_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$RESULTS"
+  QA_COVERAGE_BIN=fake-codex-fail QA_COVERAGE_FALLBACK_BIN=definitely-missing \
+    run bash "$SCRIPT" "$RESULTS"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"both bounded vendor attempts failed"* ]]
+  [[ "$output" == *"both review hosts unavailable — skipped (advisory)"* ]]
 }
 
 @test "stub output with neither MISSED nor ADEQUATE prints no-findings fallback" {

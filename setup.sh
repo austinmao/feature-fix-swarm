@@ -10,8 +10,98 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # skill installs without prompting and skips the optional-deps prompt — needed
 # for autonomous/CI deploys where stdin is not a TTY (read otherwise exits 1).
 SETUP_YES="${FFS_SETUP_YES:-0}"
-for _a in "$@"; do [ "$_a" = "--yes" ] || [ "$_a" = "-y" ] && SETUP_YES=1; done
+RECONCILE_TARGET=""
+_setup_args=("$@")
+for ((_i=0; _i<${#_setup_args[@]}; _i++)); do
+  _a="${_setup_args[$_i]}"
+  [ "$_a" = "--yes" ] || [ "$_a" = "-y" ] && SETUP_YES=1
+  if [ "$_a" = "--reconcile-consumer" ]; then
+    _i=$((_i + 1))
+    [ "$_i" -lt "${#_setup_args[@]}" ] || { echo "ERROR: --reconcile-consumer requires a target directory" >&2; exit 2; }
+    RECONCILE_TARGET="${_setup_args[$_i]}"
+  fi
+done
 export PATH="$HOME/.local/bin:$PATH"
+
+register_cli_hang_guard() {
+  local config_path="$1" command_text="$2"
+  mkdir -p "$(dirname "$config_path")"
+  python3 - "$config_path" "$command_text" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+command = sys.argv[2]
+if path.exists():
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"refusing to overwrite malformed hook config {path}: {exc}")
+else:
+    data = {}
+hooks = data.setdefault("hooks", {})
+entries = hooks.setdefault("PreToolUse", [])
+entry = next((item for item in entries if item.get("matcher") == "Bash"), None)
+if entry is None:
+    entry = {"matcher": "Bash", "hooks": []}
+    entries.append(entry)
+commands = entry.setdefault("hooks", [])
+if not any("cli-hang-guard.sh" in hook.get("command", "") for hook in commands):
+    commands.append({"type": "command", "command": command, "timeout": 10})
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+}
+
+register_consumer_hooks() {
+  local target="$1"
+  register_cli_hang_guard "$target/.claude/settings.json" \
+    'bash "$CLAUDE_PROJECT_DIR"/scripts/hooks/cli-hang-guard.sh'
+  register_cli_hang_guard "$target/.codex/hooks.json" \
+    'bash "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/hooks/cli-hang-guard.sh"'
+}
+
+verify_consumer_runtime() {
+  local target="$1" rel
+  for rel in \
+    scripts/gsd/gsd-run.sh \
+    scripts/gsd/adversary-host.sh \
+    scripts/gsd/run-bounded.sh \
+    scripts/hooks/cli-hang-guard.sh; do
+    cmp -s "$SCRIPT_DIR/$rel" "$target/$rel" || {
+      echo "ERROR: consumer runtime drift remains after setup: $rel" >&2
+      return 1
+    }
+  done
+  echo "  Consumer runtime parity: VERIFIED"
+}
+
+reconcile_consumer_runtime() {
+  local target="$1" rel
+  [ -d "$target" ] || { echo "ERROR: reconciliation target is not a directory: $target" >&2; return 2; }
+  for rel in \
+    scripts/gsd/gsd-run.sh \
+    scripts/gsd/adversary-host.sh \
+    scripts/gsd/run-bounded.sh \
+    scripts/gsd/model-equivalents.sh \
+    scripts/gsd/codex-model-sync.sh \
+    scripts/gsd/review-gate-command.sh \
+    scripts/hooks/cli-hang-guard.sh; do
+    mkdir -p "$target/$(dirname "$rel")"
+    if [ ! "$SCRIPT_DIR/$rel" -ef "$target/$rel" ]; then
+      cp "$SCRIPT_DIR/$rel" "$target/$rel"
+    fi
+    chmod +x "$target/$rel"
+  done
+  register_consumer_hooks "$target"
+  verify_consumer_runtime "$target"
+}
+
+if [ -n "$RECONCILE_TARGET" ]; then
+  reconcile_consumer_runtime "$RECONCILE_TARGET"
+  echo "=== feature-fix-swarm consumer runtime reconciled ==="
+  exit 0
+fi
 
 skill_installed() {
   local skill="$1"
@@ -550,6 +640,12 @@ for hook in worktree-gc.sh post-implement-batch.sh delegation-enforcer.sh cli-ha
     echo "  Installed scripts/hooks/$hook"
   fi
 done
+
+# Setup is a reconciliation operation, not a copy-if-missing install. Verify
+# the host runner/adapter/bound/hook bytes and register the enforcement hook
+# for both supported harnesses so a legacy consumer cannot silently persist.
+verify_consumer_runtime "$PWD"
+register_consumer_hooks "$PWD"
 
 # Copy prompts
 echo "Installing prompts..."

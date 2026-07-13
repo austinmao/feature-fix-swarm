@@ -15,14 +15,14 @@ setup() {
   grep -F '`/gsd-extract-learnings` or Codex `$gsd-extract-learnings`' skills/task-swarm/SKILL.md
 }
 
-@test "/task-swarm delegates review to the opposite host" {
+@test "/task-swarm delegates opposite-first review with bounded fallback" {
   grep -F 'opposite-host plan gate' skills/task-swarm/SKILL.md
-  grep -F 'only review gates' skills/task-swarm/SKILL.md
+  grep -F 'Review gates try the opposite family first' skills/task-swarm/SKILL.md
 }
 
 @test "/plan-decompose uses the shared opposite-host adapter" {
   grep -F '. scripts/gsd/adversary-host.sh' skills/plan-decompose/SKILL.md
-  grep -F 'adversary_invoke "$REVIEW_KIND" 540' skills/plan-decompose/SKILL.md
+  grep -F 'adversary_invoke_with_fallback "$REVIEW_KIND" "$FALLBACK_KIND" 540' skills/plan-decompose/SKILL.md
   ! grep -F 'timeout 540 codex exec' skills/plan-decompose/SKILL.md
 }
 

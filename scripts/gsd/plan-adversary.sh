@@ -68,22 +68,31 @@ if grep -q '^## Adversarial plan review' "$PLAN_FILE"; then
   exit 0
 fi
 
-ADVERSARY_KIND="${PLAN_ADVERSARY_KIND:-$(adversary_kind_for_host "$(detect_orchestrator_host)")}"
+ACTIVE_HOST="$(detect_orchestrator_host)"
+ADVERSARY_KIND="${PLAN_ADVERSARY_KIND:-$(adversary_kind_for_host "$ACTIVE_HOST")}"
+FALLBACK_KIND="$(adversary_kind_for_host "$ADVERSARY_KIND")"
 
 if [ "$ADVERSARY_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  [ -z "${PLAN_ADVERSARY_FALLBACK_BIN:-}" ] \
-    || ADVERSARY_BIN_CLAUDE="$PLAN_ADVERSARY_FALLBACK_BIN"
   MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
   EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
   HEADER_LABEL="${MODEL} ${EFFORT}"
 else
   ADVERSARY_BIN_CLAUDE="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  [ -z "${PLAN_ADVERSARY_FALLBACK_BIN:-}" ] \
-    || ADVERSARY_BIN_CODEX="$PLAN_ADVERSARY_FALLBACK_BIN"
   MODEL="${PLAN_ADVERSARY_CLAUDE_MODEL:-opus}"
   EFFORT=""
   HEADER_LABEL="claude ${MODEL}"
+fi
+if [ "$FALLBACK_KIND" = "codex" ]; then
+  ADVERSARY_BIN_CODEX="${PLAN_ADVERSARY_FALLBACK_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
+  FALLBACK_MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
+  FALLBACK_EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
+  FALLBACK_HEADER="${FALLBACK_MODEL} ${FALLBACK_EFFORT}, degraded fallback"
+else
+  ADVERSARY_BIN_CLAUDE="${PLAN_ADVERSARY_FALLBACK_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
+  FALLBACK_MODEL="${PLAN_ADVERSARY_CLAUDE_MODEL:-opus}"
+  FALLBACK_EFFORT=""
+  FALLBACK_HEADER="claude ${FALLBACK_MODEL}, degraded fallback"
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
 
@@ -95,25 +104,30 @@ $(cat "$PLAN_FILE")
 
 Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, unstated assumptions, missing or unfalsifiable acceptance criteria, sequencing hazards (a later task invalidating an earlier one), and security holes in the approach itself. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
 
-OUTPUT="$(adversary_invoke "$ADVERSARY_KIND" "${PLAN_ADVERSARY_TIMEOUT:-480}" "$MODEL" "$EFFORT" "$PROMPT" 2>&1)"
+OUTPUT="$(adversary_invoke_with_fallback "$ADVERSARY_KIND" "$FALLBACK_KIND" \
+  "${PLAN_ADVERSARY_TIMEOUT:-480}" "$MODEL" "$EFFORT" \
+  "$FALLBACK_MODEL" "$FALLBACK_EFFORT" "$PROMPT" 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
-  echo "[plan-adversary] both bounded vendor attempts failed (rc=$rc) — skipped (fail-soft)"
-  exit 0
+  echo "[plan-adversary] both review hosts unavailable (rc=$rc) — mandatory plan review blocked" >&2
+  exit 1
 fi
 
-if printf '%s\n' "$OUTPUT" | grep -q 'falling back once to claude'; then
-  printf '%s\n' "$OUTPUT" | grep 'falling back once to claude' | tail -1 >&2
-  HEADER_LABEL="claude $(claude_equiv_model "$MODEL" 2>/dev/null || echo opus)"
-elif printf '%s\n' "$OUTPUT" | grep -q 'falling back once to codex'; then
-  printf '%s\n' "$OUTPUT" | grep 'falling back once to codex' | tail -1 >&2
-  HEADER_LABEL="$(codex_equiv_model "$MODEL" 2>/dev/null || echo gpt-5.6-sol) $(codex_equiv_effort "$MODEL" 2>/dev/null || echo xhigh)"
+DEGRADED_LINE="$(printf '%s\n' "$OUTPUT" | grep -E '^adversary-host: DEGRADED ' | head -1)"
+if [ -n "$DEGRADED_LINE" ]; then
+  echo "[plan-adversary] $DEGRADED_LINE" >&2
+  HEADER_LABEL="$FALLBACK_HEADER"
 fi
 
 # codex echoes the prompt into its transcript — only line-anchored tags count,
 # and the prompt's own instruction lines never start a line with 'CRITICAL:' etc.
-VERDICT="$(printf '%s\n' "$OUTPUT" | grep -E '^VERDICT: (APPROVE|REVISE)[[:space:]]*$' | tail -1)"
-[ -z "$VERDICT" ] && VERDICT="VERDICT: UNPARSEABLE"
+VERDICT_LINES="$(printf '%s\n' "$OUTPUT" | grep -E '^VERDICT: (APPROVE|REVISE)[[:space:]]*$' || true)"
+VERDICT_COUNT="$(printf '%s\n' "$VERDICT_LINES" | awk 'NF { count++ } END { print count+0 }')"
+if [ "$VERDICT_COUNT" -ne 1 ]; then
+  echo "[plan-adversary] mandatory review returned a missing or conflicting anchored verdict; plan left unchanged" >&2
+  exit 1
+fi
+VERDICT="$VERDICT_LINES"
 FINDINGS="$(printf '%s\n' "$OUTPUT" | grep -E '^(CRITICAL|HIGH|MEDIUM):' | head -30)"
 N_FINDINGS=0
 [ -n "$FINDINGS" ] && N_FINDINGS="$(printf '%s\n' "$FINDINGS" | wc -l | tr -d ' ')"

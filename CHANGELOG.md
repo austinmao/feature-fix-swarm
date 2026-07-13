@@ -6,36 +6,51 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.14.1 — fail-closed cross-host fallback hardening (2026-07-13)
+
+- **No stateful replay:** `gsd-run.sh` now probes the invoking CLI/model/quota
+  with a fixed read-only prompt before launch. It can select the other vendor
+  only at that boundary; any nonzero exit or timeout after the GSD drive starts
+  returns bounded, same-host resume guidance and is never classified from task
+  output or replayed across vendors.
+- **Fail-closed review fallback:** ship review, plan review, QA coverage review,
+  FULL-tier review, and honest verification try the opposite host first and
+  allow one active-host fallback inside the original overall deadline because
+  those calls are read-only. Degradation is explicit. Mandatory review blocks
+  when both hosts fail, and GSD ship review requires exactly one line-anchored
+  PASS/BLOCK verdict. Review prompts stream on stdin to avoid `ARG_MAX`; the
+  optional `FFS_CROSS_VENDOR_FALLBACK=off` forensic switch disables both
+  pre-launch host selection and the read-only retry.
+- **True hard wall:** `run_bounded` arms TERM plus KILL on coreutils hosts and
+  retains the Python process-group KILL rung, so TERM-ignoring descendants
+  cannot turn a timeout into an indefinite wait.
+- **Consumer reconciliation:** `setup.sh` verifies critical runtime bytes after
+  installation, registers `cli-hang-guard.sh` for Claude and Codex, and adds
+  `--reconcile-consumer <repo>` for a dependency-free targeted refresh.
+- **Hang-guard parser:** token-aware, non-evaluating shell analysis replaces
+  substring allowlisting. Path text, environment values, nested `sh -c`, and
+  `$CODEX_BIN`/`$CLAUDE_BIN` forms no longer bypass the wall.
+- **Skill versions:** feature-implement 2.9.1, review-gate 1.8.1,
+  task-swarm 3.2.2, plan-decompose 1.5.1, fix 4.1.1, and spec-decompose
+  2.4.1.
+
 ## v4.14.0 — bounded cross-vendor availability fallback (2026-07-13)
 
-- **Native host remains first:** GSD still starts on Codex/Terra when invoked
-  from Codex and Claude/Sonnet when invoked from Claude.
-- **No quota-reset stalls:** before any mutating GSD drive, a bounded read-only
-  model probe checks the native host. A failed probe (missing CLI, quota/model,
-  auth, overload, transport, or timeout) probes the equivalent tier on the
-  other vendor once; `FFS_CROSS_VENDOR_FALLBACK=off` is the forensic opt-out.
-- **Mutation safety:** vendor selection finishes before execution, then exactly
-  one mutating GSD drive launches. Every post-launch failure—including exit
-  126/127 and timeout—keeps its original code and is never replayed across
-  vendors, because partial local/external state is ambiguous.
-- **Diagnostic isolation:** model/task output never participates in mutating
-  fallback selection, so task prose such as “connection refused” cannot
-  manufacture a second execution. Read-only review fallback recognizes exact
-  provider diagnostics on either stream because replay is side-effect-free.
-- **Review continuity:** `/review-gate`, the FULL-tier/honest verifier paths,
-  and GSD's ship review still prefer the opposite vendor, then fall back once
-  to a fresh active-host process when that reviewer is unavailable. Codex is
-  sandboxed read-only; Claude runs in safe mode with model tools, MCP, ordinary
-  hooks/customizations, and session persistence disabled. Administrator-managed
-  policy remains the trusted host boundary by design.
-- **Correct Codex agent root:** unrelated project-local `.codex/agents/*.toml`
-  files no longer shadow the global GSD Codex installation. The project root is
-  selected only when it contains actual `gsd-*.toml` roles.
-- **Large-diff-safe reviews:** adversarial prompts stream through stdin instead
-  of one argv entry, avoiding host `ARG_MAX` skips.
-- **TDD:** Bats coverage reproduces both vendor quota failures, missing native
-  CLIs, safe review fallback, mutating-timeout no-replay, task-output isolation,
-  large prompts, and both Codex agent-root branches.
+- **Native host remains first:** GSD starts on Codex/Terra when invoked from
+  Codex and Claude/Sonnet when invoked from Claude.
+- **No quota-reset stalls:** before a mutating GSD drive, a bounded read-only
+  model probe checks the native host and can select the equivalent tier on the
+  other vendor when the native CLI/model is unavailable.
+- **Mutation safety:** vendor selection happens before execution; post-launch
+  failures and timeouts are not replayed across vendors.
+- **Review continuity:** review paths prefer the opposite vendor and can use a
+  bounded active-host fallback when the preferred reviewer is unavailable.
+- **Codex config-root selection:** unrelated project-local Codex agents no
+  longer shadow the global GSD installation.
+- **Large-diff-safe reviews:** adversarial prompts stream through stdin rather
+  than one argv entry, avoiding host `ARG_MAX` limits.
+- **Forensic control:** `FFS_CROSS_VENDOR_FALLBACK=off` disables cross-vendor
+  selection when isolating one provider.
 
 ## v4.13.1 — self-healing lightweight task pipeline (2026-07-13)
 

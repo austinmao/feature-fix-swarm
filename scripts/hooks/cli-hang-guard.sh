@@ -31,15 +31,124 @@ except Exception:
     pass' 2>/dev/null) || exit 0
 [ -z "$CMD" ] && exit 0
 
-# Already-bounded forms and sanctioned levers pass.
-# (`*timeout *` also covers `gtimeout ` as a substring — SC2221)
-case "$CMD" in
-  *timeout\ *|*run_bounded*|*adversary-host*|*gsd-run.sh*|*plan-adversary*|*qa-coverage-adversary*|*review-gate-command*|*model-fallback*) exit 0 ;;
-esac
+# Parse tokens as data; never eval the command. A bound only protects the
+# simple command it actually wraps. Substrings in an echo, path, or env value
+# cannot bless a later bare CLI invocation. Recurse into shell -c payloads.
+python3 - "$CMD" <<'PY'
+import os
+import re
+import shlex
+import sys
 
-# Execution forms only — version/status probes don't match these patterns.
-if printf '%s' "$CMD" | grep -qE '(^|[[:space:];&|(])codex[[:space:]]+(exec|review)([[:space:]]|$)' || \
-   printf '%s' "$CMD" | grep -qE '(^|[[:space:];&|(])claude[[:space:]][^;&|]*(-p|--print)([[:space:]]|$|")'; then
+ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+SEPARATORS = {";", "&", "&&", "|", "||", "(", ")"}
+
+
+def tokens(command):
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True,
+                        punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def segments(command):
+    current = []
+    for token in tokens(command):
+        if token in SEPARATORS or (token and set(token) <= set(";&|()")):
+            if current:
+                yield current
+                current = []
+        else:
+            current.append(token)
+    if current:
+        yield current
+
+
+def command_index(segment):
+    i = 0
+    while i < len(segment) and ASSIGN.match(segment[i]):
+        i += 1
+    if i < len(segment) and os.path.basename(segment[i]) == "env":
+        i += 1
+        while i < len(segment):
+            token = segment[i]
+            if token in ("-u", "--unset"):
+                i += 2
+            elif token.startswith("-") or ASSIGN.match(token):
+                i += 1
+            else:
+                break
+    if i < len(segment) and os.path.basename(segment[i]) in ("command", "exec"):
+        i += 1
+        while i < len(segment) and segment[i].startswith("-"):
+            i += 1
+    return i
+
+
+def vendor_executable(token):
+    base = os.path.basename(token)
+    if base == "codex":
+        return "codex"
+    if base == "claude":
+        return "claude"
+    # Commands often route through configured executable variables. Treat a
+    # variable whose name identifies the vendor as that executable; braces do
+    # not change the decision. Do not expand or execute the value.
+    match = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", token)
+    if match:
+        name = match.group(1).upper()
+        if "CODEX" in name:
+            return "codex"
+        if "CLAUDE" in name:
+            return "claude"
+    return ""
+
+
+def unsafe(command, inherited_bound=False, depth=0):
+    if depth > 3:
+        return True
+    try:
+        parsed = list(segments(command))
+    except ValueError:
+        return False  # malformed/incomplete shell text stays fail-open
+    for segment in parsed:
+        i = command_index(segment)
+        if i >= len(segment):
+            continue
+        executable = os.path.basename(segment[i])
+        bounded = inherited_bound or executable in ("timeout", "gtimeout", "run_bounded")
+        if bounded:
+            continue
+
+        # Detect direct and wrapper-prefixed execution forms conservatively.
+        for pos, token in enumerate(segment):
+            vendor = vendor_executable(token)
+            if vendor == "codex" and pos + 1 < len(segment) and segment[pos + 1] in ("exec", "review"):
+                return True
+            if vendor == "claude" and any(arg in ("-p", "--print") for arg in segment[pos + 1:]):
+                return True
+
+        # Shell -c hides its payload in one quoted token; inspect it recursively.
+        if executable in ("bash", "sh", "zsh"):
+            try:
+                cpos = segment.index("-c", i + 1)
+            except ValueError:
+                continue
+            if cpos + 1 < len(segment) and unsafe(segment[cpos + 1], False, depth + 1):
+                return True
+    return False
+
+
+try:
+    blocked = unsafe(sys.argv[1])
+except Exception:
+    blocked = False
+sys.exit(2 if blocked else 0)
+PY
+_guard_rc=$?
+
+if [ "$_guard_rc" -eq 2 ]; then
   cat >&2 <<'MSG'
 [cli-hang-guard] BLOCKED: bare codex/claude execution without a wall-clock bound.
 A hung CLI subprocess blocks the session indefinitely (2026-07-12 dead-codex stall

@@ -66,29 +66,41 @@ fi
 
 PROMPT="QA ran these browser steps: ${STEPS_LIST}. The diff touches: ${DIFF_FILES}. List user-facing flows the QA MISSED, one per line starting \`MISSED: <flow> — <risk>\`. If coverage is adequate reply \`COVERAGE: ADEQUATE\`."
 
-ADVERSARY_KIND="${QA_COVERAGE_KIND:-$(adversary_kind_for_host "$(detect_orchestrator_host)")}"
+ACTIVE_HOST="$(detect_orchestrator_host)"
+ADVERSARY_KIND="${QA_COVERAGE_KIND:-$(adversary_kind_for_host "$ACTIVE_HOST")}"
+FALLBACK_KIND="$(adversary_kind_for_host "$ADVERSARY_KIND")"
 
 if [ "$ADVERSARY_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${QA_COVERAGE_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  [ -z "${QA_COVERAGE_FALLBACK_BIN:-}" ] \
-    || ADVERSARY_BIN_CLAUDE="$QA_COVERAGE_FALLBACK_BIN"
   MODEL="${QA_COVERAGE_MODEL:-gpt-5.6-terra}"
   EFFORT="${QA_COVERAGE_EFFORT:-high}"
 else
   ADVERSARY_BIN_CLAUDE="${QA_COVERAGE_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  [ -z "${QA_COVERAGE_FALLBACK_BIN:-}" ] \
-    || ADVERSARY_BIN_CODEX="$QA_COVERAGE_FALLBACK_BIN"
   MODEL="${QA_COVERAGE_CLAUDE_MODEL:-sonnet}"
   EFFORT=""
 fi
+if [ "$FALLBACK_KIND" = "codex" ]; then
+  ADVERSARY_BIN_CODEX="${QA_COVERAGE_FALLBACK_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
+  FALLBACK_MODEL="${QA_COVERAGE_MODEL:-gpt-5.6-terra}"
+  FALLBACK_EFFORT="${QA_COVERAGE_EFFORT:-high}"
+else
+  ADVERSARY_BIN_CLAUDE="${QA_COVERAGE_FALLBACK_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
+  FALLBACK_MODEL="${QA_COVERAGE_CLAUDE_MODEL:-sonnet}"
+  FALLBACK_EFFORT=""
+fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
 
-OUTPUT="$(adversary_invoke "$ADVERSARY_KIND" "${QA_COVERAGE_TIMEOUT:-300}" "$MODEL" "$EFFORT" "$PROMPT" 2>&1)"
+OUTPUT="$(adversary_invoke_with_fallback "$ADVERSARY_KIND" "$FALLBACK_KIND" \
+  "${QA_COVERAGE_TIMEOUT:-300}" "$MODEL" "$EFFORT" \
+  "$FALLBACK_MODEL" "$FALLBACK_EFFORT" "$PROMPT" 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
-  echo "[qa-coverage-adversary] both bounded vendor attempts failed (rc=$rc) — skipped (fail-soft)"
+  echo "[qa-coverage-adversary] both review hosts unavailable — skipped (advisory)"
   exit 0
 fi
+
+DEGRADED_LINE="$(printf '%s\n' "$OUTPUT" | grep -E '^adversary-host: DEGRADED ' | head -1)"
+[ -z "$DEGRADED_LINE" ] || echo "[qa-coverage-adversary] $DEGRADED_LINE" >&2
 
 MISSED="$(printf '%s\n' "$OUTPUT" | grep -E '^MISSED:' | head -20)"
 ADEQUATE="$(printf '%s\n' "$OUTPUT" | grep -E '^COVERAGE: ADEQUATE[[:space:]]*$' | tail -1)"

@@ -1,7 +1,7 @@
 ---
 name: fix
 description: "Investigate a bug (root cause, not symptom), then fix it through host-native /feature-implement --adhoc; only review gates cross to the opposite model family."
-version: "4.1.0"
+version: "4.1.1"
 allowed-tools:
   - Read
   - Edit
@@ -66,8 +66,10 @@ required), the `workflow.test_command` completion authority, the finish tail
 (browser gate → review-gate → grant-walled ship → merge backstop → learnings
 harvest), and the delegation histogram. Do NOT reimplement any of it here —
 drift between /fix and the spec pipeline is the defect this version removed.
-The delegated run preserves the invoking host: Claude uses Claude models, Codex
-uses the mapped Codex ladder. Its review gate deliberately uses the opposite host.
+The delegated run prefers the invoking host and uses its native model ladder. If
+that host is unavailable, the runner may select the alternate before launch; it
+never replays a stateful drive after launch. Its review gate deliberately prefers
+the opposite host.
 
 ### Step 3: Fix-specific QA loop
 

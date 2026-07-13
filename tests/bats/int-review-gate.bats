@@ -40,28 +40,28 @@ setup() {
 
 @test "Pass 2 pins Codex Sol and Claude Opus on the opposite host" {
   grep -F 'gpt-5.6-sol' skills/review-gate/SKILL.md
-  grep -F 'REVIEW_EFFORT="xhigh"' skills/review-gate/SKILL.md
   grep -F 'REVIEW_MODEL="opus"' skills/review-gate/SKILL.md
-}
-
-@test "Pass 2 uses the shared bounded opposite-host adapter with one active-host fallback" {
-  grep -F 'adversary_invoke "$REVIEW_KIND" 480 "$REVIEW_MODEL" "$REVIEW_EFFORT"' skills/review-gate/SKILL.md
-  grep -F 'falls back once to the active host' skills/review-gate/SKILL.md
-  ! grep -F 'ERROR: $REVIEW_BIN CLI not found' skills/review-gate/SKILL.md
+  grep -F 'REVIEW_EFFORT="xhigh"' skills/review-gate/SKILL.md
 }
 
 @test "honest verifier is also opposite-host and has no Claude-only Task primitive" {
-  grep -F 'adversary_invoke "$HV_KIND" 480 "$HV_MODEL" "$HV_EFFORT"' skills/review-gate/SKILL.md
+  grep -F 'adversary_invoke_with_fallback "$HV_KIND" "$HV_FALLBACK_KIND"' skills/review-gate/SKILL.md
   ! grep -F 'Task({ subagent_type: "gsd-verifier"' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: FULL-tier adversary_invoke passes a real model, not the review bin" {
-  grep -F 'adversary_invoke "$_adv_kind" 480 "$_adv_model" "$_adv_effort"' skills/review-gate/SKILL.md
-  ! grep -F 'adversary_invoke "$_adv_kind" 480 "$REVIEW_BIN"' skills/review-gate/SKILL.md
+@test "honest verifier requires exactly one anchored verdict" {
+  grep -F 'HV_VERDICT_COUNT=' skills/review-gate/SKILL.md
+  grep -F '[ "$HV_VERDICT_COUNT" -ne 1 ]' skills/review-gate/SKILL.md
+  grep -F 'duplicate or conflicting final verdict' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: FULL-tier adversary warns visibly when it cannot run" {
-  grep -F 'FULL-tier adversary unavailable' skills/review-gate/SKILL.md
+@test "INT-001: FULL-tier adversary_invoke passes a real model, not the review bin" {
+  grep -F 'adversary_invoke_with_fallback "$_adv_kind" "$_adv_fallback"' skills/review-gate/SKILL.md
+  ! grep -F 'adversary_invoke_with_fallback "$_adv_kind" "$_adv_fallback" 480 "$REVIEW_BIN"' skills/review-gate/SKILL.md
+}
+
+@test "INT-001: FULL-tier adversary fails closed when both hosts are unavailable" {
+  grep -F 'FULL-tier mandatory adversary unavailable on both hosts' skills/review-gate/SKILL.md
 }
 
 @test "INT-001: tier selection is fail-safe to standard on lever failure" {
@@ -80,8 +80,8 @@ setup() {
   grep -F 'never suppresses an otherwise-eligible honest-verifier' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: version bumped to 1.8.0" {
-  grep -F 'version: "1.8.0"' skills/review-gate/SKILL.md
+@test "INT-001: version bumped to 1.8.1" {
+grep -F 'version: "1.8.1"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

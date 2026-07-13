@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.4.0"
+version: "2.4.1"
 allowed-tools:
   - Read
   - Write
@@ -68,7 +68,7 @@ Pilot-proven reference shapes: spec 002's `.planning/` on branch `002-gsd-replac
 
 - Interactive: invoke `/gsd-plan-phase <N>` (first unchecked ROADMAP phase).
 - Interactive Claude: `/gsd-plan-phase <N>`; interactive Codex: `$gsd-plan-phase <N>`.
-- Headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-plan-phase <N>` (the runner preserves the invoking host).
+- Headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-plan-phase <N>` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch).
 
 gsd runs research → writes `NN-*-PLAN.md` files (wave/`depends_on` annotations are the
 parallelism contract `/gsd-execute-phase` executes) → plan-checker verifies. The seeded
