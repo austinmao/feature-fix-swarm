@@ -6,6 +6,32 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.13.0 — host-native GSD and symmetric cross-host review (2026-07-13)
+
+- **Host-native GSD runner:** `scripts/gsd/gsd-run.sh` now detects the invoking
+  harness and keeps ordinary execution on that vendor: Claude/Sonnet on Claude,
+  Codex/Terra on Codex. Codex command spelling is translated from `/gsd-*` to
+  `$gsd-*`; a missing native CLI fails instead of silently crossing vendors.
+- **Executable model materialization:** generated Codex agent TOMLs translate
+  Fable/Opus → `gpt-5.6-sol`, Sonnet → `gpt-5.6-terra`, and Haiku →
+  `gpt-5.6-luna` by sourcing the existing `model-equivalents.sh` table.
+- **Dual GSD surfaces:** setup reconciles both installed host runtimes even
+  when the pinned GSD package was already present, closing the prior
+  Claude-only install path.
+- **Symmetric review:** both direct `/review-gate` and GSD's ship review use
+  the opposite host with explicit models (Claude host → Codex Sol/xhigh;
+  Codex host → Claude Opus).
+- **Frontend routing audit:** `/fix` now spells GSD debug commands for both
+  hosts, while `/task-swarm` and `/plan-decompose` keep ordinary resume,
+  planning, execution, and learning commands host-native. Plan/task scoring
+  gates now use the shared opposite-host adapter instead of hard-coded Codex.
+- **Host detection hardening:** `FFS_HOST` is an explicit override,
+  `CODEX_THREAD_ID` is recognized, ancestor executables are a fallback, and
+  config roots such as `CODEX_HOME` no longer masquerade as session markers.
+- **TDD coverage:** new Bats matrices cover native GSD invocation, host
+  detection, model materialization, dual install wiring, and ship-review
+  inversion.
+
 ## v4.12.0 — promotion evidence and fail-closed production-action gates (2026-07-12)
 
 - **`lib/gates.py` promotion ledger:** adds validated, TTL-bounded `promote`

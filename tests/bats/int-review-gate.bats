@@ -33,6 +33,22 @@ setup() {
   grep -F 'adversary-host.sh' skills/review-gate/SKILL.md
 }
 
+@test "host routing is shared by ordinary GSD drives and ship review" {
+  grep -F 'adversary-host.sh' scripts/gsd/gsd-run.sh
+  grep -F 'adversary-host.sh' scripts/gsd/review-gate-command.sh
+}
+
+@test "Pass 2 pins Codex Sol and Claude Opus on the opposite host" {
+  grep -F 'gpt-5.6-sol' skills/review-gate/SKILL.md
+  grep -F 'model_reasoning_effort="xhigh"' skills/review-gate/SKILL.md
+  grep -F -- '--model opus' skills/review-gate/SKILL.md
+}
+
+@test "honest verifier is also opposite-host and has no Claude-only Task primitive" {
+  grep -F 'adversary_invoke "$HV_KIND" 480 "$HV_MODEL" "$HV_EFFORT"' skills/review-gate/SKILL.md
+  ! grep -F 'Task({ subagent_type: "gsd-verifier"' skills/review-gate/SKILL.md
+}
+
 @test "INT-001: FULL-tier adversary_invoke passes a real model, not the review bin" {
   grep -F 'adversary_invoke "$_adv_kind" 480 "$_adv_model" "$_adv_effort"' skills/review-gate/SKILL.md
   ! grep -F 'adversary_invoke "$_adv_kind" 480 "$REVIEW_BIN"' skills/review-gate/SKILL.md
@@ -58,8 +74,8 @@ setup() {
   grep -F 'never suppresses an otherwise-eligible honest-verifier' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: version bumped to 1.6.0" {
-  grep -F 'version: "1.6.0"' skills/review-gate/SKILL.md
+@test "INT-001: version bumped to 1.7.0" {
+  grep -F 'version: "1.7.0"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

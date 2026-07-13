@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Take ANY task description end-to-end autonomously: plan-decompose → /preflight → /autonomy-grant (MAX-AUTH) → /feature-implement --autonomous. v3.0.0: pure sequencing front-end over feature-implement — like /fix but with full planning; zero machinery of its own. Use when the operator hands you next instructions and wants planning, task creation, and execution without babysitting."
-version: "3.0.0"
+version: "3.1.0"
 allowed-tools:
   - Read
   - Write
@@ -24,8 +24,8 @@ review stop.
 ```
 /task-swarm "add rate limiting to the webhook endpoints"
      │
-     ├─ 1. /plan-decompose  (plan-eng-review → codex plan gate → swarm
-     │      spec-decompose → specs/NNN/tasks.md → codex score gate)
+     ├─ 1. /plan-decompose  (plan-eng-review → opposite-host plan gate →
+     │      spec-decompose → specs/NNN/tasks.md → opposite-host score gate)
      ├─ 2. preflight        (emit specs/NNN/preflight.json → gates.py preflight → PASS)
      ├─ 3. grant ledger     (enumerate typed gates from tasks.md → AUTO-GRANT
      │                       [--gated: operator yes first] → ledger)
@@ -47,8 +47,9 @@ review stop.
 
 ### Step 0 — continuity + recall (fail-soft)
 
-- Continuity is gsd-native: `.planning/STATE.md` survives context resets;
-  resume with `/gsd-resume-work`. No external checkpoint call needed.
+- Continuity is gsd-native: `.planning/STATE.md` survives context resets.
+  Resume with Claude `/gsd-resume-work`, Codex `$gsd-resume-work`, or the
+  host-preserving headless runner. No external checkpoint call needed.
 - If gbrain is present (`command -v gbrain` + `env -u DATABASE_URL gbrain doctor`
   healthy): `env -u DATABASE_URL gbrain query "<task topic>"` for prior
   decisions. Fail-soft — absence never blocks.
@@ -56,7 +57,7 @@ review stop.
 ### Step 1 — plan + decompose
 
 Invoke the `plan-decompose` skill with the task description. It runs
-`/plan-eng-review` (autonomous mode), the codex plan gate, then
+`/plan-eng-review` (autonomous mode), the opposite-host plan gate, then
 `/spec-decompose` (gsd project seed + `/gsd-plan-phase`). Output: a seeded
 `.planning/` project keyed to spec ID NNN.
 
@@ -112,7 +113,11 @@ Cross-check with `python3 lib/gates.py delegation-audit <transcript>`.
 Report `pending` actions (if any) with the exact resume command:
 `python3 lib/gates.py grant $RUN_ID --action <a>` (resolve gates.py per
 feature-implement Step 1's 3 install shapes) then `/feature-implement NNN --autonomous`.
-Close the loop with `/gsd-extract-learnings` (fail-soft).
+Close the loop with GSD extract-learnings (fail-soft). Use Claude
+`/gsd-extract-learnings` or Codex `$gsd-extract-learnings`; a headless call goes
+through `scripts/gsd/gsd-run.sh` and stays on the invoking host. All ordinary
+planning and implementation use that host's model family; only review gates
+cross to the opposite family.
 
 ## Rules
 

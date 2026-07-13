@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop (plan-phase → execute-phase → verify), wrapped in FFS walls: preflight PASS + autonomy-grant ledger for --autonomous, gates.py as sole completion authority (test_command + phase-evidence hook), review-gate grant wall at ship. v2.6.0 adds --adhoc \"<task>\": same walls + finish tail over gsd-quick, no seeded spec/plan required — /fix and /task-swarm are thin front-ends over this skill."
-version: "2.7.0"
+version: "2.8.0"
 allowed-tools:
   - Read
   - Edit
@@ -120,15 +120,16 @@ without them gsd runs ungated.
 one quick task). TDD applies: failing repro/behavior test first (RED), then the
 change (GREEN) — the gsd executor's commit trail must show both.
 
-- Interactive session: invoke the `/gsd-quick "<task>"` slash command directly.
-- `--autonomous` / headless: `TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<task>"`
+- Interactive Claude session: invoke `/gsd-quick "<task>"` directly.
+- Interactive Codex session: invoke `$gsd-quick "<task>"` directly.
+- `--autonomous` / headless on either host: `TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<task>"` (the runner preserves the invoking host).
 
 **Spec mode:** read `.planning/ROADMAP.md` for the first unchecked phase N.
 
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
-- Interactive session: invoke the `/gsd-execute-phase N` slash command directly.
-- `--autonomous` / headless: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N`
-  (trimmed-MCP, auth-scrubbed runner — NEVER launch drives from a full-MCP session).
+- Interactive Claude session: invoke `/gsd-execute-phase N` directly.
+- Interactive Codex session: invoke `$gsd-execute-phase N` directly.
+- `--autonomous` / headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` (the runner preserves the invoking host; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface).
 
 **Anti-early-stop (autonomous orchestrator loop).** Fable early-stops long runs
 with text-only intent; hold this line every turn of the drive loop:

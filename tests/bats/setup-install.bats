@@ -10,7 +10,7 @@ setup() {
 }
 
 @test "setup.sh skill manifest includes code-uplift and testing-policy" {
-  SKILL_LINE="$(grep '^for skill in ' setup.sh)"
+  SKILL_LINE="$(grep '^[[:space:]]*for skill in ' setup.sh)"
   [[ "$SKILL_LINE" == *"code-uplift"* ]]
   [[ "$SKILL_LINE" == *"testing-policy"* ]]
 }
@@ -37,6 +37,21 @@ setup() {
 @test "setup.sh gsd-script manifest includes model-equivalents.sh (spec 004 cross-vendor routing)" {
   GSD_LINE="$(grep '^for gsd_script in ' setup.sh)"
   [[ "$GSD_LINE" == *"gsd/model-equivalents.sh"* ]]
+}
+
+@test "setup.sh installs GSD for both Claude and Codex hosts" {
+  grep -F -- '--claude --global' setup.sh
+  grep -F -- '--codex --global' setup.sh
+}
+
+@test "setup.sh installs FFS skills into both host roots" {
+  grep -F '"$HOME/.claude/skills" "${CODEX_HOME:-$HOME/.codex}/skills"' setup.sh
+}
+
+@test "setup.sh installs and invokes the Codex model materializer" {
+  GSD_LINE="$(grep '^for gsd_script in ' setup.sh)"
+  [[ "$GSD_LINE" == *"gsd/codex-model-sync.sh"* ]]
+  grep -F 'codex-model-sync.sh' setup.sh
 }
 
 @test "setup.sh gsd-script manifest includes model-fallback.sh + security-model-fence.sh (feature-implement Step 2 deps)" {

@@ -35,10 +35,13 @@ run_bounded() {
     gtimeout "$_t" "$@"
   elif command -v python3 >/dev/null 2>&1; then
     # -c (not a heredoc) so the child inherits the caller's stdin untouched.
-    python3 -c 'import subprocess, sys
+    python3 -c 'import os, signal, subprocess, sys
 try:
-    sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
+    process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+    sys.exit(process.wait(timeout=float(sys.argv[1])))
 except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
     sys.exit(124)
 except FileNotFoundError:
     sys.exit(127)' "$_t" "$@"

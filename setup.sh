@@ -72,10 +72,31 @@ install_gsd() {
   echo "  gsd-core: installing pinned repo-local dep"
   # NEVER bare `npx gsd` — that resolves to the wrong package (gsd@0.0.3)
   npm install --save-dev --save-exact @opengsd/gsd-core@1.6.1
-  # node_modules/.bin/gsd-core is a shell shim, not JS — `node <shim>` feeds
-  # bash syntax to the JS parser (SyntaxError). Exec it directly.
-  node_modules/.bin/gsd-core install --claude 2>/dev/null || \
-    echo "  gsd-core: commands/hooks install step failed — run 'node_modules/.bin/gsd-core install --claude' manually"
+}
+
+install_gsd_surfaces() {
+  if [ ! -x node_modules/.bin/gsd-core ]; then
+    echo "  gsd-core: runtime surfaces not installed (repo-local binary missing)"
+    return 1
+  fi
+
+  local installed=0 failed=0
+  # node_modules/.bin/gsd-core is a shell shim, not JS — exec it directly.
+  if command -v claude >/dev/null 2>&1; then
+    installed=1
+    node_modules/.bin/gsd-core --claude --global || failed=1
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    installed=1
+    node_modules/.bin/gsd-core --codex --global || failed=1
+    GSD_MODEL_CONFIG="$SCRIPT_DIR/templates/gsd-config.base.json" \
+      bash "$SCRIPT_DIR/scripts/gsd/codex-model-sync.sh" "${CODEX_HOME:-$HOME/.codex}" || failed=1
+  fi
+  if [ "$installed" -eq 0 ]; then
+    echo "  gsd-core: no supported host CLI found (install Claude Code or Codex)"
+    return 1
+  fi
+  return "$failed"
 }
 
 check_gstack() {
@@ -324,14 +345,25 @@ check_wshobson_pack() {
 missing=()
 
 echo "Checking prerequisites..."
-command -v claude >/dev/null 2>&1 && echo "  Claude Code: OK" || { echo "  Claude Code: NOT FOUND (required) — install from https://claude.ai/code"; missing+=("Claude Code"); }
+if command -v claude >/dev/null 2>&1; then
+  echo "  Claude Code: OK"
+else
+  echo "  Claude Code: NOT FOUND (optional host; required for opposite-host review from Codex)"
+fi
+if command -v codex >/dev/null 2>&1; then
+  echo "  Codex CLI: OK"
+else
+  echo "  Codex CLI: NOT FOUND (optional host; required for opposite-host review from Claude)"
+fi
+if ! command -v claude >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; then
+  missing+=("Claude Code or Codex CLI")
+fi
 check_gstack || missing+=("gstack")
 check_gsd || missing+=("gsd-core")
 command -v npx >/dev/null 2>&1 && echo "  npx: OK" || { echo "  npx: NOT FOUND (required for skill installs)"; missing+=("npx"); }
 command -v uv >/dev/null 2>&1 && echo "  uv: OK" || { echo "  uv: NOT FOUND (required for Spec Kit)"; missing+=("uv"); }
 command -v python3 >/dev/null 2>&1 && echo "  python3: OK" || echo "  python3: NOT FOUND (required for run-state)"
 command -v jq >/dev/null 2>&1 && echo "  jq: OK" || echo "  jq: NOT FOUND (optional, used by some run-state output formatting)"
-command -v codex >/dev/null 2>&1 && echo "  codex CLI: OK" || echo "  codex CLI: NOT FOUND (optional, for adversarial audit — 'npm install -g @openai/codex')"
 check_spec_kit || missing+=("spec-kit")
 check_prompt_master || missing+=("prompt-master")
 check_goal_wrap || missing+=("goal-wrap")
@@ -360,28 +392,36 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo ""
 fi
 
-# Copy skills
-SKILLS_DIR="$HOME/.claude/skills"
-echo "Installing skills to $SKILLS_DIR/..."
-for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant task-swarm code-uplift testing-policy; do
-  TARGET="$SKILLS_DIR/$skill/SKILL.md"
-  if [ -f "$TARGET" ] && [ "$SETUP_YES" != "1" ]; then
-    read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
-    echo
-    [[ $REPLY =~ ^[Yy]$ ]] || continue
-  fi
-  mkdir -p "$SKILLS_DIR/$skill"
-  cp "$SCRIPT_DIR/skills/$skill/SKILL.md" "$TARGET"
-  echo "  Installed $TARGET"
-done
+# Reconcile both installed host surfaces even when the npm dependency was
+# already present. This closes the old check_gsd gap where a Claude-only prior
+# install was reported as healthy inside a Codex session.
+install_gsd_surfaces || echo "  WARN: one or more GSD host surfaces failed to reconcile"
 
-# swarm skill: symlink to package canonical (edits in one place propagate everywhere)
-SWARM_TARGET="$SKILLS_DIR/swarm/SKILL.md"
-SWARM_SOURCE="$SCRIPT_DIR/skills/swarm/SKILL.md"
-mkdir -p "$SKILLS_DIR/swarm"
-rm -f "$SWARM_TARGET"
-ln -s "$SWARM_SOURCE" "$SWARM_TARGET"
-echo "  Symlinked $SWARM_TARGET -> $SWARM_SOURCE"
+# Copy the FFS skills into both supported host roots. Installing only the
+# Claude copy made the advertised Codex runtime depend on consumer-specific
+# symlinks and was the other half of the host leak.
+for SKILLS_DIR in "$HOME/.claude/skills" "${CODEX_HOME:-$HOME/.codex}/skills"; do
+  echo "Installing skills to $SKILLS_DIR/..."
+  for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant task-swarm code-uplift testing-policy; do
+    TARGET="$SKILLS_DIR/$skill/SKILL.md"
+    if [ -f "$TARGET" ] && [ "$SETUP_YES" != "1" ]; then
+      read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
+      echo
+      [[ $REPLY =~ ^[Yy]$ ]] || continue
+    fi
+    mkdir -p "$SKILLS_DIR/$skill"
+    cp "$SCRIPT_DIR/skills/$skill/SKILL.md" "$TARGET"
+    echo "  Installed $TARGET"
+  done
+
+  # swarm skill: symlink to package canonical (edits in one place propagate everywhere)
+  SWARM_TARGET="$SKILLS_DIR/swarm/SKILL.md"
+  SWARM_SOURCE="$SCRIPT_DIR/skills/swarm/SKILL.md"
+  mkdir -p "$SKILLS_DIR/swarm"
+  rm -f "$SWARM_TARGET"
+  ln -s "$SWARM_SOURCE" "$SWARM_TARGET"
+  echo "  Symlinked $SWARM_TARGET -> $SWARM_SOURCE"
+done
 
 # v3.19: agent roster manifest — best-effort scan so a fresh install ships one.
 # Target repo = FFS_SCAN_REPO if set, else cwd (skipped when cwd is this repo
@@ -490,7 +530,7 @@ for script in qa-swarm.sh ralph-retry.sh browser-proof.sh harness-audit.py; do
 done
 
 mkdir -p scripts/gsd scripts/hooks
-for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-command.sh gsd/consent-check.sh gsd/state-phase.sh gsd/mempalace gsd/plan-adversary.sh gsd/canary-gate.sh gsd/qa-coverage-adversary.sh gsd/adversary-host.sh gsd/run-bounded.sh gsd/security-surface.sh gsd/review-tier.sh gsd/liveness-check.sh gsd/learnings-harvest.sh gsd/model-equivalents.sh gsd/model-fallback.sh gsd/security-model-fence.sh gsd/assert-merged.sh hooks/gsd-phase-evidence-gate.sh; do
+for gsd_script in gsd/gsd-run.sh gsd/gates-test-command.sh gsd/review-gate-command.sh gsd/consent-check.sh gsd/state-phase.sh gsd/mempalace gsd/plan-adversary.sh gsd/canary-gate.sh gsd/qa-coverage-adversary.sh gsd/adversary-host.sh gsd/run-bounded.sh gsd/security-surface.sh gsd/review-tier.sh gsd/liveness-check.sh gsd/learnings-harvest.sh gsd/model-equivalents.sh gsd/codex-model-sync.sh gsd/model-fallback.sh gsd/security-model-fence.sh gsd/assert-merged.sh hooks/gsd-phase-evidence-gate.sh; do
   if [ "$SCRIPT_DIR/scripts/$gsd_script" -ef "scripts/$gsd_script" ]; then
     echo "  scripts/$gsd_script is the repo copy — skipping self-copy"
   else

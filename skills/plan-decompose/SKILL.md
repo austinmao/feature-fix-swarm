@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
-description: "Turn a description or existing plan into tasks.md via autonomous eng review + codex gate — no speckit interview"
-version: "1.2.0"
+description: "Turn a description or existing plan into tasks.md via autonomous eng review + opposite-host gates — no speckit interview"
+version: "1.3.0"
 permissions:
   filesystem: write
   network: false
@@ -32,7 +32,7 @@ metadata:
 
 ```
 /feature-spec        — full speckit ritual (specify → plan → clarify → spec.md + plan.md)
-/plan-decompose      — lightweight path (plan-eng-review autonomous → codex gate → spec.md synthetic → tasks.md)
+/plan-decompose      — lightweight path (plan-eng-review autonomous → opposite-host gate → spec.md synthetic → tasks.md)
 /spec-decompose      — lowest-level: requires spec.md + plan.md already present
 /feature-implement   — executes tasks.md
 ```
@@ -43,7 +43,8 @@ metadata:
 /plan-decompose NNN                        # existing specs/NNN-* dir with or without plan.md
 /plan-decompose "description"             # create new spec NNN (next available slot)
 /plan-decompose NNN --from-issue GH#N     # pull context from GitHub issue
-/plan-decompose NNN --no-codex            # skip codex reviews (faster, less safe)
+/plan-decompose NNN --no-review           # skip cross-host reviews (faster, less safe)
+/plan-decompose NNN --no-codex            # deprecated alias for --no-review
 /plan-decompose NNN --dry-run             # print pipeline plan, no writes
 ```
 
@@ -53,14 +54,14 @@ metadata:
 
 ```bash
 ARGUMENTS="${ARGUMENTS:-}"
-NO_CODEX=0
+NO_REVIEW=0
 FROM_ISSUE=""
 DRY_RUN=0
 
 read -ra _ARGS <<< "$ARGUMENTS"
 for arg in "${_ARGS[@]}"; do
   case "$arg" in
-    --no-codex)      NO_CODEX=1 ;;
+    --no-review|--no-codex) NO_REVIEW=1 ;;
     --from-issue=*)  FROM_ISSUE="${arg#--from-issue=}" ;;
     --dry-run)       DRY_RUN=1 ;;
     [0-9][0-9][0-9]|[0-9][0-9][0-9]-*) SPEC_ID="$arg" ;;
@@ -82,9 +83,9 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "=== plan-decompose DRY RUN ==="
   echo "  spec dir:     $SPEC_DIR"
   echo "  from-issue:   ${FROM_ISSUE:-none}"
-  echo "  codex:        $([ $NO_CODEX = 1 ] && echo disabled || echo enabled)"
+  echo "  review:       $([ $NO_REVIEW = 1 ] && echo disabled || echo opposite-host)"
   echo "  plan-eng-review: autonomous (spawned-session mode)"
-  echo "  pipeline: plan.md → codex review → spec.md (synthetic) → spec-decompose → tasks.md → codex score gate"
+  echo "  pipeline: plan.md → opposite-host review → spec.md (synthetic) → spec-decompose → tasks.md → opposite-host score gate"
   exit 0
 fi
 ```
@@ -96,8 +97,10 @@ fi
 `env -u DATABASE_URL gbrain query "<task topic>"` and feed prior decisions into
 Step 2. Absent/unhealthy → fallback
 `git log --oneline --grep="<topic>" | head -5`; never block (see
-`docs/gbrain-optional.md`). gsd's own learnings live in `.planning/` history +
-`/gsd-mempalace-recall` where enabled.
+`docs/gbrain-optional.md`). GSD's own learnings live in `.planning/` history.
+Recall with Claude `/gsd-mempalace-recall` or Codex `$gsd-mempalace-recall`
+where enabled; headless calls go through `scripts/gsd/gsd-run.sh` and preserve
+the invoking host.
 
 ### Step 2: Run plan-eng-review (autonomous)
 
@@ -123,28 +126,34 @@ Log: `[plan-decompose] Step 2: plan.md already present — skipping plan-eng-rev
 
 Write the plan output to `$SPEC_DIR/plan.md`.
 
-### Step 3: Codex adversarial review of plan.md
+### Step 3: Opposite-host adversarial review of plan.md
 
-Skip entirely when `--no-codex` passed.
+Skip entirely when `--no-review` (or deprecated `--no-codex`) is passed.
 
-**Guarded direct invocation (v1.2.0, MANDATORY — hang prevention).** Do NOT
-invoke codex bare or via a consult-skill wrapper. A bare `codex exec` with stdin
-open blocks forever on "Reading additional input from stdin..." — observed as a
-30+ min silent hang on a ~120-line plan (the run left a 2-line session file with
-no agent message; the guarded retry finished in <9 min). Contract:
+Use the shared host adapter; do not hard-code a vendor. The reviewer is always
+the opposite family from the orchestrator: Claude host → Codex Sol/xhigh;
+Codex host → Claude Opus. The adapter owns stdin closure and portable timeout
+handling, including process-group cleanup on macOS:
 
 ```bash
-timeout 540 codex exec --sandbox read-only \
-  -c model="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}" \
-  -c model_reasoning_effort="${PLAN_ADVERSARY_EFFORT:-xhigh}" \
-  "$PROMPT" </dev/null >"$OUT_FILE" 2>&1
+. scripts/gsd/adversary-host.sh
+HOST_KIND="$(detect_orchestrator_host)"
+REVIEW_KIND="$(adversary_kind_for_host "$HOST_KIND")"
+if [ "$REVIEW_KIND" = codex ]; then
+  REVIEW_MODEL="${PLAN_ADVERSARY_MODEL_CODEX:-gpt-5.6-sol}"
+  REVIEW_EFFORT="${PLAN_ADVERSARY_EFFORT_CODEX:-xhigh}"
+else
+  REVIEW_MODEL="${PLAN_ADVERSARY_MODEL_CLAUDE:-opus}"
+  REVIEW_EFFORT=""
+fi
+adversary_invoke "$REVIEW_KIND" 540 "$REVIEW_MODEL" "$REVIEW_EFFORT" \
+  "$PROMPT" >"$OUT_FILE" 2>&1
 RC=$?   # bare exit code — NEVER pipe the live call (`| tail` masks the timeout kill)
 ```
 
-- `</dev/null` is load-bearing (stdin-wait hang); `timeout 540` caps the call
-  (`gtimeout` on macOS without coreutils `timeout`).
-- `RC=124` → fail-soft: log `[plan-decompose] codex plan review TIMEOUT — advisory
-  skipped` and continue; downstream gates (opus plan-checker, review-gate) still hold.
+- `RC=124` → fail-soft: log `[plan-decompose] opposite-host plan review TIMEOUT — advisory
+  skipped` and continue; downstream gates (the host-native strongest
+  plan-checker and opposite-host review-gate) still hold.
 - Read findings/verdict from `$OUT_FILE` after exit — never stream-parse the live run.
 
 Embed the full content of `plan.md` verbatim in the prompt (the scope line
@@ -164,11 +173,11 @@ prevents repo-wandering, the other major review-time multiplier):
 > recommended fix. Conclude with overall verdict: APPROVE / APPROVE-WITH-FIXES / REJECT."
 
 **Decision:**
-- Verdict REJECT, or any CRITICAL finding: fix `plan.md`, re-run codex review once (max 1 retry).
+- Verdict REJECT, or any CRITICAL finding: fix `plan.md`, re-run the opposite-host review once (max 1 retry).
 - Verdict APPROVE-WITH-FIXES with HIGH findings: apply HIGH fixes to `plan.md`, continue.
 - Verdict APPROVE: continue.
 
-Log finding counts: `[plan-decompose] codex plan review: C:{critical} H:{high} M:{medium} verdict:{verdict}`
+Log finding counts: `[plan-decompose] opposite-host plan review: C:{critical} H:{high} M:{medium} verdict:{verdict}`
 
 ### Step 4: Write synthetic spec.md (if absent)
 
@@ -211,13 +220,12 @@ Invoke `Skill: spec-decompose` with `$SPEC_ID`.
 
 This writes `$SPEC_DIR/tasks.md` with annotated task list.
 
-### Step 6: Codex score gate on tasks.md
+### Step 6: Opposite-host score gate on tasks.md
 
-Skip entirely when `--no-codex` passed.
+Skip entirely when `--no-review` (or deprecated `--no-codex`) is passed.
 
-Mirrors `/feature` Step 3.6 exactly. Run `codex exec` on `tasks.md` vs `spec.md`
-under the same guarded invocation contract as Step 3 (`timeout 540`, `</dev/null`,
-output file, bare exit code):
+Run the same `adversary_invoke` contract from Step 3 on `tasks.md` vs `spec.md`,
+preserving producer≠reviewer across both Claude and Codex hosts:
 
 Check:
 - US coverage (every spec.md US has at least 1 task)
@@ -231,14 +239,15 @@ Score:
 - `5-6` → **WARN** — log warning, continue
 - `≥7` → **PASS**
 
-Skip gracefully if `codex` CLI absent (`which codex` fails): log warning, continue. Non-blocking.
+Skip gracefully if the selected opposite CLI is absent: log warning and continue. Non-blocking.
 
 ### Step 7: Store the decision (fail-soft)
 
 If gbrain is healthy: `env -u DATABASE_URL gbrain put spec/<NNN>-decompose
 "<one-line outcome: verdict, score, plan path>"` then
-`env -u DATABASE_URL gbrain sync --no-pull --no-embed`. gsd captures its own
-phase learnings via `/gsd-extract-learnings`. Skip silently when absent —
+`env -u DATABASE_URL gbrain sync --no-pull --no-embed`. GSD captures its own
+phase learnings via Claude `/gsd-extract-learnings`, Codex
+`$gsd-extract-learnings`, or the host-preserving headless runner. Skip silently when absent —
 storage is enhancement, not gate.
 
 ### Step 8: Report
@@ -248,7 +257,7 @@ storage is enhancement, not gate.
 │ plan.md:       ${SPEC_DIR}/plan.md                          │
 │ spec.md:       ${SPEC_DIR}/spec.md (synthetic|existing)     │
 │ tasks.md:      ${SPEC_DIR}/tasks.md                         │
-│ codex plan:    N findings (C:0 H:1 M:2) verdict:APPROVE     │
+│ cross-host plan: N findings (C:0 H:1 M:2) verdict:APPROVE  │
 │ tasks score:   8/10 (pass)                                  │
 │ pattern:       ruflo://agentdb/<id>  (or "skipped")         │
 │                                                             │
