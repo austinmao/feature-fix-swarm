@@ -238,7 +238,10 @@ EOF
   run env FFS_HOST=codex CODEX_BIN=heartbeat-codex CLAUDE_BIN=fake-claude \
     GSD_RUN_STATE_DIR="$RUN_STATE" GSD_HEARTBEAT_SECS=1 \
     bash -c '
-      target_mtime="$(stat -f %m "$4")"
+      file_mtime() {
+        stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+      }
+      target_mtime="$(file_mtime "$4")"
       bash "$1" /gsd-quick heartbeat >"$2/heartbeat.log" 2>&1 &
       runner=$!
       i=0
@@ -251,7 +254,7 @@ EOF
       ln -s "$4" "$3/gsd-run.heartbeat"
       sleep 2
       [ ! -L "$3/gsd-run.heartbeat" ] || exit 31
-      [ "$(stat -f %m "$4")" = "$target_mtime" ] || exit 32
+      [ "$(file_mtime "$4")" = "$target_mtime" ] || exit 32
       wait "$runner"
     ' _ "$SCRIPT" "$BATS_TEST_TMPDIR" "$RUN_STATE" "$TARGET"
 
