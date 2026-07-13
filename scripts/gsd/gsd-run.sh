@@ -38,6 +38,9 @@ LOG_FILE="$LOG_DIR/gsd-run-${TS}.log"
 ACTIVE_HOST="$(detect_orchestrator_host)" || exit $?
 LEAD_TIER="${GSD_LEAD_MODEL:-sonnet}"
 CODEX_RUNTIME_HOME=""
+SELECTED_CODEX_MODEL=""
+SELECTED_CODEX_EFFORT=""
+SELECTED_CLAUDE_MODEL=""
 CODEX_SESSION_CONTRACT="${GSD_CODEX_SESSION_CONTRACT:-FFS CODEX EXEC-SESSION CONTRACT: A tool result saying 'Script running with cell ID' is not completion or failure. Wait on that yielded cell. If the wait result contains a session_id and no exit_code, the nested process is still alive: poll that exact session with write_stdin until it exits. Never launch a replacement command while the original session is alive.}"
 
 cleanup_codex_runtime() {
@@ -187,35 +190,57 @@ prepare_codex_runtime() {
 # here means the host cannot be admitted for a new drive; no output-substring
 # classification is used. The stateful invocation below is a separate call.
 probe_host() {
-  local kind="$1" bin output rc model effort
+  local kind="$1" bin output rc model effort preferred_model preferred_effort
   if [ "$kind" = "codex" ]; then
     bin="${CODEX_BIN:-codex}"
     command -v "$bin" >/dev/null 2>&1 || return 127
-    model="$(codex_lead_model)"
-    effort="$(codex_lead_effort)"
-    output="$(run_bounded "$PROBE_TIMEOUT_SECS" "$bin" exec \
-      -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
-      --sandbox read-only --ephemeral --ignore-user-config --ignore-rules \
-      --color never "$PROBE_PROMPT" </dev/null 2>&1)"
-    rc=$?
+    preferred_model="$(codex_lead_model)"
+    preferred_effort="$(codex_lead_effort)"
   else
     bin="${CLAUDE_BIN:-claude}"
     command -v "$bin" >/dev/null 2>&1 || return 127
-    model="$(claude_lead_model)"
-    output="$(run_bounded "$PROBE_TIMEOUT_SECS" env \
-      -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
-      "$bin" --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-      --permission-mode plan --tools '' --no-session-persistence \
-      --model "$model" -p "$PROBE_PROMPT" </dev/null 2>&1)"
-    rc=$?
+    preferred_model="$(claude_lead_model)"
+    preferred_effort=""
   fi
-  record_probe_output "$kind" "$rc" "$output"
-  [ "$rc" -eq 0 ] || return "$rc"
-  if ! printf '%s\n' "$output" | grep -qx "$PROBE_MARKER"; then
-    record_probe_note "$(host_label "$kind") probe missing acknowledgement '$PROBE_MARKER'"
-    return 1
-  fi
-  command_surface_available "$kind"
+
+  while IFS='|' read -r model effort; do
+    if [ "$kind" = "codex" ]; then
+      output="$(run_bounded "$PROBE_TIMEOUT_SECS" "$bin" exec \
+        -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
+        --sandbox read-only --ephemeral --ignore-user-config --ignore-rules \
+        --color never "$PROBE_PROMPT" </dev/null 2>&1)"
+      rc=$?
+    else
+      output="$(run_bounded "$PROBE_TIMEOUT_SECS" env \
+        -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+        "$bin" --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+        --permission-mode plan --tools '' --no-session-persistence \
+        --model "$model" -p "$PROBE_PROMPT" </dev/null 2>&1)"
+      rc=$?
+    fi
+    record_probe_output "$kind" "$rc" "$output"
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$output" | grep -qx "$PROBE_MARKER"; then
+      command_surface_available "$kind" || return $?
+      if [ "$kind" = "codex" ]; then
+        SELECTED_CODEX_MODEL="$model"
+        SELECTED_CODEX_EFFORT="$effort"
+      else
+        SELECTED_CLAUDE_MODEL="$model"
+      fi
+      if [ "$model" != "$preferred_model" ]; then
+        record_probe_note "$(host_label "$kind") model $preferred_model unavailable; selected $model before launch"
+      fi
+      return 0
+    fi
+    if [ "$rc" -eq 0 ]; then
+      record_probe_note "$(host_label "$kind") probe missing acknowledgement '$PROBE_MARKER' for model $model"
+      rc=1
+    fi
+    # A wall timeout implicates the CLI rather than one model. Do not repeat
+    # the same dead binary for each tier; preserve time for the other vendor.
+    [ "$rc" -ne 124 ] || return 124
+  done < <(adversary_model_ladder "$kind" "$preferred_model" "$preferred_effort")
+  return "${rc:-1}"
 }
 
 SELECTED_HOST="$ACTIVE_HOST"
@@ -244,8 +269,8 @@ first="$1"
 shift
 if [ "$SELECTED_HOST" = "codex" ]; then
   CODEX_BIN="${CODEX_BIN:-codex}"
-  LEAD_MODEL="$(codex_lead_model)"
-  LEAD_EFFORT="$(codex_lead_effort)"
+  LEAD_MODEL="${SELECTED_CODEX_MODEL:-$(codex_lead_model)}"
+  LEAD_EFFORT="${SELECTED_CODEX_EFFORT:-$(codex_lead_effort)}"
   prepare_codex_runtime || exit $?
 
   case "$first" in
@@ -267,7 +292,7 @@ $CODEX_SESSION_CONTRACT"
     "$CODEX_COMMAND")
 else
   CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-  LEAD_MODEL="$(claude_lead_model)"
+  LEAD_MODEL="${SELECTED_CLAUDE_MODEL:-$(claude_lead_model)}"
   case "$first" in
     \$gsd-*) first="/${first#\$}" ;;
     /gsd-*) ;;

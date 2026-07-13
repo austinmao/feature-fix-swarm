@@ -14,6 +14,9 @@ setup() {
   unset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_HOME CODEX_AGENT CODEX_CI
   unset CLAUDE_SESSION_ID CLAUDE_CODE
   export FFS_HOST=claude
+  # Most unit stubs model the review call directly. Dedicated admission-probe
+  # coverage below unsets this seam and exercises the default live behavior.
+  export FFS_ADVERSARY_MODEL_PROBE=off
   HIGH="$BATS_TEST_TMPDIR/01-auth-PLAN.md"
   cat > "$HIGH" <<'EOF'
 ---
@@ -37,6 +40,12 @@ EOF
   mkdir -p "$STUB_DIR"
   cat > "$STUB_DIR/fake-codex" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "${FAKE_CODEX_ARGS_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_CODEX_ARGS_LOG"
+fi
+if [ "${FAKE_CODEX_MODEL_MODE:-}" = "sol_unavailable" ] && [[ "$*" == *gpt-5.6-sol* ]]; then
+  exit 69
+fi
 echo "echoing prompt: Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:."
 echo "HIGH: plan assumes withTenantRls exists on the read path but it does not"
 echo "MEDIUM: acceptance criteria for JWT rotation are unfalsifiable"
@@ -112,6 +121,105 @@ JSON
   # frontmatter still opens the file and closes
   [ "$(head -1 "$HIGH")" = "---" ]
   [ "$(sed -n '4p' "$HIGH")" = "---" ]
+}
+
+@test "review runs from the git root containing the plan" {
+  REPO="$BATS_TEST_TMPDIR/consumer"
+  mkdir -p "$REPO/.planning/phases/01-test"
+  git -C "$REPO" init -q
+  PLAN="$REPO/.planning/phases/01-test/01-01-PLAN.md"
+  cp "$HIGH" "$PLAN"
+  PWD_LOG="$BATS_TEST_TMPDIR/review-pwd.log"
+  cat > "$STUB_DIR/fake-codex-pwd" <<EOF
+#!/usr/bin/env bash
+pwd > "$PWD_LOG"
+echo "VERDICT: APPROVE"
+EOF
+  chmod +x "$STUB_DIR/fake-codex-pwd"
+
+  PLAN_ADVERSARY_KIND=codex PLAN_ADVERSARY_BIN=fake-codex-pwd \
+    run bash "$SCRIPT" "$PLAN"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$PWD_LOG")" = "$(git -C "$REPO" rev-parse --show-toplevel)" ]
+}
+
+@test "re-review excludes historical adversary transcripts from the prompt" {
+  printf '\n## Round 1 adversarial plan review (old)\n\nVERDICT: REVISE\nHIGH: POISON-HISTORY-MUST-NOT-BE-PROMPTED\n' >> "$HIGH"
+  PROMPT_LOG="$BATS_TEST_TMPDIR/review-prompt.log"
+  cat > "$STUB_DIR/fake-codex-capture" <<EOF
+#!/usr/bin/env bash
+cat > "$PROMPT_LOG"
+echo "VERDICT: APPROVE"
+EOF
+  chmod +x "$STUB_DIR/fake-codex-capture"
+
+  PLAN_ADVERSARY_KIND=codex PLAN_ADVERSARY_BIN=fake-codex-capture \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -eq 0 ]
+  ! grep -q 'POISON-HISTORY-MUST-NOT-BE-PROMPTED' "$PROMPT_LOG"
+  grep -q 'Add RLS policies' "$PROMPT_LOG"
+}
+
+@test "unavailable Codex Sol falls through to Codex Terra before crossing vendors" {
+  ARGS_LOG="$BATS_TEST_TMPDIR/model-fallback.args"
+  FAKE_CODEX_ARGS_LOG="$ARGS_LOG" FAKE_CODEX_MODEL_MODE=sol_unavailable \
+    PLAN_ADVERSARY_KIND=codex PLAN_ADVERSARY_BIN=fake-codex \
+    PLAN_ADVERSARY_FALLBACK_BIN=definitely-missing \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -eq 0 ]
+  grep -q 'gpt-5.6-sol' "$ARGS_LOG"
+  grep -q 'gpt-5.6-terra' "$ARGS_LOG"
+  grep -q '^## Adversarial plan review (gpt-5.6-terra high, model fallback)$' "$HIGH"
+  [[ "$output" != *"DEGRADED"* ]]
+}
+
+@test "preferred-host timeout cap preserves a longer fallback review budget" {
+  cat > "$STUB_DIR/fake-slow-codex" <<'EOF'
+#!/usr/bin/env bash
+sleep 5
+EOF
+  chmod +x "$STUB_DIR/fake-slow-codex"
+
+  FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT=1 \
+    FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT=5 \
+    PLAN_ADVERSARY_KIND=codex PLAN_ADVERSARY_BIN=fake-slow-codex \
+    PLAN_ADVERSARY_FALLBACK_BIN=fake-claude \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DEGRADED"* ]]
+  grep -q '^## Adversarial plan review (claude opus, degraded fallback)$' "$HIGH"
+}
+
+@test "model admission probe skips unavailable Sol and fully reviews with Terra" {
+  ARGS_LOG="$BATS_TEST_TMPDIR/probed-models.args"
+  cat > "$STUB_DIR/fake-probed-codex" <<EOF
+#!/usr/bin/env bash
+input="\$(cat)"
+printf '%s\n' "\$*" >> "$ARGS_LOG"
+if [[ "\$input" == *FFS_ADVERSARY_MODEL_READY* ]]; then
+  if [[ "\$*" == *gpt-5.6-sol* ]]; then sleep 5; exit 69; fi
+  echo FFS_ADVERSARY_MODEL_READY
+  exit 0
+fi
+echo 'VERDICT: APPROVE'
+EOF
+  chmod +x "$STUB_DIR/fake-probed-codex"
+
+  unset FFS_ADVERSARY_MODEL_PROBE
+  FFS_ADVERSARY_MODEL_PROBE_TIMEOUT=1 \
+    PLAN_ADVERSARY_KIND=codex PLAN_ADVERSARY_BIN=fake-probed-codex \
+    PLAN_ADVERSARY_FALLBACK_BIN=definitely-missing \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -eq 0 ]
+  grep -q 'gpt-5.6-sol' "$ARGS_LOG"
+  [ "$(grep -c 'gpt-5.6-sol' "$ARGS_LOG")" -eq 1 ]
+  [ "$(grep -c 'gpt-5.6-terra' "$ARGS_LOG")" -eq 2 ]
+  grep -q '^## Adversarial plan review (gpt-5.6-terra high, model fallback)$' "$HIGH"
 }
 
 @test "second run is idempotent" {
@@ -198,6 +306,17 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"missing or conflicting anchored verdict"* ]]
   [ "$(cat "$HIGH")" = "$before" ]
+}
+
+@test "repeated identical anchored verdicts are accepted as unambiguous" {
+  cat > "$STUB_DIR/fake-codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'VERDICT: REVISE\nVERDICT: REVISE\n'
+EOF
+  chmod +x "$STUB_DIR/fake-codex"
+  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^VERDICT: REVISE$' "$HIGH")" -eq 1 ]
 }
 
 @test "codex invocation is ephemeral and pins the official read-only surface" {

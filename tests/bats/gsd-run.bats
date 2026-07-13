@@ -22,6 +22,12 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   case "\${FAKE_CODEX_PROBE_MODE:-ok}" in
     bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
     fail) echo 'native quota exhausted API_TOKEN=super-secret-value-123456789' >&2; exit 69 ;;
+    sol_unavailable)
+      if [[ "\$*" == *gpt-5.6-sol* ]]; then
+        echo 'requested Codex model unavailable' >&2
+        exit 69
+      fi
+      ;;
   esac
   echo FFS_HOST_PROBE_READY
   exit 0
@@ -67,6 +73,18 @@ EOF
   grep -F 'poll that exact session with write_stdin until it exits' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '/skills/gsd-quick/SKILL.md' "$BATS_TEST_TMPDIR/codex.skills"
   [ "$(wc -l < "$BATS_TEST_TMPDIR/codex.skills" | tr -d ' ')" -eq 1 ]
+}
+
+@test "Codex GSD probe falls from unavailable Sol to Terra before crossing vendors" {
+  FFS_HOST=codex GSD_LEAD_MODEL=opus FAKE_CODEX_PROBE_MODE=sol_unavailable \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'stay native'"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"selected gpt-5.6-terra"* ]]
+  [ -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
 @test "Codex execution prompt forbids retrying a still-live yielded session" {

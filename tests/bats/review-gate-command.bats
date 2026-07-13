@@ -6,6 +6,7 @@ setup() {
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
   CWD="$BATS_TEST_TMPDIR/cwd"
   mkdir -p "$STUB_DIR" "$CWD"
+  export FFS_ADVERSARY_MODEL_PROBE=off
 
   cat > "$STUB_DIR/fake-codex" <<EOF
 #!/usr/bin/env bash

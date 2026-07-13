@@ -38,6 +38,13 @@ if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
   exit 2
 fi
 
+# The bounce script may live in a different checkout from the consumer plan.
+# Review from the plan's own git root so read-only repository inspection sees
+# the code the plan actually names, not feature-fix-swarm's source tree.
+PLAN_DIR="$(cd "$(dirname "$PLAN_FILE")" && pwd)"
+PLAN_FILE="$PLAN_DIR/${PLAN_FILE##*/}"
+PLAN_ROOT="$(git -C "$PLAN_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$PLAN_DIR")"
+
 if [ "${PLAN_ADVERSARY:-on}" = "off" ]; then
   echo "[plan-adversary] disabled (PLAN_ADVERSARY=off) — skipped"
   exit 0
@@ -87,24 +94,27 @@ if [ "$FALLBACK_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${PLAN_ADVERSARY_FALLBACK_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
   FALLBACK_MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
   FALLBACK_EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
-  FALLBACK_HEADER="${FALLBACK_MODEL} ${FALLBACK_EFFORT}, degraded fallback"
 else
   ADVERSARY_BIN_CLAUDE="${PLAN_ADVERSARY_FALLBACK_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
   FALLBACK_MODEL="${PLAN_ADVERSARY_CLAUDE_MODEL:-opus}"
   FALLBACK_EFFORT=""
-  FALLBACK_HEADER="claude ${FALLBACK_MODEL}, degraded fallback"
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
+
+# Re-reviews should judge the revised executable plan, not recursively ingest
+# prior reviewer transcripts. The historical sections remain appended to the
+# file for auditability but are excluded from the next model prompt.
+PLAN_CONTENT="$(awk '/^## (Round [0-9]+ )?[Aa]dversarial plan review/{exit} {print}' "$PLAN_FILE")"
 
 PROMPT="You are a brutally honest principal engineer reviewing an execution PLAN before any code is written. Nothing is implemented yet — every finding here is 100x cheaper than the same finding in code review.
 
 --- PLAN START ---
-$(cat "$PLAN_FILE")
+$PLAN_CONTENT
 --- PLAN END ---
 
 Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, unstated assumptions, missing or unfalsifiable acceptance criteria, sequencing hazards (a later task invalidating an earlier one), and security holes in the approach itself. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
 
-OUTPUT="$(adversary_invoke_with_fallback "$ADVERSARY_KIND" "$FALLBACK_KIND" \
+OUTPUT="$(cd "$PLAN_ROOT" && adversary_invoke_with_fallback "$ADVERSARY_KIND" "$FALLBACK_KIND" \
   "${PLAN_ADVERSARY_TIMEOUT:-480}" "$MODEL" "$EFFORT" \
   "$FALLBACK_MODEL" "$FALLBACK_EFFORT" "$PROMPT" 2>&1)"
 rc=$?
@@ -114,20 +124,36 @@ if [ $rc -ne 0 ]; then
 fi
 
 DEGRADED_LINE="$(printf '%s\n' "$OUTPUT" | grep -E '^adversary-host: DEGRADED ' | head -1)"
+MODEL_FALLBACK_LINE="$(printf '%s\n' "$OUTPUT" | grep -E '^adversary-host: MODEL_FALLBACK ' | head -1)"
+SELECTED_LINE="$(printf '%s\n' "$OUTPUT" | grep -E '^adversary-host: SELECTED ' | tail -1)"
+if [ -n "$SELECTED_LINE" ]; then
+  read -r _selected_prefix SELECTED_KIND SELECTED_MODEL SELECTED_EFFORT <<EOF
+${SELECTED_LINE#adversary-host: }
+EOF
+  if [ "$SELECTED_KIND" = "codex" ]; then
+    HEADER_LABEL="$SELECTED_MODEL $SELECTED_EFFORT"
+  else
+    HEADER_LABEL="claude $SELECTED_MODEL"
+  fi
+fi
 if [ -n "$DEGRADED_LINE" ]; then
   echo "[plan-adversary] $DEGRADED_LINE" >&2
-  HEADER_LABEL="$FALLBACK_HEADER"
+  HEADER_LABEL="${HEADER_LABEL}, degraded fallback"
+elif [ -n "$MODEL_FALLBACK_LINE" ]; then
+  echo "[plan-adversary] $MODEL_FALLBACK_LINE" >&2
+  HEADER_LABEL="${HEADER_LABEL}, model fallback"
 fi
 
 # codex echoes the prompt into its transcript — only line-anchored tags count,
 # and the prompt's own instruction lines never start a line with 'CRITICAL:' etc.
 VERDICT_LINES="$(printf '%s\n' "$OUTPUT" | grep -E '^VERDICT: (APPROVE|REVISE)[[:space:]]*$' || true)"
 VERDICT_COUNT="$(printf '%s\n' "$VERDICT_LINES" | awk 'NF { count++ } END { print count+0 }')"
-if [ "$VERDICT_COUNT" -ne 1 ]; then
-  echo "[plan-adversary] mandatory review returned a missing or conflicting anchored verdict; plan left unchanged" >&2
+VERDICT_UNIQUE_COUNT="$(printf '%s\n' "$VERDICT_LINES" | awk 'NF { seen[$0]=1 } END { for (v in seen) count++; print count+0 }')"
+if [ "$VERDICT_COUNT" -lt 1 ] || [ "$VERDICT_UNIQUE_COUNT" -ne 1 ]; then
+  echo "[plan-adversary] mandatory review returned a missing or conflicting anchored verdict (lines=$VERDICT_COUNT unique=$VERDICT_UNIQUE_COUNT); plan left unchanged" >&2
   exit 1
 fi
-VERDICT="$VERDICT_LINES"
+VERDICT="$(printf '%s\n' "$VERDICT_LINES" | tail -1)"
 FINDINGS="$(printf '%s\n' "$OUTPUT" | grep -E '^(CRITICAL|HIGH|MEDIUM):' | head -30)"
 N_FINDINGS=0
 [ -n "$FINDINGS" ] && N_FINDINGS="$(printf '%s\n' "$FINDINGS" | wc -l | tr -d ' ')"
