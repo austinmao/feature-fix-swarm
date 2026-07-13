@@ -64,8 +64,20 @@ EOF
   grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="high"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '$gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'poll that exact session with write_stdin until it exits' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '/skills/gsd-quick/SKILL.md' "$BATS_TEST_TMPDIR/codex.skills"
   [ "$(wc -l < "$BATS_TEST_TMPDIR/codex.skills" | tr -d ' ')" -eq 1 ]
+}
+
+@test "Codex execution prompt forbids retrying a still-live yielded session" {
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'run a long gate'"
+
+  [ "$status" -eq 0 ]
+  grep -F 'Script running with cell ID' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'session_id and no exit_code' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'Never launch a replacement command while the original session is alive' "$BATS_TEST_TMPDIR/codex.args"
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
 @test "Claude host runs Claude with the Sonnet lead" {

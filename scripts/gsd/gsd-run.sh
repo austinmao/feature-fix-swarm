@@ -38,6 +38,7 @@ LOG_FILE="$LOG_DIR/gsd-run-${TS}.log"
 ACTIVE_HOST="$(detect_orchestrator_host)" || exit $?
 LEAD_TIER="${GSD_LEAD_MODEL:-sonnet}"
 CODEX_RUNTIME_HOME=""
+CODEX_SESSION_CONTRACT="${GSD_CODEX_SESSION_CONTRACT:-FFS CODEX EXEC-SESSION CONTRACT: A tool result saying 'Script running with cell ID' is not completion or failure. Wait on that yielded cell. If the wait result contains a session_id and no exit_code, the nested process is still alive: poll that exact session with write_stdin until it exits. Never launch a replacement command while the original session is alive.}"
 
 cleanup_codex_runtime() {
   if [ -n "$CODEX_RUNTIME_HOME" ] && [ -d "$CODEX_RUNTIME_HOME" ]; then
@@ -253,6 +254,12 @@ if [ "$SELECTED_HOST" = "codex" ]; then
     *) echo "gsd-run: unsupported Codex GSD command: $first" >&2; exit 2 ;;
   esac
   [ "$#" -eq 0 ] || CODEX_COMMAND="$CODEX_COMMAND $*"
+  # Codex exposes two lifetimes: the orchestration cell and the long-lived
+  # child PTY. Make the distinction explicit to the autonomous executor so a
+  # yielded cell cannot be mistaken for a failed stateful command and retried.
+  [ -z "$CODEX_SESSION_CONTRACT" ] || CODEX_COMMAND="$CODEX_COMMAND
+
+$CODEX_SESSION_CONTRACT"
   RUN=(env CODEX_HOME="$CODEX_RUNTIME_HOME" "$CODEX_BIN" exec
     -c "model=\"$LEAD_MODEL\""
     -c "model_reasoning_effort=\"$LEAD_EFFORT\""
