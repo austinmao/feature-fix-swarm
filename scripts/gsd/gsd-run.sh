@@ -50,24 +50,256 @@ LOG_DIR="$REPO_ROOT/.planning/logs"
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/gsd-run-${TS}.log"
-
-ACTIVE_HOST="$(detect_orchestrator_host)" || exit $?
+RUN_STATE_DIR="${GSD_RUN_STATE_DIR:-$REPO_ROOT/.planning/run-state}"
+RUN_PID_FILE="$RUN_STATE_DIR/gsd-run.pid"
+RUN_STATUS_FILE="$RUN_STATE_DIR/gsd-run.status"
+RUN_HEARTBEAT_FILE="$RUN_STATE_DIR/gsd-run.heartbeat"
+RUN_RECLAIM_DIR="$RUN_STATE_DIR/gsd-run.reclaim"
+RUN_HEARTBEAT_PID=""
+RUN_STATE_OWNED=0
+RUN_MACHINE_ID="${GSD_MACHINE_ID:-$(hostname 2>/dev/null || uname -n 2>/dev/null || printf unknown)}"
+RUN_MACHINE_ID="$(printf '%s' "$RUN_MACHINE_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.:-' '_' | cut -c1-128)"
+[ -n "$RUN_MACHINE_ID" ] || RUN_MACHINE_ID=unknown
+ACTIVE_HOST=""
 LEAD_TIER="${GSD_LEAD_MODEL:-sonnet}"
 CODEX_RUNTIME_HOME=""
 SELECTED_CODEX_MODEL=""
 SELECTED_CODEX_EFFORT=""
 SELECTED_CLAUDE_MODEL=""
-CODEX_SESSION_CONTRACT="${GSD_CODEX_SESSION_CONTRACT:-FFS CODEX EXEC-SESSION CONTRACT: A tool result saying 'Script running with cell ID' is not completion or failure. Wait on that yielded cell. If the wait result contains a session_id and no exit_code, the nested process is still alive: poll that exact session with write_stdin until it exits. Never launch a replacement command while the original session is alive.}"
+
+write_run_status() {
+  local state="$1" exit_code="${2:-}" tmp
+  [ "$RUN_STATE_OWNED" -eq 1 ] || return 0
+  tmp="$(mktemp "$RUN_STATE_DIR/.gsd-run.status.XXXXXX")" || return 1
+  {
+    printf 'state=%s\n' "$state"
+    printf 'pid=%s\n' "$$"
+    printf 'machine=%s\n' "$RUN_MACHINE_ID"
+    printf 'host=%s\n' "${SELECTED_HOST:-${ACTIVE_HOST:-unknown}}"
+    printf 'skill=%s\n' "$GSD_SKILL_NAME"
+    printf 'log=%s\n' "$LOG_FILE"
+    [ -z "$exit_code" ] || printf 'exit_code=%s\n' "$exit_code"
+    printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$tmp"
+  atomic_replace "$tmp" "$RUN_STATUS_FILE"
+}
+
+atomic_replace() {
+  python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+write_heartbeat() {
+  local tmp
+  tmp="$(mktemp "$RUN_STATE_DIR/.gsd-run.heartbeat.XXXXXX")" || return 1
+  if ! atomic_replace "$tmp" "$RUN_HEARTBEAT_FILE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+file_epoch() {
+  local value
+  value="$(stat -f %m "$1" 2>/dev/null || true)"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    value="$(stat -c %Y "$1" 2>/dev/null || true)"
+  fi
+  [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value"
+}
+
+claim_pidfile() {
+  local claimed_epoch
+  claimed_epoch="$(date +%s)"
+  (
+    set -C
+    {
+      printf '%s\n' "$$"
+      printf 'machine=%s\n' "$RUN_MACHINE_ID"
+      printf 'claimed_epoch=%s\n' "$claimed_epoch"
+    } > "$RUN_PID_FILE"
+  ) 2>/dev/null
+}
+
+foreign_lease_epoch() {
+  local claimed="$1" heartbeat best=0
+  heartbeat="$(file_epoch "$RUN_HEARTBEAT_FILE" 2>/dev/null || true)"
+  [[ "$claimed" =~ ^[0-9]+$ ]] && best="$claimed"
+  if [[ "$heartbeat" =~ ^[0-9]+$ ]] && [ "$heartbeat" -gt "$best" ]; then
+    best="$heartbeat"
+  fi
+  [ "$best" -gt 0 ] && printf '%s\n' "$best"
+}
+
+release_reclaim_mutex() {
+  rm -f "$RUN_RECLAIM_DIR/owner"
+  rmdir "$RUN_RECLAIM_DIR" 2>/dev/null || true
+}
+
+acquire_run_state() {
+  local live_pid="" owner_machine="" claimed_epoch="" heartbeat_epoch=""
+  local heartbeat_secs lease_secs reclaim_lease_secs reclaim_epoch now age
+  local attempt=0 owns_reclaim=0 state_path
+  [ ! -L "$RUN_STATE_DIR" ] || {
+    echo "gsd-run: refusing symlinked run-state directory: $RUN_STATE_DIR" >&2
+    return 75
+  }
+  mkdir -p "$RUN_STATE_DIR"
+  for state_path in "$RUN_PID_FILE" "$RUN_STATUS_FILE" "$RUN_HEARTBEAT_FILE" "$RUN_RECLAIM_DIR"; do
+    [ ! -L "$state_path" ] || {
+      echo "gsd-run: refusing symlinked run-state path: $state_path" >&2
+      return 75
+    }
+  done
+
+  lease_secs="${GSD_FOREIGN_LEASE_SECS:-120}"
+  case "$lease_secs" in ''|*[!0-9]*|0) lease_secs=120 ;; esac
+  reclaim_lease_secs="${GSD_RECLAIM_LEASE_SECS:-30}"
+  case "$reclaim_lease_secs" in ''|*[!0-9]*|0) reclaim_lease_secs=30 ;; esac
+
+  # The pidfile is the ownership primitive: noclobber performs an atomic
+  # exclusive create, so contenders can never observe an empty owner lock.
+  # A short-lived reclaim mutex only serializes stale-owner removal.
+  while [ "$attempt" -lt 20 ]; do
+    attempt=$((attempt + 1))
+    if [ -d "$RUN_RECLAIM_DIR" ]; then
+      reclaim_epoch="$(file_epoch "$RUN_RECLAIM_DIR" 2>/dev/null || true)"
+      now="$(date +%s)"
+      if [[ "$reclaim_epoch" =~ ^[0-9]+$ ]] \
+         && [ $((now - reclaim_epoch)) -gt "$reclaim_lease_secs" ]; then
+        release_reclaim_mutex
+        continue
+      fi
+      sleep 0.05
+      continue
+    fi
+    if claim_pidfile; then
+      RUN_STATE_OWNED=1
+      break
+    fi
+    [ ! -L "$RUN_PID_FILE" ] || {
+      echo "gsd-run: refusing symlinked run-state path: $RUN_PID_FILE" >&2
+      return 75
+    }
+    live_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+    owner_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
+    claimed_epoch="$(sed -n 's/^claimed_epoch=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
+    if { [ -z "$owner_machine" ] || [ "$owner_machine" = "$RUN_MACHINE_ID" ]; } \
+       && [[ "$live_pid" =~ ^[0-9]+$ ]] && kill -0 "$live_pid" 2>/dev/null; then
+      echo "gsd-run: active drive already owns $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
+      return 75
+    fi
+    if [ -n "$owner_machine" ] && [ "$owner_machine" != "$RUN_MACHINE_ID" ]; then
+      heartbeat_epoch="$(foreign_lease_epoch "$claimed_epoch" 2>/dev/null || true)"
+      now="$(date +%s)"
+      if [[ "$heartbeat_epoch" =~ ^[0-9]+$ ]]; then
+        age=$((now - heartbeat_epoch))
+        if [ "$age" -le "$lease_secs" ]; then
+          echo "gsd-run: foreign owner holds a fresh lease on $RUN_PID_FILE (pid=$live_pid machine=$owner_machine age=${age}s); refusing duplicate launch" >&2
+          return 75
+        fi
+      fi
+    fi
+
+    if ! mkdir "$RUN_RECLAIM_DIR" 2>/dev/null; then
+      sleep 0.05
+      continue
+    fi
+    owns_reclaim=1
+    printf '%s\nmachine=%s\n' "$$" "$RUN_MACHINE_ID" > "$RUN_RECLAIM_DIR/owner"
+
+    # Re-read under the reclaim mutex. Never remove an owner that became
+    # live or refreshed its foreign-machine lease after the first read.
+    live_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+    owner_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
+    claimed_epoch="$(sed -n 's/^claimed_epoch=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
+    if { [ -z "$owner_machine" ] || [ "$owner_machine" = "$RUN_MACHINE_ID" ]; } \
+       && [[ "$live_pid" =~ ^[0-9]+$ ]] && kill -0 "$live_pid" 2>/dev/null; then
+      release_reclaim_mutex
+      echo "gsd-run: active drive already owns $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
+      return 75
+    fi
+    if [ -n "$owner_machine" ] && [ "$owner_machine" != "$RUN_MACHINE_ID" ]; then
+      heartbeat_epoch="$(foreign_lease_epoch "$claimed_epoch" 2>/dev/null || true)"
+      now="$(date +%s)"
+      if [[ "$heartbeat_epoch" =~ ^[0-9]+$ ]] && [ $((now - heartbeat_epoch)) -le "$lease_secs" ]; then
+        release_reclaim_mutex
+        echo "gsd-run: foreign owner holds a fresh lease on $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
+        return 75
+      fi
+    fi
+    rm -f "$RUN_PID_FILE"
+    if claim_pidfile; then
+      RUN_STATE_OWNED=1
+      release_reclaim_mutex
+      owns_reclaim=0
+      break
+    fi
+    release_reclaim_mutex
+    owns_reclaim=0
+  done
+
+  [ "$RUN_STATE_OWNED" -eq 1 ] || {
+    [ "$owns_reclaim" -eq 0 ] || release_reclaim_mutex
+    echo "gsd-run: run-state ownership remained contended; refusing duplicate launch" >&2
+    return 75
+  }
+
+  write_heartbeat || return 1
+  write_run_status probing
+  heartbeat_secs="${GSD_HEARTBEAT_SECS:-15}"
+  case "$heartbeat_secs" in ''|*[!0-9]*|0) heartbeat_secs=15 ;; esac
+  (
+    heartbeat_sleep=""
+    trap '[ -z "$heartbeat_sleep" ] || kill "$heartbeat_sleep" 2>/dev/null || true; exit 0' TERM INT
+    while kill -0 "$$" 2>/dev/null; do
+      if ! write_heartbeat; then
+        echo "gsd-run: heartbeat refresh failed; terminating drive rather than losing its lease" >&2
+        kill -TERM "$$" 2>/dev/null || true
+        exit 1
+      fi
+      sleep "$heartbeat_secs" &
+      heartbeat_sleep=$!
+      wait "$heartbeat_sleep" 2>/dev/null || true
+      heartbeat_sleep=""
+    done
+  ) &
+  RUN_HEARTBEAT_PID=$!
+  echo "gsd-run: liveness pidfile=$RUN_PID_FILE pid=$$ machine=$RUN_MACHINE_ID status=$RUN_STATUS_FILE log=$LOG_FILE" >&2
+}
+
+CODEX_SESSION_CONTRACT="${GSD_CODEX_SESSION_CONTRACT:-FFS CODEX EXEC-SESSION CONTRACT: A tool result saying 'Script running with cell ID' is not completion or failure. Wait on that yielded cell. If the wait result contains a session_id and no exit_code, the nested process is still alive: poll that exact session with write_stdin until it exits. If the tool session is lost, check runner liveness with kill -0 \$(head -1 \"$RUN_PID_FILE\"); never launch a replacement while that pid is alive.}"
 
 cleanup_codex_runtime() {
   if [ -n "$CODEX_RUNTIME_HOME" ] && [ -d "$CODEX_RUNTIME_HOME" ]; then
     rm -rf "$CODEX_RUNTIME_HOME"
   fi
 }
-trap cleanup_codex_runtime EXIT
+
+cleanup_runner() {
+  local rc="$?" recorded_pid="" recorded_machine=""
+  trap - EXIT
+  if [ -n "$RUN_HEARTBEAT_PID" ]; then
+    kill "$RUN_HEARTBEAT_PID" 2>/dev/null || true
+    wait "$RUN_HEARTBEAT_PID" 2>/dev/null || true
+  fi
+  cleanup_codex_runtime
+  if [ "$RUN_STATE_OWNED" -eq 1 ]; then
+    write_run_status "$([ "$rc" -eq 0 ] && echo completed || echo failed)" "$rc"
+    [ ! -f "$RUN_PID_FILE" ] || recorded_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+    [ ! -f "$RUN_PID_FILE" ] || recorded_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
+    if [ "$recorded_pid" = "$$" ] && [ "$recorded_machine" = "$RUN_MACHINE_ID" ]; then
+      rm -f "$RUN_PID_FILE"
+    fi
+  fi
+  exit "$rc"
+}
+
+trap cleanup_runner EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+acquire_run_state || exit $?
+ACTIVE_HOST="$(detect_orchestrator_host)" || exit $?
 
 host_label() {
   case "$1" in codex) echo Codex ;; claude) echo Claude ;; esac
@@ -324,6 +556,7 @@ fi
 
 # STATEFUL BOUNDARY: exactly one drive is launched. Its output is never mined
 # for availability words and no failure/timeout is replayed on another vendor.
+write_run_status running
 run_bounded "$TIMEOUT_SECS" "${RUN[@]}" </dev/null 2>&1 | tee "$LOG_FILE"
 rc="${PIPESTATUS[0]}"
 if [ "$rc" -ne 0 ]; then

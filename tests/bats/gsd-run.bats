@@ -94,8 +94,171 @@ EOF
   [ "$status" -eq 0 ]
   grep -F 'Script running with cell ID' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'session_id and no exit_code' "$BATS_TEST_TMPDIR/codex.args"
-  grep -F 'Never launch a replacement command while the original session is alive' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'never launch a replacement while that pid is alive' "$BATS_TEST_TMPDIR/codex.args"
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "runner publishes a live pidfile and refuses a duplicate stateful drive" {
+  cat > "$STUB_DIR/slow-codex" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
+  echo FFS_HOST_PROBE_READY
+  exit 0
+fi
+touch "$BATS_TEST_TMPDIR/slow-drive-started"
+sleep 2
+echo SLOW_CODEX_OK
+EOF
+  chmod +x "$STUB_DIR/slow-codex"
+  RUN_STATE="$BATS_TEST_TMPDIR/run-state"
+
+  run env FFS_HOST=codex CODEX_BIN=slow-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" bash -c '
+      bash "$1" /gsd-quick first >"$2/first.log" 2>&1 &
+      first=$!
+      i=0
+      while [ ! -s "$3/gsd-run.pid" ] && [ "$i" -lt 100 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ -s "$3/gsd-run.pid" ] || exit 10
+      live_pid=$(head -1 "$3/gsd-run.pid" | tr -d "[:space:]")
+      kill -0 "$live_pid" || exit 11
+      grep -E "^machine=.+" "$3/gsd-run.pid" || exit 19
+      [ ! -e "$3/gsd-run.lock" ] || exit 20
+
+      bash "$1" /gsd-quick duplicate >"$2/duplicate.log" 2>&1
+      duplicate_rc=$?
+      [ "$duplicate_rc" -eq 75 ] || exit 12
+      grep -F "active drive already owns" "$2/duplicate.log" || exit 13
+      [ "$(head -1 "$3/gsd-run.pid" | tr -d "[:space:]")" = "$live_pid" ] || exit 14
+
+      wait "$first" || exit 15
+      [ ! -e "$3/gsd-run.pid" ] || exit 16
+      grep -F "state=completed" "$3/gsd-run.status" || exit 17
+      grep -F "exit_code=0" "$3/gsd-run.status" || exit 18
+    ' _ "$SCRIPT" "$BATS_TEST_TMPDIR" "$RUN_STATE"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/slow-drive-started" ]
+}
+
+@test "runner refuses a symlinked run-state directory before probing a host" {
+  mkdir -p "$BATS_TEST_TMPDIR/real-state"
+  ln -s "$BATS_TEST_TMPDIR/real-state" "$BATS_TEST_TMPDIR/symlink-state"
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$BATS_TEST_TMPDIR/symlink-state" \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"refusing symlinked run-state directory"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+}
+
+@test "live legacy one-line pidfile remains owned during an upgrade" {
+  RUN_STATE="$BATS_TEST_TMPDIR/legacy-run-state"
+  mkdir -p "$RUN_STATE"
+  printf '%s\n' "$$" > "$RUN_STATE/gsd-run.pid"
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" GSD_MACHINE_ID=local-host \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"active drive already owns"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "fresh foreign-machine ownership is never reclaimed as a dead local pid" {
+  RUN_STATE="$BATS_TEST_TMPDIR/foreign-run-state"
+  mkdir -p "$RUN_STATE"
+  printf '%s\nmachine=%s\n' 2147483647 foreign-host > "$RUN_STATE/gsd-run.pid"
+  touch "$RUN_STATE/gsd-run.heartbeat"
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" GSD_MACHINE_ID=local-host \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"foreign owner"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+}
+
+@test "fresh foreign claim outranks an old shared heartbeat during startup" {
+  RUN_STATE="$BATS_TEST_TMPDIR/foreign-claim-run-state"
+  mkdir -p "$RUN_STATE"
+  touch "$RUN_STATE/gsd-run.heartbeat"
+  touch -t 200001010000 "$RUN_STATE/gsd-run.heartbeat"
+  printf '%s\nmachine=%s\nclaimed_epoch=%s\n' \
+    2147483647 foreign-host "$(date +%s)" > "$RUN_STATE/gsd-run.pid"
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" GSD_MACHINE_ID=local-host \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"foreign owner"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "stale crashed reclaim mutex self-heals instead of stalling future drives" {
+  RUN_STATE="$BATS_TEST_TMPDIR/stale-reclaim-run-state"
+  mkdir -p "$RUN_STATE/gsd-run.reclaim"
+  touch -t 200001010000 "$RUN_STATE/gsd-run.reclaim"
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" GSD_MACHINE_ID=local-host \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CODEX_OK"* ]]
+  [ ! -e "$RUN_STATE/gsd-run.reclaim" ]
+}
+
+@test "heartbeat refresh atomically replaces a raced symlink without touching its target" {
+  cat > "$STUB_DIR/heartbeat-codex" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
+  echo FFS_HOST_PROBE_READY
+  exit 0
+fi
+touch "$BATS_TEST_TMPDIR/heartbeat-drive-started"
+sleep 3
+echo HEARTBEAT_CODEX_OK
+EOF
+  chmod +x "$STUB_DIR/heartbeat-codex"
+  RUN_STATE="$BATS_TEST_TMPDIR/heartbeat-run-state"
+  TARGET="$BATS_TEST_TMPDIR/heartbeat-target"
+  touch "$TARGET"
+  touch -t 200001010000 "$TARGET"
+
+  run env FFS_HOST=codex CODEX_BIN=heartbeat-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" GSD_HEARTBEAT_SECS=1 \
+    bash -c '
+      file_mtime() {
+        stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+      }
+      target_mtime="$(file_mtime "$4")"
+      bash "$1" /gsd-quick heartbeat >"$2/heartbeat.log" 2>&1 &
+      runner=$!
+      i=0
+      while [ ! -f "$2/heartbeat-drive-started" ] && [ "$i" -lt 100 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ -f "$2/heartbeat-drive-started" ] || exit 30
+      rm -f "$3/gsd-run.heartbeat"
+      ln -s "$4" "$3/gsd-run.heartbeat"
+      sleep 2
+      [ ! -L "$3/gsd-run.heartbeat" ] || exit 31
+      [ "$(file_mtime "$4")" = "$target_mtime" ] || exit 32
+      wait "$runner"
+    ' _ "$SCRIPT" "$BATS_TEST_TMPDIR" "$RUN_STATE" "$TARGET"
+
+  [ "$status" -eq 0 ]
 }
 
 @test "Claude host runs Claude with the Sonnet lead" {

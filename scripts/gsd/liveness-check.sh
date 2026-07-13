@@ -64,7 +64,7 @@ done
 # ── Signal P: pidfile → live process ─────────────────────────────────────
 p_signal="dead"
 if [ -f "$PIDFILE" ]; then
-  pid_raw="$(tr -d '[:space:]' < "$PIDFILE" 2>/dev/null || true)"
+  pid_raw="$(head -1 "$PIDFILE" 2>/dev/null | tr -d '[:space:]' || true)"
   if [[ "$pid_raw" =~ ^[0-9]+$ ]] && [ "$pid_raw" -gt 0 ] 2>/dev/null; then
     if kill -0 "$pid_raw" 2>/dev/null; then
       p_signal="alive"

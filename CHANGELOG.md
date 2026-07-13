@@ -6,6 +6,20 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.14.4 — mechanical drive liveness and credential-output guard (2026-07-13)
+
+- **Mechanical single-flight:** `gsd-run.sh` now owns an atomic pidfile,
+  machine-aware heartbeat lease, and status record for the entire probe+drive
+  lifetime. A second invocation refuses with rc 75 while the owner is live; a
+  dead stale owner is reclaimed safely. Codex prompts include the exact pidfile
+  fallback.
+- **No transcript credential dumps:** a Claude/Codex PreToolUse guard blocks
+  Doppler value reads/downloads and Railway variable/config JSON output while
+  preserving `doppler run` injection and `--only-names` inventory.
+- **Consumer parity:** setup/reconciliation installs, registers, and byte-checks
+  both runtime guards on Claude and Codex hosts.
+- **Skill version:** feature-implement 2.9.4.
+
 ## v4.14.3 — exact GSD requirement ownership gate (2026-07-13)
 
 - **No premature REQUIREMENTS completion:** before `/gsd-execute-phase`, FFS
