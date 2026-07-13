@@ -6,6 +6,18 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.14.2 — Codex yielded-session single-flight contract (2026-07-13)
+
+- **No duplicate long-running gates:** Codex GSD drives now receive an explicit
+  two-level exec contract: a yielded orchestration cell is not command failure,
+  and a returned `session_id` without `exit_code` must be polled with
+  `write_stdin` until completion.
+- **Single-flight by instruction:** autonomous executors are forbidden from
+  launching a diagnostic replacement while the original test/build/deploy
+  session remains alive. This closes the observed path where one real PG18
+  gate became several concurrent disposable restores.
+- **Skill version:** feature-implement 2.9.2.
+
 ## v4.14.1 — fail-closed cross-host fallback hardening (2026-07-13)
 
 - **No stateful replay:** `gsd-run.sh` now probes the invoking CLI/model/quota

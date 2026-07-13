@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.9.1"
+version: "2.9.2"
 allowed-tools:
   - Read
   - Edit
@@ -141,6 +141,14 @@ drive across vendors.
 The same pre-launch-only selection applies in spec mode. Cross-vendor replay
 after the stateful boundary is forbidden because a phase may already have
 changed the worktree, evidence ledger, or `.planning` resume state.
+
+**Codex yielded-session contract:** `Script running with cell ID ...` is
+neither success nor failure. Wait on that cell; if the result then carries a
+`session_id` without an `exit_code`, poll that exact child with `write_stdin`
+until it exits. Never relaunch the gate, test, build, or deploy while its
+original session is alive. The headless runner injects this rule into Codex
+GSD drives because confusing the outer cell with the child PTY duplicates
+stateful work and can strand disposable resources.
 
 **Anti-early-stop (autonomous orchestrator loop).** Fable early-stops long runs
 with text-only intent; hold this line every turn of the drive loop:
