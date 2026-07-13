@@ -127,6 +127,11 @@ Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG 
 | Resume after context reset | `/gsd-resume-work` (STATE.md is the resume point) |
 | Verifier found gaps | `/gsd-plan-phase N --gaps` → `/gsd-execute-phase N --gaps-only` |
 
+Before phase execution, `scripts/gsd/requirement-ownership-gate.sh N` requires
+the phase's PLAN frontmatter to own every ROADMAP requirement exactly once.
+Preparatory plans use `requirements: []`; an ID goes only on the final plan that
+genuinely completes it. Headless execution enforces this before any model probe.
+
 Completion authority is gates.py, never gsd self-report: `workflow.test_command` =
 `scripts/gsd/gates-test-command.sh` (run-gate + strict verify-done),
 `workflow.code_review_command` = `scripts/gsd/review-gate-command.sh` (grant wall + codex),

@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.4.1"
+version: "2.4.2"
 allowed-tools:
   - Read
   - Write
@@ -84,11 +84,23 @@ criteria at seed time as literal gate commands: `bash scripts/gsd/canary-gate.sh
 proof scenarios, `python3 lib/runtime_proof.py verify`. BDD scenarios from spec.md
 are the Canary step sources (testing-policy §4).
 
+Plan requirement ownership is completion ownership, not traceability repetition:
+each requirement in a ROADMAP phase belongs in exactly one PLAN. Put it on the
+last plan that genuinely completes it. Preparatory or enabling plans use an explicit
+`requirements: []`; later plans recheck earlier invariants through `must_haves`
+without repeating the requirement ID. This intentionally overrides gsd-core's
+stale template prose that says PLAN requirements cannot be empty—its executor
+otherwise marks repeated IDs complete after the first plan.
+
 ### Step 4: Coherence gate
 
 `python3 lib/gates.py analyze` against the seeded project where applicable; ERROR on
-incoherent handoffs. Then report: phases, plans per phase, wave widths, REQ coverage
-(every REQ appears in exactly one phase), gate commands present in config.
+incoherent handoffs. For every planned phase N, run
+`bash scripts/gsd/requirement-ownership-gate.sh N` once; ERROR immediately on
+nonzero with its bounded diagnostics—do not enter an open-ended repair loop.
+Then report: phases, plans per phase, wave widths, REQ coverage (every REQ appears
+in exactly one phase and one genuinely-completing plan), gate commands present
+in config.
 
 ### Step 5: Next step
 
