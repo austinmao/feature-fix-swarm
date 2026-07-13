@@ -26,6 +26,22 @@ cd "$REPO_ROOT" || exit 1
 # gsd's mempalace commands call a bare `mempalace` binary in headless mode.
 export PATH="$REPO_ROOT/scripts/gsd:$PATH"
 
+# execute-plan marks every PLAN frontmatter requirement complete without
+# checking whether another plan still owns work for that ID. Guard the whole
+# phase before even probing a model so an unsafe plan cannot mutate state.
+if [ "$GSD_SKILL_NAME" = "gsd-execute-phase" ]; then
+  if [ "$#" -lt 2 ]; then
+    echo "gsd-run: gsd-execute-phase requires a phase number" >&2
+    exit 2
+  fi
+  OWNERSHIP_GATE="$SCRIPT_DIR/requirement-ownership-gate.sh"
+  if [ ! -f "$OWNERSHIP_GATE" ]; then
+    echo "gsd-run: requirement ownership gate missing: $OWNERSHIP_GATE" >&2
+    exit 78
+  fi
+  bash "$OWNERSHIP_GATE" "$2" || exit $?
+fi
+
 TIMEOUT_SECS="${TIMEOUT:-900}"
 PROBE_TIMEOUT_SECS="${GSD_HOST_PROBE_TIMEOUT:-45}"
 PROBE_MARKER="FFS_HOST_PROBE_READY"

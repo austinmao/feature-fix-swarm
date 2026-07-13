@@ -65,6 +65,12 @@ setup() {
   [[ "$GSD_LINE" == *"gsd/assert-merged.sh"* ]]
 }
 
+@test "setup.sh installs and reconciles requirement-ownership-gate.sh" {
+  GSD_LINE="$(grep '^for gsd_script in ' setup.sh)"
+  [[ "$GSD_LINE" == *"gsd/requirement-ownership-gate.sh"* ]]
+  grep -F 'scripts/gsd/requirement-ownership-gate.sh' setup.sh
+}
+
 @test "setup.sh script manifest includes harness-audit.py (INT-003)" {
   SCRIPT_LINE="$(grep '^for script in ' setup.sh)"
   [[ "$SCRIPT_LINE" == *"harness-audit.py"* ]]
@@ -75,6 +81,7 @@ setup() {
   mkdir -p "$TARGET/scripts/gsd" "$TARGET/.claude" "$TARGET/.codex"
   printf 'legacy runner\n' > "$TARGET/scripts/gsd/gsd-run.sh"
   printf 'legacy adversary\n' > "$TARGET/scripts/gsd/adversary-host.sh"
+  printf 'legacy ownership gate\n' > "$TARGET/scripts/gsd/requirement-ownership-gate.sh"
   printf '{}\n' > "$TARGET/.claude/settings.json"
   printf '{}\n' > "$TARGET/.codex/hooks.json"
 
@@ -84,6 +91,7 @@ setup() {
   cmp -s scripts/gsd/gsd-run.sh "$TARGET/scripts/gsd/gsd-run.sh"
   cmp -s scripts/gsd/adversary-host.sh "$TARGET/scripts/gsd/adversary-host.sh"
   cmp -s scripts/gsd/run-bounded.sh "$TARGET/scripts/gsd/run-bounded.sh"
+  cmp -s scripts/gsd/requirement-ownership-gate.sh "$TARGET/scripts/gsd/requirement-ownership-gate.sh"
   cmp -s scripts/hooks/cli-hang-guard.sh "$TARGET/scripts/hooks/cli-hang-guard.sh"
   python3 - "$TARGET" <<'PY'
 import json, pathlib, sys

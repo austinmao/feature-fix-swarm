@@ -6,6 +6,19 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.14.3 — exact GSD requirement ownership gate (2026-07-13)
+
+- **No premature REQUIREMENTS completion:** before `/gsd-execute-phase`, FFS
+  now rejects any phase whose PLAN frontmatter repeats a ROADMAP requirement or
+  does not exactly cover that phase's requirement set. The headless runner
+  checks before model probing, so rejection launches no stateful drive.
+- **Preparatory plans stay honest:** `requirements: []` is explicitly supported.
+  Each ID belongs only on the last plan that genuinely completes it; earlier
+  invariant checks remain in `must_haves` without claiming completion.
+- **Consumer parity:** setup and targeted reconciliation install and byte-check
+  `requirement-ownership-gate.sh` alongside the host-native runner.
+- **Skill versions:** feature-implement 2.9.3 and spec-decompose 2.4.2.
+
 ## v4.14.2 — Codex yielded-session single-flight contract (2026-07-13)
 
 - **No duplicate long-running gates:** Codex GSD drives now receive an explicit

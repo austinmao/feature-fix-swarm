@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.9.2"
+version: "2.9.3"
 allowed-tools:
   - Read
   - Edit
@@ -132,6 +132,20 @@ output for phrases such as “API error” and never replays a partially-started
 drive across vendors.
 
 **Spec mode:** read `.planning/ROADMAP.md` for the first unchecked phase N.
+
+Before a dry run or any interactive/headless execution, run:
+
+```bash
+bash scripts/gsd/requirement-ownership-gate.sh "$N"
+```
+
+STOP on nonzero. This is the fail-fast wall for gsd-core's behavior of marking
+every requirement in an executed PLAN complete: every ROADMAP Phase N ID must
+appear in exactly one Phase N PLAN, on the last plan that genuinely completes
+it. Preparatory/enabling plans use an explicit `requirements: []`. Rechecking
+an earlier invariant belongs in `must_haves`, not repeated requirement ownership.
+The headless runner repeats this wall before its model probe so direct runner
+calls cannot bypass it.
 
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.
