@@ -70,26 +70,23 @@ ADVERSARY_KIND="${QA_COVERAGE_KIND:-$(adversary_kind_for_host "$(detect_orchestr
 
 if [ "$ADVERSARY_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${QA_COVERAGE_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  CHECK_BIN="$ADVERSARY_BIN_CODEX"
+  [ -z "${QA_COVERAGE_FALLBACK_BIN:-}" ] \
+    || ADVERSARY_BIN_CLAUDE="$QA_COVERAGE_FALLBACK_BIN"
   MODEL="${QA_COVERAGE_MODEL:-gpt-5.6-terra}"
   EFFORT="${QA_COVERAGE_EFFORT:-high}"
 else
   ADVERSARY_BIN_CLAUDE="${QA_COVERAGE_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  CHECK_BIN="$ADVERSARY_BIN_CLAUDE"
+  [ -z "${QA_COVERAGE_FALLBACK_BIN:-}" ] \
+    || ADVERSARY_BIN_CODEX="$QA_COVERAGE_FALLBACK_BIN"
   MODEL="${QA_COVERAGE_CLAUDE_MODEL:-sonnet}"
   EFFORT=""
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
 
-if ! command -v "$CHECK_BIN" >/dev/null 2>&1; then
-  echo "[qa-coverage-adversary] $CHECK_BIN CLI not found — skipped (fail-soft)"
-  exit 0
-fi
-
 OUTPUT="$(adversary_invoke "$ADVERSARY_KIND" "${QA_COVERAGE_TIMEOUT:-300}" "$MODEL" "$EFFORT" "$PROMPT" 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
-  echo "[qa-coverage-adversary] $CHECK_BIN exec failed (rc=$rc) — skipped (fail-soft)"
+  echo "[qa-coverage-adversary] both bounded vendor attempts failed (rc=$rc) — skipped (fail-soft)"
   exit 0
 fi
 

@@ -84,9 +84,18 @@ JSON
 }
 
 @test "missing adversary CLI is fail-soft" {
-  PLAN_ADVERSARY_BIN=definitely-not-a-real-cli run bash "$SCRIPT" "$HIGH"
+  PLAN_ADVERSARY_BIN=definitely-not-a-real-cli \
+    PLAN_ADVERSARY_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not found — skipped (fail-soft)"* ]]
+  [[ "$output" == *"both bounded vendor attempts failed"* ]]
+}
+
+@test "missing primary adversary falls back once and labels the actual reviewer" {
+  PLAN_ADVERSARY_BIN=definitely-not-a-real-cli \
+    PLAN_ADVERSARY_FALLBACK_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"falling back once to claude"* ]]
+  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
 }
 
 @test "high-blast plan gets findings appended, frontmatter intact" {
@@ -118,9 +127,10 @@ exit 7
 EOF
   chmod +x "$STUB_DIR/fake-codex"
   before="$(cat "$HIGH")"
-  PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
+  PLAN_ADVERSARY_BIN=fake-codex \
+    PLAN_ADVERSARY_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"exec failed (rc="* ]]
+  [[ "$output" == *"both bounded vendor attempts failed (rc="* ]]
   [ "$(cat "$HIGH")" = "$before" ]
 }
 
@@ -190,7 +200,7 @@ EOF
   command -v gtimeout >/dev/null 2>&1 || skip "gtimeout not installed on this machine"
   NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-path"
   mkdir -p "$NO_TIMEOUT_DIR"
-  for bin in bash dirname grep cat wc head tail tr env; do
+  for bin in bash dirname grep cat wc head tail tr env mktemp rm; do
     b="$(command -v "$bin" 2>/dev/null)"
     [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
   done
@@ -208,7 +218,7 @@ EOF
   # the python3 rung (fast stub completes normally, hung CLI would be reaped).
   NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-no-gtimeout-path"
   mkdir -p "$NO_TIMEOUT_DIR"
-  for bin in bash dirname grep cat wc head tail tr env python3; do
+  for bin in bash dirname grep cat wc head tail tr env python3 mktemp rm; do
     b="$(command -v "$bin" 2>/dev/null)"
     [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
   done

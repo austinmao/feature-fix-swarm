@@ -70,9 +70,10 @@ EOF
 }
 
 @test "missing adversary CLI is fail-soft exit 0" {
-  QA_COVERAGE_BIN=definitely-not-a-real-cli run bash "$SCRIPT" "$RESULTS"
+  QA_COVERAGE_BIN=definitely-not-a-real-cli \
+    QA_COVERAGE_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$RESULTS"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"CLI not found — skipped (fail-soft)"* ]]
+  [[ "$output" == *"both bounded vendor attempts failed"* ]]
 }
 
 @test "adversary CLI exit 7 is fail-soft exit 0" {
@@ -81,9 +82,10 @@ EOF
 exit 7
 EOF
   chmod +x "$STUB_DIR/fake-codex-fail"
-  QA_COVERAGE_BIN=fake-codex-fail run bash "$SCRIPT" "$RESULTS"
+  QA_COVERAGE_BIN=fake-codex-fail \
+    QA_COVERAGE_FALLBACK_BIN=also-not-a-real-cli run bash "$SCRIPT" "$RESULTS"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"exec failed (rc="* ]]
+  [[ "$output" == *"both bounded vendor attempts failed"* ]]
 }
 
 @test "stub output with neither MISSED nor ADEQUATE prints no-findings fallback" {

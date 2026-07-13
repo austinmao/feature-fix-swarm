@@ -6,6 +6,37 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.14.0 — bounded cross-vendor availability fallback (2026-07-13)
+
+- **Native host remains first:** GSD still starts on Codex/Terra when invoked
+  from Codex and Claude/Sonnet when invoked from Claude.
+- **No quota-reset stalls:** before any mutating GSD drive, a bounded read-only
+  model probe checks the native host. A failed probe (missing CLI, quota/model,
+  auth, overload, transport, or timeout) probes the equivalent tier on the
+  other vendor once; `FFS_CROSS_VENDOR_FALLBACK=off` is the forensic opt-out.
+- **Mutation safety:** vendor selection finishes before execution, then exactly
+  one mutating GSD drive launches. Every post-launch failure—including exit
+  126/127 and timeout—keeps its original code and is never replayed across
+  vendors, because partial local/external state is ambiguous.
+- **Diagnostic isolation:** model/task output never participates in mutating
+  fallback selection, so task prose such as “connection refused” cannot
+  manufacture a second execution. Read-only review fallback recognizes exact
+  provider diagnostics on either stream because replay is side-effect-free.
+- **Review continuity:** `/review-gate`, the FULL-tier/honest verifier paths,
+  and GSD's ship review still prefer the opposite vendor, then fall back once
+  to a fresh active-host process when that reviewer is unavailable. Codex is
+  sandboxed read-only; Claude runs in safe mode with model tools, MCP, ordinary
+  hooks/customizations, and session persistence disabled. Administrator-managed
+  policy remains the trusted host boundary by design.
+- **Correct Codex agent root:** unrelated project-local `.codex/agents/*.toml`
+  files no longer shadow the global GSD Codex installation. The project root is
+  selected only when it contains actual `gsd-*.toml` roles.
+- **Large-diff-safe reviews:** adversarial prompts stream through stdin instead
+  of one argv entry, avoiding host `ARG_MAX` skips.
+- **TDD:** Bats coverage reproduces both vendor quota failures, missing native
+  CLIs, safe review fallback, mutating-timeout no-replay, task-output isolation,
+  large prompts, and both Codex agent-root branches.
+
 ## v4.13.1 — self-healing lightweight task pipeline (2026-07-13)
 
 - **Task Swarm now completes its own planning loop:** `/task-swarm` remains a

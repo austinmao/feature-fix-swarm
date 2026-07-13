@@ -55,21 +55,29 @@ make_shim_path() {
   [[ "$output" == *"refusing unbounded"* ]]
 }
 
-@test "RB-006: adversary_invoke stays bounded on a coreutils-less host" {
+@test "RB-006: adversary_invoke bounds a hung primary then falls back" {
   # regression for the old "run unwrapped rather than hard-fail" branch:
-  # no timeout/gtimeout on PATH, hanging fake codex -> rc 124 at ~1s, not a block
-  make_shim_path "$TMP/shim" python3 bash dirname sleep
+  # no timeout/gtimeout on PATH, hanging fake codex -> bounded python3 rung,
+  # then one successful Claude attempt instead of waiting forever.
+  make_shim_path "$TMP/shim" python3 bash dirname sleep mktemp cat rm grep env
   cat > "$TMP/codex-hang" <<'SH'
 #!/bin/sh
 sleep 30
 SH
-  chmod +x "$TMP/codex-hang"
-  run env PATH="$TMP/shim" ADVERSARY_BIN_CODEX="$TMP/codex-hang" /bin/bash -c \
+  cat > "$TMP/claude-pass" <<'SH'
+#!/bin/sh
+echo 'VERDICT: PASS'
+SH
+  chmod +x "$TMP/codex-hang" "$TMP/claude-pass"
+  run env PATH="$TMP/shim" ADVERSARY_BIN_CODEX="$TMP/codex-hang" \
+    ADVERSARY_BIN_CLAUDE="$TMP/claude-pass" /bin/bash -c \
     ". '$ADVERSARY_HOST'; adversary_invoke codex 1 some-model high 'hi'"
-  [ "$status" -eq 124 ]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"falling back once to claude"* ]]
+  [[ "$output" == *"VERDICT: PASS"* ]]
 }
 
-@test "RB-007: review-gate ship gate fail-softs (never hangs) on a hung codex" {
+@test "RB-007: review-gate ship gate falls back instead of hanging on codex" {
   # hung codex shadowed onto PATH; GSD_REVIEW_TIMEOUT bounds at 1s; the gate
   # must return APPROVED fail-soft instead of blocking the ship forever
   mkdir -p "$TMP/shim" "$TMP/cwd"
@@ -77,12 +85,17 @@ SH
 #!/bin/sh
 sleep 30
 SH
-  chmod +x "$TMP/shim/codex"
+  cat > "$TMP/shim/claude-pass" <<'SH'
+#!/bin/sh
+echo 'VERDICT: PASS'
+SH
+  chmod +x "$TMP/shim/codex" "$TMP/shim/claude-pass"
   # HOME override: keeps a real ~/.claude/lib/feature-fix-swarm/gates.py from
   # engaging the grant wall (REVISE) before the codex call under test
-  run env PATH="$TMP/shim:$PATH" HOME="$TMP" GSD_RUN_ID=spec-000 GSD_REVIEW_TIMEOUT=1 \
+  run env PATH="$TMP/shim:$PATH" HOME="$TMP" FFS_HOST=claude GSD_RUN_ID=spec-000 GSD_REVIEW_TIMEOUT=1 \
+    ADVERSARY_BIN_CODEX=codex ADVERSARY_BIN_CLAUDE=claude-pass \
     /bin/bash -c "cd '$TMP/cwd' && echo 'diff --git a b' | /bin/bash '$REPO_ROOT/scripts/gsd/review-gate-command.sh'"
   [ "$status" -eq 0 ]
   [[ "$output" == *'"verdict":"APPROVED"'* ]]
-  [[ "$output" == *'fail-soft'* ]]
+  [[ "$output" != *'fail-soft'* ]]
 }
