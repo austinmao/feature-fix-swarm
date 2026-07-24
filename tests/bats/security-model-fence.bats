@@ -59,7 +59,7 @@ EOF
   echo "OAuth token rotation for the payment webhook" > "$TMP/.planning/ROADMAP.md"
   run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
-  [ "$(planner_model gsd-planner)" = "claude-opus-4-8" ]
+  [ "$(planner_model gsd-planner)" = "claude-opus-5" ]
 }
 
 @test "missing .planning -> fail-soft warn, exit 0" {

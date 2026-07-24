@@ -123,7 +123,7 @@ def test_fable_and_claude_id_pins_are_known(tmp_path) -> None:
     home, repo = _clean_skill_repo(tmp_path)
     (repo / ".planning").mkdir()
     (repo / ".planning" / "config.json").write_text(json.dumps(
-        {"model_overrides": {"a": "fable", "b": "claude-opus-4-8", "c": "haiku"}}))
+        {"model_overrides": {"a": "fable", "b": "claude-opus-5", "c": "haiku"}}))
 
     result = _run(repo, home)
     assert result.returncode == 0

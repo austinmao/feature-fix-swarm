@@ -37,7 +37,7 @@ from pathlib import Path
 FRONTMATTER_FIELD = re.compile(r"^(name|version):\s*(.*)$")
 
 KNOWN_MODEL_ALIASES = {"opus", "sonnet", "haiku", "fable"}
-# Full model ids like claude-opus-4-8 / claude-sonnet-4-6 are also valid pins.
+# Full model ids like claude-opus-5 / claude-sonnet-4-6 are also valid pins.
 KNOWN_MODEL_ID = re.compile(r"^claude-[a-z0-9-]+$")
 
 

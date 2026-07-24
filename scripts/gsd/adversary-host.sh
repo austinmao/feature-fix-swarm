@@ -94,7 +94,7 @@ adversary_model_ladder() {
     case "$preferred" in *terra*) ;; *) printf '%s|%s\n' gpt-5.6-terra high ;; esac
     case "$preferred" in *luna*) ;; *) printf '%s|%s\n' gpt-5.6-luna medium ;; esac
   else
-    case "$preferred" in *opus*) ;; *) printf '%s|\n' claude-opus-4-8 ;; esac
+    case "$preferred" in *opus*) ;; *) printf '%s|\n' claude-opus-5 ;; esac
     case "$preferred" in *sonnet*) ;; *) printf '%s|\n' claude-sonnet-5 ;; esac
     case "$preferred" in *haiku*) ;; *) printf '%s|\n' claude-haiku-4-5-20251001 ;; esac
   fi

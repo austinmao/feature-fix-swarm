@@ -16,7 +16,7 @@
 #
 # Both value forms are matched and the substitution PRESERVES form — gsd-core
 # aliases ("fable" -> "opus", the form templates/gsd-config.base.json and real
-# consumer configs pin) and full IDs ("claude-fable-5" -> "claude-opus-4-8").
+# consumer configs pin) and full IDs ("claude-fable-5" -> "claude-opus-5").
 #
 # Recovery: once fable is available again, restore ONLY the JSON paths this
 # lever itself rewrote — the marker (.planning/fable-fallback.json) records
@@ -52,7 +52,7 @@ PROBE_TIMEOUT="${GSD_MODEL_PROBE_TIMEOUT:-120}"
 
 MARKER="$PLANNING_DIR/fable-fallback.json"
 FABLE="claude-fable-5"
-OPUS="claude-opus-4-8"
+OPUS="claude-opus-5"
 CODEX_SOL="gpt-5.6-sol"
 
 probe_claude_model() {

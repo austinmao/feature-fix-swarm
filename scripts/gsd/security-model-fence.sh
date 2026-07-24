@@ -57,7 +57,7 @@ n = 0
 # planning roles only — executor/verifier bindings stay untouched.
 # Both spellings: template pins the "fable" alias; a resolved config
 # (resolve_model_ids) holds the full "claude-fable-5" ID.
-FENCE = {"fable": "opus", "claude-fable-5": "claude-opus-4-8"}
+FENCE = {"fable": "opus", "claude-fable-5": "claude-opus-5"}
 for role in ("gsd-planner", "gsd-plan-checker"):
     if overrides.get(role) in FENCE:
         overrides[role] = FENCE[overrides[role]]
