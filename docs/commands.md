@@ -114,7 +114,7 @@ These flags work with `/feature-implement`:
 
 ## gsd-core (Orchestration)
 
-The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.6.1`.
+The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.8.0`.
 Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG package.
 
 | Scenario | Use |

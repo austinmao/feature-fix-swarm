@@ -533,7 +533,10 @@ if [ "$SELECTED_HOST" = "codex" ]; then
   [ -z "$CODEX_SESSION_CONTRACT" ] || CODEX_COMMAND="$CODEX_COMMAND
 
 $CODEX_SESSION_CONTRACT"
-  RUN=(env CODEX_HOME="$CODEX_RUNTIME_HOME" "$CODEX_BIN" exec
+  # Subscription-only: -u OPENAI_API_KEY mirrors the ANTHROPIC_* strip on the
+  # claude branch below. Codex prefers an ambient API key over the logged-in
+  # session, so an injected key would silently meter the whole drive.
+  RUN=(env -u OPENAI_API_KEY CODEX_HOME="$CODEX_RUNTIME_HOME" "$CODEX_BIN" exec
     -c "model=\"$LEAD_MODEL\""
     -c "model_reasoning_effort=\"$LEAD_EFFORT\""
     --dangerously-bypass-approvals-and-sandbox

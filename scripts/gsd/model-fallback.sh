@@ -85,7 +85,10 @@ probe_codex_model() {
   if [ -n "$cmd" ]; then
     if $cmd "$model" >/dev/null 2>&1; then echo ok > "$cache"; else echo fail > "$cache"; fi
   else
-    if run_bounded "$PROBE_TIMEOUT" env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    # Subscription-only: strip BOTH vendors' API keys. The codex CLI prefers
+    # OPENAI_API_KEY over the logged-in ChatGPT session when one is present,
+    # which silently bills the probe to a metered key instead of the plan.
+    if run_bounded "$PROBE_TIMEOUT" env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u OPENAI_API_KEY \
         codex exec -c "model=\"$model\"" -c 'sandbox_mode="read-only"' "ok" </dev/null >/dev/null 2>&1; then
       echo ok > "$cache"
     else

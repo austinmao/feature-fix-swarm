@@ -1,6 +1,6 @@
 # Ruflo function curation — SUPERSEDED (spec 002)
 
-Ruflo was removed as FFS's orchestrator. gsd-core (`@opengsd/gsd-core@1.6.1`,
+Ruflo was removed as FFS's orchestrator. gsd-core (`@opengsd/gsd-core@1.8.0`,
 pinned) now owns orchestration; gates.py remains the sole completion authority.
 See `docs/commands.md` § "gsd-core (Orchestration)" and
 `spike-results/gsd-ruflo/` for the adoption evidence.

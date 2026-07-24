@@ -182,9 +182,10 @@ specify version
 ```
 
 **[ECC](https://github.com/affaan-m/ECC)** and
-**[wshobson/agents](https://github.com/wshobson/agents)** — the exact-agent
-catalog used by decomposition and execution. `setup.sh` installs and
-refreshes both against upstream `main`.
+**[wshobson/agents](https://github.com/wshobson/agents)** — the
+exact hybrid catalog that decomposition and execution route
+`[agent:exact-agent]` tags against. `setup.sh` installs and refreshes both
+against upstream `main`.
 
 **[goal-wrap](https://github.com/austinmao/goal-wrap)** — the
 handoff/continuation layer for `/goal-wrap`.
