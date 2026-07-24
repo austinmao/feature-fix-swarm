@@ -181,7 +181,7 @@ install_gsd() {
   fi
   echo "  gsd-core: installing pinned repo-local dep"
   # NEVER bare `npx gsd` — that resolves to the wrong package (gsd@0.0.3)
-  npm install --save-dev --save-exact @opengsd/gsd-core@1.6.1
+  npm install --save-dev --save-exact @opengsd/gsd-core@1.8.0
 }
 
 install_gsd_surfaces() {
