@@ -17,7 +17,7 @@
 # fable availability flaps (see model-fallback.sh); opus is the stable pin.
 #
 # Each function accepts either a short alias (fable, opus, sonnet, haiku) or
-# a full model ID (claude-fable-5, claude-opus-4-8, claude-sonnet-5,
+# a full model ID (claude-fable-5, claude-opus-5, claude-sonnet-5,
 # claude-haiku-4-5-20251001, gpt-5.6-sol, ...) via substring match.
 # Unknown input: echoes the input unchanged, returns 1 (fail-soft).
 

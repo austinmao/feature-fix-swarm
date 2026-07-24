@@ -76,7 +76,7 @@ EOF
   ROOT="$(pwd)"
   mkdir -p "$BATS_TEST_TMPDIR/.planning"
   cat > "$BATS_TEST_TMPDIR/.planning/fable-fallback.json" <<'JSON'
-{"mode":"codex-sol","original":"claude-fable-5","substitute":"claude-opus-4-8","paths":["model_overrides.gsd-planner"]}
+{"mode":"codex-sol","original":"claude-fable-5","substitute":"claude-opus-5","paths":["model_overrides.gsd-planner"]}
 JSON
   cd "$BATS_TEST_TMPDIR"
   PLAN_ADVERSARY_BIN=fake-codex run bash "$ROOT/$SCRIPT" "$LOW"

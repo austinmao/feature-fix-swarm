@@ -12,11 +12,11 @@ setup() {
   "model_overrides": {
     "gsd-planner": "claude-fable-5",
     "gsd-plan-checker": "claude-fable-5",
-    "gsd-verifier": "claude-opus-4-8"
+    "gsd-verifier": "claude-opus-5"
   },
   "dynamic_routing": {
     "enabled": true,
-    "tier_models": { "light": "claude-haiku-4-5-20251001", "standard": "claude-sonnet-5", "heavy": "claude-opus-4-8" }
+    "tier_models": { "light": "claude-haiku-4-5-20251001", "standard": "claude-sonnet-5", "heavy": "claude-opus-5" }
   }
 }
 JSON
@@ -36,9 +36,9 @@ teardown() { rm -rf "$TMP"; }
 @test "FALLBACK-001: fable unavailable -> rewritten to opus in all overrides" {
   GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"UNAVAILABLE -> claude-opus-4-8 (2 override(s) rewritten)"* ]]
+  [[ "$output" == *"UNAVAILABLE -> claude-opus-5 (2 override(s) rewritten)"* ]]
   ! grep -q "claude-fable-5" "$TMP/.planning/config.json"
-  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-4-8" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-5" ]
 }
 
 @test "FALLBACK-002: fable available -> config byte-identical" {
@@ -64,7 +64,7 @@ SH
 
 @test "FALLBACK-004: config without fable is a no-op (no probe)" {
   cat > "$TMP/.planning/config.json" <<'JSON'
-{ "model_overrides": { "gsd-verifier": "claude-opus-4-8" } }
+{ "model_overrides": { "gsd-verifier": "claude-opus-5" } }
 JSON
   GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
@@ -80,7 +80,7 @@ JSON
 @test "FALLBACK-006: fable down + codex sol up -> opus substituted, marker mode=codex-sol with correct paths" {
   GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"UNAVAILABLE -> claude-opus-4-8 (2 override(s) rewritten)"* ]]
+  [[ "$output" == *"UNAVAILABLE -> claude-opus-5 (2 override(s) rewritten)"* ]]
   [ -f "$TMP/.planning/fable-fallback.json" ]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['mode'])")" = "codex-sol" ]
   # paths maps each rewritten JSON path to its exact prior value (form-preserving restore)
@@ -97,7 +97,7 @@ JSON
   GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" bash "$LEVER" "$TMP/.planning" >/dev/null
   [ -f "$TMP/.planning/fable-fallback.json" ]
   # gsd-verifier was an intentional pre-existing opus pin, not a fable rewrite
-  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "claude-opus-4-8" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "claude-opus-5" ]
 
   # simulate the 24h cache expiring so the "fable is back" probe actually re-runs
   rm -f "$GSD_FALLBACK_CACHE/claude-fable-5.status"
@@ -108,12 +108,12 @@ JSON
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-fable-5" ]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-fable-5" ]
   # intentional opus pin untouched by recovery — not blanket-flipped back to fable
-  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "claude-opus-4-8" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "claude-opus-5" ]
 }
 
 @test "FALLBACK-009: no-fable config -> still no marker written" {
   cat > "$TMP/.planning/config.json" <<'JSON'
-{ "model_overrides": { "gsd-verifier": "claude-opus-4-8" } }
+{ "model_overrides": { "gsd-verifier": "claude-opus-5" } }
 JSON
   GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-fail.sh" run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
@@ -137,7 +137,7 @@ JSON
 JSON
   GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" bash "$LEVER" "$TMP/.planning" >/dev/null
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "opus" ]
-  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-opus-4-8" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-plan-checker'])")" = "claude-opus-5" ]
 
   rm -f "$GSD_FALLBACK_CACHE/claude-fable-5.status"
   GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
@@ -164,5 +164,5 @@ SH
   run env PATH="$TMP/shim:$PATH" GSD_MODEL_PROBE_TIMEOUT=1 bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
   [[ "$output" == *"UNAVAILABLE"* ]]
-  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-4-8" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-5" ]
 }

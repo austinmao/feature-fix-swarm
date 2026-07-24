@@ -6,6 +6,19 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.14.5 — Opus 5 model-pin bump (2026-07-24)
+
+- **Opus tier repinned to `claude-opus-5`** (Opus 5 release). Every live pin
+  moved off the retired `claude-opus-4-8`: `model-fallback.sh` fable→opus
+  substitute, `security-model-fence.sh` security-touching planning fence,
+  `gsd-run.sh` lead-model resolution, `adversary-host.sh` cross-model ladder.
+  Comments in `model-equivalents.sh` and `harness-audit.py` follow.
+- **No behavior change** beyond the resolved model id — tier semantics,
+  fallback ordering, and the fable→opus fence are untouched. Consumer configs
+  pinning the `opus` short alias need no edit; configs pinning the full
+  `claude-opus-4-8` id resolve to a retired model and should be updated.
+- Baseline held: pytest 325 passed, bats 287/287.
+
 ## v4.14.4 — mechanical drive liveness and credential-output guard (2026-07-13)
 
 - **Mechanical single-flight:** `gsd-run.sh` now owns an atomic pidfile,

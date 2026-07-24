@@ -46,7 +46,7 @@ setup() {
 @test "codex_equiv_model: accepts full Claude model IDs" {
   run codex_equiv_model claude-fable-5
   [ "$output" = "gpt-5.6-sol" ]
-  run codex_equiv_model claude-opus-4-8
+  run codex_equiv_model claude-opus-5
   [ "$output" = "gpt-5.6-sol" ]
   run codex_equiv_model claude-sonnet-5
   [ "$output" = "gpt-5.6-terra" ]

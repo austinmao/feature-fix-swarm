@@ -325,7 +325,7 @@ claude_lead_model() {
   if [ -z "$model" ] || [ "$model" = "$LEAD_TIER" ]; then
     case "$LEAD_TIER" in
       sonnet|claude-sonnet-*) model="claude-sonnet-5" ;;
-      opus|claude-opus-*) model="claude-opus-4-8" ;;
+      opus|claude-opus-*) model="claude-opus-5" ;;
       fable|claude-fable-*) model="claude-fable-5" ;;
       haiku|claude-haiku-*) model="claude-haiku-4-5-20251001" ;;
       *) model="$LEAD_TIER" ;;
