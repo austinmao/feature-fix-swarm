@@ -6,6 +6,30 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.15.0 — Docs overhaul, gsd-core 1.8.0, subscription-only auth guard (2026-07-24)
+
+- **New docs (Diataxis):** `docs/getting-started.md` (tutorial), `docs/choosing-a-command.md`
+  (how-to — `/office-hours` first, then `/feature-spec` / `/feature-implement` /
+  `/fix` / `/task-swarm`, each with a "wrong choice when" clause), `docs/model-tiers.md`
+  (explanation — fable/opus/sonnet/haiku routing, producer≠reviewer, fallback ladder),
+  `docs/configuration.md` (reference — every knob, default, and `file:line` consumer).
+  README rewritten around the same map; removed documented-but-nonexistent flags
+  (`--qa-loop`, `--ruflo`, `--scope=`, `RALPH_MAX_RETRIES`, `RALPH_EXECUTOR`), added
+  the real ones (`--autonomous`, `--adhoc`, `--no-finish`).
+- **gsd-core bumped 1.6.1 → 1.8.0** (`setup.sh`).
+- **Subscription-only auth guard closed a silent-billing gap:** every `claude`
+  call site already stripped `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, but no
+  `codex` call site stripped `OPENAI_API_KEY` — and `model-fallback.sh`'s codex
+  probe was stripping the *Anthropic* keys instead. Both vendor CLIs prefer an
+  ambient API key over the logged-in OAuth session, so a stray key silently bills
+  metered API instead of the subscription, with no error and no log line. Fixed
+  in `model-fallback.sh`, `gsd-run.sh`, and `lib/run_state/audit.py`
+  (`_subscription_env()` scrub before every `codex exec`/`subprocess.run` spawn).
+  New `tests/bats/subscription-auth-guard.bats` (9 cases) locks in the strip at
+  every call site plus blanket prohibitions on OpenRouter, metered SDK imports,
+  direct model-endpoint HTTP calls, and `*_BASE_URL` overrides.
+- Baseline held: pytest 325 passed, bats 296/296 (+9 new guard cases).
+
 ## v4.14.5 — Opus 5 model-pin bump (2026-07-24)
 
 - **Opus tier repinned to `claude-opus-5`** (Opus 5 release). Every live pin
