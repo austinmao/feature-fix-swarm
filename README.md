@@ -145,7 +145,10 @@ bash setup.sh
 The installer copies skills, scripts, and prompts into your project, checks
 prerequisites, and offers to bootstrap anything missing. It verifies the
 installed runner, adversary adapter, hard-bound helper, and hang guard
-byte-for-byte, and registers the guard for both Claude and Codex.
+byte-for-byte, and registers the guard for both Claude and Codex. Skills that
+ship their own `scripts/` directory (e.g. `spec-status`) get that directory
+installed alongside their `SKILL.md` — a `SKILL.md`-only copy would install a
+skill that can't run.
 
 To reconcile only the runtime levers in an existing consumer repo:
 
@@ -258,8 +261,7 @@ Verified against the shipped SKILL.md files.
 | `--attended` | task-swarm | Skip the grant ledger; prompt during implement instead |
 | `--interactive` | fix | Restore manual gates (default is non-interactive) |
 | `--no-clarify` / `--no-preflight` / `--no-grant` / `--no-swarm` | feature-spec | Skip that pipeline stage |
-| `--resume` | feature-implement | Pick up from last failure |
-| `--one` | feature-implement | Execute only the next task |
+| `--adhoc "<task>"` | feature-implement | Run a task with no spec dir |
 
 ## Configuration
 
@@ -317,6 +319,9 @@ feature-fix-swarm/
     code-uplift/      review + refactor + test-uplift for existing code
     testing-policy/   canonical testing doctrine — mock ladder, browser gate, coverage floor
     swarm/            ad-hoc task swarm, no spec dir required
+    spec-status/      spec-scoped "where are we?" status check — fans out over git,
+                      .planning/, gates ledger, runner state, evidence; writes a
+                      status report + /handoff
     goal-wrap/        bundle current work into a tracked, anti-drift /goal prompt
   scripts/
     qa-swarm.sh       QA manifest builder (2 hooks + 3 LLM agent prompts)

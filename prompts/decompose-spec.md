@@ -2,7 +2,7 @@
 
 > **LEGACY (v1 pipeline).** The `[model:]`/`[agent:]` task grammar and `tasks.md` output below were retired by `/spec-decompose` v2.0.0 — the live pipeline routes models via gsd `.planning/config.json` (`model_overrides` + `dynamic_routing.tier_models`, seeded from `templates/gsd-config.base.json`). Kept for reference and for the hybrid agent catalog.
 
-Copy this prompt verbatim into your conversation, then reference `specs/NNN-feature-name/spec.md` and `specs/NNN-feature-name/plan.md`. Use the host-appropriate model ladder for decomposition: Claude Code emits `haiku` / `sonnet` / `opus` (plus the optional Claude-Code-native `fable` tier); Codex OAuth emits `gpt-5.4-mini` / `gpt-5.4` / `gpt-5.5`.
+Copy this prompt verbatim into your conversation, then reference `specs/NNN-feature-name/spec.md` and `specs/NNN-feature-name/plan.md`. Use the host-appropriate model ladder for decomposition: Claude Code emits `haiku` / `sonnet` / `opus` (plus the optional Claude-Code-native `fable` tier); Codex OAuth emits `gpt-5.6-luna` / `gpt-5.6-terra` / `gpt-5.6-sol`.
 
 ---
 
@@ -15,7 +15,7 @@ You are a senior engineer decomposing an approved feature spec into an atomic, T
 ## Host-aware model ladder
 
 - Claude Code: `haiku` / `sonnet` / `opus` / `fable` (optional 4th tier, see below)
-- Codex OAuth: `gpt-5.4-mini` / `gpt-5.4` / `gpt-5.5`
+- Codex OAuth: `gpt-5.6-luna` / `gpt-5.6-terra` / `gpt-5.6-sol`
 - Emit the native identifiers for the host you are running in; do not translate between ladders.
 - `fable` is Claude-Code-native only — no Codex equivalent. Reserve it for tasks that need
   multi-file narrative coherence: reconciling voice/structure across several files in one
@@ -71,7 +71,7 @@ Components in order:
 | `T###` | yes | `T001`, `T042` | Sequential, zero-padded, execution order |
 | `[P]` | optional | `[P]` | Parallel-safe: different files, no deps on incomplete tasks |
 | `[USn]` | if user-story phase | `[US1]` | Ties to spec.md user story priority; NO story label for Setup/Foundational/Integration/QA phases |
-| `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus` \| `fable`; Codex: `gpt-5.4-mini` \| `gpt-5.4` \| `gpt-5.5` (`fable` is Claude-only) |
+| `[model:X]` | yes | `[model:sonnet]` | Host-specific ladder — Claude: `haiku` \| `sonnet` \| `opus` \| `fable`; Codex: `gpt-5.6-luna` \| `gpt-5.6-terra` \| `gpt-5.6-sol` (`fable` is Claude-only) |
 | `[thinking:Y]` | yes | `[thinking:med]` | `low` \| `med` \| `high` \| `max` — thinking budget for implementer |
 | `[agent:exact-agent]` | yes | `[agent:ecc:tdd-guide]` | Exact label from the hybrid ECC + wshobson catalog; keep it stable |
 | `[return:X]` | optional | `[return:deep]` | Return contract: `scout` (≤15-line facts report) \| `build` (≤20-line change report) \| `deep` (≤40-line conclusion-first report). Omit to derive from model tier (low→scout, mid→build, high→deep). Annotate only when the tier default is wrong — e.g. a low-tier model doing an audit that must report deep |
@@ -88,13 +88,13 @@ Two-space indent, `Depends-on:` prefix, comma-separated task IDs. Omit if no ups
 
 | Tier | Use for | Examples |
 |---|---|---|
-| `[model:haiku thinking:low]` / `[model:gpt-5.4-mini thinking:low]` | Boilerplate, migrations, renames, deps install | `Install shadcn/ui`, `Run migration 007`, `Rename service X to Y` |
-| `[model:sonnet thinking:med]` / `[model:gpt-5.4 thinking:med]` | Default — most logic, routes, tests, components | Writing a POST route, writing a unit test, building a React component |
-| `[model:sonnet thinking:high]` / `[model:gpt-5.4 thinking:high]` | Complex logic, edge cases, cross-module integration | Writing E2E tests with Playwright, solving race conditions, reconciling DB + cache |
-| `[model:opus thinking:max]` / `[model:gpt-5.5 thinking:max]` | Architecture decisions, complex debugging, ambiguous specs | Designing a new subsystem, investigating intermittent test failures, choosing between two fundamental approaches |
+| `[model:haiku thinking:low]` / `[model:gpt-5.6-luna thinking:low]` | Boilerplate, migrations, renames, deps install | `Install shadcn/ui`, `Run migration 007`, `Rename service X to Y` |
+| `[model:sonnet thinking:med]` / `[model:gpt-5.6-terra thinking:med]` | Default — most logic, routes, tests, components | Writing a POST route, writing a unit test, building a React component |
+| `[model:sonnet thinking:high]` / `[model:gpt-5.6-terra thinking:high]` | Complex logic, edge cases, cross-module integration | Writing E2E tests with Playwright, solving race conditions, reconciling DB + cache |
+| `[model:opus thinking:max]` / `[model:gpt-5.6-sol thinking:max]` | Architecture decisions, complex debugging, ambiguous specs | Designing a new subsystem, investigating intermittent test failures, choosing between two fundamental approaches |
 | `[model:fable thinking:high]` (Claude Code only) | Multi-file narrative/voice coherence | Rewriting docs consistently across 5+ files, a brand-voice pass over multiple pages, reconciling naming/tone across a module rename |
 
-**Default to the middle tier for the current host** (`sonnet/med` on Claude Code, `gpt-5.4/med` on Codex). Escalate only with justification (add a one-line comment above the task if escalating to the highest tier or `thinking:max`).
+**Default to the middle tier for the current host** (`sonnet/med` on Claude Code, `gpt-5.6-terra/med` on Codex). Escalate only with justification (add a one-line comment above the task if escalating to the highest tier or `thinking:max`).
 
 ## Agent routing (hybrid catalog)
 
@@ -178,7 +178,7 @@ Every implementation phase in `tasks.md` **MUST** end with a `/review-gate` task
 phase begins. This is a hard requirement — a decomposition that omits one from any implementation
 phase is invalid.
 
-Use the current host's middle model tier from the ladder above (`sonnet` on Claude Code, `gpt-5.4`
+Use the current host's middle model tier from the ladder above (`sonnet` on Claude Code, `gpt-5.6-terra`
 on Codex OAuth) — never `fable` or the top/bottom tiers — for the review-gate task itself.
 
 ### Canonical review-gate task format

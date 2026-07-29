@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.9.4"
+version: "2.10.0"
 allowed-tools:
   - Read
   - Edit
@@ -181,6 +181,48 @@ gsd-core's to guard — deeper coverage needs a gsd-core change, out of scope.)
 
 On verifier gaps: `/gsd-plan-phase N --gaps` then `/gsd-execute-phase N --gaps-only`
 (same runner), max 2 gap rounds, then STOP and report.
+
+### Package-legitimacy pre-install gate (v2.10.0)
+
+Fires inside Step 4, before ANY task runs a package install (`npm|pnpm|yarn
+install/add`, `pip install`, `cargo add`) of a package **not already** in the
+repo's manifest (`package.json` deps, `requirements*.txt`, `Cargo.toml`) and
+not explicitly named by the operator. Threat: slopsquatting — LLM-hallucinated
+package names that squatters pre-register; `npm view` success proves
+*registration*, not *legitimacy*. An agent-discovered package is `[ASSUMED]`
+until cleared.
+
+Per new package:
+
+1. **Registry existence** (registration only, ecosystem-specific):
+   `npm view <pkg> version` (Node) · `pip index versions <pkg>` (Python) ·
+   `cargo search <pkg>` (Rust). Absent from the registry → hallucination →
+   BLOCK, surface the task as a checkpoint, never silently substitute a
+   similar name.
+2. **slopcheck verdict (if installed)** — `slopcheck install <pkg> --json` →
+   `OK | SUS | SLOP`. `slopcheck` is an optional external tool; if the binary
+   is absent, skip this step and leave the package `[ASSUMED]` — never
+   hard-fail the loop on a missing optional dependency.
+3. **Disposition:**
+   - `SLOP` → hard block, always (even `--autonomous`). Never installable by
+     the loop.
+   - `[ASSUMED]` or `SUS` → operator checkpoint through the grant ledger
+     (same mechanism as the Step 2 mid-run gates):
+     ```bash
+     python3 "$GATES_PY" check-grant "$RUN_ID" --action "install:<pkg>" \
+       && npm install "<pkg>" \
+       || { python3 "$GATES_PY" pending "$RUN_ID" --action "install:<pkg>" \
+              --reason "unverified agent-discovered package"; }  # STOP that install path only
+     ```
+     Interactive (non-autonomous) mode: show the operator the registry +
+     slopcheck evidence and ask before installing, instead of consulting the
+     ledger.
+   - `OK` and (already-in-manifest or operator-named) → install normally, no
+     gate.
+
+Enumerate expected installs in `/autonomy-grant`'s gate list up front (type
+`install`, e.g. `install:left-pad`) the same as `push`/`deploy`/`merge` — an
+unlisted install still stops on `check-grant`.
 
 ### Step 5: Completion authority
 
