@@ -1,8 +1,8 @@
 # Agent Harness Pipeline
 
-End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo + host adapters.
+End-to-end flow from feature idea to production, using gstack + spec-kit + gsd-core + host adapters.
 
-**Last updated:** 2026-04-16
+**Last updated:** 2026-07-29
 **Maintainer:** ralph contributors
 **Kill criteria:** see [kill-criteria.md](kill-criteria.md) (TODO)
 
@@ -31,17 +31,15 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo
 │    │                    QA tiers: unit/int/E2E + dev/staging/prod      │
 │    │                    spec.md OPTIONAL — falls back to plan.md       │
 │    ▼                                                                   │
-│   [post-spec-write.sh hook — not yet wired, script ready]              │
+│   [consumer-repo hooks, if wired — no FFS-shipped spec-write hook]     │
 │    │   ├─ linear-auto-sync (child issues)                              │
-│    │   ├─ post-task-complete (detect [X] transitions)                  │
-│    │   └─ ruflo-load (future — loads tasks into ruflo swarm)           │
+│    │   └─ post-task-complete (detect [X] transitions)                  │
 │    │                                                                   │
 │    ▼                                                                   │
 │   /feature-implement [NNN]                                             │
 │    │   iterates tasks.md; spawns Agent per [model:] annotation         │
 │    │   sequential execution, updates [ ] → [X] or [F] on completion    │
-│    │   --dry-run, --all, --task T042, --qa-openclaw, --qa-telegram    │
-│    │   flags supported                                                  │
+│    │   flags: --dry-run, --autonomous, --adhoc, --no-finish            │
 │    │                                                                   │
 │    ▼                                                                   │
 │   /qa     (built INTO tasks.md phases — Dev QA per story)              │
@@ -59,8 +57,8 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + ruflo
 - If no spec/plan context exists yet, `/speckit.specify` and `/speckit.plan` bootstrap it before `/autoplan`
 - `spec.md` is **optional** — `/spec-decompose` extracts user stories from plan.md or treats the whole feature as a single story when missing
 - `/autoplan` reviews the plan (works on any file path)
-- `/spec-decompose` produces a normalized tasks.md with host-aware model labels
-- `/feature-implement` executes tasks one at a time with per-task model routing
+- `/spec-decompose` produces a normalized tasks.md with host-aware model labels; before plan-phase it also runs an edge-probe spec-completeness gate over `.planning/REQUIREMENTS.md` (8-category boundary-value taxonomy), writing `edge-coverage.md` and soft-gating on unresolved edges
+- `/feature-implement` executes tasks one at a time with per-task model routing; any package install first clears a package-legitimacy gate (registry-existence check + optional `slopcheck`) — `SLOP` hard-blocks, `SUS`/`[ASSUMED]` routes through the autonomy-grant ledger as `install:<pkg>`
 - The shared workflow is host-neutral; Claude and Codex only affect how the task graph is rendered and which model ladder is selected
 
 ## The user gates
@@ -73,7 +71,7 @@ At each gate, the user reviews the generated artifact and approves or iterates:
 | 2 | write plan.md (manual or /speckit.plan) | plan.md | tech approach sound? |
 | 3 | /autoplan | reviewed plan.md | accept challenges + taste decisions? |
 | 4 | /spec-decompose | tasks.md | decomposition atomic + deps right? |
-| 5 | /feature-implement per task or --all | tasks done | tests pass, behavior verified? |
+| 5 | /feature-implement (per phase, via gsd-core) | tasks done | tests pass, behavior verified? |
 | 6 | staging deploy | live URL | promote to prod? |
 
 **Optional `/speckit.specify`**: if you want user stories in a separate spec.md, run it after /office-hours. If no spec/plan context exists yet, `/feature` bootstraps it first. /spec-decompose will use the spec.md when present; if you skip it, /spec-decompose falls back to plan.md or treats the feature as a single user story.
@@ -96,13 +94,10 @@ At each gate, the user reviews the generated artifact and approves or iterates:
 
 | Command | Purpose | Status |
 |---------|---------|--------|
-| `/feature [NNN]` | **End-to-end pipeline**: bootstrap spec if needed → autoplan → decompose → implement → qa → ship → canary. 2 gates. Default. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` | available |
-| `/feature [NNN] --resume` | Resume after any failure | available |
-| `/feature [NNN] --no-ruflo` | Use native Agent tool instead of ruflo swarm, executing directly through the active host CLI | available |
-| `/feature-implement [NNN]` | **Default: run ALL tasks**. Per-task model routing via `[model:]` annotation. `--qa-openclaw`, `--qa-telegram` | available |
-| `/feature-implement [NNN] --one` | Execute only the next unchecked task | available |
-| `/feature-implement [NNN] --ruflo` | Use ruflo swarm executor (parallel [P] groups, falls back to Agent on error) via the active host CLI | available |
-| `/feature-implement [NNN] --dry-run` | Print next task without spawning | available |
+| `/feature [NNN]` | **DEPRECATED** — flagless stub chaining `/feature-spec` → `/feature-implement NNN --autonomous`. See [Commands](commands.md) | available |
+| `/feature-implement [NNN]` | **Default: run the current phase via the gsd-core loop.** Per-task model routing via `[model:]` annotation | available |
+| `/feature-implement [NNN] --autonomous` | Unattended: preflight PASS + grant ledger required | available |
+| `/feature-implement [NNN] --dry-run` | Print resolved phase + gates without executing | available |
 | `/speckit.implement` | Upstream spec-kit executor (generic, ignores annotations) | available |
 
 ### QA + Ship layer
@@ -121,19 +116,18 @@ At each gate, the user reviews the generated artifact and approves or iterates:
 
 | Artifact | Location | Produced by |
 |----------|----------|-------------|
-| Design doc | `~/.gstack/projects/$SLUG/*-design-*.md` | `/office-hours` |
-| CEO plan | `~/.gstack/projects/$SLUG/ceo-plans/*.md` | `/plan-ceo-review` |
-| Eng test plan | `~/.gstack/projects/$SLUG/*-eng-review-test-plan-*.md` | `/plan-eng-review` |
-| Autoplan restore | `~/.gstack/projects/$SLUG/*-autoplan-restore-*.md` | `/autoplan` |
 | Spec | `specs/NNN-feature-name/spec.md` | `/speckit.specify` |
 | Plan | `specs/NNN-feature-name/plan.md` | `/speckit.plan` |
 | Research | `specs/NNN-feature-name/research.md` | `/speckit.plan` |
 | Data model | `specs/NNN-feature-name/data-model.md` | `/speckit.plan` |
 | Contracts | `specs/NNN-feature-name/contracts/*` | `/speckit.plan` |
 | Tasks | `specs/NNN-feature-name/tasks.md` | `/spec-decompose` |
-| Harness state | `specs/NNN/.harness-state.json` | `scripts/hooks/post-spec-write.sh` |
-| Harness log | `specs/NNN/.harness.log` | `scripts/hooks/post-spec-write.sh` |
-| Eval baseline | `~/.gstack/projects/$SLUG/harness-eval-*.json` | `scripts/harness-eval.sh` |
+
+Dropped rows: Design doc / CEO plan / Eng test plan / Autoplan restore
+(`~/.gstack/projects/...`) had zero in-repo wiring to corroborate the path
+format — gstack owns that convention, not this package. Harness state/log and
+Eval baseline pointed at `scripts/hooks/post-spec-write.sh` and
+`scripts/harness-eval.sh`, neither of which exists anywhere in this repo.
 
 ## Custom tasks.md format
 
@@ -149,7 +143,7 @@ Every task line:
 - `[P]` parallel-safe (optional)
 - `[USn]` user-story tag (required in story phases, forbidden in Setup/Integration)
 - `[model:X thinking:Y]` tier for implementing agent — `haiku/low`, `sonnet/med` (default), `sonnet/high`, `opus/max`
-- `[agent:exact-agent]` exact hybrid-catalog routing hint for ruflo or sub-agent delegation
+- `[agent:exact-agent]` exact hybrid-catalog routing hint for sub-agent delegation via the gsd-core executor
 - Description ends with backticked path relative to repo root
 - `Depends-on:` line (indented 6 spaces) for task prerequisites
 
@@ -173,17 +167,6 @@ N+4. Rollback Plan
 | Staging | live staging URL | smoke + 24h soak | qa-engineer agent |
 | Production | live prod URL | canary + 1h monitor | devops-engineer agent |
 
-## Eval and baseline
-
-Capture current state:
-```bash
-scripts/harness-eval.sh                           # default: specs 057, 075, 081
-scripts/harness-eval.sh --all                     # every spec with tasks.md
-scripts/harness-eval.sh --compare NNN /tmp/x.md   # PASS/FAIL verdict
-```
-
-**Validation (2026-04-16):** Sonnet with `prompts/decompose-spec.md` produced functionally-equivalent-or-better decompositions vs hand-crafted baselines on specs 057 (62 tasks vs 38) and 081 (55 tasks vs 52). 100% annotation coverage, all FRs mapped, all user stories covered, QA tiers present. Opus wrapper not required.
-
 ## Rollback
 
 If the pipeline degrades:
@@ -199,14 +182,15 @@ If the pipeline degrades:
 | Tool | Kill criterion |
 |------|---------------|
 | spec-kit | Abandoned by GitHub Labs OR Anthropic ships native spec management |
-| ruflo (claude-flow@v3alpha) | Two breaking changes in 30 days OR stable 1.0 not cut by Q4 2026 |
 | `/spec-decompose` | Sonnet quality drops below 80% on 3 consecutive specs |
 | custom tasks-template.md | spec-kit changes tasks.md contract in an incompatible way |
-| post-spec-write.sh | Anthropic ships native task orchestration / Linear sync |
 
 ## QA Ralph Loop (per-phase QA)
 
-Added in harness v3. Runs automatically inside `/feature-implement` when `--qa-loop` is enabled (default).
+Runs automatically inside `/feature-implement` via the gsd-core gate ladder
+(`/gsd-execute-phase N`) — there is no `--qa-loop`/`--no-qa-loop` flag; this
+gate always runs. See [qa-ralph-loop.md](qa-ralph-loop.md) for the real
+mechanism, including the separate, narrower background auto-QA hook.
 
 ```
 Phase N tasks complete
@@ -218,7 +202,7 @@ Phase N tasks complete
 └────────┬───────────────┘
          │
          ▼
-┌─ LLM QA swarm (ruflo) ─┐
+┌─ LLM QA swarm ─────────┐
 │  qa-e2e (browser)       │
 │  qa-review (code review)│
 │  qa-security (OWASP)    │
@@ -243,12 +227,11 @@ Phase N tasks complete
     Mark [F], stop pipeline
 ```
 
-See `docs/harness/qa-ralph-loop.md` for configuration and cost details.
+See [qa-ralph-loop.md](qa-ralph-loop.md) for configuration and cost details.
 
 ## References
 
 - [decompose-spec.md](../../prompts/decompose-spec.md) — the canonical Sonnet prompt
-- `scripts/harness-eval.sh` — baseline + compare script (not included in ralph; project-specific)
 - `scripts/hooks/post-implement-batch.sh` — PostToolUse auto-QA hook
 - [spec-decompose SKILL.md](../../skills/spec-decompose/SKILL.md) — the skill
 - `specs/*/tasks.md` — use any existing tasks.md as format reference

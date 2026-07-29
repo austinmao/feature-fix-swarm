@@ -9,10 +9,10 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/office-hours` | Brainstorm product ideas, validate "is this worth building", structured problem statement |
 | `/feature-spec NNN` | **Spec-first pipeline:** speckit.specify → speckit.plan → speckit.clarify, each phase enforcing TDD unit test list, BDD Given/When/Then scenarios, and E2E Playwright stubs. Run before `/autoplan`. |
 | `/autoplan` | Full review pipeline: CEO + Eng + DX dual voices with Codex, auto-decides taste decisions; `--accept-all-recommendations` auto-selects every recommended answer |
-| `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations usable on Claude or Codex |
+| `/spec-decompose NNN` | Turn `specs/NNN/plan.md` into normalized `tasks.md` with host-aware `[model:]` `[agent:]` `[qa:]` annotations usable on Claude or Codex. Step 2.5 runs an edge-probe spec-completeness gate (8-category boundary-value taxonomy) before plan-phase — writes `edge-coverage.md`, soft-gates on unresolved edges |
 | `/plan-decompose "description"` | Turn a description or existing plan into `tasks.md` via autonomous eng review + `/review-gate` — no speckit interview. Faster path when a spec isn't warranted. |
-| `/feature-implement NNN` | Execute tasks.md one-by-one via sub-agents. `--qa-loop` (default ON), `--dry-run`, `--one`, `--qa-openclaw`, `--qa-telegram` |
-| `/feature NNN` | End-to-end: bootstrap spec if needed, autoplan, decompose, implement, qa, ship, canary. 2 hard gates. `--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram` |
+| `/feature-implement NNN` | Execute tasks.md phase-by-phase via the gsd-core loop, with per-phase QA gates. Flags: `--autonomous`, `--dry-run`, `--adhoc "<task>"`, `--no-finish`. Package installs run through a package-legitimacy pre-install gate first — registry-existence check + optional `slopcheck`; `SLOP` hard-blocks, `SUS`/`[ASSUMED]` routes to the autonomy-grant ledger as `install:<pkg>` |
+| `/feature NNN` | **DEPRECATED (v3.19.0)** — a flagless stub that chains `/feature-spec` → `/feature-implement NNN --autonomous`. Retired flags (`--accept`, `--accept-all-recommendations`, `--goal`, `--qa-openclaw`, `--qa-telegram`, etc.) are no longer translated; passing one prints a retirement notice. Call `/feature-spec` and `/feature-implement` directly instead. |
 | `/swarm "task description"` | Ad-hoc task swarm — no spec dir required. Classifies the task (model/agent/thinking tier) and executes via the gsd-core loop (see `/gsd-*` commands). |
 
 **Pipeline order:** `/office-hours` → `/feature-spec NNN` (TDD+BDD+E2E contracts) → `/autoplan` → `/spec-decompose` → `/feature-implement` → `/qa` → `/review` → `/review-gate` → `/ship` → `/land-and-deploy` → `/canary`
@@ -21,8 +21,12 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 
 | Flag | Effect |
 |------|--------|
-| (none) | Full pipeline: speckit.specify → speckit.plan → speckit.clarify |
+| (none) | Full pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose → preflight → autonomy-grant (MAX-AUTH auto-grant) |
+| `--gated` | Stop at Step 6 to review the enumerated gate list before granting |
 | `--no-clarify` | Stop after speckit.plan; skip clarify phase |
+| `--no-preflight` | Skip preflight (not recommended before `--autonomous`) |
+| `--no-grant` | Skip the grant ledger entirely (attended runs) |
+| `--no-swarm` | Single-planner decomposition instead of the swarm |
 | `--dry-run` | Preview what would be generated without writing files |
 
 ## QA + Testing
@@ -67,11 +71,10 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 
 | Command | What it does |
 |---------|-------------|
-| `/fix "bug description"` | Full loop: investigate (5 Whys) then fix (gsd executors) then qa-only then full qa. Loops until green. |
-| `/fix "desc" --plan` | Use /plan-eng-review for complex bugs needing architectural review |
-| `/fix "desc" --no-qa` | Skip full /qa, only run /qa-only on affected area |
-| `/fix "desc" --dry-run` | Investigate + plan but don't apply the fix |
-| `/fix "desc" --scope=file1,file2` | Manually scope-lock to specific files |
+| `/fix "bug description"` | Investigate (root cause, not symptom) then fix via `/feature-implement --adhoc`. Non-interactive by default; only the review-gate step crosses to the opposite model family. |
+| `/fix "desc" --interactive` | Restore manual gates between phases (default is non-interactive) |
+| `/fix "desc" --autonomous` | Pass through to `/feature-implement --adhoc --autonomous` (fail-closed walls: fresh preflight + grant ledger required) |
+| `/fix "desc" --no-finish` | Pass through — skip the finish tail (review-gate/ship). Operator-accepted-risk. Replaces the retired v3.x `--no-review-gate`/`--no-audit` |
 
 ## Debugging
 
@@ -84,32 +87,18 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 
 | Command | What it does |
 |---------|-------------|
+| `/spec-status [NNN] [--continue-compact] [--no-handoff]` | Read-only "where are we?" status check for a spec run — fans out over git, `.planning/`, gates ledger, runner state, evidence, and hygiene; writes a status report + `/handoff` (chains `/continue-compact` instead with that flag) |
 | `/retro` | Weekly retrospective of what shipped, what broke, what to improve |
 | `/checkpoint` | Save progress mid-session for resume later |
 | `/health` | Codebase quality check (dead code, test coverage, lint) |
 | `/goal-wrap [--gates] "objective"` | Bundle current work into a self-contained, anti-drift `/goal "..."` prompt with tracked DONE WHEN proof commands. Use before `/clear`, agent handoff, or switching machines. `--gates` reverts to ask-first behavior (default: full autonomy — commits/push/merge/deploy pre-approved). Degrades gracefully without repowise/gbrain/`/prompt-master`/`/handoff` — see the skill's own "Soft dependencies" table. |
 
-## QA Ralph Loop Flags
-
-These flags work with `/feature-implement`:
-
-| Flag | Effect |
-|------|--------|
-| `--qa-loop` | Enable per-phase QA (default ON). 2 test hooks + 3 LLM agents per phase. |
-| `--no-qa-loop` | Disable the Ralph loop entirely |
-| `--qa-skip e2e,security` | Skip specific QA dimensions at runtime |
-| `--qa-only review` | Run only specified QA dimensions |
-| `--dry-run` | Print the execution plan without spawning agents |
-| `--resume` | Pick up from last failure point |
-| `--one` | Execute only the next unchecked task |
-
 ## Environment Variables
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `RALPH_MAX_RETRIES` | `3` | Max retry attempts per phase on QA failure |
-| `RALPH_AUTO_QA` | `1` | Set to `0` to disable PostToolUse auto-qa hook |
-| `RALPH_EXECUTOR` | (auto) | Legacy; execution now flows through the gsd loop |
+| `--max-retries` (flag, `scripts/ralph-retry.sh`) | `3` | Max retry attempts per phase on QA failure — a script flag, not an env var |
+| `RALPH_AUTO_QA` | `1` | Set to `0` to disable the PostToolUse auto-qa hook (`scripts/hooks/post-implement-batch.sh`) |
 | `RALPH_DEBOUNCE_SECS` | `30` | Quiet window before auto-qa fires |
 
 ## gsd-core (Orchestration)

@@ -152,6 +152,20 @@ deploy, merge) stops and records it as pending rather than guessing. This is
 why `--autonomous` can have zero operator stops without being reckless: the
 approvals were all collected up front.
 
+## Mid-run: "where are we?" — `/spec-status`
+
+```bash
+/spec-status 331
+/spec-status --continue-compact
+```
+
+Not a front door — a read-only status check for a spec already in flight.
+Fans out over git, `.planning/`, the gates ledger, runner state, and evidence
+to answer what's done, running, tested, and blocked, then writes a status
+report plus a `/handoff`. Reach for it when resuming a run, handing off to
+another session, or before a `/clear`. `--no-handoff` skips the handoff;
+`--continue-compact` chains `/continue-compact` instead of a bare `/handoff`.
+
 ## Related
 
 - [Model tiers](model-tiers.md) — which model runs each role, and why

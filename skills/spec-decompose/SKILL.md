@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.4.2"
+version: "2.5.0"
 allowed-tools:
   - Read
   - Write
@@ -63,6 +63,42 @@ Otherwise translate the FFS spec into gsd's planning inputs:
   it in repos lacking `lib/tests` — vacuous evidence is worse than no evidence.
 
 Pilot-proven reference shapes: spec 002's `.planning/` on branch `002-gsd-replaces-ruflo`.
+
+### Step 2.5: Spec-completeness gate (edge-probe)
+
+`gsd-plan-checker` (Step 3) verifies a plan against the requirements that got
+written down — a data/behavior-shape edge the spec never surfaced is invisible
+to it, and it will be confidently silent about the omission. Close that gap
+before plan-phase, not after: walk every `REQ-NN` just written into
+`.planning/REQUIREMENTS.md` through a closed 8-category taxonomy and force each
+applicable edge to a resolution.
+
+For each REQ, first classify its data/behavior shape, then raise only the
+categories whose shapes intersect (relevance filter — a pure-text requirement
+is never asked about overflow):
+
+| category | applies to shape | probe question |
+|---|---|---|
+| boundary | numeric-range | value exactly at each min/max/threshold — and one step either side? |
+| adjacency | collection | when two things are exactly equal or just touch — merge, collide, or separate? |
+| empty | collection, text | result for empty / single-element / null input? |
+| encoding | text | bytes, code points, grapheme clusters, or normalized form? |
+| ordering | collection | when elements compare equal, is output order specified and stable? |
+| precision | numeric-range | where can precision loss / overflow / rounding occur — exact contract (half-up vs half-even, ceil/floor/truncate)? |
+| idempotency | stateful | what happens if this runs twice on the same input? |
+| concurrency | stateful, io | if interrupted or run in parallel, what is guaranteed? |
+
+Resolve each raised edge to one **status**: `resolved` (a checkable AC now
+exists — fold it into `REQUIREMENTS.md` or a ROADMAP phase's success criteria),
+`dismissed` (REQUIRES a non-empty reason, e.g. "N/A — bounded enum, no boundary
+exists"; silence is not a dismissal), or `unresolved` (carried forward,
+flagged).
+
+Write `${SPEC_DIR}/edge-coverage.md` — one line per edge: `REQ · category ·
+status · reason/AC`. **Soft gate**: any `unresolved` applicable edge → WARN and
+surface it before Step 3 runs; the operator resolves or dismisses it, or it
+rides into the plan as an explicit assumption `gsd-plan-checker` can then judge
+on its own terms — never silently dropped.
 
 ### Step 3: Drive plan-phase
 

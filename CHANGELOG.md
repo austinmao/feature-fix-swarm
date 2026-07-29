@@ -6,6 +6,71 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.17.0 — Edge-probe + package-legitimacy gates, Codex ladder repin (2026-07-29)
+
+Forward-ports the two techniques from the abandoned v3.22.0 "gsd-core Option-A
+borrow" WIP that main never got and nothing since replaced. That WIP is archived
+verbatim at `origin/archive/v3.22-option-a-wip`; the rest of it is deliberately
+NOT ported — its plan-checker gate is superseded by `plan-adversary.sh`
+(cross-vendor, producer≠reviewer), its honest-verifier/abstain pass already
+landed in review-gate, and its `check-gsd` hard-require is moot now that
+gsd-core is a pinned repo-local dependency reconciled by `install_gsd_surfaces`.
+
+### Added
+
+- **spec-decompose 2.5.0 — Step 2.5 spec-completeness gate (edge-probe).**
+  `gsd-plan-checker` verifies a plan against the requirements that got *written
+  down*; a data-shape edge the spec never surfaced is invisible to it and it
+  will be confidently silent about the omission. Step 2.5 walks each `REQ-NN`
+  through a closed 8-category taxonomy (boundary / adjacency / empty / encoding
+  / ordering / precision / idempotency / concurrency) behind a relevance filter,
+  forces each applicable edge to `resolved` / `dismissed` (reason required) /
+  `unresolved`, and writes `edge-coverage.md`. Soft gate: an `unresolved`
+  applicable edge WARNs before plan-phase rather than vanishing. Self-contained
+  — no runtime dependency.
+- **feature-implement 2.10.0 — package-legitimacy pre-install gate.** Guards
+  slopsquatting: LLM-hallucinated package names that squatters pre-register.
+  Registry existence proves *registration*, not legitimacy, so an
+  agent-discovered package stays `[ASSUMED]` until cleared. Absent from the
+  registry → BLOCK (never silently substitute a similar name). Optional
+  `slopcheck` verdict: `SLOP` → hard block even under `--autonomous`; `SUS` or
+  `[ASSUMED]` → operator checkpoint through the existing grant ledger as
+  `install:<pkg>`. Degrades gracefully when `slopcheck` is not installed.
+
+### Fixed
+
+- **Docs purge of flags and machinery that do not exist.** Every documented flag
+  was grepped against the skill it belongs to; the phantoms are gone.
+  `/feature-implement` was documented with `--qa-loop` / `--one` / `--resume` /
+  `--qa-openclaw` / `--qa-telegram` (zero of which exist) — README's flag table
+  said so directly under a heading claiming it was "verified against the shipped
+  SKILL.md files". `/fix`'s four documented flags were all phantom. `/feature-spec`
+  was missing four real ones. `RALPH_EXECUTOR` had no consumer anywhere;
+  `RALPH_MAX_RETRIES` is a `--max-retries` flag on `scripts/ralph-retry.sh`, not
+  an env var.
+- **Ruflo removed from the docs** (`pipeline.md`, `gbrain-optional.md`) — it was
+  retired in v4.0.0 but still described as the live orchestrator, including two
+  `--ruflo` / `--no-ruflo` flags listed as "available". `gbrain-optional.md`
+  compared gbrain to "ruflo agentdb + results.md"; the real fallback is
+  `.feature-fix-swarm/learnings-archive.jsonl`, and it is mutually exclusive with
+  the gbrain write, not additive.
+- **`qa-ralph-loop.md` rewritten** against what actually runs: gsd-core's gate
+  ladder is what gates a phase; `scripts/qa-swarm.sh` is real but wired only into
+  the narrow debounced auto-QA hook, not into a `/feature-implement` flag.
+- **Dropped doc sections describing absent scripts** — `scripts/harness-eval.sh`
+  and `scripts/hooks/post-spec-write.sh` are referenced throughout `pipeline.md`
+  but exist nowhere in the repo. Deleted rather than given an invented successor.
+
+### Changed
+
+- **Codex model ladder repinned to the 5.6 family** in `lib/dispatch.py` and
+  `prompts/decompose-spec.md`: `gpt-5.6-luna` / `gpt-5.6-terra` / `gpt-5.6-sol`,
+  matching `scripts/gsd/model-equivalents.sh` (the source of truth) which had
+  already moved. The old `gpt-5.4-mini` / `gpt-5.4` / `gpt-5.5` names are
+  retained in the tier sets and cost table so a `tasks.md` written before the
+  repin still resolves to its intended tier instead of silently falling through
+  to mid-tier.
+
 ## v4.16.0 — `/spec-status` skill (2026-07-29)
 
 - **New skill `/spec-status [NNN]`** — answers "where are we?" for a spec run from

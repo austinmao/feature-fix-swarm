@@ -27,15 +27,21 @@ STATUS_MAP = {
     'F': 'failed', 'f': 'failed', 'S': 'skipped', 's': 'skipped',
 }
 
-LOW_TIER_MODELS = {"haiku", "gpt-5.4-mini"}
-MID_TIER_MODELS = {"sonnet", "gpt-5.4"}
-HIGH_TIER_MODELS = {"opus", "gpt-5.5"}
+# Codex tiers: gpt-5.6-luna/terra/sol are canonical (scripts/gsd/model-equivalents.sh).
+# The gpt-5.4/5.5 family is kept so tasks.md files written before the 5.6 repin
+# still resolve to a tier instead of silently falling through to mid-tier.
+LOW_TIER_MODELS = {"haiku", "gpt-5.6-luna", "gpt-5.4-mini"}
+MID_TIER_MODELS = {"sonnet", "gpt-5.6-terra", "gpt-5.4"}
+HIGH_TIER_MODELS = {"opus", "gpt-5.6-sol", "gpt-5.5"}
 
 COST_PER_TASK = {
     "haiku": 0.02,
     "sonnet": 0.30,
     "opus": 2.00,
     "fable": 0.50,
+    "gpt-5.6-luna": 0.05,
+    "gpt-5.6-terra": 0.30,
+    "gpt-5.6-sol": 2.00,
     "gpt-5.4-mini": 0.05,
     "gpt-5.4": 0.30,
     "gpt-5.5": 2.00,
@@ -75,6 +81,8 @@ RETURN_CONTRACTS = {
 _ESCALATION_LADDER = {
     "haiku": "sonnet",
     "sonnet": "opus",
+    "gpt-5.6-luna": "gpt-5.6-terra",
+    "gpt-5.6-terra": "gpt-5.6-sol",
     "gpt-5.4-mini": "gpt-5.4",
     "gpt-5.4": "gpt-5.5",
 }
