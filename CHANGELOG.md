@@ -6,6 +6,20 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.16.0 — `/spec-status` skill (2026-07-29)
+
+- **New skill `/spec-status [NNN]`** — answers "where are we?" for a spec run from
+  evidence rather than recall. Fans out over git, `.planning/`, the gates ledger,
+  runner state, evidence store, and hygiene checks; synthesizes a status report and
+  a `/handoff`. Read-only apart from the report + handoff files it writes.
+  `--continue-compact` chains compact prep; `--no-handoff` skips the handoff.
+  Pins `GSD_RUN_ID`/`GATES_STORE` before any ledger read so a worktree-cwd decoy
+  store cannot answer for the main one.
+- **`setup.sh` installs skill `scripts/` directories.** The install loop copied only
+  `SKILL.md`, so any skill shipping a helper script (the first is `spec-status`, which
+  calls `scripts/collect-status-facts.sh` relative to its own dir) installed in a state
+  where it could not run. Now the loop copies a `scripts/` dir when one exists.
+
 ## v4.15.0 — Docs overhaul, gsd-core 1.8.0, subscription-only auth guard (2026-07-24)
 
 - **New docs (Diataxis):** `docs/getting-started.md` (tutorial), `docs/choosing-a-command.md`
