@@ -1147,3 +1147,92 @@ def test_analyze_api_prose_mention_not_a_path_clean() -> None:
     findings = gates.analyze_artifacts(SPEC_ONE_STORY, tasks,
                                        has_scenarios=False)
     assert findings == []
+
+
+# ── gsd-core hard-require assert (Option A borrow runtime gate) ───────────────
+# The 4 gsd borrow seams (plan-checker, verifier, edge-probe, package-legitimacy)
+# each call `gates.py check-gsd` before spawning the gsd capability. Fork A:
+# absent gsd + GSD_REQUIRED=1 (default) → hard-fail the seam; GSD_REQUIRED=0 →
+# skip+warn. Presence marker mirrors setup.sh: gsd-plan-checker.md under
+# ~/.claude|.codex|.agents/agents/.
+
+def _fake_gsd_home(tmp_path, base=".claude", agent="gsd-plan-checker.md"):
+    d = tmp_path / base / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / agent).write_text("# gsd agent stub\n")
+    return tmp_path
+
+
+def test_check_gsd_present_returns_ok(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(_fake_gsd_home(tmp_path)))
+    rc, msg = gates.check_gsd()
+    assert rc == 0
+    assert msg.startswith("GSD-OK:")
+
+
+def test_check_gsd_present_in_codex_home(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(_fake_gsd_home(tmp_path, base=".codex")))
+    rc, msg = gates.check_gsd()
+    assert rc == 0 and msg.startswith("GSD-OK:")
+
+
+def test_check_gsd_absent_required_hard_fails(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))          # empty home
+    monkeypatch.delenv("GSD_REQUIRED", raising=False)  # default = required
+    rc, msg = gates.check_gsd()
+    assert rc == 1
+    assert msg.startswith("GSD-MISSING:")
+
+
+def test_check_gsd_absent_not_required_skips(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GSD_REQUIRED", "0")
+    rc, msg = gates.check_gsd()
+    assert rc == 0
+    assert msg.startswith("GSD-SKIP:")
+
+
+def test_check_gsd_agent_param_targets_verifier(tmp_path, monkeypatch) -> None:
+    # verifier present, plan-checker absent → --agent gsd-verifier resolves it
+    monkeypatch.setenv("HOME",
+                       str(_fake_gsd_home(tmp_path, agent="gsd-verifier.md")))
+    assert gates.check_gsd(agent="gsd-verifier.md")[0] == 0
+    assert gates.check_gsd(agent="gsd-plan-checker.md")[0] == 1
+
+
+def test_check_gsd_agent_path_traversal_is_neutralized(tmp_path, monkeypatch) -> None:
+    # a real file exists outside the agent dirs; a traversal --agent must NOT
+    # stat() it and false-pass — basename strips the path → not found.
+    (tmp_path / "passwd").write_text("root:x:0:0\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GSD_REQUIRED", raising=False)
+    rc, msg = gates.check_gsd(agent="../../passwd")
+    assert rc == 1 and msg.startswith("GSD-MISSING:")
+
+
+def test_cli_check_gsd_present_exit0(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(_fake_gsd_home(tmp_path)))
+    assert gates.main(["check-gsd"]) == 0
+    assert "GSD-OK:" in capsys.readouterr().out
+
+
+def test_cli_check_gsd_absent_required_exit1(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GSD_REQUIRED", raising=False)
+    assert gates.main(["check-gsd"]) == 1
+    assert "GSD-MISSING:" in capsys.readouterr().out
+
+
+def test_cli_check_gsd_absent_skip_exit0(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GSD_REQUIRED", "0")
+    assert gates.main(["check-gsd"]) == 0
+    assert "GSD-SKIP:" in capsys.readouterr().out
+
+
+def test_cli_check_gsd_agent_flag_appends_md(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME",
+                       str(_fake_gsd_home(tmp_path, agent="gsd-verifier.md")))
+    # bare name (no .md) must still resolve
+    assert gates.main(["check-gsd", "--agent", "gsd-verifier"]) == 0
+    assert "GSD-OK:" in capsys.readouterr().out

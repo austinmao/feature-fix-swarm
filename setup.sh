@@ -88,6 +88,46 @@ install_gstack() {
   git clone https://github.com/garryslist/gstack.git "$HOME/.claude/skills/gstack"
 }
 
+# gsd-core (@opengsd/gsd-core) — REQUIRED dep (Option-A borrow: FFS review/verify/
+# plan seams invoke gsd's installed agents gsd-verifier/gsd-plan-checker + port its
+# edge-probe/package-legitimacy reference gates). Installed as AGENTS+COMMANDS (not
+# skills), so presence is checked by agent-file, not skill_installed. Same contract
+# as ruflo: setup installs it (fail-soft here), runtime seams assert it (GSD_REQUIRED).
+gsd_installed() {
+  # gsd installs gsd-*.md agents into the active host's agents dir. gsd-plan-checker
+  # is the agent the FFS borrow seams spawn — its presence proves a usable install.
+  local candidates=(
+    "$HOME/.claude/agents/gsd-plan-checker.md"
+    "$HOME/.codex/agents/gsd-plan-checker.md"
+    "$HOME/.agents/agents/gsd-plan-checker.md"
+  )
+  local path
+  for path in "${candidates[@]}"; do
+    [ -f "$path" ] && return 0
+  done
+  return 1
+}
+
+check_gsd() {
+  if gsd_installed; then
+    echo "  gsd-core: OK"
+    return 0
+  fi
+  echo "  gsd-core: NOT FOUND"
+  return 1
+}
+
+install_gsd() {
+  if ! command -v npx >/dev/null 2>&1; then
+    echo "  gsd-core: NOT FOUND (npx required to install @opengsd/gsd-core)"
+    return 1
+  fi
+  echo "  gsd-core: installing globally for Claude Code (@opengsd/gsd-core)"
+  # --claude --global preselect the installer's runtime + scope prompts (no TTY read);
+  # </dev/null guards any stray stdin read from hanging a non-interactive setup.
+  npx @opengsd/gsd-core@latest --claude --global < /dev/null
+}
+
 install_skill_repo() {
   local repo="$1"
   shift
@@ -322,6 +362,7 @@ echo "Checking prerequisites..."
 command -v claude >/dev/null 2>&1 && echo "  Claude Code: OK" || { echo "  Claude Code: NOT FOUND (required) — install from https://claude.ai/code"; missing+=("Claude Code"); }
 check_gstack || missing+=("gstack")
 check_ruflo || missing+=("ruflo")
+check_gsd || missing+=("gsd-core")
 command -v npx >/dev/null 2>&1 && echo "  npx: OK" || { echo "  npx: NOT FOUND (required for skill installs)"; missing+=("npx"); }
 command -v uv >/dev/null 2>&1 && echo "  uv: OK" || { echo "  uv: NOT FOUND (required for Spec Kit)"; missing+=("uv"); }
 command -v python3 >/dev/null 2>&1 && echo "  python3: OK" || echo "  python3: NOT FOUND (required for run-state)"
@@ -344,6 +385,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
     install_uv || true
     install_gstack || true
     install_ruflo || true
+    install_gsd || true
     install_spec_kit || true
     install_prompt_master || true
     install_goal_wrap || true

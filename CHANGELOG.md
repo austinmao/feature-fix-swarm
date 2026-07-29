@@ -6,6 +6,58 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v3.22.0 — gsd-core enforcement borrow (Option A) + hard-require gsd (2026-07-05)
+
+Borrows four proven enforcement capabilities from `@opengsd/gsd-core` onto the
+existing FFS spine (ruflo kept, no spine change, zero migration risk). Closes
+FFS's real weakness: confident self-report false-pass at the plan and verify
+boundaries. gsd-core is now a required dependency (setup.sh installs it; the two
+spawnable-agent seams hard-fail without it).
+
+### Added
+
+- **gsd-core is required (setup.sh).** `install_gsd` (`npx @opengsd/gsd-core@latest
+  --claude --global`) in the bootstrap list; `check_gsd` in the prereq report
+  (`missing+=("gsd-core")`); presence marker `gsd-plan-checker.md` under
+  `~/.claude|.codex|.agents/agents/`. Mirrors the ruflo install contract
+  (install fail-soft, runtime assert fail-closed).
+- **`gates.py check-gsd`** — runtime hard-require assert. Exit 0 iff a gsd agent
+  is installed; absent + `GSD_REQUIRED=1` (default) → exit 1 (hard-fail the seam);
+  `GSD_REQUIRED=0` → exit 0 + `GSD-SKIP`. `--agent gsd-verifier` targets a
+  specific agent. Fork A (operator-chosen 2026-07-05): hard-fail, ruflo parity.
+- **spec-decompose 1.6.0 — plan-checker gate.** After `gates.py analyze`, spawns
+  `gsd-plan-checker` (with an FFS-override prompt — the agent is gsd-`.planning`-
+  native, redirected to FFS `spec.md`/`tasks.md`) for goal-backward adversarial
+  review. Catches **silent scope reduction** the deterministic `analyze` cannot.
+  BLOCKER findings block the `/feature-implement` handoff. gsd hard-required.
+- **spec-decompose 1.6.0 — Step 3.6 edge-probe spec-completeness gate.** Ports
+  gsd's 8-category BVA taxonomy (boundary/adjacency/empty/encoding/ordering/
+  precision/idempotency/concurrency) with relevance filter + resolution states;
+  writes `edge-coverage.md`; soft-gates on unresolved applicable edges. Self-
+  contained technique (no gsd runtime dep). Its `backstop` resolutions feed the
+  honest-verifier.
+- **review-gate 1.3.0 — honest-verifier pass.** Spawns `gsd-verifier` (FFS-
+  override prompt) as a 4th pass when a spec is resolvable — abstain disposition
+  (`insufficient_spec`/`human_needed`, never a false `passed`). `VERIFIER: FAIL`
+  or `ABSTAIN` blocks the auto-PASS even at 0 CRITICAL/HIGH. gsd hard-required.
+  Full 100%→17% strength requires stream-3 `backstop` tags; weak abstain-if-
+  unsure form otherwise (documented ceiling).
+- **feature-implement 1.15.0 — package-legitimacy pre-install gate.** Ports gsd's
+  slopsquatting supply-chain gate: registry-existence check (registration ≠
+  legitimacy) + optional `slopcheck` (`OK|SUS|SLOP`) before any agent-discovered
+  package install. `SLOP` → hard block; `[ASSUMED]`/`SUS` → operator checkpoint
+  via the existing autonomy-grant ledger (`install:<pkg>`). Graceful degradation
+  without slopcheck (gsd's optional external MIT dep, not gsd itself).
+
+### Notes
+
+- The two **spawnable-agent** seams (plan-checker, honest-verifier) hard-require
+  gsd (`check-gsd`, fork A). The two **ported-reference** seams (edge-probe,
+  package-legitimacy) embed self-contained techniques and do NOT runtime-require
+  gsd — "require gsd" is enforced where gsd is actually invoked.
+- Streams 2↔3 are coupled: edge-probe emits the `backstop` tags the honest-
+  verifier consumes for its measured false-pass reduction.
+
 ## v3.21.0 — OpenWiki living-docs wiring: conditional wiki auto-update (2026-07-04)
 
 Consumer repos that keep a living wiki (`openwiki/` at repo root, reality/vision/gap

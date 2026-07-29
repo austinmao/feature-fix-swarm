@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (default). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 1.4.0
+version: 1.7.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -60,6 +60,23 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 > `env -u DATABASE_URL gbrain doctor` is healthy, run
 > `env -u DATABASE_URL gbrain query "<feature topic>"` and feed prior decisions into
 > specify/plan. Absent/unhealthy → `git log --oneline --grep="<topic>"` fallback; never block.
+>
+> **Optional codebase-state recall (fail-soft, v1.5.0):** before Phase 1, if
+> `/codebase-state` is available, invoke it for the feature area and feed its
+> digest into specify/plan; else keep the gbrain-only recall above — feature-spec
+> never hard-depends on codebase-state (repo-specific, tenant-agnostic here).
+>
+> **Prior-work + vendor-doc grounding (fail-soft, v1.7.0):** before Phase 1, if
+> the repo has `openwiki/`, run `/openwiki-find "<feature topic>"` to surface the
+> owning subsystem page(s) — Reality/Vision/Gap + any `GAP-<PREFIX>-NNN` this
+> feature closes — and feed those refs into the spec's Context so it is grounded
+> in what is already mapped (a feature that closes a named gap MUST cite it). For
+> every third-party service/SDK/API the feature touches, run `/cached-docs-find
+> <vendor>` to pull the pinned `docs/cached-docs/*.md` API shape into plan.md's
+> research instead of guessing (Context7 for anything not cached). Both are
+> read-only, grep-first, fail-soft — a repo without `openwiki/`/`docs/cached-docs/`
+> or without those skills silently no-ops. Route the lookups to a `haiku` scout
+> subagent per the Delegation discipline below on a premium host.
 
 ## Usage
 
@@ -282,6 +299,42 @@ fi
 ---
 
 **Claude: execute these steps in sequence. Do not skip any step.**
+
+## Delegation discipline (host-model-aware, v1.6.0)
+
+The host running this skill is an ORCHESTRATOR, not the worker. When the session
+model is a scarce/premium tier — **Fable** or **Opus** — do NOT burn its context
+on read-only discovery. Offload every mechanical/parallel sub-task to `Agent`
+subagents on the cheapest tier that does the job, and reserve the premium host
+for what it is FOR: narrative coherence in `spec.md`/`plan.md` prose and
+cross-section consistency. (On a `sonnet`-default host, inline is fine —
+delegation is optional and this whole section is a no-op.)
+
+Route by the model-delegation + Return-Contracts tables in
+`.claude/rules/common/agents.md`:
+
+| Sub-task (across all phases below) | Model | Return contract |
+|---|---|---|
+| grep / file-read / ref-resolution / "open `specs/NNN/X.md` and verify sections present" | `haiku` | **scout** (≤15 lines: `file:line` + pass/fail + missing-section list — NEVER the file body) |
+| codebase exploration ("where is X", blast radius) during specify/plan | `haiku`→`sonnet` on miss | **scout** |
+| research fan-out (speckit.plan Phase 0 unknowns, best-practices, vendor-doc reads) | `sonnet` | **build**/deep (conclusion first) |
+| architectural judgment (canonical-mechanism picks, security/auth tradeoffs, `[NEEDS CLARIFICATION]` resolution) | `opus` | **deep** |
+
+Concretely:
+- The inter-phase **verification reads** in Steps 1–4 ("open the file and verify
+  `## X` exists") → dispatch a `haiku` scout that returns the pass/fail +
+  missing-section list, not the artifact body.
+- Any **codebase grep/explore** while authoring → `haiku` `Explore` subagent
+  returning `file:line` refs only.
+- The optional **gbrain / `/codebase-state` recall** already fans out to a
+  Ruflo swarm (see the recall note above + the `codebase-state` skill) — keep it;
+  do not re-do that discovery inline.
+- **spec-decompose (Step 4)** already swarms roster specialists — unchanged.
+- 3+ concurrent subagents → Ruflo swarm per `agents.md`; 1–2 → bare `Agent`.
+
+Fail-soft: no `Agent` tool available, or a solo host with no subagent runtime →
+do the read inline (pre-v1.6.0 behavior). Delegation is an optimization, never a
+gate — a phase never blocks because a subagent was unavailable.
 
 ### Step 1 — speckit.specify
 

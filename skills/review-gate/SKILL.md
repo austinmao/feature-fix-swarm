@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Runs the opposite CLI from the active harness so Codex reviews with Claude and Claude reviews with Codex. 3-pass: general quality → adversarial → test-coverage gap. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.2.0"
+version: "1.3.0"
 ---
 
 # /review-gate
@@ -275,6 +275,97 @@ This composes with refute-or-promote: refute-or-promote kills false positives
 BEFORE they block; verify-the-reviewer catches stale/wrong claims (and false
 PASSes) at the moment of decision. The `/verify-review` skill is the
 standalone operator-invocable form.
+
+### Honest-verifier pass (v1.3.0 — gsd borrow)
+
+The 3 passes above find DEFECTS in the diff. They do not answer "did this diff
+achieve the phase GOAL, and if the spec can't tell, do I abstain instead of
+false-passing?" That is `gsd-verifier`'s job — goal-backward verification with an
+**abstain** disposition (`insufficient_spec` → `human_needed`, **never a false
+`passed`**). Measured: confident-false-pass on a non-inferable check drops
+100% → 17% — but ONLY when fed edge-probe `backstop` tags (the trigger is
+exogenous; "abstain if unsure" alone gets 100% → 67%). See
+`references/honest-verifier.md`.
+
+**Runs only when a spec is resolvable** (review-gate is otherwise spec-agnostic);
+gsd is hard-required (`GSD_REQUIRED=1`) when it does run:
+
+```bash
+# resolve gates.py across the three install shapes (same order as elsewhere)
+GATES_PY=""
+for _cand in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/packages/feature-fix-swarm/lib/gates.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/lib/gates.py"; do
+  [ -f "$_cand" ] && GATES_PY="$_cand" && break
+done
+
+# resolve the spec for this diff (branch NNN → specs/NNN-*/spec.md)
+HV_SPEC=""
+_NNN=$(git branch --show-current 2>/dev/null | grep -oE '^[0-9]{3}' | head -1)
+[ -n "$_NNN" ] && HV_SPEC=$(find specs -maxdepth 2 -name spec.md -path "*${_NNN}-*" 2>/dev/null | head -1)
+
+VERIFIER_STATE="SKIPPED"
+if [ -z "$HV_SPEC" ] || [ -z "$GATES_PY" ]; then
+  echo "[review-gate] honest-verifier: no spec resolvable for this diff — skipped (diff-only passes stand)."
+else
+  python3 "$GATES_PY" check-gsd --agent gsd-verifier || {
+    echo "[review-gate] gsd-verifier unavailable — install gsd-core "
+         "(npx @opengsd/gsd-core@latest --claude --global) or GSD_REQUIRED=0 to skip."
+    exit 1
+  }
+  # spawn the verifier (below); capture its verdict line into VERIFIER_STATE
+fi
+```
+
+`GSD_REQUIRED=0` prints `GSD-SKIP` (exit 0) and this pass is bypassed.
+
+**Spawn with an override prompt** (gsd-verifier is gsd-`.planning`-native — same
+redirect posture as the plan-checker gate in spec-decompose):
+
+```
+Task({ subagent_type: "gsd-verifier", model: "sonnet", prompt: `
+You are verifying that executed work achieved the phase goal. This is a
+feature-fix-swarm repo, NOT a gsd .planning/ repo.
+
+DO NOT run gsd-tools.cjs / init.phase-op / verify.* queries. DO NOT read
+ROADMAP.md / PLAN.md / VERIFICATION.md — they do not exist here. Skip your
+gsd-tools loading steps.
+
+Inputs:
+- Goal + acceptance criteria (the truths to verify): ${HV_SPEC}
+- The work under review: the current git diff. Run it yourself:
+  '${DIFF_TARGET}' = '--staged' → git diff --staged (if empty, git diff HEAD);
+  '${DIFF_TARGET}' = 'main'     → git diff main...HEAD;
+  a --file target                → git diff for that path.
+
+Apply the honest-verifier disposition (references/honest-verifier.md):
+- INFERABLE criterion (determinable from the spec) → grade ✓ VERIFIED / ✗ FAILED
+  as usual. NEVER abstain on these (over-abstention guard).
+- NON-INFERABLE criterion — one tagged 'verification: backstop' in the spec, OR
+  one whose correct answer is not derivable from the spec text alone (merge
+  semantics, grapheme-vs-codeunit, tie-breaking) — verify ONLY if there is
+  EXPLICIT evidence (a held-out/property test that passes, or a behavior you
+  directly observed in the diff). Symbol presence + wiring is NOT explicit
+  evidence. With no explicit evidence → ABSTAIN:
+  'ABSTAIN: <criterion> — insufficient_spec, held-out test recommended'.
+  NEVER emit passed for an abstained criterion.
+
+End with EXACTLY ONE of:
+  VERIFIER: PASS      — all inferable criteria VERIFIED, no unresolved abstains
+  VERIFIER: FAIL      — one or more criteria ✗ FAILED (list them)
+  VERIFIER: ABSTAIN   — N non-inferable criteria unverified (list them);
+                        route to human_needed, do NOT auto-pass
+` })
+```
+
+**Effect on the gate verdict:** capture the verifier's final line as
+`VERIFIER_STATE` (PASS | FAIL | ABSTAIN | SKIPPED). It composes with the defect
+counts below: **FAIL or ABSTAIN means the gate does NOT auto-PASS even at
+0 CRITICAL / 0 HIGH** — surface the abstained/failed criteria for the operator
+(`human_needed`). The ceiling is honest: without edge-probe `backstop` tags in
+`${HV_SPEC}` (spec-decompose edge-probe gate, stream 3) this runs the weak
+abstain-if-unsure form; wiring those tags upgrades it to the measured 100% → 17%.
 
 ### Merge and rank
 

@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into specs/NNN/tasks.md via a ruflo specialist swarm (default: orchestrator + per-domain specialists drawn from the repo's agent roster) or single-planner fallback (--no-swarm), using the canonical shared model ladder (haiku/sonnet/opus, plus optional Claude-Code-native fable) + the exact-agent hybrid catalog decomposition prompt"
-version: "1.5.0"
+version: "1.6.0"
 allowed-tools:
   - Read
   - Write
@@ -26,7 +26,8 @@ allowed-tools:
 4. **Default (v1.4.0): swarm decomposition** — ruflo `swarm_init` + orchestrator + per-domain specialists (backend/frontend/database/security/testing) drawn from the roster propose their domain's task-subset in parallel; the orchestrator merges into ONE `specs/NNN/tasks.md`. `--no-swarm` (or ruflo unreachable with `RUFLO_REQUIRED=auto`, or empty roster) falls back to the legacy single-planner sub-agent
 5. **Each phase ends with a `/review-gate` review task** — blocks the next phase if HIGH/CRITICAL findings
 6. Validates every `[agent:]` tag against the roster (`agents_manifest.py check`) + runs the `gates.py analyze` coherence gate
-7. If a prior baseline exists, runs `scripts/harness-eval.sh --compare NNN specs/NNN/tasks.md`; reports summary and flags anything suspicious
+7. **Plan-checker gate (v1.6.0):** hard-requires gsd-core (`gates.py check-gsd`) then spawns `gsd-plan-checker` with an FFS-override prompt for goal-backward adversarial review — catches silent scope reduction `analyze` can't. BLOCKER findings block the `/feature-implement` handoff
+8. If a prior baseline exists, runs `scripts/harness-eval.sh --compare NNN specs/NNN/tasks.md`; reports summary and flags anything suspicious
 
 ## Review-Gate Phase Gates (MANDATORY)
 
@@ -162,6 +163,57 @@ fallback (Step 4b) with a WARN.
 `env -u DATABASE_URL gbrain code-refs <key symbols from plan.md>` and pass the hit list to
 the specialists as blast-radius context. If gbrain is absent or unhealthy, skip silently —
 `git grep` of the key symbols is the fallback. NEVER hard-fail on gbrain.
+
+### Step 3.6: Spec-completeness gate (v1.6.0 — edge-probe borrow)
+
+Ported from gsd's `references/edge-probe.md` (a self-contained black-box QA
+technique — NOT a gsd agent, so gsd need NOT be installed to run this; the
+technique is embedded here). A goal-backward verifier only checks assertions that
+were written down; a data/behavior-shape edge the author never surfaced is
+invisible to it (and it is *confidently wrong* about the omission). The fix is
+spec completeness at the front of the pipeline: walk each spec requirement /
+user-story through a closed 8-category taxonomy BEFORE decomposition and force
+each applicable edge to a resolution.
+
+Run this over `${SPEC_DIR}/spec.md`'s requirements/user-stories. For each, first
+classify its data/behavior shape, then raise ONLY the categories whose shapes
+intersect (relevance filter — a pure-text requirement is never asked about
+overflow):
+
+| category | applies to shape | probe question |
+|---|---|---|
+| boundary | numeric-range | value exactly at each min/max/threshold — and one step either side? |
+| adjacency | collection | when two things are exactly equal or just touch — merge, collide, or separate? |
+| empty | collection, text | result for empty / single-element / null input? |
+| encoding | text | bytes, code points, grapheme clusters, or normalized form? |
+| ordering | collection | when elements compare equal, is output order specified and stable? |
+| precision | numeric-range | where can precision loss / overflow / rounding occur — exact contract (half-up vs half-even, ceil/floor/truncate)? |
+| idempotency | stateful | what happens if this runs twice on the same input? |
+| concurrency | stateful, io | if interrupted or run in parallel, what is guaranteed? |
+
+Resolve each raised edge to exactly one **status** — `resolved | dismissed |
+unresolved`; a `resolved` edge also carries a **verification** tier:
+- **resolved / explicit** — a checkable acceptance criterion is written → the
+  orchestrator MUST fold it into the tasks (a real task/AC covering that edge).
+- **resolved / backstop** — the author knows the edge but can't fully articulate
+  it in prose → record it; a held-out/property test will stand in.
+- **dismissed** — not applicable, REQUIRES a non-empty reason string ("N/A —
+  bounded enum, no boundary exists"). Silence is not a dismissal.
+- **unresolved** — carried forward and flagged.
+
+Write the result to `${SPEC_DIR}/edge-coverage.md` (one line per edge:
+`REQ · category · status · verification · reason/AC`). **Soft gate** (matches
+edge-probe's design — it raises, it does not hard-block): any `unresolved`
+*applicable* edge → WARN and surface it; the operator resolves/dismisses it, or
+the orchestrator carries it as an explicit assumption into tasks.md — never
+silently dropped.
+
+**Coupling to the honest-verifier (stream 2):** every `resolved / backstop` edge
+is exactly the `verification: backstop` tag `gsd-verifier` consumes in
+`/review-gate` to reach the measured 100% → 17% false-pass reduction. Record them
+in `edge-coverage.md` under a `## backstop` heading so review-gate can feed them
+to the verifier. Without this step, the honest-verifier runs only its weak
+abstain-if-unsure form.
 
 ### Step 4: Swarm decomposition (DEFAULT) — orchestrator + roster specialists
 
@@ -431,3 +483,81 @@ fi
 Machine analog of spec-kit's `/speckit.analyze`: FR/US coverage, per-phase
 review-gate presence, per-story e2e smoke presence. `/feature-implement` runs the
 same check at startup and refuses to start on findings.
+
+## Plan-checker gate (v1.6.0 — gsd goal-backward borrow)
+
+`gates.py analyze` is deterministic (coverage + gate presence). It cannot catch
+**silent scope reduction** — a task that references a spec requirement but
+delivers a fraction of it ("static labels v1, dynamic later", "stub", "wired
+later"). gsd's `gsd-plan-checker` agent does goal-backward adversarial analysis
+that closes exactly that hole. This gate borrows it. It runs AFTER the coherence
+gate passes and BEFORE the handoff to `/feature-implement`.
+
+**gsd is hard-required (`GSD_REQUIRED=1` default).** Assert it first — same
+resolver as gates.py:
+
+```bash
+python3 "$GATES_PY" check-gsd || {
+  echo "[spec-decompose] gsd-plan-checker unavailable — install gsd-core "
+       "(npx @opengsd/gsd-core@latest --claude --global) or re-run with "
+       "GSD_REQUIRED=0 to skip this gate."
+  exit 1
+}
+```
+
+`GSD_REQUIRED=0` prints `GSD-SKIP` (exit 0) and this whole gate is bypassed —
+debug/borrow-phase only.
+
+**Spawn the checker with an override prompt.** `gsd-plan-checker` is
+gsd-`.planning`-native (its default workflow runs `gsd-tools.cjs query
+init.phase-op` and reads `PLAN.md`/`ROADMAP.md`/`CONTEXT.md`). FFS has none of
+that — it has a flat `tasks.md`. Redirect it:
+
+```
+Task({ subagent_type: "gsd-plan-checker", model: "sonnet", prompt: `
+You are reviewing plans BEFORE execution. This is a feature-fix-swarm repo, NOT
+a gsd .planning/ repo.
+
+DO NOT run gsd-tools.cjs, init.phase-op, verify.plan-structure, or any gsd_run
+query. DO NOT read ROADMAP.md / PLAN.md / CONTEXT.md / VALIDATION.md / RESEARCH.md
+/ PATTERNS.md — they do not exist here. Skip your <verification_process> Step 1-2
+loading and your <required_reading> block entirely.
+
+The "plans" you verify are the tasks in this flat checklist:
+- Spec (the goal + requirements/user-stories): ${SPEC_DIR}/spec.md
+- Tasks (the plan to review):                  ${SPEC_DIR}/tasks.md
+
+Mapping to your model: each '- [ ] ... <desc>' line = one task; each '## Phase N'
+heading = a plan grouping; '[agent:X]' = the task owner; 'Depends-on:' lines =
+the dependency graph; '[US n]' = the user story a task serves.
+
+Apply ONLY these of your dimensions (the ones that transfer to a flat task list):
+  1. Requirement Coverage  — every user story / functional requirement in spec.md
+     has ≥1 covering task. Uncovered requirement = BLOCKER.
+  2. Task Completeness      — task descriptions are concrete (files + action), not
+     vague ("implement auth"). Vague load-bearing task = WARNING.
+  3. Dependency Correctness — Depends-on graph is acyclic, no forward references,
+     RED-before-GREEN preserved. Cycle/forward-ref = BLOCKER.
+  7b. Scope Reduction       — THE priority check. Scan every task for scope-
+     reduction language ("v1", "simplified", "static for now", "hardcoded",
+     "stub", "placeholder", "wired later", "future enhancement", "skip for now")
+     and cross-reference the spec requirement it claims to satisfy. A task that
+     references a requirement but delivers a reduced version = BLOCKER (always).
+  10. CLAUDE.md Compliance  — read ./CLAUDE.md; flag tasks that use a forbidden
+     pattern or skip a required step.
+
+Return your ISSUES FOUND / VERIFICATION PASSED format with explicit
+BLOCKER/WARNING severity per your <structured_returns>. Issues without a severity
+are invalid.
+` })
+```
+
+**Verdict handling:**
+- **VERIFICATION PASSED** or only WARNINGs → surface them, proceed to handoff.
+- **Any BLOCKER** → print the blockers, DO NOT hand off. The tasks.md must be
+  regenerated or hand-fixed to close each blocker, then re-run this gate.
+
+This gate is advisory-in-tone but blocking-in-effect on BLOCKERs — same posture as
+`gates.py analyze`. It composes with (does not replace) the deterministic gate
+above: analyze proves the checkboxes exist; the plan-checker proves they'll
+deliver the goal.

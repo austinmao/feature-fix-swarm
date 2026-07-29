@@ -41,6 +41,9 @@ Usage (inline heredoc in SKILL.md):
     python3 lib/gates.py check-red    T041        # exit 0 iff RED proven
     python3 lib/gates.py scan-tamper  < diff.txt  # exit 1 + findings if hacked
     python3 lib/gates.py analyze SPEC_FILE TASKS_FILE
+    python3 lib/gates.py check-gsd [--agent gsd-verifier]
+                                                  # exit 0 iff gsd installed;
+                                                  # GSD_REQUIRED=0 → skip+warn
 
 Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 """
@@ -705,6 +708,46 @@ def _flag(args: list[str], name: str, default: str = "") -> str:
     return default
 
 
+# ── gsd-core hard-require assert (Option A borrow seams) ─────────────────────
+# The 4 gsd borrow seams call `gates.py check-gsd` before spawning a gsd
+# capability (plan-checker / verifier / edge-probe / package-legitimacy).
+# Presence marker mirrors setup.sh: gsd-<agent>.md under one of the host agent
+# dirs. Fork A (operator-chosen): absent gsd + GSD_REQUIRED=1 (default) →
+# exit 1 (hard-fail the seam); GSD_REQUIRED=0 → exit 0 + skip warning.
+GSD_PRESENCE_AGENT = "gsd-plan-checker.md"
+
+
+def gsd_agent_path(agent: str = GSD_PRESENCE_AGENT) -> str | None:
+    home = Path.home()
+    for base in (".claude", ".codex", ".agents"):
+        p = home / base / "agents" / agent
+        if p.is_file():
+            return str(p)
+    return None
+
+
+def check_gsd(agent: str = GSD_PRESENCE_AGENT,
+              required: bool | None = None) -> tuple[int, str]:
+    # basename first: an agent arg is a bare filename, never a path — strip any
+    # '../' so '--agent ../../etc/passwd' can't stat() outside the agent dirs
+    # and false-pass the gate on an unrelated existing file.
+    agent = os.path.basename(agent.strip()) or GSD_PRESENCE_AGENT
+    if not agent.endswith(".md"):
+        agent += ".md"
+    if required is None:
+        required = os.environ.get("GSD_REQUIRED", "1") != "0"
+    path = gsd_agent_path(agent)
+    if path:
+        return 0, f"GSD-OK: {path}"
+    if required:
+        return 1, (
+            f"GSD-MISSING: gsd-core not installed (looked for {agent} under "
+            "~/.claude|.codex|.agents/agents/). Install: "
+            "npx @opengsd/gsd-core@latest --claude --global "
+            "(or set GSD_REQUIRED=0 to skip this seam).")
+    return 0, f"GSD-SKIP: {agent} absent, GSD_REQUIRED=0 — seam skipped"
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__, file=sys.stderr)
@@ -907,6 +950,10 @@ def main(argv: list[str]) -> int:
         print(f"PREFLIGHT-STALE-OR-FAILED: {run_id} — re-run "
               f"`gates.py preflight <manifest> --run {run_id}`")
         return 1
+    if cmd == "check-gsd":
+        rc, msg = check_gsd(_flag(args, "--agent", GSD_PRESENCE_AGENT))
+        print(msg)
+        return rc
     if cmd == "analyze":
         with open(args[0]) as f:
             spec = f.read()

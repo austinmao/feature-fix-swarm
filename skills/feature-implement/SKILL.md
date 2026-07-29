@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute tasks.md via ruflo swarm (strict default). Intelligent model routing via hooks_model-route overrides sonnet-default annotations (only the default `sonnet` tier is ever routed; explicit haiku/opus/fable annotations always win). Exact agent delegation uses the hybrid ECC + wshobson catalog via dispatch.py. DAA cognitive pattern selection for thinking:high/max tasks. Fable supported on native Agent path; ruflo path maps host-native tiers to haiku/sonnet/opus coordination tiers (fable itself falls back to sonnet on the ruflo path). RUFLO_REQUIRED=1 (strict default) | 0 (force native) | auto (graceful fallback). Session checkpoint auto-saved; use --resume to continue after context reset."
-version: "1.14.0"
+version: "1.15.0"
 allowed-tools:
   - Read
   - Edit
@@ -95,6 +95,53 @@ all enforced in the loop below:
    `verify-done` rejects caller-recorded evidence (`record-gate`) — only
    runner-executed `run-gate` evidence can flip a checkbox. `record-gate`/`record-red`
    now warn at runtime; they remain available for humans, never for the loop.
+8. **Package-legitimacy pre-install gate (v1.15.0 — gsd borrow).** No task installs
+   an agent-discovered new package without a legitimacy verdict — see the section
+   below.
+
+## Package-legitimacy pre-install gate (v1.15.0 — gsd borrow)
+
+Ported from gsd's Package Legitimacy Gate (a self-contained supply-chain
+technique — `slopcheck` is gsd's OPTIONAL external MIT dep, NOT gsd itself, so
+gsd need not be installed; the gate degrades gracefully without slopcheck). The
+threat is **slopsquatting**: this skill automates the full path from "an agent
+names a package" to "the executor runs `npm install`". ~20% of AI-generated
+package references are hallucinated and ~43% of those names recur — making
+pre-registration of a malicious post-install package economically viable. A
+hallucinated name that passes `npm view` (which proves *registration*, not
+*legitimacy*) would otherwise flow straight through.
+
+**When it fires:** before ANY task executes a package install (`npm|pnpm|yarn
+install/add`, `pip install`, `cargo add`, etc.) of a package **not already
+present** in the repo's manifest (`package.json` deps, `requirements*.txt`,
+`Cargo.toml`) and not explicitly named by the operator. Such a package is
+**agent-discovered → `[ASSUMED]`** (mirrors the `[ASSUMED]`/`[VERIFIED]`/`[CITED]`
+provenance model — `npm view` success does NOT upgrade `[ASSUMED]` to
+`[VERIFIED]`).
+
+**Per new package:**
+1. **Registry existence** (registration only) — ecosystem-specific, never one
+   generic check: `npm view <pkg> version` (Node) · `pip index versions <pkg>`
+   (Python) · `cargo search <pkg>` (Rust). **Absent from the registry →
+   hallucination → BLOCK the install**, surface the task as a checkpoint, never
+   silently substitute a similar name.
+2. **slopcheck verdict (if installed)** — `slopcheck install <pkg> --json` →
+   `OK | SUS | SLOP`. `SLOP` → **hard BLOCK** (always, even in autonomous mode —
+   this is the novel-action floor). `SUS` → checkpoint.
+3. **Gate disposition:**
+   - `SLOP` → hard block + report. Never installable by the loop.
+   - `[ASSUMED]` or `SUS` → operator checkpoint. **Autonomous:**
+     `python3 "$GATES_PY" check-grant "$RUN_ID" --action "install:<pkg>"`;
+     ungranted → `python3 "$GATES_PY" pending "$RUN_ID" --action "install:<pkg>"
+     --reason "unverified agent-discovered package"` and STOP that install path
+     (independent tasks continue; the morning resume is one `grant`). **Attended:**
+     prompt the operator with the registry + slopcheck evidence before installing.
+   - `OK` + already-in-manifest or operator-named → install normally.
+
+**Graceful degradation:** `slopcheck` absent → every agent-discovered new package
+is treated as `[ASSUMED]` and gated with a checkpoint (registry existence check
+still runs). The loop NEVER hard-fails on missing slopcheck — it falls back to
+the checkpoint, matching gsd's own posture.
 
 ## Autonomous mode (v3.18.0 — unattended runs)
 
