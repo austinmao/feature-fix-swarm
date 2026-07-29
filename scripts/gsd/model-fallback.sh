@@ -119,9 +119,11 @@ cfg = json.load(open(config_path))
 for path, original in marker["paths"].items():
     keys = path.split(".")
     d = cfg
+    # A segment addressing a list element is an integer index, not a dict key.
     for k in keys[:-1]:
-        d = d[k]
-    d[keys[-1]] = original
+        d = d[int(k)] if isinstance(d, list) else d[k]
+    last = int(keys[-1]) if isinstance(d, list) else keys[-1]
+    d[last] = original
 json.dump(cfg, open(config_path, "w"), indent=2)
 os.remove(marker_path)
 print(f"restored {len(marker['paths'])} path(s) — marker deleted")
@@ -154,14 +156,18 @@ cfg = json.load(open(config_path))
 # Form-preserving substitution: alias stays alias, full ID stays full ID.
 forms = {"fable": "opus", fable: opus}
 paths = {}
-def sub(d, prefix=""):
-    for k, v in d.items():
-        p = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
+def sub(container, prefix=""):
+    # Walks dicts AND lists. A list value used to fall through to `v in forms`,
+    # which hashes the list -> TypeError, aborting the whole rewrite and leaving
+    # a dead fable pin in place. List elements are addressed by index.
+    items = container.items() if isinstance(container, dict) else enumerate(container)
+    for k, v in items:
+        p = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, (dict, list)):
             sub(v, p)
-        elif v in forms:
+        elif isinstance(v, str) and v in forms:
             paths[p] = v
-            d[k] = forms[v]
+            container[k] = forms[v]
 sub(cfg)
 json.dump(cfg, open(config_path, "w"), indent=2)
 marker = {"mode": mode, "paths": paths}

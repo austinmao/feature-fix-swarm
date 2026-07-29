@@ -148,6 +148,67 @@ JSON
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "opus" ]
 }
 
+@test "FALLBACK-013: fable inside a JSON array is substituted, not a TypeError crash" {
+  # Regression: sub() recursed only into dicts, so a list value fell through to
+  # `v in forms` -> hashing a list -> TypeError. The rewrite aborted entirely and
+  # left a live fable pin in config.json, silently defeating the fallback chain.
+  # Every FALLBACK-001..012 fixture is a flat dict, which is why this shipped green.
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{
+  "model_overrides": { "gsd-planner": "fable" },
+  "review": { "default_reviewers": ["claude-fable-5", "opus", "fable"] },
+  "nested": { "deep": [{ "model": "claude-fable-5" }, ["fable"]] }
+}
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"TypeError"* ]]
+  [[ "$output" == *"(5 override(s) rewritten)"* ]]
+  ! grep -q "fable" "$TMP/.planning/config.json"
+}
+
+@test "FALLBACK-014: array substitution is form-preserving and marker indexes list elements" {
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{
+  "review": { "default_reviewers": ["claude-fable-5", "opus", "fable"] },
+  "nested": { "deep": [{ "model": "claude-fable-5" }, ["fable"]] }
+}
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" bash "$LEVER" "$TMP/.planning" >/dev/null
+  # alias stays alias, full ID stays full ID — even inside arrays
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['review']['default_reviewers'][0])")" = "claude-opus-5" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['review']['default_reviewers'][2])")" = "opus" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['nested']['deep'][1][0])")" = "opus" ]
+  # an untouched non-fable array element must survive verbatim
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['review']['default_reviewers'][1])")" = "opus" ]
+  # list elements are addressed by integer index, including list-inside-list
+  [ "$(python3 -c "import json;p=json.load(open('$TMP/.planning/fable-fallback.json'))['paths'];print('review.default_reviewers.0' in p and 'nested.deep.1.0' in p)")" = "True" ]
+}
+
+@test "FALLBACK-015: recovery round-trips an array-bearing config byte-identical" {
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{
+  "model_overrides": { "gsd-planner": "fable", "gsd-verifier": "opus" },
+  "review": { "default_reviewers": ["claude-fable-5", "opus", "fable"] },
+  "nested": { "deep": [{ "model": "claude-fable-5" }, ["fable"]] }
+}
+JSON
+  python3 -c "import json;json.dump(json.load(open('$TMP/.planning/config.json')),open('$TMP/before.json','w'),indent=2)"
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" bash "$LEVER" "$TMP/.planning" >/dev/null
+
+  rm -f "$GSD_FALLBACK_CACHE/claude-fable-5.status"
+  GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restored 5 path(s) — marker deleted"* ]]
+  [ ! -f "$TMP/.planning/fable-fallback.json" ]
+  run python3 -c "
+import json
+a=json.load(open('$TMP/before.json')); b=json.load(open('$TMP/.planning/config.json'))
+assert a==b, ('restore mismatch', a, b)
+print('ok')"
+  [ "$status" -eq 0 ]
+}
+
 @test "FALLBACK-012: real-CLI probes are wall-clock bounded (dead-CLI hang guard)" {
   # No GSD_MODEL_PROBE_CMD override -> the lever hits its real-CLI branch.
   # Shim claude/codex hang (sleep 30); GSD_MODEL_PROBE_TIMEOUT=1 must reap them
