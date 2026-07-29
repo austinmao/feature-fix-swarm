@@ -1,0 +1,358 @@
+# Instincts generated from https://github.com/austinmao/feature-fix-swarm
+# Generated: 2026-07-29T19:12:46.352Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: feature-fix-swarm-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat
+
+## Evidence
+
+- 1 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat: reconcile the openclaw vendored fork — single source of truth
+
+---
+id: feature-fix-swarm-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Commit Length
+
+## Action
+
+Write moderate-length commit messages (~67 characters)
+
+## Evidence
+
+- Average commit message length: 67 chars
+- Based on 1 commits
+
+---
+id: feature-fix-swarm-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: feature-fix-swarm-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: feature-fix-swarm-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: feature-fix-swarm-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: feature-fix-swarm-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: feature-fix-swarm-instinct-file-naming
+trigger: "When creating a new Python file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct File Naming
+
+## Action
+
+Name the file using camelCase
+
+## Evidence
+
+- Pattern in namingConventions.files: camelCase
+
+---
+id: feature-fix-swarm-instinct-function-naming
+trigger: "When defining a new function in Python"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Function Naming
+
+## Action
+
+Use camelCase for the function name
+
+## Evidence
+
+- Pattern in namingConventions.functions: camelCase
+
+---
+id: feature-fix-swarm-instinct-class-naming
+trigger: "When defining a new class in Python"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Class Naming
+
+## Action
+
+Use PascalCase for the class name
+
+## Evidence
+
+- Pattern in namingConventions.classes: PascalCase
+
+---
+id: feature-fix-swarm-instinct-constant-naming
+trigger: "When defining a constant in Python"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for the constant name
+
+## Evidence
+
+- Pattern in namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: feature-fix-swarm-instinct-import-style
+trigger: "When importing modules in Python"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in importStyle: relative
+
+---
+id: feature-fix-swarm-instinct-export-style
+trigger: "When exporting symbols from a Python module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle: named
+
+---
+id: feature-fix-swarm-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Test Location
+
+## Action
+
+Place test files in the 'tests' folder, separate from source code
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation: separate
+- Common folder: tests
+
+---
+id: feature-fix-swarm-instinct-test-type
+trigger: "When writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Test Type
+
+## Action
+
+Write unit tests
+
+## Evidence
+
+- Pattern in testing.testTypes: unit
+
+---
+id: feature-fix-swarm-instinct-test-pattern
+trigger: "When naming a test file"
+confidence: 0.6
+domain: testing
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Test Pattern
+
+## Action
+
+Use the '*.test.ts' pattern for test file names
+
+## Evidence
+
+- Pattern in testing.filePattern: *.test.ts
+
+---
+id: feature-fix-swarm-instinct-git-commit-format
+trigger: "When making a git commit"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Git Commit Format
+
+## Action
+
+Use the conventional commit format with 'feat' prefix for features
+
+## Evidence
+
+- Pattern in commits.prefixes: feat
+- Example: 'feat: reconcile the openclaw vendored fork — single source of truth'
+
+---
+id: feature-fix-swarm-instinct-git-commit-length
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: austinmao/feature-fix-swarm
+---
+
+# Feature Fix Swarm Instinct Git Commit Length
+
+## Action
+
+Keep the commit message around 67 characters on average
+
+## Evidence
+
+- Pattern in commits.averageLength: 67
+
