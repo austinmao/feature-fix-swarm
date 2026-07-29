@@ -512,7 +512,7 @@ install_gsd_surfaces || echo "  WARN: one or more GSD host surfaces failed to re
 # symlinks and was the other half of the host leak.
 for SKILLS_DIR in "$HOME/.claude/skills" "${CODEX_HOME:-$HOME/.codex}/skills"; do
   echo "Installing skills to $SKILLS_DIR/..."
-  for skill in fix feature-implement feature feature-spec spec-decompose plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant task-swarm code-uplift testing-policy; do
+  for skill in fix feature-implement feature feature-spec spec-decompose spec-status plan-decompose review-gate goal-wrap verify-review adopt-wip preflight autonomy-grant task-swarm code-uplift testing-policy; do
     TARGET="$SKILLS_DIR/$skill/SKILL.md"
     if [ -f "$TARGET" ] && [ "$SETUP_YES" != "1" ]; then
       read -p "  $TARGET exists. Overwrite? [y/N] " -n 1 -r
@@ -521,6 +521,12 @@ for SKILLS_DIR in "$HOME/.claude/skills" "${CODEX_HOME:-$HOME/.codex}/skills"; d
     fi
     mkdir -p "$SKILLS_DIR/$skill"
     cp "$SCRIPT_DIR/skills/$skill/SKILL.md" "$TARGET"
+    # Skills that ship helper scripts (spec-status) reference them relative to
+    # their own dir, so a SKILL.md-only copy installs a skill that cannot run.
+    if [ -d "$SCRIPT_DIR/skills/$skill/scripts" ]; then
+      rm -rf "$SKILLS_DIR/$skill/scripts"
+      cp -R "$SCRIPT_DIR/skills/$skill/scripts" "$SKILLS_DIR/$skill/scripts"
+    fi
     echo "  Installed $TARGET"
   done
 
