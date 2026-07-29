@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import time
 from pathlib import Path
@@ -66,10 +67,34 @@ SOFT_404_RE = re.compile("|".join(SOFT_404_PATTERNS), re.IGNORECASE)
 IMAGE_MAGIC_PREFIXES = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF")
 
 
-def _check_scenario(sc, idx, now, max_age_min, allow_re):
+def _is_real_int(value):
+    """JSON integer, excluding bool (a Python int subclass)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_nonempty_string(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _check_scenario(
+    sc,
+    idx,
+    now,
+    max_age_min,
+    allow_re,
+    artifact_root=None,
+    require_relative_screenshot=False,
+):
     """Return findings for one scenario dict."""
     findings = []
-    sid = sc.get("id") or f"scenario[{idx}]"
+    fallback_sid = f"scenario[{idx}]"
+    if not isinstance(sc, dict):
+        return [f"{fallback_sid}: scenario must be an object, got {type(sc).__name__}"]
+
+    raw_sid = sc.get("id")
+    sid = raw_sid if _is_nonempty_string(raw_sid) else fallback_sid
+    if not _is_nonempty_string(raw_sid):
+        findings.append(f"{fallback_sid}: id must be a non-empty string")
 
     kind = sc.get("kind")
     if kind not in VALID_KINDS:
@@ -80,54 +105,105 @@ def _check_scenario(sc, idx, now, max_age_min, allow_re):
         findings.append(f"{sid}: status is {status!r} (must be 'pass')")
 
     # -- curl-200 defense: a positive content assertion is mandatory
-    if not sc.get("content_assert"):
-        findings.append(f"{sid}: content_assert missing/empty — HTTP status alone "
-                        "is never proof; assert visible content")
+    content_assert = sc.get("content_assert")
+    if not _is_nonempty_string(content_assert):
+        findings.append(f"{sid}: content_assert must be a non-empty string — "
+                        "HTTP status alone is never proof; assert visible content")
     dom = sc.get("dom_excerpt")
-    if not dom:
-        findings.append(f"{sid}: dom_excerpt missing — capture rendered DOM text")
+    if not _is_nonempty_string(dom):
+        findings.append(f"{sid}: dom_excerpt must be a non-empty string — "
+                        "capture rendered DOM text")
     else:
         m = SOFT_404_RE.search(dom)
         if m:
             findings.append(f"{sid}: soft-404 marker in rendered DOM: {m.group(0)!r}")
 
-    http_status = sc.get("http_status")
-    if isinstance(http_status, int) and http_status >= 400:
-        findings.append(f"{sid}: http_status {http_status}")
+    if "http_status" in sc:
+        http_status = sc["http_status"]
+        if not _is_real_int(http_status):
+            findings.append(f"{sid}: http_status must be an integer when present")
+        elif http_status >= 400:
+            findings.append(f"{sid}: http_status {http_status}")
 
     # -- wrong-page defense: final URL after redirects must be recorded
     url_final = sc.get("url_final")
-    if not url_final:
-        findings.append(f"{sid}: url_final missing — record page.url() after "
-                        "redirects so the screenshot provably shows this page")
+    if not _is_nonempty_string(url_final):
+        findings.append(f"{sid}: url_final must be a non-empty string — record "
+                        "page.url() after redirects so the screenshot provably "
+                        "shows this page")
     else:
         expect = sc.get("expect_url")
-        if expect and expect not in url_final:
+        if expect is not None and not isinstance(expect, str):
+            findings.append(f"{sid}: expect_url must be a string when present")
+        elif expect and expect not in url_final:
             findings.append(f"{sid}: url_final {url_final!r} does not contain "
                             f"expect_url {expect!r} (wrong page?)")
 
     # -- hydration defense: console must have been read, and be clean
     console = sc.get("console_errors")
-    if console is None:
-        findings.append(f"{sid}: console_errors field missing — absence means "
+    if not isinstance(console, list):
+        findings.append(f"{sid}: console_errors must be a list — absence means "
                         "'nobody looked', not 'zero errors'")
     else:
-        real = [e for e in console if not (allow_re and allow_re.search(str(e)))]
-        if real:
-            findings.append(f"{sid}: console errors present: {real[:3]}")
+        if any(not isinstance(error, str) for error in console):
+            findings.append(f"{sid}: console_errors entries must be strings")
+        else:
+            real = [
+                error
+                for error in console
+                if not (allow_re and allow_re.search(error))
+            ]
+            if real:
+                findings.append(f"{sid}: console errors present: {real[:3]}")
 
     # -- alive defense: functional scenarios must interact unless declared static
-    if kind == "functional" and not sc.get("static"):
-        if not isinstance(sc.get("interactions"), int) or sc["interactions"] < 1:
-            findings.append(f"{sid}: functional scenario with no interactions — "
-                            "click/fill something or declare \"static\": true")
+    static = sc.get("static", False)
+    if "static" in sc and not isinstance(static, bool):
+        findings.append(f"{sid}: static must be a boolean when present")
+    if (
+        kind == "functional"
+        and static is not True
+        and (not _is_real_int(sc.get("interactions")) or sc["interactions"] < 1)
+    ):
+        findings.append(f"{sid}: functional scenario interactions must be an "
+                        "integer >= 1 — click/fill something or declare "
+                        "\"static\": true")
 
     # -- artifact defense: screenshot must exist, be non-empty, and be fresh
     shot = sc.get("screenshot")
-    if not shot:
-        findings.append(f"{sid}: screenshot path missing")
+    if not _is_nonempty_string(shot):
+        findings.append(f"{sid}: screenshot must be a non-empty string path")
     else:
         p = Path(shot).expanduser()
+        if require_relative_screenshot and p.is_absolute():
+            findings.append(
+                f"{sid}: Canary screenshot must be a relative locator rooted "
+                f"inside its session: {shot}"
+            )
+            return findings
+        if artifact_root is not None and not p.is_absolute():
+            if ".." in p.parts:
+                findings.append(f"{sid}: screenshot relative locator escapes Canary session: {shot}")
+                return findings
+            root = artifact_root.resolve()
+            unresolved = root / p
+            cursor = root
+            has_symlink = False
+            for part in p.parts:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    has_symlink = True
+                    break
+            try:
+                resolved = unresolved.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                findings.append(f"{sid}: screenshot escapes or is missing from Canary session: {shot}")
+                return findings
+            if has_symlink:
+                findings.append(f"{sid}: screenshot locator contains a symlink: {shot}")
+                return findings
+            p = resolved
         if not p.is_file():
             findings.append(f"{sid}: screenshot not found: {shot}")
         elif p.stat().st_size == 0:
@@ -146,29 +222,154 @@ def _check_scenario(sc, idx, now, max_age_min, allow_re):
     return findings
 
 
-def _cross_check_canary(proof, findings):
+def _resolve_canary_session(session, *, strict=False):
+    """Resolve a value-free session id without following a symlink boundary."""
+    if isinstance(session, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,159}", session):
+        home = Path.home()
+        cursor = home
+        for part in (".canary", "sessions", session):
+            cursor = cursor / part
+            if cursor.is_symlink():
+                return None, f"canary session boundary contains a symlink: {cursor}"
+        return cursor, None
+    if strict:
+        return None, (
+            "strict Canary proof requires a canonical session id under "
+            "~/.canary/sessions (absolute and relative session paths are rejected)"
+        )
+    if not isinstance(session, (str, os.PathLike)):
+        return None, "canary_session must be a session id or filesystem path"
+    path = Path(session).expanduser()
+    if path.is_symlink():
+        return None, f"canary session path is a symlink: {path}"
+    return path, None
+
+
+def _canary_step_scenario_id(step, scenario_ids):
+    """Return the unique proof scenario ID named by a Canary result step."""
+    for field in ("scenarioId", "scenario_id", "id"):
+        explicit = step.get(field)
+        if isinstance(explicit, str) and explicit:
+            return explicit if explicit in scenario_ids else None
+    name = step.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    matches = [
+        scenario_id
+        for scenario_id in scenario_ids
+        if name == scenario_id
+        or re.match(rf"^{re.escape(scenario_id)}(?:[-_.:]|$)", name)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _cross_check_canary(proof, findings, *, strict=False):
     """driver=canary: session results.json must exist and agree."""
     session = proof.get("canary_session")
     if not session:
         findings.append("canary driver requires canary_session path "
                         "(~/.canary/sessions/<id>)")
         return
-    results = Path(session).expanduser() / "results.json"
+    session_dir, session_error = _resolve_canary_session(session, strict=strict)
+    if session_error:
+        findings.append(session_error)
+        return
+    results = session_dir / "results.json"
+    if results.is_symlink():
+        findings.append(f"canary results.json must not be a symlink: {results}")
+        return
     if not results.is_file():
         findings.append(f"canary results.json not found: {results}")
         return
     try:
-        data = json.loads(results.read_text())
+        resolved_session = session_dir.resolve(strict=True)
+        resolved_results = results.resolve(strict=True)
+        resolved_results.relative_to(resolved_session)
+    except (OSError, ValueError):
+        findings.append(
+            f"canary results.json must be a regular file inside its session: {results}"
+        )
+        return
+    descriptor = None
+    try:
+        descriptor = os.open(
+            resolved_results,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            findings.append(f"canary results.json is not a regular file: {results}")
+            return
+        with os.fdopen(descriptor, encoding="utf-8") as results_file:
+            descriptor = None
+            data = json.load(results_file)
     except (OSError, json.JSONDecodeError) as e:
         findings.append(f"canary results.json unreadable: {e}")
         return
-    steps = data.get("steps") or []
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if not isinstance(data, dict):
+        findings.append("canary results.json must contain an object")
+        return
+    steps = data.get("steps")
+    if not isinstance(steps, list):
+        findings.append("canary results.json steps must be a list")
+        return
     if not steps:
         findings.append("canary results.json has no steps")
+        return
+    proof_scenarios = proof.get("scenarios") or []
+    proof_scenario_ids = [
+        scenario.get("id")
+        for scenario in proof_scenarios
+        if isinstance(scenario, dict) and isinstance(scenario.get("id"), str)
+    ]
+    duplicate_scenario_ids = {
+        scenario_id
+        for scenario_id in proof_scenario_ids
+        if proof_scenario_ids.count(scenario_id) > 1
+    }
+    for scenario_id in sorted(duplicate_scenario_ids):
+        findings.append(
+            f"{scenario_id}: duplicate proof scenario ID cannot bind one-to-one "
+            "to Canary results"
+        )
+    proof_by_id = {
+        scenario.get("id"): scenario
+        for scenario in proof_scenarios
+        if isinstance(scenario, dict) and isinstance(scenario.get("id"), str)
+    }
+    bound_steps = {}
     for step in steps:
+        if not isinstance(step, dict):
+            findings.append("canary results.json contains a non-object step")
+            continue
         if step.get("status") not in ("pass", "passed", "ok"):
             findings.append(f"canary step failed: {step.get('name')} "
                             f"(status={step.get('status')!r})")
+        scenario_id = _canary_step_scenario_id(step, set(proof_by_id))
+        if scenario_id is None:
+            findings.append(
+                f"canary step is unbound to a proof scenario: {step.get('name')!r}"
+            )
+            continue
+        if scenario_id in bound_steps:
+            findings.append(
+                f"{scenario_id}: multiple Canary result steps bind to one proof scenario"
+            )
+            continue
+        bound_steps[scenario_id] = step
+        proof_status = proof_by_id[scenario_id].get("status")
+        step_status = "pass" if step.get("status") in ("pass", "passed", "ok") else step.get("status")
+        if proof_status != step_status:
+            findings.append(
+                f"{scenario_id}: proof status {proof_status!r} does not match "
+                f"Canary step status {step.get('status')!r}"
+            )
+    for scenario_id in sorted(set(proof_by_id) - set(bound_steps)):
+        findings.append(
+            f"{scenario_id}: no matching Canary results.json step"
+        )
 
 
 def _cross_check_playwright(proof, findings, now, max_age_min):
@@ -181,6 +382,9 @@ def _cross_check_playwright(proof, findings, now, max_age_min):
     if not art:
         findings.append("playwright driver requires playwright_artifact "
                         "(trace.zip / results.json / report file from the run)")
+        return
+    if not isinstance(art, (str, os.PathLike)):
+        findings.append("playwright_artifact must be a filesystem path")
         return
     p = Path(art).expanduser()
     if not p.is_file():
@@ -238,14 +442,18 @@ def _check_coverage(proof, scenarios_md, findings, kind="all"):
     a functional flow "visual" to dodge the interactions check is caught."""
     try:
         text = Path(scenarios_md).expanduser().read_text()
-    except OSError:
+    except (OSError, TypeError):
         findings.append(f"scenarios source not found: {scenarios_md}")
         return
     source = _parse_scenarios_md(text)
     source_kind = {sid: k for sid, _title, k in source}
     bundle_ids = set()
     for sc in proof.get("scenarios", []):
+        if not isinstance(sc, dict):
+            continue
         sid = sc.get("id")
+        if not isinstance(sid, str):
+            continue
         bundle_ids.add(sid)
         want = source_kind.get(sid)
         if want and sc.get("kind", "functional") != want:
@@ -271,6 +479,8 @@ def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
         proof = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError) as e:
         return False, [f"proof file unreadable: {e}"]
+    if not isinstance(proof, dict):
+        return False, ["proof file must contain an object"]
 
     driver = proof.get("driver")
     if driver not in VALID_DRIVERS:
@@ -280,17 +490,36 @@ def verify_proof(path, strict=False, max_age_min=DEFAULT_MAX_AGE_MIN,
                         "evidence tier) — use canary or playwright")
 
     scenarios = proof.get("scenarios")
+    if not isinstance(scenarios, list):
+        findings.append("scenarios must be a list")
+        return False, findings
     if not scenarios:
         findings.append("no scenarios — empty bundle proves nothing")
         return False, findings
 
     allow_re = re.compile(allow_console) if allow_console else None
     now = time.time()
+    artifact_root = None
+    session = proof.get("canary_session")
+    if driver == "canary" and session:
+        resolved_session, session_error = _resolve_canary_session(session, strict=strict)
+        if session_error is None:
+            artifact_root = resolved_session
     for i, sc in enumerate(scenarios):
-        findings.extend(_check_scenario(sc, i, now, max_age_min, allow_re))
+        findings.extend(
+            _check_scenario(
+                sc,
+                i,
+                now,
+                max_age_min,
+                allow_re,
+                artifact_root,
+                require_relative_screenshot=driver == "canary",
+            )
+        )
 
     if driver == "canary":
-        _cross_check_canary(proof, findings)
+        _cross_check_canary(proof, findings, strict=strict)
     elif driver == "playwright":
         _cross_check_playwright(proof, findings, now, max_age_min)
 

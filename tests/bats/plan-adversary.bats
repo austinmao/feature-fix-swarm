@@ -7,6 +7,16 @@
 
 SCRIPT="scripts/gsd/plan-adversary.sh"
 
+# Blocking negative assertion. A bare `! grep ...` is EXEMPT from `set -e`
+# (bash never errexits on a negated command) unless it is the LAST command in
+# the test body -- every earlier one is vacuous. This helper ends in a plain
+# `[ ... ]`, which errexit does see, so it fails the test wherever it appears.
+refute_bre() { # refute_bre <bre-pattern> <file>
+  local count
+  count="$(grep -c -- "$1" "$2" || true)"
+  [ "$count" -eq 0 ]
+}
+
 setup() {
   cd "$BATS_TEST_DIRNAME/../.."
   # Hermeticity: default-kind tests assume no host is detected. Unset so a
@@ -117,7 +127,7 @@ JSON
   grep -q '^## Adversarial plan review (gpt-5.6-sol xhigh)$' "$HIGH"
   grep -q '^HIGH: plan assumes withTenantRls' "$HIGH"
   # prompt-echo line (mid-line severity words) must NOT be captured
-  ! grep -q 'echoing prompt' "$HIGH"
+  refute_bre 'echoing prompt' "$HIGH"
   # frontmatter still opens the file and closes
   [ "$(head -1 "$HIGH")" = "---" ]
   [ "$(sed -n '4p' "$HIGH")" = "---" ]
@@ -158,7 +168,7 @@ EOF
     run bash "$SCRIPT" "$HIGH"
 
   [ "$status" -eq 0 ]
-  ! grep -q 'POISON-HISTORY-MUST-NOT-BE-PROMPTED' "$PROMPT_LOG"
+  refute_bre 'POISON-HISTORY-MUST-NOT-BE-PROMPTED' "$PROMPT_LOG"
   grep -q 'Add RLS policies' "$PROMPT_LOG"
 }
 

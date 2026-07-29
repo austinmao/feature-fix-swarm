@@ -81,7 +81,7 @@ setup() {
 }
 
 @test "INT-001: version bumped to 1.8.1" {
-grep -F 'version: "1.8.1"' skills/review-gate/SKILL.md
+  grep -F 'version: "1.8.1"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

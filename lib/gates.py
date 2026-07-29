@@ -635,6 +635,7 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
         return False
     if not math.isfinite(ttl_hours) or not 0 < ttl_hours <= GRANT_MAX_TTL_HOURS:
         return False  # inf/0/negative/absurd TTL = effectively non-expiring
+    clean_reason = sanitize_reason(reason) if isinstance(reason, str) else ""
     granted_at = _now()
     with _StoreLock(store):
         data = _load_store(store)
@@ -646,8 +647,8 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
                 "expires_at": granted_at + ttl_hours * 3600,
                 "granted_by": granted_by,
             }
-            if reason:
-                entry["reason"] = sanitize_reason(reason)
+            if clean_reason.strip():
+                entry["reason"] = clean_reason
             grants[a] = entry
         # a grant resolves any matching pending record
         auto["pending"] = [p for p in auto.get("pending", [])
@@ -755,6 +756,37 @@ def record_promotion(store: Path, run_id: str, *, from_env: str, to_env: str,
     return True
 
 
+def _valid_promotion_record(data: dict, rec) -> bool:
+    """Revalidate a persisted promotion before it can authorize a read.
+
+    The ledger is an anti-accident authority, so a partially written or
+    manually corrupted record must never become more permissive than the
+    record_promotion write path. Require the immutable artifact, runner-bound
+    evidence, and bounded timestamp envelope again on every read.
+    """
+    import math
+    if not isinstance(rec, dict):
+        return False
+    artifact = rec.get("artifact")
+    evidence_ids = rec.get("evidence_ids")
+    recorded_at = rec.get("recorded_at")
+    expires_at = rec.get("expires_at")
+    if (not _valid_artifact(artifact)
+            or not isinstance(evidence_ids, list)
+            or not evidence_ids
+            or any(not isinstance(eid, str) or not eid for eid in evidence_ids)
+            or isinstance(recorded_at, bool)
+            or not isinstance(recorded_at, (int, float))
+            or not math.isfinite(recorded_at)
+            or isinstance(expires_at, bool)
+            or not isinstance(expires_at, (int, float))
+            or not math.isfinite(expires_at)
+            or expires_at <= recorded_at
+            or expires_at - recorded_at > GRANT_MAX_TTL_HOURS * 3600):
+        return False
+    return _evidence_resolves(data, evidence_ids, artifact)
+
+
 def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
                     artifact, now: float | None = None) -> bool:
     """Fail-closed read (mirrors check_grant): True ONLY for an exact,
@@ -763,8 +795,10 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
     (non-dict top level, non-list run entry, non-dict record, missing/
     non-numeric/non-finite expiry) returns False without raising, crashing,
     or writing — pure read, same posture as check_grant/check_preflight."""
-    import math
-    promotions = _load_store(store).get("_promotions")
+    if not _valid_artifact(artifact):
+        return False
+    data = _load_store(store)
+    promotions = data.get("_promotions")
     if not isinstance(promotions, dict):
         return False
     records = promotions.get(run_id)
@@ -772,7 +806,7 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
         return False
     effective_now = now if now is not None else _now()
     for rec in records:
-        if not isinstance(rec, dict):
+        if not _valid_promotion_record(data, rec):
             continue
         if rec.get("to_env") != to_env:
             continue
@@ -782,10 +816,7 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
             continue
         if rec.get("artifact") != artifact:
             continue
-        exp = rec.get("expires_at")
-        if not isinstance(exp, (int, float)) or not math.isfinite(exp):
-            continue
-        if effective_now < exp:
+        if effective_now < rec["expires_at"]:
             return True
     return False
 
@@ -805,6 +836,24 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
 # see the threat register (T-01-03), not a bug to "fix" here.
 PROD_ACTION_PREFIXES = ("deploy:prod-", "flip:prod-", "migrate:prod-")
 PROD_ACTION_TYPES = ("deploy", "flip", "migrate")
+
+
+def _hotfix_prod_surface(action: str) -> str | None:
+    """Return a production hotfix surface, including guarded variants.
+
+    Any spelling that clearly targets prod must route through the reasoned,
+    audited hotfix path instead of falling through ordinary check_grant.
+    Empty strings identify production-looking actions with no surface so the
+    caller can refuse them rather than treating them as non-production.
+    """
+    folded = action.casefold()
+    for prefix in ("hotfix:prod-", "hotfix:prod_",
+                   "hotfix:production-", "hotfix:production_"):
+        if folded.startswith(prefix):
+            return action[len(prefix):]
+    if folded in ("hotfix:prod", "hotfix:production"):
+        return ""
+    return None
 
 
 def _prod_surface(action: str) -> str | None:
@@ -859,8 +908,8 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
     prod->prod record is invisible here too (adversary CRITICAL #2, mirrors
     check_promotion's own from_env guard), so it always falls through to
     NO-PROMOTE-EVIDENCE rather than being misread as a mismatch/expiry."""
-    import math
-    promotions = _load_store(store).get("_promotions")
+    data = _load_store(store)
+    promotions = data.get("_promotions")
     if not isinstance(promotions, dict):
         return "NO-PROMOTE-EVIDENCE"
     records = promotions.get(run_id)
@@ -870,7 +919,7 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
     surface_matches = False
     artifact_match_expired = False
     for rec in records:
-        if not isinstance(rec, dict):
+        if not _valid_promotion_record(data, rec):
             continue
         if rec.get("to_env") != "prod" or rec.get("from_env") != "staging":
             continue
@@ -879,10 +928,7 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
         surface_matches = True
         if rec.get("artifact") != artifact:
             continue
-        exp = rec.get("expires_at")
-        if not isinstance(exp, (int, float)) or not math.isfinite(exp):
-            continue
-        if effective_now >= exp:
+        if effective_now >= rec["expires_at"]:
             artifact_match_expired = True
     if artifact_match_expired:
         return "PROMOTE-EXPIRED"
@@ -908,7 +954,7 @@ def _check_hotfix_bypass(store: Path, run_id: str, action: str,
     entry = (_load_store(store).get("_autonomy", {})
              .get(run_id, {}).get("grants", {}).get(action)) or {}
     reason = entry.get("reason")
-    if not reason:
+    if not isinstance(reason, str) or not reason.strip():
         record_pending(store, run_id, action,
                        "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
                        "grant carrying a non-empty --reason")
@@ -949,7 +995,13 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
     (REQ-07/EDGE-004) — routed to _check_hotfix_bypass BEFORE the ordinary
     prod-prefix dispatch, since 'hotfix:prod-' is not in PROD_ACTION_PREFIXES
     and never requires promote evidence."""
-    if action.startswith("hotfix:prod-"):
+    hotfix_surface = _hotfix_prod_surface(action)
+    if hotfix_surface is not None:
+        if not hotfix_surface:
+            record_pending(store, run_id, action,
+                           "NO-HOTFIX-GRANT: production hotfix requires a "
+                           "non-empty target surface")
+            return False
         return _check_hotfix_bypass(store, run_id, action, now=now)
 
     surface = _prod_surface(action)
@@ -1532,7 +1584,8 @@ def main(argv: list[str]) -> int:
     if cmd == "check-grant":
         run_id, action = args[0], _flag(args, "--action")
         safe = sanitize_reason(action)
-        if action.startswith("hotfix:prod-"):
+        hotfix_surface = _hotfix_prod_surface(action)
+        if hotfix_surface is not None:
             if check_grant_prod(store, run_id, action, None):
                 entry = (_load_store(store).get("_autonomy", {})
                         .get(run_id, {}).get("grants", {}).get(action)) or {}

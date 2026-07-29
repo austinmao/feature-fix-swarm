@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import runtime_proof as rp  # noqa: E402
+import runtime_proof as rp
 
 MODULE = Path(__file__).resolve().parents[1] / "runtime_proof.py"
 
@@ -111,7 +111,7 @@ def test_missing_file_fails(tmp_path):
 def test_invalid_json_fails(tmp_path):
     p = tmp_path / "proof.json"
     p.write_text("{not json")
-    ok, findings = verify(p)
+    ok, _findings = verify(p)
     assert not ok
 
 
@@ -122,14 +122,118 @@ def test_empty_scenarios_fails(tmp_path):
 
 
 def test_unknown_driver_fails(tmp_path):
-    ok, findings = verify(good_proof(tmp_path, driver="curl"))
+    ok, _findings = verify(good_proof(tmp_path, driver="curl"))
     assert not ok
 
 
 def test_unfilled_skeleton_rejected(tmp_path):
     sc = good_scenario(tmp_path, status="UNFILLED")
-    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+    ok, _findings = verify(good_proof(tmp_path, scenarios=[sc]))
     assert not ok
+
+
+@pytest.mark.parametrize("scenario", [None, "not-an-object", 7, True, []])
+def test_scenario_must_be_an_object_without_crashing(tmp_path, scenario):
+    ok, findings = verify(good_proof(tmp_path, scenarios=[scenario]))
+
+    assert not ok
+    assert any("scenario[0]" in finding and "object" in finding
+               for finding in findings)
+
+
+@pytest.mark.parametrize("scenarios", [{"id": "US1-S1"}, "not-a-list", 7, True])
+def test_scenarios_must_be_a_list_without_crashing(tmp_path, scenarios):
+    ok, findings = verify(good_proof(tmp_path, scenarios=scenarios))
+
+    assert not ok
+    assert any("scenarios" in finding and "list" in finding for finding in findings)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", ""),
+        ("id", 7),
+        ("content_assert", 7),
+        ("content_assert", ""),
+        ("dom_excerpt", 7),
+        ("dom_excerpt", ""),
+        ("url_final", 7),
+        ("url_final", ""),
+        ("screenshot", 7),
+        ("screenshot", ""),
+    ],
+)
+def test_required_scenario_strings_are_nonempty_strings(tmp_path, field, value):
+    sc = good_scenario(tmp_path, **{field: value})
+
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+
+    assert not ok
+    assert any(field in finding and "non-empty string" in finding
+               for finding in findings)
+
+
+@pytest.mark.parametrize("console_errors", ["", "TypeError", {}, 7, True])
+def test_console_errors_must_be_a_list_without_crashing(tmp_path, console_errors):
+    sc = good_scenario(tmp_path, console_errors=console_errors)
+
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+
+    assert not ok
+    assert any("console_errors" in finding and "list" in finding
+               for finding in findings)
+
+
+def test_console_error_entries_must_be_strings(tmp_path):
+    sc = good_scenario(tmp_path, console_errors=[{"message": "boom"}])
+
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+
+    assert not ok
+    assert any("console_errors" in finding and "strings" in finding
+               for finding in findings)
+
+
+@pytest.mark.parametrize("interactions", [True, False, 1.0, "1", 0, -1])
+def test_functional_interactions_must_be_positive_real_integer(tmp_path, interactions):
+    sc = good_scenario(tmp_path, interactions=interactions)
+
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+
+    assert not ok
+    assert any("interactions" in finding for finding in findings)
+
+
+@pytest.mark.parametrize("static", ["true", 1, 0, None, [], {}])
+def test_static_must_be_boolean_when_present(tmp_path, static):
+    sc = good_scenario(tmp_path, static=static)
+
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+
+    assert not ok
+    assert any("static" in finding and "boolean" in finding for finding in findings)
+
+
+@pytest.mark.parametrize("http_status", [True, False, 200.0, "200", None, [], {}])
+def test_http_status_must_be_real_integer_when_present(tmp_path, http_status):
+    sc = good_scenario(tmp_path, http_status=http_status)
+
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+
+    assert not ok
+    assert any("http_status" in finding and "integer" in finding
+               for finding in findings)
+
+
+def test_malformed_optional_expect_url_yields_finding_instead_of_crashing(tmp_path):
+    sc = good_scenario(tmp_path, expect_url={"path": "/dashboard"})
+
+    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+
+    assert not ok
+    assert any("expect_url" in finding and "string" in finding
+               for finding in findings)
 
 
 # ---------------------------------------------------------------- verdicts
@@ -214,7 +318,7 @@ def test_url_final_mismatch_fails(tmp_path):
 def test_missing_url_final_fails(tmp_path):
     sc = good_scenario(tmp_path)
     del sc["url_final"]
-    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+    ok, _findings = verify(good_proof(tmp_path, scenarios=[sc]))
     assert not ok
 
 
@@ -257,7 +361,7 @@ def test_missing_console_errors_field_fails(tmp_path):
     # absence of the field means "nobody looked" — not the same as zero errors
     sc = good_scenario(tmp_path)
     del sc["console_errors"]
-    ok, findings = verify(good_proof(tmp_path, scenarios=[sc]))
+    ok, _findings = verify(good_proof(tmp_path, scenarios=[sc]))
     assert not ok
 
 
@@ -308,14 +412,160 @@ def test_strict_rejects_agent_driver(tmp_path):
     assert any("strict" in f.lower() or "agent" in f.lower() for f in findings)
 
 
-def test_strict_accepts_canary_driver(tmp_path):
-    session = tmp_path / "session"
+def test_strict_accepts_canonical_canary_session_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "runtime-proof-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot="scenario.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+    ok, findings = verify(p, strict=True)
+    assert ok, findings
+
+
+def test_strict_canary_rejects_arbitrary_absolute_session_path(tmp_path):
+    session = tmp_path / "attacker-controlled-session"
     session.mkdir()
     (session / "results.json").write_text(json.dumps(
         {"steps": [{"name": "US1-S1", "status": "pass"}]}))
     p = good_proof(tmp_path, driver="canary", canary_session=str(session))
     ok, findings = verify(p, strict=True)
+    assert not ok
+    assert any("session id" in finding.lower() for finding in findings)
+
+
+def test_canary_rejects_absolute_screenshot_even_inside_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "absolute-screenshot-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    shot = make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot=str(shot))
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+    ok, findings = verify(p, strict=True)
+    assert not ok
+    assert any("relative" in finding.lower() for finding in findings)
+
+
+def test_canary_session_id_resolves_relative_artifacts_without_absolute_proof_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "spec299-fixture-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    shot = make_screenshot(session, "generated.png")
+    sc = good_scenario(tmp_path, screenshot=shot.name)
+    p = good_proof(tmp_path, driver="canary", canary_session=session_id, scenarios=[sc])
+    ok, findings = verify(p, strict=True)
     assert ok, findings
+
+
+def test_canary_relative_screenshot_rejects_symlink_escape(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "spec299-symlink-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    outside = make_screenshot(tmp_path, "outside.png")
+    (session / "escaped.png").symlink_to(outside)
+    sc = good_scenario(tmp_path, screenshot="escaped.png")
+    p = good_proof(tmp_path, driver="canary", canary_session=session_id, scenarios=[sc])
+    ok, findings = verify(p, strict=True)
+    assert not ok
+    assert any("symlink" in finding.lower() or "escapes" in finding.lower() for finding in findings)
+
+
+def test_canary_session_id_rejects_symlinked_session_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "spec299-session-root-link"
+    sessions = tmp_path / ".canary" / "sessions"
+    sessions.mkdir(parents=True)
+    outside = tmp_path / "outside-session"
+    outside.mkdir()
+    (outside / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    make_screenshot(outside, "shot.png")
+    (sessions / session_id).symlink_to(outside, target_is_directory=True)
+    sc = good_scenario(tmp_path, screenshot="shot.png")
+    p = good_proof(tmp_path, driver="canary", canary_session=session_id, scenarios=[sc])
+    ok, findings = verify(p, strict=True)
+    assert not ok
+    assert any("session" in finding.lower() and "symlink" in finding.lower() for finding in findings)
+
+
+def test_strict_canary_rejects_symlinked_results_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "spec299-results-link"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    outside = tmp_path / "outside-results.json"
+    outside.write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    (session / "results.json").symlink_to(outside)
+    make_screenshot(session, "shot.png")
+    scenario = good_scenario(tmp_path, screenshot="shot.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+
+    ok, findings = verify(p, strict=True)
+
+    assert not ok
+    assert any("results.json" in finding and "symlink" in finding.lower()
+               for finding in findings)
+
+
+@pytest.mark.parametrize("symlinked_boundary", [".canary", "sessions"])
+def test_canary_session_id_rejects_symlinked_canonical_root_boundary(
+    tmp_path, monkeypatch, symlinked_boundary,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    outside = tmp_path / "outside-root"
+    outside.mkdir()
+    if symlinked_boundary == ".canary":
+        (tmp_path / ".canary").symlink_to(outside, target_is_directory=True)
+    else:
+        canary_root = tmp_path / ".canary"
+        canary_root.mkdir()
+        (canary_root / "sessions").symlink_to(outside, target_is_directory=True)
+    session_id = "spec299-boundary-link"
+    session = outside / session_id
+    session.mkdir()
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    make_screenshot(session, "shot.png")
+    scenario = good_scenario(tmp_path, screenshot="shot.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+
+    ok, findings = verify(p, strict=True)
+
+    assert not ok
+    assert any("boundary" in finding.lower() and "symlink" in finding.lower() for finding in findings)
 
 
 # ---------------------------------------------------------------- canary cross-check
@@ -337,6 +587,169 @@ def test_canary_failed_step_fails_bundle(tmp_path):
     ok, findings = verify(p)
     assert not ok
     assert any("US1-S2" in f for f in findings)
+
+
+def test_canary_results_must_cover_each_proof_scenario_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "scenario-binding-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "UNRELATED-S1", "status": "pass"}]}))
+    make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot="scenario.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+    ok, findings = verify(p, strict=True)
+    assert not ok
+    assert any("US1-S1" in finding and "step" in finding.lower() for finding in findings)
+
+
+def test_canary_results_reject_unbound_extra_step(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "extra-step-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps({"steps": [
+        {"name": "US1-S1-recorded", "status": "pass"},
+        {"name": "US9-S9-unbound", "status": "pass"},
+    ]}))
+    make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot="scenario.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+    ok, findings = verify(p, strict=True)
+    assert not ok
+    assert any("US9-S9-unbound" in finding and "unbound" in finding.lower() for finding in findings)
+
+
+def test_canary_results_reject_duplicate_proof_scenario_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "duplicate-scenario-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1-recorded", "status": "pass"}]}))
+    make_screenshot(session, "first.png")
+    make_screenshot(session, "second.png")
+    scenarios = [
+        good_scenario(tmp_path, screenshot="first.png"),
+        good_scenario(tmp_path, screenshot="second.png"),
+    ]
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=scenarios,
+    )
+
+    ok, findings = verify(p, strict=True)
+
+    assert not ok
+    assert any("duplicate proof scenario ID" in finding for finding in findings)
+
+
+def test_canary_results_reject_duplicate_step_scenario_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "duplicate-step-id-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps({"steps": [
+        {"name": "first capture", "scenarioId": "US1-S1", "status": "pass"},
+        {"name": "second capture", "scenarioId": "US1-S1", "status": "pass"},
+    ]}))
+    make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot="scenario.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+
+    ok, findings = verify(p, strict=True)
+
+    assert not ok
+    assert any("multiple Canary result steps" in finding for finding in findings)
+
+
+def test_canary_results_reject_proof_scenario_without_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "missing-scenario-id-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1", "status": "pass"}]}))
+    make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot="scenario.png")
+    del scenario["id"]
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+
+    ok, findings = verify(p, strict=True)
+
+    assert not ok
+    assert any("id" in finding and "non-empty string" in finding
+               for finding in findings)
+
+
+@pytest.mark.parametrize("results_payload", [[], "not-an-object", 7, True])
+def test_canary_malformed_results_payload_yields_finding(
+    tmp_path, monkeypatch, results_payload,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "malformed-results-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(results_payload))
+    make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot="scenario.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+
+    ok, findings = verify(p, strict=True)
+
+    assert not ok
+    assert any("results.json" in finding and "object" in finding
+               for finding in findings)
+
+
+def test_canary_results_status_must_match_bound_proof_scenario(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "status-binding-session"
+    session = tmp_path / ".canary" / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "results.json").write_text(json.dumps(
+        {"steps": [{"name": "US1-S1-recorded", "status": "fail"}]}))
+    make_screenshot(session, "scenario.png")
+    scenario = good_scenario(tmp_path, screenshot="scenario.png")
+    p = good_proof(
+        tmp_path,
+        driver="canary",
+        canary_session=session_id,
+        scenarios=[scenario],
+    )
+
+    ok, findings = verify(p, strict=True)
+
+    assert not ok
+    assert any("proof status" in finding.lower() and "step status" in finding.lower() for finding in findings)
 
 
 def test_canary_missing_results_json_fails(tmp_path):

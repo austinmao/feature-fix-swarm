@@ -130,7 +130,8 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = "VERDICT: PASS" ]
   cmp -s "$prompt_file" "$BATS_TEST_TMPDIR/codex.stdin"
-  ! grep -Fq 'PROMPT_ONLY_ON_STDIN_ffs_47' "$BATS_TEST_TMPDIR/codex.args"
+  codex_args_count="$(grep -Fc -- 'PROMPT_ONLY_ON_STDIN_ffs_47' "$BATS_TEST_TMPDIR/codex.args" || true)"
+  [ "$codex_args_count" -eq 0 ]
 
   run env ADVERSARY_BIN_CLAUDE=stream-claude PATH="$STUB_DIR:$PATH" \
     bash -c '. "$1"; prompt="$(cat "$2")"; adversary_invoke claude 10 opus "" "$prompt"' \
