@@ -3,5 +3,3 @@ __pycache__/
 .pytest_cache/
 .context/
 .feature-fix-swarm/
-.planning/logs/
-.planning/run-state/

@@ -1419,6 +1419,39 @@ def test_check_promotion_malformed_ledger_fails_closed(tmp_path) -> None:
                                      _GOOD_ARTIFACT) is False, f"case {i}"
 
 
+def test_check_promotion_revalidates_artifact_and_runner_provenance_on_read(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_success(store)
+    data = json.loads(store.read_text())
+    now = gates._now()
+    base = {
+        "from_env": "staging",
+        "to_env": "prod",
+        "surface": "web",
+        "artifact": _GOOD_ARTIFACT,
+        "evidence_ids": ["stg-web"],
+        "recorded_at": now,
+        "expires_at": now + 3600,
+    }
+    cases = [
+        ({**base, "artifact": "img:latest"}, "img:latest"),
+        ({k: v for k, v in base.items() if k != "evidence_ids"}, _GOOD_ARTIFACT),
+        ({**base, "evidence_ids": ["never-ran"]}, _GOOD_ARTIFACT),
+        ({k: v for k, v in base.items() if k != "recorded_at"}, _GOOD_ARTIFACT),
+        ({**base, "expires_at": now + (gates.GRANT_MAX_TTL_HOURS + 1) * 3600},
+         _GOOD_ARTIFACT),
+    ]
+    for i, (record, artifact) in enumerate(cases):
+        candidate = dict(data)
+        candidate["_promotions"] = {"run-1": [record]}
+        store.write_text(json.dumps(candidate))
+        before = store.read_bytes()
+        assert gates.check_promotion(
+            store, "run-1", "prod", "web", artifact, now=now,
+        ) is False, f"case {i} authorized malformed promotion evidence"
+        assert store.read_bytes() == before
+
+
 def test_check_promotion_false_when_promotions_key_missing(tmp_path) -> None:
     store = tmp_path / "evidence.json"
     _seed_success(store)
@@ -1839,6 +1872,44 @@ def test_hotfix_granted_without_reason_refuses(tmp_path) -> None:
     assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
     pend = gates.list_pending(store, "run-1")
     assert any("NO-HOTFIX-GRANT" in p["reason"] for p in pend)
+
+
+def test_hotfix_prod_spelling_variants_never_fall_through_plain_grant(tmp_path) -> None:
+    for i, action in enumerate((
+        "hotfix:PROD-cp",
+        "hotfix:prod_cp",
+        "hotfix:production-cp",
+        "hotfix:Production_cp",
+    )):
+        store = tmp_path / f"variant-{i}.json"
+        assert gates.grant_actions(store, "run-1", [action])
+        assert gates.check_grant_prod(store, "run-1", action, None) is False
+        data = json.loads(store.read_text())
+        assert not data["_autonomy"]["run-1"].get("hotfix_bypasses")
+        assert any("NO-HOTFIX-GRANT" in p["reason"]
+                   for p in gates.list_pending(store, "run-1"))
+
+
+def test_hotfix_case_variant_with_reason_is_audited(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    action = "hotfix:PROD-cp"
+    assert gates.grant_actions(store, "run-1", [action], reason="db down")
+    assert gates.check_grant_prod(store, "run-1", action, None) is True
+    bypass = json.loads(store.read_text())["_autonomy"]["run-1"]["hotfix_bypasses"]
+    assert bypass == [{
+        "action": action,
+        "reason": "db down",
+        "recorded_at": bypass[0]["recorded_at"],
+    }]
+
+
+def test_hotfix_whitespace_only_reason_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    action = "hotfix:prod-cp"
+    assert gates.grant_actions(store, "run-1", [action], reason=" \t ")
+    assert gates.check_grant_prod(store, "run-1", action, None) is False
+    entry = json.loads(store.read_text())["_autonomy"]["run-1"]["grants"][action]
+    assert "reason" not in entry
 
 
 def test_hotfix_no_grant_refuses_and_records_pending(tmp_path) -> None:

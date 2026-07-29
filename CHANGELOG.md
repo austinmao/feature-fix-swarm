@@ -6,6 +6,54 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.18.0 — Reconcile the openclaw vendored fork; single source of truth (2026-07-29)
+
+The `openclaw` monorepo vendors this package at `packages/feature-fix-swarm/`.
+That copy had diverged in BOTH directions since v4.14.5: it was missing six
+releases of upstream work, and it carried ~1,300 lines of hardening that was
+never pushed back here. A one-way sync in either direction would have destroyed
+real work, so every differing file was classified against the v4.14.5 baseline
+and merged three-way. This release lands the openclaw side upstream so the two
+trees are byte-identical again.
+
+### Added — recovered from the openclaw fork
+
+- **`scripts/gsd/model-fallback.sh` recovery hardening** (179 → 446 lines). The
+  upstream version restored blind: it walked the config with no guard, so a
+  legacy marker whose path had two valid readings (a literal dot-bearing key vs
+  a nested path) could restore into the wrong node — silently and
+  unrecoverably. The recovered version detects that ambiguity and skips with a
+  reason, verifies the current value against what the lever actually wrote
+  (CAS) before overwriting, prunes the marker to only unresolved paths so a
+  restored entry is never re-applied on a later run, and skips the config write
+  entirely when nothing changed (it used to truncate and rewrite a file it had
+  no edits for). Test coverage went 15 → 31 cases (FALLBACK-016..030).
+- **`lib/runtime_proof.py` + `lib/gates.py` hardening**, with their suites
+  (`test_runtime_proof.py`, `test_gates.py`). Pytest 325 → 392.
+- **bats coverage** for `adversary-host`, `int-review-gate`, `plan-adversary`.
+
+### Fixed
+
+- **`docs/promotion-protocol.md` genericization regression.** The openclaw copy
+  had grown a vendor-specific section (a named deploy platform, tenant slugs,
+  and cross-references to spec directories that do not exist in this repo). It
+  failed this repo's own `test_doc_has_zero_vendor_names` guard — a red test
+  sitting in the vendored tree. The genericized version is canonical here; the
+  vendor-specific content belongs in the consumer repo's own docs.
+
+### Notes
+
+- Reconciliation was three-way against v4.14.5 (`0785e83`), not a pick-a-side
+  merge. Where both trees changed a file, both sets of changes were kept.
+  `tests/bats/model-fallback.bats` is the one exception to blind union: both
+  trees had independently added FALLBACK-013/014/015, so a union produced
+  duplicate test names that bats rejects outright — the openclaw file was taken
+  wholesale after verifying it is a strict superset (all 15 upstream tests
+  present, plus 16).
+- Line count is NOT a direction signal, and was not used as one: several docs
+  are *shorter* upstream because v4.17.0's truth pass deleted content that the
+  fork still carries.
+
 ## v4.17.0 — Edge-probe + package-legitimacy gates, Codex ladder repin (2026-07-29)
 
 Forward-ports the two techniques from the abandoned v3.22.0 "gsd-core Option-A
