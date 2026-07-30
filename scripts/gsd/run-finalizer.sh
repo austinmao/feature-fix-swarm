@@ -26,14 +26,26 @@
 # Exit: always 0.
 set -uo pipefail
 
-DRY=0
-if [ "${1:-}" = "--dry-run" ]; then DRY=1; shift; fi
-PR="${1:-}"
-REPO_ARGS=()
-[ -n "${2:-}" ] && REPO_ARGS=(--repo "$2")
-
 note() { echo "[run-finalizer] $*"; }
 warn() { echo "[run-finalizer] WARN: $*" >&2; }
+
+# Flags are position-free and junk is refused loudly: a positional-only
+# --dry-run turned a stray arg into `--repo --dry-run`, which failed gh and
+# skipped cleanup SILENTLY (observed on the first live run, PR #62).
+DRY=0
+PR=""
+REPO=""
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY=1 ;;
+    -*) warn "unknown argument '$arg' — skipping"; exit 0 ;;
+    *) if [ -z "$PR" ]; then PR="$arg"
+       elif [ -z "$REPO" ]; then REPO="$arg"
+       else warn "unexpected extra argument '$arg' — skipping"; exit 0; fi ;;
+  esac
+done
+REPO_ARGS=()
+[ -n "$REPO" ] && REPO_ARGS=(--repo "$REPO")
 
 if [ "${FFS_RUN_FINALIZER:-on}" = "off" ]; then
   note "disabled via FFS_RUN_FINALIZER=off — skipping"
@@ -107,7 +119,13 @@ delete_landed_branch() { # delete $1 only under landed-tip proof
 remove_worktree_for_branch "$BRANCH" || true
 # 2. local + remote feature branch
 delete_landed_branch "$BRANCH"
-run git push origin --delete "$BRANCH"
+# `gh pr merge --delete-branch` usually got here first — only push a delete if
+# the remote ref still exists, else every finish tail ends on a bogus WARN.
+if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+  run git push origin --delete "$BRANCH"
+else
+  note "remote branch '$BRANCH' already gone — nothing to delete"
+fi
 # 3. gsd/phase-* intermediates: prune only ancestors of the merged head
 while IFS= read -r pb; do
   [ -n "$pb" ] || continue

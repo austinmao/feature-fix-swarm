@@ -168,3 +168,35 @@ EOF
   git ls-remote --exit-code origin refs/heads/feat/x
   [ -f .planning/run-state/gsd-run.pid ]
 }
+
+# Flag position must not matter. The first live run (PR #62) was invoked as
+# `<pr> --dry-run` and silently no-op'd: --dry-run landed in $2, became
+# `--repo --dry-run`, and gh failed — the exact silent cleanup-skip this
+# lever exists to prevent, in an autonomous finish tail nobody watches.
+@test "--dry-run is accepted AFTER the pr number (flag position is free)" {
+  mock_gh_merged
+  run bash "$LEVER" 1 --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRY"* ]]
+  [[ "$output" != *"failed"* ]]
+  git show-ref --verify -q refs/heads/feat/x
+  [ -f .planning/run-state/gsd-run.pid ]
+}
+
+# gh pr merge --delete-branch normally beat us to it; a WARN on every single
+# finish tail is a WARN nobody reads.
+@test "already-deleted remote branch is a note, not a WARN" {
+  mock_gh_merged
+  git push -q origin --delete feat/x
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already gone"* ]]
+  [[ "$output" != *"step failed"* ]]
+}
+
+@test "a flag-shaped junk arg is refused, not silently passed to --repo" {
+  mock_gh_merged
+  run bash "$LEVER" --dry-run 1 --bogus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unknown argument"* ]]
+}
