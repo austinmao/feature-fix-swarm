@@ -26,7 +26,7 @@
       "heavy": "opus"
     },
     "escalate_on_failure": true,
-    "max_escalations": 2
+    "max_escalations": 1
   },
   "workflow": {
     "research": true,

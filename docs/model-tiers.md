@@ -152,6 +152,21 @@ opus plan is cheaper than a stalled overnight run.
 producer≠reviewer degrades to the within-vendor ladder — still a different
 model, but a weaker guarantee than cross-vendor.
 
+## Fable-era operating notes
+
+Three practices from Anthropic's Fable 5 prompting guide that this package
+relies on (they inform the skill prose, not new config knobs):
+
+- **Parallel dispatch.** Fable dispatches subagents readily; the orchestrator
+  should fan out independent work and keep going, not block per return. Only
+  the plan gauntlet (plan → check → bounce) is inherently serial.
+- **Short guards over checklists.** Fable's instruction-following makes a
+  one-sentence steer as effective as an enumerated behavior list. Skill guard
+  blocks stay short on purpose — resist growing them.
+- **Effort, not model swaps, for routine work.** On runtimes exposing effort,
+  lower effort on Fable still outperforms prior-generation `xhigh`; prefer
+  dialing effort down for mechanical passes before repinning models.
+
 ## Changing the assignments
 
 Every tier above is a default, not a law. See

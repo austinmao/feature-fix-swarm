@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.10.0"
+version: "2.11.0"
 allowed-tools:
   - Read
   - Edit
@@ -175,6 +175,21 @@ with text-only intent; hold this line every turn of the drive loop:
 > analysis, a question, a list of next steps, or a promise about work you have
 > not done ("I'll…"), do that work now with tool calls. End your turn only when
 > the task is complete or you are blocked on input only the user can provide.
+> You have ample context remaining — do not stop, summarize, or suggest a new
+> session on account of context limits; the harness handles compaction.
+
+**Fable dispatch discipline (per Anthropic's Fable 5 prompting guide).** A
+Fable orchestrator dispatches parallel subagents readily — lean into it, don't
+serialize:
+
+> Delegate independent subtasks to subagents in parallel and keep working while
+> they run — do not block on each return. Intervene only if a subagent goes off
+> track or is missing context. Serial gates (plan → check → bounce) stay
+> serial; everything independent (research fan-out, per-file verify, doc
+> passes) runs concurrently.
+
+Fable's instruction-following is strong enough that these two short guards
+replace enumerated behavior lists — do not grow them into checklists.
 
 (Orchestrator-level mitigation: per-turn work inside gsd-core sub-agents is
 gsd-core's to guard — deeper coverage needs a gsd-core change, out of scope.)
