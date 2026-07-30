@@ -6,6 +6,35 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.19.0 — Fable-guide alignment + measurable runs (2026-07-30)
+
+Prompted by a consumer-repo finding: gsd phases were taking 30–50 min and the
+run logs carried no timestamps, so the question could only be answered by
+counting the gate pipeline by hand. Two of the three time sinks were config
+drift (the consumer's `.planning/config.json` had lost the fable planner pin
+and was running 7 opus passes per phase against this package's own template
+of 4); the third was unmeasurable. This release fixes the measurement gap and
+folds in Anthropic's Fable 5 prompting-guide practices.
+
+### Added
+
+- `scripts/gsd/gsd-run.sh`: the on-disk run log now carries per-line
+  `[YYYY-MM-DDTHH:MM:SS]` stamps (terminal stream unchanged), so phase
+  durations are derivable from any run log after the fact.
+- `docs/model-tiers.md` § "Fable-era operating notes": parallel dispatch,
+  short-guards-over-checklists, effort-before-repin — the three guide
+  practices this package relies on.
+- `skills/feature-implement/SKILL.md` **v2.10.0 → v2.11.0**: drive-loop guard
+  gains the guide's context-limit line ("do not stop … on account of context
+  limits") and a Fable dispatch-discipline block (fan out independent work,
+  never block per subagent return; plan gauntlet stays serial).
+
+### Changed
+
+- `templates/gsd-config.base.json`: `dynamic_routing.max_escalations` 2 → 1.
+  Two escalations meant a soft-failing gate could run three times at rising
+  tiers — a 3× flake tax; one escalation captures the recovery value.
+
 ## v4.18.0 — Reconcile the openclaw vendored fork; single source of truth (2026-07-29)
 
 The `openclaw` monorepo vendors this package at `packages/feature-fix-swarm/`.

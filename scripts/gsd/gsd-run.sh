@@ -559,8 +559,12 @@ fi
 
 # STATEFUL BOUNDARY: exactly one drive is launched. Its output is never mined
 # for availability words and no failure/timeout is replayed on another vendor.
+# The on-disk log gets per-line wall-clock stamps (terminal stream stays raw)
+# so phase durations are measurable after the fact — untimed logs made every
+# "why is this phase slow" question unanswerable.
 write_run_status running
-run_bounded "$TIMEOUT_SECS" "${RUN[@]}" </dev/null 2>&1 | tee "$LOG_FILE"
+run_bounded "$TIMEOUT_SECS" "${RUN[@]}" </dev/null 2>&1 \
+  | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' > "$LOG_FILE")
 rc="${PIPESTATUS[0]}"
 if [ "$rc" -ne 0 ]; then
   echo "gsd-run: stateful drive failed on $SELECTED_HOST (rc=$rc); cross-vendor replay is forbidden" >&2
