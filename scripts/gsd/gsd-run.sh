@@ -40,6 +40,18 @@ if [ "$GSD_SKILL_NAME" = "gsd-execute-phase" ]; then
     exit 78
   fi
   bash "$OWNERSHIP_GATE" "$2" || exit $?
+  # Advisory scope-drift re-anchor (once per phase start, never per turn):
+  # deterministic diff-vs-declared-surface + PHASE GOAL line. Fail-soft.
+  DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"
+  if [ -f "$DRIFT_GATE" ]; then
+    DRIFT_PLANS=()
+    for _p in "$REPO_ROOT"/.planning/phases/*/*-PLAN.md; do
+      [ -f "$_p" ] && DRIFT_PLANS+=(--plan "$_p")
+    done
+    if [ "${#DRIFT_PLANS[@]}" -gt 0 ]; then
+      bash "$DRIFT_GATE" "${DRIFT_PLANS[@]}" || true
+    fi
+  fi
 fi
 
 TIMEOUT_SECS="${TIMEOUT:-900}"

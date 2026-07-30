@@ -856,6 +856,19 @@ def test_grant_expires(tmp_path) -> None:
                              now=now + 3601) is False  # fail closed on expiry
 
 
+def test_grant_default_ttl_covers_multiday_runs(tmp_path) -> None:
+    s = tmp_path / "evidence.json"
+    # No explicit ttl_hours: default must cover multi-day agentic runs (72h)
+    # — 24h grants expired mid-run on overnight+next-day work.
+    gates.grant_actions(s, "run-1", ["ship:gsd"])
+    import time as _t
+    now = _t.time()
+    assert gates.check_grant(s, "run-1", "ship:gsd",
+                             now=now + 71 * 3600) is True
+    assert gates.check_grant(s, "run-1", "ship:gsd",
+                             now=now + 73 * 3600) is False
+
+
 def test_pending_records_unlisted_gate(tmp_path) -> None:
     s = tmp_path / "evidence.json"
     gates.record_pending(s, "run-1", "rotate:prod-secret", "not in ledger")

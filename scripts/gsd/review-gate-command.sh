@@ -13,6 +13,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DIFF="$(cat)"
 
+# Advisory scope-drift check (stderr ONLY — stdout must stay the JSON verdict;
+# advisory means it never contributes to REVISE, which stays scoped to
+# security/correctness findings). Once per ship, not per turn.
+if [ -f "$SCRIPT_DIR/scope-drift-gate.sh" ]; then
+  DRIFT_PLANS=()
+  for _p in .planning/phases/*/*-PLAN.md; do
+    [ -f "$_p" ] && DRIFT_PLANS+=(--plan "$_p")
+  done
+  if [ "${#DRIFT_PLANS[@]}" -gt 0 ]; then
+    bash "$SCRIPT_DIR/scope-drift-gate.sh" "${DRIFT_PLANS[@]}" >&2 || true
+  fi
+fi
+
 # Autonomy-grant wall (fail-closed): ship is an operator-gated action. This seam
 # runs inside /gsd:ship and a REVISE verdict blocks it, so the grant ledger check
 # lives here (day-1 wrapper; native ship:pre capability gate deferred — no

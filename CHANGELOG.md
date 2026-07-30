@@ -6,6 +6,49 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.20.0 — Anti-entanglement: run-end finalizer, drift gate, 72h grants (2026-07-30)
+
+Prompted by a consumer-repo estate audit (2026-07-30): 95 branches (~30
+orphaned `gsd/phase-*`), 38 worktrees (26 dirty) with zero run-end GC, and
+run bookkeeping (`.planning/**`, `spike-results/**`) riding every PR diff —
+plus two operator pain points: grants expiring mid-run on multi-day work,
+and long runs drifting from the plan (tunnel vision) with no check cheaper
+than a per-turn hook.
+
+### Added
+
+- `scripts/gsd/run-finalizer.sh` (+ `tests/bats/run-finalizer.bats`): run-end
+  estate cleanup, called from the finish tail after `assert-merged.sh` passes.
+  Removes the run's clean worktree (dirty → routed to `/adopt-wip`), deletes
+  the landed branch local+remote (squash-safe: only under merged-`headRefOid`
+  proof — never a blind force-delete), prunes `gsd/phase-*` ancestors of the
+  merged head, clears `.planning/run-state/` (denylist protects the gates
+  evidence ledger). Fail-soft, always exit 0. Kill-switch `FFS_RUN_FINALIZER=off`.
+- `scripts/gsd/scope-drift-gate.sh` (+ `tests/bats/scope-drift-gate.bats`):
+  phase-boundary (never per-turn) advisory drift check. Deterministic mode:
+  diff-vs-`files_modified` classification (threshold `GSD_DRIFT_THRESHOLD_PCT`,
+  default 20%) + `PHASE GOAL:` re-anchor line. `--judge`: ONE bounded
+  cross-vendor verdict via adversary-host (`DRIFT-VERDICT: ON-TRACK|DRIFT`).
+  Wired at three phase-frequency points: `gsd-run.sh` pre-phase wall,
+  feature-implement Step 5 (with `--judge`), review-gate-command (stderr-only).
+  Kill-switch `GSD_DRIFT_GATE=off`; test seam `GSD_DRIFT_JUDGE_CMD`.
+
+### Changed
+
+- `lib/gates.py`: `GRANT_DEFAULT_TTL_HOURS` 24 → **72** (cap unchanged at
+  168h). 24h grants expired mid-run on multi-day agentic work; 72h covers the
+  window while still expiring within the week. `skills/feature-spec/SKILL.md`
+  **v2.4.0 → v2.5.0** and `skills/autonomy-grant/SKILL.md` **v1.1.0 → v1.2.0**
+  updated to match (feature-spec's explicit `--ttl-hours 24` was overriding
+  any default and is now 72).
+- `skills/review-gate/SKILL.md` **v1.8.1 → v1.9.0**: reviewer-facing diff
+  capture now excludes `.planning/` and `spike-results/` via git pathspecs —
+  run bookkeeping is not production source and ballooned review diffs by
+  hundreds of doc files on long spec branches.
+- `skills/feature-implement/SKILL.md` **v2.11.0 → v2.12.0**: Step 5 gains the
+  scope-drift gate (advisory, `--judge`); Step 6.5 gains the run-end finalizer
+  after `assert-merged`.
+
 ## v4.19.0 — Fable-guide alignment + measurable runs (2026-07-30)
 
 Prompted by a consumer-repo finding: gsd phases were taking 30–50 min and the

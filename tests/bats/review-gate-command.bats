@@ -175,3 +175,21 @@ EOF
   [ "$elapsed" -lt 9 ]
   [[ "$output" == *'both review hosts unavailable'* ]]
 }
+
+@test "scope-drift advisory stays on stderr — stdout remains pure JSON verdict" {
+  mkdir -p "$CWD/.planning/phases/01-x"
+  cat > "$CWD/.planning/phases/01-x/01-01-PLAN.md" <<'EOF'
+---
+files_modified:
+  - a
+goal: stdout purity
+---
+EOF
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>/dev/null"
+  [ "$status" -eq 0 ]
+  # stdout alone must be exactly the JSON verdict — parseable, no drift lines
+  echo "$output" | python3 -m json.tool >/dev/null
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+}
