@@ -599,7 +599,7 @@ def analyze_artifacts(spec_text: str, tasks_text: str,
 # for a local single-user store is over-engineering; strictness here is
 # validation (typed actions, bounded TTL, fail-closed expiry), not signatures.
 ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S+$")
-GRANT_DEFAULT_TTL_HOURS = 24.0
+GRANT_DEFAULT_TTL_HOURS = 72.0  # multi-day runs; 24h expired mid-run
 GRANT_MAX_TTL_HOURS = 168.0  # 7 days — non-finite/zero/negative/huger rejected
 
 # Artifact identity (spec-295 EDGE-006): an immutable OCI digest reference

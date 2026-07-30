@@ -1,7 +1,7 @@
 ---
 name: autonomy-grant
 description: "Pre-approve the operator gates an unattended run will hit — prod push, deploy, merge, DNS — so the run proceeds through them without stopping. Use at plan approval, while the operator is present, to build the typed approval ledger that /feature-implement --autonomous checks mechanically."
-version: "1.1.0"
+version: "1.2.0"
 ---
 
 # /autonomy-grant
@@ -58,7 +58,8 @@ unapproved external gates.
      --ttl-hours 12
    ```
 
-   TTL default 24h; set it to cover the run window only. Grants are
+   TTL default 72h — sized for multi-day agentic runs (24h expired
+   mid-run). Trim with `--ttl-hours` for short runs; cap 168h. Grants are
    run-bound: they never leak into the next run.
 
 4. **At each gate, the loop checks — never asks:**

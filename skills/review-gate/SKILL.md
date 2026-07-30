@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.8.1"
+version: "1.9.0"
 ---
 
 # /review-gate
@@ -125,13 +125,18 @@ done
 # silently produced an empty diff and bypassed review). Both `--file <path>`
 # (two tokens, above) and `--file=<path>` are parsed into FILE_PATH; file
 # mode diffs via `git diff HEAD -- "$FILE_PATH"`.
+# Run bookkeeping (.planning/, spike-results/) is excluded from the reviewer's
+# diff: it is not production source, and on long spec branches it balloons the
+# review surface by hundreds of doc files (2026-07-30 estate audit). File mode
+# keeps the explicit path untouched.
+BOOKKEEPING_EXCLUDES=(":(exclude).planning" ":(exclude)spike-results")
 if [ "$DIFF_TARGET" = "--staged" ]; then
-  DIFF=$(git diff --staged 2>/dev/null)
-  [ -z "$DIFF" ] && DIFF=$(git diff HEAD 2>/dev/null)
+  DIFF=$(git diff --staged -- . "${BOOKKEEPING_EXCLUDES[@]}" 2>/dev/null)
+  [ -z "$DIFF" ] && DIFF=$(git diff HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}" 2>/dev/null)
 elif [ "$DIFF_TARGET" = "file" ]; then
   DIFF=$(git diff HEAD -- "$FILE_PATH" 2>/dev/null)
 else
-  DIFF=$(git diff "$DIFF_TARGET"...HEAD 2>/dev/null)
+  DIFF=$(git diff "$DIFF_TARGET"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}" 2>/dev/null)
 fi
 
 if [ -z "$DIFF" ]; then

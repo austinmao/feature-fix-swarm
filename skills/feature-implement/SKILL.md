@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.11.0"
+version: "2.12.0"
 allowed-tools:
   - Read
   - Edit
@@ -254,6 +254,15 @@ gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
 verify step runs: gates.py evidence, not self-report. A quick task whose test
 gate did not run is NOT done.
 
+**Scope-drift gate (advisory, once per phase wall — NEVER per turn):** alongside
+verify-done, run
+`bash scripts/gsd/scope-drift-gate.sh --judge --plan <this phase's .planning/phases/<phase>/*-PLAN.md files>`
+— deterministic diff-vs-`files_modified` classification + `PHASE GOAL:` re-anchor,
+plus ONE bounded cross-vendor judge verdict (`DRIFT-VERDICT: ON-TRACK|DRIFT`).
+A DRIFT warning is advisory: re-read the spec/plan success criteria before
+starting the next phase, and record the correction in the phase SUMMARY.
+Kill-switch `GSD_DRIFT_GATE=off`; judge seam `GSD_DRIFT_JUDGE_CMD`.
+
 ### Step 6: Finish tail (default; `--no-finish` opts out)
 
 browser gate → openwiki stage → `/review-gate` → ship (grant-walled) → `/canary`. Applies to BOTH
@@ -308,6 +317,14 @@ exit 0
    landed — stop, report). After ship/merge completes: if a `/landing-report`
    skill is available, run it (read-only queue snapshot). Both skill references
    are fail-soft — sessions without them use the bare-`gh` path silently.
+   **Run-end finalizer (after assert-merged exits 0):**
+   `bash scripts/gsd/run-finalizer.sh <pr-number>` — removes the run's clean
+   worktree (dirty → routed to `/adopt-wip`, never deleted), deletes the landed
+   feature branch local+remote (squash-safe: only under merged-`headRefOid`
+   proof, never a blind force-delete), prunes `gsd/phase-*` branches that are
+   ancestors of the merged head, clears `.planning/run-state/`. Fail-soft,
+   ALWAYS exits 0 — cleanup failure never un-merges or blocks the report.
+   Kill-switch `FFS_RUN_FINALIZER=off`.
 6. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
    persists this run's `.planning/**/learnings*.jsonl` to gbrain-or-archive and
    prints `<N> harvested`. ALWAYS exits 0 — a broken/unreachable memory backend

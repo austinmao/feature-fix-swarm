@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.4.0
+version: 2.5.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -347,7 +347,7 @@ fi
 # v2.4.0 launch notice — the authorization moment is HERE, not hours later at
 # Step 6. Running without --gated IS the operator's max-auth approval.
 if [ $GATED -eq 0 ] && [ $NO_GRANT -eq 0 ]; then
-  echo "[feature-spec] MAX-AUTH (default): every operator gate enumerated at Step 6 will be auto-granted (TTL 24h)."
+  echo "[feature-spec] MAX-AUTH (default): every operator gate enumerated at Step 6 will be auto-granted (TTL 72h)."
   echo "[feature-spec] Pass --gated to review the list before it is recorded, or --no-grant to skip the ledger."
 fi
 ```
@@ -605,7 +605,7 @@ stalling. Build the ledger NOW — by default with zero stops:
 3. Record:
 
    ```bash
-   python3 "$GATES_PY" grant "$RUN_ID" --action <a1> --action <a2> ... --ttl-hours 24
+   python3 "$GATES_PY" grant "$RUN_ID" --action <a1> --action <a2> ... --ttl-hours 72
    ```
 
 **The safety floor is identical in both modes.** Grants are exact typed entries
@@ -627,7 +627,7 @@ Artifacts:
   specs/NNN/plan.md          — unit test list + TDD test map + integration tests + phase gates
   specs/NNN/tasks.md         — swarm-decomposed tasks with roster [agent:] tags + review-gates
   specs/NNN/preflight.json   — env/service manifest, PREFLIGHT-PASS recorded for run spec-NNN
-  grant ledger               — N typed actions granted (MAX-AUTH auto | --gated reviewed), TTL 24h (run spec-NNN)
+  grant ledger               — N typed actions granted (MAX-AUTH auto | --gated reviewed), TTL 72h (run spec-NNN)
 
 Granted gates (MAX-AUTH default — review here; rebuild with --gated if any should not run):
   <type:target> — rollback: <one line>        (one row per granted action)
