@@ -29,7 +29,11 @@
 # proof scenarios; full provenance binding is a recorded follow-up.
 set -euo pipefail
 
-DIFF_BASE="${CANARY_DIFF_BASE:-origin/main}"
+# Default diff-base resolves through base-branch.sh — a hardcoded origin/main
+# diffs against a nonexistent ref on master/trunk repos.
+# Fail-soft (`|| echo main`): on a crippled PATH the gate must still reach its
+# own fail-closed checks instead of dying 127 in this default init.
+DIFF_BASE="${CANARY_DIFF_BASE:-origin/$(bash "$(dirname "${BASH_SOURCE[0]:-$0}")/base-branch.sh" 2>/dev/null || echo main)}"
 RESULTS_ARG=""
 
 while [ $# -gt 0 ]; do

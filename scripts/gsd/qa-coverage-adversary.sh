@@ -18,7 +18,8 @@ if [ -z "$RESULTS_FILE" ]; then
 fi
 shift || true
 
-DIFF_BASE="origin/main"
+# Resolves through base-branch.sh; --diff-base still overrides.
+DIFF_BASE="origin/$(bash "$(dirname "${BASH_SOURCE[0]:-$0}")/base-branch.sh" 2>/dev/null || echo main)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --diff-base)
