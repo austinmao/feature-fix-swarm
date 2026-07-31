@@ -1209,6 +1209,7 @@ def delegation_audit(transcript_text: str) -> dict:
     hist: dict[str, int] = {}
     unpinned_build: list[str] = []
     inline_mechanical: list[str] = []
+    advisor_calls = 0
     for line in transcript_text.splitlines():
         line = line.strip()
         if not line:
@@ -1232,6 +1233,11 @@ def delegation_audit(transcript_text: str) -> dict:
             if name in ("Agent", "Task"):
                 model = (inp.get("model") or "").strip().lower() or "inherit"
                 hist[model] = hist.get(model, 0) + 1
+                # Advisor-call budget (borrowed: advisor-call-budget): a
+                # premium-tier pin is an advisor consult. Counted so a cap can
+                # make the cheap-executor discount enforceable, not assumed.
+                if "opus" in model or "fable" in model:
+                    advisor_calls += 1
                 desc = inp.get("description") or ""
                 if model == "inherit" and BUILD_DESC_PAT.search(desc):
                     unpinned_build.append(desc[:80])
@@ -1242,7 +1248,8 @@ def delegation_audit(transcript_text: str) -> dict:
                 if _is_tripwire(cmd):
                     inline_mechanical.append((inp.get("description") or cmd)[:80])
     return {"histogram": hist, "unpinned_build": unpinned_build,
-            "inline_mechanical": inline_mechanical}
+            "inline_mechanical": inline_mechanical,
+            "advisor_calls": advisor_calls}
 
 
 def _manifest_scalar(raw: str, *, line_no: int) -> str:
@@ -1431,12 +1438,16 @@ def main(argv: list[str]) -> int:
         return 1 if findings else 0
     if cmd == "delegation-audit":
         threshold = int(_flag(args, "--threshold", "3"))
+        # Advisor-call cap (advisory): premium-tier spawns per transcript.
+        # Unset = count-only, no cap check.
+        advisor_cap_raw = _flag(args, "--advisor-cap", "")
+        advisor_cap = int(advisor_cap_raw) if advisor_cap_raw != "" else None
         pos, skip = [], False
         for a in args:
             if skip:
                 skip = False
                 continue
-            if a == "--threshold":
+            if a in ("--threshold", "--advisor-cap"):
                 skip = True
                 continue
             pos.append(a)
@@ -1446,6 +1457,12 @@ def main(argv: list[str]) -> int:
         print(f"SPAWNS: {total}")
         for m, n in sorted(res["histogram"].items(), key=lambda kv: (-kv[1], kv[0])):
             print(f"  {m}: {n}")
+        print(f"ADVISOR-CALLS: {res['advisor_calls']}"
+              + (f" (cap {advisor_cap})" if advisor_cap is not None else ""))
+        if advisor_cap is not None and res["advisor_calls"] > advisor_cap:
+            print(f"ADVISOR-WARN: {res['advisor_calls']} premium consult(s) "
+                  f"exceed the cap of {advisor_cap} — an uncapped advisor "
+                  "erodes the cheap-executor discount. Advisory only.")
         for d in res["unpinned_build"]:
             print(f"UNPINNED-BUILD: {sanitize_reason(d)}")
         for d in res["inline_mechanical"]:

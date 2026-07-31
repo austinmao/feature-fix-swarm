@@ -74,3 +74,33 @@ EOF
   [[ "$output" == *"threshold=10"* ]]
   [[ "$output" == *"DELEGATION-WARN"* ]]
 }
+
+# ── advisor-call budget (borrowed: advisor-call-budget) ──────────────────────
+# Premium-tier spawns (opus/fable pins) are advisor calls. An uncapped advisor
+# erodes the cheap-executor discount one "just checking" call at a time; the
+# cap makes the budget enforceable instead of assumed. Advisory: always exit 0.
+
+@test "advisor calls counted: opus + fable pins, cheap tiers excluded" {
+  ADV="$BATS_TEST_TMPDIR/advisor.jsonl"
+  cat > "$ADV" <<'EOF'
+{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{"model":"opus","description":"deep review"}}]}}
+{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{"model":"claude-fable-5","description":"plan check"}}]}}
+{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{"model":"haiku","description":"scout"}}]}}
+EOF
+  run python3 "$GATES" delegation-audit "$ADV"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ADVISOR-CALLS: 2"* ]]
+  [[ "$output" != *"ADVISOR-WARN"* ]]
+}
+
+@test "--advisor-cap: over-cap warns, still exit 0" {
+  run python3 "$GATES" delegation-audit "$FIXTURE" --advisor-cap 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ADVISOR-WARN"* ]]
+}
+
+@test "--advisor-cap: at-or-under cap no advisor warn" {
+  run python3 "$GATES" delegation-audit "$FIXTURE" --advisor-cap 5
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ADVISOR-WARN"* ]]
+}

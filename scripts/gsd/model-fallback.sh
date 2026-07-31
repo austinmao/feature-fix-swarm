@@ -436,6 +436,18 @@ EOF
 echo "[model-fallback] $RESULT"
 if [ -f "$MARKER" ]; then
   echo "[model-fallback] fallback mode: $MODE (marker: $MARKER)"
+  # tested-fallback discipline: a backup you never ran is a hope. The rungs this
+  # run just fell back onto are only trustworthy if they carried a LIVE call
+  # recently (fallback-rehearsal.sh records that). Missing/stale record = WARN,
+  # never a block — an unrehearsed fallback still beats no fallback.
+  REHEARSAL_FILE="$CACHE_DIR/rehearsal.json"
+  if [ ! -f "$REHEARSAL_FILE" ]; then
+    echo "[model-fallback] WARN: fallback REHEARSAL never run — the rungs have" \
+         "never carried a live call; run scripts/gsd/fallback-rehearsal.sh"
+  elif [ -z "$(find "$REHEARSAL_FILE" -mtime -30 2>/dev/null)" ]; then
+    echo "[model-fallback] WARN: fallback REHEARSAL record is stale (>30d) —" \
+         "re-run scripts/gsd/fallback-rehearsal.sh"
+  fi
 else
   # Zero rewrites (e.g. every fable literal sat under a dot-bearing key, or
   # matched only as a KEY) writes no marker. Claiming a fallback mode and naming a
