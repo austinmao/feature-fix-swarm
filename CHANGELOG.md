@@ -6,6 +6,38 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.22.0 — Buildomator borrows: sync-drift check, session handoff, base-branch resolver (2026-07-31)
+
+Three patterns adapted from `buildomator/buildomator` (MIT, the plugin cousin
+of this repo's gsd lineage), each targeting pain this repo has measured.
+
+### Added
+
+- `scripts/gsd/sync-drift-check.sh` (+ `tests/bats/sync-drift-check.bats`):
+  vendor-drift detector for the whole packaged-lever surface — generalizes
+  FALLBACK-017's single-file check. Consumer copies classify IN-SYNC /
+  MISSING (warn) / FORKED (allowlisted, reason printed) / DRIFT (exit 1) /
+  STALE-ALLOWLIST. Allowlist = `<filename> <reason>` lines, making deliberate
+  forks auditable instead of destroyable-by-blind-sync (the 2026-07-31
+  six-file drift incident, hand-measured, motivates this). Validated live
+  against a real consumer: correctly separated 2 known forks from true drift.
+- `hooks/gsd-checkpoint.sh` + `hooks/gsd-handoff-resume.sh`
+  (+ `tests/bats/gsd-checkpoint.bats`): microcompact-surviving session
+  continuity. Claude Code's microcompact strips tool outputs WITHOUT firing
+  PreCompact, so PreCompact-only checkpoints go arbitrarily stale; the writer
+  refreshes `.planning/run-state/HANDOFF.json` (ts, branch, head, dirty count,
+  STATE.md position) at most once per 60s via mtime throttle; the SessionStart
+  surfacer prints it + a `/gsd-resume-work` pointer. Both ALWAYS exit 0, inert
+  until wired in a consumer's settings.json. Kill-switch `GSD_CHECKPOINT=off`.
+- `scripts/gsd/base-branch.sh` (+ `tests/bats/base-branch.bats`): ONE default-
+  branch resolver (`GSD_BASE_BRANCH` env → origin/HEAD symref → local
+  main/master → `main`; offline-only, no `git remote show` — network in a
+  pre-run wall is a hang risk). `canary-gate.sh`, `qa-coverage-adversary.sh`,
+  and `scope-drift-gate.sh` defaults now resolve through it (fail-soft to
+  `main` on a crippled PATH) instead of hardcoding `origin/main`, which
+  silently diffed against a nonexistent ref on master/trunk repos. Explicit
+  `--diff-base`/`--base`/env overrides unchanged.
+
 ## v4.21.0 — Cost-discipline borrows: tested fallback, advisor budget, verify blocks (2026-07-31)
 
 Three patterns adapted from `Neeeophytee/ai-cost-cutter-skills` (MIT), fitted

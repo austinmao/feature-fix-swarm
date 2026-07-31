@@ -32,7 +32,8 @@ if [ "${GSD_DRIFT_GATE:-on}" = "off" ]; then
   exit 0
 fi
 
-BASE="origin/main"
+# Resolves through base-branch.sh; --base still overrides.
+BASE="origin/$(bash "$(dirname "${BASH_SOURCE[0]:-$0}")/base-branch.sh" 2>/dev/null || echo main)"
 JUDGE=0
 GOAL=""
 PLANS=()
