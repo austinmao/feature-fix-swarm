@@ -125,11 +125,15 @@ EOF
   [ "$status" -eq 2 ]
 }
 
-@test "unresolvable diff base FAILs closed (no origin/main, no --diff-base)" {
+@test "unresolvable diff base FAILs closed (no origin remote, no --diff-base)" {
   add_web_commit
   run bash "$SCRIPT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"canary-gate: FAIL — diff base 'origin/main' unresolvable (fetch it or pass --diff-base)"* ]]
+  # The default base now resolves via base-branch.sh, so the branch NAME in the
+  # message follows the fixture host's git init.defaultBranch — pin the shape,
+  # not the name (CI's default differed from the author machine's).
+  [[ "$output" == *"canary-gate: FAIL — diff base 'origin/"* ]]
+  [[ "$output" == *"unresolvable (fetch it or pass --diff-base)"* ]]
 }
 
 @test "--diff-base with no value is usage error exit 2" {

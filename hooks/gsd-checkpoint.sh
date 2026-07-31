@@ -22,9 +22,16 @@ set -uo pipefail
 
 HANDOFF=".planning/run-state/HANDOFF.json"
 
-# Throttle on the handoff's own mtime (macOS stat -f / GNU stat -c both tried).
+# Throttle on the handoff's own mtime. GNU form FIRST: on Linux, `stat -f %m`
+# does not fail — it prints the filesystem MOUNT POINT (nonnumeric), which
+# poisoned the arithmetic and broke the throttle. The numeric guard catches
+# any remaining platform surprise by treating it as "stale" (rewrite), the
+# safe direction for a checkpoint.
 if [ -f "$HANDOFF" ]; then
-  mtime="$(stat -f %m "$HANDOFF" 2>/dev/null || stat -c %Y "$HANDOFF" 2>/dev/null || echo 0)"
+  mtime="$(stat -c %Y "$HANDOFF" 2>/dev/null || stat -f %m "$HANDOFF" 2>/dev/null || echo 0)"
+  case "$mtime" in
+    *[!0-9]*|'') mtime=0 ;;
+  esac
   now="$(date +%s)"
   [ $((now - mtime)) -lt 60 ] && exit 0
 fi
