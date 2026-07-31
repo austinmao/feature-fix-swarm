@@ -164,3 +164,32 @@ EOF
   [ "$status" -eq 127 ]
   [ ! -f "$BATS_TEST_TMPDIR/fallback-started" ]
 }
+
+# BASH_SOURCE is bash-only: under zsh ${BASH_SOURCE[0]} is empty, so
+# `dirname ""` yields "." and the sibling source resolved to ./run-bounded.sh
+# -- which does not exist at the repo root. run_bounded then stayed undefined
+# and every bounded reviewer call failed. Measured under zsh before the fix:
+#   scripts/gsd/adversary-host.sh:.:20: no such file or directory: ./run-bounded.sh
+@test "sources under zsh from an unrelated cwd (run_bounded defined)" {
+  command -v zsh >/dev/null 2>&1 || skip "zsh not installed"
+  cd "$BATS_TEST_TMPDIR"
+  run zsh -c ". '$LIB' && typeset -f run_bounded >/dev/null && echo DEFINED"
+  [ "$status" -eq 0 ]
+  [ "$output" = "DEFINED" ]
+}
+
+@test "sources under bash from an unrelated cwd (run_bounded defined)" {
+  cd "$BATS_TEST_TMPDIR"
+  run bash -c ". '$LIB' && type run_bounded >/dev/null && echo DEFINED"
+  [ "$status" -eq 0 ]
+  [ "$output" = "DEFINED" ]
+}
+
+@test "a missing sibling run-bounded.sh fails loudly, not silently" {
+  ISOLATED="$BATS_TEST_TMPDIR/isolated"
+  mkdir -p "$ISOLATED"
+  cp "$LIB" "$ISOLATED/adversary-host.sh"   # deliberately WITHOUT run-bounded.sh
+  run bash -c ". '$ISOLATED/adversary-host.sh'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot locate run-bounded.sh"* ]]
+}
