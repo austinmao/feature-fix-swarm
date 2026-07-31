@@ -17,7 +17,28 @@
 # rc-124). NEVER run the CLI unwrapped — an unbounded hang is a silent forever
 # block (2026-07-12 dead-codex forensics); a refused/timed-out call returns
 # 124 and the callers' existing fail-open paths fire.
-. "$(dirname "${BASH_SOURCE[0]}")/run-bounded.sh"
+#
+# `${BASH_SOURCE[0]}` is EMPTY when this file is sourced from zsh, so
+# `dirname ""` yielded "." and this resolved to ./run-bounded.sh -- which does
+# not exist at the repo root. Measured under zsh:
+#   scripts/gsd/adversary-host.sh:.:20: no such file or directory: ./run-bounded.sh
+# `run_bounded` then stayed undefined and every bounded reviewer call failed.
+# Resolved zsh-safely: $0 is the SOURCED FILE's path in zsh (verified), while
+# bash populates BASH_SOURCE, so this one expression carries the right
+# provenance in both -- and needs no zsh-only syntax such as ${(%):-%x}, which
+# bash cannot even PARSE (so it cannot sit in an elif branch). Deliberately NOT
+# falling back to the CWD's git root: sourcing one checkout's copy from another
+# would silently load THAT checkout's run-bounded.sh, so a reviewer could run a
+# run_bounded from a different revision than the branch under review, unwarned.
+_ah_dir="$(dirname "${BASH_SOURCE[0]:-$0}")"
+if [ ! -f "${_ah_dir}/run-bounded.sh" ]; then
+  echo "adversary-host: FATAL: cannot locate run-bounded.sh next to adversary-host.sh (looked in '${_ah_dir}')" >&2
+  unset _ah_dir
+  return 1 2>/dev/null || exit 1
+fi
+. "${_ah_dir}/run-bounded.sh"
+# Do not leak scaffolding into the caller's shell.
+unset _ah_dir
 
 detect_orchestrator_host() {
   case "${FFS_HOST:-}" in
