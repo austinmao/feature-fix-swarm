@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.12.0"
+version: "2.12.1"
 allowed-tools:
   - Read
   - Edit
@@ -325,6 +325,16 @@ exit 0
    ancestors of the merged head, clears `.planning/run-state/`. Fail-soft,
    ALWAYS exits 0 — cleanup failure never un-merges or blocks the report.
    Kill-switch `FFS_RUN_FINALIZER=off`.
+   CI re-proves the levers this step names actually exist (verify block,
+   executed by `scripts/verify-skill-blocks.py`):
+
+   ```bash verify
+   test -f "$REPO_ROOT/scripts/gsd/run-finalizer.sh"
+   test -f "$REPO_ROOT/scripts/gsd/assert-merged.sh"
+   test -f "$REPO_ROOT/scripts/gsd/model-fallback.sh"
+   test -f "$REPO_ROOT/scripts/gsd/fallback-rehearsal.sh"
+   ```
+
 6. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
    persists this run's `.planning/**/learnings*.jsonl` to gbrain-or-archive and
    prints `<N> harvested`. ALWAYS exits 0 — a broken/unreachable memory backend

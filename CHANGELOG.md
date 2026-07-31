@@ -6,6 +6,33 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v4.21.0 — Cost-discipline borrows: tested fallback, advisor budget, verify blocks (2026-07-31)
+
+Three patterns adapted from `Neeeophytee/ai-cost-cutter-skills` (MIT), fitted
+to FFS's OAuth-only constraint (nothing routes through API keys or gateways).
+
+### Added
+
+- `scripts/gsd/fallback-rehearsal.sh` (+ `tests/bats/fallback-rehearsal.bats`):
+  "a backup you never ran is a hope" — operator-invoked bounded smoke through
+  BOTH fallback rungs (claude-opus-5 via claude CLI, gpt-5.6-sol via codex CLI,
+  both vendors' API keys stripped), recording `tested_on` + per-rung results to
+  the probe cache (`rehearsal.json`). Exit 1 on any failed rung. Never wired
+  into CI (no OAuth there). `model-fallback.sh` now WARNs at fallback-ENGAGE
+  time when the rehearsal record is missing ("never run") or >30d stale —
+  advisory, an unrehearsed fallback still beats no fallback.
+- `gates.py delegation-audit`: advisor-call budget. Premium-tier spawns
+  (model pin containing `opus`/`fable`) are counted as advisor consults —
+  `ADVISOR-CALLS: n` always printed; optional `--advisor-cap N` adds
+  `ADVISOR-WARN` when exceeded. Advisory: the always-exit-0 contract holds.
+- `scripts/verify-skill-blocks.py` (+ `tests/test_verify_skill_blocks.py`, CI
+  step): anti-rot gate for skill prose. Every ` ```bash verify` fence in
+  `skills/*/SKILL.md` is extracted and EXECUTED in a fresh temp dir
+  (`REPO_ROOT` exported, hermetic, 120s bound); nonzero fails the build and
+  names the skill. Plain ` ```bash` fences stay prose. Seeded: autonomy-grant
+  (TTL constants 72h/168h ↔ `lib/gates.py`) and feature-implement (finish-tail
+  levers exist on disk).
+
 ## v4.20.0 — Anti-entanglement: run-end finalizer, drift gate, 72h grants (2026-07-30)
 
 Prompted by a consumer-repo estate audit (2026-07-30): 95 branches (~30

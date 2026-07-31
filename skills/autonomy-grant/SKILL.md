@@ -1,7 +1,7 @@
 ---
 name: autonomy-grant
 description: "Pre-approve the operator gates an unattended run will hit — prod push, deploy, merge, DNS — so the run proceeds through them without stopping. Use at plan approval, while the operator is present, to build the typed approval ledger that /feature-implement --autonomous checks mechanically."
-version: "1.2.0"
+version: "1.2.1"
 ---
 
 # /autonomy-grant
@@ -61,6 +61,14 @@ unapproved external gates.
    TTL default 72h — sized for multi-day agentic runs (24h expired
    mid-run). Trim with `--ttl-hours` for short runs; cap 168h. Grants are
    run-bound: they never leak into the next run.
+
+   CI re-proves that claim against the code (verify block, executed by
+   `scripts/verify-skill-blocks.py`):
+
+   ```bash verify
+   grep -q 'GRANT_DEFAULT_TTL_HOURS = 72.0' "$REPO_ROOT/lib/gates.py"
+   grep -q 'GRANT_MAX_TTL_HOURS = 168.0' "$REPO_ROOT/lib/gates.py"
+   ```
 
 4. **At each gate, the loop checks — never asks:**
 
