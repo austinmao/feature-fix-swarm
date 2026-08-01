@@ -26,6 +26,7 @@ REQUIRED = {
     "findings",
     "requirement_coverage_regression",
 }
+FINDING_SEVERITIES = {"BLOCKER", "CRITICAL", "HIGH", "MEDIUM", "LOW"}
 
 
 def validate_result(result: dict[str, Any]) -> None:
@@ -38,6 +39,18 @@ def validate_result(result: dict[str, Any]) -> None:
         raise EvalResultError("invalid tier")
     if result["blast_radius"] not in {"low", "medium", "high"}:
         raise EvalResultError("invalid blast_radius")
+    for field in ("mandatory_gates_passed", "requirement_coverage_regression"):
+        if type(result[field]) is not bool:
+            raise EvalResultError(f"{field} must be a boolean")
+    if not isinstance(result["findings"], list) or not all(
+        isinstance(item, dict) for item in result["findings"]
+    ):
+        raise EvalResultError("findings must be a list of objects")
+    if any(
+        item.get("severity") not in FINDING_SEVERITIES
+        for item in result["findings"]
+    ):
+        raise EvalResultError("finding severity must be a known uppercase value")
 
 
 def choose_lower_effort(
@@ -49,7 +62,8 @@ def choose_lower_effort(
     for row in rows:
         validate_result(row)
         severe = any(
-            str(item.get("severity", "")).upper() in {"BLOCKER", "HIGH"}
+            str(item.get("severity", "")).upper()
+            in {"BLOCKER", "CRITICAL", "HIGH"}
             for item in row["findings"]
         )
         if (
@@ -60,4 +74,3 @@ def choose_lower_effort(
         ):
             return higher
     return lower
-

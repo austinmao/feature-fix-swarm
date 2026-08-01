@@ -358,12 +358,11 @@ adversary_invoke_with_fallback() {
 
   total="${timeout_s%%.*}"
   case "$total" in ''|*[!0-9]*|0) total=1 ;; esac
-  # Split the advertised wall so even a dead preferred CLI leaves a reliable
-  # fallback slice. A fast primary failure still gives the fallback more time.
-  # Opposite-vendor review remains preferred, but it must not consume half the
-  # whole deadline when a full-context request is quota-limited even though a
-  # tiny availability probe succeeded. Reserve the majority for fallback.
-  primary_budget=$(( total / 4 ))
+  # Split the advertised wall evenly so a healthy preferred CLI has enough
+  # time for a substantive diff while a dead CLI still leaves a complete
+  # fallback slice. The previous one-quarter share admitted Claude on a tiny
+  # probe, then killed every real 90-100 KB review before it could answer.
+  primary_budget=$(( total / 2 ))
   [ "$primary_budget" -ge 1 ] || primary_budget=1
   [ "$primary_budget" -le "$total" ] || primary_budget="$total"
   start="$SECONDS"

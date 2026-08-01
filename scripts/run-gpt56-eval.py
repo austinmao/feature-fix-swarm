@@ -15,7 +15,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 
 MATRIX = {
@@ -30,9 +30,10 @@ FORBIDDEN_PROVIDER_VARS = (
     "OPENAI_API_BASE",
     "CODEX_MODEL_PROVIDER",
 )
+FINDING_SEVERITIES = {"BLOCKER", "CRITICAL", "HIGH", "MEDIUM", "LOW"}
 
 
-def fail(message: str) -> "NoReturn":
+def fail(message: str) -> NoReturn:
     raise SystemExit(f"gpt56-eval: {message}")
 
 
@@ -243,6 +244,29 @@ def run_one(
     }
 
 
+def selection_row_is_clean(row: dict[str, Any]) -> bool:
+    for field in ("mandatory_gates_passed", "requirement_coverage_regression"):
+        if type(row.get(field)) is not bool:
+            fail(f"{field} must be boolean")
+    findings = row.get("findings")
+    if not isinstance(findings, list) or not all(
+        isinstance(item, dict) for item in findings
+    ):
+        fail("findings must be a list of objects")
+    if any(item.get("severity") not in FINDING_SEVERITIES for item in findings):
+        fail("finding severity is invalid")
+    severe = any(
+        str(item.get("severity", "")).upper()
+        in {"BLOCKER", "CRITICAL", "HIGH"}
+        for item in findings
+    )
+    return bool(
+        row["mandatory_gates_passed"]
+        and not row["requirement_coverage_regression"]
+        and not severe
+    )
+
+
 def selections(results: list[dict[str, Any]]) -> dict[str, str]:
     selected: dict[str, str] = {}
     for tier, (_model, efforts) in MATRIX.items():
@@ -252,18 +276,10 @@ def selections(results: list[dict[str, Any]]) -> dict[str, str]:
         if any(sum(row["effort"] == effort for row in tier_rows) != expected_per_effort for effort in efforts):
             fail(f"incomplete {tier} evaluation matrix")
         higher_rows = [row for row in tier_rows if row["effort"] == higher]
-        if any(not row["mandatory_gates_passed"] for row in higher_rows):
+        if any(not selection_row_is_clean(row) for row in higher_rows):
             fail(f"higher-effort {tier} baseline failed mandatory gates")
         lower_rows = [row for row in tier_rows if row["effort"] == lower]
-        clean = all(
-            row["mandatory_gates_passed"]
-            and not row["requirement_coverage_regression"]
-            and not any(
-                str(item.get("severity", "")).upper() in {"BLOCKER", "HIGH"}
-                for item in row["findings"]
-            )
-            for row in lower_rows
-        )
+        clean = all(selection_row_is_clean(row) for row in lower_rows)
         selected[tier] = lower if clean else higher
     return selected
 

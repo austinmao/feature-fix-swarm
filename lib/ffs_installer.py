@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -92,6 +94,105 @@ def copy_path(source: Path, destination: Path) -> None:
         shutil.copytree(source, destination, symlinks=True)
     else:
         shutil.copy2(source, destination)
+
+
+def copy_entry_between_fds(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    """Recursively copy one entry without resolving either parent by path."""
+    source_stat = os.stat(
+        source_name, dir_fd=source_parent_fd, follow_symlinks=False
+    )
+    mode = source_stat.st_mode
+    if stat.S_ISLNK(mode):
+        os.symlink(
+            os.readlink(source_name, dir_fd=source_parent_fd),
+            destination_name,
+            dir_fd=destination_parent_fd,
+        )
+        return
+    if stat.S_ISREG(mode):
+        try:
+            source_fd = os.open(
+                source_name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=source_parent_fd,
+            )
+        except OSError as exc:
+            raise ActionableError(
+                f"source changed during backup: {source_name}: {exc}"
+            ) from exc
+        opened_source = os.fstat(source_fd)
+        if (opened_source.st_dev, opened_source.st_ino) != (
+            source_stat.st_dev,
+            source_stat.st_ino,
+        ):
+            os.close(source_fd)
+            raise ActionableError(f"source changed during backup: {source_name}")
+        try:
+            destination_fd = os.open(
+                destination_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                stat.S_IMODE(mode),
+                dir_fd=destination_parent_fd,
+            )
+        except BaseException:
+            os.close(source_fd)
+            raise
+        try:
+            while block := os.read(source_fd, 1024 * 1024):
+                view = memoryview(block)
+                while view:
+                    written = os.write(destination_fd, view)
+                    if written == 0:
+                        raise OSError("zero-byte write while copying backup")
+                    view = view[written:]
+            os.fchmod(destination_fd, stat.S_IMODE(mode))
+        finally:
+            os.close(destination_fd)
+            os.close(source_fd)
+        return
+    if not stat.S_ISDIR(mode):
+        raise ActionableError(f"cannot back up special file: {source_name}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        source_fd = os.open(source_name, flags, dir_fd=source_parent_fd)
+    except OSError as exc:
+        raise ActionableError(
+            f"source changed during backup: {source_name}: {exc}"
+        ) from exc
+    opened_source = os.fstat(source_fd)
+    if (opened_source.st_dev, opened_source.st_ino) != (
+        source_stat.st_dev,
+        source_stat.st_ino,
+    ):
+        os.close(source_fd)
+        raise ActionableError(f"source changed during backup: {source_name}")
+    try:
+        os.mkdir(destination_name, stat.S_IMODE(mode), dir_fd=destination_parent_fd)
+        destination_fd = os.open(
+            destination_name, flags, dir_fd=destination_parent_fd
+        )
+    except BaseException:
+        os.close(source_fd)
+        raise
+    try:
+        for child in sorted(os.listdir(source_fd)):
+            copy_entry_between_fds(source_fd, child, destination_fd, child)
+        os.fchmod(destination_fd, stat.S_IMODE(mode))
+    finally:
+        os.close(destination_fd)
+        os.close(source_fd)
 
 
 def secure_backup_object(path: Path) -> None:
@@ -180,13 +281,88 @@ def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o644) -> None:
             os.unlink(temporary)
 
 
+def write_json_file(path: Path, value: dict[str, Any], mode: int = 0o644) -> None:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = os.open(path, flags, mode)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        os.fchmod(handle.fileno(), mode)
+
+
+@contextlib.contextmanager
+def private_cache_root_fd() -> Iterator[tuple[int, Path]]:
+    """Create/open the private cache root without following mutable links."""
+    home = Path.home().absolute()
+    root = home / ".cache" / "feature-fix-swarm"
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        home_fd = os.open(home, flags)
+    except OSError as exc:
+        raise ActionableError(f"private home root is unsafe: {home}: {exc}") from exc
+    cache_fd: int | None = None
+    root_fd: int | None = None
+    try:
+        try:
+            os.mkdir(".cache", 0o700, dir_fd=home_fd)
+        except FileExistsError:
+            pass
+        cache_fd = os.open(".cache", flags, dir_fd=home_fd)
+        try:
+            os.mkdir("feature-fix-swarm", 0o700, dir_fd=cache_fd)
+        except FileExistsError:
+            pass
+        root_fd = os.open("feature-fix-swarm", flags, dir_fd=cache_fd)
+        os.fchmod(root_fd, 0o700)
+        yield root_fd, root
+    except OSError as exc:
+        raise ActionableError(f"private cache root is unsafe: {root}: {exc}") from exc
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+        if cache_fd is not None:
+            os.close(cache_fd)
+        os.close(home_fd)
+
+
 def cache_root() -> Path:
-    root = Path.home() / ".cache" / "feature-fix-swarm"
-    if lexists(root) and (root.is_symlink() or not root.is_dir()):
-        raise ActionableError(f"private cache root is not a regular directory: {root}")
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root.chmod(0o700)
-    return root
+    with private_cache_root_fd() as (_root_fd, root):
+        return root
+
+
+def open_backup_directory(backup_id: str) -> tuple[int, Path]:
+    """Open one backup directory through the private cache descriptor chain."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    with private_cache_root_fd() as (cache_fd, cache_path):
+        try:
+            backups_fd = os.open("backups", flags, dir_fd=cache_fd)
+        except OSError as exc:
+            raise ActionableError("backup store is missing or unsafe") from exc
+        try:
+            try:
+                directory_fd = os.open(backup_id, flags, dir_fd=backups_fd)
+            except OSError as exc:
+                raise ActionableError(
+                    f"backup not found or unsafe: {backup_id}"
+                ) from exc
+        finally:
+            os.close(backups_fd)
+    return directory_fd, cache_path / "backups" / backup_id
 
 
 def project_lock_path(project: Path) -> Path:
@@ -216,51 +392,301 @@ def exclusive_lock(path: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextlib.contextmanager
+def anchored_working_directory(directory_fd: int) -> Iterator[None]:
+    """Resolve relative filesystem operations from a stable open directory."""
+    saved_fd = os.open(".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fchdir(directory_fd)
+        yield
+    finally:
+        os.fchdir(saved_fd)
+        os.close(saved_fd)
+
+
+@contextlib.contextmanager
+def project_parent_fd(
+    project: Path, destination: Path
+) -> Iterator[tuple[int, str]]:
+    """Open/create a project destination parent without following symlinks."""
+    root = project.resolve()
+    try:
+        relative = destination.absolute().relative_to(root)
+    except ValueError as exc:
+        raise ActionableError(
+            f"project managed path escapes checkout: {destination}"
+        ) from exc
+    if not relative.parts or ".." in relative.parts:
+        raise ActionableError(f"unsafe project destination: {destination}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    root_fd = os.open(root, flags)
+    directory_fd = root_fd
+    try:
+        for part in relative.parts[:-1]:
+            try:
+                os.mkdir(part, 0o755, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            if directory_fd != root_fd:
+                os.close(directory_fd)
+            directory_fd = next_fd
+        yield directory_fd, relative.name
+    except OSError as exc:
+        raise ActionableError(
+            f"unsafe project destination {destination}: {exc}"
+        ) from exc
+    finally:
+        if directory_fd != root_fd:
+            os.close(directory_fd)
+        os.close(root_fd)
+
+
+@contextlib.contextmanager
+def relative_parent_fd(root_fd: int, relative: Path) -> Iterator[tuple[int, str]]:
+    """Open/create a relative parent beneath an already verified root fd."""
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ActionableError(f"unsafe anchored destination: {relative}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in relative.parts[:-1]:
+            try:
+                os.mkdir(part, 0o755, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        yield directory_fd, relative.name
+    except OSError as exc:
+        raise ActionableError(
+            f"unsafe anchored destination {relative}: {exc}"
+        ) from exc
+    finally:
+        os.close(directory_fd)
+
+
+def rename_no_replace(
+    source: str,
+    destination: str,
+    *,
+    source_fd: int,
+    destination_fd: int,
+) -> None:
+    """Atomically rename one entry without replacing an existing destination."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    result: int
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        renameatx_np = libc.renameatx_np
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            source_fd,
+            source_bytes,
+            destination_fd,
+            destination_bytes,
+            0x00000004,  # RENAME_EXCL
+        )
+    elif hasattr(libc, "renameat2"):
+        renameat2 = libc.renameat2
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            source_fd,
+            source_bytes,
+            destination_fd,
+            destination_bytes,
+            0x00000001,  # RENAME_NOREPLACE
+        )
+    else:
+        raise ActionableError(
+            "atomic no-replace rename is unsupported on this platform"
+        )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error), destination)
+    raise OSError(error, os.strerror(error), destination)
+
+
 class Backup:
     def __init__(self, operation: str, scope: str, project: Path | None = None) -> None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.backup_id = f"{stamp}-{os.getpid()}-{secrets.token_hex(3)}"
-        backups = cache_root() / "backups"
-        if lexists(backups) and (backups.is_symlink() or not backups.is_dir()):
-            raise ActionableError(f"private backup root is not a regular directory: {backups}")
-        backups.mkdir(mode=0o700, exist_ok=True)
-        backups.chmod(0o700)
-        self.directory = backups / self.backup_id
-        self.directory.mkdir(mode=0o700, exist_ok=False)
-        self.directory.chmod(0o700)
+        with private_cache_root_fd() as (cache_fd, cache_path):
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                os.mkdir("backups", 0o700, dir_fd=cache_fd)
+            except FileExistsError:
+                pass
+            try:
+                backups_fd = os.open("backups", flags, dir_fd=cache_fd)
+            except OSError as exc:
+                raise ActionableError(
+                    f"private backup root is unsafe: {cache_path / 'backups'}: {exc}"
+                ) from exc
+            try:
+                os.fchmod(backups_fd, 0o700)
+                os.mkdir(self.backup_id, 0o700, dir_fd=backups_fd)
+                directory_fd = os.open(self.backup_id, flags, dir_fd=backups_fd)
+                try:
+                    os.fchmod(directory_fd, 0o700)
+                except BaseException:
+                    os.close(directory_fd)
+                    raise
+            finally:
+                os.close(backups_fd)
+        self.directory = cache_path / "backups" / self.backup_id
+        self.directory_fd = directory_fd
         self.entries: list[dict[str, Any]] = []
         self.seen: set[str] = set()
         self.operation = operation
         self.scope = scope
         self.project = project
 
-    def before(self, path: Path) -> None:
+    def _record_before(
+        self,
+        path: Path,
+        source: Path | None,
+        *,
+        source_parent_fd: int | None = None,
+        source_name: str | None = None,
+    ) -> dict[str, Any] | None:
         absolute = str(path.absolute())
         if absolute in self.seen:
-            return
+            return None
         self.seen.add(absolute)
-        entry: dict[str, Any] = {"path": absolute, "before": fingerprint(path)}
-        if lexists(path):
-            metadata = path.lstat()
+        entry: dict[str, Any] = {"path": absolute, "before": "missing"}
+
+        def inspect_source(source_path: Path) -> bool:
+            if not lexists(source_path):
+                return False
+            entry["before"] = fingerprint(source_path)
+            metadata = source_path.lstat()
             entry["mode"] = f"{stat.S_IMODE(metadata.st_mode):04o}"
             if stat.S_ISLNK(metadata.st_mode):
                 entry["type"] = "symlink"
-                entry["target"] = os.readlink(path)
+                entry["target"] = os.readlink(source_path)
             elif stat.S_ISDIR(metadata.st_mode):
                 entry["type"] = "directory"
             elif stat.S_ISREG(metadata.st_mode):
                 entry["type"] = "file"
-                entry["sha256"] = sha256_file(path)
+                entry["sha256"] = sha256_file(source_path)
             else:
                 entry["type"] = "other"
-            entry["modes"] = capture_modes(path)
+            entry["modes"] = capture_modes(source_path)
+            return True
+
+        anchored_source = source_parent_fd is not None and source_name is not None
+        if anchored_source:
+            assert source_parent_fd is not None and source_name is not None
+            with anchored_working_directory(source_parent_fd):
+                source_exists = inspect_source(Path(source_name))
+        else:
+            source_exists = source is not None and inspect_source(source)
+
+        if source_exists:
             backup_rel = f"objects/{len(self.entries):04d}"
-            backup_path = self.directory / backup_rel
-            copy_path(path, backup_path)
-            backup_path.parent.chmod(0o700)
-            secure_backup_object(backup_path)
+            if anchored_source:
+                assert source_parent_fd is not None and source_name is not None
+                try:
+                    os.mkdir("objects", 0o700, dir_fd=self.directory_fd)
+                except FileExistsError:
+                    pass
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                objects_fd = os.open("objects", flags, dir_fd=self.directory_fd)
+                try:
+                    copy_entry_between_fds(
+                        source_parent_fd,
+                        source_name,
+                        objects_fd,
+                        f"{len(self.entries):04d}",
+                    )
+                finally:
+                    os.close(objects_fd)
+            else:
+                assert source is not None
+                with anchored_working_directory(self.directory_fd):
+                    copy_path(source, Path(backup_rel))
+            with anchored_working_directory(self.directory_fd):
+                backup_path = Path(backup_rel)
+                if fingerprint(backup_path) != entry["before"]:
+                    remove_path(backup_path)
+                    raise ActionableError(
+                        f"source changed while creating backup: {path}"
+                    )
+                backup_path.parent.chmod(0o700)
+                secure_backup_object(backup_path)
             entry["backup"] = backup_rel
         self.entries.append(entry)
+        return entry
+
+    def before(self, path: Path) -> dict[str, Any] | None:
+        if not lexists(path):
+            return self._record_before(path, None)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            parent_fd = os.open(path.absolute().parent, flags)
+        except OSError as exc:
+            raise ActionableError(
+                f"backup source parent is unsafe: {path.parent}: {exc}"
+            ) from exc
+        try:
+            return self._record_before(
+                path,
+                None,
+                source_parent_fd=parent_fd,
+                source_name=path.name,
+            )
+        finally:
+            os.close(parent_fd)
+
+    def before_anchored(
+        self, path: Path, parent_fd: int, source_name: str | None
+    ) -> dict[str, Any] | None:
+        """Snapshot a project entry relative to an already verified parent fd."""
+        return self._record_before(
+            path,
+            None,
+            source_parent_fd=parent_fd if source_name is not None else None,
+            source_name=source_name,
+        )
 
     def assume_created(self, path: Path) -> None:
         """Record an upstream-manifest path proven absent from the old manifest."""
@@ -272,31 +698,75 @@ class Backup:
 
     def finish(self) -> None:
         for entry in self.entries:
-            entry["after"] = fingerprint(Path(entry["path"]))
-        atomic_json(
-            self.directory / "manifest.json",
-            {
-                "schema": BACKUP_SCHEMA,
-                "backup_id": self.backup_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "operation": self.operation,
-                "scope": self.scope,
-                "project_dir": str(self.project) if self.project else None,
-                "entries": self.entries,
-            },
-            mode=0o600,
-        )
+            entry.setdefault("after", fingerprint(Path(entry["path"])))
+        with anchored_working_directory(self.directory_fd):
+            atomic_json(
+                Path("manifest.json"),
+                {
+                    "schema": BACKUP_SCHEMA,
+                    "backup_id": self.backup_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "operation": self.operation,
+                    "scope": self.scope,
+                    "project_dir": str(self.project) if self.project else None,
+                    "entries": self.entries,
+                },
+                mode=0o600,
+            )
 
     def restore_uncommitted(self) -> None:
         """Best-effort transaction rollback before control returns to caller."""
+        conflicts: list[Path] = []
         for entry in reversed(self.entries):
             destination = Path(entry["path"])
+            backup_rel = entry.get("backup")
+            if self.project is not None:
+                try:
+                    destination.absolute().relative_to(self.project.resolve())
+                except ValueError:
+                    pass
+                else:
+                    try:
+                        restore_project_entry(
+                            self.project,
+                            destination,
+                            None,
+                            expected_current=entry.get("after"),
+                            modes=entry.get("modes"),
+                            root_mode=entry.get("mode"),
+                            source_parent_fd=(
+                                self.directory_fd if backup_rel else None
+                            ),
+                            source_name=backup_rel,
+                        )
+                    except ActionableError:
+                        conflicts.append(destination)
+                    continue
+            if entry.get("restore_root") and entry.get("restore_relative"):
+                try:
+                    restore_anchored_backup_entry(
+                        entry,
+                        destination,
+                        None,
+                        source_parent_fd=(self.directory_fd if backup_rel else None),
+                        source_name=backup_rel,
+                    )
+                except ActionableError:
+                    conflicts.append(destination)
+                continue
             if lexists(destination):
                 remove_path(destination)
-            backup_rel = entry.get("backup")
             if backup_rel:
-                copy_path(self.directory / backup_rel, destination)
-                restore_modes(destination, entry.get("modes"), entry.get("mode"))
+                with anchored_working_directory(self.directory_fd):
+                    copy_path(Path(backup_rel), destination)
+                    restore_modes(
+                        destination, entry.get("modes"), entry.get("mode")
+                    )
+        if conflicts:
+            rendered = ", ".join(str(path) for path in conflicts)
+            raise ActionableError(
+                f"managed path changed during rollback; preserved: {rendered}"
+            )
 
 
 def source_version(source: Path) -> str:
@@ -345,6 +815,24 @@ def safe_project_destination(project: Path, key: str | Path) -> Path:
             raise ActionableError(
                 f"project install path has a symlinked ancestor: {current}"
             )
+    return destination
+
+
+def safe_project_directory(project: Path, key: str | Path) -> Path:
+    destination = safe_project_destination(project, key)
+    if destination.is_symlink():
+        raise ActionableError(f"symlinked project directory is unsafe: {destination}")
+    if lexists(destination) and not destination.is_dir():
+        raise ActionableError(f"project directory is not a directory: {destination}")
+    return destination
+
+
+def safe_project_file(project: Path, key: str | Path) -> Path:
+    destination = safe_project_destination(project, key)
+    if destination.is_symlink():
+        raise ActionableError(f"symlinked project file is unsafe: {destination}")
+    if lexists(destination) and not destination.is_file():
+        raise ActionableError(f"project file is not a regular file: {destination}")
     return destination
 
 
@@ -410,7 +898,7 @@ def atomic_copy_inside(root: Path, relative: str | Path, source: Path) -> None:
 def manifest_path(scope: str, project: Path | None) -> Path:
     if scope == "project":
         assert project is not None
-        return safe_project_destination(
+        return safe_project_file(
             project, Path(".feature-fix-swarm") / "install-manifest.json"
         )
     return cache_root() / "install-manifest.json"
@@ -457,7 +945,238 @@ def ensure_replaceable(path: Path, expected: str, managed: dict[str, str], *, br
     )
 
 
-def replace_tree(source: Path, destination: Path, backup: Backup) -> None:
+def replace_anchored_entry(
+    destination: Path,
+    backup: Backup | None,
+    expected_before: str | None,
+    materialize: Any | None,
+    parent_fd: int,
+    name: str,
+    *,
+    scope_label: str,
+) -> None:
+    """Replace one entry through an already verified no-follow parent fd."""
+    temporary = f".{destination.name}.ffs-new-{os.getpid()}-{secrets.token_hex(4)}"
+    quarantine = f".{destination.name}.ffs-old-{os.getpid()}-{secrets.token_hex(4)}"
+    moved_old = False
+    installed_new = False
+    backup_entry: dict[str, Any] | None = None
+    try:
+        try:
+            os.rename(
+                name,
+                quarantine,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            moved_old = True
+        except FileNotFoundError:
+            pass
+        with anchored_working_directory(parent_fd):
+            current = fingerprint(Path(quarantine)) if moved_old else "missing"
+        if expected_before is not None and current != expected_before:
+            if moved_old:
+                rename_no_replace(
+                    quarantine,
+                    name,
+                    source_fd=parent_fd,
+                    destination_fd=parent_fd,
+                )
+                moved_old = False
+            raise ActionableError(
+                f"{scope_label} destination changed during install: {destination}"
+            )
+        if backup is not None:
+            backup_entry = backup.before_anchored(
+                destination, parent_fd, quarantine if moved_old else None
+            )
+        if materialize is not None:
+            with anchored_working_directory(parent_fd):
+                materialize(Path(temporary), parent_fd)
+                if lexists(Path(name)):
+                    raise ActionableError(
+                        f"{scope_label} destination changed during install: {destination}"
+                    )
+            rename_no_replace(
+                temporary,
+                name,
+                source_fd=parent_fd,
+                destination_fd=parent_fd,
+            )
+            installed_new = True
+        if backup_entry is not None:
+            with anchored_working_directory(parent_fd):
+                backup_entry["after"] = fingerprint(Path(name))
+        if moved_old:
+            with anchored_working_directory(parent_fd):
+                remove_path(Path(quarantine))
+            moved_old = False
+    except BaseException:
+        with anchored_working_directory(parent_fd):
+            if lexists(Path(temporary)):
+                remove_path(Path(temporary))
+            if installed_new and lexists(Path(name)):
+                remove_path(Path(name))
+        if moved_old:
+            try:
+                rename_no_replace(
+                    quarantine,
+                    name,
+                    source_fd=parent_fd,
+                    destination_fd=parent_fd,
+                )
+            except FileExistsError as exc:
+                raise ActionableError(
+                    f"{scope_label} destination changed during rollback; "
+                    f"preserved prior entry as {destination.parent / quarantine}"
+                ) from exc
+        raise
+
+
+def replace_project_entry(
+    destination: Path,
+    backup: Backup | None,
+    project: Path,
+    expected_before: str | None,
+    materialize: Any | None,
+) -> None:
+    """Replace one project entry through a no-follow parent descriptor."""
+    with project_parent_fd(project, destination) as (parent_fd, name):
+        replace_anchored_entry(
+            destination,
+            backup,
+            expected_before,
+            materialize,
+            parent_fd,
+            name,
+            scope_label="project",
+        )
+
+
+def restore_project_entry(
+    project: Path,
+    destination: Path,
+    source: Path | None,
+    *,
+    expected_current: str | None = None,
+    modes: dict[str, str] | None = None,
+    root_mode: str | None = None,
+    source_parent_fd: int | None = None,
+    source_name: str | None = None,
+) -> None:
+    def materialize(temporary: Path, destination_parent_fd: int) -> None:
+        if source_parent_fd is not None and source_name is not None:
+            copy_entry_between_fds(
+                source_parent_fd,
+                source_name,
+                destination_parent_fd,
+                temporary.name,
+            )
+        else:
+            assert source is not None
+            copy_path(source, temporary)
+        restore_modes(temporary, modes, root_mode)
+
+    has_source = source is not None or (
+        source_parent_fd is not None and source_name is not None
+    )
+
+    replace_project_entry(
+        destination,
+        None,
+        project,
+        expected_current,
+        materialize if has_source else None,
+    )
+
+
+def restore_anchored_backup_entry(
+    entry: dict[str, Any],
+    destination: Path,
+    source: Path | None,
+    *,
+    source_parent_fd: int | None = None,
+    source_name: str | None = None,
+) -> None:
+    """Restore a user legacy entry only beneath its original directory inode."""
+    root = Path(entry["restore_root"])
+    relative = Path(entry["restore_relative"])
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as exc:
+        raise ActionableError(
+            f"user legacy root changed during rollback: {root}: {exc}"
+        ) from exc
+    try:
+        current_root = os.fstat(root_fd)
+        if (
+            current_root.st_dev != entry.get("restore_root_dev")
+            or current_root.st_ino != entry.get("restore_root_ino")
+        ):
+            raise ActionableError(
+                f"user legacy root changed during rollback: {root}"
+            )
+
+        def materialize(temporary: Path, destination_parent_fd: int) -> None:
+            if source_parent_fd is not None and source_name is not None:
+                copy_entry_between_fds(
+                    source_parent_fd,
+                    source_name,
+                    destination_parent_fd,
+                    temporary.name,
+                )
+            else:
+                assert source is not None
+                copy_path(source, temporary)
+            restore_modes(
+                temporary,
+                entry.get("modes"),
+                entry.get("mode"),
+            )
+
+        with relative_parent_fd(root_fd, relative) as (parent_fd, name):
+            replace_anchored_entry(
+                destination,
+                None,
+                entry.get("after"),
+                materialize
+                if source is not None
+                or (source_parent_fd is not None and source_name is not None)
+                else None,
+                parent_fd,
+                name,
+                scope_label="user legacy",
+            )
+    finally:
+        os.close(root_fd)
+
+
+def replace_tree(
+    source: Path,
+    destination: Path,
+    backup: Backup,
+    *,
+    project: Path | None = None,
+    expected_before: str | None = None,
+) -> None:
+    if project is not None:
+        if expected_before is None:
+            raise ActionableError(
+                f"missing project precondition for destination: {destination}"
+            )
+        replace_project_entry(
+            destination,
+            backup,
+            project,
+            expected_before,
+            lambda temporary, _parent_fd: copy_path(source, temporary),
+        )
+        return
     if fingerprint(source) == fingerprint(destination):
         return
     backup.before(destination)
@@ -467,8 +1186,28 @@ def replace_tree(source: Path, destination: Path, backup: Backup) -> None:
     shutil.copytree(source, destination, symlinks=True)
 
 
-def replace_link(destination: Path, target: Path, backup: Backup) -> None:
+def replace_link(
+    destination: Path,
+    target: Path,
+    backup: Backup,
+    *,
+    project: Path | None = None,
+    expected_before: str | None = None,
+) -> None:
     link_text = os.path.relpath(target, destination.parent)
+    if project is not None:
+        if expected_before is None:
+            raise ActionableError(
+                f"missing project precondition for destination: {destination}"
+            )
+        replace_project_entry(
+            destination,
+            backup,
+            project,
+            expected_before,
+            lambda temporary, _parent_fd: temporary.symlink_to(link_text),
+        )
+        return
     if destination.is_symlink() and os.readlink(destination) == link_text:
         return
     backup.before(destination)
@@ -509,62 +1248,233 @@ def migrate_legacy(
     known = known_legacy_hashes(source)
     legacy_names = legacy_skill_names(source)
     preserved: list[Path] = []
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+    def legacy_changed(path: Path, detail: str | None = None) -> ActionableError:
+        suffix = f": {detail}" if detail else ""
+        return ActionableError(f"legacy skill changed during migration: {path}{suffix}")
+
+    def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    def hash_open_file(file_fd: int) -> str:
+        digest = hashlib.sha256()
+        os.lseek(file_fd, 0, os.SEEK_SET)
+        while block := os.read(file_fd, 1024 * 1024):
+            digest.update(block)
+        return digest.hexdigest()
+
+    def restore_quarantine(
+        parent_fd: int, quarantine: str, original: str, shown: Path
+    ) -> None:
+        try:
+            rename_no_replace(
+                quarantine,
+                original,
+                source_fd=parent_fd,
+                destination_fd=parent_fd,
+            )
+        except FileExistsError as exc:
+            raise legacy_changed(
+                shown,
+                f"a concurrent entry won the destination; preserved as {quarantine}",
+            ) from exc
+
+    def process_anchored_root(root_fd: int, display_root: Path) -> None:
+        """Migrate legacy files without resolving mutable path components."""
+        root_identity = os.fstat(root_fd)
+
+        def process_directory(
+            directory_fd: int,
+            skill_name: str,
+            relative: tuple[str, ...],
+        ) -> None:
+            try:
+                names = sorted(os.listdir(directory_fd), reverse=True)
+            except OSError as exc:
+                raise legacy_changed(
+                    display_root / skill_name / Path(*relative), str(exc)
+                ) from exc
+            for name in names:
+                shown = display_root / skill_name / Path(*relative, name)
+                try:
+                    before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise legacy_changed(shown, str(exc)) from exc
+                mode = before.st_mode
+                if stat.S_ISDIR(mode):
+                    try:
+                        child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                    except OSError as exc:
+                        raise legacy_changed(shown, str(exc)) from exc
+                    try:
+                        opened = os.fstat(child_fd)
+                        if not same_inode(before, opened):
+                            raise legacy_changed(shown)
+                        process_directory(
+                            child_fd, skill_name, (*relative, name)
+                        )
+                        try:
+                            current = os.stat(
+                                name,
+                                dir_fd=directory_fd,
+                                follow_symlinks=False,
+                            )
+                        except OSError as exc:
+                            raise legacy_changed(shown, str(exc)) from exc
+                        if not same_inode(opened, current):
+                            raise legacy_changed(shown)
+                        with contextlib.suppress(OSError):
+                            os.rmdir(name, dir_fd=directory_fd)
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                    preserved.append(shown)
+                    continue
+
+                quarantine = f".ffs-legacy-{secrets.token_hex(12)}"
+                try:
+                    rename_no_replace(
+                        name,
+                        quarantine,
+                        source_fd=directory_fd,
+                        destination_fd=directory_fd,
+                    )
+                except (FileExistsError, OSError) as exc:
+                    raise legacy_changed(shown, str(exc)) from exc
+                try:
+                    try:
+                        file_fd = os.open(
+                            quarantine,
+                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                            dir_fd=directory_fd,
+                        )
+                    except OSError as exc:
+                        restore_quarantine(directory_fd, quarantine, name, shown)
+                        raise legacy_changed(shown, str(exc)) from exc
+                    try:
+                        quarantined = os.fstat(file_fd)
+                        if not same_inode(before, quarantined) or not stat.S_ISREG(
+                            quarantined.st_mode
+                        ):
+                            restore_quarantine(directory_fd, quarantine, name, shown)
+                            raise legacy_changed(shown)
+                        digest = hash_open_file(file_fd)
+                    finally:
+                        os.close(file_fd)
+
+                    catalog_path = (
+                        f"skills/{skill_name}/"
+                        f"{Path(*relative, name).as_posix()}"
+                    )
+                    if digest not in known.get(catalog_path, set()):
+                        restore_quarantine(directory_fd, quarantine, name, shown)
+                        preserved.append(shown)
+                        continue
+                    entry = backup.before_anchored(shown, directory_fd, quarantine)
+                    try:
+                        current = os.stat(
+                            quarantine,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise legacy_changed(shown, str(exc)) from exc
+                    if not same_inode(before, current):
+                        raise legacy_changed(shown)
+                    os.unlink(quarantine, dir_fd=directory_fd)
+                    if entry is not None:
+                        entry["after"] = "missing"
+                        if project is None:
+                            entry["restore_root"] = str(display_root.absolute())
+                            entry["restore_relative"] = shown.relative_to(
+                                display_root
+                            ).as_posix()
+                            entry["restore_root_dev"] = root_identity.st_dev
+                            entry["restore_root_ino"] = root_identity.st_ino
+                except Exception:
+                    try:
+                        os.stat(
+                            quarantine,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        restore_quarantine(directory_fd, quarantine, name, shown)
+                    raise
+
+        try:
+            skill_names = sorted(os.listdir(root_fd))
+        except OSError as exc:
+            raise legacy_changed(display_root, str(exc)) from exc
+        for skill_name in skill_names:
+            if skill_name not in legacy_names:
+                continue
+            shown_skill = display_root / skill_name
+            try:
+                before = os.stat(
+                    skill_name, dir_fd=root_fd, follow_symlinks=False
+                )
+            except OSError as exc:
+                raise legacy_changed(shown_skill, str(exc)) from exc
+            if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+                preserved.append(shown_skill)
+                continue
+            try:
+                skill_fd = os.open(skill_name, directory_flags, dir_fd=root_fd)
+            except OSError as exc:
+                raise legacy_changed(shown_skill, str(exc)) from exc
+            try:
+                opened = os.fstat(skill_fd)
+                if not same_inode(before, opened):
+                    raise legacy_changed(shown_skill)
+                process_directory(skill_fd, skill_name, ())
+                try:
+                    current = os.stat(
+                        skill_name, dir_fd=root_fd, follow_symlinks=False
+                    )
+                except OSError as exc:
+                    raise legacy_changed(shown_skill, str(exc)) from exc
+                if not same_inode(opened, current):
+                    raise legacy_changed(shown_skill)
+                with contextlib.suppress(OSError):
+                    os.rmdir(skill_name, dir_fd=root_fd)
+            finally:
+                os.close(skill_fd)
+
     for root in roots:
         if project is not None:
             relative = root.absolute().relative_to(project.resolve())
-            safe_project_destination(project, relative)
-        if not root.exists():
+            safe_project_directory(project, relative)
+        if not lexists(root):
             continue
-        for skill_dir in sorted(root.iterdir()):
-            if project is not None:
-                # Recheck after every directory iteration so a concurrent
-                # ancestor swap cannot silently redirect later deletions.
-                relative = root.absolute().relative_to(project.resolve())
-                safe_project_destination(project, relative)
-            if skill_dir.name not in legacy_names:
-                continue
-            if skill_dir.is_symlink():
-                safe = False
-                if skill_dir.exists() and skill_dir.is_dir():
-                    target_files = [item for item in skill_dir.rglob("*") if item.is_file()]
-                    safe = bool(target_files) and all(
-                        sha256_file(item)
-                        in known.get(f"skills/{skill_dir.name}/{item.relative_to(skill_dir).as_posix()}", set())
-                        for item in target_files
-                    )
-                elif not skill_dir.exists():
-                    safe = True
-                if safe:
-                    backup.before(skill_dir)
-                    remove_path(skill_dir)
-                else:
-                    preserved.append(skill_dir)
-                continue
-            if not skill_dir.is_dir():
-                preserved.append(skill_dir)
-                continue
-            for item in sorted(skill_dir.rglob("*"), reverse=True):
-                if item.is_dir() and not item.is_symlink():
-                    with contextlib.suppress(OSError):
-                        item.rmdir()
-                    continue
-                if item.is_symlink():
-                    if not item.exists():
-                        backup.before(item)
-                        item.unlink()
-                    else:
-                        preserved.append(item)
-                    continue
-                rel = f"skills/{skill_dir.name}/{item.relative_to(skill_dir).as_posix()}"
-                if item.is_file() and sha256_file(item) in known.get(rel, set()):
-                    backup.before(item)
-                    item.unlink()
-                else:
-                    preserved.append(item)
-            with contextlib.suppress(OSError):
-                skill_dir.rmdir()
-        with contextlib.suppress(OSError):
-            root.rmdir()
+        if project is None:
+            try:
+                root_fd = os.open(root, directory_flags)
+            except OSError as exc:
+                raise ActionableError(
+                    f"unsafe legacy skill root {root}: {exc}"
+                ) from exc
+            try:
+                process_anchored_root(root_fd, root)
+            finally:
+                os.close(root_fd)
+            continue
+        # Open the final legacy root itself with O_NOFOLLOW and keep all
+        # traversal/deletions anchored to that descriptor.
+        with project_parent_fd(project, root / ".ffs-legacy-anchor") as (
+            directory_fd,
+            _anchor,
+        ):
+            process_anchored_root(directory_fd, root)
     return preserved
 
 
@@ -719,6 +1629,7 @@ def install(source: Path, scope: str, project: Path | None) -> int:
     release_version = source_version(source)
     destination_manifest = manifest_path(scope, project)
     previous = read_json(destination_manifest)
+    destination_manifest_before = fingerprint(destination_manifest)
     managed = managed_fingerprints(previous, scope, project)
     backup = Backup("install", scope, project)
     prompt_master = stage_prompt_master(source, backup)
@@ -746,6 +1657,7 @@ def install(source: Path, scope: str, project: Path | None) -> int:
         if prompt_master:
             for host in (Path.home() / ".agents", Path.home() / ".claude"):
                 planned.append((host / "skills" / "prompt-master", fingerprint(prompt_master), False))
+    preflight_fingerprints: dict[str, str] = {}
     for path, expected, broken_ok in planned:
         if scope == "project":
             assert project is not None
@@ -755,6 +1667,7 @@ def install(source: Path, scope: str, project: Path | None) -> int:
                 raise ActionableError(f"project install path escapes checkout: {path}") from exc
             safe_project_destination(project, relative)
         ensure_replaceable(path, expected, managed, broken_link_ok=broken_ok)
+        preflight_fingerprints[str(path.absolute())] = fingerprint(path)
 
     try:
         # GSD owns every artifact this command writes. FFS invokes the exact
@@ -774,19 +1687,43 @@ def install(source: Path, scope: str, project: Path | None) -> int:
                 target = safe_project_destination(
                     project, Path(".feature-fix-swarm") / "vendor" / "skills" / name
                 )
-                replace_tree(source_dir, target, backup)
+                replace_tree(
+                    source_dir,
+                    target,
+                    backup,
+                    project=project,
+                    expected_before=preflight_fingerprints[str(target.absolute())],
+                )
                 for host in (".agents", ".claude"):
                     link = safe_project_destination(project, Path(host) / "skills" / name)
-                    replace_link(link, target, backup)
+                    replace_link(
+                        link,
+                        target,
+                        backup,
+                        project=project,
+                        expected_before=preflight_fingerprints[str(link.absolute())],
+                    )
             if prompt_master:
                 canonical = safe_project_destination(
                     project, Path(".agents") / "skills" / "prompt-master"
                 )
-                replace_tree(prompt_master, canonical, backup)
+                replace_tree(
+                    prompt_master,
+                    canonical,
+                    backup,
+                    project=project,
+                    expected_before=preflight_fingerprints[str(canonical.absolute())],
+                )
                 claude_link = safe_project_destination(
                     project, Path(".claude") / "skills" / "prompt-master"
                 )
-                replace_link(claude_link, canonical, backup)
+                replace_link(
+                    claude_link,
+                    canonical,
+                    backup,
+                    project=project,
+                    expected_before=preflight_fingerprints[str(claude_link.absolute())],
+                )
             legacy_roots = [legacy_root]
         else:
             for name, source_dir in skills.items():
@@ -817,23 +1754,33 @@ def install(source: Path, scope: str, project: Path | None) -> int:
         ):
             installed_at = previous["installed_at"]
         rendered_source = manifest_source(source, scope, project)
-        backup.before(destination_manifest)
-        atomic_json(
-            destination_manifest,
-            {
-                "schema": INSTALL_SCHEMA,
-                "version": release_version,
-                "scope": scope,
-                "installed_at": installed_at,
-                "source": rendered_source,
-                "paths": paths,
-                "gsd": {
-                    "owner": "upstream-installer",
-                    "version": GSD_VERSION,
-                    "profiles": {"claude": "full", "codex": "full"},
-                },
+        manifest_value = {
+            "schema": INSTALL_SCHEMA,
+            "version": release_version,
+            "scope": scope,
+            "installed_at": installed_at,
+            "source": rendered_source,
+            "paths": paths,
+            "gsd": {
+                "owner": "upstream-installer",
+                "version": GSD_VERSION,
+                "profiles": {"claude": "full", "codex": "full"},
             },
-        )
+        }
+        if scope == "project":
+            assert project is not None
+            replace_project_entry(
+                destination_manifest,
+                backup,
+                project,
+                destination_manifest_before,
+                lambda temporary, _parent_fd: write_json_file(
+                    temporary, manifest_value
+                ),
+            )
+        else:
+            backup.before(destination_manifest)
+            atomic_json(destination_manifest, manifest_value)
         backup.finish()
     except Exception:
         # install_gsd_with_rollback already restores on failures inside the
@@ -868,6 +1815,22 @@ def uninstall(scope: str, project: Path | None) -> int:
     for key, metadata in manifest.get("paths", {}).items():
         destination = manifest_destination(key, scope, project)
         expected = metadata.get("fingerprint") if isinstance(metadata, dict) else None
+        if not isinstance(expected, str):
+            preserved.append(destination)
+            continue
+        if scope == "project":
+            assert project is not None
+            try:
+                replace_project_entry(
+                    destination,
+                    backup,
+                    project,
+                    expected,
+                    None,
+                )
+            except ActionableError:
+                preserved.append(destination)
+            continue
         if not lexists(destination):
             continue
         if fingerprint(destination) != expected:
@@ -875,8 +1838,18 @@ def uninstall(scope: str, project: Path | None) -> int:
             continue
         backup.before(destination)
         remove_path(destination)
-    backup.before(path)
-    path.unlink()
+    if scope == "project":
+        assert project is not None
+        replace_project_entry(
+            path,
+            backup,
+            project,
+            fingerprint(path),
+            None,
+        )
+    else:
+        backup.before(path)
+        path.unlink()
     backup.finish()
     print(f"backup_id={backup.backup_id}")
     if preserved:
@@ -889,31 +1862,73 @@ def uninstall(scope: str, project: Path | None) -> int:
 def rollback(backup_id: str) -> int:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", backup_id):
         raise InvocationError("invalid backup id")
-    directory = cache_root() / "backups" / backup_id
-    manifest = read_json(directory / "manifest.json")
-    if not manifest or manifest.get("schema") != BACKUP_SCHEMA:
-        raise ActionableError(f"backup not found or invalid: {backup_id}")
-    project_text = manifest.get("project_dir")
-    project = Path(project_text) if project_text else None
-    lock_path = project_lock_path(project) if project else cache_root() / "setup.lock"
-    with exclusive_lock(lock_path):
-        conflicts: list[Path] = []
-        for entry in reversed(manifest.get("entries", [])):
-            destination = Path(entry["path"])
-            current = fingerprint(destination)
-            if current != entry.get("after"):
-                conflicts.append(destination)
-                continue
-            if lexists(destination):
-                remove_path(destination)
-            backup_rel = entry.get("backup")
-            if backup_rel:
-                copy_path(directory / backup_rel, destination)
-                restore_modes(destination, entry.get("modes"), entry.get("mode"))
-        if conflicts:
-            for destination in conflicts:
-                print(f"preserved path changed since backup: {destination}", file=sys.stderr)
-            return 1
+    directory_fd, _directory = open_backup_directory(backup_id)
+    try:
+        with anchored_working_directory(directory_fd):
+            manifest = read_json(Path("manifest.json"))
+        if not manifest or manifest.get("schema") != BACKUP_SCHEMA:
+            raise ActionableError(f"backup not found or invalid: {backup_id}")
+        project_text = manifest.get("project_dir")
+        project = Path(project_text) if project_text else None
+        lock_path = project_lock_path(project) if project else cache_root() / "setup.lock"
+        with exclusive_lock(lock_path):
+            conflicts: list[Path] = []
+            for entry in reversed(manifest.get("entries", [])):
+                destination = Path(entry["path"])
+                backup_rel = entry.get("backup")
+                if project is not None:
+                    try:
+                        destination.absolute().relative_to(project.resolve())
+                    except ValueError:
+                        pass
+                    else:
+                        try:
+                            restore_project_entry(
+                                project,
+                                destination,
+                                None,
+                                expected_current=entry.get("after"),
+                                modes=entry.get("modes"),
+                                root_mode=entry.get("mode"),
+                                source_parent_fd=(directory_fd if backup_rel else None),
+                                source_name=backup_rel,
+                            )
+                        except ActionableError:
+                            conflicts.append(destination)
+                        continue
+                if entry.get("restore_root") and entry.get("restore_relative"):
+                    try:
+                        restore_anchored_backup_entry(
+                            entry,
+                            destination,
+                            None,
+                            source_parent_fd=(directory_fd if backup_rel else None),
+                            source_name=backup_rel,
+                        )
+                    except ActionableError:
+                        conflicts.append(destination)
+                    continue
+                current = fingerprint(destination)
+                if current != entry.get("after"):
+                    conflicts.append(destination)
+                    continue
+                if lexists(destination):
+                    remove_path(destination)
+                if backup_rel:
+                    with anchored_working_directory(directory_fd):
+                        copy_path(Path(backup_rel), destination)
+                        restore_modes(
+                            destination, entry.get("modes"), entry.get("mode")
+                        )
+            if conflicts:
+                for destination in conflicts:
+                    print(
+                        f"preserved path changed since backup: {destination}",
+                        file=sys.stderr,
+                    )
+                return 1
+    finally:
+        os.close(directory_fd)
     print(f"rolled_back={backup_id}")
     return 0
 

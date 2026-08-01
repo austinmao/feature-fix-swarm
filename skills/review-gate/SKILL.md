@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.10.0"
+version: "1.11.0"
 ---
 
 # /review-gate

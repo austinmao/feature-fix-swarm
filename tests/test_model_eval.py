@@ -50,6 +50,7 @@ def test_lower_effort_requires_two_clean_repetitions() -> None:
     [
         {"mandatory_gates_passed": False},
         {"findings": [{"severity": "HIGH", "message": "regression"}]},
+        {"findings": [{"severity": "CRITICAL", "message": "regression"}]},
         {"requirement_coverage_regression": True},
     ],
 )
@@ -66,3 +67,38 @@ def test_result_schema_requires_reproducibility_metadata() -> None:
     with pytest.raises(EvalResultError, match="codex_cli_version"):
         validate_result(result)
 
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mandatory_gates_passed", "false"),
+        ("mandatory_gates_passed", 1),
+        ("requirement_coverage_regression", 0),
+    ],
+)
+def test_result_schema_rejects_non_boolean_gate_fields(field: str, value: object) -> None:
+    result = _result(1)
+    result[field] = value
+    with pytest.raises(EvalResultError, match=field):
+        validate_result(result)
+
+
+def test_result_schema_rejects_non_object_findings() -> None:
+    result = _result(1)
+    result["findings"] = ["HIGH"]
+    with pytest.raises(EvalResultError, match="findings"):
+        validate_result(result)
+
+
+@pytest.mark.parametrize(
+    "finding",
+    [
+        {"severity": "CRITICAL ", "message": "malformed"},
+        {"message": "missing severity"},
+    ],
+)
+def test_result_schema_rejects_unknown_finding_severity(finding: dict) -> None:
+    result = _result(1)
+    result["findings"] = [finding]
+    with pytest.raises(EvalResultError, match="finding severity"):
+        validate_result(result)

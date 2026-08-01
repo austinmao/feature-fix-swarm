@@ -65,6 +65,33 @@ EOF
   [[ "$output" == *"DEGRADED"* ]]
 }
 
+@test "preferred reviewer receives half of the shared deadline for substantive diffs" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/slow-preferred" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+sleep 3
+printf 'NO FINDINGS\n'
+EOF
+  cat > "$STUB_DIR/fallback-must-not-start" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/fallback-started"
+printf 'NO FINDINGS\n'
+EOF
+  chmod +x "$STUB_DIR/slow-preferred" "$STUB_DIR/fallback-must-not-start"
+
+  run env FFS_ADVERSARY_MODEL_PROBE=off RUN_BOUNDED_KILL_AFTER=1 \
+    ADVERSARY_BIN_CLAUDE=slow-preferred \
+    ADVERSARY_BIN_CODEX=fallback-must-not-start PATH="$STUB_DIR:$PATH" \
+    bash -c ". '$LIB'; adversary_invoke_with_fallback claude codex 10 opus '' sol high review"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NO FINDINGS"* ]]
+  [[ "$output" != *"DEGRADED"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/fallback-started" ]
+}
+
 @test "Codex review returns only the official last-message payload" {
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$STUB_DIR"
