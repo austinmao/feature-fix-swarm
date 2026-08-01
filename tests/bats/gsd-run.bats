@@ -53,7 +53,12 @@ EOF
   printf '%s\n' '{"name":"@opengsd/gsd-core","version":"1.9.1"}' > "$GSD_PACKAGE_ROOT/package.json"
   NODE_ON_PATH="$(command -v node)"
   [ -x "$NODE_ON_PATH" ]
-  SAFE_NODE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$NODE_ON_PATH")"
+  SAFE_NODE="$BATS_TEST_TMPDIR/trusted-node"
+  cat > "$SAFE_NODE" <<EOF
+#!/bin/sh
+exec "$NODE_ON_PATH" "\$@"
+EOF
+  chmod 700 "$SAFE_NODE"
   python3 - "$CODEX_SOURCE_ROOT/hooks.json" "$CODEX_SOURCE_ROOT/hooks" "$SAFE_NODE" <<'PY'
 import json, sys
 path, hooks, node = sys.argv[1:]
@@ -134,7 +139,8 @@ pwd -P > "$BATS_TEST_TMPDIR/codex.cwd"
 printf '%s\n' "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skills"
 cat "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skill-content"
 printf '%s\n' "\${OPENAI_API_KEY-unset}" > "$BATS_TEST_TMPDIR/codex.api-key"
-{ stat -f '%Lp' "\${CODEX_HOME:-}/auth.json" 2>/dev/null || stat -c '%a' "\${CODEX_HOME:-}/auth.json"; } > "$BATS_TEST_TMPDIR/codex.auth-mode"
+python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' \
+  "\${CODEX_HOME:-}/auth.json" > "$BATS_TEST_TMPDIR/codex.auth-mode"
 cp "\${CODEX_HOME:-}/config.toml" "$BATS_TEST_TMPDIR/codex.config"
 cp "\${CODEX_HOME:-}/hooks.json" "$BATS_TEST_TMPDIR/codex.hooks-json"
 [ -f "\${CODEX_HOME:-}/hooks/sibling/dependency.js" ] && touch "$BATS_TEST_TMPDIR/complete-hooks-copied"
@@ -238,7 +244,7 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   exit 0
 fi
 touch "$BATS_TEST_TMPDIR/slow-drive-started"
-sleep 2
+sleep 4
 echo SLOW_CODEX_OK
 EOF
   chmod +x "$STUB_DIR/slow-codex"
@@ -246,14 +252,25 @@ EOF
 
   run env FFS_HOST=codex CODEX_BIN=slow-codex CLAUDE_BIN=fake-claude \
     GSD_RUN_STATE_DIR="$RUN_STATE" bash -c '
+      cd "$2"
       bash "$1" /gsd-quick first >"$2/first.log" 2>&1 &
       first=$!
       i=0
-      while [ ! -s "$3/gsd-run.pid" ] && [ "$i" -lt 100 ]; do
+      while { [ ! -s "$3/gsd-run.pid" ] || [ ! -f "$2/slow-drive-started" ]; } \
+          && [ "$i" -lt 1500 ]; do
         sleep 0.02
         i=$((i + 1))
       done
-      [ -s "$3/gsd-run.pid" ] || exit 10
+      [ -s "$3/gsd-run.pid" ] || {
+        echo "runner pidfile was not published; first.log follows" >&2
+        cat "$2/first.log" >&2
+        exit 10
+      }
+      [ -f "$2/slow-drive-started" ] || {
+        echo "runner drive did not start; first.log follows" >&2
+        cat "$2/first.log" >&2
+        exit 21
+      }
       live_pid=$(head -1 "$3/gsd-run.pid" | tr -d "[:space:]")
       kill -0 "$live_pid" || exit 11
       grep -E "^machine=.+" "$3/gsd-run.pid" || exit 19
@@ -359,7 +376,7 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   exit 0
 fi
 touch "$BATS_TEST_TMPDIR/heartbeat-drive-started"
-sleep 3
+sleep 8
 echo HEARTBEAT_CODEX_OK
 EOF
   chmod +x "$STUB_DIR/heartbeat-codex"
@@ -371,6 +388,7 @@ EOF
   run env FFS_HOST=codex CODEX_BIN=heartbeat-codex CLAUDE_BIN=fake-claude \
     GSD_RUN_STATE_DIR="$RUN_STATE" GSD_HEARTBEAT_SECS=1 \
     bash -c '
+      cd "$2"
       file_mtime() {
         stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
       }
@@ -378,16 +396,30 @@ EOF
       bash "$1" /gsd-quick heartbeat >"$2/heartbeat.log" 2>&1 &
       runner=$!
       i=0
-      while [ ! -f "$2/heartbeat-drive-started" ] && [ "$i" -lt 100 ]; do
+      while [ ! -f "$2/heartbeat-drive-started" ] && [ "$i" -lt 1500 ]; do
         sleep 0.02
         i=$((i + 1))
       done
-      [ -f "$2/heartbeat-drive-started" ] || exit 30
+      [ -f "$2/heartbeat-drive-started" ] || {
+        echo "heartbeat drive did not start; heartbeat.log follows" >&2
+        cat "$2/heartbeat.log" >&2
+        exit 30
+      }
       rm -f "$3/gsd-run.heartbeat"
       ln -s "$4" "$3/gsd-run.heartbeat"
-      sleep 2
-      [ ! -L "$3/gsd-run.heartbeat" ] || exit 31
-      [ "$(file_mtime "$4")" = "$target_mtime" ] || exit 32
+      i=0
+      while [ -L "$3/gsd-run.heartbeat" ] && [ "$i" -lt 250 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ ! -L "$3/gsd-run.heartbeat" ] || {
+        echo "heartbeat symlink was not replaced" >&2
+        exit 31
+      }
+      [ "$(file_mtime "$4")" = "$target_mtime" ] || {
+        echo "heartbeat symlink target was modified" >&2
+        exit 32
+      }
       wait "$runner"
     ' _ "$SCRIPT" "$BATS_TEST_TMPDIR" "$RUN_STATE" "$TARGET"
 
@@ -964,7 +996,7 @@ EOF
 
   [ "$status" -eq 0 ]
   grep -Fq refreshed "$CODEX_SOURCE_ROOT/auth.json"
-  [ "$(stat -f '%Lp' "$CODEX_SOURCE_ROOT/auth.json" 2>/dev/null || stat -c '%a' "$CODEX_SOURCE_ROOT/auth.json")" = 600 ]
+  [ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' "$CODEX_SOURCE_ROOT/auth.json")" = 600 ]
 }
 
 @test "OAuth CAS preserves a concurrently refreshed real credential" {

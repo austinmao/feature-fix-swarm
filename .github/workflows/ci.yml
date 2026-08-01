@@ -60,7 +60,7 @@ jobs:
           if [ "${#SUITES[@]}" -eq 0 ]; then
             echo "no bats suites found"; exit 0
           fi
-          bats "${SUITES[@]}"
+          bats --print-output-on-failure "${SUITES[@]}"
 
   host-shell-matrix:
     strategy:
