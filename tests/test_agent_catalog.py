@@ -78,7 +78,8 @@ def test_decompose_prompt_emits_shell_free_preflight_probes() -> None:
 
     assert '`{"kind": "probe", "name": …, "argv": […]}`' in prompt
     assert '`{"kind": "probe", "name": …, "cmd": …}`' not in prompt
-    assert "shell command strings, pipes, redirects, and operators are invalid" in prompt
+    assert "shell command strings, environment placeholders" in prompt
+    assert "must read secrets from it rather than from process arguments" in prompt
 
 
 def test_supporting_docs_and_scoped_installer_match_the_same_catalog() -> None:

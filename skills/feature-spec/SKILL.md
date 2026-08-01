@@ -547,9 +547,12 @@ Requirements are proven NOW, while the operator is present — never discovered 
 
    ```json
    [
-     {"kind": "env",   "name": "DATABASE_URL"},
+     {"kind": "env",   "name": "PGHOST"},
+     {"kind": "env",   "name": "PGDATABASE"},
+     {"kind": "env",   "name": "PGUSER"},
+     {"kind": "env",   "name": "PGPASSWORD"},
      {"kind": "probe", "name": "db-reachable",
-      "argv": ["psql", "${DATABASE_URL}", "-c", "select 1", "-qtA"]}
+      "argv": ["psql", "-c", "select 1", "-qtA"]}
    ]
    ```
 

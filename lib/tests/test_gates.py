@@ -946,28 +946,38 @@ def test_preflight_probe_rejects_invalid_argv_shapes() -> None:
         assert res["results"][0]["detail"].startswith("INVALID:")
 
 
-def test_preflight_probe_expands_environment_without_recording_value(monkeypatch) -> None:
+def test_preflight_probe_inherits_environment_without_recording_value(monkeypatch) -> None:
     secret = "postgresql://private-value"
     monkeypatch.setenv("FFS_TEST_DATABASE_URL", secret)
-    observed: list[list[str]] = []
-
-    def fake_run(command, **kwargs):
-        observed.append(command)
-        assert kwargs["shell"] is False
-        return gates.subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(gates.subprocess, "run", fake_run)
     res = gates.preflight_check([
         {
             "kind": "probe",
             "name": "database",
-            "argv": ["psql", "${FFS_TEST_DATABASE_URL}", "-c", "select 1"],
+            "argv": [
+                "python3",
+                "-c",
+                "import os,sys; sys.exit(0 if os.environ.get('FFS_TEST_DATABASE_URL') else 1)",
+            ],
         },
     ])
 
     assert res["pass"] is True
-    assert observed == [["psql", secret, "-c", "select 1"]]
     assert secret not in json.dumps(res)
+
+
+def test_preflight_probe_rejects_environment_placeholders(monkeypatch) -> None:
+    def unexpected_run(command, **kwargs):
+        raise AssertionError(f"placeholder command executed: {command}")
+
+    monkeypatch.setattr(gates.subprocess, "run", unexpected_run)
+    for placeholder in ("$DATABASE_URL", "${DATABASE_URL}"):
+        res = gates.preflight_check([
+            {"kind": "probe", "name": "database", "argv": ["psql", placeholder]},
+        ])
+        assert res["pass"] is False
+        assert res["results"][0]["detail"] == (
+            "INVALID: environment placeholders are not allowed in probe argv"
+        )
 
 
 def test_preflight_probe_reports_timeout_without_raising(monkeypatch) -> None:

@@ -1078,10 +1078,14 @@ def preflight_check(requirements: list[dict], timeout: int = 30, *,
                             for arg in argv)):
                 ok = False
                 detail = "INVALID: probe requires a non-empty argv string array"
+            elif any(re.search(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})", arg)
+                     for arg in argv):
+                ok = False
+                detail = "INVALID: environment placeholders are not allowed in probe argv"
             else:
-                # Expand environment placeholders without handing the manifest
-                # to a shell. The resolved argv is deliberately never recorded.
-                command = [os.path.expandvars(arg) for arg in argv]
+                # Probe processes inherit the environment. Secrets must stay
+                # there instead of becoming OS-visible process arguments.
+                command = list(argv)
                 try:
                     proc = subprocess.run(command, shell=False,
                                           capture_output=True, timeout=timeout)

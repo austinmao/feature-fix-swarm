@@ -34,10 +34,13 @@ never discovered at run time.
 
    ```json
    [
-     {"kind": "env",   "name": "DATABASE_URL"},
+     {"kind": "env",   "name": "PGHOST"},
+     {"kind": "env",   "name": "PGDATABASE"},
+     {"kind": "env",   "name": "PGUSER"},
+     {"kind": "env",   "name": "PGPASSWORD"},
      {"kind": "env",   "name": "N8N_WEBHOOK_HMAC_SECRET"},
      {"kind": "probe", "name": "db-reachable",
-      "argv": ["psql", "${DATABASE_URL}", "-c", "select 1", "-qtA"]},
+      "argv": ["psql", "-c", "select 1", "-qtA"]},
      {"kind": "probe", "name": "gateway-health",
       "argv": ["curl", "-sf", "-m", "10", "http://127.0.0.1:18789/health", "-o", "/dev/null"]},
      {"kind": "probe", "name": "vercel-auth", "argv": ["vercel", "whoami"]}
@@ -80,10 +83,11 @@ promotion protocol; staging-proof preflight checks are one of its enforcement po
 - **Env checks are presence-only.** A secret VALUE never appears in the
   manifest, the output, or the evidence store — names only.
 - **Probes are real executions**, not greps. `argv` is a non-empty JSON array
-  and is executed directly without a shell; environment placeholders such as
-  `${DATABASE_URL}` are expanded without recording their values. Shell command
-  strings, pipes, redirects, and operators are rejected. "The var is set" does
-  not prove the service answers; probe the service.
+  and is executed directly without a shell. Environment placeholders are
+  rejected because expanding secrets into process arguments exposes them to OS
+  process inspection; invoke a program that reads the inherited environment
+  instead. Shell command strings, pipes, redirects, and operators are rejected.
+  "The var is set" does not prove the service answers; probe the service.
 - **Empty manifest fails.** A run with nothing declared is undeclared, not
   requirement-free.
 - **Scan is additive, never authoritative.** Grepping the diff for env reads

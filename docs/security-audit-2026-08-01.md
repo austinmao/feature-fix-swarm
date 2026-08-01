@@ -37,8 +37,9 @@ test.
 - Remediated the vulnerable transitive npm lockfile entries without changing
   the exact GSD 1.9.1 direct pin.
 - Replaced preflight probe command strings with non-empty JSON `argv` arrays.
-  Probes execute without an implicit shell, expand environment placeholders
-  without storing resolved values, and fail closed on invalid shapes.
+  Probes execute without an implicit shell, reject environment placeholders so
+  secrets cannot move into OS-visible process arguments, inherit environment
+  variables for programs to read directly, and fail closed on invalid shapes.
 - Added least-privilege workflow permissions, timeouts, immutable action SHAs,
   Dependabot configuration, CodeQL, and OpenSSF Scorecard.
 - Added a private vulnerability-reporting policy and standard community files.

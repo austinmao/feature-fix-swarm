@@ -11,8 +11,9 @@ all skills.
 ### Security
 
 - Preflight probes now require a structured `argv` array and execute without
-  an implicit shell. Legacy `cmd` strings fail closed; migrate each command to
-  one argument per JSON array item.
+  an implicit shell. Legacy `cmd` strings and environment placeholders fail
+  closed; migrate each command to one literal argument per JSON array item and
+  let invoked programs read secrets from their inherited environment.
 - Remediated one high and two moderate transitive npm advisories while keeping
   the direct GSD 1.9.1 pin exact.
 - CI actions are immutable-SHA pinned with least-privilege permissions; CodeQL,
