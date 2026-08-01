@@ -6,6 +6,20 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v5.0.5 — Durable finalization and archive-aware status (2026-08-01)
+
+### Fixed
+
+- Finalization now copies each worktree's run ledger to a durable, run-keyed
+  archive before removing the worktree. The copy is containment-checked,
+  symlink-safe, checksum-verified, concurrency-safe, and complete-or-refuse;
+  an external in-worktree `GATES_STORE` is preserved alongside the standard
+  `.feature-fix-swarm` ledger.
+- `spec-status` now resolves the requested spec's active or archived planning
+  state explicitly, rejects ambiguous spec/planning identities and mismatched
+  run ledgers, and reports PID liveness only when it is attributable to the
+  current worktree.
+
 ## v5.0.4 — Canonical symlinked backup sources (2026-08-01)
 
 ### Fixed
