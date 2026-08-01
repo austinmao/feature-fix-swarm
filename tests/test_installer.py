@@ -99,6 +99,7 @@ def test_backup_payloads_are_private_even_with_permissive_source_modes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
+    home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     source = tmp_path / "config"
     source.mkdir(mode=0o755)
@@ -299,11 +300,18 @@ def test_unmanifested_v413_legacy_copy_is_recognized_by_catalog(
     historical_hash = "215e6f6355208ecac78280f92780bec64c25b60b78162fdbec8e42fa9731188e"
     known = ffs_installer.known_legacy_hashes(ROOT)
     assert historical_hash in known["skills/feature-implement/SKILL.md"]
-    real_sha256 = ffs_installer.sha256_file
+    fixture_hash = ffs_installer.sha256_file(legacy)
+    real_known_legacy_hashes = ffs_installer.known_legacy_hashes
+
+    def catalog_with_fixture_hash(source: Path) -> dict[str, set[str]]:
+        catalog = real_known_legacy_hashes(source)
+        catalog["skills/feature-implement/SKILL.md"].add(fixture_hash)
+        return catalog
+
     monkeypatch.setattr(
         ffs_installer,
-        "sha256_file",
-        lambda path: historical_hash if Path(path) == legacy else real_sha256(Path(path)),
+        "known_legacy_hashes",
+        catalog_with_fixture_hash,
     )
 
     backup = ffs_installer.Backup("test-migration", "user")
@@ -497,6 +505,177 @@ def test_project_install_refuses_symlinked_discovery_ancestor(tmp_path: Path) ->
     assert list(outside.iterdir()) == []
 
 
+def test_project_install_refuses_ancestor_swap_after_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv(
+        "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
+    )
+    monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
+    real_replace_tree = ffs_installer.replace_tree
+    swapped = False
+
+    def swap_then_replace(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            (project / ".feature-fix-swarm").symlink_to(
+                outside, target_is_directory=True
+            )
+        real_replace_tree(*args, **kwargs)
+
+    monkeypatch.setattr(ffs_installer, "replace_tree", swap_then_replace)
+
+    with pytest.raises(
+        ffs_installer.ActionableError,
+        match="unsafe project destination|symlinked ancestor|changed during rollback",
+    ):
+        ffs_installer.install(ROOT, "project", project)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_project_install_preserves_destination_created_after_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv(
+        "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
+    )
+    monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
+    real_replace_tree = ffs_installer.replace_tree
+    injected: Path | None = None
+
+    def inject_then_replace(
+        source: Path, destination: Path, *args: object, **kwargs: object
+    ) -> None:
+        nonlocal injected
+        if injected is None:
+            destination.mkdir(parents=True)
+            injected = destination / "operator.txt"
+            injected.write_text("preserve me\n")
+        real_replace_tree(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(ffs_installer, "replace_tree", inject_then_replace)
+
+    with pytest.raises(ffs_installer.ActionableError, match="changed during install"):
+        ffs_installer.install(ROOT, "project", project)
+
+    assert injected is not None
+    assert injected.read_text() == "preserve me\n"
+
+
+def test_project_entry_replacement_preserves_creation_during_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    destination = project / ".agents/skills/example"
+    backup = ffs_installer.Backup("install", "project", project)
+
+    def materialize(temporary: Path, _parent_fd: int) -> None:
+        temporary.symlink_to("../../vendor/example")
+        Path(destination.name).write_text("preserve me\n")
+
+    with pytest.raises(ffs_installer.ActionableError, match="changed during install"):
+        ffs_installer.replace_project_entry(
+            destination,
+            backup,
+            project,
+            "missing",
+            materialize,
+        )
+
+    assert destination.read_text() == "preserve me\n"
+
+
+def test_project_no_replace_rename_preserves_existing_destination(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    source = parent / "source"
+    source.write_text("new\n")
+    destination = parent / "destination"
+    destination.write_text("preserve me\n")
+    directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(FileExistsError):
+            ffs_installer.rename_no_replace(
+                source.name,
+                destination.name,
+                source_fd=directory_fd,
+                destination_fd=directory_fd,
+            )
+    finally:
+        os.close(directory_fd)
+
+    assert source.read_text() == "new\n"
+    assert destination.read_text() == "preserve me\n"
+
+
+def test_project_manifest_write_refuses_post_write_ancestor_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv(
+        "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
+    )
+    monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
+    real_replace_link = ffs_installer.replace_link
+    last_skill = max(ffs_installer.source_skills(ROOT))
+    swapped = False
+
+    def swap_after_last_link(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        real_replace_link(*args, **kwargs)
+        destination = args[0]
+        assert isinstance(destination, Path)
+        if (
+            not swapped
+            and destination.name == last_skill
+            and destination.parent == project / ".claude/skills"
+        ):
+            swapped = True
+            anchor = project / ".feature-fix-swarm"
+            anchor.rename(project / ".feature-fix-swarm-held")
+            anchor.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(ffs_installer, "replace_link", swap_after_last_link)
+
+    with pytest.raises(
+        ffs_installer.ActionableError,
+        match="unsafe project destination|symlinked ancestor|changed during rollback",
+    ):
+        ffs_installer.install(ROOT, "project", project)
+
+    assert list(outside.iterdir()) == []
+
+
 def test_partial_upstream_gsd_failure_restores_preexisting_namespace(tmp_path: Path) -> None:
     home = tmp_path / "home"
     old_agent = home / ".claude/agents/gsd-old.md"
@@ -569,6 +748,271 @@ def test_project_legacy_migration_refuses_symlinked_codex_ancestor(tmp_path: Pat
     assert not (tmp_path / "home/.codex/gsd-file-manifest.json").exists()
 
 
+def test_backup_creation_refuses_symlink_race_before_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    original_mode = stat.S_IMODE(outside.stat().st_mode)
+    real_mkdir = os.mkdir
+    raced = False
+
+    def plant_backup_symlink(
+        path: object,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal raced
+        if not raced and path == "backups" and dir_fd is not None:
+            raced = True
+            (home / ".cache/feature-fix-swarm/backups").symlink_to(
+                outside, target_is_directory=True
+            )
+            raise FileExistsError(path)
+        real_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", plant_backup_symlink)
+
+    with pytest.raises(ffs_installer.ActionableError, match="private backup root"):
+        ffs_installer.Backup("install", "user")
+
+    assert raced
+    assert stat.S_IMODE(outside.stat().st_mode) == original_mode
+    assert list(outside.iterdir()) == []
+
+
+def test_private_json_has_restrictive_mode_before_content_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "private.json"
+    real_dump = json.dump
+    observed_mode: int | None = None
+
+    def inspect_mode(value: object, handle: object, *args: object, **kwargs: object) -> None:
+        nonlocal observed_mode
+        observed_mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
+        real_dump(value, handle, *args, **kwargs)
+
+    monkeypatch.setattr(json, "dump", inspect_mode)
+
+    ffs_installer.write_json_file(destination, {"token": "redacted"}, mode=0o600)
+
+    assert observed_mode == 0o600
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_backup_payload_writes_stay_on_open_directory_after_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    backup = ffs_installer.Backup("install", "user")
+    held = backup.directory.with_name(f"{backup.directory.name}-held")
+    backup.directory.rename(held)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    backup.directory.symlink_to(outside, target_is_directory=True)
+    source = tmp_path / "source.txt"
+    source.write_text("private payload\n")
+
+    backup.before(source)
+    backup.finish()
+
+    assert (held / "objects/0000").read_text() == "private payload\n"
+    assert (held / "manifest.json").is_file()
+    assert list(outside.iterdir()) == []
+
+
+def test_rollback_refuses_symlinked_backup_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    source = tmp_path / "source.txt"
+    source.write_text("private payload\n")
+    backup = ffs_installer.Backup("install", "user")
+    backup.before(source)
+    backup.finish()
+    held = backup.directory.with_name(f"{backup.directory.name}-held")
+    backup.directory.rename(held)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    backup.directory.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ffs_installer.ActionableError, match="backup not found or unsafe"):
+        ffs_installer.rollback(backup.backup_id)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_backup_source_swap_to_symlink_is_rejected_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    source = tmp_path / "source.txt"
+    source.write_text("expected bytes\n")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("must not be copied\n")
+    backup = ffs_installer.Backup("install", "user")
+    real_open = os.open
+    swapped = False
+
+    def swap_before_source_open(
+        path: object, flags: int, *args: object, **kwargs: object
+    ) -> int:
+        nonlocal swapped
+        if (
+            not swapped
+            and path == source.name
+            and flags & getattr(os, "O_NOFOLLOW", 0)
+            and not flags & getattr(os, "O_DIRECTORY", 0)
+            and kwargs.get("dir_fd") is not None
+        ):
+            swapped = True
+            source.unlink()
+            source.symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_source_open)
+
+    with pytest.raises(ffs_installer.ActionableError, match="source changed"):
+        backup.before(source)
+
+    assert swapped
+    copied = backup.directory / "objects/0000"
+    assert not copied.exists()
+    assert outside.read_text() == "must not be copied\n"
+    os.close(backup.directory_fd)
+
+
+def test_project_legacy_migration_refuses_symlinked_final_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    outside = tmp_path / "outside"
+    legacy = outside / "feature-spec"
+    legacy.mkdir(parents=True)
+    legacy_file = legacy / "SKILL.md"
+    legacy_file.write_text((ROOT / "skills/feature-spec/SKILL.md").read_text())
+    codex = project / ".codex"
+    codex.mkdir()
+    (codex / "skills").symlink_to(outside, target_is_directory=True)
+
+    result = run_setup(tmp_path, "--scope", "project", "--project-dir", str(project))
+
+    assert result.returncode == 1
+    assert "symlinked project directory" in result.stderr
+    assert legacy_file.is_file()
+
+
+def test_user_legacy_migration_refuses_symlinked_final_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    outside = tmp_path / "outside"
+    legacy = outside / "feature-spec"
+    legacy.mkdir(parents=True)
+    legacy_file = legacy / "SKILL.md"
+    legacy_file.write_text((ROOT / "skills/feature-spec/SKILL.md").read_text())
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "skills").symlink_to(outside, target_is_directory=True)
+    backup = ffs_installer.Backup("install", "user")
+
+    with pytest.raises(ffs_installer.ActionableError, match="unsafe legacy skill root"):
+        ffs_installer.migrate_legacy(ROOT, [codex / "skills"], backup)
+
+    assert legacy_file.is_file()
+
+
+def test_user_legacy_rollback_refuses_post_migration_root_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    legacy_root = home / ".codex/skills"
+    legacy = legacy_root / "feature-spec/SKILL.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text((ROOT / "skills/feature-spec/SKILL.md").read_text())
+    backup = ffs_installer.Backup("install", "user")
+
+    preserved = ffs_installer.migrate_legacy(ROOT, [legacy_root], backup)
+
+    assert preserved == []
+    assert not legacy.exists()
+    held = home / ".codex/skills-held"
+    legacy_root.rename(held)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    legacy_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ffs_installer.ActionableError, match="managed path changed"):
+        backup.restore_uncommitted()
+
+    assert not (outside / "feature-spec/SKILL.md").exists()
+    assert any((backup.directory / "objects").iterdir())
+
+
+def test_project_legacy_migration_refuses_child_swap_to_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    legacy = project / ".codex/skills/feature-spec"
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text(
+        (ROOT / "skills/feature-spec/SKILL.md").read_text()
+    )
+    outside = tmp_path / "outside/feature-spec"
+    outside.mkdir(parents=True)
+    outside_file = outside / "SKILL.md"
+    outside_file.write_text((ROOT / "skills/feature-spec/SKILL.md").read_text())
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    backup = ffs_installer.Backup("install", "project", project)
+    real_open = os.open
+    swapped = False
+
+    def swap_before_child_open(
+        path: object, flags: int, *args: object, **kwargs: object
+    ) -> int:
+        nonlocal swapped
+        if (
+            not swapped
+            and path == "feature-spec"
+            and flags & getattr(os, "O_DIRECTORY", 0)
+            and kwargs.get("dir_fd") is not None
+        ):
+            swapped = True
+            legacy.rename(project / ".codex/skills/feature-spec-held")
+            legacy.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_child_open)
+
+    with pytest.raises(ffs_installer.ActionableError, match="legacy skill changed"):
+        ffs_installer.migrate_legacy(
+            ROOT,
+            [project / ".codex/skills"],
+            backup,
+            project=project,
+        )
+
+    assert swapped
+    assert outside_file.is_file()
+
+
 def test_failure_after_first_ffs_write_restores_gsd_and_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -585,9 +1029,14 @@ def test_failure_after_first_ffs_write_restores_gsd_and_project(
     real_replace_tree = ffs_installer.replace_tree
     failed = False
 
-    def fail_after_write(source: Path, destination: Path, backup: ffs_installer.Backup) -> None:
+    def fail_after_write(
+        source: Path,
+        destination: Path,
+        backup: ffs_installer.Backup,
+        **kwargs: object,
+    ) -> None:
         nonlocal failed
-        real_replace_tree(source, destination, backup)
+        real_replace_tree(source, destination, backup, **kwargs)
         if not failed and str(destination).startswith(str(project)):
             failed = True
             raise RuntimeError("synthetic post-GSD failure")
@@ -598,5 +1047,48 @@ def test_failure_after_first_ffs_write_restores_gsd_and_project(
         ffs_installer.install(ROOT, "project", project)
 
     assert list((project / ".feature-fix-swarm/vendor/skills").glob("*")) == []
+    assert not (home / ".claude/gsd-file-manifest.json").exists()
+    assert not (home / ".codex/gsd-file-manifest.json").exists()
+
+
+def test_failure_rollback_preserves_concurrent_project_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv(
+        "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
+    )
+    monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
+    real_replace_tree = ffs_installer.replace_tree
+    changed: Path | None = None
+
+    def change_then_fail(
+        source: Path,
+        destination: Path,
+        backup: ffs_installer.Backup,
+        **kwargs: object,
+    ) -> None:
+        nonlocal changed
+        real_replace_tree(source, destination, backup, **kwargs)
+        if changed is None and str(destination).startswith(str(project)):
+            ffs_installer.remove_path(destination)
+            destination.mkdir()
+            changed = destination / "concurrent.txt"
+            changed.write_text("preserve me\n")
+            raise RuntimeError("synthetic concurrent change")
+
+    monkeypatch.setattr(ffs_installer, "replace_tree", change_then_fail)
+
+    with pytest.raises(ffs_installer.ActionableError, match="changed during rollback"):
+        ffs_installer.install(ROOT, "project", project)
+
+    assert changed is not None
+    assert changed.read_text() == "preserve me\n"
     assert not (home / ".claude/gsd-file-manifest.json").exists()
     assert not (home / ".codex/gsd-file-manifest.json").exists()

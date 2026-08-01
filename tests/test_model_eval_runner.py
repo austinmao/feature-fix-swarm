@@ -16,6 +16,27 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+def _matrix_results() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for tier, (model, efforts) in RUNNER.MATRIX.items():
+        for effort in efforts:
+            for fixture in range(6):
+                for repetition in (1, 2):
+                    rows.append(
+                        {
+                            "fixture_id": f"{tier}-{fixture}",
+                            "repetition": repetition,
+                            "tier": tier,
+                            "model_id": model,
+                            "effort": effort,
+                            "mandatory_gates_passed": True,
+                            "findings": [],
+                            "requirement_coverage_regression": False,
+                        }
+                    )
+    return rows
+
+
 def test_eval_refuses_custom_provider_before_codex_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -100,3 +121,72 @@ def test_eval_synchronizes_auth_when_evaluation_is_interrupted(
         )
 
     assert len(synchronized) == 1
+
+
+def test_selections_choose_lower_effort_for_complete_clean_matrix() -> None:
+    assert RUNNER.selections(_matrix_results()) == {
+        tier: efforts[1] for tier, (_model, efforts) in RUNNER.MATRIX.items()
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"findings": [{"severity": "CRITICAL", "message": "regression"}]},
+        {"requirement_coverage_regression": True},
+    ],
+)
+def test_selections_reject_dirty_lower_effort_rows(mutation: dict[str, object]) -> None:
+    rows = _matrix_results()
+    target = next(
+        row
+        for row in rows
+        if row["tier"] == "execution"
+        and row["effort"] == RUNNER.MATRIX["execution"][1][1]
+    )
+    target.update(mutation)
+
+    selected = RUNNER.selections(rows)
+
+    assert selected["execution"] == RUNNER.MATRIX["execution"][1][0]
+
+
+def test_selections_fail_closed_on_non_boolean_gate_result() -> None:
+    rows = _matrix_results()
+    rows[0]["mandatory_gates_passed"] = "false"
+
+    with pytest.raises(SystemExit, match="mandatory_gates_passed must be boolean"):
+        RUNNER.selections(rows)
+
+
+@pytest.mark.parametrize(
+    "finding",
+    [
+        {"severity": "CRITICAL ", "message": "malformed"},
+        {"message": "missing severity"},
+    ],
+)
+def test_selections_fail_closed_on_unknown_finding_severity(
+    finding: dict[str, str],
+) -> None:
+    rows = _matrix_results()
+    rows[-1]["findings"] = [finding]
+
+    with pytest.raises(SystemExit, match="finding severity is invalid"):
+        RUNNER.selections(rows)
+
+
+def test_selections_fail_closed_on_incomplete_matrix() -> None:
+    rows = _matrix_results()
+    rows.pop()
+
+    with pytest.raises(SystemExit, match="incomplete volume evaluation matrix"):
+        RUNNER.selections(rows)
+
+
+def test_selections_fail_when_higher_effort_baseline_is_dirty() -> None:
+    rows = _matrix_results()
+    rows[0]["findings"] = [{"severity": "HIGH", "message": "regression"}]
+
+    with pytest.raises(SystemExit, match="higher-effort judgment baseline failed"):
+        RUNNER.selections(rows)

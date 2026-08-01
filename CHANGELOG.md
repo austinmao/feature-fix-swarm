@@ -6,6 +6,26 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v5.0.2 — Fail-closed review and installer races (2026-08-01)
+
+### Fixed
+
+- Project-scope skill, manifest, rollback, uninstall, and legacy-migration
+  mutations now resolve through no-follow directory descriptors, reject
+  post-preflight collisions, and preserve concurrently created destinations.
+- User and project legacy migration, transactional rollback, and private backup
+  creation/copy/restore now remain anchored to verified directory descriptors;
+  symlink swaps fail closed without reading, chmodding, or writing their targets.
+- GPT-5.6 evaluation selection now treats `CRITICAL` findings as severe and
+  rejects non-boolean gate results in both the pairwise and complete-matrix
+  selectors.
+- Opposite-host adversarial review now receives half of the shared deadline,
+  allowing substantive Claude reviews to finish while retaining a complete
+  bounded fallback slice.
+- Project-scope documentation now states explicitly that scope controls FFS
+  discovery while the pinned full GSD profiles remain global and
+  upstream-owned.
+
 ## v5.0.1 — Deterministic consumer reconciliation (2026-08-01)
 
 ### Fixed

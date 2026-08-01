@@ -25,6 +25,10 @@ relative Claude link. Nothing is installed under `.codex/skills`.
 Project operations lock through `git rev-parse --git-common-dir`. A primary
 checkout and all of its linked worktrees therefore share one installer lock.
 
+The scope flag controls FFS discovery only. Both project and user setup also
+ensure the pinned, upstream-owned GSD full profiles in the user-global Claude
+and Codex roots shown under **GSD ownership** below.
+
 ## User scope
 
 Use user scope to make FFS available outside a particular repository:
