@@ -136,10 +136,15 @@ End with exactly one line: DRIFT-VERDICT: ON-TRACK  or  DRIFT-VERDICT: DRIFT —
       . "$SCRIPT_DIR/adversary-host.sh"
       ACTIVE_HOST="$(detect_orchestrator_host)" || ACTIVE_HOST="claude"
       KIND="$(adversary_kind_for_host "$ACTIVE_HOST")"
-      if [ "$KIND" = "codex" ]; then PM="gpt-5.6-sol"; PE="xhigh"; else PM="opus"; PE=""; fi
-      if [ "$ACTIVE_HOST" = "codex" ]; then FM="gpt-5.6-sol"; FE="xhigh"; else FM="opus"; FE=""; fi
-      JUDGE_OUT="$(adversary_invoke_with_fallback "$KIND" "$ACTIVE_HOST" \
-        "${GSD_DRIFT_JUDGE_TIMEOUT:-300}" "$PM" "$PE" "$FM" "$FE" "$PROMPT" 2>/dev/null)" || JUDGE_OUT=""
+      MODEL_REQUEST="${GSD_DRIFT_MODEL_REQUEST:-}"
+      [ -n "$MODEL_REQUEST" ] || MODEL_REQUEST='{"kind":"tier","name":"judgment"}'
+      if adversary_reject_legacy_model_vars GSD_DRIFT_MODEL GSD_DRIFT_EFFORT \
+          GSD_DRIFT_CLAUDE_MODEL; then
+        JUDGE_OUT="$(adversary_invoke_typed_request "$KIND" "$ACTIVE_HOST" \
+          "${GSD_DRIFT_JUDGE_TIMEOUT:-300}" "$MODEL_REQUEST" "$PROMPT" 2>/dev/null)" || JUDGE_OUT=""
+      else
+        warn "legacy raw model override rejected; use GSD_DRIFT_MODEL_REQUEST"
+      fi
     fi
   fi
 

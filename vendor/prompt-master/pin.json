@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/nidhinjs/prompt-master.git",
+  "commit": "d15eabbe5d2122eedc060bae8a771381e9873d1b",
+  "patch": "codex-gpt56.patch",
+  "upstream_submission": "https://github.com/nidhinjs/prompt-master/pull/57"
+}

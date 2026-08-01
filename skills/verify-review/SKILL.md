@@ -1,10 +1,16 @@
 ---
 name: verify-review
 description: "Verify a code review before acting on it. Use when Claude, Codex, review-gate, or a human reviewer returns a verdict (PASS, FIX_FIRST, REQUEST_CHANGES, CRITICAL finding) and you must decide whether to merge, fix, or push back — spot-check the load-bearing claims against current HEAD first."
-version: "1.0.0"
+version: "1.1.0"
 ---
 
 # /verify-review
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 A review is a signal, not ground truth. Reviewers read stale code, invent line
 numbers, misread intent, and rubber-stamp. Verify the reviewer before spending

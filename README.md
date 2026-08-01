@@ -30,20 +30,24 @@ points. Read this before running anything.
 The short version:
 
 ```
-/office-hours          shape a fuzzy idea into a scoped task   (gstack, manual first step)
+$office-hours          shape a fuzzy idea into a scoped task   (Codex; use /office-hours in Claude)
       ↓
-/fix "<symptom>"       something is broken, no spec exists
-/task-swarm "<task>"   bounded task, plan it, skip the ceremony
-/feature-spec "<x>"    real feature that deserves a spec on disk
+$fix "<symptom>"       something is broken, no spec exists
+$task-swarm "<task>"   bounded task, plan it, skip the ceremony
+$feature-spec "<x>"    real feature that deserves a spec on disk
       ↓
-/feature-implement NNN --autonomous     ← all three converge here
+$feature-implement NNN --autonomous     ← all three converge here
 ```
+
+Examples use Codex's `$skill` form. On Claude Code, use the corresponding
+`/skill` form.
 
 **Want to change how it behaves?** → [Configuration](docs/configuration.md)
 — every knob, its default, and the code that reads it.
 
 **Wondering why it picked that model?** → [Model tiers](docs/model-tiers.md)
-— fable / opus / sonnet / haiku, and the producer≠reviewer rule.
+— typed judgment / execution / volume requests, host resolution, and the
+producer≠reviewer rule.
 
 ---
 
@@ -111,14 +115,16 @@ Unit and integration are free. The three LLM agents cost ~$0.15/phase total.
 
 ## Model routing in one paragraph
 
-Claude Code uses `fable` for planning and orchestration, `sonnet` for
-execution, `opus` for architecture and verification, `haiku` for mechanical
-work. Codex uses the equivalent ladder: fable/opus → `gpt-5.6-sol`, sonnet →
-`gpt-5.6-terra`, haiku → `gpt-5.6-luna`. Whatever model produces an artifact,
-a **different** model with fresh context reviews it — `/review-gate`
-deliberately tries the opposite vendor first. Full detail, including the
-fable-unavailable fallback and the security fence: [Model
-tiers](docs/model-tiers.md).
+FFS requests workload intent, not an implicit vendor ID: `judgment` resolves
+to GPT-5.6 Sol at high effort, `execution` to Terra at medium effort, and
+`volume` to Luna at low effort. The thin orchestrator uses the execution tier;
+planning, checking, debugging, verification, and security use judgment.
+Execution, research, integration, and Nyquist work use execution; mapping,
+synthesis, and status collection use volume. Exact model requests are explicit
+and never silently fall back. Whatever model produces an artifact, a
+**different** model with fresh context reviews it — `$review-gate` in Codex or
+`/review-gate` in Claude deliberately tries the opposite vendor first. Full
+detail: [Model tiers](docs/model-tiers.md).
 
 ## Cost
 
@@ -139,16 +145,33 @@ tiers](docs/model-tiers.md).
 ```bash
 git clone https://github.com/austinmao/feature-fix-swarm.git
 cd feature-fix-swarm
-bash setup.sh
+bash setup.sh --scope project --project-dir /absolute/path/to/your/repo
 ```
 
-The installer copies skills, scripts, and prompts into your project, checks
-prerequisites, and offers to bootstrap anything missing. It verifies the
-installed runner, adversary adapter, hard-bound helper, and hang guard
-byte-for-byte, and registers the guard for both Claude and Codex. Skills that
-ship their own `scripts/` directory (e.g. `spec-status`) get that directory
-installed alongside their `SKILL.md` — a `SKILL.md`-only copy would install a
-skill that can't run.
+Project scope creates portable relative links from `.agents/skills` and
+`.claude/skills` to the vendored FFS sources. User scope creates
+manifest/hash-managed copies in both user roots:
+
+```bash
+bash setup.sh --scope user
+```
+
+The no-argument form temporarily aliases user scope and emits a deprecation
+warning. FFS never installs into legacy `.codex/skills`. It invokes the
+upstream GSD installer for the complete Claude and Codex profiles, checks
+prerequisites, and verifies its own runner and machine gates byte-for-byte.
+Skills that ship a `scripts/` directory (for example `spec-status`) install
+that directory with `SKILL.md`.
+
+Verify an installation with the versioned doctor contract:
+
+```bash
+bash setup.sh --doctor --scope project --project-dir /absolute/path/to/your/repo
+bash setup.sh --doctor --scope user --json
+```
+
+See [Codex and GPT-5.6 compatibility](docs/codex-gpt56-modernization.md) for
+the compatibility matrix, migration catalog, backup layout, and rollback.
 
 To reconcile only the runtime levers in an existing consumer repo:
 
@@ -171,9 +194,10 @@ the skills this package orchestrates: `/office-hours` (shape an idea),
 cd ~/.claude/skills && git clone https://github.com/garryslist/gstack.git
 ```
 
-**[Open GSD Core](https://github.com/open-gsd/gsd-core)** — exact-pinned by
-this package and installed by `setup.sh` for every available host runtime.
-GSD owns plan/execute/verify orchestration.
+**[Open GSD Core](https://github.com/open-gsd/gsd-core)** — exact-pinned at
+`@opengsd/gsd-core@1.9.1` and installed by `setup.sh` with its full upstream
+Claude and Codex profiles. GSD owns plan/execute/verify orchestration; FFS
+does not copy or rewrite GSD source artifacts.
 
 **[Spec Kit](https://github.com/github/spec-kit)** by GitHub — the
 spec/plan/tasks bootstrap `/feature-spec` builds on.
@@ -195,7 +219,7 @@ handoff/continuation layer for `/goal-wrap`.
 
 ```bash
 npx skills add austinmao/goal-wrap --skill goal-wrap --skill handoff -g -a claude-code -a codex -y
-npx skills add nidhinjs/prompt-master --skill prompt-master -g -a claude-code -a codex -y
+# prompt-master is installed by setup.sh from the pinned, patched source.
 ```
 
 ### Opposite-host review runtime
@@ -306,7 +330,7 @@ That table is the short list. **Every** knob, with its consumer and default:
 
 ```
 feature-fix-swarm/
-  skills/           Claude Code SKILL.md files
+  skills/           host-neutral SKILL.md sources for Codex and Claude Code
     feature-spec/     spec-first pipeline (speckit specify → plan → clarify, TDD/BDD/E2E)
     feature-implement/  the executor — task execution with per-phase QA gates
     fix/              investigate + fix + verify loop
@@ -322,6 +346,7 @@ feature-fix-swarm/
     spec-status/      spec-scoped "where are we?" status check — fans out over git,
                       .planning/, gates ledger, runner state, evidence; writes a
                       status report + /handoff
+    continue-compact/ durable handoff + host-native resume before /compact
     goal-wrap/        bundle current work into a tracked, anti-drift /goal prompt
   scripts/
     qa-swarm.sh       QA manifest builder (2 hooks + 3 LLM agent prompts)

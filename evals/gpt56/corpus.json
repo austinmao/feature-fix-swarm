@@ -1,0 +1,20 @@
+[
+  {"id":"judgment-low-1","tier":"judgment","blast_radius":"low","task":"Review a one-line validation change for correctness. State the validation invariant and one edge case.","must_include":["edge case"]},
+  {"id":"judgment-low-2","tier":"judgment","blast_radius":"low","task":"Check a small plan for complete acceptance criteria. State one measurable acceptance criterion.","must_include":["acceptance"]},
+  {"id":"judgment-medium-1","tier":"judgment","blast_radius":"medium","task":"Review a cross-module API change and its tests. Name both a contract risk and an integration test.","must_include":["contract"]},
+  {"id":"judgment-medium-2","tier":"judgment","blast_radius":"medium","task":"Verify a migration plan preserves rollback. Name a rollback invariant and a failure injection test.","must_include":["rollback"]},
+  {"id":"judgment-high-1","tier":"judgment","blast_radius":"high","task":"Audit an authentication change and adversarial cases. Name a credential boundary and a replay attack test.","must_include":["replay"]},
+  {"id":"judgment-high-2","tier":"judgment","blast_radius":"high","task":"Verify a multi-tenant isolation design and evidence. Name the tenant boundary and negative isolation evidence.","must_include":["isolation"]},
+  {"id":"execution-low-1","tier":"execution","blast_radius":"low","task":"Describe a bounded mechanical rename with tests. Include the rename scope and verification command.","must_include":["test"]},
+  {"id":"execution-low-2","tier":"execution","blast_radius":"low","task":"Describe a deterministic CLI validation branch. Include its exit code and one test case.","must_include":["exit code"]},
+  {"id":"execution-medium-1","tier":"execution","blast_radius":"medium","task":"Describe a scoped installer migration with rollback. Include collision preservation and rollback verification.","must_include":["rollback"]},
+  {"id":"execution-medium-2","tier":"execution","blast_radius":"medium","task":"Describe a runner refactor that preserves session state. Include the state tuple and resume refusal.","must_include":["resume"]},
+  {"id":"execution-high-1","tier":"execution","blast_radius":"high","task":"Describe OAuth refresh compare-and-swap semantics. Include the initial hash and concurrent refresh behavior.","must_include":["concurrent"]},
+  {"id":"execution-high-2","tier":"execution","blast_radius":"high","task":"Describe sandbox policy and one-time grant consumption. Include the sandbox mode and consumed grant record.","must_include":["grant"]},
+  {"id":"volume-low-1","tier":"volume","blast_radius":"low","task":"Classify changed files by subsystem and state the grouping rule.","must_include":["subsystem"]},
+  {"id":"volume-low-2","tier":"volume","blast_radius":"low","task":"Collect status facts from a small run and distinguish observed from inferred facts.","must_include":["observed"]},
+  {"id":"volume-medium-1","tier":"volume","blast_radius":"medium","task":"Map references across a medium package and name source and consumer nodes.","must_include":["consumer"]},
+  {"id":"volume-medium-2","tier":"volume","blast_radius":"medium","task":"Explain how to synthesize six research summaries without omissions and include a coverage check.","must_include":["coverage"]},
+  {"id":"volume-high-1","tier":"volume","blast_radius":"high","task":"Map a large security-sensitive dependency surface and distinguish direct from transitive dependencies.","must_include":["transitive"]},
+  {"id":"volume-high-2","tier":"volume","blast_radius":"high","task":"Collect release evidence across all rollout lanes and include artifact identity and gate status.","must_include":["artifact"]}
+]

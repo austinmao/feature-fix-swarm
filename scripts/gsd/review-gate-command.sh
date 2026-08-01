@@ -76,30 +76,20 @@ ACTIVE_HOST="$(detect_orchestrator_host)" || {
   exit 1
 }
 REVIEW_KIND="$(adversary_kind_for_host "$ACTIVE_HOST")"
-
-review_model_for_kind() {
-  if [ "$1" = "codex" ]; then
-    REVIEW_MODEL="gpt-5.6-sol"
-    REVIEW_EFFORT="xhigh"
-  else
-    REVIEW_MODEL="opus"
-    REVIEW_EFFORT=""
-  fi
+MODEL_REQUEST="${GSD_REVIEW_MODEL_REQUEST:-}"
+[ -n "$MODEL_REQUEST" ] || MODEL_REQUEST='{"kind":"tier","name":"judgment"}'
+adversary_reject_legacy_model_vars GSD_REVIEW_MODEL GSD_REVIEW_EFFORT \
+  GSD_REVIEW_CLAUDE_MODEL || {
+  echo '{"verdict":"REVISE","note":"BLOCKED: legacy raw model override; use GSD_REVIEW_MODEL_REQUEST"}'
+  exit 1
 }
 
 # Reviews are read-only, so one fallback to the active host is safe. The shared
 # helper gives both attempts one overall deadline and never feeds the failed
 # transcript to the fallback reviewer.
-review_model_for_kind "$REVIEW_KIND"
-PREFERRED_MODEL="$REVIEW_MODEL"
-PREFERRED_EFFORT="$REVIEW_EFFORT"
 FALLBACK_KIND="$ACTIVE_HOST"
-review_model_for_kind "$FALLBACK_KIND"
-FALLBACK_MODEL="$REVIEW_MODEL"
-FALLBACK_EFFORT="$REVIEW_EFFORT"
-OUTPUT="$(adversary_invoke_with_fallback "$REVIEW_KIND" "$FALLBACK_KIND" \
-  "${GSD_REVIEW_TIMEOUT:-600}" "$PREFERRED_MODEL" "$PREFERRED_EFFORT" \
-  "$FALLBACK_MODEL" "$FALLBACK_EFFORT" "$PROMPT" 2>&1)"
+OUTPUT="$(adversary_invoke_typed_request "$REVIEW_KIND" "$FALLBACK_KIND" \
+  "${GSD_REVIEW_TIMEOUT:-600}" "$MODEL_REQUEST" "$PROMPT" 2>&1)"
 rc=$?
 if [ "$rc" -ne 0 ]; then
   echo '{"verdict":"REVISE","note":"BLOCKED: both review hosts unavailable; no review verdict"}'

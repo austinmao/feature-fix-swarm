@@ -1,8 +1,9 @@
-# Why four models, and which one runs what
+# Typed model requests and host resolution
 
-feature-fix-swarm runs every role on the cheapest model that can do that
-role's job, and it never lets a model review its own work. This page
-explains both rules and shows where they live in code.
+feature-fix-swarm requests the kind of work a role performs, resolves that
+request for the selected host, and never lets a model review its own work.
+This page explains those rules and the compatibility aliases retained for
+older FFS configurations.
 
 ## The problem
 
@@ -20,39 +21,26 @@ self-review. Worse, a reviewer *shown the author's reasoning* scores no
 better than self-review (F1 23.8% vs 24.6%) — statistically indistinguishable
 — while a fully-fresh reviewer scores 28.6%. Context poisons the review.
 
-## The approach: four tiers, assigned by job
+## The approach: three workload tiers
 
-| Tier | Model | Runs |
-|---|---|---|
-| **haiku** | `claude-haiku-4-5-20251001` | Mechanical edits, search, parallel-fanned workers, research synthesis, codebase mapping |
-| **sonnet** | `claude-sonnet-5` | The executor. Feature coding, most implementation, integration checks |
-| **fable** | `claude-fable-5` | Planning and orchestration. Owns the plan, delegates execution to sonnet workers |
-| **opus** | `claude-opus-5` | Architecture, security audit, adversarial verify, final review |
+| Request | Codex resolution | Default effort | Runs |
+|---|---|---|---|
+| **judgment** | `gpt-5.6-sol` | high | Planning, checking, debugging, verification, code/security review |
+| **execution** | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research, integration, Nyquist work |
+| **volume** | `gpt-5.6-luna` | low | Mapping, synthesis, and status collection |
 
-Fable's role is specific and worth stating plainly: it plans, then hands
-execution to sonnet. That split lands around **96% of all-Fable quality at
-roughly 46% of the cost**. It is a router, not a worker.
+Defaults are declared in `templates/model-requests.json`. A request is either
+`{"kind":"tier","name":"judgment|execution|volume"}` or
+`{"kind":"exact","id":"…"}`. Raw vendor IDs outside an exact request
+fail validation. Exact requests never silently substitute another model;
+optional fallback is available only for tier requests and records degraded
+adversary provenance. FFS infers the supported CLI from the exact ID (`gpt-*`
+and `oN*` use Codex; `claude-*` uses Claude); any other vendor fails before a
+CLI is launched.
 
-The defaults are declared in `templates/gsd-config.base.json`:
-
-| Role | Tier | Line |
-|---|---|---|
-| `gsd-planner` | fable | :8 |
-| `gsd-plan-checker` | opus | :9 |
-| `gsd-executor` | sonnet | :10 |
-| `gsd-debugger` | opus | :11 |
-| `gsd-phase-researcher` | sonnet | :12 |
-| `gsd-project-researcher` | sonnet | :13 |
-| `gsd-research-synthesizer` | haiku | :14 |
-| `gsd-codebase-mapper` | haiku | :15 |
-| `gsd-verifier` | opus | :16 |
-| `gsd-code-reviewer` | opus | :17 |
-| `gsd-integration-checker` | sonnet | :18 |
-| `gsd-nyquist-auditor` | sonnet | :19 |
-
-Read that table as the rule in action: planner is fable, its checker is
-opus. Executor is sonnet, its reviewer is opus. Never the same tier on both
-sides of a check.
+Read the assignments as the producer/reviewer rule in action: executors use
+the execution tier while their verification and security reviewers use
+judgment. Never use the same resolved model on both sides of a check.
 
 ## Producer never reviews producer
 
@@ -79,28 +67,27 @@ repo. It never gets the producer's conversation. Do not paste author context
 into a reviewer prompt, and do not starve the reviewer of the artifact
 either.
 
-## Codex equivalents
+## Legacy host aliases
 
-Every Claude tier has a pinned Codex counterpart, so a run can cross vendors
-without changing its routing intent (`scripts/gsd/model-equivalents.sh:11-14, 26-28`):
+Older FFS configs and Claude-native levers still use the historical aliases.
+`scripts/gsd/model-equivalents.sh` maps them without letting a raw alias become
+an untyped model request:
 
 | Claude | Codex | Effort |
 |---|---|---|
-| fable, opus | `gpt-5.6-sol` | `xhigh` |
-| sonnet | `gpt-5.6-terra` | `high` |
-| haiku | `gpt-5.6-luna` | `medium` |
+| fable, opus | `gpt-5.6-sol` | `high` |
+| sonnet | `gpt-5.6-terra` | `medium` |
+| haiku | `gpt-5.6-luna` | `low` |
 
-The reverse map collapses `sol → opus`, never `sol → fable`. Fable
-availability flaps; opus is the stable pin, so it is the safe landing spot
-coming back from Codex.
+The reverse map collapses `sol → opus`, never `sol → fable`. An explicit exact
+Fable request is not this compatibility mapping: it never falls back and its
+provenance gate cannot be satisfied by Sol or Opus.
 
-Codex effort enum is `none|minimal|low|medium|high|xhigh`. `ultra` and `max`
-are accepted CLI aliases; `xhigh` is canonical.
+## Legacy Fable fallback lever
 
-## When fable is unavailable
-
-Fable's OAuth availability is not guaranteed. `scripts/gsd/model-fallback.sh`
-handles that without a human in the loop.
+`scripts/gsd/model-fallback.sh` remains for pre-5.0 Claude configurations.
+It does not apply to a typed exact Fable request, whose contract is fail
+closed.
 
 **Trigger** — a probe finds fable unavailable (`:136`). Probe results cache
 for 24h in `$GSD_FALLBACK_CACHE` (default `~/.cache/gsd-model-probe`), bounded

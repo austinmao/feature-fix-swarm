@@ -38,14 +38,14 @@ setup() {
   grep -F 'adversary-host.sh' scripts/gsd/review-gate-command.sh
 }
 
-@test "Pass 2 pins Codex Sol and Claude Opus on the opposite host" {
-  grep -F 'gpt-5.6-sol' skills/review-gate/SKILL.md
-  grep -F 'REVIEW_MODEL="opus"' skills/review-gate/SKILL.md
-  grep -F 'REVIEW_EFFORT="xhigh"' skills/review-gate/SKILL.md
+@test "Pass 2 resolves a typed judgment request on the opposite host" {
+  grep -F 'REVIEW_MODEL_REQUEST=' skills/review-gate/SKILL.md
+  grep -F '"kind":"tier","name":"judgment"' skills/review-gate/SKILL.md
+  grep -F 'adversary_invoke_typed_request "$REVIEW_KIND" "$FALLBACK_KIND"' skills/review-gate/SKILL.md
 }
 
 @test "honest verifier is also opposite-host and has no Claude-only Task primitive" {
-  grep -F 'adversary_invoke_with_fallback "$HV_KIND" "$HV_FALLBACK_KIND"' skills/review-gate/SKILL.md
+  grep -F 'adversary_invoke_typed_request "$HV_KIND" "$HV_FALLBACK_KIND"' skills/review-gate/SKILL.md
   ! grep -F 'Task({ subagent_type: "gsd-verifier"' skills/review-gate/SKILL.md
 }
 
@@ -56,8 +56,8 @@ setup() {
 }
 
 @test "INT-001: FULL-tier adversary_invoke passes a real model, not the review bin" {
-  grep -F 'adversary_invoke_with_fallback "$_adv_kind" "$_adv_fallback"' skills/review-gate/SKILL.md
-  ! grep -F 'adversary_invoke_with_fallback "$_adv_kind" "$_adv_fallback" 480 "$REVIEW_BIN"' skills/review-gate/SKILL.md
+  grep -F 'adversary_invoke_typed_request "$_adv_kind" "$_adv_fallback"' skills/review-gate/SKILL.md
+  ! grep -F 'adversary_invoke_typed_request "$_adv_kind" "$_adv_fallback" 480 "$REVIEW_BIN"' skills/review-gate/SKILL.md
 }
 
 @test "INT-001: FULL-tier adversary fails closed when both hosts are unavailable" {
@@ -80,8 +80,8 @@ setup() {
   grep -F 'never suppresses an otherwise-eligible honest-verifier' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: version bumped to 1.9.0" {
-  grep -F 'version: "1.9.0"' skills/review-gate/SKILL.md
+@test "INT-001: review-gate retains the 1.9 contract after host-neutral bump" {
+  grep -F 'version: "1.10.0"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

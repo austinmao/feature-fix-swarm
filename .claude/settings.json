@@ -9,6 +9,21 @@
             "command": "bash \"$CLAUDE_PROJECT_DIR\"/scripts/hooks/gsd-phase-evidence-gate.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/scripts/hooks/cli-hang-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/scripts/hooks/credential-output-guard.sh",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.12.1"
+version: "2.13.0"
 allowed-tools:
   - Read
   - Edit
@@ -11,6 +11,13 @@ allowed-tools:
 ---
 
 # feature-implement — Execute a feature through the gsd loop
+
+## Host dispatch contract
+
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
+- Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 ## When to invoke
 
@@ -80,11 +87,10 @@ if [ "$AUTONOMOUS" = "1" ]; then
   python3 "$GATES_PY" check-preflight "$RUN_ID" || {
     echo "[feature-implement] ERROR: no fresh preflight for $RUN_ID — run /preflight first."; exit 1; }
 fi
-# Model availability wall (all modes): rewrite dead premium pins (fable→opus)
-# before any spawn — an overnight run must not die on an OAuth catalog change.
+# Legacy Claude config wall: rewrite unavailable non-exact Fable pins to Opus.
+# Typed exact requests fail closed and never use this compatibility fallback.
 [ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh .planning || true
-# Security fence (all modes): security-touching specs plan on opus, not fable —
-# Fable classifiers can false-refuse benign defensive-security work mid-run.
+# Legacy Claude security fence: security-touching configs use Opus judgment.
 [ -f scripts/gsd/security-model-fence.sh ] && bash scripts/gsd/security-model-fence.sh .planning specs/"$SPEC_ID"*/spec.md specs/"$SPEC_ID"*/plan.md || true
 # Ledger key for gsd seams: review-gate-command.sh reads GSD_RUN_ID (no
 # hardcoded default) — export it so ship grants key to THIS run.
@@ -168,7 +174,7 @@ stateful work and can strand disposable resources. The runner also publishes
 probe if the tool session itself is lost. A second runner refuses to launch
 while that pid is live, so single-flight is mechanical rather than prompt-only.
 
-**Anti-early-stop (autonomous orchestrator loop).** Fable early-stops long runs
+**Anti-early-stop (autonomous orchestrator loop).** Legacy Claude Fable can stop long runs
 with text-only intent; hold this line every turn of the drive loop:
 
 > Before ending your turn, check your last paragraph. If it is a plan, an
@@ -178,8 +184,8 @@ with text-only intent; hold this line every turn of the drive loop:
 > You have ample context remaining — do not stop, summarize, or suggest a new
 > session on account of context limits; the harness handles compaction.
 
-**Fable dispatch discipline (per Anthropic's Fable 5 prompting guide).** A
-Fable orchestrator dispatches parallel subagents readily — lean into it, don't
+**Legacy Claude Fable dispatch discipline.** A Claude Fable orchestrator
+dispatches parallel subagents readily — lean into it, don't
 serialize:
 
 > Delegate independent subtasks to subagents in parallel and keep working while
@@ -188,7 +194,7 @@ serialize:
 > serial; everything independent (research fan-out, per-file verify, doc
 > passes) runs concurrently.
 
-Fable's instruction-following is strong enough that these two short guards
+Claude Fable's instruction-following is strong enough that these two short guards
 replace enumerated behavior lists — do not grow them into checklists.
 
 (Orchestrator-level mitigation: per-turn work inside gsd-core sub-agents is
@@ -346,8 +352,9 @@ Consumed grants + artifacts (sha/PR#) go in the report.
 
 Phases executed, verifier verdicts, gap rounds, gate evidence ids, consumed grants,
 pendings (for one-command morning resume), files changed. Include the delegation
-histogram `models={opus:N,sonnet:N,haiku:N,fable:N,inline-mechanical:N}` (spawns
-by pinned model; `inline-mechanical` = host trip-wire drains, target 0) — verify
+histogram `tiers={judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`
+(spawns by typed request and resolved model; `inline-mechanical` = host
+trip-wire drains, target 0) — verify
 with `python3 lib/gates.py delegation-audit <session-transcript.jsonl>`.
 
 ## Removed in v2.0.0

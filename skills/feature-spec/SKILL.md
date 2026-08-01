@@ -1,10 +1,17 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.5.0
+version: 2.6.0
 ---
 
 # /feature-spec [NNN | "description"]
+
+## Host dispatch contract
+
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
+- Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 Spec-first feature definition pipeline. Chains three speckit phases in sequence and
 enforces that TDD unit tests, BDD behavior scenarios, and E2E test definitions are
@@ -54,7 +61,7 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 ```
 
 > **Note on command naming:** speckit uses `speckit.specify` (not `speckit.spec`).
-> Invoke via the Skill tool with name `speckit.specify`.
+> Invoke the host-native `speckit.specify` skill.
 
 > **Optional recall (fail-soft):** before Phase 1, if `command -v gbrain` succeeds and
 > `env -u DATABASE_URL gbrain doctor` is healthy, run
@@ -70,22 +77,22 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 > to pull the pinned `docs/cached-docs/*.md` API shape into plan.md's research
 > instead of guessing (Context7 for anything not cached). Both are read-only,
 > grep-first, fail-soft — a repo without `openwiki/`/`docs/cached-docs/` or
-> without those skills silently no-ops. Route the lookups to a `haiku` scout
+> without those skills silently no-ops. Route the lookups to a volume-tier scout
 > subagent per the Delegation discipline section below.
 
 ### Prior-art search — skills + OSS repos (fail-soft)
 
 Also before Phase 1, and in parallel with the recall above, dispatch TWO
-`Agent` subagents (explicit `model` pins, **scout** return contract, ≤15
+host-native subagents (explicit resolved model pins, **scout** return contract, ≤15
 lines each — see the Delegation discipline section below for the contract
 shapes) to find prior work before any new spec text is drafted:
 
-- **`haiku` scout — local skill search.** Try the `/find-skills` skill if it
-  is available in this session; also run
+- **Volume scout — local skill search.** Codex uses Luna low; Claude uses Haiku.
+  Try the host-native `find-skills` skill if it is available; also run
   `python3 -m compiler.engine.cli skill find "<feature topic>"` (fail-soft —
   a repo without the `compiler.engine.cli` module just skips that leg).
   Returns candidate skills with a one-line applicability note each.
-- **`sonnet` researcher — OSS prior art.** Run
+- **Execution researcher — OSS prior art.** Codex uses Terra medium; Claude uses Sonnet. Run
   `gh search repos "<topic>" --sort stars --limit 10` and
   `gh search code "<distinctive API/problem phrase>" --limit 10`.
   Vindication threshold: env `PRIOR_ART_MIN_STARS` (default `200`), or
@@ -106,7 +113,8 @@ skill/repo | stars/downloads | applicability verdict | evidence link`) plus
 a `## Decision input` section summarizing what the two scouts found.
 
 **Adjudication:** only if ≥1 vindicated AND applicable candidate exists,
-dispatch an `opus` judge (**deep** contract, ≤40 lines) to decide
+dispatch a judgment-tier judge (Codex Sol high; Claude Opus; **deep**
+contract, ≤40 lines) to decide
 adopt/port/wrap/build-fresh, with rationale — license, maintenance recency,
 fit %, integration cost. This decision + rationale MUST be cited in
 `plan.md` (Step 2 below) — do not silently drop it.
@@ -354,27 +362,26 @@ fi
 
 ---
 
-**Claude: execute these steps in sequence. Do not skip any step.**
+**Execute these steps in sequence on the active host. Do not skip any step.**
 
 ## Delegation discipline (host-model-aware, gsd-aligned, v2.0.0)
 
-The host running this skill is an ORCHESTRATOR, not the worker. When the session
-model is a scarce/premium tier — **Fable** or **Opus** — do NOT burn its context
-on read-only discovery. Offload every mechanical/parallel sub-task to `Agent`
-subagents on the cheapest tier that does the job, and reserve the premium host
-for what it is FOR: narrative coherence in `spec.md`/`plan.md` prose and
-cross-section consistency. (On a `sonnet`-default host, inline is fine —
-delegation is optional and this whole section is a no-op.)
+The host running this skill is an ORCHESTRATOR, not the worker. Offload
+mechanical/parallel work to the lowest workload tier that satisfies the task,
+and reserve judgment for narrative coherence, architectural decisions, and
+cross-section consistency. Resolve tiers through the host dispatch contract:
+volume = Codex Luna low / Claude Haiku; execution = Codex Terra medium /
+Claude Sonnet; judgment = Codex Sol high / Claude Opus.
 
 Tier ladder mirrors gsd's `dynamic_routing` (light/standard/heavy) + premium:
 
 | Sub-task (across all phases below) | Model | Return contract |
 |---|---|---|
-| grep / file-read / ref-resolution / "open `specs/NNN/X.md` and verify sections present" | `haiku` | **scout** (≤15 lines: `file:line` + pass/fail + missing-section list — NEVER the file body) |
-| codebase exploration ("where is X", blast radius) during specify/plan | `haiku`→`sonnet` on miss | **scout** |
-| research fan-out (speckit.plan Phase 0 unknowns, best-practices, vendor-doc reads) | `sonnet` | **build**/deep (conclusion first) |
-| architectural judgment (canonical-mechanism picks, security/auth tradeoffs, `[NEEDS CLARIFICATION]` resolution) | `opus` | **deep** |
-| adversarial spec critique before plan (optional, big specs) | `fable` if available, else `opus` | **deep** |
+| grep / file-read / ref-resolution / "open `specs/NNN/X.md` and verify sections present" | volume | **scout** (≤15 lines: `file:line` + pass/fail + missing-section list — NEVER the file body) |
+| codebase exploration ("where is X", blast radius) during specify/plan | volume → execution on miss | **scout** |
+| research fan-out (speckit.plan Phase 0 unknowns, best-practices, vendor-doc reads) | execution | **build**/deep (conclusion first) |
+| architectural judgment (canonical-mechanism picks, security/auth tradeoffs, `[NEEDS CLARIFICATION]` resolution) | judgment | **deep** |
+| adversarial spec critique before plan (optional, big specs) | judgment on a fresh producer-distinct model | **deep** |
 
 **Orchestrator self-discipline (trip-wires):** the host running this skill is
 bound by this section too, not just the sub-agents it spawns. Never run these
@@ -385,39 +392,38 @@ inline: grant-gated outward actions (merge/push/PR — authority stays in the
 host), ledger/evidence bookkeeping, CI-watch/poll-monitoring loops, single
 small edits (≤2 files). Every spawn carries an explicit `model` pin — an
 unpinned build/rebase/prep spawn silently inherits the host's tier, a real
-cost bug when the host is running Fable or Opus. Detection lever:
+cost bug when the host is running a judgment model. Detection lever:
 `python3 lib/gates.py delegation-audit <session-transcript.jsonl>` (advisory
 histogram + UNPINNED-BUILD/INLINE-MECHANICAL findings, never blocks).
 
-**Premium fallback:** `fable` is an OAuth-subscription model that comes and
-goes. If a `fable` spawn errors (model unavailable), retry the SAME prompt on
-`opus` — same semantics as `scripts/gsd/model-fallback.sh` applies to
-`.planning/config.json` pins. Never stall a phase on a dead premium model.
+**Fallback:** tier requests may resolve through the bounded fallback ladder and
+must record degraded provenance. An exact Claude Fable request never falls back; stop
+with the unavailable-model evidence instead.
 
 **Parallelize the recon, not the artifacts.** spec.md → plan.md → tasks.md is
-a real dependency chain (sequential). What IS parallel: dispatch the haiku
-scouts + sonnet researchers for a phase CONCURRENTLY (one message, multiple
-Agent calls) while the host synthesizes — e.g. during specify, codebase scouts
+a real dependency chain (sequential). What IS parallel: dispatch the volume
+scouts and execution researchers for a phase concurrently while the host
+synthesizes — e.g. during specify, codebase scouts
 + vendor-doc research run at the same time as spec drafting; their reports
 land before the section that needs them.
 
 Concretely:
 - The inter-phase **verification reads** in Steps 1–4 ("open the file and verify
-  `## X` exists") → dispatch a `haiku` scout that returns the pass/fail +
+  `## X` exists") → dispatch a volume scout that returns the pass/fail +
   missing-section list, not the artifact body.
-- Any **codebase grep/explore** while authoring → `haiku` `Explore` subagent
+- Any **codebase grep/explore** while authoring → volume-tier explorer
   returning `file:line` refs only.
 - **spec-decompose (Step 4)** seeds the gsd project; gsd's own planner/checker
-  ladder (fable/opus plan, sonnet research, opus verify — post model-fallback)
+  ladder (judgment plan/check/verify, execution research)
   takes over from there. Do not duplicate its research inline.
 
-Fail-soft: no `Agent` tool available, or a solo host with no subagent runtime →
+Fail-soft: no host-native subagent runtime available →
 do the read inline. Delegation is an optimization, never a gate — a phase never
 blocks because a subagent was unavailable.
 
 ### Step 1 — speckit.specify
 
-Invoke the `speckit.specify` skill via the Skill tool.
+Invoke the host-native `speckit.specify` skill.
 Pass the spec number or description from `$ARGUMENTS`.
 
 After it completes, open `specs/${SPEC_ID}/spec.md` and verify:
@@ -432,7 +438,7 @@ If any check fails, **fix it now** before proceeding to Step 2.
 
 ### Step 2 — speckit.plan
 
-Invoke the `speckit.plan` skill via the Skill tool.
+Invoke the host-native `speckit.plan` skill.
 
 After it completes, open `specs/${SPEC_ID}/plan.md` and verify:
 - `## Unit Test List` — all anticipated test cases, sequenced by design-criticality
@@ -457,7 +463,7 @@ order: plan → review gauntlet → decompose.
 
 Skip if `--no-clarify` was passed.
 
-Invoke the `speckit.clarify` skill via the Skill tool.
+Invoke the host-native `speckit.clarify` skill.
 
 After it completes, verify the spec contains:
 - `## Edge Cases` — at least one EDGE-NNN entry
@@ -468,7 +474,7 @@ If any section is missing, **add it now**.
 
 ### Step 4 — spec-decompose (v2.0.0, gsd-native)
 
-Invoke the `spec-decompose` skill via the Skill tool with `${SPEC_ID}`. It seeds
+Invoke the host-native `spec-decompose` skill with `${SPEC_ID}`. It seeds
 the gsd project (`.planning/PROJECT.md` + `REQUIREMENTS.md` + `ROADMAP.md` +
 gate-carrying `config.json`) from spec.md/plan.md and drives `/gsd-plan-phase`
 (research → wave-parallel plans → plan-checker).

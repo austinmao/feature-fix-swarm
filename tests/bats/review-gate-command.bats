@@ -22,7 +22,7 @@ EOF
   export PATH="$STUB_DIR:$PATH"
 }
 
-@test "Claude-hosted ship review uses Codex Sol xhigh" {
+@test "Claude-hosted ship review resolves the Codex judgment tier" {
   run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
     ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
     bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
@@ -32,7 +32,7 @@ EOF
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
   grep -F 'model="gpt-5.6-sol"' "$BATS_TEST_TMPDIR/codex.args"
-  grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model_reasoning_effort="high"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
 @test "Codex-hosted ship review uses Claude Opus" {
@@ -45,7 +45,7 @@ EOF
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
-  grep -Fx 'opus' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-opus-5' "$BATS_TEST_TMPDIR/claude.args"
 }
 
 @test "opposite reviewer unavailable falls back once to active host with explicit degradation" {

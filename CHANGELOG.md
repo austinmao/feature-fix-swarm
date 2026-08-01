@@ -6,6 +6,46 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v5.0.0 — Codex/GPT-5.6 modernization (2026-08-01)
+
+### Added
+
+- Native project and user installation scopes for Codex's canonical
+  `.agents/skills` discovery root, plus `ffs.doctor/v1`, managed backups,
+  rollback, legacy-hash migration, and shared primary/worktree locking.
+- Host-neutral dispatch contracts for every FFS skill and the new
+  `continue-compact` resume skill. Codex uses `$skill`; Claude Code uses
+  `/skill`.
+- Typed judgment/execution/volume model requests, GPT-5.6 role defaults, an
+  18-case reproducible evaluation corpus, and lint that rejects unqualified
+  raw model identifiers. All runtime adversary entry points use the same typed
+  dispatcher; exact requests disable model ladders and cross-host fallback.
+  CI also rejects skill/runtime paths that bypass the typed dispatcher or
+  expand retired raw-model environment variables.
+- A pinned `prompt-master` integration at commit
+  `d15eabbe5d2122eedc060bae8a771381e9873d1b` with a minimal Codex GPT-5.6
+  compatibility patch.
+
+### Changed
+
+- Exact-pinned GSD Core at `@opengsd/gsd-core@1.9.1`; setup delegates GSD's
+  complete Claude and Codex profiles to the upstream installer.
+- Rebuilt isolated Codex runs around manifest-complete runtime bundles,
+  writable OAuth copies with compare-and-swap refresh, Codex CLI
+  `>=0.137.0,<0.147.0`, custom-provider refusal, and persisted resume tuples.
+- Runner and evaluation OAuth refreshes share one user-global file lock and
+  race-safe CAS implementation; interrupted evaluations synchronize from a
+  `finally` boundary or preserve a private recovery copy.
+- Default isolation is `approval_policy=never` plus `workspace-write` and a
+  binary network mode. Unsandboxed execution now requires a consumed,
+  run-bound 72-hour `sandbox:danger-full-access` grant.
+
+### Removed
+
+- New installs no longer write `.codex/skills`; known unedited legacy files
+  from v4.13.0 through v4.22.0 are migrated through the historical hash
+  catalog, while edited or unknown files are preserved.
+
 ## v4.22.0 — Buildomator borrows: sync-drift check, session handoff, base-branch resolver (2026-07-31)
 
 Three patterns adapted from `buildomator/buildomator` (MIT, the plugin cousin

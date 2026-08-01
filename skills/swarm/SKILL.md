@@ -1,7 +1,7 @@
 ---
 name: swarm
-description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks run as concurrent native Task() agents (haiku=mechanical, sonnet=default, opus=adversarial/architecture), dependent tasks run serially. No spec directory required. Ruflo coordination removed in v2.0.0 (spec 002) — for full-feature work use /feature-implement (gsd loop) instead."
-version: "2.0.0"
+description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
+version: "2.1.0"
 permissions:
   filesystem: write
   network: false
@@ -19,6 +19,12 @@ metadata:
 ---
 
 # /swarm — Ad-hoc parallel task executor
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 One command. Pass task descriptions, get model classification, parallel execution,
 and a structured result. No spec pipeline, no `.planning/` prerequisite.
@@ -39,21 +45,22 @@ For anything that IS a feature (multi-phase, TDD, ship tail): use
 /swarm --tasks-file PATH           # md checklist or one-per-line
 /swarm ... --dry-run               # print annotated plan, don't execute
 /swarm ... --sequential            # serial execution
-/swarm ... --model-override opus   # override all model assignments
+/swarm ... --model-request '{"kind":"tier","name":"judgment"}'
 ```
 
 ## Workflow
 
 ### Step 1: Classify
 
-Per task, assign model by the static ladder (haiku = mechanical/search,
-sonnet = default dev, opus = architecture/security/adversarial) and mark `[P]`
-when tasks share no files and no ordering dependency.
+Per task, assign a typed workload request: volume for mechanical/search,
+execution for default development, judgment for architecture/security/review.
+Resolve through the active host and mark `[P]` when tasks share no files and
+no ordering dependency.
 
 ### Step 2: Execute
 
-- `[P]` groups → concurrent native `Task()`/Agent calls in ONE message, small-toolset
-  named agent types where one fits (never general-purpose on constrained machines).
+- `[P]` groups → concurrent host-native subagent calls in one wave, using a
+  small-toolset named role where one fits.
 - Dependent tasks → serial, each receiving the prior result.
 - Delegation prompt = Goal · Scope (in/out of bounds) · return contract
   (scout ≤15 / build ≤20 / deep ≤40 lines) · done-means.

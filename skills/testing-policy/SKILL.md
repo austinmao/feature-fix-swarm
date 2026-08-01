@@ -1,7 +1,7 @@
 ---
 name: testing-policy
 description: "Canonical FFS testing doctrine — mock-minimization ladder, real-browser verification, console/network tripwires, independent test authorship, BDD-as-executable-input, coverage floor, smoke design. Other skills reference this instead of restating it."
-version: "1.0.0"
+version: "1.1.0"
 allowed-tools:
   - Read
   - Bash
@@ -10,6 +10,12 @@ allowed-tools:
 ---
 
 # testing-policy — one home for how FFS tests
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 ## When to invoke
 

@@ -15,8 +15,10 @@ setup() {
   mkdir -p "$SRC" "$CONSUMER"
   printf '#!/bin/bash\necho a\n' > "$SRC/alpha.sh"
   printf '#!/bin/bash\necho b\n' > "$SRC/beta.sh"
+  printf 'print("helper")\n' > "$SRC/helper.py"
   cp "$SRC/alpha.sh" "$CONSUMER/alpha.sh"
   cp "$SRC/beta.sh" "$CONSUMER/beta.sh"
+  cp "$SRC/helper.py" "$CONSUMER/helper.py"
 }
 
 run_check() {
@@ -35,6 +37,13 @@ run_check() {
   run_check
   [ "$status" -eq 1 ]
   [[ "$output" == *"DRIFT: beta.sh"* ]]
+}
+
+@test "python runner helper drift is fail-closed" {
+  echo '# changed' >> "$CONSUMER/helper.py"
+  run_check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIFT: helper.py"* ]]
 }
 
 @test "allowlisted fork: exit 0, reported FORKED with reason" {

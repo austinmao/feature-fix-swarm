@@ -12,27 +12,31 @@ Budget about 20 minutes, most of it install.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) **or** [Codex
   CLI](https://github.com/openai/codex). Both is better — that's what enables
   cross-vendor review
-- Node 18+, Python 3.9+, `git`
+- Node 22+, npm 10+, Python 3.9+, `git`
 
 ## Step 1: install
 
 ```bash
 git clone https://github.com/austinmao/feature-fix-swarm.git
 cd feature-fix-swarm
-bash setup.sh
+bash setup.sh --scope user
 ```
 
-`setup.sh` checks prerequisites and offers to bootstrap what's missing
-(gstack, Spec Kit, gsd-core, the agent catalogs). Say yes.
+For a reproducible repository-local install instead:
 
-You should see it finish with a byte-for-byte verification of the runner,
-adversary adapter, and hang guard. If it warns about a missing prerequisite,
-install that one and re-run — the pipeline degrades in specific, documented
-ways without them, but the first run is smoother with everything present.
+```bash
+bash setup.sh --scope project --project-dir /absolute/path/to/repo
+```
+
+The installer hash-manages FFS skills for both Codex and Claude. It installs
+nothing under legacy `.codex/skills`; GSD's upstream installer owns all
+`gsd-*` runtime surfaces. See [Installer, migration, and
+rollback](installer.md) for scope resolution, doctor, and rollback details.
 
 ## Step 2: confirm the harness is healthy
 
 ```bash
+bash setup.sh --doctor --scope user
 python3 scripts/harness-audit.py
 ```
 
@@ -52,10 +56,11 @@ nobody added.
 
 Before you run anything, decide which door you're going through. The full
 decision is in [Choosing a command](choosing-a-command.md); for a first run,
-`/task-swarm` is the right one. It plans, but skips the spec ceremony.
+`task-swarm` is the right one. It plans, but skips the spec ceremony.
 
-```bash
-/task-swarm "add rate limiting to the webhook endpoints" --dry-run
+```text
+Codex: $task-swarm "add rate limiting to the webhook endpoints" --dry-run
+Claude: /task-swarm "add rate limiting to the webhook endpoints" --dry-run
 ```
 
 `--dry-run` plans without executing. You'll see the decomposed task list,
@@ -66,8 +71,9 @@ This is the cheapest possible moment to notice the plan is wrong.
 
 Drop `--dry-run`:
 
-```bash
-/task-swarm "add rate limiting to the webhook endpoints"
+```text
+Codex: $task-swarm "add rate limiting to the webhook endpoints"
+Claude: /task-swarm "add rate limiting to the webhook endpoints"
 ```
 
 What happens, in order:

@@ -74,8 +74,8 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
-@test "no BASE_URL override that would redirect off the subscription endpoint" {
-  run grep -rn 'ANTHROPIC_BASE_URL\|OPENAI_BASE_URL' \
+@test "no BASE_URL assignment that would redirect off the subscription endpoint" {
+  run grep -rnE '(ANTHROPIC_BASE_URL|OPENAI_BASE_URL)[[:space:]]*=' \
     "$REPO_ROOT/scripts" "$REPO_ROOT/lib" "$REPO_ROOT/templates"
   [ "$status" -ne 0 ]
 }

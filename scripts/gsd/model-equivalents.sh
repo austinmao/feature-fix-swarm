@@ -8,10 +8,10 @@
 # canonical top is xhigh. See docs/fable-pilotfish-alignment.md (v4.5.1 note).
 #
 # Map (docs/fable-pilotfish-alignment.md ~L90-98, plan-adversary.sh defaults):
-#   fable  -> gpt-5.6-sol   / xhigh
-#   opus   -> gpt-5.6-sol   / xhigh
-#   sonnet -> gpt-5.6-terra / high
-#   haiku  -> gpt-5.6-luna  / medium
+#   fable  -> gpt-5.6-sol   / high
+#   opus   -> gpt-5.6-sol   / high
+#   sonnet -> gpt-5.6-terra / medium
+#   haiku  -> gpt-5.6-luna  / low
 #
 # Reverse (codex -> claude) intentionally collapses sol -> opus, never fable —
 # fable availability flaps (see model-fallback.sh); opus is the stable pin.
@@ -32,9 +32,9 @@ codex_equiv_model() {
 
 codex_equiv_effort() {
   case "$1" in
-    *fable*|*opus*) echo "xhigh" ;;
-    *sonnet*) echo "high" ;;
-    *haiku*) echo "medium" ;;
+    *fable*|*opus*) echo "high" ;;
+    *sonnet*) echo "medium" ;;
+    *haiku*) echo "low" ;;
     *) echo "$1"; return 1 ;;
   esac
 }

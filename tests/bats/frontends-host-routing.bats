@@ -22,7 +22,7 @@ setup() {
 
 @test "/plan-decompose uses the shared opposite-host adapter" {
   grep -F '. scripts/gsd/adversary-host.sh' skills/plan-decompose/SKILL.md
-  grep -F 'adversary_invoke_with_fallback "$REVIEW_KIND" "$FALLBACK_KIND" 540' skills/plan-decompose/SKILL.md
+  grep -F 'adversary_invoke_typed_request "$REVIEW_KIND" "$FALLBACK_KIND" 540' skills/plan-decompose/SKILL.md
   ! grep -F 'timeout 540 codex exec' skills/plan-decompose/SKILL.md
 }
 

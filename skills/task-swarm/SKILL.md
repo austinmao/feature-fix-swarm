@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Lightweight autonomous feature pipeline: self-healing plan-decompose → preflight → autonomy-grant → feature-implement --autonomous. DRY sequencing only; child skills own all machinery."
-version: "3.2.2"
+version: "3.3.0"
 allowed-tools:
   - Read
   - Write
@@ -12,6 +12,12 @@ allowed-tools:
 ---
 
 # /task-swarm "<task description>"
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 One command from free-text instruction to shipped, canaried change. It is the
 lightweight sibling of `/feature-spec`: no speckit specify/plan/clarify ceremony,
@@ -116,8 +122,8 @@ you are blocked on input only the user can provide.
 
 feature-implement's proof artifact + final report are the record. Add this
 skill's wrapper line to `.feature-fix-swarm/results.md`:
-`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed} models={opus:N,sonnet:N,haiku:N,fable:N,inline-mechanical:N}`.
-The `models=` histogram counts Task/Agent spawns by pinned model over the
+`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed} tiers={judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`.
+The `tiers=` histogram counts host-native subagent spawns by typed request and resolved model over the
 whole run (`inline-mechanical` = trip-wire work the host drained inline —
 see `feature-spec` SKILL.md § Orchestrator self-discipline; target 0).
 Cross-check with `python3 lib/gates.py delegation-audit <transcript>`.

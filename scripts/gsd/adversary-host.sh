@@ -40,6 +40,83 @@ fi
 # Do not leak scaffolding into the caller's shell.
 unset _ah_dir
 
+adversary_model_request_helper() {
+  local candidate
+  for candidate in \
+    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/model_requests.py" \
+    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/model_requests.py"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "adversary-host: typed model request resolver is unavailable" >&2
+  return 78
+}
+
+# adversary_resolve_model_request <codex|claude> <request-json>
+# Emits model|effort|kind. Raw vendor IDs are invalid input: callers expose
+# only the typed JSON contract and the resolver owns host-specific IDs.
+adversary_resolve_model_request() {
+  local host="$1" request="$2" helper resolved
+  helper="$(adversary_model_request_helper)" || return $?
+  resolved="$(/usr/bin/python3 "$helper" resolve "$request" --host "$host")" || return $?
+  printf '%s' "$resolved" | /usr/bin/python3 -c '
+import json, re, sys
+r = json.load(sys.stdin)
+if r["kind"] == "exact" and not re.match(r"^(?:gpt-|o[1-9](?:-|$)|claude-)", r["model"]):
+    print("adversary-host: exact model vendor is unsupported: {}".format(r["model"]), file=sys.stderr)
+    raise SystemExit(2)
+print("{}|{}|{}".format(r["model"], r.get("effort") or "", r["kind"]))
+'
+}
+
+# adversary_invoke_typed_request <preferred-kind> <fallback-kind> <timeout>
+#   <request-json> <prompt>
+# Exact requests are provenance-sensitive: no model ladder and no cross-host
+# fallback may satisfy them. Tier requests retain the bounded fallback policy.
+adversary_invoke_typed_request() {
+  local preferred="$1" fallback="$2" timeout_s="$3" request="$4" prompt="$5"
+  local preferred_model preferred_effort request_kind fallback_model fallback_effort ignored exact_host
+  IFS='|' read -r preferred_model preferred_effort request_kind <<EOF
+$(adversary_resolve_model_request "$preferred" "$request")
+EOF
+  [ -n "$preferred_model" ] || return 78
+  if [ "$request_kind" = exact ]; then
+    case "$preferred_model" in
+      gpt-*|o[1-9]*) exact_host=codex ;;
+      claude-*) exact_host=claude ;;
+      *)
+        echo "adversary-host: exact model vendor is unsupported: $preferred_model" >&2
+        return 2
+        ;;
+    esac
+    IFS='|' read -r preferred_model preferred_effort ignored <<EOF
+$(adversary_resolve_model_request "$exact_host" "$request")
+EOF
+    : "$ignored"
+    adversary_invoke "$exact_host" "$timeout_s" "$preferred_model" "$preferred_effort" "$prompt"
+    return $?
+  fi
+  IFS='|' read -r fallback_model fallback_effort ignored <<EOF
+$(adversary_resolve_model_request "$fallback" "$request")
+EOF
+  : "$ignored"
+  [ -n "$fallback_model" ] || return 78
+  adversary_invoke_with_fallback "$preferred" "$fallback" "$timeout_s" \
+    "$preferred_model" "$preferred_effort" "$fallback_model" "$fallback_effort" "$prompt"
+}
+
+adversary_reject_legacy_model_vars() {
+  local name
+  for name in "$@"; do
+    if [ "${!name+x}" = x ]; then
+      echo "adversary-host: $name is unsupported; use the caller's typed *_MODEL_REQUEST JSON variable" >&2
+      return 2
+    fi
+  done
+}
+
 detect_orchestrator_host() {
   case "${FFS_HOST:-}" in
     codex|claude)
@@ -111,9 +188,9 @@ adversary_model_ladder() {
   local kind="$1" preferred="$2" preferred_effort="$3"
   printf '%s|%s\n' "$preferred" "$preferred_effort"
   if [ "$kind" = "codex" ]; then
-    case "$preferred" in *sol*) ;; *) printf '%s|%s\n' gpt-5.6-sol xhigh ;; esac
-    case "$preferred" in *terra*) ;; *) printf '%s|%s\n' gpt-5.6-terra high ;; esac
-    case "$preferred" in *luna*) ;; *) printf '%s|%s\n' gpt-5.6-luna medium ;; esac
+    case "$preferred" in *sol*) ;; *) printf '%s|%s\n' gpt-5.6-sol high ;; esac
+    case "$preferred" in *terra*) ;; *) printf '%s|%s\n' gpt-5.6-terra medium ;; esac
+    case "$preferred" in *luna*) ;; *) printf '%s|%s\n' gpt-5.6-luna low ;; esac
   else
     case "$preferred" in *opus*) ;; *) printf '%s|\n' claude-opus-5 ;; esac
     case "$preferred" in *sonnet*) ;; *) printf '%s|\n' claude-sonnet-5 ;; esac

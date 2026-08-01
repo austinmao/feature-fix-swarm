@@ -88,6 +88,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | Command | What it does |
 |---------|-------------|
 | `/spec-status [NNN] [--continue-compact] [--no-handoff]` | Read-only "where are we?" status check for a spec run — fans out over git, `.planning/`, gates ledger, runner state, evidence, and hygiene; writes a status report + `/handoff` (chains `/continue-compact` instead with that flag) |
+| `/continue-compact` | Save a durable handoff and produce the exact host-native resume command before the built-in `/compact`; Codex invokes the skill as `$continue-compact` |
 | `/retro` | Weekly retrospective of what shipped, what broke, what to improve |
 | `/checkpoint` | Save progress mid-session for resume later |
 | `/health` | Codebase quality check (dead code, test coverage, lint) |
@@ -103,7 +104,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 
 ## gsd-core (Orchestration)
 
-The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.8.0`.
+The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.9.1`.
 Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG package.
 
 | Scenario | Use |

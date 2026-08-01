@@ -1,6 +1,6 @@
 ---
 name: goal-wrap
-version: "1.0.0"
+version: "1.1.0"
 description: Bundle current work into a self-contained autonomous-execution prompt with tracked done-when criteria, best-effort architecture grounding, and full autonomy by default (pass --gates to enable operator confirmation prompts).
 argument-hint: "[--gates] What should the next session accomplish?"
 allowed-tools:
@@ -13,6 +13,12 @@ allowed-tools:
 ---
 
 # /goal-wrap — Grounded, tracked goal bundle
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 Pack current conversation state into a self-contained execution bundle:
 1. **Best-effort research first** — a small research pass grounds the goal in real
@@ -165,7 +171,8 @@ Goal clears ONLY when ALL items show `[✓]`. Executor must run proof commands; 
 
 ### Step 4: Draft the goal body
 
-**If `/prompt-master` is available**, call `Skill(prompt-master, args=<below spec>)`:
+**If the host-native `prompt-master` skill is available**, invoke it with the
+following specification:
 
 ```
 Draft a /goal-runnable prompt under 2800 chars for autonomous execution. Context:
@@ -178,7 +185,7 @@ Draft a /goal-runnable prompt under 2800 chars for autonomous execution. Context
 - Architecture context: <ARCH_CONTEXT from Phase 0>
 - Hard constraints:
   * AUTONOMY=<mode>: [full = all prod/DB/merge/deploy pre-approved, no confirmation prompts] [supervised = ask before irreversible actions]
-  * For parallel work (3+ independent tasks): use `/feature-implement` if a tasks.md exists (this package's own executor), otherwise spawn Agent calls directly
+  * For parallel work (3+ independent tasks): use the host-native `feature-implement` skill if a tasks.md exists, otherwise spawn bounded host-native subagents
   * Full test suite (unit + integration + e2e) MUST pass before marking any DONE WHEN [✓]
   * Run proof command from DONE WHEN; capture exit code + output before updating status
   * Anti-drift: every action traces to spec @ <SPEC_SHA>. Drift = STOP + emit blocker checkpoint
@@ -208,7 +215,7 @@ HANDOFF DOC: <path from Step 6>
 DONE WHEN (executor: run proof cmd, capture exit+output, then update status):
 <DONE WHEN items from Step 3>
 
-PARALLEL WORK: use /feature-implement if specs/NNN/tasks.md exists, otherwise spawn Agent calls directly for independent work
+PARALLEL WORK: use the host-native feature-implement skill if specs/NNN/tasks.md exists, otherwise spawn bounded host-native subagents for independent work
 ```
 
 Verify total ≤4000 chars: `printf '%s' "$GOAL_BODY" | wc -c`
@@ -217,7 +224,9 @@ Final form: `/goal "<GOAL_BODY>"` ready to paste.
 
 ### Step 6: Handoff doc
 
-**If `/handoff` is available**, call `Skill(handoff, args=<$ARGUMENTS>)`. Capture the path it writes to (OS temp dir per its own spec). Inject into GOAL_BODY at `HANDOFF DOC:` line.
+**If the host-native `handoff` skill is available**, invoke it with
+`$ARGUMENTS`. Capture the path it writes to (OS temp dir per its own spec) and
+inject it into the `HANDOFF DOC:` line.
 
 Read the handoff doc and verify it references (does not duplicate): spec+plan by SHA, ADRs by path, commits by sha+subject, spike findings by path+1-line summary, task count+ids, outstanding decisions 1-line each.
 
