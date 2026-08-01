@@ -10,6 +10,8 @@ all skills.
 
 ### Security
 
+- Updated the pinned pytest development tool to 9.0.3 after GitHub's
+  post-merge dependency refresh identified GHSA-6w46-j5rx-g56g in 9.0.2.
 - Preflight probes now require a structured `argv` array and execute without
   an implicit shell. Legacy `cmd` strings and environment placeholders fail
   closed; migrate each command to one literal argument per JSON array item and
