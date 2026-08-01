@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sync-drift-check.sh — vendor-drift detector for the packaged gsd levers
 # (borrowed: buildomator's check-drift ratchet pattern; generalizes the
-# FALLBACK-017 single-file check to the whole scripts/gsd surface).
+# FALLBACK-017 single-file check to the whole shell/Python scripts/gsd surface).
 #
 # A consumer repo (e.g. a monorepo vendoring feature-fix-swarm) carries LIVE
 # COPIES of these levers that drift independently — measured 2026-07-31: six
@@ -39,7 +39,10 @@ allow_reason() {
 }
 
 drift=0
-for src_file in "$SRC"/*.sh; do
+# Python helpers are part of the runnable lever surface too (the isolated
+# Codex runner delegates bundle, grant, hash, and config work to them).
+for src_file in "$SRC"/*.sh "$SRC"/*.py; do
+  [ -f "$src_file" ] || continue
   name="$(basename "$src_file")"
   dst="$CONSUMER/$name"
   reason="$(allow_reason "$name")"

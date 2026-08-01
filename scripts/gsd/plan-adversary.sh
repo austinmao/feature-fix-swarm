@@ -5,7 +5,7 @@
 # Why plan-stage: the planner tier (fable/opus) is trusted precisely because it
 # plans well — which makes an undetected plan error the most expensive kind.
 # A same-family plan-checker is near-self-critique; this lever brings a
-# different-provider adversary (default gpt-5.6-sol @ xhigh) to the plan.
+# different-provider judgment-tier adversary to the plan.
 #
 # Invoked by /gsd-plan-phase's bounce step (gsd-core workflows/plan-phase.md):
 #   plan-adversary.sh <PLAN_FILE> [PASSES]
@@ -20,7 +20,7 @@
 # review sections. Accepted for seam-contract compatibility; not consumed.
 #
 # Cost guard: only high-blast plans (auth/RLS/payments/migrations/…) burn the
-# xhigh review; everything else no-ops. Kill-switch: PLAN_ADVERSARY=off.
+# judgment review; everything else no-ops. Kill-switch: PLAN_ADVERSARY=off.
 #
 # Host-aware: the adversary is always the OPPOSITE vendor CLI from whichever
 # harness is orchestrating (claude vs codex) — see adversary-host.sh.
@@ -78,28 +78,28 @@ fi
 ACTIVE_HOST="$(detect_orchestrator_host)"
 ADVERSARY_KIND="${PLAN_ADVERSARY_KIND:-$(adversary_kind_for_host "$ACTIVE_HOST")}"
 FALLBACK_KIND="$(adversary_kind_for_host "$ADVERSARY_KIND")"
+MODEL_REQUEST="${PLAN_ADVERSARY_MODEL_REQUEST:-}"
+[ -n "$MODEL_REQUEST" ] || MODEL_REQUEST='{"kind":"tier","name":"judgment"}'
+adversary_reject_legacy_model_vars PLAN_ADVERSARY_MODEL PLAN_ADVERSARY_EFFORT \
+  PLAN_ADVERSARY_CLAUDE_MODEL || exit $?
 
 if [ "$ADVERSARY_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
-  EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
-  HEADER_LABEL="${MODEL} ${EFFORT}"
 else
   ADVERSARY_BIN_CLAUDE="${PLAN_ADVERSARY_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  MODEL="${PLAN_ADVERSARY_CLAUDE_MODEL:-opus}"
-  EFFORT=""
-  HEADER_LABEL="claude ${MODEL}"
 fi
 if [ "$FALLBACK_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${PLAN_ADVERSARY_FALLBACK_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  FALLBACK_MODEL="${PLAN_ADVERSARY_MODEL:-gpt-5.6-sol}"
-  FALLBACK_EFFORT="${PLAN_ADVERSARY_EFFORT:-xhigh}"
 else
   ADVERSARY_BIN_CLAUDE="${PLAN_ADVERSARY_FALLBACK_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  FALLBACK_MODEL="${PLAN_ADVERSARY_CLAUDE_MODEL:-opus}"
-  FALLBACK_EFFORT=""
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
+IFS='|' read -r MODEL EFFORT REQUEST_KIND <<EOF
+$(adversary_resolve_model_request "$ADVERSARY_KIND" "$MODEL_REQUEST")
+EOF
+: "$REQUEST_KIND"
+[ -n "$MODEL" ] || exit 2
+HEADER_LABEL="$MODEL${EFFORT:+ $EFFORT}"
 
 # Re-reviews should judge the revised executable plan, not recursively ingest
 # prior reviewer transcripts. The historical sections remain appended to the
@@ -114,9 +114,9 @@ $PLAN_CONTENT
 
 Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, unstated assumptions, missing or unfalsifiable acceptance criteria, sequencing hazards (a later task invalidating an earlier one), and security holes in the approach itself. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
 
-OUTPUT="$(cd "$PLAN_ROOT" && adversary_invoke_with_fallback "$ADVERSARY_KIND" "$FALLBACK_KIND" \
-  "${PLAN_ADVERSARY_TIMEOUT:-480}" "$MODEL" "$EFFORT" \
-  "$FALLBACK_MODEL" "$FALLBACK_EFFORT" "$PROMPT" 2>&1)"
+OUTPUT="$(cd "$PLAN_ROOT" && adversary_invoke_typed_request \
+  "$ADVERSARY_KIND" "$FALLBACK_KIND" "${PLAN_ADVERSARY_TIMEOUT:-480}" \
+  "$MODEL_REQUEST" "$PROMPT" 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
   echo "[plan-adversary] both review hosts unavailable (rc=$rc) — mandatory plan review blocked" >&2

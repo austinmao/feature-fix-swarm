@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
 description: "Create and decompose a lightweight plan with opposite-first review, one bounded read-only active-host fallback, and bounded self-repair; returns success or an evidence-backed terminal block."
-version: "1.5.1"
+version: "1.6.0"
 permissions:
   filesystem: write
   network: false
@@ -21,6 +21,12 @@ metadata:
 ---
 
 # plan-decompose — Autonomous plan → tasks.md (no speckit)
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 ## When to invoke
 
@@ -153,8 +159,8 @@ Write the plan output to `$SPEC_DIR/plan.md`.
 Skip entirely when `--no-review` (or deprecated `--no-codex`) is passed.
 
 Use the shared host adapter; do not hard-code a vendor. The reviewer is always
-the opposite family from the orchestrator: Claude host → Codex Sol/xhigh;
-Codex host → Claude Opus. The adapter owns stdin closure and portable timeout
+the opposite family from the orchestrator and resolves a typed judgment-tier
+request for that host. The adapter owns stdin closure and portable timeout
 handling, including process-group cleanup on macOS:
 
 ```bash
@@ -162,22 +168,10 @@ handling, including process-group cleanup on macOS:
 HOST_KIND="$(detect_orchestrator_host)"
 REVIEW_KIND="$(adversary_kind_for_host "$HOST_KIND")"
 FALLBACK_KIND="$HOST_KIND"
-if [ "$REVIEW_KIND" = codex ]; then
-  REVIEW_MODEL="${PLAN_ADVERSARY_MODEL_CODEX:-gpt-5.6-sol}"
-  REVIEW_EFFORT="${PLAN_ADVERSARY_EFFORT_CODEX:-xhigh}"
-else
-  REVIEW_MODEL="${PLAN_ADVERSARY_MODEL_CLAUDE:-opus}"
-  REVIEW_EFFORT=""
-fi
-if [ "$FALLBACK_KIND" = codex ]; then
-  FALLBACK_MODEL="${PLAN_ADVERSARY_MODEL_CODEX:-gpt-5.6-sol}"
-  FALLBACK_EFFORT="${PLAN_ADVERSARY_EFFORT_CODEX:-xhigh}"
-else
-  FALLBACK_MODEL="${PLAN_ADVERSARY_MODEL_CLAUDE:-opus}"
-  FALLBACK_EFFORT=""
-fi
-adversary_invoke_with_fallback "$REVIEW_KIND" "$FALLBACK_KIND" 540 \
-  "$REVIEW_MODEL" "$REVIEW_EFFORT" "$FALLBACK_MODEL" "$FALLBACK_EFFORT" \
+REVIEW_MODEL_REQUEST="${PLAN_ADVERSARY_MODEL_REQUEST:-}"
+[ -n "$REVIEW_MODEL_REQUEST" ] || REVIEW_MODEL_REQUEST='{"kind":"tier","name":"judgment"}'
+adversary_invoke_typed_request "$REVIEW_KIND" "$FALLBACK_KIND" 540 \
+  "$REVIEW_MODEL_REQUEST" \
   "$PROMPT" >"$OUT_FILE" 2>&1
 RC=$?   # bare exit code — NEVER pipe the live call (`| tail` masks the timeout kill)
 ```
@@ -270,7 +264,7 @@ This writes `$SPEC_DIR/tasks.md` with annotated task list.
 
 Skip entirely when `--no-review` (or deprecated `--no-codex`) is passed.
 
-Run the same `adversary_invoke_with_fallback` contract from Step 3 on
+Run the same `adversary_invoke_typed_request` contract from Step 3 on
 `tasks.md` vs `spec.md`,
 preserving producer≠reviewer across both Claude and Codex hosts:
 

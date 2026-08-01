@@ -60,8 +60,9 @@ def _read(relpath: str) -> str:
 # (feature-implement, spec-decompose) and docs/commands.md to gsd-native model
 # routing (`model_profiles` in config.json), so they no longer restate the
 # exact-agent catalog. The catalog itself is still live: it is defined in the
-# decompose prompt and pipeline doc, advertised in the README, and installed by
-# setup.sh (ECC + wshobson packs). These tests guard the surfaces that still own it.
+# decompose prompt and pipeline doc and advertised in the README. GSD's upstream
+# installer now owns agent packs; the scoped FFS installer must not recreate
+# those third-party artifacts. These tests guard the surfaces that still own it.
 def test_hybrid_catalog_is_defined_in_the_decompose_prompt() -> None:
     prompt = _read("prompts/decompose-spec.md")
 
@@ -72,14 +73,16 @@ def test_hybrid_catalog_is_defined_in_the_decompose_prompt() -> None:
         assert label in prompt, label
 
 
-def test_supporting_docs_and_bootstrap_match_the_same_catalog() -> None:
+def test_supporting_docs_and_scoped_installer_match_the_same_catalog() -> None:
     pipeline = _read("docs/pipeline.md")
     readme = _read("README.md")
-    setup = _read("setup.sh")
+    installer = _read("lib/ffs_installer.py")
 
     assert "[agent:exact-agent]" in pipeline
     assert "exact hybrid catalog" in readme
-    assert "ECC_REPO" in setup
-    assert "WSH_REPO" in setup
-    assert "install_ecc_pack" in setup
-    assert "install_wshobson_pack" in setup
+    assert '"owner": "upstream-installer"' in installer
+    assert '"--profile=full"' in installer
+    assert "source_skills(source)" in installer
+    assert '(".agents", ".claude")' in installer
+    assert "install_ecc_pack" not in installer
+    assert "install_wshobson_pack" not in installer

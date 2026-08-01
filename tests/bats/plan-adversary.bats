@@ -116,7 +116,7 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"DEGRADED"* ]]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (claude opus, degraded fallback)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5, degraded fallback)$' "$HIGH"
 }
 
 @test "high-blast plan gets findings appended, frontmatter intact" {
@@ -124,7 +124,7 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
   [[ "$output" == *"2 finding(s) appended"* ]]
-  grep -q '^## Adversarial plan review (gpt-5.6-sol xhigh)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-5.6-sol high)$' "$HIGH"
   grep -q '^HIGH: plan assumes withTenantRls' "$HIGH"
   # prompt-echo line (mid-line severity words) must NOT be captured
   refute_bre 'echoing prompt' "$HIGH"
@@ -182,7 +182,7 @@ EOF
   [ "$status" -eq 0 ]
   grep -q 'gpt-5.6-sol' "$ARGS_LOG"
   grep -q 'gpt-5.6-terra' "$ARGS_LOG"
-  grep -q '^## Adversarial plan review (gpt-5.6-terra high, model fallback)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-5.6-terra medium, model fallback)$' "$HIGH"
   [[ "$output" != *"DEGRADED"* ]]
 }
 
@@ -201,7 +201,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"DEGRADED"* ]]
-  grep -q '^## Adversarial plan review (claude opus, degraded fallback)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5, degraded fallback)$' "$HIGH"
 }
 
 @test "model admission probe skips unavailable Sol and fully reviews with Terra" {
@@ -229,7 +229,7 @@ EOF
   grep -q 'gpt-5.6-sol' "$ARGS_LOG"
   [ "$(grep -c 'gpt-5.6-sol' "$ARGS_LOG")" -eq 1 ]
   [ "$(grep -c 'gpt-5.6-terra' "$ARGS_LOG")" -eq 2 ]
-  grep -q '^## Adversarial plan review (gpt-5.6-terra high, model fallback)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-5.6-terra medium, model fallback)$' "$HIGH"
 }
 
 @test "second run is idempotent" {
@@ -263,14 +263,14 @@ EOF
   PLAN_ADVERSARY_KIND=claude PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5)$' "$HIGH"
   grep -q '^HIGH: plan assumes withTenantRls' "$HIGH"
 }
 
 @test "host-aware: explicit Codex host auto-flips to claude adversary" {
   FFS_HOST=codex PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
-  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5)$' "$HIGH"
 }
 
 @test "no host env detected emits stderr note, stdout stays clean, defaults to claude host" {
@@ -280,7 +280,7 @@ EOF
   [[ "$output" == *"adversary-host: orchestrator undetected — defaulting to claude host"* ]]
   # host defaulted to claude -> opposite adversary is codex (proves stdout
   # capture of detect_orchestrator_host wasn't polluted by the stderr note).
-  grep -q '^## Adversarial plan review (gpt-5.6-sol xhigh)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-5.6-sol high)$' "$HIGH"
 }
 
 @test "second positional arg (PASSES=3) still yields exactly one section" {
@@ -359,7 +359,7 @@ EOF
   PATH="$NO_TIMEOUT_DIR" PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (gpt-5.6-sol xhigh)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-5.6-sol high)$' "$HIGH"
 }
 
 @test "adversary_invoke stays bounded via python3 rung when neither timeout nor gtimeout is present (claude branch)" {
@@ -376,5 +376,85 @@ EOF
   PATH="$NO_TIMEOUT_DIR" PLAN_ADVERSARY_KIND=claude PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (claude opus)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5)$' "$HIGH"
+}
+
+@test "legacy raw model overrides fail closed with typed-request remediation" {
+  before="$(cat "$HIGH")"
+  PLAN_ADVERSARY_MODEL=gpt-5.6-sol run bash "$SCRIPT" "$HIGH"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"PLAN_ADVERSARY_MODEL is unsupported"* ]]
+  [[ "$output" == *"typed *_MODEL_REQUEST"* ]]
+  [ "$(cat "$HIGH")" = "$before" ]
+}
+
+@test "an exact model request never uses the model ladder or cross-host fallback" {
+  fallback_log="$BATS_TEST_TMPDIR/exact-fallback.log"
+  cat > "$STUB_DIR/exact-codex" <<'EOF'
+#!/usr/bin/env bash
+exit 7
+EOF
+  cat > "$STUB_DIR/exact-claude" <<EOF
+#!/usr/bin/env bash
+touch "$fallback_log"
+echo 'VERDICT: APPROVE'
+EOF
+  chmod +x "$STUB_DIR/exact-codex" "$STUB_DIR/exact-claude"
+
+  PLAN_ADVERSARY_MODEL_REQUEST='{"kind":"exact","id":"gpt-5.6-sol"}' \
+    PLAN_ADVERSARY_BIN=exact-codex PLAN_ADVERSARY_FALLBACK_BIN=exact-claude \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -ne 0 ]
+  [ ! -e "$fallback_log" ]
+  [ "$(grep -c '^## Adversarial plan review' "$HIGH")" -eq 0 ]
+}
+
+@test "an exact GPT request selects Codex even when the opposite-host preference is Claude" {
+  args_log="$BATS_TEST_TMPDIR/exact-gpt.args"
+  cat > "$STUB_DIR/exact-gpt-codex" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$args_log"
+echo 'VERDICT: APPROVE'
+EOF
+  chmod +x "$STUB_DIR/exact-gpt-codex"
+
+  FFS_HOST=codex \
+    PLAN_ADVERSARY_MODEL_REQUEST='{"kind":"exact","id":"gpt-5.6-sol"}' \
+    PLAN_ADVERSARY_BIN=definitely-not-a-real-claude \
+    PLAN_ADVERSARY_FALLBACK_BIN=exact-gpt-codex \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -eq 0 ]
+  grep -F 'model="gpt-5.6-sol"' "$args_log"
+}
+
+@test "an exact Claude request selects Claude even when the opposite-host preference is Codex" {
+  args_log="$BATS_TEST_TMPDIR/exact-claude.args"
+  cat > "$STUB_DIR/exact-claude-cli" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$args_log"
+echo 'VERDICT: APPROVE'
+EOF
+  chmod +x "$STUB_DIR/exact-claude-cli"
+
+  FFS_HOST=claude \
+    PLAN_ADVERSARY_MODEL_REQUEST='{"kind":"exact","id":"claude-fable-5"}' \
+    PLAN_ADVERSARY_BIN=definitely-not-a-real-codex \
+    PLAN_ADVERSARY_FALLBACK_BIN=exact-claude-cli \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -eq 0 ]
+  grep -Fx -- '--model' "$args_log"
+  grep -Fx 'claude-fable-5' "$args_log"
+}
+
+@test "an exact request for an unsupported vendor fails before any CLI" {
+  PLAN_ADVERSARY_MODEL_REQUEST='{"kind":"exact","id":"gemini-3-pro"}' \
+    PLAN_ADVERSARY_BIN=fake-codex PLAN_ADVERSARY_FALLBACK_BIN=fake-claude \
+    run bash "$SCRIPT" "$HIGH"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exact model vendor is unsupported"* ]]
+  [ "$(grep -c '^## Adversarial plan review' "$HIGH")" -eq 0 ]
 }

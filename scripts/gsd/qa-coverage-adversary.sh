@@ -70,30 +70,25 @@ PROMPT="QA ran these browser steps: ${STEPS_LIST}. The diff touches: ${DIFF_FILE
 ACTIVE_HOST="$(detect_orchestrator_host)"
 ADVERSARY_KIND="${QA_COVERAGE_KIND:-$(adversary_kind_for_host "$ACTIVE_HOST")}"
 FALLBACK_KIND="$(adversary_kind_for_host "$ADVERSARY_KIND")"
+MODEL_REQUEST="${QA_COVERAGE_MODEL_REQUEST:-}"
+[ -n "$MODEL_REQUEST" ] || MODEL_REQUEST='{"kind":"tier","name":"execution"}'
+adversary_reject_legacy_model_vars QA_COVERAGE_MODEL QA_COVERAGE_EFFORT \
+  QA_COVERAGE_CLAUDE_MODEL || exit $?
 
 if [ "$ADVERSARY_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${QA_COVERAGE_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  MODEL="${QA_COVERAGE_MODEL:-gpt-5.6-terra}"
-  EFFORT="${QA_COVERAGE_EFFORT:-high}"
 else
   ADVERSARY_BIN_CLAUDE="${QA_COVERAGE_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  MODEL="${QA_COVERAGE_CLAUDE_MODEL:-sonnet}"
-  EFFORT=""
 fi
 if [ "$FALLBACK_KIND" = "codex" ]; then
   ADVERSARY_BIN_CODEX="${QA_COVERAGE_FALLBACK_BIN:-${ADVERSARY_BIN_CODEX:-codex}}"
-  FALLBACK_MODEL="${QA_COVERAGE_MODEL:-gpt-5.6-terra}"
-  FALLBACK_EFFORT="${QA_COVERAGE_EFFORT:-high}"
 else
   ADVERSARY_BIN_CLAUDE="${QA_COVERAGE_FALLBACK_BIN:-${ADVERSARY_BIN_CLAUDE:-claude}}"
-  FALLBACK_MODEL="${QA_COVERAGE_CLAUDE_MODEL:-sonnet}"
-  FALLBACK_EFFORT=""
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
 
-OUTPUT="$(adversary_invoke_with_fallback "$ADVERSARY_KIND" "$FALLBACK_KIND" \
-  "${QA_COVERAGE_TIMEOUT:-300}" "$MODEL" "$EFFORT" \
-  "$FALLBACK_MODEL" "$FALLBACK_EFFORT" "$PROMPT" 2>&1)"
+OUTPUT="$(adversary_invoke_typed_request "$ADVERSARY_KIND" "$FALLBACK_KIND" \
+  "${QA_COVERAGE_TIMEOUT:-300}" "$MODEL_REQUEST" "$PROMPT" 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
   echo "[qa-coverage-adversary] both review hosts unavailable — skipped (advisory)"

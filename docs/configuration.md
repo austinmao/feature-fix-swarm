@@ -137,12 +137,14 @@ references to either.
 | `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:78` | Hard override of diff-risk tier (`light\|standard\|full`) |
 | `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:116` | Merge-base for `--all` diffs |
 | `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:88` | Budget for ship-time review, both hosts combined |
+| `GSD_REVIEW_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/review-gate-command.sh` | Typed ship-review request; exact requests disable all fallback |
 | `PLAN_ADVERSARY` | on | `scripts/gsd/plan-adversary.sh:48` | `off` skips the cross-model plan review |
 | `PLAN_ADVERSARY_KEYWORDS` | `auth\|rls\|payment\|stripe\|crypto\|jwt\|...` | `scripts/gsd/plan-adversary.sh:54` | High-blast trigger set; a plan matching none skips the costly review |
-| `PLAN_ADVERSARY_MODEL` / `_EFFORT` / `_CLAUDE_MODEL` | `gpt-5.6-sol` / `xhigh` / `opus` | `scripts/gsd/plan-adversary.sh:84-89` | Model selection for plan-stage review |
+| `PLAN_ADVERSARY_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/plan-adversary.sh` | Typed plan-review request; legacy raw model variables fail closed |
 | `PLAN_ADVERSARY_TIMEOUT` | `480` | `scripts/gsd/plan-adversary.sh` | Wall-clock cap |
 | `QA_COVERAGE` | on | `scripts/gsd/qa-coverage-adversary.sh:38` | `off` skips the advisory QA-coverage critique |
-| `QA_COVERAGE_MODEL` / `_EFFORT` / `_CLAUDE_MODEL` / `_TIMEOUT` | `gpt-5.6-terra` / `high` / `sonnet` / `300` | `scripts/gsd/qa-coverage-adversary.sh:70-94` | QA-coverage adversary selection |
+| `QA_COVERAGE_MODEL_REQUEST` / `_TIMEOUT` | `{"kind":"tier","name":"execution"}` / `300` | `scripts/gsd/qa-coverage-adversary.sh` | Typed QA-coverage adversary request and budget |
+| `GSD_DRIFT_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/scope-drift-gate.sh` | Typed optional drift-judge request |
 | `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:23` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
 | `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:78` | `0`/`off` disables the one-shot cross-vendor fallback |
 | `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:172` | `off` skips the cheap pre-review availability probe |
@@ -201,18 +203,16 @@ All default to on. Set to `off` to disable.
 | `RALPH_DEBOUNCE_SECS` | `30` | `scripts/hooks/post-implement-batch.sh:38` | Quiet time before the QA watcher fires |
 | `SPEC_DIR` | `specs/unknown` | `scripts/ralph-retry.sh:130` | Spec dir passed to `qa-swarm.sh` on retry |
 
-## Known inconsistency
+## Model-request migration
 
-The plan-stage adversary model is settable through **two non-interoperable
-env-var families** that happen to share the same defaults:
-
-| Call site | Vars it reads |
-|---|---|
-| `scripts/gsd/plan-adversary.sh:84-89` | `PLAN_ADVERSARY_MODEL`, `PLAN_ADVERSARY_EFFORT`, `PLAN_ADVERSARY_CLAUDE_MODEL` |
-| `skills/plan-decompose/SKILL.md:166-174` (inline) | `PLAN_ADVERSARY_MODEL_CODEX`, `PLAN_ADVERSARY_EFFORT_CODEX`, `PLAN_ADVERSARY_MODEL_CLAUDE` |
-
-Setting one family has no effect on the other call site. To override the
-plan adversary globally today, **set both**.
+FFS 5.0 removes raw runtime model overrides. Use one of the typed `*_MODEL_REQUEST`
+variables above with either `{"kind":"tier","name":"judgment|execution|volume"}`
+or `{"kind":"exact","id":"vendor-model-id"}`. The retired
+`PLAN_ADVERSARY_MODEL`, `PLAN_ADVERSARY_EFFORT`, `PLAN_ADVERSARY_CLAUDE_MODEL`,
+`QA_COVERAGE_MODEL`, and corresponding raw review/drift variables fail closed
+with remediation instead of silently selecting a billing or provenance path.
+Exact IDs must target a supported host (`gpt-*`/`oN*` for Codex or `claude-*`
+for Claude); the dispatcher selects that host directly and never falls back.
 
 ## Related
 

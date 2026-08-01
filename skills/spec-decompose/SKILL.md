@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.5.0"
+version: "2.6.0"
 allowed-tools:
   - Read
   - Write
@@ -11,6 +11,12 @@ allowed-tools:
 ---
 
 # spec-decompose — Turn an approved spec into gsd phase plans
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 ## When to invoke
 
@@ -50,13 +56,13 @@ Otherwise translate the FFS spec into gsd's planning inputs:
 - `.planning/config.json` — copy `templates/gsd-config.base.json`; MUST carry
   `workflow.test_command = bash scripts/gsd/gates-test-command.sh` and
   `workflow.code_review_command = bash scripts/gsd/review-gate-command.sh`
-- Then run `bash scripts/gsd/model-fallback.sh .planning` — probes premium-model
-  availability (claude-fable-5 on OAuth comes and goes) and rewrites unavailable
-  pins to their fallback (fable→opus) so spawns never error on a dead model.
+- Then run `bash scripts/gsd/model-fallback.sh .planning` only for legacy
+  Claude alias configs. Typed tier requests use the bounded runtime fallback;
+  an exact Claude Fable request fails closed and is never rewritten.
 - Then run `bash scripts/gsd/security-model-fence.sh .planning specs/NNN-*/spec.md specs/NNN-*/plan.md`
   — security-touching specs (auth/RLS/payments/crypto/…) force the planning
-  roles fable→opus even when fable is available: Fable's classifiers can
-  false-refuse benign defensive-security work and stall the run silently.
+  legacy Claude planning aliases to Opus judgment. Typed configs already map
+  security planning to the judgment tier.
 - Write `.planning/gsd-test-command` — ONE shell line running the repo's real
   test suite for this spec (e.g. `bash scripts/tests/specNNN-*.test.sh && bats
   tests/bats/specNNN-*.bats`). `gates-test-command.sh` refuses to run without
@@ -111,7 +117,7 @@ parallelism contract `/gsd-execute-phase` executes) → plan-checker verifies. T
 config also wires the plan-bounce seam (`workflow.plan_bounce_script =
 scripts/gsd/plan-adversary.sh`): high-blast plans (auth/RLS/payments/migrations/…)
 get a cross-model adversarial review (default `gpt-5.6-sol` @ `xhigh`, same adversary
-tier as review-gate) appended as findings, which the opus plan-checker re-run
+tier as review-gate) appended as findings, which the judgment plan-checker re-run
 adjudicates. Low-blast plans skip it (zero cost); kill-switch `PLAN_ADVERSARY=off`.
 Plans with
 UI-touchable stories must carry browser-proof success criteria — inject into ROADMAP

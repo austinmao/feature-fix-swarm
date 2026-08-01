@@ -1,10 +1,17 @@
 ---
 name: spec-status
-description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan-out subagents (haiku/sonnet/opus, fable-or-opus synthesis) over git, .planning, gates ledger, runner state, evidence, and hygiene; writes a status report + /handoff. --continue-compact chains compact prep."
-version: "1.0.0"
+description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan out volume, execution, and judgment roles over git, .planning, gates, runner state, evidence, and hygiene; write a status report and host-native handoff."
+version: "1.1.0"
 ---
 
 # /spec-status [NNN] [--continue-compact] [--no-handoff]
+
+## Host dispatch contract
+
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
+- Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 Answers "where are we?" for a spec run with evidence, not recall. Read-only
 except the report + handoff files it writes.
@@ -34,15 +41,17 @@ HYGIENE (key-shaped strings in evidence/, filenames only) · DISK.
 
 | Agent | Model | Contract | Job |
 |---|---|---|---|
-| planning scout | haiku | scout ≤15 lines | ROADMAP flips vs SUMMARY presence; dirty-file classification (spec's vs foreign); branch drift vs upstream |
-| ledger scout | haiku | scout ≤15 lines | pendings by class (operator-reserved vs drainable); grant TTLs near expiry (<4h = flag); evidence-store decoy check |
-| runner analyst | sonnet | build ≤20 lines | classify runner log tail: progressing / stopped-at-gate / stalled / dead; name the exact stop rule or gate if stopped |
-| test/gate analyst | sonnet | build ≤20 lines | last gate evidence per phase (verify-done ids), suite counts from evidence not re-runs; flag fixtures older than the code they test |
-| risk assessor | opus | deep ≤40 lines | conclusion first: top blockers ranked by likelihood, what only the operator can decide, what the next 3 actions are |
+| planning scout | volume | scout ≤15 lines | ROADMAP flips vs SUMMARY presence; dirty-file classification (spec's vs foreign); branch drift vs upstream |
+| ledger scout | volume | scout ≤15 lines | pendings by class (operator-reserved vs drainable); grant TTLs near expiry (<4h = flag); evidence-store decoy check |
+| runner analyst | execution | build ≤20 lines | classify runner log tail: progressing / stopped-at-gate / stalled / dead; name the exact stop rule or gate if stopped |
+| test/gate analyst | execution | build ≤20 lines | last gate evidence per phase (verify-done ids), suite counts from evidence not re-runs; flag fixtures older than the code they test |
+| risk assessor | judgment | deep ≤40 lines | conclusion first: top blockers ranked by likelihood, what only the operator can decide, what the next 3 actions are |
 
-Synthesis: fable if the session model is fable (orchestrator does it inline);
-otherwise spawn `opus`. Producer ≠ reviewer holds: the synthesizer never
-re-litigates scouts, it reconciles contradictions and says which report won.
+Resolve `volume` to Codex Luna low / Claude Haiku, `execution` to Codex Terra
+medium / Claude Sonnet, and `judgment` to Codex Sol high / Claude Opus.
+Synthesis uses judgment unless the thin orchestrator can reconcile the reports
+inline. Producer ≠ reviewer holds: the synthesizer never re-litigates scouts;
+it reconciles contradictions and says which report won.
 
 ## Step 4 — Report
 

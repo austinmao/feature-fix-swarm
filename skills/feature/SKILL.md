@@ -1,7 +1,7 @@
 ---
 name: feature
 description: "DEPRECATED (v3.19.0) — replaced by /feature-spec (spec→plan→tasks→preflight→grant) + /feature-implement --autonomous (swarm impl→QA→review-gate→ship→canary). This stub chains the replacements for back-compat and will be removed next release."
-version: "3.0.0-deprecated"
+version: "3.0.1-deprecated"
 allowed-tools:
   - Read
   - Bash
@@ -9,6 +9,12 @@ allowed-tools:
 ---
 
 # /feature — DEPRECATED
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 > **v3.19.0: `/feature` is retired.** Its post-decompose tail (review-gate → ship
 > → canary) moved INTO `/feature-implement` as the Step 10 finish tail, gated by

@@ -1,7 +1,7 @@
 ---
 name: code-uplift
 description: "Review + refactor code that's already written — same gsd machinery as feature-spec/feature-implement but findings-driven instead of spec-driven. Adversarial cross-model review, refactor phases, test uplift to the coverage floor, smoke/e2e via canary-gate, review-gate finish tail."
-version: "1.1.0"
+version: "1.2.0"
 allowed-tools:
   - Read
   - Write
@@ -13,6 +13,12 @@ allowed-tools:
 ---
 
 # code-uplift — review, refactor, and test-uplift existing code
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 ## When to invoke
 
@@ -77,19 +83,23 @@ the diff. Not a new script — a documented invocation mode of this skill.
 
 ### Step 1: Review sweep (parallel, cross-model)
 
-Dispatch in ONE message (explicit model pins; scout/deep return contracts per
+Dispatch in one bounded parallel wave (explicit resolved model pins;
+scout/deep return contracts per
 `.claude/rules/common/agents.md`):
 
-1. **opus code reviewer** — correctness/security/maintainability findings on
+1. **Judgment code reviewer** — Codex Sol high or Claude Opus;
+   correctness/security/maintainability findings on
    `$TARGET`, severity-tagged CRITICAL/HIGH/MEDIUM/LOW, `file:line` anchored.
 2. **Cross-vendor adversary** — opposite-CLI review of the same files (host-aware,
-   same convention as `/review-gate`: claude host → `codex exec` gpt-5.6-sol xhigh;
-   codex host → `claude -p --model opus`). Findings, not prose.
-3. **sonnet test auditor** — judge the EXISTING tests against `testing-policy`:
+   same convention as the host-native `review-gate`: Claude host → Codex Sol;
+   Codex host → Claude Opus). Findings, not prose.
+3. **Execution test auditor** — Codex Terra medium or Claude Sonnet; judge the
+   EXISTING tests against `testing-policy`:
    first-party mocks, jsdom-claiming-UI-truth, mock-call-count assertions,
    coverage gaps per file, missing e2e for user-facing flows.
-4. **haiku dead-code scout** — unused exports/files/deps in `$TARGET` (candidates
-   only; deletion decisions stay with the opus reviewer).
+4. **Volume dead-code scout** — Codex Luna low or Claude Haiku; unused
+   exports/files/deps in `$TARGET` (candidates only; deletion decisions stay
+   with the judgment reviewer).
 
 Merge into `specs/NNN-uplift-<slug>/REVIEW.md` (next free NNN): deduped findings
 table + per-file coverage + test-policy violations. `--review-only` stops here.

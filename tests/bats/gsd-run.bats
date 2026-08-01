@@ -4,24 +4,125 @@ bats_require_minimum_version 1.5.0
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-  SCRIPT="$ROOT/scripts/gsd/gsd-run.sh"
+  HARNESS_ROOT="$BATS_TEST_TMPDIR/runner-layout"
+  mkdir -p "$HARNESS_ROOT/scripts"
+  cp -R "$ROOT/scripts/gsd" "$HARNESS_ROOT/scripts/gsd"
+  cp -R "$ROOT/lib" "$HARNESS_ROOT/lib"
+  SCRIPT="$HARNESS_ROOT/scripts/gsd/gsd-run.sh"
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
   CODEX_SOURCE_ROOT="$BATS_TEST_TMPDIR/codex-root"
+  PROJECT_AGENTS_ROOT="$BATS_TEST_TMPDIR/.agents"
+  USER_AGENTS_ROOT="$BATS_TEST_TMPDIR/user-agents"
   CLAUDE_SKILLS_ROOT="$BATS_TEST_TMPDIR/claude-skills"
+  GSD_PACKAGE_ROOT="$BATS_TEST_TMPDIR/gsd-package"
+  TRUSTED_GRANT_DIR="$BATS_TEST_TMPDIR/danger"
+  git -C "$BATS_TEST_TMPDIR" init -q
+  git -C "$BATS_TEST_TMPDIR" config user.email test@example.com
+  git -C "$BATS_TEST_TMPDIR" config user.name Test
+  printf '%s\n' seed > "$BATS_TEST_TMPDIR/seed"
+  git -C "$BATS_TEST_TMPDIR" add seed
+  git -C "$BATS_TEST_TMPDIR" commit -qm seed
   mkdir -p "$STUB_DIR" \
-    "$CODEX_SOURCE_ROOT/skills/gsd-quick" "$CODEX_SOURCE_ROOT/agents" \
+    "$PROJECT_AGENTS_ROOT/skills/gsd-quick" "$USER_AGENTS_ROOT/skills" \
+    "$CODEX_SOURCE_ROOT/agents" "$CODEX_SOURCE_ROOT/gsd-core" \
+    "$CODEX_SOURCE_ROOT/hooks" \
+    "$GSD_PACKAGE_ROOT/hooks/dist" "$GSD_PACKAGE_ROOT/hooks/sibling" "$TRUSTED_GRANT_DIR" \
     "$CLAUDE_SKILLS_ROOT/gsd-quick"
-  printf '%s\n' '---' 'name: gsd-quick' '---' > "$CODEX_SOURCE_ROOT/skills/gsd-quick/SKILL.md"
+  printf '%s\n' '---' 'name: gsd-quick' '---' > "$PROJECT_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
+  mkdir -p "$USER_AGENTS_ROOT/skills/gsd-quick"
+  cp "$PROJECT_AGENTS_ROOT/skills/gsd-quick/SKILL.md" "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
   printf '%s\n' 'name = "gsd-executor"' 'model = "sonnet"' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml"
+  printf '%s\n' '# executor' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.md"
+  printf '%s\n' '1.9.1' > "$CODEX_SOURCE_ROOT/gsd-core/VERSION"
+  cat > "$CODEX_SOURCE_ROOT/hooks/gsd-context-monitor.js" <<EOF
+process.stdin.resume();
+process.stdin.on('end', () => require('fs').writeFileSync('$BATS_TEST_TMPDIR/hook.smoked', 'yes\n'));
+EOF
+  cat > "$CODEX_SOURCE_ROOT/hooks/gsd-check-update.js" <<'EOF'
+process.stdin.resume();
+process.stdin.on('end', () => process.exit(0));
+EOF
+  printf '%s\n' 'module.exports = true;' > "$CODEX_SOURCE_ROOT/hooks/gsd-check-update-worker.js"
+  printf '%s\n' 'module.exports = true;' > "$CODEX_SOURCE_ROOT/hooks/managed-hooks-registry.cjs"
+  printf '%s\n' '{"type":"commonjs"}' > "$CODEX_SOURCE_ROOT/hooks/package.json"
+  cp "$CODEX_SOURCE_ROOT/hooks/gsd-context-monitor.js" "$GSD_PACKAGE_ROOT/hooks/dist/gsd-context-monitor.js"
+  cp "$CODEX_SOURCE_ROOT/hooks/gsd-check-update.js" "$GSD_PACKAGE_ROOT/hooks/dist/gsd-check-update.js"
+  cp "$CODEX_SOURCE_ROOT/hooks/gsd-check-update-worker.js" "$GSD_PACKAGE_ROOT/hooks/dist/gsd-check-update-worker.js"
+  cp "$CODEX_SOURCE_ROOT/hooks/managed-hooks-registry.cjs" "$GSD_PACKAGE_ROOT/hooks/dist/managed-hooks-registry.cjs"
+  printf '%s\n' 'module.exports = true;' > "$GSD_PACKAGE_ROOT/hooks/sibling/dependency.js"
+  printf '%s\n' '{"name":"@opengsd/gsd-core","version":"1.9.1"}' > "$GSD_PACKAGE_ROOT/package.json"
+  NODE_ON_PATH="$(command -v node)"
+  [ -x "$NODE_ON_PATH" ]
+  SAFE_NODE="$BATS_TEST_TMPDIR/trusted-node"
+  cat > "$SAFE_NODE" <<EOF
+#!/bin/sh
+exec "$NODE_ON_PATH" "\$@"
+EOF
+  chmod 700 "$SAFE_NODE"
+  python3 - "$CODEX_SOURCE_ROOT/hooks.json" "$CODEX_SOURCE_ROOT/hooks" "$SAFE_NODE" <<'PY'
+import json, sys
+path, hooks, node = sys.argv[1:]
+events = {
+    "SessionStart": "gsd-check-update.js",
+    "SubagentStart": "gsd-context-monitor.js", "Stop": "gsd-context-monitor.js",
+    "PostToolUse": "gsd-context-monitor.js", "PreToolUse": "gsd-context-monitor.js",
+    "PermissionRequest": "gsd-context-monitor.js", "PreCompact": "gsd-context-monitor.js",
+    "PostCompact": "gsd-context-monitor.js", "SubagentStop": "gsd-context-monitor.js",
+    "UserPromptSubmit": "gsd-context-monitor.js",
+}
+data = {"hooks": {event: [{"hooks": [{"type": "command", "command": f'{node} "{hooks}/{target}"'}]}] for event, target in events.items()}}
+open(path, "w").write(json.dumps(data))
+PY
+  TRUSTED_NODE="$SAFE_NODE"
+  python3 - "$SCRIPT" "$CODEX_SOURCE_ROOT" "$USER_AGENTS_ROOT" "$GSD_PACKAGE_ROOT" "$TRUSTED_GRANT_DIR/danger-grants.json" "$BATS_TEST_TMPDIR/auth.lock" "$TRUSTED_NODE" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+replacements = {
+    'CODEX_SOURCE_ROOT_FIXED="$REAL_USER_HOME/.codex"': f'CODEX_SOURCE_ROOT_FIXED="{sys.argv[2]}"',
+    'USER_AGENTS_ROOT_FIXED="$REAL_USER_HOME/.agents"': f'USER_AGENTS_ROOT_FIXED="{sys.argv[3]}"',
+    'GSD_PACKAGE_ROOT_FIXED="$SCRIPT_DIR/../../node_modules/@opengsd/gsd-core"': f'GSD_PACKAGE_ROOT_FIXED="{sys.argv[4]}"',
+    'DANGER_GRANT_STORE_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/danger-grants.json"': f'DANGER_GRANT_STORE_FIXED="{sys.argv[5]}"',
+    'AUTH_LOCK_DIR_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/codex-auth.lock"': f'AUTH_LOCK_DIR_FIXED="{sys.argv[6]}"',
+    'TRUSTED_NODE_BIN_FIXED=""': f'TRUSTED_NODE_BIN_FIXED="{sys.argv[7]}"',
+    'FFS_USER_MANIFEST_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/install-manifest.json"': f'FFS_USER_MANIFEST_FIXED="{sys.argv[3]}/install-manifest.json"',
+}
+for old, new in replacements.items():
+    if text.count(old) != 1:
+        raise SystemExit(f"runner fixture patch target missing: {old}")
+    text = text.replace(old, new)
+path.write_text(text)
+PY
+  cat > "$CODEX_SOURCE_ROOT/config.toml" <<'EOF'
+# GSD Agent Configuration — managed by gsd-core installer
+[features]
+hooks = true
+[agents]
+max_depth = 1
+EOF
+  printf '%s\n' '{"refresh_token":"initial"}' > "$CODEX_SOURCE_ROOT/auth.json"
+  chmod 600 "$CODEX_SOURCE_ROOT/auth.json"
+  agent_toml_hash="$(shasum -a 256 "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml" | awk '{print $1}')"
+  agent_md_hash="$(shasum -a 256 "$CODEX_SOURCE_ROOT/agents/gsd-executor.md" | awk '{print $1}')"
+  version_hash="$(shasum -a 256 "$CODEX_SOURCE_ROOT/gsd-core/VERSION" | awk '{print $1}')"
+  cat > "$CODEX_SOURCE_ROOT/gsd-file-manifest.json" <<EOF
+{"version":"1.9.1","files":{"agents/gsd-executor.toml":"$agent_toml_hash","agents/gsd-executor.md":"$agent_md_hash","gsd-core/VERSION":"$version_hash"}}
+EOF
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$CLAUDE_SKILLS_ROOT/gsd-quick/SKILL.md"
 
   cat > "$STUB_DIR/fake-codex" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  echo "codex-cli \${FAKE_CODEX_VERSION:-0.146.1}"
+  exit 0
+fi
 if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   touch "$BATS_TEST_TMPDIR/codex.probed"
+  printf '%s\n' "\${OPENAI_API_KEY-unset}" > "$BATS_TEST_TMPDIR/codex.probe-api-key"
   case "\${FAKE_CODEX_PROBE_MODE:-ok}" in
     bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
-    fail) echo 'native quota exhausted API_TOKEN=super-secret-value-123456789' >&2; exit 69 ;;
+    fail) echo 'native quota exhausted API_TOKEN=super-secret-value-123456789 api_key=xYz bearer tiny' >&2; exit 69 ;;
     sol_unavailable)
       if [[ "\$*" == *gpt-5.6-sol* ]]; then
         echo 'requested Codex model unavailable' >&2
@@ -34,9 +135,23 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
 fi
 printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
 printf '%s\n' "\${CODEX_HOME:-}" > "$BATS_TEST_TMPDIR/codex.home"
+pwd -P > "$BATS_TEST_TMPDIR/codex.cwd"
 printf '%s\n' "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skills"
 cat "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skill-content"
+printf '%s\n' "\${OPENAI_API_KEY-unset}" > "$BATS_TEST_TMPDIR/codex.api-key"
+python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' \
+  "\${CODEX_HOME:-}/auth.json" > "$BATS_TEST_TMPDIR/codex.auth-mode"
+cp "\${CODEX_HOME:-}/config.toml" "$BATS_TEST_TMPDIR/codex.config"
+cp "\${CODEX_HOME:-}/hooks.json" "$BATS_TEST_TMPDIR/codex.hooks-json"
+[ -f "\${CODEX_HOME:-}/hooks/sibling/dependency.js" ] && touch "$BATS_TEST_TMPDIR/complete-hooks-copied"
+if [ "\${FAKE_CODEX_REFRESH_AUTH:-0}" = 1 ]; then
+  if [ -n "\${FAKE_CODEX_CONCURRENT_AUTH_FILE:-}" ]; then
+    printf '%s\n' '{"refresh_token":"concurrent"}' > "\$FAKE_CODEX_CONCURRENT_AUTH_FILE"
+  fi
+  printf '%s\n' '{"refresh_token":"refreshed"}' > "\${CODEX_HOME:-}/auth.json"
+fi
 echo CODEX_OK
+exit "\${FAKE_CODEX_DRIVE_RC:-0}"
 EOF
   cat > "$STUB_DIR/fake-claude" <<EOF
 #!/usr/bin/env bash
@@ -54,8 +169,13 @@ echo CLAUDE_OK
 EOF
   chmod +x "$STUB_DIR/fake-codex" "$STUB_DIR/fake-claude"
   export PATH="$STUB_DIR:$PATH"
-  export GSD_CODEX_CONFIG_ROOT="$CODEX_SOURCE_ROOT"
   export GSD_CLAUDE_SKILLS_ROOT="$CLAUDE_SKILLS_ROOT"
+  export GSD_NETWORK_MODE=enabled
+  export GSD_NETWORK_PURPOSE=general
+}
+
+teardown() {
+  :
 }
 
 @test "Codex host runs Codex with the Sonnet-equivalent Terra lead" {
@@ -68,11 +188,20 @@ EOF
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
   grep -Fx 'exec' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
-  grep -F 'model_reasoning_effort="high"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model_reasoning_effort="medium"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '$gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'poll that exact session with write_stdin until it exits' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '/skills/gsd-quick/SKILL.md' "$BATS_TEST_TMPDIR/codex.skills"
   [ "$(wc -l < "$BATS_TEST_TMPDIR/codex.skills" | tr -d ' ')" -eq 1 ]
+}
+
+@test "Codex probe strips OPENAI_API_KEY before subscription-backed auth selection" {
+  OPENAI_API_KEY=must-not-meter FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick probe-auth"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/codex.probe-api-key")" = unset ]
+  [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
 }
 
 @test "Codex GSD probe falls from unavailable Sol to Terra before crossing vendors" {
@@ -98,15 +227,24 @@ EOF
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
+@test "GSD command names reject slash and dot-segment traversal before filesystem mutation" {
+  run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' '/gsd-../../victim'"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid GSD command name"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
 @test "runner publishes a live pidfile and refuses a duplicate stateful drive" {
   cat > "$STUB_DIR/slow-codex" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
 if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   echo FFS_HOST_PROBE_READY
   exit 0
 fi
 touch "$BATS_TEST_TMPDIR/slow-drive-started"
-sleep 2
+sleep 4
 echo SLOW_CODEX_OK
 EOF
   chmod +x "$STUB_DIR/slow-codex"
@@ -114,14 +252,25 @@ EOF
 
   run env FFS_HOST=codex CODEX_BIN=slow-codex CLAUDE_BIN=fake-claude \
     GSD_RUN_STATE_DIR="$RUN_STATE" bash -c '
+      cd "$2"
       bash "$1" /gsd-quick first >"$2/first.log" 2>&1 &
       first=$!
       i=0
-      while [ ! -s "$3/gsd-run.pid" ] && [ "$i" -lt 100 ]; do
+      while { [ ! -s "$3/gsd-run.pid" ] || [ ! -f "$2/slow-drive-started" ]; } \
+          && [ "$i" -lt 1500 ]; do
         sleep 0.02
         i=$((i + 1))
       done
-      [ -s "$3/gsd-run.pid" ] || exit 10
+      [ -s "$3/gsd-run.pid" ] || {
+        echo "runner pidfile was not published; first.log follows" >&2
+        cat "$2/first.log" >&2
+        exit 10
+      }
+      [ -f "$2/slow-drive-started" ] || {
+        echo "runner drive did not start; first.log follows" >&2
+        cat "$2/first.log" >&2
+        exit 21
+      }
       live_pid=$(head -1 "$3/gsd-run.pid" | tr -d "[:space:]")
       kill -0 "$live_pid" || exit 11
       grep -E "^machine=.+" "$3/gsd-run.pid" || exit 19
@@ -221,12 +370,13 @@ EOF
 @test "heartbeat refresh atomically replaces a raced symlink without touching its target" {
   cat > "$STUB_DIR/heartbeat-codex" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
 if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   echo FFS_HOST_PROBE_READY
   exit 0
 fi
 touch "$BATS_TEST_TMPDIR/heartbeat-drive-started"
-sleep 3
+sleep 8
 echo HEARTBEAT_CODEX_OK
 EOF
   chmod +x "$STUB_DIR/heartbeat-codex"
@@ -238,6 +388,7 @@ EOF
   run env FFS_HOST=codex CODEX_BIN=heartbeat-codex CLAUDE_BIN=fake-claude \
     GSD_RUN_STATE_DIR="$RUN_STATE" GSD_HEARTBEAT_SECS=1 \
     bash -c '
+      cd "$2"
       file_mtime() {
         stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
       }
@@ -245,16 +396,30 @@ EOF
       bash "$1" /gsd-quick heartbeat >"$2/heartbeat.log" 2>&1 &
       runner=$!
       i=0
-      while [ ! -f "$2/heartbeat-drive-started" ] && [ "$i" -lt 100 ]; do
+      while [ ! -f "$2/heartbeat-drive-started" ] && [ "$i" -lt 1500 ]; do
         sleep 0.02
         i=$((i + 1))
       done
-      [ -f "$2/heartbeat-drive-started" ] || exit 30
+      [ -f "$2/heartbeat-drive-started" ] || {
+        echo "heartbeat drive did not start; heartbeat.log follows" >&2
+        cat "$2/heartbeat.log" >&2
+        exit 30
+      }
       rm -f "$3/gsd-run.heartbeat"
       ln -s "$4" "$3/gsd-run.heartbeat"
-      sleep 2
-      [ ! -L "$3/gsd-run.heartbeat" ] || exit 31
-      [ "$(file_mtime "$4")" = "$target_mtime" ] || exit 32
+      i=0
+      while [ -L "$3/gsd-run.heartbeat" ] && [ "$i" -lt 250 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ ! -L "$3/gsd-run.heartbeat" ] || {
+        echo "heartbeat symlink was not replaced" >&2
+        exit 31
+      }
+      [ "$(file_mtime "$4")" = "$target_mtime" ] || {
+        echo "heartbeat symlink target was modified" >&2
+        exit 32
+      }
       wait "$runner"
     ' _ "$SCRIPT" "$BATS_TEST_TMPDIR" "$RUN_STATE" "$TARGET"
 
@@ -272,6 +437,9 @@ EOF
   grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
   grep -Fx 'claude-sonnet-5' "$BATS_TEST_TMPDIR/claude.args"
   grep -F '/gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx -- '--permission-mode' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx -- 'acceptEdits' "$BATS_TEST_TMPDIR/claude.args"
+  ! grep -Fq -- '--dangerously-skip-permissions' "$BATS_TEST_TMPDIR/claude.args"
 }
 
 @test "missing native Codex CLI is detected before launch and selects Claude" {
@@ -287,6 +455,7 @@ EOF
 @test "native task failure mentioning API error never replays on alternate host" {
   cat > "$STUB_DIR/native-fails" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
 if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   echo FFS_HOST_PROBE_READY
   exit 0
@@ -315,6 +484,7 @@ EOF
 @test "timeout after native drive starts never replays on alternate host" {
   cat > "$STUB_DIR/native-times-out" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
 if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   echo FFS_HOST_PROBE_READY
   exit 0
@@ -341,6 +511,7 @@ EOF
 @test "native preflight failure selects available alternate before the stateful drive" {
   cat > "$STUB_DIR/native-unavailable" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
 touch "$BATS_TEST_TMPDIR/native-probed"
 exit 69
 EOF
@@ -406,14 +577,18 @@ EOF
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
   [[ "$output" == *"native quota exhausted"* ]]
   [[ "$output" != *"super-secret-value"* ]]
+  [[ "$output" != *"xYz"* ]]
+  [[ "$output" != *"bearer tiny"* ]]
   [[ "$output" == *"no usable host before launch"* ]]
   grep -Fq 'native quota exhausted' "$BATS_TEST_TMPDIR/.planning/logs/"*.log
   ! grep -Fq 'super-secret-value' "$BATS_TEST_TMPDIR/.planning/logs/"*.log
+  ! grep -Fq 'xYz' "$BATS_TEST_TMPDIR/.planning/logs/"*.log
 }
 
 @test "operator TERM during a hanging native probe exits without probing or driving the alternate" {
   cat > "$STUB_DIR/native-probe-hangs" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
 touch "$BATS_TEST_TMPDIR/native-probe-started"
 sleep 30
 EOF
@@ -444,18 +619,17 @@ EOF
 }
 
 @test "model probe passes but missing exact Codex GSD skill selects Claude before launch" {
-  MISSING_ROOT="$BATS_TEST_TMPDIR/codex-without-requested-skill"
-  mkdir -p "$MISSING_ROOT/skills" "$MISSING_ROOT/agents" \
-    "$CLAUDE_SKILLS_ROOT/gsd-plan-phase"
+  rm -rf "$PROJECT_AGENTS_ROOT/skills/gsd-plan-phase" "$USER_AGENTS_ROOT/skills/gsd-plan-phase"
+  mkdir -p "$CLAUDE_SKILLS_ROOT/gsd-plan-phase"
   printf '%s\n' '---' 'name: gsd-plan-phase' '---' \
     > "$CLAUDE_SKILLS_ROOT/gsd-plan-phase/SKILL.md"
 
-  FFS_HOST=codex GSD_CODEX_CONFIG_ROOT="$MISSING_ROOT" \
+  FFS_HOST=codex \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-plan-phase 2 --auto"
 
   [ "$status" -eq 0 ]
-  [ -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
   [ -f "$BATS_TEST_TMPDIR/claude.probed" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
@@ -465,13 +639,13 @@ EOF
 
 @test "unrelated project Codex agents do not shadow the global exact GSD surface" {
   unset GSD_CODEX_CONFIG_ROOT
+  rm -rf "$PROJECT_AGENTS_ROOT/skills/gsd-quick"
   REPO="$BATS_TEST_TMPDIR/unrelated-project"
-  GLOBAL="$BATS_TEST_TMPDIR/global-codex"
-  mkdir -p "$REPO/.codex/agents" "$GLOBAL/skills/gsd-quick" "$GLOBAL/agents"
+  GLOBAL="$CODEX_SOURCE_ROOT"
+  mkdir -p "$REPO/.codex/agents" "$USER_AGENTS_ROOT/skills/gsd-quick"
   printf '%s\n' 'name = "unrelated"' > "$REPO/.codex/agents/unrelated.toml"
   printf '%s\n' '---' 'name: gsd-quick' 'marker: global-surface' '---' \
-    > "$GLOBAL/skills/gsd-quick/SKILL.md"
-  printf '%s\n' 'name = "gsd-executor"' > "$GLOBAL/agents/gsd-executor.toml"
+    > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
 
   FFS_HOST=codex CODEX_HOME="$GLOBAL" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
@@ -481,17 +655,13 @@ EOF
 }
 
 @test "project-local exact GSD skill and roles select the project Codex surface" {
-  unset GSD_CODEX_CONFIG_ROOT
-  REPO="$BATS_TEST_TMPDIR/gsd-project"
-  GLOBAL="$BATS_TEST_TMPDIR/global-codex"
-  mkdir -p "$REPO/.codex/skills/gsd-quick" "$REPO/.codex/agents" \
-    "$GLOBAL/skills/gsd-quick" "$GLOBAL/agents"
+  REPO="$BATS_TEST_TMPDIR"
+  GLOBAL="$CODEX_SOURCE_ROOT"
+  mkdir -p "$REPO/.agents/skills/gsd-quick" "$USER_AGENTS_ROOT/skills/gsd-quick"
   printf '%s\n' '---' 'name: gsd-quick' 'marker: project-surface' '---' \
-    > "$REPO/.codex/skills/gsd-quick/SKILL.md"
-  printf '%s\n' 'name = "gsd-executor"' > "$REPO/.codex/agents/gsd-executor.toml"
+    > "$REPO/.agents/skills/gsd-quick/SKILL.md"
   printf '%s\n' '---' 'name: gsd-quick' 'marker: global-surface' '---' \
-    > "$GLOBAL/skills/gsd-quick/SKILL.md"
-  printf '%s\n' 'name = "gsd-executor"' > "$GLOBAL/agents/gsd-executor.toml"
+    > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
 
   FFS_HOST=codex CODEX_HOME="$GLOBAL" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
@@ -505,6 +675,7 @@ EOF
   REPO="$BATS_TEST_TMPDIR/unsafe-plan"
   PHASE_DIR="$REPO/.planning/phases/02-example"
   mkdir -p "$PHASE_DIR"
+  git -C "$REPO" init -q
   cat > "$REPO/.planning/ROADMAP.md" <<'EOF'
 # Roadmap
 
@@ -530,4 +701,448 @@ EOF
   [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "Codex CLI outside the supported range fails before probing" {
+  FFS_HOST=codex FAKE_CODEX_VERSION=0.147.0 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"supported range >=0.137.0,<0.147.0"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "Codex drive uses safe workspace sandbox and declared disabled network" {
+  OPENAI_API_KEY=must-not-leak FFS_HOST=codex GSD_NETWORK_MODE=none \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  grep -Fx -- '--sandbox' "$BATS_TEST_TMPDIR/codex.args"
+  grep -Fx -- 'workspace-write' "$BATS_TEST_TMPDIR/codex.args"
+  ! grep -Fq -- '--dangerously-bypass-approvals-and-sandbox' "$BATS_TEST_TMPDIR/codex.args"
+  grep -Fq 'approval_policy = "never"' "$BATS_TEST_TMPDIR/codex.config"
+  grep -Fq 'network_access = false' "$BATS_TEST_TMPDIR/codex.config"
+  grep -Fq '/.claude/worktrees/' "$BATS_TEST_TMPDIR/codex.config"
+  grep -Fq '/.claude/worktrees/' "$BATS_TEST_TMPDIR/codex.cwd"
+  ACTUAL_COMMON="$(git -C "$(cat "$BATS_TEST_TMPDIR/codex.cwd")" rev-parse --git-common-dir)"
+  case "$ACTUAL_COMMON" in
+    /*) ACTUAL_COMMON="$(cd "$ACTUAL_COMMON" && pwd -P)" ;;
+    *) ACTUAL_COMMON="$(cd "$(cat "$BATS_TEST_TMPDIR/codex.cwd")/$ACTUAL_COMMON" && pwd -P)" ;;
+  esac
+  [ "$ACTUAL_COMMON" = "$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)" ]
+  [ "$(python3 - "$BATS_TEST_TMPDIR/codex.config" <<'PY'
+import ast, re, sys
+text = open(sys.argv[1]).read()
+roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
+print(len(roots))
+PY
+)" -eq 1 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
+}
+
+@test "danger-full-access requires and atomically consumes the exact run grant" {
+  STORE="$TRUSTED_GRANT_DIR/danger-grants.json"
+  COMMON_DIR="$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)"
+  python3 "$ROOT/scripts/gsd/consume-danger-grant.py" issue "$STORE" danger-run 1 "$COMMON_DIR" gsd-quick enabled >/dev/null
+
+  FFS_HOST=claude GSD_RUN_ID=danger-run GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  grep -Fx -- 'danger-full-access' "$BATS_TEST_TMPDIR/codex.args"
+  grep -Fq 'sandbox_mode = "danger-full-access"' "$BATS_TEST_TMPDIR/codex.config"
+  python3 - "$STORE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data['schema'] == 'ffs.danger-grants/v1'
+entry = data['grants']['danger-run']
+assert entry['consumed_by'] == 'gsd-run'
+assert entry['consumption_id']
+assert entry['action'] == 'sandbox:danger-full-access'
+PY
+}
+
+@test "danger grant reuse is refused before a second stateful drive" {
+  STORE="$TRUSTED_GRANT_DIR/reuse-grants.json"
+  STORE="$TRUSTED_GRANT_DIR/danger-grants.json"
+  COMMON_DIR="$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)"
+  python3 "$ROOT/scripts/gsd/consume-danger-grant.py" issue "$STORE" reuse-run 1 "$COMMON_DIR" gsd-quick enabled >/dev/null
+  run env FFS_HOST=codex GSD_RUN_ID=reuse-run GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  rm -f "$BATS_TEST_TMPDIR/codex.args"
+
+  run env FFS_HOST=codex GSD_RUN_ID=reuse-run GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"reuse is forbidden"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "interrupted danger run resumes under the same unexpired run-bound grant" {
+  STORE="$TRUSTED_GRANT_DIR/danger-grants.json"
+  COMMON_DIR="$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)"
+  RUN_STATE="$BATS_TEST_TMPDIR/danger-resume-state"
+  python3 "$ROOT/scripts/gsd/consume-danger-grant.py" issue "$STORE" danger-resume 1 "$COMMON_DIR" gsd-quick enabled >/dev/null
+
+  FFS_HOST=codex GSD_RUN_ID=danger-resume GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general GSD_RUN_STATE_DIR="$RUN_STATE" \
+    FAKE_CODEX_DRIVE_RC=42 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 42 ]
+  FIRST_CONSUMPTION="$(sed -n 's/^sandbox_grant_consumption=//p' "$RUN_STATE/gsd-run.tuple")"
+
+  FFS_HOST=codex GSD_RUN_ID=danger-resume GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general GSD_RUN_STATE_DIR="$RUN_STATE" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  [ "$(sed -n 's/^sandbox_grant_consumption=//p' "$RUN_STATE/gsd-run.tuple")" = "$FIRST_CONSUMPTION" ]
+}
+
+@test "danger grant over 72 hours is refused" {
+  STORE="$TRUSTED_GRANT_DIR/danger-grants.json"
+  COMMON_DIR="$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)"
+  python3 "$ROOT/scripts/gsd/consume-danger-grant.py" issue "$STORE" long-run 1 "$COMMON_DIR" gsd-quick enabled >/dev/null
+  python3 - "$STORE" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+entry = data['grants']['long-run']
+entry['expires_at'] = entry['granted_at'] + 73 * 60 * 60
+with open(path, 'w') as handle:
+    json.dump(data, handle)
+PY
+  chmod 600 "$STORE"
+
+  FFS_HOST=codex GSD_RUN_ID=long-run GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"exceeds the 72-hour maximum"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "danger grant binding refuses a different skill in the same repository" {
+  STORE="$TRUSTED_GRANT_DIR/danger-grants.json"
+  COMMON_DIR="$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)"
+  python3 "$ROOT/scripts/gsd/consume-danger-grant.py" issue "$STORE" bound-run 1 "$COMMON_DIR" gsd-other enabled >/dev/null
+
+  FFS_HOST=codex GSD_RUN_ID=bound-run GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"fresh exact run-bound"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "prelaunch tuple records network audit metadata and complete config hashes" {
+  RUN_STATE="$BATS_TEST_TMPDIR/tuple-state"
+  mkdir -p "$USER_AGENTS_ROOT/skills/gsd-other"
+  printf '%s\n' '---' 'name: gsd-other' '---' > "$USER_AGENTS_ROOT/skills/gsd-other/SKILL.md"
+
+  FFS_HOST=codex GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=package-registry \
+    GSD_RUN_STATE_DIR="$RUN_STATE" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'network_mode=enabled' "$RUN_STATE/gsd-run.tuple"
+  grep -Fq 'network_purpose=package-registry' "$RUN_STATE/gsd-run.tuple"
+  grep -Eq '^skill_hash=[0-9a-f]{64}$' "$RUN_STATE/gsd-run.tuple"
+  grep -Eq '^role_config_hash=[0-9a-f]{64}$' "$RUN_STATE/gsd-run.tuple"
+  grep -Eq '^bundle_hash=[0-9a-f]{64}$' "$RUN_STATE/gsd-run.tuple"
+  grep -Eq '^ffs_skill_hash=[0-9a-f]{64}$' "$RUN_STATE/gsd-run.tuple"
+  grep -Fq '/skills/gsd-other/SKILL.md' "$BATS_TEST_TMPDIR/codex.skills"
+}
+
+@test "resume refuses resolved FFS skill-tree drift" {
+  RUN_STATE="$BATS_TEST_TMPDIR/ffs-drift-state"
+  mkdir -p "$BATS_TEST_TMPDIR/.agents/skills/ffs-one" "$BATS_TEST_TMPDIR/.feature-fix-swarm"
+  printf '%s\n' 'version one' > "$BATS_TEST_TMPDIR/.agents/skills/ffs-one/SKILL.md"
+  cat > "$BATS_TEST_TMPDIR/.feature-fix-swarm/install-manifest.json" <<'EOF'
+{"schema":"ffs.install/v1","scope":"project","paths":{".agents/skills/ffs-one":{"fingerprint":"fixture"}}}
+EOF
+
+  FFS_HOST=codex FAKE_CODEX_DRIVE_RC=42 GSD_RUN_STATE_DIR="$RUN_STATE" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 42 ]
+  printf '%s\n' 'version two' > "$BATS_TEST_TMPDIR/.agents/skills/ffs-one/SKILL.md"
+  rm -f "$BATS_TEST_TMPDIR/codex.args"
+
+  FFS_HOST=codex GSD_RUN_STATE_DIR="$RUN_STATE" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"resume tuple drift"* ]]
+  [[ "$output" == *"ffs_skill_hash"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "invalid network mode is rejected before probing" {
+  FFS_HOST=codex GSD_NETWORK_MODE=docs CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"network_mode must be none or enabled"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "network-enabled runs require an auditable purpose" {
+  FFS_HOST=codex GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE= \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"requires network_purpose"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "custom Codex providers fail closed before probing" {
+  printf '%s\n' '[model_providers.proxy]' 'base_url = "https://proxy.invalid"' >> "$CODEX_SOURCE_ROOT/config.toml"
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"custom model providers are unsupported"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "temporary Codex home verifies bundle rewrites and smokes hooks" {
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/hook.smoked" ]
+  [ -f "$BATS_TEST_TMPDIR/complete-hooks-copied" ]
+  grep -Fq '/ffs-gsd-codex.' "$BATS_TEST_TMPDIR/codex.hooks-json"
+  ! grep -Fq "$CODEX_SOURCE_ROOT/hooks" "$BATS_TEST_TMPDIR/codex.hooks-json"
+  [ "$(cat "$BATS_TEST_TMPDIR/codex.auth-mode")" = 600 ]
+}
+
+@test "missing canonical pinned hook registration fails before the drive" {
+  python3 - "$CODEX_SOURCE_ROOT/hooks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+del data["hooks"]["PermissionRequest"]
+open(path, "w").write(json.dumps(data))
+PY
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PermissionRequest must contain exactly one canonical"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "tampered installed hooks fail pinned-package verification before the drive" {
+  printf '%s\n' 'require("child_process").execSync("echo pwned");' >> \
+    "$CODEX_SOURCE_ROOT/hooks/gsd-context-monitor.js"
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hook dependency hash mismatch"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/hook.smoked" ]
+}
+
+@test "source sandbox table is replaced structurally without duplicate TOML headers" {
+  cat >> "$CODEX_SOURCE_ROOT/config.toml" <<'EOF'
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["/tmp/hostile"]
+EOF
+
+  FFS_HOST=codex GSD_NETWORK_MODE=none CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^\[sandbox_workspace_write\]$' "$BATS_TEST_TMPDIR/codex.config")" -eq 1 ]
+  grep -Fq 'network_access = false' "$BATS_TEST_TMPDIR/codex.config"
+  ! grep -Fq '/tmp/hostile' "$BATS_TEST_TMPDIR/codex.config"
+}
+
+@test "repo-writable autonomy JSON cannot forge a trusted danger grant" {
+  FORGED="$BATS_TEST_TMPDIR/forged-evidence.json"
+  COMMON_DIR="$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)"
+  python3 "$ROOT/scripts/gsd/consume-danger-grant.py" issue "$FORGED" forged 1 "$COMMON_DIR" gsd-quick enabled >/dev/null
+
+  FFS_HOST=codex GSD_RUN_ID=forged GSD_SANDBOX_MODE=danger-full-access \
+    GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general GATES_STORE="$FORGED" \
+    GSD_DANGER_GRANT_STORE="$BATS_TEST_TMPDIR/missing-trusted-store.json" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"fresh exact run-bound"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "OAuth refresh is synchronized back only when the source hash is unchanged" {
+  FFS_HOST=codex FAKE_CODEX_REFRESH_AUTH=1 GSD_CODEX_AUTH_FILE="$CODEX_SOURCE_ROOT/auth.json" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  grep -Fq refreshed "$CODEX_SOURCE_ROOT/auth.json"
+  [ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' "$CODEX_SOURCE_ROOT/auth.json")" = 600 ]
+}
+
+@test "OAuth CAS preserves a concurrently refreshed real credential" {
+  FFS_HOST=codex FAKE_CODEX_REFRESH_AUTH=1 \
+    FAKE_CODEX_CONCURRENT_AUTH_FILE="$CODEX_SOURCE_ROOT/auth.json" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  grep -Fq concurrent "$CODEX_SOURCE_ROOT/auth.json"
+  ! grep -Fq refreshed "$CODEX_SOURCE_ROOT/auth.json"
+  [[ "$output" == *"changed concurrently"* ]]
+}
+
+@test "OAuth refresh lock contention fails the otherwise successful run" {
+  python3 - "$SCRIPT" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace("AUTH_LOCK_ATTEMPTS_FIXED=100", "AUTH_LOCK_ATTEMPTS_FIXED=2"))
+PY
+  python3 - "$BATS_TEST_TMPDIR/auth.lock" "$BATS_TEST_TMPDIR/auth-lock-ready" <<'PY' &
+import fcntl, os, pathlib, sys, time
+lock = pathlib.Path(sys.argv[1])
+fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+pathlib.Path(sys.argv[2]).touch()
+time.sleep(30)
+PY
+  lock_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$BATS_TEST_TMPDIR/auth-lock-ready" ] && break
+    sleep 0.05
+  done
+
+  FFS_HOST=codex FAKE_CODEX_REFRESH_AUTH=1 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  kill "$lock_pid" 2>/dev/null || true
+  wait "$lock_pid" 2>/dev/null || true
+
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"auth lock remained busy"* ]]
+}
+
+@test "Codex auth with group-readable mode fails before the drive" {
+  chmod 640 "$CODEX_SOURCE_ROOT/auth.json"
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"mode 0600"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "a legitimate OAuth refresh does not create false resume drift" {
+  RUN_STATE="$BATS_TEST_TMPDIR/oauth-resume-state"
+  FFS_HOST=codex FAKE_CODEX_REFRESH_AUTH=1 FAKE_CODEX_DRIVE_RC=42 \
+    GSD_RUN_STATE_DIR="$RUN_STATE" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 42 ]
+  grep -Fq refreshed "$CODEX_SOURCE_ROOT/auth.json"
+
+  FFS_HOST=codex GSD_RUN_STATE_DIR="$RUN_STATE" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CODEX_OK"* ]]
+}
+
+@test "an exact Fable request never probes or drives another model" {
+  FFS_HOST=codex GSD_MODEL_REQUEST='{"kind":"exact","id":"claude-fable-5"}' FAKE_CLAUDE_PROBE_MODE=fail \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 69 ]
+  [ -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "raw vendor model ids are rejected unless typed exact" {
+  FFS_HOST=codex GSD_LEAD_MODEL=gpt-5.6-sol CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"raw vendor model ids require"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "openclaw consumer layout resolves the vendored typed model helper" {
+  CONSUMER="$BATS_TEST_TMPDIR/openclaw-consumer"
+  mkdir -p "$CONSUMER/scripts" "$CONSUMER/packages/feature-fix-swarm/lib"
+  cp -R "$ROOT/scripts/gsd" "$CONSUMER/scripts/gsd"
+  cp "$ROOT/lib/model_requests.py" "$CONSUMER/packages/feature-fix-swarm/lib/model_requests.py"
+
+  GSD_MODEL_REQUEST='{"kind":"tier","name":"invalid"}' \
+    run bash "$CONSUMER/scripts/gsd/gsd-run.sh" /gsd-quick test
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"model-request: tier request"* ]]
+  [[ "$output" != *"typed model request helper is missing"* ]]
+}
+
+@test "typed exact Codex request drives only the exact model" {
+  FFS_HOST=claude GSD_MODEL_REQUEST='{"kind":"exact","id":"gpt-5.6-sol"}' \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  grep -F 'model="gpt-5.6-sol"' "$BATS_TEST_TMPDIR/codex.args"
+  [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "resume refuses Codex CLI drift before a second stateful drive" {
+  RUN_STATE="$BATS_TEST_TMPDIR/resume-state"
+  FFS_HOST=codex FAKE_CODEX_VERSION=0.146.1 FAKE_CODEX_DRIVE_RC=42 GSD_RUN_STATE_DIR="$RUN_STATE" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 42 ]
+  rm -f "$BATS_TEST_TMPDIR/codex.args" "$BATS_TEST_TMPDIR/codex.probed"
+
+  FFS_HOST=codex FAKE_CODEX_VERSION=0.145.0 GSD_RUN_STATE_DIR="$RUN_STATE" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"resume tuple drift"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "linked worktrees resolve the default runner lock through the common git directory" {
+  REPO="$BATS_TEST_TMPDIR/common-lock-repo"
+  LINKED="$BATS_TEST_TMPDIR/common-lock-linked"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/seed"
+  git -C "$REPO" add seed
+  git -C "$REPO" commit -qm seed
+  git -C "$REPO" worktree add -q -b linked "$LINKED"
+
+  FFS_HOST=codex GSD_PROJECT_SKILLS_ROOT="$PROJECT_AGENTS_ROOT/skills" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$LINKED' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  COMMON_DIR="$(git -C "$REPO" rev-parse --absolute-git-dir)"
+  [ -f "$COMMON_DIR/ffs/gsd-run/gsd-run.status" ]
+  grep -Fq "pidfile=$COMMON_DIR/ffs/gsd-run/gsd-run.pid" <<<"$output"
 }

@@ -13,12 +13,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install exact GSD package
+        run: npm ci
       - name: Run python test suites
         run: |
           python -m pip install --quiet pytest
           python -m pytest lib/ tests/ -q
       - name: SKILL.md verify blocks (anti-rot)
-        run: python scripts/verify-skill-blocks.py
+        run: |
+          python scripts/verify-skill-blocks.py
+          python scripts/lint_host_dispatch.py skills/*/SKILL.md
+          python scripts/lint_model_routing.py
+          python lib/model_requests.py lint templates/model-requests.json
 
   shellcheck:
     runs-on: ubuntu-latest
@@ -50,4 +60,31 @@ jobs:
           if [ "${#SUITES[@]}" -eq 0 ]; then
             echo "no bats suites found"; exit 0
           fi
-          bats "${SUITES[@]}"
+          bats --print-output-on-failure "${SUITES[@]}"
+
+  host-shell-matrix:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: python -m pip install --quiet pytest
+      - name: Scoped installer and prompt-master compatibility
+        run: python -m pytest -q tests/test_installer.py tests/test_prompt_master_patch.py
+      - name: Bash and zsh parser checks
+        shell: bash
+        run: |
+          bash -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh
+          if ! command -v zsh >/dev/null 2>&1; then
+            sudo apt-get update -q && sudo apt-get install -y -q zsh
+          fi
+          zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh

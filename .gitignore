@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 .context/
 .feature-fix-swarm/
+node_modules/
+.codex/
+.planning/logs/
+.planning/run-state/

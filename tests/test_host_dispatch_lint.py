@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from scripts.lint_host_dispatch import lint_skill_text
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_annotated_cross_host_examples_are_allowed() -> None:
+    text = """
+Host dispatch:
+- Codex: invoke `$gsd-plan-phase 2`.
+- Claude: invoke `/gsd-plan-phase 2`.
+"""
+    assert lint_skill_text(text) == []
+
+
+def test_unqualified_host_specific_calls_are_rejected() -> None:
+    failures = lint_skill_text("Next run /gsd-plan-phase 2 with the Skill tool.")
+    assert any("unqualified Claude skill call" in item for item in failures)
+    assert any("unqualified host tool" in item for item in failures)
+
+
+def test_unqualified_claude_model_alias_is_rejected() -> None:
+    failures = lint_skill_text("Spawn an opus reviewer for this task.")
+    assert any("unqualified Claude model alias" in item for item in failures)
+    assert lint_skill_text("Claude: spawn an Opus reviewer for this task.") == []
+
+
+def test_priority_skills_declare_the_shared_dispatch_contract() -> None:
+    for name in ("feature-spec", "feature-implement", "spec-status", "continue-compact"):
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        assert "## Host dispatch contract" in text, name
+
+
+def test_continue_compact_keeps_compact_builtin_and_dispatches_resume() -> None:
+    text = (ROOT / "skills" / "continue-compact" / "SKILL.md").read_text()
+    assert "Do not redefine" in text
+    assert "Codex: `$feature-implement" in text
+    assert "Claude: `/feature-implement" in text
+
+
+def test_every_shipped_skill_passes_host_dispatch_lint() -> None:
+    failures: list[str] = []
+    for path in sorted((ROOT / "skills").glob("*/SKILL.md")):
+        failures.extend(f"{path.parent.name}: {item}" for item in lint_skill_text(path.read_text()))
+    assert failures == []

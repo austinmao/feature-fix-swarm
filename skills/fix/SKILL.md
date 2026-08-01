@@ -1,7 +1,7 @@
 ---
 name: fix
 description: "Investigate a bug (root cause, not symptom), then fix it through host-native /feature-implement --adhoc; only review gates cross to the opposite model family."
-version: "4.1.1"
+version: "4.2.0"
 allowed-tools:
   - Read
   - Edit
@@ -13,6 +13,12 @@ allowed-tools:
 ---
 
 # /fix — Investigate, then fix via feature-implement --adhoc
+
+## Host dispatch contract
+
+- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Claude: `/skill`, Agent/Skill tools, and Claude aliases.
+- A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 One command. Takes a bug description or symptom, traces root cause, then hands the
 fix to `/feature-implement --adhoc` — the ONE home for walls (model-fallback,
