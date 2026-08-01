@@ -946,6 +946,71 @@ def test_preflight_probe_rejects_invalid_argv_shapes() -> None:
         assert res["results"][0]["detail"].startswith("INVALID:")
 
 
+def test_preflight_probe_expands_environment_without_recording_value(monkeypatch) -> None:
+    secret = "postgresql://private-value"
+    monkeypatch.setenv("FFS_TEST_DATABASE_URL", secret)
+    observed: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        observed.append(command)
+        assert kwargs["shell"] is False
+        return gates.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    res = gates.preflight_check([
+        {
+            "kind": "probe",
+            "name": "database",
+            "argv": ["psql", "${FFS_TEST_DATABASE_URL}", "-c", "select 1"],
+        },
+    ])
+
+    assert res["pass"] is True
+    assert observed == [["psql", secret, "-c", "select 1"]]
+    assert secret not in json.dumps(res)
+
+
+def test_preflight_probe_reports_timeout_without_raising(monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        raise gates.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    res = gates.preflight_check([
+        {"kind": "probe", "name": "slow", "argv": ["slow-command"]},
+    ], timeout=7)
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "timeout after 7s"
+
+
+def test_preflight_probe_reports_missing_executable_without_raising(monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    res = gates.preflight_check([
+        {"kind": "probe", "name": "missing", "argv": ["missing-command"]},
+    ])
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "executable unavailable"
+
+
+def test_shipped_preflight_manifest_uses_valid_probe_argv() -> None:
+    manifest = json.loads(
+        (DISPATCH_DIR.parent / "specs/003-orchestration-hardening/preflight.json")
+        .read_text(encoding="utf-8")
+    )
+
+    probes = [requirement for requirement in manifest if requirement.get("kind") == "probe"]
+    assert probes
+    for probe in probes:
+        assert "cmd" not in probe
+        assert isinstance(probe.get("argv"), list)
+        assert probe["argv"]
+        assert all(isinstance(arg, str) and arg and "\0" not in arg for arg in probe["argv"])
+
+
 def test_preflight_empty_requirements_fails(tmp_path) -> None:
     # empty manifest must not read as pass — all([]) is True hazard
     res = gates.preflight_check([])

@@ -170,7 +170,7 @@ Do not hide required end-to-end coverage behind generic "run QA" tasks.
 - Prefer small, atomic test tasks that fail for the intended reason before the corresponding implementation task.
 - Every test task must be **fail-under-broken**: state (in the description) the task trajectory it exercises and confirm the test would FAIL under the old/broken behavior — a test that passes either way is not a gate. Where cheap, name the "easy fake pass" the test must rule out (e.g. mock instead of production path, assert on a constant).
 - REFUTED is a recognized run-time outcome: if implementation later proves a task's premise wrong at HEAD, the task closes with zero diff via `gates.py note-refuted` — decompose so each task's premise is checkable (cite the file/behavior the task assumes).
-- Emit `specs/NNN/preflight.json` alongside tasks.md when any task needs env vars, secrets, or external services (deploy, DB, gateway, webhooks): one `{"kind": "env", "name": …}` entry per variable NAME (never a value) and one `{"kind": "probe", "name": …, "cmd": …}` per service the run must reach. `/preflight` verifies it before an unattended run starts (v3.18.0).
+- Emit `specs/NNN/preflight.json` alongside tasks.md when any task needs env vars, secrets, or external services (deploy, DB, gateway, webhooks): one `{"kind": "env", "name": …}` entry per variable NAME (never a value) and one `{"kind": "probe", "name": …, "argv": […]}` per service the run must reach. Each `argv` item is one literal argument; shell command strings, pipes, redirects, and operators are invalid. `/preflight` verifies the manifest before an unattended run starts.
 
 ## Review-Gate Phase Gates (MANDATORY)
 
