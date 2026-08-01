@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a focused improvement to Feature Fix Swarm
+title: "[Feature]: "
+labels: [enhancement, triage]
+body:
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and documentation for this capability.
+          required: true
+  - type: textarea
+    attributes:
+      label: Who has this problem?
+      description: Describe the user and workflow, not only the desired implementation.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What problem should FFS solve?
+      description: Explain the failure mode, frequency, and consequence.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed outcome
+      description: What should become possible or safer?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: Could GSD, the host CLI, or an optional integration own this instead?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Compatibility and security impact
+      description: Note host, installer, model, sandbox, credential, network, or migration effects.

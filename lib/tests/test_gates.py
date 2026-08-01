@@ -911,8 +911,8 @@ def test_preflight_env_and_probe(tmp_path, monkeypatch) -> None:
     res = gates.preflight_check([
         {"kind": "env", "name": "FFS_TEST_PRESENT"},
         {"kind": "env", "name": "FFS_TEST_MISSING"},
-        {"kind": "probe", "name": "true-probe", "cmd": "true"},
-        {"kind": "probe", "name": "false-probe", "cmd": "false"},
+        {"kind": "probe", "name": "true-probe", "argv": ["true"]},
+        {"kind": "probe", "name": "false-probe", "argv": ["false"]},
     ])
     assert res["pass"] is False
     by = {r["name"]: r for r in res["results"]}
@@ -920,6 +920,106 @@ def test_preflight_env_and_probe(tmp_path, monkeypatch) -> None:
     assert by["true-probe"]["ok"] and not by["false-probe"]["ok"]
     # secret value must never appear anywhere in the result
     assert "value-should-never-print" not in json.dumps(res)
+
+
+def test_preflight_probe_rejects_shell_command_strings(tmp_path) -> None:
+    marker = tmp_path / "shell-command-ran"
+    res = gates.preflight_check([
+        {
+            "kind": "probe",
+            "name": "legacy-shell-command",
+            "cmd": f"touch {marker}",
+        },
+    ])
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "INVALID: probe requires a non-empty argv string array"
+    assert not marker.exists()
+
+
+def test_preflight_probe_rejects_invalid_argv_shapes() -> None:
+    for argv in (None, [], "true", ["true", 1], [""]):
+        res = gates.preflight_check([
+            {"kind": "probe", "name": "invalid-argv", "argv": argv},
+        ])
+        assert res["pass"] is False
+        assert res["results"][0]["detail"].startswith("INVALID:")
+
+
+def test_preflight_probe_inherits_environment_without_recording_value(monkeypatch) -> None:
+    secret = "postgresql://private-value"
+    monkeypatch.setenv("FFS_TEST_DATABASE_URL", secret)
+    res = gates.preflight_check([
+        {
+            "kind": "probe",
+            "name": "database",
+            "argv": [
+                "python3",
+                "-c",
+                "import os,sys; sys.exit(0 if os.environ.get('FFS_TEST_DATABASE_URL') else 1)",
+            ],
+        },
+    ])
+
+    assert res["pass"] is True
+    assert secret not in json.dumps(res)
+
+
+def test_preflight_probe_rejects_environment_placeholders(monkeypatch) -> None:
+    def unexpected_run(command, **kwargs):
+        raise AssertionError(f"placeholder command executed: {command}")
+
+    monkeypatch.setattr(gates.subprocess, "run", unexpected_run)
+    for placeholder in ("$DATABASE_URL", "${DATABASE_URL}"):
+        res = gates.preflight_check([
+            {"kind": "probe", "name": "database", "argv": ["psql", placeholder]},
+        ])
+        assert res["pass"] is False
+        assert res["results"][0]["detail"] == (
+            "INVALID: environment placeholders are not allowed in probe argv"
+        )
+
+
+def test_preflight_probe_reports_timeout_without_raising(monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        raise gates.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    res = gates.preflight_check([
+        {"kind": "probe", "name": "slow", "argv": ["slow-command"]},
+    ], timeout=7)
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "timeout after 7s"
+
+
+def test_preflight_probe_reports_missing_executable_without_raising(monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    res = gates.preflight_check([
+        {"kind": "probe", "name": "missing", "argv": ["missing-command"]},
+    ])
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "executable unavailable"
+
+
+def test_shipped_preflight_manifest_uses_valid_probe_argv() -> None:
+    manifest = json.loads(
+        (DISPATCH_DIR.parent / "specs/003-orchestration-hardening/preflight.json")
+        .read_text(encoding="utf-8")
+    )
+
+    probes = [requirement for requirement in manifest if requirement.get("kind") == "probe"]
+    assert probes
+    for probe in probes:
+        assert "cmd" not in probe
+        assert isinstance(probe.get("argv"), list)
+        assert probe["argv"]
+        assert all(isinstance(arg, str) and arg and "\0" not in arg for arg in probe["argv"])
+        assert not any(arg == ".planning" or arg.startswith(".planning/") for arg in probe["argv"])
 
 
 def test_preflight_empty_requirements_fails(tmp_path) -> None:
@@ -937,7 +1037,7 @@ def test_cli_preflight_records_and_check(tmp_path, monkeypatch) -> None:
     manifest = tmp_path / "preflight.json"
     manifest.write_text(json.dumps([
         {"kind": "env", "name": "FFS_PF_OK"},
-        {"kind": "probe", "name": "echo", "cmd": "true"},
+        {"kind": "probe", "name": "echo", "argv": ["true"]},
     ]))
     r = _sp.run(["python3", g, "preflight", str(manifest), "--run", "run-9"],
                 capture_output=True, text=True, env=env)

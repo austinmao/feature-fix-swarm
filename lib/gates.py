@@ -1062,8 +1062,9 @@ def preflight_check(requirements: list[dict], timeout: int = 30, *,
                     store: Path | None = None, run_id: str | None = None) -> dict:
     """Prove env vars present and services reachable BEFORE an unattended run.
     Env checks report presence only — a secret value never enters the result.
-    Probes execute for real (exit 0 = reachable). Empty manifest fails: an
-    unattended run with nothing declared is undeclared, not requirement-free."""
+    Probes execute for real (exit 0 = reachable), but never through an
+    implicit shell. Empty manifest fails: an unattended run with nothing
+    declared is undeclared, not requirement-free."""
     results: list[dict] = []
     for req in requirements:
         kind, name = req.get("kind"), req.get("name", "")
@@ -1071,13 +1072,29 @@ def preflight_check(requirements: list[dict], timeout: int = 30, *,
             ok = bool(os.environ.get(name))
             detail = "present" if ok else "MISSING"
         elif kind == "probe":
-            try:
-                proc = subprocess.run(req.get("cmd", "false"), shell=True,
-                                      capture_output=True, timeout=timeout)
-                ok = proc.returncode == 0
-                detail = f"exit {proc.returncode}"
-            except subprocess.TimeoutExpired:
-                ok, detail = False, f"timeout after {timeout}s"
+            argv = req.get("argv")
+            if not (isinstance(argv, list) and argv
+                    and all(isinstance(arg, str) and arg and "\0" not in arg
+                            for arg in argv)):
+                ok = False
+                detail = "INVALID: probe requires a non-empty argv string array"
+            elif any(re.search(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})", arg)
+                     for arg in argv):
+                ok = False
+                detail = "INVALID: environment placeholders are not allowed in probe argv"
+            else:
+                # Probe processes inherit the environment. Secrets must stay
+                # there instead of becoming OS-visible process arguments.
+                command = list(argv)
+                try:
+                    proc = subprocess.run(command, shell=False,
+                                          capture_output=True, timeout=timeout)
+                    ok = proc.returncode == 0
+                    detail = f"exit {proc.returncode}"
+                except subprocess.TimeoutExpired:
+                    ok, detail = False, f"timeout after {timeout}s"
+                except OSError:
+                    ok, detail = False, "executable unavailable"
         elif kind == "staging-proof":
             artifact = req.get("artifact")
             if store is None or run_id is None:

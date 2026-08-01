@@ -6,6 +6,28 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## Unreleased
+
+### Security
+
+- Preflight probes now require a structured `argv` array and execute without
+  an implicit shell. Legacy `cmd` strings and environment placeholders fail
+  closed; migrate each command to one literal argument per JSON array item and
+  let invoked programs read secrets from their inherited environment.
+- Remediated one high and two moderate transitive npm advisories while keeping
+  the direct GSD 1.9.1 pin exact.
+- CI actions are immutable-SHA pinned with least-privilege permissions; CodeQL,
+  Bandit, OpenSSF Scorecard, and Dependabot coverage were added.
+
+### Documentation
+
+- Reframed the README around audience, problem, outcome, quick start, and the
+  GSD/FFS ownership boundary; added dependency, security, contribution,
+  support, conduct, issue, and pull-request guidance.
+- Removed stale internal GSD planning state and superseded Ruflo spike output
+  from the public source tree. Reproducible model-evaluation evidence and
+  test-referenced specifications remain tracked.
+
 ## v5.0.5 — Durable finalization and archive-aware status (2026-08-01)
 
 ### Fixed

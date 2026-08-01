@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.6.0
+version: 2.6.1
 ---
 
 # /feature-spec [NNN | "description"]
@@ -547,9 +547,12 @@ Requirements are proven NOW, while the operator is present — never discovered 
 
    ```json
    [
-     {"kind": "env",   "name": "DATABASE_URL"},
+     {"kind": "env",   "name": "PGHOST"},
+     {"kind": "env",   "name": "PGDATABASE"},
+     {"kind": "env",   "name": "PGUSER"},
+     {"kind": "env",   "name": "PGPASSWORD"},
      {"kind": "probe", "name": "db-reachable",
-      "cmd": "psql \"$DATABASE_URL\" -c 'select 1' -qtA"}
+      "argv": ["psql", "-c", "select 1", "-qtA"]}
    ]
    ```
 
@@ -559,7 +562,7 @@ Requirements are proven NOW, while the operator is present — never discovered 
 
    ```json
    {"kind": "probe", "name": "qa-app-reachable",
-    "cmd": "bash scripts/browser-proof.sh --diff placeholder.tsx"}
+    "argv": ["bash", "scripts/browser-proof.sh", "--diff", "placeholder.tsx"]}
    ```
 
    (The command exits 0 only when a server answers — QA_BASE_URL or a probed
