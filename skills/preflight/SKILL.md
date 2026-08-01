@@ -1,7 +1,7 @@
 ---
 name: preflight
 description: "Prove every env var, secret, and service the run will need is present and reachable BEFORE starting an unattended or overnight run. Use at the planning stage — after decompose, before /feature-implement — so the run never stalls at 3am on a missing variable or dead endpoint."
-version: "1.2.0"
+version: "2.0.0"
 ---
 
 # /preflight
@@ -37,10 +37,10 @@ never discovered at run time.
      {"kind": "env",   "name": "DATABASE_URL"},
      {"kind": "env",   "name": "N8N_WEBHOOK_HMAC_SECRET"},
      {"kind": "probe", "name": "db-reachable",
-      "cmd": "psql \"$DATABASE_URL\" -c 'select 1' -qtA"},
+      "argv": ["psql", "${DATABASE_URL}", "-c", "select 1", "-qtA"]},
      {"kind": "probe", "name": "gateway-health",
-      "cmd": "curl -sf -m 10 http://127.0.0.1:18789/health -o /dev/null"},
-     {"kind": "probe", "name": "vercel-auth", "cmd": "vercel whoami"}
+      "argv": ["curl", "-sf", "-m", "10", "http://127.0.0.1:18789/health", "-o", "/dev/null"]},
+     {"kind": "probe", "name": "vercel-auth", "argv": ["vercel", "whoami"]}
    ]
    ```
 
@@ -79,8 +79,11 @@ promotion protocol; staging-proof preflight checks are one of its enforcement po
 
 - **Env checks are presence-only.** A secret VALUE never appears in the
   manifest, the output, or the evidence store — names only.
-- **Probes are real executions**, not greps. "The var is set" does not prove
-  the service answers; probe the service.
+- **Probes are real executions**, not greps. `argv` is a non-empty JSON array
+  and is executed directly without a shell; environment placeholders such as
+  `${DATABASE_URL}` are expanded without recording their values. Shell command
+  strings, pipes, redirects, and operators are rejected. "The var is set" does
+  not prove the service answers; probe the service.
 - **Empty manifest fails.** A run with nothing declared is undeclared, not
   requirement-free.
 - **Scan is additive, never authoritative.** Grepping the diff for env reads

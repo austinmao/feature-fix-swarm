@@ -1,11 +1,11 @@
 [
-  {"kind": "probe", "name": "bats-present", "cmd": "command -v bats"},
-  {"kind": "probe", "name": "shellcheck-present", "cmd": "command -v shellcheck"},
-  {"kind": "probe", "name": "jq-present", "cmd": "command -v jq"},
-  {"kind": "probe", "name": "python3-pytest", "cmd": "python3 -m pytest --version"},
-  {"kind": "probe", "name": "codex-cli-present", "cmd": "command -v codex"},
-  {"kind": "probe", "name": "gh-authed", "cmd": "gh auth status"},
-  {"kind": "probe", "name": "gsd-core-tools", "cmd": "test -f node_modules/.bin/gsd-tools || npm ls @opengsd/gsd-core"},
-  {"kind": "probe", "name": "suite-baseline-green", "cmd": "python3 -m pytest -q"},
-  {"kind": "probe", "name": "gsd-test-command-seeded", "cmd": "test -s .planning/gsd-test-command"}
+  {"kind": "probe", "name": "bats-present", "argv": ["which", "bats"]},
+  {"kind": "probe", "name": "shellcheck-present", "argv": ["which", "shellcheck"]},
+  {"kind": "probe", "name": "jq-present", "argv": ["which", "jq"]},
+  {"kind": "probe", "name": "python3-pytest", "argv": ["python3", "-m", "pytest", "--version"]},
+  {"kind": "probe", "name": "codex-cli-present", "argv": ["which", "codex"]},
+  {"kind": "probe", "name": "gh-authed", "argv": ["gh", "auth", "status"]},
+  {"kind": "probe", "name": "gsd-core-tools", "argv": ["test", "-f", "node_modules/.bin/gsd-tools"]},
+  {"kind": "probe", "name": "suite-baseline-green", "argv": ["python3", "-m", "pytest", "-q"]},
+  {"kind": "probe", "name": "gsd-test-command-seeded", "argv": ["test", "-s", ".planning/gsd-test-command"]}
 ]

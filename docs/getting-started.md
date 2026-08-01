@@ -4,8 +4,6 @@ By the end of this you'll have feature-fix-swarm installed and one real task
 shipped through it, with per-phase QA and a cross-model review gate on the
 way out.
 
-Budget about 20 minutes, most of it install.
-
 ## What you'll need
 
 - A git repo you're willing to land a small change in
@@ -19,6 +17,7 @@ Budget about 20 minutes, most of it install.
 ```bash
 git clone https://github.com/austinmao/feature-fix-swarm.git
 cd feature-fix-swarm
+npm ci
 bash setup.sh --scope user
 ```
 
@@ -118,8 +117,8 @@ Where to go next:
 - [Choosing a command](choosing-a-command.md) — `/task-swarm` was the
   training-wheels choice. Learn when you want `/feature-spec` or `/fix`
   instead
-- [Model tiers](model-tiers.md) — why the planner ran on fable and the
-  reviewer on opus
+- [Model tiers](model-tiers.md) — why planning and review use the judgment
+  tier while implementation normally uses the execution tier
 - [Configuration](configuration.md) — every knob you can turn
 
 ## Troubleshooting
@@ -140,8 +139,7 @@ that the opposite-host CLI is logged in.
 **Review says `DEGRADED`.** Only one host CLI available. Install the other
 (`npm install -g @openai/codex && codex login`) for true cross-vendor review.
 
-**Everything routes to opus and costs more than expected.** Either the
-security fence caught a keyword in your spec, or fable was unavailable and
-the fallback fired. Check for `.planning/fable-fallback.json` — if it exists,
-that's the fallback, and it self-restores when fable returns. See [Model
-tiers](model-tiers.md#when-fable-is-unavailable).
+**A role resolved to a different model than expected.** Check the persisted
+model request, effort, and adversary provenance before resuming. Tier fallback
+is recorded as degraded; an exact model request fails instead of silently
+substituting. See [Model tiers](model-tiers.md).

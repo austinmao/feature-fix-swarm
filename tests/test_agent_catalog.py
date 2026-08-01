@@ -59,10 +59,10 @@ def _read(relpath: str) -> str:
 # The gsd migration (spec-002, gsd replaces ruflo) moved the execution SKILLs
 # (feature-implement, spec-decompose) and docs/commands.md to gsd-native model
 # routing (`model_profiles` in config.json), so they no longer restate the
-# exact-agent catalog. The catalog itself is still live: it is defined in the
-# decompose prompt and pipeline doc and advertised in the README. GSD's upstream
-# installer now owns agent packs; the scoped FFS installer must not recreate
-# those third-party artifacts. These tests guard the surfaces that still own it.
+# exact-agent catalog. The catalog itself is still live in the decompose prompt
+# and pipeline doc, but third-party catalogs are optional integrations rather
+# than FFS-installed dependencies. GSD's upstream installer owns its own agent
+# packs; the scoped FFS installer must not recreate external artifacts.
 def test_hybrid_catalog_is_defined_in_the_decompose_prompt() -> None:
     prompt = _read("prompts/decompose-spec.md")
 
@@ -76,10 +76,12 @@ def test_hybrid_catalog_is_defined_in_the_decompose_prompt() -> None:
 def test_supporting_docs_and_scoped_installer_match_the_same_catalog() -> None:
     pipeline = _read("docs/pipeline.md")
     readme = _read("README.md")
+    dependencies = _read("docs/dependencies.md")
     installer = _read("lib/ffs_installer.py")
 
     assert "[agent:exact-agent]" in pipeline
-    assert "exact hybrid catalog" in readme
+    assert "External agent catalogs" in readme
+    assert "not installed or refreshed by FFS" in dependencies
     assert '"owner": "upstream-installer"' in installer
     assert '"--profile=full"' in installer
     assert "source_skills(source)" in installer

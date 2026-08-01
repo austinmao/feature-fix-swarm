@@ -1,4 +1,10 @@
 {
+  "name": "feature-fix-swarm",
+  "private": true,
+  "engines": {
+    "node": ">=22",
+    "npm": ">=10"
+  },
   "devDependencies": {
     "@opengsd/gsd-core": "1.9.1"
   }
