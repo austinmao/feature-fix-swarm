@@ -680,11 +680,7 @@ codex_source_root() {
 }
 
 codex_skill_root() {
-  if [ -f "$REPO_ROOT/.agents/skills/$GSD_SKILL_NAME/SKILL.md" ]; then
-    printf '%s\n' "$REPO_ROOT/.agents/skills"
-  else
-    printf '%s\n' "$USER_AGENTS_ROOT_FIXED/skills"
-  fi
+  printf '%s\n' "$USER_AGENTS_ROOT_FIXED/skills"
 }
 
 trusted_gsd_package_root() {
@@ -767,10 +763,16 @@ reject_custom_codex_provider() {
 }
 
 command_surface_available() {
-  local kind="$1" root skill_root manifest
+  local kind="$1" root skill_root manifest project_skill
   if [ "$kind" = "codex" ]; then
     root="$(codex_source_root)"
     skill_root="$(codex_skill_root)"
+    for project_skill in "$REPO_ROOT"/.agents/skills/gsd-*; do
+      if [ -e "$project_skill" ] || [ -L "$project_skill" ]; then
+        echo "gsd-run: project-local GSD skill overrides are forbidden; remove $project_skill" >&2
+        return 78
+      fi
+    done
     if [ ! -f "$skill_root/$GSD_SKILL_NAME/SKILL.md" ]; then
       echo "gsd-run: exact $GSD_SKILL_NAME surface unavailable for Codex at $skill_root/$GSD_SKILL_NAME/SKILL.md" >&2
       return 78
@@ -785,6 +787,8 @@ command_surface_available() {
       echo "gsd-run: verified GSD Codex manifest unavailable at $manifest" >&2
       return 78
     fi
+    /usr/bin/python3 "$SCRIPT_DIR/stage-gsd-skills.py" verify \
+      "$manifest" "$skill_root" "$GSD_SKILL_NAME" || return $?
     reject_custom_codex_provider "$root" || return $?
   else
     root="${GSD_CLAUDE_SKILLS_ROOT:-$HOME/.claude/skills}"
@@ -796,26 +800,18 @@ command_surface_available() {
 }
 
 prepare_codex_runtime() {
-  local source_root skill_root source_skill auth_source network_bool writable_json root skill trusted_package node_bin auth_meta auth_uid auth_mode user_skill_root
+  local source_root skill_root auth_source network_bool writable_json trusted_package node_bin auth_meta auth_uid auth_mode
   source_root="$(codex_source_root)"
   skill_root="$(codex_skill_root)"
   command_surface_available codex || return $?
   CODEX_RUNTIME_HOME="$(mktemp -d "${TMPDIR:-/tmp}/ffs-gsd-codex.XXXXXX")" || return 1
   mkdir -p "$CODEX_RUNTIME_HOME/skills"
-  # Build one canonical merged GSD skill tree: user scope first, then project
-  # overrides. Never consult the retired CODEX_HOME/skills surface.
-  user_skill_root="$USER_AGENTS_ROOT_FIXED/skills"
-  for root in "$user_skill_root" "$REPO_ROOT/.agents/skills"; do
-    [ -d "$root" ] || continue
-    for skill in "$root"/gsd-*; do
-      [ -d "$skill" ] || continue
-      rm -rf "$CODEX_RUNTIME_HOME/skills/$(basename "$skill")"
-      cp -RL "$skill" "$CODEX_RUNTIME_HOME/skills/$(basename "$skill")" || return 1
-    done
-  done
-  source_skill="$skill_root/$GSD_SKILL_NAME"
-  rm -rf "$CODEX_RUNTIME_HOME/skills/$GSD_SKILL_NAME"
-  cp -RL "$source_skill" "$CODEX_RUNTIME_HOME/skills/$GSD_SKILL_NAME" || return 1
+  # The upstream installer owns GSD skills in the global `.agents` root and
+  # records their exact hashes in the Codex manifest. Project overrides and
+  # symlink-following copies are intentionally excluded from headless runs.
+  /usr/bin/python3 "$SCRIPT_DIR/stage-gsd-skills.py" stage \
+    "$source_root/gsd-file-manifest.json" "$skill_root" \
+    "$CODEX_RUNTIME_HOME/skills" "$GSD_SKILL_NAME" || return $?
   SKILL_HASH="$(sha256_tree "$CODEX_RUNTIME_HOME/skills")" || return 1
   trusted_package="$(trusted_gsd_package_root)" || return $?
   node_bin="$(trusted_node_bin)" || return $?

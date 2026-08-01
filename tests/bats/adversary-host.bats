@@ -94,6 +94,48 @@ EOF
   [ "$output" = "VERDICT: PASS" ]
 }
 
+@test "Codex adversary is data-only and strips provider credentials" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/data-only-codex" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/data-only.args"
+printf '%s|%s|%s|%s\n' \
+  "\${OPENAI_API_KEY-unset}" "\${OPENAI_BASE_URL-unset}" \
+  "\${OPENAI_API_BASE-unset}" "\${CODEX_MODEL_PROVIDER-unset}" \
+  > "$BATS_TEST_TMPDIR/data-only.env"
+last_message=""
+data_cwd=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o|--output-last-message) last_message="\$2"; shift 2 ;;
+    -C|--cd) data_cwd="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "\$data_cwd" > "$BATS_TEST_TMPDIR/data-only.cwd"
+cat >/dev/null
+printf 'VERDICT: PASS\n' > "\$last_message"
+EOF
+  chmod +x "$STUB_DIR/data-only-codex"
+
+  OPENAI_API_KEY=secret OPENAI_BASE_URL=https://proxy.invalid \
+    OPENAI_API_BASE=https://legacy.invalid CODEX_MODEL_PROVIDER=proxy \
+    ADVERSARY_BIN_CODEX=data-only-codex PATH="$STUB_DIR:$PATH" \
+    run bash -c ". '$LIB'; adversary_invoke codex 10 sol xhigh review"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/data-only.env")" = 'unset|unset|unset|unset' ]
+  for feature in shell_tool unified_exec code_mode code_mode_host apps browser_use computer_use js_repl multi_agent multi_agent_v2 image_generation; do
+    grep -Fqx -- "$feature" "$BATS_TEST_TMPDIR/data-only.args"
+  done
+  grep -Fqx -- '--sandbox' "$BATS_TEST_TMPDIR/data-only.args"
+  grep -Fqx -- 'read-only' "$BATS_TEST_TMPDIR/data-only.args"
+  grep -Fqx -- '--skip-git-repo-check' "$BATS_TEST_TMPDIR/data-only.args"
+  [[ "$(cat "$BATS_TEST_TMPDIR/data-only.cwd")" == */ffs-codex-data-only.* ]]
+  [ ! -e "$(cat "$BATS_TEST_TMPDIR/data-only.cwd")" ]
+}
+
 @test "review prompts stream on stdin instead of consuming one argv entry" {
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$STUB_DIR"
