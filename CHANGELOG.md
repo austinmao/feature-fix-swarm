@@ -6,6 +6,14 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v5.0.4 — Canonical symlinked backup sources (2026-08-01)
+
+### Fixed
+
+- Backup snapshots now support intentional symlinked configuration roots such
+  as `~/.claude` by resolving the source parent once and copying exclusively
+  through its pinned canonical directory descriptor.
+
 ## v5.0.3 — Canonical symlinked cache parents (2026-08-01)
 
 ### Fixed

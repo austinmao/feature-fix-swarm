@@ -805,6 +805,25 @@ def test_private_cache_supports_an_intentional_cache_parent_symlink(
     assert (backup.directory / "objects/0000").read_text() == "private payload\n"
 
 
+def test_backup_supports_an_intentional_source_parent_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    claude_target = tmp_path / "claude-target"
+    claude_target.mkdir()
+    (home / ".claude").symlink_to(claude_target, target_is_directory=True)
+    source = home / ".claude/config.json"
+    source.write_text('{"private":"payload"}\n')
+    backup = ffs_installer.Backup("install", "user")
+
+    backup.before(source)
+    backup.finish()
+
+    assert (backup.directory / "objects/0000").read_text() == source.read_text()
+
+
 def test_private_json_has_restrictive_mode_before_content_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
