@@ -675,8 +675,9 @@ class Backup:
             | getattr(os, "O_NOFOLLOW", 0)
         )
         try:
-            parent_fd = os.open(path.absolute().parent, flags)
-        except OSError as exc:
+            canonical_parent = path.absolute().parent.resolve(strict=True)
+            parent_fd = os.open(canonical_parent, flags)
+        except (OSError, RuntimeError) as exc:
             raise ActionableError(
                 f"backup source parent is unsafe: {path.parent}: {exc}"
             ) from exc
