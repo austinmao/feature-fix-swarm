@@ -1143,6 +1143,40 @@ PY
   [[ "$output" != *"typed model request helper is missing"* ]]
 }
 
+@test "consumer runner accepts an explicit absolute pinned GSD package root" {
+  OVERRIDE_SCRIPT="$BATS_TEST_TMPDIR/gsd-run-package-override.sh"
+  cp "$SCRIPT" "$OVERRIDE_SCRIPT"
+  python3 - "$OVERRIDE_SCRIPT" "$GSD_PACKAGE_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+package = sys.argv[2]
+text = path.read_text()
+old = f'GSD_PACKAGE_ROOT_FIXED="{package}"'
+if text.count(old) != 1:
+    raise SystemExit("runner fixture package root missing")
+path.write_text(text.replace(old, 'GSD_PACKAGE_ROOT_FIXED="/missing/consumer/node_modules/@opengsd/gsd-core"'))
+PY
+
+  FFS_HOST=codex FFS_GSD_PACKAGE_ROOT="$GSD_PACKAGE_ROOT" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$OVERRIDE_SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CODEX_OK"* ]]
+}
+
+@test "consumer runner rejects a relative explicit GSD package root" {
+  FFS_HOST=codex FFS_GSD_PACKAGE_ROOT="relative/package" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"must be an absolute path"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
 @test "typed exact Codex request drives only the exact model" {
   FFS_HOST=claude GSD_MODEL_REQUEST='{"kind":"exact","id":"gpt-5.6-sol"}' \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \

@@ -684,10 +684,21 @@ codex_skill_root() {
 }
 
 trusted_gsd_package_root() {
-  local candidate
-  candidate="$GSD_PACKAGE_ROOT_FIXED"
-  if [ ! -f "$candidate/package.json" ]; then
-    candidate="$GSD_PACKAGE_FALLBACK_FIXED"
+  local candidate override
+  override="${FFS_GSD_PACKAGE_ROOT:-}"
+  if [ -n "$override" ]; then
+    case "$override" in
+      /*) candidate="$override" ;;
+      *)
+        echo "gsd-run: FFS_GSD_PACKAGE_ROOT must be an absolute path" >&2
+        return 78
+        ;;
+    esac
+  else
+    candidate="$GSD_PACKAGE_ROOT_FIXED"
+    if [ ! -f "$candidate/package.json" ]; then
+      candidate="$GSD_PACKAGE_FALLBACK_FIXED"
+    fi
   fi
   if [ ! -f "$candidate/package.json" ]; then
     echo "gsd-run: pinned @opengsd/gsd-core package unavailable for hook verification: $candidate" >&2
