@@ -42,6 +42,7 @@ DANGER_GRANT_STORE_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/danger-grants
 AUTH_LOCK_DIR_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/codex-auth.lock"
 FFS_USER_MANIFEST_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/install-manifest.json"
 AUTH_LOCK_ATTEMPTS_FIXED=100
+TRUSTED_NODE_BIN_FIXED=""
 
 # A linked worktree has its own git-dir but shares one common directory with
 # the primary checkout. Runner ownership and resume state live under that
@@ -701,7 +702,8 @@ trusted_gsd_package_root() {
 
 trusted_node_bin() {
   local candidate real metadata owner mode
-  for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+  for candidate in "$TRUSTED_NODE_BIN_FIXED" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+    [ -n "$candidate" ] || continue
     [ -x "$candidate" ] || continue
     real="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate")" || continue
     [ -x "$real" ] || continue

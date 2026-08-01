@@ -66,7 +66,8 @@ events = {
 data = {"hooks": {event: [{"hooks": [{"type": "command", "command": f'{node} "{hooks}/{target}"'}]}] for event, target in events.items()}}
 open(path, "w").write(json.dumps(data))
 PY
-  python3 - "$SCRIPT" "$CODEX_SOURCE_ROOT" "$USER_AGENTS_ROOT" "$GSD_PACKAGE_ROOT" "$TRUSTED_GRANT_DIR/danger-grants.json" "$BATS_TEST_TMPDIR/auth.lock" <<'PY'
+  TRUSTED_NODE="$(command -v node)"
+  python3 - "$SCRIPT" "$CODEX_SOURCE_ROOT" "$USER_AGENTS_ROOT" "$GSD_PACKAGE_ROOT" "$TRUSTED_GRANT_DIR/danger-grants.json" "$BATS_TEST_TMPDIR/auth.lock" "$TRUSTED_NODE" <<'PY'
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
@@ -77,6 +78,7 @@ replacements = {
     'GSD_PACKAGE_ROOT_FIXED="$SCRIPT_DIR/../../node_modules/@opengsd/gsd-core"': f'GSD_PACKAGE_ROOT_FIXED="{sys.argv[4]}"',
     'DANGER_GRANT_STORE_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/danger-grants.json"': f'DANGER_GRANT_STORE_FIXED="{sys.argv[5]}"',
     'AUTH_LOCK_DIR_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/codex-auth.lock"': f'AUTH_LOCK_DIR_FIXED="{sys.argv[6]}"',
+    'TRUSTED_NODE_BIN_FIXED=""': f'TRUSTED_NODE_BIN_FIXED="{sys.argv[7]}"',
     'FFS_USER_MANIFEST_FIXED="$REAL_USER_HOME/.cache/feature-fix-swarm/install-manifest.json"': f'FFS_USER_MANIFEST_FIXED="{sys.argv[3]}/install-manifest.json"',
 }
 for old, new in replacements.items():

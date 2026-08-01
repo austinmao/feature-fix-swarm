@@ -227,20 +227,30 @@ def test_unrelated_codex_skill_is_outside_ffs_migration_scope(tmp_path: Path) ->
     assert unrelated.read_text() == "private\n"
 
 
-def test_unmanifested_v413_legacy_copy_is_recognized_by_catalog(tmp_path: Path) -> None:
+def test_unmanifested_v413_legacy_copy_is_recognized_by_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
     legacy = home / ".codex/skills/feature-implement/SKILL.md"
     legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(
-        subprocess.check_output(
-            ["git", "show", "b748d64289f237921a56176821fed9cb9700f4aa:skills/feature-implement/SKILL.md"],
-            cwd=ROOT,
-        )
+    legacy.write_text("hermetic stand-in for the v4.13.0 skill\n")
+    historical_hash = "215e6f6355208ecac78280f92780bec64c25b60b78162fdbec8e42fa9731188e"
+    known = ffs_installer.known_legacy_hashes(ROOT)
+    assert historical_hash in known["skills/feature-implement/SKILL.md"]
+    real_sha256 = ffs_installer.sha256_file
+    monkeypatch.setattr(
+        ffs_installer,
+        "sha256_file",
+        lambda path: historical_hash if Path(path) == legacy else real_sha256(Path(path)),
     )
 
-    result = run_setup(tmp_path, "--scope", "user")
+    backup = ffs_installer.Backup("test-migration", "user")
+    preserved = ffs_installer.migrate_legacy(
+        ROOT, [home / ".codex/skills"], backup
+    )
 
-    assert result.returncode == 0, result.stderr
+    assert preserved == []
     assert not legacy.exists()
 
 
