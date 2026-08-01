@@ -51,7 +51,9 @@ EOF
   cp "$CODEX_SOURCE_ROOT/hooks/managed-hooks-registry.cjs" "$GSD_PACKAGE_ROOT/hooks/dist/managed-hooks-registry.cjs"
   printf '%s\n' 'module.exports = true;' > "$GSD_PACKAGE_ROOT/hooks/sibling/dependency.js"
   printf '%s\n' '{"name":"@opengsd/gsd-core","version":"1.9.1"}' > "$GSD_PACKAGE_ROOT/package.json"
-  SAFE_NODE="$(for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do [ -x "$candidate" ] && python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate" && break; done)"
+  NODE_ON_PATH="$(command -v node)"
+  [ -x "$NODE_ON_PATH" ]
+  SAFE_NODE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$NODE_ON_PATH")"
   python3 - "$CODEX_SOURCE_ROOT/hooks.json" "$CODEX_SOURCE_ROOT/hooks" "$SAFE_NODE" <<'PY'
 import json, sys
 path, hooks, node = sys.argv[1:]
@@ -66,7 +68,7 @@ events = {
 data = {"hooks": {event: [{"hooks": [{"type": "command", "command": f'{node} "{hooks}/{target}"'}]}] for event, target in events.items()}}
 open(path, "w").write(json.dumps(data))
 PY
-  TRUSTED_NODE="$(command -v node)"
+  TRUSTED_NODE="$SAFE_NODE"
   python3 - "$SCRIPT" "$CODEX_SOURCE_ROOT" "$USER_AGENTS_ROOT" "$GSD_PACKAGE_ROOT" "$TRUSTED_GRANT_DIR/danger-grants.json" "$BATS_TEST_TMPDIR/auth.lock" "$TRUSTED_NODE" <<'PY'
 from pathlib import Path
 import sys
