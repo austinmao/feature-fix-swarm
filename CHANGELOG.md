@@ -6,6 +6,26 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v5.0.1 — Deterministic consumer reconciliation (2026-08-01)
+
+### Fixed
+
+- Project manifests now preserve `installed_at` on same-release reinstalls and
+  record vendored sources relative to the project, so committed installs are
+  portable and idempotent under CI verification.
+- `--reconcile-consumer` now copies the complete drift-checked shell/Python
+  runtime surface while preserving consumer files named in the local fork
+  allowlist. Reconciliation now rejects symlinked destinations and performs
+  no-follow, directory-relative atomic replacements.
+- Installer cache and backup payloads now use private directory/file modes.
+- Codex adversary reviews run without execution-capable tools or ambient API
+  provider overrides, and isolated runs accept GSD skills only when their
+  global installation matches the upstream manifest hashes.
+- Nested `prompt-master` patch markers are classified as patch syntax rather
+  than source whitespace by Git's diff hygiene checks.
+- `model-fallback.sh` no longer uses the here-doc command-substitution quoting
+  form that macOS Bash 3.2 accepted in syntax checks but rejected at runtime.
+
 ## v5.0.0 — Codex/GPT-5.6 modernization (2026-08-01)
 
 ### Added

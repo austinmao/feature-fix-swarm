@@ -94,6 +94,66 @@ def copy_path(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def secure_backup_object(path: Path) -> None:
+    """Make copied backup payloads private without following stored symlinks."""
+    if path.is_symlink():
+        return
+    if path.is_file():
+        path.chmod(0o600)
+        return
+    if not path.is_dir():
+        return
+    path.chmod(0o700)
+    for directory, names, files in os.walk(path, followlinks=False):
+        current = Path(directory)
+        if not current.is_symlink():
+            current.chmod(0o700)
+        for name in names:
+            child = current / name
+            if not child.is_symlink():
+                child.chmod(0o700)
+        for name in files:
+            child = current / name
+            if not child.is_symlink() and child.is_file():
+                child.chmod(0o600)
+
+
+def capture_modes(path: Path) -> dict[str, str]:
+    """Record regular file/directory modes without dereferencing symlinks."""
+    modes: dict[str, str] = {}
+    if path.is_symlink():
+        return modes
+    if path.is_file() or path.is_dir():
+        modes[""] = f"{stat.S_IMODE(path.stat().st_mode):04o}"
+    if path.is_dir():
+        for child in path.rglob("*"):
+            if child.is_symlink():
+                continue
+            if child.is_file() or child.is_dir():
+                modes[child.relative_to(path).as_posix()] = (
+                    f"{stat.S_IMODE(child.stat().st_mode):04o}"
+                )
+    return modes
+
+
+def restore_modes(path: Path, modes: dict[str, str] | None, root_mode: str | None) -> None:
+    """Restore recorded modes after copying a private backup payload."""
+    recorded = dict(modes or {})
+    if not recorded and root_mode:
+        recorded[""] = root_mode
+    # Children first leaves the root traversable until restoration is complete.
+    for relative, rendered in sorted(
+        recorded.items(), key=lambda item: len(Path(item[0]).parts), reverse=True
+    ):
+        destination = path if not relative else path / relative
+        if destination.is_symlink() or not lexists(destination):
+            continue
+        try:
+            destination.chmod(int(rendered, 8))
+        except (OSError, ValueError) as exc:
+            raise ActionableError(f"could not restore mode for {destination}: {exc}") from exc
+
+
 def read_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -121,7 +181,12 @@ def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o644) -> None:
 
 
 def cache_root() -> Path:
-    return Path.home() / ".cache" / "feature-fix-swarm"
+    root = Path.home() / ".cache" / "feature-fix-swarm"
+    if lexists(root) and (root.is_symlink() or not root.is_dir()):
+        raise ActionableError(f"private cache root is not a regular directory: {root}")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    return root
 
 
 def project_lock_path(project: Path) -> Path:
@@ -155,8 +220,14 @@ class Backup:
     def __init__(self, operation: str, scope: str, project: Path | None = None) -> None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.backup_id = f"{stamp}-{os.getpid()}-{secrets.token_hex(3)}"
-        self.directory = cache_root() / "backups" / self.backup_id
-        self.directory.mkdir(parents=True, exist_ok=False)
+        backups = cache_root() / "backups"
+        if lexists(backups) and (backups.is_symlink() or not backups.is_dir()):
+            raise ActionableError(f"private backup root is not a regular directory: {backups}")
+        backups.mkdir(mode=0o700, exist_ok=True)
+        backups.chmod(0o700)
+        self.directory = backups / self.backup_id
+        self.directory.mkdir(mode=0o700, exist_ok=False)
+        self.directory.chmod(0o700)
         self.entries: list[dict[str, Any]] = []
         self.seen: set[str] = set()
         self.operation = operation
@@ -182,8 +253,12 @@ class Backup:
                 entry["sha256"] = sha256_file(path)
             else:
                 entry["type"] = "other"
+            entry["modes"] = capture_modes(path)
             backup_rel = f"objects/{len(self.entries):04d}"
-            copy_path(path, self.directory / backup_rel)
+            backup_path = self.directory / backup_rel
+            copy_path(path, backup_path)
+            backup_path.parent.chmod(0o700)
+            secure_backup_object(backup_path)
             entry["backup"] = backup_rel
         self.entries.append(entry)
 
@@ -221,6 +296,7 @@ class Backup:
             backup_rel = entry.get("backup")
             if backup_rel:
                 copy_path(self.directory / backup_rel, destination)
+                restore_modes(destination, entry.get("modes"), entry.get("mode"))
 
 
 def source_version(source: Path) -> str:
@@ -233,6 +309,16 @@ def source_version(source: Path) -> str:
         if match:
             return match.group(1)
     return "0.0.0-dev"
+
+
+def manifest_source(source: Path, scope: str, project: Path | None) -> str:
+    rendered = str(source)
+    if scope == "project" and project is not None:
+        try:
+            rendered = source.resolve().relative_to(project.resolve()).as_posix()
+        except ValueError:
+            pass
+    return rendered
 
 
 def source_skills(source: Path) -> dict[str, Path]:
@@ -260,6 +346,65 @@ def safe_project_destination(project: Path, key: str | Path) -> Path:
                 f"project install path has a symlinked ancestor: {current}"
             )
     return destination
+
+
+def atomic_copy_inside(root: Path, relative: str | Path, source: Path) -> None:
+    """Atomically replace a regular file beneath root without following links."""
+    key = Path(relative)
+    if key.is_absolute() or not key.parts or ".." in key.parts:
+        raise ActionableError(f"unsafe consumer path: {relative}")
+    if source.is_symlink() or not source.is_file():
+        raise ActionableError(f"consumer source is not a regular file: {source}")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(root, directory_flags)
+    directory_fd = root_fd
+    temporary = f".{key.name}.ffs-{os.getpid()}-{secrets.token_hex(4)}"
+    try:
+        for part in key.parts[:-1]:
+            try:
+                os.mkdir(part, 0o755, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            if directory_fd != root_fd:
+                os.close(directory_fd)
+            directory_fd = next_fd
+
+        try:
+            existing = os.stat(key.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise ActionableError(f"consumer destination is not a regular file: {root / key}")
+
+        source_mode = stat.S_IMODE(source.stat().st_mode) | 0o111
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        output_fd = os.open(temporary, flags, source_mode, dir_fd=directory_fd)
+        try:
+            with source.open("rb") as input_handle, os.fdopen(output_fd, "wb") as output_handle:
+                shutil.copyfileobj(input_handle, output_handle)
+                output_handle.flush()
+                os.fsync(output_handle.fileno())
+                os.fchmod(output_handle.fileno(), source_mode)
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        os.rename(
+            temporary,
+            key.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        raise ActionableError(f"unsafe consumer destination {root / key}: {exc}") from exc
+    finally:
+        if directory_fd != root_fd:
+            os.close(directory_fd)
+        os.close(root_fd)
 
 
 def manifest_path(scope: str, project: Path | None) -> Path:
@@ -571,6 +716,7 @@ def install_gsd_with_rollback(source: Path, backup: Backup) -> None:
 
 def install(source: Path, scope: str, project: Path | None) -> int:
     skills = source_skills(source)
+    release_version = source_version(source)
     destination_manifest = manifest_path(scope, project)
     previous = read_json(destination_manifest)
     managed = managed_fingerprints(previous, scope, project)
@@ -661,15 +807,25 @@ def install(source: Path, scope: str, project: Path | None) -> int:
         paths: dict[str, dict[str, str]] = {}
         for path, _, _ in planned:
             paths[manifest_key(path, scope, project)] = {"fingerprint": fingerprint(path)}
+        installed_at = datetime.now(timezone.utc).isoformat()
+        if (
+            previous
+            and previous.get("schema") == INSTALL_SCHEMA
+            and previous.get("scope") == scope
+            and previous.get("version") == release_version
+            and isinstance(previous.get("installed_at"), str)
+        ):
+            installed_at = previous["installed_at"]
+        rendered_source = manifest_source(source, scope, project)
         backup.before(destination_manifest)
         atomic_json(
             destination_manifest,
             {
                 "schema": INSTALL_SCHEMA,
-                "version": source_version(source),
+                "version": release_version,
                 "scope": scope,
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-                "source": str(source),
+                "installed_at": installed_at,
+                "source": rendered_source,
                 "paths": paths,
                 "gsd": {
                     "owner": "upstream-installer",
@@ -753,6 +909,7 @@ def rollback(backup_id: str) -> int:
             backup_rel = entry.get("backup")
             if backup_rel:
                 copy_path(directory / backup_rel, destination)
+                restore_modes(destination, entry.get("modes"), entry.get("mode"))
         if conflicts:
             for destination in conflicts:
                 print(f"preserved path changed since backup: {destination}", file=sys.stderr)
@@ -950,32 +1107,46 @@ def doctor(scope: str, project: Path | None, as_json: bool) -> int:
 
 
 def reconcile_consumer(source: Path, target: Path) -> int:
-    if not target.is_dir():
+    if target.is_symlink() or not target.is_dir():
         raise InvocationError(f"reconciliation target is not a directory: {target}")
-    relative_files = [
-        "scripts/gsd/gsd-run.sh",
-        "scripts/gsd/requirement-ownership-gate.sh",
-        "scripts/gsd/adversary-host.sh",
-        "scripts/gsd/run-bounded.sh",
-        "scripts/gsd/model-equivalents.sh",
-        "scripts/gsd/codex-model-sync.sh",
-        "scripts/gsd/codex-runtime-bundle.py",
-        "scripts/gsd/consume-danger-grant.py",
-"scripts/gsd/hash-ffs-skills.py",
-"scripts/gsd/sanitize-codex-config.py",
-"scripts/gsd/sync-codex-auth.py",
-        "scripts/gsd/review-gate-command.sh",
+    target = target.resolve()
+    packaged_gsd = source / "scripts" / "gsd"
+    fork_allowlist = safe_project_destination(
+        target, Path("scripts") / "gsd" / "fork-allowlist.txt"
+    )
+    preserved_forks: set[str] = set()
+    if fork_allowlist.is_symlink():
+        raise ActionableError(f"consumer fork allowlist must not be a symlink: {fork_allowlist}")
+    if fork_allowlist.is_file():
+        for line in fork_allowlist.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                preserved_forks.add(stripped.split(maxsplit=1)[0])
+    relative_files: list[str] = []
+    for path in sorted(packaged_gsd.iterdir()):
+        if path.is_symlink() or not path.is_file() or path.suffix not in {".sh", ".py"}:
+            continue
+        relative = path.relative_to(source)
+        target_file = safe_project_destination(target, relative)
+        if target_file.is_symlink():
+            raise ActionableError(f"consumer destination must not be a symlink: {target_file}")
+        if path.name in preserved_forks and target_file.exists():
+            if not target_file.is_file():
+                raise ActionableError(f"declared consumer fork is not a regular file: {target_file}")
+            continue
+        relative_files.append(str(relative))
+    relative_files += [
         "scripts/hooks/cli-hang-guard.sh",
         "scripts/hooks/credential-output-guard.sh",
         "lib/model_requests.py",
     ]
     for relative in relative_files:
         source_file = source / relative
-        target_file = target / relative
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        if source_file.absolute() != target_file.absolute():
-            shutil.copy2(source_file, target_file)
-        target_file.chmod(target_file.stat().st_mode | 0o111)
+        target_file = safe_project_destination(target, relative)
+        if target_file.is_symlink():
+            raise ActionableError(f"consumer destination must not be a symlink: {target_file}")
+        if source_file.resolve() != target_file.resolve():
+            atomic_copy_inside(target, relative, source_file)
     print("consumer_runtime=reconciled")
     return 0
 

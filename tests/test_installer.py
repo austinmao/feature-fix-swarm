@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
@@ -71,6 +72,66 @@ def test_project_install_uses_portable_relative_links_and_never_codex(tmp_path: 
     manifest = json.loads((project / ".feature-fix-swarm/install-manifest.json").read_text())
     assert manifest["schema"] == "ffs.install/v1"
     assert manifest["scope"] == "project"
+
+
+def test_same_release_project_reinstall_preserves_manifest_bytes(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    first = run_setup(tmp_path, "--scope", "project", "--project-dir", str(project))
+    manifest_path = project / ".feature-fix-swarm/install-manifest.json"
+    before = manifest_path.read_bytes()
+
+    second = run_setup(tmp_path, "--scope", "project", "--project-dir", str(project))
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert manifest_path.read_bytes() == before
+
+
+def test_project_manifest_source_is_relative_when_vendored(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "packages/feature-fix-swarm"
+    assert ffs_installer.manifest_source(source, "project", project) == "packages/feature-fix-swarm"
+    assert ffs_installer.manifest_source(source, "user", None) == str(source)
+
+
+def test_backup_payloads_are_private_even_with_permissive_source_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    source = tmp_path / "config"
+    source.mkdir(mode=0o755)
+    secret = source / "auth.json"
+    secret.write_text('{"token":"redacted"}\n')
+    nested = source / "private"
+    nested.mkdir(mode=0o711)
+    nested_file = nested / "token"
+    nested_file.write_text("redacted\n")
+    source.chmod(0o755)
+    secret.chmod(0o644)
+    nested.chmod(0o711)
+    nested_file.chmod(0o640)
+
+    backup = ffs_installer.Backup("test-private", "user")
+    backup.before(source)
+    backup.finish()
+
+    assert stat.S_IMODE((home / ".cache/feature-fix-swarm").stat().st_mode) == 0o700
+    assert stat.S_IMODE(backup.directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE((backup.directory / "objects").stat().st_mode) == 0o700
+    copied_root = backup.directory / "objects/0000"
+    assert stat.S_IMODE(copied_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((copied_root / "auth.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((copied_root / "private").stat().st_mode) == 0o700
+    assert stat.S_IMODE((copied_root / "private/token").stat().st_mode) == 0o600
+    assert stat.S_IMODE((backup.directory / "manifest.json").stat().st_mode) == 0o600
+
+    assert ffs_installer.rollback(backup.backup_id) == 0
+    assert stat.S_IMODE(source.stat().st_mode) == 0o755
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o644
+    assert stat.S_IMODE(nested.stat().st_mode) == 0o711
+    assert stat.S_IMODE(nested_file.stat().st_mode) == 0o640
 
 
 def test_user_install_copies_identical_hash_managed_skills(tmp_path: Path) -> None:

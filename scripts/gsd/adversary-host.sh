@@ -205,7 +205,7 @@ adversary_model_ladder() {
 adversary_invoke() {
   local kind="$1" timeout_s="$2" model="$3" effort="$4" prompt="$5"
   if [ "$kind" = "codex" ]; then
-    local bin="${ADVERSARY_BIN_CODEX:-codex}" last_message transcript rc
+    local bin="${ADVERSARY_BIN_CODEX:-codex}" last_message transcript data_dir rc
     if ! command -v "$bin" >/dev/null 2>&1; then
       return 127
     fi
@@ -214,9 +214,27 @@ adversary_invoke() {
       rm -f "$last_message"
       return 1
     }
-    printf '%s' "$prompt" | run_bounded "$timeout_s" "$bin" exec \
+    data_dir="$(mktemp -d "${TMPDIR:-/tmp}/ffs-codex-data-only.XXXXXX")" || {
+      rm -f "$last_message" "$transcript"
+      return 1
+    }
+    # Codex has no Claude-style `--tools ''` flag. Disable every built-in
+    # agentic tool family supported by the pinned CLI, run from a disposable
+    # empty directory, and retain the read-only sandbox as defense in depth.
+    # Provider overrides are stripped so an adversarial review cannot switch
+    # away from first-party subscription auth or inherit a metered API key.
+    printf '%s' "$prompt" | run_bounded "$timeout_s" /usr/bin/env \
+      -u OPENAI_API_KEY -u OPENAI_BASE_URL -u OPENAI_API_BASE \
+      -u CODEX_MODEL_PROVIDER \
+      "$bin" exec \
       -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
       --sandbox read-only --ephemeral --ignore-user-config --ignore-rules \
+      --disable shell_tool --disable unified_exec \
+      --disable code_mode --disable code_mode_host \
+      --disable apps --disable browser_use --disable computer_use \
+      --disable js_repl --disable multi_agent --disable multi_agent_v2 \
+      --disable image_generation \
+      -C "$data_dir" --skip-git-repo-check \
       --color never --output-last-message "$last_message" \
       - >"$transcript" 2>&1
     rc="${PIPESTATUS[1]}"
@@ -232,6 +250,7 @@ adversary_invoke() {
       cat "$transcript" >&2
     fi
     rm -f "$last_message" "$transcript"
+    rm -rf "$data_dir"
     return "$rc"
   else
     local bin="${ADVERSARY_BIN_CLAUDE:-claude}"

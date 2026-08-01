@@ -159,7 +159,11 @@ fi
 
 if probe_claude_model "$FABLE"; then
   if [ -f "$MARKER" ]; then
-    RESULT="$(MARKER="$MARKER" CONFIG="$CONFIG" python3 - <<'EOF'
+    # Do not wrap a here-doc command substitution in an outer double quote.
+    # macOS Bash 3.2 misparses the nested Python quotes at execution time even
+    # though `bash -n` accepts the file. Assignment context already suppresses
+    # word splitting and pathname expansion.
+    RESULT=$(MARKER="$MARKER" CONFIG="$CONFIG" python3 - <<'EOF'
 import json, os, sys
 marker_path = os.environ["MARKER"]; config_path = os.environ["CONFIG"]
 
@@ -300,7 +304,7 @@ else:
     os.remove(marker_path)
     print(f"restored {restored} path(s) — marker deleted")
 EOF
-)"
+)
     echo "[model-fallback] $FABLE available — $RESULT"
   else
     echo "[model-fallback] $FABLE available — config unchanged"
@@ -320,7 +324,7 @@ else
   MODE="opus-only"
 fi
 
-RESULT="$(FABLE="$FABLE" OPUS="$OPUS" CONFIG="$CONFIG" MARKER="$MARKER" MODE="$MODE" python3 - <<'EOF'
+RESULT=$(FABLE="$FABLE" OPUS="$OPUS" CONFIG="$CONFIG" MARKER="$MARKER" MODE="$MODE" python3 - <<'EOF'
 import json, os, sys
 config_path = os.environ["CONFIG"]; fable = os.environ["FABLE"]; opus = os.environ["OPUS"]
 marker_path = os.environ["MARKER"]; mode = os.environ["MODE"]
@@ -432,7 +436,7 @@ atomic_write(marker_path, {"mode": mode, "paths": paths, "installed": installed}
 atomic_write(config_path, cfg)
 print(f"{fable} UNAVAILABLE -> {opus} ({rewritten} override(s) rewritten){warn}")
 EOF
-)"
+)
 echo "[model-fallback] $RESULT"
 if [ -f "$MARKER" ]; then
   echo "[model-fallback] fallback mode: $MODE (marker: $MARKER)"

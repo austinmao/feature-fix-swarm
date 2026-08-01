@@ -23,14 +23,12 @@ setup() {
   git -C "$BATS_TEST_TMPDIR" add seed
   git -C "$BATS_TEST_TMPDIR" commit -qm seed
   mkdir -p "$STUB_DIR" \
-    "$PROJECT_AGENTS_ROOT/skills/gsd-quick" "$USER_AGENTS_ROOT/skills" \
+    "$PROJECT_AGENTS_ROOT/skills" "$USER_AGENTS_ROOT/skills/gsd-quick" \
     "$CODEX_SOURCE_ROOT/agents" "$CODEX_SOURCE_ROOT/gsd-core" \
     "$CODEX_SOURCE_ROOT/hooks" \
     "$GSD_PACKAGE_ROOT/hooks/dist" "$GSD_PACKAGE_ROOT/hooks/sibling" "$TRUSTED_GRANT_DIR" \
     "$CLAUDE_SKILLS_ROOT/gsd-quick"
-  printf '%s\n' '---' 'name: gsd-quick' '---' > "$PROJECT_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
-  mkdir -p "$USER_AGENTS_ROOT/skills/gsd-quick"
-  cp "$PROJECT_AGENTS_ROOT/skills/gsd-quick/SKILL.md" "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
+  printf '%s\n' '---' 'name: gsd-quick' '---' > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
   printf '%s\n' 'name = "gsd-executor"' 'model = "sonnet"' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml"
   printf '%s\n' '# executor' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.md"
   printf '%s\n' '1.9.1' > "$CODEX_SOURCE_ROOT/gsd-core/VERSION"
@@ -106,8 +104,9 @@ EOF
   agent_toml_hash="$(shasum -a 256 "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml" | awk '{print $1}')"
   agent_md_hash="$(shasum -a 256 "$CODEX_SOURCE_ROOT/agents/gsd-executor.md" | awk '{print $1}')"
   version_hash="$(shasum -a 256 "$CODEX_SOURCE_ROOT/gsd-core/VERSION" | awk '{print $1}')"
+  quick_skill_hash="$(shasum -a 256 "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md" | awk '{print $1}')"
   cat > "$CODEX_SOURCE_ROOT/gsd-file-manifest.json" <<EOF
-{"version":"1.9.1","files":{"agents/gsd-executor.toml":"$agent_toml_hash","agents/gsd-executor.md":"$agent_md_hash","gsd-core/VERSION":"$version_hash"}}
+{"version":"1.9.1","files":{"agents/gsd-executor.toml":"$agent_toml_hash","agents/gsd-executor.md":"$agent_md_hash","gsd-core/VERSION":"$version_hash","skills/gsd-quick/SKILL.md":"$quick_skill_hash"}}
 EOF
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$CLAUDE_SKILLS_ROOT/gsd-quick/SKILL.md"
 
@@ -176,6 +175,20 @@ EOF
 
 teardown() {
   :
+}
+
+refresh_gsd_skill_manifest() {
+  python3 - "$CODEX_SOURCE_ROOT/gsd-file-manifest.json" "$USER_AGENTS_ROOT/skills" <<'PY'
+import hashlib, json, pathlib, sys
+manifest, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+data = json.loads(manifest.read_text())
+for key in list(data["files"]):
+    if key.startswith("skills/gsd-"):
+        del data["files"][key]
+for skill in sorted(root.glob("gsd-*/SKILL.md")):
+    data["files"][f"skills/{skill.parent.name}/SKILL.md"] = hashlib.sha256(skill.read_bytes()).hexdigest()
+manifest.write_text(json.dumps(data))
+PY
 }
 
 @test "Codex host runs Codex with the Sonnet-equivalent Terra lead" {
@@ -646,6 +659,7 @@ EOF
   printf '%s\n' 'name = "unrelated"' > "$REPO/.codex/agents/unrelated.toml"
   printf '%s\n' '---' 'name: gsd-quick' 'marker: global-surface' '---' \
     > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
+  refresh_gsd_skill_manifest
 
   FFS_HOST=codex CODEX_HOME="$GLOBAL" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
@@ -654,7 +668,7 @@ EOF
   grep -Fq 'marker: global-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
 }
 
-@test "project-local exact GSD skill and roles select the project Codex surface" {
+@test "project-local GSD skill override is rejected before probing" {
   REPO="$BATS_TEST_TMPDIR"
   GLOBAL="$CODEX_SOURCE_ROOT"
   mkdir -p "$REPO/.agents/skills/gsd-quick" "$USER_AGENTS_ROOT/skills/gsd-quick"
@@ -662,13 +676,43 @@ EOF
     > "$REPO/.agents/skills/gsd-quick/SKILL.md"
   printf '%s\n' '---' 'name: gsd-quick' 'marker: global-surface' '---' \
     > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
+  refresh_gsd_skill_manifest
 
-  FFS_HOST=codex CODEX_HOME="$GLOBAL" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  FFS_HOST=codex CODEX_HOME="$GLOBAL" GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
 
-  [ "$status" -eq 0 ]
-  grep -Fq 'marker: project-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
-  ! grep -Fq 'marker: global-surface' "$BATS_TEST_TMPDIR/codex.skill-content"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"project-local GSD skill overrides are forbidden"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "manifest hash mismatch in the global GSD skill fails before probing" {
+  printf '%s\n' tampered >> "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
+
+  FFS_HOST=codex GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GSD skill hash mismatch against installer manifest"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "symlinked global GSD skill is rejected before probing" {
+  mv "$USER_AGENTS_ROOT/skills/gsd-quick" "$USER_AGENTS_ROOT/skills/gsd-quick-real"
+  ln -s "$USER_AGENTS_ROOT/skills/gsd-quick-real" "$USER_AGENTS_ROOT/skills/gsd-quick"
+
+  FFS_HOST=codex GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must not be a symlink"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
 }
 
 @test "requirement ownership mismatch blocks execute-phase before any host probe" {
@@ -847,6 +891,7 @@ PY
   RUN_STATE="$BATS_TEST_TMPDIR/tuple-state"
   mkdir -p "$USER_AGENTS_ROOT/skills/gsd-other"
   printf '%s\n' '---' 'name: gsd-other' '---' > "$USER_AGENTS_ROOT/skills/gsd-other/SKILL.md"
+  refresh_gsd_skill_manifest
 
   FFS_HOST=codex GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=package-registry \
     GSD_RUN_STATE_DIR="$RUN_STATE" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
