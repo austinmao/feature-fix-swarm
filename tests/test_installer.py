@@ -785,6 +785,26 @@ def test_backup_creation_refuses_symlink_race_before_chmod(
     assert list(outside.iterdir()) == []
 
 
+def test_private_cache_supports_an_intentional_cache_parent_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    cache_target = tmp_path / "cache-target"
+    cache_target.mkdir()
+    (home / ".cache").symlink_to(cache_target, target_is_directory=True)
+    backup = ffs_installer.Backup("install", "user")
+    source = tmp_path / "source.txt"
+    source.write_text("private payload\n")
+
+    backup.before(source)
+    backup.finish()
+
+    assert backup.directory.resolve().is_relative_to(cache_target.resolve())
+    assert (backup.directory / "objects/0000").read_text() == "private payload\n"
+
+
 def test_private_json_has_restrictive_mode_before_content_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

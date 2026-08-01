@@ -301,7 +301,7 @@ def write_json_file(path: Path, value: dict[str, Any], mode: int = 0o644) -> Non
 def private_cache_root_fd() -> Iterator[tuple[int, Path]]:
     """Create/open the private cache root without following mutable links."""
     home = Path.home().absolute()
-    root = home / ".cache" / "feature-fix-swarm"
+    cache_link = home / ".cache"
     flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -314,11 +314,22 @@ def private_cache_root_fd() -> Iterator[tuple[int, Path]]:
     cache_fd: int | None = None
     root_fd: int | None = None
     try:
-        try:
-            os.mkdir(".cache", 0o700, dir_fd=home_fd)
-        except FileExistsError:
-            pass
-        cache_fd = os.open(".cache", flags, dir_fd=home_fd)
+        if cache_link.is_symlink():
+            try:
+                cache_path = cache_link.resolve(strict=True)
+            except OSError as exc:
+                raise ActionableError(
+                    f"private cache parent is unsafe: {cache_link}: {exc}"
+                ) from exc
+            cache_fd = os.open(cache_path, flags)
+        else:
+            try:
+                os.mkdir(".cache", 0o700, dir_fd=home_fd)
+            except FileExistsError:
+                pass
+            cache_fd = os.open(".cache", flags, dir_fd=home_fd)
+            cache_path = cache_link
+        root = cache_path / "feature-fix-swarm"
         try:
             os.mkdir("feature-fix-swarm", 0o700, dir_fd=cache_fd)
         except FileExistsError:
@@ -327,7 +338,9 @@ def private_cache_root_fd() -> Iterator[tuple[int, Path]]:
         os.fchmod(root_fd, 0o700)
         yield root_fd, root
     except OSError as exc:
-        raise ActionableError(f"private cache root is unsafe: {root}: {exc}") from exc
+        raise ActionableError(
+            f"private cache root is unsafe: {cache_link / 'feature-fix-swarm'}: {exc}"
+        ) from exc
     finally:
         if root_fd is not None:
             os.close(root_fd)

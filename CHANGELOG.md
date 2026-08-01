@@ -6,6 +6,14 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## v5.0.3 — Canonical symlinked cache parents (2026-08-01)
+
+### Fixed
+
+- Private backup setup now supports an intentional symlink at `~/.cache` by
+  resolving and opening its canonical directory once, while all
+  feature-fix-swarm descendants remain no-follow and descriptor-anchored.
+
 ## v5.0.2 — Fail-closed review and installer races (2026-08-01)
 
 ### Fixed
