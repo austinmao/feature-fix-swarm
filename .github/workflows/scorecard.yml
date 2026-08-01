@@ -14,7 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      actions: read
+      checks: read
+      contents: read
       id-token: write
+      issues: read
+      pull-requests: read
       security-events: write
     steps:
       - name: Checkout repository

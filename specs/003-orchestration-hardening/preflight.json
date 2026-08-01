@@ -6,6 +6,5 @@
   {"kind": "probe", "name": "codex-cli-present", "argv": ["which", "codex"]},
   {"kind": "probe", "name": "gh-authed", "argv": ["gh", "auth", "status"]},
   {"kind": "probe", "name": "gsd-core-tools", "argv": ["test", "-f", "node_modules/.bin/gsd-tools"]},
-  {"kind": "probe", "name": "suite-baseline-green", "argv": ["python3", "-m", "pytest", "-q"]},
-  {"kind": "probe", "name": "gsd-test-command-seeded", "argv": ["test", "-s", ".planning/gsd-test-command"]}
+  {"kind": "probe", "name": "suite-baseline-green", "argv": ["python3", "-m", "pytest", "-q"]}
 ]

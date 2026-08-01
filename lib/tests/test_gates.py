@@ -1009,6 +1009,7 @@ def test_shipped_preflight_manifest_uses_valid_probe_argv() -> None:
         assert isinstance(probe.get("argv"), list)
         assert probe["argv"]
         assert all(isinstance(arg, str) and arg and "\0" not in arg for arg in probe["argv"])
+        assert not any(arg == ".planning" or arg.startswith(".planning/") for arg in probe["argv"])
 
 
 def test_preflight_empty_requirements_fails(tmp_path) -> None:
