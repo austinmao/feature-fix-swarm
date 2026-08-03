@@ -80,6 +80,28 @@ if [ "$GSD_SKILL_NAME" = "gsd-execute-phase" ]; then
     exit 78
   fi
   bash "$OWNERSHIP_GATE" "$2" || exit $?
+  # spec-004 AC-005/INT-001: blocking per-phase plan review wall — every
+  # plan under this phase must clear before the executor spawns. PHASE_DIR
+  # resolution mirrors requirement-ownership-gate.sh's regex (^0*{N}-) so
+  # both levers agree on which directory owns phase "$2" (ownership gate
+  # already proved exactly one such directory exists, above).
+  PLAN_WALL_LEVER="$SCRIPT_DIR/plan-wall.sh"
+  if [ ! -f "$PLAN_WALL_LEVER" ]; then
+    echo "gsd-run: plan wall lever missing: $PLAN_WALL_LEVER" >&2
+    exit 78
+  fi
+  WALL_PHASE_DIR="$(/usr/bin/python3 - "$REPO_ROOT" "$2" <<'PY'
+import re, sys
+from pathlib import Path
+root, phase_number = sys.argv[1], int(sys.argv[2], 10)
+phases_root = Path(root) / ".planning" / "phases"
+dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^0*{phase_number}-", p.name))
+print(dirs[0] if dirs else "", end="")
+PY
+)"
+  if [ -n "$WALL_PHASE_DIR" ]; then
+    bash "$PLAN_WALL_LEVER" "$WALL_PHASE_DIR" || exit $?
+  fi
   # Advisory scope-drift re-anchor (once per phase start, never per turn):
   # deterministic diff-vs-declared-surface + PHASE GOAL line. Fail-soft.
   DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"

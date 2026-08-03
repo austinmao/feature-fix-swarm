@@ -153,6 +153,21 @@ an earlier invariant belongs in `must_haves`, not repeated requirement ownership
 The headless runner repeats this wall before its model probe so direct runner
 calls cannot bypass it.
 
+Immediately after the ownership gate clears, run the per-phase blocking plan
+review wall (spec-004 AC-005 — every `*-PLAN.md` / bare `PLAN.md` under phase
+N must clear a fresh adversarial review before execution starts):
+
+```bash
+PHASE_DIR="$(ls -d .planning/phases/*-* 2>/dev/null | grep -E "^\.planning/phases/0*${N}-" | head -1)"
+[ -n "$PHASE_DIR" ] && bash scripts/gsd/plan-wall.sh "$PHASE_DIR"
+```
+
+STOP on nonzero. `PLAN_WALL=off` skips ONLY with a durable waiver record
+(AC-008) — a skip that cannot write its waiver record fails closed. The
+headless runner (`gsd-run.sh`) invokes the SAME lever again at its own
+pre-execution seam (beside `requirement-ownership-gate.sh`), so a direct
+runner call cannot bypass this wall either.
+
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.
 - Interactive Codex session: invoke `$gsd-execute-phase N` directly.
