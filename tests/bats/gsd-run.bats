@@ -1153,6 +1153,73 @@ PY
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
+@test "frontier tier resolves gpt-5.6-sol at xhigh on the Codex host" {
+  FFS_HOST=codex GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  grep -F 'model="gpt-5.6-sol"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
+}
+
+@test "frontier tier resolves claude-fable-5 on the Claude host" {
+  FFS_HOST=claude GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5' "$BATS_TEST_TMPDIR/claude.args"
+}
+
+@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5 semantics and requires network_mode=enabled" {
+  FFS_HOST=claude GSD_LEAD_MODEL=fable GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"exact Fable requires network_mode=enabled"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "GSD_LEAD_MODEL=fable exact request host-pins Claude even when FFS_HOST requests Codex" {
+  FFS_HOST=codex GSD_LEAD_MODEL=fable GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  grep -Fx 'claude-fable-5' "$BATS_TEST_TMPDIR/claude.args"
+}
+
+@test "GSD_LEAD_MODEL=fable is incompatible with danger-full-access sandbox" {
+  FFS_HOST=codex GSD_LEAD_MODEL=fable GSD_RUN_ID=fable-danger-run \
+    GSD_SANDBOX_MODE=danger-full-access GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"exact Fable and Codex danger-full-access are incompatible"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "unknown tier is rejected with the 4-tier error message" {
+  GSD_MODEL_REQUEST='{"kind":"tier","name":"premium"}' \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"frontier|judgment|execution|volume"* ]]
+}
+
 @test "resume refuses Codex CLI drift before a second stateful drive" {
   RUN_STATE="$BATS_TEST_TMPDIR/resume-state"
   FFS_HOST=codex FAKE_CODEX_VERSION=0.146.1 FAKE_CODEX_DRIVE_RC=42 GSD_RUN_STATE_DIR="$RUN_STATE" \
