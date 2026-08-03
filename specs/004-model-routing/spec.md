@@ -1,6 +1,6 @@
 # Spec 004 — Model routing for the Claude 5 / GPT-5.6 generation: split the judgment tier, unbreak plan-gauntlet self-review, define degrade behaviour per vendor state
 
-**Status:** draft-r3 (two adversarial rounds adjudicated: opus plan-check + codex sol bounce ×2) · **Branch:** `004-model-routing` · **Date:** 2026-08-03
+**Status:** draft-r5 (three gauntlet rounds + one verify-only confirmation round adjudicated: fresh opus checker ×4 + codex sol ×4; see §Confirmation round) · **Branch:** `004-model-routing` · **Date:** 2026-08-03
 **Prior art:** `specs/004-model-routing/prior-art.md` (consort two-vendor lifecycle, spec-kit #513, gsd-core v1.9.x — pattern-mined 2026-08-03)
 
 ## Context
@@ -62,7 +62,9 @@ must clear the plan gauntlet first.
   resolve takes no disposition/reason, and `findings_add` deduplicates against
   RESOLVED signatures without reopening — a blindly-resolved finding never
   blocks again even if re-reported. Tier names are also hardcoded in
-  `gsd-run.sh:142-150` and `lib/model_eval.py`, not only in the resolver.
+  `gsd-run.sh:142-150`, `lib/model_eval.py`, AND the eval driver's
+  tier→model MATRIX (`scripts/run-gpt56-eval.py:19-24`) — not only in the
+  resolver.
 - **Brief errata:** `hooks/delegation-enforcer.sh` → actual path is
   `scripts/hooks/delegation-enforcer.sh`. All other brief claims verified
   (gsd-core v1.9.1 latest; Opus 5 $5/$25 Jul 24; consort architecture as
@@ -80,7 +82,7 @@ must clear the plan gauntlet first.
 | **volume** | `claude-haiku-4-5-20251001` | `gpt-5.6-luna` @ low | Luna $0.20/$1.20, AA-CAI 74.6 [labelled]; luna effort low [F6 measured]. Haiku side = **GUESS → EVAL-C Claude arm** (incumbent carried without qualifying evidence). **Bounded-context inputs only** — luna MRCR recall 41.3% [labelled]. |
 
 Model IDs are exact resolver IDs (full haiku date suffix — matches
-`lib/model_requests.py:28` and the adversary ladder).
+`lib/model_requests.py:29` and the adversary ladder).
 
 Role assignments (`templates/model-requests.json` = canonical): `gsd-planner`
 → frontier. `gsd-plan-checker`, `gsd-debugger`, `gsd-verifier`,
@@ -109,7 +111,10 @@ the missing axis and its record says which axis it actually added.
 to go stale), and the HARDCODED tier sets in `gsd-run.sh` + `lib/model_eval.py`
 (F9 — brought under lint by AC-003). Role present in one source but not
 another = ERROR unless on an explicit justified allowlist (`orchestrator`,
-`spec-status` — not Agent-tool spawns). `dynamic_routing.tier_models` is
+`spec-status` — neither is a gsd-core subagent type that
+`delegation-enforcer.sh` pins from `model_overrides`; `spec-status` DOES fan
+out Agent-tool spawns, but each carries an explicit tier pin in its own
+SKILL.md prose — see AC-012's skill-prose sweep). `dynamic_routing.tier_models` is
 tier-keyed with exactly three rungs mapping light/standard/heavy ↔
 volume/execution/judgment; **frontier is deliberately unreachable via dynamic
 escalation** (escalation must never auto-select the most expensive tier) and
@@ -253,12 +258,12 @@ Scenario: wall blocks on cross-vendor HIGH finding (US1 happy path)
 
 Scenario: refute-or-fix unblocks (US1 + US8)
   Given a wall-recorded HIGH finding blocks a phase
-  When the operator resolves it with disposition refute and a reason, and the wall re-runs
-  Then the wall exits 0 and the record shows the adjudicated disposition
+  When the operator resolves it with disposition refute and a reason, and the wall re-runs against the UNCHANGED plan
+  Then the wall exits 0 with verdict adjudicated-pass WITHOUT a new reviewer dispatch (plan sha256 matches the prior record) and the record shows the adjudicated disposition
 
 Scenario: re-reported finding reopens (US8)
   Given a signature previously resolved with disposition refute
-  When a later wall run reports the same finding
+  When the plan CHANGES and the next wall run's fresh review reports the same finding
   Then the signature REOPENS and blocks again
 
 Scenario: wall record labels the relation (US2)
@@ -343,10 +348,18 @@ Scenario: effort prose audit (US9)
   (`CODEX_TIERS`/`CLAUDE_TIERS` + the error message that today hardcodes
   `judgment|execution|volume`), `gsd-run.sh` tier handling — BOTH the
   tier→alias reverse map (:142-150 region) AND the forward legacy-alias block
-  (:124-134 region, where `GSD_LEAD_MODEL=fable` currently routes to an exact
-  `claude-fable-5` request — it must reach frontier-tier semantics, not
-  diverge from the tier path) — and `lib/model_eval.py` legal-set. Unknown
-  tiers still fail validation. Exact-request semantics byte-compatible.
+  (:124-134 region) — and `lib/model_eval.py` legal-set. Unknown tiers still
+  fail validation. Exact-request semantics byte-compatible.
+  **`GSD_LEAD_MODEL=fable` alias divergence is DELIBERATE and preserved:**
+  the alias keeps its exact `claude-fable-5` request semantics — including
+  `EXACT_FABLE_REQUEST` host-pinning (`ACTIVE_HOST=claude`, gsd-run.sh
+  :591-596 region) and its fail-closed guards (danger-full-access :189-192,
+  `network_mode=none`) — because an operator naming fable wants FABLE, and a
+  tier conversion would silently substitute sol@xhigh on a Codex host
+  (constraint 3 violation, confirmation-round HIGH). The tier path gains
+  `{"kind":"tier","name":"frontier"}` as the portable spelling; a regression
+  unit case pins the alias's exact semantics + guards unchanged, and a
+  second case pins frontier→sol@xhigh on the codex host.
 - AC-002: `templates/model-requests.json` carries the role moves (planner →
   frontier; mapper → execution). `templates/gsd-config.base.json`
   `model_overrides` agrees through the tier map AND gains
@@ -362,17 +375,21 @@ Scenario: effort prose audit (US9)
   tier_models is an error ONLY for the three mapped tiers — frontier's
   absence is asserted, not excepted); hardcoded-consumer check (grep-level
   assertion that `gsd-run.sh` — both the :124-134 forward-alias block and the
-  :142-150 reverse map — and `lib/model_eval.py` recognize exactly the
-  canonical tier set). Unknown alias anywhere = error (EDGE-004).
+  :142-150 reverse map — `lib/model_eval.py`, AND the eval driver MATRIX in
+  `scripts/run-gpt56-eval.py` recognize exactly the canonical tier set; the
+  MATRIX additionally needs a `frontier` row for EVAL-B to run). Unknown
+  alias anywhere = error (EDGE-004).
 - AC-004: `scripts/gsd/model-equivalents.sh`: `codex_equiv_model` unchanged;
   `codex_equiv_effort` splits `*fable*` → `xhigh`, `*opus*` → `high`. Reverse
   map unchanged. Existing caller suites stay green.
 - AC-005: new lever `scripts/gsd/plan-wall.sh <PHASE_DIR|PLAN_FILE>`, invoked
   PER PHASE after that phase's revision gate and before its implementation
   starts, at BOTH seams: the `gsd-run.sh` per-phase pre-execution block
-  (beside `OWNERSHIP_GATE`, `gsd-run.sh:77`) and the feature-implement
-  per-phase wall step (the SKILL.md lever block region, :92-94 — invoked per
-  phase, not once per run). Given a phase dir it enumerates ALL `*-PLAN.md`
+  (beside `OWNERSHIP_GATE`, `gsd-run.sh:77`) and a NEW feature-implement
+  per-phase wall step placed at the phase-resolution point (the SKILL.md
+  Step-4 region where phase N is resolved from ROADMAP, :140-146 — NOT the
+  run-start bootstrap block at :92-94, which runs before any phase is known;
+  confirmation-round MEDIUM). Given a phase dir it enumerates ALL `*-PLAN.md`
   plus bare `PLAN.md` (the repo's real plan naming — `gsd-run.sh:88` globs
   `.planning/phases/*/*-PLAN.md`) and every one must clear (aggregate
   blocking). The wall ALWAYS runs (no
@@ -380,6 +397,18 @@ Scenario: effort prose audit (US9)
   typed judgment dispatch; HIGH/CRITICAL findings recorded to findings-queue
   (AC-015 semantics) block via non-zero exit until adjudicated;
   MEDIUM/LOW advisory. Reviewer exhaustion → `WALL-UNREVIEWED`, blocking.
+  **Queue I/O is fail-closed:** any findings-queue command failure inside
+  the wall (add/list non-zero, store unwritable/corrupt) → blocked verdict,
+  record stamped `queue_error: true`; a fault-injection unit case pins it
+  (confirmation-round HIGH — findings must never disappear before the
+  blocking decision). **Re-run idempotence (adjudication semantics):** the
+  wall re-dispatches a reviewer ONLY when the plan's `sha256` differs from
+  the plan's latest wall record; an unchanged plan whose HIGH/CRITICAL
+  signatures are all resolved passes as `verdict: adjudicated-pass` WITHOUT
+  a new dispatch — so refuting a finding deterministically unblocks, and
+  reopen (AC-015) fires only when a CHANGED plan's fresh review re-reports
+  the signature (resolves the refute-vs-reopen livelock, confirmation-round
+  HIGH).
   `PLAN_WALL=off` skips ONLY with a durable waiver record (AC-008); a skip
   that cannot write its waiver record fails closed. The wall independently
   greps the plan content against `security-surface.sh` KEYWORDS (never
@@ -389,9 +418,18 @@ Scenario: effort prose audit (US9)
   non-inheriting agent, no session reuse) whose payload contains ONLY the
   fixed review-brief template + the plan content; a test asserts the
   dispatch payload contains nothing else. Never modifies the plan file.
-  Residual (documented): a bare interactive `/gsd-execute-phase` outside the
-  FFS pipeline is gsd-core native surface FFS cannot wrap without an
-  upstream change.
+  **Completion backstop (closes the bypass surface):**
+  `scripts/gsd/gates-test-command.sh` — the `workflow.test_command` gate
+  gsd-core itself invokes on EVERY execution path, including interactive
+  `/gsd-execute-phase N` and bare gsd-core invocations — additionally
+  asserts a wall record exists for the executing phase with verdict
+  `reviewed-pass|adjudicated-pass|WAIVED`; absent record = non-zero
+  (fail-late-but-closed: an unwalled phase can start but can never
+  COMPLETE; confirmation-round CRITICAL + MEDIUM, two reviewers
+  independently). Backstop skips silently when no `.planning/run-state/`
+  exists (non-gsd callers unchanged). Residual (narrowed): only a run that
+  ALSO strips `workflow.test_command` from config escapes — that is
+  operator sabotage, not drift.
 - AC-006: wall findings conform to `schemas/review-finding.schema.json`:
   root = JSON array of objects; required: `severity` (enum
   `CRITICAL|HIGH|MEDIUM|LOW`), `file` (string, repo-relative), `claim`
@@ -416,8 +454,16 @@ Scenario: effort prose audit (US9)
   verdicts. Fields: `{planner_model, reviewer_model, relation, rung_trail[],
   verdict, plan_sha256, run_id, security_match, fence_marker, fence_enabled
   (kill-switch state at wall time), cross_vendor_fallback (state of the
-  existing `FFS_CROSS_VENDOR_FALLBACK` knob, which can silently narrow the
-  wall to same-vendor and must therefore be stamped), waiver?}`.
+  existing `FFS_CROSS_VENDOR_FALLBACK` knob — it gates ONLY the same-vendor
+  DEGRADE fallback after the opposite-vendor reviewer already failed,
+  `adversary-host.sh:380`; `off` is therefore STRICTER, failing rather than
+  degrading; stamped so the record shows which regime selected the
+  reviewer), escalation_enabled (config
+  `dynamic_routing.escalate_on_failure` at wall time — when true, mid-run
+  escalation can move the producer onto the reviewer's model AFTER the wall
+  stamped `relation`, so consumers must treat `relation` as
+  wall-time-truth, not run-invariant; confirmation-round HIGH),
+  queue_error?, waiver?}`.
   `planner_model` is resolved AT WALL TIME from the live
   `.planning/config.json` override + the `model-fallback.sh` marker + the
   fence marker — never from templates — so a fallback-demoted planner is
@@ -429,8 +475,12 @@ Scenario: effort prose audit (US9)
   record-write failure on ANY path fails closed (non-zero). A `PLAN_WALL=off`
   skip writes `verdict: "WAIVED"` with `waiver: {reason (required non-empty),
   plan_sha256, run_id, waived_security: <security_match OR fence_marker>}`
-  and additionally registers a findings-queue entry with disposition `waive`
-  so morning review surfaces it.
+  and additionally registers the waiver in the findings-queue via `add`
+  (source `wall`, the plan path, severity HIGH) immediately followed by
+  `resolve --disposition waive --reason <waiver reason>` — the two-step is
+  the mechanism (AC-015 deliberately keeps `--disposition` on `resolve`
+  only; confirmation-round HIGH closed) — so morning review surfaces it as
+  an adjudicated-waive entry with history.
 - AC-009: `setup.sh --doctor` additions (the NEW checks are advisory —
   existing doctor check statuses and exit semantics unchanged):
   (a) surfaces gsd-core stale-bake-guard state; (b) model resolvability —
@@ -463,8 +513,19 @@ Scenario: effort prose audit (US9)
   `docs/configuration.md` (new knobs: `PLAN_WALL`, `SECURITY_MODEL_FENCE`,
   `SPEC_PANEL`; plus the EXISTING `FFS_CROSS_VENDOR_FALLBACK` documented as a
   wall-affecting knob whose state the wall record stamps), CHANGELOG entry.
-- AC-013: every new/changed shell script shellcheck-clean in its OWN phase
-  gate and re-checked in the final gate; bats for plan-wall
+  **Skill-prose tier-map sweep:** prose tier→model maps that lint cannot
+  parse are updated by hand in the same change — at minimum
+  `skills/spec-status/SKILL.md:50-51` (volume/execution/judgment resolution
+  prose) and `skills/task-swarm/SKILL.md:125` (tier enum) — plus a grep
+  sweep of `skills/*/SKILL.md` for `judgment|execution|volume` maps missing
+  `frontier` (confirmation-round MEDIUM).
+- AC-013: every new/changed shell script shellcheck-clean AT THE REPO
+  CONVENTION SEVERITY — `shellcheck -S warning`, matching CI
+  (`.github/workflows/ci.yml:52`) and `CONTRIBUTING.md:62`; bare
+  `shellcheck` is red on untouched files at baseline and is NOT the gate
+  (confirmation-round HIGH) — in its OWN phase gate and re-checked in the
+  final gate with CI's full sweep scope (`setup.sh hooks/*.sh scripts/*.sh
+  scripts/hooks/*.sh scripts/gsd/*.sh`); bats for plan-wall
   (block/adjudicate/reopen/degrade/exhaustion/waiver/multi-plan/kill-switch),
   fence, equivalents, probe-lib; pytest for resolver, lint, queue v2, doctor;
   full suites ≥ pre-edit baselines (recorded to
@@ -592,10 +653,36 @@ never mocked.
 | Layer | Count | Status |
 |---|---|---|
 | BDD Scenarios | 18 | draft |
-| Unit test cases | 32 | listed (plan.md) |
-| Unit test files (distinct) | 13 | mapped (plan.md) |
-| Integration tests | 6 | defined |
+| Unit test cases | 36 | listed (plan.md) |
+| Unit test files (distinct) | 14 | mapped (plan.md) |
+| Integration tests | 7 | defined |
 | E2E paths (bats journeys) | 17 | stubbed |
+
+## Confirmation round (r4 → r5 adjudication log)
+
+Verify-only round on committed r4 (`2b5d037`): fresh opus checker (repo
+spot-checks) + `codex exec -m gpt-5.6-sol @medium` (spec+plan consistency),
+both fresh-context. 16 findings adjudicated:
+
+**Promoted + fixed (11):** codex-C1/opus-M2 completion backstop in
+`gates-test-command.sh` (AC-005); codex-H1 queue I/O fail-closed (AC-005);
+codex-H2 sha-idempotence resolves refute-vs-reopen livelock (AC-005 + BDD
+2/3); codex-H3 `escalation_enabled` stamp (AC-008); opus-H1 shellcheck
+`-S warning` + CI sweep scope (AC-013, plan gates); opus-H2 fable-alias
+keeps exact semantics + host-pin guards, frontier tier is the portable
+spelling (AC-001); opus-H3 waiver queue mechanism = add + resolve-waive
+two-step (AC-008); opus-M1 feature-implement wall seam moved to the
+phase-resolution region :140-146 (AC-005); opus-M3 eval-driver MATRIX under
+lint + frontier row (F9, AC-003); opus-M4 skill-prose tier-map sweep
+(AC-012); opus-L1/L2/L3/L4 citation line 29, status header, spec-status
+allowlist wording, final-gate sweep scope.
+
+**Refuted (1):** codex-C2 "`FFS_CROSS_VENDOR_FALLBACK` may force
+same-vendor even when the opposite vendor is available" — evidence:
+`adversary-host.sh:380` consults the knob ONLY after the preferred
+opposite-vendor ladder already failed; `off` disables the same-vendor
+degrade and is strictly STRICTER. The spec's own r4 sentence
+mischaracterized the knob the same way and was corrected (AC-008).
 
 ## Out of scope
 
@@ -609,9 +696,12 @@ never mocked.
   `-c model_reasoning_effort` already invocation-time; candidate later).
 - review-gate mechanical migration to the shared finding schema + queue-v2
   source tags (prose-level adoption here; follow-up).
-- Wrapping gsd-core's native interactive `/gsd-execute-phase` (upstream
-  change; residual documented in AC-005).
+- Wrapping gsd-core's native interactive `/gsd-execute-phase` PRE-execution
+  (upstream change) — but its COMPLETION is covered by the AC-005
+  `gates-test-command.sh` backstop, so the unwalled-start residual is
+  fail-late-but-closed, not fail-open.
 - Escalation-path guard for `dynamic_routing.escalate_on_failure` landing a
-  producer on its reviewer's model mid-run (documented residual; lint covers
-  the static mapping only).
+  producer on its reviewer's model mid-run (lint covers the static mapping
+  only; the wall record's `escalation_enabled` stamp keeps the risk visible
+  per AC-008 — a mid-run guard remains follow-up).
 - Windows.

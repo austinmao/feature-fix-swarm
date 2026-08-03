@@ -1,4 +1,4 @@
-# Plan — spec 004 model routing (Claude 5 / GPT-5.6 generation) · r4
+# Plan — spec 004 model routing (Claude 5 / GPT-5.6 generation) · r5
 
 ## Prior-art decision (required citation)
 
@@ -16,15 +16,24 @@ the direction, ships no artifact.
   restores-and-discards on non-zero exit (`plan-adversary.sh:12-15`) — a
   blocking wall cannot live there. `scripts/gsd/plan-wall.sh` is FFS-owned,
   invoked PER PHASE at both verified seams: `gsd-run.sh` per-phase
-  pre-execution block (beside `OWNERSHIP_GATE`, `gsd-run.sh:77`) and the
-  feature-implement per-phase wall step (SKILL.md lever-block region,
-  `skills/feature-implement/SKILL.md:92-94` — extended to run per phase,
-  after that phase's plan resolution). Plan discovery uses the repo's REAL
+  pre-execution block (beside `OWNERSHIP_GATE`, `gsd-run.sh:77`) and a NEW
+  feature-implement per-phase wall step at the phase-resolution point
+  (`skills/feature-implement/SKILL.md:140-146` region, where phase N is
+  known — NOT the :92-94 run-start bootstrap, which precedes phase
+  resolution; confirmation-round fix). Plan discovery uses the repo's REAL
   naming: `*-PLAN.md` + bare `PLAN.md` (`gsd-run.sh:88` globs
   `.planning/phases/*/*-PLAN.md`); PATH-011 executes the real gsd-run.sh
   path against real-named fixtures (grep-pins alone can pass dead wiring).
-  Residual: bare interactive `/gsd-execute-phase` outside FFS is gsd-core
-  native surface — documented, not wrapped.
+  **Completion backstop**: `gates-test-command.sh` asserts a wall record
+  for the executing phase (verdict reviewed-pass|adjudicated-pass|WAIVED)
+  and fails non-zero otherwise; silently skips when `.planning/run-state/`
+  is absent. Runs on EVERY gsd execution path (workflow.test_command), so
+  interactive `/gsd-execute-phase` and bare gsd-core invocations
+  fail-late-but-closed instead of fail-open. **Re-run idempotence**: wall
+  re-dispatches only on plan-sha change; unchanged plan + fully-adjudicated
+  queue → `adjudicated-pass` with no dispatch. **Queue I/O fail-closed**:
+  findings-queue command failure inside the wall → blocked verdict +
+  `queue_error` stamp.
 - **No blast tiering**: the wall always runs; HIGH/CRITICAL always block.
   review-tier.sh is NOT reused (it classifies git diffs, which don't exist at
   plan time). The wall's own `security-surface.sh` KEYWORDS grep over plan
@@ -76,12 +85,16 @@ resolves (single-vendor hosts must pass).
 
 ## Unit Test List
 
-Sequenced design-critical first (32 cases):
+Sequenced design-critical first (36 cases):
 
 - [ ] resolver: `frontier` → claude-fable-5/None, gpt-5.6-sol/xhigh
 - [ ] resolver: `judgment` unchanged; unknown tier rejected with 4-tier message; exact round-trip byte-compatible
 - [ ] gsd-run tier handling: frontier lead model + effort on both hosts (reverse map :142-150)
-- [ ] gsd-run forward-alias block (:124-134): `GSD_LEAD_MODEL=fable` reaches frontier semantics, no divergence from tier path
+- [ ] gsd-run forward-alias block (:124-134): `GSD_LEAD_MODEL=fable` KEEPS exact `claude-fable-5` semantics — `EXACT_FABLE_REQUEST` host-pinning + danger-full-access + network_mode guards regression-pinned (confirmation-round fix)
+- [ ] gsd-run tier path: `GSD_MODEL_REQUEST={"kind":"tier","name":"frontier"}` resolves sol@xhigh on codex host, fable on claude host
+- [ ] wall: findings-queue add/list failure (unwritable store fixture) → blocked verdict + `queue_error` stamp (fault injection)
+- [ ] wall: unchanged plan sha + all sigs resolved → `adjudicated-pass`, zero reviewer dispatches (shim call-count = 0)
+- [ ] lint: `scripts/run-gpt56-eval.py` MATRIX missing a canonical tier (incl. frontier row) → non-zero
 - [ ] model_eval legal set includes frontier
 - [ ] equivalents: `codex_equiv_effort fable`→xhigh, `opus`→high; model + reverse maps unchanged
 - [ ] lint: drift fixture → non-zero naming role
@@ -127,8 +140,9 @@ Sequenced design-critical first (32 cases):
 | lib/ffs_installer.py (doctor) | tests/test_installer.py (extended) | stale-bake surface, probe expansion, per-surface catalog warnings |
 | scripts/gsd/adversary-host.sh (ordered-rungs + schema ext) | tests/bats/adversary-host.bats (extended) | ordered-rungs selection, per-rung validation, back-compat |
 | panel lever (Phase 4) | tests/bats/spec-panel.bats (new) | blind-draft isolation, degrade pair, artifact shape |
+| scripts/gsd/gates-test-command.sh (backstop) | tests/bats/gates-test-command.bats (new) | wall-record assertion, verdict acceptance set, silent skip without run-state |
 
-(13 distinct test files.)
+(14 distinct test files.)
 
 ## Integration Tests
 
@@ -145,6 +159,12 @@ Sequenced design-critical first (32 cases):
 - INT-006: queue integration — wall-recorded signature visible to filtered
   `findings-queue list --plan`; resolve unblocks; reopen re-blocks; unrelated
   evidence keys untouched.
+- INT-007: completion backstop — sandbox `.planning/` with an executed
+  phase but NO wall record → `gates-test-command.sh` exits non-zero; with a
+  WAIVED record → exits per its existing gate result; without
+  `.planning/run-state/` → backstop silent, prior behaviour byte-identical
+  (covers the interactive `/gsd-execute-phase` bypass, confirmation-round
+  CRITICAL).
 
 ## Phase breakdown
 
@@ -158,9 +178,10 @@ security-auditor pin + tier_models shape (AC-002) · lint (AC-003).
 
 ### Phase 2 — queue v2 + adversary extension + wall + fence + schema
 findings-queue v2 (AC-015) · adversary-host ordered-rungs + schema validation
-(AC-016) · plan-wall.sh + per-plan records/waivers (AC-005/AC-008) · finding
-schema (AC-006) · fence kill-switch + run-scoped marker (AC-007) · probe-lib
-extraction (AC-009 prerequisite).
+(AC-016) · plan-wall.sh + per-plan records/waivers + sha-idempotence +
+queue-I/O fail-closed (AC-005/AC-008) · gates-test-command.sh completion
+backstop (AC-005, INT-007) · finding schema (AC-006) · fence kill-switch +
+run-scoped marker (AC-007) · probe-lib extraction (AC-009 prerequisite).
 
 ### Phase 3 — doctor + docs + hygiene
 doctor additions (AC-009) · effort-hygiene audit → effort-audit.md (AC-011) ·
@@ -180,22 +201,27 @@ migration note (AC-014) → merge → re-vendor consumers + runtime
 | Phase | Gate condition | Command |
 |---|---|---|
 | Phase 0 | baseline artifact exists | `test -s specs/004-model-routing/baseline.txt` |
-| Phase 1 | resolver/lint/equivalents + shellcheck | `python3 -m pytest tests/test_model_requests.py tests/test_model_routing_lint.py tests/test_model_eval.py -q && bats tests/bats/model-equivalents.bats tests/bats/gsd-run.bats && shellcheck scripts/gsd/model-equivalents.sh scripts/gsd/gsd-run.sh` |
-| Phase 2 | queue/wall/fence/probe-lib/adversary + shellcheck | `python3 -m pytest lib/tests/test_findings_queue.py -q && bats tests/bats/plan-wall.bats tests/bats/security-model-fence.bats tests/bats/model-probe-lib.bats tests/bats/model-fallback.bats tests/bats/adversary-host.bats && shellcheck scripts/gsd/plan-wall.sh scripts/gsd/model-probe-lib.sh scripts/gsd/security-model-fence.sh scripts/gsd/adversary-host.sh` |
+| Phase 1 | resolver/lint/equivalents + shellcheck | `python3 -m pytest tests/test_model_requests.py tests/test_model_routing_lint.py tests/test_model_eval.py -q && bats tests/bats/model-equivalents.bats tests/bats/gsd-run.bats && shellcheck -S warning scripts/gsd/model-equivalents.sh scripts/gsd/gsd-run.sh` |
+| Phase 2 | queue/wall/fence/probe-lib/adversary/backstop + shellcheck | `python3 -m pytest lib/tests/test_findings_queue.py -q && bats tests/bats/plan-wall.bats tests/bats/security-model-fence.bats tests/bats/model-probe-lib.bats tests/bats/model-fallback.bats tests/bats/adversary-host.bats tests/bats/gates-test-command.bats && shellcheck -S warning scripts/gsd/plan-wall.sh scripts/gsd/model-probe-lib.sh scripts/gsd/security-model-fence.sh scripts/gsd/adversary-host.sh scripts/gsd/gates-test-command.sh` |
 | Phase 3 | doctor + install + docs assertions | `python3 -m pytest tests/test_installer.py -q && bats tests/bats/setup-install.bats && test -s specs/004-model-routing/effort-audit.md && grep -q PLAN_WALL docs/configuration.md && grep -q "spec 004" CHANGELOG.md` |
 | Phase 4 | panel fixture + EVAL-D artifact | `bats tests/bats/spec-panel.bats && test -s evals/spec-panel/eval-d-results.json` |
-| Final | full suite ≥ baseline + shellcheck sweep | `python3 -m pytest -q && bats tests/bats/ && shellcheck scripts/gsd/*.sh scripts/hooks/*.sh` (vs baseline.txt; 0 failures) |
+| Final | full suite ≥ baseline + shellcheck sweep (CI scope) | `python3 -m pytest -q && bats tests/bats/ && shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh` (vs baseline.txt; 0 failures; sweep = .github/workflows/ci.yml:52 scope so gate-pass ⇒ CI-green) |
 
 ## Migration note (lands in PR body per AC-014)
 
 - **Changes:** 4-tier table (frontier); planner→frontier, mapper→execution,
   security-auditor newly pinned (F8 — behaviour change); codex effort split
   fable=xhigh/opus=high; always-on plan wall (behaviour change — one
-  judgment-tier call per phase; waivers durable-recorded); fence kill-switch
+  judgment-tier call per phase; waivers durable-recorded; re-runs on an
+  unchanged plan are dispatch-free `adjudicated-pass`); completion backstop
+  in gates-test-command.sh (behaviour change — a gsd phase cannot complete
+  without a wall record; non-gsd callers unaffected); fence kill-switch
   + run-scoped marker (demotion scope unchanged); findings-queue v2
   dispositions/reopen/metadata; adversary-host ordered-rungs + schema
   validation (opt-in); doctor model checks; finding schema; probe-lib
-  extraction.
+  extraction. `GSD_LEAD_MODEL=fable` is UNCHANGED (stays an exact
+  claude-pinned request with its host guards); `frontier` tier is the new
+  portable spelling.
 - **Breaks/flags for consumers:** synced levers flagged by sync-drift-check
   until re-synced; fork-allowlisted copies unaffected; runtime
   `~/.claude/skills` re-sync; consumers that spawned gsd-security-auditor
