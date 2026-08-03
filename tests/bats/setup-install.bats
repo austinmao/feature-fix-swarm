@@ -78,3 +78,23 @@ setup() {
 @test "installer source never names legacy .codex/skills as a destination" {
   ! grep -E '(copytree|replace_tree|symlink_to).*\.codex.*/skills' lib/ffs_installer.py
 }
+
+@test "consumer reconciliation installs the finding schema with correct (non-executable) bits" {
+  target="$BATS_TEST_TMPDIR/consumer"
+  mkdir -p "$target"
+
+  run bash setup.sh --reconcile-consumer "$target"
+  [ "$status" -eq 0 ]
+
+  cmp -s schemas/review-finding.schema.json "$target/schemas/review-finding.schema.json"
+  # plan-wall.sh (spec-004 INT-003) is a shell script — the drift-surface
+  # glob always adds +x. The schema is JSON data, not runnable, and must
+  # keep the source's own (non-executable) mode instead of always gaining +x.
+  stat_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+  [ "$(stat_mode "$target/schemas/review-finding.schema.json")" = "$(stat_mode schemas/review-finding.schema.json)" ]
+  [ ! -x "$target/schemas/review-finding.schema.json" ]
+  cmp -s scripts/gsd/plan-wall.sh "$target/scripts/gsd/plan-wall.sh"
+  cmp -s scripts/gsd/model-probe-lib.sh "$target/scripts/gsd/model-probe-lib.sh"
+  [ -x "$target/scripts/gsd/plan-wall.sh" ]
+  [ -x "$target/scripts/gsd/model-probe-lib.sh" ]
+}
