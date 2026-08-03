@@ -303,6 +303,23 @@ def test_doctor_degrades_to_warn_when_lint_model_routing_missing(tmp_path: Path)
     assert "lint_model_routing.py" in checks[0]["message"]
 
 
+def _fake_host_cli_path(tmp_path: Path) -> str:
+    """PATH with stub claude/codex binaries prepended.
+
+    Doctor's model-resolvability check gates on `shutil.which(host)` before
+    honoring the GSD_MODEL_PROBE_CMD* stubs, so a runner without the real
+    CLIs (CI) silently takes the probe-skipped branch and the probe-path
+    assertions never execute. The stubs are inert — the probe commands
+    themselves are already overridden to `true` by run_setup."""
+    bin_dir = tmp_path / "fake-host-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for host in ("claude", "codex"):
+        exe = bin_dir / host
+        exe.write_text("#!/bin/sh\nexit 0\n")
+        exe.chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+
 def test_doctor_model_resolvability_pass_message_notes_cache_refresh_and_timeout(tmp_path: Path) -> None:
     """spec-004 fix round finding 9b: the forced probe is bounded by a
     doctor-scoped, env-overridable timeout (FFS_DOCTOR_PROBE_TIMEOUT,
@@ -317,7 +334,10 @@ def test_doctor_model_resolvability_pass_message_notes_cache_refresh_and_timeout
         "--scope",
         "user",
         "--json",
-        extra_env={"FFS_DOCTOR_PROBE_TIMEOUT": "7"},
+        extra_env={
+            "FFS_DOCTOR_PROBE_TIMEOUT": "7",
+            "PATH": _fake_host_cli_path(tmp_path),
+        },
     )
     report = json.loads(result.stdout)
     assert result.returncode == 0

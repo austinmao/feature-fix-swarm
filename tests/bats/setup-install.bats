@@ -90,7 +90,11 @@ setup() {
   # plan-wall.sh (spec-004 INT-003) is a shell script — the drift-surface
   # glob always adds +x. The schema is JSON data, not runnable, and must
   # keep the source's own (non-executable) mode instead of always gaining +x.
-  stat_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+  # NOT `stat`: BSD needs -f '%Lp', GNU needs -c '%a', and GNU `stat -f`
+  # is FILESYSTEM stat — it can succeed with non-mode output, so the ||
+  # fallback never fires on Linux and the comparison goes garbage-vs-garbage
+  # (CI-only failure, 2026-08-03). python3 is portable and already required.
+  stat_mode() { python3 -c 'import os,stat,sys;print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$1"; }
   [ "$(stat_mode "$target/schemas/review-finding.schema.json")" = "$(stat_mode schemas/review-finding.schema.json)" ]
   [ ! -x "$target/schemas/review-finding.schema.json" ]
   cmp -s scripts/gsd/plan-wall.sh "$target/scripts/gsd/plan-wall.sh"
