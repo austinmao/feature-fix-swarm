@@ -93,6 +93,31 @@ EOF
   [ ! -d "$OUT" ]
 }
 
+@test "spec-004 fix round finding 15: a pre-planted symlink at panel/ is refused, never written through" {
+  mkdir -p "$WORK/outside-target"
+  mkdir -p "$OUT"
+  ln -s "$WORK/outside-target" "$OUT/panel"
+  stub_vendor stub-claude CLAUDE_VOICE "$WORK/claude.stdin"
+  ADVERSARY_BIN_CLAUDE=stub-claude SPEC_PANEL=on run "$LEVER" "$BRIEF" "$OUT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL"* ]]
+  [[ "$output" == *"symlink"* ]]
+  [ ! -e "$WORK/outside-target/draft-anthropic.md" ]
+  [ ! -e "$WORK/outside-target/synthesis.md" ]
+}
+
+@test "spec-004 fix round finding 15: a pre-planted symlink at an artifact path is refused" {
+  mkdir -p "$OUT/panel"
+  ln -s "$WORK/brief.txt" "$OUT/panel/record.json"
+  stub_vendor stub-claude CLAUDE_VOICE "$WORK/claude.stdin"
+  ADVERSARY_BIN_CLAUDE=stub-claude SPEC_PANEL=on run "$LEVER" "$BRIEF" "$OUT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL"* ]]
+  [[ "$output" == *"symlink"* ]]
+  # the symlink's TARGET (brief.txt) must never have been overwritten
+  grep -q "bound a retry on a flaky call" "$WORK/brief.txt"
+}
+
 @test "panel mode: two blind drafts with no cross-visibility, principal never drafts" {
   stub_vendor stub-claude CLAUDE_VOICE "$WORK/claude.stdin"
   stub_vendor stub-codex CODEX_VOICE "$WORK/codex.stdin"

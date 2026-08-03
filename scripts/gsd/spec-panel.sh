@@ -46,7 +46,19 @@ if [ ! -f "$BRIEF_FILE" ] || [ ! -r "$BRIEF_FILE" ]; then
   exit 1
 fi
 
+# Symlink-attack guard (spec-004 fix round finding 15): a pre-planted
+# symlink at the panel dir or any artifact path would make a plain `>`
+# redirect write through it to wherever it points. Reject before writing
+# anything, not after.
+_sp_reject_symlink() {
+  if [ -L "$1" ]; then
+    echo "spec-panel: FATAL: refusing to write through a symlink at $1" >&2
+    exit 1
+  fi
+}
+
 PANEL_DIR="$SPEC_DIR/panel"
+_sp_reject_symlink "$PANEL_DIR"
 mkdir -p "$PANEL_DIR" 2>/dev/null || {
   echo "spec-panel: cannot create $PANEL_DIR" >&2
   exit 1
@@ -78,6 +90,7 @@ _sp_bin_available() {
 }
 
 _sp_write() {
+  _sp_reject_symlink "$1"
   printf '%s\n' "$2" > "$1"
 }
 
@@ -108,6 +121,7 @@ _sp_graft() {
       [ -n "$section" ] && body="${body}"$'\n'"[voice: ${label_b}] ${section}"$'\n'
     fi
   done
+  _sp_reject_symlink "$out"
   printf '%s\n' "$body" > "$out"
 }
 
@@ -129,6 +143,7 @@ if [ "$CLAUDE_OK" -eq 1 ] && [ "$CODEX_OK" -eq 1 ]; then
   _sp_write "$PANEL_DIR/draft-anthropic.md" "$draft_anthropic"
   _sp_write "$PANEL_DIR/draft-openai.md" "$draft_openai"
   _sp_graft "$PANEL_DIR/synthesis.md" anthropic "$draft_anthropic" openai "$draft_openai"
+  _sp_reject_symlink "$PANEL_DIR/record.json"
   jq -n '{mode:"panel", relation:"cross-vendor"}' > "$PANEL_DIR/record.json"
   echo "spec-panel: PANEL synthesis written to $PANEL_DIR/synthesis.md"
   exit 0
@@ -164,6 +179,7 @@ fi
 _sp_write "$PANEL_DIR/refute-${vendor}.md" "$refute"
 
 _sp_graft "$PANEL_DIR/synthesis.md" "${vendor}-author" "$draft" "${vendor}-refuter" "$refute"
+_sp_reject_symlink "$PANEL_DIR/record.json"
 jq -n --arg vendor "$vendor" '{mode:"degrade", vendor:$vendor, relation:"self"}' > "$PANEL_DIR/record.json"
 echo "spec-panel: DEGRADE ($vendor) synthesis written to $PANEL_DIR/synthesis.md (relation: self)"
 exit 0

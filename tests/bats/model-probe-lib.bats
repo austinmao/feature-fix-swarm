@@ -22,10 +22,19 @@ SH
   chmod +x "$TMP/probe-ok.sh" "$TMP/probe-fail.sh"
 }
 
-@test "sourcing the lib has no side effects beyond function+cache-dir setup" {
+@test "sourcing the lib has NO side effects beyond defining functions (genuinely, not just cache-dir setup)" {
+  # spec-004 fix round finding 15: the header's "no side effects beyond
+  # defining functions" claim used to be false — mkdir ran unconditionally
+  # at source time. mkdir now happens lazily inside each probe function.
   run bash -c ". '$LIB'; type probe_claude_model >/dev/null && type probe_codex_model >/dev/null && echo DEFINED"
   [ "$status" -eq 0 ]
   [ "$output" = "DEFINED" ]
+  [ ! -d "$GSD_FALLBACK_CACHE" ]
+}
+
+@test "calling a probe function creates the cache dir lazily" {
+  run env GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
+  [ "$status" -eq 0 ]
   [ -d "$GSD_FALLBACK_CACHE" ]
 }
 

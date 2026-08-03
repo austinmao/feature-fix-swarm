@@ -36,12 +36,15 @@ fi
 unset _mpl_dir
 
 CACHE_DIR="${GSD_FALLBACK_CACHE:-$HOME/.cache/gsd-model-probe}"
-mkdir -p "$CACHE_DIR"
 
 PROBE_TIMEOUT="${GSD_MODEL_PROBE_TIMEOUT:-120}"
 
 probe_claude_model() {
   # exit 0 = available, 1 = unavailable. 24h cache per model (cache file name).
+  # mkdir happens HERE, not at source time (spec-004 fix round finding 15:
+  # the header's "no side effects beyond defining functions" claim used to
+  # be false — sourcing this file always created CACHE_DIR on disk).
+  mkdir -p "$CACHE_DIR"
   local model="$1" cache="$CACHE_DIR/$1.status"
   if [ "${GSD_MODEL_PROBE_FORCE:-0}" != "1" ] && [ -f "$cache" ] \
      && [ -n "$(find "$cache" -mmin -1440 2>/dev/null)" ]; then
@@ -63,6 +66,7 @@ probe_claude_model() {
 
 probe_codex_model() {
   # Separate cache key from probe_claude_model (distinct cache filename per model).
+  mkdir -p "$CACHE_DIR"
   local model="$1" cache="$CACHE_DIR/$1.status"
   if [ "${GSD_MODEL_PROBE_FORCE:-0}" != "1" ] && [ -f "$cache" ] \
      && [ -n "$(find "$cache" -mmin -1440 2>/dev/null)" ]; then
