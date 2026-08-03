@@ -352,7 +352,7 @@ Consumed grants + artifacts (sha/PR#) go in the report.
 
 Phases executed, verifier verdicts, gap rounds, gate evidence ids, consumed grants,
 pendings (for one-command morning resume), files changed. Include the delegation
-histogram `tiers={judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`
+histogram `tiers={frontier:N,judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`
 (spawns by typed request and resolved model; `inline-mechanical` = host
 trip-wire drains, target 0) — verify
 with `python3 lib/gates.py delegation-audit <session-transcript.jsonl>`.

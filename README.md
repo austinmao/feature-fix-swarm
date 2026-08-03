@@ -27,6 +27,8 @@ decision downstream of it.
 FFS puts a boundary around each phase:
 
 - Deterministic tests must pass before progress advances.
+- Every phase's plan clears an adversarial plan wall before implementation
+  starts, reviewed by a model distinct from the one that wrote it.
 - Review findings are severity-tagged, persisted, and rechecked.
 - High-risk completion claims receive an adversarial review from a fresh model
   and, when available, the opposite host vendor.
@@ -34,6 +36,12 @@ FFS puts a boundary around each phase:
   hidden context.
 - Push, merge, deploy, and unsandboxed actions remain explicit, run-bound
   operator decisions.
+
+FFS is the full development pipeline, not a single check: spec → plan → phase
+execution → deterministic QA gates → adversarial review → gated ship. It
+runs on two disciplines throughout — orchestration (typed workflows, resumable
+state) and delegation (typed model tiers routing each seat to the model suited
+to it, producer never equal to reviewer).
 
 ## How it works
 
@@ -154,6 +162,9 @@ and rollback semantics are in [Installer, migration, and rollback](docs/installe
   back only with compare-and-swap protection against concurrent refreshes.
 - Exact model requests do not silently fall back; degraded tier fallback cannot
   satisfy an exact-provenance gate.
+- Every phase plan clears an always-on adversarial wall (producer never equal
+  to reviewer) before that phase can be marked complete; a skip requires a
+  durable, recorded waiver.
 - Project/user installs are manifest- and hash-managed. Edited or unknown files
   are preserved instead of overwritten.
 
@@ -164,14 +175,18 @@ See [Security policy](SECURITY.md) and the
 
 FFS requests workload intent rather than scattering vendor IDs through skills:
 
-| Tier | Codex default | Effort | Typical work |
-| --- | --- | ---: | --- |
-| `judgment` | GPT-5.6 Sol | high | Planning, checking, debugging, verification, security |
-| `execution` | GPT-5.6 Terra | medium | Implementation, research, integration, orchestration |
-| `volume` | GPT-5.6 Luna | low | Mapping, synthesis, status collection |
+| Tier | Claude default | Codex default | Effort | Typical work |
+| --- | --- | --- | ---: | --- |
+| `frontier` | Claude Fable | GPT-5.6 Sol | xhigh | Planning — the low-volume, highest-leverage seat |
+| `judgment` | Claude Opus | GPT-5.6 Sol | high | Checking, debugging, verification, code/security review |
+| `execution` | Claude Sonnet | GPT-5.6 Terra | medium | Implementation, research, integration, orchestration |
+| `volume` | Claude Haiku | GPT-5.6 Luna | low | Mapping, synthesis, status collection (bounded-context inputs only) |
 
-The producer and reviewer must resolve to different models. Raw vendor model
-IDs are allowed only through an explicit exact request. See
+The producer and reviewer must resolve to different models — enforced end to
+end, including a per-phase plan wall that reviews every plan before its phase
+can execute. `frontier` is deliberately unreachable via dynamic escalation; it
+is assigned only where a role is explicitly pinned to it. Raw vendor model IDs
+are allowed only through an explicit exact request. See
 [Model tiers](docs/model-tiers.md) for host mappings, fallback provenance, and
 the legacy alias bridge.
 

@@ -123,8 +123,16 @@ the phase's PLAN frontmatter to own every ROADMAP requirement exactly once.
 Preparatory plans use `requirements: []`; an ID goes only on the final plan that
 genuinely completes it. Headless execution enforces this before any model probe.
 
+Also before execution — after the ownership gate, before any task starts —
+`scripts/gsd/plan-wall.sh` reviews the phase's plan(s) with a model distinct
+from the one that wrote it (producer≠reviewer, always on; see
+[Model tiers](model-tiers.md#the-plan-wall)). HIGH/CRITICAL findings block
+until adjudicated; `PLAN_WALL=off` skips only with a recorded waiver.
+
 Completion authority is gates.py, never gsd self-report: `workflow.test_command` =
-`scripts/gsd/gates-test-command.sh` (run-gate + strict verify-done),
+`scripts/gsd/gates-test-command.sh` (run-gate + strict verify-done + plan-wall
+completion backstop — a phase can start unwalled but cannot COMPLETE without a
+passing wall record),
 `workflow.code_review_command` = `scripts/gsd/review-gate-command.sh` (grant wall + codex),
 and the `gsd-phase-evidence-gate.sh` PreToolUse hook blocks ROADMAP/STATE phase flips
 without evidence.
@@ -157,5 +165,8 @@ Completion authority for autonomous runs — evidence, not agent self-report.
 | `gates.py proof RUN T040 T041 … [--defer "name: reason"]… [--strict] [--out path]` | Emit the per-run proof artifact (`proof-<run>.json`): one claim per task with evidence cmd, real exit, sha256 of stored log material, live-vs-structural kind; named deferrals; go/no-go verdict. Exit 1 on no-go (v3.15.0) |
 | `gates.py scan-tamper < diff` | Flag reward-hacking moves: deleted asserts, added skips, `exit 0`, CI edits. Exit 1 on findings |
 | `gates.py analyze spec.md tasks.md` | Spec↔tasks coherence gate (spec-kit analyze analog); `/feature-implement` refuses to start on findings |
+| `gates.py findings-queue add ... [--severity S] [--source wall\|review-gate] [--plan PATH]` | Record a review finding (plan-wall, review-gate, or manual); re-adding a RESOLVED signature reopens it |
+| `gates.py findings-queue resolve ... --disposition refute\|fix\|waive --reason "…"` | Resolve a finding; disposition and reason are required and kept in history |
+| `gates.py findings-queue list [--unresolved] [--severity ...] [--source ...] [--plan ...]` | Filtered finding listing; the plan wall's blocking check is `list --unresolved --source wall --severity HIGH,CRITICAL --plan <plan>` |
 
 Gate ladder (cheap→expensive, fail-fast): compile → typecheck → lint → unit → integration → e2e → LLM review. Truth score is computed by `phase-score` at every phase gate; < 0.95 after max retries → rollback to phase checkpoint. No-progress is enforced by `note-failure` in the retry loop. LLM review rounds capped at 2/phase. `record-gate` still exists for humans but warns at runtime and is rejected under strict mode. Optional PreToolUse hook `hooks/tdd-gate.sh` blocks source writes with no matching test file.

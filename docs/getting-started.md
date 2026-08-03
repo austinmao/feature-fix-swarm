@@ -117,8 +117,8 @@ Where to go next:
 - [Choosing a command](choosing-a-command.md) — `/task-swarm` was the
   training-wheels choice. Learn when you want `/feature-spec` or `/fix`
   instead
-- [Model tiers](model-tiers.md) — why planning and review use the judgment
-  tier while implementation normally uses the execution tier
+- [Model tiers](model-tiers.md) — why planning uses the frontier tier, review
+  uses the judgment tier, and implementation normally uses the execution tier
 - [Configuration](configuration.md) — every knob you can turn
 
 ## Troubleshooting

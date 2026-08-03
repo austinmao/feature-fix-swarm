@@ -21,6 +21,14 @@ an accidental floating upgrade fails before installation or launch.
 Contributor-only Python tools are exact-pinned in `requirements-dev.txt`.
 They do not ship into a consumer repository.
 
+## Contributor and CI tooling
+
+| Component | Version policy | Ownership | Purpose |
+| --- | --- | --- | --- |
+| [bats-core](https://github.com/bats-core/bats-core) | Contributor-installed | User-installed | Runs `tests/bats/*.bats` — plan-wall, fence, adversary-equivalents, probe-lib |
+| [ShellCheck](https://github.com/koalaman/shellcheck) | Contributor-installed, `-S warning` at repo convention | User-installed | Lints every changed/new shell script; matches `CONTRIBUTING.md` and CI |
+| `slopcheck` | Optional | Not installed by FFS | Package-legitimacy verdict (`OK\|SUS\|SLOP`) consulted by the `feature-implement` install gate; absent binary degrades to `[ASSUMED]`, never a hard failure |
+
 ## Why GSD is a dependency instead of vendored code
 
 GSD already owns the durable planning model and the plan/execute/verify loop.

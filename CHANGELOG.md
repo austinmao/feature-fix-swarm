@@ -10,6 +10,25 @@ all skills.
 
 ### Added
 
+- Added a fourth model-request tier, `frontier` (spec 004,
+  `specs/004-model-routing/`), splitting the collapsed `judgment` tier that
+  planning and review previously shared. `gsd-planner` moves to `frontier`
+  (Claude Fable / Codex Sol @ xhigh); `gsd-plan-checker` and other
+  review/verification roles stay on `judgment` (Claude Opus / Codex Sol @
+  high) — the two now resolve to genuinely different models on Claude, and to
+  a different effort on Codex, closing a same-model self-review gap in the
+  plan gate. Added an always-on per-phase plan wall
+  (`scripts/gsd/plan-wall.sh`, kill-switch `PLAN_WALL=off` with a durable
+  waiver) that dispatches an adversarial review of each phase's plan to a
+  model distinct from the planner's before that phase can execute, selected
+  by a diversity-invariant algorithm (cross-vendor beats same-vendor
+  different-model beats same-model different-effort); a completion backstop
+  in `scripts/gsd/gates-test-command.sh` additionally refuses to let a phase
+  finish without a passing wall record. `findings-queue` (`lib/gates.py`)
+  gained typed dispositions (`refute|fix|waive` with a required reason) and
+  reopens a finding whose signature recurs after resolution. Added
+  `SECURITY_MODEL_FENCE=off` as an explicit kill-switch for the existing
+  security-spec planning fence.
 - Added `/spec-guide` v1.0.0 to generate developer, admin, and user
   instructions for a delivered spec and verify every step through its actual
   browser, API/MCP, chat, email, CLI, webhook, worker, database, or design

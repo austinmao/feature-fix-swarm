@@ -122,7 +122,7 @@ you are blocked on input only the user can provide.
 
 feature-implement's proof artifact + final report are the record. Add this
 skill's wrapper line to `.feature-fix-swarm/results.md`:
-`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed} tiers={judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`.
+`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed} tiers={frontier:N,judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`.
 The `tiers=` histogram counts host-native subagent spawns by typed request and resolved model over the
 whole run (`inline-mechanical` = trip-wire work the host drained inline —
 see `feature-spec` SKILL.md § Orchestrator self-discipline; target 0).

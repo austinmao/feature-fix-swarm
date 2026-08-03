@@ -37,6 +37,8 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + gsd-c
 │    │                                                                   │
 │    ▼                                                                   │
 │   /feature-implement [NNN]                                             │
+│    │   per phase: plan-wall (adversarial plan review, always on,       │
+│    │   producer≠reviewer) must pass before that phase's tasks start    │
 │    │   iterates tasks.md; spawns Agent per [model:] annotation         │
 │    │   sequential execution, updates [ ] → [X] or [F] on completion    │
 │    │   flags: --dry-run, --autonomous, --adhoc, --no-finish            │
@@ -59,6 +61,7 @@ End-to-end flow from feature idea to production, using gstack + spec-kit + gsd-c
 - `/autoplan` reviews the plan (works on any file path)
 - `/spec-decompose` produces a normalized tasks.md with host-aware model labels; before plan-phase it also runs an edge-probe spec-completeness gate over `.planning/REQUIREMENTS.md` (8-category boundary-value taxonomy), writing `edge-coverage.md` and soft-gating on unresolved edges
 - `/feature-implement` executes tasks one at a time with per-task model routing; any package install first clears a package-legitimacy gate (registry-existence check + optional `slopcheck`) — `SLOP` hard-blocks, `SUS`/`[ASSUMED]` routes through the autonomy-grant ledger as `install:<pkg>`
+- Before each phase's tasks start, `scripts/gsd/plan-wall.sh` runs an always-on adversarial review of that phase's plan with a model distinct from the planner's (see [Model tiers](model-tiers.md#the-plan-wall)); HIGH/CRITICAL findings block until adjudicated, and a completion backstop in `gates-test-command.sh` refuses to let a phase finish without a passing wall record
 - The shared workflow is host-neutral; Claude and Codex only affect how the task graph is rendered and which model ladder is selected
 
 ## The user gates
