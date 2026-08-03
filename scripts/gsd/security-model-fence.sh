@@ -63,18 +63,21 @@ FENCE_MARKER="$RUN_STATE_DIR/security-fence-${SAFE_RUN_ID}.json"
 # shellcheck source=scripts/gsd/security-surface.sh
 . "$(dirname "${BASH_SOURCE[0]}")/security-surface.sh"
 
-SCAN_FILES=""
+SCAN_FILES=()
 for f in "$PLANNING_DIR/PROJECT.md" "$PLANNING_DIR/REQUIREMENTS.md" "$PLANNING_DIR/ROADMAP.md" "$@"; do
-  [ -f "$f" ] && SCAN_FILES="$SCAN_FILES $f"
+  [ -f "$f" ] && SCAN_FILES+=("$f")
 done
 
-if [ -z "$SCAN_FILES" ]; then
+if [ "${#SCAN_FILES[@]}" -eq 0 ]; then
   echo "[security-model-fence] WARN: no planning docs to scan — config unchanged" >&2
   exit 0
 fi
 
-# shellcheck disable=SC2086  # intentional word-split: SCAN_FILES is a checked file list
-if ! grep -Eiq "$KEYWORDS" $SCAN_FILES 2>/dev/null; then
+# Array + `--` (not a word-split string): a scan path containing whitespace
+# or shaped like a grep option (e.g. a spec file literally named "-e...")
+# must never be split into extra args or parsed as a flag (spec-004 fix
+# round finding 14).
+if ! grep -Eiq -- "$KEYWORDS" "${SCAN_FILES[@]}" 2>/dev/null; then
   echo "[security-model-fence] no security keywords — config unchanged"
   exit 0
 fi

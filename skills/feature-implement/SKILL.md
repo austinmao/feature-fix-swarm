@@ -159,7 +159,7 @@ N must clear a fresh adversarial review before execution starts):
 
 ```bash
 PHASE_DIR="$(ls -d .planning/phases/*-* 2>/dev/null | grep -E "^\.planning/phases/0*${N}-" | head -1)"
-[ -n "$PHASE_DIR" ] && bash scripts/gsd/plan-wall.sh "$PHASE_DIR"
+[ -n "$PHASE_DIR" ] && export GSD_PHASE_ID="$(basename "$PHASE_DIR")" && bash scripts/gsd/plan-wall.sh "$PHASE_DIR"
 ```
 
 STOP on nonzero. `PLAN_WALL=off` skips ONLY with a durable waiver record

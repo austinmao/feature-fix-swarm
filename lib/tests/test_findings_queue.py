@@ -148,6 +148,41 @@ def test_signature_different_file_same_issue_distinct(tmp_path) -> None:
     assert sig1 != sig2
 
 
+def test_signature_same_file_and_issue_different_plan_distinct(tmp_path) -> None:
+    """spec-004 fix round finding 6: the SAME file+issue text reported for
+    two different plans must be two distinct findings — otherwise plan B's
+    identical finding silently vanishes into plan A's record and plan B's
+    `list --plan B` (what the wall actually checks) sees nothing."""
+    store = tmp_path / "evidence.json"
+    sig1, deduped1, _ = gates.findings_add(
+        store, "shared.py", "identical defect text", plan="phase-1/PLAN.md")
+    sig2, deduped2, _ = gates.findings_add(
+        store, "shared.py", "identical defect text", plan="phase-2/PLAN.md")
+    assert sig1 != sig2
+    assert deduped1 is False
+    assert deduped2 is False
+
+    plan1_view = gates.findings_list(store, unresolved=True, plan="phase-1/PLAN.md")
+    plan2_view = gates.findings_list(store, unresolved=True, plan="phase-2/PLAN.md")
+    assert {f["sig"] for f in plan1_view} == {sig1}
+    assert {f["sig"] for f in plan2_view} == {sig2}
+
+
+def test_cli_cross_plan_duplicate_surfaces_under_each_plans_own_wall_query(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _run("add", "shared.py", "identical defect text", "--severity", "HIGH",
+         "--source", "wall", "--plan", "phase-1/PLAN.md", store=store)
+    _run("add", "shared.py", "identical defect text", "--severity", "HIGH",
+         "--source", "wall", "--plan", "phase-2/PLAN.md", store=store)
+
+    proc = _run("list", "--unresolved", "--source", "wall", "--severity", "HIGH,CRITICAL",
+                "--plan", "phase-2/PLAN.md", store=store)
+    assert proc.returncode == 0
+    listed = json.loads(proc.stdout.strip())
+    assert len(listed) == 1
+    assert listed[0]["plan"] == "phase-2/PLAN.md"
+
+
 # ── dedup atomicity ───────────────────────────────────────────────────────────
 
 def test_dedup_flag_from_locked_operation_not_a_preread(tmp_path) -> None:
@@ -365,6 +400,32 @@ def test_readd_of_resolved_signature_reopens_with_history(tmp_path) -> None:
     assert record["history"][0]["reason"] == "false positive"
 
 
+def test_double_resolve_preserves_prior_disposition_in_history(tmp_path) -> None:
+    """spec-004 fix round finding 11: re-resolving an ALREADY-resolved
+    signature (e.g. an operator correcting refute -> fix) must not silently
+    discard the earlier adjudication — it goes to `history`, same as the
+    reopen path already does."""
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "a.py", "leaky query")
+    assert gates.findings_resolve(store, sig, disposition="refute", reason="false positive")
+    assert gates.findings_resolve(store, sig, disposition="fix", reason="actually real, patched")
+
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig)
+    assert record["resolved"] is True
+    assert record["disposition"] == "fix"
+    assert record["reason"] == "actually real, patched"
+    assert len(record["history"]) == 1
+    assert record["history"][0]["disposition"] == "refute"
+    assert record["history"][0]["reason"] == "false positive"
+
+    # a THIRD resolve appends a second history entry — nothing overwritten
+    assert gates.findings_resolve(store, sig, disposition="waive", reason="deprioritized")
+    record2 = next(f for f in gates.findings_list(store) if f["sig"] == sig)
+    assert len(record2["history"]) == 2
+    assert record2["history"][1]["disposition"] == "fix"
+    assert record2["history"][1]["reason"] == "actually real, patched"
+
+
 def test_readd_of_unresolved_signature_does_not_reopen(tmp_path) -> None:
     store = tmp_path / "evidence.json"
     sig1, _, _ = gates.findings_add(store, "a.py", "issue")
@@ -405,6 +466,41 @@ def test_add_with_metadata_flags(tmp_path) -> None:
     assert record["run_id"] == "run-1"
     assert record["source"] == "wall"
     assert record["plan"] == ".planning/phases/1/PLAN.md"
+
+
+def test_add_positional_value_matching_a_flag_name_is_not_hijacked(tmp_path) -> None:
+    """spec-004 fix round finding 5a: <file>/<issue> are the two FIXED
+    leading positionals, consumed strictly by position — an
+    adversary-controlled value (e.g. an LLM-reported finding's `file` text)
+    that happens to equal a known flag name like "--severity" must land in
+    its intended positional slot, not get reinterpreted as that flag."""
+    store = tmp_path / "evidence.json"
+    proc = _run("add", "--severity", "attacker-controlled issue text", store=store)
+    assert proc.returncode == 0
+    sig = json.loads(proc.stdout.strip())["sig"]
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig)
+    assert record["file"] == "--severity"
+    assert record["issue"] == "attacker-controlled issue text"
+    # never silently promoted to an actual HIGH/etc severity via injection
+    assert record["severity"] != "attacker-controlled issue text"
+
+
+def test_add_trailing_flag_with_no_value_is_a_usage_error(tmp_path) -> None:
+    """spec-004 fix round finding 5b: a recognized flag with nothing after it
+    used to silently fall through and become an unintended 3rd positional
+    (ignored, not an error) — now it is a usage error."""
+    store = tmp_path / "evidence.json"
+    proc = _run("add", "a.py", "issue", "--severity", store=store)
+    assert proc.returncode == 2
+    assert proc.stderr.strip() != ""
+
+
+def test_resolve_trailing_flag_with_no_value_is_a_usage_error(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "a.py", "issue")
+    proc = _run("resolve", sig, "--disposition", "fix", "--reason", store=store)
+    assert proc.returncode == 2
+    assert proc.stderr.strip() != ""
 
 
 def test_list_severity_filter_comma_separated(tmp_path) -> None:

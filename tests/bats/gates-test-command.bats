@@ -120,3 +120,29 @@ write_record() {
   GSD_PHASE_ID=phase-env run bash "$LEVER"
   [ "$status" -eq 0 ]
 }
+
+@test "no arg, no GSD_PHASE_ID, run-state empty -> unscoped BACKSTOP blocks (not literal 'gsd-phase' key)" {
+  mkdir -p .planning/run-state
+  unset GSD_PHASE_ID
+  run bash "$LEVER"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"BACKSTOP"* ]]
+  [[ "$output" == *"no phase id"* ]]
+}
+
+@test "no arg, no GSD_PHASE_ID, every record under run-state accepted -> unscoped backstop clears" {
+  write_record "phase-1" "01-PLAN" "reviewed-pass"
+  write_record "phase-2" "01-PLAN" "WAIVED"
+  unset GSD_PHASE_ID
+  run bash "$LEVER"
+  [ "$status" -eq 0 ]
+}
+
+@test "no arg, no GSD_PHASE_ID, one unaccepted record anywhere under run-state -> unscoped backstop blocks" {
+  write_record "phase-1" "01-PLAN" "reviewed-pass"
+  write_record "phase-2" "01-PLAN" "blocked"
+  unset GSD_PHASE_ID
+  run bash "$LEVER"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"BACKSTOP"* ]]
+}

@@ -18,8 +18,16 @@ import time
 from typing import Any, NoReturn
 
 
+# "frontier" is the pinned single-effort reference tier (gpt-5.6-sol @
+# xhigh, per agents.md's model-delegation table) — never a live two-arm eval
+# in this corpus (the 18 fixtures only carry judgment/execution/volume
+# tiers). "judgment" is the DISTINCT two-arm EVAL-B experiment (sol@xhigh vs
+# sol@high) that decides whether frontier can safely degrade to high at the
+# gates — the two rows used to be byte-identical, which silently meant
+# frontier's own pin was never actually being asserted as fixed (spec-004
+# fix round finding 15).
 MATRIX = {
-    "frontier": ("gpt-5.6-sol", ("xhigh", "high")),
+    "frontier": ("gpt-5.6-sol", ("xhigh",)),
     "judgment": ("gpt-5.6-sol", ("xhigh", "high")),
     "execution": ("gpt-5.6-terra", ("high", "medium")),
     "volume": ("gpt-5.6-luna", ("medium", "low")),
@@ -271,6 +279,10 @@ def selection_row_is_clean(row: dict[str, Any]) -> bool:
 def selections(results: list[dict[str, Any]]) -> dict[str, str]:
     selected: dict[str, str] = {}
     for tier, (_model, efforts) in MATRIX.items():
+        if len(efforts) < 2:
+            # A single-effort row (frontier) has nothing to select between —
+            # it is a pinned reference, never a live A/B arm in this corpus.
+            continue
         higher, lower = efforts
         tier_rows = [row for row in results if row["tier"] == tier]
         expected_per_effort = 12

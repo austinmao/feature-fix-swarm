@@ -798,6 +798,13 @@ EOF
   [[ "$output" == *"WALL-UNREVIEWED"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+
+  # spec-004 fix round finding 1: gsd-run.sh must export GSD_PHASE_ID as the
+  # phase DIRECTORY basename (e.g. "02-example"), matching the key
+  # plan-wall.sh itself writes records under — NOT gates-test-command.sh's
+  # old literal-"gsd-phase" default, which never matched any real record.
+  record_count="$(find "$REPO/.planning/run-state" -maxdepth 1 -name 'plan-wall-02-example-*.json' 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$record_count" -ge 1 ]
 }
 
 @test "Codex CLI outside the supported range fails before probing" {

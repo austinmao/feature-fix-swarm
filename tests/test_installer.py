@@ -286,6 +286,47 @@ def test_doctor_warns_on_unreachable_canonical_tier_model(tmp_path: Path) -> Non
     assert "claude-opus-5" in check["message"]
 
 
+def test_doctor_degrades_to_warn_when_lint_model_routing_missing(tmp_path: Path) -> None:
+    """spec-004 fix round finding 9a: a missing scripts/lint_model_routing.py
+    must produce a single warn check row, never raise and abort the whole
+    doctor run (it used to raise ActionableError/FileNotFoundError and hide
+    every other doctor check behind it)."""
+    fake_source = tmp_path / "fake-source"
+    (fake_source / "lib").mkdir(parents=True)
+    (fake_source / "lib" / "model_requests.py").write_bytes((ROOT / "lib" / "model_requests.py").read_bytes())
+    # scripts/lint_model_routing.py deliberately absent.
+    checks: list[dict[str, str]] = []
+    ffs_installer.add_model_routing_doctor_checks(checks, fake_source)
+    assert len(checks) == 1
+    assert checks[0]["id"] == "model-resolvability"
+    assert checks[0]["status"] == "warn"
+    assert "lint_model_routing.py" in checks[0]["message"]
+
+
+def test_doctor_model_resolvability_pass_message_notes_cache_refresh_and_timeout(tmp_path: Path) -> None:
+    """spec-004 fix round finding 9b: the forced probe is bounded by a
+    doctor-scoped, env-overridable timeout (FFS_DOCTOR_PROBE_TIMEOUT,
+    default 20s — was unbounded at the shared 120s reviewer-dispatch
+    default), and the pass message says the shared probe cache was
+    refreshed rather than merely read from cache."""
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+
+    result = run_setup(
+        tmp_path,
+        "--doctor",
+        "--scope",
+        "user",
+        "--json",
+        extra_env={"FFS_DOCTOR_PROBE_TIMEOUT": "7"},
+    )
+    report = json.loads(result.stdout)
+    assert result.returncode == 0
+    check = next(item for item in report["checks"] if item["id"] == "model-resolvability")
+    assert check["status"] == "pass"
+    assert "cache refreshed" in check["message"]
+    assert "7s/probe" in check["message"]
+
+
 def test_different_version_duplicate_fails_doctor(tmp_path: Path) -> None:
     project = tmp_path / "project"
     init_repo(project)

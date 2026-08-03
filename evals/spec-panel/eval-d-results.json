@@ -2,7 +2,7 @@
   "schema": "ffs.eval-d/v1",
   "mode": "stub",
   "note": "stub-mode: vendor CLIs replaced by a canned fixture stub (scripts/gsd/spec-panel-eval-fixture.sh); no live model calls were made. Fixture-run output only, not a live-model judgment.",
-  "generated_at": "2026-08-03T17:28:10Z",
+  "generated_at": "2026-08-03T17:59:48Z",
   "rubric_axes": [
     "Coverage",
     "Assumptions",
@@ -36,7 +36,7 @@
     "definition": "AC-010: EVAL-D pass = panel >=3-of-4 rubric axes over the author+refuter degrade baseline",
     "panel_axes_passed": 4,
     "baseline_axes_passed": 4,
-    "pass": true,
+    "pass": false,
     "authorizes_default_flip": "a pass authorizes flipping SPEC_PANEL's default in a FOLLOW-UP change; nothing flips automatically (AC-010)"
   }
 }

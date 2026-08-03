@@ -90,7 +90,7 @@ if [ "$GSD_SKILL_NAME" = "gsd-execute-phase" ]; then
     echo "gsd-run: plan wall lever missing: $PLAN_WALL_LEVER" >&2
     exit 78
   fi
-  WALL_PHASE_DIR="$(/usr/bin/python3 - "$REPO_ROOT" "$2" <<'PY'
+  WALL_PHASE_DIR="$(python3 - "$REPO_ROOT" "$2" <<'PY'
 import re, sys
 from pathlib import Path
 root, phase_number = sys.argv[1], int(sys.argv[2], 10)
@@ -99,9 +99,24 @@ dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^
 print(dirs[0] if dirs else "", end="")
 PY
 )"
-  if [ -n "$WALL_PHASE_DIR" ]; then
-    bash "$PLAN_WALL_LEVER" "$WALL_PHASE_DIR" || exit $?
+  wall_resolve_rc=$?
+  # $2 is already proven numeric (requirement-ownership-gate.sh above would
+  # have exited nonzero otherwise) and the ownership gate already proved
+  # exactly one phase directory owns it — so a resolution failure or an
+  # empty result here is a real bug, not a "no wall needed" case. Fail loud
+  # rather than silently letting the phase start unwalled (spec-004 fix
+  # round finding 12).
+  if [ "$wall_resolve_rc" -ne 0 ]; then
+    echo "gsd-run: FATAL: phase directory resolution for phase $2 failed (rc=$wall_resolve_rc) — refusing to start unwalled" >&2
+    exit 78
   fi
+  if [ -z "$WALL_PHASE_DIR" ]; then
+    echo "gsd-run: FATAL: no phase directory found for phase $2 under .planning/phases (ownership gate proved one exists) — refusing to start unwalled" >&2
+    exit 78
+  fi
+  GSD_PHASE_ID="$(basename "$WALL_PHASE_DIR")"
+  export GSD_PHASE_ID
+  bash "$PLAN_WALL_LEVER" "$WALL_PHASE_DIR" || exit $?
   # Advisory scope-drift re-anchor (once per phase start, never per turn):
   # deterministic diff-vs-declared-surface + PHASE GOAL line. Fail-soft.
   DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"

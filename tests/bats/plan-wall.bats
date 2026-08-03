@@ -183,6 +183,33 @@ EOF
   [ "$(jq -r '.verdict' "$record")" = "WALL-UNREVIEWED" ]
 }
 
+@test "spec-004 fix round finding 2: a prior WALL-UNREVIEWED record on an UNCHANGED plan does NOT take the zero-dispatch idempotence path" {
+  write_config fable
+  stub_fail stub-claude
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"WALL-UNREVIEWED"* ]]
+
+  # plan is UNCHANGED, findings queue is trivially empty (no reviewer ever
+  # ran to report anything) — the old bug let this launder into a zero-
+  # dispatch "adjudicated-pass" on the next run. A real reviewer must be
+  # dispatched again; prove it by making the fresh dispatch observable.
+  MARKER="$BATS_TEST_TMPDIR/reviewer-ran"
+  cat > bin/stub-claude <<EOF
+#!/usr/bin/env bash
+touch "$MARKER"
+cat >/dev/null
+printf '[]\n'
+EOF
+  chmod +x bin/stub-claude
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  [ -f "$MARKER" ]
+  [[ "$output" != *"ADJUDICATED-PASS"* ]]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.verdict' "$record")" = "reviewed-pass" ]
+}
+
 # ── PATH-016: cross-vendor exhaustion falls through to same-vendor rule 2 ──
 
 @test "PATH-016: both CLIs installed, every opposite-vendor rung fails -> falls through to same-vendor" {
@@ -283,6 +310,42 @@ EOF
   [ "$(jq -r '.verdict' ".planning/run-state/plan-wall-1-foo-nope-plan.json")" = "NO-PLAN" ]
 }
 
+# ── path containment: a plan path must resolve inside the repo ─────────────
+
+@test "path containment: symlink escaping the repo is FATAL-refused, never read" {
+  echo "TOP_SECRET_OUTSIDE_REPO_CONTENT" > "$BATS_TEST_TMPDIR/outside-secret.md"
+  ln -s "$BATS_TEST_TMPDIR/outside-secret.md" .planning/phases/1-foo/escape-PLAN.md
+  cat > bin/stub-claude <<'EOF'
+#!/usr/bin/env bash
+cat > "$BATS_TEST_TMPDIR/should-not-be-dispatched"
+printf '[]\n'
+EOF
+  chmod +x bin/stub-claude
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude \
+    run bash "$LEVER" .planning/phases/1-foo/escape-PLAN.md
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FATAL"* ]]
+  [[ "$output" == *"outside the repo"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/should-not-be-dispatched" ]
+  [ ! -f ".planning/run-state/plan-wall-1-foo-escape-plan.json" ]
+}
+
+@test "path containment: a plain in-repo plan file is unaffected" {
+  stub_claude_json '[]'
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+}
+
+# ── missing schema file -> FATAL, never a silent unvalidated run ───────────
+
+@test "missing review-finding schema file -> FATAL before any dispatch" {
+  rm -f schemas/review-finding.schema.json
+  run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL"* ]]
+  [[ "$output" == *"schema"* ]]
+}
+
 # ── queue I/O fail-closed (fault injection) ─────────────────────────────────
 
 @test "queue I/O failure (unwritable store) -> blocked verdict + queue_error stamp" {
@@ -366,12 +429,38 @@ EOF
 
 @test "escalation_enabled and cross_vendor_fallback are stamped from config/env" {
   stub_claude_json '[]'
+  # No codex binary configured -> the opposite-vendor rung (rule 1) fails.
+  # FFS_CROSS_VENDOR_FALLBACK=off means selection must NOT fall back to the
+  # same-vendor claude stub (rule 2) — off is stricter, not looser (spec-004
+  # fix round finding 8) — so this now exhausts straight to WALL-UNREVIEWED
+  # rather than silently passing on a same-vendor reviewer.
   FFS_CROSS_VENDOR_FALLBACK=off FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude \
+    run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"WALL-UNREVIEWED"* ]]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.verdict' "$record")" = "WALL-UNREVIEWED" ]
+  [ "$(jq -r '.escalation_enabled' "$record")" = "true" ]
+  [ "$(jq -r '.cross_vendor_fallback' "$record")" = "off" ]
+  trail="$(jq -r '.rung_trail | join(";")' "$record")"
+  [[ "$trail" == *"rule2-skipped:cross-vendor-fallback-off"* ]]
+}
+
+@test "FFS_CROSS_VENDOR_FALLBACK=off with a working opposite-vendor rung still passes normally" {
+  # host=codex -> opposite vendor (rule 1) is claude, which the simple
+  # stub_claude_json helper can satisfy directly (unlike a codex stub, which
+  # would need to replicate --output-last-message file semantics). Rule 1
+  # succeeds on the FIRST attempt, so cvf=off never even needs to matter —
+  # it only changes behavior once rule 1 is exhausted.
+  stub_claude_json '[]'
+  FFS_CROSS_VENDOR_FALLBACK=off FFS_HOST=codex ADVERSARY_BIN_CLAUDE=stub-claude \
     run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.escalation_enabled' "$record")" = "true" ]
-  [ "$(jq -r '.cross_vendor_fallback' "$record")" = "off" ]
+  [ "$(jq -r '.verdict' "$record")" = "reviewed-pass" ]
+  trail="$(jq -r '.rung_trail | join(";")' "$record")"
+  [[ "$trail" == *"rule1-opposite-vendor"* ]]
+  [[ "$trail" != *"rule2-skipped"* ]]
 }
 
 # ── EDGE-003: schema-invalid / zero-byte rung output is a rung failure ─────
@@ -411,6 +500,52 @@ for a in "$@"; do
 done
 case "$model" in
   *fable*) printf '{"not":"an array"}\n' ;;
+  *sonnet*) printf '[]\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x bin/stub-claude
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+}
+
+@test "EDGE-003: wrong-typed field (line as a string) is a rung failure, not a laundered finding" {
+  write_config fable
+  cat > bin/stub-claude <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+model=""
+for a in "$@"; do
+  case "$prev" in --model) model="$a" ;; esac
+  prev="$a"
+done
+case "$model" in
+  *fable*) printf '[{"severity":"HIGH","file":"a.py","claim":"x","line":"not-a-number"}]\n' ;;
+  *sonnet*) printf '[]\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x bin/stub-claude
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+}
+
+@test "EDGE-003: out-of-range confidence (>1) is a rung failure" {
+  write_config fable
+  cat > bin/stub-claude <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+model=""
+for a in "$@"; do
+  case "$prev" in --model) model="$a" ;; esac
+  prev="$a"
+done
+case "$model" in
+  *fable*) printf '[{"severity":"HIGH","file":"a.py","claim":"x","confidence":1.5}]\n' ;;
   *sonnet*) printf '[]\n' ;;
   *) exit 1 ;;
 esac

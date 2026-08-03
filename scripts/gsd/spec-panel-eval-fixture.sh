@@ -134,8 +134,16 @@ degrade_o_axes="$(_rubric_axes_passed "$WORK/arm-degrade-openai/panel/synthesis.
 baseline_axes="$degrade_a_axes"
 [ "$degrade_o_axes" -lt "$baseline_axes" ] && baseline_axes="$degrade_o_axes"
 
+# AC-010: pass = panel >=3-of-4 rubric axes OVER the author+refuter degrade
+# baseline — both conditions, not just the floor. A panel that merely ties
+# the degrade baseline (e.g. both hit 3/4 by coincidence) has demonstrated
+# no improvement from the extra reviewer and must not pass (spec-004 fix
+# round finding 4: the floor-only predicate previously contradicted this
+# script's own `eval_d.definition` string below).
 eval_d_pass=false
-[ "$panel_axes" -ge 3 ] && eval_d_pass=true
+if [ "$panel_axes" -ge 3 ] && [ "$panel_axes" -gt "$baseline_axes" ]; then
+  eval_d_pass=true
+fi
 
 jq -n \
   --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

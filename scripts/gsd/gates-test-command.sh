@@ -4,7 +4,14 @@
 set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-PHASE_ID="${1:-${GSD_PHASE_ID:-gsd-phase}}"
+# PHASE_ID resolution: explicit arg > GSD_PHASE_ID env (set by gsd-run.sh /
+# feature-implement around their plan-wall.sh invocation, keyed on the phase
+# dir basename — the same key plan-wall.sh writes records under) > unscoped
+# fallback (empty) when gsd-core invokes this command bare, with no phase
+# context at all. The fallback is NOT the literal string "gsd-phase" — that
+# never matched any real record key and hard-failed every phase completion
+# once run-state existed (spec-004 fix round finding 1).
+PHASE_ID="${1:-${GSD_PHASE_ID:-}}"
 
 GATES_PY=""
 for candidate in \
@@ -33,11 +40,22 @@ fi
 # all) sees byte-identical behaviour to before this backstop existed.
 RUN_STATE_DIR="$REPO_ROOT/.planning/run-state"
 if [ -d "$RUN_STATE_DIR" ]; then
+  nullglob_was_set=0
+  shopt -q nullglob && nullglob_was_set=1
   shopt -s nullglob
-  wall_records=("$RUN_STATE_DIR"/plan-wall-"$PHASE_ID"-*.json)
-  shopt -u nullglob
+  if [ -n "$PHASE_ID" ]; then
+    wall_records=("$RUN_STATE_DIR"/plan-wall-"$PHASE_ID"-*.json)
+    phase_desc="phase '$PHASE_ID'"
+  else
+    # No scoping key available (no arg, no GSD_PHASE_ID) — fail-closed
+    # without name coupling: require EVERY plan-wall record under run-state
+    # to carry an accepted verdict, not just records matching a guessed key.
+    wall_records=("$RUN_STATE_DIR"/plan-wall-*.json)
+    phase_desc="this run (no phase id — unscoped backstop over all wall records)"
+  fi
+  [ "$nullglob_was_set" -eq 1 ] || shopt -u nullglob
   if [ "${#wall_records[@]}" -eq 0 ]; then
-    echo "gates-test-command: BACKSTOP: no plan-wall record for phase '$PHASE_ID' under $RUN_STATE_DIR — a gsd phase cannot complete without a wall record (spec-004 AC-005)" >&2
+    echo "gates-test-command: BACKSTOP: no plan-wall record for $phase_desc under $RUN_STATE_DIR — a gsd phase cannot complete without a wall record (spec-004 AC-005)" >&2
     exit 1
   fi
   for record in "${wall_records[@]}"; do
@@ -51,7 +69,7 @@ except Exception:
     case "$verdict" in
       reviewed-pass|adjudicated-pass|WAIVED) ;;
       *)
-        echo "gates-test-command: BACKSTOP: $record has verdict '$verdict' (need reviewed-pass|adjudicated-pass|WAIVED) — phase '$PHASE_ID' cannot complete" >&2
+        echo "gates-test-command: BACKSTOP: $record has verdict '$verdict' (need reviewed-pass|adjudicated-pass|WAIVED) — $phase_desc cannot complete" >&2
         exit 1
         ;;
     esac

@@ -2099,7 +2099,21 @@ def add_stale_bake_doctor_check(checks: list[dict[str, str]], source: Path, cwd:
 def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) -> None:
     """AC-009(b)/(c): canonical-tier probe + per-surface catalog/resolver warnings."""
     model_requests = _load_sibling_module(source / "lib" / "model_requests.py", "ffs_doctor_model_requests")
-    lint_mod = _load_sibling_module(source / "scripts" / "lint_model_routing.py", "ffs_doctor_lint_model_routing")
+    try:
+        lint_mod = _load_sibling_module(source / "scripts" / "lint_model_routing.py", "ffs_doctor_lint_model_routing")
+    except (ActionableError, OSError) as exc:
+        # A missing/broken lint_model_routing.py used to raise and abort the
+        # ENTIRE doctor run, hiding every other check behind an unrelated
+        # sibling-module problem. Degrade to a single warn row instead
+        # (spec-004 fix round finding 9a).
+        check_entry(
+            checks,
+            "model-resolvability",
+            "warn",
+            f"scripts/lint_model_routing.py unavailable ({exc}); canonical-tier probe skipped",
+            "verify scripts/lint_model_routing.py exists in this FFS install",
+        )
+        return
 
     # (b) probe every canonical-tier exact id, deduped by (vendor, id), for
     # each host whose CLI is installed. Force a fresh probe past the 24h
@@ -2109,6 +2123,12 @@ def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) 
         check_entry(checks, "model-resolvability", "pass", "no host CLI (claude/codex) installed; probe skipped")
     else:
         probe_lib = source / "scripts" / "gsd" / "model-probe-lib.sh"
+        # Doctor-scoped timeout: the default per-probe wall-clock bound
+        # (120s, GSD_MODEL_PROBE_TIMEOUT) is sized for a real reviewer
+        # dispatch, not a health check — an unbounded doctor run stacked
+        # that across every (host, tier) target. Shorter default,
+        # env-overridable for slow networks (spec-004 fix round finding 9b).
+        probe_timeout = os.environ.get("FFS_DOCTOR_PROBE_TIMEOUT", "20")
         targets: dict[tuple[str, str], str] = {}
         for host in hosts:
             for tier in lint_mod.CANONICAL_TIERS:
@@ -2119,7 +2139,11 @@ def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) 
             probe_fn = "probe_claude_model" if vendor == "claude" else "probe_codex_model"
             result = subprocess.run(
                 ["bash", "-c", f'. "$1" && {probe_fn} "$2"', "_", str(probe_lib), model_id],
-                env={**os.environ, "GSD_MODEL_PROBE_FORCE": "1"},
+                env={
+                    **os.environ,
+                    "GSD_MODEL_PROBE_FORCE": "1",
+                    "GSD_MODEL_PROBE_TIMEOUT": probe_timeout,
+                },
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -2135,7 +2159,14 @@ def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) 
                 "verify CLI auth/availability for these models",
             )
         else:
-            check_entry(checks, "model-resolvability", "pass", f"all canonical-tier models resolved for {', '.join(hosts)}")
+            check_entry(
+                checks,
+                "model-resolvability",
+                "pass",
+                f"all canonical-tier models resolved for {', '.join(hosts)} "
+                f"(forced past the shared 24h probe cache — cache refreshed for these models, "
+                f"{probe_timeout}s/probe)",
+            )
 
     # (c) per-surface catalog + resolver cross-checks (advisory, independent —
     # a surface can be resolver-known but catalog-absent, e.g. claude-opus-5
