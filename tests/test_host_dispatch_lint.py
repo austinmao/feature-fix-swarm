@@ -30,7 +30,13 @@ def test_unqualified_claude_model_alias_is_rejected() -> None:
 
 
 def test_priority_skills_declare_the_shared_dispatch_contract() -> None:
-    for name in ("feature-spec", "feature-implement", "spec-status", "continue-compact"):
+    for name in (
+        "feature-spec",
+        "feature-implement",
+        "spec-status",
+        "spec-guide",
+        "continue-compact",
+    ):
         text = (ROOT / "skills" / name / "SKILL.md").read_text()
         assert "## Host dispatch contract" in text, name
 

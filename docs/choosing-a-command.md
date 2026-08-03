@@ -166,6 +166,24 @@ report plus a `/handoff`. Reach for it when resuming a run, handing off to
 another session, or before a `/clear`. `--no-handoff` skips the handoff;
 `--continue-compact` chains `/continue-compact` instead of a bare `/handoff`.
 
+## After implementation: "how do people use it?" — `/spec-guide`
+
+```text
+Codex:  $spec-guide 348
+Claude: /spec-guide 348
+```
+
+Use this after a feature is implemented, or near completion, to produce a
+source-backed `usage-guide.md` divided into developer, admin, and user
+instructions. Each numbered instruction must be exercised through its actual
+delivery vehicle: browser steps through QA, API/MCP steps through real calls,
+chat steps through the real channel fixture, and so on. If the spec changed a
+visual surface, the guide cannot be fully verified until design review passes.
+
+`--no-live` drafts the guide without live actions, but keeps unexecuted steps
+honestly marked `PARTIAL` or `BLOCKED`. Use `--output PATH` to place the guide
+outside the spec directory.
+
 ## Related
 
 - [Model tiers](model-tiers.md) — which model runs each role, and why

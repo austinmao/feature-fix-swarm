@@ -98,6 +98,7 @@ right. The full walkthrough is in [Getting started](docs/getting-started.md).
 | A bounded task | `$task-swarm "task"` | `/task-swarm "task"` | Lightweight plan, phase execution, and finish gates |
 | A substantial feature | `$feature-spec "feature"` | `/feature-spec "feature"` | Durable spec, plan, tasks, preflight, and implementation |
 | An existing FFS/GSD plan | `$feature-implement NNN` | `/feature-implement NNN` | Resume phase-by-phase execution |
+| A shipped feature people must learn | `$spec-guide NNN` | `/spec-guide NNN` | Verified developer, admin, and user instructions across every delivery vehicle |
 
 See [Choosing a command](docs/choosing-a-command.md) for trade-offs and output
 artifacts.

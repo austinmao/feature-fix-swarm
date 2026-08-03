@@ -88,6 +88,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | Command | What it does |
 |---------|-------------|
 | `/spec-status [NNN] [--continue-compact] [--no-handoff]` | Read-only "where are we?" status check for a spec run — fans out over git, `.planning/`, gates ledger, runner state, evidence, and hygiene; writes a status report + `/handoff` (chains `/continue-compact` instead with that flag) |
+| `/spec-guide [NNN] [--no-live] [--output PATH]` | Produce developer, admin, and user instructions for a spec, map every step to its real browser/API/MCP/chat/email/CLI/webhook/worker vehicle, execute those proofs, and write `<spec-dir>/usage-guide.md`; design changes require `/design-review` |
 | `/continue-compact` | Save a durable handoff and produce the exact host-native resume command before the built-in `/compact`; Codex invokes the skill as `$continue-compact` |
 | `/retro` | Weekly retrospective of what shipped, what broke, what to improve |
 | `/checkpoint` | Save progress mid-session for resume later |
