@@ -747,6 +747,66 @@ EOF
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
+@test "gsd-run.sh wires plan-wall.sh beside the ownership gate (spec-004 INT-001 grep-pin)" {
+  gate_line="$(grep -n 'bash "$OWNERSHIP_GATE" "$2"' "$SCRIPT" | cut -d: -f1)"
+  wall_line="$(grep -n 'PLAN_WALL_LEVER="$SCRIPT_DIR/plan-wall.sh"' "$SCRIPT" | cut -d: -f1)"
+  drift_line="$(grep -n 'DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"' "$SCRIPT" | cut -d: -f1)"
+  [ -n "$gate_line" ]
+  [ -n "$wall_line" ]
+  [ -n "$drift_line" ]
+  [ "$wall_line" -gt "$gate_line" ]
+  [ "$wall_line" -lt "$drift_line" ]
+}
+
+@test "plan wall blocks execute-phase before any host probe (spec-004 PATH-011, real gsd-run.sh seam)" {
+  REPO="$BATS_TEST_TMPDIR/wall-wiring"
+  PHASE_DIR="$REPO/.planning/phases/02-example"
+  mkdir -p "$PHASE_DIR" "$REPO/lib" "$REPO/schemas"
+  git -C "$REPO" init -q
+  cp "$ROOT/lib/gates.py" "$REPO/lib/gates.py"
+  cp "$ROOT/schemas/review-finding.schema.json" "$REPO/schemas/review-finding.schema.json"
+  cat > "$REPO/.planning/ROADMAP.md" <<'EOF'
+# Roadmap
+
+## Phase 2: Example
+**Requirements:** FR-001
+EOF
+  cat > "$PHASE_DIR/02-01-PLAN.md" <<'EOF'
+---
+phase: 02-example
+plan: "01"
+requirements: [FR-001]
+---
+
+Phase 2: build a plain widget, nothing sensitive here.
+EOF
+  cat > "$REPO/.planning/config.json" <<'EOF'
+{"model_overrides": {"gsd-planner": "fable"}, "dynamic_routing": {"escalate_on_failure": true}}
+EOF
+
+  # Real gsd-run.sh path, real plan-wall.sh (never stubbed) — only the
+  # reviewer CLIs are pointed at nonexistent binaries so every ladder rung
+  # fails fast (rc=127) instead of shelling out to a real claude/codex CLI
+  # that may be installed on the machine running this suite.
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    ADVERSARY_BIN_CODEX=nonexistent-codex-binary-xyz \
+    ADVERSARY_BIN_CLAUDE=nonexistent-claude-binary-xyz \
+    FFS_ADVERSARY_MODEL_PROBE=off \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 2"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WALL-UNREVIEWED"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+
+  # spec-004 fix round finding 1: gsd-run.sh must export GSD_PHASE_ID as the
+  # phase DIRECTORY basename (e.g. "02-example"), matching the key
+  # plan-wall.sh itself writes records under — NOT gates-test-command.sh's
+  # old literal-"gsd-phase" default, which never matched any real record.
+  record_count="$(find "$REPO/.planning/run-state" -maxdepth 1 -name 'plan-wall-02-example-*.json' 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$record_count" -ge 1 ]
+}
+
 @test "Codex CLI outside the supported range fails before probing" {
   FFS_HOST=codex FAKE_CODEX_VERSION=0.147.0 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1151,6 +1211,73 @@ PY
   grep -F 'model="gpt-5.6-sol"' "$BATS_TEST_TMPDIR/codex.args"
   [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "frontier tier resolves gpt-5.6-sol at xhigh on the Codex host" {
+  FFS_HOST=codex GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  grep -F 'model="gpt-5.6-sol"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
+}
+
+@test "frontier tier resolves claude-fable-5 on the Claude host" {
+  FFS_HOST=claude GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5' "$BATS_TEST_TMPDIR/claude.args"
+}
+
+@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5 semantics and requires network_mode=enabled" {
+  FFS_HOST=claude GSD_LEAD_MODEL=fable GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"exact Fable requires network_mode=enabled"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "GSD_LEAD_MODEL=fable exact request host-pins Claude even when FFS_HOST requests Codex" {
+  FFS_HOST=codex GSD_LEAD_MODEL=fable GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  grep -Fx 'claude-fable-5' "$BATS_TEST_TMPDIR/claude.args"
+}
+
+@test "GSD_LEAD_MODEL=fable is incompatible with danger-full-access sandbox" {
+  FFS_HOST=codex GSD_LEAD_MODEL=fable GSD_RUN_ID=fable-danger-run \
+    GSD_SANDBOX_MODE=danger-full-access GSD_NETWORK_MODE=enabled GSD_NETWORK_PURPOSE=general \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"exact Fable and Codex danger-full-access are incompatible"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "unknown tier is rejected with the 4-tier error message" {
+  GSD_MODEL_REQUEST='{"kind":"tier","name":"premium"}' \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"frontier|judgment|execution|volume"* ]]
 }
 
 @test "resume refuses Codex CLI drift before a second stateful drive" {

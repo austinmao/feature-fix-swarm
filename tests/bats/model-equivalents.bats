@@ -32,11 +32,11 @@ setup() {
   [ "$output" = "gpt-5.6-luna" ]
 }
 
-@test "codex_equiv_effort: fable/opus -> high, sonnet -> medium, haiku -> low" {
+@test "codex_equiv_effort: fable -> xhigh, opus -> high, sonnet -> medium, haiku -> low" {
   run codex_equiv_effort fable
-[ "$output" = "high" ]
+  [ "$output" = "xhigh" ]
   run codex_equiv_effort opus
-[ "$output" = "high" ]
+  [ "$output" = "high" ]
   run codex_equiv_effort sonnet
   [ "$output" = "medium" ]
   run codex_equiv_effort haiku

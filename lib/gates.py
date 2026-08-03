@@ -1154,39 +1154,127 @@ def _findings_ns(data: dict) -> list:
     return findings
 
 
-def findings_add(store: Path, file: str, issue: str) -> tuple[str, bool]:
-    """Queue a review finding. Returns (sig, deduped) computed INSIDE the
-    store lock — the dedup outcome is atomic with the write, never a racy
-    pre-read (adversary F2). `file` is a free-text display/hash field only —
-    never opened or path-resolved (no traversal surface)."""
-    sig = hashlib.sha256(json.dumps([file, _normalize(issue)]).encode()).hexdigest()
+def findings_add(store: Path, file: str, issue: str, *, severity: str | None = None,
+                  run_id: str | None = None, source: str | None = None,
+                  plan: str | None = None) -> tuple[str, bool, bool]:
+    """Queue a review finding. Returns (sig, deduped, reopened) computed
+    INSIDE the store lock — the dedup outcome is atomic with the write,
+    never a racy pre-read (adversary F2). `file` is a free-text display/hash
+    field only — never opened or path-resolved (no traversal surface).
+
+    v2 (spec-004 AC-015): re-adding a RESOLVED signature REOPENS it (marks
+    unresolved again, appends the prior disposition/reason/resolved_at to
+    `history`) instead of silently no-op'ing — "resolved" must mean
+    adjudicated, not silenced forever. Re-adding an already-UNRESOLVED
+    signature stays a plain dedup (reopened=False). Optional metadata
+    (severity/run_id/source/plan) is stamped on first insert and refreshed
+    on reopen (a fresh report may carry updated context); a plain dedup of
+    an unresolved finding leaves existing metadata untouched.
+
+    `plan` is folded into the signature (AC-015: "phase-scoped, so one
+    phase's finding never blocks another phase's wall"): the identical
+    file+issue text reported for two DIFFERENT plans is two distinct
+    findings, each visible to its own `list --plan <that-plan>` and each
+    independently resolvable. Without this, the second plan's identical
+    report deduped into the FIRST plan's record — the second plan's wall
+    then saw zero unresolved findings under its own `--plan` scope and
+    passed unreviewed (spec-004 fix round finding 6: cross-plan duplicate
+    loses scope). Findings recorded with no plan at all keep the prior
+    global dedup behavior (plan="" folds identically for every no-plan
+    caller)."""
+    sig = hashlib.sha256(
+        json.dumps([plan or "", file, _normalize(issue)]).encode()
+    ).hexdigest()
+    reopened = False
     with _StoreLock(store):
         data = _load_store(store)
         findings = _findings_ns(data)
-        deduped = any(f["sig"] == sig for f in findings)
-        if not deduped:
-            findings.append({"sig": sig, "file": file, "issue": issue,
-                             "resolved": False, "recorded_at": _now()})
+        existing = next((f for f in findings if f["sig"] == sig), None)
+        deduped = existing is not None
+        if existing is None:
+            findings.append({
+                "sig": sig, "file": file, "issue": issue, "resolved": False,
+                "recorded_at": _now(), "severity": severity, "run_id": run_id,
+                "source": source, "plan": plan, "history": [],
+            })
             _save_store(store, data)
-    return sig, deduped
+        elif existing.get("resolved"):
+            existing.setdefault("history", []).append({
+                "disposition": existing.get("disposition"),
+                "reason": existing.get("reason"),
+                "resolved_at": existing.get("resolved_at"),
+            })
+            existing["resolved"] = False
+            existing.pop("disposition", None)
+            existing.pop("reason", None)
+            existing.pop("resolved_at", None)
+            for key, val in (("severity", severity), ("run_id", run_id),
+                              ("source", source), ("plan", plan)):
+                if val is not None:
+                    existing[key] = val
+            reopened = True
+            _save_store(store, data)
+    return sig, deduped, reopened
 
 
-def findings_list(store: Path, unresolved: bool = False) -> list:
+_VALID_DISPOSITIONS = {"refute", "fix", "waive"}
+
+
+def findings_list(store: Path, unresolved: bool = False, *, severity: str | None = None,
+                   source: str | None = None, plan: str | None = None) -> list:
+    """v2 (AC-015) adds optional severity/source/plan filters (comma-separated
+    for severity, e.g. `HIGH,CRITICAL`). Absent filters are no-ops — existing
+    callers (`--unresolved` only) are unaffected."""
     findings = _findings_ns(_load_store(store))
+    result = list(findings)
     if unresolved:
-        return [f for f in findings if not f.get("resolved")]
-    return list(findings)
+        result = [f for f in result if not f.get("resolved")]
+    if severity:
+        wanted = {s.strip().upper() for s in severity.split(",") if s.strip()}
+        result = [f for f in result if (f.get("severity") or "").upper() in wanted]
+    if source:
+        result = [f for f in result if f.get("source") == source]
+    if plan:
+        result = [f for f in result if f.get("plan") == plan]
+    return result
 
 
-def findings_resolve(store: Path, sig: str) -> bool:
+def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) -> bool:
     """Marks the matching signature resolved. False when sig unknown — no
-    write happens on a miss (adversary F4)."""
+    write happens on a miss (adversary F4).
+
+    v2 (AC-015): resolution now REQUIRES a disposition (`refute|fix|waive`)
+    and a non-empty reason — "resolved" means adjudicated, not silenced.
+    Raises ValueError on an invalid/missing disposition or empty reason
+    (validated before touching the store, including on an unknown sig, so a
+    malformed resolve never has a side effect either).
+
+    Re-resolving an ALREADY-resolved signature (double-resolve, e.g. an
+    operator correcting an earlier `refute` to `fix`) appends the PRIOR
+    disposition/reason/resolved_at to `history` before overwriting — same
+    provenance-preserving pattern `findings_add`'s reopen path already uses.
+    Without this, a double-resolve silently discarded the earlier
+    adjudication with no trace (spec-004 fix round finding 11)."""
+    if disposition not in _VALID_DISPOSITIONS:
+        raise ValueError("--disposition must be one of "
+                          f"{sorted(_VALID_DISPOSITIONS)}, got {disposition!r}")
+    if not reason or not reason.strip():
+        raise ValueError("--reason is required and must be non-empty")
     with _StoreLock(store):
         data = _load_store(store)
         findings = _findings_ns(data)
         for f in findings:
             if f["sig"] == sig:
+                if f.get("resolved"):
+                    f.setdefault("history", []).append({
+                        "disposition": f.get("disposition"),
+                        "reason": f.get("reason"),
+                        "resolved_at": f.get("resolved_at"),
+                    })
                 f["resolved"] = True
+                f["disposition"] = disposition
+                f["reason"] = reason
+                f["resolved_at"] = _now()
                 _save_store(store, data)
                 return True
     return False
@@ -1380,6 +1468,45 @@ def _flag(args: list[str], name: str, default: str = "") -> str:
         if a == name and i + 1 < len(args):
             return args[i + 1]
     return default
+
+
+def _extract_flags(
+    args: list[str], names: set[str], num_positional: int = 0
+) -> tuple[list[str], dict[str, str]]:
+    """Split `args` into (positionals, {flag: value}) for `--name value` pairs
+    matching `names`, wherever they appear after the fixed positional prefix
+    — everything else stays positional in order (findings-queue v2, AC-015:
+    flags may follow the legacy positional `<file> <issue>` form in any
+    position).
+
+    `num_positional` reserves that many LEADING tokens as fixed positionals,
+    consumed strictly by position before any flag matching runs. This is
+    what keeps an adversary-controlled positional value — e.g. an
+    LLM-reported finding's `file`/`issue` text that happens to equal a known
+    flag name like "--severity" — from being silently reinterpreted as that
+    flag instead of its intended positional value (spec-004 fix round
+    finding 5a: flag-token injection).
+
+    A recognized flag with no trailing value raises ValueError rather than
+    silently falling through to become an unintended extra positional
+    (finding 5b)."""
+    positionals: list[str] = []
+    values: dict[str, str] = {}
+    i = 0
+    while i < len(args) and len(positionals) < num_positional:
+        positionals.append(args[i])
+        i += 1
+    while i < len(args):
+        a = args[i]
+        if a in names:
+            if i + 1 >= len(args):
+                raise ValueError(f"{a} requires a value")
+            values[a] = args[i + 1]
+            i += 2
+            continue
+        positionals.append(a)
+        i += 1
+    return positionals, values
 
 
 def main(argv: list[str]) -> int:
@@ -1704,23 +1831,78 @@ def main(argv: list[str]) -> int:
         rest = args[1:]
         try:
             if sub == "add":
-                if len(rest) < 2:
-                    print("usage: findings-queue add <file> <issue>", file=sys.stderr)
+                # v2 (AC-015): optional --severity/--run-id/--source/--plan may
+                # appear anywhere after the subcommand; the positional
+                # `<file> <issue>` form (v1) stays valid regardless of order.
+                # <file> and <issue> are the two FIXED leading positionals —
+                # taken strictly by position (num_positional=2) so an
+                # adversary-controlled file/issue value that happens to equal
+                # a flag name can never hijack the parse.
+                try:
+                    positionals, flags = _extract_flags(
+                        rest, {"--severity", "--run-id", "--source", "--plan"},
+                        num_positional=2)
+                except ValueError as e:
+                    print(f"usage: findings-queue add <file> <issue> "
+                          f"[--severity S] [--run-id ID] [--source wall|review-gate] "
+                          f"[--plan PATH] ({e})", file=sys.stderr)
                     return 2
-                sig, deduped = findings_add(store, rest[0], rest[1])
-                print(json.dumps({"sig": sig, "deduped": deduped}))
+                if len(positionals) != 2:
+                    print("usage: findings-queue add <file> <issue> "
+                          "[--severity S] [--run-id ID] [--source wall|review-gate] "
+                          "[--plan PATH]", file=sys.stderr)
+                    return 2
+                sig, deduped, reopened = findings_add(
+                    store, positionals[0], positionals[1],
+                    severity=flags.get("--severity"), run_id=flags.get("--run-id"),
+                    source=flags.get("--source"), plan=flags.get("--plan"))
+                print(json.dumps({"sig": sig, "deduped": deduped, "reopened": reopened}))
                 return 0
             if sub == "list":
-                unresolved = "--unresolved" in rest
-                print(json.dumps(findings_list(store, unresolved=unresolved)))
+                try:
+                    positionals, flags = _extract_flags(
+                        rest, {"--severity", "--source", "--plan"})
+                except ValueError as e:
+                    print(f"usage: findings-queue list [--unresolved] "
+                          f"[--severity S] [--source wall|review-gate] "
+                          f"[--plan PATH] ({e})", file=sys.stderr)
+                    return 2
+                unresolved = "--unresolved" in positionals
+                print(json.dumps(findings_list(
+                    store, unresolved=unresolved, severity=flags.get("--severity"),
+                    source=flags.get("--source"), plan=flags.get("--plan"))))
                 return 0
             if sub == "resolve":
-                if not rest:
-                    print("usage: findings-queue resolve <sig>", file=sys.stderr)
+                # <sig> is the one fixed leading positional — same
+                # by-position rationale as `add` above.
+                try:
+                    positionals, flags = _extract_flags(
+                        rest, {"--disposition", "--reason"}, num_positional=1)
+                except ValueError as e:
+                    print(f"usage: findings-queue resolve <sig> "
+                          f"--disposition refute|fix|waive --reason <text> ({e})",
+                          file=sys.stderr)
                     return 2
-                sig = rest[0]
-                if findings_resolve(store, sig):
-                    print(json.dumps({"sig": sig, "resolved": True}))
+                if not positionals:
+                    print("usage: findings-queue resolve <sig> "
+                          "--disposition refute|fix|waive --reason <text>", file=sys.stderr)
+                    return 2
+                sig = positionals[0]
+                disposition = flags.get("--disposition")
+                reason = flags.get("--reason")
+                if not disposition or not reason:
+                    print("usage: findings-queue resolve <sig> "
+                          "--disposition refute|fix|waive --reason <text>", file=sys.stderr)
+                    return 2
+                try:
+                    resolved = findings_resolve(store, sig, disposition=disposition,
+                                                 reason=reason)
+                except ValueError as e:
+                    print(str(e), file=sys.stderr)
+                    return 2
+                if resolved:
+                    print(json.dumps({"sig": sig, "resolved": True,
+                                      "disposition": disposition}))
                     return 0
                 print(f"unknown signature: {sig}", file=sys.stderr)
                 return 1

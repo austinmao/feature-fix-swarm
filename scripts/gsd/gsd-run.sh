@@ -80,6 +80,43 @@ if [ "$GSD_SKILL_NAME" = "gsd-execute-phase" ]; then
     exit 78
   fi
   bash "$OWNERSHIP_GATE" "$2" || exit $?
+  # spec-004 AC-005/INT-001: blocking per-phase plan review wall — every
+  # plan under this phase must clear before the executor spawns. PHASE_DIR
+  # resolution mirrors requirement-ownership-gate.sh's regex (^0*{N}-) so
+  # both levers agree on which directory owns phase "$2" (ownership gate
+  # already proved exactly one such directory exists, above).
+  PLAN_WALL_LEVER="$SCRIPT_DIR/plan-wall.sh"
+  if [ ! -f "$PLAN_WALL_LEVER" ]; then
+    echo "gsd-run: plan wall lever missing: $PLAN_WALL_LEVER" >&2
+    exit 78
+  fi
+  WALL_PHASE_DIR="$(python3 - "$REPO_ROOT" "$2" <<'PY'
+import re, sys
+from pathlib import Path
+root, phase_number = sys.argv[1], int(sys.argv[2], 10)
+phases_root = Path(root) / ".planning" / "phases"
+dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^0*{phase_number}-", p.name))
+print(dirs[0] if dirs else "", end="")
+PY
+)"
+  wall_resolve_rc=$?
+  # $2 is already proven numeric (requirement-ownership-gate.sh above would
+  # have exited nonzero otherwise) and the ownership gate already proved
+  # exactly one phase directory owns it — so a resolution failure or an
+  # empty result here is a real bug, not a "no wall needed" case. Fail loud
+  # rather than silently letting the phase start unwalled (spec-004 fix
+  # round finding 12).
+  if [ "$wall_resolve_rc" -ne 0 ]; then
+    echo "gsd-run: FATAL: phase directory resolution for phase $2 failed (rc=$wall_resolve_rc) — refusing to start unwalled" >&2
+    exit 78
+  fi
+  if [ -z "$WALL_PHASE_DIR" ]; then
+    echo "gsd-run: FATAL: no phase directory found for phase $2 under .planning/phases (ownership gate proved one exists) — refusing to start unwalled" >&2
+    exit 78
+  fi
+  GSD_PHASE_ID="$(basename "$WALL_PHASE_DIR")"
+  export GSD_PHASE_ID
+  bash "$PLAN_WALL_LEVER" "$WALL_PHASE_DIR" || exit $?
   # Advisory scope-drift re-anchor (once per phase start, never per turn):
   # deterministic diff-vs-declared-surface + PHASE GOAL line. Fail-soft.
   DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"
@@ -147,7 +184,7 @@ kind = d["kind"]
 name = d.get("name", "")
 model = d["model"]
 effort = d.get("effort", "medium")
-tier = {"judgment": "opus", "execution": "sonnet", "volume": "haiku"}.get(name, model)
+tier = {"frontier": "fable", "judgment": "opus", "execution": "sonnet", "volume": "haiku"}.get(name, model)
 print("|".join((kind, name, model if kind == "exact" else "", tier, model, effort)))
 PY
 )

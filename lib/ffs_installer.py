@@ -13,6 +13,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -850,8 +851,16 @@ def safe_project_file(project: Path, key: str | Path) -> Path:
     return destination
 
 
-def atomic_copy_inside(root: Path, relative: str | Path, source: Path) -> None:
-    """Atomically replace a regular file beneath root without following links."""
+def atomic_copy_inside(
+    root: Path, relative: str | Path, source: Path, *, executable: bool = True
+) -> None:
+    """Atomically replace a regular file beneath root without following links.
+
+    ``executable`` defaults to True (existing scripts/gsd/*.sh|.py drift-surface
+    behaviour, pinned by setup-install.bats). Pass False for data files (e.g.
+    schemas/*.json) so the copy keeps the source's own bits instead of always
+    gaining +x (spec-004 INT-003: "correct bits").
+    """
     key = Path(relative)
     if key.is_absolute() or not key.parts or ".." in key.parts:
         raise ActionableError(f"unsafe consumer path: {relative}")
@@ -880,7 +889,9 @@ def atomic_copy_inside(root: Path, relative: str | Path, source: Path) -> None:
         if existing is not None and not stat.S_ISREG(existing.st_mode):
             raise ActionableError(f"consumer destination is not a regular file: {root / key}")
 
-        source_mode = stat.S_IMODE(source.stat().st_mode) | 0o111
+        source_mode = stat.S_IMODE(source.stat().st_mode)
+        if executable:
+            source_mode |= 0o111
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         output_fd = os.open(temporary, flags, source_mode, dir_fd=directory_fd)
         try:
@@ -2001,6 +2012,216 @@ def add_gsd_doctor_checks(checks: list[dict[str, str]], source: Path) -> None:
         check_entry(checks, "gsd-manifests", "pass", "Claude and Codex full-profile manifests are upstream-owned at 1.9.1")
 
 
+def _load_sibling_module(path: Path, name: str) -> Any:
+    """importlib.util load, not ``import`` — ffs_installer.py runs both as a
+    package member (pytest) and as a bare script (setup.sh), and those two
+    contexts disagree on whether ``lib/`` sibling modules are importable by
+    bare name. Loading by explicit file path sidesteps that entirely."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ActionableError(f"cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _catalog_model_ids(catalog: dict[str, Any]) -> set[str]:
+    """Every string found under a 'model' key anywhere in gsd-core's catalog."""
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "model" and isinstance(value, str):
+                    found.add(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(catalog)
+    return found
+
+
+def add_stale_bake_doctor_check(checks: list[dict[str, str]], source: Path, cwd: Path) -> None:
+    """AC-009(a): surface gsd-core's stale-bake-guard state (advisory)."""
+    guard = (
+        source / "node_modules" / "@opengsd" / "gsd-core" / "gsd-core" / "bin" / "lib" / "stale-bake-guard.cjs"
+    )
+    if not guard.is_file():
+        check_entry(checks, "stale-bake-guard", "warn", f"gsd-core stale-bake-guard module not found: {guard}")
+        return
+    script = (
+        "const g = require(process.argv[1]);"
+        "const fs = require('fs');"
+        "let config = {};"
+        "try { config = JSON.parse(fs.readFileSync(process.argv[2] + '/.planning/config.json', 'utf8')); } catch (e) {}"
+        "const runtime = g.resolveRuntimeFromConfig(config);"
+        "if (!g.STATIC_FRONTMATTER_RUNTIMES.includes(runtime)) { console.log(JSON.stringify({applicable: false})); process.exit(0); }"
+        "const newest = g.findNewestConfigMtime(process.argv[2]);"
+        "const oldest = g.findOldestAgentMtime(runtime);"
+        "if (!newest || !oldest) { console.log(JSON.stringify({applicable: false})); process.exit(0); }"
+        "const signal = g.detectStaleBake({runtime, configMtimeMs: newest.mtimeMs, agentMtimeMs: oldest.mtimeMs});"
+        "console.log(JSON.stringify({applicable: true, runtime, stale: !!signal}));"
+    )
+    node = shutil.which("node")
+    if not node:
+        check_entry(checks, "stale-bake-guard", "pass", "node is not installed; stale-bake check skipped")
+        return
+    process = subprocess.run(
+        [node, "-e", script, str(guard), str(cwd)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    try:
+        result = json.loads(process.stdout) if process.returncode == 0 else None
+    except json.JSONDecodeError:
+        result = None
+    if result is None:
+        check_entry(checks, "stale-bake-guard", "warn", f"stale-bake probe failed: {process.stderr.strip() or 'unknown error'}")
+    elif not result.get("applicable"):
+        check_entry(checks, "stale-bake-guard", "pass", "no static-frontmatter runtime (codex/kilo/opencode) configured; stale-bake check not applicable")
+    elif result.get("stale"):
+        check_entry(
+            checks,
+            "stale-bake-guard",
+            "warn",
+            f"{result['runtime']} agents were baked before the current model config changed",
+            f"rerun 'gsd install --{result['runtime']}' (or 'gsd update')",
+        )
+    else:
+        check_entry(checks, "stale-bake-guard", "pass", f"{result['runtime']} agent bake is current with model config")
+
+
+def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) -> None:
+    """AC-009(b)/(c): canonical-tier probe + per-surface catalog/resolver warnings."""
+    model_requests = _load_sibling_module(source / "lib" / "model_requests.py", "ffs_doctor_model_requests")
+    try:
+        lint_mod = _load_sibling_module(source / "scripts" / "lint_model_routing.py", "ffs_doctor_lint_model_routing")
+    except (ActionableError, OSError) as exc:
+        # A missing/broken lint_model_routing.py used to raise and abort the
+        # ENTIRE doctor run, hiding every other check behind an unrelated
+        # sibling-module problem. Degrade to a single warn row instead
+        # (spec-004 fix round finding 9a).
+        check_entry(
+            checks,
+            "model-resolvability",
+            "warn",
+            f"scripts/lint_model_routing.py unavailable ({exc}); canonical-tier probe skipped",
+            "verify scripts/lint_model_routing.py exists in this FFS install",
+        )
+        return
+
+    # (b) probe every canonical-tier exact id, deduped by (vendor, id), for
+    # each host whose CLI is installed. Force a fresh probe past the 24h
+    # cache TTL (EDGE-006) via model-probe-lib.sh's cached probe functions.
+    hosts = [host for host in ("claude", "codex") if shutil.which(host)]
+    if not hosts:
+        check_entry(checks, "model-resolvability", "pass", "no host CLI (claude/codex) installed; probe skipped")
+    else:
+        probe_lib = source / "scripts" / "gsd" / "model-probe-lib.sh"
+        # Doctor-scoped timeout: the default per-probe wall-clock bound
+        # (120s, GSD_MODEL_PROBE_TIMEOUT) is sized for a real reviewer
+        # dispatch, not a health check — an unbounded doctor run stacked
+        # that across every (host, tier) target. Shorter default,
+        # env-overridable for slow networks (spec-004 fix round finding 9b).
+        probe_timeout = os.environ.get("FFS_DOCTOR_PROBE_TIMEOUT", "20")
+        targets: dict[tuple[str, str], str] = {}
+        for host in hosts:
+            for tier in lint_mod.CANONICAL_TIERS:
+                info = model_requests.resolve_request({"kind": "tier", "name": tier}, host=host)
+                targets[(host, info["model"])] = tier
+        unreachable: list[str] = []
+        for (vendor, model_id), tier in sorted(targets.items()):
+            probe_fn = "probe_claude_model" if vendor == "claude" else "probe_codex_model"
+            result = subprocess.run(
+                ["bash", "-c", f'. "$1" && {probe_fn} "$2"', "_", str(probe_lib), model_id],
+                env={
+                    **os.environ,
+                    "GSD_MODEL_PROBE_FORCE": "1",
+                    "GSD_MODEL_PROBE_TIMEOUT": probe_timeout,
+                },
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode != 0:
+                unreachable.append(f"{vendor}/{tier}={model_id}")
+        if unreachable:
+            check_entry(
+                checks,
+                "model-resolvability",
+                "warn",
+                f"unreachable canonical-tier models: {', '.join(unreachable)}",
+                "verify CLI auth/availability for these models",
+            )
+        else:
+            check_entry(
+                checks,
+                "model-resolvability",
+                "pass",
+                f"all canonical-tier models resolved for {', '.join(hosts)} "
+                f"(forced past the shared 24h probe cache — cache refreshed for these models, "
+                f"{probe_timeout}s/probe)",
+            )
+
+    # (c) per-surface catalog + resolver cross-checks (advisory, independent —
+    # a surface can be resolver-known but catalog-absent, e.g. claude-opus-5
+    # today, or vice versa).
+    catalog_path = (
+        source / "node_modules" / "@opengsd" / "gsd-core" / "gsd-core" / "bin" / "shared" / "model-catalog.json"
+    )
+    catalog_ids = _catalog_model_ids(read_json(catalog_path) or {}) if catalog_path.is_file() else set()
+
+    surfaces: dict[str, str] = {}  # "<source-file>:<role>" -> tier name (or raw alias if unrecognized)
+    canonical_path = source / "templates" / "model-requests.json"
+    if canonical_path.is_file():
+        for role, request in (read_json(canonical_path) or {}).items():
+            if isinstance(request, dict) and request.get("kind") == "tier":
+                surfaces[f"model-requests.json:{role}"] = request.get("name")
+    config_path = source / "templates" / "gsd-config.base.json"
+    if config_path.is_file():
+        overrides = (read_json(config_path) or {}).get("model_overrides", {})
+        alias_to_tier = {alias: tier for tier, alias in lint_mod.TIER_ALIAS.items()}
+        for role, alias in overrides.items():
+            surfaces[f"gsd-config.base.json:{role}"] = alias_to_tier.get(alias, alias)
+
+    resolver_absent: list[str] = []
+    catalog_absent: list[str] = []
+    for surface, tier in surfaces.items():
+        if tier not in lint_mod.CANONICAL_TIERS:
+            resolver_absent.append(f"{surface}={tier!r}")
+            continue
+        model_id = model_requests.resolve_request({"kind": "tier", "name": tier}, host="claude")["model"]
+        if model_id not in catalog_ids:
+            catalog_absent.append(f"{surface}={model_id}")
+
+    if resolver_absent:
+        check_entry(
+            checks,
+            "model-routing-resolver",
+            "warn",
+            f"surfaces absent from the FFS resolver: {', '.join(sorted(resolver_absent))}",
+            "add the tier to lib/model_requests.py or fix the surface",
+        )
+    else:
+        check_entry(checks, "model-routing-resolver", "pass", "every configured surface resolves via the FFS resolver")
+
+    if catalog_absent:
+        check_entry(
+            checks,
+            "model-routing-catalog",
+            "warn",
+            f"surfaces absent from the gsd-core catalog: {', '.join(sorted(catalog_absent))}",
+            "expected until upstream gsd-core adds these model ids (tracked follow-up)",
+        )
+    else:
+        check_entry(checks, "model-routing-catalog", "pass", "every configured surface's model is present in the gsd-core catalog")
+
+
 def parse_cli_version(output: str) -> tuple[int, int, int] | None:
     match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", output)
     return tuple(map(int, match.groups())) if match else None
@@ -2045,6 +2266,8 @@ def doctor(scope: str, project: Path | None, as_json: bool) -> int:
     source = Path(__file__).resolve().parents[1]
     add_gsd_doctor_checks(checks, source)
     add_codex_version_check(checks)
+    add_stale_bake_doctor_check(checks, source, project or Path.cwd())
+    add_model_routing_doctor_checks(checks, source)
     path = manifest_path(scope, project)
     try:
         manifest = read_json(path)
@@ -2169,13 +2392,18 @@ def reconcile_consumer(source: Path, target: Path) -> int:
         "scripts/hooks/credential-output-guard.sh",
         "lib/model_requests.py",
     ]
-    for relative in relative_files:
+    # spec-004 INT-003: plan-wall.sh (already covered by the scripts/gsd/*.sh
+    # glob above) resolves its schema at $REPO_ROOT/schemas/*.json — a
+    # consumer missing this file loses wall finding validation. Not a script,
+    # so it travels through the non-executable branch below.
+    data_files = ["schemas/review-finding.schema.json"]
+    for relative in relative_files + data_files:
         source_file = source / relative
         target_file = safe_project_destination(target, relative)
         if target_file.is_symlink():
             raise ActionableError(f"consumer destination must not be a symlink: {target_file}")
         if source_file.resolve() != target_file.resolve():
-            atomic_copy_inside(target, relative, source_file)
+            atomic_copy_inside(target, relative, source_file, executable=relative not in data_files)
     print("consumer_runtime=reconciled")
     return 0
 

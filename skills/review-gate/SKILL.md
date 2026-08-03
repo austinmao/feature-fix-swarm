@@ -595,7 +595,8 @@ resolved so subsequent re-runs skip it:
 
 ```bash
 if [ -n "$GATES_PY" ] && [ -n "${FIXED_FINDING_SIG:-}" ]; then
-  if ! (cd "$REPO_ROOT" && python3 "$GATES_PY" findings-queue resolve "$FIXED_FINDING_SIG" >/dev/null 2>&1); then
+  if ! (cd "$REPO_ROOT" && python3 "$GATES_PY" findings-queue resolve "$FIXED_FINDING_SIG" \
+      --disposition fix --reason "review-gate fix round" >/dev/null 2>&1); then
     echo "[review-gate] WARN: findings-queue resolve failed for $FIXED_FINDING_SIG." >&2
     DEGRADED_PERSISTENCE=1
   fi

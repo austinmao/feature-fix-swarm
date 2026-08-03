@@ -49,8 +49,9 @@ HYGIENE (key-shaped strings in evidence/, filenames only) · DISK.
 
 Resolve `volume` to Codex Luna low / Claude Haiku, `execution` to Codex Terra
 medium / Claude Sonnet, and `judgment` to Codex Sol high / Claude Opus.
-Synthesis uses judgment unless the thin orchestrator can reconcile the reports
-inline. Producer ≠ reviewer holds: the synthesizer never re-litigates scouts;
+(`frontier` — Codex Sol xhigh / Claude Fable — is the planning-only tier and
+has no role in this status fan-out.) Synthesis uses judgment unless the thin
+orchestrator can reconcile the reports inline. Producer ≠ reviewer holds: the synthesizer never re-litigates scouts;
 it reconciles contradictions and says which report won.
 
 ## Step 4 — Report

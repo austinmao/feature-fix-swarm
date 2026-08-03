@@ -35,7 +35,7 @@ def validate_result(result: dict[str, Any]) -> None:
         raise EvalResultError(f"missing required result field: {', '.join(missing)}")
     if result["repetition"] not in {1, 2}:
         raise EvalResultError("repetition must be 1 or 2")
-    if result["tier"] not in {"judgment", "execution", "volume"}:
+    if result["tier"] not in {"frontier", "judgment", "execution", "volume"}:
         raise EvalResultError("invalid tier")
     if result["blast_radius"] not in {"low", "medium", "high"}:
         raise EvalResultError("invalid blast_radius")

@@ -124,8 +124,14 @@ def test_eval_synchronizes_auth_when_evaluation_is_interrupted(
 
 
 def test_selections_choose_lower_effort_for_complete_clean_matrix() -> None:
+    # "frontier" is a single-effort pinned reference row (spec-004 fix round
+    # finding 15) — selections() has nothing to choose between for it, so it
+    # is excluded from the expected decision dict, same as selections()
+    # itself skips it.
     assert RUNNER.selections(_matrix_results()) == {
-        tier: efforts[1] for tier, (_model, efforts) in RUNNER.MATRIX.items()
+        tier: efforts[1]
+        for tier, (_model, efforts) in RUNNER.MATRIX.items()
+        if len(efforts) >= 2
     }
 
 
@@ -151,9 +157,20 @@ def test_selections_reject_dirty_lower_effort_rows(mutation: dict[str, object]) 
     assert selected["execution"] == RUNNER.MATRIX["execution"][1][0]
 
 
+def _first_row_for_a_two_arm_tier(rows: list[dict[str, object]]) -> dict[str, object]:
+    """First row belonging to a tier selections() actually validates —
+    "frontier" (spec-004 fix round finding 15: single-effort pinned
+    reference) is skipped by selections() entirely, so mutating a frontier
+    row would never surface as a SystemExit."""
+    return next(
+        row for row in rows
+        if len(RUNNER.MATRIX[row["tier"]][1]) >= 2
+    )
+
+
 def test_selections_fail_closed_on_non_boolean_gate_result() -> None:
     rows = _matrix_results()
-    rows[0]["mandatory_gates_passed"] = "false"
+    _first_row_for_a_two_arm_tier(rows)["mandatory_gates_passed"] = "false"
 
     with pytest.raises(SystemExit, match="mandatory_gates_passed must be boolean"):
         RUNNER.selections(rows)
@@ -186,7 +203,16 @@ def test_selections_fail_closed_on_incomplete_matrix() -> None:
 
 def test_selections_fail_when_higher_effort_baseline_is_dirty() -> None:
     rows = _matrix_results()
-    rows[0]["findings"] = [{"severity": "HIGH", "message": "regression"}]
+    dirty_row = _first_row_for_a_two_arm_tier(rows)
+    dirty_tier = dirty_row["tier"]
+    dirty_row["findings"] = [{"severity": "HIGH", "message": "regression"}]
 
-    with pytest.raises(SystemExit, match="higher-effort judgment baseline failed"):
+    # regex is derived from the dirtied row's own tier, not hardcoded to
+    # "judgment" — spec-004 AC-003 added a `frontier` MATRIX row ahead of
+    # judgment, and the fix round (finding 15) made frontier single-effort
+    # and therefore skipped entirely by selections(), so the dirtied row
+    # must land on the first tier selections() actually validates rather
+    # than blindly rows[0] (pre-existing test staleness pinned to
+    # "judgment" pre-Phase-2, unrelated to Phase 2 itself).
+    with pytest.raises(SystemExit, match=f"higher-effort {dirty_tier} baseline failed"):
         RUNNER.selections(rows)

@@ -33,6 +33,15 @@ def run_setup(
             "FFS_SKIP_PROMPT_MASTER": "1",
             "FFS_GSD_INSTALLER": str(ROOT / "tests/fixtures/gsd-installer-stub.py"),
             "FFS_GSD_STUB_LOG": str(tmp_path / "gsd-installer.log"),
+            # spec-004 AC-009: doctor's model-resolvability check shells out to
+            # model-probe-lib.sh's cached probe, forcing past the TTL cache.
+            # Stub both vendor commands so the baseline test suite never
+            # depends on (or bills) a real claude/codex CLI that may happen to
+            # be installed on the machine running these tests — deterministic
+            # "always available" unless a test overrides these to prove the
+            # warn path.
+            "GSD_MODEL_PROBE_CMD": "true",
+            "GSD_MODEL_PROBE_CMD_CODEX": "true",
         }
     )
     env.update(extra_env or {})
@@ -223,6 +232,126 @@ def test_doctor_rejects_unsupported_codex_cli(tmp_path: Path) -> None:
     report = json.loads(result.stdout)
     assert result.returncode == 1
     assert any(check["id"] == "codex-cli-version" and check["status"] == "fail" for check in report["checks"])
+
+
+def test_doctor_reports_ac009_model_routing_advisory_checks(tmp_path: Path) -> None:
+    """spec-004 AC-009: stale-bake surface + per-surface catalog/resolver
+    warnings are advisory (never fail doctor) and the catalog check fires
+    for claude-opus-5 today (gsd-core's own catalog only knows
+    claude-opus-4-8)."""
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+
+    result = run_setup(tmp_path, "--doctor", "--scope", "user", "--json")
+    report = json.loads(result.stdout)
+    assert result.returncode == 0
+    checks_by_id = {check["id"]: check for check in report["checks"]}
+    assert checks_by_id["stale-bake-guard"]["status"] == "pass"
+    assert checks_by_id["model-resolvability"]["status"] == "pass"
+    assert checks_by_id["model-routing-resolver"]["status"] == "pass"
+    assert checks_by_id["model-routing-catalog"]["status"] == "warn"
+    assert "claude-opus-5" in checks_by_id["model-routing-catalog"]["message"]
+
+
+def test_doctor_warns_on_unreachable_canonical_tier_model(tmp_path: Path) -> None:
+    """spec-004 AC-009(b): doctor forces a fresh probe (EDGE-006) and warns —
+    never fails — when a canonical-tier model is unreachable."""
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_claude.chmod(0o755)
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text("#!/usr/bin/env bash\n[ \"${1:-}\" = --version ] && echo 'codex-cli 0.146.0'\nexit 0\n")
+    fake_codex.chmod(0o755)
+    fail_probe = tmp_path / "fail-on-opus.sh"
+    fail_probe.write_text('#!/usr/bin/env bash\n[ "$1" = claude-opus-5 ] && exit 1\nexit 0\n')
+    fail_probe.chmod(0o755)
+
+    result = run_setup(
+        tmp_path,
+        "--doctor",
+        "--scope",
+        "user",
+        "--json",
+        extra_env={
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "GSD_MODEL_PROBE_CMD": str(fail_probe),
+        },
+    )
+    report = json.loads(result.stdout)
+    assert result.returncode == 0
+    check = next(item for item in report["checks"] if item["id"] == "model-resolvability")
+    assert check["status"] == "warn"
+    assert "claude-opus-5" in check["message"]
+
+
+def test_doctor_degrades_to_warn_when_lint_model_routing_missing(tmp_path: Path) -> None:
+    """spec-004 fix round finding 9a: a missing scripts/lint_model_routing.py
+    must produce a single warn check row, never raise and abort the whole
+    doctor run (it used to raise ActionableError/FileNotFoundError and hide
+    every other doctor check behind it)."""
+    fake_source = tmp_path / "fake-source"
+    (fake_source / "lib").mkdir(parents=True)
+    (fake_source / "lib" / "model_requests.py").write_bytes((ROOT / "lib" / "model_requests.py").read_bytes())
+    # scripts/lint_model_routing.py deliberately absent.
+    checks: list[dict[str, str]] = []
+    ffs_installer.add_model_routing_doctor_checks(checks, fake_source)
+    assert len(checks) == 1
+    assert checks[0]["id"] == "model-resolvability"
+    assert checks[0]["status"] == "warn"
+    assert "lint_model_routing.py" in checks[0]["message"]
+
+
+def _fake_host_cli_path(tmp_path: Path) -> str:
+    """PATH with stub claude/codex binaries prepended.
+
+    Doctor's model-resolvability check gates on `shutil.which(host)` before
+    honoring the GSD_MODEL_PROBE_CMD* stubs, so a runner without the real
+    CLIs (CI) silently takes the probe-skipped branch and the probe-path
+    assertions never execute. The stubs are inert — the probe commands
+    themselves are already overridden to `true` by run_setup."""
+    bin_dir = tmp_path / "fake-host-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for host in ("claude", "codex"):
+        exe = bin_dir / host
+        # Answer --version with an in-range pin: a codex on PATH also wakes
+        # the pre-existing codex-cli-version doctor check, which fails hard
+        # on an unparseable version.
+        exe.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "--version" ]; then echo "0.146.0"; fi\n'
+            'exit 0\n'
+        )
+        exe.chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+
+def test_doctor_model_resolvability_pass_message_notes_cache_refresh_and_timeout(tmp_path: Path) -> None:
+    """spec-004 fix round finding 9b: the forced probe is bounded by a
+    doctor-scoped, env-overridable timeout (FFS_DOCTOR_PROBE_TIMEOUT,
+    default 20s — was unbounded at the shared 120s reviewer-dispatch
+    default), and the pass message says the shared probe cache was
+    refreshed rather than merely read from cache."""
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+
+    result = run_setup(
+        tmp_path,
+        "--doctor",
+        "--scope",
+        "user",
+        "--json",
+        extra_env={
+            "FFS_DOCTOR_PROBE_TIMEOUT": "7",
+            "PATH": _fake_host_cli_path(tmp_path),
+        },
+    )
+    report = json.loads(result.stdout)
+    assert result.returncode == 0
+    check = next(item for item in report["checks"] if item["id"] == "model-resolvability")
+    assert check["status"] == "pass"
+    assert "cache refreshed" in check["message"]
+    assert "7s/probe" in check["message"]
 
 
 def test_different_version_duplicate_fails_doctor(tmp_path: Path) -> None:

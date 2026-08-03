@@ -142,11 +142,15 @@ that requested an exact reviewer such as Fable.
 Model selection is intentionally typed:
 
 ```json
+{"kind":"tier","name":"frontier"}
 {"kind":"tier","name":"judgment"}
 {"kind":"tier","name":"execution"}
 {"kind":"tier","name":"volume"}
 {"kind":"exact","id":"gpt-5.6-sol"}
 ```
+
+`frontier` (spec 004) is the planning-only tier added alongside the original
+three; it is not reachable through dynamic escalation.
 
 Raw vendor model identifiers outside `kind: "exact"` fail lint. Default role
 assignments live in `templates/model-requests.json`; the reproducible 18-case
