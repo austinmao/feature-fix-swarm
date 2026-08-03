@@ -22,6 +22,42 @@ if [ -z "$GATES_PY" ]; then
   exit 1
 fi
 
+# spec-004 AC-005 completion backstop (INT-007): this is the ONE gate gsd-core
+# invokes on EVERY execution path — interactive `/gsd-execute-phase N` and bare
+# gsd-core invocations included — so it is the only seam that can close the
+# unwalled-start residual (plan-wall.sh only wraps gsd-run.sh's own pre-phase
+# block and feature-implement's per-phase step; neither wraps gsd-core's
+# native interactive execution). Fail-late-but-closed: an unwalled phase can
+# START but can never COMPLETE. Silent no-op when `.planning/run-state/` is
+# absent entirely — a non-gsd caller (or a repo that never ran plan-wall.sh at
+# all) sees byte-identical behaviour to before this backstop existed.
+RUN_STATE_DIR="$REPO_ROOT/.planning/run-state"
+if [ -d "$RUN_STATE_DIR" ]; then
+  shopt -s nullglob
+  wall_records=("$RUN_STATE_DIR"/plan-wall-"$PHASE_ID"-*.json)
+  shopt -u nullglob
+  if [ "${#wall_records[@]}" -eq 0 ]; then
+    echo "gates-test-command: BACKSTOP: no plan-wall record for phase '$PHASE_ID' under $RUN_STATE_DIR — a gsd phase cannot complete without a wall record (spec-004 AC-005)" >&2
+    exit 1
+  fi
+  for record in "${wall_records[@]}"; do
+    verdict="$(python3 -c "
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get('verdict', ''))
+except Exception:
+    print('')
+" "$record" 2>/dev/null)"
+    case "$verdict" in
+      reviewed-pass|adjudicated-pass|WAIVED) ;;
+      *)
+        echo "gates-test-command: BACKSTOP: $record has verdict '$verdict' (need reviewed-pass|adjudicated-pass|WAIVED) — phase '$PHASE_ID' cannot complete" >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
+
 # Test command resolution: GSD_TEST_CMD env > .planning/gsd-test-command file
 # > repo lib/tests. NO vacuous fallback — a syntax-check-of-self used to record
 # verify-done evidence that unlocked phase flips without testing anything

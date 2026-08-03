@@ -198,12 +198,19 @@ adversary_model_ladder() {
   fi
 }
 
-# adversary_invoke <kind> <timeout> <model> <effort> <prompt>
+# adversary_invoke <kind> <timeout> <model> <effort> <prompt> [schema_file]
 # Prints the underlying command's stdout+stderr and returns its exit code.
 # effort is unused for kind=claude — accepted and ignored. rc=127 if the
 # resolved bin is absent (fail-soft signal to the caller).
+#
+# AC-016(a): optional trailing schema_file — codex natively enforces it via
+# --output-schema (structured-output support in the pinned CLI); claude has
+# no equivalent flag, so schema_file is accepted-and-ignored on that branch
+# (post-hoc jq-validation is the caller's job in adversary_invoke_model_ladder,
+# which applies uniformly to both hosts). Absent schema_file = byte-identical
+# to the pre-AC-016 invocation.
 adversary_invoke() {
-  local kind="$1" timeout_s="$2" model="$3" effort="$4" prompt="$5"
+  local kind="$1" timeout_s="$2" model="$3" effort="$4" prompt="$5" schema_file="${6:-}"
   if [ "$kind" = "codex" ]; then
     local bin="${ADVERSARY_BIN_CODEX:-codex}" last_message transcript data_dir rc
     if ! command -v "$bin" >/dev/null 2>&1; then
@@ -218,6 +225,8 @@ adversary_invoke() {
       rm -f "$last_message" "$transcript"
       return 1
     }
+    local -a schema_args=()
+    [ -n "$schema_file" ] && schema_args=(--output-schema "$schema_file")
     # Codex has no Claude-style `--tools ''` flag. Disable every built-in
     # agentic tool family supported by the pinned CLI, run from a disposable
     # empty directory, and retain the read-only sandbox as defense in depth.
@@ -236,6 +245,7 @@ adversary_invoke() {
       --disable image_generation \
       -C "$data_dir" --skip-git-repo-check \
       --color never --output-last-message "$last_message" \
+      "${schema_args[@]}" \
       - >"$transcript" 2>&1
     rc="${PIPESTATUS[1]}"
     if [ "$rc" -eq 0 ] && [ -s "$last_message" ]; then
@@ -270,17 +280,32 @@ adversary_invoke() {
 }
 
 # adversary_invoke_model_ladder <kind> <timeout> <model> <effort> <prompt>
-#   [per-attempt-cap] [review-cap]
+#   [per-attempt-cap] [review-cap] [ordered-rungs] [schema-file] [validate-cmd]
 # Try models on one vendor before crossing vendors. Each attempt has its own
 # wall-clock cap; rc=124 means the CLI itself is hanging, so lower models on
 # that same binary are skipped. Failed transcripts are intentionally discarded
 # and never become input to a later reviewer.
+#
+# AC-016(b) ordered-rungs: when non-empty, REPLACES the built-in
+# adversary_model_ladder sequence with the caller's own newline-separated
+# "model|effort" list (same wire shape adversary_model_ladder emits) — the
+# plan-wall selection algorithm needs fable-first (Claude fence case) or
+# terra-first (Codex distinct-model rule) orderings the built-in ladder can
+# never produce (it always ladders down FROM the preferred model). Absent =
+# byte-identical to the pre-AC-016 built-in ladder.
+#
+# AC-016(a) schema validation: when both schema-file and validate-cmd are
+# non-empty, a rung that returns rc=0 is additionally piped through
+# `"$validate_cmd" "$schema_file"` (candidate output on stdin); a nonzero
+# exit there is treated as a RUNG FAILURE (ladder continues), never a caller
+# error — invalid/empty output must never look like a successful review.
 adversary_invoke_model_ladder() {
   local kind="$1" timeout_s="$2" preferred_model="$3"
   local preferred_effort="$4" prompt="$5" requested_cap="${6:-}"
-  local requested_review_cap="${7:-}"
+  local requested_review_cap="${7:-}" ordered_rungs="${8:-}"
+  local schema_file="${9:-}" validate_cmd="${10:-}"
   local total attempt_cap started remaining budget model effort output rc
-  local probe_enabled probe_timeout probe_output review_cap
+  local probe_enabled probe_timeout probe_output review_cap rung_source
 
   total="${timeout_s%%.*}"
   case "$total" in ''|*[!0-9]*|0) total=1 ;; esac
@@ -292,8 +317,14 @@ adversary_invoke_model_ladder() {
   review_cap="${requested_review_cap:-${FFS_ADVERSARY_REVIEW_ATTEMPT_TIMEOUT:-180}}"
   case "$review_cap" in ''|*[!0-9]*|0) review_cap=180 ;; esac
   started="$SECONDS"
+  if [ -n "$ordered_rungs" ]; then
+    rung_source="$ordered_rungs"
+  else
+    rung_source="$(adversary_model_ladder "$kind" "$preferred_model" "$preferred_effort")"
+  fi
 
   while IFS='|' read -r model effort; do
+    [ -n "$model" ] || continue
     remaining=$(( total - (SECONDS - started) ))
     [ "$remaining" -ge 1 ] || return 124
     if [ "$probe_enabled" != "off" ]; then
@@ -322,8 +353,14 @@ adversary_invoke_model_ladder() {
       [ "$budget" -le "$remaining" ] || budget="$remaining"
     fi
 
-    output="$(adversary_invoke "$kind" "$budget" "$model" "$effort" "$prompt" 2>&1)"
+    output="$(adversary_invoke "$kind" "$budget" "$model" "$effort" "$prompt" "$schema_file" 2>&1)"
     rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$schema_file" ] && [ -n "$validate_cmd" ]; then
+      if ! printf '%s' "$output" | "$validate_cmd" "$schema_file" >/dev/null 2>&1; then
+        echo "adversary-host: $kind model $model rung output failed schema validation ($schema_file)" >&2
+        rc=97   # sentinel: schema-invalid — distinct from CLI-unavailable, still a rung failure
+      fi
+    fi
     if [ "$rc" -eq 0 ]; then
       if [ "$model" != "$preferred_model" ]; then
         echo "adversary-host: MODEL_FALLBACK — $kind $preferred_model unavailable; selected $model" >&2
@@ -339,7 +376,9 @@ adversary_invoke_model_ladder() {
     if [ "$rc" -eq 124 ] && [ "$probe_enabled" = "off" ]; then
       return 124
     fi
-  done < <(adversary_model_ladder "$kind" "$preferred_model" "$preferred_effort")
+  done <<EOF
+$rung_source
+EOF
   return "${rc:-1}"
 }
 

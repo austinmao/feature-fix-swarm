@@ -186,7 +186,13 @@ def test_selections_fail_closed_on_incomplete_matrix() -> None:
 
 def test_selections_fail_when_higher_effort_baseline_is_dirty() -> None:
     rows = _matrix_results()
+    dirty_tier = rows[0]["tier"]
     rows[0]["findings"] = [{"severity": "HIGH", "message": "regression"}]
 
-    with pytest.raises(SystemExit, match="higher-effort judgment baseline failed"):
+    # regex is derived from rows[0]'s own tier, not hardcoded to "judgment" —
+    # spec-004 AC-003 added a `frontier` MATRIX row ahead of judgment, so
+    # rows[0] is whichever tier iterates first in RUNNER.MATRIX (pre-existing
+    # test staleness pinned to "judgment" pre-Phase-2, unrelated to Phase 2
+    # itself; fixed here as a one-line regression-test correctness fix).
+    with pytest.raises(SystemExit, match=f"higher-effort {dirty_tier} baseline failed"):
         RUNNER.selections(rows)
