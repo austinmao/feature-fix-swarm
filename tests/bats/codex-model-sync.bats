@@ -34,7 +34,8 @@ EOF
   run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
-grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
+  # spec-004 AC-004 effort split: fable materializes at xhigh, opus stays high
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
   grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor-sonnet.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor-sonnet.toml"
@@ -72,7 +73,8 @@ JSON
   GSD_MODEL_CONFIG="$CONFIG" run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-planner.toml"
-grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  # spec-004 AC-004: fable override materializes at xhigh
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
   grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor.toml"
 }
