@@ -147,7 +147,7 @@ kind = d["kind"]
 name = d.get("name", "")
 model = d["model"]
 effort = d.get("effort", "medium")
-tier = {"judgment": "opus", "execution": "sonnet", "volume": "haiku"}.get(name, model)
+tier = {"frontier": "fable", "judgment": "opus", "execution": "sonnet", "volume": "haiku"}.get(name, model)
 print("|".join((kind, name, model if kind == "exact" else "", tier, model, effort)))
 PY
 )

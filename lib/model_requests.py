@@ -19,11 +19,13 @@ class ModelRequestError(ValueError):
 
 
 CODEX_TIERS = {
+    "frontier": ("gpt-5.6-sol", "xhigh"),
     "judgment": ("gpt-5.6-sol", "high"),
     "execution": ("gpt-5.6-terra", "medium"),
     "volume": ("gpt-5.6-luna", "low"),
 }
 CLAUDE_TIERS = {
+    "frontier": ("claude-fable-5", None),
     "judgment": ("claude-opus-5", None),
     "execution": ("claude-sonnet-5", None),
     "volume": ("claude-haiku-4-5-20251001", None),
@@ -47,7 +49,8 @@ def resolve_request(request: object, *, host: str = "codex") -> dict[str, Any]:
         tiers = CODEX_TIERS if host == "codex" else CLAUDE_TIERS
         if name not in tiers or set(request) != {"kind", "name"}:
             raise ModelRequestError(
-                "tier request must be {kind:'tier', name:'judgment|execution|volume'}"
+                "tier request must be {kind:'tier', "
+                "name:'frontier|judgment|execution|volume'}"
             )
         model, effort = tiers[str(name)]
         return {

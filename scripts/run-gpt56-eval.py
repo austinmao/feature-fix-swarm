@@ -19,6 +19,7 @@ from typing import Any, NoReturn
 
 
 MATRIX = {
+    "frontier": ("gpt-5.6-sol", ("xhigh", "high")),
     "judgment": ("gpt-5.6-sol", ("xhigh", "high")),
     "execution": ("gpt-5.6-terra", ("high", "medium")),
     "volume": ("gpt-5.6-luna", ("medium", "low")),
