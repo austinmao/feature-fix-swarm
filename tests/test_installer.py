@@ -315,7 +315,14 @@ def _fake_host_cli_path(tmp_path: Path) -> str:
     bin_dir.mkdir(exist_ok=True)
     for host in ("claude", "codex"):
         exe = bin_dir / host
-        exe.write_text("#!/bin/sh\nexit 0\n")
+        # Answer --version with an in-range pin: a codex on PATH also wakes
+        # the pre-existing codex-cli-version doctor check, which fails hard
+        # on an unparseable version.
+        exe.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "--version" ]; then echo "0.146.0"; fi\n'
+            'exit 0\n'
+        )
         exe.chmod(0o755)
     return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
 
