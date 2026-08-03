@@ -8,6 +8,15 @@ all skills.
 
 ## Unreleased
 
+### Added
+
+- Added `/spec-guide` v1.0.0 to generate developer, admin, and user
+  instructions for a delivered spec and verify every step through its actual
+  browser, API/MCP, chat, email, CLI, webhook, worker, database, or design
+  surface. Its deterministic collector inventories source and evidence names
+  without reading evidence contents, and the installer ships the skill to both
+  Claude and Codex discovery roots.
+
 ### Security
 
 - Updated the pinned pytest development tool to 9.0.3 after GitHub's
