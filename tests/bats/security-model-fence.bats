@@ -74,3 +74,39 @@ EOF
   [[ "$output" == *"config unchanged"* ]]
   [ "$(planner_model gsd-planner)" = "fable" ]
 }
+
+# ── spec-004 AC-007: kill-switch + run-scoped marker ─────────────────────────
+
+@test "SECURITY_MODEL_FENCE=off -> config unchanged, no marker, exit 0" {
+  echo "Phase 1: harden RLS policies and JWT verification" > "$TMP/.planning/ROADMAP.md"
+  SECURITY_MODEL_FENCE=off run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kill-switch"* ]]
+  [ "$(planner_model gsd-planner)" = "fable" ]
+  [ ! -d "$TMP/.planning/run-state" ]
+}
+
+@test "trigger writes a run-scoped marker under .planning/run-state/" {
+  echo "Phase 1: harden RLS policies and JWT verification" > "$TMP/.planning/ROADMAP.md"
+  GSD_RUN_ID=spec-004-test run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  MARKER="$TMP/.planning/run-state/security-fence-spec-004-test.json"
+  [ -f "$MARKER" ]
+  [ "$(python3 -c "import json;print(json.load(open('$MARKER'))['run_id'])")" = "spec-004-test" ]
+  roles="$(python3 -c "import json;print(','.join(json.load(open('$MARKER'))['roles']))")"
+  [[ "$roles" == *"gsd-planner"* ]]
+  [[ "$roles" == *"gsd-plan-checker"* ]]
+}
+
+@test "no trigger (non-security spec) -> no marker written" {
+  echo "Phase 1: add pagination to the blog listing page" > "$TMP/.planning/ROADMAP.md"
+  GSD_RUN_ID=spec-004-notrigger run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/.planning/run-state/security-fence-spec-004-notrigger.json" ]
+}
+
+@test "SECURITY_MODEL_FENCE=off with no other config bypasses fail-soft warns too" {
+  SECURITY_MODEL_FENCE=off run bash "$LEVER" "$TMP/nonexistent"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kill-switch"* ]]
+}

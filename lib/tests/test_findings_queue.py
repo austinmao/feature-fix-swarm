@@ -1,10 +1,13 @@
-"""Tests for lib/gates.py `findings-queue` subcommand family (REQ-06 / AC-006).
+"""Tests for lib/gates.py `findings-queue` subcommand family (REQ-06 / AC-006,
+extended by spec-004 AC-015 — findings-queue v2: dispositions + reopen +
+severity/source/plan metadata + filtered list).
 
 Covers: function-level lifecycle, full subprocess CLI lifecycle (PATH-004),
 signature stability + delimiter-injection distinctness (EDGE-004), dedup
 atomicity, unknown-sig resolve error, usage errors, schema-conflict guard,
-store-key isolation, and synchronized-thread concurrency (adversary F1/F2/
-F4/F5/F7/F8).
+store-key isolation, synchronized-thread concurrency (adversary F1/F2/F4/F5/
+F7/F8), and v2: disposition/reason requirement, reopen-on-re-add-of-resolved,
+severity/source/plan filters, backward-compat store isolation.
 """
 from __future__ import annotations
 
@@ -15,6 +18,8 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+
+import pytest
 
 DISPATCH_DIR = Path(__file__).resolve().parents[1]
 GATES_PY = DISPATCH_DIR / "gates.py"
@@ -43,16 +48,17 @@ def _run(*args: str, store: Path) -> subprocess.CompletedProcess:
 
 def test_add_list_resolve_function_lifecycle(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    sig1, deduped1 = gates.findings_add(store, "a.py", "Missing null check")
-    sig2, deduped2 = gates.findings_add(store, "b.py", "No error handling")
-    sig3, deduped3 = gates.findings_add(store, "c.py", "Unbounded query")
+    sig1, deduped1, reopened1 = gates.findings_add(store, "a.py", "Missing null check")
+    sig2, deduped2, reopened2 = gates.findings_add(store, "b.py", "No error handling")
+    sig3, deduped3, reopened3 = gates.findings_add(store, "c.py", "Unbounded query")
     assert deduped1 is False and deduped2 is False and deduped3 is False
+    assert reopened1 is False and reopened2 is False and reopened3 is False
     assert len({sig1, sig2, sig3}) == 3
 
     unresolved = gates.findings_list(store, unresolved=True)
     assert len(unresolved) == 3
 
-    resolved = gates.findings_resolve(store, sig1)
+    resolved = gates.findings_resolve(store, sig1, disposition="fix", reason="patched")
     assert resolved is True
 
     unresolved_after = gates.findings_list(store, unresolved=True)
@@ -74,9 +80,10 @@ def test_cli_full_lifecycle_add_list_resolve_dedup(tmp_path) -> None:
         assert proc.returncode == 0
         line = proc.stdout.strip()
         payload = json.loads(line)
-        assert set(payload.keys()) == {"sig", "deduped"}
+        assert set(payload.keys()) == {"sig", "deduped", "reopened"}
         assert len(payload["sig"]) == 64
         assert payload["deduped"] is False
+        assert payload["reopened"] is False
         sigs.append(payload["sig"])
 
     proc = _run("list", "--unresolved", store=store)
@@ -85,20 +92,23 @@ def test_cli_full_lifecycle_add_list_resolve_dedup(tmp_path) -> None:
     assert isinstance(listed, list)
     assert len(listed) == 3
 
-    proc = _run("resolve", sigs[0], store=store)
+    proc = _run("resolve", sigs[0], "--disposition", "fix", "--reason", "patched",
+                store=store)
     assert proc.returncode == 0
     payload = json.loads(proc.stdout.strip())
-    assert payload == {"sig": sigs[0], "resolved": True}
+    assert payload == {"sig": sigs[0], "resolved": True, "disposition": "fix"}
 
     proc = _run("list", "--unresolved", store=store)
     listed = json.loads(proc.stdout.strip())
     assert len(listed) == 2
 
-    # re-add a duplicate — deduped:true, count unchanged
+    # re-add of the just-resolved signature — deduped:true, and since it was
+    # resolved, this REOPENS it (v2 AC-015); count stays unchanged (same sig).
     proc = _run("add", "a.py", "issue one", store=store)
     assert proc.returncode == 0
     payload = json.loads(proc.stdout.strip())
     assert payload["deduped"] is True
+    assert payload["reopened"] is True
     assert payload["sig"] == sigs[0]
 
     proc = _run("list", store=store)
@@ -110,8 +120,8 @@ def test_cli_full_lifecycle_add_list_resolve_dedup(tmp_path) -> None:
 
 def test_signature_stability_whitespace_and_case_normalized(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    sig1, _ = gates.findings_add(store, "f.py", "Missing check")
-    sig2, deduped2 = gates.findings_add(store, "f.py", "  missing   CHECK ")
+    sig1, _, _ = gates.findings_add(store, "f.py", "Missing check")
+    sig2, deduped2, _ = gates.findings_add(store, "f.py", "  missing   CHECK ")
     assert sig1 == sig2
     assert len(sig1) == 64
     assert deduped2 is True
@@ -119,22 +129,22 @@ def test_signature_stability_whitespace_and_case_normalized(tmp_path) -> None:
 
 def test_signature_delimiter_injection_distinct(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    sig1, _ = gates.findings_add(store, "a:b", "c")
-    sig2, _ = gates.findings_add(store, "a", "b:c")
+    sig1, _, _ = gates.findings_add(store, "a:b", "c")
+    sig2, _, _ = gates.findings_add(store, "a", "b:c")
     assert sig1 != sig2
 
 
 def test_signature_same_file_reworded_issue_distinct(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    sig1, _ = gates.findings_add(store, "f.py", "Missing null check")
-    sig2, _ = gates.findings_add(store, "f.py", "Null check missing entirely")
+    sig1, _, _ = gates.findings_add(store, "f.py", "Missing null check")
+    sig2, _, _ = gates.findings_add(store, "f.py", "Null check missing entirely")
     assert sig1 != sig2
 
 
 def test_signature_different_file_same_issue_distinct(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    sig1, _ = gates.findings_add(store, "a.py", "same issue")
-    sig2, _ = gates.findings_add(store, "b.py", "same issue")
+    sig1, _, _ = gates.findings_add(store, "a.py", "same issue")
+    sig2, _, _ = gates.findings_add(store, "b.py", "same issue")
     assert sig1 != sig2
 
 
@@ -142,8 +152,8 @@ def test_signature_different_file_same_issue_distinct(tmp_path) -> None:
 
 def test_dedup_flag_from_locked_operation_not_a_preread(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    sig1, deduped1 = gates.findings_add(store, "x.py", "dup me")
-    sig2, deduped2 = gates.findings_add(store, "x.py", "dup me")
+    sig1, deduped1, _ = gates.findings_add(store, "x.py", "dup me")
+    sig2, deduped2, _ = gates.findings_add(store, "x.py", "dup me")
     assert sig1 == sig2
     assert deduped1 is False
     assert deduped2 is True
@@ -156,7 +166,7 @@ def test_concurrent_add_same_sig_exactly_one_not_deduped(tmp_path) -> None:
     # deduped=False and the store holds exactly one record for that sig.
     store = tmp_path / "evidence.json"
     barrier = threading.Barrier(2)
-    results: list[tuple[str, bool]] = []
+    results: list[tuple[str, bool, bool]] = []
     append_lock = threading.Lock()
 
     def do_add():
@@ -173,9 +183,9 @@ def test_concurrent_add_same_sig_exactly_one_not_deduped(tmp_path) -> None:
     t2.join()
 
     assert len(results) == 2
-    sigs = {sig for sig, _ in results}
+    sigs = {sig for sig, _, _ in results}
     assert len(sigs) == 1  # identical sig
-    assert sorted(deduped for _, deduped in results) == [False, True]  # exactly one new
+    assert sorted(deduped for _, deduped, _ in results) == [False, True]  # exactly one new
 
     data = json.loads(store.read_text())
     matching = [f for f in data["findings"] if f["sig"] == sigs.pop()]
@@ -187,13 +197,15 @@ def test_concurrent_add_same_sig_exactly_one_not_deduped(tmp_path) -> None:
 def test_findings_resolve_unknown_sig_returns_false(tmp_path) -> None:
     store = tmp_path / "evidence.json"
     gates.findings_add(store, "a.py", "known issue")
-    assert gates.findings_resolve(store, "deadbeef" * 8) is False
+    assert gates.findings_resolve(store, "deadbeef" * 8, disposition="fix",
+                                   reason="n/a") is False
 
 
 def test_cli_resolve_unknown_sig_nonzero_exit_with_stderr(tmp_path) -> None:
     store = tmp_path / "evidence.json"
     _run("add", "a.py", "known issue", store=store)
-    proc = _run("resolve", "deadbeef" * 8, store=store)
+    proc = _run("resolve", "deadbeef" * 8, "--disposition", "fix", "--reason", "n/a",
+                store=store)
     assert proc.returncode == 1
     assert proc.stderr.strip() != ""
 
@@ -230,7 +242,8 @@ def test_schema_conflict_guard_never_clobbers(tmp_path) -> None:
     assert proc.returncode == 3
     assert store.read_text() == before
 
-    proc = _run("resolve", "deadbeef" * 8, store=store)
+    proc = _run("resolve", "deadbeef" * 8, "--disposition", "fix", "--reason", "n/a",
+                store=store)
     assert proc.returncode == 3
     assert store.read_text() == before
 
@@ -243,8 +256,8 @@ def test_unrelated_store_keys_untouched(tmp_path) -> None:
               "T001": {"gate": {"exit_code": 0}}}
     store.write_text(json.dumps(seeded, indent=2))
 
-    sig, _ = gates.findings_add(store, "a.py", "issue")
-    gates.findings_resolve(store, sig)
+    sig, _, _ = gates.findings_add(store, "a.py", "issue")
+    gates.findings_resolve(store, sig, disposition="fix", reason="patched")
 
     data = json.loads(store.read_text())
     assert data["_autonomy"] == seeded["_autonomy"]
@@ -256,7 +269,7 @@ def test_unrelated_store_keys_untouched(tmp_path) -> None:
 
 def test_concurrent_add_and_resolve_no_lost_update(tmp_path) -> None:
     store = tmp_path / "evidence.json"
-    pre_sig, _ = gates.findings_add(store, "pre.py", "pre-existing")
+    pre_sig, _, _ = gates.findings_add(store, "pre.py", "pre-existing")
 
     barrier = threading.Barrier(2)
     results: dict[str, object] = {}
@@ -267,7 +280,8 @@ def test_concurrent_add_and_resolve_no_lost_update(tmp_path) -> None:
 
     def do_resolve():
         barrier.wait()
-        results["resolved"] = gates.findings_resolve(store, pre_sig)
+        results["resolved"] = gates.findings_resolve(store, pre_sig, disposition="fix",
+                                                       reason="patched")
 
     t1 = threading.Thread(target=do_add)
     t2 = threading.Thread(target=do_resolve)
@@ -277,11 +291,179 @@ def test_concurrent_add_and_resolve_no_lost_update(tmp_path) -> None:
     t2.join()
 
     assert results["resolved"] is True
-    new_sig, deduped = results["new_sig"]
+    new_sig, deduped, reopened = results["new_sig"]
     assert deduped is False
+    assert reopened is False
 
     data = json.loads(store.read_text())
     findings = data["findings"]
     by_sig = {f["sig"]: f for f in findings}
     assert new_sig in by_sig
     assert by_sig[pre_sig]["resolved"] is True
+
+
+# ── v2 (AC-015): disposition/reason requirement ──────────────────────────────
+
+def test_resolve_without_disposition_raises(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "a.py", "issue")
+    with pytest.raises(ValueError):
+        gates.findings_resolve(store, sig, disposition="bogus", reason="x")
+
+
+def test_resolve_without_reason_raises(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "a.py", "issue")
+    with pytest.raises(ValueError):
+        gates.findings_resolve(store, sig, disposition="fix", reason="")
+    with pytest.raises(ValueError):
+        gates.findings_resolve(store, sig, disposition="fix", reason="   ")
+
+
+def test_cli_resolve_missing_disposition_usage_error(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    proc = _run("add", "a.py", "issue", store=store)
+    sig = json.loads(proc.stdout.strip())["sig"]
+    proc = _run("resolve", sig, store=store)
+    assert proc.returncode == 2
+    assert proc.stderr.strip() != ""
+
+
+def test_cli_resolve_bad_disposition_usage_error(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    proc = _run("add", "a.py", "issue", store=store)
+    sig = json.loads(proc.stdout.strip())["sig"]
+    proc = _run("resolve", sig, "--disposition", "yolo", "--reason", "x", store=store)
+    assert proc.returncode == 2
+    assert proc.stderr.strip() != ""
+
+
+# ── v2 (AC-015): reopen semantics ────────────────────────────────────────────
+
+def test_readd_of_resolved_signature_reopens_with_history(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig1, deduped1, reopened1 = gates.findings_add(store, "a.py", "leaky query")
+    assert deduped1 is False and reopened1 is False
+    assert gates.findings_resolve(store, sig1, disposition="refute", reason="false positive")
+
+    unresolved = gates.findings_list(store, unresolved=True)
+    assert sig1 not in {f["sig"] for f in unresolved}
+
+    sig2, deduped2, reopened2 = gates.findings_add(store, "a.py", "leaky query")
+    assert sig2 == sig1
+    assert deduped2 is True
+    assert reopened2 is True
+
+    unresolved_after = gates.findings_list(store, unresolved=True)
+    assert sig1 in {f["sig"] for f in unresolved_after}
+
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig1)
+    assert record["resolved"] is False
+    assert "disposition" not in record
+    assert len(record["history"]) == 1
+    assert record["history"][0]["disposition"] == "refute"
+    assert record["history"][0]["reason"] == "false positive"
+
+
+def test_readd_of_unresolved_signature_does_not_reopen(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "a.py", "issue")
+    sig2, deduped2, reopened2 = gates.findings_add(store, "a.py", "issue")
+    assert sig1 == sig2
+    assert deduped2 is True
+    assert reopened2 is False
+
+
+def test_cli_readd_of_resolved_reopens(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    proc = _run("add", "a.py", "leaky query", store=store)
+    sig = json.loads(proc.stdout.strip())["sig"]
+    _run("resolve", sig, "--disposition", "refute", "--reason", "nope", store=store)
+
+    proc = _run("add", "a.py", "leaky query", store=store)
+    payload = json.loads(proc.stdout.strip())
+    assert payload["sig"] == sig
+    assert payload["deduped"] is True
+    assert payload["reopened"] is True
+
+    proc = _run("list", "--unresolved", store=store)
+    listed = json.loads(proc.stdout.strip())
+    assert sig in {f["sig"] for f in listed}
+
+
+# ── v2 (AC-015): metadata + filters ──────────────────────────────────────────
+
+def test_add_with_metadata_flags(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    proc = _run("add", "plan.md", "missing test", "--severity", "HIGH",
+                "--run-id", "run-1", "--source", "wall", "--plan",
+                ".planning/phases/1/PLAN.md", store=store)
+    assert proc.returncode == 0
+    sig = json.loads(proc.stdout.strip())["sig"]
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig)
+    assert record["severity"] == "HIGH"
+    assert record["run_id"] == "run-1"
+    assert record["source"] == "wall"
+    assert record["plan"] == ".planning/phases/1/PLAN.md"
+
+
+def test_list_severity_filter_comma_separated(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.findings_add(store, "a.py", "one", severity="HIGH")
+    gates.findings_add(store, "b.py", "two", severity="LOW")
+    gates.findings_add(store, "c.py", "three", severity="CRITICAL")
+    result = gates.findings_list(store, severity="HIGH,CRITICAL")
+    assert {f["file"] for f in result} == {"a.py", "c.py"}
+
+
+def test_list_source_and_plan_filters(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.findings_add(store, "a.py", "one", source="wall", plan="phase-1/PLAN.md")
+    gates.findings_add(store, "b.py", "two", source="review-gate", plan="phase-1/PLAN.md")
+    gates.findings_add(store, "c.py", "three", source="wall", plan="phase-2/PLAN.md")
+
+    wall_only = gates.findings_list(store, source="wall")
+    assert {f["file"] for f in wall_only} == {"a.py", "c.py"}
+
+    phase1_only = gates.findings_list(store, plan="phase-1/PLAN.md")
+    assert {f["file"] for f in phase1_only} == {"a.py", "b.py"}
+
+    scoped = gates.findings_list(store, unresolved=True, source="wall",
+                                  severity="HIGH,CRITICAL", plan="phase-1/PLAN.md")
+    assert scoped == []  # none of the phase-1/wall findings carry HIGH/CRITICAL
+
+
+def test_cli_list_plan_scoped_filter(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _run("add", "a.py", "issue-a", "--severity", "HIGH", "--source", "wall",
+         "--plan", "phase-1/PLAN.md", store=store)
+    _run("add", "b.py", "issue-b", "--severity", "HIGH", "--source", "wall",
+         "--plan", "phase-2/PLAN.md", store=store)
+    proc = _run("list", "--unresolved", "--source", "wall", "--severity", "HIGH,CRITICAL",
+                "--plan", "phase-1/PLAN.md", store=store)
+    assert proc.returncode == 0
+    listed = json.loads(proc.stdout.strip())
+    assert len(listed) == 1
+    assert listed[0]["file"] == "a.py"
+
+
+# ── backward-compat: prior (v1-shaped) entries untouched by v2 filters ──────
+
+def test_v1_shaped_entries_survive_v2_filters(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    seeded = {"findings": [{"sig": "a" * 64, "file": "x.py", "issue": "old",
+                            "resolved": False, "recorded_at": 0}]}
+    store.write_text(json.dumps(seeded, indent=2))
+
+    all_findings = gates.findings_list(store)
+    assert len(all_findings) == 1
+    assert all_findings[0]["file"] == "x.py"
+
+    # a v1 entry has no severity/source/plan — filtering on any of those excludes it,
+    # never raises.
+    assert gates.findings_list(store, severity="HIGH") == []
+    assert gates.findings_list(store, source="wall") == []
+    assert gates.findings_list(store, plan="anything") == []
+
+    # resolving a v1-shaped entry with v2 semantics still works
+    assert gates.findings_resolve(store, "a" * 64, disposition="fix", reason="ok") is True

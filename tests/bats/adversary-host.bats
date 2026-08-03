@@ -262,3 +262,156 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot locate run-bounded.sh"* ]]
 }
+
+# ── spec-004 AC-016: ordered-rungs + schema validation extension ────────────
+
+@test "ordered-rungs overrides the built-in ladder (terra first, not sol)" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/ordered-codex" <<EOF
+#!/usr/bin/env bash
+model=""
+last_message=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -c) case "\$2" in model=*) model="\$2" ;; esac; shift 2 ;;
+    -o|--output-last-message) last_message="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "\$model" >> "$BATS_TEST_TMPDIR/tried.log"
+case "\$model" in
+  *terra*) exit 1 ;;
+  *luna*) printf 'VERDICT: PASS\n' > "\$last_message" ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/ordered-codex"
+
+  run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=ordered-codex \
+    PATH="$STUB_DIR:$PATH" bash -c \
+    ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol xhigh review 5 5 \$'gpt-5.6-terra|medium\ngpt-5.6-luna|low'"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: PASS"* ]]
+  [[ "$output" == *"SELECTED codex gpt-5.6-luna"* ]]
+  tried="$(cat "$BATS_TEST_TMPDIR/tried.log")"
+  # terra tried before luna; sol (the preferred/producer model) never tried —
+  # ordered-rungs REPLACES the built-in ladder entirely.
+  first_line="$(echo "$tried" | head -1)"
+  [[ "$first_line" == *terra* ]]
+  ! echo "$tried" | grep -q 'model="gpt-5.6-sol"'
+}
+
+@test "schema validation: rc=0 output failing the validator is a rung failure, ladder continues" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/schema-codex" <<EOF
+#!/usr/bin/env bash
+model=""
+last_message=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -c) case "\$2" in model=*) model="\$2" ;; esac; shift 2 ;;
+    -o|--output-last-message) last_message="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$model" in
+  *terra*) printf 'NOT VALID JSON\n' > "\$last_message" ;;
+  *luna*) printf '[]\n' > "\$last_message" ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/schema-codex"
+  cat > "$STUB_DIR/reject-non-array" <<'EOF'
+#!/usr/bin/env bash
+# $1 = schema file (ignored, structural check only). stdin = candidate JSON.
+out="$(cat)"
+printf '%s' "$out" | head -c1 | grep -q '\[' && exit 0
+exit 1
+EOF
+  chmod +x "$STUB_DIR/reject-non-array"
+
+  run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=schema-codex \
+    PATH="$STUB_DIR:$PATH" bash -c \
+    ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol xhigh review 5 5 \
+      \$'gpt-5.6-terra|medium\ngpt-5.6-luna|low' /dev/null reject-non-array"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "adversary-host: MODEL_FALLBACK — codex gpt-5.6-sol unavailable; selected gpt-5.6-luna
+adversary-host: SELECTED codex gpt-5.6-luna low
+[]" ] || [[ "$output" == *"SELECTED codex gpt-5.6-luna"* ]]
+  [[ "$output" == *"[]"* ]]
+}
+
+@test "schema args absent: byte-compatible with pre-AC-016 built-in ladder" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/plain-codex" <<EOF
+#!/usr/bin/env bash
+last_message=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o|--output-last-message) last_message="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'VERDICT: PASS\n' > "\$last_message"
+EOF
+  chmod +x "$STUB_DIR/plain-codex"
+  run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=plain-codex \
+    PATH="$STUB_DIR:$PATH" bash -c \
+    ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol xhigh review"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SELECTED codex gpt-5.6-sol"* ]]
+}
+
+@test "--output-schema is passed to codex exec when a schema file is given" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/capture-args-codex" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/argv.log"
+last_message=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o|--output-last-message) last_message="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '[]\n' > "\$last_message"
+EOF
+  chmod +x "$STUB_DIR/capture-args-codex"
+  SCHEMA="$BATS_TEST_TMPDIR/finding.schema.json"
+  echo '{}' > "$SCHEMA"
+
+  run env ADVERSARY_BIN_CODEX=capture-args-codex PATH="$STUB_DIR:$PATH" \
+    bash -c ". '$LIB'; adversary_invoke codex 10 sol xhigh review '$SCHEMA'"
+
+  [ "$status" -eq 0 ]
+  grep -Fqx -- '--output-schema' "$BATS_TEST_TMPDIR/argv.log"
+  grep -Fqx -- "$SCHEMA" "$BATS_TEST_TMPDIR/argv.log"
+}
+
+@test "adversary_invoke without schema_file omits --output-schema (backward-compat)" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/capture-args-codex" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/argv.log"
+last_message=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o|--output-last-message) last_message="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '[]\n' > "\$last_message"
+EOF
+  chmod +x "$STUB_DIR/capture-args-codex"
+
+  run env ADVERSARY_BIN_CODEX=capture-args-codex PATH="$STUB_DIR:$PATH" \
+    bash -c ". '$LIB'; adversary_invoke codex 10 sol xhigh review"
+
+  [ "$status" -eq 0 ]
+  ! grep -Fqx -- '--output-schema' "$BATS_TEST_TMPDIR/argv.log"
+}
