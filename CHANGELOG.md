@@ -29,6 +29,22 @@ all skills.
   reopens a finding whose signature recurs after resolution. Added
   `SECURITY_MODEL_FENCE=off` as an explicit kill-switch for the existing
   security-spec planning fence.
+- Added `/git-branch-consolidate` v1.0.0 and `/git-branch-cleanup` v1.0.0, a
+  repository-hygiene pair for reconciling a sprawling branch estate back down
+  to one `origin/main`. Consolidate is read-only: its deterministic collector
+  (`skills/git-branch-consolidate/scripts/collect-estate.py`) classifies every
+  branch and worktree by whether the base branch already carries the content,
+  what work is still owed, whether tests exist, and whether the
+  spec/plan/tasks trail is complete, then writes an ordered merge set, cleanup
+  set, and testing-gap list to `.planning/ESTATE-<UTC>.md` without ever
+  checking out, fetching, merging, or deleting. Cleanup owns the acting half:
+  CI-gated merges of non-gated PRs under the pinned merge protocol, then
+  pruning merged refs and their worktrees. Both treat merged-PR state and
+  residual-code emptiness as authoritative rather than `git branch --merged`,
+  which reports every squash-merged branch as unmerged; remote deletion is
+  compare-and-delete via `--force-with-lease` only. Consolidate hands its
+  `delete-safe` set to cleanup and never the reverse — land before cleanup, or
+  you delete the only copy.
 - Added `/spec-guide` v1.0.0 to generate developer, admin, and user
   instructions for a delivered spec and verify every step through its actual
   browser, API/MCP, chat, email, CLI, webhook, worker, database, or design

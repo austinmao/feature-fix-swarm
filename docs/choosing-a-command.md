@@ -184,6 +184,32 @@ visual surface, the guide cannot be fully verified until design review passes.
 honestly marked `PARTIAL` or `BLOCKED`. Use `--output PATH` to place the guide
 outside the spec directory.
 
+## After the dust settles: "what's still unmerged?" — `/git-branch-consolidate`
+
+```text
+Codex:  $git-branch-consolidate
+Claude: /git-branch-consolidate
+```
+
+Not a front door either — reach for it when the branch list has outgrown what
+anyone can hold in their head, or before a release when "is everything landed?"
+needs an evidence-backed answer rather than a guess.
+
+It is read-only: it classifies every branch and worktree by whether the base
+branch already carries the content, what work is still owed, whether tests
+exist, and whether the spec/plan/tasks trail is complete — then writes an
+ordered merge set, cleanup set, and testing-gap list to
+`.planning/ESTATE-<UTC>.md`. It never checks out, fetches, merges, or deletes.
+
+Its counterpart `/git-branch-cleanup` does the acting: CI-gated merges of
+non-gated PRs, then pruning merged refs and their worktrees. Consolidate hands
+its `delete-safe` set to cleanup, never the reverse — **land before cleanup, or
+you delete the only copy.**
+
+The load-bearing subtlety in both: on a squash-merge repo, `git branch --merged`
+lies. A squash-merged branch looks unmerged by ancestry alone, so both commands
+treat merged-PR state and residual-code emptiness as authoritative instead.
+
 ## Related
 
 - [Model tiers](model-tiers.md) — which model runs each role, and why
