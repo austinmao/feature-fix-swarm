@@ -52,6 +52,18 @@ all skills.
   without reading evidence contents, and the installer ships the skill to both
   Claude and Codex discovery roots.
 
+### Fixed
+
+- `/spec-status NNN` now resolves the unique `spec-NNN` archive when the active
+  `.planning/` tree carries several *unrelated* identities. The conflicting
+  active identities check previously fail-closed on any multi-identity tree,
+  which blocked status for an explicitly-requested archived spec whenever the
+  root project had moved on. A conflict that includes the requested spec still
+  fails closed — active planning must not be ambiguous about the spec you
+  asked for. Regression test covers the live shape that exposed this: a
+  `.planning/` root naming two other specs while `spec-NNN` sits in the
+  archive.
+
 ### Security
 
 - Updated the pinned pytest development tool to 9.0.3 after GitHub's
