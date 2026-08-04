@@ -95,6 +95,17 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/health` | Codebase quality check (dead code, test coverage, lint) |
 | `/goal-wrap [--gates] "objective"` | Bundle current work into a self-contained, anti-drift `/goal "..."` prompt with tracked DONE WHEN proof commands. Use before `/clear`, agent handoff, or switching machines. `--gates` reverts to ask-first behavior (default: full autonomy — commits/push/merge/deploy pre-approved). Degrades gracefully without repowise/gbrain/`/prompt-master`/`/handoff` — see the skill's own "Soft dependencies" table. |
 
+## Repository Hygiene
+
+| Command | What it does |
+|---------|-------------|
+| `/git-branch-consolidate` | Read-only audit of every branch and worktree — is the content already landed, what does it still owe, does it have tests, is its spec/plan/tasks trail complete. Emits an ordered merge set, cleanup set, and testing gaps to `.planning/ESTATE-<UTC>.md`; never checks out, merges, or deletes |
+| `/git-branch-cleanup` | Triage branches against the base branch, merge only CI-green non-gated PRs, prune merged refs + worktrees. Squash-merge and operator-gate aware; owns the deletion approval flow |
+
+**Pair order:** `/git-branch-consolidate` audits and decides, then hands its
+`delete-safe` set to `/git-branch-cleanup` to execute. Land before cleanup, or
+you delete the only copy.
+
 ## Environment Variables
 
 | Var | Default | Effect |

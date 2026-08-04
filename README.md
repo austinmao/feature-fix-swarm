@@ -107,6 +107,8 @@ right. The full walkthrough is in [Getting started](docs/getting-started.md).
 | A substantial feature | `$feature-spec "feature"` | `/feature-spec "feature"` | Durable spec, plan, tasks, preflight, and implementation |
 | An existing FFS/GSD plan | `$feature-implement NNN` | `/feature-implement NNN` | Resume phase-by-phase execution |
 | A shipped feature people must learn | `$spec-guide NNN` | `/spec-guide NNN` | Verified developer, admin, and user instructions across every delivery vehicle |
+| More branches than anyone can track | `$git-branch-consolidate` | `/git-branch-consolidate` | Read-only estate audit: what already landed, what still owes work or tests, and the ordered path back to one `origin/main` |
+| An audited cleanup set to execute | `$git-branch-cleanup` | `/git-branch-cleanup` | CI-gated merges of non-gated PRs, then pruning merged refs and their worktrees |
 
 See [Choosing a command](docs/choosing-a-command.md) for trade-offs and output
 artifacts.
