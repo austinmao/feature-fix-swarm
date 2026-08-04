@@ -42,6 +42,19 @@ setup() {
   [[ "$output" == *"no runner state for spec 340"* ]]
 }
 
+@test "explicit archived spec ignores conflicting unrelated active identities" {
+  printf '# Project: spec-303 active\n' > .planning/PROJECT.md
+  printf '%s\n' '# STATE — spec-349' 'Run id: spec-349' > .planning/STATE.md
+
+  run env -u GSD_RUN_ID -u GATES_STORE bash "$COLLECTOR" 340
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planning-source: archive:.planning/archive/spec-340"* ]]
+  [[ "$output" == *"ARCHIVE-340-MARKER"* ]]
+  [[ "$output" != *"ACTIVE-342-MARKER"* ]]
+  [[ "$output" != *"ACTIVE-342-RUNNER-MARKER"* ]]
+}
+
 @test "matching active planning wins over an older archive" {
   printf '# Project: spec-340 active\n' > .planning/PROJECT.md
   printf '%s\n' '- [ ] ACTIVE-340-MARKER' > .planning/ROADMAP.md

@@ -54,7 +54,14 @@ PLANNING_KIND=""
 if [ -d .planning ]; then
   ACTIVE_SPEC_IDS="$(planning_spec_ids .planning)"
   ACTIVE_SPEC_ID_COUNT="$(printf '%s\n' "$ACTIVE_SPEC_IDS" | sed '/^$/d' | wc -l | tr -d ' ')"
-  if [ "$ACTIVE_SPEC_ID_COUNT" -gt 1 ]; then
+  ACTIVE_HAS_REQUESTED=0
+  if printf '%s\n' "$ACTIVE_SPEC_IDS" | grep -qx "$SPEC_ID"; then
+    ACTIVE_HAS_REQUESTED=1
+  fi
+  # Only fail closed when the conflict actually involves the requested spec.
+  # An active tree holding several unrelated identities must not block
+  # resolving an explicitly-requested spec from its archive.
+  if [ "$ACTIVE_SPEC_ID_COUNT" -gt 1 ] && [ "$ACTIVE_HAS_REQUESTED" -eq 1 ]; then
     echo "conflicting active planning identities: ${ACTIVE_SPEC_IDS//$'\n'/, }"
     exit 1
   fi

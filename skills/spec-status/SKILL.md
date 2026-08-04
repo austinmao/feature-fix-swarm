@@ -1,7 +1,7 @@
 ---
 name: spec-status
 description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan out volume, execution, and judgment roles over git, .planning, gates, runner state, evidence, and hygiene; write a status report and host-native handoff."
-version: "1.1.1"
+version: "1.1.2"
 ---
 
 # /spec-status [NNN] [--continue-compact] [--no-handoff]
