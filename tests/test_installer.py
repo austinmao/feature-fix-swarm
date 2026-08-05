@@ -4,9 +4,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -15,6 +17,10 @@ from lib import ffs_installer
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "setup.sh"
 INSTALLER = ROOT / "lib" / "ffs_installer.py"
+
+# Sentinel distinguishing "no patch key at all" from an explicit JSON null,
+# which stage_installer_root must be able to write independently.
+OMIT = object()
 
 
 def run_setup(
@@ -59,6 +65,83 @@ def run_setup(
 def init_repo(path: Path) -> None:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
+
+
+def build_socratic_fixture_repo(tmp_path: Path) -> tuple[Path, str]:
+    """Local git repo shaped like socratic, for a network-free clone source."""
+    repo = Path(tempfile.mkdtemp(dir=tmp_path, prefix="socratic-fixture-"))
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    (repo / "SKILL.md").write_text("# socratic\n")
+    (repo / "questions/core").mkdir(parents=True)
+    (repo / "questions/core/00-requirements.md").write_text("## Verification\ncore requirements\n")
+    (repo / "questions/full").mkdir(parents=True)
+    (repo / "questions/full/00-requirements.md").write_text("## Verification\nfull requirements\n")
+    (repo / "packs").mkdir(parents=True)
+    (repo / "packs/operations.md").write_text("operations pack\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True)
+    sha = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    return repo, sha
+
+
+def stage_installer_root(
+    tmp_path: Path,
+    repository: str,
+    commit: str,
+    patch: object = OMIT,
+) -> Path:
+    """Throwaway installer root mirroring the real repo layout, so the real
+    scripts/install-socratic.sh (derived from SCRIPT_DIR/..) runs against a
+    synthesised pin instead of the production one."""
+    root = Path(tempfile.mkdtemp(dir=tmp_path, prefix="installer-root-"))
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    installer_dest = scripts_dir / "install-socratic.sh"
+    shutil.copy2(ROOT / "scripts/install-socratic.sh", installer_dest)
+    installer_dest.chmod(installer_dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    vendor_dir = root / "vendor" / "socratic"
+    vendor_dir.mkdir(parents=True)
+    pin: dict[str, object] = {"repository": repository, "commit": commit}
+    if patch is not OMIT:
+        if patch is None:
+            pin["patch"] = None
+        else:
+            patch_path = Path(str(patch))
+            shutil.copy2(patch_path, vendor_dir / patch_path.name)
+            pin["patch"] = patch_path.name
+    (vendor_dir / "pin.json").write_text(json.dumps(pin, indent=2) + "\n")
+    return root
+
+
+def run_socratic_installer(
+    root: Path, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Runs the staged install-socratic.sh, forwarding args and env — no
+    existing helper runs a script with caller-supplied arguments."""
+    installer = root / "scripts" / "install-socratic.sh"
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+    return subprocess.run(
+        ["bash", str(installer), *args],
+        env=run_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def test_socratic_pin_is_exact() -> None:
+    metadata = json.loads((ROOT / "vendor/socratic/pin.json").read_text())
+    assert metadata["repository"] == "https://github.com/m4vic/socratic.git"
+    assert metadata["commit"] == "862b52e898134ba13ac05a43651ba8d1a7f2a28a"
+    assert "patch" not in metadata
 
 
 def test_project_install_uses_portable_relative_links_and_never_codex(tmp_path: Path) -> None:
