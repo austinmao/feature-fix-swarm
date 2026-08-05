@@ -350,6 +350,23 @@ def test_install_socratic_rejects_patch_path_traversal(tmp_path: Path) -> None:
     assert not dest.exists()
 
 
+def test_ci_and_contributing_syntax_checks_cover_install_socratic() -> None:
+    workflow_lines = [
+        line
+        for line in (ROOT / ".github/workflows/ci.yml").read_text().splitlines()
+        if not line.strip().startswith("#")
+    ]
+    contributing_lines = [
+        line
+        for line in (ROOT / "CONTRIBUTING.md").read_text().splitlines()
+        if not line.strip().startswith("#")
+    ]
+    workflow_hits = sum(1 for line in workflow_lines if "scripts/install-socratic.sh" in line)
+    contributing_hits = sum(1 for line in contributing_lines if "scripts/install-socratic.sh" in line)
+    assert workflow_hits >= 2
+    assert contributing_hits >= 1
+
+
 def test_project_install_uses_portable_relative_links_and_never_codex(tmp_path: Path) -> None:
     project = tmp_path / "project"
     init_repo(project)

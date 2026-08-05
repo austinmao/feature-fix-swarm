@@ -66,7 +66,7 @@ bats --print-output-on-failure $(find . -name '*.bats' -not -path './.git/*')
 On macOS, also keep the zsh parser contract green:
 
 ```bash
-zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh
+zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
 ```
 
 Tests that require provider credentials or live model calls must remain
