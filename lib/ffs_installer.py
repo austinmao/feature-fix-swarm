@@ -1522,6 +1522,26 @@ def stage_prompt_master(source: Path, backup: Backup) -> Path | None:
     return staged
 
 
+def stage_socratic(source: Path, backup: Backup) -> Path | None:
+    """Materialize the pinned external skill without giving it ownership."""
+    if os.environ.get("FFS_SKIP_SOCRATIC") == "1":
+        return None
+    override = os.environ.get("FFS_SOCRATIC_INSTALLER")
+    installer = Path(override) if override else source / "scripts" / "install-socratic.sh"
+    if not installer.is_file():
+        raise ActionableError(f"pinned socratic installer is missing: {installer}")
+    staged = backup.directory / "socratic-stage"
+    command = ["bash", str(installer), "--dest", str(staged)]
+    external_source = os.environ.get("FFS_SOCRATIC_SOURCE")
+    if external_source:
+        command.extend(["--source", external_source])
+    process = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if process.returncode != 0:
+        detail = process.stderr.strip() or process.stdout.strip() or "unknown failure"
+        raise ActionableError(f"pinned socratic installation failed: {detail}")
+    return staged
+
+
 def verify_gsd_package(source: Path) -> None:
     package_path = source / "package.json"
     installed_path = source / "node_modules" / "@opengsd" / "gsd-core" / "package.json"
