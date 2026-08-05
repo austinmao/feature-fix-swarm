@@ -1678,6 +1678,7 @@ def install(source: Path, scope: str, project: Path | None) -> int:
     managed = managed_fingerprints(previous, scope, project)
     backup = Backup("install", scope, project)
     prompt_master = stage_prompt_master(source, backup)
+    socratic = stage_socratic(source, backup)
 
     planned: list[tuple[Path, str, bool]] = []
     if scope == "project":
@@ -1695,6 +1696,17 @@ def install(source: Path, scope: str, project: Path | None) -> int:
             planned.append((canonical, fingerprint(prompt_master), False))
             claude_link = project / ".claude" / "skills" / "prompt-master"
             planned.append((claude_link, "symlink:" + os.path.relpath(canonical, claude_link.parent), True))
+        if socratic:
+            socratic_canonical = project / ".agents" / "skills" / "socratic"
+            planned.append((socratic_canonical, fingerprint(socratic), False))
+            socratic_claude_link = project / ".claude" / "skills" / "socratic"
+            planned.append(
+                (
+                    socratic_claude_link,
+                    "symlink:" + os.path.relpath(socratic_canonical, socratic_claude_link.parent),
+                    True,
+                )
+            )
     else:
         for name, source_dir in skills.items():
             for host in (Path.home() / ".agents", Path.home() / ".claude"):
@@ -1702,6 +1714,9 @@ def install(source: Path, scope: str, project: Path | None) -> int:
         if prompt_master:
             for host in (Path.home() / ".agents", Path.home() / ".claude"):
                 planned.append((host / "skills" / "prompt-master", fingerprint(prompt_master), False))
+        if socratic:
+            for host in (Path.home() / ".agents", Path.home() / ".claude"):
+                planned.append((host / "skills" / "socratic", fingerprint(socratic), False))
     preflight_fingerprints: dict[str, str] = {}
     for path, expected, broken_ok in planned:
         if scope == "project":
@@ -1769,6 +1784,27 @@ def install(source: Path, scope: str, project: Path | None) -> int:
                     project=project,
                     expected_before=preflight_fingerprints[str(claude_link.absolute())],
                 )
+            if socratic:
+                socratic_canonical = safe_project_destination(
+                    project, Path(".agents") / "skills" / "socratic"
+                )
+                replace_tree(
+                    socratic,
+                    socratic_canonical,
+                    backup,
+                    project=project,
+                    expected_before=preflight_fingerprints[str(socratic_canonical.absolute())],
+                )
+                socratic_claude_link = safe_project_destination(
+                    project, Path(".claude") / "skills" / "socratic"
+                )
+                replace_link(
+                    socratic_claude_link,
+                    socratic_canonical,
+                    backup,
+                    project=project,
+                    expected_before=preflight_fingerprints[str(socratic_claude_link.absolute())],
+                )
             legacy_roots = [legacy_root]
         else:
             for name, source_dir in skills.items():
@@ -1777,6 +1813,9 @@ def install(source: Path, scope: str, project: Path | None) -> int:
             if prompt_master:
                 for host in (Path.home() / ".agents", Path.home() / ".claude"):
                     replace_tree(prompt_master, host / "skills" / "prompt-master", backup)
+            if socratic:
+                for host in (Path.home() / ".agents", Path.home() / ".claude"):
+                    replace_tree(socratic, host / "skills" / "socratic", backup)
             codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
             legacy_roots = [codex_home / "skills"]
 
@@ -1837,6 +1876,8 @@ def install(source: Path, scope: str, project: Path | None) -> int:
     finally:
         if prompt_master and prompt_master.exists():
             shutil.rmtree(prompt_master)
+        if socratic and socratic.exists():
+            shutil.rmtree(socratic)
     print(f"backup_id={backup.backup_id}")
     print(f"installed_scope={scope}")
     print(f"gsd=upstream-installer@{GSD_VERSION}:claude-full,codex-full")
