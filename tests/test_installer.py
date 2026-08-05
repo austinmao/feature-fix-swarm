@@ -37,6 +37,7 @@ def run_setup(
             "HOME": str(home),
             "CODEX_HOME": str(home / ".codex"),
             "FFS_SKIP_PROMPT_MASTER": "1",
+            "FFS_SKIP_SOCRATIC": "1",
             "FFS_GSD_INSTALLER": str(ROOT / "tests/fixtures/gsd-installer-stub.py"),
             "FFS_GSD_STUB_LOG": str(tmp_path / "gsd-installer.log"),
             # spec-004 AC-009: doctor's model-resolvability check shells out to
@@ -365,6 +366,76 @@ def test_ci_and_contributing_syntax_checks_cover_install_socratic() -> None:
     contributing_hits = sum(1 for line in contributing_lines if "scripts/install-socratic.sh" in line)
     assert workflow_hits >= 2
     assert contributing_hits >= 1
+
+
+def test_stage_socratic_materialises_tree_from_staged_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
+    monkeypatch.delenv("FFS_SOCRATIC_INSTALLER", raising=False)
+    monkeypatch.delenv("FFS_SOCRATIC_SOURCE", raising=False)
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    backup = ffs_installer.Backup("test-stage-socratic", "user")
+
+    staged = ffs_installer.stage_socratic(root, backup)
+
+    assert staged == backup.directory / "socratic-stage"
+    assert (staged / "SKILL.md").is_file()
+    assert (staged / ".ffs-socratic.json").is_file()
+    assert ffs_installer.fingerprint(staged)
+
+
+def test_stage_socratic_returns_none_when_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    backup = ffs_installer.Backup("test-stage-socratic-skip", "user")
+
+    staged = ffs_installer.stage_socratic(root, backup)
+
+    assert staged is None
+    assert not (backup.directory / "socratic-stage").exists()
+
+
+def test_stage_socratic_raises_when_installer_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
+    monkeypatch.delenv("FFS_SOCRATIC_INSTALLER", raising=False)
+    source = tmp_path / "no-installer-source"
+    source.mkdir()
+    backup = ffs_installer.Backup("test-stage-socratic-missing", "user")
+    missing_installer = source / "scripts" / "install-socratic.sh"
+
+    with pytest.raises(ffs_installer.ActionableError) as excinfo:
+        ffs_installer.stage_socratic(source, backup)
+
+    assert str(missing_installer) in str(excinfo.value)
+
+
+def test_stage_socratic_surfaces_installer_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
+    failing = tmp_path / "failing-socratic-installer.sh"
+    failing.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'synthetic socratic installer failure' >&2\n"
+        "exit 1\n"
+    )
+    failing.chmod(failing.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("FFS_SOCRATIC_INSTALLER", str(failing))
+    source = tmp_path / "any-source"
+    source.mkdir()
+    backup = ffs_installer.Backup("test-stage-socratic-stderr", "user")
+
+    with pytest.raises(ffs_installer.ActionableError) as excinfo:
+        ffs_installer.stage_socratic(source, backup)
+
+    assert "synthetic socratic installer failure" in str(excinfo.value)
 
 
 def test_project_install_uses_portable_relative_links_and_never_codex(tmp_path: Path) -> None:
@@ -952,6 +1023,7 @@ def test_project_install_refuses_ancestor_swap_after_preflight(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )
@@ -989,6 +1061,7 @@ def test_project_install_preserves_destination_created_after_preflight(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )
@@ -1077,6 +1150,7 @@ def test_project_manifest_write_refuses_post_write_ancestor_swap(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )
@@ -1497,6 +1571,7 @@ def test_failure_after_first_ffs_write_restores_gsd_and_project(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv("FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py"))
     monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
 
@@ -1535,6 +1610,7 @@ def test_failure_rollback_preserves_concurrent_project_change(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )
