@@ -12,6 +12,9 @@ setup() {
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
          GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
   unset FFS_RUN_FINALIZER || true
+  # ambient GSD_RUN_ID (exported by feature-implement autonomous runs) rekeys
+  # the archive dir away from the pr${PR} default these fixtures assert on
+  unset GSD_RUN_ID || true
 
   # repo with a bare origin, main + squash-merged feature branch
   ORIGIN="$BATS_TEST_TMPDIR/origin.git"
