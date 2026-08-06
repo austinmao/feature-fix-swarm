@@ -30,6 +30,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 START_TOKEN="SOCRATIC_DATA_START"
 END_TOKEN="SOCRATIC_DATA_END"
+ESCAPED_TOKEN="SOCRATIC_DATA_ESCAPED"
 
 warn() { echo "socratic: WARN $*" >&2; }
 status() { echo "socratic: $*" >&2; }
@@ -321,6 +322,15 @@ for entry in "${DOMAIN_ENUM_ORDER[@]}"; do
   fi
 done
 
+# A declared slug outside the closed enum resolves to no path at all; warn
+# once per unknown value, known values still arm (EDGE-002).
+for slug in ${DOMAIN_SLUGS[@]+"${DOMAIN_SLUGS[@]}"}; do
+  [ -n "$slug" ] || continue
+  if ! domain_stem_for "$slug" >/dev/null; then
+    warn "unknown domain '$slug'"
+  fi
+done
+
 # --- depth resolution: an out-of-enum value warns and falls back to core,
 # consumption stays fail-soft over a hand-editable field ---------------------
 DEPTH_VALUE="core"
@@ -370,6 +380,7 @@ for slug in ${SELECTED_DOMAIN_SLUGS[@]+"${SELECTED_DOMAIN_SLUGS[@]}"}; do
   fi
 
   if [ ! -f "$file" ]; then
+    warn "domain file missing for '$slug': $file"
     continue
   fi
   USABLE_DOMAIN_COUNT=$((USABLE_DOMAIN_COUNT + 1))
@@ -469,20 +480,45 @@ $pack_content"
   done
 fi
 
+# --- ASSUME ledger: lines matching a leading list marker followed by
+# ASSUME-NNN: extracted from the socratic.md body by the python3 parser
+# above. Emitted after domain content and pack cards, inside the same
+# single delimiter pair, in BOTH plan and verify modes. -----------------
+LEDGER_CONTENT=""
+if [ "${#ASSUME_LINES[@]}" -gt 0 ]; then
+  LEDGER_CONTENT="## Assumed"
+  for assume_line in "${ASSUME_LINES[@]}"; do
+    LEDGER_CONTENT="$LEDGER_CONTENT
+$assume_line"
+  done
+fi
+
 # --- skip decision: fires only when THIS MODE'S emittable set is empty -----
-# plan/arm emittable set = question files + pack cards (ledger alone
-# insufficient, wired in a later task); verify emittable set = Verification
-# blocks (ledger alone sufficient, wired in a later task).
+# plan/arm emittable set = question files + pack cards + ledger, with the
+# ledger alone NOT sufficient (a ledger with no question material behind it
+# gives a reviewer nothing to check it against). verify emittable set =
+# Verification blocks + ledger, with the ledger alone sufficient (verify
+# mode's job is a verdict per ASSUME entry; dropping the ledger would
+# silently skip that audit). Usable-domain selection is checked FIRST so no
+# input state can claim both empty-ish wordings.
 if [ "$MODE" = "verify" ]; then
-  if [ "$USABLE_DOMAIN_COUNT" -eq 0 ]; then
+  if [ "$USABLE_DOMAIN_COUNT" -eq 0 ] && [ -z "$LEDGER_CONTENT" ]; then
     status "skipped (no domains)"
     exit 0
   fi
-  if [ -z "$DOMAIN_CONTENT" ]; then
+  if [ -z "$DOMAIN_CONTENT" ] && [ -z "$LEDGER_CONTENT" ]; then
     status "skipped (no verification content)"
     exit 0
   fi
   FULL_CONTENT="$DOMAIN_CONTENT"
+  if [ -n "$LEDGER_CONTENT" ]; then
+    if [ -n "$FULL_CONTENT" ]; then
+      FULL_CONTENT="$FULL_CONTENT
+$LEDGER_CONTENT"
+    else
+      FULL_CONTENT="$LEDGER_CONTENT"
+    fi
+  fi
 else
   if [ "${#CONTRIBUTING_DOMAIN_SLUGS[@]}" -eq 0 ] && [ "${#HONORED_PACKS[@]}" -eq 0 ]; then
     status "skipped (no domains)"
@@ -497,6 +533,14 @@ $PACK_CONTENT"
       FULL_CONTENT="$PACK_CONTENT"
     fi
   fi
+  if [ -n "$LEDGER_CONTENT" ]; then
+    if [ -n "$FULL_CONTENT" ]; then
+      FULL_CONTENT="$FULL_CONTENT
+$LEDGER_CONTENT"
+    else
+      FULL_CONTENT="$LEDGER_CONTENT"
+    fi
+  fi
 fi
 
 DOMAINS_FIELD="none"
@@ -509,8 +553,14 @@ if [ "$MODE" != "verify" ] && [ "${#HONORED_PACKS[@]}" -gt 0 ]; then
   PACKS_FIELD="$(IFS=,; echo "${HONORED_PACKS[*]}")"
 fi
 
+# Neutralize delimiter impersonation by SUBSTRING (never whole-line): any
+# emitted line containing either token anywhere has each occurrence
+# rewritten to SOCRATIC_DATA_ESCAPED before emission — rewrite, not drop,
+# so the surrounding ledger entry stays visible to the reviewer.
+NEUTRALIZED_CONTENT="$(printf '%s' "$FULL_CONTENT" | sed -e "s/${START_TOKEN}/${ESCAPED_TOKEN}/g" -e "s/${END_TOKEN}/${ESCAPED_TOKEN}/g")"
+
 printf '%s\n' "$START_TOKEN"
-printf '%s\n' "$FULL_CONTENT"
+printf '%s\n' "$NEUTRALIZED_CONTENT"
 printf '%s\n' "$END_TOKEN"
 
 status "armed domains=$DOMAINS_FIELD packs=$PACKS_FIELD"
