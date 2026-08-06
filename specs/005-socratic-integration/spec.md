@@ -17,7 +17,7 @@
   decision (user-directed; no local overlap found by scout).
 - Existing vendoring convention to mirror: `vendor/prompt-master/pin.json` +
   `scripts/install-prompt-master.sh` + `lib/ffs_installer.py:stage_prompt_master`.
-- Integration seams (confirmed): `skills/feature-spec/SKILL.md` (pre-Phase-1),
+- Integration seams (confirmed): `skills/feature-spec/SKILL.md` (Step 1.5),
   `skills/plan-decompose/SKILL.md` Step 3, `scripts/gsd/plan-wall.sh:263-283`
   (`PW_REVIEW_BRIEF` / `_pw_build_prompt`), `skills/review-gate/SKILL.md` Pass 3 +
   honest-verifier.
@@ -31,9 +31,12 @@ flows. In `--autonomous` (default for `/feature-implement`) and under MAX-AUTH
 
 - Every socratic "open question" is resolved by recording a defensible default as
   an `ASSUME-NNN` ledger entry in `socratic.md` — never an interactive stop.
-- Authority decisions that map to operator-gated actions become typed grant-ledger
-  entries (auto-granted under MAX-AUTH, reviewed under `--gated`) — the EXISTING
-  grant machinery, no new stop points.
+- Authority decisions that map to operator-gated actions become typed PENDING
+  ledger entries (`gates.py pending`) that are never auto-granted — MAX-AUTH
+  auto-grants only feature-spec's own deterministic enumeration of tasks.md +
+  plan.md (Step 6 item 1), never socratic-sourced entries. `--gated` runs
+  surface the pendings at the EXISTING Step 6 stop for the operator to
+  promote to grants; no new stop points either way.
 - Socratic interactive-interview mode is never used by FFS.
 - The assumption ledger + would-have-asked list surfaces in the completion
   summary, so the operator reviews decisions after the fact instead of being
@@ -49,7 +52,7 @@ its question files reproducibly and offline, immune to upstream churn.
 ### US-2: Spec-time self-interrogation artifact
 **As a** spec author (or autonomous run), **I want** `/feature-spec` to produce
 `specs/NNN/socratic.md` — domain set, self-answered highlights, assumption ledger,
-risks, open-questions-routed-to-grants — **so that** domain coverage and assumptions
+risks, open-questions-routed-to-pending — **so that** domain coverage and assumptions
 are explicit inputs to spec/plan instead of vanishing.
 
 ### US-3: Domain-armed plan wall
@@ -86,7 +89,7 @@ Scenario: feature-spec emits the socratic artifact
 Scenario: Autonomous run never prompted by socratic (error-path of the old behavior)
   Given a socratic pass whose questions include an authority decision (e.g. vendor choice)
   When  the pass runs under `--autonomous` / MAX-AUTH
-  Then  the decision is recorded as an assumption or typed grant entry and the run continues without an operator stop
+  Then  the decision is recorded as an assumption or typed pending entry and the run continues without an operator stop
 
 Scenario: Plan wall consumes the domain slice
   Given `specs/NNN/socratic.md` with `domains: [requirements, testing, security]`
@@ -115,7 +118,9 @@ Scenario: Review gate audits the assumption ledger
   (`stage_socratic` mirroring `stage_prompt_master:1506`) into
   `.agents/skills/socratic` (canonical) with fingerprint tracking; uninstall and
   doctor treat it as a managed external skill.
-- AC-003: `/feature-spec` gains a pre-Phase-1 socratic step producing
+- AC-003: `/feature-spec` gains a Step 1.5 socratic step (after
+  speckit.specify creates specs/NNN/, before speckit.plan consumes it)
+  producing
   `specs/NNN/socratic.md` with machine-readable frontmatter
   (`domains: [...]`, `depth: core|full`, `packs: [...]`) and sections
   `## Self-answered highlights`, `## Assumed (flag if wrong)` (`ASSUME-NNN:` lines),
@@ -127,7 +132,9 @@ Scenario: Review gate audits the assumption ledger
   Skipped/unknown domains surface in the completion summary.
 - AC-004: In `--autonomous`/MAX-AUTH flows, the socratic step NEVER calls
   AskUserQuestion or otherwise blocks on the operator; open questions are recorded
-  as ASSUME entries and/or typed grant actions. In `--gated` attended mode, open
+  as ASSUME entries and/or typed PENDING actions (never auto-granted; MAX-AUTH
+  auto-grants only feature-spec's own deterministic tasks.md/plan.md
+  enumeration). In `--gated` attended mode, open
   questions may be batched into the EXISTING Step-6 review stop only — no new stop
   points anywhere.
 - AC-005: `plan-wall.sh` resolves the spec dir from the branch-NNN convention
@@ -211,7 +218,8 @@ Scenario: Review gate audits the assumption ledger
 - EDGE-009: Existing unmanaged `.agents/skills/socratic` at install time →
   installer refuses (setup.sh ownership rules), same as prompt-master.
 - EDGE-010: Autonomous run where socratic surfaces an authority decision →
-  recorded as ASSUME/grant entry, never an operator prompt (AC-004); attended
+  recorded as ASSUME/PENDING entry (never a grant, never auto-granted), never
+  an operator prompt (AC-004); attended
   `--gated` runs batch it into the existing Step-6 stop only.
 
 ## E2E Test Stubs
