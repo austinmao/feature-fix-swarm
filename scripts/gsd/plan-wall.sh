@@ -307,8 +307,14 @@ _pw_build_prompt() {
     printf '%s\n%s\nPLAN_DATA_END' "$PW_REVIEW_BRIEF" "$1"
     return
   fi
+  # ARMED only: neutralize a counterfeit SOCRATIC_DATA_START/END impersonation
+  # inside the plan body itself — same substring->SOCRATIC_DATA_ESCAPED
+  # rewrite socratic-slice.sh applies to its own content. The unarmed branch
+  # above is untouched on purpose (byte-identity contract, AC-005/AC-008).
+  local neutralized_plan
+  neutralized_plan="$(printf '%s' "$1" | sed -e 's/SOCRATIC_DATA_START/SOCRATIC_DATA_ESCAPED/g' -e 's/SOCRATIC_DATA_END/SOCRATIC_DATA_ESCAPED/g')"
   printf '%s\n%s\nPLAN_DATA_END\n%s\n%s\n%s' \
-    "$PW_REVIEW_BRIEF" "$1" "$PW_SOCRATIC_LEAD_LINE" "$2" "$PW_SOCRATIC_TRAIL_LINE"
+    "$PW_REVIEW_BRIEF" "$neutralized_plan" "$PW_SOCRATIC_LEAD_LINE" "$2" "$PW_SOCRATIC_TRAIL_LINE"
 }
 
 # _pw_validate_findings <schema-file>   (stdin = candidate review output)
