@@ -456,6 +456,18 @@ external users, public APIs, authentication, money, PII, regulated data,
 autonomous tools, or costly or irreversible actions. Select at most two
 `packs` from the pack enum, none when none fit.
 
+The interrogation itself is the point, not the artifact: after the
+resolution ladder below assigns `SOCRATIC_SLICE`, author the frontmatter
+(header comment + `domains`/`depth`/`packs` + empty section headings) FIRST,
+run `"$SOCRATIC_SLICE" "specs/${SPEC_ID}" --mode arm` to emit the selected
+domains' question slice, then ANSWER those questions against the draft
+spec.md before filling the body: answers that changed or confirmed a spec
+decision go to `## Self-answered highlights`; defaults you took without
+evidence become `ASSUME-NNN:` lines; questions only the operator can answer
+go to `## Open questions → grants`; the sharpest exposures go to
+`## Top risks`. A body written without reading the emitted questions is not
+a socratic pass — do not skip the arm invocation when the helper resolved.
+
 Write `specs/${SPEC_ID}/socratic.md`: an enum-documenting header comment
 ABOVE the frontmatter, emitted as one or more COMPLETE single-line comments
 (never a multi-line block — plan 02-01's parser skips only single-line
