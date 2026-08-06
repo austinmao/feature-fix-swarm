@@ -51,6 +51,26 @@ all skills.
   surface. Its deterministic collector inventories source and evidence names
   without reading evidence contents, and the installer ships the skill to both
   Claude and Codex discovery roots.
+- Added a pinned `socratic` question bank (spec 005,
+  `specs/005-socratic-integration/`), vendored via `vendor/socratic/pin.json`
+  and `scripts/install-socratic.sh` and staged by `stage_socratic()` into
+  `.agents/skills/socratic` as a managed external skill with fingerprint
+  tracking, skippable with `FFS_SKIP_SOCRATIC=1`. Added
+  `scripts/gsd/socratic-slice.sh`, the single deterministic emitter that
+  turns a spec's `socratic.md` frontmatter into a delimited, domain-scoped
+  slice, with two deliberately different postures: fail-soft at consumption
+  time, so a missing vendor tree or an unknown domain degrades to a thinner
+  slice, and fail-closed under `--validate` at authoring time, so an invalid
+  spec is rejected outright. `/feature-spec` Step 1.5 now authors
+  `specs/NNN/socratic.md` with zero operator prompts, routing open questions
+  to typed `gates.py` PENDING actions rather than into the MAX-AUTH
+  auto-grant enumeration. Three reviewer seams are armed by the resulting
+  slice — `plan-wall.sh`, `plan-decompose` Step 3, and `review-gate`'s honest
+  verifier, the last of which audits each ASSUME entry to held, violated, or
+  unverifiable and routes violated entries into the normal findings queue at
+  HIGH. Every seam is fail-soft: with no vendor tree installed, each prompt
+  stays byte-identical to its pre-feature form, and `SOCRATIC=off` disables
+  arming for a single run through that same path.
 
 ### Fixed
 
