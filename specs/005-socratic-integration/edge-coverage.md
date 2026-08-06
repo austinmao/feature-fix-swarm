@@ -19,7 +19,8 @@ One line per applicable edge: `REQ · category · status · reason/AC`.
 - REQ-06 · empty · resolved · the plan-decompose Step 3 seam is LLM-followed prose, not a script, so "byte-identical when the helper is silent" means identical INSTRUCTED behavior; its evidence is grep-pin ordering assertions (tests/bats/int-plan-wall-skill.bats's pattern), not prompt byte-comparison
 - REQ-07 · empty · resolved · zero ASSUME entries → verify-mode slice still emits Verification blocks; verifier instructed "0 assumptions recorded" — no fabricated verdicts; folded into socratic-review-gate.bats
 - REQ-07 · ordering · resolved · verdicts emitted in ledger order (stable, diffable)
+- REQ-07 · routing · resolved · a violated ASSUME verdict becomes a merged finding at HIGH, entering Merge-and-rank before Record-findings so it inherits dedupe, the resolved-sig drop, and refute-or-promote's false-positive kill — never a direct findings-queue call
 - REQ-09 · boundary · resolved · first two SURVIVING in-enum packs honored (enum filter then missing-file filter run before the cap); additional survivors skipped with warn (EDGE-007; unit test listed)
-- REQ-12 · boundary · resolved · exactly one status line per successfully-parsed invocation (exit 0/3) even when warns also fire — warns are separate stderr lines, status line count asserted in bats; usage errors (exit 2) emit usage text only
+- REQ-12 · boundary · resolved · exactly one status line per successfully-parsed invocation on the emission and --validate paths (exit 0/3) even when warns also fire — warns are separate stderr lines, status line count asserted in bats; usage errors (exit 2) emit usage text only; --record-pendings emits no status line (exit 0 success, exit 1 fatal)
 
 Unresolved: none.

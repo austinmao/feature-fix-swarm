@@ -16,6 +16,9 @@
 # values still arm. Do not "fix" this asymmetry; it is the whole design.
 #
 # Exit 0: emission path always, EXCEPT:
+#   Exit 1: --record-pendings only — a fatal (missing socratic.md, missing
+#           gates.py). --record-pendings carries no status-line contract at
+#           all; see the stderr paragraph below.
 #   Exit 2: usage/invocation error (zero args, unknown flag, unknown --mode
 #           value, --mode with no value, --validate combined with --mode) —
 #           usage errors carry a usage message on stderr and NO status line;
@@ -30,7 +33,8 @@
 #
 # stdout: empty on the emission path unless armed (one SOCRATIC_DATA_START
 #   ... SOCRATIC_DATA_END block); ALWAYS empty in --validate mode.
-# stderr: exactly one status line per PARSED invocation —
+# stderr: exactly one status line per successfully-parsed invocation on the
+#   emission and --validate paths —
 #   "socratic: armed domains=<csv|none> packs=<csv|none>" (emission) or
 #   "socratic: armed domains=<csv> packs=<csv|none> (validate)" (validate
 #   pass) or "socratic: skipped (<reason>)" (emission skip) or
@@ -39,6 +43,9 @@
 #   degradations on the emission path only; --validate emits validation-
 #   error lines instead and suppresses the EDGE-007 excess-pack cap warn
 #   entirely (an excess in-enum pack is not a validation error).
+#   --record-pendings emits NO status line at all (exit 0 success, exit 1
+#   fatal) — it is a separate mode with its own fatal-line contract, not a
+#   third status-line shape.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

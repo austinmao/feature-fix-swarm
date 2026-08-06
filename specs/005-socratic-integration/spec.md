@@ -167,10 +167,11 @@ Scenario: Review gate audits the assumption ledger
   diff recorded in `evals/socratic-ab.md`. Empty diff → retro decision is to
   un-arm the three seams.
 - AC-012: Observability + escape hatch: `socratic-slice.sh` emits exactly one
-  stderr status line per successfully-parsed invocation (exit 0/3); usage
-  errors (exit 2) emit usage text only (`armed domains=…` / `skipped
-  (<reason>)`), and `SOCRATIC=off` disables arming per-run via the same
-  empty-output fail-soft path.
+  stderr status line per successfully-parsed invocation on the emission and
+  `--validate` paths (exit 0/3); usage errors (exit 2) emit usage text only
+  (`armed domains=…` / `skipped (<reason>)`); `--record-pendings` emits no
+  status line (exit 0 success, exit 1 fatal); and `SOCRATIC=off` disables
+  arming per-run via the same empty-output fail-soft path.
 
 ## E2E Test Paths
 
