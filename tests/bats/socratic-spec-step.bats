@@ -526,6 +526,9 @@ EOF
 }
 
 @test "the existing host-dispatch lint stays green after the SKILL.md edit" {
+  # CI's bats job runs on a bare python3 without pytest — the lint is
+  # enforced by the dedicated pytest CI job; this bats echo is local-only
+  python3 -c 'import pytest' 2>/dev/null || skip "pytest module unavailable"
   run python3 -m pytest "$ROOT/tests/test_host_dispatch_lint.py" -q
   [ "$status" -eq 0 ]
 }
