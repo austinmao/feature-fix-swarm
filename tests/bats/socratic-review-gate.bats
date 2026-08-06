@@ -201,6 +201,69 @@ depth: core" "- ASSUME-001: default A
   [[ "$routing_text" == *"HIGH"* ]]
 }
 
+# --- Task 3 (cross-model review fix round): EXECUTABLE case ----------------
+# Extracts the ACTUAL shell lines of the HV_SOCRATIC block from SKILL.md
+# (sed, anchored on unique substrings rather than hardcoded line numbers) and
+# evals them against a stub HV_SPEC/FFS_SOCRATIC_DIR fixture — the GREP-PIN
+# cases above prove the prose/placement; this one proves the shell behaves.
+
+build_hv_harness() {
+  local out="$1" spec_md="$2" block="$3"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -uo pipefail\n'
+    printf 'HV_SPEC=%q\n' "$spec_md"
+    printf '%s\n' "$block"
+    printf 'printf "%%s\\n" "SPEC_DATA_END${HV_SOCRATIC_BLOCK}"\n'
+    printf 'printf "DIFF_DATA_START\\n"\n'
+  } > "$out"
+}
+
+@test "EXECUTABLE: the extracted HV_SOCRATIC block arms exactly once, and is byte-identical unarmed" {
+  cd "$REPO_ROOT"
+  start_line="$(grep -nF 'HV_SPEC_DIR="$(dirname "$HV_SPEC")"' "$SKILL" | head -1 | cut -d: -f1)"
+  fi_line="$(grep -nFx '$HV_SOCRATIC_OUT"' "$SKILL" | head -1 | cut -d: -f1)"
+  [ -n "$start_line" ]
+  [ -n "$fi_line" ]
+  end_line=$((fi_line + 1))
+  block_script="$(sed -n "${start_line},${end_line}p" "$SKILL")"
+  [[ "$block_script" == *'if [ -n "$HV_SOCRATIC_OUT" ]; then'* ]]
+
+  harness="$BATS_TEST_TMPDIR/hv-socratic-harness.sh"
+
+  # --- armed: vendor tree + socratic.md carrying an ASSUME entry -----------
+  make_spec_dir "$SPEC" "domains: [requirements]" "- ASSUME-001: default A"
+  build_hv_harness "$harness" "$SPEC/spec.md" "$block_script"
+  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$harness'"
+  [ "$status" -eq 0 ]
+
+  start_count="$(printf '%s\n' "$output" | grep -c '^SOCRATIC_DATA_START$')"
+  end_count="$(printf '%s\n' "$output" | grep -c '^SOCRATIC_DATA_END$')"
+  [ "$start_count" -eq 1 ]
+  [ "$end_count" -eq 1 ]
+
+  spec_end_offset="$(printf '%s' "$output" | grep -bo '^SPEC_DATA_END$' | head -1 | cut -d: -f1)"
+  socratic_start_offset="$(printf '%s' "$output" | grep -bo '^SOCRATIC_DATA_START$' | head -1 | cut -d: -f1)"
+  diff_start_offset="$(printf '%s' "$output" | grep -bo '^DIFF_DATA_START$' | head -1 | cut -d: -f1)"
+  socratic_end_offset="$(printf '%s' "$output" | grep -bo '^SOCRATIC_DATA_END$' | head -1 | cut -d: -f1)"
+  [ -n "$spec_end_offset" ]
+  [ -n "$socratic_start_offset" ]
+  [ -n "$socratic_end_offset" ]
+  [ -n "$diff_start_offset" ]
+  [ "$socratic_start_offset" -gt "$spec_end_offset" ]
+  [ "$socratic_end_offset" -lt "$diff_start_offset" ]
+
+  # --- unarmed: vendor tree present, spec dir has NO socratic.md -----------
+  UNARMED_SPEC="$BATS_TEST_TMPDIR/unarmed-spec"
+  mkdir -p "$UNARMED_SPEC"
+  build_hv_harness "$harness" "$UNARMED_SPEC/spec.md" "$block_script"
+  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$harness'"
+  [ "$status" -eq 0 ]
+
+  no_block_expected="$(printf '%s\n' 'SPEC_DATA_END' 'DIFF_DATA_START')"
+  [ "$output" = "$no_block_expected" ]
+}
+
 @test "the verifier grammar is untouched" {
   grep -qF 'HV_VERDICT_COUNT=' "$SKILL"
   grep -qF '[ "$HV_VERDICT_COUNT" -ne 1 ]' "$SKILL"
