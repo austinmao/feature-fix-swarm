@@ -130,3 +130,80 @@ depth: core" "- ASSUME-001: default A
   [ "$capture_line_num" -gt "$reroot_line" ]
   [[ "$capture_line" == *'|| true'* ]]
 }
+
+# --- Task 2: the ASSUME audit — per-entry verdicts, zero-entry, routing ----
+
+@test "the ledger reaches verify-mode stdout in declaration order" {
+  make_spec_dir "$SPEC" "domains: [requirements]" "- ASSUME-003: third
+- ASSUME-001: first
+- ASSUME-002: second"
+
+  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ASSUME-003: third"* ]]
+  [[ "$output" == *"ASSUME-001: first"* ]]
+  [[ "$output" == *"ASSUME-002: second"* ]]
+
+  off3="$(printf '%s' "$output" | grep -bo 'ASSUME-003: third' | head -1 | cut -d: -f1)"
+  off1="$(printf '%s' "$output" | grep -bo 'ASSUME-001: first' | head -1 | cut -d: -f1)"
+  off2="$(printf '%s' "$output" | grep -bo 'ASSUME-002: second' | head -1 | cut -d: -f1)"
+  [ "$off3" -lt "$off1" ]
+  [ "$off1" -lt "$off2" ]
+}
+
+@test "a spec with Verification content and an empty ledger still arms" {
+  make_spec_dir "$SPEC" "domains: [requirements]"
+
+  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null"
+
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  [[ "$output" == *"VERIFICATION_REQUIREMENTS_SENTINEL"* ]]
+  [[ "$output" != *"ASSUME-"* ]]
+}
+
+@test "one verdict per ledger entry, in ledger order, in the fixed shape" {
+  cond_line="$(grep -nF 'if [ -n "$HV_SOCRATIC_OUT" ]' "$SKILL" | head -1 | cut -d: -f1)"
+  block_end_line="$(grep -n '^\$HV_SOCRATIC_OUT"$' "$SKILL" | head -1 | cut -d: -f1)"
+  held_line="$(grep -nF 'held|violated|unverifiable' "$SKILL" | head -1 | cut -d: -f1)"
+  order_line="$(grep -nF 'in the order the ledger presents them' "$SKILL" | head -1 | cut -d: -f1)"
+  shape_line="$(grep -nF 'ASSUME-NNN: held|violated|unverifiable' "$SKILL" | head -1 | cut -d: -f1)"
+  [ -n "$cond_line" ]
+  [ -n "$block_end_line" ]
+  [ -n "$held_line" ]
+  [ -n "$order_line" ]
+  [ -n "$shape_line" ]
+  [ "$held_line" -gt "$cond_line" ]
+  [ "$held_line" -lt "$block_end_line" ]
+  [ "$order_line" -gt "$cond_line" ]
+  [ "$order_line" -lt "$block_end_line" ]
+}
+
+@test "the zero-entry wording is present and literal" {
+  grep -qF 'ASSUME AUDIT: 0 assumptions recorded' "$SKILL"
+}
+
+@test "fabrication is forbidden" {
+  grep -qF 'Never produce a verdict for an identifier not present' "$SKILL"
+}
+
+@test "violated verdicts are routed into the merged findings at HIGH" {
+  routing_line="$(grep -nF '**ASSUME audit routing:**' "$SKILL" | head -1 | cut -d: -f1)"
+  merge_line="$(grep -n '^### Merge and rank$' "$SKILL" | head -1 | cut -d: -f1)"
+  record_line="$(grep -n '^### Record findings' "$SKILL" | head -1 | cut -d: -f1)"
+  [ -n "$routing_line" ]
+  [ -n "$merge_line" ]
+  [ -n "$record_line" ]
+  [ "$routing_line" -lt "$merge_line" ]
+  [ "$routing_line" -lt "$record_line" ]
+  routing_text="$(sed -n "${routing_line}p" "$SKILL")"
+  [[ "$routing_text" == *"HIGH"* ]]
+}
+
+@test "the verifier grammar is untouched" {
+  grep -qF 'HV_VERDICT_COUNT=' "$SKILL"
+  grep -qF '[ "$HV_VERDICT_COUNT" -ne 1 ]' "$SKILL"
+  grep -qF 'ASSUME-NNN:' "$SKILL"
+  ! grep -qF 'VERIFIER: ASSUME' "$SKILL"
+}
