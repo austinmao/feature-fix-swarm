@@ -14,7 +14,7 @@ setup() {
 @test "tracer: one declared domain emits its core file inside one delimiter pair" {
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC'"
+  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"CORE_REQUIREMENTS_SENTINEL"* ]]
