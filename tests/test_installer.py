@@ -4,9 +4,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -15,6 +17,26 @@ from lib import ffs_installer
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "setup.sh"
 INSTALLER = ROOT / "lib" / "ffs_installer.py"
+STUB_SOCRATIC_INSTALLER = ROOT / "tests/fixtures/socratic-installer-stub.sh"
+
+
+def socratic_env() -> dict[str, str]:
+    """Env override for run_setup: clear the ambient skip flag and pin the
+    subprocess boundary at the offline shell stub."""
+    return {"FFS_SKIP_SOCRATIC": "", "FFS_SOCRATIC_INSTALLER": str(STUB_SOCRATIC_INSTALLER)}
+
+
+def function_source(module_text: str, name: str) -> str:
+    """Slice one top-level function body out of module source text, for
+    literal-freedom assertions without importing/dis-assembling the module."""
+    marker = f"\ndef {name}("
+    start = module_text.index(marker) + 1
+    end = module_text.index("\ndef ", start + 1)
+    return module_text[start:end]
+
+# Sentinel distinguishing "no patch key at all" from an explicit JSON null,
+# which stage_installer_root must be able to write independently.
+OMIT = object()
 
 
 def run_setup(
@@ -31,6 +53,7 @@ def run_setup(
             "HOME": str(home),
             "CODEX_HOME": str(home / ".codex"),
             "FFS_SKIP_PROMPT_MASTER": "1",
+            "FFS_SKIP_SOCRATIC": "1",
             "FFS_GSD_INSTALLER": str(ROOT / "tests/fixtures/gsd-installer-stub.py"),
             "FFS_GSD_STUB_LOG": str(tmp_path / "gsd-installer.log"),
             # spec-004 AC-009: doctor's model-resolvability check shells out to
@@ -59,6 +82,586 @@ def run_setup(
 def init_repo(path: Path) -> None:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
+
+
+def build_socratic_fixture_repo(tmp_path: Path) -> tuple[Path, str]:
+    """Local git repo shaped like socratic, for a network-free clone source."""
+    repo = Path(tempfile.mkdtemp(dir=tmp_path, prefix="socratic-fixture-"))
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    (repo / "SKILL.md").write_text("# socratic\n")
+    (repo / "questions/core").mkdir(parents=True)
+    (repo / "questions/core/00-requirements.md").write_text("## Verification\ncore requirements\n")
+    (repo / "questions/full").mkdir(parents=True)
+    (repo / "questions/full/00-requirements.md").write_text("## Verification\nfull requirements\n")
+    (repo / "packs").mkdir(parents=True)
+    (repo / "packs/operations.md").write_text("operations pack\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True)
+    sha = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    return repo, sha
+
+
+def stage_installer_root(
+    tmp_path: Path,
+    repository: str,
+    commit: str,
+    patch: object = OMIT,
+) -> Path:
+    """Throwaway installer root mirroring the real repo layout, so the real
+    scripts/install-socratic.sh (derived from SCRIPT_DIR/..) runs against a
+    synthesised pin instead of the production one."""
+    root = Path(tempfile.mkdtemp(dir=tmp_path, prefix="installer-root-"))
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    installer_dest = scripts_dir / "install-socratic.sh"
+    shutil.copy2(ROOT / "scripts/install-socratic.sh", installer_dest)
+    installer_dest.chmod(installer_dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    vendor_dir = root / "vendor" / "socratic"
+    vendor_dir.mkdir(parents=True)
+    pin: dict[str, object] = {"repository": repository, "commit": commit}
+    if patch is not OMIT:
+        if patch is None:
+            pin["patch"] = None
+        else:
+            patch_path = Path(str(patch))
+            shutil.copy2(patch_path, vendor_dir / patch_path.name)
+            pin["patch"] = patch_path.name
+    (vendor_dir / "pin.json").write_text(json.dumps(pin, indent=2) + "\n")
+    return root
+
+
+def run_socratic_installer(
+    root: Path, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Runs the staged install-socratic.sh, forwarding args and env — no
+    existing helper runs a script with caller-supplied arguments."""
+    installer = root / "scripts" / "install-socratic.sh"
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+    return subprocess.run(
+        ["bash", str(installer), *args],
+        env=run_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def test_socratic_pin_is_exact() -> None:
+    metadata = json.loads((ROOT / "vendor/socratic/pin.json").read_text())
+    assert metadata["repository"] == "https://github.com/m4vic/socratic.git"
+    assert metadata["commit"] == "862b52e898134ba13ac05a43651ba8d1a7f2a28a"
+    assert "patch" not in metadata
+
+
+def test_install_socratic_writes_marker_with_null_patch_sha(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    dest = tmp_path / "dest" / "socratic"
+
+    result = run_socratic_installer(root, "--dest", str(dest))
+
+    assert result.returncode == 0, result.stderr
+    assert (dest / "SKILL.md").is_file()
+    assert (dest / "questions/core/00-requirements.md").is_file()
+    assert not (dest / ".git").exists()
+    marker = json.loads((dest / ".ffs-socratic.json").read_text())
+    assert marker == {
+        "schema": "ffs.external-skill/v1",
+        "repository": str(repo),
+        "commit": sha,
+        "patch_sha256": None,
+    }
+
+
+def test_install_socratic_honours_source_override(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, "https://example.invalid/unreachable/socratic.git", sha)
+    dest = tmp_path / "dest"
+
+    result = run_socratic_installer(root, "--dest", str(dest), "--source", str(repo))
+
+    assert result.returncode == 0, result.stderr
+    marker = json.loads((dest / ".ffs-socratic.json").read_text())
+    assert marker["repository"] == "https://example.invalid/unreachable/socratic.git"
+
+
+def test_install_socratic_refuses_existing_destination(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    sentinel = dest / "sentinel.txt"
+    sentinel.write_text("do-not-touch\n")
+
+    result = run_socratic_installer(root, "--dest", str(dest))
+
+    assert result.returncode == 1
+    assert "setup.sh" in result.stderr
+    assert sentinel.read_text() == "do-not-touch\n"
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link_dest = tmp_path / "linked-dest"
+    link_dest.symlink_to(outside, target_is_directory=True)
+
+    link_result = run_socratic_installer(root, "--dest", str(link_dest))
+
+    assert link_result.returncode == 1
+    assert link_dest.is_symlink()
+    assert list(outside.iterdir()) == []
+
+
+def test_install_socratic_refuses_unsafe_destinations(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+
+    for raw_dest in ("/", str(fake_home), f"{fake_home}/", "."):
+        tmpdir = Path(tempfile.mkdtemp(dir=tmp_path, prefix="tmpdir-unsafe-"))
+        result = run_socratic_installer(
+            root, "--dest", raw_dest, env={"HOME": str(fake_home), "TMPDIR": str(tmpdir)}
+        )
+        assert result.returncode == 2, (raw_dest, result.stderr)
+        assert list(tmpdir.iterdir()) == []
+
+
+def test_install_socratic_refuses_unsafe_destination_after_expansion(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+
+    result = run_socratic_installer(root, "--dest", "~", env={"HOME": str(fake_home)})
+
+    assert result.returncode == 2
+
+
+def test_install_socratic_rechecks_destination_before_move() -> None:
+    script = (ROOT / "scripts/install-socratic.sh").read_text()
+    lines = script.splitlines()
+    mv_index = next(i for i, line in enumerate(lines) if line.strip().startswith("mv "))
+    recheck_index = next(
+        i for i, line in enumerate(lines) if "appeared concurrently" in line
+    )
+    assert recheck_index < mv_index
+
+
+def test_install_socratic_treats_null_patch_as_unpatched(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha, patch=None)
+    dest = tmp_path / "dest"
+
+    result = run_socratic_installer(root, "--dest", str(dest))
+
+    assert result.returncode == 0, result.stderr
+    marker = json.loads((dest / ".ffs-socratic.json").read_text())
+    assert marker["patch_sha256"] is None
+
+
+def test_install_socratic_fails_closed_on_incomplete_pin(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    pin_path = root / "vendor/socratic/pin.json"
+    incomplete = json.loads(pin_path.read_text())
+    del incomplete["commit"]
+    pin_path.write_text(json.dumps(incomplete, indent=2) + "\n")
+    dest = tmp_path / "dest"
+
+    result = run_socratic_installer(root, "--dest", str(dest))
+
+    assert result.returncode != 0
+    assert not dest.exists()
+
+
+def test_install_socratic_applies_declared_patch_and_records_sha(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    scratch = tmp_path / "scratch-clone"
+    subprocess.run(["git", "clone", "-q", str(repo), str(scratch)], check=True)
+    skill = scratch / "SKILL.md"
+    skill.write_text(skill.read_text() + "patched line\n")
+    diff = subprocess.run(
+        ["git", "-C", str(scratch), "diff"], check=True, capture_output=True, text=True
+    ).stdout
+    patch_file = tmp_path / "compat.patch"
+    patch_file.write_text(diff)
+
+    root = stage_installer_root(tmp_path, str(repo), sha, patch=patch_file)
+    dest = tmp_path / "dest"
+
+    result = run_socratic_installer(root, "--dest", str(dest))
+
+    assert result.returncode == 0, result.stderr
+    assert (dest / "SKILL.md").read_text().endswith("patched line\n")
+    expected_sha = hashlib.sha256(
+        (root / "vendor/socratic" / patch_file.name).read_bytes()
+    ).hexdigest()
+    marker = json.loads((dest / ".ffs-socratic.json").read_text())
+    assert marker["patch_sha256"] == expected_sha
+
+
+def test_install_socratic_rejects_patch_that_fails_apply_check(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    bad_patch = tmp_path / "bad.patch"
+    bad_patch.write_text(
+        "--- a/missing-file.md\n"
+        "+++ b/missing-file.md\n"
+        "@@ -1,1 +1,2 @@\n"
+        " line one\n"
+        "+line two\n"
+    )
+    root = stage_installer_root(tmp_path, str(repo), sha, patch=bad_patch)
+    dest = tmp_path / "dest"
+    tmpdir = Path(tempfile.mkdtemp(dir=tmp_path, prefix="tmpdir-bad-patch-"))
+
+    result = run_socratic_installer(root, "--dest", str(dest), env={"TMPDIR": str(tmpdir)})
+
+    assert result.returncode != 0
+    assert not dest.exists()
+    assert list(tmpdir.iterdir()) == []
+
+
+def test_install_socratic_rejects_option_like_or_exotic_source(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+
+    dash_dest = tmp_path / "dest-dash"
+    dash_result = run_socratic_installer(
+        root, "--dest", str(dash_dest), "--source", "--upload-pack=touch pwned"
+    )
+    assert dash_result.returncode == 2
+    assert not dash_dest.exists()
+
+    ext_dest = tmp_path / "dest-ext"
+    ext_result = run_socratic_installer(
+        root, "--dest", str(ext_dest), "--source", "ext::sh -c touch pwned"
+    )
+    assert ext_result.returncode == 2
+    assert not ext_dest.exists()
+
+
+def test_install_socratic_guards_dest_and_source_missing_value(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+
+    dest_result = run_socratic_installer(root, "--dest")
+    assert dest_result.returncode == 2
+    assert dest_result.stderr.strip() != ""
+    assert "usage" in dest_result.stderr.lower()
+
+    dest = tmp_path / "dest-src-missing"
+    source_result = run_socratic_installer(root, "--dest", str(dest), "--source")
+    assert source_result.returncode == 2
+    assert source_result.stderr.strip() != ""
+    assert "usage" in source_result.stderr.lower()
+    assert not dest.exists()
+
+
+def test_install_socratic_rejects_patch_path_traversal(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    pin_path = root / "vendor/socratic/pin.json"
+    pin = json.loads(pin_path.read_text())
+    pin["patch"] = "../outside.patch"
+    pin_path.write_text(json.dumps(pin, indent=2) + "\n")
+    outside = root / "vendor" / "outside.patch"
+    outside.write_text(
+        "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1 +1,2 @@\n # socratic\n+traversal\n"
+    )
+    dest = tmp_path / "dest"
+
+    result = run_socratic_installer(root, "--dest", str(dest))
+
+    assert result.returncode == 2
+    assert not dest.exists()
+
+
+def test_ci_and_contributing_syntax_checks_cover_install_socratic() -> None:
+    workflow_lines = [
+        line
+        for line in (ROOT / ".github/workflows/ci.yml").read_text().splitlines()
+        if not line.strip().startswith("#")
+    ]
+    contributing_lines = [
+        line
+        for line in (ROOT / "CONTRIBUTING.md").read_text().splitlines()
+        if not line.strip().startswith("#")
+    ]
+    workflow_hits = sum(1 for line in workflow_lines if "scripts/install-socratic.sh" in line)
+    contributing_hits = sum(1 for line in contributing_lines if "scripts/install-socratic.sh" in line)
+    assert workflow_hits >= 2
+    assert contributing_hits >= 1
+
+
+def test_stage_socratic_materialises_tree_from_staged_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
+    monkeypatch.delenv("FFS_SOCRATIC_INSTALLER", raising=False)
+    monkeypatch.delenv("FFS_SOCRATIC_SOURCE", raising=False)
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    backup = ffs_installer.Backup("test-stage-socratic", "user")
+
+    staged = ffs_installer.stage_socratic(root, backup)
+
+    assert staged == backup.directory / "socratic-stage"
+    assert (staged / "SKILL.md").is_file()
+    assert (staged / ".ffs-socratic.json").is_file()
+    assert ffs_installer.fingerprint(staged)
+
+
+def test_stage_socratic_returns_none_when_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+    backup = ffs_installer.Backup("test-stage-socratic-skip", "user")
+
+    staged = ffs_installer.stage_socratic(root, backup)
+
+    assert staged is None
+    assert not (backup.directory / "socratic-stage").exists()
+
+
+def test_stage_socratic_raises_when_installer_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
+    monkeypatch.delenv("FFS_SOCRATIC_INSTALLER", raising=False)
+    source = tmp_path / "no-installer-source"
+    source.mkdir()
+    backup = ffs_installer.Backup("test-stage-socratic-missing", "user")
+    missing_installer = source / "scripts" / "install-socratic.sh"
+
+    with pytest.raises(ffs_installer.ActionableError) as excinfo:
+        ffs_installer.stage_socratic(source, backup)
+
+    assert str(missing_installer) in str(excinfo.value)
+
+
+def test_stage_socratic_surfaces_installer_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
+    failing = tmp_path / "failing-socratic-installer.sh"
+    failing.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'synthetic socratic installer failure' >&2\n"
+        "exit 1\n"
+    )
+    failing.chmod(failing.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("FFS_SOCRATIC_INSTALLER", str(failing))
+    source = tmp_path / "any-source"
+    source.mkdir()
+    backup = ffs_installer.Backup("test-stage-socratic-stderr", "user")
+
+    with pytest.raises(ffs_installer.ActionableError) as excinfo:
+        ffs_installer.stage_socratic(source, backup)
+
+    assert "synthetic socratic installer failure" in str(excinfo.value)
+
+
+def test_project_install_stages_socratic_canonically(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+
+    result = run_setup(
+        tmp_path,
+        "--scope",
+        "project",
+        "--project-dir",
+        str(project),
+        extra_env=socratic_env(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    canonical = project / ".agents/skills/socratic"
+    claude_link = project / ".claude/skills/socratic"
+    assert canonical.is_dir() and not canonical.is_symlink()
+    assert (canonical / ".ffs-socratic.json").is_file()
+    assert claude_link.is_symlink()
+    target = os.readlink(claude_link)
+    assert not os.path.isabs(target)
+    assert claude_link.resolve() == canonical
+    assert not (project / ".codex/skills").exists()
+
+
+def test_project_install_records_socratic_in_manifest(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    env = socratic_env()
+    installed = run_setup(
+        tmp_path, "--scope", "project", "--project-dir", str(project), extra_env=env
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    manifest = json.loads((project / ".feature-fix-swarm/install-manifest.json").read_text())
+    agents_key = ".agents/skills/socratic"
+    claude_key = ".claude/skills/socratic"
+    assert manifest["paths"][agents_key]["fingerprint"]
+    assert manifest["paths"][claude_key]["fingerprint"]
+
+    clean = run_setup(
+        tmp_path, "--doctor", "--scope", "project", "--project-dir", str(project), "--json"
+    )
+    assert clean.returncode == 0, clean.stdout
+
+    (project / ".agents/skills/socratic/SKILL.md").write_text("mutated\n")
+    drift = run_setup(
+        tmp_path, "--doctor", "--scope", "project", "--project-dir", str(project), "--json"
+    )
+    assert drift.returncode != 0
+    report = json.loads(drift.stdout)
+    assert any(
+        check["id"] == "managed-path"
+        and check["status"] == "fail"
+        and "socratic" in check["message"]
+        for check in report["checks"]
+    )
+
+
+def test_user_install_copies_socratic_to_both_hosts(tmp_path: Path) -> None:
+    result = run_setup(tmp_path, "--scope", "user", extra_env=socratic_env())
+
+    assert result.returncode == 0, result.stderr
+    home = tmp_path / "home"
+    agents = home / ".agents/skills/socratic"
+    claude = home / ".claude/skills/socratic"
+    assert agents.is_dir() and not agents.is_symlink()
+    assert claude.is_dir() and not claude.is_symlink()
+    assert ffs_installer.fingerprint(agents) == ffs_installer.fingerprint(claude)
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    assert manifest["paths"][str(agents.absolute())]["fingerprint"]
+    assert manifest["paths"][str(claude.absolute())]["fingerprint"]
+
+
+def test_same_release_project_reinstall_with_socratic_preserves_manifest_bytes(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    env = socratic_env()
+    first = run_setup(
+        tmp_path, "--scope", "project", "--project-dir", str(project), extra_env=env
+    )
+    manifest_path = project / ".feature-fix-swarm/install-manifest.json"
+    before = manifest_path.read_bytes()
+
+    second = run_setup(
+        tmp_path, "--scope", "project", "--project-dir", str(project), extra_env=env
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    manifest = json.loads(before)
+    assert ".agents/skills/socratic" in manifest["paths"]
+    assert manifest_path.read_bytes() == before
+
+
+def test_uninstall_removes_managed_socratic_via_manifest(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    env = socratic_env()
+    installed = run_setup(
+        tmp_path, "--scope", "project", "--project-dir", str(project), extra_env=env
+    )
+    assert installed.returncode == 0, installed.stderr
+    assert (project / ".agents/skills/socratic").is_dir()
+
+    uninstalled = run_setup(
+        tmp_path,
+        "--uninstall",
+        "--scope",
+        "project",
+        "--project-dir",
+        str(project),
+        extra_env=env,
+    )
+
+    assert uninstalled.returncode == 0, uninstalled.stderr
+    assert not (project / ".agents/skills/socratic").exists()
+    assert not (project / ".claude/skills/socratic").exists()
+    installer_source = INSTALLER.read_text()
+    uninstall_body = function_source(installer_source, "uninstall")
+    assert "socratic" not in uninstall_body
+
+
+def test_uninstall_preserves_edited_socratic_copy(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    env = socratic_env()
+    installed = run_setup(
+        tmp_path, "--scope", "project", "--project-dir", str(project), extra_env=env
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    edited = project / ".agents/skills/socratic/SKILL.md"
+    edited.write_text("locally edited\n")
+
+    result = run_setup(
+        tmp_path,
+        "--uninstall",
+        "--scope",
+        "project",
+        "--project-dir",
+        str(project),
+        extra_env=env,
+    )
+
+    assert result.returncode == 1
+    assert edited.read_text() == "locally edited\n"
+    assert "preserved" in result.stderr.lower()
+
+
+def test_socratic_stage_directory_removed_after_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
+    monkeypatch.setenv("FFS_SOCRATIC_INSTALLER", str(STUB_SOCRATIC_INSTALLER))
+    monkeypatch.setenv(
+        "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
+    )
+    monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
+    backups_root = home / ".cache/feature-fix-swarm/backups"
+
+    def stage_dirs() -> list[Path]:
+        if not backups_root.exists():
+            return []
+        return list(backups_root.glob("*/socratic-stage"))
+
+    assert ffs_installer.install(ROOT, "project", project) == 0
+    assert (project / ".agents/skills/socratic").is_dir()
+    assert stage_dirs() == []
+
+    real_replace_tree = ffs_installer.replace_tree
+
+    def fail_after_first_write(*args: object, **kwargs: object) -> None:
+        real_replace_tree(*args, **kwargs)
+        raise RuntimeError("synthetic failure after first write")
+
+    monkeypatch.setattr(ffs_installer, "replace_tree", fail_after_first_write)
+
+    with pytest.raises(RuntimeError, match="synthetic failure after first write"):
+        ffs_installer.install(ROOT, "project", project)
+
+    assert stage_dirs() == []
 
 
 def test_project_install_uses_portable_relative_links_and_never_codex(tmp_path: Path) -> None:
@@ -646,6 +1249,7 @@ def test_project_install_refuses_ancestor_swap_after_preflight(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )
@@ -683,6 +1287,7 @@ def test_project_install_preserves_destination_created_after_preflight(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )
@@ -771,6 +1376,7 @@ def test_project_manifest_write_refuses_post_write_ancestor_swap(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )
@@ -1191,6 +1797,7 @@ def test_failure_after_first_ffs_write_restores_gsd_and_project(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv("FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py"))
     monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
 
@@ -1229,6 +1836,7 @@ def test_failure_rollback_preserves_concurrent_project_change(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
     monkeypatch.setenv(
         "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
     )

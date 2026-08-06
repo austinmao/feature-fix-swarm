@@ -12,6 +12,9 @@ setup() {
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
          GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
   unset FFS_RUN_FINALIZER || true
+  # ambient GSD_RUN_ID (exported by feature-implement autonomous runs) rekeys
+  # the archive dir away from the pr${PR} default these fixtures assert on
+  unset GSD_RUN_ID || true
 
   # repo with a bare origin, main + squash-merged feature branch
   ORIGIN="$BATS_TEST_TMPDIR/origin.git"
@@ -1104,6 +1107,21 @@ SCRIPT
     "$(cd "$WORK/.feature-fix-swarm" && pwd)"/*) : ;;
     *) false ;;
   esac
+}
+
+@test "coverage: GSD_RUN_ID=spec-005 lands under its own rekeyed run-key dir, not pr<N>" {
+  mock_gh_merged
+  WT="$BATS_TEST_TMPDIR/wt-feat"
+  git worktree add -q "$WT" feat/x
+  mkdir -p "$WT/.feature-fix-swarm"
+  echo '{"w":"1"}' > "$WT/.feature-fix-swarm/evidence.json"
+  GSD_RUN_ID="spec-005" run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [ ! -d "$WT" ]
+  ARCHIVE_ROOT="$WORK/.feature-fix-swarm/archive"
+  [ ! -d "$ARCHIVE_ROOT/pr1" ]
+  [ -d "$ARCHIVE_ROOT/spec-005" ]
+  [ -f "$ARCHIVE_ROOT/spec-005/feat-x/evidence.json" ]
 }
 
 @test "coverage: GSD_RUN_ID with slashes and dots is sanitized into its own run-key dir, not pr<N>" {

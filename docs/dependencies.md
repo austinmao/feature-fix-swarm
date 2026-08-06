@@ -44,7 +44,9 @@ When GSD is upgraded, update the exact package pin, lockfile, installer
 constant, compatibility matrix, and relevant fixtures together. Never copy or
 patch installed GSD artifacts by hand.
 
-## Pinned external source
+## Pinned external sources
+
+### prompt-master
 
 `prompt-master` is installed from
 `nidhinjs/prompt-master@d15eabbe5d2122eedc060bae8a771381e9873d1b`.
@@ -55,6 +57,72 @@ patch has been submitted upstream as
 
 This pin avoids executing a moving branch during setup. `setup.sh` preserves
 an existing unowned destination rather than overwriting it.
+
+### socratic
+
+`socratic` is installed from
+`m4vic/socratic@862b52e898134ba13ac05a43651ba8d1a7f2a28a` via
+`scripts/install-socratic.sh`, staged by `stage_socratic()` into
+`.agents/skills/socratic` (with a `.claude/` project-scope symlink) exactly
+like `prompt-master`. Installation is default and skippable with
+`FFS_SKIP_SOCRATIC=1`; the emission-side kill switch is `SOCRATIC=off` and
+the vendor-tree override is `FFS_SOCRATIC_DIR`.
+
+Two more env vars steer `stage_socratic()` at the subprocess boundary, both
+read by `lib/ffs_installer.py`: `FFS_SOCRATIC_INSTALLER` overrides the
+installer path itself (a test seam — points install-time tests at
+`tests/fixtures/socratic-installer-stub.sh` instead of the real
+`scripts/install-socratic.sh`, mirroring the pre-existing
+`FFS_GSD_INSTALLER`/`FFS_PROMPT_MASTER_SOURCE` precedents), and
+`FFS_SOCRATIC_SOURCE` overrides the clone source, appended to the installer
+command as `--source <value>` when set (the same seam
+`test_install_socratic_honours_source_override` exercises directly against
+the real installer). Neither is meant to be set in normal operation.
+
+No patch is pinned at this commit. `vendor/socratic/pin.json` carries no
+`patch` key at all, and the installed marker (`.ffs-socratic.json`, schema
+`ffs.external-skill/v1`) accordingly records a null `patch_sha256` — this is
+a fact about this pin, not a placeholder. The `patch` key is optional:
+`install-socratic.sh` reads it through a `dict.get("patch")`, so an absent
+key and an explicit JSON `null` take the identical code path. When a patch
+is named it must be a bare filename — any value containing a slash is
+refused with exit 2 before resolution — and it is resolved inside
+`vendor/socratic/`, so a patch can never be pulled from outside the vendor
+directory.
+
+The upstream-submission channel is the same convention `prompt-master`
+already exercises: a compatibility patch is submitted upstream and the
+resulting PR URL is recorded in `pin.json`'s `upstream_submission`. That
+field is `null` here because no patch has been needed at this commit.
+
+### Bumping the socratic pin
+
+1. Audit the upstream diff between the current pin and the candidate commit,
+   paying attention to question files, pack directories, and `SKILL.md` —
+   those are what actually reach a reviewer prompt.
+2. Update `commit` in `vendor/socratic/pin.json`, adding a `patch` bare
+   filename beside it only if an FFS compatibility patch is genuinely
+   required.
+3. Reinstall: `bash scripts/install-socratic.sh --dest <path>` for a
+   standalone check, or a full `setup.sh` run to exercise `stage_socratic()`'s
+   fingerprint tracking and the manifest entries `uninstall` and `doctor`
+   read.
+4. Run the socratic suites: `bats tests/bats/socratic-slice.bats
+   tests/bats/socratic-spec-step.bats tests/bats/socratic-plan-wall.bats
+   tests/bats/socratic-review-gate.bats` plus `python3 -m pytest
+   tests/test_installer.py -q`.
+5. Amend the enum tables in `scripts/gsd/socratic-slice.sh` if the bump
+   added, renamed, or removed a question file or a pack directory.
+   `DOMAIN_ENUM_ORDER` and `PACK_ENUM` are a frozen mirror of the upstream
+   tree at this exact pin, hosted once and shared by both validation
+   postures. A layout change degrades silently in two opposite directions at
+   once: the emission path is fail-soft, so a domain whose file vanished is
+   skipped with a `WARN` and a thinner slice still arms; `--validate` is
+   fail-closed, so a spec author declaring a domain that upstream genuinely
+   added is rejected at exit 3 with a spec that is correct. Neither is a
+   test failure — every bats suite runs against `make_vendor_tree` fixtures
+   and never against the real pin — so CI cannot catch enum drift. This step
+   is the only control that exists.
 
 ## Optional integrations
 

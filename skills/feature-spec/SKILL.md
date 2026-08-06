@@ -37,6 +37,9 @@ See `docs/tdd-bdd-guide.md` for the full research-backed TDD/BDD reference.
 │    ├─ ENFORCED: Acceptance criteria (numbered, testable)        │
 │    └─ ENFORCED: E2E test path definitions (PATH-NNN)            │
 │                                                                 │
+│  Phase 1.5: socratic self-interrogation                         │
+│      Writes specs/NNN/socratic.md (fail-closed authoring)       │
+│                                                                 │
 │  Phase 2: /speckit.plan                                         │
 │    ├─ Writes specs/NNN/plan.md                                  │
 │    ├─ ENFORCED: Unit test list (all anticipated cases, in order)│
@@ -436,6 +439,88 @@ After it completes, open `specs/${SPEC_ID}/spec.md` and verify:
 
 If any check fails, **fix it now** before proceeding to Step 2.
 
+### Step 1.5 — socratic self-interrogation (fail-closed authoring)
+
+If SOCRATIC is set to off in the environment, skip this step entirely: no socratic.md is authored, no validation runs, proceed straight to Step 2, and let the completion summary print the `SOCRATIC=off` skip line. The kill
+switch must kill the producer too, or it stops being a per-run escape hatch.
+
+Otherwise, if no vendored socratic tree resolves (`.agents/skills/socratic` or the sibling candidate paths the helper itself checks), skip the step silently and proceed to Step 2 — the same fail-soft posture as the optional
+recall / prior-work callouts above. Nothing downstream may block on this
+artifact.
+
+Do the self-interrogation inline, no subagent dispatch. Build the working
+domain set from the spec's content: always include `requirements` and
+`testing`, plus every domain the content signals. Keep `depth: core` by
+default; escalate to `full` when the spec touches production systems,
+external users, public APIs, authentication, money, PII, regulated data,
+autonomous tools, or costly or irreversible actions. Select at most two
+`packs` from the pack enum, none when none fit.
+
+The interrogation itself is the point, not the artifact: after the
+resolution ladder below assigns `SOCRATIC_SLICE`, author the frontmatter
+(header comment + `domains`/`depth`/`packs` + empty section headings) FIRST,
+run `"$SOCRATIC_SLICE" "specs/${SPEC_ID}" --mode arm` to emit the selected
+domains' question slice, then ANSWER those questions against the draft
+spec.md before filling the body: answers that changed or confirmed a spec
+decision go to `## Self-answered highlights`; defaults you took without
+evidence become `ASSUME-NNN:` lines; questions only the operator can answer
+go to `## Open questions → grants`; the sharpest exposures go to
+`## Top risks`. A body written without reading the emitted questions is not
+a socratic pass — do not skip the arm invocation when the helper resolved.
+
+Write `specs/${SPEC_ID}/socratic.md`: an enum-documenting header comment
+ABOVE the frontmatter, emitted as one or more COMPLETE single-line comments
+(never a multi-line block — plan 02-01's parser skips only single-line
+comments); then `domains`/`depth`/`packs` frontmatter; then the four
+required sections verbatim — `## Self-answered highlights`,
+`## Assumed (flag if wrong)` (one `ASSUME-NNN:` line per default taken),
+`## Open questions → grants`, `## Top risks`. `socratic.md` is untrusted,
+LLM-authored, hand-editable input and is never auto-granted from (see
+Step 6) — the same posture the slice helper already gives it.
+
+Resolve `socratic-slice.sh` itself through its own resolution ladder — repo
+root first, then the `~/.claude` install equivalents — never a bare
+repo-relative path, since an installed checkout has no `scripts/` directory:
+
+```bash
+SOCRATIC_SLICE=""
+for _cand in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/gsd/socratic-slice.sh" \
+  "$HOME/.claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh" \
+  "$HOME/.claude/scripts/gsd/socratic-slice.sh"; do
+  [ -f "$_cand" ] && SOCRATIC_SLICE="$_cand" && break
+done
+```
+
+Then invoke `"$SOCRATIC_SLICE" --validate "specs/${SPEC_ID}/socratic.md"` and
+key the response on the EXIT CODE — an unresolved `$SOCRATIC_SLICE` (the
+ladder found nothing) takes the same helper-unavailable branch as exit
+126/127 below — one disposition per code:
+
+- **exit 3** — validation failure, the file is wrong: correct the named
+  values and re-emit, at most TWO repair attempts. Only exit 3 ever consumes
+  a repair attempt.
+- **exit 2** — usage/invocation error: abort the step loudly, no repair
+  attempt.
+- **exit 126 or 127** — helper-unavailable despite the ladder: an
+  ENVIRONMENT defect, not an authoring one — rename the file to
+  `specs/${SPEC_ID}/socratic.md.unvalidated`, report the helper-unavailable
+  branch in the summary, and proceed. Phase 3 consumers resolve socratic.md only, so nothing arms on the unvalidated file until an
+  operator validates and renames it back.
+- **any other unexpected nonzero** — abort as an environment error, no
+  repair attempt.
+
+If the file still fails `--validate` after the second repair attempt, the
+step FAILS: exits nonzero, relays the validator's stderr naming every invalid value. Rule: do NOT proceed to Step 2. The step never continues unarmed on a validation failure — silent degradation is exactly what
+AC-003's fail-closed authoring exists to prevent, and a loud nonzero error
+satisfies AC-004 in full (AC-004 forbids operator prompts, not errors).
+Never route a validation defect into an ASSUME or pending entry.
+
+State the autonomy invariant plainly: this step never calls AskUserQuestion
+or otherwise blocks — in autonomous, MAX-AUTH and `--gated` runs alike,
+every open question becomes an `ASSUME-NNN` ledger line or a typed PENDING
+entry (Step 6), never an interactive stop.
+
 ### Step 2 — speckit.plan
 
 Invoke the host-native `speckit.plan` skill.
@@ -617,6 +702,42 @@ stalling. Build the ledger NOW — by default with zero stops:
    python3 "$GATES_PY" grant "$RUN_ID" --action <a1> --action <a2> ... --ttl-hours 72
    ```
 
+4. **socratic.md's open questions route to PENDING, never grant.** If
+   `specs/${SPEC_ID}/socratic.md` exists (Step 1.5 may have skipped and left
+   nothing to walk), resolve `socratic-slice.sh` through the same ladder
+   Step 1.5 used for the validator (re-run the resolution here — Step 6 may
+   execute in a fresh shell with no inherited `$SOCRATIC_SLICE`) and invoke:
+
+   ```bash
+   SOCRATIC_SLICE=""
+   for _cand in \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/gsd/socratic-slice.sh" \
+     "$HOME/.claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh" \
+     "$HOME/.claude/scripts/gsd/socratic-slice.sh"; do
+     [ -f "$_cand" ] && SOCRATIC_SLICE="$_cand" && break
+   done
+   [ -n "$SOCRATIC_SLICE" ] && "$SOCRATIC_SLICE" --record-pendings "specs/${SPEC_ID}/socratic.md" "$RUN_ID"
+   ```
+
+   That mode parses the `## Open questions → grants` section, regex-gates
+   each candidate action, and calls `gates.py pending` itself — Step 6
+   hand-rolls no shell around it. socratic.md is LLM-authored, hand-editable
+   untrusted input; its entries never enter the auto-grant enumeration in
+   item 1 above, which walks tasks.md and plan.md only — folding a
+   tampered or prompt-injection-influenced open question into that list
+   would mint an auto-granted authorization with no stop anywhere.
+   `check-grant` returns NOT-GRANTED for a pending action, so the action
+   blocks at execution time inside `/feature-implement` while
+   `/feature-spec` itself continues unattended: pendings are recorded without stopping in MAX-AUTH, and under `--gated` they are surfaced at
+   this existing Step-6 stop for the operator to promote to grants — no new
+   stop point is added in either mode.
+
+   The two ledgers stay separate on purpose: `ASSUME-NNN` entries are
+   spec-time engineering defaults audited later by the review gate; grant-
+   ledger entries are TTL'd operator authorizations consumed at execution;
+   pending entries are the unauthorized third state in between. Folding any
+   pair together would make one consumer read another's records.
+
 **The safety floor is identical in both modes.** Grants are exact typed entries
 walked from the plan — MAX-AUTH is not `push:*`. An action the plan did NOT
 enumerate (a novel mid-run discovery) still stops and records `pending`.
@@ -625,6 +746,21 @@ Grants stay run-bound + TTL'd; if an auto-granted action should NOT run, stop
 before `/feature-implement` and rebuild the ledger with `--gated`.
 
 ### Completion summary
+
+The socratic.md row and its trailer line are CONDITIONAL on Step 1.5's
+three outcomes — never advertise an artifact the run never wrote, and never
+omit the row for one it did:
+
+- **wrote and validated** — an artifact row for `specs/NNN/socratic.md`
+  plus one line reporting the ASSUME count, any skipped/unknown domains,
+  and any pending entries recorded from it.
+- **skipped before writing** (`SOCRATIC=off` or vendor tree absent) — one
+  `socratic: skipped (<reason>)` line only; no artifact row, no ASSUME
+  count.
+- **wrote but NOT validated** (helper unavailable, exit 126/127) — the
+  `specs/NNN/socratic.md.unvalidated` artifact row, plus the explicit
+  warning `socratic.md written but NOT validated (helper unavailable)`;
+  NO skip line.
 
 Print:
 
@@ -636,6 +772,10 @@ Artifacts:
   specs/NNN/plan.md          — unit test list + TDD test map + integration tests + phase gates
   specs/NNN/tasks.md         — swarm-decomposed tasks with roster [agent:] tags + review-gates
   specs/NNN/preflight.json   — env/service manifest, PREFLIGHT-PASS recorded for run spec-NNN
+  specs/NNN/socratic.md      — domain set + assumption ledger + risks (branch a) OR
+  specs/NNN/socratic.md.unvalidated — written but NOT validated, helper unavailable (branch c)
+  socratic: N ASSUME entries, 0 skipped domains, M pending entries recorded (branch a only)
+  socratic: skipped (<reason>)                                              (branch b only)
   grant ledger               — N typed actions granted (MAX-AUTH auto | --gated reviewed), TTL 72h (run spec-NNN)
 
 Granted gates (MAX-AUTH default — review here; rebuild with --gated if any should not run):

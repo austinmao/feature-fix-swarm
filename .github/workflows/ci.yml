@@ -49,7 +49,7 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           # warning level: the repo's heredoc-heavy SKILL snippets live in md
           # (not linted); this covers the executable shell surface.
-          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh
+          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh tests/fixtures/socratic-installer-stub.sh
 
   bats:
     runs-on: ubuntu-latest
@@ -99,8 +99,8 @@ jobs:
       - name: Bash and zsh parser checks
         shell: bash
         run: |
-          bash -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh
+          bash -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
           if ! command -v zsh >/dev/null 2>&1; then
             sudo apt-get update -q && sudo apt-get install -y -q zsh
           fi
-          zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh
+          zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
