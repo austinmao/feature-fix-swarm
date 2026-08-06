@@ -217,7 +217,11 @@ if domains_list is None or domains_list == "MALFORMED":
     sys.exit(0)
 
 packs_list = parse_list_field("packs")
-if packs_list is None or packs_list == "MALFORMED":
+packs_malformed = "0"
+if packs_list == "MALFORMED":
+    packs_malformed = "1"
+    packs_list = []
+elif packs_list is None:
     packs_list = []
 
 depth_idx, depth_raw = find_field("depth")
@@ -233,6 +237,7 @@ else:
 print("STATUS:ok")
 print(f"DOMAINS:{','.join(domains_list)}")
 print(f"PACKS:{','.join(packs_list)}")
+print(f"PACKS_MALFORMED:{packs_malformed}")
 print(f"DEPTH:{depth_value}")
 print(f"DEPTH_DECLARED:{depth_declared}")
 
@@ -246,6 +251,7 @@ PY
   STATUS_FIELD="malformed"
   DOMAINS_RAW=""
   PACKS_RAW=""
+  PACKS_MALFORMED="0"
   DEPTH_RAW="core"
   DEPTH_DECLARED="0"
   ASSUME_LINES=()
@@ -255,6 +261,7 @@ PY
       STATUS:*) STATUS_FIELD="${line#STATUS:}" ;;
       DOMAINS:*) DOMAINS_RAW="${line#DOMAINS:}" ;;
       PACKS:*) PACKS_RAW="${line#PACKS:}" ;;
+      PACKS_MALFORMED:*) PACKS_MALFORMED="${line#PACKS_MALFORMED:}" ;;
       DEPTH:*) DEPTH_RAW="${line#DEPTH:}" ;;
       DEPTH_DECLARED:*) DEPTH_DECLARED="${line#DEPTH_DECLARED:}" ;;
       ASSUME:*) ASSUME_LINES+=("${line#ASSUME:}") ;;
@@ -333,6 +340,10 @@ run_validate() {
     joined_packs="$(IFS=,; echo "${bad_packs[*]}")"
     errors+=("unknown pack(s): $joined_packs")
     named+=("pack: $joined_packs")
+  fi
+  if [ "$PACKS_MALFORMED" = "1" ]; then
+    errors+=("malformed packs value (not a bracket list)")
+    named+=("packs: malformed")
   fi
 
   if [ "$DEPTH_RAW" != "core" ] && [ "$DEPTH_RAW" != "full" ]; then
@@ -759,6 +770,10 @@ $block"
     DOMAIN_CONTENT="$block"
   fi
 done
+
+if [ "$PACKS_MALFORMED" = "1" ]; then
+  warn "malformed packs value — ignoring"
+fi
 
 DECLARED_PACKS=()
 if [ -n "$PACKS_RAW" ]; then

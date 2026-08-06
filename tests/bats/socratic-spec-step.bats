@@ -137,6 +137,20 @@ packs: []" "## Self-answered highlights
   [[ "$output" == *"domains=requirements"* ]]
 }
 
+@test "validate rejects a malformed (non-bracket-list) packs value" {
+  make_spec_dir "$SPEC" "domains: [requirements]
+depth: core
+packs: operations" "## Self-answered highlights
+## Assumed (flag if wrong)
+## Open questions → grants
+## Top risks"
+
+  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"packs"* ]]
+  [[ "$output" == *"VALIDATE-FAIL"* ]]
+}
+
 @test "validate rejects an out-of-enum pack even beyond the EDGE-007 cap" {
   make_spec_dir "$SPEC" "domains: [requirements]
 depth: core

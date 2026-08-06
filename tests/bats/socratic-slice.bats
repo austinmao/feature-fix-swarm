@@ -301,6 +301,23 @@ EOF
   [ "$output" = "socratic: skipped (malformed frontmatter)" ]
 }
 
+@test "a malformed (non-bracket-list) packs value warns and is ignored, domains still arm" {
+  make_spec_dir "$SPEC" "domains: [requirements]
+depth: core
+packs: operations" "## Self-answered highlights
+## Assumed (flag if wrong)
+## Open questions → grants
+## Top risks"
+
+  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"socratic: WARN malformed packs value — ignoring"* ]]
+  [[ "$output" == *"socratic: armed"* ]]
+  [[ "$output" == *"domains=requirements"* ]]
+  [[ "$output" == *"packs=none"* ]]
+}
+
 @test "an explicitly empty domains list takes the no-domains path, not the malformed path" {
   make_spec_dir "$SPEC" "domains: []"
 
