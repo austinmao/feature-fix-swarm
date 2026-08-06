@@ -48,7 +48,7 @@ EOF
 @test "validate passes a well-formed socratic.md" {
   make_valid_fixture "$SPEC"
 
-  run bash "$SCRIPT" --validate "$SPEC/socratic.md"
+  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [ -z "$output" ]

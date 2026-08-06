@@ -4,25 +4,41 @@
 #
 # Usage: socratic-slice.sh <spec_dir_or_socratic.md> [--mode plan|arm|verify]
 #   plan/arm are synonyms for the default emission mode.
+#        socratic-slice.sh --validate <spec_dir_or_socratic.md>
+#   socratic-slice.sh --record-pendings <socratic.md> <run-id>
 #
-# Exit 0: always, EXCEPT:
+# TWO validation postures over the SAME enum tables, deliberately different
+# failure modes (research Pitfall 4): --validate is fail-CLOSED, authoring-
+# time — it runs BEFORE the SOCRATIC=off kill switch and BEFORE vendor-tree
+# resolution, needs neither, and fails on any out-of-enum value at ANY list
+# position (even beyond the pack cap). The default/emission path below is
+# fail-SOFT, consumption-time — unknown values warn and are skipped, known
+# values still arm. Do not "fix" this asymmetry; it is the whole design.
+#
+# Exit 0: emission path always, EXCEPT:
 #   Exit 2: usage/invocation error (zero args, unknown flag, unknown --mode
-#           value, --mode with no value) — usage errors carry a usage
-#           message on stderr and NO status line; there is no armed-or-
-#           skipped fact about a run that never started.
-#   (Exit 3 is reserved for socratic-slice.sh --validate, added by a later
-#    plan; this script never returns it.)
+#           value, --mode with no value, --validate combined with --mode) —
+#           usage errors carry a usage message on stderr and NO status line;
+#           there is no armed-or-skipped fact about a run that never started.
+#   Exit 3: --validate only — the invocation was well formed and the FILE is
+#           wrong (missing, malformed, empty domains, out-of-enum domain/
+#           pack/depth, or a missing required section).
 #
 # Kill switch: SOCRATIC=off — empty stdout, exit 0, one status line
 #   "socratic: skipped (SOCRATIC=off)". Checked first, before any filesystem
-#   work.
+#   work, but ONLY on the emission path — --validate ignores it entirely.
 #
-# stdout: empty, or exactly one SOCRATIC_DATA_START ... SOCRATIC_DATA_END
-#   block wrapping the resolved question/pack/assumption content.
-# stderr: exactly one status line per PARSED invocation (exit 0) —
-#   "socratic: armed domains=<csv|none> packs=<csv|none>" or
-#   "socratic: skipped (<reason>)" — plus zero or more
-#   "socratic: WARN <detail>" lines for per-item degradations.
+# stdout: empty on the emission path unless armed (one SOCRATIC_DATA_START
+#   ... SOCRATIC_DATA_END block); ALWAYS empty in --validate mode.
+# stderr: exactly one status line per PARSED invocation —
+#   "socratic: armed domains=<csv|none> packs=<csv|none>" (emission) or
+#   "socratic: armed domains=<csv> packs=<csv|none> (validate)" (validate
+#   pass) or "socratic: skipped (<reason>)" (emission skip) or
+#   "socratic: skipped (validate-failed: <named values>)" (validate fail) —
+#   plus zero or more "socratic: WARN <detail>" lines for per-item
+#   degradations on the emission path only; --validate emits validation-
+#   error lines instead and suppresses the EDGE-007 excess-pack cap warn
+#   entirely (an excess in-enum pack is not a validation error).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,118 +52,89 @@ warn() { echo "socratic: WARN $*" >&2; }
 status() { echo "socratic: $*" >&2; }
 usage() {
   echo "usage: socratic-slice.sh <spec_dir_or_socratic.md> [--mode plan|arm|verify]" >&2
+  echo "       socratic-slice.sh --validate <spec_dir_or_socratic.md>" >&2
+  echo "       socratic-slice.sh --record-pendings <socratic.md> <run-id>" >&2
 }
 
-# --- argument parsing --------------------------------------------------------
-POSITIONAL=""
-HAVE_POSITIONAL=0
-MODE="plan"
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --mode)
-      if [ $# -lt 2 ]; then
-        usage
-        exit 2
-      fi
-      case "$2" in
-        --*)
-          usage
-          exit 2
-          ;;
-      esac
-      case "$2" in
-        plan|arm) MODE="plan" ;;
-        verify) MODE="verify" ;;
-        *)
-          usage
-          exit 2
-          ;;
-      esac
-      shift 2
-      ;;
-    --*)
-      usage
-      exit 2
-      ;;
-    *)
-      if [ "$HAVE_POSITIONAL" -eq 1 ]; then
-        usage
-        exit 2
-      fi
-      POSITIONAL="$1"
-      HAVE_POSITIONAL=1
-      shift
-      ;;
-  esac
-done
+# --- domain enum: ordered, closed lookup from slug to NN-prefixed stem -------
+# Hosted ONCE, shared by the fail-closed --validate check and the fail-soft
+# emission path — a second copy anywhere is the exact drift Pitfall 4 warns
+# about.
+DOMAIN_ENUM_ORDER=(
+  "requirements:00-requirements"
+  "frontend:01-frontend"
+  "backend:02-backend"
+  "data:03-data"
+  "api:04-api"
+  "security:05-security"
+  "infra:06-infra"
+  "testing:07-testing"
+  "observability:08-observability"
+  "ai-llm:09-ai-llm"
+  "mobile:10-mobile"
+  "product-ux:11-product-ux"
+  "cost-performance:12-cost-performance"
+  "compliance:13-compliance"
+  "team-maintenance:14-team-maintenance"
+)
 
-if [ "$HAVE_POSITIONAL" -eq 0 ]; then
-  usage
-  exit 2
-fi
-
-# --- kill switch, checked first, before any filesystem work ------------------
-if [ "${SOCRATIC:-on}" = "off" ]; then
-  status "skipped (SOCRATIC=off)"
-  exit 0
-fi
-
-# --- vendor tree resolution ---------------------------------------------------
-# Stage one: FFS_SOCRATIC_DIR, when set and non-empty, is AUTHORITATIVE — no
-# fall-through to stage two, even when it names a path that does not exist.
-resolve_vendor_dir() {
-  if [ -n "${FFS_SOCRATIC_DIR:-}" ]; then
-    if [ -d "$FFS_SOCRATIC_DIR" ]; then
-      printf '%s\n' "$FFS_SOCRATIC_DIR"
-      return 0
-    fi
-    return 1
-  fi
-  local candidates=(
-    "$REPO_ROOT/.agents/skills/socratic"
-    "$REPO_ROOT/.claude/skills/socratic"
-    "$HOME/.agents/skills/socratic"
-    "$HOME/.claude/skills/socratic"
-  )
-  local c
-  for c in "${candidates[@]}"; do
-    if [ -d "$c" ]; then
-      printf '%s\n' "$c"
+domain_stem_for() {
+  local slug="$1" entry
+  for entry in "${DOMAIN_ENUM_ORDER[@]}"; do
+    if [ "${entry%%:*}" = "$slug" ]; then
+      printf '%s\n' "${entry#*:}"
       return 0
     fi
   done
   return 1
 }
 
-VENDOR_DIR="$(resolve_vendor_dir)" || {
-  status "skipped (vendor tree absent)"
-  exit 0
+# --- pack enum: closed set of the ten real pack slugs at the pin -----------
+PACK_ENUM=(
+  "software-design"
+  "domain-modeling"
+  "data-systems"
+  "operations"
+  "threat-modeling"
+  "ai-engineering"
+  "agent-design"
+  "legacy-change"
+  "testing-design"
+  "product-discovery"
+)
+
+is_known_pack() {
+  local needle="$1" p
+  for p in "${PACK_ENUM[@]}"; do
+    [ "$p" = "$needle" ] && return 0
+  done
+  return 1
 }
 
-# --- socratic.md resolution ----------------------------------------------------
-# A positional naming an existing directory reads <dir>/socratic.md; naming
-# an existing file uses it as-is; naming NEITHER takes the fail-soft
-# no-socratic.md path (exit 0, empty stdout) rather than erroring.
-if [ -d "$POSITIONAL" ]; then
-  SOCRATIC_MD="$POSITIONAL/socratic.md"
-elif [ -f "$POSITIONAL" ]; then
-  SOCRATIC_MD="$POSITIONAL"
-else
-  status "skipped (no socratic.md)"
-  exit 0
-fi
+# The four sections AC-003 requires, quoted verbatim from spec.md:120-122,
+# including the typographic arrow (not an ASCII "->"). --validate matches
+# these literally, one whole line each — a paraphrase or an ASCII-arrow
+# near-miss fails, because this is the one place the producer (SKILL.md
+# Step 1.5) and this validator must agree byte-for-byte.
+REQUIRED_SECTIONS=(
+  "## Self-answered highlights"
+  "## Assumed (flag if wrong)"
+  "## Open questions → grants"
+  "## Top risks"
+)
 
-if [ ! -f "$SOCRATIC_MD" ]; then
-  status "skipped (no socratic.md)"
-  exit 0
-fi
-
-# --- frontmatter parsing -------------------------------------------------------
+# parse_frontmatter_file <path>
+#
 # One embedded python3 heredoc, adapted from
 # requirement-ownership-gate.sh:104-153's parse_scalar/bracket-splitting
 # logic, inverted to fail-soft: every stop() there becomes a machine-
 # readable line printed to stdout for bash to read back, never a raise.
-PARSE_OUTPUT="$(python3 - "$SOCRATIC_MD" <<'PY'
+# Shared by the emission path and --validate — sets globals STATUS_FIELD,
+# DOMAINS_RAW, PACKS_RAW, DEPTH_RAW, DEPTH_DECLARED, ASSUME_LINES.
+parse_frontmatter_file() {
+  local path="$1"
+  local parse_output
+  parse_output="$(python3 - "$path" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -249,61 +236,411 @@ for line in body:
 PY
 )"
 
-STATUS_FIELD="malformed"
-DOMAINS_RAW=""
-PACKS_RAW=""
-DEPTH_RAW="core"
-DEPTH_DECLARED="0"
-ASSUME_LINES=()
-while IFS= read -r line; do
-  case "$line" in
-    STATUS:*) STATUS_FIELD="${line#STATUS:}" ;;
-    DOMAINS:*) DOMAINS_RAW="${line#DOMAINS:}" ;;
-    PACKS:*) PACKS_RAW="${line#PACKS:}" ;;
-    DEPTH:*) DEPTH_RAW="${line#DEPTH:}" ;;
-    DEPTH_DECLARED:*) DEPTH_DECLARED="${line#DEPTH_DECLARED:}" ;;
-    ASSUME:*) ASSUME_LINES+=("${line#ASSUME:}") ;;
-  esac
-done <<< "$PARSE_OUTPUT"
+  STATUS_FIELD="malformed"
+  DOMAINS_RAW=""
+  PACKS_RAW=""
+  DEPTH_RAW="core"
+  DEPTH_DECLARED="0"
+  ASSUME_LINES=()
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      STATUS:*) STATUS_FIELD="${line#STATUS:}" ;;
+      DOMAINS:*) DOMAINS_RAW="${line#DOMAINS:}" ;;
+      PACKS:*) PACKS_RAW="${line#PACKS:}" ;;
+      DEPTH:*) DEPTH_RAW="${line#DEPTH:}" ;;
+      DEPTH_DECLARED:*) DEPTH_DECLARED="${line#DEPTH_DECLARED:}" ;;
+      ASSUME:*) ASSUME_LINES+=("${line#ASSUME:}") ;;
+    esac
+  done <<< "$parse_output"
+}
 
-if [ "$STATUS_FIELD" != "ok" ]; then
-  status "skipped (malformed frontmatter)"
-  exit 0
-fi
+# run_validate <spec_dir_or_socratic.md>
+#
+# Fail-closed authoring-time check (AC-003). Ignores SOCRATIC=off and needs
+# no vendor tree — the enum tables live in this script and are fixed at the
+# pin. Scans the ENTIRE declared domain/pack list regardless of position
+# (fail-closed beats the EDGE-007 cap: a typo parked behind the cap is a
+# silently-dropped pack the moment a pack ahead of it is removed). Reports
+# every offense before returning 3, so one authoring pass fixes everything.
+# Never writes to stdout.
+run_validate() {
+  local target="$1" socratic_md
 
-# --- domain enum: ordered, closed lookup from slug to NN-prefixed stem -------
-DOMAIN_ENUM_ORDER=(
-  "requirements:00-requirements"
-  "frontend:01-frontend"
-  "backend:02-backend"
-  "data:03-data"
-  "api:04-api"
-  "security:05-security"
-  "infra:06-infra"
-  "testing:07-testing"
-  "observability:08-observability"
-  "ai-llm:09-ai-llm"
-  "mobile:10-mobile"
-  "product-ux:11-product-ux"
-  "cost-performance:12-cost-performance"
-  "compliance:13-compliance"
-  "team-maintenance:14-team-maintenance"
-)
+  if [ -d "$target" ]; then
+    socratic_md="$target/socratic.md"
+  else
+    socratic_md="$target"
+  fi
 
-domain_stem_for() {
-  local slug="$1" entry
-  for entry in "${DOMAIN_ENUM_ORDER[@]}"; do
-    if [ "${entry%%:*}" = "$slug" ]; then
-      printf '%s\n' "${entry#*:}"
+  if [ ! -f "$socratic_md" ]; then
+    status "skipped (validate-failed: missing socratic.md)"
+    return 3
+  fi
+
+  parse_frontmatter_file "$socratic_md"
+
+  if [ "$STATUS_FIELD" != "ok" ]; then
+    status "skipped (validate-failed: malformed frontmatter)"
+    return 3
+  fi
+
+  local -a domain_slugs=() declared_packs=()
+  local -a bad_domains=() bad_packs=() missing_sections=()
+  local -a errors=() named=()
+
+  if [ -n "$DOMAINS_RAW" ]; then
+    IFS=',' read -r -a domain_slugs <<< "$DOMAINS_RAW"
+  fi
+  if [ "${#domain_slugs[@]}" -eq 0 ]; then
+    errors+=("empty domains list")
+    named+=("domains: <empty>")
+  fi
+
+  local slug
+  for slug in ${domain_slugs[@]+"${domain_slugs[@]}"}; do
+    [ -n "$slug" ] || continue
+    if ! domain_stem_for "$slug" >/dev/null; then
+      bad_domains+=("$slug")
+    fi
+  done
+  if [ "${#bad_domains[@]}" -gt 0 ]; then
+    local joined_domains
+    joined_domains="$(IFS=,; echo "${bad_domains[*]}")"
+    errors+=("unknown domain(s): $joined_domains")
+    named+=("domain: $joined_domains")
+  fi
+
+  if [ -n "$PACKS_RAW" ]; then
+    IFS=',' read -r -a declared_packs <<< "$PACKS_RAW"
+  fi
+  local p
+  for p in ${declared_packs[@]+"${declared_packs[@]}"}; do
+    [ -n "$p" ] || continue
+    if ! is_known_pack "$p"; then
+      bad_packs+=("$p")
+    fi
+  done
+  if [ "${#bad_packs[@]}" -gt 0 ]; then
+    local joined_packs
+    joined_packs="$(IFS=,; echo "${bad_packs[*]}")"
+    errors+=("unknown pack(s): $joined_packs")
+    named+=("pack: $joined_packs")
+  fi
+
+  if [ "$DEPTH_RAW" != "core" ] && [ "$DEPTH_RAW" != "full" ]; then
+    errors+=("invalid depth '$DEPTH_RAW'")
+    named+=("depth: $DEPTH_RAW")
+  fi
+
+  local heading
+  for heading in "${REQUIRED_SECTIONS[@]}"; do
+    if ! grep -Fxq "$heading" "$socratic_md"; then
+      missing_sections+=("$heading")
+    fi
+  done
+  if [ "${#missing_sections[@]}" -gt 0 ]; then
+    local sec
+    for sec in "${missing_sections[@]}"; do
+      errors+=("missing required section: $sec")
+    done
+    local joined_sections
+    joined_sections="$(IFS='|'; echo "${missing_sections[*]}")"
+    named+=("missing sections: $joined_sections")
+  fi
+
+  if [ "${#errors[@]}" -gt 0 ]; then
+    local err
+    for err in "${errors[@]}"; do
+      echo "socratic: VALIDATE-FAIL $err" >&2
+    done
+    local named_joined
+    named_joined="$(IFS='; '; echo "${named[*]}")"
+    status "skipped (validate-failed: $named_joined)"
+    return 3
+  fi
+
+  # Success: report ALL declared domains/packs — validation states what the
+  # file DECLARES, never the emission-time EDGE-007 cap.
+  local domains_field="none" packs_field="none"
+  if [ "${#domain_slugs[@]}" -gt 0 ]; then
+    domains_field="$(IFS=,; echo "${domain_slugs[*]}")"
+  fi
+  if [ "${#declared_packs[@]}" -gt 0 ]; then
+    packs_field="$(IFS=,; echo "${declared_packs[*]}")"
+  fi
+
+  status "armed domains=$domains_field packs=$packs_field (validate)"
+  return 0
+}
+
+# resolve_gates_py — same 3-candidate ladder skills/feature-spec/SKILL.md
+# Step 5/6 already inlines; not a bare repo-relative path, since an
+# installed/consumer checkout has no such path.
+resolve_gates_py() {
+  local cand
+  for cand in \
+    "$REPO_ROOT/packages/feature-fix-swarm/lib/gates.py" \
+    "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+    "$REPO_ROOT/lib/gates.py"; do
+    if [ -f "$cand" ]; then
+      printf '%s\n' "$cand"
       return 0
     fi
   done
   return 1
 }
 
-DOMAIN_SLUGS=()
-if [ -n "$DOMAINS_RAW" ]; then
-  IFS=',' read -r -a DOMAIN_SLUGS <<< "$DOMAINS_RAW"
+# sanitize_reason_value <raw>
+#
+# The shell-safe transform T-02-11's mitigation names: strip embedded
+# single-quoted-style quote characters and control characters, then cap at
+# 200 characters — the same transform the reason value would need if it
+# were ever single-quoted into a constructed shell command line. The
+# sanitized value here is passed to gates.py as ONE whole argv element
+# (never re-assembled into a shell command STRING), so this is defense in
+# depth on the stored reason text itself, not a quoting requirement for the
+# call below.
+sanitize_reason_value() {
+  python3 -c '
+import re
+import sys
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+raw = raw.replace("\x27", "")
+raw = re.sub(r"[\x00-\x1f\x7f]", "", raw)
+print(raw[:200])
+' "$1"
+}
+
+# record_pendings <socratic.md> <run-id>
+#
+# T-02-07/T-02-11 mitigation, in one executable artifact rather than in
+# SKILL.md prose: walks the "## Open questions -> grants" section, REGEX-
+# VALIDATES each candidate action against ^[a-z-]+:[A-Za-z0-9._/@-]+$ BEFORE
+# it reaches any command, and calls gates.py pending itself — never grant.
+# A non-matching entry never becomes a shell word: it is recorded as the
+# static action review:malformed-socratic-entry with a fixed literal reason
+# instead, so a tampered/prompt-injection-influenced entry stays visible
+# rather than silently dropped.
+record_pendings() {
+  local socratic_md="$1" run_id="$2" gates_py
+
+  if [ ! -f "$socratic_md" ]; then
+    echo "socratic: record-pendings FATAL: no such file: $socratic_md" >&2
+    return 1
+  fi
+
+  gates_py="$(resolve_gates_py)" || {
+    echo "socratic: record-pendings FATAL: gates.py not found" >&2
+    return 1
+  }
+
+  local action_pat='^[a-z-]+:[A-Za-z0-9._/@-]+$'
+  local -a entries=()
+  local in_section=0 line
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$line" = "## Open questions → grants" ]; then
+      in_section=1
+      continue
+    fi
+    case "$line" in
+      "## "*|"# "*)
+        if [ "$in_section" -eq 1 ]; then
+          break
+        fi
+        continue
+        ;;
+    esac
+    if [ "$in_section" -eq 1 ]; then
+      case "$line" in
+        "- "*|"* "*) entries+=("${line:2}") ;;
+      esac
+    fi
+  done < "$socratic_md"
+
+  local entry action reason
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    [ -n "$entry" ] || continue
+    action="${entry%%[[:space:]]*}"
+    reason="$(sanitize_reason_value "$entry")"
+    if [[ "$action" =~ $action_pat ]]; then
+      python3 "$gates_py" pending "$run_id" --action "$action" --reason "$reason" >/dev/null
+    else
+      python3 "$gates_py" pending "$run_id" \
+        --action "review:malformed-socratic-entry" \
+        --reason "malformed socratic.md open-question entry did not match the action grammar" \
+        >/dev/null
+    fi
+  done
+  return 0
+}
+
+# --- argument parsing --------------------------------------------------------
+POSITIONAL=""
+HAVE_POSITIONAL=0
+MODE="plan"
+MODE_EXPLICIT=0
+VALIDATE_MODE=0
+RECORD_PENDINGS_MODE=0
+RECORD_PENDINGS_RUN_ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --validate)
+      VALIDATE_MODE=1
+      shift
+      ;;
+    --record-pendings)
+      RECORD_PENDINGS_MODE=1
+      shift
+      if [ $# -lt 1 ]; then
+        usage
+        exit 2
+      fi
+      POSITIONAL="$1"
+      HAVE_POSITIONAL=1
+      shift
+      if [ $# -lt 1 ]; then
+        usage
+        exit 2
+      fi
+      RECORD_PENDINGS_RUN_ID="$1"
+      shift
+      ;;
+    --mode)
+      if [ $# -lt 2 ]; then
+        usage
+        exit 2
+      fi
+      case "$2" in
+        --*)
+          usage
+          exit 2
+          ;;
+      esac
+      case "$2" in
+        plan|arm) MODE="plan" ;;
+        verify) MODE="verify" ;;
+        *)
+          usage
+          exit 2
+          ;;
+      esac
+      MODE_EXPLICIT=1
+      shift 2
+      ;;
+    --*)
+      usage
+      exit 2
+      ;;
+    *)
+      if [ "$HAVE_POSITIONAL" -eq 1 ]; then
+        usage
+        exit 2
+      fi
+      POSITIONAL="$1"
+      HAVE_POSITIONAL=1
+      shift
+      ;;
+  esac
+done
+
+if [ "$VALIDATE_MODE" -eq 1 ] && { [ "$MODE_EXPLICIT" -eq 1 ] || [ "$RECORD_PENDINGS_MODE" -eq 1 ]; }; then
+  usage
+  exit 2
+fi
+
+if [ "$RECORD_PENDINGS_MODE" -eq 1 ] && [ "$MODE_EXPLICIT" -eq 1 ]; then
+  usage
+  exit 2
+fi
+
+if [ "$HAVE_POSITIONAL" -eq 0 ]; then
+  usage
+  exit 2
+fi
+
+# --- --validate: fail-closed authoring-time check, runs before ANY of the
+# emission path's fail-soft gates (kill switch, vendor tree) ----------------
+if [ "$VALIDATE_MODE" -eq 1 ]; then
+  run_validate "$POSITIONAL"
+  exit $?
+fi
+
+# --- --record-pendings: parses the Open questions -> grants section and
+# routes each entry to gates.py pending, never grant (see script docstring
+# and Step 6 of skills/feature-spec/SKILL.md for the reason) ----------------
+if [ "$RECORD_PENDINGS_MODE" -eq 1 ]; then
+  if [ -z "$RECORD_PENDINGS_RUN_ID" ]; then
+    usage
+    exit 2
+  fi
+  record_pendings "$POSITIONAL" "$RECORD_PENDINGS_RUN_ID"
+  exit $?
+fi
+
+# --- kill switch, checked first, before any filesystem work ------------------
+if [ "${SOCRATIC:-on}" = "off" ]; then
+  status "skipped (SOCRATIC=off)"
+  exit 0
+fi
+
+# --- vendor tree resolution ---------------------------------------------------
+# Stage one: FFS_SOCRATIC_DIR, when set and non-empty, is AUTHORITATIVE — no
+# fall-through to stage two, even when it names a path that does not exist.
+resolve_vendor_dir() {
+  if [ -n "${FFS_SOCRATIC_DIR:-}" ]; then
+    if [ -d "$FFS_SOCRATIC_DIR" ]; then
+      printf '%s\n' "$FFS_SOCRATIC_DIR"
+      return 0
+    fi
+    return 1
+  fi
+  local candidates=(
+    "$REPO_ROOT/.agents/skills/socratic"
+    "$REPO_ROOT/.claude/skills/socratic"
+    "$HOME/.agents/skills/socratic"
+    "$HOME/.claude/skills/socratic"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [ -d "$c" ]; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+VENDOR_DIR="$(resolve_vendor_dir)" || {
+  status "skipped (vendor tree absent)"
+  exit 0
+}
+
+# --- socratic.md resolution ----------------------------------------------------
+# A positional naming an existing directory reads <dir>/socratic.md; naming
+# an existing file uses it as-is; naming NEITHER takes the fail-soft
+# no-socratic.md path (exit 0, empty stdout) rather than erroring.
+if [ -d "$POSITIONAL" ]; then
+  SOCRATIC_MD="$POSITIONAL/socratic.md"
+elif [ -f "$POSITIONAL" ]; then
+  SOCRATIC_MD="$POSITIONAL"
+else
+  status "skipped (no socratic.md)"
+  exit 0
+fi
+
+if [ ! -f "$SOCRATIC_MD" ]; then
+  status "skipped (no socratic.md)"
+  exit 0
+fi
+
+# --- frontmatter parsing -------------------------------------------------------
+parse_frontmatter_file "$SOCRATIC_MD"
+
+if [ "$STATUS_FIELD" != "ok" ]; then
+  status "skipped (malformed frontmatter)"
+  exit 0
 fi
 
 is_declared_domain() {
@@ -313,6 +650,11 @@ is_declared_domain() {
   done
   return 1
 }
+
+DOMAIN_SLUGS=()
+if [ -n "$DOMAINS_RAW" ]; then
+  IFS=',' read -r -a DOMAIN_SLUGS <<< "$DOMAINS_RAW"
+fi
 
 SELECTED_DOMAIN_SLUGS=()
 for entry in "${DOMAIN_ENUM_ORDER[@]}"; do
@@ -410,28 +752,6 @@ $block"
     DOMAIN_CONTENT="$block"
   fi
 done
-
-# --- pack enum: closed set of the ten real pack slugs at the pin -----------
-PACK_ENUM=(
-  "software-design"
-  "domain-modeling"
-  "data-systems"
-  "operations"
-  "threat-modeling"
-  "ai-engineering"
-  "agent-design"
-  "legacy-change"
-  "testing-design"
-  "product-discovery"
-)
-
-is_known_pack() {
-  local needle="$1" p
-  for p in "${PACK_ENUM[@]}"; do
-    [ "$p" = "$needle" ] && return 0
-  done
-  return 1
-}
 
 DECLARED_PACKS=()
 if [ -n "$PACKS_RAW" ]; then
