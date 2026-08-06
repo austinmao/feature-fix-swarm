@@ -234,10 +234,14 @@ else:
         depth_value = "core"
     depth_declared = "1"
 
+empty_items = "1" if (any(not d for d in domains_list) or any(not pk for pk in packs_list)) else "0"
+domains_list = [d for d in domains_list if d]
+packs_list = [pk for pk in packs_list if pk]
 print("STATUS:ok")
 print(f"DOMAINS:{','.join(domains_list)}")
 print(f"PACKS:{','.join(packs_list)}")
 print(f"PACKS_MALFORMED:{packs_malformed}")
+print(f"LIST_EMPTY_ITEM:{empty_items}")
 print(f"DEPTH:{depth_value}")
 print(f"DEPTH_DECLARED:{depth_declared}")
 
@@ -254,6 +258,7 @@ PY
   PACKS_MALFORMED="0"
   DEPTH_RAW="core"
   DEPTH_DECLARED="0"
+  LIST_EMPTY_ITEM="0"
   ASSUME_LINES=()
   local line
   while IFS= read -r line; do
@@ -262,6 +267,7 @@ PY
       DOMAINS:*) DOMAINS_RAW="${line#DOMAINS:}" ;;
       PACKS:*) PACKS_RAW="${line#PACKS:}" ;;
       PACKS_MALFORMED:*) PACKS_MALFORMED="${line#PACKS_MALFORMED:}" ;;
+      LIST_EMPTY_ITEM:*) LIST_EMPTY_ITEM="${line#LIST_EMPTY_ITEM:}" ;;
       DEPTH:*) DEPTH_RAW="${line#DEPTH:}" ;;
       DEPTH_DECLARED:*) DEPTH_DECLARED="${line#DEPTH_DECLARED:}" ;;
       ASSUME:*) ASSUME_LINES+=("${line#ASSUME:}") ;;
@@ -311,9 +317,21 @@ run_validate() {
     named+=("domains: <empty>")
   fi
 
+  if [ "$LIST_EMPTY_ITEM" = "1" ]; then
+    # fail-closed: a trailing/double comma leaves an empty list element —
+    # a formatting slip in a hand-editable file must not pass validation
+    errors+=("empty list element (trailing or doubled comma)")
+    named+=("list-element: <empty>")
+  fi
+
   local slug
   for slug in ${domain_slugs[@]+"${domain_slugs[@]}"}; do
-    [ -n "$slug" ] || continue
+    if [ -z "$slug" ]; then
+      # fail-closed: an empty element (trailing/double comma) is a malformed
+      # declaration, not a skippable blank — a formatting slip must not pass
+      bad_domains+=("<empty>")
+      continue
+    fi
     if ! domain_stem_for "$slug" >/dev/null; then
       bad_domains+=("$slug")
     fi
@@ -330,7 +348,10 @@ run_validate() {
   fi
   local p
   for p in ${declared_packs[@]+"${declared_packs[@]}"}; do
-    [ -n "$p" ] || continue
+    if [ -z "$p" ]; then
+      bad_packs+=("<empty>")
+      continue
+    fi
     if ! is_known_pack "$p"; then
       bad_packs+=("$p")
     fi
