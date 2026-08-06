@@ -120,3 +120,142 @@ run_wall_capture() {
   [ "$status" -eq 0 ]
   cmp "$PROMPT_CAPTURE" "$BASELINE"
 }
+
+# --- Task 2: the four unarmed routes + the idempotence-key fold ------------
+
+@test "a branch with no leading three digits leaves the prompt byte-identical" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  make_spec_dir "specs/042-tracer" "domains: [requirements]"
+  git checkout -q -b feature-no-digits
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  cmp "$PROMPT_CAPTURE" "$BASELINE"
+
+  rm -rf .planning/run-state
+  git checkout -q --detach HEAD
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  cmp "$PROMPT_CAPTURE" "$BASELINE"
+}
+
+@test "SOCRATIC=off leaves the prompt byte-identical" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  make_spec_dir "specs/042-tracer" "domains: [requirements]"
+  git checkout -q -b 042-tracer
+  export SOCRATIC=off
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  cmp "$PROMPT_CAPTURE" "$BASELINE"
+}
+
+@test "a resolvable spec dir with no socratic.md leaves the prompt byte-identical" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  mkdir -p specs/042-tracer
+  git checkout -q -b 042-tracer
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  cmp "$PROMPT_CAPTURE" "$BASELINE"
+}
+
+@test "GSD_RUN_ID set still arms" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  make_spec_dir "specs/042-tracer" "domains: [requirements]"
+  git checkout -q -b 042-tracer
+  export GSD_RUN_ID=custom-run-id
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  grep -q 'CORE_REQUIREMENTS_SENTINEL' "$PROMPT_CAPTURE"
+}
+
+@test "two spec dirs sharing the numeric prefix resolve to the LEXICALLY first" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  make_spec_dir "specs/042-beta" "domains: [security]"
+  make_spec_dir "specs/042-alpha" "domains: [requirements]"
+  git checkout -q -b 042-tracer
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  grep -q 'CORE_REQUIREMENTS_SENTINEL' "$PROMPT_CAPTURE"
+  ! grep -q 'CORE_SECURITY_SENTINEL' "$PROMPT_CAPTURE"
+}
+
+@test "editing socratic.md invalidates the zero-dispatch fast path" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  make_spec_dir "specs/042-tracer" "domains: [requirements]"
+  git checkout -q -b 042-tracer
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ADJUDICATED-PASS"* ]]
+
+  rm -f "$PROMPT_CAPTURE"
+  make_spec_dir "specs/042-tracer" "domains: [requirements, security]"
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ADJUDICATED-PASS"* ]]
+  [ -f "$PROMPT_CAPTURE" ]
+}
+
+@test "an unreadable socratic.md neither arms nor folds" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  make_spec_dir "specs/042-tracer" "domains: [requirements]"
+  chmod 000 specs/042-tracer/socratic.md
+  git checkout -q -b 042-tracer
+
+  run_wall_capture
+  chmod 644 specs/042-tracer/socratic.md
+  [ "$status" -eq 0 ]
+  cmp "$PROMPT_CAPTURE" "$BASELINE"
+
+  key="$(jq -r '.plan_sha256' .planning/run-state/plan-wall-1-foo-plan.json)"
+  [[ "$key" != *:* ]]
+}
+
+@test "the pack cap survives the integration" {
+  VENDOR="$BATS_TEST_TMPDIR/vendor/socratic"
+  make_vendor_tree "$VENDOR"
+  export FFS_SOCRATIC_DIR="$VENDOR"
+  make_spec_dir "specs/042-tracer" "domains: [requirements]
+packs: [operations, threat-modeling, software-design]"
+  git checkout -q -b 042-tracer
+
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  grep -q 'PACK_OPERATIONS_SENTINEL' "$PROMPT_CAPTURE"
+  grep -q 'PACK_THREAT_MODELING_SENTINEL' "$PROMPT_CAPTURE"
+  ! grep -q 'PACK_SOFTWARE_DESIGN_SENTINEL' "$PROMPT_CAPTURE"
+}
+
+@test "an unarmed run stores the plain plan sha" {
+  # FFS_SOCRATIC_DIR (setup()) points nowhere -> unarmed.
+  run_wall_capture
+  [ "$status" -eq 0 ]
+  key="$(jq -r '.plan_sha256' .planning/run-state/plan-wall-1-foo-plan.json)"
+  if command -v sha256sum >/dev/null 2>&1; then
+    expected="$(sha256sum .planning/phases/1-foo/PLAN.md | awk '{print $1}')"
+  else
+    expected="$(shasum -a 256 .planning/phases/1-foo/PLAN.md | awk '{print $1}')"
+  fi
+  [ "$key" = "$expected" ]
+}
