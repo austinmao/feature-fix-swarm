@@ -197,7 +197,7 @@ depth: core" "- ASSUME-001: default A
   [ -n "$record_line" ]
   [ "$routing_line" -lt "$merge_line" ]
   [ "$routing_line" -lt "$record_line" ]
-  routing_text="$(sed -n "${routing_line}p" "$SKILL")"
+  routing_text="$(sed -n "${routing_line},$((routing_line + 2))p" "$SKILL")"
   [[ "$routing_text" == *"HIGH"* ]]
 }
 
