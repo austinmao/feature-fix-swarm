@@ -247,6 +247,48 @@ packs: [operations, threat-modeling, software-design]"
   ! grep -q 'PACK_SOFTWARE_DESIGN_SENTINEL' "$PROMPT_CAPTURE"
 }
 
+# --- Task 3: plan-decompose Step 3 grep-pins (static, no script execution,
+# tests/bats/int-plan-wall-skill.bats's pattern) --------------------------
+
+@test "plan-decompose Step 3 names the slice helper after Step 3 begins and before Step 4" {
+  cd "$BATS_TEST_DIRNAME/../.."
+  step3_line="$(grep -n '^### Step 3:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  helper_line="$(grep -n 'bash scripts/gsd/socratic-slice.sh' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  step4_line="$(grep -n '^### Step 4:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  [ -n "$step3_line" ]
+  [ -n "$helper_line" ]
+  [ -n "$step4_line" ]
+  [ "$helper_line" -gt "$step3_line" ]
+  [ "$helper_line" -lt "$step4_line" ]
+}
+
+@test "the socratic placeholder sits between the plan content and the verdict instruction" {
+  cd "$BATS_TEST_DIRNAME/../.."
+  plan_line="$(grep -n '^> THE PLAN:$' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  placeholder_line="$(grep -n '^> <SOCRATIC block:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  return_line="$(grep -n '^> Return: numbered list' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  [ -n "$plan_line" ]
+  [ -n "$placeholder_line" ]
+  [ -n "$return_line" ]
+  [ "$placeholder_line" -gt "$plan_line" ]
+  [ "$placeholder_line" -lt "$return_line" ]
+}
+
+@test "Step 3 reuses the Step 0 spec directory" {
+  cd "$BATS_TEST_DIRNAME/../.."
+  helper_line="$(grep -n 'bash scripts/gsd/socratic-slice.sh' skills/plan-decompose/SKILL.md)"
+  [[ "$helper_line" == *'"$SPEC_DIR"'* ]]
+}
+
+@test "the fail-soft rule is stated with the placeholder" {
+  cd "$BATS_TEST_DIRNAME/../.."
+  placeholder_line="$(grep -n '^> <SOCRATIC block:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  silent_line="$(grep -n 'silent empty-stdout path' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  [ -n "$placeholder_line" ]
+  [ -n "$silent_line" ]
+  [ "$silent_line" -gt "$placeholder_line" ]
+}
+
 @test "an unarmed run stores the plain plan sha" {
   # FFS_SOCRATIC_DIR (setup()) points nowhere -> unarmed.
   run_wall_capture
