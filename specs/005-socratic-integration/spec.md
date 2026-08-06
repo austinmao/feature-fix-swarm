@@ -165,14 +165,20 @@ Scenario: Review gate audits the assumption ledger
   CHANGELOG entry; `install-socratic.sh` added to the CI installer
   syntax-check lines.
 - AC-011 (advisory, not a ship gate): one A/B evidence pass — the plan-wall
-  adversary run on a historical phase plan with and without the slice, findings
-  diff recorded in `evals/socratic-ab.md`. Empty diff → retro decision is to
-  un-arm the three seams.
+  reviewer-prompt build run on a historical phase plan with and without the
+  slice, prompt delta recorded in `evals/socratic-ab.md`. Adjudicated
+  deviation (Phase 4): a two-dispatch findings diff was not run — a stub
+  reviewer returns zero findings on both arms, so the empty-diff un-arm
+  trigger is NOT exercised by this pass and remains an open retro question;
+  the artifact states this explicitly.
 - AC-012: Observability + escape hatch: `socratic-slice.sh` emits exactly one
   stderr status line per successfully-parsed invocation on the emission and
   `--validate` paths (exit 0/3); usage errors (exit 2) emit usage text only
   (`armed domains=…` / `skipped (<reason>)`); `--record-pendings` emits no
-  status line (exit 0 success, exit 1 fatal); and `SOCRATIC=off` disables
+  armed/skipped status line but DOES emit exactly one machine-readable stderr
+  summary line on success (`socratic: record-pendings recorded=<n>
+  malformed=<m> skipped=<k>` — the producer's pending-count source; exit 0
+  success, exit 1 fatal); and `SOCRATIC=off` disables
   arming per-run via the same empty-output fail-soft path.
 
 ## E2E Test Paths
