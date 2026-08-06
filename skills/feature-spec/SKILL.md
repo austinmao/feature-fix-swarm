@@ -466,12 +466,24 @@ required sections verbatim — `## Self-answered highlights`,
 LLM-authored, hand-editable input and is never auto-granted from (see
 Step 6) — the same posture the slice helper already gives it.
 
-Resolve the validator through the same 3-candidate ladder Steps 5/6 already
-use for `$GATES_PY` (repo-root `packages/feature-fix-swarm/lib/gates.py`,
-user install, in-repo `lib/gates.py`), never a bare repo-relative path — an
-installed checkout has no `scripts/` directory. Then invoke
-`socratic-slice.sh --validate "specs/${SPEC_ID}/socratic.md"` and key the
-response on the EXIT CODE, one disposition per code:
+Resolve `socratic-slice.sh` itself through its own resolution ladder — repo
+root first, then the `~/.claude` install equivalents — never a bare
+repo-relative path, since an installed checkout has no `scripts/` directory:
+
+```bash
+SOCRATIC_SLICE=""
+for _cand in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/gsd/socratic-slice.sh" \
+  "$HOME/.claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh" \
+  "$HOME/.claude/scripts/gsd/socratic-slice.sh"; do
+  [ -f "$_cand" ] && SOCRATIC_SLICE="$_cand" && break
+done
+```
+
+Then invoke `"$SOCRATIC_SLICE" --validate "specs/${SPEC_ID}/socratic.md"` and
+key the response on the EXIT CODE — an unresolved `$SOCRATIC_SLICE` (the
+ladder found nothing) takes the same helper-unavailable branch as exit
+126/127 below — one disposition per code:
 
 - **exit 3** — validation failure, the file is wrong: correct the named
   values and re-emit, at most TWO repair attempts. Only exit 3 ever consumes
@@ -680,11 +692,19 @@ stalling. Build the ledger NOW — by default with zero stops:
 
 4. **socratic.md's open questions route to PENDING, never grant.** If
    `specs/${SPEC_ID}/socratic.md` exists (Step 1.5 may have skipped and left
-   nothing to walk), resolve `socratic-slice.sh` through the same
-   3-candidate ladder Step 1.5 used for the validator and invoke:
+   nothing to walk), resolve `socratic-slice.sh` through the same ladder
+   Step 1.5 used for the validator (re-run the resolution here — Step 6 may
+   execute in a fresh shell with no inherited `$SOCRATIC_SLICE`) and invoke:
 
    ```bash
-   "$SOCRATIC_SLICE" --record-pendings "specs/${SPEC_ID}/socratic.md" "$RUN_ID"
+   SOCRATIC_SLICE=""
+   for _cand in \
+     "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/gsd/socratic-slice.sh" \
+     "$HOME/.claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh" \
+     "$HOME/.claude/scripts/gsd/socratic-slice.sh"; do
+     [ -f "$_cand" ] && SOCRATIC_SLICE="$_cand" && break
+   done
+   [ -n "$SOCRATIC_SLICE" ] && "$SOCRATIC_SLICE" --record-pendings "specs/${SPEC_ID}/socratic.md" "$RUN_ID"
    ```
 
    That mode parses the `## Open questions → grants` section, regex-gates
