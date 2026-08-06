@@ -143,6 +143,7 @@ on integration, safety, and proof.
 | Open GSD Core `1.9.1` | Yes, exact pin | Yes, through its upstream installer | Planning, execution, verification, and runtime manifests |
 | Python 3.11+, Node 22+/npm 10+, Git, Bash/zsh | Yes | No | Installer, gates, tests, and worktrees |
 | `prompt-master` at commit `d15eab…` | Yes | Yes, pinned and compatibility-patched | Host-aware prompt refinement without copying an unreviewed moving branch |
+| `socratic` at commit `862b52…` | Yes | Yes, pinned by default; skippable with `FFS_SKIP_SOCRATIC=1` | Pinned question bank the spec, plan-wall, plan-decompose, and review-gate seams slice from |
 | The opposite host CLI | Recommended | No | Stronger cross-vendor adversarial review; otherwise review is marked degraded |
 | [gstack](https://github.com/garrytan/gstack) | Optional integration | No | Idea shaping, browser QA, investigation, review, and shipping skills |
 | [GitHub Spec Kit](https://github.com/github/spec-kit) | Needed for the full spec bootstrap | No | Produces durable feature specs and plans before FFS decomposition |
