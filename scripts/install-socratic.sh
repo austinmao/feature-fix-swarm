@@ -8,11 +8,14 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PIN_FILE="$ROOT/vendor/socratic/pin.json"
 DEST=""
 SOURCE=""
+usage() {
+  echo "usage: install-socratic.sh --dest <path> [--source <url>]" >&2
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --dest) DEST="${2:-}"; shift 2 ;;
-    --source) SOURCE="${2:-}"; shift 2 ;;
+    --dest) [ "$#" -ge 2 ] || { usage; exit 2; }; DEST="$2"; shift 2 ;;
+    --source) [ "$#" -ge 2 ] || { usage; exit 2; }; SOURCE="$2"; shift 2 ;;
     *) echo "socratic installer: unknown argument $1" >&2; exit 2 ;;
   esac
 done

@@ -348,6 +348,23 @@ def test_install_socratic_rejects_option_like_or_exotic_source(tmp_path: Path) -
     assert not ext_dest.exists()
 
 
+def test_install_socratic_guards_dest_and_source_missing_value(tmp_path: Path) -> None:
+    repo, sha = build_socratic_fixture_repo(tmp_path)
+    root = stage_installer_root(tmp_path, str(repo), sha)
+
+    dest_result = run_socratic_installer(root, "--dest")
+    assert dest_result.returncode == 2
+    assert dest_result.stderr.strip() != ""
+    assert "usage" in dest_result.stderr.lower()
+
+    dest = tmp_path / "dest-src-missing"
+    source_result = run_socratic_installer(root, "--dest", str(dest), "--source")
+    assert source_result.returncode == 2
+    assert source_result.stderr.strip() != ""
+    assert "usage" in source_result.stderr.lower()
+    assert not dest.exists()
+
+
 def test_install_socratic_rejects_patch_path_traversal(tmp_path: Path) -> None:
     repo, sha = build_socratic_fixture_repo(tmp_path)
     root = stage_installer_root(tmp_path, str(repo), sha)
