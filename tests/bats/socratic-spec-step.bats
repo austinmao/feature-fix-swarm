@@ -652,6 +652,39 @@ EOF
   [[ "$output" == *"review:malformed-socratic-entry"* ]]
 }
 
+@test "sanitize: a 400-char reason with a single quote and a control char is stored clean and truncated to 200" {
+  mkdir -p "$SPEC"
+  local filler bel entry_line
+  filler="$(python3 -c "print('x' * 370)")"
+  bel="$(printf '\x07')"
+  entry_line="- rotate:secret it's a problem${bel}${filler}"
+  {
+    echo "---"
+    echo "domains: [requirements]"
+    echo "depth: core"
+    echo "packs: []"
+    echo "---"
+    echo "## Self-answered highlights"
+    echo "## Assumed (flag if wrong)"
+    echo "## Open questions → grants"
+    printf '%s\n' "$entry_line"
+    echo "## Top risks"
+  } > "$SPEC/socratic.md"
+
+  export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run bash "$SCRIPT" --record-pendings "$SPEC/socratic.md" "spec-sanitize"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"recorded=1 malformed=0 skipped=0"* ]]
+
+  run python3 "$ROOT/lib/gates.py" pending "spec-sanitize"
+  [[ "$output" == *"rotate:secret"* ]]
+  [[ "$output" != *"'"* ]]
+  [[ "$output" != *"$bel"* ]]
+  stored_reason="$(printf '%s\n' "$output" | grep '^PENDING:' | sed 's/^PENDING: [^—]*— //')"
+  reason_len="$(printf '%s' "$stored_reason" | wc -c | tr -d ' ')"
+  [ "$reason_len" -le 200 ]
+}
+
 @test "a failing gates.py pending write is a FATAL, not a silent partial run" {
   mkdir -p "$SPEC" "$BATS_TEST_TMPDIR/bin"
   cat > "$SPEC/socratic.md" <<'EOF'
