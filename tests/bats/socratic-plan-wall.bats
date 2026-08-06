@@ -253,7 +253,7 @@ packs: [operations, threat-modeling, software-design]"
 @test "plan-decompose Step 3 names the slice helper after Step 3 begins and before Step 4" {
   cd "$BATS_TEST_DIRNAME/../.."
   step3_line="$(grep -n '^### Step 3:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
-  helper_line="$(grep -n 'bash scripts/gsd/socratic-slice.sh' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  helper_line="$(grep -nF 'bash "$SOCRATIC_SLICE" "$SPEC_DIR" --mode arm' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
   step4_line="$(grep -n '^### Step 4:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
   [ -n "$step3_line" ]
   [ -n "$helper_line" ]
@@ -276,7 +276,7 @@ packs: [operations, threat-modeling, software-design]"
 
 @test "Step 3 reuses the Step 0 spec directory" {
   cd "$BATS_TEST_DIRNAME/../.."
-  helper_line="$(grep -n 'bash scripts/gsd/socratic-slice.sh' skills/plan-decompose/SKILL.md)"
+  helper_line="$(grep -nF 'bash "$SOCRATIC_SLICE" "$SPEC_DIR" --mode arm' skills/plan-decompose/SKILL.md)"
   [[ "$helper_line" == *'"$SPEC_DIR"'* ]]
 }
 

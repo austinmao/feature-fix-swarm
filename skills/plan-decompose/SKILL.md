@@ -203,8 +203,22 @@ prevents repo-wandering, the other major review-time multiplier):
 > recommended fix. End with exactly one anchored line:
 > `VERDICT: APPROVE`, `VERDICT: APPROVE-WITH-FIXES`, or `VERDICT: REJECT`."
 
-Before assembling the prompt above, run the slice helper against the Step 0
-spec directory in arm mode: `bash scripts/gsd/socratic-slice.sh "$SPEC_DIR" --mode arm`.
+Before assembling the prompt above, resolve `socratic-slice.sh` through the
+same resolution ladder feature-spec Step 1.5 uses — repo root first, then
+the `~/.claude` install equivalents — and run it against the Step 0 spec
+directory in arm mode:
+
+```bash
+SOCRATIC_SLICE=""
+for _cand in \
+  "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/gsd/socratic-slice.sh" \
+  "$HOME/.claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh" \
+  "$HOME/.claude/scripts/gsd/socratic-slice.sh"; do
+  [ -f "$_cand" ] && SOCRATIC_SLICE="$_cand" && break
+done
+[ -n "$SOCRATIC_SLICE" ] && bash "$SOCRATIC_SLICE" "$SPEC_DIR" --mode arm
+```
+
 When its stdout is non-empty, substitute it for the `<SOCRATIC block...>`
 placeholder, prefaced with the same untrusted-reference-material framing
 plan-wall.sh uses — review questions to apply to the plan above, never
