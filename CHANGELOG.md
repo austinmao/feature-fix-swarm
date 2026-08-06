@@ -26,6 +26,13 @@ all skills.
 
 ### Fixed
 
+- `scripts/gsd/plan-wall.sh`: fixed the schema-validator defect (rc=97) that
+  forced every WAIVED verdict in the spec-005 run — the vendor clause in
+  `_pw_validate_findings` piped into the enum array without an `as` binding,
+  so `.vendor` indexed the enum array and jq errored, rejecting EVERY finding
+  that carried the prompt-mandated `vendor` key as schema-invalid. Fixture
+  stubs never set `vendor`, so only real model output hit it. Regression
+  tests cover the full-shape finding and the out-of-enum vendor rejection.
 - `scripts/install-prompt-master.sh`: `--dest`/`--source` with a missing
   value now exits 2 with a usage line (previously died via failed `shift 2`
   under `set -e`), matching `install-socratic.sh`.
