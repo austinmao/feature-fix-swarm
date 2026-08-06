@@ -257,11 +257,15 @@ build_hv_harness() {
   UNARMED_SPEC="$BATS_TEST_TMPDIR/unarmed-spec"
   mkdir -p "$UNARMED_SPEC"
   build_hv_harness "$harness" "$UNARMED_SPEC/spec.md" "$block_script"
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$harness'"
+  # stdout must stay byte-identical unarmed; the helper's status line now
+  # passes through on stderr (AC-012 observability) instead of being dropped
+  unarmed_err="$BATS_TEST_TMPDIR/unarmed.err"
+  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$harness' 2>'$unarmed_err'"
   [ "$status" -eq 0 ]
 
   no_block_expected="$(printf '%s\n' 'SPEC_DATA_END' 'DIFF_DATA_START')"
   [ "$output" = "$no_block_expected" ]
+  grep -q '^socratic: skipped' "$unarmed_err"
 }
 
 @test "the verifier grammar is untouched" {

@@ -449,9 +449,11 @@ else
   HV_SOCRATIC_HELPER="$HV_REPO_ROOT/scripts/gsd/socratic-slice.sh"
   HV_SOCRATIC_OUT=""
   if [ -f "$HV_SOCRATIC_HELPER" ]; then
-    # capture stdout only (usage text is stderr-only); `|| true` keeps a
-    # nonzero helper exit from aborting this pass under errexit.
-    HV_SOCRATIC_OUT="$(bash "$HV_SOCRATIC_HELPER" "$HV_SPEC_DIR" --mode verify 2>/dev/null)" || true
+    # capture stdout only — stderr passes through so the helper's single
+    # armed/skipped status line (this seam's designed observability, AC-012)
+    # reaches the operator log; usage text is stderr-only and never captured.
+    # `|| true` keeps a nonzero helper exit from aborting under errexit.
+    HV_SOCRATIC_OUT="$(bash "$HV_SOCRATIC_HELPER" "$HV_SPEC_DIR" --mode verify)" || true
   fi
   HV_SOCRATIC_BLOCK=""
   if [ -n "$HV_SOCRATIC_OUT" ]; then
