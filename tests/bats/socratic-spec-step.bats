@@ -529,3 +529,150 @@ EOF
   run python3 -m pytest "$ROOT/tests/test_host_dispatch_lint.py" -q
   [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Cross-model review fix round: record_pendings hardening (prose-bullet skip,
+# per-call gates.py exit-status check, machine-readable summary line)
+# ---------------------------------------------------------------------------
+
+@test "record-pendings happy path reaches gates.py pending and reports the summary line" {
+  mkdir -p "$SPEC"
+  cat > "$SPEC/socratic.md" <<'EOF'
+---
+domains: [requirements]
+depth: core
+packs: []
+---
+## Self-answered highlights
+## Assumed (flag if wrong)
+## Open questions → grants
+- rotate:secret needs a fresh value before the next deploy
+## Top risks
+EOF
+  export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run bash "$SCRIPT" --record-pendings "$SPEC/socratic.md" "spec-happy"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"socratic: record-pendings recorded=1 malformed=0 skipped=0"* ]]
+
+  run python3 "$ROOT/lib/gates.py" pending "spec-happy"
+  [[ "$output" == *"rotate:secret"* ]]
+}
+
+@test "record-pendings only reads bullets inside the Open questions section" {
+  mkdir -p "$SPEC"
+  cat > "$SPEC/socratic.md" <<'EOF'
+---
+domains: [requirements]
+depth: core
+packs: []
+---
+## Self-answered highlights
+- rotate:before-section should never be recorded
+
+## Assumed (flag if wrong)
+## Open questions → grants
+- rotate:in-section should be recorded
+## Top risks
+- rotate:after-section should never be recorded
+EOF
+  export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run bash "$SCRIPT" --record-pendings "$SPEC/socratic.md" "spec-bounds"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"recorded=1 malformed=0 skipped=0"* ]]
+
+  run python3 "$ROOT/lib/gates.py" pending "spec-bounds"
+  [[ "$output" == *"in-section"* ]]
+  [[ "$output" != *"before-section"* ]]
+  [[ "$output" != *"after-section"* ]]
+}
+
+@test "a prose bullet with no colon in its first token is skipped, not recorded as malformed" {
+  mkdir -p "$SPEC"
+  cat > "$SPEC/socratic.md" <<'EOF'
+---
+domains: [requirements]
+depth: core
+packs: []
+---
+## Self-answered highlights
+## Assumed (flag if wrong)
+## Open questions → grants
+- None outstanding; every default taken above is defensible.
+## Top risks
+EOF
+  export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run bash "$SCRIPT" --record-pendings "$SPEC/socratic.md" "spec-prose"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"recorded=0 malformed=0 skipped=1"* ]]
+
+  run python3 "$ROOT/lib/gates.py" pending "spec-prose"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"malformed-socratic-entry"* ]]
+}
+
+@test "an empty Open questions section records nothing and exits 0" {
+  mkdir -p "$SPEC"
+  cat > "$SPEC/socratic.md" <<'EOF'
+---
+domains: [requirements]
+depth: core
+packs: []
+---
+## Self-answered highlights
+## Assumed (flag if wrong)
+## Open questions → grants
+## Top risks
+EOF
+  export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run bash "$SCRIPT" --record-pendings "$SPEC/socratic.md" "spec-empty"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"recorded=0 malformed=0 skipped=0"* ]]
+}
+
+@test "a malformed action WITH a colon still records review:malformed-socratic-entry" {
+  mkdir -p "$SPEC"
+  cat > "$SPEC/socratic.md" <<'EOF'
+---
+domains: [requirements]
+depth: core
+packs: []
+---
+## Self-answered highlights
+## Assumed (flag if wrong)
+## Open questions → grants
+- Bad$(x):target needs a human to look at it
+## Top risks
+EOF
+  export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run bash "$SCRIPT" --record-pendings "$SPEC/socratic.md" "spec-malformed"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"recorded=0 malformed=1 skipped=0"* ]]
+
+  run python3 "$ROOT/lib/gates.py" pending "spec-malformed"
+  [[ "$output" == *"review:malformed-socratic-entry"* ]]
+}
+
+@test "a failing gates.py pending write is a FATAL, not a silent partial run" {
+  mkdir -p "$SPEC" "$BATS_TEST_TMPDIR/bin"
+  cat > "$SPEC/socratic.md" <<'EOF'
+---
+domains: [requirements]
+depth: core
+packs: []
+---
+## Self-answered highlights
+## Assumed (flag if wrong)
+## Open questions → grants
+- rotate:secret needs a fresh value
+## Top risks
+EOF
+  cat > "$BATS_TEST_TMPDIR/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/python3"
+  export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run bash -c "PATH='$BATS_TEST_TMPDIR/bin:$PATH' bash '$SCRIPT' --record-pendings '$SPEC/socratic.md' spec-fatal"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"socratic: record-pendings FATAL: pending write failed"* ]]
+}

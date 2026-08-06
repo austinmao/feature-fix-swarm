@@ -477,20 +477,37 @@ record_pendings() {
     fi
   done < "$socratic_md"
 
-  local entry action reason
+  local entry action reason recorded=0 malformed=0 skipped=0
   for entry in ${entries[@]+"${entries[@]}"}; do
     [ -n "$entry" ] || continue
     action="${entry%%[[:space:]]*}"
+    # A prose bullet ("- None outstanding; ...") has no ':' in its first
+    # whitespace-delimited token at all — that is not a candidate action,
+    # it is narrative. Record nothing for it rather than minting a bogus
+    # review:malformed-socratic-entry.
+    if [[ "$action" != *:* ]]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
     reason="$(sanitize_reason_value "$entry")"
     if [[ "$action" =~ $action_pat ]]; then
-      python3 "$gates_py" pending "$run_id" --action "$action" --reason "$reason" >/dev/null
+      if ! python3 "$gates_py" pending "$run_id" --action "$action" --reason "$reason" >/dev/null; then
+        echo "socratic: record-pendings FATAL: pending write failed" >&2
+        return 1
+      fi
+      recorded=$((recorded + 1))
     else
-      python3 "$gates_py" pending "$run_id" \
+      if ! python3 "$gates_py" pending "$run_id" \
         --action "review:malformed-socratic-entry" \
         --reason "malformed socratic.md open-question entry did not match the action grammar" \
-        >/dev/null
+        >/dev/null; then
+        echo "socratic: record-pendings FATAL: pending write failed" >&2
+        return 1
+      fi
+      malformed=$((malformed + 1))
     fi
   done
+  echo "socratic: record-pendings recorded=$recorded malformed=$malformed skipped=$skipped" >&2
   return 0
 }
 
