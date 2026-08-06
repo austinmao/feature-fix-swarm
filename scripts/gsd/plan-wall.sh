@@ -575,7 +575,15 @@ _pw_resolve_socratic_slice() {
   # site, which reuses PW_SOCRATIC_SHA rather than recomputing it.
   if [ -n "$PW_SOCRATIC_SLICE" ]; then
     PW_SOCRATIC_SHA="$(_pw_sha256 "$socratic_md" 2>/dev/null)"
-    [ -n "$PW_SOCRATIC_SHA" ] && PW_SOCRATIC_ARMED=true
+    if [ -n "$PW_SOCRATIC_SHA" ]; then
+      PW_SOCRATIC_ARMED=true
+    else
+      # armed ⇒ folded must hold structurally: a slice whose sha cannot be
+      # computed would dispatch an armed prompt under an unfolded key, so a
+      # later socratic.md edit could never invalidate the cache. Drop the
+      # slice instead — unarmed prompt, byte-identical baseline path.
+      PW_SOCRATIC_SLICE=""
+    fi
   fi
 }
 
