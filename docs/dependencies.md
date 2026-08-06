@@ -68,6 +68,17 @@ like `prompt-master`. Installation is default and skippable with
 `FFS_SKIP_SOCRATIC=1`; the emission-side kill switch is `SOCRATIC=off` and
 the vendor-tree override is `FFS_SOCRATIC_DIR`.
 
+Two more env vars steer `stage_socratic()` at the subprocess boundary, both
+read by `lib/ffs_installer.py`: `FFS_SOCRATIC_INSTALLER` overrides the
+installer path itself (a test seam — points install-time tests at
+`tests/fixtures/socratic-installer-stub.sh` instead of the real
+`scripts/install-socratic.sh`, mirroring the pre-existing
+`FFS_GSD_INSTALLER`/`FFS_PROMPT_MASTER_SOURCE` precedents), and
+`FFS_SOCRATIC_SOURCE` overrides the clone source, appended to the installer
+command as `--source <value>` when set (the same seam
+`test_install_socratic_honours_source_override` exercises directly against
+the real installer). Neither is meant to be set in normal operation.
+
 No patch is pinned at this commit. `vendor/socratic/pin.json` carries no
 `patch` key at all, and the installed marker (`.ffs-socratic.json`, schema
 `ffs.external-skill/v1`) accordingly records a null `patch_sha256` — this is
