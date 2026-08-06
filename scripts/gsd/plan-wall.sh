@@ -602,6 +602,13 @@ _pw_dispatch_path() {
 
   plan_content="$(cat "$plan_file")"
   sha="$(_pw_sha256 "$plan_file")"
+  # Fold socratic.md's sha into the LOCAL sha (and nowhere else): the
+  # idempotence comparison below and the PW_PLAN_SHA record write both
+  # consume THIS variable, so folding here — not at the PW_PLAN_SHA
+  # assignment — keeps compare and store in agreement. Gated on the SAME
+  # single armed predicate the resolver decided (PW_SOCRATIC_ARMED),
+  # reusing PW_SOCRATIC_SHA rather than recomputing the digest.
+  [ "$PW_SOCRATIC_ARMED" = true ] && sha="${sha}:${PW_SOCRATIC_SHA}"
   sec_match="$(_pw_security_match "$plan_file")"
   fence_marker="$(_pw_fence_marker)"
   fence_enabled="$(_pw_fence_enabled_state)"
