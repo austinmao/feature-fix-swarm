@@ -30,7 +30,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 START_TOKEN="SOCRATIC_DATA_START"
 END_TOKEN="SOCRATIC_DATA_END"
-ESCAPED_TOKEN="SOCRATIC_DATA_ESCAPED"
 
 warn() { echo "socratic: WARN $*" >&2; }
 status() { echo "socratic: $*" >&2; }
@@ -322,24 +321,77 @@ for entry in "${DOMAIN_ENUM_ORDER[@]}"; do
   fi
 done
 
-# --- resolve selected domains to their core file (task 1: core depth only) --
+# --- depth resolution: an out-of-enum value warns and falls back to core,
+# consumption stays fail-soft over a hand-editable field ---------------------
+DEPTH_VALUE="core"
+if [ "$DEPTH_RAW" = "core" ] || [ "$DEPTH_RAW" = "full" ]; then
+  DEPTH_VALUE="$DEPTH_RAW"
+elif [ "$DEPTH_DECLARED" = "1" ]; then
+  warn "invalid depth '$DEPTH_RAW', falling back to core"
+fi
+
+# extract_verification_block <file>
+#
+# Emits the region beginning at the line whose content is the "##
+# Verification" heading and ending immediately before the next line
+# starting a heading at the same or a shallower level (or at EOF).
+extract_verification_block() {
+  local file="$1" in_block=0 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$in_block" -eq 0 ]; then
+      case "$line" in
+        "## Verification"|"## Verification "*) in_block=1 ;;
+      esac
+      continue
+    fi
+    case "$line" in
+      "# "*|"## "*|"#"|"##")
+        return 0
+        ;;
+    esac
+    printf '%s\n' "$line"
+  done < "$file"
+}
+
+# --- resolve selected domains to a file per mode/depth ----------------------
+# --mode verify ALWAYS reads the top-level full file regardless of declared
+# depth (core files carry no Verification block at the pin); otherwise depth
+# full reads the top-level file and depth core (default) reads
+# questions/core/.
 CONTRIBUTING_DOMAIN_SLUGS=()
 DOMAIN_TEXT_BLOCKS=()
+USABLE_DOMAIN_COUNT=0
 for slug in ${SELECTED_DOMAIN_SLUGS[@]+"${SELECTED_DOMAIN_SLUGS[@]}"}; do
   stem="$(domain_stem_for "$slug")"
-  file="$VENDOR_DIR/questions/core/$stem.md"
+  if [ "$MODE" = "verify" ] || [ "$DEPTH_VALUE" = "full" ]; then
+    file="$VENDOR_DIR/questions/$stem.md"
+  else
+    file="$VENDOR_DIR/questions/core/$stem.md"
+  fi
+
   if [ ! -f "$file" ]; then
     continue
   fi
-  block="$(cat "$file")"
+  USABLE_DOMAIN_COUNT=$((USABLE_DOMAIN_COUNT + 1))
+
+  if [ "$MODE" = "verify" ]; then
+    block="$(extract_verification_block "$file")"
+    if [ -z "$block" ]; then
+      warn "no Verification block for domain '$slug'"
+    fi
+  else
+    block="$(cat "$file")"
+  fi
+
   if [ -n "$block" ]; then
     CONTRIBUTING_DOMAIN_SLUGS+=("$slug")
-    DOMAIN_TEXT_BLOCKS+=("$block")
   fi
+  DOMAIN_TEXT_BLOCKS+=("$block")
 done
 
 DOMAIN_CONTENT=""
 for block in ${DOMAIN_TEXT_BLOCKS[@]+"${DOMAIN_TEXT_BLOCKS[@]}"}; do
+  [ -n "$block" ] || continue
   if [ -n "$DOMAIN_CONTENT" ]; then
     DOMAIN_CONTENT="$DOMAIN_CONTENT
 $block"
@@ -348,16 +400,117 @@ $block"
   fi
 done
 
-if [ "${#CONTRIBUTING_DOMAIN_SLUGS[@]}" -eq 0 ]; then
-  status "skipped (no domains)"
-  exit 0
+# --- pack enum: closed set of the ten real pack slugs at the pin -----------
+PACK_ENUM=(
+  "software-design"
+  "domain-modeling"
+  "data-systems"
+  "operations"
+  "threat-modeling"
+  "ai-engineering"
+  "agent-design"
+  "legacy-change"
+  "testing-design"
+  "product-discovery"
+)
+
+is_known_pack() {
+  local needle="$1" p
+  for p in "${PACK_ENUM[@]}"; do
+    [ "$p" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+DECLARED_PACKS=()
+if [ -n "$PACKS_RAW" ]; then
+  IFS=',' read -r -a DECLARED_PACKS <<< "$PACKS_RAW"
 fi
 
-DOMAINS_FIELD="$(IFS=,; echo "${CONTRIBUTING_DOMAIN_SLUGS[*]}")"
+# Pipeline order: enum filter FIRST, then drop in-enum packs whose core.md is
+# missing from disk (one WARN each), and only THEN cap at two survivors —
+# neither an out-of-enum name nor an unresolvable in-enum name ever consumes
+# a cap slot.
+RESOLVED_PACKS=()
+for p in ${DECLARED_PACKS[@]+"${DECLARED_PACKS[@]}"}; do
+  [ -n "$p" ] || continue
+  if ! is_known_pack "$p"; then
+    warn "unknown pack '$p'"
+    continue
+  fi
+  pack_file="$VENDOR_DIR/packs/$p/core.md"
+  if [ ! -f "$pack_file" ]; then
+    warn "pack file missing for '$p': $pack_file"
+    continue
+  fi
+  RESOLVED_PACKS+=("$p")
+done
+
+# Packs resolve to packs/<name>/core.md at every depth (real packs ship no
+# full variant) and are emitted only in plan/arm mode, never in verify mode.
+HONORED_PACKS=()
+PACK_CONTENT=""
+if [ "$MODE" != "verify" ]; then
+  pack_index=0
+  for p in ${RESOLVED_PACKS[@]+"${RESOLVED_PACKS[@]}"}; do
+    if [ "$pack_index" -lt 2 ]; then
+      HONORED_PACKS+=("$p")
+      pack_content="$(cat "$VENDOR_DIR/packs/$p/core.md")"
+      if [ -n "$PACK_CONTENT" ]; then
+        PACK_CONTENT="$PACK_CONTENT
+$pack_content"
+      else
+        PACK_CONTENT="$pack_content"
+      fi
+    else
+      warn "pack '$p' skipped: cap of 2 reached"
+    fi
+    pack_index=$((pack_index + 1))
+  done
+fi
+
+# --- skip decision: fires only when THIS MODE'S emittable set is empty -----
+# plan/arm emittable set = question files + pack cards (ledger alone
+# insufficient, wired in a later task); verify emittable set = Verification
+# blocks (ledger alone sufficient, wired in a later task).
+if [ "$MODE" = "verify" ]; then
+  if [ "$USABLE_DOMAIN_COUNT" -eq 0 ]; then
+    status "skipped (no domains)"
+    exit 0
+  fi
+  if [ -z "$DOMAIN_CONTENT" ]; then
+    status "skipped (no verification content)"
+    exit 0
+  fi
+  FULL_CONTENT="$DOMAIN_CONTENT"
+else
+  if [ "${#CONTRIBUTING_DOMAIN_SLUGS[@]}" -eq 0 ] && [ "${#HONORED_PACKS[@]}" -eq 0 ]; then
+    status "skipped (no domains)"
+    exit 0
+  fi
+  FULL_CONTENT="$DOMAIN_CONTENT"
+  if [ -n "$PACK_CONTENT" ]; then
+    if [ -n "$FULL_CONTENT" ]; then
+      FULL_CONTENT="$FULL_CONTENT
+$PACK_CONTENT"
+    else
+      FULL_CONTENT="$PACK_CONTENT"
+    fi
+  fi
+fi
+
+DOMAINS_FIELD="none"
+if [ "${#CONTRIBUTING_DOMAIN_SLUGS[@]}" -gt 0 ]; then
+  DOMAINS_FIELD="$(IFS=,; echo "${CONTRIBUTING_DOMAIN_SLUGS[*]}")"
+fi
+
 PACKS_FIELD="none"
+if [ "$MODE" != "verify" ] && [ "${#HONORED_PACKS[@]}" -gt 0 ]; then
+  PACKS_FIELD="$(IFS=,; echo "${HONORED_PACKS[*]}")"
+fi
 
 printf '%s\n' "$START_TOKEN"
-printf '%s\n' "$DOMAIN_CONTENT"
+printf '%s\n' "$FULL_CONTENT"
 printf '%s\n' "$END_TOKEN"
 
 status "armed domains=$DOMAINS_FIELD packs=$PACKS_FIELD"
