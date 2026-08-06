@@ -1109,6 +1109,21 @@ SCRIPT
   esac
 }
 
+@test "coverage: GSD_RUN_ID=spec-005 lands under its own rekeyed run-key dir, not pr<N>" {
+  mock_gh_merged
+  WT="$BATS_TEST_TMPDIR/wt-feat"
+  git worktree add -q "$WT" feat/x
+  mkdir -p "$WT/.feature-fix-swarm"
+  echo '{"w":"1"}' > "$WT/.feature-fix-swarm/evidence.json"
+  GSD_RUN_ID="spec-005" run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [ ! -d "$WT" ]
+  ARCHIVE_ROOT="$WORK/.feature-fix-swarm/archive"
+  [ ! -d "$ARCHIVE_ROOT/pr1" ]
+  [ -d "$ARCHIVE_ROOT/spec-005" ]
+  [ -f "$ARCHIVE_ROOT/spec-005/feat-x/evidence.json" ]
+}
+
 @test "coverage: GSD_RUN_ID with slashes and dots is sanitized into its own run-key dir, not pr<N>" {
   mock_gh_merged
   WT="$BATS_TEST_TMPDIR/wt-feat"
