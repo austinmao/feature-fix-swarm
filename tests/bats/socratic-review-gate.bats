@@ -104,7 +104,7 @@ depth: core" "- ASSUME-001: default A
 
 @test "the diff block still follows immediately" {
   terminator_line="$(grep -nF 'SPEC_DATA_END${HV_SOCRATIC_BLOCK}' "$SKILL" | head -1 | cut -d: -f1)"
-  diff_start_line="$(grep -nF '^DIFF_DATA_START$' "$SKILL" | head -1 | cut -d: -f1)"
+  diff_start_line="$(grep -n '^DIFF_DATA_START$' "$SKILL" | awk -F: -v after="$terminator_line" '$1 > after { print $1; exit }')"
   [ -n "$terminator_line" ]
   [ -n "$diff_start_line" ]
   [ "$diff_start_line" -eq "$((terminator_line + 1))" ]
