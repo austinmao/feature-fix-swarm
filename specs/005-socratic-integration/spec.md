@@ -155,9 +155,11 @@ Scenario: Review gate audits the assumption ledger
   absent, every touched skill/script produces its pre-feature behavior (verified by
   tests running both with and without a fixture vendor tree).
 - AC-009: Token discipline: a default (core-depth) socratic pass loads only the
-  selected domains' core files (~120 tokens each) + SKILL.md — never the full
-  question bank; full depth only on AC-003's escalation signals or explicit
-  request.
+  selected domains' core files (~120 tokens each) — never the full question
+  bank; full depth only on AC-003's escalation signals or explicit request.
+  socratic's `SKILL.md`/`PROMPT.md` are runtime instruction files for the
+  vendored skill itself and are never injected into reviewer prompts — the
+  slice is question data only (untrusted-data posture).
 - AC-010: Docs updated: `docs/dependencies.md` gains a socratic section (pin,
   patch policy, upstream-submission convention, concrete pin-bump runbook);
   CHANGELOG entry; `install-socratic.sh` added to the CI installer
