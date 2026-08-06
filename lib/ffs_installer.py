@@ -1260,6 +1260,7 @@ def legacy_skill_names(source: Path) -> set[str]:
     known = known_legacy_hashes(source)
     names = {path.split("/", 2)[1] for path in known if path.startswith("skills/")}
     names.add("prompt-master")
+    names.add("socratic")
     return names
 
 
@@ -1503,43 +1504,39 @@ def migrate_legacy(
     return preserved
 
 
-def stage_prompt_master(source: Path, backup: Backup) -> Path | None:
-    """Materialize the pinned external skill without giving it ownership."""
-    if os.environ.get("FFS_SKIP_PROMPT_MASTER") == "1":
+def _stage_external_skill(source: Path, backup: Backup, *, name: str, env_prefix: str) -> Path | None:
+    """Materialize a pinned external skill without giving it ownership.
+
+    Env contract per skill (uniform across prompt-master and socratic):
+    FFS_SKIP_<PREFIX>=1 skips, FFS_<PREFIX>_INSTALLER overrides the installer
+    script (the seam must be an env var — tests drive it across the setup.sh
+    subprocess boundary where monkeypatch cannot reach), FFS_<PREFIX>_SOURCE
+    overrides the clone source.
+    """
+    if os.environ.get(f"FFS_SKIP_{env_prefix}") == "1":
         return None
-    installer = source / "scripts" / "install-prompt-master.sh"
+    override = os.environ.get(f"FFS_{env_prefix}_INSTALLER")
+    installer = Path(override) if override else source / "scripts" / f"install-{name}.sh"
     if not installer.is_file():
-        raise ActionableError(f"pinned prompt-master installer is missing: {installer}")
-    staged = backup.directory / "prompt-master-stage"
+        raise ActionableError(f"pinned {name} installer is missing: {installer}")
+    staged = backup.directory / f"{name}-stage"
     command = ["bash", str(installer), "--dest", str(staged)]
-    external_source = os.environ.get("FFS_PROMPT_MASTER_SOURCE")
+    external_source = os.environ.get(f"FFS_{env_prefix}_SOURCE")
     if external_source:
         command.extend(["--source", external_source])
     process = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if process.returncode != 0:
         detail = process.stderr.strip() or process.stdout.strip() or "unknown failure"
-        raise ActionableError(f"pinned prompt-master installation failed: {detail}")
+        raise ActionableError(f"pinned {name} installation failed: {detail}")
     return staged
+
+
+def stage_prompt_master(source: Path, backup: Backup) -> Path | None:
+    return _stage_external_skill(source, backup, name="prompt-master", env_prefix="PROMPT_MASTER")
 
 
 def stage_socratic(source: Path, backup: Backup) -> Path | None:
-    """Materialize the pinned external skill without giving it ownership."""
-    if os.environ.get("FFS_SKIP_SOCRATIC") == "1":
-        return None
-    override = os.environ.get("FFS_SOCRATIC_INSTALLER")
-    installer = Path(override) if override else source / "scripts" / "install-socratic.sh"
-    if not installer.is_file():
-        raise ActionableError(f"pinned socratic installer is missing: {installer}")
-    staged = backup.directory / "socratic-stage"
-    command = ["bash", str(installer), "--dest", str(staged)]
-    external_source = os.environ.get("FFS_SOCRATIC_SOURCE")
-    if external_source:
-        command.extend(["--source", external_source])
-    process = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if process.returncode != 0:
-        detail = process.stderr.strip() or process.stdout.strip() or "unknown failure"
-        raise ActionableError(f"pinned socratic installation failed: {detail}")
-    return staged
+    return _stage_external_skill(source, backup, name="socratic", env_prefix="SOCRATIC")
 
 
 def verify_gsd_package(source: Path) -> None:
