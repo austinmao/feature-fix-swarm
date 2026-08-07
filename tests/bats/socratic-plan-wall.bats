@@ -52,13 +52,13 @@ JSON
 
 # capture_stub — tests/bats/plan-wall.bats:49-56's stub_claude_json VERBATIM
 # with exactly one change: `cat >/dev/null` becomes `cat > "$PROMPT_CAPTURE"`.
-# Same shebang, same response envelope (empty findings array, which
+# Same shebang, same response envelope (empty findings object, which
 # _pw_validate_findings already accepts), same chmod.
 capture_stub() {
   cat > bin/stub-claude <<EOF
 #!/usr/bin/env bash
 cat > "$PROMPT_CAPTURE"
-printf '%s\n' '[]'
+printf '%s\n' '{"findings":[]}'
 EOF
   chmod +x bin/stub-claude
   export ADVERSARY_BIN_CLAUDE="$REPO/bin/stub-claude"

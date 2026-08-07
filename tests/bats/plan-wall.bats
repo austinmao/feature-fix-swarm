@@ -47,11 +47,13 @@ record_for() {
 }
 
 stub_claude_json() {
-  # stub_claude_json <output-json>
+  # stub_claude_json <findings-array-json> — wraps the array in the object
+  # root the schema mandates ({"findings":[...]}, an OpenAI structured-outputs
+  # requirement), so call sites keep passing bare arrays.
   cat > bin/stub-claude <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
-printf '%s\n' '$1'
+printf '%s\n' '{"findings": $1}'
 EOF
   chmod +x bin/stub-claude
 }
@@ -90,7 +92,7 @@ queue_list() {
 #!/usr/bin/env bash
 touch "$MARKER"
 cat >/dev/null
-printf '[]\n'
+printf '{"findings":[]}\n'
 EOF
   chmod +x bin/stub-claude
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
@@ -184,7 +186,7 @@ for a in "$@"; do
 done
 case "$model" in
   *fable*) exit 1 ;;
-  *sonnet*) printf '[]\n' ;;
+  *sonnet*) printf '{"findings":[]}\n' ;;
   *) exit 1 ;;
 esac
 EOF
@@ -225,7 +227,7 @@ EOF
 #!/usr/bin/env bash
 touch "$MARKER"
 cat >/dev/null
-printf '[]\n'
+printf '{"findings":[]}\n'
 EOF
   chmod +x bin/stub-claude
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
@@ -262,8 +264,8 @@ EOF
 #!/usr/bin/env bash
 input="$(cat)"
 case "$input" in
-  *"dirty plan"*) printf '[{"severity":"CRITICAL","file":"x.py","claim":"sql injection"}]\n' ;;
-  *) printf '[]\n' ;;
+  *"dirty plan"*) printf '{"findings":[{"severity":"CRITICAL","file":"x.py","claim":"sql injection"}]}\n' ;;
+  *) printf '{"findings":[]}\n' ;;
 esac
 EOF
   chmod +x bin/stub-claude
@@ -344,7 +346,7 @@ EOF
   cat > bin/stub-claude <<'EOF'
 #!/usr/bin/env bash
 cat > "$BATS_TEST_TMPDIR/should-not-be-dispatched"
-printf '[]\n'
+printf '{"findings":[]}\n'
 EOF
   chmod +x bin/stub-claude
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude \
@@ -395,7 +397,7 @@ EOF
   cat > bin/stub-claude <<EOF
 #!/usr/bin/env bash
 cat > "$BATS_TEST_TMPDIR/captured-stdin.txt"
-printf '[]\n'
+printf '{"findings":[]}\n'
 EOF
   chmod +x bin/stub-claude
   GSD_RUN_ID=my-secret-run-id-42 FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude \
@@ -503,7 +505,7 @@ for a in "$@"; do
 done
 case "$model" in
   *fable*) printf '' ;;
-  *sonnet*) printf '[]\n' ;;
+  *sonnet*) printf '{"findings":[]}\n' ;;
   *) exit 1 ;;
 esac
 EOF
@@ -526,7 +528,7 @@ for a in "$@"; do
 done
 case "$model" in
   *fable*) printf '{"not":"an array"}\n' ;;
-  *sonnet*) printf '[]\n' ;;
+  *sonnet*) printf '{"findings":[]}\n' ;;
   *) exit 1 ;;
 esac
 EOF
@@ -548,8 +550,8 @@ for a in "$@"; do
   prev="$a"
 done
 case "$model" in
-  *fable*) printf '[{"severity":"HIGH","file":"a.py","claim":"x","line":"not-a-number"}]\n' ;;
-  *sonnet*) printf '[]\n' ;;
+  *fable*) printf '{"findings":[{"severity":"HIGH","file":"a.py","claim":"x","line":"not-a-number"}]}\n' ;;
+  *sonnet*) printf '{"findings":[]}\n' ;;
   *) exit 1 ;;
 esac
 EOF
@@ -571,8 +573,8 @@ for a in "$@"; do
   prev="$a"
 done
 case "$model" in
-  *fable*) printf '[{"severity":"HIGH","file":"a.py","claim":"x","confidence":1.5}]\n' ;;
-  *sonnet*) printf '[]\n' ;;
+  *fable*) printf '{"findings":[{"severity":"HIGH","file":"a.py","claim":"x","confidence":1.5}]}\n' ;;
+  *sonnet*) printf '{"findings":[]}\n' ;;
   *) exit 1 ;;
 esac
 EOF
