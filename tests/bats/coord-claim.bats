@@ -94,14 +94,14 @@ setup() {
     rm -rf "$REPO/.feature-fix-swarm"
     a_log="$BATS_TEST_TMPDIR/diff-a-$i.log"
     b_log="$BATS_TEST_TMPDIR/diff-b-$i.log"
-    ( cd "$REPO" && FFS_RUN_ID="race-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+    ( set +e; cd "$REPO" && FFS_RUN_ID="race-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
       echo $? > "$a_log.rc" ) &
     pid_a=$!
-    ( cd "$REPO" && FFS_RUN_ID="race-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+    ( set +e; cd "$REPO" && FFS_RUN_ID="race-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
       echo $? > "$b_log.rc" ) &
     pid_b=$!
-    wait "$pid_a"
-    wait "$pid_b"
+    wait "$pid_a" || true
+    wait "$pid_b" || true
     rc_a="$(cat "$a_log.rc")"
     rc_b="$(cat "$b_log.rc")"
     ok=0; held=0
@@ -122,14 +122,14 @@ setup() {
     rm -rf "$REPO/.feature-fix-swarm"
     a_log="$BATS_TEST_TMPDIR/same-a-$i.log"
     b_log="$BATS_TEST_TMPDIR/same-b-$i.log"
-    ( cd "$REPO" && FFS_RUN_ID="same-run-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+    ( set +e; cd "$REPO" && FFS_RUN_ID="same-run-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
       echo $? > "$a_log.rc" ) &
     pid_a=$!
-    ( cd "$REPO" && FFS_RUN_ID="same-run-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+    ( set +e; cd "$REPO" && FFS_RUN_ID="same-run-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
       echo $? > "$b_log.rc" ) &
     pid_b=$!
-    wait "$pid_a"
-    wait "$pid_b"
+    wait "$pid_a" || true
+    wait "$pid_b" || true
     rc_a="$(cat "$a_log.rc")"
     rc_b="$(cat "$b_log.rc")"
     if [ "$rc_a" -ne 0 ] || [ "$rc_b" -ne 0 ]; then
@@ -157,14 +157,14 @@ assert d['generations']['claim:spec-009']['gen'] == 1, d['generations']
     rm -rf "$REPO/.feature-fix-swarm"
     a_log="$BATS_TEST_TMPDIR/wt-a-$i.log"
     b_log="$BATS_TEST_TMPDIR/wt-b-$i.log"
-    ( cd "$REPO" && FFS_RUN_ID="wt-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+    ( set +e; cd "$REPO" && FFS_RUN_ID="wt-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
       echo $? > "$a_log.rc" ) &
     pid_a=$!
-    ( cd "$BATS_TEST_TMPDIR/wt" && FFS_RUN_ID="wt-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+    ( set +e; cd "$BATS_TEST_TMPDIR/wt" && FFS_RUN_ID="wt-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
       echo $? > "$b_log.rc" ) &
     pid_b=$!
-    wait "$pid_a"
-    wait "$pid_b"
+    wait "$pid_a" || true
+    wait "$pid_b" || true
     rc_a="$(cat "$a_log.rc")"
     rc_b="$(cat "$b_log.rc")"
     ok=0; held=0

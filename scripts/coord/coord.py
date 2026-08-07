@@ -616,10 +616,39 @@ def _resolve_mode(store: StoreFds) -> str:
 
 
 # ── CLI subcommands ──────────────────────────────────────────────────────
+def _grant_entry(gen_entry: dict, identity: dict, ttl_secs: float, now: float) -> dict:
+    """A fresh grant OR a staleness-based reclaim (Task 3) — both mint a new
+    generation and overwrite every holder_* field. `gen_entry` is the
+    permanent generations[key] record; its `gen` is bumped in place."""
+    new_gen = gen_entry["gen"] + 1
+    gen_entry["gen"] = new_gen
+    return {
+        "holder_uuid": identity["session_uuid"],
+        "holder_anchor_pid": identity["anchor_pid"],
+        "holder_anchor_start_token": identity["anchor_start_token"],
+        "holder_host": identity["host"],
+        "holder_worktree": identity["worktree"],
+        "generation": new_gen,
+        "acquired_at": now,
+        "last_renewed_at": now,
+        "ttl_secs": ttl_secs,
+        "expires_at": now + ttl_secs,
+        "cli_pid": os.getpid(),
+    }
+
+
+def _print_claim_held(entry: dict) -> None:
+    print(
+        "CLAIM-HELD "
+        f"holder={entry.get('holder_uuid')} "
+        f"anchor_pid={entry.get('holder_anchor_pid')} "
+        f"worktree={entry.get('holder_worktree')} "
+        f"expires_at={entry.get('expires_at')}",
+        file=sys.stderr,
+    )
+
+
 def cmd_claim(store: StoreFds, args) -> int:
-    """Task 1: happy path only — grant an unheld spec at generation 1.
-    Contention (idempotent re-claim, foreign-live refusal, staleness-based
-    reclaim) is added in Task 2 / Task 3."""
     claim_id = _validate_claim_id(args.spec_id)
     ttl_secs = _validate_ttl(args.ttl, args.heartbeat)
     identity = resolve_identity(store)
@@ -630,24 +659,37 @@ def cmd_claim(store: StoreFds, args) -> int:
             key, {"gen": 0, "last_holder_uuid": None, "released_at": None}
         )
         now = time.time()
-        new_gen = gen_entry["gen"] + 1
-        gen_entry["gen"] = new_gen
-        registry["claims"][key] = {
-            "holder_uuid": identity["session_uuid"],
-            "holder_anchor_pid": identity["anchor_pid"],
-            "holder_anchor_start_token": identity["anchor_start_token"],
-            "holder_host": identity["host"],
-            "holder_worktree": identity["worktree"],
-            "generation": new_gen,
-            "acquired_at": now,
-            "last_renewed_at": now,
-            "ttl_secs": ttl_secs,
-            "expires_at": now + ttl_secs,
-            "cli_pid": os.getpid(),
-        }
-        _save_registry(store, registry)
-        print(f"CLAIM-OK generation={new_gen}")
-        return EXIT_OK
+        entry = registry["claims"].get(key)
+
+        if entry is None:
+            new_entry = _grant_entry(gen_entry, identity, ttl_secs, now)
+            registry["claims"][key] = new_entry
+            _save_registry(store, registry)
+            print(f"CLAIM-OK generation={new_entry['generation']}")
+            return EXIT_OK
+
+        if entry["holder_uuid"] == identity["session_uuid"]:
+            # idempotent re-claim: generation byte-identical, refresh the
+            # clock and TTL (carried forward unless this invocation passed
+            # an explicit --ttl), re-copy CURRENT anchor fields (post-rebind).
+            eff_ttl = args.ttl if args.ttl is not None else entry.get("ttl_secs", DEFAULT_TTL_SECS)
+            if args.ttl is not None:
+                eff_ttl = _validate_ttl(args.ttl, args.heartbeat)
+            entry["last_renewed_at"] = now
+            entry["ttl_secs"] = eff_ttl
+            entry["expires_at"] = now + eff_ttl
+            entry["holder_anchor_pid"] = identity["anchor_pid"]
+            entry["holder_anchor_start_token"] = identity["anchor_start_token"]
+            entry["holder_host"] = identity["host"]
+            entry["holder_worktree"] = identity["worktree"]
+            _save_registry(store, registry)
+            print(f"CLAIM-OK generation={entry['generation']}")
+            return EXIT_OK
+
+        # Task 2: any existing foreign entry is treated as live (placeholder).
+        # Task 3 replaces this with the real three-valued staleness decision.
+        _print_claim_held(entry)
+        return EXIT_REFUSED
 
 
 def cmd_status(store: StoreFds, args) -> int:
