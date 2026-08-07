@@ -503,6 +503,26 @@ def _adopt_with_rebind(store: StoreFds, record: dict, anchor_pid, anchor_start_t
     return record
 
 
+def _refuse_borrowed_identity(record: dict, anchor_pid) -> None:
+    """EDGE-006/T-01-02: applies to resolution step (i) ONLY —
+    $FFS_COORD_SESSION can name anywhere, including a live peer. Refuse
+    only when the recorded anchor is alive, its token still matches, and it
+    is not this invocation's own anchor. A dead or recycled anchor, or our
+    own, is ordinary reuse and resolves normally."""
+    recorded_pid = record.get("anchor_pid")
+    if recorded_pid == anchor_pid:
+        return
+    verdict = _anchor_is_stale(
+        recorded_pid, record.get("host"), record.get("anchor_start_token")
+    )
+    if verdict == "live":
+        raise CoordExit(
+            EXIT_STORE_REFUSED,
+            f"coord: refusing borrowed identity — session "
+            f"{record.get('session_uuid')} has a live anchor",
+        )
+
+
 def resolve_identity(store: StoreFds) -> dict:
     run_id = os.environ.get("FFS_RUN_ID")
     session_env = os.environ.get("FFS_COORD_SESSION")
@@ -519,6 +539,7 @@ def resolve_identity(store: StoreFds) -> dict:
                 EXIT_STORE_REFUSED,
                 f"coord: FFS_COORD_SESSION names no known session: {session_env}",
             )
+        _refuse_borrowed_identity(record, anchor_pid)  # step (i) ONLY
         return _adopt_with_rebind(store, record, anchor_pid, anchor_start_token)
 
     if run_id:
@@ -648,6 +669,38 @@ def _print_claim_held(entry: dict) -> None:
     )
 
 
+def _is_reclaimable(entry: dict, now: float) -> tuple[bool, str]:
+    """THE RECLAIM DECISION (REQ-04) — one ordered list, first match wins.
+    Returns (reclaimable, anchor_verdict) for callers that also want the
+    verdict for diagnostics/tests."""
+    worktree = entry.get("holder_worktree")
+    if worktree and not os.path.exists(worktree):
+        return True, "worktree-gone"  # spec EDGE-002, no TTL wait
+
+    verdict = _anchor_is_stale(
+        entry.get("holder_anchor_pid"),
+        entry.get("holder_host"),
+        entry.get("holder_anchor_start_token"),
+    )
+    if verdict == "stale":
+        return True, verdict
+    if verdict == "live":
+        return False, verdict  # never reclaimable at any age
+
+    # unprobeable: the SOLE bounded recovery route, gated on the entry's OWN
+    # ttl_secs — never DEFAULT_TTL_SECS directly (the reclaiming process's
+    # compiled-in default is not the interval the holder was granted under).
+    ttl = entry.get("ttl_secs")
+    if ttl is None:
+        ttl = DEFAULT_TTL_SECS
+    last = entry.get("last_renewed_at")
+    if last is None:
+        last = entry.get("acquired_at")
+    if last is None:
+        return True, verdict  # fully torn record, no clock at all
+    return (now - last) >= ttl, verdict
+
+
 def cmd_claim(store: StoreFds, args) -> int:
     claim_id = _validate_claim_id(args.spec_id)
     ttl_secs = _validate_ttl(args.ttl, args.heartbeat)
@@ -686,42 +739,186 @@ def cmd_claim(store: StoreFds, args) -> int:
             print(f"CLAIM-OK generation={entry['generation']}")
             return EXIT_OK
 
-        # Task 2: any existing foreign entry is treated as live (placeholder).
-        # Task 3 replaces this with the real three-valued staleness decision.
-        _print_claim_held(entry)
+        reclaimable, _verdict = _is_reclaimable(entry, now)
+        if not reclaimable:
+            _print_claim_held(entry)
+            return EXIT_REFUSED
+
+        new_entry = _grant_entry(gen_entry, identity, ttl_secs, now)
+        registry["claims"][key] = new_entry
+        _save_registry(store, registry)
+        print(f"CLAIM-OK generation={new_entry['generation']}")
+        return EXIT_OK
+
+
+def cmd_claim_check(store: StoreFds, args) -> int:
+    claim_id = _validate_claim_id(args.spec_id)
+    generation = _validate_generation(args.generation)
+    identity = resolve_identity(store)
+    print(f"session={identity['session_uuid']}")
+    with registry_transaction(store) as registry:
+        key = _claim_key(claim_id)
+        entry = registry["claims"].get(key)
+        current_gen = entry["generation"] if entry else registry["generations"].get(key, {}).get("gen", 0)
+        if entry is not None and entry["generation"] == generation:
+            print("CLAIM-OK")
+            return EXIT_OK
+        print(
+            f"CLAIM-SUPERSEDED caller_generation={generation} current_generation={current_gen}",
+            file=sys.stderr,
+        )
+        return EXIT_SUPERSEDED
+
+
+def cmd_claim_renew(store: StoreFds, args) -> int:
+    claim_id = _validate_claim_id(args.spec_id)
+    generation = _validate_generation(args.generation)
+    identity = resolve_identity(store)
+    print(f"session={identity['session_uuid']}")
+    with registry_transaction(store) as registry:
+        key = _claim_key(claim_id)
+        entry = registry["claims"].get(key)
+
+        if entry is None:
+            # the authority is gone — same news as CLAIM-SUPERSEDED.
+            print(
+                f"CLAIM-SUPERSEDED (no such claim) caller_generation={generation}",
+                file=sys.stderr,
+            )
+            return EXIT_SUPERSEDED
+
+        if entry["holder_uuid"] != identity["session_uuid"]:
+            _print_claim_held(entry)
+            return EXIT_REFUSED
+
+        # HOLDER UUID IS NOT PROOF OF GENERATION: the caller must state the
+        # generation it believes it holds, and be fenced if that authority
+        # has been revoked (a stale process from an earlier incarnation
+        # shares the same holder_uuid across a reclaim-and-re-acquire cycle).
+        if entry["generation"] != generation:
+            print(
+                f"CLAIM-SUPERSEDED caller_generation={generation} "
+                f"current_generation={entry['generation']}",
+                file=sys.stderr,
+            )
+            return EXIT_SUPERSEDED  # entry byte-identical: no write below this line
+
+        now = time.time()
+        eff_ttl = entry.get("ttl_secs", DEFAULT_TTL_SECS)
+        if args.ttl is not None:
+            eff_ttl = _validate_ttl(args.ttl, getattr(args, "heartbeat", None))
+        entry["last_renewed_at"] = now
+        entry["ttl_secs"] = eff_ttl
+        entry["expires_at"] = now + eff_ttl
+        entry["holder_anchor_pid"] = identity["anchor_pid"]
+        entry["holder_anchor_start_token"] = identity["anchor_start_token"]
+        entry["holder_host"] = identity["host"]
+        _save_registry(store, registry)
+        print(f"CLAIM-OK generation={entry['generation']}")
+        return EXIT_OK
+
+
+def cmd_release(store: StoreFds, args) -> int:
+    claim_id = _validate_claim_id(args.spec_id)
+    generation = _validate_generation(args.generation)
+    identity = resolve_identity(store)
+    print(f"session={identity['session_uuid']}")
+    with registry_transaction(store) as registry:
+        key = _claim_key(claim_id)
+        entry = registry["claims"].get(key)
+        gen_entry = registry["generations"].setdefault(
+            key, {"gen": 0, "last_holder_uuid": None, "released_at": None}
+        )
+        now = time.time()
+
+        if entry is not None:
+            if entry["holder_uuid"] != identity["session_uuid"]:
+                print("RELEASE-REFUSED: foreign holder", file=sys.stderr)
+                return EXIT_REFUSED
+            if entry["generation"] != generation:
+                print("RELEASE-REFUSED: stale generation", file=sys.stderr)
+                return EXIT_REFUSED
+            del registry["claims"][key]
+            gen_entry["last_holder_uuid"] = identity["session_uuid"]
+            gen_entry["released_at"] = now
+            _save_registry(store, registry)
+            print("RELEASE-OK")
+            return EXIT_OK
+
+        # entry ABSENT: the tombstone is the only thing that can tell an
+        # idempotent second release by the real holder apart from a foreign
+        # release — entry-absence alone cannot (T-01-11).
+        if gen_entry.get("last_holder_uuid") == identity["session_uuid"]:
+            print("RELEASE-OK")
+            return EXIT_OK
+        print("RELEASE-REFUSED: not last holder", file=sys.stderr)
         return EXIT_REFUSED
 
 
 def cmd_status(store: StoreFds, args) -> int:
     with registry_transaction(store) as registry:
         claims = dict(registry.get("claims", {}))
+    now = time.time()
     for key, entry in sorted(claims.items()):
+        flags = []
+        worktree = entry.get("holder_worktree")
+        if worktree and not os.path.exists(worktree):
+            flags.append("MISSING-WORKTREE")
+        holder_host = entry.get("holder_host")
+        if holder_host and holder_host != _host_name():
+            flags.append("FOREIGN-HOST")
+        if (
+            entry.get("holder_anchor_pid") is None
+            or entry.get("last_renewed_at") is None
+            or entry.get("ttl_secs") is None
+        ):
+            flags.append("INCOMPLETE-ENTRY")
         line = (
             f"{key} holder={entry.get('holder_uuid')} "
             f"generation={entry.get('generation')} "
             f"anchor_pid={entry.get('holder_anchor_pid')} "
             f"cli_pid={entry.get('cli_pid')} "
-            f"worktree={entry.get('holder_worktree')} "
+            f"worktree={worktree} "
             f"last_renewed_at={entry.get('last_renewed_at')} "
             f"ttl_secs={entry.get('ttl_secs')} "
             f"expires_at={entry.get('expires_at')}"
         )
+        if flags:
+            line += " flags=" + ",".join(flags)
         print(line)
     return EXIT_OK
 
 
-def _stub(name: str):
-    def _cmd(store: StoreFds, args) -> int:
-        print(f"coord: {name} not implemented in task 1", file=sys.stderr)
-        return EXIT_USAGE
+def cmd_doctor(store: StoreFds, args) -> int:
+    """REQ-12: the surface Phase 4's preflight probes. Never raises — names
+    the offending state and returns the contract exit code instead."""
+    try:
+        filelock = _require_filelock()
+    except CoordExit as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.code
+    version = getattr(filelock, "__version__", "unknown")
 
-    return _cmd
+    staleness = "ok" if _identity_module() is not None else "degraded"
+    try:
+        mode, mode_source = _resolve_mode_with_source(store)
+    except CoordExit as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.code
 
+    try:
+        with registry_transaction(store) as registry:
+            live_claims = len(registry.get("claims", {}))
+    except CoordExit as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.code
 
-cmd_claim_check = _stub("claim-check")
-cmd_claim_renew = _stub("claim-renew")
-cmd_release = _stub("release")
-cmd_doctor = _stub("doctor")
+    print(f"filelock_version={version}")
+    print(f"store_path={store.store_root}")
+    print(f"mode={mode} mode_source={mode_source}")
+    print(f"staleness={staleness}")
+    print(f"live_claims={live_claims}")
+    return EXIT_OK
 
 
 COMMANDS = {
@@ -768,6 +965,9 @@ def main(argv=None) -> int:
     store = None
     try:
         store = _open_store()
+        if args.command != "doctor" and _resolve_mode(store) == "off":
+            print("COORD-OFF")
+            return EXIT_OK
         handler = COMMANDS[args.command]
         return handler(store, args)
     except CoordExit as exc:

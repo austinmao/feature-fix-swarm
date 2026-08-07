@@ -94,10 +94,15 @@ setup() {
     rm -rf "$REPO/.feature-fix-swarm"
     a_log="$BATS_TEST_TMPDIR/diff-a-$i.log"
     b_log="$BATS_TEST_TMPDIR/diff-b-$i.log"
-    ( set +e; cd "$REPO" && FFS_RUN_ID="race-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+    # FFS_COORD_ANCHOR_PID pinned to the test's own (durable, alive for the
+    # whole test) pid — this test exercises atomicity, not staleness; the
+    # default anchor (ppid) would be the racer's own backgrounding subshell,
+    # which exits within microseconds of the child and would make Task 3's
+    # staleness check see a dead anchor between the two racers.
+    ( set +e; cd "$REPO" && FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID="race-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
       echo $? > "$a_log.rc" ) &
     pid_a=$!
-    ( set +e; cd "$REPO" && FFS_RUN_ID="race-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+    ( set +e; cd "$REPO" && FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID="race-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
       echo $? > "$b_log.rc" ) &
     pid_b=$!
     wait "$pid_a" || true
@@ -157,10 +162,10 @@ assert d['generations']['claim:spec-009']['gen'] == 1, d['generations']
     rm -rf "$REPO/.feature-fix-swarm"
     a_log="$BATS_TEST_TMPDIR/wt-a-$i.log"
     b_log="$BATS_TEST_TMPDIR/wt-b-$i.log"
-    ( set +e; cd "$REPO" && FFS_RUN_ID="wt-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+    ( set +e; cd "$REPO" && FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID="wt-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
       echo $? > "$a_log.rc" ) &
     pid_a=$!
-    ( set +e; cd "$BATS_TEST_TMPDIR/wt" && FFS_RUN_ID="wt-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+    ( set +e; cd "$BATS_TEST_TMPDIR/wt" && FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID="wt-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
       echo $? > "$b_log.rc" ) &
     pid_b=$!
     wait "$pid_a" || true
@@ -199,11 +204,16 @@ assert d['generations']['claim:spec-009']['gen'] == 1, d['generations']
 }
 
 @test "a foreign session claiming an already-held spec exits 3 naming holder and expiry" {
-  run env -C "$REPO" FFS_RUN_ID=holder python3 "$COORD" claim spec-009
+  # FFS_COORD_ANCHOR_PID pinned to the test's own durable pid — each `run`
+  # invocation is a separate, sequential subshell that has already exited
+  # by the time the next `run` starts, so the default ppid anchor would be
+  # provably dead before the second claim even runs (this test is about
+  # CLAIM-HELD, not staleness — see the anchor-kill test for that).
+  run env -C "$REPO" FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID=holder python3 "$COORD" claim spec-009
   [ "$status" -eq 0 ]
   holder_sid="${lines[0]#session=}"
 
-  run env -C "$REPO" FFS_RUN_ID=other python3 "$COORD" claim spec-009
+  run env -C "$REPO" FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID=other python3 "$COORD" claim spec-009
   [ "$status" -eq 3 ]
   [[ "$output" == *"CLAIM-HELD"* ]]
   [[ "$output" == *"$holder_sid"* ]]
