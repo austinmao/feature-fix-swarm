@@ -36,6 +36,7 @@ planners implement, never reopen.
 | 18 | codex (G12 mechanics) | immediate mode had no trigger/cursor/transport/failure signal | ADOPTED — durable cursor, finalizer+cron invocation, DIGEST_NOTIFY_CMD, cursor-retained-on-failure; REQ-701 |
 | 19 | codex C15 | run_id join broken (spec-NNN vs random runstore hex vs gh) | ADOPTED — ledger id canonical + mapping record at run start; budgets join via mapping; REQ-703 |
 | 20 | opus F1 anchor | review-gate DEGRADED anchor is :98-99/:117, not :29 | ADOPTED — seam table corrected |
+| 21 | gsd plan-checker | gsd-run has no task loop, token-delta producer, or remaining-work queue — "quarantine the rest" had no mechanism | ADOPTED — producer = end-of-drive vendor token-report parse (codex trailer / claude usage; absent → WARN, no event); enforcement drive-granular: post-drive quarantine evidence + PRE-LAUNCH refusal for breached runs; REQ-501/AC-008 amended |
 
 ## Verified seam anchors (scout + gauntlet corrections, main @ a8866f7)
 

@@ -61,10 +61,16 @@ code/store state). IDs stable; phases cite them. Post-gauntlet revision.
 
 ## US5 — budget breach (G10)
 
-- US5-S1: Given a run one update below its spec budget, When two updates
-  cross then exceed the limit, Then exactly one `BUDGET-BREACH:` line
-  prints and the drive loop finishes the current task then quarantines the
-  rest with a typed reason.
+- US5-S1: Given a run one update below its spec budget, When gsd-run's
+  end-of-drive token parse feeds the crossing delta, Then exactly one
+  `BUDGET-BREACH:` line prints, the in-flight drive completes, and a
+  durable quarantine evidence event is recorded.
+- US5-S2: Given a run carrying breach/quarantine evidence, When gsd-run is
+  invoked for a new drive, Then it refuses pre-launch with a typed reason
+  and nonzero exit.
+- US5-S3: Given a drive whose output carries no parseable token report,
+  When the drive ends, Then one WARN line prints, no accounting event is
+  recorded, and the drive result is unaffected.
 
 ## US6 — single-flight finisher (G11)
 

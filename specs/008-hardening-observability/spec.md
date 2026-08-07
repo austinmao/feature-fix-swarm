@@ -142,14 +142,23 @@ REQ-501); N-parallel scaling before G12 lands.
 - REQ-501: `inc_tokens` detects the CROSSING (pre/post comparison — fires
   once, not on every call past the limit; codex C12) and returns a typed
   breach; `cmd_update --tokens` prints a machine-readable
-  `BUDGET-BREACH: <run_id> <limit> <spent>` line on crossing; the
-  gsd-run.sh drive loop — the seam that invokes run-state updates — reads
-  it and applies the SPEC response: finish current task, ship green,
-  quarantine the rest (typed reason). DESCOPED: the daily budget + "stop
-  starting new specs" scheduler — no daily aggregate store and no
-  scheduler seam exist (opus F7/codex C12); recorded as out-of-scope with
-  the breach event feeding G12 so a future scheduler has its signal.
-  EDGE-009 (double-cross) is descoped with it.
+  `BUDGET-BREACH: <run_id> <limit> <spent>` line on crossing. PRODUCER
+  (plan-check adoption — NO token producer existed anywhere): gsd-run.sh
+  parses the vendor CLI's end-of-drive token report (codex's `tokens used`
+  trailer; claude's usage output; absent/unparseable → one WARN line and
+  NO accounting event — accounting is per-vendor best-effort, enforcement
+  acts only on recorded totals) and feeds the delta to
+  `cmd_update --tokens`. ENFORCEMENT is DRIVE-granular: on a breach line,
+  gsd-run records a durable quarantine evidence event (typed reason
+  `BUDGET-BREACH`, mapped ids, limit, spent) after the in-flight drive
+  completes — "finish current task" = the running drive — and gsd-run
+  REFUSES to launch any NEW drive for a run carrying breach/quarantine
+  evidence (pre-launch check, typed refusal, nonzero exit). No queue, no
+  scheduler, no new run-state enum — refusing launch IS the quarantine of
+  the remainder. DESCOPED: the daily budget + "stop starting new specs"
+  scheduler — no daily aggregate store and no scheduler seam exist (opus
+  F7/codex C12); the breach event feeds G12 so a future scheduler has its
+  signal. EDGE-009 (double-cross) descoped with it.
 
 ### G11 — global finisher lock (REQ-601)
 
@@ -300,7 +309,12 @@ Scenario: immediate digest is idempotent
 - AC-008 (G10): pytest — inc_tokens returns None below, typed breach
   exactly ONCE on crossing (idempotent under repeated over-limit updates);
   cmd_update prints the BUDGET-BREACH line on crossing only; bats —
-  gsd-run seam quarantines remaining tasks with typed reason.
+  gsd-run parses a codex-shaped token trailer fixture into
+  `cmd_update --tokens`; breach line → durable quarantine evidence after
+  the drive completes; a run carrying breach evidence → pre-launch refusal
+  (typed, nonzero) on the next gsd-run invocation; no-breach passthrough
+  unchanged; absent/unparseable trailer → one WARN, no event, drive result
+  unaffected.
 - AC-009 (G11): bats — extracted lock primitive: two concurrent claimants
   → one acts; waiter exits 0 after FINISHER_LOCK_WAIT with a
   finisher-skipped event recorded; stale (dead-pid) lock reclaimed;
