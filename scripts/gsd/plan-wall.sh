@@ -21,6 +21,9 @@
 #   PLAN_WALL=off        skip with a durable waiver record (AC-008/EDGE-007)
 #   PLAN_WALL_REASON     waiver reason (non-empty; default supplied)
 #   PLAN_WALL_TIMEOUT    overall per-plan reviewer dispatch budget (default 180s)
+#   PLAN_WALL_MAX_ROUNDS wall invocations allowed per phase per run (default 3;
+#                        durable counter — cap-hit exits 3 with WALL-ROUND-CAP,
+#                        a quarantine verdict, not a retryable BLOCKED)
 #   GSD_RUN_ID           run id stamped into every record (else derived)
 #
 # Selection algorithm (plan.md "Reviewer selection"): rule 1 opposite-vendor
@@ -750,6 +753,38 @@ _pw_dispatch_path() {
 }
 
 # ── driver ───────────────────────────────────────────────────────────────
+
+# Round cap (2026-08 autonomy red-team G3): one wall invocation on a phase =
+# one round. The wall itself was the unbounded seam in both recorded burn
+# incidents (19 rounds / 2 days; 38+ turns / a week of vendor quota) — the
+# orchestrator loops wall->BLOCKED->fix->wall with nothing counting. The
+# counter is durable (gates.py `_loops` namespace), so an orchestrator
+# restart cannot reset it; run-finalizer clears it with run-state at run end.
+# Cap-hit emits WALL-ROUND-CAP (deliberately NOT "BLOCKED" — BLOCKED invites
+# another fix round) and exit 3: quarantine this phase, move to other work.
+# No off-switch by design: raising PLAN_WALL_MAX_ROUNDS is the escape, and
+# it leaves the raised value visible in the invocation rather than a silent
+# waiver. PLAN_WALL=off (operator waiver) never counts a round.
+PW_MAX_ROUNDS="${PLAN_WALL_MAX_ROUNDS:-3}"
+case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=3 ;; esac
+[ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=3
+if [ "${PLAN_WALL:-on}" != off ]; then
+  _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
+      --max "$PW_MAX_ROUNDS" 2>&1)"
+  _pw_lr_rc=$?
+  printf '%s\n' "$_pw_lr_out" >&2
+  if [ "$_pw_lr_rc" -ne 0 ] && printf '%s' "$_pw_lr_out" | grep -q '^LOOP-CAP:'; then
+    echo "plan-wall: WALL-ROUND-CAP $TARGET — $PW_MAX_ROUNDS wall rounds exhausted for this phase without convergence" >&2
+    echo "plan-wall: quarantine this phase and move on. Unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:$PHASE_SLUG --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+    exit 3
+  elif [ "$_pw_lr_rc" -ne 0 ]; then
+    # Counter plumbing failed (corrupt/unwritable store, missing python…).
+    # Fail OPEN: the cap is a guard, and a guard's infrastructure failure
+    # must not impersonate the guard firing — the wall's own queue_error
+    # path downstream is the authority on a broken store.
+    echo "plan-wall: WARN: round counter unavailable (loop-round rc=$_pw_lr_rc) — proceeding without cap this invocation" >&2
+  fi
+fi
 
 OVERALL_RC=0
 for plan_file in "${PLAN_FILES[@]}"; do

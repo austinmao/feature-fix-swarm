@@ -839,6 +839,20 @@ for f in .planning/run-state/gsd-run.heartbeat \
   [ -e "$f" ] || continue
   run rm -f "$f"
 done
+# 4b. loop-round counters (plan-wall cap, gates.py `_loops` namespace): a
+# spec's run_id is stable across runs, so a LANDED run must drop its
+# counters or the next run of the same spec starts pre-capped. Fail-soft
+# like everything here — a missing gates.py never blocks finalization.
+_gates_py=""
+for _c in "$(pwd)/packages/feature-fix-swarm/lib/gates.py" \
+          "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+          "$(pwd)/lib/gates.py"; do
+  [ -f "$_c" ] && _gates_py="$_c" && break
+done
+if [ -n "$_gates_py" ]; then
+  run python3 "$_gates_py" loop-round "${GSD_RUN_ID:-pr${PR}}" --reset-all \
+    || note "loop-round reset failed (non-fatal)"
+fi
 # 5. stale worktree metadata
 run git worktree prune
 

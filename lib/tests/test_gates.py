@@ -109,9 +109,12 @@ def test_scan_tamper_flags_exit_zero_and_ci_edits() -> None:
 
 
 def test_scan_tamper_clean_diff_returns_empty() -> None:
+    # neutral path: lib/gates.py itself is now a (warn-tier) finding by
+    # design — G2 flags gate-implementation edits; see
+    # test_scan_tamper_flags_gate_and_ledger_file_edits.
     diff = (
-        "--- a/lib/gates.py\n"
-        "+++ b/lib/gates.py\n"
+        "--- a/lib/helpers.py\n"
+        "+++ b/lib/helpers.py\n"
         "+def helper():\n"
         "+    return 1\n"
     )
@@ -129,11 +132,84 @@ def test_impl_task_may_not_touch_test_files() -> None:
 
 # ── Stream E: no-progress detection ──────────────────────────────────────────
 
+def test_scan_tamper_flags_gate_and_ledger_file_edits() -> None:
+    diff = (
+        "--- a/lib/gates.py\n+++ b/lib/gates.py\n+x = 1\n"
+        "--- a/.feature-fix-swarm/evidence.json\n"
+        "+++ b/.feature-fix-swarm/evidence.json\n+{}\n"
+        "--- a/lib/other.py\n+++ b/lib/other.py\n+y = 2\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    gate_hits = [f for f in findings if f.startswith("gate/ledger file edited")]
+    assert len(gate_hits) == 2
+    assert not any("other.py" in f for f in gate_hits)
+
+
+def test_store_path_env_always_wins(monkeypatch) -> None:
+    monkeypatch.setenv("GATES_STORE", "/tmp/custom/ev.json")
+    assert gates._store_path() == gates.Path("/tmp/custom/ev.json")
+
+
+def test_store_path_resolves_worktree_to_main_checkout(tmp_path, monkeypatch) -> None:
+    """G5: from a linked worktree the DEFAULT store must resolve to the MAIN
+    checkout's .feature-fix-swarm/evidence.json, not the worktree's cwd."""
+    import subprocess as sp
+    main = tmp_path / "main"
+    main.mkdir()
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=main, check=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-q", "--allow-empty", "-m", "init"], cwd=main, check=True)
+    wt = tmp_path / "wt"
+    sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+           cwd=main, check=True)
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(wt)
+    resolved = gates._store_path()
+    assert resolved == main / ".feature-fix-swarm" / "evidence.json"
+    # from the main checkout itself, behavior is the historic relative default
+    monkeypatch.chdir(main)
+    assert str(gates._store_path()).endswith(".feature-fix-swarm/evidence.json")
+
+
 def test_no_progress_when_same_failure_repeats() -> None:
     assert gates.no_progress(["FAILED test_a - AssertionError",
                               "FAILED test_a - AssertionError"]) is True
     assert gates.no_progress(["FAILED test_a", "FAILED test_b"]) is False
     assert gates.no_progress(["FAILED test_a"]) is False
+
+
+def test_no_progress_catches_oscillating_signatures() -> None:
+    """2026-08 red-team G3: an A,B,A,B loop never trips a consecutive-pair
+    test — the two recorded burn incidents ran 19 and 38 rounds on exactly
+    this shape. Revisiting ANY earlier signature is no-progress."""
+    assert gates.no_progress(["sig A", "sig B", "sig A"]) is True
+    assert gates.no_progress(["sig A", "sig B", "sig C", "sig B"]) is True
+    # a genuinely new failure is still progress
+    assert gates.no_progress(["sig A", "sig B", "sig C"]) is False
+
+
+def test_loop_round_counts_durably_and_resets(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.loop_round(store, "run-1", "wall:p1") == 1
+    assert gates.loop_round(store, "run-1", "wall:p1") == 2
+    # independent loops and runs do not share counters
+    assert gates.loop_round(store, "run-1", "wall:p2") == 1
+    assert gates.loop_round(store, "run-2", "wall:p1") == 1
+    gates.reset_loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round(store, "run-1", "wall:p1") == 1
+    # reset-all drops every counter for the run, others untouched
+    gates.reset_loop_round(store, "run-1", None)
+    assert gates.loop_round(store, "run-1", "wall:p2") == 1
+    assert gates.loop_round(store, "run-2", "wall:p1") == 2
+
+
+def test_loop_round_shape_guard_refuses_conflicting_store(tmp_path) -> None:
+    import json
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"_loops": "not-a-dict"}))
+    import pytest
+    with pytest.raises(SystemExit):
+        gates.loop_round(store, "run-1", "wall:p1")
 
 
 # ── Stream G: spec/tasks coherence analyze ───────────────────────────────────

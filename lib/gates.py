@@ -86,6 +86,12 @@ FAILURE_MARKERS = re.compile(r"\bfailed\b|\berror\b|\bFAIL(ED)?\b|\bERROR\b|\bAs
 
 TEST_FILE_PAT = re.compile(r"(^|/)(tests?/|test_[^/]+$|[^/]+[._-]test\.[a-z]+$|[^/]+\.spec\.[a-z]+$)")
 CI_FILE_PAT = re.compile(r"\.github/workflows/|\.gitlab-ci|Jenkinsfile|\.circleci/")
+# G2 (2026-08 red-team): the gate implementation and the evidence ledger are
+# themselves tamper surfaces — an agent editing its own gates or committing
+# a store file should surface as a finding. Advisory tier in this repo's CI
+# (these files are the product here and change legitimately); consumer repos
+# can treat it as failing.
+GATE_FILE_PAT = re.compile(r"(^|/)lib/gates\.py$|(^|/)\.feature-fix-swarm/")
 
 
 # ── Stream A: completion authority ───────────────────────────────────────────
@@ -321,6 +327,8 @@ def scan_test_tampering(diff_text: str) -> list[str]:
             in_test_file = bool(TEST_FILE_PAT.search(path))
             if line.startswith("+++ ") and CI_FILE_PAT.search(path):
                 findings.append(f"CI/workflow file edited: {path}")
+            if line.startswith("+++ ") and GATE_FILE_PAT.search(path):
+                findings.append(f"gate/ledger file edited: {path}")
             continue
         if line.startswith("-") and not line.startswith("---"):
             # deletions of asserts are suspicious everywhere: in tests they
@@ -350,15 +358,72 @@ def check_test_separation(changed_files: list[str], task_kind: str) -> list[str]
 # ── Stream E: no-progress detection ──────────────────────────────────────────
 
 def no_progress(failure_signatures: list[str]) -> bool:
-    """True when the last two failure signatures are identical — the loop is
-    stuck; stop and report instead of burning retries."""
-    return len(failure_signatures) >= 2 and failure_signatures[-1] == failure_signatures[-2]
+    """True when the latest failure signature has been seen before ANYWHERE
+    in the history — the loop is revisiting old ground; stop and report
+    instead of burning retries.
+
+    Was "last two identical" until the 2026-08 autonomy red-team: an
+    oscillating loop (A,B,A,B,…) never trips a consecutive-pair test, and
+    the two recorded burn incidents ran 19 and 38 rounds. Set membership
+    catches revisits regardless of interleaving; genuinely NEW failures
+    still count as progress."""
+    return (len(failure_signatures) >= 2
+            and failure_signatures[-1] in failure_signatures[:-1])
+
+
+def _loops_ns(data: dict, run_id: str) -> dict:
+    """Shape guard for the `_loops` store namespace (2026-08 autonomy
+    red-team G3, ports the `_promotions_ns` idiom): `_loops` must be a
+    dict-of-dicts or absent; a per-run entry must be a dict of
+    loop-name -> round-count. Violations raise SystemExit rather than
+    silently clobbering an unrelated record."""
+    loops = data.setdefault("_loops", {})
+    if not isinstance(loops, dict):
+        raise SystemExit("loop-round: store key '_loops' is not a dict "
+                         "(schema conflict — refusing to overwrite)")
+    run_entry = loops.setdefault(run_id, {})
+    if not isinstance(run_entry, dict):
+        raise SystemExit(f"loop-round: '_loops[{run_id}]' is not a dict "
+                         "(schema conflict — refusing to overwrite)")
+    return run_entry
+
+
+def loop_round(store: Path, run_id: str, loop_name: str) -> int:
+    """Increment the named loop's round counter for this run and return the
+    new round number (1-based). The CAP decision belongs to the caller (the
+    CLI compares against --max) — this function only counts durably, so an
+    orchestrator restart cannot reset a loop back to round 0."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        run_entry = _loops_ns(data, run_id)
+        current = run_entry.get(loop_name)
+        n = (current if isinstance(current, int) and current >= 0 else 0) + 1
+        run_entry[loop_name] = n
+        _save_store(store, data)
+    return n
+
+
+def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
+    """Clear the named loop counter, or EVERY counter for the run when
+    loop_name is None (run-finalizer's run-end sweep — a spec's run_id is
+    stable across runs, so a landed run must drop its counters or the next
+    run of the same spec starts pre-capped)."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        if loop_name is None:
+            loops = data.get("_loops")
+            if isinstance(loops, dict):
+                loops.pop(run_id, None)
+        else:
+            run_entry = _loops_ns(data, run_id)
+            run_entry.pop(loop_name, None)
+        _save_store(store, data)
 
 
 def note_failure(store: Path, task_id: str, signature: str) -> bool:
     """Append a failure signature to the task's history and report whether
-    the loop is stuck (same signature twice in a row). Wires no_progress
-    into the retry loop via the evidence store.
+    the loop is stuck (signature seen before in the history). Wires
+    no_progress into the retry loop via the evidence store.
     Blank/whitespace signatures are IGNORED (not recorded, never stuck) —
     two empty captures would otherwise stop the loop with a false
     NO-PROGRESS (codex gate round 2, v3.14)."""
@@ -1283,7 +1348,31 @@ def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) ->
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _store_path() -> Path:
-    return Path(os.environ.get("GATES_STORE", ".feature-fix-swarm/evidence.json"))
+    """Resolve the evidence store. $GATES_STORE always wins; the DEFAULT is
+    pinned to the MAIN checkout via `git rev-parse --git-common-dir` rather
+    than cwd (2026-08 red-team G5): a cwd-relative default silently
+    fragments the ledger across worktrees — 4 distinct evidence.json were
+    live at audit time — so grants/evidence recorded in one worktree are
+    invisible to another, which stalls runs or lets them re-grant. One
+    store also makes _StoreLock actually serialize parallel sessions.
+    Non-git cwd (or any probe failure) keeps today's relative default."""
+    env = os.environ.get("GATES_STORE")
+    if env:
+        return Path(env)
+    try:
+        probe = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                               capture_output=True, text=True, timeout=5)
+        if probe.returncode == 0:
+            common = Path(probe.stdout.strip())
+            # main checkout returns ".git" (relative) — parent is "." so the
+            # result equals the historic default; a linked worktree returns
+            # the ABSOLUTE main .git dir, which is the fix. Bare/odd layouts
+            # (name != .git) fall through to the historic default.
+            if common.name == ".git":
+                return common.parent / ".feature-fix-swarm" / "evidence.json"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return Path(".feature-fix-swarm/evidence.json")
 
 
 # ── delegation-audit: orchestrator discipline (advisory, never blocks) ───────
@@ -1648,9 +1737,55 @@ def main(argv: list[str]) -> int:
         return 0 if ok else 1
     if cmd == "note-failure":
         stuck = note_failure(store, args[0], _flag(args, "--sig"))
-        print("NO-PROGRESS: same failure signature twice in a row — stop and report"
+        print("NO-PROGRESS: failure signature already seen this run — stop and report"
               if stuck else "PROGRESS-OK")
         return 1 if stuck else 0
+    if cmd == "loop-round":
+        # loop-round <run_id> <loop_name> --max N   (increment-and-check)
+        parser = argparse.ArgumentParser(prog="gates.py loop-round",
+                                         add_help=False, allow_abbrev=False)
+        parser.add_argument("run_id")
+        parser.add_argument("loop_name", nargs="?")
+        parser.add_argument("--max", type=int)
+        parser.add_argument("--reset", action="store_true")
+        parser.add_argument("--reset-all", action="store_true")
+        try:
+            ns = parser.parse_args(args)
+        except SystemExit:
+            return 2
+        if ns.reset_all:
+            reset_loop_round(store, ns.run_id, None)
+            print(f"LOOP-RESET-ALL: (run {ns.run_id})")
+            return 0
+        if ns.loop_name is None:
+            print("LOOP-ROUND-REJECTED: loop name required unless --reset-all",
+                  file=sys.stderr)
+            return 2
+        if ns.reset:
+            reset_loop_round(store, ns.run_id, ns.loop_name)
+            print(f"LOOP-RESET: {ns.loop_name} (run {ns.run_id})")
+            return 0
+        if ns.max is None or ns.max < 1:
+            print("LOOP-ROUND-REJECTED: --max must be >= 1", file=sys.stderr)
+            return 2
+        try:
+            n = loop_round(store, ns.run_id, ns.loop_name)
+        except (OSError, json.JSONDecodeError) as exc:
+            # Counter INFRASTRUCTURE failure (unreadable/corrupt/unwritable
+            # store) is rc=3, distinct from cap-hit (1) and usage (2): the
+            # caller must fail OPEN on it — a broken store already has its
+            # own authoritative failure path downstream (plan-wall's
+            # queue_error blocked verdict), and a guard's plumbing failure
+            # must never impersonate the guard firing.
+            print(f"LOOP-ROUND-ERROR: store unusable ({exc})", file=sys.stderr)
+            return 3
+        if n > ns.max:
+            print(f"LOOP-CAP: {ns.loop_name} round {n} exceeds max {ns.max} "
+                  f"(run {ns.run_id}) — quarantine this item and move on; "
+                  f"raise with --max or reset with --reset after operator review")
+            return 1
+        print(f"LOOP-ROUND: {ns.loop_name} round {n}/{ns.max} (run {ns.run_id})")
+        return 0
     if cmd == "proof":
         # argparse fails closed on every malformed shape the hand parser kept
         # leaking (codex rounds 1-4): missing run id, trailing/optionless

@@ -168,6 +168,15 @@ headless runner (`gsd-run.sh`) invokes the SAME lever again at its own
 pre-execution seam (beside `requirement-ownership-gate.sh`), so a direct
 runner call cannot bypass this wall either.
 
+Exit 3 = `WALL-ROUND-CAP` (durable per-phase round cap, default
+`PLAN_WALL_MAX_ROUNDS=3`): this is TERMINAL for the phase, not a retryable
+BLOCKED — do NOT start another fix round. Quarantine the phase (record the
+open findings + the printed unblock commands in the run report / pendings)
+and move to other runnable work; the cap exists because uncounted
+wall→fix→wall loops have burned 19 rounds/2 days and 38+ turns/a week of
+vendor quota. Only an operator-reviewed findings resolution (or a deliberate
+`PLAN_WALL_MAX_ROUNDS` raise) reopens it.
+
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.
 - Interactive Codex session: invoke `$gsd-execute-phase N` directly.

@@ -37,6 +37,39 @@ jobs:
           python scripts/lint_host_dispatch.py skills/*/SKILL.md
           python scripts/lint_model_routing.py
           python lib/model_requests.py lint templates/model-requests.json
+  tamper:
+    # G2 (2026-08 red-team): the reward-hacking scanner ran on the honor
+    # system — administered by the entity it guards. Run it server-side on
+    # every PR diff. Strong signals (deleted asserts, weakened assertions,
+    # test skips, unconditional zero-exit additions) FAIL the job;
+    # path-edit signals (CI/workflow, gate/ledger files) are printed as
+    # warnings only — in THIS repo those files are the product and change
+    # legitimately. (Wording note: this comment deliberately avoids the
+    # scanner's own literal patterns — it scans added lines, comments
+    # included, and flagged the first version of itself.)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: scan PR diff for reward-hacking moves
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch -q origin "$BASE_REF"
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
+          python3 lib/gates.py scan-tamper < /tmp/pr.diff > /tmp/findings.txt || true
+          cat /tmp/findings.txt
+          if grep -E '^TAMPER:' /tmp/findings.txt \
+            | grep -vE '^TAMPER: (CI/workflow file edited|gate/ledger file edited)' \
+            | grep -q .; then
+            echo "::error::tamper findings above — deleted/weakened asserts, skips, or exit-0 in this diff"
+            exit 1
+          fi
+
   shellcheck:
     runs-on: ubuntu-latest
     timeout-minutes: 10
