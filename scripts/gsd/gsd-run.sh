@@ -250,6 +250,29 @@ if [ -n "${GSD_RUN_ID:-}" ] && [ "$_safe_run_id" != "$RUN_ID" ]; then
 fi
 RUN_ID="$_safe_run_id"
 unset _safe_run_id
+
+# Coord identity/config (P-22..P-31). RUN_COORD_ID is the claim key and is
+# set ONLY when the caller exported an explicit GSD_RUN_ID -- the auto-derived
+# date+pid RUN_ID (above) is unique per invocation by construction, so
+# claiming it could never return CLAIM-HELD and would buy zero collision
+# protection while showing the run as coordinated in `coord.py status`. When
+# set, RUN_COORD_ID is RUN_ID VERBATIM: never truncated, padded, lowercased
+# or otherwise rewritten to fit coord.py's own CLAIM_ID_RE (64 bytes,
+# alphanumeric-anchored) -- gsd-run.sh:246-251 above already proves RUN_ID
+# fits ITS OWN [A-Za-z0-9_.-]{1,128} superset, and coord.py's exit 2
+# propagates verbatim through the pre-existing `acquire_run_state || exit $?`
+# at the bottom of this file rather than being silently repaired here.
+export FFS_RUN_ID="$RUN_ID"
+# The long-lived runner process is the claim's anchor, never a transient
+# command-substitution subshell (which os.getppid() would otherwise resolve
+# to and which is already dead by the time a peer checks staleness).
+export FFS_COORD_ANCHOR_PID="$$"
+RUN_COORD_GENERATION=""
+RUN_COORD_TTL=300
+COORD_PY="$SCRIPT_DIR/../coord/coord.py"
+RUN_COORD_ID=""
+[ -z "${GSD_RUN_ID:-}" ] || RUN_COORD_ID="$RUN_ID"
+
 RUN_WORKTREE_ROOT="$PROJECT_PRIMARY_ROOT/.claude/worktrees/$RUN_ID"
 CODEX_RUNTIME_HOME=""
 CODEX_CLI_VERSION=""
@@ -294,6 +317,63 @@ write_heartbeat() {
     rm -f "$tmp"
     return 1
   fi
+}
+
+# coord_claim_run (P-22, P-24, P-25, P-28). Called INSIDE acquire_run_state,
+# after the run-state pidfile ownership confirmation and BEFORE the heartbeat
+# subshell forks, so the fork's copy of RUN_COORD_GENERATION is already
+# populated when the subshell is created (P-28's whole read-side proof).
+coord_claim_run() {
+  # FIRST: coord.py absent -> silent no-op, no stdout, no stderr (P-25
+  # fail-soft). Probing RUN_COORD_ID first would print a new stderr line in
+  # every coord-less repo and break "byte-identical to today".
+  [ -f "$COORD_PY" ] || return 0
+  # SECOND: coord layer present but no explicit GSD_RUN_ID -> no claim is
+  # attempted, one stderr notice naming the remedy (P-22/P-23). The 31+
+  # pre-existing cases run with no GSD_RUN_ID; this order keeps them silent.
+  if [ -z "$RUN_COORD_ID" ]; then
+    echo "gsd-run: automatic coord claim skipped (no explicit GSD_RUN_ID exported); export a spec-stable GSD_RUN_ID or claim manually per docs/coordination.md" >&2
+    return 0
+  fi
+  local output rc
+  output="$(python3 "$COORD_PY" claim "$RUN_COORD_ID" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    RUN_COORD_GENERATION="$(printf '%s\n' "$output" | sed -n 's/^CLAIM-OK generation=\([0-9]*\)$/\1/p' | head -1)"
+    # ONE extra subprocess, at acquire only, never per tick: read the
+    # claim's OWN ttl_secs (idempotent re-claims and manual --ttl grants
+    # carry it forward) rather than assuming DEFAULT_TTL_SECS, which is
+    # what P-24b's staleness budget below is measured against.
+    local status_line claim_ttl
+    status_line="$(python3 "$COORD_PY" status 2>/dev/null | grep -F "claim:$RUN_COORD_ID ")"
+    claim_ttl="$(printf '%s\n' "$status_line" | sed -n 's/.*ttl_secs=\([0-9]*\).*/\1/p' | head -1)"
+    if [ -n "$claim_ttl" ]; then
+      RUN_COORD_TTL="$claim_ttl"
+    else
+      echo "gsd-run: could not read claim ttl_secs from coord status; using default ${RUN_COORD_TTL}s" >&2
+    fi
+    return 0
+  fi
+  # Never remap a coord exit code to gsd-run.sh's own 75, and never retry
+  # with a modified id -- the caller's exact value already went to coord.py.
+  echo "gsd-run: coord claim failed for $RUN_COORD_ID (rc=$rc): $output" >&2
+  case "$rc" in
+    2) echo "gsd-run: id rejected by coord.py's CLAIM_ID_RE (alphanumeric-anchored, 64-byte cap) -- shorten GSD_RUN_ID and retry; it is never truncated for you" >&2 ;;
+    69) echo "gsd-run: coord store unavailable -- run 'python3 scripts/coord/coord.py doctor', set FFS_COORD_MODE=off, or 'python3 -m pip install --requirement requirements-dev.txt'" >&2 ;;
+  esac
+  return "$rc"
+}
+
+# coord_release_run (P-24). Called from cleanup_runner, on every exit path.
+coord_release_run() {
+  [ -f "$COORD_PY" ] || return 0
+  # Guards implied ownership: RUN_COORD_GENERATION is non-empty only if
+  # coord_claim_run succeeded, which only runs after acquire_run_state's
+  # pidfile ownership confirmation succeeded -- so a second entry (double
+  # cleanup_runner) or an entry by a run that never claimed is a no-op.
+  [ -n "$RUN_COORD_GENERATION" ] || return 0
+  python3 "$COORD_PY" release "$RUN_COORD_ID" --generation "$RUN_COORD_GENERATION" >/dev/null 2>&1 || true
+  RUN_COORD_GENERATION=""
 }
 
 file_epoch() {
@@ -446,6 +526,13 @@ acquire_run_state() {
   write_run_status probing
   heartbeat_secs="${GSD_HEARTBEAT_SECS:-15}"
   case "$heartbeat_secs" in ''|*[!0-9]*|0) heartbeat_secs=15 ;; esac
+  # AFTER the pidfile ownership confirmation above (a losing pidfile
+  # contender already returned 75 and never reaches here) and BEFORE the
+  # heartbeat subshell forks below -- a claim taken after the fork would
+  # leave the subshell's copy of RUN_COORD_GENERATION empty for the run's
+  # whole life (P-28). `return $?` (never `exit`) lets the pre-existing
+  # `acquire_run_state || exit $?` propagate coord.py's own code verbatim.
+  coord_claim_run || return $?
   (
     heartbeat_sleep=""
     trap '[ -z "$heartbeat_sleep" ] || kill "$heartbeat_sleep" 2>/dev/null || true; exit 0' TERM INT
@@ -596,6 +683,11 @@ cleanup_runner() {
     wait "$RUN_HEARTBEAT_PID" 2>/dev/null || true
   fi
   cleanup_codex_runtime || auth_rc=$?
+  # Every exit path unwinds through this trap (gsd-run.sh:614), so this is
+  # the one release site for normal, non-zero, timeout, external SIGTERM and
+  # the mid-run coord self-kill alike (P-24). The heartbeat subshell has
+  # already been killed above, so no renew can race this release.
+  coord_release_run
   if [ "$auth_rc" -ne 0 ]; then
     echo "gsd-run: OAuth refresh synchronization failed (rc=$auth_rc)" >&2
     [ "$rc" -ne 0 ] || rc="$auth_rc"
