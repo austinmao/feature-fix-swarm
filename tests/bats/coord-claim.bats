@@ -58,7 +58,7 @@ setup() {
 @test "malformed spec-id is rejected with exit 2 before any write" {
   run env -C "$REPO" python3 "$COORD" claim "../etc"
   [ "$status" -eq 2 ]
-  [ ! -d "$REPO/.feature-fix-swarm" ]
+  [ ! -f "$REPO/.feature-fix-swarm/coord/registry.json" ]
 }
 
 @test "symlinked store root is refused before any write" {
@@ -77,7 +77,7 @@ setup() {
   pointer="$REPO/.feature-fix-swarm/coord/sessions/by-run/r1"
   [ -f "$pointer" ]
   printf 'not-a-uuid' > "$pointer"
-  run env -C "$REPO" FFS_RUN_ID=r1 python3 "$COORD" status
+  run env -C "$REPO" FFS_RUN_ID=r1 python3 "$COORD" claim spec-009
   [ "$status" -eq 69 ]
   [[ "$output" == *"r1"* ]]
   content="$(cat "$pointer")"

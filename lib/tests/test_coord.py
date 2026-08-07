@@ -23,6 +23,7 @@ COORD_PATH = REPO_ROOT / "scripts" / "coord" / "coord.py"
 
 _spec = importlib.util.spec_from_file_location("coord_under_test", COORD_PATH)
 coord = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = coord  # dataclasses' postponed-annotation resolution needs this registered
 _spec.loader.exec_module(coord)
 
 
@@ -269,15 +270,18 @@ def test_anchor_pid_defaults_to_parent_and_env_wins(repo, monkeypatch):
 
 def test_claim_survives_claiming_cli_process_exit(repo, monkeypatch):
     """REQ-04 regression guard: liveness is judged on the ANCHOR, never the
-    coord.py CLI pid — a claim survives its own claiming command exiting."""
-    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(os.getpid()))
+    coord.py CLI pid — a claim survives its own claiming command exiting.
+    In-process (no FFS_COORD_ANCHOR_PID override) the anchor defaults to
+    os.getppid(), which necessarily differs from this process's own pid."""
+    monkeypatch.delenv("FFS_COORD_ANCHOR_PID", raising=False)
     store = coord._open_store()
     try:
         args = argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None)
         coord.cmd_claim(store, args)
         with coord.registry_transaction(store) as registry:
             entry = registry["claims"]["claim:spec-009"]
-        assert entry["holder_anchor_pid"] == os.getpid()
+        assert entry["holder_anchor_pid"] == os.getppid()
+        assert entry["cli_pid"] == os.getpid()
         assert entry["cli_pid"] != entry["holder_anchor_pid"]
     finally:
         coord._close_store(store)
@@ -288,18 +292,29 @@ def argparse_namespace(**kw):
     return argparse.Namespace(**kw)
 
 
+def _spawn_anchor():
+    """A real, killable process to stand in for a session's anchor — a
+    genuinely-dead PID never captures a start token at mint, which the
+    rebind rule (correctly) classifies UNPROBEABLE rather than STALE."""
+    return sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
 # ── anchor rebind (threat T-01-13, T-01-16) ─────────────────────────────
 def test_anchor_rebind_on_dead_anchor_adoption(repo, monkeypatch):
-    dead_pid = 999998
-    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(dead_pid))
+    anchor = _spawn_anchor()
+    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(anchor.pid))
     monkeypatch.setenv("FFS_RUN_ID", "r1")
     store = coord._open_store()
     try:
         original = coord.resolve_identity(store)
-        assert original["anchor_pid"] == dead_pid
+        assert original["anchor_pid"] == anchor.pid
+        assert original["anchor_start_token"] is not None
         coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
     finally:
         coord._close_store(store)
+
+    anchor.kill()
+    anchor.wait(timeout=5)
 
     live_pid = os.getpid()
     monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(live_pid))
@@ -335,8 +350,8 @@ def test_anchor_rebind_does_not_happen_while_anchor_alive(repo, monkeypatch):
 
 
 def test_rebind_ordering_registry_written_before_session_record(repo, monkeypatch):
-    dead_pid = 999997
-    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(dead_pid))
+    anchor = _spawn_anchor()
+    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(anchor.pid))
     monkeypatch.setenv("FFS_RUN_ID", "r1")
     store = coord._open_store()
     try:
@@ -344,6 +359,9 @@ def test_rebind_ordering_registry_written_before_session_record(repo, monkeypatc
         coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
     finally:
         coord._close_store(store)
+
+    anchor.kill()
+    anchor.wait(timeout=5)
 
     live_pid = os.getpid()
     monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(live_pid))
