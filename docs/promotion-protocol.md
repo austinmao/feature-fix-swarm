@@ -17,6 +17,18 @@ below is one sentence, followed by the mechanism that enforces it today.
 11. Environment drift is machine-detected on a recurring basis, not tracked from memory (Enforcement: the parity manifest and its read-only audit lever).
 12. An emergency bypass exists, is restricted to an operator, and is loudly and durably recorded (Enforcement: the evidence ledger's operator-only emergency escape, grant- and reason-gated).
 
+## Accepted risk: loop credential scope (operator decision, 2026-08-07)
+
+The autonomous loop's GitHub credential retains `repo` (including repo
+administration) and `workflow` scopes. That means branch protection on `main`
+and the workflow definitions the required checks come from are editable from
+inside the loop — the one control an agent's shell cannot otherwise reach.
+The recommended mitigation (a fine-grained PAT without `administration`/
+`workflow` for autonomous runs, keeping the broad token interactive-only) was
+explicitly declined by the operator; the risk is accepted as-is. Compensating
+controls: the `tamper` CI job scans every PR diff for gate-weakening moves,
+and GitHub's audit log records `protected_branch.*` mutations post-hoc.
+
 ## Maintenance obligations
 
 The set of action-name prefixes that this protocol treats as production-targeting

@@ -86,6 +86,12 @@ FAILURE_MARKERS = re.compile(r"\bfailed\b|\berror\b|\bFAIL(ED)?\b|\bERROR\b|\bAs
 
 TEST_FILE_PAT = re.compile(r"(^|/)(tests?/|test_[^/]+$|[^/]+[._-]test\.[a-z]+$|[^/]+\.spec\.[a-z]+$)")
 CI_FILE_PAT = re.compile(r"\.github/workflows/|\.gitlab-ci|Jenkinsfile|\.circleci/")
+# G2 (2026-08 red-team): the gate implementation and the evidence ledger are
+# themselves tamper surfaces — an agent editing its own gates or committing
+# a store file should surface as a finding. Advisory tier in this repo's CI
+# (these files are the product here and change legitimately); consumer repos
+# can treat it as failing.
+GATE_FILE_PAT = re.compile(r"(^|/)lib/gates\.py$|(^|/)\.feature-fix-swarm/")
 
 
 # ── Stream A: completion authority ───────────────────────────────────────────
@@ -321,6 +327,8 @@ def scan_test_tampering(diff_text: str) -> list[str]:
             in_test_file = bool(TEST_FILE_PAT.search(path))
             if line.startswith("+++ ") and CI_FILE_PAT.search(path):
                 findings.append(f"CI/workflow file edited: {path}")
+            if line.startswith("+++ ") and GATE_FILE_PAT.search(path):
+                findings.append(f"gate/ledger file edited: {path}")
             continue
         if line.startswith("-") and not line.startswith("---"):
             # deletions of asserts are suspicious everywhere: in tests they
@@ -1340,7 +1348,31 @@ def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) ->
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _store_path() -> Path:
-    return Path(os.environ.get("GATES_STORE", ".feature-fix-swarm/evidence.json"))
+    """Resolve the evidence store. $GATES_STORE always wins; the DEFAULT is
+    pinned to the MAIN checkout via `git rev-parse --git-common-dir` rather
+    than cwd (2026-08 red-team G5): a cwd-relative default silently
+    fragments the ledger across worktrees — 4 distinct evidence.json were
+    live at audit time — so grants/evidence recorded in one worktree are
+    invisible to another, which stalls runs or lets them re-grant. One
+    store also makes _StoreLock actually serialize parallel sessions.
+    Non-git cwd (or any probe failure) keeps today's relative default."""
+    env = os.environ.get("GATES_STORE")
+    if env:
+        return Path(env)
+    try:
+        probe = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                               capture_output=True, text=True, timeout=5)
+        if probe.returncode == 0:
+            common = Path(probe.stdout.strip())
+            # main checkout returns ".git" (relative) — parent is "." so the
+            # result equals the historic default; a linked worktree returns
+            # the ABSOLUTE main .git dir, which is the fix. Bare/odd layouts
+            # (name != .git) fall through to the historic default.
+            if common.name == ".git":
+                return common.parent / ".feature-fix-swarm" / "evidence.json"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return Path(".feature-fix-swarm/evidence.json")
 
 
 # ── delegation-audit: orchestrator discipline (advisory, never blocks) ───────
