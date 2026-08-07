@@ -136,6 +136,40 @@ def test_no_progress_when_same_failure_repeats() -> None:
     assert gates.no_progress(["FAILED test_a"]) is False
 
 
+def test_no_progress_catches_oscillating_signatures() -> None:
+    """2026-08 red-team G3: an A,B,A,B loop never trips a consecutive-pair
+    test — the two recorded burn incidents ran 19 and 38 rounds on exactly
+    this shape. Revisiting ANY earlier signature is no-progress."""
+    assert gates.no_progress(["sig A", "sig B", "sig A"]) is True
+    assert gates.no_progress(["sig A", "sig B", "sig C", "sig B"]) is True
+    # a genuinely new failure is still progress
+    assert gates.no_progress(["sig A", "sig B", "sig C"]) is False
+
+
+def test_loop_round_counts_durably_and_resets(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.loop_round(store, "run-1", "wall:p1") == 1
+    assert gates.loop_round(store, "run-1", "wall:p1") == 2
+    # independent loops and runs do not share counters
+    assert gates.loop_round(store, "run-1", "wall:p2") == 1
+    assert gates.loop_round(store, "run-2", "wall:p1") == 1
+    gates.reset_loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round(store, "run-1", "wall:p1") == 1
+    # reset-all drops every counter for the run, others untouched
+    gates.reset_loop_round(store, "run-1", None)
+    assert gates.loop_round(store, "run-1", "wall:p2") == 1
+    assert gates.loop_round(store, "run-2", "wall:p1") == 2
+
+
+def test_loop_round_shape_guard_refuses_conflicting_store(tmp_path) -> None:
+    import json
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"_loops": "not-a-dict"}))
+    import pytest
+    with pytest.raises(SystemExit):
+        gates.loop_round(store, "run-1", "wall:p1")
+
+
 # ── Stream G: spec/tasks coherence analyze ───────────────────────────────────
 
 SPEC = """# Spec
