@@ -1768,7 +1768,17 @@ def main(argv: list[str]) -> int:
         if ns.max is None or ns.max < 1:
             print("LOOP-ROUND-REJECTED: --max must be >= 1", file=sys.stderr)
             return 2
-        n = loop_round(store, ns.run_id, ns.loop_name)
+        try:
+            n = loop_round(store, ns.run_id, ns.loop_name)
+        except (OSError, json.JSONDecodeError) as exc:
+            # Counter INFRASTRUCTURE failure (unreadable/corrupt/unwritable
+            # store) is rc=3, distinct from cap-hit (1) and usage (2): the
+            # caller must fail OPEN on it — a broken store already has its
+            # own authoritative failure path downstream (plan-wall's
+            # queue_error blocked verdict), and a guard's plumbing failure
+            # must never impersonate the guard firing.
+            print(f"LOOP-ROUND-ERROR: store unusable ({exc})", file=sys.stderr)
+            return 3
         if n > ns.max:
             print(f"LOOP-CAP: {ns.loop_name} round {n} exceeds max {ns.max} "
                   f"(run {ns.run_id}) — quarantine this item and move on; "

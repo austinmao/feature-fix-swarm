@@ -767,11 +767,20 @@ PW_MAX_ROUNDS="${PLAN_WALL_MAX_ROUNDS:-3}"
 case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=3 ;; esac
 [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=3
 if [ "${PLAN_WALL:-on}" != off ]; then
-  if ! python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
-      --max "$PW_MAX_ROUNDS" >&2; then
+  _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
+      --max "$PW_MAX_ROUNDS" 2>&1)"
+  _pw_lr_rc=$?
+  printf '%s\n' "$_pw_lr_out" >&2
+  if [ "$_pw_lr_rc" -ne 0 ] && printf '%s' "$_pw_lr_out" | grep -q '^LOOP-CAP:'; then
     echo "plan-wall: WALL-ROUND-CAP $TARGET — $PW_MAX_ROUNDS wall rounds exhausted for this phase without convergence" >&2
     echo "plan-wall: quarantine this phase and move on. Unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:$PHASE_SLUG --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
     exit 3
+  elif [ "$_pw_lr_rc" -ne 0 ]; then
+    # Counter plumbing failed (corrupt/unwritable store, missing python…).
+    # Fail OPEN: the cap is a guard, and a guard's infrastructure failure
+    # must not impersonate the guard firing — the wall's own queue_error
+    # path downstream is the authority on a broken store.
+    echo "plan-wall: WARN: round counter unavailable (loop-round rc=$_pw_lr_rc) — proceeding without cap this invocation" >&2
   fi
 fi
 

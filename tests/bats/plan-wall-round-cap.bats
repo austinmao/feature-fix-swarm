@@ -89,6 +89,23 @@ run_wall() {
   [ "$status" -eq 3 ]
 }
 
+@test "round cap: counter infrastructure failure fails OPEN, never impersonates the cap" {
+  # An empty read-only store makes loop-round's _load_store raise
+  # (JSONDecodeError) — rc=3 LOOP-ROUND-ERROR. The wall must WARN and
+  # proceed unbounded (the queue_error path downstream owns broken-store
+  # reporting), never exit 3. Regression for PR #91 round 1: any nonzero
+  # from loop-round was read as cap-hit, breaking plan-wall.bats' own
+  # queue-I/O fault-injection case.
+  mkdir -p "$(dirname "$GATES_STORE")"
+  : > "$GATES_STORE"
+  chmod 444 "$GATES_STORE"
+  run bash "$LEVER" .planning/phases/1-foo
+  chmod 644 "$GATES_STORE"
+  [ "$status" -ne 3 ]
+  [[ "$output" == *"round counter unavailable"* ]]
+  [[ "$output" != *"WALL-ROUND-CAP"* ]]
+}
+
 @test "round cap: distinct phases count independently" {
   mkdir -p .planning/phases/2-bar
   echo "Phase 2: another plain widget" > .planning/phases/2-bar/PLAN.md
