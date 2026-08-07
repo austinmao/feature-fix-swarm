@@ -209,3 +209,65 @@ assert d['generations']['claim:spec-009']['gen'] == 1, d['generations']
   [[ "$output" == *"$holder_sid"* ]]
   [[ "$output" == *"expires_at"* ]]
 }
+
+# ── Task 3: staleness, fencing, release, doctor/status ──────────────────────
+
+@test "REQ-04: a claim survives while its anchor lives, reclaims once the anchor is killed, and the superseded holder is fenced" {
+  # spawn a real background anchor process; claim under it; let the
+  # claiming CLI itself exit (it always does — every coord.py invocation is
+  # short-lived) — the claim must still be held.
+  ( sleep 60 ) &
+  anchor_pid=$!
+
+  run env -C "$REPO" FFS_COORD_ANCHOR_PID="$anchor_pid" python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+
+  # claiming CLI is long gone; anchor still alive -> a peer is refused
+  run env -C "$REPO" FFS_RUN_ID=peer python3 "$COORD" claim spec-009
+  [ "$status" -eq 3 ]
+
+  # now kill the anchor -> the peer reclaims at generation 2
+  kill "$anchor_pid" 2>/dev/null || true
+  wait "$anchor_pid" 2>/dev/null || true
+  run env -C "$REPO" FFS_RUN_ID=peer python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"generation=2"* ]]
+
+  # the superseded original holder's claim-check at generation 1 is fenced
+  run env -C "$REPO" python3 "$COORD" claim-check spec-009 --generation 1
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"CLAIM-SUPERSEDED"* ]]
+
+  # the new holder's claim-check at generation 2 succeeds
+  run env -C "$REPO" FFS_RUN_ID=peer python3 "$COORD" claim-check spec-009 --generation 2
+  [ "$status" -eq 0 ]
+}
+
+@test "REQ-12: doctor exits 69 COORD-UNAVAILABLE with a shimmed filelock lacking the version floor, no traceback" {
+  shim_dir="$BATS_TEST_TMPDIR/shim-old"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/filelock.py" <<'PYEOF'
+__version__ = "3.29.0"
+class FileLock: pass
+class Timeout(Exception): pass
+PYEOF
+  run env -C "$REPO" PYTHONPATH="$shim_dir" python3 "$COORD" doctor
+  [ "$status" -eq 69 ]
+  [[ "$output" == *"COORD-UNAVAILABLE"* ]]
+  [[ "$output" != *"Traceback"* ]]
+
+  run env -C "$REPO" PYTHONPATH="$shim_dir" python3 "$COORD" claim spec-009
+  [ "$status" -eq 69 ]
+  [[ "$output" == *"COORD-UNAVAILABLE"* ]]
+}
+
+@test "REQ-12: doctor exits 0 with the real filelock and reports version/store/mode/live-claims" {
+  run env -C "$REPO" python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+  run env -C "$REPO" python3 "$COORD" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"filelock_version="* ]]
+  [[ "$output" == *"store_path="* ]]
+  [[ "$output" == *"mode="* ]]
+  [[ "$output" == *"live_claims=1"* ]]
+}

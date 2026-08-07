@@ -499,3 +499,492 @@ def test_must_have_req02_single_store_per_repo(tmp_path, monkeypatch):
     monkeypatch.chdir(wt)
     root_from_wt = coord._coord_store_root()
     assert root_from_main == root_from_wt
+
+
+# ── Task 3: staleness, fencing, release authorization, doctor/status ───────
+def _spawn_dead_pid_source():
+    """A real subprocess whose pid we can capture a start token for, then
+    kill — the only way to produce an entry with a non-null recorded token
+    whose pid later proves dead (STALE), as opposed to a pid that was never
+    alive (UNPROBEABLE, null token from birth)."""
+    return sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def test_anchor_is_stale_verdicts(repo, monkeypatch):
+    live_pid = os.getpid()
+    live_token = coord._capture_start_token(live_pid)
+    assert coord._anchor_is_stale(live_pid, coord._host_name(), live_token) == "live"
+
+    proc = _spawn_dead_pid_source()
+    token = coord._capture_start_token(proc.pid)
+    assert token is not None
+    proc.kill()
+    proc.wait(timeout=5)
+    assert coord._anchor_is_stale(proc.pid, coord._host_name(), token) == "stale"
+
+    # unprobeable: null fields, foreign host, degraded module
+    assert coord._anchor_is_stale(None, coord._host_name(), 1) == "unprobeable"
+    assert coord._anchor_is_stale(live_pid, "some-other-host", live_token) == "unprobeable"
+    assert coord._anchor_is_stale(live_pid, coord._host_name(), None) == "unprobeable"
+
+    saved = coord._IDENTITY_MOD_CACHE
+    coord._IDENTITY_MOD_CACHE = None
+    try:
+        assert coord._anchor_is_stale(live_pid, coord._host_name(), live_token) == "unprobeable"
+    finally:
+        coord._IDENTITY_MOD_CACHE = saved
+
+
+def test_anchor_is_stale_unreadable_token_is_unprobeable_not_live_or_stale(repo, monkeypatch):
+    """The branch REQ-04 exists to get right: an unreadable token for a
+    LIVE pid is neither proof of life nor proof of death."""
+    live_pid = os.getpid()
+    real_mod = coord._identity_module()
+
+    class _FakeMod:
+        host_name = staticmethod(real_mod.host_name)
+        process_alive = staticmethod(real_mod.process_alive)
+
+        @staticmethod
+        def process_start_token(pid):
+            return None  # unreadable for every pid, simulating a probe failure
+
+    coord._IDENTITY_MOD_CACHE = _FakeMod
+    try:
+        verdict = coord._anchor_is_stale(live_pid, coord._host_name(), 12345)
+        assert verdict == "unprobeable"
+    finally:
+        coord._IDENTITY_MOD_CACHE = real_mod
+
+
+def _hand_stamp_claim(store, claim_id, **overrides):
+    key = coord._claim_key(claim_id)
+    with coord.registry_transaction(store) as registry:
+        gen_entry = registry["generations"].setdefault(
+            key, {"gen": 0, "last_holder_uuid": None, "released_at": None}
+        )
+        now = time.time()
+        gen_entry["gen"] = max(gen_entry["gen"], 1)
+        entry = {
+            "holder_uuid": "foreign-uuid",
+            "holder_anchor_pid": None,
+            "holder_anchor_start_token": None,
+            "holder_host": coord._host_name(),
+            "holder_worktree": str(store.store_root.parent.parent),
+            "generation": gen_entry["gen"],
+            "acquired_at": now,
+            "last_renewed_at": now,
+            "ttl_secs": coord.DEFAULT_TTL_SECS,
+            "expires_at": now + coord.DEFAULT_TTL_SECS,
+            "cli_pid": 0,
+        }
+        entry.update(overrides)
+        registry["claims"][key] = entry
+        coord._save_registry(store, registry)
+    return entry
+
+
+def test_reclaim_decision_worktree_gone_is_immediately_reclaimable(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "peer")
+    store = coord._open_store()
+    try:
+        _hand_stamp_claim(
+            store, "spec-009",
+            holder_worktree=str(store.store_root / "nonexistent-worktree"),
+            holder_anchor_pid=os.getpid(),
+            holder_anchor_start_token=coord._capture_start_token(os.getpid()),
+        )
+        rc = coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        assert rc == 0
+        with coord.registry_transaction(store) as registry:
+            assert registry["claims"]["claim:spec-009"]["generation"] == 2
+    finally:
+        coord._close_store(store)
+
+
+def test_reclaim_decision_stale_anchor_is_reclaimable(repo, monkeypatch):
+    proc = _spawn_dead_pid_source()
+    token = coord._capture_start_token(proc.pid)
+    monkeypatch.setenv("FFS_RUN_ID", "peer")
+    store = coord._open_store()
+    try:
+        _hand_stamp_claim(
+            store, "spec-009",
+            holder_anchor_pid=proc.pid,
+            holder_anchor_start_token=token,
+            holder_worktree=str(store.store_root.parent.parent),
+        )
+        proc.kill()
+        proc.wait(timeout=5)
+        rc = coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        assert rc == 0
+        with coord.registry_transaction(store) as registry:
+            assert registry["claims"]["claim:spec-009"]["generation"] == 2
+    finally:
+        coord._close_store(store)
+
+
+@pytest.mark.parametrize("multiplier", [1, 2, 10])
+def test_reclaim_decision_live_matching_anchor_never_reclaimable_at_any_age(repo, monkeypatch, multiplier):
+    live_pid = os.getpid()
+    token = coord._capture_start_token(live_pid)
+    monkeypatch.setenv("FFS_RUN_ID", "peer")
+    store = coord._open_store()
+    try:
+        ttl = 60.0
+        _hand_stamp_claim(
+            store, "spec-009",
+            holder_anchor_pid=live_pid,
+            holder_anchor_start_token=token,
+            holder_worktree=str(store.store_root.parent.parent),
+            ttl_secs=ttl,
+            last_renewed_at=time.time() - (multiplier * ttl),
+        )
+        rc = coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        assert rc == 3
+        with coord.registry_transaction(store) as registry:
+            assert registry["claims"]["claim:spec-009"]["generation"] == 1
+    finally:
+        coord._close_store(store)
+
+
+def test_reclaim_decision_unprobeable_bounded_by_own_ttl_secs(repo, monkeypatch):
+    """Per-claim ttl_secs governs reclaim, never DEFAULT_TTL_SECS directly:
+    a --ttl 9999 claim survives past DEFAULT_TTL_SECS; a --ttl 30 claim
+    does not survive to DEFAULT_TTL_SECS."""
+    monkeypatch.setenv("FFS_RUN_ID", "peer")
+    store = coord._open_store()
+    try:
+        # long TTL: aged past DEFAULT_TTL_SECS but well under its own ttl_secs
+        _hand_stamp_claim(
+            store, "spec-009",
+            holder_anchor_pid=None,
+            holder_anchor_start_token=None,
+            holder_worktree=str(store.store_root.parent.parent),
+            ttl_secs=9999.0,
+            last_renewed_at=time.time() - (coord.DEFAULT_TTL_SECS + 5),
+        )
+        rc = coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        assert rc == 3  # not reclaimable — comparing against DEFAULT_TTL_SECS would wrongly reclaim here
+    finally:
+        coord._close_store(store)
+
+    store2 = coord._open_store()
+    try:
+        # short TTL: past its OWN ttl_secs, well under DEFAULT_TTL_SECS
+        _hand_stamp_claim(
+            store2, "spec-030",
+            holder_anchor_pid=None,
+            holder_anchor_start_token=None,
+            holder_worktree=str(store2.store_root.parent.parent),
+            ttl_secs=30.0,
+            last_renewed_at=time.time() - 60,
+        )
+        rc = coord.cmd_claim(store2, argparse_namespace(spec_id="spec-030", ttl=None, heartbeat=None))
+        assert rc == 0  # reclaimed on its own short schedule, not DEFAULT_TTL_SECS
+    finally:
+        coord._close_store(store2)
+
+
+def test_crash_recovery_torn_entry_reclaimable_once_ttl_since_acquired(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "peer")
+    store = coord._open_store()
+    try:
+        key = coord._claim_key("spec-009")
+        with coord.registry_transaction(store) as registry:
+            registry["generations"][key] = {"gen": 1, "last_holder_uuid": None, "released_at": None}
+            registry["claims"][key] = {
+                "holder_uuid": "torn",
+                "holder_anchor_pid": None,
+                "holder_worktree": str(store.store_root.parent.parent),
+                "acquired_at": time.time() - (coord.DEFAULT_TTL_SECS + 5),
+                # last_renewed_at and ttl_secs both absent — torn record
+            }
+            coord._save_registry(store, registry)
+        rc = coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        assert rc == 0
+    finally:
+        coord._close_store(store)
+
+
+def test_generation_persists_across_release_1_2_3(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "r1")
+    store = coord._open_store()
+    try:
+        for expected_gen in (1, 2, 3):
+            rc = coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+            assert rc == 0
+            with coord.registry_transaction(store) as registry:
+                assert registry["claims"]["claim:spec-009"]["generation"] == expected_gen
+            rc = coord.cmd_release(
+                store, argparse_namespace(spec_id="spec-009", generation=expected_gen)
+            )
+            assert rc == 0
+            with coord.registry_transaction(store) as registry:
+                assert registry["generations"]["claim:spec-009"]["gen"] == expected_gen
+    finally:
+        coord._close_store(store)
+
+
+def test_claim_check_ok_and_superseded(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "r1")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        rc_ok = coord.cmd_claim_check(store, argparse_namespace(spec_id="spec-009", generation="1"))
+        assert rc_ok == 0
+        rc_bad = coord.cmd_claim_check(store, argparse_namespace(spec_id="spec-009", generation="2"))
+        assert rc_bad == 4
+        with pytest.raises(coord.CoordExit) as exc:
+            coord.cmd_claim_check(store, argparse_namespace(spec_id="spec-009", generation="abc"))
+        assert exc.value.code == 2
+    finally:
+        coord._close_store(store)
+
+
+def test_claim_renew_fencing_stale_process_same_uuid(repo, monkeypatch):
+    """REQ-04 renewal fencing: holder UUID alone is not proof of generation
+    — a stale process sharing the holder UUID at an old generation must be
+    refused with exit 4, and must not bump the clock."""
+    monkeypatch.setenv("FFS_RUN_ID", "r1")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        key = coord._claim_key("spec-009")
+        with coord.registry_transaction(store) as registry:
+            registry["claims"][key]["generation"] = 2
+            registry["generations"][key]["gen"] = 2
+            frozen_renewed_at = registry["claims"][key]["last_renewed_at"] = time.time() - 100
+            coord._save_registry(store, registry)
+
+        rc = coord.cmd_claim_renew(
+            store, argparse_namespace(spec_id="spec-009", generation="1", ttl=None, heartbeat=None)
+        )
+        assert rc == 4
+        with coord.registry_transaction(store) as registry:
+            assert registry["claims"][key]["last_renewed_at"] == frozen_renewed_at
+            assert registry["claims"][key]["generation"] == 2
+
+        rc_ok = coord.cmd_claim_renew(
+            store, argparse_namespace(spec_id="spec-009", generation="2", ttl=None, heartbeat=None)
+        )
+        assert rc_ok == 0
+        with coord.registry_transaction(store) as registry:
+            assert registry["claims"][key]["last_renewed_at"] != frozen_renewed_at
+    finally:
+        coord._close_store(store)
+
+
+def test_claim_renew_foreign_holder_refused(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "holder")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+    finally:
+        coord._close_store(store)
+    monkeypatch.setenv("FFS_RUN_ID", "other")
+    store2 = coord._open_store()
+    try:
+        rc = coord.cmd_claim_renew(
+            store2, argparse_namespace(spec_id="spec-009", generation="1", ttl=None, heartbeat=None)
+        )
+        assert rc == 3
+    finally:
+        coord._close_store(store2)
+
+
+def test_release_present_entry_foreign_and_stale_generation_refused(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "holder")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+    finally:
+        coord._close_store(store)
+
+    monkeypatch.setenv("FFS_RUN_ID", "other")
+    store2 = coord._open_store()
+    try:
+        rc = coord.cmd_release(store2, argparse_namespace(spec_id="spec-009", generation=1))
+        assert rc == 3
+    finally:
+        coord._close_store(store2)
+
+    monkeypatch.setenv("FFS_RUN_ID", "holder")
+    store3 = coord._open_store()
+    try:
+        rc = coord.cmd_release(store3, argparse_namespace(spec_id="spec-009", generation=99))
+        assert rc == 3
+        rc_ok = coord.cmd_release(store3, argparse_namespace(spec_id="spec-009", generation=1))
+        assert rc_ok == 0
+    finally:
+        coord._close_store(store3)
+
+
+def test_release_absent_entry_idempotent_for_last_holder_refused_for_others(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "holder")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        rc = coord.cmd_release(store, argparse_namespace(spec_id="spec-009", generation=1))
+        assert rc == 0
+        # idempotent second release by the same (last) holder
+        rc2 = coord.cmd_release(store, argparse_namespace(spec_id="spec-009", generation=1))
+        assert rc2 == 0
+    finally:
+        coord._close_store(store)
+
+    monkeypatch.setenv("FFS_RUN_ID", "somebody-else")
+    store2 = coord._open_store()
+    try:
+        rc3 = coord.cmd_release(store2, argparse_namespace(spec_id="spec-009", generation=1))
+        assert rc3 == 3
+    finally:
+        coord._close_store(store2)
+
+
+def test_borrowed_identity_refused_via_session_env_exempt_via_run_id(repo, monkeypatch):
+    """EDGE-006/T-01-02: a live foreign anchor is refused only through
+    resolution step (i), $FFS_COORD_SESSION — step (ii), the by-run
+    pointer, is exempt by design (same run id == same logical session)."""
+    anchor = _spawn_anchor()
+    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(anchor.pid))
+    monkeypatch.setenv("FFS_RUN_ID", "peer-run")
+    store = coord._open_store()
+    try:
+        peer_identity = coord.resolve_identity(store)
+    finally:
+        coord._close_store(store)
+
+    try:
+        monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(os.getpid()))
+        monkeypatch.delenv("FFS_RUN_ID", raising=False)
+        monkeypatch.setenv("FFS_COORD_SESSION", peer_identity["session_uuid"])
+        store2 = coord._open_store()
+        try:
+            with pytest.raises(coord.CoordExit) as exc:
+                coord.resolve_identity(store2)
+            assert exc.value.code == 78
+        finally:
+            coord._close_store(store2)
+
+        # step (ii), same run id: exempt, resolves normally (adopts unchanged
+        # since the anchor is still alive).
+        monkeypatch.delenv("FFS_COORD_SESSION", raising=False)
+        monkeypatch.setenv("FFS_RUN_ID", "peer-run")
+        store3 = coord._open_store()
+        try:
+            adopted = coord.resolve_identity(store3)
+            assert adopted["session_uuid"] == peer_identity["session_uuid"]
+        finally:
+            coord._close_store(store3)
+    finally:
+        anchor.kill()
+        anchor.wait(timeout=5)
+
+
+def test_borrowed_identity_not_refused_when_anchor_is_dead_or_own(repo, monkeypatch):
+    """Re-exporting a session= value emitted by a finished invocation must
+    keep working — only a LIVE, FOREIGN anchor is refused."""
+    monkeypatch.delenv("FFS_RUN_ID", raising=False)
+    store = coord._open_store()
+    try:
+        finished = coord.resolve_identity(store)
+    finally:
+        coord._close_store(store)
+
+    monkeypatch.setenv("FFS_COORD_SESSION", finished["session_uuid"])
+    store2 = coord._open_store()
+    try:
+        # the anchor default here (os.getppid()) is THIS invocation's own
+        # anchor most of the time in a pytest run, but even so this must
+        # not raise — re-exporting is always safe when the anchor is dead
+        # or already ours.
+        adopted = coord.resolve_identity(store2)
+        assert adopted["session_uuid"] == finished["session_uuid"]
+    finally:
+        coord._close_store(store2)
+
+
+def test_mode_resolution_precedence_and_invalid_value(repo, monkeypatch):
+    store = coord._open_store()
+    try:
+        assert coord._resolve_mode(store) == "enforce"
+        coord._atomic_write_json  # sanity: helper exists
+        fd = os.open("mode", os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=store.coord_fd)
+        with os.fdopen(fd, "w") as f:
+            f.write("audit\n")
+        assert coord._resolve_mode(store) == "audit"
+
+        monkeypatch.setenv("FFS_COORD_MODE", "off")
+        assert coord._resolve_mode(store) == "off"
+
+        monkeypatch.setenv("FFS_COORD_MODE", "bogus")
+        with pytest.raises(coord.CoordExit) as exc:
+            coord._resolve_mode(store)
+        assert exc.value.code == 2
+    finally:
+        coord._close_store(store)
+
+
+def test_edge_003_unparseable_registry_enforce_vs_audit(repo, monkeypatch):
+    store = coord._open_store()
+    try:
+        fd = os.open(
+            ".registry-corrupt.tmp", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=store.coord_fd
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write("{not json")
+        os.replace(".registry-corrupt.tmp", "registry.json", src_dir_fd=store.coord_fd, dst_dir_fd=store.coord_fd)
+
+        monkeypatch.delenv("FFS_COORD_MODE", raising=False)
+        with pytest.raises(coord.CoordExit) as exc:
+            coord._load_registry(store)
+        assert exc.value.code == 69
+
+        monkeypatch.setenv("FFS_COORD_MODE", "audit")
+        registry = coord._load_registry(store)
+        assert registry["claims"] == {}
+    finally:
+        coord._close_store(store)
+
+
+def test_status_flags_missing_worktree_foreign_host_incomplete_entry(repo, monkeypatch, capsys):
+    store = coord._open_store()
+    try:
+        _hand_stamp_claim(
+            store, "spec-missing-wt",
+            holder_worktree=str(store.store_root / "gone"),
+        )
+        with coord.registry_transaction(store) as registry:
+            registry["claims"][coord._claim_key("spec-foreign-host")] = {
+                "holder_uuid": "x", "holder_host": "some-other-host",
+                "holder_worktree": str(store.store_root.parent.parent),
+                "generation": 1, "last_renewed_at": time.time(), "ttl_secs": 300.0,
+            }
+            registry["claims"][coord._claim_key("spec-incomplete")] = {
+                "holder_uuid": "y", "holder_worktree": str(store.store_root.parent.parent),
+                "generation": 1,
+            }
+            coord._save_registry(store, registry)
+        coord.cmd_status(store, argparse_namespace())
+    finally:
+        coord._close_store(store)
+    out = capsys.readouterr().out
+    assert "MISSING-WORKTREE" in out
+    assert "FOREIGN-HOST" in out
+    assert "INCOMPLETE-ENTRY" in out
+
+
+def test_doctor_reports_version_store_mode_live_claims(repo, monkeypatch, capsys):
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        rc = coord.cmd_doctor(store, argparse_namespace())
+    finally:
+        coord._close_store(store)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "filelock_version=" in out
+    assert "store_path=" in out
+    assert "mode=" in out
+    assert "live_claims=1" in out
