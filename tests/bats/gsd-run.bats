@@ -191,6 +191,57 @@ manifest.write_text(json.dumps(data))
 PY
 }
 
+# Fixture coord.py for Task 2's tri-state renew RED cases (transient vs
+# persistent staleness-budget arms) ONLY -- the real core cannot be made to
+# return 69 mid-drive deterministically without a timing race, and a real
+# 300s TTL cannot be waited out in a test suite. claim/status/release behave
+# like a single, self-consistent generation-1 holder; claim-renew always
+# answers 69 (a non-revocation failure). FIXTURE_TTL_SECS is read at status
+# time so the SAME fixture serves both cases -- the only difference between
+# the transient case and the persistent case is FIXTURE_TTL_SECS versus the
+# stub drive's own duration.
+write_fixture_coord() {
+  local dest="$1"
+  cat > "$dest" <<'PY'
+#!/usr/bin/env python3
+import os
+import sys
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else ""
+    ttl = os.environ.get("FIXTURE_TTL_SECS", "300")
+    if cmd == "claim":
+        print("session=fixture-session-0000")
+        print("CLAIM-OK generation=1")
+        return 0
+    if cmd == "status":
+        print(
+            "claim:spec-009 holder=fixture-session-0000 generation=1 "
+            "anchor_pid=1 cli_pid=1 worktree=/tmp last_renewed_at=0 "
+            f"ttl_secs={ttl} expires_at=0"
+        )
+        return 0
+    if cmd == "claim-renew":
+        print("fixture-coord: claim-renew always answers 69 for this test", file=sys.stderr)
+        return 69
+    if cmd == "release":
+        print("RELEASE-OK")
+        return 0
+    if cmd == "doctor":
+        print("filelock_version=fixture")
+        return 0
+    print(f"fixture-coord: unsupported command {cmd}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+  chmod +x "$dest"
+}
+
 @test "Codex host runs Codex with the Sonnet-equivalent Terra lead" {
   FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'fix the host leak'"
@@ -835,13 +886,17 @@ EOF
     *) ACTUAL_COMMON="$(cd "$(cat "$BATS_TEST_TMPDIR/codex.cwd")/$ACTUAL_COMMON" && pwd -P)" ;;
   esac
   [ "$ACTUAL_COMMON" = "$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)" ]
+  # P-29 (04-01): writable_roots now grants the run worktree AND the shared
+  # .feature-fix-swarm subtree at the main checkout -- widened from 1 to 2
+  # entries in the same line this widening lands on. See the dedicated
+  # "coord wiring" case below for the content assertion on each entry.
   [ "$(python3 - "$BATS_TEST_TMPDIR/codex.config" <<'PY'
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
 print(len(roots))
 PY
-)" -eq 1 ]
+)" -eq 2 ]
   [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
 }
 
@@ -1434,4 +1489,263 @@ EOF
     run python3 -c "import json; d=json.load(open('$REGISTRY')); assert not d.get('claims'), d['claims']"
     [ "$status" -eq 0 ]
   fi
+}
+
+# ── Phase 4 Task 2: renew, revalidate, abort-on-revocation, release-on-every-
+# exit-path, sandbox write grant (P-24, P-24b, P-26, P-29) ─────────────────
+
+@test "the heartbeat renews the coord claim; expires_at strictly increases across ticks (coord wiring)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+  cat > "$STUB_DIR/renew-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+cp "$REGISTRY" "$BATS_TEST_TMPDIR/renew.snap1.json" 2>/dev/null || true
+sleep 3
+cp "$REGISTRY" "$BATS_TEST_TMPDIR/renew.snap2.json" 2>/dev/null || true
+echo RENEW_OK
+exit 0
+EOF
+  chmod +x "$STUB_DIR/renew-codex"
+
+  FFS_HOST=codex GSD_RUN_ID=spec-009 GSD_HEARTBEAT_SECS=1 \
+    CODEX_BIN=renew-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/renew.snap1.json" ]
+  [ -f "$BATS_TEST_TMPDIR/renew.snap2.json" ]
+  # This is also the ONLY mechanical proof of Task 1's call-site ordering: a
+  # claim minted after acquire_run_state returns leaves the forked
+  # subshell's RUN_COORD_GENERATION empty, coord_renew_run early-returns
+  # every tick, and expires_at never moves.
+  run python3 -c "
+import json
+a = json.load(open('$BATS_TEST_TMPDIR/renew.snap1.json'))['claims']['claim:spec-009']['expires_at']
+b = json.load(open('$BATS_TEST_TMPDIR/renew.snap2.json'))['claims']['claim:spec-009']['expires_at']
+assert b > a, (a, b)
+"
+  [ "$status" -eq 0 ]
+}
+
+@test "a generation bump on the live claim aborts a running drive with CLAIM-SUPERSEDED (coord wiring)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+  cat > "$STUB_DIR/gen-bump-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+touch "$BATS_TEST_TMPDIR/gen-bump-drive-started"
+sleep 20
+echo GEN_BUMP_SHOULD_NEVER_FINISH
+EOF
+  chmod +x "$STUB_DIR/gen-bump-codex"
+
+  run env FFS_HOST=codex GSD_RUN_ID=spec-009 GSD_HEARTBEAT_SECS=1 \
+    CODEX_BIN=gen-bump-codex CLAUDE_BIN=fake-claude \
+    bash -c '
+      cd "$1"
+      bash "$2" /gsd-quick test >"$1/gen-bump.log" 2>&1 &
+      runner=$!
+      i=0
+      while [ ! -f "$1/gen-bump-drive-started" ] && [ "$i" -lt 1500 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ -f "$1/gen-bump-drive-started" ] || { echo "drive did not start" >&2; cat "$1/gen-bump.log" >&2; exit 30; }
+      python3 -c "
+import json
+p = \"$3\"
+d = json.load(open(p))
+d[\"claims\"][\"claim:spec-009\"][\"generation\"] = 2
+json.dump(d, open(p, \"w\"))
+"
+      wait "$runner"
+      exit $?
+    ' _ "$BATS_TEST_TMPDIR" "$SCRIPT" "$REGISTRY"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CLAIM-SUPERSEDED"* ]]
+  [ -f "$BATS_TEST_TMPDIR/gen-bump-drive-started" ]
+}
+
+@test "a foreign holder_uuid takeover on the live claim also aborts mid-flight (P-24 exit-3 arm, coord wiring)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+  cat > "$STUB_DIR/foreign-take-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+touch "$BATS_TEST_TMPDIR/foreign-take-drive-started"
+sleep 20
+echo FOREIGN_TAKE_SHOULD_NEVER_FINISH
+EOF
+  chmod +x "$STUB_DIR/foreign-take-codex"
+
+  run env FFS_HOST=codex GSD_RUN_ID=spec-009 GSD_HEARTBEAT_SECS=1 \
+    CODEX_BIN=foreign-take-codex CLAUDE_BIN=fake-claude \
+    bash -c '
+      cd "$1"
+      bash "$2" /gsd-quick test >"$1/foreign-take.log" 2>&1 &
+      runner=$!
+      i=0
+      while [ ! -f "$1/foreign-take-drive-started" ] && [ "$i" -lt 1500 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ -f "$1/foreign-take-drive-started" ] || { echo "drive did not start" >&2; cat "$1/foreign-take.log" >&2; exit 30; }
+      python3 -c "
+import json, uuid
+p = \"$3\"
+d = json.load(open(p))
+d[\"claims\"][\"claim:spec-009\"][\"holder_uuid\"] = str(uuid.uuid4())
+json.dump(d, open(p, \"w\"))
+"
+      wait "$runner"
+      exit $?
+    ' _ "$BATS_TEST_TMPDIR" "$SCRIPT" "$REGISTRY"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CLAIM-SUPERSEDED"* ]]
+  [ -f "$BATS_TEST_TMPDIR/foreign-take-drive-started" ]
+}
+
+@test "a transient non-revocation renew failure inside the staleness budget does not abort the drive (P-24b, coord wiring)" {
+  mkdir -p "$HARNESS_ROOT/scripts/coord"
+  write_fixture_coord "$HARNESS_ROOT/scripts/coord/coord.py"
+  cat > "$STUB_DIR/transient-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+sleep 2
+echo TRANSIENT_OK
+exit 0
+EOF
+  chmod +x "$STUB_DIR/transient-codex"
+
+  # ttl_secs=30 vs a ~2s drive is what makes this the transient case rather
+  # than the persistent one below -- changing either number silently
+  # converts one case into the other.
+  FFS_HOST=codex GSD_RUN_ID=spec-009 GSD_HEARTBEAT_SECS=1 FIXTURE_TTL_SECS=30 \
+    CODEX_BIN=transient-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TRANSIENT_OK"* ]]
+}
+
+@test "a persistently failing renew past the claim's own ttl_secs DOES abort with CLAIM-STALE (P-24b CRITICAL arm, coord wiring)" {
+  mkdir -p "$HARNESS_ROOT/scripts/coord"
+  write_fixture_coord "$HARNESS_ROOT/scripts/coord/coord.py"
+  RUN_STATE="$BATS_TEST_TMPDIR/persist-state"
+  cat > "$STUB_DIR/persist-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+touch "$BATS_TEST_TMPDIR/persist-drive-started"
+sleep 30
+echo PERSIST_SHOULD_NEVER_FINISH
+EOF
+  chmod +x "$STUB_DIR/persist-codex"
+
+  start_epoch="$(date +%s)"
+  FFS_HOST=codex GSD_RUN_ID=spec-009 GSD_HEARTBEAT_SECS=1 FIXTURE_TTL_SECS=3 \
+    GSD_RUN_STATE_DIR="$RUN_STATE" CODEX_BIN=persist-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  end_epoch="$(date +%s)"
+
+  [ "$status" -ne 0 ]
+  elapsed=$((end_epoch - start_epoch))
+  # far below the stub's own 30s -- an implementation that returns 0 from
+  # coord_renew_run on every 69 passes every other case and hangs here.
+  [ "$elapsed" -lt 10 ]
+  [[ "$output" == *"CLAIM-STALE"* ]]
+  [ -f "$BATS_TEST_TMPDIR/persist-drive-started" ]
+  grep -Fx 'coord_abort=CLAIM-STALE' "$RUN_STATE/gsd-run.status"
+}
+
+@test "the claim is released on the non-zero-drive exit path (coord wiring)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+
+  FFS_HOST=codex GSD_RUN_ID=spec-009 FAKE_CODEX_DRIVE_RC=1 \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 1 ]
+  [ -f "$REGISTRY" ]
+  run python3 -c "import json; d=json.load(open('$REGISTRY')); assert 'claim:spec-009' not in d.get('claims', {}), d['claims']"
+  [ "$status" -eq 0 ]
+}
+
+@test "the claim is released on the run_bounded timeout exit path (coord wiring)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+  cat > "$STUB_DIR/timeout-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+sleep 30
+EOF
+  chmod +x "$STUB_DIR/timeout-codex"
+
+  FFS_HOST=codex GSD_RUN_ID=spec-009 TIMEOUT=1 \
+    CODEX_BIN=timeout-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 124 ]
+  [ -f "$REGISTRY" ]
+  run python3 -c "import json; d=json.load(open('$REGISTRY')); assert 'claim:spec-009' not in d.get('claims', {}), d['claims']"
+  [ "$status" -eq 0 ]
+}
+
+@test "the claim is released when the runner is SIGTERMed externally mid-drive (coord wiring)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+  cat > "$STUB_DIR/sigterm-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+touch "$BATS_TEST_TMPDIR/sigterm-drive-started"
+sleep 30
+EOF
+  chmod +x "$STUB_DIR/sigterm-codex"
+
+  run env FFS_HOST=codex GSD_RUN_ID=spec-009 CODEX_BIN=sigterm-codex CLAUDE_BIN=fake-claude \
+    bash -c '
+      cd "$1"
+      bash "$2" /gsd-quick test >"$1/sigterm.log" 2>&1 &
+      runner=$!
+      i=0
+      while [ ! -f "$1/sigterm-drive-started" ] && [ "$i" -lt 1500 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ -f "$1/sigterm-drive-started" ] || { echo "drive did not start" >&2; cat "$1/sigterm.log" >&2; exit 30; }
+      kill -TERM "$runner"
+      wait "$runner"
+      exit $?
+    ' _ "$BATS_TEST_TMPDIR" "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [ -f "$REGISTRY" ]
+  run python3 -c "import json; d=json.load(open('$REGISTRY')); assert 'claim:spec-009' not in d.get('claims', {}), d['claims']"
+  [ "$status" -eq 0 ]
+}
+
+@test "the sandboxed Codex drive can write both the run worktree and the shared coord store (P-29, coord wiring)" {
+  FFS_HOST=codex GSD_NETWORK_MODE=none CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  run python3 - "$BATS_TEST_TMPDIR/codex.config" <<'PY'
+import ast, re, sys
+text = open(sys.argv[1]).read()
+roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
+assert len(roots) == 2, roots
+assert any(r.endswith('/.feature-fix-swarm') for r in roots), roots
+assert any('/.claude/worktrees/' in r for r in roots), roots
+PY
+  [ "$status" -eq 0 ]
 }
