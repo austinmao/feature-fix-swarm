@@ -26,6 +26,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -44,6 +45,10 @@ DEFAULT_TTL_SECS = 300.0
 DEFAULT_HEARTBEAT_SECS = 60.0
 MAX_TTL_SECS = 86400.0
 LEASE_ACQUIRE_TIMEOUT_SECS = 5.0
+MAX_GENERATION = 2**63 - 1  # oversized --generation is a usage error, never compared
+
+LEASE_PREFIX = "path:"
+_GLOB_SUFFIX = "/**"
 
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -367,6 +372,10 @@ def _validate_generation(raw) -> int:
         raise CoordExit(EXIT_USAGE, f"coord: invalid --generation: {raw!r}") from exc
     if val < 0:
         raise CoordExit(EXIT_USAGE, f"coord: --generation must be non-negative: {raw!r}")
+    if val > MAX_GENERATION:
+        raise CoordExit(
+            EXIT_USAGE, f"coord: --generation exceeds MAX_GENERATION ({MAX_GENERATION})"
+        )
     return val
 
 
@@ -560,7 +569,7 @@ def resolve_identity(store: StoreFds) -> dict:
 def _load_registry(store: StoreFds) -> dict:
     _refuse_if_symlink(store.coord_fd, "registry.json")
     try:
-        return _read_json_fd(store.coord_fd, "registry.json")
+        registry = _read_json_fd(store.coord_fd, "registry.json")
     except FileNotFoundError:
         return {"version": 1, "claims": {}, "leases": {}, "generations": {}}
     except json.JSONDecodeError as exc:
@@ -574,6 +583,22 @@ def _load_registry(store: StoreFds) -> dict:
             EXIT_UNAVAILABLE,
             f"coord: COORD-UNAVAILABLE unparseable {store.store_root / 'registry.json'}",
         ) from exc
+
+    # NAMESPACE INIT (Phase 2, plan step 3a) — a registry loaded from disk is
+    # history-influenced (older build, hand-edit, torn write) and is not
+    # guaranteed to match the schema this function mints on a missing file.
+    # setdefault covers ABSENT only; wrong TYPE survives it untouched and
+    # would reach mutation code as a TypeError/AttributeError one level up
+    # (T-02-10) — so every namespace is also asserted to be a dict here, the
+    # ONE place every subcommand (claims included) routes through.
+    for _ns in ("claims", "leases", "generations"):
+        registry.setdefault(_ns, {})
+        if not isinstance(registry[_ns], dict):
+            raise CoordExit(
+                EXIT_UNAVAILABLE,
+                f"coord: COORD-UNAVAILABLE namespace not a dict offending_key={_ns}",
+            )
+    return registry
 
 
 def _save_registry(store: StoreFds, data: dict) -> None:
@@ -699,6 +724,267 @@ def _is_reclaimable(entry: dict, now: float) -> tuple[bool, str]:
     if last is None:
         return True, verdict  # fully torn record, no clock at all
     return (now - last) >= ttl, verdict
+
+
+# ── lease resource validation (REQ-06, P-07, threats T-02-01/02/03) ────────
+def _lease_parse_raw(raw) -> tuple[str, bool]:
+    """Stages (a)-(d): prefix, NFC, form/glob-charset, lexical. Pure — no
+    filesystem call of any kind. Returns (literal, is_prefix_form) where
+    `literal` is NFC-normalized but NOT yet casefolded (containment must run
+    against the real case; folding is stage (f), applied by the caller)."""
+    if raw is None or not isinstance(raw, str) or not raw.startswith(LEASE_PREFIX):
+        raise CoordExit(
+            EXIT_USAGE, f"coord: lease resource must start with 'path:': {raw!r}"
+        )
+    body = raw[len(LEASE_PREFIX):]
+    # NFC FIRST — before any charset/form check (Pitfall 2): normalization
+    # changes the bytes those checks inspect.
+    body = unicodedata.normalize("NFC", body)
+    is_prefix_form = body.endswith(_GLOB_SUFFIX)
+    literal = body[: -len(_GLOB_SUFFIX)] if is_prefix_form else body
+    if not literal or any(c in literal for c in "*?[]"):
+        raise CoordExit(
+            EXIT_USAGE, f"coord: unsupported path resource syntax: {raw!r}"
+        )
+    # control characters — not covered by the glob-charset check above;
+    # os.path.realpath raises ValueError on an embedded NUL, which would
+    # otherwise unwind past CoordExit to a traceback and exit 1.
+    if any(ord(ch) < 0x20 or ch == "\x7f" for ch in body):
+        raise CoordExit(
+            EXIT_USAGE, f"coord: control character in path resource: {raw!r}"
+        )
+    if literal.startswith("/") or os.path.isabs(literal):
+        raise CoordExit(EXIT_USAGE, f"coord: absolute paths not accepted: {raw!r}")
+    parts = literal.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise CoordExit(
+            EXIT_USAGE, f"coord: invalid path segment in resource: {raw!r}"
+        )
+    return literal, is_prefix_form
+
+
+def _fold_lease_key(literal: str, is_prefix_form: bool) -> str:
+    """Stage (f) — casefold for STORAGE/COMPARISON only, never for display.
+    Per-segment fold, then join: casefold can change string LENGTH, so
+    index-based slicing across a partially-folded pair is unsound."""
+    folded = "/".join(seg.casefold() for seg in literal.split("/"))
+    return LEASE_PREFIX + folded + (_GLOB_SUFFIX if is_prefix_form else "")
+
+
+def _lease_key_from_arg(raw: str) -> str:
+    """The LEXICAL entry point — stages (a)-(d)+(f). No filesystem call.
+    Deterministic and idempotent: feeding it an already-canonical key
+    returns that key unchanged. Used by lease-renew/lease-release (a
+    granted key is a registry lookup, not a path) and by every read-side
+    key-grammar check in `_lease_entries`."""
+    literal, is_prefix_form = _lease_parse_raw(raw)
+    return _fold_lease_key(literal, is_prefix_form)
+
+
+def _validate_lease_resource(raw: str, root: str) -> str:
+    """`_lease_key_from_arg` THEN stage (e), the realpath containment check.
+    Used ONLY by lease-acquire — once granted, a lease key is a registry
+    lookup and containment is diagnostic-only afterwards (T-02-11)."""
+    literal, is_prefix_form = _lease_parse_raw(raw)
+    candidate = os.path.join(root, literal)
+    real = os.path.realpath(candidate)
+    real_root = os.path.realpath(root)
+    if real != real_root and not real.startswith(real_root + os.sep):
+        raise CoordExit(
+            EXIT_STORE_REFUSED, f"coord: path resource escapes worktree root: {raw!r}"
+        )
+    return _fold_lease_key(literal, is_prefix_form)
+
+
+def _parse_lease_resource(key: str) -> tuple[tuple[str, ...], bool]:
+    """`key` is an already-validated, already-folded 'path:<form>' string."""
+    body = key[len(LEASE_PREFIX):]
+    is_prefix_form = body.endswith(_GLOB_SUFFIX)
+    literal = body[: -len(_GLOB_SUFFIX)] if is_prefix_form else body
+    return tuple(literal.split("/")), is_prefix_form
+
+
+def _lease_keys_overlap(key_a: str, key_b: str) -> bool:
+    """Tuple-prefix comparison (RESEARCH Pattern 3) — no fnmatch, no regex
+    glob engine, no pathlib glob matching (Don't Hand-Roll)."""
+    a, a_is_prefix = _parse_lease_resource(key_a)
+    b, b_is_prefix = _parse_lease_resource(key_b)
+    if not a_is_prefix and not b_is_prefix:
+        return a == b
+    if a_is_prefix and not b_is_prefix:
+        return len(b) > len(a) and b[: len(a)] == a
+    if b_is_prefix and not a_is_prefix:
+        return len(a) > len(b) and a[: len(b)] == b
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return longer[: len(shorter)] == shorter
+
+
+# ── lease store structural validation (T-02-10) ─────────────────────────────
+def _is_plain_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_plain_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _validate_lease_key(key) -> None:
+    """Re-derive the key through the lexical validator and require it to
+    EQUAL the stored key — catches both a non-conforming key (claim-shaped,
+    bad charset) and a merely non-canonical one (unfolded, NFD-encoded),
+    which would silently miss every overlap comparison. Works because
+    stages (a)-(d)+(f) are idempotent on an already-canonical key."""
+    if not isinstance(key, str):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease key offending_key={key!r}",
+        )
+    try:
+        canonical = _lease_key_from_arg(key)
+    except CoordExit as exc:
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease key offending_key={key!r}",
+        ) from exc
+    if canonical != key:
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE non-canonical lease key offending_key={key!r}",
+        )
+
+
+def _validate_lease_holder(key: str, holder) -> None:
+    """PER-FIELD CLASSIFICATION (plan step 3b table). `generation` is the
+    one field promoted to REQUIRED — every other field is torn-tolerant
+    (absent/None routes to the UNPROBEABLE/torn path); WRONG TYPE anywhere
+    is corruption, exit 69, naming the key, never repaired."""
+    if not isinstance(holder, dict):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease holder offending_key={key}",
+        )
+    gen = holder.get("generation")
+    if not _is_plain_int(gen) or gen < 1:
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease holder generation offending_key={key}",
+        )
+    pid = holder.get("holder_anchor_pid")
+    if pid is not None and not _is_plain_int(pid):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease holder anchor_pid offending_key={key}",
+        )
+    token = holder.get("holder_anchor_start_token")
+    if token is not None and not isinstance(token, (int, str)):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease holder start_token offending_key={key}",
+        )
+    for field in ("last_renewed_at", "acquired_at", "ttl_secs", "expires_at"):
+        val = holder.get(field)
+        if val is not None and not _is_plain_number(val):
+            raise CoordExit(
+                EXIT_UNAVAILABLE,
+                f"coord: COORD-UNAVAILABLE malformed lease holder {field} offending_key={key}",
+            )
+    worktree = holder.get("holder_worktree")
+    if worktree is not None and not isinstance(worktree, str):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease holder worktree offending_key={key}",
+        )
+    host = holder.get("holder_host")
+    if host is not None and not isinstance(host, str):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed lease holder host offending_key={key}",
+        )
+
+
+def _validate_generations_record(key: str, record) -> None:
+    """Generations records read by LEASE code (P-05) get the same
+    discipline: a bare int (pre-Phase-1 shape) or string is corruption."""
+    if not isinstance(record, dict):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed generations record offending_key={key}",
+        )
+    gen = record.get("gen")
+    if gen is not None and (not _is_plain_int(gen) or gen < 0):
+        raise CoordExit(
+            EXIT_UNAVAILABLE,
+            f"coord: COORD-UNAVAILABLE malformed generations record offending_key={key}",
+        )
+    released = record.get("released_holders")
+    if released is not None:
+        if not isinstance(released, dict):
+            raise CoordExit(
+                EXIT_UNAVAILABLE,
+                f"coord: COORD-UNAVAILABLE malformed generations record offending_key={key}",
+            )
+        for rec in released.values():
+            if not isinstance(rec, dict):
+                raise CoordExit(
+                    EXIT_UNAVAILABLE,
+                    f"coord: COORD-UNAVAILABLE malformed generations record offending_key={key}",
+                )
+            rgen = rec.get("generation")
+            if not _is_plain_int(rgen):
+                raise CoordExit(
+                    EXIT_UNAVAILABLE,
+                    f"coord: COORD-UNAVAILABLE malformed generations record offending_key={key}",
+                )
+            rat = rec.get("released_at")
+            if rat is not None and not _is_plain_number(rat):
+                raise CoordExit(
+                    EXIT_UNAVAILABLE,
+                    f"coord: COORD-UNAVAILABLE malformed generations record offending_key={key}",
+                )
+
+
+def _lease_entries(registry: dict) -> dict:
+    """The SOLE read accessor for `registry["leases"]` — every lease
+    subcommand and `status`/`doctor` route through this. Validates every
+    key and entry it yields; raises exit 69 COORD-UNAVAILABLE naming the
+    offending key on any structural corruption (T-02-10). No repair."""
+    leases = registry.get("leases", {})
+    if not isinstance(leases, dict):
+        raise CoordExit(
+            EXIT_UNAVAILABLE, "coord: COORD-UNAVAILABLE leases namespace not a dict"
+        )
+    for key, entry in leases.items():
+        _validate_lease_key(key)
+        if not isinstance(entry, dict):
+            raise CoordExit(
+                EXIT_UNAVAILABLE,
+                f"coord: COORD-UNAVAILABLE malformed lease entry offending_key={key}",
+            )
+        if entry.get("mode") not in ("shared", "exclusive"):
+            raise CoordExit(
+                EXIT_UNAVAILABLE,
+                f"coord: COORD-UNAVAILABLE malformed lease mode offending_key={key}",
+            )
+        holders = entry.get("holders")
+        if not isinstance(holders, dict):
+            raise CoordExit(
+                EXIT_UNAVAILABLE,
+                f"coord: COORD-UNAVAILABLE malformed lease holders offending_key={key}",
+            )
+        for holder in holders.values():
+            _validate_lease_holder(key, holder)
+    return leases
+
+
+def _lease_gen_entry(registry: dict, key: str) -> dict:
+    """generations[key] for a LEASE key — created lazily, same shape as the
+    claim path, validated with the lease-side discipline (P-05)."""
+    gen_entry = registry["generations"].setdefault(
+        key, {"gen": 0, "last_holder_uuid": None, "released_at": None}
+    )
+    _validate_generations_record(key, gen_entry)
+    gen_entry.setdefault("gen", 0)  # absent gen reads as 0 (torn OK, coord.py:711 precedent)
+    return gen_entry
 
 
 def cmd_claim(store: StoreFds, args) -> int:
@@ -855,9 +1141,187 @@ def cmd_release(store: StoreFds, args) -> int:
         return EXIT_REFUSED
 
 
+def _print_lease_held(blockers: list[tuple[str, dict]]) -> None:
+    """Names EVERY surviving foreign holder, not just the first — a shared
+    lease can block an exclusive request with N holders."""
+    for _key, holder in blockers:
+        print(
+            "LEASE-HELD "
+            f"holder={holder.get('holder_uuid')} "
+            f"anchor_pid={holder.get('holder_anchor_pid')} "
+            f"worktree={holder.get('holder_worktree')} "
+            f"expires_at={holder.get('expires_at')}",
+            file=sys.stderr,
+        )
+
+
+def cmd_lease_acquire(store: StoreFds, args) -> int:
+    root = _worktree_root()
+    key = _validate_lease_resource(args.resource, root)
+    mode = args.mode
+    ttl_secs = _validate_ttl(args.ttl, args.heartbeat)
+    identity = resolve_identity(store)
+    print(f"session={identity['session_uuid']}")
+    with registry_transaction(store) as registry:
+        leases = _lease_entries(registry)
+        now = time.time()
+
+        overlapping = [(k, e) for k, e in leases.items() if _lease_keys_overlap(k, key)]
+
+        # P-06: evaluate FOREIGN holders only — a session never conflicts
+        # with itself, in any mode combination, same-key or cross-key.
+        blocking: list[tuple[str, dict]] = []
+        to_prune: list[tuple[str, str]] = []
+        for k, entry in overlapping:
+            for h_uuid, holder in entry["holders"].items():
+                if h_uuid == identity["session_uuid"]:
+                    continue
+                reclaimable, _verdict = _is_reclaimable(holder, now)
+                if reclaimable:
+                    to_prune.append((k, h_uuid))
+                    continue
+                if entry["mode"] == "exclusive" or mode == "exclusive":
+                    blocking.append((k, holder))
+
+        if blocking:
+            _print_lease_held(blocking)
+            return EXIT_REFUSED  # registry byte-identical: no write below this line
+
+        # GRANT. Prune reclaimable foreign holders found above, delete any
+        # overlapping entry whose holders became empty.
+        for k, h_uuid in to_prune:
+            del leases[k]["holders"][h_uuid]
+        for k, _snapshot in overlapping:
+            if k in leases and not leases[k]["holders"]:
+                del leases[k]
+
+        entry = leases.get(key)
+        if entry is not None and identity["session_uuid"] in entry["holders"]:
+            # idempotent self re-acquire (mirrors cmd_claim, coord.py
+            # same-uuid branch): refresh clock/TTL/anchor, generation
+            # UNCHANGED, mode may flip (a self-only entry, or one where
+            # every foreign holder was just pruned above).
+            holder = entry["holders"][identity["session_uuid"]]
+            holder["last_renewed_at"] = now
+            holder["ttl_secs"] = ttl_secs
+            holder["expires_at"] = now + ttl_secs
+            holder["holder_anchor_pid"] = identity["anchor_pid"]
+            holder["holder_anchor_start_token"] = identity["anchor_start_token"]
+            holder["holder_host"] = identity["host"]
+            holder["holder_worktree"] = identity["worktree"]
+            entry["mode"] = mode
+            leases[key] = entry
+            _save_registry(store, registry)
+            print(f"LEASE-OK generation={holder['generation']}")
+            return EXIT_OK
+
+        gen_entry = _lease_gen_entry(registry, key)
+        new_holder = _grant_entry(gen_entry, identity, ttl_secs, now)
+        if entry is None:
+            entry = {"mode": mode, "holders": {}}
+        entry["mode"] = mode
+        entry["holders"][identity["session_uuid"]] = new_holder  # MUTATE in place
+        leases[key] = entry
+        _save_registry(store, registry)
+        print(f"LEASE-OK generation={new_holder['generation']}")
+        return EXIT_OK
+
+
+def cmd_lease_renew(store: StoreFds, args) -> int:
+    # LEXICAL entry point only — a granted key is a registry lookup, never a
+    # filesystem path; re-running containment here would strand an escaped
+    # lease as unrenewable until TTL expiry (T-02-11).
+    key = _lease_key_from_arg(args.resource)
+    generation = _validate_generation(args.generation)
+    identity = resolve_identity(store)
+    print(f"session={identity['session_uuid']}")
+    with registry_transaction(store) as registry:
+        leases = _lease_entries(registry)
+        entry = leases.get(key)
+        holder = entry["holders"].get(identity["session_uuid"]) if entry else None
+
+        if holder is None or holder["generation"] != generation:
+            current = holder["generation"] if holder is not None else None
+            print(
+                f"LEASE-SUPERSEDED caller_generation={generation} "
+                f"current_generation={current}",
+                file=sys.stderr,
+            )
+            return EXIT_SUPERSEDED  # entry byte-identical: no write below this line
+
+        now = time.time()
+        eff_ttl = holder.get("ttl_secs", DEFAULT_TTL_SECS)
+        if args.ttl is not None:
+            eff_ttl = _validate_ttl(args.ttl, getattr(args, "heartbeat", None))
+        holder["last_renewed_at"] = now
+        holder["ttl_secs"] = eff_ttl
+        holder["expires_at"] = now + eff_ttl
+        holder["holder_anchor_pid"] = identity["anchor_pid"]
+        holder["holder_anchor_start_token"] = identity["anchor_start_token"]
+        holder["holder_host"] = identity["host"]
+        _save_registry(store, registry)
+        print(f"LEASE-OK generation={holder['generation']}")
+        return EXIT_OK
+
+
+def cmd_lease_release(store: StoreFds, args) -> int:
+    key = _lease_key_from_arg(args.resource)
+    generation = _validate_generation(args.generation)
+    identity = resolve_identity(store)
+    print(f"session={identity['session_uuid']}")
+    with registry_transaction(store) as registry:
+        leases = _lease_entries(registry)
+        entry = leases.get(key)
+        now = time.time()
+
+        # ORDERED LADDER, first match wins (P-05/T-02-04):
+        # 1. caller IS a current holder (presence in holders{} IS the uuid check)
+        if entry is not None and identity["session_uuid"] in entry["holders"]:
+            holder = entry["holders"][identity["session_uuid"]]
+            if holder["generation"] != generation:
+                print("RELEASE-REFUSED: stale generation", file=sys.stderr)
+                return EXIT_REFUSED
+            del entry["holders"][identity["session_uuid"]]
+            if not entry["holders"]:
+                del leases[key]
+            gen_entry = _lease_gen_entry(registry, key)
+            gen_entry.setdefault("released_holders", {})[identity["session_uuid"]] = {
+                "generation": generation,
+                "released_at": now,
+            }
+            _save_registry(store, registry)
+            print("RELEASE-OK")
+            return EXIT_OK
+
+        # 2. caller is NOT a current holder, but has a tombstone — consulted
+        # BEFORE the refusal in branch 3 (a shared co-holder's idempotent
+        # re-release while the entry still exists is not "foreign").
+        gen_entry = registry["generations"].get(key)
+        if gen_entry is not None:
+            _validate_generations_record(key, gen_entry)
+        tombstone = (gen_entry or {}).get("released_holders", {}).get(
+            identity["session_uuid"]
+        )
+        if tombstone is not None:
+            if tombstone.get("generation") == generation:
+                print("RELEASE-OK")
+                return EXIT_OK
+            print("RELEASE-REFUSED: stale generation", file=sys.stderr)
+            return EXIT_REFUSED
+
+        # 3. neither — stranger, or a holder pruned by an overlapping
+        # acquire (reclaimed, never tombstoned). Phase 1's "foreign holder"
+        # string is NOT reused here — misleading to a reclaimed holder.
+        held_by = ",".join(sorted(entry["holders"].keys())) if entry else ""
+        suffix = f" held_by={held_by}" if held_by else ""
+        print(f"RELEASE-REFUSED: not a recorded holder{suffix}", file=sys.stderr)
+        return EXIT_REFUSED
+
+
 def cmd_status(store: StoreFds, args) -> int:
     with registry_transaction(store) as registry:
         claims = dict(registry.get("claims", {}))
+        leases = dict(_lease_entries(registry))
     now = time.time()
     for key, entry in sorted(claims.items()):
         flags = []
@@ -886,6 +1350,35 @@ def cmd_status(store: StoreFds, args) -> int:
         if flags:
             line += " flags=" + ",".join(flags)
         print(line)
+    for key, lease in sorted(leases.items()):
+        mode = lease.get("mode")
+        for holder_uuid, entry in sorted(lease.get("holders", {}).items()):
+            flags = []
+            worktree = entry.get("holder_worktree")
+            if worktree and not os.path.exists(worktree):
+                flags.append("MISSING-WORKTREE")
+            holder_host = entry.get("holder_host")
+            if holder_host and holder_host != _host_name():
+                flags.append("FOREIGN-HOST")
+            if (
+                entry.get("holder_anchor_pid") is None
+                or entry.get("last_renewed_at") is None
+                or entry.get("ttl_secs") is None
+            ):
+                flags.append("INCOMPLETE-ENTRY")
+            line = (
+                f"{key} mode={mode} holder={holder_uuid} "
+                f"generation={entry.get('generation')} "
+                f"anchor_pid={entry.get('holder_anchor_pid')} "
+                f"cli_pid={entry.get('cli_pid')} "
+                f"worktree={worktree} "
+                f"last_renewed_at={entry.get('last_renewed_at')} "
+                f"ttl_secs={entry.get('ttl_secs')} "
+                f"expires_at={entry.get('expires_at')}"
+            )
+            if flags:
+                line += " flags=" + ",".join(flags)
+            print(line)
     return EXIT_OK
 
 
@@ -913,11 +1406,43 @@ def cmd_doctor(store: StoreFds, args) -> int:
         print(exc.message, file=sys.stderr)
         return exc.code
 
+    live_leases = 0
+    lease_holders = 0
+    escaped: list[str] = []
+    try:
+        with registry_transaction(store) as registry:
+            leases = _lease_entries(registry)
+            live_leases = len(leases)
+            lease_holders = sum(len(e["holders"]) for e in leases.values())
+            # T-02-11: DIAGNOSTIC ONLY, never enforced. Re-run the
+            # acquisition-time containment resolution against every live
+            # lease key; degrade a single key to "unknown" on OSError
+            # rather than taking down doctor, which by contract never
+            # raises.
+            root = _worktree_root()
+            real_root = os.path.realpath(root)
+            for key in leases:
+                try:
+                    segments, _is_prefix = _parse_lease_resource(key)
+                    candidate = os.path.join(root, *segments)
+                    real = os.path.realpath(candidate)
+                    if real != real_root and not real.startswith(real_root + os.sep):
+                        escaped.append(key)
+                except OSError:
+                    pass
+    except CoordExit as exc:
+        print(f"lease_store=corrupt {exc.message}", file=sys.stderr)
+        return exc.code
+
     print(f"filelock_version={version}")
     print(f"store_path={store.store_root}")
     print(f"mode={mode} mode_source={mode_source}")
     print(f"staleness={staleness}")
     print(f"live_claims={live_claims}")
+    print(f"live_leases={live_leases}")
+    print(f"lease_holders={lease_holders}")
+    if escaped:
+        print(f"escaped_leases={','.join(escaped)}")
     return EXIT_OK
 
 
@@ -926,6 +1451,9 @@ COMMANDS = {
     "claim-check": cmd_claim_check,
     "claim-renew": cmd_claim_renew,
     "release": cmd_release,
+    "lease-acquire": cmd_lease_acquire,
+    "lease-renew": cmd_lease_renew,
+    "lease-release": cmd_lease_release,
     "status": cmd_status,
     "doctor": cmd_doctor,
 }
@@ -952,6 +1480,22 @@ def build_parser() -> argparse.ArgumentParser:
     release = sub.add_parser("release")
     release.add_argument("spec_id")
     release.add_argument("--generation", required=True)
+
+    lease_acquire = sub.add_parser("lease-acquire")
+    lease_acquire.add_argument("--resource", required=True)
+    lease_acquire.add_argument("--mode", required=True, choices=("shared", "exclusive"))
+    lease_acquire.add_argument("--ttl")
+    lease_acquire.add_argument("--heartbeat")
+
+    lease_renew = sub.add_parser("lease-renew")
+    lease_renew.add_argument("--resource", required=True)
+    lease_renew.add_argument("--generation", required=True)
+    lease_renew.add_argument("--ttl")
+    lease_renew.add_argument("--heartbeat")
+
+    lease_release = sub.add_parser("lease-release")
+    lease_release.add_argument("--resource", required=True)
+    lease_release.add_argument("--generation", required=True)
 
     sub.add_parser("status")
     sub.add_parser("doctor")
