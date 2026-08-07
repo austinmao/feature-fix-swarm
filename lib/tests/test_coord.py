@@ -436,6 +436,53 @@ def test_atomic_save_temp_file_is_o_excl(repo):
         coord._close_store(store)
 
 
+# ── Task 2: idempotency + no second artifact (P-04) ─────────────────────────
+def test_idempotent_reclaim_same_uuid_leaves_generation_unchanged(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "r1")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        with coord.registry_transaction(store) as registry:
+            assert registry["claims"]["claim:spec-009"]["generation"] == 1
+            assert registry["generations"]["claim:spec-009"]["gen"] == 1
+    finally:
+        coord._close_store(store)
+
+
+def test_foreign_fresh_claim_is_refused_not_overwritten(repo, monkeypatch):
+    monkeypatch.setenv("FFS_RUN_ID", "holder")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+    finally:
+        coord._close_store(store)
+
+    monkeypatch.setenv("FFS_RUN_ID", "other")
+    store2 = coord._open_store()
+    try:
+        rc = coord.cmd_claim(store2, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+        assert rc == 3
+        with coord.registry_transaction(store2) as registry:
+            assert registry["claims"]["claim:spec-009"]["generation"] == 1
+    finally:
+        coord._close_store(store2)
+
+
+def test_no_second_artifact_only_registry_and_sessions_on_disk(repo, monkeypatch):
+    """P-04: the registry claim entry is the SOLE claim record — no
+    claims/ directory, no per-resource lease marker file."""
+    monkeypatch.setenv("FFS_RUN_ID", "r1")
+    store = coord._open_store()
+    try:
+        coord.cmd_claim(store, argparse_namespace(spec_id="spec-009", ttl=None, heartbeat=None))
+    finally:
+        coord._close_store(store)
+    entries = {p.name for p in store.store_root.iterdir()}
+    assert entries <= {"registry.json", "registry.lock", "sessions", "mode"}
+    assert "claims" not in entries
+
+
 # ── must_haves.truths — one named test per truth this task can prove ───────
 def test_must_have_req02_single_store_per_repo(tmp_path, monkeypatch):
     """REQ-02: every coord path resolves through git-common-dir to ONE store

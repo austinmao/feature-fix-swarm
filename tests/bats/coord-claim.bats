@@ -83,3 +83,129 @@ setup() {
   content="$(cat "$pointer")"
   [ "$content" = "not-a-uuid" ]
 }
+
+# ── Task 2: claim atomicity and contention ──────────────────────────────────
+# Both racers are backgrounded directly in the test's own shell (not inside a
+# helper's command substitution) so `wait $pid` targets a direct child — a
+# grandchild backgrounded inside $(...) cannot be `wait`-ed by pid in bash.
+
+@test "20-rep different-identity race yields exactly one CLAIM-OK and one CLAIM-HELD, never two of either" {
+  for i in $(seq 1 20); do
+    rm -rf "$REPO/.feature-fix-swarm"
+    a_log="$BATS_TEST_TMPDIR/diff-a-$i.log"
+    b_log="$BATS_TEST_TMPDIR/diff-b-$i.log"
+    ( cd "$REPO" && FFS_RUN_ID="race-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+      echo $? > "$a_log.rc" ) &
+    pid_a=$!
+    ( cd "$REPO" && FFS_RUN_ID="race-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+      echo $? > "$b_log.rc" ) &
+    pid_b=$!
+    wait "$pid_a"
+    wait "$pid_b"
+    rc_a="$(cat "$a_log.rc")"
+    rc_b="$(cat "$b_log.rc")"
+    ok=0; held=0
+    [ "$rc_a" -eq 0 ] && ok=$((ok + 1))
+    [ "$rc_a" -eq 3 ] && held=$((held + 1))
+    [ "$rc_b" -eq 0 ] && ok=$((ok + 1))
+    [ "$rc_b" -eq 3 ] && held=$((held + 1))
+    if [ "$ok" -ne 1 ] || [ "$held" -ne 1 ]; then
+      echo "iteration $i: rc_a=$rc_a rc_b=$rc_b" >&2
+      cat "$a_log" "$b_log" >&2
+      return 1
+    fi
+  done
+}
+
+@test "20-rep same-run-id race yields two CLAIM-OKs sharing one session, one claims entry, one generation bump" {
+  for i in $(seq 1 20); do
+    rm -rf "$REPO/.feature-fix-swarm"
+    a_log="$BATS_TEST_TMPDIR/same-a-$i.log"
+    b_log="$BATS_TEST_TMPDIR/same-b-$i.log"
+    ( cd "$REPO" && FFS_RUN_ID="same-run-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+      echo $? > "$a_log.rc" ) &
+    pid_a=$!
+    ( cd "$REPO" && FFS_RUN_ID="same-run-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+      echo $? > "$b_log.rc" ) &
+    pid_b=$!
+    wait "$pid_a"
+    wait "$pid_b"
+    rc_a="$(cat "$a_log.rc")"
+    rc_b="$(cat "$b_log.rc")"
+    if [ "$rc_a" -ne 0 ] || [ "$rc_b" -ne 0 ]; then
+      echo "iteration $i: rc_a=$rc_a rc_b=$rc_b" >&2
+      cat "$a_log" "$b_log" >&2
+      return 1
+    fi
+    sess_a="$(head -1 "$a_log")"
+    sess_b="$(head -1 "$b_log")"
+    [ "$sess_a" = "$sess_b" ]
+    registry="$REPO/.feature-fix-swarm/coord/registry.json"
+    run python3 -c "
+import json
+d = json.load(open('$registry'))
+assert len(d['claims']) == 1, d['claims']
+assert d['generations']['claim:spec-009']['gen'] == 1, d['generations']
+"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "different-identity race across a linked worktree still yields exactly one CLAIM-OK" {
+  git -C "$REPO" worktree add -q "$BATS_TEST_TMPDIR/wt" -b wtbranch
+  for i in 1 2 3; do
+    rm -rf "$REPO/.feature-fix-swarm"
+    a_log="$BATS_TEST_TMPDIR/wt-a-$i.log"
+    b_log="$BATS_TEST_TMPDIR/wt-b-$i.log"
+    ( cd "$REPO" && FFS_RUN_ID="wt-a-$i" python3 "$COORD" claim spec-009 >"$a_log" 2>&1
+      echo $? > "$a_log.rc" ) &
+    pid_a=$!
+    ( cd "$BATS_TEST_TMPDIR/wt" && FFS_RUN_ID="wt-b-$i" python3 "$COORD" claim spec-009 >"$b_log" 2>&1
+      echo $? > "$b_log.rc" ) &
+    pid_b=$!
+    wait "$pid_a"
+    wait "$pid_b"
+    rc_a="$(cat "$a_log.rc")"
+    rc_b="$(cat "$b_log.rc")"
+    ok=0; held=0
+    [ "$rc_a" -eq 0 ] && ok=$((ok + 1))
+    [ "$rc_a" -eq 3 ] && held=$((held + 1))
+    [ "$rc_b" -eq 0 ] && ok=$((ok + 1))
+    [ "$rc_b" -eq 3 ] && held=$((held + 1))
+    [ "$ok" -eq 1 ]
+    [ "$held" -eq 1 ]
+  done
+}
+
+@test "env-carried identity: re-claiming via exported session= is idempotent, generation unchanged" {
+  run env -C "$REPO" python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+  sid="${lines[0]#session=}"
+
+  run env -C "$REPO" FFS_COORD_SESSION="$sid" python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLAIM-OK generation=1"* ]]
+
+  run env -C "$REPO" python3 "$COORD" status
+  [[ "$output" == *"generation=1"* ]]
+}
+
+@test "run-id-carried identity: second claim with same FFS_RUN_ID is idempotent, generation unchanged" {
+  run env -C "$REPO" FFS_RUN_ID=r1 python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+  run env -C "$REPO" FFS_RUN_ID=r1 python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLAIM-OK generation=1"* ]]
+}
+
+@test "a foreign session claiming an already-held spec exits 3 naming holder and expiry" {
+  run env -C "$REPO" FFS_RUN_ID=holder python3 "$COORD" claim spec-009
+  [ "$status" -eq 0 ]
+  holder_sid="${lines[0]#session=}"
+
+  run env -C "$REPO" FFS_RUN_ID=other python3 "$COORD" claim spec-009
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"CLAIM-HELD"* ]]
+  [[ "$output" == *"$holder_sid"* ]]
+  [[ "$output" == *"expires_at"* ]]
+}
