@@ -8,7 +8,7 @@ Format: REQ · category · status · reason/AC.
 | REQ-101 registry | encoding | resolved | tabs/CRLF/dup keys in surfaces → REJECT (REQ-103); prose fields never machine-parsed |
 | REQ-102 resolution | precedence | resolved | env var > environments.yaml > parity-manifest; explicit --manifest wins; empty --manifest REJECTED (EDGE-011) |
 | REQ-102 resolution | io | resolved | set-but-broken env var → REJECTED prod (EDGE-010); unparseable resolved file → REJECTED both modes (EDGE-005) |
-| REQ-102 trust | concurrency/identity | resolved | worktree-local uncommitted registry → REJECTED (main-checkout + tracked anchor, EDGE-012) |
+| REQ-102 trust | concurrency/identity | resolved | worktree-local uncommitted registry → governs nothing (implicit lookups read main HEAD only → absent + advisory; caller-supplied paths REJECTED — main-checkout anchor, EDGE-012, wall round-3) |
 | REQ-102 matching | encoding | resolved | casefold surface both sides; sentinel casefold+strip (EDGE-014) |
 | REQ-103 parser | ordering | resolved | surfaces-not-last parses; single-entry — later surface-shaped lines inert (EDGE-013) |
 | REQ-103 parser | adjacency | resolved | nested surfaces: at indent>0 ignored (EDGE-001) |

@@ -75,7 +75,7 @@ Sequenced design-critical first (each RED before implementation):
 - [ ] render: collision → .ffs-proposed.yml + original cmp-identical; byte-identical existing → up-to-date, no proposal
 - [ ] render: absent dependabot.yml → emitted with github-actions ecosystem; existing dependabot.yml without that ecosystem → advisory printed, file untouched
 - [ ] test_ci_templates: every job timeout, workflow-level permissions, 40-hex pinned uses + comment, concurrency (pr/push), fetch-depth 1, deploy-prod environment + pre-mutation check-grant --require-environments
-- [ ] check_grant_prod: resolved-but-unparseable registry → REJECTED both modes; untracked/worktree-only registry → REJECTED; casefolded surface + sentinel matching; hard mode unsatisfied by legacy parity-manifest; UNKNOWN-PROD-SURFACE under require-mode
+- [ ] check_grant_prod: resolved-but-unparseable registry → REJECTED both modes; untracked/worktree-only registry → never authoritative (caller-supplied REJECTED; implicit absent + advisory; staged deletion with HEAD intact → still enforced); casefolded surface + sentinel matching; hard mode unsatisfied by legacy parity-manifest; UNKNOWN-PROD-SURFACE under require-mode
 - [ ] check_grant_prod CLI: typed reason line printed (NO-STAGING-COUNTERPART/UNKNOWN-PROD-SURFACE/ENV-REGISTRY-INVALID) with remedy — asserted against stdout AND the pending record
 - [ ] parser: environments-block-after-surfaces fixture → its `- surface:`-shaped lines never parsed (single-entry); dup keys/blocks/tabs/unknown fields → REJECT
 - [ ] leak scan: each detector family fires on its fixture; uses:@40hex + sha256:64hex whitelisted; secret substring absent from stdout+stderr

@@ -70,8 +70,20 @@ that haven't migrated.
   distinguished from flag-absent; (d) resolution anchors to the MAIN
   checkout (same `git rev-parse --git-common-dir` pin as the evidence store —
   a worktree-local uncommitted registry must not govern its own prod gate)
-  and the resolved registry file must be git-TRACKED (`git ls-files
-  --error-unmatch`); untracked → treated as parse-failure (REJECTED on prod).
+  and CALLER-SUPPLIED registry paths (`$FFS_ENV_REGISTRY`; `--manifest`
+  under hard mode) must be git-TRACKED (`git ls-files
+  --error-unmatch -- ":(literal)<relpath>"` — literal pathspec, glob
+  metacharacters never interpreted) AND present in HEAD; untracked or
+  tracked-but-uncommitted → REJECTED on prod (`git commit` remedy).
+  Implicit resolutions (steps 2-3) read COMMITTED bytes with HEAD as the
+  SOLE authority — `git -C <main-root> show HEAD:<relpath>` success =
+  exists, failure = absent; the index plays NO role in implicit resolution
+  (a staged deletion cannot fake absence while HEAD holds the registry;
+  an untracked working-tree file governs nothing → absent plus one
+  advisory naming it) — and a tracked-but-dirty working
+  copy is inert (one stderr advisory when working tree differs from HEAD);
+  trackedness alone proves index membership, not content authority (wall
+  round-2 and round-3 adoptions).
   Hard mode (`--require-environments` / `FFS_ENV_REGISTRY_REQUIRED=1`,
   prod-prefix actions only): requires a committed `ffs.environments/v1`
   registry — legacy `parity-manifest.yaml` satisfies soft mode only; absent
@@ -83,15 +95,30 @@ that haven't migrated.
   plainly: require-mode covers `PROD_ACTION_PREFIXES` actions only —
   `hotfix:prod-*` routes before manifest logic today and stays unchanged
   (posture-knob domain, spec 006/008). Explicit valid `--manifest` always
-  wins; JSON manifests still load.
+  wins in SOFT mode; in HARD mode an explicit `--manifest` satisfies the
+  committed-v1 requirement only when it is itself a tracked, committed
+  `ffs.environments/v1` file (else CHECK-GRANT-REJECTED — a spoofable
+  schema-comment on an untracked file must not clear the hard-mode bar; wall
+  round-2 adoption). JSON manifests still load (duplicate keys at any depth
+  rejected via object_pairs_hook — parity with the YAML dup-key rule; and
+  casefold-duplicate surface names, e.g. `web`+`WEB`, rejected across BOTH
+  formats after normalization).
 - REQ-103: parser hardening (existing parser hardened — no NEW parser) —
   `surfaces:` trigger requires indent==0 (a nested `surfaces:` key must not
   flip parsing); flush-and-clear replaces break AND sets the parse
   single-entry (after the surfaces block closes, `in_surfaces` stays False
   forever — later indented `- surface:` lines, e.g. inside the
   `environments:` prose block, are never parsed; fixture pins `environments:`
-  placed AFTER `surfaces:`); within the surfaces block, duplicate surface
-  keys, duplicate blocks, tab indentation, and unknown row fields are
+  placed AFTER `surfaces:`); flush-and-latch fires ONLY on a non-blank,
+  non-comment indent-0 KEY line — blank lines and full-line comments are
+  NEUTRAL at any indent (no flush, no latch, no row termination, no
+  rejection; an interior blank must not close the block and let later rows
+  or duplicates evade parsing — wall round-3 adoption); within the surfaces
+  block, duplicate surface
+  keys, duplicate blocks, tab indentation, unknown row fields, and same-row
+  co-presence of `staging_instance` with its legacy alias `staging`
+  (semantic duplicate — rejected in every format regardless of value
+  agreement, each key alone valid; wall round-3 adoption) are
   REJECTED (fail-closed — never "deterministic either-way"); stale docstring
   at `_surface_has_staging` (gates.py:975-979, the "wiring lands Phase 4"
   text) corrected — NOT :890-894 as the design doc said.
@@ -271,7 +298,10 @@ Scenario: tier lookup drives CI
   NO-STAGING-COUNTERPART asserted via BOTH the pending record's typed reason
   AND the CLI-printed reason line, casefolded surface matching, unparseable
   resolved registry → REJECTED both modes, untracked/worktree-only registry
-  → REJECTED, omitted surfaces + `--require-environments` →
+  → never authoritative (caller-supplied path REJECTED; implicit path
+  absent + one advisory naming the uncommitted file; staged deletion or
+  working-tree delete with HEAD intact → still enforced),
+  omitted surfaces + `--require-environments` →
   UNKNOWN-PROD-SURFACE REJECTED, hard mode not satisfied by legacy
   parity-manifest, absent registry → byte-identical exit + one stderr
   advisory.
@@ -354,7 +384,9 @@ Scenario: tier lookup drives CI
 - EDGE-011: `--manifest ""` (empty value) → REJECTED, distinguished from
   flag-absent (falsy-string fall-through forbidden).
 - EDGE-012: registry exists only in the agent worktree (uncommitted/untracked)
-  → prod actions REJECTED (main-checkout + tracked-file anchoring).
+  → governs nothing (main-checkout anchoring: implicit lookups read main
+  HEAD only → absent + advisory naming the uncommitted file; caller-supplied
+  paths → REJECTED).
 - EDGE-013: `environments:` block placed AFTER `surfaces:` containing
   indented `- surface:`-shaped prose lines → never parsed (single-entry
   parse); fixture pins it.
