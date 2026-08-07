@@ -365,6 +365,34 @@ def test_install_socratic_guards_dest_and_source_missing_value(tmp_path: Path) -
     assert not dest.exists()
 
 
+def test_install_prompt_master_guards_dest_and_source_missing_value(tmp_path: Path) -> None:
+    # The guard fires at argument-parse time, before the pin is read or any
+    # clone happens, so the production script is safe to invoke directly.
+    installer = ROOT / "scripts" / "install-prompt-master.sh"
+
+    dest_result = subprocess.run(
+        ["bash", str(installer), "--dest"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    assert dest_result.returncode == 2
+    assert "usage" in dest_result.stderr.lower()
+
+    dest = tmp_path / "pm-dest-src-missing"
+    source_result = subprocess.run(
+        ["bash", str(installer), "--dest", str(dest), "--source"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    assert source_result.returncode == 2
+    assert "usage" in source_result.stderr.lower()
+    assert not dest.exists()
+
+
+def test_legacy_skill_names_includes_pinned_external_skills() -> None:
+    names = ffs_installer.legacy_skill_names(ROOT)
+    assert "prompt-master" in names
+    assert "socratic" in names
+
+
 def test_install_socratic_rejects_patch_path_traversal(tmp_path: Path) -> None:
     repo, sha = build_socratic_fixture_repo(tmp_path)
     root = stage_installer_root(tmp_path, str(repo), sha)

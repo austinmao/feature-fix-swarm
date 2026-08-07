@@ -121,6 +121,32 @@ EOF
   [ "$(jq -r '.verdict' "$record")" = "reviewed-pass" ]
 }
 
+# ── spec-005 retro: full-shape finding with EVERY optional key validates ────
+# Regression for the rc=97 defect that forced every WAIVED verdict in the
+# spec-005 run: the vendor clause in _pw_validate_findings piped into the
+# enum array without an `as` binding, so `.vendor` indexed the enum array and
+# jq errored — any finding carrying the (prompt-mandated) "vendor" key was
+# rejected as schema-invalid. Fixture stubs never set vendor, so only real
+# model output hit it.
+
+@test "spec-005 regression: finding with vendor/confidence/repro keys is schema-valid, not rc=97" {
+  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"missing null check","line":3,"repro":"call f(null)","vendor":"anthropic","confidence":0.8}]'
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCKED"* ]]
+  [[ "$output" != *"WALL-UNREVIEWED"* ]]
+  [[ "$output" != *"schema validation"* ]]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.verdict' "$record")" = "blocked" ]
+}
+
+@test "spec-005 regression: an out-of-enum vendor value is still rejected" {
+  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"x","vendor":"acme"}]'
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WALL-UNREVIEWED"* ]]
+}
+
 # ── PATH-003: claude-only -> same-vendor relation ────────────────────────────
 
 @test "PATH-003: claude-only shim, planner fable -> opus reviews, relation same-vendor" {

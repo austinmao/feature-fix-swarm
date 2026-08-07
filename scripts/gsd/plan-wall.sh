@@ -339,7 +339,7 @@ _pw_validate_findings() {
        else true end) and
       (if has("repro") then (.repro == null or (.repro | type) == "string") else true end) and
       (if has("vendor") then
-         ((.vendor | type) == "string" and (["anthropic","openai"] | index(.vendor) != null))
+         ((.vendor | type) == "string" and (.vendor as $v | ["anthropic","openai"] | index($v) != null))
        else true end) and
       (if has("confidence") then
          ((.confidence | type) == "number" and .confidence >= 0 and .confidence <= 1)

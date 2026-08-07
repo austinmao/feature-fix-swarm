@@ -10,6 +10,33 @@ all skills.
 
 ### Added
 
+- Post-spec-005 hygiene: opt-in enum-drift suite
+  (`tests/bats/socratic-enum-drift.bats`) asserting
+  `DOMAIN_ENUM_ORDER`/`PACK_ENUM` map 1:1 to a REAL resolved socratic vendor
+  tree (skips where none resolves, so CI is unaffected); spec-005 retro note
+  (`specs/005-socratic-integration/retro.md`).
+
+### Changed
+
+- `lib/ffs_installer.py`: `stage_prompt_master`/`stage_socratic` deduplicated
+  into one `_stage_external_skill()` with a uniform env contract —
+  prompt-master gains `FFS_PROMPT_MASTER_INSTALLER` for parity with the
+  socratic seam; `legacy_skill_names()` now recognizes a stray legacy
+  `socratic` dir as managed during migration.
+
+### Fixed
+
+- `scripts/gsd/plan-wall.sh`: fixed the schema-validator defect (rc=97) that
+  forced every WAIVED verdict in the spec-005 run — the vendor clause in
+  `_pw_validate_findings` piped into the enum array without an `as` binding,
+  so `.vendor` indexed the enum array and jq errored, rejecting EVERY finding
+  that carried the prompt-mandated `vendor` key as schema-invalid. Fixture
+  stubs never set `vendor`, so only real model output hit it. Regression
+  tests cover the full-shape finding and the out-of-enum vendor rejection.
+- `scripts/install-prompt-master.sh`: `--dest`/`--source` with a missing
+  value now exits 2 with a usage line (previously died via failed `shift 2`
+  under `set -e`), matching `install-socratic.sh`.
+
 - Added a fourth model-request tier, `frontier` (spec 004,
   `specs/004-model-routing/`), splitting the collapsed `judgment` tier that
   planning and review previously shared. `gsd-planner` moves to `frontier`

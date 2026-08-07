@@ -73,11 +73,19 @@ read by `lib/ffs_installer.py`: `FFS_SOCRATIC_INSTALLER` overrides the
 installer path itself (a test seam — points install-time tests at
 `tests/fixtures/socratic-installer-stub.sh` instead of the real
 `scripts/install-socratic.sh`, mirroring the pre-existing
-`FFS_GSD_INSTALLER`/`FFS_PROMPT_MASTER_SOURCE` precedents), and
-`FFS_SOCRATIC_SOURCE` overrides the clone source, appended to the installer
-command as `--source <value>` when set (the same seam
-`test_install_socratic_honours_source_override` exercises directly against
-the real installer). Neither is meant to be set in normal operation.
+`FFS_GSD_INSTALLER` precedent), and `FFS_SOCRATIC_SOURCE` overrides the
+clone source, appended to the installer command as `--source <value>` when
+set (the same seam `test_install_socratic_honours_source_override`
+exercises directly against the real installer). Neither is meant to be set
+in normal operation.
+
+Both pinned external skills now share one staging implementation
+(`_stage_external_skill()` in `lib/ffs_installer.py`) and therefore one
+uniform env contract: `FFS_SKIP_<SKILL>`, `FFS_<SKILL>_INSTALLER`,
+`FFS_<SKILL>_SOURCE` for `PROMPT_MASTER` and `SOCRATIC` alike. The
+`*_INSTALLER` override stays an env var by design rather than a
+monkeypatch seam: install-time tests drive `setup.sh` as a subprocess, and
+only the environment crosses that boundary.
 
 No patch is pinned at this commit. `vendor/socratic/pin.json` carries no
 `patch` key at all, and the installed marker (`.ffs-socratic.json`, schema
@@ -121,8 +129,11 @@ field is `null` here because no patch has been needed at this commit.
    fail-closed, so a spec author declaring a domain that upstream genuinely
    added is rejected at exit 3 with a spec that is correct. Neither is a
    test failure — every bats suite runs against `make_vendor_tree` fixtures
-   and never against the real pin — so CI cannot catch enum drift. This step
-   is the only control that exists.
+   and never against the real pin — so CI cannot catch enum drift. Besides
+   this step, the opt-in suite `tests/bats/socratic-enum-drift.bats` asserts
+   the 1:1 enum↔file mapping against a REAL resolved vendor tree (it skips
+   wherever no tree resolves, i.e. on CI) — run it on any machine with the
+   new pin installed to catch drift mechanically.
 
 ## Optional integrations
 
