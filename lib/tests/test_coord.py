@@ -988,3 +988,38 @@ def test_doctor_reports_version_store_mode_live_claims(repo, monkeypatch, capsys
     assert "store_path=" in out
     assert "mode=" in out
     assert "live_claims=1" in out
+
+
+# ── W1 gap-closure: exit 75 COORD-CONTENTION (plan T-01-12) ──────────────
+def test_registry_contention_exits_75(repo, monkeypatch):
+    """A registry lock held by ANOTHER process forces exit 75, not a hang."""
+    monkeypatch.setattr(coord, "LEASE_ACQUIRE_TIMEOUT_SECS", 0.3)
+    store = coord._open_store()
+    try:
+        holder = sp.Popen(
+            [sys.executable, "-c",
+             "import sys, time\n"
+             "from filelock import FileLock\n"
+             "l = FileLock(sys.argv[1])\n"
+             "l.acquire()\n"
+             "print('HELD', flush=True)\n"
+             "time.sleep(30)\n",
+             str(store.lock_path)],
+            stdout=sp.PIPE, text=True)
+        try:
+            assert holder.stdout.readline().strip() == "HELD"
+            before = (store.store_root / "registry.json").read_bytes() \
+                if (store.store_root / "registry.json").exists() else None
+            with pytest.raises(coord.CoordExit) as exc:
+                with coord.registry_transaction(store):
+                    pass  # pragma: no cover — must never be reached
+            assert exc.value.code == 75
+            assert "COORD-CONTENTION" in (exc.value.message or "")
+            after = (store.store_root / "registry.json").read_bytes() \
+                if (store.store_root / "registry.json").exists() else None
+            assert before == after  # registry untouched on contention
+        finally:
+            holder.kill()
+            holder.wait()
+    finally:
+        coord._close_store(store)
