@@ -1318,3 +1318,120 @@ PY
   [ -f "$COMMON_DIR/ffs/gsd-run/gsd-run.status" ]
   grep -Fq "pidfile=$COMMON_DIR/ffs/gsd-run/gsd-run.pid" <<<"$output"
 }
+
+# ── Phase 4 Task 1: coord claim/release wiring (P-22, P-24, P-25) ──────────
+# P-27: scripts/coord is copied into HARNESS_ROOT inside each case's OWN
+# body, never in setup() — every pre-existing case above stays on the
+# fail-soft no-coord-layer path byte-identically.
+
+@test "explicit GSD_RUN_ID holds a coord claim during the drive and releases it after (coord wiring)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+  SNAPSHOT="$BATS_TEST_TMPDIR/registry.mid-drive.json"
+  cat > "$STUB_DIR/coord-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+cp "$REGISTRY" "$SNAPSHOT" 2>/dev/null || true
+touch "$BATS_TEST_TMPDIR/coord.args"
+echo CODEX_OK
+exit 0
+EOF
+  chmod +x "$STUB_DIR/coord-codex"
+
+  FFS_HOST=codex GSD_RUN_ID=spec-009 CODEX_BIN=coord-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/coord.args" ]
+
+  # mid-drive snapshot: before-and-after alone would pass against a no-op,
+  # so the discriminating half is that the claim is visible WHILE the drive
+  # (the stub) is running.
+  [ -f "$SNAPSHOT" ]
+  run python3 -c "import json; d=json.load(open('$SNAPSHOT')); assert 'claim:spec-009' in d['claims'], d['claims']"
+  [ "$status" -eq 0 ]
+
+  # after the EXIT trap completes, the claim is gone.
+  [ -f "$REGISTRY" ]
+  run python3 -c "import json; d=json.load(open('$REGISTRY')); assert 'claim:spec-009' not in d.get('claims', {}), d['claims']"
+  [ "$status" -eq 0 ]
+}
+
+@test "a live foreign coord claim holder refuses the launch with coord.py's own exit 3, never gsd-run.sh's pidfile 75" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  ( sleep 30 ) &
+  anchor_pid=$!
+  env -C "$BATS_TEST_TMPDIR" FFS_COORD_ANCHOR_PID="$anchor_pid" FFS_RUN_ID=foreign \
+    python3 "$ROOT/scripts/coord/coord.py" claim spec-009 >/dev/null
+
+  FFS_HOST=codex GSD_RUN_ID=spec-009 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  kill "$anchor_pid" 2>/dev/null || true
+  wait "$anchor_pid" 2>/dev/null || true
+
+  [ "$status" -eq 3 ]
+  [ "$status" -ne 75 ]
+  [[ "$output" == *"CLAIM-HELD"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "a runner with no explicit GSD_RUN_ID takes no coord claim and still completes (P-22)" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+
+  run env -u GSD_RUN_ID FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CODEX_OK"* ]]
+  if [ -f "$REGISTRY" ]; then
+    run python3 -c "import json; d=json.load(open('$REGISTRY')); assert not d.get('claims'), d['claims']"
+    [ "$status" -eq 0 ]
+  fi
+}
+
+@test "a repo without the coord layer runs the drive byte-identically to today (P-25 fail-soft)" {
+  FFS_HOST=codex GSD_RUN_ID=spec-009 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CODEX_OK"* ]]
+  [ ! -d "$BATS_TEST_TMPDIR/.feature-fix-swarm" ]
+}
+
+@test "a GSD_RUN_ID over coord.py's 64-byte CLAIM_ID_RE cap is refused verbatim, never truncated to fit" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+  LONG_ID="$(python3 -c 'print("a" * 65)')"
+
+  FFS_HOST=codex GSD_RUN_ID="$LONG_ID" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CLAIM_ID_RE"* ]]
+  [[ "$output" == *"64"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  if [ -f "$REGISTRY" ]; then
+    run python3 -c "import json; d=json.load(open('$REGISTRY')); assert not d.get('claims'), d['claims']"
+    [ "$status" -eq 0 ]
+  fi
+}
+
+@test "a GSD_RUN_ID valid to the runner's sanitizer but invalid to coord.py's CLAIM_ID_RE is refused verbatim" {
+  cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
+  REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
+
+  FFS_HOST=codex GSD_RUN_ID=_leading-underscore CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CLAIM_ID_RE"* ]]
+  [[ "$output" == *"64"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  if [ -f "$REGISTRY" ]; then
+    run python3 -c "import json; d=json.load(open('$REGISTRY')); assert not d.get('claims'), d['claims']"
+    [ "$status" -eq 0 ]
+  fi
+}
