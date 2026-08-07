@@ -23,8 +23,11 @@
 # THE GUARD IS A READER. It never writes registry.json, never mints a
 # session, never takes the registry filelock, never prunes a stale holder,
 # and never brings a coordination store into existence in a repo that had
-# none. The only file it may write is its own guard-cache.json, and that
-# cache can never change a verdict (see the python core below).
+# none. The only file it may write is its own guard-cache.json. Cache
+# read/write ERRORS never change a verdict (they skip the cache); the cache
+# CONTENT is trusted after tag+digest+structural validation, so a same-UID
+# writer who forges a correctly-digested cache can flip a verdict — accepted
+# residual, that writer can edit registry.json directly (plan P-18).
 #
 # Fail-closed in enforce mode on malformed hook JSON, an unreadable store,
 # or a broken filelock install (REQ-08). Fail-open (warn + exit 0) in audit
