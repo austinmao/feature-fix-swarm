@@ -203,6 +203,40 @@ def test_loop_round_counts_durably_and_resets(tmp_path) -> None:
     assert gates.loop_round(store, "run-2", "wall:p1") == 2
 
 
+def test_reset_loop_round_noop_leaves_store_byte_identical(tmp_path) -> None:
+    # run-finalizer sweeps loop-round counters on EVERY landed run; a store
+    # with no counters must not be rewritten (run-finalizer.bats pins
+    # "evidence store untouched" against the literal prior bytes).
+    import json
+    store = tmp_path / "evidence.json"
+    store.write_text('{"k":"v"}')
+    gates.reset_loop_round(store, "run-1", None)
+    gates.reset_loop_round(store, "run-1", "wall:p1")
+    assert store.read_text() == '{"k":"v"}'
+    # a store that has OTHER runs' counters is also untouched by a no-op reset
+    gates.loop_round(store, "run-2", "wall:p1")
+    before = store.read_text()
+    gates.reset_loop_round(store, "run-1", None)
+    assert store.read_text() == before
+    assert json.loads(before)["k"] == "v"
+
+
+def test_reset_loop_round_creates_no_debris_on_missing_or_corrupt_store(tmp_path) -> None:
+    import pytest as _pytest
+    # missing store: reset is a silent no-op — must not resurrect the parent
+    # dir or drop a .lock (run-finalizer step 4b runs AFTER worktree removal)
+    gone = tmp_path / "removed-worktree" / "custom-gates" / "evidence.json"
+    gates.reset_loop_round(gone, "run-1", None)
+    assert not gone.parent.exists()
+    # corrupt store: the error still surfaces (CLI maps it to rc 3), but no
+    # .lock may be created on the way out
+    corrupt = tmp_path / "evidence.json"
+    corrupt.write_text("GATES-VERSION")
+    with _pytest.raises(ValueError):
+        gates.reset_loop_round(corrupt, "run-1", None)
+    assert not (tmp_path / "evidence.lock").exists()
+
+
 def test_loop_round_shape_guard_refuses_conflicting_store(tmp_path) -> None:
     import json
     store = tmp_path / "evidence.json"
