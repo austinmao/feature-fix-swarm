@@ -70,11 +70,12 @@ class CoordExit(Exception):
 def _require_filelock():
     """Import filelock and enforce the >=3.30 floor via symbol presence.
 
-    Phase 1 never calls SoftFileLease or ReadWriteLock (P-04: no lease
-    markers) — they are the VERSION-FLOOR PROBE only, since SoftFileLease
-    landed in 3.30 and ReadWriteLock in 3.21. Their absence is how a
-    below-floor 3.29.x install is detected without parsing a version string.
-    Phase 2 will use ReadWriteLock for real; do not remove this probe.
+    SoftFileLease and ReadWriteLock are NEVER instantiated anywhere in this
+    module (P-04: no lease markers; P-08: ReadWriteLock retired on evidence
+    from the installed 3.32.2 source) — they are the VERSION-FLOOR PROBE
+    only, since SoftFileLease landed in 3.30 and ReadWriteLock in 3.21.
+    Their absence is how a below-floor 3.29.x install is detected without
+    parsing a version string. Do not remove this probe.
     """
     try:
         import filelock
