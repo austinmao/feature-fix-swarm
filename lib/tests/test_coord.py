@@ -1296,14 +1296,22 @@ def test_lease_ttl_floor_w4_mechanical(repo, monkeypatch):
 
 # ── overlap scan + mutation in ONE transaction ──────────────────────────────
 def test_lease_acquire_enters_registry_transaction_exactly_once(repo, monkeypatch):
+    """P2-W1: prove the registry lock is HELD at _save_registry time, not
+    merely that the lock file EXISTS (a lock file survives release, so
+    existence proves nothing). A non-blocking (timeout=0) re-acquisition of
+    the SAME lock from inside the spy must raise filelock.Timeout -- that
+    can only happen while this process itself still holds it."""
+    import filelock
+
     monkeypatch.setenv("FFS_RUN_ID", "r1")
     store = coord._open_store()
     calls = []
     real_save = coord._save_registry
 
     def spy(store_, data):
-        # the registry lock is held by the time we save
-        assert store_.lock_path.exists() or True  # existence isn't proof of hold; assert via re-entrancy below
+        probe = filelock.FileLock(str(store_.lock_path), timeout=0)
+        with pytest.raises(filelock.Timeout):
+            probe.acquire()
         calls.append(1)
         return real_save(store_, data)
 
@@ -1466,15 +1474,21 @@ def test_lease_holder_torn_field_is_not_corrupt(repo, field, capsys):
 
 
 def test_doctor_never_raises_on_corrupt_lease_store(repo, capsys):
+    """P2-W2: capsys.readouterr() DRAINS the buffer -- a second call returns
+    empty, so the original two-call form silently asserted nothing about
+    `out`. One drain, and the `lease_store=corrupt` line (with its
+    offending key) is asserted for real (02-01-PLAN.md:173)."""
     store = coord._open_store()
     try:
         _write_raw_leases(store, {"path:a": []})
         rc = coord.cmd_doctor(store, argparse_namespace())
         assert rc == 69
-        out = capsys.readouterr().out + capsys.readouterr().err
+        cap = capsys.readouterr()
+        combined = cap.out + cap.err
+        assert "lease_store=corrupt" in combined, combined
+        assert "path:a" in combined, combined
     finally:
         coord._close_store(store)
-    assert rc == 69
 
 
 def test_doctor_escaped_leases_diagnostic_t_02_11(repo, capsys):
@@ -1991,12 +2005,14 @@ def test_lease_release_shared_partial(repo, monkeypatch):
         coord._close_store(store)
 
 
-def test_lease_p05_tombstone_before_refusal(repo, monkeypatch):
+def test_lease_p05_tombstone_before_refusal(repo, monkeypatch, capsys):
     monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(os.getpid()))
+    holder_sids = {}
     for run_id in ("a", "b", "c"):
         monkeypatch.setenv("FFS_RUN_ID", run_id)
         store = coord._open_store()
         coord.cmd_lease_acquire(store, _lease_args(resource="path:a", mode="shared"))
+        holder_sids[run_id] = capsys.readouterr().out.splitlines()[0][len("session="):]
         coord._close_store(store)
 
     monkeypatch.setenv("FFS_RUN_ID", "a")
@@ -2015,8 +2031,15 @@ def test_lease_p05_tombstone_before_refusal(repo, monkeypatch):
     monkeypatch.setenv("FFS_RUN_ID", "d")
     store = coord._open_store()
     try:
+        capsys.readouterr()
         rc3 = coord.cmd_lease_release(store, _release_args(resource="path:a", generation=1))
         assert rc3 == 3
+        cap = capsys.readouterr()
+        combined = cap.out + cap.err
+        assert "not a recorded holder" in combined, combined
+        expected_held_by = ",".join(sorted([holder_sids["b"], holder_sids["c"]]))
+        assert f"held_by={expected_held_by}" in combined, combined
+        assert "foreign holder" not in combined, combined
     finally:
         coord._close_store(store)
 
@@ -2080,17 +2103,23 @@ def test_lease_release_ladder_holdership_before_stale_tombstone(repo, monkeypatc
         coord._close_store(store)
 
 
-def test_lease_release_refusals_stale_generation_and_stranger(repo, monkeypatch):
+def test_lease_release_refusals_stale_generation_and_stranger(repo, monkeypatch, capsys):
     monkeypatch.setenv("FFS_RUN_ID", "holder")
     store = coord._open_store()
     coord.cmd_lease_acquire(store, _lease_args(resource="path:a", mode="exclusive"))
+    holder_sid = capsys.readouterr().out.splitlines()[0][len("session="):]
     coord._close_store(store)
 
     store = coord._open_store()
     try:
         before = (store.store_root / "registry.json").read_bytes()
+        capsys.readouterr()
         rc = coord.cmd_lease_release(store, _release_args(resource="path:a", generation=99))
         assert rc == 3
+        cap = capsys.readouterr()
+        combined = cap.out + cap.err
+        assert "stale generation" in combined, combined
+        assert "foreign holder" not in combined, combined
         after = (store.store_root / "registry.json").read_bytes()
         assert before == after
     finally:
@@ -2100,15 +2129,34 @@ def test_lease_release_refusals_stale_generation_and_stranger(repo, monkeypatch)
     store2 = coord._open_store()
     try:
         before = (store2.store_root / "registry.json").read_bytes()
+        capsys.readouterr()
         rc2 = coord.cmd_lease_release(store2, _release_args(resource="path:a", generation=1))
         assert rc2 == 3
+        cap2 = capsys.readouterr()
+        combined2 = cap2.out + cap2.err
+        assert "not a recorded holder" in combined2, combined2
+        assert f"held_by={holder_sid}" in combined2, combined2
+        assert "foreign holder" not in combined2, combined2
         after = (store2.store_root / "registry.json").read_bytes()
         assert before == after
     finally:
         coord._close_store(store2)
 
 
-def test_lease_release_reclaimed_holder_refused_not_released(repo, monkeypatch):
+def test_lease_release_reclaimed_holder_refused_not_released(repo, monkeypatch, capsys):
+    """P2-W3 (deviation from the plan's literal token, recorded honestly):
+    the reclaiming session (peer) is the SAME identity used for both the
+    reclaim and this release call, so the ladder's step-1 "caller IS a
+    current holder" branch fires here -- peer genuinely holds the lease
+    after reclaiming it -- and the refusal is on GENERATION, not on
+    holdership. The dead "dying" holder was hand-stamped directly into the
+    registry with no session record, so there is no way to authenticate AS
+    "dying" through the normal identity flow to exercise the
+    never-a-holder path from this fixture; that path is already covered by
+    the stranger sub-case in test_lease_release_refusals_stale_generation_and_stranger.
+    Verified against production directly (io-capture probe) before writing
+    this assertion -- production is correct, the plan text's stale-generation
+    assertion in its OWN paragraph applies to exactly this shape."""
     proc = _spawn_lease_anchor()
     token = coord._capture_start_token(proc.pid)
     monkeypatch.setenv("FFS_RUN_ID", "peer")
@@ -2124,10 +2172,15 @@ def test_lease_release_reclaimed_holder_refused_not_released(repo, monkeypatch):
 
     store2 = coord._open_store()
     try:
+        capsys.readouterr()
         rc = coord.cmd_lease_release(
             store2, _release_args(resource="path:a", generation=holder["generation"])
         )
         assert rc == 3
+        cap = capsys.readouterr()
+        combined = cap.out + cap.err
+        assert "stale generation" in combined, combined
+        assert "foreign holder" not in combined, combined
         with coord.registry_transaction(store2) as registry:
             entry = registry["leases"]["path:a"]
             assert "dying" not in entry["holders"]

@@ -41,9 +41,11 @@ assert len(e['holders']) == 1, e
   [ "$status" -eq 3 ]
   [[ "$output" == *"LEASE-HELD"* ]]
   [[ "$output" == *"$holder_sid"* ]]
-  [[ "$output" == *"anchor_pid"* ]]
-  [[ "$output" == *"worktree"* ]]
-  [[ "$output" == *"expires_at"* ]]
+  # P2-W4: assert VALUE SHAPE, not bare field names -- a holder rendered as
+  # `anchor_pid=None` satisfies a bare-name substring check completely.
+  [[ "$output" =~ anchor_pid=[0-9]+ ]]
+  [[ "$output" =~ worktree=/ ]]
+  [[ "$output" =~ expires_at=[0-9] ]]
 
   run env -C "$REPO" FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID=other2 python3 "$COORD" lease-acquire --resource path:docs/a.md --mode exclusive
   [ "$status" -eq 3 ]
