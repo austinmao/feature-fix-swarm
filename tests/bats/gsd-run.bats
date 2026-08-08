@@ -886,17 +886,18 @@ EOF
     *) ACTUAL_COMMON="$(cd "$(cat "$BATS_TEST_TMPDIR/codex.cwd")/$ACTUAL_COMMON" && pwd -P)" ;;
   esac
   [ "$ACTUAL_COMMON" = "$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)" ]
-  # P-29 (04-01): writable_roots now grants the run worktree AND the shared
-  # .feature-fix-swarm subtree at the main checkout -- widened from 1 to 2
-  # entries in the same line this widening lands on. See the dedicated
-  # "coord wiring" case below for the content assertion on each entry.
+  # P-29 (04-01): writable_roots grants the run worktree, the shared
+  # .feature-fix-swarm subtree, and (spec-008 live fix) the two git-metadata
+  # roots a commit inside the linked worktree writes: <common>/objects and
+  # <common>/worktrees/<run-id>. NEVER the whole .git -- hooks/ and refs/
+  # stay non-writable. See the "coord wiring" case for content assertions.
   [ "$(python3 - "$BATS_TEST_TMPDIR/codex.config" <<'PY'
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
 print(len(roots))
 PY
-)" -eq 2 ]
+)" -eq 4 ]
   [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
 }
 
@@ -1763,9 +1764,12 @@ EOF
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
-assert len(roots) == 2, roots
+assert len(roots) == 4, roots
 assert any(r.endswith('/.feature-fix-swarm') for r in roots), roots
 assert any('/.claude/worktrees/' in r for r in roots), roots
+assert any(r.endswith('/objects') for r in roots), roots
+assert any('/worktrees/' in r and r.rstrip('/').endswith('gsd-quick') for r in roots) or any('/.git/worktrees/' in r for r in roots), roots
+assert not any(r.rstrip('/').endswith('/.git') for r in roots), roots
 PY
   [ "$status" -eq 0 ]
 }

@@ -1047,8 +1047,18 @@ prepare_codex_runtime() {
   # (no tracked source becomes writable) and this also unblocks the sibling
   # evidence.json write (lib/gates.py:1372) that was broken for the same
   # reason.
-  writable_json="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1], sys.argv[2]]))' \
-    "$RUN_WORKTREE_ROOT" "$PROJECT_PRIMARY_ROOT/.feature-fix-swarm")" || return 1
+  # Spec-008 live fix: a commit inside the LINKED worktree writes git
+  # metadata OUTSIDE the worktree root — its per-worktree git dir
+  # (<common>/worktrees/<run-id>: index.lock, HEAD, logs) and the SHARED
+  # object store (<common>/objects). Without these two roots every
+  # sandboxed `git add`/`git commit` dies with "Unable to create
+  # index.lock: Operation not permitted" and the drive cannot make its
+  # RED/GREEN/SUMMARY commits. Deliberately NARROW: never the whole .git —
+  # hooks/ (arbitrary code executed by the next unsandboxed git call) and
+  # refs/ (other branches) stay non-writable.
+  writable_json="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]]))' \
+    "$RUN_WORKTREE_ROOT" "$PROJECT_PRIMARY_ROOT/.feature-fix-swarm" \
+    "$GIT_COMMON_DIR/objects" "$GIT_COMMON_DIR/worktrees/$RUN_ID")" || return 1
   {
     printf 'approval_policy = "never"\n'
     printf 'sandbox_mode = "%s"\n' "$REQUESTED_SANDBOX_MODE"
