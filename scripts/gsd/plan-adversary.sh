@@ -46,6 +46,10 @@ PLAN_FILE="$PLAN_DIR/${PLAN_FILE##*/}"
 PLAN_ROOT="$(git -C "$PLAN_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$PLAN_DIR")"
 
 if [ "${PLAN_ADVERSARY:-on}" = "off" ]; then
+  if ! "$SCRIPT_DIR/waiver-record.sh" "plan-adversary" "PLAN_ADVERSARY=off"; then
+    echo "[plan-adversary] WAIVER-UNRECORDED — refusing disabled bypass" >&2
+    exit 1
+  fi
   echo "[plan-adversary] disabled (PLAN_ADVERSARY=off) — skipped"
   exit 0
 fi

@@ -499,6 +499,11 @@ _pw_waiver_path() {
   local plan_file="$1" record_path="$2" reason sha sec_match fence_marker waived_security
   local sig add_out add_rc
 
+  if ! "$SCRIPT_DIR/waiver-record.sh" "plan-wall" "PLAN_WALL=off"; then
+    echo "plan-wall: WAIVER-UNRECORDED — refusing waiver path" >&2
+    return 1
+  fi
+
   reason="${PLAN_WALL_REASON:-operator waiver via PLAN_WALL=off}"
   sha=""
   [ -f "$plan_file" ] && [ -r "$plan_file" ] && sha="$(_pw_sha256 "$plan_file")"
