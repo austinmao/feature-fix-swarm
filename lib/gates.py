@@ -408,15 +408,35 @@ def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
     loop_name is None (run-finalizer's run-end sweep — a spec's run_id is
     stable across runs, so a landed run must drop its counters or the next
     run of the same spec starts pre-capped)."""
+    store = Path(store)
+    if not store.exists():
+        # Nothing recorded — and _StoreLock would mkdir the store's parent and
+        # leave a .lock file behind, resurrecting a worktree directory the
+        # finalizer just removed (GATES_STORE pointing into the archived tree).
+        # A reset must never create store/lock debris.
+        return
+    # Probe WITHOUT the lock: a no-op reset must leave the store's directory
+    # byte-identical (no .lock debris — a foreign GATES_STORE may sit in
+    # tracked worktree space, where any new file makes the tree DIRTY).
+    # Corrupt-store errors propagate to the CLI's rc-3 path un-locked too.
+    probe = json.loads(store.read_text())
+    loops = probe.get("_loops")
+    if loop_name is None:
+        if not (isinstance(loops, dict) and run_id in loops):
+            return
+    else:
+        if not (isinstance(loops, dict)
+                and isinstance(loops.get(run_id), dict)
+                and loop_name in loops[run_id]):
+            return
     with _StoreLock(store):
         data = _load_store(store)
-        if loop_name is None:
-            loops = data.get("_loops")
-            if isinstance(loops, dict):
+        loops = data.get("_loops")
+        if isinstance(loops, dict):
+            if loop_name is None:
                 loops.pop(run_id, None)
-        else:
-            run_entry = _loops_ns(data, run_id)
-            run_entry.pop(loop_name, None)
+            elif isinstance(loops.get(run_id), dict):
+                loops[run_id].pop(loop_name, None)
         _save_store(store, data)
 
 
