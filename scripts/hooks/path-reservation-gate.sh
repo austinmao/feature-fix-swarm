@@ -429,7 +429,18 @@ try:
             sys.exit(0)
 
         # ── step 3(h): the message (REQ-07) ──────────────────────────────
-        coord._print_lease_held([(k, h) for k, _u, h in blockers])
+        # NOT coord._print_lease_held: that helper prints the FULL holder
+        # uuid, which is the FFS_COORD_SESSION impersonation token this
+        # stderr must never carry (review-gate HIGH). Redacted local form.
+        for _k, _u, _h in blockers:
+            print(
+                "LEASE-HELD "
+                f"holder={_u[:8]}... "
+                f"anchor_pid={_h.get('holder_anchor_pid')} "
+                f"worktree={_h.get('holder_worktree')} "
+                f"expires_at={_h.get('expires_at')}",
+                file=sys.stderr,
+            )
         key, h_uuid, holder = blockers[0]
         gen = holder["generation"]
         # held_by is TRUNCATED on purpose: the full session uuid IS the

@@ -422,18 +422,26 @@ def _load_session_record(store: StoreFds, session_uuid: str):
 
 
 def _read_by_run_pointer(store: StoreFds, run_id: str):
-    _refuse_if_symlink(store.by_run_fd, run_id)
-    try:
-        raw = _read_text_fd(store.by_run_fd, run_id)
-    except FileNotFoundError:
-        return None
-    content = raw[:-1] if raw.endswith("\n") else raw
-    if not SESSION_UUID_RE.match(content):
-        raise CoordExit(
-            EXIT_UNAVAILABLE,
-            f"coord: COORD-UNAVAILABLE malformed by-run pointer sessions/by-run/{run_id}",
-        )
-    return content
+    # A loser of the O_EXCL publish race can read the winner's pointer in the
+    # open()-to-write() window and see it empty/partial (CI-observed torn
+    # read). That state is TRANSIENT — retry briefly before declaring the
+    # pointer corrupt. Permanent garbage still exits 69 after the retries.
+    deadline_attempts = 5
+    for attempt in range(deadline_attempts):
+        _refuse_if_symlink(store.by_run_fd, run_id)
+        try:
+            raw = _read_text_fd(store.by_run_fd, run_id)
+        except FileNotFoundError:
+            return None
+        content = raw[:-1] if raw.endswith("\n") else raw
+        if SESSION_UUID_RE.match(content):
+            return content
+        if attempt < deadline_attempts - 1:
+            time.sleep(0.01)
+    raise CoordExit(
+        EXIT_UNAVAILABLE,
+        f"coord: COORD-UNAVAILABLE malformed by-run pointer sessions/by-run/{run_id}",
+    )
 
 
 def _publish_by_run_pointer(store: StoreFds, run_id: str, session_uuid: str) -> bool:
@@ -446,8 +454,13 @@ def _publish_by_run_pointer(store: StoreFds, run_id: str, session_uuid: str) -> 
         )
     except FileExistsError:
         return False
-    with os.fdopen(fd, "w") as f:
-        f.write(session_uuid + "\n")
+    # Single unbuffered write: with fdopen the payload only hit the file at
+    # close, leaving the pointer visibly EMPTY for the whole with-block —
+    # the larger half of the torn-read window the reader retry covers.
+    try:
+        os.write(fd, (session_uuid + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
     return True
 
 

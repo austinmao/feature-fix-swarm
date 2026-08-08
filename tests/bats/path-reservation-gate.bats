@@ -74,7 +74,8 @@ mkstub_python3() {
 
   run bash -c "$(declare -f envelope); envelope Edit '$REPO/skills/feature-implement/SKILL.md' | FFS_COORD_MODE=enforce CLAUDE_PROJECT_DIR='$REPO' FFS_RUN_ID=other bash '$HOOK'"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"$holder_sid"* ]]
+  [[ "$output" == *"${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
 }
 
 @test "T1: block message carries the four mandated elements as real values" {
@@ -86,7 +87,8 @@ mkstub_python3() {
 
   run bash -c "$(declare -f envelope); envelope Edit '$REPO/skills/feature-implement/SKILL.md' | FFS_COORD_MODE=enforce CLAUDE_PROJECT_DIR='$REPO' FFS_RUN_ID=other bash '$HOOK'"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"$holder_sid"* ]]
+  [[ "$output" == *"${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
   [[ "$output" =~ anchor_pid=[0-9]+ ]]
   [[ "$output" =~ worktree=/ ]]
   [[ "$output" =~ expires_at=[0-9] ]]
@@ -270,7 +272,8 @@ mkstub_python3() {
 
   run bash -c "$(declare -f envelope); envelope Edit '$REPO/skills/feature-implement/SKILL.md' | PATH_RESERVATION_GATE_FORCE_DELEGATE=1 FFS_COORD_MODE=enforce FFS_RUN_ID=other bash '$HOOK'"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"$holder_sid"* ]]
+  [[ "$output" == *"${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
   [[ "$output" != *"COORD-GATE-FAIL"* ]]
   [[ "$output" != *"not a git repository"* ]]
 
@@ -492,7 +495,8 @@ mkstub_python3() {
   run bash -c "$(declare -f envelope); envelope Edit '$REPO/skills/feature-implement/SKILL.md' | FFS_COORD_MODE=audit CLAUDE_PROJECT_DIR='$REPO' FFS_RUN_ID=other bash '$HOOK'"
   [ "$status" -eq 0 ]
   [[ "$output" == *"COORD-AUDIT"* ]]
-  [[ "$output" == *"$holder_sid"* ]]
+  [[ "$output" == *"${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
   [[ "$output" == *"path:skills/**"* ]]
 }
 

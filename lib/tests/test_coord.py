@@ -14,6 +14,7 @@ import os
 import subprocess as sp
 import sys
 import time
+import uuid as uuid_mod
 from pathlib import Path
 
 import pytest
@@ -200,6 +201,36 @@ def test_by_run_pointer_content_validation_rejects(repo, bad, monkeypatch):
     after = coord._read_text_fd(store.by_run_fd, "r1")
     assert after == bad  # left byte-identical — never repaired or reminted
     coord._close_store(store)
+
+
+def test_by_run_pointer_torn_read_is_transient_not_corrupt(repo):
+    """CI-observed race: the O_EXCL publish loser can read the winner's
+    pointer EMPTY in the open()-to-write() window. The reader must retry
+    through that transient state instead of exiting 69 (which refused a
+    perfectly healthy claim on iteration 7 of the same-run-id race in CI)."""
+    import threading
+
+    store = coord._open_store()
+    fd = os.open("torn", os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=store.by_run_fd)
+    os.close(fd)  # pointer exists, EMPTY — mid-publish state
+    real_uuid = str(uuid_mod.uuid4())
+
+    def finish_publish():
+        time.sleep(0.02)
+        wfd = os.open("torn", os.O_WRONLY, dir_fd=store.by_run_fd)
+        try:
+            os.write(wfd, (real_uuid + "\n").encode("ascii"))
+        finally:
+            os.close(wfd)
+
+    t = threading.Thread(target=finish_publish)
+    t.start()
+    try:
+        got = coord._read_by_run_pointer(store, "torn")
+    finally:
+        t.join()
+        coord._close_store(store)
+    assert got == real_uuid
 
 
 def test_ttl_recording_and_validation(repo):
