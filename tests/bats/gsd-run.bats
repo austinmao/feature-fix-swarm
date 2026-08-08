@@ -4,6 +4,20 @@ bats_require_minimum_version 1.5.0
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  # Hermetic with respect to an active parent GSD drive: the suite must
+  # produce identical results whether or not it runs inside a live drive, so
+  # scrub every runtime variable gsd-run.sh reads (plus the git redirection
+  # trio) BEFORE any fixture runs. Scrubbing here rather than relying on an
+  # `env -u` invocation incantation is deliberate: the evidence must be
+  # trustworthy for whoever runs the suite next, not only for the person who
+  # remembers the flags. Cases that need one of these set it explicitly.
+  unset GSD_ACTIVE_DRIVE GSD_RUN_ID GSD_RUN_STATE_DIR GSD_MACHINE_ID \
+        GSD_RESUME GSD_TOKEN_BUDGET GSD_HEARTBEAT_SECS GSD_FOREIGN_LEASE_SECS \
+        GSD_RECLAIM_LEASE_SECS GSD_SANDBOX_MODE GSD_NETWORK_MODE \
+        GATES_STORE GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE || true
+  RF_REAL_HOME="${HOME:-}"
+  export HOME="$BATS_TEST_TMPDIR/hermetic-home"
+  mkdir -p "$HOME"
   HARNESS_ROOT="$BATS_TEST_TMPDIR/runner-layout"
   mkdir -p "$HARNESS_ROOT/scripts"
   cp -R "$ROOT/scripts/gsd" "$HARNESS_ROOT/scripts/gsd"
@@ -440,7 +454,7 @@ EOF
       bash "$1" /gsd-quick duplicate >"$2/duplicate.log" 2>&1
       duplicate_rc=$?
       [ "$duplicate_rc" -eq 75 ] || exit 12
-      grep -F "active drive already owns" "$2/duplicate.log" || exit 13
+      grep -F "active owner holds" "$2/duplicate.log" || exit 13
       [ "$(head -1 "$3/gsd-run.pid" | tr -d "[:space:]")" = "$live_pid" ] || exit 14
 
       wait "$first" || exit 15
@@ -461,7 +475,7 @@ EOF
     GSD_RUN_STATE_DIR="$BATS_TEST_TMPDIR/symlink-state" \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
-  [ "$status" -eq 75 ]
+  [ "$status" -eq 78 ]
   [[ "$output" == *"refusing symlinked run-state directory"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
@@ -477,7 +491,7 @@ EOF
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 75 ]
-  [[ "$output" == *"active drive already owns"* ]]
+  [[ "$output" == *"active owner holds"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
 }
 
@@ -1478,6 +1492,7 @@ PY
 # fail-soft no-coord-layer path byte-identically.
 
 @test "explicit GSD_RUN_ID holds a coord claim during the drive and releases it after (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   SNAPSHOT="$BATS_TEST_TMPDIR/registry.mid-drive.json"
@@ -1512,6 +1527,7 @@ EOF
 }
 
 @test "a live foreign coord claim holder refuses the launch with coord.py's own exit 3, never gsd-run.sh's pidfile 75" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   ( sleep 30 ) &
   anchor_pid=$!
@@ -1597,6 +1613,7 @@ EOF
 # exit-path, sandbox write grant (P-24, P-24b, P-26, P-29) ─────────────────
 
 @test "the heartbeat renews the coord claim; expires_at strictly increases across ticks (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/renew-codex" <<EOF
@@ -1632,6 +1649,7 @@ assert b > a, (a, b)
 }
 
 @test "a generation bump on the live claim aborts a running drive with CLAIM-SUPERSEDED (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/gen-bump-codex" <<EOF
@@ -1673,6 +1691,7 @@ json.dump(d, open(p, \"w\"))
 }
 
 @test "a foreign holder_uuid takeover on the live claim also aborts mid-flight (P-24 exit-3 arm, coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/foreign-take-codex" <<EOF
@@ -1788,6 +1807,7 @@ EOF
 }
 
 @test "the claim is released on the non-zero-drive exit path (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
 
@@ -1802,6 +1822,7 @@ EOF
 }
 
 @test "the claim is released on the run_bounded timeout exit path (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/timeout-codex" <<EOF
@@ -1823,6 +1844,7 @@ EOF
 }
 
 @test "the claim is released when the runner is SIGTERMed externally mid-drive (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/sigterm-codex" <<EOF
