@@ -8,6 +8,39 @@ all skills.
 
 ## Unreleased
 
+### Changed
+
+- Dependency refresh (2026-08-08): `@opengsd/gsd-core` exact pin `1.9.1` →
+  `1.10.0` (constants in `lib/ffs_installer.py`, `scripts/gsd/stage-gsd-skills.py`,
+  `scripts/gsd/codex-runtime-bundle.py`, plus lockfile, fixtures, and docs);
+  `pytest` `9.0.3` → `9.1.1`; vendored `socratic` pin `862b52e` → `8c7e1fd`
+  (upstream added an opt-in `grades/` readiness-gate surface — additive, inert
+  unless a grade is named). `npm audit fix` cleared one high (`ip-address`
+  SSRF) and one moderate (`hono`) transitive advisory. The `gsd-manifests`
+  doctor message now interpolates `GSD_VERSION` instead of repeating the
+  literal, so it cannot drift from the pin again.
+- Codex CLI supported range widened to `>=0.137.0,<0.148.0` (was `<0.147.0`),
+  admitting the `0.147.x` line. Not a blind ceiling bump: `0.147.0` was
+  installed to a scratch prefix and exercised against FFS's exact `gsd-run`
+  invocation — `codex exec -c model=… -c model_reasoning_effort=… --sandbox
+  workspace-write --color never` — inside an *unfamiliar* fresh git project,
+  the precise condition upstream's new explicit-project-trust requirement
+  (openai/codex#36960) would have rejected. The drive returned `PROBE_OK`
+  with rc 0, and `--version` still parses. `0.147.0` also removes
+  `codex exec --full-auto`, which FFS has never used (it already passes
+  `--sandbox workspace-write`, the documented replacement). Both range sites
+  moved together — `CODEX_MAX_VERSION` in `lib/ffs_installer.py` and the
+  independent `version_in_supported_codex_range` predicate in
+  `scripts/gsd/gsd-run.sh` — plus their two out-of-range test fixtures.
+
+### Fixed
+
+- `tests/bats/socratic-enum-drift.bats` no longer fails on upstream's
+  `packs/_template` scaffold, which ships a `core.md` but is deliberately
+  absent from `PACK_ENUM`. The suite is opt-in (`FFS_SOCRATIC_DIR`), so it had
+  never been exercised in CI; it failed identically against both the old and
+  new socratic pins, confirming a suite bug rather than vendor drift.
+
 ### Added
 
 - Post-spec-005 hygiene: opt-in enum-drift suite

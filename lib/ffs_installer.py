@@ -31,9 +31,9 @@ from typing import Any, Iterator
 INSTALL_SCHEMA = "ffs.install/v1"
 DOCTOR_SCHEMA = "ffs.doctor/v1"
 BACKUP_SCHEMA = "ffs.backup/v1"
-GSD_VERSION = "1.9.1"
+GSD_VERSION = "1.10.0"
 CODEX_MIN_VERSION = (0, 137, 0)
-CODEX_MAX_VERSION = (0, 147, 0)
+CODEX_MAX_VERSION = (0, 148, 0)
 
 
 class InvocationError(Exception):
@@ -2067,7 +2067,12 @@ def add_gsd_doctor_checks(checks: list[dict[str, str]], source: Path) -> None:
             "rerun setup for both upstream full profiles",
         )
     else:
-        check_entry(checks, "gsd-manifests", "pass", "Claude and Codex full-profile manifests are upstream-owned at 1.9.1")
+        check_entry(
+            checks,
+            "gsd-manifests",
+            "pass",
+            f"Claude and Codex full-profile manifests are upstream-owned at {GSD_VERSION}",
+        )
 
 
 def _load_sibling_module(path: Path, name: str) -> Any:
@@ -2304,7 +2309,7 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             "codex-cli-version",
             "fail",
             f"could not parse Codex CLI version from {executable}",
-            "install Codex CLI >=0.137.0,<0.147.0",
+            "install Codex CLI >=0.137.0,<0.148.0",
         )
     elif not (CODEX_MIN_VERSION <= parsed < CODEX_MAX_VERSION):
         rendered = ".".join(map(str, parsed))
@@ -2312,7 +2317,7 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             checks,
             "codex-cli-version",
             "fail",
-            f"Codex CLI {rendered} is outside supported range >=0.137.0,<0.147.0",
+            f"Codex CLI {rendered} is outside supported range >=0.137.0,<0.148.0",
             "install a supported Codex CLI release; 0.146.x is the tested line",
         )
     else:
