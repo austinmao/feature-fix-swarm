@@ -37,6 +37,10 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${QA_COVERAGE:-on}" = "off" ]; then
+  if ! "$SCRIPT_DIR/waiver-record.sh" "qa-coverage-adversary" "QA_COVERAGE=off"; then
+    echo "[qa-coverage-adversary] WAIVER-UNRECORDED — refusing disabled bypass" >&2
+    exit 1
+  fi
   echo "[qa-coverage-adversary] disabled (QA_COVERAGE=off) — skipped"
   exit 0
 fi

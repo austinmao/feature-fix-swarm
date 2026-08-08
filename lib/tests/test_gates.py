@@ -23,6 +23,28 @@ def _load(name: str):
 gates = _load("gates")
 
 
+# ── spec-008 Phase 2: durable operator waivers (RED) ───────────────────────
+
+def test_waiver_rows_are_validated_and_append_without_deduplication(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_waiver(store, "spec-008", "canary-gate", "CANARY_GATE=off")
+    gates.record_waiver(store, "spec-008", "canary-gate", "CANARY_GATE=off")
+    rows = json.loads(store.read_text())["waivers"]
+    assert len(rows) == 2
+    assert {"run_id", "gate", "env_var", "ts"} == set(rows[0])
+
+
+def test_waiver_rejects_blank_or_oversized_values_without_partial_row(tmp_path) -> None:
+    import pytest
+
+    store = tmp_path / "evidence.json"
+    with pytest.raises(ValueError, match="INVALID-WAIVER"):
+        gates.record_waiver(store, "", "canary-gate", "CANARY_GATE=off")
+    with pytest.raises(ValueError, match="INVALID-WAIVER"):
+        gates.record_waiver(store, "spec-008", "x" * 257, "CANARY_GATE=off")
+    assert not store.exists()
+
+
 # ── spec-008 Phase 1: degradation evidence + ratio guard (RED) ─────────────
 
 def test_degradation_events_are_validated_idempotent_and_ratio_scoped(tmp_path) -> None:

@@ -499,6 +499,16 @@ _pw_waiver_path() {
   local plan_file="$1" record_path="$2" reason sha sec_match fence_marker waived_security
   local sig add_out add_rc
 
+  # stdout suppressed: gates.py's "WAIVER-RECORDED" success line is pure
+  # recorder-internal noise the pre-migration waiver path never printed —
+  # forwarding it would break byte-compat with that baseline (WR-130).
+  # Failure diagnostics are unaffected: waiver-record.sh writes those to
+  # stderr, which stays connected.
+  if ! "$SCRIPT_DIR/waiver-record.sh" "plan-wall" "PLAN_WALL=off" >/dev/null; then
+    echo "plan-wall: WAIVER-UNRECORDED — refusing waiver path" >&2
+    return 1
+  fi
+
   reason="${PLAN_WALL_REASON:-operator waiver via PLAN_WALL=off}"
   sha=""
   [ -f "$plan_file" ] && [ -r "$plan_file" ] && sha="$(_pw_sha256 "$plan_file")"

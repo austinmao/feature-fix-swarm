@@ -58,6 +58,11 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${CANARY_GATE:-on}" = "off" ]; then
+  if ! "$(dirname "${BASH_SOURCE[0]:-$0}")/waiver-record.sh" \
+      "canary-gate" "CANARY_GATE=off"; then
+    echo "canary-gate: WAIVER-UNRECORDED — refusing disabled bypass" >&2
+    exit 1
+  fi
   echo "canary-gate: disabled (CANARY_GATE=off)"
   exit 0
 fi
@@ -116,6 +121,13 @@ fi
 if [ "${CANARY_GATE_ALLOW_STALE:-0}" != "1" ] && [ "$RESULTS_MTIME" -lt "$HEAD_TIME" ]; then
   echo "canary-gate: FAIL — stale canary results (older than HEAD)" >&2
   exit 1
+fi
+if [ "${CANARY_GATE_ALLOW_STALE:-0}" = "1" ] && [ "$RESULTS_MTIME" -lt "$HEAD_TIME" ]; then
+  if ! "$(dirname "${BASH_SOURCE[0]:-$0}")/waiver-record.sh" \
+      "canary-gate" "CANARY_GATE_ALLOW_STALE=1"; then
+    echo "canary-gate: WAIVER-UNRECORDED — refusing stale-results bypass" >&2
+    exit 1
+  fi
 fi
 
 STATUS="$(jq -r '.status // empty' "$RESULTS" 2>/dev/null || true)"

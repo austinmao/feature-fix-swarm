@@ -140,6 +140,31 @@ class _StoreLock:
 LEDGER_RUN_ID_PAT = re.compile(r"(?:spec-[0-9]{3}|adhoc-[a-z0-9][a-z0-9-]*|run-[0-9]+)")
 RUNSTORE_ID_PAT = re.compile(r"[0-9a-f]{12}")
 RUNG_ID_PAT = re.compile(r"[^:\s]+:[^:\s]+:[^:\s]+")
+WAIVER_TEXT_MAX = 256
+
+
+def _require_waiver_text(value: str) -> None:
+    if (not isinstance(value, str) or not value.strip() or len(value) > WAIVER_TEXT_MAX
+            or "\x00" in value):
+        raise ValueError("INVALID-WAIVER")
+
+
+def record_waiver(store: Path, run_id: str, gate: str, env_var: str) -> None:
+    """Append one auditable operator waiver under the shared store lock.
+
+    Waivers are intentionally not deduplicated: two switch firings are two
+    distinct bypass events, even when they share their labels.
+    """
+    _require_waiver_text(run_id)
+    _require_waiver_text(gate)
+    _require_waiver_text(env_var)
+    with _StoreLock(store):
+        data = _load_store(store)
+        rows = data.setdefault("waivers", [])
+        if not isinstance(rows, list):
+            raise ValueError("WAIVER-SCHEMA-CONFLICT")
+        rows.append({"run_id": run_id, "gate": gate, "env_var": env_var, "ts": _now()})
+        _save_store(store, data)
 
 
 def _require_ledger_run_id(run_id: str) -> None:
@@ -1808,6 +1833,19 @@ def main(argv: list[str]) -> int:
         return 2
     cmd, args = argv[0], argv[1:]
     store = _store_path()
+    if cmd == "waiver":
+        parser = argparse.ArgumentParser(prog="gates.py waiver", add_help=False)
+        parser.add_argument("--run-id")
+        parser.add_argument("--gate")
+        parser.add_argument("--env-var")
+        try:
+            ns = parser.parse_args(args)
+            record_waiver(store, ns.run_id, ns.gate, ns.env_var)
+        except (ValueError, SystemExit) as exc:
+            print(f"WAIVER-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("WAIVER-RECORDED")
+        return 0
     if cmd == "note-degraded":
         parser = argparse.ArgumentParser(prog="gates.py note-degraded", add_help=False)
         parser.add_argument("kind", nargs="?")
