@@ -102,10 +102,27 @@ FINISHER_RECLAIM="$HOME/.cache/feature-fix-swarm/finisher.reclaim"
 FINISHER_MACHINE="$(hostname 2>/dev/null || uname -n)"
 FINISHER_OWNED=0
 release_finisher_lock() { [ "$FINISHER_OWNED" -eq 1 ] && ffs_lock_release "$FINISHER_LOCK" "$FINISHER_MACHINE" || true; }
+# A signaled owner must TERMINATE, never resume: with a release-only trap,
+# bash runs the handler and then continues after the interrupted command, so
+# the first finalizer kept doing cleanup WITHOUT ownership while a second
+# acquired the lock (02-VERIFICATION.md GAP 3). The handler clears every
+# trap (no re-entry), surrenders ownership, and re-raises the same signal at
+# this shell's own pid so the process dies by the signal it received —
+# status 128+N, exactly what the script did before any trap existed. The
+# always-0 tail contract is unaffected: the lock phase runs strictly before
+# the first cleanup mutation.
+die_by_signal() {
+  trap - EXIT HUP INT TERM
+  release_finisher_lock
+  kill -s "$1" $$
+}
 if [ "$DRY" -eq 0 ]; then
   [ ! -L "$HOME/.cache/feature-fix-swarm" ] || { warn "finisher lock directory is symlinked"; exit 78; }
   mkdir -p "$HOME/.cache/feature-fix-swarm" || { warn "could not create finisher lock directory"; exit 78; }
-  trap release_finisher_lock EXIT HUP INT TERM
+  trap release_finisher_lock EXIT
+  trap 'die_by_signal HUP' HUP
+  trap 'die_by_signal INT' INT
+  trap 'die_by_signal TERM' TERM
   wait_secs="${FINISHER_LOCK_WAIT:-60}"
   case "$wait_secs" in *[!0-9]*|'') wait_secs=60 ;; esac
   started="$(date +%s)"
