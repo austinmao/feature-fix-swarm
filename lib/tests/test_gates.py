@@ -131,6 +131,18 @@ def test_scan_tamper_unannotated_exit_zero_in_test_body_still_flags() -> None:
     assert any("exit 0" in f for f in findings)
 
 
+def test_scan_tamper_annotation_never_exempts_non_test_files() -> None:
+    # review-gate HIGH: `exit 0 # tamper-ok:` in a gate/CI/impl script must
+    # still flag — the allowlist is test-fixture-only.
+    diff = (
+        "--- a/scripts/gsd/canary-gate.sh\n"
+        "+++ b/scripts/gsd/canary-gate.sh\n"
+        "+exit 0  # tamper-ok: nice try\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
 def test_scan_tamper_clean_diff_returns_empty() -> None:
     # neutral path: lib/gates.py itself is now a (warn-tier) finding by
     # design — G2 flags gate-implementation edits; see

@@ -345,14 +345,17 @@ def scan_test_tampering(diff_text: str) -> list[str]:
             if re.search(r"\bexit 0\b|sys\.exit\(0\)|process\.exit\(0\)", line):
                 # Fixture allowlist (F1, PR #94 audit: 6 bats stub-fixture
                 # lines + 1 test title flagged). Two narrow exemptions, this
-                # finding class ONLY:
+                # finding class ONLY, and ONLY inside test files (review-gate
+                # HIGH: an annotation must never exempt a gate/CI/impl
+                # script — there `exit 0` always flags):
                 #   1. bats @test title lines — the string is a name, not code
                 #   2. explicit `tamper-ok: <reason>` annotation — auditable
                 #      in-diff opt-out for stub fixtures a test writes to disk
-                # Everything else (impl files, gate scripts, unannotated test
-                # bodies) still flags.
                 stripped = line[1:].lstrip()
-                if not (stripped.startswith("@test ") or "tamper-ok:" in line):
+                exempt = in_test_file and (
+                    stripped.startswith("@test ") or "tamper-ok:" in line
+                )
+                if not exempt:
                     findings.append(f"unconditional exit 0 added: {line.strip()}")
     return findings
 
