@@ -9,6 +9,27 @@ setup() {
   unset CLAUDE_SESSION_ID CLAUDE_CODE
 }
 
+@test "tripped rungs are skipped centrally while preserving the final candidate" {
+  store="$BATS_TEST_TMPDIR/evidence.json"
+  rung="codex:gpt-5.6-terra:medium"
+  for _ in $(seq 1 20); do
+    GATES_STORE="$store" python3 "$ROOT/lib/gates.py" note-degraded rung-attempt --rung-id "$rung" --outcome fail >/dev/null
+  done
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/recording-codex" <<EOF
+#!/usr/bin/env bash
+last=""; model=""
+while [ "\$#" -gt 0 ]; do case "\$1" in -c) model="\$2"; shift 2;; -o|--output-last-message) last="\$2"; shift 2;; *) shift;; esac; done
+printf '%s\n' "\$model" >> "$BATS_TEST_TMPDIR/models"
+printf 'OK\n' > "\$last"
+EOF
+  chmod +x "$STUB_DIR/recording-codex"
+  run env GATES_STORE="$store" FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=recording-codex PATH="$STUB_DIR:$PATH" bash -c ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol high review 5 5 \$'gpt-5.6-terra|medium\ngpt-5.6-luna|low'"
+  [ "$status" -eq 0 ]
+  ! grep -q terra "$BATS_TEST_TMPDIR/models"
+  grep -q luna "$BATS_TEST_TMPDIR/models"
+}
+
 @test "explicit FFS_HOST wins over ambient markers" {
   FFS_HOST=claude CODEX_THREAD_ID=thread-1 run bash -c ". '$LIB'; detect_orchestrator_host"
   [ "$status" -eq 0 ]
