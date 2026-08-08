@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # gates-test-command.sh — spec-004 AC-005 completion backstop (INT-007).
 # Asserts a plan-wall record exists for the executing phase with an accepted
-# verdict (reviewed-pass|adjudicated-pass|WAIVED) before letting the
+# verdict (reviewed-pass|adjudicated-pass|pass-residual|WAIVED) before letting the
 # gsd-core workflow.test_command gate run at all. Silent no-op when
 # .planning/run-state/ is entirely absent (byte-identical prior behaviour —
 # covers non-gsd callers and repos that never ran plan-wall.sh).
@@ -69,6 +69,13 @@ write_record() {
   write_record "phase-1" "PLAN" "adjudicated-pass"
   run bash "$LEVER" phase-1
   [ "$status" -eq 0 ]
+}
+
+@test "verdict pass-residual -> backstop clears (wall policy (b) diminishing-returns pass)" {
+  write_record "phase-1" "PLAN" "pass-residual"
+  run bash "$LEVER" phase-1
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"BACKSTOP"* ]]
 }
 
 @test "verdict WAIVED -> backstop clears (a recorded waiver still completes the phase)" {
