@@ -23,6 +23,58 @@ def _load(name: str):
 gates = _load("gates")
 
 
+# ── spec-008 Phase 1: degradation evidence + ratio guard (RED) ─────────────
+
+def test_degradation_events_are_validated_idempotent_and_ratio_scoped(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_degraded(store, "rung-attempt", rung_id="vendor:model:high",
+                               outcome="fail") is True
+    assert gates.note_degraded(store, "invocation", run_id="spec-008",
+                               seam="review-gate", degraded=True,
+                               invocation_id="review-1") is True
+    assert gates.note_degraded(store, "invocation", run_id="spec-008",
+                               seam="review-gate", degraded=True,
+                               invocation_id="review-1") is False
+    assert gates.degraded_ratio(store, "spec-008") == (1, 1)
+    try:
+        gates.note_degraded(store, "invocation", run_id="spec-008",
+                             seam="review-gate", degraded=False,
+                             invocation_id="review-1")
+    except ValueError as exc:
+        assert "IDEMPOTENCY-CONFLICT" in str(exc)
+    else:
+        raise AssertionError("conflicting replay must fail closed")
+    try:
+        gates.degraded_ratio(store, "not-a-ledger-id")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("ratio reads must reject non-ledger ids")
+
+
+def test_degradation_rung_status_probe_and_reset_are_locked_contracts(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    rung = "vendor:model:high"
+    for _ in range(20):
+        gates.note_degraded(store, "rung-attempt", rung_id=rung, outcome="fail")
+    assert gates.rung_status(store, rung)["tripped"] is True
+    assert [gates.probe_check(store, rung) for _ in range(10)] == [False] * 9 + [True]
+    assert gates.reset_rung(store, rung) is True
+    assert gates.rung_status(store, rung)["tripped"] is False
+
+
+def test_run_mapping_is_shape_checked_idempotent_and_conflict_rejecting(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    runstore = "a" * 12
+    assert gates.record_run_mapping(store, "spec-008", runstore) is True
+    assert gates.record_run_mapping(store, "spec-008", runstore) is False
+    import pytest
+    with pytest.raises(ValueError, match="RUN-MAPPING-CONFLICT"):
+        gates.record_run_mapping(store, "spec-008", "b" * 12)
+    with pytest.raises(ValueError, match="INVALID-RUNSTORE-ID"):
+        gates.record_run_mapping(store, "spec-009", "not-a-uuid")
+
+
 # ── Stream A: completion authority ───────────────────────────────────────────
 
 def test_verify_done_requires_recorded_evidence(tmp_path) -> None:

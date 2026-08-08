@@ -135,6 +135,132 @@ class _StoreLock:
         self.fd.close()
 
 
+# ── spec-008 Phase 1: degradation evidence ─────────────────────────────────
+
+LEDGER_RUN_ID_PAT = re.compile(r"(?:spec-[0-9]{3}|adhoc-[a-z0-9][a-z0-9-]*|run-[0-9]+)")
+RUNSTORE_ID_PAT = re.compile(r"[0-9a-f]{12}")
+RUNG_ID_PAT = re.compile(r"[^:\s]+:[^:\s]+:[^:\s]+")
+
+
+def _require_ledger_run_id(run_id: str) -> None:
+    if not isinstance(run_id, str) or not LEDGER_RUN_ID_PAT.fullmatch(run_id):
+        raise ValueError("INVALID-LEDGER-RUN-ID")
+
+
+def _degradation_ns(data: dict) -> dict:
+    ns = data.setdefault("_degradation", {"rungs": {}, "invocations": [], "mappings": {}})
+    if not isinstance(ns, dict):
+        raise ValueError("DEGRADATION-SCHEMA-CONFLICT")
+    ns.setdefault("rungs", {})
+    ns.setdefault("invocations", [])
+    ns.setdefault("mappings", {})
+    if not isinstance(ns["rungs"], dict) or not isinstance(ns["invocations"], list) or not isinstance(ns["mappings"], dict):
+        raise ValueError("DEGRADATION-SCHEMA-CONFLICT")
+    return ns
+
+
+def note_degraded(store: Path, kind: str, **payload) -> bool:
+    """Append a validated degradation event; identical invocation replays dedupe."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        ns = _degradation_ns(data)
+        if kind == "rung-attempt":
+            rung, outcome = payload.get("rung_id"), payload.get("outcome")
+            if not isinstance(rung, str) or not RUNG_ID_PAT.fullmatch(rung) or outcome not in ("ok", "fail"):
+                raise ValueError("INVALID-RUNG-ATTEMPT")
+            events = ns["rungs"].setdefault(rung, {"events": [], "opportunities": 0})
+            if not isinstance(events, dict) or not isinstance(events.get("events"), list):
+                raise ValueError("DEGRADATION-SCHEMA-CONFLICT")
+            events["events"].append({"outcome": outcome, "recorded_at": _now()})
+            events["events"] = events["events"][-20:]
+        elif kind == "invocation":
+            run_id, seam, degraded, invocation_id = (payload.get("run_id"), payload.get("seam"),
+                                                       payload.get("degraded"), payload.get("invocation_id"))
+            _require_ledger_run_id(run_id)
+            if not isinstance(seam, str) or not seam.strip() or not isinstance(degraded, bool) or not isinstance(invocation_id, str) or not invocation_id:
+                raise ValueError("INVALID-INVOCATION")
+            for existing in ns["invocations"]:
+                if existing.get("run_id") == run_id and existing.get("invocation_id") == invocation_id:
+                    if existing.get("seam") == seam and existing.get("degraded") is degraded:
+                        return False
+                    raise ValueError("IDEMPOTENCY-CONFLICT")
+            ns["invocations"].append({"run_id": run_id, "seam": seam, "degraded": degraded,
+                                      "invocation_id": invocation_id, "recorded_at": _now()})
+        else:
+            raise ValueError("INVALID-DEGRADATION-KIND")
+        _save_store(store, data)
+    return True
+
+
+def rung_status(store: Path, rung_id: str) -> dict:
+    if not isinstance(rung_id, str) or not RUNG_ID_PAT.fullmatch(rung_id):
+        raise ValueError("INVALID-RUNG-ATTEMPT")
+    ns = _degradation_ns(_load_store(store))
+    entry = ns["rungs"].get(rung_id, {"events": [], "opportunities": 0})
+    events = entry.get("events", []) if isinstance(entry, dict) else []
+    tripped = len(events) == 20 and all(e.get("outcome") == "fail" for e in events if isinstance(e, dict))
+    return {"rung_id": rung_id, "tripped": tripped, "attempts": len(events),
+            "opportunities": entry.get("opportunities", 0) if isinstance(entry, dict) else 0}
+
+
+def probe_check(store: Path, rung_id: str) -> bool:
+    if not isinstance(rung_id, str) or not RUNG_ID_PAT.fullmatch(rung_id):
+        raise ValueError("INVALID-RUNG-ATTEMPT")
+    with _StoreLock(store):
+        data = _load_store(store)
+        ns = _degradation_ns(data)
+        entry = ns["rungs"].setdefault(rung_id, {"events": [], "opportunities": 0})
+        entry["opportunities"] = int(entry.get("opportunities", 0)) + 1
+        due = entry["opportunities"] % 10 == 0
+        _save_store(store, data)
+    return due
+
+
+def reset_rung(store: Path, rung_id: str) -> bool:
+    if not isinstance(rung_id, str) or not RUNG_ID_PAT.fullmatch(rung_id):
+        raise ValueError("INVALID-RUNG-ATTEMPT")
+    with _StoreLock(store):
+        data = _load_store(store)
+        ns = _degradation_ns(data)
+        existed = rung_id in ns["rungs"]
+        ns["rungs"].pop(rung_id, None)
+        _save_store(store, data)
+    return existed
+
+
+def degraded_ratio(store: Path, run_id: str) -> tuple[int, int]:
+    _require_ledger_run_id(run_id)
+    ns = _degradation_ns(_load_store(store))
+    events = [event for event in ns["invocations"] if event.get("run_id") == run_id]
+    return sum(bool(event.get("degraded")) for event in events), len(events)
+
+
+def record_run_mapping(store: Path, ledger_run_id: str, runstore_id: str) -> bool:
+    _require_ledger_run_id(ledger_run_id)
+    if not isinstance(runstore_id, str) or not RUNSTORE_ID_PAT.fullmatch(runstore_id):
+        raise ValueError("INVALID-RUNSTORE-ID")
+    with _StoreLock(store):
+        data = _load_store(store)
+        mappings = _degradation_ns(data)["mappings"]
+        current = mappings.get(ledger_run_id)
+        reverse = next((ledger for ledger, value in mappings.items() if value == runstore_id), None)
+        if (current is not None and current != runstore_id) or (reverse is not None and reverse != ledger_run_id):
+            raise ValueError("RUN-MAPPING-CONFLICT")
+        if current == runstore_id:
+            return False
+        mappings[ledger_run_id] = runstore_id
+        _save_store(store, data)
+    return True
+
+
+def _degraded_ratio_allowed(data: dict, run_id: str) -> bool:
+    _require_ledger_run_id(run_id)
+    ns = _degradation_ns(data)
+    events = [event for event in ns["invocations"] if event.get("run_id") == run_id]
+    total = len(events)
+    return total == 0 or sum(bool(event.get("degraded")) for event in events) * 2 <= total
+
+
 def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
                          tests_before: str = "", tests_after: str = "") -> None:
     """Trusted-caller write. Prefer run_gate(), which executes the command
@@ -861,6 +987,8 @@ def record_promotion(store: Path, run_id: str, *, from_env: str, to_env: str,
     recorded_at = _now()
     with _StoreLock(store):
         data = _load_store(store)
+        if to_env == "prod" and not _degraded_ratio_allowed(data, run_id):
+            raise ValueError("DEGRADED-REVIEW-RATIO: degraded invocations exceed 50%; remediate review evidence")
         if (not all(isinstance(value, str) and value.strip()
                     for value in (from_env, to_env, surface))
                 or not _evidence_resolves(data, evidence_ids, artifact)):
@@ -1129,6 +1257,12 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
     surface = _prod_surface(action)
     if surface is None:
         return check_grant(store, run_id, action, now=now)
+
+    try:
+        if not _degraded_ratio_allowed(_load_store(store), run_id):
+            return False
+    except ValueError:
+        return False
 
     if not artifact:
         record_pending(store, run_id, action,
@@ -1661,6 +1795,51 @@ def main(argv: list[str]) -> int:
         return 2
     cmd, args = argv[0], argv[1:]
     store = _store_path()
+    if cmd == "note-degraded":
+        parser = argparse.ArgumentParser(prog="gates.py note-degraded", add_help=False)
+        parser.add_argument("kind", nargs="?")
+        parser.add_argument("--rung-id")
+        parser.add_argument("--outcome")
+        parser.add_argument("--run-id")
+        parser.add_argument("--seam")
+        parser.add_argument("--degraded", choices=("true", "false"))
+        parser.add_argument("--invocation-id")
+        parser.add_argument("--tripped", action="store_true")
+        parser.add_argument("--probe-check")
+        parser.add_argument("--reset-rung")
+        try:
+            ns = parser.parse_args(args)
+            if ns.tripped:
+                data = _degradation_ns(_load_store(store))
+                print(json.dumps([r for r in data["rungs"] if rung_status(store, r)["tripped"]]))
+                return 0
+            if ns.probe_check:
+                print("PROBE-DUE" if probe_check(store, ns.probe_check) else "PROBE-NOT-DUE")
+                return 0
+            if ns.reset_rung:
+                print("RUNG-RESET" if reset_rung(store, ns.reset_rung) else "RUNG-ABSENT")
+                return 0
+            if ns.kind == "rung-attempt":
+                note_degraded(store, ns.kind, rung_id=ns.rung_id, outcome=ns.outcome)
+            elif ns.kind == "invocation":
+                note_degraded(store, ns.kind, run_id=ns.run_id, seam=ns.seam,
+                              degraded=ns.degraded == "true", invocation_id=ns.invocation_id)
+            else:
+                raise ValueError("INVALID-DEGRADATION-KIND")
+        except (ValueError, SystemExit) as exc:
+            print(f"NOTE-DEGRADED-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("DEGRADATION-RECORDED")
+        return 0
+    if cmd == "map-run":
+        try:
+            created = record_run_mapping(store, _flag(args, "--ledger-run-id"),
+                                         _flag(args, "--runstore-id"))
+        except ValueError as exc:
+            print(f"RUN-MAPPING-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("RUN-MAPPING-RECORDED" if created else "RUN-MAPPING-EXISTS")
+        return 0
     if cmd == "record-gate":
         print("WARNING: trusted-caller evidence (executed_by=caller); prefer "
               "run-gate — exit codes recorded here are not runner-verified",

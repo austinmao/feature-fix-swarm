@@ -54,6 +54,54 @@ adversary_model_request_helper() {
   return 78
 }
 
+# The evidence ledger is deliberately owned here: callers supply only seam/run
+# context and cannot accidentally omit an attempt or invocation event.
+adversary_gates() {
+  local candidate
+  for candidate in "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/gates.py" "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/gates.py"; do
+    [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  echo "adversary-host: gates.py unavailable" >&2
+  return 78
+}
+
+adversary_evidence_enabled() {
+  [ -n "${GSD_RUN_ID:-}" ] || [ -n "${GATES_STORE:-}" ]
+}
+
+adversary_note_rung() {
+  local rung="$1" outcome="$2" gates before after
+  adversary_evidence_enabled || return 0
+  gates="$(adversary_gates)" || return $?
+  before="$(python3 "$gates" note-degraded --tripped 2>/dev/null)" || return 78
+  python3 "$gates" note-degraded rung-attempt --rung-id "$rung" --outcome "$outcome" >/dev/null || {
+    echo "adversary-host: FATAL: durable rung evidence write failed for $rung" >&2; return 78; }
+  after="$(python3 "$gates" note-degraded --tripped 2>/dev/null)" || return 78
+  if ! printf '%s' "$before" | grep -Fq "\"$rung\"" && printf '%s' "$after" | grep -Fq "\"$rung\""; then
+    echo "adversary-host: RUNG-TRIPPED $rung" >&2
+  fi
+}
+
+adversary_tripped_rungs() {
+  local gates
+  adversary_evidence_enabled || { printf '[]'; return 0; }
+  gates="$(adversary_gates)" || return $?
+  python3 "$gates" note-degraded --tripped
+}
+
+adversary_record_invocation() {
+  # Existing standalone helper users do not always have a ledger id. Real
+  # review seams do; preserve historical library use while making supplied
+  # context fail conspicuously if persistence is unavailable.
+  [ -n "${GSD_RUN_ID:-}" ] || return 0
+  local gates id
+  gates="$(adversary_gates)" || return $?
+  id="${ADVERSARY_INVOCATION_ID:-${ADVERSARY_SEAM:-adversary}-$$-$RANDOM}"
+  python3 "$gates" note-degraded invocation --run-id "$GSD_RUN_ID" \
+    --seam "${ADVERSARY_SEAM:-adversary}" --degraded "$1" --invocation-id "$id" >/dev/null || {
+      echo "adversary-host: FATAL: durable invocation evidence write failed" >&2; return 78; }
+}
+
 # adversary_resolve_model_request <codex|claude> <request-json>
 # Emits model|effort|kind. Raw vendor IDs are invalid input: callers expose
 # only the typed JSON contract and the resolver owns host-specific IDs.
@@ -95,8 +143,10 @@ EOF
 $(adversary_resolve_model_request "$exact_host" "$request")
 EOF
     : "$ignored"
-    adversary_invoke "$exact_host" "$timeout_s" "$preferred_model" "$preferred_effort" "$prompt"
-    return $?
+    adversary_invoke_model_ladder "$exact_host" "$timeout_s" "$preferred_model" "$preferred_effort" "$prompt" "" "" "$preferred_model|$preferred_effort"
+    local exact_rc=$?
+    adversary_record_invocation false || return $?
+    return "$exact_rc"
   fi
   IFS='|' read -r fallback_model fallback_effort ignored <<EOF
 $(adversary_resolve_model_request "$fallback" "$request")
@@ -305,7 +355,7 @@ adversary_invoke_model_ladder() {
   local requested_review_cap="${7:-}" ordered_rungs="${8:-}"
   local schema_file="${9:-}" validate_cmd="${10:-}"
   local total attempt_cap started remaining budget model effort output rc
-  local probe_enabled probe_timeout probe_output review_cap rung_source
+  local probe_enabled probe_timeout probe_output review_cap rung_source tripped filtered rung candidates all_tripped probe_due
 
   total="${timeout_s%%.*}"
   case "$total" in ''|*[!0-9]*|0) total=1 ;; esac
@@ -323,8 +373,35 @@ adversary_invoke_model_ladder() {
     rung_source="$(adversary_model_ladder "$kind" "$preferred_model" "$preferred_effort")"
   fi
 
+  # Filter before execution on both ordered and built-in ladders. Retain the
+  # original sequence if every option is tripped: fail-closed review outranks
+  # cadence, so this is a normal fallback attempt, never a rate-limited probe.
+  tripped="$(adversary_tripped_rungs)" || return $?
+  filtered=""
+  candidates=0
   while IFS='|' read -r model effort; do
     [ -n "$model" ] || continue
+    rung="$kind:$model:${effort:--}"
+    if ! printf '%s' "$tripped" | grep -Fq "\"$rung\""; then
+      filtered="${filtered}${model}|${effort}"$'\n'; candidates=$((candidates + 1))
+    fi
+  done <<EOF
+$rung_source
+EOF
+  all_tripped=0
+  if [ "$candidates" -gt 0 ]; then
+    rung_source="${filtered%$'\n'}"
+  else
+    all_tripped=1
+  fi
+
+  while IFS='|' read -r model effort; do
+    [ -n "$model" ] || continue
+    rung="$kind:$model:${effort:--}"
+    if [ "$all_tripped" -eq 0 ] && printf '%s' "$tripped" | grep -Fq "\"$rung\""; then
+      probe_due="$(python3 "$(adversary_gates)" note-degraded --probe-check "$rung" 2>/dev/null)" || return 78
+      [ "$probe_due" = PROBE-DUE ] || continue
+    fi
     remaining=$(( total - (SECONDS - started) ))
     [ "$remaining" -ge 1 ] || return 124
     if [ "$probe_enabled" != "off" ]; then
@@ -340,6 +417,7 @@ adversary_invoke_model_ladder() {
         # one Codex/Claude tier hang while another tier on the same CLI works.
         # Continue the bounded ladder; at worst this spends one short probe
         # window per model before crossing vendors.
+        adversary_note_rung "$rung" fail || return $?
         continue
       fi
       remaining=$(( total - (SECONDS - started) ))
@@ -362,6 +440,7 @@ adversary_invoke_model_ladder() {
       fi
     fi
     if [ "$rc" -eq 0 ]; then
+      adversary_note_rung "$rung" ok || return $?
       if [ "$model" != "$preferred_model" ]; then
         echo "adversary-host: MODEL_FALLBACK — $kind $preferred_model unavailable; selected $model" >&2
       fi
@@ -369,6 +448,7 @@ adversary_invoke_model_ladder() {
       printf '%s\n' "$output"
       return 0
     fi
+    adversary_note_rung "$rung" fail || return $?
     echo "adversary-host: $kind model $model unavailable (rc=$rc)" >&2
     # With an admission probe, a review timeout may be model-specific; try the
     # next candidate if deadline remains. Without a probe, preserve the older
@@ -412,6 +492,7 @@ adversary_invoke_with_fallback() {
     "${FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-90}" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
+    adversary_record_invocation false || return $?
     printf '%s\n' "$output"
     return 0
   fi
@@ -432,6 +513,9 @@ adversary_invoke_with_fallback() {
     "${FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-120}" \
     "${FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-240}" 2>&1)"
   rc=$?
-  [ "$rc" -eq 0 ] && printf '%s\n' "$output"
+  if [ "$rc" -eq 0 ]; then
+    adversary_record_invocation true || return $?
+    printf '%s\n' "$output"
+  fi
   return "$rc"
 }

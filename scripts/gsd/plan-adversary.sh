@@ -114,6 +114,7 @@ $PLAN_CONTENT
 
 Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, unstated assumptions, missing or unfalsifiable acceptance criteria, sequencing hazards (a later task invalidating an earlier one), and security holes in the approach itself. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
 
+ADVERSARY_SEAM=plan-adversary; export ADVERSARY_SEAM
 OUTPUT="$(cd "$PLAN_ROOT" && adversary_invoke_typed_request \
   "$ADVERSARY_KIND" "$FALLBACK_KIND" "${PLAN_ADVERSARY_TIMEOUT:-480}" \
   "$MODEL_REQUEST" "$PROMPT" 2>&1)"
