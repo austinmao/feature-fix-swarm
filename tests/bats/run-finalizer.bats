@@ -1277,3 +1277,166 @@ EOF
   [[ "$output" == *"deleted local branch 'feat/x'"* ]]
   [ ! -f "$LOCK" ]
 }
+
+# ---------------------------------------------------------------------------
+# AC-009 / GAP 5 — the finalizer-adapter lock matrix (RF-210..RF-216).
+# lib-lock.bats proves the helper in isolation; these prove the same
+# transitions THROUGH run-finalizer.sh: bounded wait, marked yield, default
+# and override bounds, stale reclaim, tamper refusal, event-failure refusal,
+# and the attribution chain.
+#
+# Caller inventory (grep of skills/ and scripts/, 2026-08-08):
+#   - skills/feature-implement/SKILL.md finish tail — invokes
+#     `bash scripts/gsd/run-finalizer.sh <pr-number>` fail-soft; tolerates a
+#     pre-mutation nonzero (78 is a new exit class on that seam).
+#   - scripts/coord/forbidden-paths-check.sh — path REFERENCE only, no exec.
+#   - scripts/gsd/plan-wall.sh — comment reference only, no exec.
+# Every case sets HOME to a per-test tmp dir (the lock path derives from
+# HOME at runtime) so the invoking user's real finisher.lock is untouched.
+# ---------------------------------------------------------------------------
+
+_rf_fixture_home() { # fixture HOME + lock/holder helpers for the matrix
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.cache/feature-fix-swarm"
+  LOCK="$HOME/.cache/feature-fix-swarm/finisher.lock"
+  MACHINE="$(hostname 2>/dev/null || uname -n)"
+}
+
+_rf_hold_lock_live() { # seed the lock with a live holder process; sets HOLDER_PID
+  sleep 120 &
+  HOLDER_PID=$!
+  printf '%s\nmachine=%s\nclaimed_epoch=%s\n' "$HOLDER_PID" "$MACHINE" "$(date +%s)" > "$LOCK"
+}
+
+_rf_sentinel_gh_stub() { # gh stub that records any invocation — cleanup marker
+  cat > "$MOCK_BIN/gh" <<EOF
+#!/usr/bin/env bash
+echo invoked >> "$BATS_TEST_TMPDIR/gh-sentinel"
+exit 64
+EOF
+  chmod +x "$MOCK_BIN/gh"
+}
+
+teardown_rf_holder() { [ -n "${HOLDER_PID:-}" ] && kill "$HOLDER_PID" 2>/dev/null; wait "$HOLDER_PID" 2>/dev/null || true; }
+
+@test "RF-210: contender against a live holder yields at its bound with one marked row and zero cleanup" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  STORE="$BATS_TEST_TMPDIR/rf210-store.json"
+  run env GATES_STORE="$STORE" FINISHER_LOCK_WAIT=1 bash "$LEVER" --run-id spec-rf210 7
+  teardown_rf_holder
+  [ "$status" -eq 0 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]                # no gh cleanup ran
+  git show-ref --verify -q refs/heads/feat/x              # no branch mutation
+  [ -f .planning/run-state/gsd-run.pid ]                  # no run-state cleanup
+  [ -d "$BATS_TEST_TMPDIR/work/.feature-fix-swarm" ]      # no archive mutation
+  [[ "$output" == *"finisher-skipped run_id=spec-rf210 pr=7"* ]]
+  run python3 -c "
+import json
+d = json.load(open('$STORE'))
+rows = [e for e in d['events'] if e['kind'] == 'finisher-skipped']
+assert len(rows) == 1, rows
+assert rows[0]['run_id'] == 'spec-rf210' and rows[0]['pr'] == 7, rows"
+  [ "$status" -eq 0 ]
+}
+
+@test "RF-211: the wait bound defaults to 60 — pinned in source and by a contender still waiting seconds in" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  # source pin: the comment-stripped default in the wait normalization line
+  grep -vE '^\s*#' "$LEVER" | grep -q 'FINISHER_LOCK_WAIT:-60'
+  # behavioral pin: no override -> still waiting (not yielded) several seconds in
+  env GATES_STORE="$BATS_TEST_TMPDIR/rf211-store.json" bash "$LEVER" 7 > "$BATS_TEST_TMPDIR/rf211.out" 2>&1 &
+  CONTENDER=$!
+  sleep 3
+  kill -0 "$CONTENDER" 2>/dev/null
+  alive=$?
+  kill "$CONTENDER" 2>/dev/null; wait "$CONTENDER" 2>/dev/null || true
+  teardown_rf_holder
+  [ "$alive" -eq 0 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]
+}
+
+@test "RF-212: a non-numeric FINISHER_LOCK_WAIT normalizes to the default instead of yielding immediately" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  env GATES_STORE="$BATS_TEST_TMPDIR/rf212-store.json" FINISHER_LOCK_WAIT=abc bash "$LEVER" 7 > "$BATS_TEST_TMPDIR/rf212.out" 2>&1 &
+  CONTENDER=$!
+  sleep 3
+  kill -0 "$CONTENDER" 2>/dev/null
+  alive=$?
+  kill "$CONTENDER" 2>/dev/null; wait "$CONTENDER" 2>/dev/null || true
+  teardown_rf_holder
+  [ "$alive" -eq 0 ]
+  ! grep -q "finisher-skipped" "$BATS_TEST_TMPDIR/rf212.out"
+}
+
+@test "RF-213: a dead-pid lock is reclaimed and the finalizer proceeds normally" {
+  _rf_fixture_home
+  # dead holder: a real pid that has provably exited
+  sleep 0.01 &
+  DEAD_PID=$!
+  wait "$DEAD_PID" 2>/dev/null || true
+  printf '%s\nmachine=%s\nclaimed_epoch=%s\n' "$DEAD_PID" "$MACHINE" "$(date +%s)" > "$LOCK"
+  mock_gh_merged
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"finalize complete"* ]]
+  [ ! -f "$LOCK" ]
+}
+
+@test "RF-214: a symlinked lock path returns 78 with no cleanup" {
+  _rf_fixture_home
+  touch "$BATS_TEST_TMPDIR/decoy"
+  ln -s "$BATS_TEST_TMPDIR/decoy" "$LOCK"
+  _rf_sentinel_gh_stub
+  run bash "$LEVER" 7
+  [ "$status" -eq 78 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]
+  git show-ref --verify -q refs/heads/feat/x
+}
+
+@test "RF-215: a failed finisher-skipped event write returns 78 with no cleanup and no marked-exit notice" {
+  [ "$(id -u)" -ne 0 ] || skip "root can write anywhere; unwritable-store fixture is meaningless"
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  RO="$BATS_TEST_TMPDIR/ro-store"
+  mkdir -p "$RO"
+  chmod 555 "$RO"
+  CHMOD_RESTORE_PATHS+=("$RO")
+  run env GATES_STORE="$RO/store.json" FINISHER_LOCK_WAIT=1 bash "$LEVER" --run-id spec-rf215 7
+  teardown_rf_holder
+  [ "$status" -eq 78 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]
+  ! grep -q "finisher-skipped run_id=" <<<"$output"
+  git show-ref --verify -q refs/heads/feat/x
+}
+
+@test "RF-216: yield attribution resolves --run-id, then GSD_RUN_ID, then the unattributed trace fallback" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  SA="$BATS_TEST_TMPDIR/rf216-a.json"; SB="$BATS_TEST_TMPDIR/rf216-b.json"; SC="$BATS_TEST_TMPDIR/rf216-c.json"
+  run env GATES_STORE="$SA" FINISHER_LOCK_WAIT=1 bash "$LEVER" --run-id spec-rfa 7
+  [ "$status" -eq 0 ]
+  run env GATES_STORE="$SB" FINISHER_LOCK_WAIT=1 GSD_RUN_ID=spec-rfb bash "$LEVER" 7
+  [ "$status" -eq 0 ]
+  run env GATES_STORE="$SC" FINISHER_LOCK_WAIT=1 bash "$LEVER" 7
+  teardown_rf_holder
+  [ "$status" -eq 0 ]
+  run python3 -c "
+import json
+a = json.load(open('$SA'))['events'][0]
+b = json.load(open('$SB'))['events'][0]
+c = json.load(open('$SC'))['events'][0]
+assert a['run_id'] == 'spec-rfa', a
+assert b['run_id'] == 'spec-rfb', b
+assert c['run_id'] == 'unattributed', c
+assert c['lock_path'] == '$LOCK', c
+assert c['holder_pid'] == $HOLDER_PID, c"
+  [ "$status" -eq 0 ]
+}
