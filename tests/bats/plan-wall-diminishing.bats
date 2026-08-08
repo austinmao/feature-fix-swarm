@@ -145,3 +145,19 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" != *"PLAN-WALL-PASS-RESIDUAL"* ]]
 }
+
+@test "passing wall re-runs never exhaust the round cap — pass resets the counter" {
+  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"one"},{"severity":"HIGH","file":"b.py","claim":"two"}]'
+  run_wall
+  [ "$status" -eq 1 ]
+  stub_claude_json '[{"severity":"HIGH","file":"c.py","claim":"three"}]'
+  run_wall
+  [ "$status" -eq 0 ]
+  # a runner/orchestrator may re-invoke the wall on every attempt; three
+  # more idempotent passes must never trip WALL-ROUND-CAP (default max 3)
+  for _ in 1 2 3 4; do
+    run_wall
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WALL-ROUND-CAP"* ]]
+  done
+}

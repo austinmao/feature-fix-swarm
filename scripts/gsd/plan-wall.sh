@@ -942,4 +942,17 @@ if [ "${PLAN_WALL:-on}" != off ]; then
   fi
 fi
 
+# A PASSING wall clears its own round counter (+count history): the counter
+# bounds CONVERGENCE attempts, and a pass IS convergence. Without this, every
+# post-pass re-invocation (runner pre-execution seam, orchestrator retries,
+# nested single-flight refusals) burns a round toward WALL-ROUND-CAP even
+# though each one passes idempotently — observed live on spec-008: two
+# passing re-runs + two nested runner retries capped a phase that had
+# already PASSED. A plan edited after a pass correctly restarts at a strict
+# round 1. Reset failure is a WARN, never a verdict change.
+if [ "$OVERALL_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
+  python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" --reset >/dev/null 2>&1 \
+    || echo "plan-wall: WARN: passing-round counter reset failed (non-fatal)" >&2
+fi
+
 exit "$OVERALL_RC"
