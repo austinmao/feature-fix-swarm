@@ -63,6 +63,18 @@ def test_degradation_rung_status_probe_and_reset_are_locked_contracts(tmp_path) 
     assert gates.rung_status(store, rung)["tripped"] is False
 
 
+def test_run_mapping_is_shape_checked_idempotent_and_conflict_rejecting(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    runstore = "a" * 12
+    assert gates.record_run_mapping(store, "spec-008", runstore) is True
+    assert gates.record_run_mapping(store, "spec-008", runstore) is False
+    import pytest
+    with pytest.raises(ValueError, match="RUN-MAPPING-CONFLICT"):
+        gates.record_run_mapping(store, "spec-008", "b" * 12)
+    with pytest.raises(ValueError, match="INVALID-RUNSTORE-ID"):
+        gates.record_run_mapping(store, "spec-009", "not-a-uuid")
+
+
 # ── Stream A: completion authority ───────────────────────────────────────────
 
 def test_verify_done_requires_recorded_evidence(tmp_path) -> None:
