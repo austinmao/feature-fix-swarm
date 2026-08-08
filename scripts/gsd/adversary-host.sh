@@ -94,7 +94,9 @@ adversary_record_invocation() {
   # review seams do; preserve historical library use while making supplied
   # context fail conspicuously if persistence is unavailable.
   [ -n "${GSD_RUN_ID:-}" ] || return 0
-  local gates="$(adversary_gates)" id="${ADVERSARY_INVOCATION_ID:-${ADVERSARY_SEAM:-adversary}-$$-$RANDOM}"
+  local gates id
+  gates="$(adversary_gates)" || return $?
+  id="${ADVERSARY_INVOCATION_ID:-${ADVERSARY_SEAM:-adversary}-$$-$RANDOM}"
   python3 "$gates" note-degraded invocation --run-id "$GSD_RUN_ID" \
     --seam "${ADVERSARY_SEAM:-adversary}" --degraded "$1" --invocation-id "$id" >/dev/null || {
       echo "adversary-host: FATAL: durable invocation evidence write failed" >&2; return 78; }
