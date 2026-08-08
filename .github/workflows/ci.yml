@@ -69,6 +69,17 @@ jobs:
             echo "::error::tamper findings above — deleted/weakened asserts, skips, or exit-0 in this diff"
             exit 1
           fi
+      - name: forbidden-paths-check against the PR base (REQ-10)
+        # The base ref is passed EXPLICITLY, so P-30's hard-fail arm governs
+        # here: if fetch-depth:0 above is ever narrowed, or the base fetch
+        # fails, this step goes red naming the unresolvable ref rather than
+        # quietly checking only the (empty, on a fresh checkout) working
+        # tree. No || true, no continue-on-error, no fallback ref — each of
+        # those would restore exactly the fail-open this hard-fail arm
+        # exists to remove.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/coord/forbidden-paths-check.sh --base "origin/$BASE_REF"
 
   shellcheck:
     runs-on: ubuntu-latest
@@ -82,7 +93,7 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           # warning level: the repo's heredoc-heavy SKILL snippets live in md
           # (not linted); this covers the executable shell surface.
-          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh tests/fixtures/socratic-installer-stub.sh
+          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh scripts/coord/*.sh tests/fixtures/socratic-installer-stub.sh
 
   bats:
     runs-on: ubuntu-latest
@@ -91,6 +102,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install python coord-layer dependencies (filelock)
+        run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Run bats suites
         env:
           # This IS the packaged repo — there is no consumer-installed copy of the

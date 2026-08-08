@@ -215,6 +215,7 @@ skill hash, or Codex CLI version drift is an actionable failure.
 | [Pipeline](docs/pipeline.md) | How do the stages connect? |
 | [Commands](docs/commands.md) | What commands and gates are available? |
 | [Configuration](docs/configuration.md) | What can I tune? |
+| [Coordination](docs/coordination.md) | How do sessions avoid colliding on the same spec? |
 | [Model tiers](docs/model-tiers.md) | Which model runs what, and how is provenance enforced? |
 | [Browser proof](docs/browser-proof.md) | What counts as browser-QA evidence? |
 | [Promotion protocol](docs/promotion-protocol.md) | How does staging evidence authorize production? |

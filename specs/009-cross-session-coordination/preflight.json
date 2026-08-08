@@ -1,0 +1,20 @@
+[
+  {"kind": "probe", "name": "python3-present",
+   "argv": ["python3", "--version"]},
+  {"kind": "probe", "name": "filelock-floor-3.30",
+   "argv": ["python3", "-c", "import filelock; from filelock import SoftFileLease, ReadWriteLock, StrictSoftFileLock; import sys; v=tuple(int(x) for x in filelock.__version__.split('.')[:2]); sys.exit(0 if v>=(3,30) else 1)"]},
+  {"kind": "probe", "name": "pytest-present",
+   "argv": ["python3", "-m", "pytest", "--version"]},
+  {"kind": "probe", "name": "bats-present",
+   "argv": ["bats", "--version"]},
+  {"kind": "probe", "name": "shellcheck-present",
+   "argv": ["shellcheck", "--version"]},
+  {"kind": "probe", "name": "git-common-dir-resolves",
+   "argv": ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]},
+  {"kind": "probe", "name": "gsd-tools-shim",
+   "argv": ["node", "-e", "require(process.env.HOME + '/.claude/gsd-core/bin/gsd-tools.cjs')"]},
+  {"kind": "probe", "name": "codex-cli-for-review-gate",
+   "argv": ["codex", "--version"]},
+  {"kind": "probe", "name": "jq-present",
+   "argv": ["jq", "--version"]}
+]
