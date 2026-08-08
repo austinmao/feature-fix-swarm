@@ -29,6 +29,26 @@ They do not ship into a consumer repository.
 | [ShellCheck](https://github.com/koalaman/shellcheck) | Contributor-installed, `-S warning` at repo convention | User-installed | Lints every changed/new shell script; matches `CONTRIBUTING.md` and CI |
 | `slopcheck` | Optional | Not installed by FFS | Package-legitimacy verdict (`OK\|SUS\|SLOP`) consulted by the `feature-implement` install gate; absent binary degrades to `[ASSUMED]`, never a hard failure |
 
+## Coordination layer
+
+| Component | Version policy | Ownership | Purpose |
+| --- | --- | --- | --- |
+| [filelock](https://github.com/tox-dev/filelock) | `>=3.30,<4` (floor-plus-ceiling, not exact-pinned) | Third-party, PyPI-installed via `requirements-dev.txt` — never vendored | Cross-process/cross-session registry mutex (`filelock.FileLock`) and the process-liveness primitives (`filelock._identity.process_alive`/`process_start_token`/`host_name`) `scripts/coord/coord.py` uses to decide whether a claim's holder is provably dead |
+
+`filelock` is MIT-licensed and published by the `tox-dev` GitHub organization.
+The `>=3.30,<4` range deliberately departs from this file's exact-pin
+convention used elsewhere: `filelock` is the first third-party **runtime**
+(not contributor-only) Python dependency this file describes, and its
+version is *probed at runtime* by `coord.py doctor` — via `SoftFileLease`
+(added 3.30.0) and `ReadWriteLock` (added 3.21.0) symbol presence, not a
+version-string parse — rather than trusted as a hard pin. The `<4` ceiling
+guards the one private symbol `coord.py` imports
+(`filelock._identity.process_start_token`), which a major bump could remove
+without a deprecation cycle. Install via `python -m pip install --requirement
+requirements-dev.txt`; a bare `pip install filelock` is not sanctioned
+because the resolver can silently land on a pre-3.30 release that lacks the
+floor-verification symbols.
+
 ## Why GSD is a dependency instead of vendored code
 
 GSD already owns the durable planning model and the plan/execute/verify loop.

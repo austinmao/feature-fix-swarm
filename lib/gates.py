@@ -403,6 +403,38 @@ def loop_round(store: Path, run_id: str, loop_name: str) -> int:
     return n
 
 
+def loop_round_note_count(store: Path, run_id: str, loop_name: str,
+                          count: int) -> tuple[int, int | None]:
+    """Record this round's new-finding count for the named loop and return
+    (round, previous round's count or None). Wall policy (b) (2026-08-08
+    operator decision — diminishing-returns plan-wall): the wall passes on
+    zero-CRITICAL + strict round-over-round DECREASE in new HIGH/CRITICAL
+    findings, so each round's count must be durable beside the round counter.
+    History lives at `_loops[run][loop + "#counts"]` (round-number str ->
+    count); `#` cannot appear in a phase-slug-derived loop name, so the
+    sidecar key never collides with a real loop counter. Raises ValueError
+    when the loop has no active round (nothing was incremented) — the caller
+    must treat missing history as fail-closed (strict rule), never invent a
+    round."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        run_entry = _loops_ns(data, run_id)
+        current = run_entry.get(loop_name)
+        if not isinstance(current, int) or current < 1:
+            raise ValueError(
+                f"loop-round note-count: no active round for '{loop_name}' "
+                f"(run {run_id}) — increment before noting")
+        counts = run_entry.setdefault(loop_name + "#counts", {})
+        if not isinstance(counts, dict):
+            raise SystemExit(
+                f"loop-round: '_loops[{run_id}][{loop_name}#counts]' is not "
+                "a dict (schema conflict — refusing to overwrite)")
+        counts[str(current)] = count
+        prev = counts.get(str(current - 1))
+        _save_store(store, data)
+    return current, (prev if isinstance(prev, int) else None)
+
+
 def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
     """Clear the named loop counter, or EVERY counter for the run when
     loop_name is None (run-finalizer's run-end sweep — a spec's run_id is
@@ -427,7 +459,8 @@ def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
     else:
         if not (isinstance(loops, dict)
                 and isinstance(loops.get(run_id), dict)
-                and loop_name in loops[run_id]):
+                and (loop_name in loops[run_id]
+                     or loop_name + "#counts" in loops[run_id])):
             return
     with _StoreLock(store):
         data = _load_store(store)
@@ -437,6 +470,10 @@ def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
                 loops.pop(run_id, None)
             elif isinstance(loops.get(run_id), dict):
                 loops[run_id].pop(loop_name, None)
+                # count history goes WITH the counter (wall policy (b)): a
+                # stale pre-reset count would fake a round-over-round
+                # decrease on the first post-reset round.
+                loops[run_id].pop(loop_name + "#counts", None)
         _save_store(store, data)
 
 
@@ -1769,6 +1806,7 @@ def main(argv: list[str]) -> int:
         parser.add_argument("--max", type=int)
         parser.add_argument("--reset", action="store_true")
         parser.add_argument("--reset-all", action="store_true")
+        parser.add_argument("--note-count", type=int)
         try:
             ns = parser.parse_args(args)
         except SystemExit:
@@ -1784,6 +1822,31 @@ def main(argv: list[str]) -> int:
         if ns.reset:
             reset_loop_round(store, ns.run_id, ns.loop_name)
             print(f"LOOP-RESET: {ns.loop_name} (run {ns.run_id})")
+            return 0
+        if ns.note_count is not None:
+            # Record the CURRENT round's new-finding count (no increment) and
+            # report the previous round's for the diminishing-returns
+            # comparison (wall policy (b)). rc contract mirrors the increment
+            # path: 2 = usage (no active round / negative count), 3 = store
+            # infrastructure (caller fails CLOSED to the strict rule — no
+            # history means no pass-with-residuals).
+            if ns.note_count < 0:
+                print("LOOP-COUNT-REJECTED: --note-count must be >= 0",
+                      file=sys.stderr)
+                return 2
+            try:
+                rnd, prev = loop_round_note_count(
+                    store, ns.run_id, ns.loop_name, ns.note_count)
+            except ValueError as exc:
+                print(f"LOOP-COUNT-REJECTED: {exc}", file=sys.stderr)
+                return 2
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"LOOP-ROUND-ERROR: store unusable ({exc})",
+                      file=sys.stderr)
+                return 3
+            prev_repr = "none" if prev is None else str(prev)
+            print(f"LOOP-COUNT: {ns.loop_name} round={rnd} "
+                  f"count={ns.note_count} prev={prev_repr}")
             return 0
         if ns.max is None or ns.max < 1:
             print("LOOP-ROUND-REJECTED: --max must be >= 1", file=sys.stderr)
