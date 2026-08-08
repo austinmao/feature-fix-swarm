@@ -70,6 +70,15 @@ jobs:
             exit 1
           fi
       - name: forbidden-paths-check against the PR base (REQ-10)
+        # REQ-10/AC-010 protects the PARALLEL program's files (lib/gates.py,
+        # plan-wall.sh, run-finalizer.sh) from SPEC-009's OWN diffs ("wired
+        # into the phase gates"). Scoped to 009-* head branches accordingly:
+        # unscoped, this step permanently froze those files against the very
+        # program that owns them (first hit: PR #96, the operator-directed
+        # 2026-08-08 wall-policy change). Live cross-session protection stays
+        # with the claims/lease PreToolUse guard, which is dynamic — this
+        # static list only ever described spec-009's obligations.
+        if: startsWith(github.head_ref, '009')
         # The base ref is passed EXPLICITLY, so P-30's hard-fail arm governs
         # here: if fetch-depth:0 above is ever narrowed, or the base fetch
         # fails, this step goes red naming the unresolvable ref rather than

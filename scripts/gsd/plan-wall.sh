@@ -14,9 +14,25 @@
 #   PLAN_FILE  -> reviews exactly that one file
 #
 # Every plan under the target must clear — aggregate blocking (exit 0 only
-# when EVERY plan's verdict is reviewed-pass|adjudicated-pass|WAIVED). One
-# durable record per plan under .planning/run-state/, numbered suffix on a
-# slug collision between two DIFFERENT plan files.
+# when EVERY plan's verdict is reviewed-pass|adjudicated-pass|pass-residual|
+# WAIVED). One durable record per plan under .planning/run-state/, numbered
+# suffix on a slug collision between two DIFFERENT plan files.
+#
+# Wall policy (b)+(c) — operator decision 2026-08-08, after specs 006/007/008
+# all capped at their walls (finding trajectories 6/4/4 rounds, every finding
+# real-narrow-non-repeating: adversarial review of plan PROSE never reaches
+# 0-HIGH on security-adjacent designs).
+#   (b) diminishing returns: an unresolved CRITICAL always blocks; when every
+#       block is HIGH-only, the phase PASSES iff this round found STRICTLY
+#       FEWER new HIGH/CRITICAL findings than the previous round (per-round
+#       counts via `gates.py loop-round --note-count`). Missing history —
+#       first blocking round, counter unavailable, post-reset — is strict:
+#       blocked. On pass, residual HIGHs stay UNRESOLVED in findings-queue
+#       and are listed in <PHASE_DIR>/WALL-RESIDUALS.md as pinned executor
+#       assumptions.
+#   (c) wall the diff: those residuals are closed at the EXECUTED-DIFF review
+#       (review-gate-command.sh feeds WALL-RESIDUALS.md to the ship reviewer
+#       as review focus), where findings are falsifiable against real code.
 #
 #   PLAN_WALL=off        skip with a durable waiver record (AC-008/EDGE-007)
 #   PLAN_WALL_REASON     waiver reason (non-empty; default supplied)
@@ -598,7 +614,7 @@ _pw_dispatch_path() {
   local plan_file="$1" record_path="$2"
   local plan_content sha sec_match fence_marker fence_enabled cvf esc source_plan
   local prior_sha prior_verdict prior_queue_error unresolved unresolved_count host prompt queue_error finding
-  local sev fpath claim line issue add_out add_rc
+  local sev fpath claim line issue add_out add_rc _pw_is_new critical_count
 
   _pw_resolve_socratic_slice
 
@@ -656,7 +672,7 @@ _pw_dispatch_path() {
     prior_queue_error="$(jq -r '.queue_error // false' "$record_path" 2>/dev/null)"
     if [ -n "$sha" ] && [ "$prior_sha" = "$sha" ] \
        && { [ "$prior_verdict" = reviewed-pass ] || [ "$prior_verdict" = adjudicated-pass ] \
-            || [ "$prior_verdict" = blocked ]; } \
+            || [ "$prior_verdict" = blocked ] || [ "$prior_verdict" = pass-residual ]; } \
        && [ "$prior_queue_error" = false ]; then
       unresolved="$(python3 "$GATES_PY" findings-queue list --unresolved --source wall \
         --severity HIGH,CRITICAL --plan "$source_plan" 2>&1)"
@@ -676,6 +692,22 @@ _pw_dispatch_path() {
           echo "plan-wall: FATAL: record write failed at $record_path" >&2; return 1; }
         echo "plan-wall: ADJUDICATED-PASS $plan_file (unchanged plan, zero dispatch)"
         return 0
+      fi
+      if [ "$prior_verdict" = pass-residual ]; then
+        # Unchanged plan already passed with residuals riding (wall policy
+        # (b)) — idempotent, zero dispatch, residuals stay queued for the
+        # executed-diff review. A CRITICAL that appeared in the queue since
+        # the pass falls through to fresh dispatch instead (a pass-residual
+        # verdict is only ever granted on zero CRITICAL).
+        if [ "$(printf '%s' "$unresolved" | jq \
+              '[.[] | select(.severity == "CRITICAL")] | length' 2>/dev/null || echo 1)" = "0" ]; then
+          PW_REVIEWER_MODEL=""; PW_RELATION=""; PW_VERDICT="pass-residual"; PW_QUEUE_ERROR=false
+          PW_RUNG_TRAIL=()
+          _pw_write_record "$record_path" "$(_pw_build_record_json)" || {
+            echo "plan-wall: FATAL: record write failed at $record_path" >&2; return 1; }
+          echo "plan-wall: PASS-RESIDUAL $plan_file (unchanged plan, zero dispatch, $unresolved_count residual finding(s) ride)"
+          return 0
+        fi
       fi
       # sha unchanged but unresolved HIGH/CRITICAL remain -> fresh dispatch below
     fi
@@ -718,6 +750,19 @@ _pw_dispatch_path() {
         queue_error=true
         break
       fi
+      # Wall policy (b): count NEW HIGH/CRITICAL findings this invocation.
+      # `add` reports dedup atomically — a re-report of a still-unresolved
+      # finding is a residual, not new; a REOPEN (previously resolved,
+      # re-reported) counts as new (the fix did not hold). An unparseable
+      # add result counts as new — fail closed toward blocking.
+      case "$sev" in
+        HIGH|CRITICAL)
+          _pw_is_new="$(printf '%s' "$add_out" | jq -r \
+            'if (.deduped == false) or (.reopened == true) then "1" else "0" end' \
+            2>/dev/null || echo 1)"
+          [ "$_pw_is_new" = "0" ] || PW_ROUND_NEW=$((PW_ROUND_NEW + 1))
+          ;;
+      esac
     done < <(printf '%s' "$PW_FINDINGS_JSON" | jq -c '.findings[]')
   fi
 
@@ -738,11 +783,24 @@ _pw_dispatch_path() {
   PW_QUEUE_ERROR=false
   unresolved_count="$(printf '%s' "$unresolved" | jq 'length' 2>/dev/null || echo 1)"
   if [ "$unresolved_count" != "0" ]; then
+    # Wall policy (b) (2026-08-08 operator decision): an unresolved CRITICAL
+    # always blocks; unresolved HIGHs defer to the PHASE-level
+    # diminishing-returns comparison in the driver. An unparseable severity
+    # scan counts as CRITICAL — fail closed.
+    critical_count="$(printf '%s' "$unresolved" | jq \
+      '[.[] | select(.severity == "CRITICAL")] | length' 2>/dev/null || echo 1)"
     PW_VERDICT="blocked"
     _pw_write_record "$record_path" "$(_pw_build_record_json)" || {
       echo "plan-wall: FATAL: record write failed at $record_path" >&2; return 1; }
-    echo "plan-wall: BLOCKED $plan_file ($unresolved_count unresolved HIGH/CRITICAL finding(s))" >&2
-    return 1
+    if [ "$critical_count" != "0" ]; then
+      echo "plan-wall: BLOCKED $plan_file ($unresolved_count unresolved HIGH/CRITICAL finding(s), $critical_count CRITICAL)" >&2
+      return 1
+    fi
+    # HIGH-only: verdict recorded as blocked (true at plan level right now);
+    # the driver either confirms the block or rewrites this record to
+    # pass-residual after the round-count comparison.
+    echo "plan-wall: RESIDUAL-HIGH $plan_file ($unresolved_count unresolved HIGH finding(s) — phase-level diminishing-returns decision pending)" >&2
+    return 2
   fi
 
   PW_VERDICT="reviewed-pass"
@@ -786,7 +844,54 @@ if [ "${PLAN_WALL:-on}" != off ]; then
   fi
 fi
 
+# _pw_emit_pass_residual — wall policy (b) pass-with-residuals: write the
+# WALL-RESIDUALS.md manifest (executor visibility + policy (c) diff-review
+# focus), rewrite the soft-blocked records' verdicts, print the pass line.
+# The findings-queue stays AUTHORITATIVE — nothing is auto-resolved here and
+# the manifest is a convenience surface (grants/budgets/findings are always
+# re-read from the store, never trusted from a doc).
+_pw_emit_pass_residual() {
+  local p rp rows residual_lines total tmp
+  residual_lines=""
+  for p in "${PW_SOFT_PLANS[@]}"; do
+    rows="$(python3 "$GATES_PY" findings-queue list --unresolved --source wall \
+      --severity HIGH,CRITICAL --plan "$p" 2>/dev/null | jq -r \
+      '.[] | "- \(.sig[0:12]) \(.severity // "HIGH") \(.file) — \(.issue) (plan: \(.plan // ""))"' \
+      2>/dev/null)" || rows=""
+    [ -n "$rows" ] && residual_lines="${residual_lines}${rows}"$'\n'
+  done
+  total="$(printf '%s' "$residual_lines" | grep -c '^-')" || true
+  {
+    echo "# Wall residuals — $PHASE_SLUG ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo
+    echo "Wall policy (b) diminishing-returns pass: these unresolved HIGH findings"
+    echo "ride into execution as PINNED EXECUTOR ASSUMPTIONS. They are closed by the"
+    echo "executed-diff review (policy (c)), not by plan re-litigation — do not"
+    echo "resolve without a fix; treat each as a constraint the diff must satisfy"
+    echo "or consciously carry. Authoritative copy: findings-queue (this file is a"
+    echo "convenience surface)."
+    echo
+    printf '%s' "$residual_lines"
+  } > "$PHASE_DIR/WALL-RESIDUALS.md" || \
+    echo "plan-wall: WARN: WALL-RESIDUALS.md write failed — findings-queue remains the authoritative residual list" >&2
+  for rp in "${PW_SOFT_RECORDS[@]}"; do
+    tmp="$(mktemp)"
+    if jq '.verdict = "pass-residual"' "$rp" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$rp"
+    else
+      rm -f "$tmp"
+      echo "plan-wall: WARN: verdict rewrite failed for $rp" >&2
+    fi
+  done
+  echo "plan-wall: PLAN-WALL-PASS-RESIDUAL: $total HIGH ride as executor assumptions ($PW_ROUND_NEW new this round < $_pw_prev previous; manifest: $PHASE_DIR/WALL-RESIDUALS.md)"
+  OVERALL_RC=0
+}
+
 OVERALL_RC=0
+PW_ROUND_NEW=0
+PW_HARD_BLOCK=false
+PW_SOFT_RECORDS=()
+PW_SOFT_PLANS=()
 for plan_file in "${PLAN_FILES[@]}"; do
   plan_slug="$(_pw_slug "$plan_file")"
   record_path="$(_pw_record_path "$PHASE_SLUG" "$plan_slug" "$plan_file")"
@@ -794,8 +899,47 @@ for plan_file in "${PLAN_FILES[@]}"; do
   if [ "${PLAN_WALL:-on}" = off ]; then
     _pw_waiver_path "$plan_file" "$record_path" || OVERALL_RC=1
   else
-    _pw_dispatch_path "$plan_file" "$record_path" || OVERALL_RC=1
+    _pw_dispatch_path "$plan_file" "$record_path"
+    _pw_rc=$?
+    if [ "$_pw_rc" -eq 2 ]; then
+      # HIGH-only unresolved — soft block, phase-level decision below.
+      PW_SOFT_RECORDS+=("$record_path")
+      PW_SOFT_PLANS+=("$PW_SOURCE_PLAN")
+      OVERALL_RC=1   # provisional: confirmed or lifted by the (b) comparison
+    elif [ "$_pw_rc" -ne 0 ]; then
+      PW_HARD_BLOCK=true
+      OVERALL_RC=1
+    fi
   fi
 done
+
+# ── wall policy (b): diminishing-returns phase verdict (operator decision
+# 2026-08-08) ── note this round's NEW HIGH/CRITICAL count regardless of
+# verdict — the NEXT round's comparison needs history even when this round
+# blocks. Then, when every block is HIGH-only (zero CRITICAL, no queue/plan
+# infrastructure failure), pass iff this round found STRICTLY FEWER new
+# HIGH/CRITICAL than the previous round. Missing history (first blocking
+# round, counter unavailable, post-reset) is STRICT: blocked — the policy
+# never invents a comparison it cannot read back.
+if [ "${PLAN_WALL:-on}" != off ]; then
+  _pw_nc_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
+      --note-count "$PW_ROUND_NEW" 2>&1)"
+  _pw_nc_rc=$?
+  _pw_prev=""
+  if [ "$_pw_nc_rc" -eq 0 ]; then
+    _pw_prev="$(printf '%s' "$_pw_nc_out" | sed -n 's/.*prev=\([0-9a-z]*\)$/\1/p')"
+  else
+    printf '%s\n' "$_pw_nc_out" >&2
+  fi
+  if [ "$PW_HARD_BLOCK" = false ] && [ "${#PW_SOFT_RECORDS[@]}" -gt 0 ]; then
+    if [ "$_pw_nc_rc" -ne 0 ] || [ -z "$_pw_prev" ] || [ "$_pw_prev" = none ]; then
+      echo "plan-wall: BLOCKED $TARGET (diminishing-returns: no prior round count to compare — first blocking round is strict)" >&2
+    elif [ "$PW_ROUND_NEW" -ge "$_pw_prev" ]; then
+      echo "plan-wall: BLOCKED $TARGET (diminishing-returns: $PW_ROUND_NEW new HIGH/CRITICAL this round >= $_pw_prev previous — not converging)" >&2
+    else
+      _pw_emit_pass_residual
+    fi
+  fi
+fi
 
 exit "$OVERALL_RC"

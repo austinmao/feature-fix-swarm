@@ -221,6 +221,50 @@ def test_reset_loop_round_noop_leaves_store_byte_identical(tmp_path) -> None:
     assert json.loads(before)["k"] == "v"
 
 
+def test_loop_round_note_count_records_and_returns_prev(tmp_path) -> None:
+    """Wall policy (b) (2026-08-08 operator decision): the plan wall passes on
+    zero-CRITICAL + strict round-over-round decrease in new HIGH/CRITICAL
+    findings. That comparison needs per-round count history stored beside the
+    round counter."""
+    store = tmp_path / "evidence.json"
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 7) == (1, None)
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 4) == (2, 7)
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 4) == (3, 4)
+    # re-noting the SAME round overwrites (idempotent re-run of one round)
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 2) == (3, 4)
+    # independent loops do not share history
+    gates.loop_round(store, "run-1", "wall:p2")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p2", 9) == (1, None)
+
+
+def test_loop_round_note_count_requires_active_round(tmp_path) -> None:
+    import pytest as _pytest
+    store = tmp_path / "evidence.json"
+    with _pytest.raises(ValueError):
+        gates.loop_round_note_count(store, "run-1", "wall:p1", 3)
+
+
+def test_reset_loop_round_clears_count_history(tmp_path) -> None:
+    """A named reset must drop the count history WITH the round counter —
+    a stale pre-reset count would otherwise fake a round-over-round
+    decrease on the first post-reset round."""
+    store = tmp_path / "evidence.json"
+    gates.loop_round(store, "run-1", "wall:p1")
+    gates.loop_round_note_count(store, "run-1", "wall:p1", 5)
+    gates.reset_loop_round(store, "run-1", "wall:p1")
+    gates.loop_round(store, "run-1", "wall:p1")
+    # fresh round 1: prev must be None, not the pre-reset round-0 ghost
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 3) == (1, None)
+    # reset-all drops history too
+    gates.loop_round_note_count(store, "run-1", "wall:p1", 3)
+    gates.reset_loop_round(store, "run-1", None)
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 1) == (1, None)
+
+
 def test_reset_loop_round_creates_no_debris_on_missing_or_corrupt_store(tmp_path) -> None:
     import pytest as _pytest
     # missing store: reset is a silent no-op — must not resurrect the parent
