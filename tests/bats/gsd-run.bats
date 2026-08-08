@@ -1485,7 +1485,11 @@ EOF
 }
 
 @test "a repo without the coord layer runs the drive byte-identically to today (P-25 fail-soft)" {
-  FFS_HOST=codex GSD_RUN_ID=spec-009 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  # Non-ledger run id: a LEDGER-shaped id (spec-NNN) now legitimately
+  # writes the REQ-703 budget mapping into the evidence store, which this
+  # test's no-store assertion predates. P-25's claim is about the COORD
+  # layer specifically, so the fixture id stays outside the ledger shape.
+  FFS_HOST=codex GSD_RUN_ID=coordless-fixture CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 0 ]

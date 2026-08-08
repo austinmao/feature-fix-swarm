@@ -326,6 +326,14 @@ run_state_cli() {
 
 budget_prepare_mapping() {
   [ -n "${GSD_RUN_ID:-}" ] || return 0
+  # Budget/mapping semantics exist only for LEDGER-shaped run ids (must
+  # mirror gates.py LEDGER_RUN_ID_PAT). A fixture name or this script's own
+  # date-PID fallback id has no grant/budget ledger, so there is nothing to
+  # map or account — skip silently rather than refusing the drive (first
+  # integration run: every non-ledger run exited 78 on
+  # RUN-MAPPING-REJECTED). Run-state/mapping failure for a VALID ledger id
+  # below stays fail-closed.
+  [[ "$GSD_RUN_ID" =~ ^(spec-[0-9]{3}|adhoc-[a-z0-9][a-z0-9-]*|run-[0-9]+)$ ]] || return 0
   local started gates
   local -a args=(start --skill fix --objective "$GSD_SKILL_NAME" --worktree "$RUN_WORKTREE_ROOT")
   [ -z "${GSD_TOKEN_BUDGET:-}" ] || args+=(--tokens "$GSD_TOKEN_BUDGET")
