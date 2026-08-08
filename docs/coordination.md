@@ -50,7 +50,7 @@ COORD-CONTENTION (lock timeout, retryable), `78` store/config refusal
 |---|---|---|---|---|
 | `claim <spec-id>` | `[--ttl N] [--heartbeat N]` | `session=<uuid>` then `CLAIM-OK generation=<n>` | `CLAIM-HELD holder=... anchor_pid=... worktree=... expires_at=...` | 0 / 2 / 3 / 64 / 69 / 75 / 78 |
 | `claim-check <spec-id>` | `--generation N` | `CLAIM-OK` | `CLAIM-SUPERSEDED caller_generation=N current_generation=M` | 0 / 4 |
-| `claim-renew <spec-id>` | `--generation N [--ttl N]` | `CLAIM-OK generation=<n>` | `CLAIM-SUPERSEDED ...` (generation mismatch or gone) or `CLAIM-HELD ...` (foreign holder) | 0 / 3 / 4 |
+| `claim-renew <spec-id>` | `--generation N [--ttl N]` | `CLAIM-OK generation=<n>` | `CLAIM-SUPERSEDED ...` (generation mismatch or gone) or `CLAIM-HELD ...` (foreign holder) | 0 / 3 / 4 (plus 69 / 75 / 78 store-failure arms — the runner budgets these, see Runner lifecycle) |
 | `release <spec-id>` | `--generation N` | `RELEASE-OK` | `RELEASE-REFUSED: foreign holder` / `: stale generation` | 0 / 3 |
 | `lease-acquire` | `--resource <key> --mode shared\|exclusive [--ttl N] [--heartbeat N]` | `session=<uuid>` then `LEASE-OK generation=<n>` | lease-held listing | 0 / 3 |
 | `lease-renew` | `--resource <key> --generation N [--ttl N]` | `LEASE-OK generation=<n>` | `LEASE-SUPERSEDED caller_generation=N current_generation=M` | 0 / 4 |
@@ -217,9 +217,11 @@ this layer's own exit-code contract instead of a traceback. Field-by-field:
 
 One mid-run arm deserves its own note: a `claim-renew` returning 78 (the
 store was moved, or its path symlink-swapped, out from under a live run) is
-logged and the drive CONTINUES per the runner's revocation-only abort rule —
-and unlike a transient failure, the staleness-budget backstop does NOT later
-convert it into a supersession, because the claim itself is no longer
-readable from this process. That is safe rather than lucky: a vanished store
-blocks every peer from claiming too, so there is no second writer to race
-against.
+logged and the drive continues for the moment — 78 is not in the immediate
+revocation set {3, 4}. But it counts against the staleness budget like every
+other non-success: if renews keep failing, the runner presumes the claim
+reclaimed once `ttl_secs` elapses since the last successful renew and kills
+the drive (`CLAIM-STALE`). The budget acts on elapsed-time-without-success;
+it does not need to read the claim back. The interim window is safe rather
+than lucky: a vanished store blocks every peer from claiming too, so there
+is no second writer to race against while the budget runs down.

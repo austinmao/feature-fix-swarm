@@ -1649,18 +1649,38 @@ echo PERSIST_SHOULD_NEVER_FINISH
 EOF
   chmod +x "$STUB_DIR/persist-codex"
 
-  start_epoch="$(date +%s)"
-  FFS_HOST=codex GSD_RUN_ID=spec-009 GSD_HEARTBEAT_SECS=1 FIXTURE_TTL_SECS=3 \
+  # Anchor the elapsed measurement at the drive-started sentinel, not the
+  # pre-launch epoch -- runner startup (probe, seeding) runs BEFORE the ttl=3
+  # budget clock matters, and measuring it too made this case flake under
+  # load (phase-4 verifier W2). The budget guarantee is kill within
+  # ttl_secs + one tick of the claim being held, which the sentinel bounds.
+  run env FFS_HOST=codex GSD_RUN_ID=spec-009 GSD_HEARTBEAT_SECS=1 FIXTURE_TTL_SECS=3 \
     GSD_RUN_STATE_DIR="$RUN_STATE" CODEX_BIN=persist-codex CLAUDE_BIN=fake-claude \
-    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
-  end_epoch="$(date +%s)"
+    bash -c '
+      cd "$1"
+      bash "$2" /gsd-quick test >"$1/persist.log" 2>&1 &
+      runner=$!
+      i=0
+      while [ ! -f "$1/persist-drive-started" ] && [ "$i" -lt 3000 ]; do
+        sleep 0.02
+        i=$((i + 1))
+      done
+      [ -f "$1/persist-drive-started" ] || { echo "drive did not start" >&2; cat "$1/persist.log" >&2; exit 30; }
+      started="$(date +%s)"
+      wait "$runner"
+      rc=$?
+      ended="$(date +%s)"
+      echo "PERSIST_ELAPSED=$((ended - started))"
+      exit "$rc"
+    ' _ "$BATS_TEST_TMPDIR" "$SCRIPT"
 
   [ "$status" -ne 0 ]
-  elapsed=$((end_epoch - start_epoch))
+  elapsed="$(printf '%s\n' "$output" | sed -n 's/^PERSIST_ELAPSED=//p' | tail -1)"
   # far below the stub's own 30s -- an implementation that returns 0 from
   # coord_renew_run on every 69 passes every other case and hangs here.
+  [ -n "$elapsed" ]
   [ "$elapsed" -lt 10 ]
-  [[ "$output" == *"CLAIM-STALE"* ]]
+  grep -Fq "CLAIM-STALE" "$BATS_TEST_TMPDIR/persist.log"
   [ -f "$BATS_TEST_TMPDIR/persist-drive-started" ]
   grep -Fx 'coord_abort=CLAIM-STALE' "$RUN_STATE/gsd-run.status"
 }
