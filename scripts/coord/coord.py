@@ -697,10 +697,20 @@ def _grant_entry(gen_entry: dict, identity: dict, ttl_secs: float, now: float) -
     }
 
 
+def _redact_uuid(u) -> str:
+    """8-char prefix only: the full session uuid IS the FFS_COORD_SESSION
+    impersonation token (EDGE-006) and refusal/status output lands in
+    FOREIGN sessions' transcripts (skills invoke this CLI directly).
+    Matches the path-reservation-gate hook's redaction. The owner learns
+    its own full uuid from the mint-time `session=` line only."""
+    s = str(u or "")
+    return f"{s[:8]}..." if len(s) > 8 else s
+
+
 def _print_claim_held(entry: dict) -> None:
     print(
         "CLAIM-HELD "
-        f"holder={entry.get('holder_uuid')} "
+        f"holder={_redact_uuid(entry.get('holder_uuid'))} "
         f"anchor_pid={entry.get('holder_anchor_pid')} "
         f"worktree={entry.get('holder_worktree')} "
         f"expires_at={entry.get('expires_at')}",
@@ -1161,7 +1171,7 @@ def _print_lease_held(blockers: list[tuple[str, dict]]) -> None:
     for _key, holder in blockers:
         print(
             "LEASE-HELD "
-            f"holder={holder.get('holder_uuid')} "
+            f"holder={_redact_uuid(holder.get('holder_uuid'))} "
             f"anchor_pid={holder.get('holder_anchor_pid')} "
             f"worktree={holder.get('holder_worktree')} "
             f"expires_at={holder.get('expires_at')}",
@@ -1352,7 +1362,7 @@ def cmd_status(store: StoreFds, args) -> int:
         ):
             flags.append("INCOMPLETE-ENTRY")
         line = (
-            f"{key} holder={entry.get('holder_uuid')} "
+            f"{key} holder={_redact_uuid(entry.get('holder_uuid'))} "
             f"generation={entry.get('generation')} "
             f"anchor_pid={entry.get('holder_anchor_pid')} "
             f"cli_pid={entry.get('cli_pid')} "
@@ -1381,7 +1391,7 @@ def cmd_status(store: StoreFds, args) -> int:
             ):
                 flags.append("INCOMPLETE-ENTRY")
             line = (
-                f"{key} mode={mode} holder={holder_uuid} "
+                f"{key} mode={mode} holder={_redact_uuid(holder_uuid)} "
                 f"generation={entry.get('generation')} "
                 f"anchor_pid={entry.get('holder_anchor_pid')} "
                 f"cli_pid={entry.get('cli_pid')} "

@@ -2388,3 +2388,81 @@ def test_lease_escaped_lease_stays_renewable_and_releasable(repo, monkeypatch):
         assert rc_release == 0
     finally:
         coord._close_store(store2)
+
+
+# ── uuid redaction in refusal/status output (adhoc 2026-08-08) ────────────
+# The full session uuid IS the FFS_COORD_SESSION impersonation token
+# (EDGE-006). The PreToolUse hook already redacts to an 8-char prefix; the
+# CLI's refusal/status paths must match — skill wiring (spec-009 follow-up)
+# has FOREIGN sessions invoking `coord.py claim` directly, so refusal output
+# lands in their transcripts.
+
+def _claim_as(monkeypatch, run_id, spec_id="spec-X"):
+    monkeypatch.setenv("FFS_RUN_ID", run_id)
+    store = coord._open_store()
+    try:
+        rc = coord.cmd_claim(store, argparse_namespace(spec_id=spec_id, ttl=None, heartbeat=None))
+        with coord.registry_transaction(store) as registry:
+            entry = registry["claims"].get(coord._claim_key(spec_id))
+        return rc, (entry or {}).get("holder_uuid")
+    finally:
+        coord._close_store(store)
+
+
+def test_claim_refusal_redacts_holder_uuid(repo, monkeypatch, capsys):
+    rc, holder_uuid = _claim_as(monkeypatch, "holder")
+    assert rc == 0 and holder_uuid
+    capsys.readouterr()
+
+    rc2, _ = _claim_as(monkeypatch, "contender")
+    assert rc2 == coord.EXIT_REFUSED
+    cap = capsys.readouterr()
+    combined = cap.out + cap.err
+    assert holder_uuid[:8] in combined
+    assert holder_uuid not in combined
+
+
+def test_lease_refusal_redacts_holder_uuid(repo, monkeypatch, capsys):
+    monkeypatch.setenv("FFS_RUN_ID", "holder")
+    store = coord._open_store()
+    try:
+        assert coord.cmd_lease_acquire(store, _lease_args(resource="path:docs/**", mode="exclusive")) == 0
+        with coord.registry_transaction(store) as registry:
+            holder_uuid = next(iter(registry["leases"]["path:docs/**"]["holders"]))
+    finally:
+        coord._close_store(store)
+    capsys.readouterr()
+
+    monkeypatch.setenv("FFS_RUN_ID", "contender")
+    store2 = coord._open_store()
+    try:
+        rc = coord.cmd_lease_acquire(store2, _lease_args(resource="path:docs/**", mode="shared"))
+    finally:
+        coord._close_store(store2)
+    assert rc == coord.EXIT_REFUSED
+    cap = capsys.readouterr()
+    combined = cap.out + cap.err
+    assert holder_uuid[:8] in combined
+    assert holder_uuid not in combined
+
+
+def test_status_redacts_holder_uuids(repo, monkeypatch, capsys):
+    rc, claim_uuid = _claim_as(monkeypatch, "holder")
+    assert rc == 0
+    store = coord._open_store()
+    try:
+        assert coord.cmd_lease_acquire(store, _lease_args(resource="path:docs/**", mode="exclusive")) == 0
+    finally:
+        coord._close_store(store)
+    capsys.readouterr()
+
+    monkeypatch.delenv("FFS_RUN_ID", raising=False)
+    store2 = coord._open_store()
+    try:
+        assert coord.cmd_status(store2, argparse_namespace()) == 0
+    finally:
+        coord._close_store(store2)
+    cap = capsys.readouterr()
+    combined = cap.out + cap.err
+    assert claim_uuid[:8] in combined
+    assert claim_uuid not in combined

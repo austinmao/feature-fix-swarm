@@ -216,7 +216,11 @@ assert d['generations']['claim:spec-009']['gen'] == 1, d['generations']
   run env -C "$REPO" FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID=other python3 "$COORD" claim spec-009
   [ "$status" -eq 3 ]
   [[ "$output" == *"CLAIM-HELD"* ]]
-  [[ "$output" == *"$holder_sid"* ]]
+  # adhoc 2026-08-08: refusal output is redacted to the 8-char prefix — the
+  # full uuid is the FFS_COORD_SESSION impersonation token and this output
+  # prints into the FOREIGN session's transcript.
+  [[ "$output" == *"${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
   [[ "$output" == *"expires_at"* ]]
 }
 

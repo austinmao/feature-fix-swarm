@@ -424,6 +424,31 @@ Fail-soft: no host-native subagent runtime available →
 do the read inline. Delegation is an optimization, never a gate — a phase never
 blocks because a subagent was unavailable.
 
+### Step 0.5 — cross-session claim (spec-009 — claim-or-stop)
+
+Two sessions authoring the same spec produce colliding `specs/NNN/` trees.
+Claim `spec-NNN` before any artifact is written (fail-soft when the coord CLI
+is absent — consumer repos skip silently):
+
+```bash
+COORD_PY="$(git rev-parse --show-toplevel 2>/dev/null)/scripts/coord/coord.py"
+if [ -n "$SPEC_ID" ] && [ -f "$COORD_PY" ]; then
+  FFS_RUN_ID="spec-${SPEC_ID%%-*}" FFS_COORD_ANCHOR_PID=$PPID python3 "$COORD_PY" claim "spec-${SPEC_ID%%-*}"
+  _claim_rc=$?
+  case $_claim_rc in
+    0) ;;  # capture the printed session=<uuid> + generation=<N> for release
+    3|4) echo "[feature-spec] STOP: spec-${SPEC_ID%%-*} is held by another live session. Inspect: python3 \"$COORD_PY\" status"; exit $_claim_rc ;;
+    *) echo "[feature-spec] WARN: coord store unavailable (rc=$_claim_rc) — proceeding UNCLAIMED" ;;
+  esac
+fi
+```
+
+**Release at the end of this pipeline (Step 6, after the grant ledger)** with
+`FFS_COORD_SESSION=<captured uuid> python3 "$COORD_PY" release "spec-NNN"
+--generation <captured N>` — releasing matters: `/feature-implement` claims the
+same key from a fresh session, and a spec claim left held would refuse it
+until TTL expiry. Release on any STOP path too.
+
 ### Step 1 — speckit.specify
 
 Invoke the host-native `speckit.specify` skill.
@@ -744,6 +769,17 @@ enumerate (a novel mid-run discovery) still stops and records `pending`.
 Max-auth widens what is foreseen-and-approved, never what is allowed unforeseen.
 Grants stay run-bound + TTL'd; if an auto-granted action should NOT run, stop
 before `/feature-implement` and rebuild the ledger with `--gated`.
+
+### Step 6.5 — release the spec claim (spec-009)
+
+Authoring is done — release the Step 0.5 claim so `/feature-implement` (any
+session) can take the key:
+
+```bash
+[ ! -f "$COORD_PY" ] || FFS_RUN_ID="$RUN_ID" FFS_COORD_ANCHOR_PID=$PPID \
+  FFS_COORD_SESSION="<uuid captured at claim>" \
+  python3 "$COORD_PY" release "$RUN_ID" --generation "<generation captured at claim>" || true
+```
 
 ### Completion summary
 

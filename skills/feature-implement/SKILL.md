@@ -80,6 +80,36 @@ done
 [ -z "$GATES_PY" ] && { echo "ERROR: gates.py not found — run setup.sh"; exit 1; }
 ```
 
+### Step 1.5: Cross-session claim (spec-009 — claim-or-stop)
+
+Exactly one session may implement a run id. Autonomous/headless runs SKIP the
+skill-level claim: `gsd-run.sh` takes, renews, and releases the claim itself
+(P-22..P-24b) once `GSD_RUN_ID` is exported in Step 2 — a second claim here
+would collide with the runner's own and refuse the launch.
+
+```bash
+COORD_PY="$(git rev-parse --show-toplevel 2>/dev/null)/scripts/coord/coord.py"
+if [ "$AUTONOMOUS" != "1" ] && [ -f "$COORD_PY" ]; then
+  FFS_RUN_ID="$RUN_ID" FFS_COORD_ANCHOR_PID=$PPID python3 "$COORD_PY" claim "$RUN_ID"
+  _claim_rc=$?
+  case $_claim_rc in
+    0) ;;  # claimed — see capture note below
+    3|4) echo "[feature-implement] STOP: '$RUN_ID' is held by another live session — do not implement it here. Inspect: python3 \"$COORD_PY\" status"; exit $_claim_rc ;;
+    *) echo "[feature-implement] WARN: coord store unavailable (rc=$_claim_rc) — proceeding UNCLAIMED; diagnose with: python3 \"$COORD_PY\" doctor" ;;
+  esac
+fi
+```
+
+On success the claim prints `session=<uuid>` and `CLAIM-OK generation=<N>`.
+**Capture both**: every later coord call for this run (renew, release) must
+carry `FFS_COORD_SESSION=<that uuid>` and `--generation <that N>` — a call
+without them is a foreign contender, not the holder. The claim is released in
+Step 7 (and on ANY stop/abort path before it); missed releases expire by TTL +
+anchor-pid staleness, so a crashed session never wedges the run id.
+
+Consumer repos without `scripts/coord/coord.py` skip silently (fail-soft) —
+coordination is an FFS-repo capability until the coord CLI ships in setup.sh.
+
 ### Step 2: Walls (fail-closed, --autonomous only)
 
 ```bash
@@ -363,6 +393,7 @@ exit 0
    test -f "$REPO_ROOT/scripts/gsd/assert-merged.sh"
    test -f "$REPO_ROOT/scripts/gsd/model-fallback.sh"
    test -f "$REPO_ROOT/scripts/gsd/fallback-rehearsal.sh"
+   test -f "$REPO_ROOT/scripts/coord/coord.py"
    ```
 
 6. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
@@ -372,7 +403,16 @@ exit 0
 
 Consumed grants + artifacts (sha/PR#) go in the report.
 
-### Step 7: Report
+### Step 7: Release claim + report
+
+Interactive claims only (the headless runner releases its own on every exit
+path): release the Step 1.5 claim FIRST, so a stop mid-report never strands it:
+
+```bash
+[ "$AUTONOMOUS" = "1" ] || [ ! -f "$COORD_PY" ] || \
+  FFS_RUN_ID="$RUN_ID" FFS_COORD_ANCHOR_PID=$PPID FFS_COORD_SESSION="<uuid captured at claim>" \
+  python3 "$COORD_PY" release "$RUN_ID" --generation "<generation captured at claim>" || true
+```
 
 Phases executed, verifier verdicts, gap rounds, gate evidence ids, consumed grants,
 pendings (for one-command morning resume), files changed. Include the delegation

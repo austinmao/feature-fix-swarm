@@ -40,7 +40,11 @@ assert len(e['holders']) == 1, e
   run env -C "$REPO" FFS_COORD_ANCHOR_PID="$$" FFS_RUN_ID=other python3 "$COORD" lease-acquire --resource path:docs/a.md --mode shared
   [ "$status" -eq 3 ]
   [[ "$output" == *"LEASE-HELD"* ]]
-  [[ "$output" == *"$holder_sid"* ]]
+  # adhoc 2026-08-08: refusal output is redacted to the 8-char prefix — the
+  # full uuid is the FFS_COORD_SESSION impersonation token and this output
+  # prints into the FOREIGN session's transcript.
+  [[ "$output" == *"${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
   # P2-W4: assert VALUE SHAPE, not bare field names -- a holder rendered as
   # `anchor_pid=None` satisfies a bare-name substring check completely.
   [[ "$output" =~ anchor_pid=[0-9]+ ]]

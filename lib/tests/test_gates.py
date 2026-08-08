@@ -108,6 +108,29 @@ def test_scan_tamper_flags_exit_zero_and_ci_edits() -> None:
     assert "exit 0" in joined
 
 
+def test_scan_tamper_exit_zero_fixture_allowlist() -> None:
+    # F1 (PR #94 audit): bats stub fixtures and @test titles are not gate
+    # bypasses. Exemptions are narrow — the exit-0 class only, and only for
+    # @test title lines or lines carrying an explicit `tamper-ok:` note.
+    diff = (
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        '+@test "hook exits 0 when store absent (exit 0 fast path)" {\n'
+        "+  printf 'exit 0\\n' > \"$STUBDIR/python3\"  # tamper-ok: stub fixture\n"
+    )
+    assert gates.scan_test_tampering(diff) == []
+
+
+def test_scan_tamper_unannotated_exit_zero_in_test_body_still_flags() -> None:
+    diff = (
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        "+  exit 0\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
 def test_scan_tamper_clean_diff_returns_empty() -> None:
     # neutral path: lib/gates.py itself is now a (warn-tier) finding by
     # design — G2 flags gate-implementation edits; see
