@@ -87,6 +87,7 @@ else
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
 
+ADVERSARY_SEAM=qa-coverage-adversary; export ADVERSARY_SEAM
 OUTPUT="$(adversary_invoke_typed_request "$ADVERSARY_KIND" "$FALLBACK_KIND" \
   "${QA_COVERAGE_TIMEOUT:-300}" "$MODEL_REQUEST" "$PROMPT" 2>&1)"
 rc=$?

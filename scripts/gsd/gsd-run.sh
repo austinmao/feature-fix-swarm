@@ -298,6 +298,7 @@ BUNDLE_HASH=""
 FFS_SKILL_HASH=""
 SANDBOX_GRANT_CONSUMPTION="none"
 ADVERSARY_DEGRADED=false
+RUNSTORE_ID=""
 SELECTED_CODEX_MODEL=""
 SELECTED_CODEX_EFFORT=""
 SELECTED_CLAUDE_MODEL=""
@@ -317,6 +318,45 @@ write_run_status() {
     printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$tmp"
   atomic_replace "$tmp" "$RUN_STATUS_FILE"
+}
+
+run_state_cli() {
+  PYTHONPATH="$SCRIPT_DIR/../../lib${PYTHONPATH:+:$PYTHONPATH}" python3 -m run_state.cli "$@"
+}
+
+budget_prepare_mapping() {
+  [ -n "${GSD_RUN_ID:-}" ] || return 0
+  local started gates
+  local -a args=(start --skill fix --objective "$GSD_SKILL_NAME" --worktree "$RUN_WORKTREE_ROOT")
+  [ -z "${GSD_TOKEN_BUDGET:-}" ] || args+=(--tokens "$GSD_TOKEN_BUDGET")
+  started="$(run_state_cli "${args[@]}" 2>&1)" || {
+    echo "gsd-run: BUDGET-MAPPING-FAILED: cannot create run-state record" >&2; return 78; }
+  RUNSTORE_ID="$(printf '%s' "$started" | python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' 2>/dev/null)" || return 78
+  gates="$SCRIPT_DIR/../../lib/gates.py"
+  python3 "$gates" map-run --ledger-run-id "$GSD_RUN_ID" --runstore-id "$RUNSTORE_ID" >/dev/null || {
+    echo "gsd-run: BUDGET-MAPPING-FAILED: cannot persist ledger mapping" >&2; return 78; }
+}
+
+budget_account_tail() {
+  local capture="$1" tail_line tokens update rc
+  [ -n "$RUNSTORE_ID" ] || return 0
+  tail_line="$(tail -n 10 "$capture" | grep -E '^tokens used:[[:space:]]*[0-9]+[[:space:]]*$' | tail -1 || true)"
+  if [ -z "$tail_line" ]; then
+    echo "gsd-run: WARN BUDGET-ACCOUNTING-UNAVAILABLE: no parseable token trailer" >&2
+    return 0
+  fi
+  tokens="$(printf '%s' "$tail_line" | sed -E 's/^tokens used:[[:space:]]*([0-9]+)[[:space:]]*$/\1/')"
+  update="$(run_state_cli update "$RUNSTORE_ID" --tokens "$tokens" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] || { [ -n "$update" ] && ! printf '%s\n' "$update" | grep -Eq '^BUDGET-BREACH: [0-9a-f]{12} [0-9]+ [0-9]+$'; }; then
+    # Empty output is the normal non-breach result; malformed non-empty output
+    # is observable but must not rewrite a successful drive outcome.
+    if [ "$rc" -ne 0 ]; then echo "gsd-run: WARN BUDGET-ACCOUNTING-FAILED: cmd_update rc=$rc" >&2; fi
+    return 0
+  fi
+  if printf '%s\n' "$update" | grep -q '^BUDGET-BREACH:'; then
+    echo "gsd-run: BUDGET-BREACH: quarantining subsequent launches" >&2
+    write_run_status quarantined 0 || return 1
+  fi
 }
 
 atomic_replace() {
@@ -1271,6 +1311,7 @@ if [ "$_native_rc" -ne 0 ]; then
 fi
 
 ensure_run_worktree || exit $?
+budget_prepare_mapping || exit $?
 
 first="$1"
 shift
@@ -1329,9 +1370,13 @@ fi
 # "why is this phase slow" question unanswerable.
 write_run_status running
 cd "$RUN_WORKTREE_ROOT" || exit 1
+DRIVE_CAPTURE="$(mktemp "${TMPDIR:-/tmp}/ffs-gsd-drive.XXXXXX")" || exit 1
 run_bounded "$TIMEOUT_SECS" "${RUN[@]}" </dev/null 2>&1 \
-  | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' > "$LOG_FILE")
+  | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' > "$LOG_FILE") \
+  | tee "$DRIVE_CAPTURE"
 rc="${PIPESTATUS[0]}"
+budget_account_tail "$DRIVE_CAPTURE" || { rm -f "$DRIVE_CAPTURE"; exit 1; }
+rm -f "$DRIVE_CAPTURE"
 if [ "$rc" -ne 0 ]; then
   echo "gsd-run: stateful drive failed on $SELECTED_HOST (rc=$rc); cross-vendor replay is forbidden" >&2
   echo "gsd-run: fix availability if needed, then resume on $SELECTED_HOST from .planning state; log: $LOG_FILE" >&2

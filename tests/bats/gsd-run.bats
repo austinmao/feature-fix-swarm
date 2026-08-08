@@ -188,7 +188,7 @@ echo DRIVE_OK
 echo 'tokens used: 42'
 EOF
   chmod +x "$STUB_DIR/token-codex"
-  run env FFS_HOST=codex CODEX_BIN=token-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
     RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
     bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
   [ "$status" -eq 0 ]

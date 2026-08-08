@@ -7,6 +7,7 @@ setup() {
   LIB="$ROOT/scripts/gsd/adversary-host.sh"
   unset FFS_HOST CODEX_SESSION_ID CODEX_THREAD_ID CODEX_AGENT CODEX_CI
   unset CLAUDE_SESSION_ID CLAUDE_CODE
+  unset GSD_RUN_ID GATES_STORE
 }
 
 @test "tripped rungs are skipped centrally while preserving the final candidate" {
@@ -24,10 +25,11 @@ printf '%s\n' "\$model" >> "$BATS_TEST_TMPDIR/models"
 printf 'OK\n' > "\$last"
 EOF
   chmod +x "$STUB_DIR/recording-codex"
-  run env GATES_STORE="$store" FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=recording-codex PATH="$STUB_DIR:$PATH" bash -c ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol high review 5 5 \$'gpt-5.6-terra|medium\ngpt-5.6-luna|low'"
+  run env GATES_STORE="$store" FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=recording-codex PATH="$STUB_DIR:$PATH" bash -c '. "$1"; rungs="gpt-5.6-terra|medium
+gpt-5.6-luna|low"; adversary_invoke_model_ladder codex 10 gpt-5.6-sol high review 5 5 "$rungs"' _ "$LIB"
   [ "$status" -eq 0 ]
-  ! grep -q terra "$BATS_TEST_TMPDIR/models"
-  grep -q luna "$BATS_TEST_TMPDIR/models"
+  [[ "$output" != *"SELECTED codex gpt-5.6-terra"* ]]
+  [[ "$output" == *"SELECTED codex gpt-5.6-luna"* ]]
 }
 
 @test "explicit FFS_HOST wins over ambient markers" {
