@@ -189,7 +189,7 @@ def test_by_run_pointer_content_validation_rejects(repo, bad, monkeypatch):
     store = coord._open_store()
     # write the pointer directly through the held descriptor, bypassing the
     # publish helper (which would itself validate on the writer's side).
-    fd = os.open("r1", os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=store.by_run_fd)
+    fd = os.open("r1", os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=store.by_run_fd)
     with os.fdopen(fd, "w") as f:
         f.write(bad)
     calls = _clear_pointer_write_wrap(monkeypatch)
@@ -211,7 +211,7 @@ def test_by_run_pointer_torn_read_is_transient_not_corrupt(repo):
     import threading
 
     store = coord._open_store()
-    fd = os.open("torn", os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=store.by_run_fd)
+    fd = os.open("torn", os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=store.by_run_fd)
     os.close(fd)  # pointer exists, EMPTY — mid-publish state
     real_uuid = str(uuid_mod.uuid4())
 
@@ -462,7 +462,7 @@ def test_atomic_save_temp_file_is_o_excl(repo):
         coord.secrets.token_hex = fixed_token
         try:
             colliding = f".registry.json-{'deadbeefdeadbeef'}.tmp"
-            fd = os.open(colliding, os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=store.coord_fd)
+            fd = os.open(colliding, os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=store.coord_fd)
             os.write(fd, b"pre-existing")
             os.close(fd)
             with pytest.raises(FileExistsError):
@@ -950,7 +950,7 @@ def test_mode_resolution_precedence_and_invalid_value(repo, monkeypatch):
     try:
         assert coord._resolve_mode(store) == "enforce"
         coord._atomic_write_json  # sanity: helper exists
-        fd = os.open("mode", os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=store.coord_fd)
+        fd = os.open("mode", os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=store.coord_fd)
         with os.fdopen(fd, "w") as f:
             f.write("audit\n")
         assert coord._resolve_mode(store) == "audit"
@@ -970,7 +970,7 @@ def test_edge_003_unparseable_registry_enforce_vs_audit(repo, monkeypatch):
     store = coord._open_store()
     try:
         fd = os.open(
-            ".registry-corrupt.tmp", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=store.coord_fd
+            ".registry-corrupt.tmp", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, dir_fd=store.coord_fd
         )
         with os.fdopen(fd, "w") as f:
             f.write("{not json")

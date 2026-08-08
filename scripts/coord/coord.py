@@ -308,7 +308,7 @@ def _atomic_write_json(dir_fd: int, name: str, data) -> None:
     fd = os.open(
         tmp_name,
         os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-        0o644,
+        0o600,
         dir_fd=dir_fd,
     )
     try:
@@ -449,7 +449,7 @@ def _publish_by_run_pointer(store: StoreFds, run_id: str, session_uuid: str) -> 
         fd = os.open(
             run_id,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-            0o644,
+            0o600,
             dir_fd=store.by_run_fd,
         )
     except FileExistsError:

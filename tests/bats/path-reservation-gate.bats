@@ -165,10 +165,18 @@ mkstub_python3() {
 @test "T1: hook reads stdin not argv — invoked with zero args; >256KB file_path still decides correctly" {
   run acquire_as holder "path:skills/**" exclusive
   [ "$status" -eq 0 ]
-  big_suffix=$(python3 -c "print('x' * 300000)")
-  fp="$REPO/skills/feature-implement/${big_suffix}.md"
   mkdir -p "$REPO/skills/feature-implement"
-  run bash -c "$(declare -f envelope); envelope Edit '$fp' | FFS_COORD_MODE=enforce CLAUDE_PROJECT_DIR='$REPO' FFS_RUN_ID=other bash '$HOOK'"
+  # Build the giant envelope in a FILE, not argv: Linux MAX_ARG_STRLEN caps a
+  # single argument at 128KiB, so passing the >256KB path through the shell
+  # killed the TEST harness itself on ubuntu ("Argument list too long")
+  # before the hook ever ran. The hook reads stdin; feed it from the file.
+  python3 - "$REPO" > "$BATS_TEST_TMPDIR/big-envelope.json" <<'PYEOF'
+import json, sys
+repo = sys.argv[1]
+fp = repo + "/skills/feature-implement/" + ("x" * 300000) + ".md"
+json.dump({"tool_name": "Edit", "tool_input": {"file_path": fp}}, sys.stdout)
+PYEOF
+  run bash -c "FFS_COORD_MODE=enforce CLAUDE_PROJECT_DIR='$REPO' FFS_RUN_ID=other bash '$HOOK' < '$BATS_TEST_TMPDIR/big-envelope.json'"
   [ "$status" -eq 2 ]
 }
 
