@@ -31,6 +31,10 @@ operator can paste at a logical task boundary.
    - Otherwise use Codex `$prompt-master` or Claude `/prompt-master` to create a
      compact resume prompt from the handoff.
 4. Append the exact resume command under `## Resume Prompt` in the handoff.
+5. Before committing a handoff artifact, stage it, copy its index blob to a
+   private `mktemp` file (`chmod 600`), then run the shared scanner on that
+   copy: `scripts/gsd/scan-handoff-credentials.sh "$HANDOFF_PATH"`. A finding
+   stops the commit; a missing scanner warns and continues.
 5. Build an instruction under 250 characters. It starts with the active task
    and ends exactly: `After compact, execute the Resume Prompt in the handoff doc.`
 

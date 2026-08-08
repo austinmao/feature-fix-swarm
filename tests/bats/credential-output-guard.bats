@@ -68,6 +68,19 @@ envelope() {
   [ "$status" -eq 0 ]
 }
 
+@test "CG-010: deterministic scan-file mode accepts clean content and blocks credentials" {
+  clean="$BATS_TEST_TMPDIR/clean-handoff.md"
+  secret="$BATS_TEST_TMPDIR/secret-handoff.md"
+  printf 'Progress: tests passed\n' > "$clean"
+  printf 'API_TOKEN=sk_123456789012345678\n' > "$secret"
+  run bash "$HOOK" --scan-file "$clean"
+  [ "$status" -eq 0 ]
+  run bash "$HOOK" --scan-file "$secret"
+  [ "$status" -eq 2 ]
+  run bash "$HOOK" --scan-file "$BATS_TEST_TMPDIR/missing"
+  [ "$status" -eq 2 ]
+}
+
 @test "CG-007: eval and common execution wrappers cannot bypass the guard" {
   for command in \
     "eval 'doppler secrets --json'" \

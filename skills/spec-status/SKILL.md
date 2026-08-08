@@ -77,6 +77,11 @@ Print the headline + Next 3 inline; the file carries the rest.
   (it chains handoff → context-save → compact command block; never trigger
   `/compact` yourself — present the block for the operator).
 
+Before committing any status artifact or produced handoff, stage it and scan
+the exact staged bytes with `scripts/gsd/scan-handoff-credentials.sh
+"$HANDOFF_PATH"`. A finding stops the commit; if the scanner is absent, warn
+once and continue. Preserve `--no-handoff` behavior.
+
 ## Constraints
 
 - READ-ONLY toward the run: never restart/kill the runner, never flip
