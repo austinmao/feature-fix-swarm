@@ -376,6 +376,42 @@ coord_release_run() {
   RUN_COORD_GENERATION=""
 }
 
+# coord_renew_run (P-24, P-24b, P-26, P-28). Called every heartbeat tick from
+# INSIDE the existing heartbeat subshell -- one call serves both REQ-11's
+# renew and revalidate clauses; no separate claim-check subprocess is added.
+# Local function-return codes only -- NEVER a process exit code and NEVER
+# coord.py's own 0/2/3/4/64/69/75/78 contract -- picked well outside that
+# range so a later reader cannot mistake one for the process exit table:
+#   0  = renew reached the store and succeeded
+#   90 = DETECTED revocation (coord.py claim-renew returned 3 or 4)
+#   91 = DEGRADED: any other coord.py failure, tolerated under P-24b's budget
+# Collapsing 90/91 into a shared "return 0" would make the staleness budget
+# below unmeasurable -- a tolerated failure must never look like a success.
+coord_renew_run() {
+  [ -f "$COORD_PY" ] || return 0
+  # Empty generation only happens for a P-22 no-claim or P-25 no-coord run,
+  # where the heartbeat still ticks but there is no claim to renew or go
+  # stale -- never true for a claimed run, since Task 1's claim call site
+  # runs before this subshell forks and the fork copies the populated value.
+  [ -n "$RUN_COORD_GENERATION" ] || return 0
+  local output rc
+  output="$(python3 "$COORD_PY" claim-renew "$RUN_COORD_ID" --generation "$RUN_COORD_GENERATION" 2>&1)"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3|4)
+      echo "gsd-run: CLAIM-SUPERSEDED renewing $RUN_COORD_ID (coord exit $rc)" >&2
+      printf '%s\n' "$output" >&2
+      return 90
+      ;;
+    *)
+      echo "gsd-run: coord claim-renew warning for $RUN_COORD_ID (rc=$rc); tolerating within the staleness budget" >&2
+      printf '%s\n' "$output" >&2
+      return 91
+      ;;
+  esac
+}
+
 file_epoch() {
   local value
   value="$(stat -f %m "$1" 2>/dev/null || true)"
@@ -536,11 +572,57 @@ acquire_run_state() {
   (
     heartbeat_sleep=""
     trap '[ -z "$heartbeat_sleep" ] || kill "$heartbeat_sleep" 2>/dev/null || true; exit 0' TERM INT
+    # Subshell-local, seeded to fork time -- the subshell owns the whole
+    # renew loop and is the only reader, so no write-back channel is needed
+    # (P-28). Refreshed on every successful renew below; a tolerated (P-24b
+    # DEGRADED) tick deliberately does NOT refresh it, which is what makes
+    # the staleness budget measurable.
+    _coord_last_renew_success="$(date +%s)"
     while kill -0 "$$" 2>/dev/null; do
       if ! write_heartbeat; then
         echo "gsd-run: heartbeat refresh failed; terminating drive rather than losing its lease" >&2
         kill -TERM "$$" 2>/dev/null || true
         exit 1
+      fi
+      # P-26: one claim-renew call serves both REQ-11's renew and revalidate
+      # clauses; the 15s default tick is deliberately 4x the claim's own 60s
+      # heartbeat assumption, so CLAIM-SUPERSEDED is detected strictly faster
+      # than "at the next phase boundary". No second claim-check call.
+      coord_renew_run
+      _coord_renew_rc=$?
+      if [ "$_coord_renew_rc" -eq 0 ]; then
+        _coord_last_renew_success="$(date +%s)"
+      elif [ "$_coord_renew_rc" -eq 90 ]; then
+        printf 'CLAIM-SUPERSEDED\n' > "$RUN_STATE_DIR/gsd-run.coord-abort" 2>/dev/null || true
+        echo "gsd-run: CLAIM-SUPERSEDED; terminating drive rather than continuing with a revoked claim" >&2
+        # kill -TERM "$$" alone only queues the signal for the parent shell
+        # and bash defers running its trap until the CURRENT foreground
+        # command completes -- so while the stateful drive's pipeline
+        # (run_bounded | tee) is actively running, plain "$$" would not be
+        # dead until that pipeline finishes on its own, defeating the whole
+        # point of a bounded kill. pkill -P "$$" targets ONLY $$'s direct
+        # children (the running `timeout`/tee pipe members), never siblings
+        # or ancestors, which lets that foreground pipeline unblock promptly
+        # so the pending TERM trap on $$ (below) fires within this tick.
+        pkill -TERM -P "$$" 2>/dev/null || true
+        kill -TERM "$$" 2>/dev/null || true
+        exit 1
+      elif [ -n "$RUN_COORD_GENERATION" ]; then
+        # P-24b staleness budget: guarded on a non-empty generation so a
+        # P-22 no-claim or P-25 no-coord run (whose heartbeat still ticks)
+        # can never kill itself over a claim it never took.
+        _coord_now="$(date +%s)"
+        if [ $((_coord_now - _coord_last_renew_success)) -ge "$RUN_COORD_TTL" ]; then
+          printf 'CLAIM-STALE\n' > "$RUN_STATE_DIR/gsd-run.coord-abort" 2>/dev/null || true
+          echo "gsd-run: CLAIM-STALE; no successful claim-renew within ttl_secs=$RUN_COORD_TTL; terminating drive" >&2
+          # See the CLAIM-SUPERSEDED arm above for why pkill -P is required
+          # in addition to kill -TERM "$$" -- without it this arm cannot
+          # meet its own "dead within ttl_secs + one tick" mandate while a
+          # stateful drive is actively running in the foreground pipeline.
+          pkill -TERM -P "$$" 2>/dev/null || true
+          kill -TERM "$$" 2>/dev/null || true
+          exit 1
+        fi
       fi
       sleep "$heartbeat_secs" &
       heartbeat_sleep=$!
@@ -694,6 +776,14 @@ cleanup_runner() {
   fi
   if [ "$RUN_STATE_OWNED" -eq 1 ]; then
     write_run_status "$([ "$rc" -eq 0 ] && echo completed || echo failed)" "$rc"
+    # Additive, after the write above (which atomically REPLACES the status
+    # file) -- a coord-abort token written from the heartbeat subshell would
+    # otherwise be clobbered by that replace. One-token sidecar, not a
+    # general channel, and never a route for RUN_COORD_GENERATION.
+    if [ -f "$RUN_STATE_DIR/gsd-run.coord-abort" ]; then
+      printf 'coord_abort=%s\n' "$(cat "$RUN_STATE_DIR/gsd-run.coord-abort" 2>/dev/null)" >> "$RUN_STATUS_FILE"
+      rm -f "$RUN_STATE_DIR/gsd-run.coord-abort"
+    fi
     [ ! -f "$RUN_PID_FILE" ] || recorded_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
     [ ! -f "$RUN_PID_FILE" ] || recorded_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
     if [ "$recorded_pid" = "$$" ] && [ "$recorded_machine" = "$RUN_MACHINE_ID" ]; then
@@ -949,7 +1039,16 @@ prepare_codex_runtime() {
 
   network_bool=false
   [ "$NETWORK_MODE" = enabled ] && network_bool=true
-  writable_json="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1]]))' "$RUN_WORKTREE_ROOT")" || return 1
+  # P-29: also grants the shared .feature-fix-swarm subtree at the main
+  # checkout (git-common-dir's parent), which is where coord.py's store
+  # anchors (coord.py:180-189) -- NOT the run worktree -- so a headless
+  # sandboxed drive's coord writes were unconditionally denied before this
+  # line. The whole subtree is granted, not just coord/: it is gitignored
+  # (no tracked source becomes writable) and this also unblocks the sibling
+  # evidence.json write (lib/gates.py:1372) that was broken for the same
+  # reason.
+  writable_json="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1], sys.argv[2]]))' \
+    "$RUN_WORKTREE_ROOT" "$PROJECT_PRIMARY_ROOT/.feature-fix-swarm")" || return 1
   {
     printf 'approval_policy = "never"\n'
     printf 'sandbox_mode = "%s"\n' "$REQUESTED_SANDBOX_MODE"

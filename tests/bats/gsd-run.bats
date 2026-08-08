@@ -1566,7 +1566,7 @@ json.dump(d, open(p, \"w\"))
     ' _ "$BATS_TEST_TMPDIR" "$SCRIPT" "$REGISTRY"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"CLAIM-SUPERSEDED"* ]]
+  grep -Fq "CLAIM-SUPERSEDED" "$BATS_TEST_TMPDIR/gen-bump.log"
   [ -f "$BATS_TEST_TMPDIR/gen-bump-drive-started" ]
 }
 
@@ -1607,7 +1607,7 @@ json.dump(d, open(p, \"w\"))
     ' _ "$BATS_TEST_TMPDIR" "$SCRIPT" "$REGISTRY"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"CLAIM-SUPERSEDED"* ]]
+  grep -Fq "CLAIM-SUPERSEDED" "$BATS_TEST_TMPDIR/foreign-take.log"
   [ -f "$BATS_TEST_TMPDIR/foreign-take-drive-started" ]
 }
 
