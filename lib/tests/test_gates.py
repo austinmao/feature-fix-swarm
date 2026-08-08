@@ -131,6 +131,31 @@ def test_scan_tamper_unannotated_exit_zero_in_test_body_still_flags() -> None:
     assert any("exit 0" in f for f in findings)
 
 
+def test_scan_tamper_one_liner_test_disable_still_flags() -> None:
+    # review-gate round 2 HIGH: `@test "x" { exit 0; }` disables the test —
+    # the exit 0 is control flow (outside quotes), so the title exemption
+    # must not apply.
+    diff = (
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        '+@test "x" { exit 0; }\n'
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
+def test_scan_tamper_annotated_executable_exit_zero_still_flags() -> None:
+    # `exit 0  # tamper-ok:` as a statement (unquoted) is control flow —
+    # the annotation only covers exit 0 written as quoted DATA.
+    diff = (
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        "+  exit 0  # tamper-ok: trust me\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
 def test_scan_tamper_annotation_never_exempts_non_test_files() -> None:
     # review-gate HIGH: `exit 0 # tamper-ok:` in a gate/CI/impl script must
     # still flag — the allowlist is test-fixture-only.

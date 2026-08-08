@@ -433,7 +433,11 @@ is absent — consumer repos skip silently):
 ```bash
 COORD_PY="$(git rev-parse --show-toplevel 2>/dev/null)/scripts/coord/coord.py"
 if [ -n "$SPEC_ID" ] && [ -f "$COORD_PY" ]; then
-  FFS_RUN_ID="spec-${SPEC_ID%%-*}" FFS_COORD_ANCHOR_PID=$PPID python3 "$COORD_PY" claim "spec-${SPEC_ID%%-*}"
+  # 4h TTL — no heartbeat daemon in an interactive session (see
+  # feature-implement Step 1.5 for the renewal discipline rationale).
+  # Re-claim (idempotent holder refresh, FFS_COORD_SESSION exported) at each
+  # phase boundary: after specify, plan, clarify, and decompose.
+  FFS_RUN_ID="spec-${SPEC_ID%%-*}" FFS_COORD_ANCHOR_PID=$PPID python3 "$COORD_PY" claim "spec-${SPEC_ID%%-*}" --ttl 14400 --heartbeat 3600
   _claim_rc=$?
   case $_claim_rc in
     0) ;;  # capture the printed session=<uuid> + generation=<N> for release

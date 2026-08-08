@@ -90,7 +90,12 @@ would collide with the runner's own and refuse the launch.
 ```bash
 COORD_PY="$(git rev-parse --show-toplevel 2>/dev/null)/scripts/coord/coord.py"
 if [ "$AUTONOMOUS" != "1" ] && [ -f "$COORD_PY" ]; then
-  FFS_RUN_ID="$RUN_ID" FFS_COORD_ANCHOR_PID=$PPID python3 "$COORD_PY" claim "$RUN_ID"
+  # 4h TTL: an interactive session has no heartbeat daemon, so the TTL must
+  # outlive a working session leg (review-gate round 2 HIGH — a 300s default
+  # expires mid-run and re-opens the two-writer window). Belt: re-claim
+  # (idempotent, refreshes the clock) at every step boundary below. Backstop:
+  # anchor-pid staleness reclaims instantly if this session dies.
+  FFS_RUN_ID="$RUN_ID" FFS_COORD_ANCHOR_PID=$PPID python3 "$COORD_PY" claim "$RUN_ID" --ttl 14400 --heartbeat 3600
   _claim_rc=$?
   case $_claim_rc in
     0) ;;  # claimed — see capture note below
@@ -106,6 +111,13 @@ carry `FFS_COORD_SESSION=<that uuid>` and `--generation <that N>` — a call
 without them is a foreign contender, not the holder. The claim is released in
 Step 7 (and on ANY stop/abort path before it); missed releases expire by TTL +
 anchor-pid staleness, so a crashed session never wedges the run id.
+
+**Renewal discipline (interactive runs):** at every step boundary that
+follows (each phase start in Step 4, each gap round, the Step 6 finish tail),
+re-run the SAME claim command with `FFS_COORD_SESSION=<captured uuid>` —
+re-claim by the holder is idempotent and refreshes the TTL clock. If a
+re-claim ever returns 3/4 (superseded after an expiry), STOP: another session
+may hold the run now; inspect `coord.py status` before touching anything.
 
 Consumer repos without `scripts/coord/coord.py` skip silently (fail-soft) —
 coordination is an FFS-repo capability until the coord CLI ships in setup.sh.
