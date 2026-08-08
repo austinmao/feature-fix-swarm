@@ -42,9 +42,8 @@ acquire() {
 @test "stale foreign ownership is reclaimed and lock paths reject symlinks" {
   lock="$LOCK_DIR/stale.pid"
   printf '999999\nmachine=foreign\nclaimed_epoch=1\n' > "$lock"
-  run acquire "$lock" "" "$LOCK_DIR/reclaim" local 1 1 lock ""
-  [ "$status" -eq 0 ]
   source "$LOCK_LIB"
+  ffs_lock_acquire "$lock" "" "$LOCK_DIR/reclaim" local 1 1 lock
   ffs_lock_release "$lock" local
 
   target="$LOCK_DIR/target"

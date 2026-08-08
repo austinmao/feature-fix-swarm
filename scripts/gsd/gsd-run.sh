@@ -6,6 +6,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib-lock.sh"
 . "$SCRIPT_DIR/adversary-host.sh"
 . "$SCRIPT_DIR/model-equivalents.sh"
 
@@ -505,152 +506,19 @@ coord_renew_run() {
   esac
 }
 
-file_epoch() {
-  local value
-  value="$(stat -f %m "$1" 2>/dev/null || true)"
-  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    value="$(stat -c %Y "$1" 2>/dev/null || true)"
-  fi
-  [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value"
-}
-
-claim_pidfile() {
-  local claimed_epoch
-  claimed_epoch="$(date +%s)"
-  (
-    set -C
-    {
-      printf '%s\n' "$$"
-      printf 'machine=%s\n' "$RUN_MACHINE_ID"
-      printf 'claimed_epoch=%s\n' "$claimed_epoch"
-    } > "$RUN_PID_FILE"
-  ) 2>/dev/null
-}
-
-foreign_lease_epoch() {
-  local claimed="$1" heartbeat best=0
-  heartbeat="$(file_epoch "$RUN_HEARTBEAT_FILE" 2>/dev/null || true)"
-  [[ "$claimed" =~ ^[0-9]+$ ]] && best="$claimed"
-  if [[ "$heartbeat" =~ ^[0-9]+$ ]] && [ "$heartbeat" -gt "$best" ]; then
-    best="$heartbeat"
-  fi
-  [ "$best" -gt 0 ] && printf '%s\n' "$best"
-}
-
-release_reclaim_mutex() {
-  rm -f "$RUN_RECLAIM_DIR/owner"
-  rmdir "$RUN_RECLAIM_DIR" 2>/dev/null || true
-}
-
 acquire_run_state() {
-  local live_pid="" owner_machine="" claimed_epoch="" heartbeat_epoch=""
-  local heartbeat_secs lease_secs reclaim_lease_secs reclaim_epoch now age
-  local attempt=0 owns_reclaim=0 state_path
   [ ! -L "$RUN_STATE_DIR" ] || {
     echo "gsd-run: refusing symlinked run-state directory: $RUN_STATE_DIR" >&2
-    return 75
+    return 78
   }
   mkdir -p "$RUN_STATE_DIR"
-  for state_path in "$RUN_PID_FILE" "$RUN_STATUS_FILE" "$RUN_HEARTBEAT_FILE" "$RUN_RECLAIM_DIR"; do
-    [ ! -L "$state_path" ] || {
-      echo "gsd-run: refusing symlinked run-state path: $state_path" >&2
-      return 75
-    }
-  done
+  ffs_lock_acquire "$RUN_PID_FILE" "$RUN_HEARTBEAT_FILE" "$RUN_RECLAIM_DIR" \
+    "$RUN_MACHINE_ID" "${GSD_FOREIGN_LEASE_SECS:-120}" "${GSD_RECLAIM_LEASE_SECS:-30}" \
+    "gsd-run" "$RUN_STATUS_FILE" || return $?
+  RUN_STATE_OWNED=1
 
-  lease_secs="${GSD_FOREIGN_LEASE_SECS:-120}"
-  case "$lease_secs" in ''|*[!0-9]*|0) lease_secs=120 ;; esac
-  reclaim_lease_secs="${GSD_RECLAIM_LEASE_SECS:-30}"
-  case "$reclaim_lease_secs" in ''|*[!0-9]*|0) reclaim_lease_secs=30 ;; esac
-
-  # The pidfile is the ownership primitive: noclobber performs an atomic
-  # exclusive create, so contenders can never observe an empty owner lock.
-  # A short-lived reclaim mutex only serializes stale-owner removal.
-  while [ "$attempt" -lt 20 ]; do
-    attempt=$((attempt + 1))
-    if [ -d "$RUN_RECLAIM_DIR" ]; then
-      reclaim_epoch="$(file_epoch "$RUN_RECLAIM_DIR" 2>/dev/null || true)"
-      now="$(date +%s)"
-      if [[ "$reclaim_epoch" =~ ^[0-9]+$ ]] \
-         && [ $((now - reclaim_epoch)) -gt "$reclaim_lease_secs" ]; then
-        release_reclaim_mutex
-        continue
-      fi
-      sleep 0.05
-      continue
-    fi
-    if claim_pidfile; then
-      RUN_STATE_OWNED=1
-      break
-    fi
-    [ ! -L "$RUN_PID_FILE" ] || {
-      echo "gsd-run: refusing symlinked run-state path: $RUN_PID_FILE" >&2
-      return 75
-    }
-    live_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-    owner_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    claimed_epoch="$(sed -n 's/^claimed_epoch=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    if { [ -z "$owner_machine" ] || [ "$owner_machine" = "$RUN_MACHINE_ID" ]; } \
-       && [[ "$live_pid" =~ ^[0-9]+$ ]] && kill -0 "$live_pid" 2>/dev/null; then
-      echo "gsd-run: active drive already owns $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
-      return 75
-    fi
-    if [ -n "$owner_machine" ] && [ "$owner_machine" != "$RUN_MACHINE_ID" ]; then
-      heartbeat_epoch="$(foreign_lease_epoch "$claimed_epoch" 2>/dev/null || true)"
-      now="$(date +%s)"
-      if [[ "$heartbeat_epoch" =~ ^[0-9]+$ ]]; then
-        age=$((now - heartbeat_epoch))
-        if [ "$age" -le "$lease_secs" ]; then
-          echo "gsd-run: foreign owner holds a fresh lease on $RUN_PID_FILE (pid=$live_pid machine=$owner_machine age=${age}s); refusing duplicate launch" >&2
-          return 75
-        fi
-      fi
-    fi
-
-    if ! mkdir "$RUN_RECLAIM_DIR" 2>/dev/null; then
-      sleep 0.05
-      continue
-    fi
-    owns_reclaim=1
-    printf '%s\nmachine=%s\n' "$$" "$RUN_MACHINE_ID" > "$RUN_RECLAIM_DIR/owner"
-
-    # Re-read under the reclaim mutex. Never remove an owner that became
-    # live or refreshed its foreign-machine lease after the first read.
-    live_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-    owner_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    claimed_epoch="$(sed -n 's/^claimed_epoch=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    if { [ -z "$owner_machine" ] || [ "$owner_machine" = "$RUN_MACHINE_ID" ]; } \
-       && [[ "$live_pid" =~ ^[0-9]+$ ]] && kill -0 "$live_pid" 2>/dev/null; then
-      release_reclaim_mutex
-      echo "gsd-run: active drive already owns $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
-      return 75
-    fi
-    if [ -n "$owner_machine" ] && [ "$owner_machine" != "$RUN_MACHINE_ID" ]; then
-      heartbeat_epoch="$(foreign_lease_epoch "$claimed_epoch" 2>/dev/null || true)"
-      now="$(date +%s)"
-      if [[ "$heartbeat_epoch" =~ ^[0-9]+$ ]] && [ $((now - heartbeat_epoch)) -le "$lease_secs" ]; then
-        release_reclaim_mutex
-        echo "gsd-run: foreign owner holds a fresh lease on $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
-        return 75
-      fi
-    fi
-    rm -f "$RUN_PID_FILE"
-    if claim_pidfile; then
-      RUN_STATE_OWNED=1
-      release_reclaim_mutex
-      owns_reclaim=0
-      break
-    fi
-    release_reclaim_mutex
-    owns_reclaim=0
-  done
-
-  [ "$RUN_STATE_OWNED" -eq 1 ] || {
-    [ "$owns_reclaim" -eq 0 ] || release_reclaim_mutex
-    echo "gsd-run: run-state ownership remained contended; refusing duplicate launch" >&2
-    return 75
-  }
-
+  local heartbeat_secs
+  # Lock claim/reclaim/lease checks live exclusively in lib-lock.sh.
   write_heartbeat || return 1
   write_run_status probing
   heartbeat_secs="${GSD_HEARTBEAT_SECS:-15}"
@@ -851,7 +719,7 @@ cleanup_codex_runtime() {
 }
 
 cleanup_runner() {
-  local rc="$?" auth_rc=0 recorded_pid="" recorded_machine=""
+  local rc="$?" auth_rc=0
   trap - EXIT
   if [ -n "$RUN_HEARTBEAT_PID" ]; then
     kill "$RUN_HEARTBEAT_PID" 2>/dev/null || true
@@ -877,11 +745,7 @@ cleanup_runner() {
       printf 'coord_abort=%s\n' "$(cat "$RUN_STATE_DIR/gsd-run.coord-abort" 2>/dev/null)" >> "$RUN_STATUS_FILE"
       rm -f "$RUN_STATE_DIR/gsd-run.coord-abort"
     fi
-    [ ! -f "$RUN_PID_FILE" ] || recorded_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-    [ ! -f "$RUN_PID_FILE" ] || recorded_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    if [ "$recorded_pid" = "$$" ] && [ "$recorded_machine" = "$RUN_MACHINE_ID" ]; then
-      rm -f "$RUN_PID_FILE"
-    fi
+    ffs_lock_release "$RUN_PID_FILE" "$RUN_MACHINE_ID" || true
   fi
   exit "$rc"
 }
