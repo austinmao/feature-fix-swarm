@@ -956,7 +956,7 @@ version_in_supported_codex_range() {
 $version
 EOF
   case "$major:$minor:$patch" in *[!0-9:]*|::*|*::) return 1 ;; esac
-  [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 147 ]
+  [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 148 ]
 }
 
 require_supported_codex_cli() {
@@ -969,7 +969,7 @@ require_supported_codex_cli() {
   version="$(printf '%s\n' "$raw" | sed -nE 's/.*[^0-9]([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)"
   if [ -z "$version" ] || ! version_in_supported_codex_range "$version"; then
     CODEX_PREFLIGHT_FATAL=1
-    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.147.0" >&2
+    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.148.0" >&2
     return 78
   fi
   CODEX_CLI_VERSION="$version"
