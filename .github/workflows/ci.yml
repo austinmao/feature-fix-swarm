@@ -69,6 +69,17 @@ jobs:
             echo "::error::tamper findings above — deleted/weakened asserts, skips, or exit-0 in this diff"
             exit 1
           fi
+      - name: forbidden-paths-check against the PR base (REQ-10)
+        # The base ref is passed EXPLICITLY, so P-30's hard-fail arm governs
+        # here: if fetch-depth:0 above is ever narrowed, or the base fetch
+        # fails, this step goes red naming the unresolvable ref rather than
+        # quietly checking only the (empty, on a fresh checkout) working
+        # tree. No || true, no continue-on-error, no fallback ref — each of
+        # those would restore exactly the fail-open this hard-fail arm
+        # exists to remove.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/coord/forbidden-paths-check.sh --base "origin/$BASE_REF"
 
   shellcheck:
     runs-on: ubuntu-latest
