@@ -9,9 +9,19 @@ SCRIPT_REL="scripts/gsd/canary-gate.sh"
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-  SCRIPT="$ROOT/$SCRIPT_REL"
   REPO="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$REPO"
+  # canary-gate.sh resolves its waiver-record.sh sibling via its OWN
+  # $BASH_SOURCE dirname, which is script-relative and ignores cwd/GATES_STORE
+  # — running $ROOT's copy would make CANARY_GATE=off write into the
+  # developer's real canonical evidence store no matter what this fixture's
+  # git repo looks like. Run a fixture-local copy instead (see WR-140).
+  mkdir -p "$REPO/scripts/gsd" "$REPO/lib"
+  cp "$ROOT/scripts/gsd/canary-gate.sh" "$REPO/scripts/gsd/canary-gate.sh"
+  cp "$ROOT/scripts/gsd/waiver-record.sh" "$REPO/scripts/gsd/waiver-record.sh"
+  cp "$ROOT/lib/gates.py" "$REPO/lib/gates.py"
+  chmod +x "$REPO/scripts/gsd/canary-gate.sh" "$REPO/scripts/gsd/waiver-record.sh"
+  SCRIPT="$REPO/scripts/gsd/canary-gate.sh"
   cd "$REPO" || return 1
   git init -q
   git config user.email t@t

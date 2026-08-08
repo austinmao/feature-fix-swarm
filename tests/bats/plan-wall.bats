@@ -7,16 +7,29 @@
 bats_require_minimum_version 1.5.0
 
 setup() {
-  LEVER="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/gsd/plan-wall.sh"
-  FENCE_LEVER="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/gsd/security-model-fence.sh"
-  REAL_GATES_PY="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/lib/gates.py"
-  REAL_SCHEMA="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/schemas/review-finding.schema.json"
+  ROOT_REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  REAL_GATES_PY="$ROOT_REPO/lib/gates.py"
+  REAL_SCHEMA="$ROOT_REPO/schemas/review-finding.schema.json"
   REPO="$BATS_TEST_TMPDIR/repo"
   # highest-priority GATES_PY candidate — guarantees the fixture's own (v2)
   # gates.py wins over any machine-global FFS install, on any test runner.
-  mkdir -p "$REPO/packages/feature-fix-swarm/lib" "$REPO/schemas" "$REPO/bin"
+  mkdir -p "$REPO/packages/feature-fix-swarm/lib" "$REPO/schemas" "$REPO/bin" "$REPO/lib"
   cp "$REAL_GATES_PY" "$REPO/packages/feature-fix-swarm/lib/gates.py"
+  # waiver-record.sh (see LEVER below) hardcodes $REPO_ROOT/lib/gates.py with
+  # no candidate search, so the fixture needs its own copy at that exact path
+  # too — independent of plan-wall.sh's own GATES_PY resolution above.
+  cp "$REAL_GATES_PY" "$REPO/lib/gates.py"
   cp "$REAL_SCHEMA" "$REPO/schemas/review-finding.schema.json"
+  # LEVER/FENCE_LEVER run from a fixture-local COPY of scripts/gsd, not the
+  # real repo checkout: both scripts resolve sibling calls (waiver-record.sh)
+  # via their own $SCRIPT_DIR, which is script-relative and cannot be
+  # redirected by GATES_STORE or cwd — running the real repo's copy would
+  # make PLAN_WALL=off write into the developer's real canonical evidence
+  # store no matter what this fixture sets up (see WR-140).
+  cp -r "$ROOT_REPO/scripts" "$REPO/scripts"
+  chmod +x "$REPO"/scripts/gsd/*.sh "$REPO"/scripts/hooks/*.sh 2>/dev/null || true
+  LEVER="$REPO/scripts/gsd/plan-wall.sh"
+  FENCE_LEVER="$REPO/scripts/gsd/security-model-fence.sh"
   cd "$REPO"
   git init -q -b main
   git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
