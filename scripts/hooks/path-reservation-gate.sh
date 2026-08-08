@@ -432,14 +432,20 @@ try:
         coord._print_lease_held([(k, h) for k, _u, h in blockers])
         key, h_uuid, holder = blockers[0]
         gen = holder["generation"]
+        # held_by is TRUNCATED on purpose: the full session uuid IS the
+        # FFS_COORD_SESSION impersonation token, and this stderr is read by
+        # the very agent that was just blocked (review-gate HIGH finding).
+        # The 8-char prefix identifies the holder in `status` output; the
+        # true holder recovers its own full uuid from its own session env
+        # or its sessions/ file, never from this message.
         body = "\n".join(
             [
                 f"PATH-RESERVED {fp}",
-                f"lease={key} held_by={h_uuid} generation={gen}",
+                f"lease={key} held_by={h_uuid[:8]}... generation={gen}",
                 "inspect:  python3 scripts/coord/coord.py status",
-                f"release:  python3 scripts/coord/coord.py lease-release --resource {key} --generation {gen}",
-                "or, if this lease is yours and the identity env is not visible to Claude Code:",
-                f"  export FFS_COORD_SESSION={h_uuid} and retry",
+                f"release:  python3 scripts/coord/coord.py lease-release --resource {key} --generation {gen}  (holder only)",
+                "or, if this lease is YOURS and the identity env is not visible to Claude Code:",
+                "  re-export the FFS_COORD_SESSION value from the session that acquired it and retry",
             ]
         )
         if MODE == "audit":

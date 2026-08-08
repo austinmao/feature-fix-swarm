@@ -106,7 +106,10 @@ mkstub_python3() {
   run bash -c "$(declare -f envelope); envelope Edit '$REPO/skills/feature-implement/SKILL.md' | FFS_COORD_MODE=enforce CLAUDE_PROJECT_DIR='$REPO' FFS_RUN_ID=other bash '$HOOK'"
   [ "$status" -eq 2 ]
   [[ "$output" =~ --generation\ [0-9]+ ]]
-  [[ "$output" == *"held_by=$holder_sid"* ]]
+  # truncated prefix only — the FULL uuid is the FFS_COORD_SESSION
+  # impersonation token and must never appear in the block message
+  [[ "$output" == *"held_by=${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
   [[ "$output" != *"<N>"* ]]
   [[ "$output" != *"<key>"* ]]
   [[ "$output" != *"<uuid>"* ]]
@@ -304,7 +307,7 @@ mkstub_python3() {
   [ "$status" -eq 0 ]
 }
 
-@test "P-12: unresolvable identity blocks and the message says how to recover" {
+@test "P-12: unresolvable identity blocks and the message says how to recover WITHOUT leaking the impersonation token" {
   run acquire_as holder "path:skills/**" exclusive
   [ "$status" -eq 0 ]
   holder_sid="${lines[0]#session=}"
@@ -312,7 +315,10 @@ mkstub_python3() {
   run bash -c "$(declare -f envelope); envelope Edit '$REPO/skills/feature-implement/SKILL.md' | FFS_COORD_MODE=enforce CLAUDE_PROJECT_DIR='$REPO' FFS_RUN_ID=nobody bash '$HOOK'"
   [ "$status" -eq 2 ]
   [[ "$output" == *"FFS_COORD_SESSION"* ]]
-  [[ "$output" == *"$holder_sid"* ]]
+  # recovery guidance names the env var and the truncated holder prefix,
+  # but the FULL uuid is the impersonation token — must never be printed
+  [[ "$output" == *"held_by=${holder_sid:0:8}"* ]]
+  [[ "$output" != *"$holder_sid"* ]]
 }
 
 @test "P-15: a corrupt registry.json in enforce mode exits EXACTLY 2, never 69" {
