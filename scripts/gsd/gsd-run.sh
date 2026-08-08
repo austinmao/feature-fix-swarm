@@ -248,7 +248,13 @@ if [ "$GSD_SKILL_NAME" = gsd-resume-work ]; then
   RESUME_REQUESTED=1
 elif [ -f "$RUN_TUPLE_FILE" ] && [ -f "$RUN_STATUS_FILE" ] \
   && grep -q '^state=failed$' "$RUN_STATUS_FILE" \
-  && grep -q "^skill=$GSD_SKILL_NAME$" "$RUN_STATUS_FILE"; then
+  && grep -q "^skill=$GSD_SKILL_NAME$" "$RUN_STATUS_FILE" \
+  && grep -q "^skill=$GSD_SKILL_NAME$" "$RUN_TUPLE_FILE"; then
+  # The tuple is what resume validates against; a tuple persisted by a
+  # DIFFERENT skill's drive is definitionally not this drive's resume state.
+  # Without this guard a pre-launch refusal (which never persists a tuple)
+  # arms resume against the previous drive's tuple and wedges every fresh
+  # launch on tuple drift.
   RESUME_REQUESTED=1
 fi
 RUN_ID="${GSD_RUN_ID:-}"

@@ -246,6 +246,28 @@ EOF
   [ "$output" = "(1, 84)" ]
 }
 
+@test "a stale tuple from a different skill never arms auto-resume (pre-launch failure wedge)" {
+  # Wedge chain from the first phase-2 gap-plan drive: a PRE-LAUNCH refusal
+  # (codex quota) wrote state=failed for gsd-plan-phase, arming the
+  # auto-resume heuristic; resume then validated against the tuple persisted
+  # by the COMPLETED execute drive (a different skill) and refused every
+  # fresh launch with tuple drift — a permanent wedge. Auto-resume must also
+  # require the stored tuple's skill to match the requested skill.
+  STATE_DIR="$BATS_TEST_TMPDIR/.git/ffs/gsd-run"
+  mkdir -p "$STATE_DIR"
+  printf 'state=failed\npid=1\nmachine=m\nhost=codex\nskill=gsd-quick\nlog=/dev/null\nexit_code=69\nupdated_at=now\n' \
+    > "$STATE_DIR/gsd-run.status"
+  printf 'schema=ffs.gsd-run/v1\nrun_id=spec-008\nruntime=codex\nskill=gsd-OTHER-skill\nsandbox_mode=workspace-write\nnetwork_mode=none\n' \
+    > "$STATE_DIR/gsd-run.tuple"
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick go"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"tuple drift"* ]]
+  run grep '^skill=' "$STATE_DIR/gsd-run.tuple"
+  [ "$output" = "skill=gsd-quick" ]
+}
+
 @test "a mapped ledger run whose runstore record is unreadable fails closed" {
   # Reuse must never invent state: mapping present but runstore record gone
   # (pruned db, cross-machine copy) is exit 78, not a silent fresh start
