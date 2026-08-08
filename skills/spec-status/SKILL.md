@@ -77,10 +77,24 @@ Print the headline + Next 3 inline; the file carries the rest.
   (it chains handoff → context-save → compact command block; never trigger
   `/compact` yourself — present the block for the operator).
 
-Before committing any status artifact or produced handoff, stage it and scan
-the exact staged bytes with `scripts/gsd/scan-handoff-credentials.sh
-"$HANDOFF_PATH"`. A finding stops the commit; if the scanner is absent, warn
-once and continue. Preserve `--no-handoff` behavior.
+Before committing any status artifact or produced handoff, run the shared
+copy-then-scan-then-publish harness on each — it never scans a git index
+blob, only a private temp copy made before anything is staged:
+
+```bash handoff-scan
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+bash "$REPO_ROOT/scripts/gsd/publish-scanned-handoff.sh" \
+  "$STATUS_PATH" --commit "docs(status): save spec status report" || exit $?
+if [ -n "${HANDOFF_PATH:-}" ]; then
+  bash "$REPO_ROOT/scripts/gsd/publish-scanned-handoff.sh" \
+    "$HANDOFF_PATH" --commit "docs(handoff): save durable handoff" || exit $?
+fi
+```
+
+A finding stops the commit for that artifact with nothing added to the
+index or object database; a missing scanner warns once per artifact and
+continues. `HANDOFF_PATH` stays unset under `--no-handoff`, so the second
+call never runs — preserving that flag's behavior.
 
 ## Constraints
 

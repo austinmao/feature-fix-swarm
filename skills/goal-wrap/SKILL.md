@@ -230,10 +230,18 @@ inject it into the `HANDOFF DOC:` line.
 
 Read the handoff doc and verify it references (does not duplicate): spec+plan by SHA, ADRs by path, commits by sha+subject, spike findings by path+1-line summary, task count+ids, outstanding decisions 1-line each.
 
-Before publishing the handoff, copy it to a private `mktemp` file (`chmod 600`),
-run `scripts/gsd/scan-handoff-credentials.sh "$HANDOFF_PATH"` on that copy,
-and publish exactly the scanned copy. A finding stops publishing; a missing
-scanner emits one warning and continues.
+Before publishing the handoff, run the shared copy-then-scan-then-publish
+harness — it never scans a git index blob, only a private temp copy made
+before anything is published:
+
+```bash handoff-scan
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+bash "$REPO_ROOT/scripts/gsd/publish-scanned-handoff.sh" \
+  "$HANDOFF_PATH" --publish-to "${HANDOFF_DEST:-$HANDOFF_PATH}"
+```
+
+A finding stops publishing with the destination unchanged or absent; a
+missing scanner emits one warning and continues.
 
 **If `/handoff` is unavailable**, write a minimal handoff doc yourself to the OS temp dir (`mktemp` or equivalent) covering the same references list above, and note `HANDOFF: inlined (skill unavailable)` in the bundle output.
 
