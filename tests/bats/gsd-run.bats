@@ -219,6 +219,44 @@ EOF
   [ "$output" = 124988 ]
 }
 
+@test "a relaunch of the same ledger run reuses its mapped runstore (no RUN-MAPPING-CONFLICT, cumulative accounting)" {
+  # A ledger run legitimately spans multiple drives (deviation-checkpoint
+  # relaunches, mid-phase session ends). The first phase-2 drive relaunch
+  # wedged: every drive started a fresh runstore and map-run refused the
+  # remap (RUN-MAPPING-CONFLICT -> exit 78). A relaunch must REUSE the
+  # mapped runstore — one ledger run, one runstore, tokens cumulative.
+  cat > "$STUB_DIR/token-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+echo DRIVE_OK
+echo 'tokens used: 42'
+EOF
+  chmod +x "$STUB_DIR/token-codex"
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 0 ]
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"RUN-MAPPING"* ]]
+  run python3 -c "import sqlite3; c=sqlite3.connect('$BATS_TEST_TMPDIR/run-state.sqlite'); print(c.execute('select count(*), sum(tokens_used) from runs').fetchone())"
+  [ "$output" = "(1, 84)" ]
+}
+
+@test "a mapped ledger run whose runstore record is unreadable fails closed" {
+  # Reuse must never invent state: mapping present but runstore record gone
+  # (pruned db, cross-machine copy) is exit 78, not a silent fresh start
+  # that would orphan the prior drive's accounting.
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && python3 '$HARNESS_ROOT/lib/gates.py' map-run --ledger-run-id spec-008 --runstore-id dddddddddddd >/dev/null && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"BUDGET-MAPPING-FAILED"* ]]
+}
+
 refresh_gsd_skill_manifest() {
   python3 - "$CODEX_SOURCE_ROOT/gsd-file-manifest.json" "$USER_AGENTS_ROOT/skills" <<'PY'
 import hashlib, json, pathlib, sys

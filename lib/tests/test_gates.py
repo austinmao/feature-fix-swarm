@@ -75,6 +75,20 @@ def test_run_mapping_is_shape_checked_idempotent_and_conflict_rejecting(tmp_path
         gates.record_run_mapping(store, "spec-009", "not-a-uuid")
 
 
+def test_run_mapping_is_readable_for_relaunch_reuse(tmp_path) -> None:
+    # A relaunch of the same ledger run must be able to READ its existing
+    # mapping and reuse the runstore instead of starting a fresh record and
+    # dying on RUN-MAPPING-CONFLICT (first phase-2 drive relaunch wedged on
+    # exactly this). Missing mapping reads as None, never raises.
+    store = tmp_path / "evidence.json"
+    assert gates.get_run_mapping(store, "spec-008") is None
+    gates.record_run_mapping(store, "spec-008", "a" * 12)
+    assert gates.get_run_mapping(store, "spec-008") == "a" * 12
+    import pytest
+    with pytest.raises(ValueError):
+        gates.get_run_mapping(store, "not-ledger-shaped")
+
+
 # ── Stream A: completion authority ───────────────────────────────────────────
 
 def test_verify_done_requires_recorded_evidence(tmp_path) -> None:

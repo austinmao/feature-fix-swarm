@@ -334,13 +334,26 @@ budget_prepare_mapping() {
   # RUN-MAPPING-REJECTED). Run-state/mapping failure for a VALID ledger id
   # below stays fail-closed.
   [[ "$GSD_RUN_ID" =~ ^(spec-[0-9]{3}|adhoc-[a-z0-9][a-z0-9-]*|run-[0-9]+)$ ]] || return 0
-  local started gates
+  local started gates existing
+  gates="$SCRIPT_DIR/../../lib/gates.py"
+  # A relaunch of the same ledger run (deviation checkpoint, mid-phase
+  # session end) reuses the mapped runstore: one ledger run owns exactly one
+  # runstore across drives, and token accounting stays cumulative. A fresh
+  # record per drive would either die on RUN-MAPPING-CONFLICT (second drive
+  # of phase 2 wedged on this) or fragment the budget across runstores.
+  if existing="$(python3 "$gates" map-run --ledger-run-id "$GSD_RUN_ID" --get 2>/dev/null)" && [ -n "$existing" ]; then
+    if run_state_cli status "$existing" >/dev/null 2>&1; then
+      RUNSTORE_ID="$existing"
+      return 0
+    fi
+    echo "gsd-run: BUDGET-MAPPING-FAILED: mapped runstore '$existing' is unreadable — refusing a fresh start that would orphan its accounting" >&2
+    return 78
+  fi
   local -a args=(start --skill fix --objective "$GSD_SKILL_NAME" --worktree "$RUN_WORKTREE_ROOT")
   [ -z "${GSD_TOKEN_BUDGET:-}" ] || args+=(--tokens "$GSD_TOKEN_BUDGET")
   started="$(run_state_cli "${args[@]}" 2>&1)" || {
     echo "gsd-run: BUDGET-MAPPING-FAILED: cannot create run-state record" >&2; return 78; }
   RUNSTORE_ID="$(printf '%s' "$started" | python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' 2>/dev/null)" || return 78
-  gates="$SCRIPT_DIR/../../lib/gates.py"
   python3 "$gates" map-run --ledger-run-id "$GSD_RUN_ID" --runstore-id "$RUNSTORE_ID" >/dev/null || {
     echo "gsd-run: BUDGET-MAPPING-FAILED: cannot persist ledger mapping" >&2; return 78; }
 }

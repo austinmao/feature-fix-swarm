@@ -253,6 +253,19 @@ def record_run_mapping(store: Path, ledger_run_id: str, runstore_id: str) -> boo
     return True
 
 
+def get_run_mapping(store: Path, ledger_run_id: str) -> str | None:
+    """Read the runstore id mapped to a ledger run, or None. A relaunch of
+    the same ledger run reuses this mapping instead of starting a fresh
+    runstore and dying on RUN-MAPPING-CONFLICT — one ledger run spans
+    multiple drives but owns exactly one runstore."""
+    _require_ledger_run_id(ledger_run_id)
+    store = Path(store)
+    if not store.exists():
+        return None
+    value = _degradation_ns(_load_store(store))["mappings"].get(ledger_run_id)
+    return value if isinstance(value, str) else None
+
+
 def _degraded_ratio_allowed(data: dict, run_id: str) -> bool:
     _require_ledger_run_id(run_id)
     ns = _degradation_ns(data)
@@ -1832,6 +1845,16 @@ def main(argv: list[str]) -> int:
         print("DEGRADATION-RECORDED")
         return 0
     if cmd == "map-run":
+        if "--get" in args:
+            try:
+                mapped = get_run_mapping(store, _flag(args, "--ledger-run-id"))
+            except ValueError as exc:
+                print(f"RUN-MAPPING-REJECTED: {exc}", file=sys.stderr)
+                return 2
+            if mapped is None:
+                return 1
+            print(mapped)
+            return 0
         try:
             created = record_run_mapping(store, _flag(args, "--ledger-run-id"),
                                          _flag(args, "--runstore-id"))
