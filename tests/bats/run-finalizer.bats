@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # run-finalizer.sh — run-end estate cleanup after a verified merge.
 # Fixtures: real git repos in $BATS_TEST_TMPDIR (local bare origin), gh mocked.
+# Callers (`feature-implement` and the finish tail) tolerate a pre-mutation
+# nonzero: lock tampering and evidence persistence intentionally fail closed.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -77,6 +79,19 @@ fi
 exit 64
 EOF
   chmod +x "$MOCK_BIN/gh"
+}
+
+@test "finisher-skipped evidence CLI validates inputs before one atomic event row" {
+  EVENT="$REPO_ROOT/lib/evidence_events.py"
+  STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run env GATES_STORE="$STORE" python3 "$EVENT" finisher-skipped --run-id spec-008 --pr 12
+  [ "$status" -eq 0 ]
+  run python3 -c "import json; d=json.load(open('$STORE')); e=d['events']; assert len(e)==1; assert set(e[0]) == {'kind','run_id','pr','ts'}; assert e[0]['pr'] == 12 and isinstance(e[0]['ts'], (int,float))"
+  [ "$status" -eq 0 ]
+  before="$(cksum "$STORE")"
+  run env GATES_STORE="$STORE" python3 "$EVENT" finisher-skipped --run-id $'bad\nrun' --pr +12
+  [ "$status" -ne 0 ]
+  [ "$(cksum "$STORE")" = "$before" ]
 }
 
 @test "kill-switch FFS_RUN_FINALIZER=off -> no-op, exit 0" {
