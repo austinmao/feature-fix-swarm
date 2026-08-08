@@ -63,6 +63,19 @@ else
 fi
 unset _git_common
 
+# A drive launched by this runner carries GSD_ACTIVE_DRIVE=1. A headless
+# agent inside that drive re-invoking gsd-run.sh (observed on spec-008
+# phase 1: the codex agent re-ran the runner instead of executing the
+# phase workflow, then read the single-flight refusal as a blocker —
+# sandboxed kill -0 cannot see the live outer runner, so it looked like a
+# dead-pid-with-live-heartbeat foreign owner) gets an INSTRUCTIVE refusal
+# before any gate, probe, or state mutation, instead of a confusing lease
+# error.
+if [ "${GSD_ACTIVE_DRIVE:-0}" = "1" ]; then
+  echo "gsd-run: NESTED-INVOCATION refused — this shell is already inside the active runner's drive session. The runner has already run the ownership gate and plan wall for this phase; execute the phase workflow directly per the skill instructions (spawn the plan executors). Never re-invoke gsd-run.sh from inside a drive." >&2
+  exit 64
+fi
+
 # gsd's mempalace commands call a bare `mempalace` binary in headless mode.
 export PATH="$REPO_ROOT/scripts/gsd:$PATH"
 
@@ -1284,7 +1297,7 @@ $CODEX_SESSION_CONTRACT"
   # Subscription-only: -u OPENAI_API_KEY mirrors the ANTHROPIC_* strip on the
   # claude branch below. Codex prefers an ambient API key over the logged-in
   # session, so an injected key would silently meter the whole drive.
-  RUN=(env -u OPENAI_API_KEY CODEX_HOME="$CODEX_RUNTIME_HOME" "$CODEX_BIN" exec
+  RUN=(env -u OPENAI_API_KEY GSD_ACTIVE_DRIVE=1 CODEX_HOME="$CODEX_RUNTIME_HOME" "$CODEX_BIN" exec
     -c "model=\"$LEAD_MODEL\""
     -c "model_reasoning_effort=\"$LEAD_EFFORT\""
     --sandbox "$REQUESTED_SANDBOX_MODE"
@@ -1305,7 +1318,7 @@ else
   persist_prelaunch_tuple "$LEAD_MODEL" "" || exit $?
   CLAUDE_ARGS=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'
     --permission-mode acceptEdits --model "$LEAD_MODEL" -p "$CMD_STR")
-  RUN=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
+  RUN=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN GSD_ACTIVE_DRIVE=1
     "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}")
 fi
 

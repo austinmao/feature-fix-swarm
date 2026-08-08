@@ -133,6 +133,7 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   exit 0
 fi
 printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
+printf '%s\n' "\${GSD_ACTIVE_DRIVE-unset}" > "$BATS_TEST_TMPDIR/codex.active-drive"
 printf '%s\n' "\${CODEX_HOME:-}" > "$BATS_TEST_TMPDIR/codex.home"
 pwd -P > "$BATS_TEST_TMPDIR/codex.cwd"
 printf '%s\n' "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skills"
@@ -240,6 +241,23 @@ if __name__ == "__main__":
     sys.exit(main())
 PY
   chmod +x "$dest"
+}
+
+@test "nested invocation from inside an active drive is refused with instructions (exit 64)" {
+  GSD_ACTIVE_DRIVE=1 FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'nested attempt'"
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"NESTED-INVOCATION"* ]]
+  [[ "$output" == *"execute the phase workflow directly"* ]]
+  # refused BEFORE any drive launch or state mutation
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "the launched drive carries GSD_ACTIVE_DRIVE=1 so nested gsd-run self-identifies" {
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'carry the marker'"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/codex.active-drive")" = "1" ]
 }
 
 @test "Codex host runs Codex with the Sonnet-equivalent Terra lead" {
