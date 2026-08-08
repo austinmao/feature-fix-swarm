@@ -1195,3 +1195,85 @@ SCRIPT
   [[ "$output" == *"could not be resolved after"* ]]
   git show-ref --verify -q refs/heads/feat/x
 }
+
+# ---------------------------------------------------------------------------
+# AC-009 / GAP 3 — signal semantics of the finisher lock owner (RF-201/RF-202)
+#
+# Every case below sets HOME to a per-test tmp directory: the finisher lock
+# path is derived from HOME at runtime, so this is the only thing standing
+# between the suite and the invoking user's real
+# ~/.cache/feature-fix-swarm/finisher.lock.
+#
+# Launch discipline: the finalizer runs in its OWN process group (python3
+# os.setsid exec wrapper; macOS ships no setsid binary) and signals are
+# delivered to the WHOLE GROUP. Bash defers a trapped signal handler until
+# the foreground child (the parked gh stub) exits, so a TERM to the
+# finalizer pid alone would sit deferred for the stub's entire sleep; the
+# group TERM kills the stub too, the foreground call returns, and the
+# deferred handler then fires promptly.
+# ---------------------------------------------------------------------------
+
+_rf_setsid_launch() { # $1=output file; launches $LEVER 1 in its own pgid; sets RF_PID
+  python3 -c 'import os,sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])' bash "$LEVER" 1 > "$1" 2>&1 &
+  RF_PID=$!
+}
+
+_rf_parked_gh_stub() { # gh stub: record entry, then park well past the test horizon
+  cat > "$MOCK_BIN/gh" <<EOF
+#!/usr/bin/env bash
+echo entered > "$BATS_TEST_TMPDIR/gh-entered"
+sleep 120
+exit 0
+EOF
+  chmod +x "$MOCK_BIN/gh"
+}
+
+@test "RF-201: signaled lock owner releases and dies by the signal instead of resuming cleanup" {
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME"
+  LOCK="$HOME/.cache/feature-fix-swarm/finisher.lock"
+  _rf_parked_gh_stub
+  OUT="$BATS_TEST_TMPDIR/rf201.out"
+  _rf_setsid_launch "$OUT"
+  # park point: inside the first gh call, strictly after lock acquisition
+  for _ in $(seq 1 100); do
+    [ -f "$BATS_TEST_TMPDIR/gh-entered" ] && [ -f "$LOCK" ] && break
+    sleep 0.2
+  done
+  [ -f "$BATS_TEST_TMPDIR/gh-entered" ]
+  [ -f "$LOCK" ]
+  kill -TERM -- "-$RF_PID"
+  st=0; wait "$RF_PID" || st=$?
+  [ "$st" -eq 143 ]                       # 128+15: died BY the signal, not exit 0
+  ! grep -q "MERGED — finalizing" "$OUT"  # no post-gh cleanup output
+  [ ! -f "$LOCK" ]                        # ownership released on the way out
+}
+
+@test "RF-202: after the owner is signaled away, a second finalizer acquires and is the only cleanup actor" {
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME"
+  LOCK="$HOME/.cache/feature-fix-swarm/finisher.lock"
+  _rf_parked_gh_stub
+  OUT="$BATS_TEST_TMPDIR/rf202-first.out"
+  _rf_setsid_launch "$OUT"
+  for _ in $(seq 1 100); do
+    [ -f "$BATS_TEST_TMPDIR/gh-entered" ] && [ -f "$LOCK" ] && break
+    sleep 0.2
+  done
+  [ -f "$LOCK" ]
+  kill -TERM -- "-$RF_PID"
+  st=0; wait "$RF_PID" || st=$?
+  [ ! -f "$LOCK" ]
+  # first finalizer performed no cleanup: branch survives
+  git show-ref --verify -q refs/heads/feat/x
+  ! grep -q "deleted local branch" "$OUT"
+  # second finalizer with a normal gh stub is the only cleanup actor
+  mock_gh_merged
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"finalize complete"* ]]
+  [[ "$output" == *"deleted local branch 'feat/x'"* ]]
+  [ ! -f "$LOCK" ]
+}
