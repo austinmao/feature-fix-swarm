@@ -2,7 +2,8 @@
 # TDD RED for scripts/hooks/gsd-phase-evidence-gate.sh — PreToolUse (Edit|Write)
 # gsd analog of openclaw's checkbox-evidence-gate.sh: a phase-complete flip in
 # .planning/ROADMAP.md or a completed_phases increment in .planning/STATE.md
-# requires gates.py verify-done evidence (gsd-phase-NN, fallback gsd-phase).
+# requires gates.py verify-done evidence keyed by phase-dir basename or the
+# legacy gsd-phase-NN id. Generic `gsd-phase` no longer unlocks (P4-W6).
 
 setup() {
   GATE="$BATS_TEST_DIRNAME/../scripts/hooks/gsd-phase-evidence-gate.sh"
@@ -36,12 +37,32 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "ROADMAP phase flip WITH generic gsd-phase evidence passes" {
+@test "generic gsd-phase evidence no longer unlocks a flip (P4-W6)" {
   python3 "$BATS_TEST_DIRNAME/../lib/gates.py" run-gate gsd-phase -- true
   run bash "$GATE" <<EOF
 $(hook_input Edit .planning/ROADMAP.md "- [ ] **Phase 2: Next**" "- [x] **Phase 2: Next**")
 EOF
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"BLOCKED"* ]]
+}
+
+@test "ROADMAP phase flip WITH phase-dir-basename evidence passes" {
+  mkdir -p "$BATS_TEST_TMPDIR/.planning/phases/02-next-things"
+  python3 "$BATS_TEST_DIRNAME/../lib/gates.py" run-gate 02-next-things -- true
+  run bash "$GATE" <<EOF
+$(hook_input Edit "$BATS_TEST_TMPDIR/.planning/ROADMAP.md" "- [ ] **Phase 2: Next**" "- [x] **Phase 2: Next**")
+EOF
   [ "$status" -eq 0 ]
+}
+
+@test "another phase's dir-basename evidence does NOT unlock this phase" {
+  mkdir -p "$BATS_TEST_TMPDIR/.planning/phases/01-other"
+  mkdir -p "$BATS_TEST_TMPDIR/.planning/phases/02-next-things"
+  python3 "$BATS_TEST_DIRNAME/../lib/gates.py" run-gate 01-other -- true
+  run bash "$GATE" <<EOF
+$(hook_input Edit "$BATS_TEST_TMPDIR/.planning/ROADMAP.md" "- [ ] **Phase 2: Next**" "- [x] **Phase 2: Next**")
+EOF
+  [ "$status" -eq 2 ]
 }
 
 @test "STATE.md completed_phases increment WITHOUT evidence blocks" {

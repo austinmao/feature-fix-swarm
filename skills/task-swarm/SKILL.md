@@ -53,6 +53,12 @@ review stop.
 
 ## Procedure
 
+Cross-session coordination (spec-009) is inherited, not re-implemented: the
+execution step routes through `/feature-implement`, whose Step 1.5
+claim-or-stop claims the run id (interactive) or defers to `gsd-run.sh`'s own
+claim (headless). A REFUSED claim means another live session owns this work —
+stop and inspect `python3 scripts/coord/coord.py status`.
+
 ### Step 0 — continuity + recall (fail-soft)
 
 - Continuity is gsd-native: `.planning/STATE.md` survives context resets.

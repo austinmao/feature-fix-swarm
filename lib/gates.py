@@ -92,6 +92,7 @@ CI_FILE_PAT = re.compile(r"\.github/workflows/|\.gitlab-ci|Jenkinsfile|\.circlec
 # (these files are the product here and change legitimately); consumer repos
 # can treat it as failing.
 GATE_FILE_PAT = re.compile(r"(^|/)lib/gates\.py$|(^|/)\.feature-fix-swarm/")
+EXIT0_PAT = re.compile(r"\bexit 0\b|sys\.exit\(0\)|process\.exit\(0\)")
 
 
 # ── Stream A: completion authority ───────────────────────────────────────────
@@ -342,8 +343,29 @@ def scan_test_tampering(diff_text: str) -> list[str]:
                 findings.append(f"always-true (weakened) assertion added: {line.strip()}")
             if re.search(r"\.skip\b|@pytest\.mark\.skip|\bxfail\b|@unittest\.skip", line):
                 findings.append(f"test skip added: {line.strip()}")
-            if re.search(r"\bexit 0\b|sys\.exit\(0\)|process\.exit\(0\)", line):
-                findings.append(f"unconditional exit 0 added: {line.strip()}")
+            if re.search(EXIT0_PAT, line):
+                # Fixture allowlist (F1, PR #94 audit: 6 bats stub-fixture
+                # lines + 1 test title flagged). Exempt ONLY when all three
+                # hold (review-gate rounds 1+2):
+                #   1. test file — an annotation never exempts gate/CI/impl
+                #      scripts;
+                #   2. the line is a @test title or carries an explicit
+                #      `tamper-ok: <reason>` annotation;
+                #   3. every exit-0 occurrence sits INSIDE a quoted string —
+                #      data being written to a stub, not control flow. This
+                #      kills `@test "x" { exit 0; }` (one-line test disable)
+                #      and executable `exit 0  # tamper-ok:` in a test body.
+                # Heredoc-body stub lines still flag — write stubs via quoted
+                # printf/echo if they must carry exit 0.
+                stripped = line[1:].lstrip()
+                unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "", line)
+                exempt = (
+                    in_test_file
+                    and (stripped.startswith("@test ") or "tamper-ok:" in line)
+                    and not re.search(EXIT0_PAT, unquoted)
+                )
+                if not exempt:
+                    findings.append(f"unconditional exit 0 added: {line.strip()}")
     return findings
 
 
