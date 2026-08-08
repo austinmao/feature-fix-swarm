@@ -67,9 +67,9 @@ except Exception:
     print('')
 " "$record" 2>/dev/null)"
     case "$verdict" in
-      reviewed-pass|adjudicated-pass|WAIVED) ;;
+      reviewed-pass|adjudicated-pass|pass-residual|WAIVED) ;;
       *)
-        echo "gates-test-command: BACKSTOP: $record has verdict '$verdict' (need reviewed-pass|adjudicated-pass|WAIVED) — $phase_desc cannot complete" >&2
+        echo "gates-test-command: BACKSTOP: $record has verdict '$verdict' (need reviewed-pass|adjudicated-pass|pass-residual|WAIVED) — $phase_desc cannot complete" >&2
         exit 1
         ;;
     esac
