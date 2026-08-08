@@ -346,14 +346,33 @@ budget_prepare_mapping() {
 }
 
 budget_account_tail() {
-  local capture="$1" tail_line tokens update rc
+  local capture="$1" tokens update rc
   [ -n "$RUNSTORE_ID" ] || return 0
-  tail_line="$(tail -n 10 "$capture" | grep -E '^tokens used:[[:space:]]*[0-9]+[[:space:]]*$' | tail -1 || true)"
-  if [ -z "$tail_line" ]; then
+  # Two anchored trailer shapes, last occurrence in the 10-line tail wins:
+  # single-line 'tokens used: N' AND the live codex CLI's two-line form —
+  # 'tokens used' followed by a comma-grouped count on the next line (the
+  # colon-only parse WARNed BUDGET-ACCOUNTING-UNAVAILABLE on every real
+  # drive). Mid-stream trailer-shaped text stays unread: only the tail.
+  tokens="$(tail -n 10 "$capture" | python3 -c '
+import re, sys
+lines = [l.rstrip("\n") for l in sys.stdin]
+val = None
+for i, l in enumerate(lines):
+    m = re.fullmatch(r"tokens used:?\s*([0-9][0-9,]*)?\s*", l)
+    if not m:
+        continue
+    if m.group(1):
+        val = m.group(1)
+    elif i + 1 < len(lines):
+        m2 = re.fullmatch(r"\s*([0-9][0-9,]*)\s*", lines[i + 1])
+        if m2:
+            val = m2.group(1)
+print(val.replace(",", "") if val else "")
+')"
+  if [ -z "$tokens" ]; then
     echo "gsd-run: WARN BUDGET-ACCOUNTING-UNAVAILABLE: no parseable token trailer" >&2
     return 0
   fi
-  tokens="$(printf '%s' "$tail_line" | sed -E 's/^tokens used:[[:space:]]*([0-9]+)[[:space:]]*$/\1/')"
   update="$(run_state_cli update "$RUNSTORE_ID" --tokens "$tokens" 2>&1)"; rc=$?
   if [ "$rc" -ne 0 ] || { [ -n "$update" ] && ! printf '%s\n' "$update" | grep -Eq '^BUDGET-BREACH: [0-9a-f]{12} [0-9]+ [0-9]+$'; }; then
     # Empty output is the normal non-breach result; malformed non-empty output

@@ -196,6 +196,29 @@ EOF
   [ "$output" = 42 ]
 }
 
+@test "real codex two-line comma trailer (tokens used / 124,988) is accounted" {
+  # The live codex CLI prints the trailer as TWO lines — 'tokens used' then
+  # a comma-grouped count — not the single-line colon form. First
+  # integration drive WARNed BUDGET-ACCOUNTING-UNAVAILABLE on every real
+  # run while the colon-only fixture stayed green.
+  cat > "$STUB_DIR/token2-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+echo DRIVE_OK
+echo 'tokens used'
+echo '124,988'
+EOF
+  chmod +x "$STUB_DIR/token2-codex"
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token2-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"BUDGET-ACCOUNTING-UNAVAILABLE"* ]]
+  run python3 -c "import sqlite3; c=sqlite3.connect('$BATS_TEST_TMPDIR/run-state.sqlite'); print(c.execute('select tokens_used from runs').fetchone()[0])"
+  [ "$output" = 124988 ]
+}
+
 refresh_gsd_skill_manifest() {
   python3 - "$CODEX_SOURCE_ROOT/gsd-file-manifest.json" "$USER_AGENTS_ROOT/skills" <<'PY'
 import hashlib, json, pathlib, sys
