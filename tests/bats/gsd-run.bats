@@ -915,7 +915,7 @@ text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
 print(len(roots))
 PY
-)" -eq 4 ]
+)" -eq 6 ]
   [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
 }
 
@@ -1782,12 +1782,19 @@ EOF
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
-assert len(roots) == 4, roots
+assert len(roots) == 6, roots
 assert any(r.endswith('/.feature-fix-swarm') for r in roots), roots
 assert any('/.claude/worktrees/' in r for r in roots), roots
 assert any(r.endswith('/objects') for r in roots), roots
-assert any('/worktrees/' in r and r.rstrip('/').endswith('gsd-quick') for r in roots) or any('/.git/worktrees/' in r for r in roots), roots
+assert any('/.git/worktrees/' in r for r in roots), roots
+assert any(r.endswith('/refs/heads/gsd') for r in roots), roots
+assert any(r.endswith('/logs/refs/heads/gsd') for r in roots), roots
 assert not any(r.rstrip('/').endswith('/.git') for r in roots), roots
+assert not any(r.rstrip('/').endswith('/refs/heads') for r in roots), roots
+import os
+for r in roots:
+    if r.endswith('/refs/heads/gsd') or r.endswith('/logs/refs/heads/gsd'):
+        assert os.path.isdir(r), f"granted root must be pre-created: {r}"
 PY
   [ "$status" -eq 0 ]
 }

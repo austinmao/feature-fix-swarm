@@ -1069,9 +1069,16 @@ prepare_codex_runtime() {
   # RED/GREEN/SUMMARY commits. Deliberately NARROW: never the whole .git —
   # hooks/ (arbitrary code executed by the next unsandboxed git call) and
   # refs/ (other branches) stay non-writable.
-  writable_json="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]]))' \
+  # The executor also creates/advances phase branches under the gsd/*
+  # namespace (refs/heads/gsd/phase-* + their reflogs). Grant EXACTLY that
+  # namespace — pre-created here because the sandbox cannot mkdir inside
+  # the ungranted refs/heads parent — so main and every other branch ref
+  # stay non-writable.
+  mkdir -p "$GIT_COMMON_DIR/refs/heads/gsd" "$GIT_COMMON_DIR/logs/refs/heads/gsd" || return 1
+  writable_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
     "$RUN_WORKTREE_ROOT" "$PROJECT_PRIMARY_ROOT/.feature-fix-swarm" \
-    "$GIT_COMMON_DIR/objects" "$GIT_COMMON_DIR/worktrees/$RUN_ID")" || return 1
+    "$GIT_COMMON_DIR/objects" "$GIT_COMMON_DIR/worktrees/$RUN_ID" \
+    "$GIT_COMMON_DIR/refs/heads/gsd" "$GIT_COMMON_DIR/logs/refs/heads/gsd")" || return 1
   {
     printf 'approval_policy = "never"\n'
     printf 'sandbox_mode = "%s"\n' "$REQUESTED_SANDBOX_MODE"
