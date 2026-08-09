@@ -61,6 +61,7 @@ exec python3 - "$VERB" "$ROOT" "$@" <<'PYEOF'
 import datetime as _dt
 import difflib
 import fcntl
+import fnmatch
 import json
 import os
 import re
@@ -548,6 +549,85 @@ def validate_registry_text(text, *, label):
     return sections, env_kind, surfaces_map
 
 
+# ── covers-glob coverage matcher (REQ-303; audit row 26 LOCKED, D-coverage:
+# additive inside check — ROW_KEYS/schema untouched; closes the
+# 02-01-PLAN.md:36 deferral) ────────────────────────────────────────────────
+
+_WALK_SKIP = (".git", ".worktrees", "node_modules")
+
+
+def _discover_suites():
+    """Deterministic os.walk under ROOT (skip .git, .worktrees,
+    .claude/worktrees, node_modules): files named test_*.py under tests/ or
+    lib/, plus *.bats under tests/."""
+    suites = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        rel = os.path.relpath(dirpath, ROOT)
+        for d in list(dirnames):
+            drel = d if rel == "." else os.path.join(rel, d)
+            if d in _WALK_SKIP \
+                    or drel == os.path.join(".claude", "worktrees"):
+                dirnames.remove(d)
+        dirnames.sort()
+        if rel == ".":
+            continue
+        top = rel.split(os.sep)[0]
+        for fname in sorted(filenames):
+            if top in ("tests", "lib") and fname.startswith("test_") \
+                    and fname.endswith(".py"):
+                suites.append(os.path.join(rel, fname))
+            elif top == "tests" and fname.endswith(".bats"):
+                suites.append(os.path.join(rel, fname))
+    return sorted(suites)
+
+
+def _covers_match(pat, relpath):
+    """Pinned match rule: `<prefix>/**` matches any relpath under the
+    prefix; anything else is plain fnmatch."""
+    if pat.endswith("/**"):
+        prefix = pat[:-3]
+        return relpath == prefix or relpath.startswith(prefix + "/")
+    return fnmatch.fnmatch(relpath, pat)
+
+
+def _nearest_tier(tier_rows, relpath):
+    """Tier whose covers globs share the longest common leading path
+    segments with the suite; tie → first declared."""
+    parts = relpath.split("/")
+    best, best_len = None, -1
+    for row in tier_rows:
+        score = 0
+        for pat in row.get("covers") or []:
+            prefix = pat[:-3] if pat.endswith("/**") else pat
+            n = 0
+            for a, b in zip(prefix.split("/"), parts):
+                if a != b:
+                    break
+                n += 1
+            score = max(score, n)
+        if score > best_len:  # strict > keeps the first-declared on ties
+            best_len = score
+            best = row
+    return best
+
+
+def check_coverage(sections):
+    """Every discovered suite must match >=1 tier's covers globs; empty
+    discovery is a vacuous pass (phase-2 fixtures stay green)."""
+    tier_rows = sections.get("test_tiers") or []
+    for suite in _discover_suites():
+        if any(_covers_match(pat, suite)
+               for row in tier_rows for pat in (row.get("covers") or [])):
+            continue
+        near = _nearest_tier(tier_rows, suite) or {}
+        s_suite = safe_path(suite, "coverage matcher")
+        s_tier = safe_name(near.get("tier"), "coverage matcher")
+        fail(f"ENV-REGISTRY-INVALID: test suite {s_suite} matches no "
+             f"tier's covers globs (nearest tier: {s_tier}) — remedy: add "
+             f"a covers glob to that tier in config/environments.yaml, or "
+             f"reclassify the suite")
+
+
 def cmd_check(args):
     manifest = None
     manifest_given = False
@@ -589,6 +669,8 @@ def cmd_check(args):
             text, label=path)
     except SchemaError as exc:
         fail(f"ENV-REGISTRY-INVALID: {exc}")
+    # coverage matcher runs AFTER referential integrity (REQ-303, row 26)
+    check_coverage(sections)
     stale_advisories(sections)
     if probe:
         gh_probe()
