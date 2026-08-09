@@ -332,3 +332,115 @@ EOF
   echo "$output" | grep -q '^loop-cap '
   [ "$(grep -c '^waiver ' "$NOTIFY_OUT")" -eq 1 ]
 }
+
+# ── Task 3: scan-tamper + drift classes, --daily ────────────────────────────
+
+mock_gh_drift() { # mock_gh_drift <protection-json> <workflows-json> — canned gh api
+  cat > "$MOCK_BIN/gh" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "api" ]; then
+  case "\$2" in
+    *protection*) printf '%s\n' '$1'; exit 0 ;;
+    *workflows*)  printf '%s\n' '$2'; exit 0 ;;
+  esac
+fi
+exit 64
+EOF
+  chmod +x "$MOCK_BIN/gh"
+}
+
+@test "scan-tamper: cursor-absent initialization records HEAD and emits nothing (decision 2)" {
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^scan-tamper '
+  # a PRE-cursor tampering commit is never scanned (no unbounded history scan)
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["scan-tamper"])' "$CURSOR" | grep -q "$(git rev-parse HEAD)"
+}
+
+@test "scan-tamper: a tampering commit past the cursor emits one finding line with its sha, then never again" {
+  run bash "$SCRIPT" --immediate   # initialize cursor to HEAD
+  echo 'describe.skip("x")' > bad.js
+  git add bad.js && git commit -qm "sneaky"
+  SHA="$(git rev-parse HEAD)"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^scan-tamper ')" -eq 1 ]
+  echo "$output" | grep '^scan-tamper ' | grep -q "sha=$SHA"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^scan-tamper '
+  # a clean commit emits nothing but advances the sha cursor
+  echo clean > clean.txt
+  git add clean.txt && git commit -qm "clean"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^scan-tamper '
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["scan-tamper"])' "$CURSOR" | grep -q "$(git rev-parse HEAD)"
+}
+
+@test "drift: baseline absent -> stderr note only; failing gh at record-baseline -> loud nonzero (decision 3)" {
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^drift '
+  echo "$output" | grep -qi 'baseline'
+  # default stub gh exits 64: record-baseline is the one loud-failure mode
+  run bash "$SCRIPT" --record-baseline
+  [ "$status" -ne 0 ]
+  [ ! -f "$BASELINE" ]
+}
+
+@test "drift: changed protection emits one drift line, second run silent (fingerprint cursor)" {
+  mock_gh_drift '{"protection":1}' '[{"sha":"wf1"}]'
+  run bash "$SCRIPT" --record-baseline
+  [ "$status" -eq 0 ]
+  [ -f "$BASELINE" ]
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^drift '   # matches baseline: no drift
+  mock_gh_drift '{"protection":2}' '[{"sha":"wf1"}]'
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^drift ')" -eq 1 ]
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^drift '   # unchanged drift never re-emits
+  # gh unreachable mid-poll: stderr note, exit 0, cursor retained
+  printf '#!/usr/bin/env bash\nexit 64\n' > "$MOCK_BIN/gh"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qi 'gh unreachable'
+}
+
+@test "daily renders all seven labeled fields; gh-backed field degrades to unavailable" {
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli start --skill feature --objective done --tokens 100 > "$BATS_TEST_TMPDIR/s1.json"
+  R1="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$BATS_TEST_TMPDIR/s1.json")"
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli update "$R1" --tokens 10
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli complete "$R1"
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli start --skill feature --objective burn --tokens 10 > "$BATS_TEST_TMPDIR/s2.json"
+  R2="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$BATS_TEST_TMPDIR/s2.json")"
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli update "$R2" --tokens 20
+  run bash "$SCRIPT" --daily
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '^specs: completed=1 quarantined=1'
+  echo "$output" | grep -q '^merges: 0'          # git-backed field stays real
+  echo "$output" | grep -q '^degraded-review: 0/0'
+  echo "$output" | grep -q '^tokens: used=30 budget=110'
+  echo "$output" | grep -q '^pending: 0'
+  echo "$output" | grep -q '^stranded: '
+  echo "$output" | grep -q '^oldest-pr: unavailable'   # default gh stub fails
+}
+
+@test "daily oldest-pr renders from gh when reachable" {
+  cat > "$MOCK_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  echo '[{"createdAt":"2026-08-01T00:00:00Z"}]'; exit 0
+fi
+exit 64
+EOF
+  chmod +x "$MOCK_BIN/gh"
+  run bash "$SCRIPT" --daily
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '^oldest-pr: '
+  ! echo "$output" | grep -q '^oldest-pr: unavailable'
+}
