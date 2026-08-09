@@ -2840,3 +2840,51 @@ def test_ac005_normalize_manifest_preserves_optional_rollback(tmp_path) -> None:
             gates._normalize_manifest({"surfaces": [
                 {"surface": "cp", "staging_instance": "stg-cp",
                  "rollback": bad}]})
+
+
+# ── spec-008 Phase 4: durable loop-cap event producer (REQ-701 OQ-1) ────────
+
+def test_loop_cap_appends_durable_typed_event(tmp_path, monkeypatch, capsys) -> None:
+    """The cap branch appends one {kind, run_id, loop, round, ts} row to the
+    top-level events list so the digest has a durable producer; sub-cap
+    rounds append nothing."""
+    store = tmp_path / "evidence.json"
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 0
+    assert json.loads(store.read_text()).get("events", []) == []
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 1
+    assert "LOOP-CAP:" in capsys.readouterr().out
+    events = json.loads(store.read_text())["events"]
+    assert len(events) == 1
+    ev = events[0]
+    assert set(ev) == {"kind", "run_id", "loop", "round", "ts"}
+    assert ev["kind"] == "loop-cap"
+    assert ev["run_id"] == "spec-008"
+    assert ev["loop"] == "wall:p1"
+    assert ev["round"] == 2
+    assert isinstance(ev["ts"], float)
+
+
+def test_loop_cap_event_write_failure_is_fail_soft(tmp_path, monkeypatch, capsys) -> None:
+    """Decision 1: event-write failure warns on stderr but the cap STILL
+    returns 1 with its LOOP-CAP line intact — observability never gates
+    the cap. The rc-3 store-unusable path is untouched (counter save fails
+    first there)."""
+    store = tmp_path / "evidence.json"
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 0
+    real_save = gates._save_store
+    calls = {"n": 0}
+
+    def flaky(path, data):
+        calls["n"] += 1
+        if calls["n"] == 2:  # call 1 = counter save, call 2 = event append
+            raise OSError("disk full")
+        real_save(path, data)
+
+    monkeypatch.setattr(gates, "_save_store", flaky)
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 1
+    captured = capsys.readouterr()
+    assert "LOOP-CAP:" in captured.out
+    assert "LOOP-CAP-EVENT-UNRECORDED" in captured.err
+    assert "events" not in json.loads(store.read_text())

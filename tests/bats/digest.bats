@@ -190,3 +190,145 @@ EOF
   run bash "$SCRIPT"
   [ "$status" -eq 2 ]
 }
+
+# ── Task 2: remaining store classes, loop-cap producer, run_id join ─────────
+
+@test "tripped-rung emits exactly once, cursor is a window fingerprint not a timestamp" {
+  # 20 consecutive fails = tripped (gates.py:226). Two events share an
+  # identical recorded_at on purpose: the cursor must be a content
+  # fingerprint of the window, never a recorded_at comparison (wall ba54308a).
+  python3 - "$STORE" <<'EOF'
+import json, sys
+events = [{"outcome": "fail", "recorded_at": 100.0} for _ in range(20)]
+events[5]["recorded_at"] = 100.0  # explicit tie
+open(sys.argv[1], "w").write(json.dumps(
+    {"_degradation": {"rungs": {"review-rung": {"events": events, "opportunities": 3}},
+                      "invocations": [], "mappings": {}}}))
+EOF
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^tripped-rung ')" -eq 1 ]
+  echo "$output" | grep '^tripped-rung ' | grep -q 'rung=review-rung'
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^tripped-rung '
+}
+
+@test "loop-cap: the real gates.py producer feeds the digest exactly once" {
+  # end to end through the OQ-1 producer: cap-crossing loop-round durably
+  # appends the typed event; digest emits it once.
+  run python3 "$REPO/lib/gates.py" loop-round spec-008 wall:p1 --max 1
+  [ "$status" -eq 0 ]
+  run python3 "$REPO/lib/gates.py" loop-round spec-008 wall:p1 --max 1
+  [ "$status" -eq 1 ]
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^loop-cap ')" -eq 1 ]
+  echo "$output" | grep '^loop-cap ' | grep -q 'run_id=spec-008'
+  echo "$output" | grep '^loop-cap ' | grep -q 'loop=wall:p1'
+  echo "$output" | grep '^loop-cap ' | grep -q 'round=2'
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^loop-cap '
+}
+
+@test "budget-breach emits exactly once via sqlite rowid cursor" {
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli start --skill feature --objective x --tokens 10 > "$BATS_TEST_TMPDIR/start.json"
+  RS_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$BATS_TEST_TMPDIR/start.json")"
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli update "$RS_ID" --tokens 20 | grep -q '^BUDGET-BREACH:'
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^budget-breach ')" -eq 1 ]
+  echo "$output" | grep '^budget-breach ' | grep -q "runstore_id=$RS_ID"
+  echo "$output" | grep '^budget-breach ' | grep -q 'run_id=unmapped'
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^budget-breach '
+}
+
+@test "AC-011 join: budget row and waiver row name the SAME ledger run_id via the mapping" {
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli start --skill feature --objective x --tokens 10 > "$BATS_TEST_TMPDIR/start.json"
+  RS_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$BATS_TEST_TMPDIR/start.json")"
+  python3 "$REPO/lib/gates.py" map-run --ledger-run-id spec-008 --runstore-id "$RS_ID"
+  PYTHONPATH="$REPO/lib" python3 -m run_state.cli update "$RS_ID" --tokens 20 | grep -q '^BUDGET-BREACH:'
+  seed_waiver spec-008
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  echo "$output" | grep '^budget-breach ' | grep -q 'run_id=spec-008'
+  echo "$output" | grep '^budget-breach ' | grep -q "runstore_id=$RS_ID"
+  echo "$output" | grep '^waiver ' | grep -q 'run_id=spec-008'
+}
+
+@test "finisher-skipped emits with pr join key; lock-trace variant emits honestly without an invented run" {
+  python3 "$REPO/lib/evidence_events.py" finisher-skipped --run-id spec-008 --pr 7
+  python3 "$REPO/lib/evidence_events.py" finisher-skipped --run-id unattributed --pr 8 \
+    --lock-path /tmp/finish.lock --holder-pid 5
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^finisher-skipped ')" -eq 2 ]
+  echo "$output" | grep '^finisher-skipped ' | grep 'run_id=spec-008' | grep -q 'pr=7'
+  echo "$output" | grep '^finisher-skipped ' | grep 'run_id=unattributed' | grep -q 'lock_path=/tmp/finish.lock'
+  echo "$output" | grep '^finisher-skipped ' | grep 'run_id=unattributed' | grep -q 'holder_pid=5'
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^finisher-skipped '
+}
+
+@test "promotion emits once and carries the artifact sha gh join key" {
+  SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  python3 - "$STORE" "$SHA" <<'EOF'
+import json, sys
+open(sys.argv[1], "w").write(json.dumps({"_promotions": {"spec-008": [
+    {"from_env": "staging", "to_env": "prod", "surface": "web",
+     "artifact": sys.argv[2], "evidence_ids": [], "recorded_at": 100.0,
+     "expires_at": 200.0}]}}))
+EOF
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^promotion ')" -eq 1 ]
+  echo "$output" | grep '^promotion ' | grep -q 'run_id=spec-008'
+  echo "$output" | grep '^promotion ' | grep -q "artifact=$SHA"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^promotion '
+}
+
+@test "rollback-dryrun emits once with its REQ-302 keys" {
+  SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  python3 "$REPO/lib/gates.py" rollback-dryrun --run-id spec-008 --surface web \
+    --command "echo rollback" --exit-code 0 --artifact-sha "$SHA"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c '^rollback-dryrun ')" -eq 1 ]
+  echo "$output" | grep '^rollback-dryrun ' | grep -q 'run_id=spec-008'
+  echo "$output" | grep '^rollback-dryrun ' | grep -q 'exit_code=0'
+  echo "$output" | grep '^rollback-dryrun ' | grep -q "artifact_sha=$SHA"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^rollback-dryrun '
+}
+
+@test "mid-list class failure leaves earlier classes' cursor advances intact (Pitfall 4)" {
+  seed_waiver
+  run python3 "$REPO/lib/gates.py" loop-round spec-008 wall:p1 --max 1
+  run python3 "$REPO/lib/gates.py" loop-round spec-008 wall:p1 --max 1
+  NOTIFY_OUT="$BATS_TEST_TMPDIR/notified.txt"
+  cat > "$BATS_TEST_TMPDIR/notify.sh" <<EOF
+#!/usr/bin/env bash
+input="\$(cat)"
+if printf '%s\n' "\$input" | grep -q '^loop-cap '; then exit 1; fi
+printf '%s\n' "\$input" >> "$NOTIFY_OUT"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/notify.sh"
+  export DIGEST_NOTIFY_CMD="$BATS_TEST_TMPDIR/notify.sh"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '^waiver '
+  echo "$output" | grep -q '^loop-cap '
+  # waiver advanced (delivered once), loop-cap retained and redelivered
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^waiver '
+  echo "$output" | grep -q '^loop-cap '
+  [ "$(grep -c '^waiver ' "$NOTIFY_OUT")" -eq 1 ]
+}
