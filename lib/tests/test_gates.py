@@ -209,6 +209,30 @@ def test_scan_tamper_exit_zero_fixture_allowlist() -> None:
     assert gates.scan_test_tampering(diff) == []
 
 
+def test_scan_tamper_comment_line_exit_zero_not_flagged() -> None:
+    # PR #103 CI false positive: doc comments like `+#   --immediate ... exit 0`
+    # were flagged — a pure comment line cannot alter control flow.
+    diff = (
+        "--- a/scripts/gsd/digest.sh\n"
+        "+++ b/scripts/gsd/digest.sh\n"
+        "+#   --immediate  poll stores, emit new events, exit 0 always\n"
+        "+  # cursor retained on notify failure; exit 0\n"
+    )
+    assert gates.scan_test_tampering(diff) == []
+
+
+def test_scan_tamper_exit_zero_finding_carries_path() -> None:
+    # Findings are path-scoped so the CI tamper job can allowlist files whose
+    # CONTRACT is unconditional exit 0 without blinding the heuristic.
+    diff = (
+        "--- a/scripts/gsd/whatever.sh\n"
+        "+++ b/scripts/gsd/whatever.sh\n"
+        "+exit 0\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("[scripts/gsd/whatever.sh]" in f for f in findings)
+
+
 def test_scan_tamper_unannotated_exit_zero_in_test_body_still_flags() -> None:
     diff = (
         "--- a/tests/bats/x.bats\n"

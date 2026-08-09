@@ -151,7 +151,12 @@ build_handoff_fixture() {
   cp "$REPO_ROOT/scripts/hooks/credential-output-guard.sh" "$dir/scripts/hooks/"
   chmod +x "$dir"/scripts/gsd/*.sh "$dir"/scripts/hooks/*.sh
   git -C "$dir" init -q -b main
-  git -C "$dir" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  # Repo-local identity: the handoff-scan block runs publish-scanned-handoff
+  # inside this fixture, and its commit needs an author on hosts with no
+  # global gitconfig (PR #103 CI: "Author identity unknown").
+  git -C "$dir" config user.email t@t
+  git -C "$dir" config user.name t
+  git -C "$dir" commit -q --allow-empty -m init
 }
 
 @test "CG-020: continue-compact.sh handoff-scan block extracts and executes — clean, finding, absent-guard" {

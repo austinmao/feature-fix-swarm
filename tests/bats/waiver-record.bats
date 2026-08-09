@@ -301,6 +301,12 @@ normalize_wr130() {
 
 @test "WR-130: plan-wall's successful PLAN_WALL=off waiver path is byte-identical to the pre-migration baseline" {
   local pw_first old_extract old_work new_work
+  # The byte-compat comparison needs real history back to the pinned
+  # pre-migration anchor; a shallow CI clone (fetch-depth 1) cannot resolve
+  # it — skip rather than fail on an environment that lacks the baseline
+  # (first hit: PR #103 CI, `fatal: bad revision`).
+  git -C "$ROOT" rev-parse -q --verify 'e3ec94b^{commit}' >/dev/null 2>&1 \
+    || skip "baseline commit e3ec94b unavailable (shallow clone)"
   pw_first="$(git -C "$ROOT" rev-list --reverse HEAD --not e3ec94b -- scripts/gsd/plan-wall.sh | head -1)"
   [ -n "$pw_first" ]
 

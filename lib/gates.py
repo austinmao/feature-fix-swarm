@@ -485,11 +485,14 @@ def scan_test_tampering(diff_text: str) -> list[str]:
     """Flag reward-hacking moves in a unified diff. Empty list = clean."""
     findings: list[str] = []
     in_test_file = False
+    current_path = ""
     for line in diff_text.splitlines():
         if line.startswith("--- ") or line.startswith("+++ "):
             path = line[4:]
             path = path[2:] if path.startswith(("a/", "b/")) else path
             in_test_file = bool(TEST_FILE_PAT.search(path))
+            if line.startswith("+++ "):
+                current_path = path
             if line.startswith("+++ ") and CI_FILE_PAT.search(path):
                 findings.append(f"CI/workflow file edited: {path}")
             if line.startswith("+++ ") and GATE_FILE_PAT.search(path):
@@ -522,6 +525,11 @@ def scan_test_tampering(diff_text: str) -> list[str]:
                 # Heredoc-body stub lines still flag — write stubs via quoted
                 # printf/echo if they must carry exit 0.
                 stripped = line[1:].lstrip()
+                if stripped.startswith("#"):
+                    # A pure comment line cannot alter control flow — the
+                    # CI tamper job flagged doc comments like
+                    # `+#   --immediate ... exit 0` (PR #103 false positive).
+                    continue
                 unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "", line)
                 exempt = (
                     in_test_file
@@ -529,7 +537,11 @@ def scan_test_tampering(diff_text: str) -> list[str]:
                     and not re.search(EXIT0_PAT, unquoted)
                 )
                 if not exempt:
-                    findings.append(f"unconditional exit 0 added: {line.strip()}")
+                    # Path-scoped so consumers (CI tamper job) can allowlist
+                    # files whose CONTRACT is unconditional exit 0 (e.g. the
+                    # digest observability tool) without blinding the
+                    # heuristic everywhere else.
+                    findings.append(f"unconditional exit 0 added [{current_path}]: {line.strip()}")
     return findings
 
 
