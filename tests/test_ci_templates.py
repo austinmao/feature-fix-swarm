@@ -627,3 +627,355 @@ def test_dependabot_excluded_from_workflow_sweep_by_name():
     # wall d3b57631: exclusion is by explicit filename, not discovery accident
     assert DEPENDABOT not in WORKFLOWS
     assert set(PINNED_TIMEOUTS) <= set(WORKFLOWS)
+
+
+# ---------------------------------------------------------------------------
+# completeness + inventory drift tripwires
+# ---------------------------------------------------------------------------
+
+def test_exactly_six_templates():
+    names = sorted(p.name for p in discovered_templates())
+    assert names == sorted(WORKFLOWS + [DEPENDABOT])
+
+
+def test_placeholder_inventory_union_is_exactly_six():
+    # key link: this inventory IS 03-02 render's substitution set — a token
+    # missing here ships a dead {{TOKEN}} in a rendered workflow.
+    union = set()
+    for p in discovered_templates():
+        union |= set(PLACEHOLDER_RE.findall(p.read_text(encoding="utf-8")))
+    assert union == PLACEHOLDER_INVENTORY
+
+
+# ---------------------------------------------------------------------------
+# deploy pair — structural (REQ-301 rows 4-5, audit rows 22/24 locked)
+# ---------------------------------------------------------------------------
+
+DEPLOYS = {
+    "deploy-staging.yml": PINNED_INPUTS_STAGING,
+    "deploy-prod.yml": PINNED_INPUTS_PROD,
+}
+DEPLOY_ENVIRONMENT = {
+    "deploy-staging.yml": "{{STAGING_ENV}}",
+    "deploy-prod.yml": "{{PROD_ENV}}",
+}
+
+
+def run_steps(job_body):
+    out = []
+    for st in steps(job_body):
+        r = run_of(st)
+        if r is not None:
+            out.append((step_name(st), r, st))
+    return out
+
+
+def _deploy_job(wf):
+    text = strip_comments(read(wf))
+    jb = jobs(text)
+    assert len(jb) == 1
+    return next(iter(jb.values()))
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_inputs_pinned_and_dispatch_parity(wf):
+    # wall 9d404c88: workflow_dispatch mirrors workflow_call inputs exactly
+    # (same keys, types, required flags) so manual dispatch can supply
+    # everything the steps consume.
+    text = strip_comments(read(wf))
+    call_inputs = inputs_of(text, "workflow_call")
+    dispatch_inputs = inputs_of(text, "workflow_dispatch")
+    assert call_inputs == DEPLOYS[wf]
+    assert dispatch_inputs == DEPLOYS[wf]
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_environment_and_oidc(wf):
+    body = _deploy_job(wf)
+    assert scalar(body, "environment", 4) == DEPLOY_ENVIRONMENT[wf]
+    perm = [
+        ln.strip()
+        for ln in section(body, "permissions", 4).splitlines()
+        if ln.strip()
+    ]
+    assert "id-token: write" in perm
+    assert "contents: read" in perm  # wall 7f08ccda
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_env_binds_inputs_once(wf):
+    # walls af9f57b1 + eb28c568: inputs cross into shell only via the job
+    # env mapping, and ARTIFACT_DIGEST is bound exactly once — the digest
+    # that is gated IS the digest deployed.
+    text = strip_comments(read(wf))
+    body = _deploy_job(wf)
+    env = env_map(section(body, "env", 4))
+    assert env["ARTIFACT_DIGEST"] == "${{ inputs.artifact_digest }}"
+    assert env["SURFACE"] == "${{ inputs.surface }}"
+    assert env["SMOKE_TIER"] == "${{ inputs.smoke_tier }}"
+    # OQ9: positional run-id for gates.py calls
+    assert env["RUN_ID"] == "ffs-${{ github.run_id }}"
+    assert text.count("inputs.artifact_digest") == 3  # 2 declarations + 1 env
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_smoke_step_is_exactly_the_gate_wrapped_form(wf):
+    # walls ebadd63a + d688023e: run-gate wraps the sole tier->command source.
+    runs = [r for _, r, _ in run_steps(_deploy_job(wf))]
+    assert SMOKE_RUN in runs
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_smoke_tier_shape_validated_in_job(wf):
+    runs = "\n".join(r for _, r, _ in run_steps(_deploy_job(wf)))
+    assert "^[a-z][a-z0-9_-]{0,31}$" in runs
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_consumer_marker_block(wf):
+    # wall 4b37c841: deploy mechanism is ONLY the marked no-op consumer
+    # block — no input and no token carries a command.
+    raw = read(wf)
+    assert "CONSUMER DEPLOY STEP — replace this block" in raw
+    marker = [
+        (n, r, st)
+        for n, r, st in run_steps(_deploy_job(wf))
+        if "CONSUMER DEPLOY STEP" in r
+    ]
+    assert len(marker) == 1
+    _, run, _ = marker[0]
+    # wall 760b2ad9: the marker guidance binds BOTH surface and digest.
+    assert "$SURFACE" in run
+    assert "$ARTIFACT_DIGEST" in run
+    # wall 431cd39a: template form is echo-only and exits 0 so the smoke
+    # gate is what fails the job — the placeholder must not mask it.
+    assert "exit 1" not in run
+    for line in run.splitlines():
+        if line.strip():
+            assert line.lstrip().startswith("echo"), (
+                f"non-echo line in consumer block: {line!r}"
+            )
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_gate_calls_share_the_digest_env_var(wf):
+    # wall eb28c568: every gates.py call binds the SAME "$ARTIFACT_DIGEST".
+    for _, run, _ in run_steps(_deploy_job(wf)):
+        if "lib/gates.py" in run:
+            assert '"$ARTIFACT_DIGEST"' in run
+
+
+@pytest.mark.parametrize("wf", sorted(DEPLOYS))
+def test_deploy_no_build_invocation(wf):
+    stripped = strip_comments(read(wf))
+    assert not re.search(
+        r"docker\s+build|docker\s+push|npm\s+publish|pip\s+wheel", stripped
+    )
+
+
+def test_staging_order_is_the_contract():
+    # deploy -> run-gate smoke -> promote (REQ-301; audit row 24 locked)
+    rs = run_steps(_deploy_job("deploy-staging.yml"))
+    runs = [r for _, r, _ in rs]
+    i_deploy = next(i for i, r in enumerate(runs) if "CONSUMER DEPLOY" in r)
+    i_smoke = runs.index(SMOKE_RUN)
+    i_promote = next(
+        i for i, r in enumerate(runs)
+        if r.startswith("python3 lib/gates.py promote")
+    )
+    assert i_deploy < i_smoke < i_promote
+
+
+def test_staging_promote_shape_and_no_escape():
+    rs = run_steps(_deploy_job("deploy-staging.yml"))
+    promote = [
+        (r, st) for _, r, st in rs
+        if r.startswith("python3 lib/gates.py promote")
+    ]
+    assert len(promote) == 1
+    run, st = promote[0]
+    assert '"$RUN_ID" --from staging --to prod --surface "$SURFACE"' in run
+    assert "--evidence" in run
+    # no-escape: a smoke failure must skip this step (comment-stripped)
+    assert scalar(st, "if", 8) is None
+    assert scalar(st, "continue-on-error", 8) is None
+
+
+def test_prod_checkout_pins_run_sha_and_trust_chain_comment():
+    # walls 792e5b5b + c6a42b43: ref pin + authoritative-control-chain comment
+    raw = read("deploy-prod.yml")
+    assert "branch protection" in raw
+    assert "defense-in-depth" in raw
+    text = strip_comments(raw)
+    body = _deploy_job("deploy-prod.yml")
+    checkout = [
+        st for st in steps(body)
+        if (scalar(st, "uses", 8) or "").startswith("actions/checkout@")
+    ]
+    assert len(checkout) == 1
+    with_block = section(checkout[0], "with", 8)
+    assert scalar(with_block, "ref", 10) == "${{ github.sha }}"
+
+
+def test_prod_ref_guard_then_check_grant_before_any_mutation():
+    # wall c6a42b43: the ref guard refuses non-default-branch runs BEFORE
+    # check-grant; check-grant runs strictly before any mutation step.
+    rs = run_steps(_deploy_job("deploy-prod.yml"))
+    runs = [r for _, r, _ in rs]
+    assert "default branch" in runs[0] and "exit 1" in runs[0]
+    assert runs[1].startswith("python3 lib/gates.py check-grant")
+    assert "--require-environments" in runs[1]
+    assert '"$RUN_ID"' in runs[1]
+    assert 'deploy:prod-$SURFACE' in runs[1]
+    i_deploy = next(i for i, r in enumerate(runs) if "CONSUMER DEPLOY" in r)
+    assert i_deploy > 1
+    i_smoke = runs.index(SMOKE_RUN)
+    assert i_deploy < i_smoke
+
+
+def test_prod_rollback_emitted_never_executed():
+    # previous_digest is referenced ONLY by the if: failure() emission step,
+    # whose run block consists solely of writes to GITHUB_OUTPUT /
+    # GITHUB_STEP_SUMMARY (PROJECT.md non-negotiable).
+    text = strip_comments(read("deploy-prod.yml"))
+    refs = [
+        ln for ln in text.splitlines() if "inputs.previous_digest" in ln
+    ]
+    body = _deploy_job("deploy-prod.yml")
+    emission = [
+        st for st in steps(body) if scalar(st, "if", 8) == "failure()"
+    ]
+    assert len(emission) == 1
+    st = emission[0]
+    env = env_map(section(st, "env", 8))
+    assert env.get("PREVIOUS_DIGEST") == "${{ inputs.previous_digest }}"
+    # the env line above plus the two trigger declarations are the only refs
+    assert len(refs) == 3
+    for ln in refs:
+        assert "previous_digest:" in ln or "PREVIOUS_DIGEST:" in ln
+    for line in run_of(st).splitlines():
+        if line.strip():
+            assert re.search(
+                r'>>\s*"\$GITHUB_(OUTPUT|STEP_SUMMARY)"\s*$', line
+            ), f"emission line does not write to outputs: {line!r}"
+
+
+def test_prod_promote_absent():
+    # promotion is staging's job; prod records no promote
+    runs = [r for _, r, _ in run_steps(_deploy_job("deploy-prod.yml"))]
+    assert not any("lib/gates.py promote" in r for r in runs)
+
+
+# ---------------------------------------------------------------------------
+# gates.py CLI parity (zero network, subprocess over the repo checkout).
+# DEVIATION from plan letter: the hand-rolled gates.py parser has no
+# per-subcommand --help (`check-grant --help` prints NOT-GRANTED, rc 1);
+# the bare usage text carries the full CLI surface, so parity pins ride on
+# it — same flag-drift tripwire, zero network.
+# ---------------------------------------------------------------------------
+
+def _gates_usage():
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "lib" / "gates.py")],
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout + proc.stderr
+
+
+def test_cli_parity_check_grant_require_environments():
+    assert "--require-environments" in _gates_usage()
+
+
+def test_cli_parity_promote_evidence():
+    assert "--evidence" in _gates_usage()
+
+
+# ---------------------------------------------------------------------------
+# behavioral smoke-fail (plan.md row 84): smoke failure records NO promotion
+# ---------------------------------------------------------------------------
+
+EXPR_FIXTURES = {
+    "inputs.artifact_digest": "app@sha256:" + "ab" * 32,
+    "inputs.surface": "web",
+    "inputs.smoke_tier": "fast",
+    "inputs.previous_digest": "app@sha256:" + "cd" * 32,
+    "github.run_id": "12345",
+}
+PLACEHOLDER_FIXTURES = {
+    "TIER_FAST": "fast",
+    "TIER_FULL": "full",
+    "TIER_NIGHTLY": "nightly",
+    "STAGING_ENV": "staging",
+    "PROD_ENV": "production",
+    "LOCKFILE_HASH_PATH": "requirements.txt",
+}
+
+_STUB_GATES = textwrap.dedent(
+    """\
+    import sys
+    from pathlib import Path
+
+    log = Path(__file__).resolve().parent.parent / "calls.log"
+    with log.open("a") as fh:
+        fh.write(" ".join(sys.argv[1:]) + "\\n")
+    sys.exit(1 if sys.argv[1:] and sys.argv[1] == "run-gate" else 0)
+    """
+)
+
+
+def _subst_fixtures(value):
+    def erepl(m):
+        return EXPR_FIXTURES.get(m.group(1).strip(), "fixture")
+
+    v = PLACEHOLDER_RE.sub(
+        lambda m: PLACEHOLDER_FIXTURES[m.group(1)], value
+    )
+    return re.sub(r"\$\{\{(.*?)\}\}", erepl, v)
+
+
+def test_staging_smoke_failure_records_no_promotion(tmp_path):
+    """Execute deploy-staging's run blocks in step order against a recorder
+    stub gates.py (run-gate exits 1), honoring Actions semantics: stop at
+    the first failure, then only if: failure() steps run. wall 431cd39a:
+    the consumer no-op block exits 0 so the smoke step IS exercised."""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "gates.py").write_text(_STUB_GATES)
+
+    text = strip_comments(read("deploy-staging.yml"))
+    body = _deploy_job("deploy-staging.yml")
+    env = dict(os.environ)
+    for k, v in env_map(section(body, "env", 4)).items():
+        env[k] = _subst_fixtures(v)
+
+    failed = False
+    executed = []
+    for name, run, st in run_steps(body):
+        cond = scalar(st, "if", 8)
+        if failed and cond != "failure()":
+            continue
+        if not failed and cond == "failure()":
+            continue
+        step_env = dict(env)
+        for k, v in env_map(section(st, "env", 8)).items():
+            step_env[k] = _subst_fixtures(v)
+        proc = subprocess.run(
+            ["bash", "-e", "-c", _subst_fixtures(run)],
+            cwd=tmp_path,
+            env=step_env,
+            capture_output=True,
+            text=True,
+        )
+        executed.append(name)
+        if proc.returncode != 0:
+            failed = True
+
+    log_path = tmp_path / "calls.log"
+    log = log_path.read_text() if log_path.exists() else ""
+    calls = [ln for ln in log.splitlines() if ln.strip()]
+    assert failed, "smoke failure must fail the job"
+    # wall 431cd39a: the smoke step was actually exercised
+    assert any(c.startswith("run-gate smoke") for c in calls)
+    assert "Smoke gate" in executed
+    # zero promote invocations recorded
+    assert not any(c.startswith("promote") for c in calls)
