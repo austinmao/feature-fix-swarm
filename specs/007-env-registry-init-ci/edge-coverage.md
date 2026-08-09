@@ -5,13 +5,13 @@ Format: REQ · category · status · reason/AC.
 | REQ | category | status | reason / AC |
 |---|---|---|---|
 | REQ-101 registry | empty | resolved | no prod surfaces → surfaces block omitted, soft mode unchanged; bare repo → local-only registry (REQ-202) |
-| REQ-101 registry | encoding | resolved | tabs/CRLF/dup keys in surfaces → REJECT (REQ-103); prose fields never machine-parsed |
+| REQ-101 registry | encoding | resolved | nine-key row allowlist (surface, staging_instance, staging, prod_instance, staging_artifact, prod_artifact, staging_migration_head, prod_migration_head, rollback) — unknown keys REJECT; folded duplicate surface names, duplicate fields, and staging/staging_instance alias co-presence REJECT regardless of value agreement; PD-4: allowlisted field lines before the first `- surface:` row REJECT (directly or after a comment); PD-3: unquoted inline comments strip via the `_manifest_scalar` sentinel, quoted values stay literal; tabs in-block REJECT; CRLF parses equal to LF; JSON duplicate keys REJECT via object_pairs_hook, either order, any depth; prose fields never machine-parsed |
 | REQ-102 resolution | precedence | resolved | env var > environments.yaml > parity-manifest; explicit --manifest wins; empty --manifest REJECTED (EDGE-011) |
 | REQ-102 resolution | io | resolved | set-but-broken env var → REJECTED prod (EDGE-010); unparseable resolved file → REJECTED both modes (EDGE-005) |
 | REQ-102 trust | concurrency/identity | resolved | worktree-local uncommitted registry → governs nothing (implicit lookups read main HEAD only → absent + advisory; caller-supplied paths REJECTED — main-checkout anchor, EDGE-012, wall round-3) |
 | REQ-102 matching | encoding | resolved | casefold surface both sides; sentinel casefold+strip (EDGE-014) |
-| REQ-103 parser | ordering | resolved | surfaces-not-last parses; single-entry — later surface-shaped lines inert (EDGE-013) |
-| REQ-103 parser | adjacency | resolved | nested surfaces: at indent>0 ignored (EDGE-001) |
+| REQ-103 parser | ordering | resolved | surfaces-not-last parses — the block flushes-and-clears at the next indent-0 key; single-entry latch — later surface-shaped lines inert (EDGE-013); blank and comment lines are neutral (they never flush or complete a row) |
+| REQ-103 parser | adjacency | resolved | indentation is the sole discriminator: a surfaces: key at indent>0 is inert (EDGE-001); a second indent-0 surfaces: key REJECTS as duplicate |
 | REQ-104 reasons | empty | resolved | every refusal carries remedy text; CLI + pending record both assert |
 | REQ-201 modes | idempotency | resolved | --update preserves operator fields; --yes over existing registry does not regenerate; declines keyed to evidence re-propose on new evidence |
 | REQ-201 answers | empty | resolved | missing required key → nonzero naming key + expected shape, nothing written (EDGE-008) |
