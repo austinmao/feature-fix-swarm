@@ -3203,13 +3203,13 @@ def test_env_registry_precedence_first_verdict_wins(tmp_path) -> None:
     (repo / "reg-flag.yaml").write_text(_registry_text("d"))
     cases = [
         # (run_id, surface expected to win, extra argv, env-var value)
-        ("run-d", "d", ["--manifest", "reg-flag.yaml"], "reg-env.yaml"),
-        ("run-c", "c", [], "reg-env.yaml"),
-        ("run-a", "a", [], None),
-        ("run-b", "b", [], None),  # after environments.yaml leaves HEAD
+        ("run-11", "d", ["--manifest", "reg-flag.yaml"], "reg-env.yaml"),
+        ("run-12", "c", [], "reg-env.yaml"),
+        ("run-13", "a", [], None),
+        ("run-14", "b", [], None),  # after environments.yaml leaves HEAD
     ]
     for run_id, surface, extra, env_reg in cases:
-        if run_id == "run-b":
+        if surface == "b":
             _sp.run(["git", "rm", "-q", "config/environments.yaml"],
                     cwd=repo, check=True)
             _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
@@ -3270,15 +3270,16 @@ def test_env_registry_env_var_failure_classes_all_reject(tmp_path) -> None:
         "outside": str(outside),
     }
     try:
-        for name, value in cases.items():
+        for idx, (name, value) in enumerate(cases.items()):
+            run_id = f"run-2{idx}"
             store = tmp_path / f"ev-{name}.json"
             env = _env_registry_env(store)
             env["FFS_ENV_REGISTRY"] = value
-            _seed_prod_ok(env, repo, run_id=f"run-{name}", surface="a")
-            r = _check_grant_prod_cli(env, repo, run_id=f"run-{name}",
+            _seed_prod_ok(env, repo, run_id=run_id, surface="a")
+            r = _check_grant_prod_cli(env, repo, run_id=run_id,
                                       action="deploy:prod-a")
             assert r.returncode == 1, f"{name}: {r.stdout}{r.stderr}"
-            reasons = _pending_reasons(store, f"run-{name}")
+            reasons = _pending_reasons(store, run_id)
             # never falls through to the (valid, different-surface) default
             assert not any("NO-STAGING-COUNTERPART" in x for x in reasons), name
             assert any("FFS_ENV_REGISTRY" in x for x in reasons), (name, reasons)

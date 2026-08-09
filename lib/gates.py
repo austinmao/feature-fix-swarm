@@ -39,7 +39,8 @@ Usage (inline heredoc in SKILL.md):
                                                   # artifact identity to real
                                                   # recorded staging gate evidence
     python3 lib/gates.py check-grant run-42 --action deploy:prod-web \
-        --artifact name@sha256:<64hex> [--manifest parity.json|parity.yaml]
+        --artifact name@sha256:<64hex> [--manifest parity.json|parity.yaml] \
+        [--require-environments]
                                                   # prod actions (deploy/flip/
                                                   # migrate:prod-*) ALSO require
                                                   # a fresh staging->prod promote
@@ -1258,17 +1259,41 @@ def _prod_surface(action: str) -> str | None:
     return None
 
 
+def _fold_surface(value: str) -> str:
+    """Strip+casefold — used at the registry-comparison boundary ONLY
+    (EDGE-014). _prod_surface's return value stays original-case: its other
+    consumers key promotion records off the as-typed surface."""
+    return value.strip().casefold()
+
+
+def _manifest_row(manifest: dict, surface: str) -> dict | None:
+    """Folded row lookup: the single place a prod surface meets registry keys
+    (spec-007 T-01-04 — `deploy:prod-Web` cannot bypass a `web` row)."""
+    folded = _fold_surface(surface)
+    for key, entry in manifest.items():
+        if isinstance(key, str) and _fold_surface(key) == folded:
+            return entry if isinstance(entry, dict) else None
+    return None
+
+
 def _surface_has_staging(surface: str, manifest: dict | None) -> bool:
-    """True unless `manifest` explicitly declares `surface` with staging ==
-    'none' (EDGE-003). manifest=None skips this check entirely — real
-    config/parity-manifest.yaml wiring lands Phase 4, so the absence of a
-    manifest here must never fabricate a pass OR a refusal."""
+    """True unless `manifest` declares `surface` (matched folded+stripped,
+    EDGE-014) with staging equal to the folded `none` sentinel (EDGE-003).
+    The default registry resolution (spec-007 Phase 1) feeds this manifest
+    from the committed registry on every prod-prefix check-grant; manifest=
+    None still means nothing resolved and must never fabricate a pass OR a
+    refusal."""
     if manifest is None:
         return True
-    entry = manifest.get(surface)
+    entry = _manifest_row(manifest, surface)
     if not isinstance(entry, dict):
         return True
-    return entry.get("staging") not in (None, "none")
+    staging = entry.get("staging")
+    if staging is None:
+        return False
+    if not isinstance(staging, str):
+        return True
+    return _fold_surface(staging) != "none"
 
 
 def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
@@ -1366,6 +1391,7 @@ def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> 
 
 def check_grant_prod(store: Path, run_id: str, action: str, artifact,
                      *, manifest: dict | None = None,
+                     require_environments: bool = False,
                      now: float | None = None) -> bool:
     """Fail-closed prod-action precondition: a deploy:prod-* / flip:prod-* /
     migrate:prod-* action additionally requires a fresh staging->prod promote
@@ -1401,6 +1427,18 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         record_pending(store, run_id, action,
                        "NO-PROMOTE-EVIDENCE: --artifact is required for a "
                        "prod-targeting action")
+        return False
+
+    if (manifest is not None and require_environments
+            and _manifest_row(manifest, surface) is None):
+        # Hard mode only (REQ-102): unknown is not safe. Soft mode keeps
+        # today's unknown-surface pass unchanged (Pitfall-3 option 2 — one
+        # extra if in the caller, no 3-way return, no second lookup below).
+        record_pending(store, run_id, action,
+                       f"UNKNOWN-PROD-SURFACE: surface '{surface}' has no row "
+                       "in the environment registry and --require-environments "
+                       "is on; remedy: add a surfaces: row for it "
+                       "(run /ffs-init)")
         return False
 
     if manifest is not None and not _surface_has_staging(surface, manifest):
@@ -2070,6 +2108,10 @@ def _load_manifest(path: str) -> dict:
 # ── spec-007 Phase 1: env registry resolution (REQ-101/102) ──────────────────
 
 _ENV_REGISTRY_REL = "config/environments.yaml"
+_LEGACY_REGISTRY_REL = "config/parity-manifest.yaml"
+# The v1 credential is a forgeable comment, so hard mode always reads it from
+# HEAD bytes (T-01-07) — never from a working-tree copy.
+_V1_MARKER = re.compile(r"^\s*#\s*schema:\s*ffs\.environments/v1\s*$", re.M)
 
 
 def _main_checkout_root() -> Path | None:
@@ -2120,48 +2162,154 @@ def _head_bytes(root: Path, rel: str) -> str | None:
     return None
 
 
+def _rel_to_root(root: Path, path_str: str) -> str | None:
+    """`path_str` as a main-root-relative posix path, or None when it points
+    outside the main checkout. Relative inputs resolve against the MAIN root
+    (not cwd) — the membership probes below only answer about main's index."""
+    candidate = Path(path_str)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        return candidate.resolve().relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return None
+
+
 def _resolve_registry(args: list[str]) -> tuple[dict | None, str, str | None, bool]:
     """Resolve the environment registry for a prod-prefix check-grant.
 
     Returns (manifest|None, kind, typed refusal reason|None, dirty flag).
-    Implicit default-filename steps parse HEAD bytes with HEAD as the SOLE
-    authority; the working tree is consulted only AFTER the verdict, for the
-    dirty advisory. A resolved-but-unparseable registry is a refusal, never
-    absent (EDGE-005)."""
+    Precedence: --manifest -> $FFS_ENV_REGISTRY -> config/environments.yaml
+    -> config/parity-manifest.yaml -> absent; FIRST verdict wins (REQ-102).
+
+    PD-2 taxonomy (2c72f448), stated once: CALLER-SUPPLIED paths parse
+    WORKING-TREE bytes and every failure class (unreadable/missing/empty/
+    unparseable) is a refusal; IMPLICIT default-filename steps parse HEAD
+    bytes with HEAD as the SOLE authority — the index and working tree never
+    enter the verdict, and the working tree is consulted only AFTER the
+    verdict, for the advisories. A resolved-but-unparseable registry is a
+    refusal in every mode, never absent (EDGE-005). `kind` is the winning
+    source token with a `:v1` suffix when HEAD bytes carry the schema marker.
+    Reason strings name the SOURCE token, never an absolute path, and carry
+    a remedy."""
     root = _main_checkout_root()
-    if root is None:
-        return None, "absent", None, False
-    head = _head_bytes(root, _ENV_REGISTRY_REL)
-    if head is None:
-        return None, "absent", None, False
-    try:
-        manifest = _load_manifest_text(head)
-    except ValueError as exc:
-        return (None, _ENV_REGISTRY_REL,
-                f"ENV-REGISTRY-INVALID: {_ENV_REGISTRY_REL} (HEAD bytes) "
-                f"failed to parse: {exc}; remedy: fix the registry and "
-                "commit the fix", False)
-    dirty = False
-    try:
-        working = root / _ENV_REGISTRY_REL
-        if working.is_file() and working.read_text() != head:
-            dirty = True
-    except OSError:
-        pass  # unreadable working copy is irrelevant to the HEAD verdict
-    return manifest, _ENV_REGISTRY_REL, None, dirty
+
+    # Step 1: explicit --manifest. None = flag absent; "" = present-empty,
+    # REJECTED (EDGE-011, the _flag None sentinel — signature untouched).
+    explicit = _flag(args, "--manifest", None)
+    if explicit is not None:
+        if not explicit:
+            return (None, "--manifest",
+                    "ENV-REGISTRY-INVALID: --manifest is present but empty; "
+                    "remedy: pass a registry path or drop the flag", False)
+        try:
+            manifest = _load_manifest(explicit)
+        except (OSError, ValueError) as exc:
+            return (None, "--manifest",
+                    f"ENV-REGISTRY-INVALID: cannot load the --manifest "
+                    f"registry: {exc}; remedy: fix the file passed via "
+                    "--manifest", False)
+        kind = "--manifest"
+        if root is not None:
+            rel = _rel_to_root(root, explicit)
+            if rel is not None and _is_git_tracked(root, rel):
+                head = _head_bytes(root, rel)
+                if head is not None and _V1_MARKER.search(head):
+                    kind += ":v1"
+        return manifest, kind, None, False
+
+    # Step 2: $FFS_ENV_REGISTRY — an unaudited one-word control channel
+    # (T-01-02): membership first (outside-root, literal-pathspec tracked
+    # probe, HEAD presence), then parse WORKING-TREE bytes per PD-2.
+    env_path = os.environ.get("FFS_ENV_REGISTRY")
+    if env_path is not None:
+        src = "$FFS_ENV_REGISTRY"
+        if not env_path.strip():
+            return (None, src,
+                    f"ENV-REGISTRY-INVALID: {src} is set but empty; remedy: "
+                    "unset it or point it at a committed registry", False)
+        if root is None:
+            return (None, src,
+                    f"ENV-REGISTRY-INVALID: {src} is set but no git main "
+                    "checkout exists to validate membership; remedy: unset "
+                    "it or run inside the repository", False)
+        rel = _rel_to_root(root, env_path)
+        if rel is None:
+            return (None, src,
+                    f"ENV-REGISTRY-INVALID: {src} points outside the main "
+                    "checkout; remedy: point it at a repository-relative "
+                    "committed registry", False)
+        if not _is_git_tracked(root, rel):
+            return (None, src,
+                    f"ENV-REGISTRY-INVALID: {src} names an untracked or "
+                    f"missing path; remedy: create it, then git add {rel} "
+                    "and commit — or unset the variable", False)
+        head = _head_bytes(root, rel)
+        if head is None:
+            return (None, src,
+                    f"ENV-REGISTRY-INVALID: {src} names a staged-but-"
+                    "uncommitted path absent from HEAD; remedy: git commit "
+                    "the staged registry", False)
+        try:
+            text = (root / rel).read_text()
+        except OSError:
+            return (None, src,
+                    f"ENV-REGISTRY-INVALID: {src} working-tree copy is "
+                    "unreadable (caller-supplied paths parse working-tree "
+                    "bytes); remedy: restore read access or unset the "
+                    "variable", False)
+        try:
+            manifest = _load_manifest_text(text)
+        except ValueError as exc:
+            return (None, src,
+                    f"ENV-REGISTRY-INVALID: {src} failed to parse: {exc}; "
+                    "remedy: fix the registry and commit the fix", False)
+        kind = src + (":v1" if _V1_MARKER.search(head) else "")
+        return manifest, kind, None, False
+
+    # Steps 3-4: implicit default filenames — HEAD bytes, sole authority.
+    # No main root -> both steps are absent by construction.
+    if root is not None:
+        for rel in (_ENV_REGISTRY_REL, _LEGACY_REGISTRY_REL):
+            head = _head_bytes(root, rel)
+            if head is None:
+                continue
+            try:
+                manifest = _load_manifest_text(head)
+            except ValueError as exc:
+                return (None, rel,
+                        f"ENV-REGISTRY-INVALID: {rel} (HEAD bytes) failed "
+                        f"to parse: {exc}; remedy: fix the registry and "
+                        "commit the fix", False)
+            dirty = False
+            try:
+                working = root / rel
+                if working.is_file() and working.read_text() != head:
+                    dirty = True
+            except OSError:
+                pass  # unreadable working copy never touches the verdict
+            # legacy parity-manifest is marked non-v1 unconditionally
+            kind = rel
+            if rel == _ENV_REGISTRY_REL and _V1_MARKER.search(head):
+                kind += ":v1"
+            return manifest, kind, None, dirty
+    return None, "absent", None, False
 
 
 def _registry_absent_advisory() -> str:
     """The single ENV-REGISTRY-ABSENT line (REQ-102): names /ffs-init, and
-    names an uncommitted working-tree file at the implicit path when one
+    names an uncommitted working-tree file at an implicit path when one
     exists (an untracked registry governs nothing until committed)."""
     line = ("ENV-REGISTRY-ABSENT: no environment registry resolved "
             "(run /ffs-init to create config/environments.yaml)")
     root = _main_checkout_root()
-    if root is not None and (root / _ENV_REGISTRY_REL).is_file():
-        line += (f" — uncommitted {_ENV_REGISTRY_REL} present in the working "
-                 f"tree governs nothing; activate it with git add "
-                 f"{_ENV_REGISTRY_REL} && git commit")
+    if root is not None:
+        for rel in (_ENV_REGISTRY_REL, _LEGACY_REGISTRY_REL):
+            if (root / rel).is_file():
+                line += (f" — uncommitted {rel} present in the working tree "
+                         f"governs nothing; activate it with git add {rel} "
+                         "&& git commit")
+                break
     return line
 
 
@@ -2657,34 +2805,56 @@ def main(argv: list[str]) -> int:
         prod_surface = _prod_surface(action)
         if prod_surface is not None:
             artifact = _flag(args, "--artifact") or None
-            manifest_path = _flag(args, "--manifest")
-            manifest = None
-            if manifest_path:
-                # PINNED (wall 538ffc42): an explicit --manifest takes today's
-                # raw _load_manifest path unchanged — the resolver below adds
-                # the implicit branch BESIDE it, never replacing it.
-                try:
-                    manifest = _load_manifest(manifest_path)
-                except (OSError, ValueError) as exc:
-                    print(f"CHECK-GRANT-REJECTED: cannot load manifest "
-                          f"{manifest_path}: {exc}", file=sys.stderr)
+            # Full precedence chain (REQ-102): the resolver owns --manifest,
+            # $FFS_ENV_REGISTRY, and both implicit steps; first verdict wins.
+            manifest, kind, refusal, dirty = _resolve_registry(args)
+            if refusal is not None:
+                record_pending(store, run_id, action, refusal)
+                print(f"CHECK-GRANT-REJECTED: {sanitize_reason(refusal)}",
+                      file=sys.stderr)
+                return 1
+            # Hard mode: ON iff the flag is in argv or the env var strips to
+            # exactly "1". Satisfied only by a committed ffs.environments/v1
+            # registry; --manifest must itself be tracked+committed v1.
+            require_env = (
+                "--require-environments" in args
+                or os.environ.get("FFS_ENV_REGISTRY_REQUIRED",
+                                  "").strip() == "1")
+            if require_env:
+                hard_refusal = None
+                if manifest is None:
+                    hard_refusal = (
+                        "NO-ENV-REGISTRY: --require-environments needs a "
+                        "committed ffs.environments/v1 registry and none "
+                        "resolved; remedy: run /ffs-init")
+                elif kind.startswith("--manifest") and kind != "--manifest:v1":
+                    hard_refusal = (
+                        "NO-ENV-REGISTRY: under --require-environments an "
+                        "explicit --manifest counts only when it is itself a "
+                        "tracked, committed ffs.environments/v1 registry; "
+                        "remedy: commit it or run /ffs-init")
+                elif not kind.endswith(":v1"):
+                    hard_refusal = (
+                        "NO-ENV-REGISTRY: the resolved registry is not "
+                        "ffs.environments/v1 (legacy or JSON registries "
+                        "satisfy soft mode only); remedy: run /ffs-init")
+                if hard_refusal is not None:
+                    record_pending(store, run_id, action, hard_refusal)
+                    print(f"CHECK-GRANT-REJECTED: "
+                          f"{sanitize_reason(hard_refusal)}", file=sys.stderr)
                     return 1
-            else:
-                manifest, _kind, refusal, dirty = _resolve_registry(args)
-                if refusal is not None:
-                    record_pending(store, run_id, action, refusal)
-                    print(f"CHECK-GRANT-REJECTED: {sanitize_reason(refusal)}",
-                          file=sys.stderr)
-                    return 1
-                if dirty:
-                    # single ENV-REGISTRY-DIRTY emission site (REQ-102)
-                    print(f"ENV-REGISTRY-DIRTY: {_ENV_REGISTRY_REL} working "
-                          "tree differs from HEAD; committed bytes govern "
-                          "this verdict", file=sys.stderr)
-                elif manifest is None:
-                    # single ENV-REGISTRY-ABSENT emission site (REQ-102)
-                    print(_registry_absent_advisory(), file=sys.stderr)
-            if check_grant_prod(store, run_id, action, artifact, manifest=manifest):
+            if dirty:
+                # single ENV-REGISTRY-DIRTY emission site (REQ-102); dirty is
+                # only ever set by the implicit steps, whose kind is the rel
+                print(f"ENV-REGISTRY-DIRTY: {kind.removesuffix(':v1')} "
+                      "working tree differs from HEAD; committed bytes "
+                      "govern this verdict", file=sys.stderr)
+            elif manifest is None:
+                # single ENV-REGISTRY-ABSENT emission site (REQ-102)
+                print(_registry_absent_advisory(), file=sys.stderr)
+            if check_grant_prod(store, run_id, action, artifact,
+                                manifest=manifest,
+                                require_environments=require_env):
                 print(f"GRANTED: {safe}")
                 return 0
             print(f"NOT-GRANTED: {safe} (run {run_id}) — record promote "
