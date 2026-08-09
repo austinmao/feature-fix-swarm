@@ -508,3 +508,122 @@ def _assert_checkouts_hardened(text, wf):
                     f"{wf}:{job_id} checkout without persist-credentials false"
                 )
     assert found >= 1, f"{wf} has no checkout step"
+
+
+# ---------------------------------------------------------------------------
+# main-full.yml contract (REQ-301 row 2)
+# ---------------------------------------------------------------------------
+
+def test_main_full_trigger_push_main():
+    text = strip_comments(read("main-full.yml"))
+    push = section(section(text, "on", 0), "push", 2)
+    branches = section(push, "branches", 4)
+    assert "- main" in [ln.strip() for ln in branches.splitlines()]
+
+
+def test_main_full_needs_chaining():
+    text = strip_comments(read("main-full.yml"))
+    needs = [
+        scalar(body, "needs", 4) for body in jobs(text).values()
+    ]
+    assert any(n for n in needs if n), "no job declares needs:"
+
+
+def test_main_full_matrix_fail_fast_false():
+    text = strip_comments(read("main-full.yml"))
+    hits = [
+        scalar(section(body, "strategy", 4), "fail-fast", 6)
+        for body in jobs(text).values()
+    ]
+    assert "false" in hits
+
+
+def test_main_full_artifact_retention_seven():
+    text = strip_comments(read("main-full.yml"))
+    for _, body in jobs(text).items():
+        for st in steps(body):
+            uses = scalar(st, "uses", 8)
+            if uses and uses.split("#")[0].strip().startswith(
+                "actions/upload-artifact@"
+            ):
+                with_block = section(st, "with", 8)
+                assert scalar(with_block, "retention-days", 10) == "7"
+                return
+    pytest.fail("no upload-artifact step")
+
+
+def test_main_full_two_step_full_tier():
+    text = strip_comments(read("main-full.yml"))
+    runs = [r for _, _, r in all_run_blocks(text)]
+    assert TIER_STEP.format(token="{{TIER_FULL}}") in runs
+
+
+def test_main_full_cache_keyed_on_lockfile_placeholder():
+    assert "hashFiles('{{LOCKFILE_HASH_PATH}}')" in read("main-full.yml")
+
+
+# ---------------------------------------------------------------------------
+# nightly-deep.yml contract (REQ-301 row 3)
+# ---------------------------------------------------------------------------
+
+def test_nightly_triggers_schedule_and_dispatch():
+    text = strip_comments(read("nightly-deep.yml"))
+    on = section(text, "on", 0)
+    sched = section(on, "schedule", 2)
+    assert re.search(r"-\s*cron:", sched)
+    assert re.search(r"^  workflow_dispatch:", on, re.M)
+
+
+def test_nightly_two_step_nightly_tier():
+    text = strip_comments(read("nightly-deep.yml"))
+    runs = [r for _, _, r in all_run_blocks(text)]
+    assert TIER_STEP.format(token="{{TIER_NIGHTLY}}") in runs
+
+
+def test_nightly_failure_job_opens_issue():
+    """Failure path opens an issue instead of reddening main (RESEARCH A3,
+    Pitfall 8): if failure() + needs on the test job + job-scoped
+    issues: write + gh guarded by command -v."""
+    text = strip_comments(read("nightly-deep.yml"))
+    jb = jobs(text)
+    fail_jobs = [
+        (job_id, body)
+        for job_id, body in jb.items()
+        if scalar(body, "if", 4) == "failure()"
+    ]
+    assert len(fail_jobs) == 1
+    job_id, body = fail_jobs[0]
+    needs = scalar(body, "needs", 4)
+    assert needs in jb and needs != job_id
+    perm = [
+        ln.strip()
+        for ln in section(body, "permissions", 4).splitlines()
+        if ln.strip()
+    ]
+    assert "issues: write" in perm
+    assert "contents: read" in perm  # wall 7f08ccda
+    runs = "\n".join(run_of(st) or "" for st in steps(body))
+    assert "command -v gh" in runs
+    assert "gh issue create" in runs
+
+
+# ---------------------------------------------------------------------------
+# dependabot.yml — SOURCE CONTENT only, asserted structurally (wall d3b57631,
+# wall 731b58ce: emission/advisory BEHAVIOR is 03-02's render concern; no
+# render-behavior assertion may live here)
+# ---------------------------------------------------------------------------
+
+def test_dependabot_source_structural():
+    text = strip_comments(read(DEPENDABOT))
+    assert scalar(text, "version", 0) == "2"
+    upd = section(text, "updates", 0)
+    entries = [ln.strip() for ln in upd.splitlines() if ln.strip()]
+    assert "- package-ecosystem: github-actions" in entries
+    sched = section(upd, "schedule", 4)
+    assert scalar(sched, "interval", 6) == "weekly"
+
+
+def test_dependabot_excluded_from_workflow_sweep_by_name():
+    # wall d3b57631: exclusion is by explicit filename, not discovery accident
+    assert DEPENDABOT not in WORKFLOWS
+    assert set(PINNED_TIMEOUTS) <= set(WORKFLOWS)
