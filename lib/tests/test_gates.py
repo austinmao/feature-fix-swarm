@@ -3174,3 +3174,451 @@ def test_env_registry_live_ffs_registry_loads() -> None:
     # FFS's own committed registry parses to exactly one release row.
     live = DISPATCH_DIR.parent / "config" / "environments.yaml"
     assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
+
+
+# ── Task 2: precedence chain, fail-closed refusals, hard mode, folding ───────
+
+def _registry_text(surface: str, staging: str = "none") -> str:
+    return ("# schema: ffs.environments/v1\n"
+            "surfaces:\n"
+            f"  - surface: {surface}\n"
+            f"    staging_instance: {staging}\n")
+
+
+def _commit_file(repo: Path, rel: str, text: str) -> None:
+    import subprocess as _sp
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(text)
+    _sp.run(["git", "add", rel], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", f"add {rel}"], cwd=repo, check=True)
+
+
+def test_env_registry_precedence_first_verdict_wins(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    _commit_file(repo, "config/parity-manifest.yaml",
+                 "surfaces:\n  - surface: b\n    staging_instance: none\n")
+    _commit_file(repo, "reg-env.yaml", _registry_text("c"))
+    (repo / "reg-flag.yaml").write_text(_registry_text("d"))
+    cases = [
+        # (run_id, surface expected to win, extra argv, env-var value)
+        ("run-d", "d", ["--manifest", "reg-flag.yaml"], "reg-env.yaml"),
+        ("run-c", "c", [], "reg-env.yaml"),
+        ("run-a", "a", [], None),
+        ("run-b", "b", [], None),  # after environments.yaml leaves HEAD
+    ]
+    for run_id, surface, extra, env_reg in cases:
+        if run_id == "run-b":
+            _sp.run(["git", "rm", "-q", "config/environments.yaml"],
+                    cwd=repo, check=True)
+            _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "-m", "drop registry"], cwd=repo, check=True)
+        store = tmp_path / f"ev-{run_id}.json"
+        env = _env_registry_env(store)
+        if env_reg is not None:
+            env["FFS_ENV_REGISTRY"] = env_reg
+        _seed_prod_ok(env, repo, run_id=run_id, surface=surface)
+        r = _check_grant_prod_cli(env, repo, run_id=run_id,
+                                  action=f"deploy:prod-{surface}", extra=extra)
+        assert r.returncode == 1, f"{run_id}: {r.stdout}{r.stderr}"
+        reasons = _pending_reasons(store, run_id)
+        assert any("NO-STAGING-COUNTERPART" in x and f"'{surface}'" in x
+                   for x in reasons), (run_id, reasons)
+
+
+def test_env_registry_manifest_flag_empty_rejects_but_absent_resolves(tmp_path) -> None:
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    # present-but-empty --manifest -> REJECTED (EDGE-011)
+    store = tmp_path / "ev-empty.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="a")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-a",
+                              extra=["--manifest", ""])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "CHECK-GRANT-REJECTED" in r.stderr
+    assert any("ENV-REGISTRY-INVALID" in x for x in _pending_reasons(store))
+    # paired: flag ABSENT on the same fixture still resolves the default file
+    store2 = tmp_path / "ev-absent.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="a")
+    r2 = _check_grant_prod_cli(env2, repo, action="deploy:prod-a")
+    assert r2.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store2))
+
+
+def test_env_registry_env_var_failure_classes_all_reject(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))  # decoy default
+    _commit_file(repo, "reg-000.yaml", _registry_text("c"))
+    (repo / "reg-000.yaml").chmod(0o000)
+    _commit_file(repo, "reg-bad.yaml", "surfaces:\n  - surface: c\n")
+    (repo / "reg-untracked.yaml").write_text(_registry_text("c"))
+    (repo / "reg-staged.yaml").write_text(_registry_text("c"))
+    _sp.run(["git", "add", "reg-staged.yaml"], cwd=repo, check=True)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(_registry_text("c"))
+    cases = {
+        "empty": "",
+        "nonexistent": "reg-nope.yaml",
+        "unreadable": "reg-000.yaml",  # PD-2: caller-supplied parses
+        # WORKING-TREE bytes — the discriminating twin of the implicit
+        # chmod-000 case above, which still resolves from HEAD.
+        "unparseable": "reg-bad.yaml",
+        "untracked": "reg-untracked.yaml",
+        "staged": "reg-staged.yaml",
+        "outside": str(outside),
+    }
+    try:
+        for name, value in cases.items():
+            store = tmp_path / f"ev-{name}.json"
+            env = _env_registry_env(store)
+            env["FFS_ENV_REGISTRY"] = value
+            _seed_prod_ok(env, repo, run_id=f"run-{name}", surface="a")
+            r = _check_grant_prod_cli(env, repo, run_id=f"run-{name}",
+                                      action="deploy:prod-a")
+            assert r.returncode == 1, f"{name}: {r.stdout}{r.stderr}"
+            reasons = _pending_reasons(store, f"run-{name}")
+            # never falls through to the (valid, different-surface) default
+            assert not any("NO-STAGING-COUNTERPART" in x for x in reasons), name
+            assert any("FFS_ENV_REGISTRY" in x for x in reasons), (name, reasons)
+            if name == "untracked":
+                assert any("git add" in x for x in reasons), reasons
+            if name == "staged":
+                # distinct git-commit remedy, not the git-add one
+                staged = [x for x in reasons if "FFS_ENV_REGISTRY" in x]
+                assert any("git commit" in x and "git add" not in x
+                           for x in staged), reasons
+    finally:
+        (repo / "reg-000.yaml").chmod(0o644)
+
+
+def test_env_registry_env_var_worktree_branch_commit_rejects(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    wt = tmp_path / "wt"
+    _sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+            cwd=repo, check=True)
+    (wt / "reg-side.yaml").write_text(_registry_text("c"))
+    _sp.run(["git", "add", "reg-side.yaml"], cwd=wt, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "side-only registry"], cwd=wt, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    env["FFS_ENV_REGISTRY"] = "reg-side.yaml"
+    _seed_prod_ok(env, wt, surface="a")
+    r = _check_grant_prod_cli(env, wt, action="deploy:prod-a")
+    assert r.returncode == 1, r.stdout + r.stderr
+    reasons = _pending_reasons(store)
+    assert any("FFS_ENV_REGISTRY" in x for x in reasons), reasons
+    assert not any("NO-STAGING-COUNTERPART" in x for x in reasons)
+
+
+def test_env_registry_glob_pathspec_bypass_pinned_at_helper(tmp_path) -> None:
+    # HELPER-level pin (T-01-09): only this level discriminates the
+    # `:(literal)` escape — end-to-end, a glob-interpreted pathspec would
+    # match the TRACKED registry and also reject, hiding the fail-open.
+    repo = _init_registry_repo(tmp_path)  # commits config/environments.yaml
+    for tricky in ("config/en*.yaml", "config/environments?yaml",
+                   "config/[e]nvironments.yaml"):
+        (repo / tricky).write_text(_registry_text("evil"))
+        assert gates._is_git_tracked(repo, tricky) is False, tricky
+    assert gates._is_git_tracked(repo, "config/environments.yaml") is True
+    # end-to-end defense-in-depth only — does NOT discriminate the escape
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    env["FFS_ENV_REGISTRY"] = "config/en*.yaml"
+    _seed_prod_ok(env, repo, surface="web")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-web")
+    assert r.returncode == 1
+
+
+def test_env_registry_committed_unparseable_rejects_in_both_modes(tmp_path) -> None:
+    # EDGE-005: a RESOLVED-but-unparseable registry is a refusal, never absent
+    repo = _init_registry_repo(tmp_path, "surfaces:\n  - surface: web\n")
+    for mode_extra in ([], ["--require-environments"]):
+        store = tmp_path / f"ev-{len(mode_extra)}.json"
+        env = _env_registry_env(store)
+        _seed_prod_ok(env, repo, surface="web")
+        r = _check_grant_prod_cli(env, repo, extra=mode_extra)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert any("ENV-REGISTRY-INVALID" in x for x in _pending_reasons(store))
+
+
+def test_env_registry_worktree_c_discriminator(tmp_path) -> None:
+    # Registry committed ONLY on a linked worktree's branch, invoked from
+    # inside that worktree -> ABSENT (main HEAD is the sole authority; this
+    # exit code flips if `-C <main_root>` is dropped from the probes).
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    wt = tmp_path / "wt"
+    _sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+            cwd=repo, check=True)
+    (wt / "config").mkdir()
+    (wt / "config/environments.yaml").write_text(_ENV_REGISTRY_WEB)
+    _sp.run(["git", "add", "config/environments.yaml"], cwd=wt, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "side-only registry"], cwd=wt, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, wt)
+    r = _check_grant_prod_cli(env, wt)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+
+
+def test_env_registry_absent_advisory_scoped_to_prod_prefix_branch(tmp_path) -> None:
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    g = str(DISPATCH_DIR / "gates.py")
+    # prod action, registry absent, require off -> exit unchanged + exactly 1
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+    assert "/ffs-init" in r.stderr
+    # non-prod action: zero advisory lines, exit code unchanged (REQ-402)
+    import subprocess as _sp2
+    _sp2.run(["python3", g, "grant", "run-1", "--action", "push:origin/main"],
+             capture_output=True, text=True, env=env, cwd=repo)
+    r2 = _sp2.run(["python3", g, "check-grant", "run-1",
+                   "--action", "push:origin/main"],
+                  capture_output=True, text=True, env=env, cwd=repo)
+    assert r2.returncode == 0 and r2.stderr == ""
+    # hotfix:prod-* action: zero advisory lines (audit row 14 untouched)
+    _sp2.run(["python3", g, "grant", "run-1", "--action", "hotfix:prod-web",
+              "--reason", "sev1"],
+             capture_output=True, text=True, env=env, cwd=repo)
+    r3 = _sp2.run(["python3", g, "check-grant", "run-1",
+                   "--action", "hotfix:prod-web"],
+                  capture_output=True, text=True, env=env, cwd=repo)
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert _advisory_count(r3.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r3.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_non_git_directory_triptych(tmp_path) -> None:
+    # not a git repo: implicit file IGNORED, --manifest HONORED, env var
+    # REJECTED (no main root to validate membership against).
+    plain = tmp_path / "plain"
+    (plain / "config").mkdir(parents=True)
+    (plain / "config/environments.yaml").write_text(_ENV_REGISTRY_WEB)
+    # implicit: ignored -> granted
+    store = tmp_path / "ev-implicit.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, plain)
+    r = _check_grant_prod_cli(env, plain)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    # --manifest: honored -> NO-STAGING refusal
+    store2 = tmp_path / "ev-flag.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, plain)
+    r2 = _check_grant_prod_cli(env2, plain,
+                               extra=["--manifest", "config/environments.yaml"])
+    assert r2.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store2))
+    # env var: rejected
+    store3 = tmp_path / "ev-env.json"
+    env3 = _env_registry_env(store3)
+    env3["FFS_ENV_REGISTRY"] = "config/environments.yaml"
+    _seed_prod_ok(env3, plain)
+    r3 = _check_grant_prod_cli(env3, plain)
+    assert r3.returncode == 1
+    assert any("FFS_ENV_REGISTRY" in x for x in _pending_reasons(store3))
+
+
+def test_env_registry_hard_mode_flag_and_env_byte_identical(tmp_path) -> None:
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo)
+    r_flag = _check_grant_prod_cli(env, repo, extra=["--require-environments"])
+    env_hard = dict(env, FFS_ENV_REGISTRY_REQUIRED="1")
+    r_env = _check_grant_prod_cli(env_hard, repo)
+    assert r_flag.returncode == 1 and r_env.returncode == 1
+    assert r_flag.stdout == r_env.stdout and r_flag.stderr == r_env.stderr
+    reasons = _pending_reasons(store)
+    assert any("NO-ENV-REGISTRY" in x and "/ffs-init" in x for x in reasons)
+    # same invocation WITHOUT the flag does not reject
+    r_soft = _check_grant_prod_cli(env, repo)
+    assert r_soft.returncode == 0 and "GRANTED" in r_soft.stdout
+    # non-1 env values leave hard mode OFF
+    for off in ("0", "true", ""):
+        env_off = dict(env, FFS_ENV_REGISTRY_REQUIRED=off)
+        r_off = _check_grant_prod_cli(env_off, repo)
+        assert r_off.returncode == 0, (off, r_off.stdout + r_off.stderr)
+
+
+def test_env_registry_hard_mode_rejects_legacy_and_json_kinds(tmp_path) -> None:
+    import subprocess as _sp
+    # legacy parity-manifest satisfies SOFT mode only
+    base_l = tmp_path / "legacy"
+    base_l.mkdir()
+    repo = base_l / "repo"
+    (repo / "config").mkdir(parents=True)
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "config/parity-manifest.yaml").write_text(
+        "surfaces:\n  - surface: web\n    staging_instance: none\n")
+    _sp.run(["git", "add", "config/parity-manifest.yaml"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "legacy"], cwd=repo, check=True)
+    store = base_l / "ev-soft.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    store2 = base_l / "ev-hard.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo)
+    r2 = _check_grant_prod_cli(env2, repo, extra=["--require-environments"])
+    assert r2.returncode == 1
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store2))
+    # committed JSON registry via env var satisfies SOFT mode only
+    base_j = tmp_path / "jsonkind"
+    base_j.mkdir()
+    repo_j = base_j / "repo"
+    repo_j.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo_j, check=True)
+    (repo_j / "reg.json").write_text('{"web": {"staging": "none"}}')
+    _sp.run(["git", "add", "reg.json"], cwd=repo_j, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "json"], cwd=repo_j, check=True)
+    store3 = base_j / "ev-soft.json"
+    env3 = _env_registry_env(store3)
+    env3["FFS_ENV_REGISTRY"] = "reg.json"
+    _seed_prod_ok(env3, repo_j)
+    r3 = _check_grant_prod_cli(env3, repo_j)
+    assert r3.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store3))
+    store4 = base_j / "ev-hard.json"
+    env4 = _env_registry_env(store4)
+    env4["FFS_ENV_REGISTRY"] = "reg.json"
+    _seed_prod_ok(env4, repo_j)
+    r4 = _check_grant_prod_cli(env4, repo_j, extra=["--require-environments"])
+    assert r4.returncode == 1
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store4))
+
+
+def test_env_registry_hard_mode_manifest_spoofable_comment_bar(tmp_path) -> None:
+    # T-01-07: the v1 marker is a forgeable comment — hard mode reads the
+    # credential from HEAD bytes of a tracked, committed --manifest only.
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    (repo / "reg-forged.yaml").write_text(_registry_text("web"))  # v1 marker, untracked
+    _commit_file(repo, "reg-real.yaml", _registry_text("web"))
+    # untracked v1 --manifest REJECTED under hard mode
+    store = tmp_path / "ev-forged.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="web")
+    r = _check_grant_prod_cli(env, repo, extra=["--manifest", "reg-forged.yaml",
+                                                "--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store))
+    # tracked+committed v1 --manifest ACCEPTED under hard mode (clears the
+    # bar; verdict is then the ordinary manifest guard refusal)
+    store2 = tmp_path / "ev-real.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="web")
+    r2 = _check_grant_prod_cli(env2, repo, extra=["--manifest", "reg-real.yaml",
+                                                 "--require-environments"])
+    assert r2.returncode == 1
+    reasons2 = _pending_reasons(store2)
+    assert any("NO-STAGING-COUNTERPART" in x for x in reasons2), reasons2
+    assert not any("NO-ENV-REGISTRY" in x for x in reasons2)
+    # the same untracked file is HONORED under soft mode
+    store3 = tmp_path / "ev-soft.json"
+    env3 = _env_registry_env(store3)
+    _seed_prod_ok(env3, repo, surface="web")
+    r3 = _check_grant_prod_cli(env3, repo, extra=["--manifest", "reg-forged.yaml"])
+    assert r3.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store3))
+
+
+def test_env_registry_hard_mode_unknown_prod_surface(tmp_path) -> None:
+    repo = _init_registry_repo(tmp_path, _registry_text("web"))
+    # hard mode + no folded row -> UNKNOWN-PROD-SURFACE with remedy in pending
+    store = tmp_path / "ev-hard.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="api")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-api",
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    reasons = _pending_reasons(store)
+    assert any("UNKNOWN-PROD-SURFACE" in x and "remedy" in x
+               for x in reasons), reasons
+    # soft mode unchanged: unknown surface still passes with full seeds
+    store2 = tmp_path / "ev-soft.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="api")
+    r2 = _check_grant_prod_cli(env2, repo, action="deploy:prod-api")
+    assert r2.returncode == 0 and "GRANTED" in r2.stdout
+    # folded lookup: a case-varied action resolves the lowercase row rather
+    # than tripping UNKNOWN (registry declares `release`)
+    base = tmp_path / "release"
+    base.mkdir()
+    repo2 = _init_registry_repo(base, _registry_text("release"))
+    store3 = base / "evidence.json"
+    env3 = _env_registry_env(store3)
+    _seed_prod_ok(env3, repo2, surface="Release")
+    r3 = _check_grant_prod_cli(env3, repo2, action="deploy:prod-Release",
+                               extra=["--require-environments"])
+    assert r3.returncode == 1
+    reasons3 = _pending_reasons(store3)
+    assert any("NO-STAGING-COUNTERPART" in x for x in reasons3), reasons3
+    assert not any("UNKNOWN-PROD-SURFACE" in x for x in reasons3)
+
+
+def test_env_registry_sentinel_and_surface_folding(tmp_path) -> None:
+    # sentinel folds stripped+casefolded (EDGE-014); `none-prod-1` is real
+    for staging in ("NONE", "none ", "None"):
+        store = tmp_path / f"ev-{staging.strip()!r}.json".replace("'", "")
+        _seed_success(store)
+        gates.grant_actions(store, "run-1", ["deploy:prod-web"])
+        gates.record_promotion(store, "run-1", from_env="staging",
+                               to_env="prod", surface="web",
+                               artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"])
+        ok = gates.check_grant_prod(store, "run-1", "deploy:prod-web",
+                                    _GOOD_ARTIFACT,
+                                    manifest={"web": {"staging": staging}})
+        assert ok is False, staging
+        assert any("NO-STAGING-COUNTERPART" in p["reason"]
+                   for p in gates.list_pending(store, "run-1")), staging
+    # none-prod-1 does NOT trip the sentinel
+    store = tmp_path / "ev-real.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-web"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(
+        store, "run-1", "deploy:prod-web", _GOOD_ARTIFACT,
+        manifest={"web": {"staging": "none-prod-1"}}) is True
+    # deploy:prod-Web vs a `web` row trips it (folded surface lookup)
+    store2 = tmp_path / "ev-case.json"
+    _seed_success(store2)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-Web"])
+    gates.record_promotion(store2, "run-1", from_env="staging", to_env="prod",
+                           surface="Web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(
+        store2, "run-1", "deploy:prod-Web", _GOOD_ARTIFACT,
+        manifest={"web": {"staging": "none"}}) is False
+    assert any("NO-STAGING-COUNTERPART" in p["reason"]
+               for p in gates.list_pending(store2, "run-1"))
+    # folding did NOT migrate into _prod_surface (promotion records key off
+    # the original-case surface)
+    assert gates._prod_surface("deploy:prod-Web") == "Web"
