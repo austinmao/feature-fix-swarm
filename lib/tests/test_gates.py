@@ -3928,3 +3928,127 @@ def test_surfaces_parser_regression_live_registry_and_legacy_shape() -> None:
     # rewrite (the legacy-shape test above stays green unedited)
     live = DISPATCH_DIR.parent / "config" / "environments.yaml"
     assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
+
+
+# ── spec-007 Phase 1 Plan 02 Task 1: reason_sink + CLI print rule (REQ-104) ──
+# Print rule, ONE condition on ONE input: only the reason arriving through
+# check_grant_prod's reason_sink is eligible; contains `remedy:` → verbatim
+# `NOT-GRANTED: <action> (run <id>) — <reason>` on stdout; otherwise today's
+# promote/grant hint prints unchanged. Resolver refusals never enter the rule
+# — they return on stderr behind CHECK-GRANT-REJECTED before check_grant_prod
+# runs. Wall 3bc9da55: the sink carries sanitize_reason(reason) — the SAME
+# value record_pending stores — never the raw string.
+
+
+def test_cli_prints_typed_reason_with_remedy(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)  # committed registry: web/none
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+    assert "'web'" in r.stdout
+    assert "remedy:" in r.stdout
+    assert "config/environments.yaml" in r.stdout
+
+
+def test_cli_promote_and_grant_hints_unchanged(tmp_path) -> None:
+    import subprocess as _sp
+    # promote-path hint: real staging counterpart, grant seeded, no promote
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, _registry_text("web", "stg-web"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-1", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env, cwd=repo)
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-web", "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "record promote" in r.stdout
+    assert "--from staging --to prod --surface web" in r.stdout
+    assert "remedy:" not in r.stdout
+    # grant-path hint (non-prod): verbatim pending-command text
+    r2 = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                  "push:origin/main"],
+                 capture_output=True, text=True, env=env, cwd=repo)
+    assert r2.returncode == 1
+    assert "record with" in r2.stdout and "pending" in r2.stdout
+    assert "remedy:" not in r2.stdout
+
+
+def test_reason_sink_beats_pending_reread(tmp_path) -> None:
+    # Refuse the SAME action twice in one run for two DIFFERENT reasons.
+    # record_pending dedupes by action, so a list_pending re-read would print
+    # the FIRST reason (NO-PROMOTE-EVIDENCE); the sink must carry the SECOND.
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)  # committed registry: web/none
+    g = str(DISPATCH_DIR / "gates.py")
+    first = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                     "deploy:prod-web"],  # no --artifact
+                    capture_output=True, text=True, env=env, cwd=repo)
+    assert first.returncode == 1
+    assert any("NO-PROMOTE-EVIDENCE" in x for x in _pending_reasons(store))
+    second = _check_grant_prod_cli(env, repo)  # artifact present, staging none
+    assert second.returncode == 1, second.stdout + second.stderr
+    assert "NO-STAGING-COUNTERPART" in second.stdout
+    assert "NO-PROMOTE-EVIDENCE" not in second.stdout
+
+
+def test_reason_budget_64_char_surface(tmp_path) -> None:
+    # sanitize_reason truncates at 200 chars; a 64-char surface still yields
+    # a stored reason containing `remedy:` (surface interpolated exactly
+    # once, never an artifact digest), and the sink carries the SAME value.
+    store = tmp_path / "evidence.json"
+    surface = "s" * 64
+    manifest = {surface: {"staging": "none"}}
+    sink: list[str] = []
+    assert gates.check_grant_prod(store, "run-1", f"deploy:prod-{surface}",
+                                  _GOOD_ARTIFACT, manifest=manifest,
+                                  reason_sink=sink) is False
+    reasons = _pending_reasons(store)
+    assert len(reasons) == 1
+    stored = reasons[0]
+    assert "remedy:" in stored and len(stored) <= 200
+    assert stored.count(surface) == 1
+    assert "sha256" not in stored
+    assert sink == [stored]
+
+
+def test_unknown_prod_surface_reason_reaches_stdout(tmp_path) -> None:
+    # hard mode, committed v1 registry, no matching row → the 01-01
+    # UNKNOWN-PROD-SURFACE reason (already remedy-carrying) reaches stdout
+    # through the same print rule.
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-ghost",
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "UNKNOWN-PROD-SURFACE" in r.stdout
+    assert "remedy:" in r.stdout
+
+
+def test_cli_sink_reason_hostile_surface_sanitized(tmp_path) -> None:
+    # Wall 3bc9da55: a registry-driven refusal whose surface name embeds
+    # control chars (\x1b, \r) reaches stdout stripped/escaped and within the
+    # 200-char reason budget — asserted on the CLI's real output.
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    hostile = "deploy:prod-web\x1b[31mEVIL\rGRANTED: fake"
+    r = _check_grant_prod_cli(env, repo, action=hostile,
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNKNOWN-PROD-SURFACE" in r.stdout
+    assert "\x1b" not in r.stdout
+    line = next(ln for ln in r.stdout.splitlines() if "NOT-GRANTED" in ln)
+    assert "\x1b" not in line and "\r" not in line
+    reason = line.split(" — ", 1)[1]
+    assert len(reason) <= 200 and "remedy:" in reason
