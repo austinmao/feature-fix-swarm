@@ -1392,6 +1392,7 @@ def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> 
 def check_grant_prod(store: Path, run_id: str, action: str, artifact,
                      *, manifest: dict | None = None,
                      require_environments: bool = False,
+                     reason_sink: list[str] | None = None,
                      now: float | None = None) -> bool:
     """Fail-closed prod-action precondition: a deploy:prod-* / flip:prod-* /
     migrate:prod-* action additionally requires a fresh staging->prod promote
@@ -1417,6 +1418,18 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
     if surface is None:
         return check_grant(store, run_id, action, now=now)
 
+    def _refuse(reason: str) -> bool:
+        """Single non-hotfix refusal exit (REQ-104): record the pending
+        entry, then hand the caller the SAME sanitized value record_pending
+        stores (wall 3bc9da55) — the sink structurally cannot carry raw
+        registry-derived bytes. Not a list_pending re-read: record_pending
+        dedupes by action, so a re-read would surface the run's FIRST
+        reason, not this one."""
+        record_pending(store, run_id, action, reason)
+        if reason_sink is not None:
+            reason_sink.append(sanitize_reason(reason))
+        return False
+
     try:
         if not _degraded_ratio_allowed(_load_store(store), run_id):
             return False
@@ -1424,34 +1437,30 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         return False
 
     if not artifact:
-        record_pending(store, run_id, action,
-                       "NO-PROMOTE-EVIDENCE: --artifact is required for a "
+        return _refuse("NO-PROMOTE-EVIDENCE: --artifact is required for a "
                        "prod-targeting action")
-        return False
 
     if (manifest is not None and require_environments
             and _manifest_row(manifest, surface) is None):
         # Hard mode only (REQ-102): unknown is not safe. Soft mode keeps
         # today's unknown-surface pass unchanged (Pitfall-3 option 2 — one
         # extra if in the caller, no 3-way return, no second lookup below).
-        record_pending(store, run_id, action,
-                       f"UNKNOWN-PROD-SURFACE: surface '{surface}' has no row "
-                       "in the environment registry and --require-environments "
-                       "is on; remedy: add a surfaces: row for it "
-                       "(run /ffs-init)")
-        return False
+        return _refuse(
+            f"UNKNOWN-PROD-SURFACE: surface '{surface}' has no row "
+            "in the environment registry and --require-environments "
+            "is on; remedy: add a surfaces: row for it "
+            "(run /ffs-init)")
 
     if manifest is not None and not _surface_has_staging(surface, manifest):
-        record_pending(store, run_id, action,
-                       f"NO-STAGING-COUNTERPART: surface '{surface}' has no "
-                       "staging counterpart per the parity manifest")
-        return False
+        return _refuse(
+            f"NO-STAGING-COUNTERPART: surface '{surface}' has no "
+            "staging counterpart per the parity manifest; remedy: declare "
+            "its staging row in config/environments.yaml (run /ffs-init)")
 
     if not check_grant(store, run_id, action, now=now):
-        record_pending(store, run_id, action,
-                       "needs operator grant for this prod action (a promote "
-                       "record confers no authority on its own)")
-        return False
+        return _refuse(
+            "needs operator grant for this prod action (a promote "
+            "record confers no authority on its own)")
 
     if check_promotion(store, run_id, "prod", surface, artifact, now=now):
         # REQ-302: a surface whose manifest row declares a rollback command
@@ -1465,17 +1474,15 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         if _rollback_dryrun_ok(_load_store(store), run_id, surface, declared,
                                artifact):
             return True
-        record_pending(store, run_id, action,
-                       f"ROLLBACK-DRYRUN-REQUIRED: surface '{surface}' "
-                       "declares a rollback command; need a same-run "
-                       f"successful dry-run bound to artifact {artifact}")
-        return False
+        return _refuse(
+            f"ROLLBACK-DRYRUN-REQUIRED: surface '{surface}' "
+            "declares a rollback command; need a same-run "
+            f"successful dry-run bound to artifact {artifact}")
 
     reason = _promote_miss_reason(store, run_id, surface, artifact, now=now)
-    record_pending(store, run_id, action,
-                   f"{reason}: no fresh staging->prod promote record matches "
-                   f"artifact {artifact} for surface '{surface}'")
-    return False
+    return _refuse(
+        f"{reason}: no fresh staging->prod promote record matches "
+        f"artifact {artifact} for surface '{surface}'")
 
 
 def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
@@ -2954,11 +2961,22 @@ def main(argv: list[str]) -> int:
             elif manifest is None:
                 # single ENV-REGISTRY-ABSENT emission site (REQ-102)
                 print(_registry_absent_advisory(), file=sys.stderr)
+            sink: list[str] = []
             if check_grant_prod(store, run_id, action, artifact,
                                 manifest=manifest,
-                                require_environments=require_env):
+                                require_environments=require_env,
+                                reason_sink=sink):
                 print(f"GRANTED: {safe}")
                 return 0
+            # Print rule (REQ-104), ONE condition on ONE input: only the
+            # sink-delivered reason is eligible; `remedy:` present → the
+            # typed reason prints verbatim (sink bytes are pre-sanitized,
+            # wall 3bc9da55); otherwise today's hint, unchanged. Resolver
+            # refusals never reach here — stderr CHECK-GRANT-REJECTED above.
+            reason = sink[-1] if sink else ""
+            if "remedy:" in reason:
+                print(f"NOT-GRANTED: {safe} (run {run_id}) — {reason}")
+                return 1
             print(f"NOT-GRANTED: {safe} (run {run_id}) — record promote "
                   f"evidence via `gates.py promote {run_id} --from staging "
                   f"--to prod --surface {prod_surface} --artifact <digest> "
