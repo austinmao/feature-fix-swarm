@@ -228,3 +228,79 @@ def test_bad_run_id_refused():
     assert r.returncode == 1
     assert r.stdout == ""
     assert "pwn" not in r.stdout
+
+
+# ── INT-004 + seam-presence pins (Task 3) ───────────────────────────────────
+
+import re  # noqa: E402
+
+REVIEW_GATE = ROOT / "scripts" / "gsd" / "review-gate-command.sh"
+FI_SKILL = ROOT / "skills" / "feature-implement" / "SKILL.md"
+PF_SKILL = ROOT / "skills" / "preflight" / "SKILL.md"
+PHASE_BASE = "2e77ed7"
+
+
+def test_int004a_review_gate_zero_seam_tokens():
+    """INT-004(a): the whole-file scan is deliberate and cannot
+    self-invalidate — this phase never edits review-gate-command.sh, so ANY
+    mention of these tokens (comments included) is a seam violation. Hard
+    mode reaches it through gates.py env-var resolution (lib/gates.py:
+    2941-2945), never a call-site edit."""
+    text = REVIEW_GATE.read_text()
+    for token in ("env-registry", "FFS_ENV_REGISTRY", "require-environments"):
+        assert token not in text, token
+
+
+def test_int004b_review_gate_byte_unchanged_vs_phase_base():
+    """INT-004(b): the literal byte-unchanged phase pin against the phase
+    base commit; skipped when the commit is unreachable (post-squash-merge
+    main may not retain it)."""
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", PHASE_BASE + "^{commit}"],
+        cwd=ROOT, capture_output=True, timeout=30)
+    if probe.returncode != 0:
+        pytest.skip("phase base commit unreachable")
+    r = subprocess.run(
+        ["git", "diff", "--quiet", PHASE_BASE, "--",
+         "scripts/gsd/review-gate-command.sh"],
+        cwd=ROOT, capture_output=True, timeout=30)
+    assert r.returncode == 0
+
+
+def test_seam_presence_pins():
+    """test_promotion_protocol_doc idiom: guards silent seam removal by
+    later SKILL edits."""
+    fi = FI_SKILL.read_text()
+    assert "FFS_ENV_REGISTRY_REQUIRED" in fi          # Step-2 hard-mode seam
+    assert fi.count("promote-emit.sh") >= 2           # Step 6 + verify block
+    assert "env-registry.sh seed" in PF_SKILL.read_text()  # preflight seam
+
+
+def test_step2_export_guarded_by_autonomous_and_prod_detection():
+    """The export appears exactly once, INSIDE a conditional guarded by
+    AUTONOMOUS=1 AND prod-prefix detection (ledger-first, plan-grep
+    fallback) — never unconditionally."""
+    fi = FI_SKILL.read_text()
+    assert fi.count("export FFS_ENV_REGISTRY_REQUIRED=1") == 1
+    guarded = re.search(
+        r'if \[ "\$AUTONOMOUS" = "1" \]'            # autonomous guard
+        r'[\s\S]{0,1200}?PROD_ACTION_PREFIXES'      # ledger-first detection
+        r'[\s\S]{0,1200}?'
+        + re.escape("deploy:prod-|flip:prod-|migrate:prod-")  # plan-grep
+        + r'[\s\S]{0,1200}?export FFS_ENV_REGISTRY_REQUIRED=1',
+        fi)
+    assert guarded, "export must sit inside the guarded detection block"
+
+
+def test_require_environments_flag_only_at_skill_prod_callsites():
+    """sig 16ac087d resolution: the 'zero call-site edits' pin covers
+    gates.py INTERNALS and pre-existing consumers (review-gate-command.sh —
+    INT-004 above); this skill's OWN new/edited prod invocation lines may
+    and DO carry the flag explicitly (sig ba1efa84: deterministic per-call
+    hard mode; the Step-2 export is belt-and-braces for subprocesses, and
+    no assertion depends on it surviving block boundaries)."""
+    fi = FI_SKILL.read_text()
+    flag_lines = [ln for ln in fi.splitlines()
+                  if "--require-environments" in ln]
+    assert flag_lines, "the skill's prod call site must pass the flag"
+    assert all("check-grant" in ln for ln in flag_lines), flag_lines
