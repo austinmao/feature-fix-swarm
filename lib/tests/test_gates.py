@@ -4120,6 +4120,22 @@ def test_live_ffs_registry_refuses_via_default_resolution(tmp_path) -> None:
     assert "NO-STAGING-COUNTERPART" in r.stdout
 
 
+def test_non_ledger_run_id_reaches_registry_refusal(tmp_path) -> None:
+    # AC-003's literal command uses run id `ac003` (not run-<digits>). The
+    # degraded-ratio guard's run-id shape check must be vacuous for such ids
+    # (they can have no degradation events), never a SILENT unrecorded False
+    # — that would refuse without a typed reason (REQ-104) and block the
+    # spec's live gate before the registry check.
+    store = tmp_path / "evidence.json"
+    sink: list[str] = []
+    assert gates.check_grant_prod(
+        store, "ac003", "deploy:prod-release", _GOOD_ARTIFACT,
+        manifest={"release": {"staging": "none"}}, reason_sink=sink) is False
+    assert sink and "NO-STAGING-COUNTERPART" in sink[0]
+    assert any("NO-STAGING-COUNTERPART" in x
+               for x in _pending_reasons(store, "ac003"))
+
+
 def test_stale_docstring_claim_absent() -> None:
     # 01-01 removed the later-phase wiring claim from gates.py; assert it
     # has not returned (absence only, no particular replacement wording).

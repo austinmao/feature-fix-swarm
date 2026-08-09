@@ -1431,10 +1431,19 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         return False
 
     try:
-        if not _degraded_ratio_allowed(_load_store(store), run_id):
+        data = _load_store(store)
+    except ValueError:
+        return False  # corrupt store stays fail-closed
+    try:
+        if not _degraded_ratio_allowed(data, run_id):
             return False
     except ValueError:
-        return False
+        # Non-ledger run ids (AC-003's literal `ac003`) cannot have recorded
+        # degradation events by construction — the ratio guard is vacuously
+        # satisfied. A silent False here refused with NO recorded reason,
+        # violating REQ-104 (every refusal carries a typed reason) and
+        # blocking the spec's live AC-003 command before the registry check.
+        pass
 
     if not artifact:
         return _refuse("NO-PROMOTE-EVIDENCE: --artifact is required for a "
