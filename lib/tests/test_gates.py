@@ -215,8 +215,8 @@ def test_scan_tamper_comment_line_exit_zero_not_flagged() -> None:
     diff = (
         "--- a/scripts/gsd/digest.sh\n"
         "+++ b/scripts/gsd/digest.sh\n"
-        "+#   --immediate  poll stores, emit new events, exit 0 always\n"
-        "+  # cursor retained on notify failure; exit 0\n"
+        "+#   --immediate  poll stores, emit new events, exit 0 always\n"  # tamper-ok: quoted scanner fixture
+        "+  # cursor retained on notify failure; exit 0\n"  # tamper-ok: quoted scanner fixture
     )
     assert gates.scan_test_tampering(diff) == []
 
@@ -227,7 +227,7 @@ def test_scan_tamper_exit_zero_finding_carries_path() -> None:
     diff = (
         "--- a/scripts/gsd/whatever.sh\n"
         "+++ b/scripts/gsd/whatever.sh\n"
-        "+exit 0\n"
+        "+exit 0\n"  # tamper-ok: quoted scanner fixture
     )
     findings = gates.scan_test_tampering(diff)
     assert any("[scripts/gsd/whatever.sh]" in f for f in findings)
