@@ -2008,13 +2008,41 @@ def _manifest_scalar(raw: str, *, line_no: int) -> str:
     return value
 
 
+def _guard_manifest_rows(pairs: list[tuple[str, dict]]) -> None:
+    """Single exit-point guard shared by EVERY manifest input format (REQ-103)
+    — YAML rows, JSON surfaces arrays, and legacy JSON maps with no surfaces
+    key (the early-return bypass is closed). Rejects folded-duplicate surface
+    names and same-row staging_instance/staging alias co-presence regardless
+    of value agreement."""
+    seen: set[str] = set()
+    for surface, row in pairs:
+        if (isinstance(row, dict) and "staging_instance" in row
+                and "staging" in row):
+            raise ValueError(
+                f"manifest surface {surface!r} declares both staging_instance "
+                "and staging — keep exactly one")
+        if not isinstance(surface, str):
+            raise ValueError(
+                "each manifest surface needs a non-empty surface name")
+        folded = surface.strip().casefold()
+        if folded in seen:
+            raise ValueError(f"duplicate manifest surface: {surface}")
+        seen.add(folded)
+
+
 def _normalize_manifest(data: dict) -> dict:
-    """Normalize legacy JSON maps and the committed `surfaces:` row shape."""
+    """Normalize legacy JSON maps and the committed `surfaces:` row shape.
+
+    Duplicate and alias rejection happens in _guard_manifest_rows at the
+    single exit point over the map about to be returned; keys keep their
+    original case (folding lives at the comparison boundary, not here)."""
     if "surfaces" not in data:
+        _guard_manifest_rows(list(data.items()))
         return data
     rows = data.get("surfaces")
     if not isinstance(rows, list) or not rows:
         raise ValueError("manifest surfaces must be a non-empty list")
+    pairs: list[tuple[str, dict]] = []
     normalized: dict[str, dict[str, str]] = {}
     for row in rows:
         if not isinstance(row, dict):
@@ -2025,8 +2053,6 @@ def _normalize_manifest(data: dict) -> dict:
             raise ValueError("each manifest surface needs a non-empty surface name")
         if not isinstance(staging, str) or not staging.strip():
             raise ValueError(f"manifest surface {surface!r} needs staging_instance")
-        if surface in normalized:
-            raise ValueError(f"duplicate manifest surface: {surface}")
         entry = {"staging": staging}
         # Optional rollback declaration (REQ-302, pinned decision 4): preserve
         # the command string verbatim; absent key = no declaration = gate no-op.
@@ -2037,49 +2063,125 @@ def _normalize_manifest(data: dict) -> dict:
                     f"manifest surface {surface!r} rollback must be a "
                     "non-empty command string")
             entry["rollback"] = rollback
+        pairs.append((surface, row))
         normalized[surface] = entry
+    _guard_manifest_rows(pairs)
     return normalized
 
 
-def _parse_parity_manifest_yaml(text: str) -> dict:
-    """Parse only the dependency-free YAML subset used by parity-manifest.yaml.
+# Nine-key allowlist (REQ-103): the middle five keep the committed legacy
+# parity-manifest shape loading; `rollback` is spec-008's REQ-302 declaration
+# consumed by _normalize_manifest from JSON rows. The allowlist only decides
+# reject-vs-accept — of the nine, only surface/staging_instance/staging
+# values are stored from YAML (today's drop-behavior for the rest unchanged).
+_MANIFEST_ROW_FIELDS = ("surface", "staging_instance", "staging",
+                        "prod_instance", "staging_artifact", "prod_artifact",
+                        "staging_migration_head", "prod_migration_head",
+                        "rollback")
+_MANIFEST_FIELD_PAT = re.compile(
+    r"(%s):\s*(.+)" % "|".join(_MANIFEST_ROW_FIELDS))
 
-    check-grant needs two fields: `surface` and `staging_instance`. Restricting
-    the parser to those flat rows keeps gates.py zero-install while malformed,
-    empty, and duplicate rows still fail closed.
-    """
+
+def _parse_parity_manifest_yaml(text: str) -> dict:
+    """Parse only the dependency-free YAML subset used by the committed
+    registry and parity manifest (REQ-103 — hardened in place, no new parser).
+
+    Three-state machine (ever_entered / in_surfaces / current row): the
+    `surfaces:` trigger requires indent==0 (EDGE-001); an indent-0 KEY line
+    inside the block FLUSHES the in-progress row and LATCHES the parse
+    single-entry (EDGE-002/EDGE-013) — parsing continues but a second
+    `surfaces:` block rejects; blank lines and full-line comments are
+    NEUTRAL everywhere (no flush, no latch, no row termination, no
+    rejection). Every other in-block shape rejects with a named ValueError —
+    including allowlisted field lines before the first `- surface:` row
+    (PD-4) and tab-indented lines. check-grant still consumes two fields;
+    malformed, empty, and duplicate input keeps failing closed."""
+    ever_entered = False
     in_surfaces = False
     rows: list[dict[str, str]] = []
     current: dict[str, str] | None = None
+    seen_fields: set[str] = set()
     for line_no, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip())
+            continue  # neutral at any indent, checked before everything else
+        indent_ws = line[:len(line) - len(line.lstrip())]
+        indent = len(indent_ws)
         if not in_surfaces:
-            if stripped == "surfaces:":
+            if indent == 0 and stripped == "surfaces:":
+                if ever_entered:
+                    raise ValueError(
+                        f"duplicate surfaces block at line {line_no}")
+                ever_entered = True
                 in_surfaces = True
             continue
         if indent == 0:
-            break
+            if stripped == "surfaces:":
+                raise ValueError(f"duplicate surfaces block at line {line_no}")
+            if not re.match(r"[^\s#-][^:]*:", stripped):
+                raise ValueError(
+                    f"unsupported indent-0 line in surfaces block at line "
+                    f"{line_no}: {stripped[:60]!r}")
+            # flush-and-latch: fires ONLY on this non-blank, non-comment
+            # indent-0 KEY line; the parse is single-entry from here on
+            if current is not None:
+                rows.append(current)
+                current = None
+            in_surfaces = False
+            continue
+        if "\t" in indent_ws:
+            raise ValueError(
+                f"tab-indented line in surfaces block at line {line_no}")
         surface_match = re.fullmatch(r"-\s+surface:\s*(.+)", stripped)
         if surface_match:
             if current is not None:
                 rows.append(current)
             current = {
-                "surface": _manifest_scalar(surface_match.group(1), line_no=line_no),
+                "surface": _manifest_scalar(surface_match.group(1),
+                                            line_no=line_no),
             }
+            # seed `surface` as seen: a redeclared in-row surface rejects
+            seen_fields = {"surface"}
             continue
-        field_match = re.fullmatch(r"(staging_instance|staging):\s*(.+)", stripped)
-        if current is not None and field_match:
-            current["staging_instance"] = _manifest_scalar(
-                field_match.group(2), line_no=line_no,
-            )
+        field_match = re.fullmatch(_MANIFEST_FIELD_PAT, stripped)
+        if field_match:
+            key = field_match.group(1)
+            if current is None:
+                # PD-4 (0fdfeee3): a field line before the first row must
+                # reject, never be silently dropped
+                raise ValueError(
+                    f"field line {key!r} before any '- surface:' row at "
+                    f"line {line_no}")
+            if key in seen_fields:
+                raise ValueError(
+                    f"duplicate field {key!r} in surface row at line "
+                    f"{line_no}")
+            seen_fields.add(key)
+            if key in ("staging_instance", "staging"):
+                current[key] = _manifest_scalar(field_match.group(2),
+                                                line_no=line_no)
+            continue
+        raise ValueError(
+            f"unsupported line in surfaces block at line {line_no}: "
+            f"{stripped[:60]!r}")
     if current is not None:
         rows.append(current)
-    if not in_surfaces:
+    if not ever_entered:
         raise ValueError("YAML manifest must contain a top-level surfaces list")
     return _normalize_manifest({"surfaces": rows})
+
+
+def _reject_duplicate_json_keys(pairs: list) -> dict:
+    """object_pairs_hook detector (REQ-103): JSON duplicate keys reject at
+    ANY depth, in either order — json.loads's silent last-write-wins is the
+    reviewer-vs-gate spoof in JSON clothing. Raises the same typed duplicate
+    ValueError the YAML rules use; no new error type."""
+    obj: dict = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate manifest key: {key}")
+        obj[key] = value
+    return obj
 
 
 def _load_manifest_text(text: str) -> dict:
@@ -2087,7 +2189,7 @@ def _load_manifest_text(text: str) -> dict:
     resolver feeds it HEAD bytes directly, so implicit resolution never round-
     trips through the working tree. Every parser hardening lands HERE."""
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
     except json.JSONDecodeError:
         return _parse_parity_manifest_yaml(text)
     if not isinstance(data, dict):
