@@ -113,6 +113,88 @@ class SchemaError(Exception):
     line numbers, and EXPECTED shapes only — never got-bytes."""
 
 
+# ── leak scan (REQ-202a; audit rows 10-12, LOCKED) ──────────────────────────
+# Self-contained scanner: credential-output-guard.sh is untouched; only its
+# conventions are reused (rc 2 on finding; matched bytes NEVER printed on
+# either stream). Eight detector families; the two-entry context whitelist
+# (`uses: <owner>/<repo>@<40-hex>` pins, `sha256:<64-hex>` digests) is
+# applied per line BEFORE the hex/base64 families and exempts ONLY the
+# MATCHED SPAN, never the whole line (wall a8f9af82).
+_WHITELIST = (
+    re.compile(r"uses:\s*[\w.-]+/[\w.-]+@[0-9a-fA-F]{40}"),
+    re.compile(r"sha256:[0-9a-fA-F]{64}"),
+)
+_FAMILIES = (
+    ("pem-block", re.compile(r"-----BEGIN[ A-Z]*")),
+    ("jwt", re.compile(
+        r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")),
+    ("aws-access-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("provider-token-prefix", re.compile(
+        r"\b(?:ghp_[A-Za-z0-9]{16,}|gho_[A-Za-z0-9]{16,}|"
+        r"github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{12,}|"
+        r"xox[bp]-[A-Za-z0-9-]{8,})")),
+    ("credential-url", re.compile(
+        r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@")),
+    ("secret-assignment", re.compile(
+        r"(?i)\b(?:password|token|secret)\s*[:=]\s*\S{8,}")),
+    ("hex-run", re.compile(r"\b[0-9a-fA-F]{32,}\b")),
+    ("base64-run", re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}")),
+)
+
+
+def _is_committed(path, root):
+    try:
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+        if rel.startswith(".."):
+            return False
+        r = subprocess.run(
+            ["git", "-C", root, "ls-files", "--error-unmatch", "--", rel],
+            capture_output=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _nearest_key(line, start, line_no):
+    prefix = line[:start]
+    m = re.search(r"([^\s:=]+)\s*[:=][^:=]*$", prefix)
+    if not m:
+        m = re.match(r"\s*-?\s*([^\s:=]+)\s*[:=]", line)
+    key = m.group(1) if m else ""
+    return safe_key(key, line_no)
+
+
+def leak_scan(path, text):
+    """Returns finding lines in the fixed output contract (row 12):
+    `line N, key <name>, shape <class> — remedy: replace the literal with a
+    NAME in secret_names`. Matched bytes never appear in a finding."""
+    findings = []
+    committed = _is_committed(path, ROOT)
+    for line_no, line in enumerate(text.splitlines(), 1):
+        wl_spans = [m.span() for wl in _WHITELIST for m in wl.finditer(line)]
+        claimed = []
+        for shape, pat in _FAMILIES:
+            for m in pat.finditer(line):
+                s, e = m.span()
+                # wall a8f9af82: exemption covers ONLY the matched span — a
+                # second credential on the same line must still flag
+                if any(ws <= s and e <= we for ws, we in wl_spans):
+                    continue
+                if any(not (e <= cs or s >= ce) for cs, ce in claimed):
+                    continue  # most-specific family already claimed this span
+                claimed.append((s, e))
+                key = _nearest_key(line, s, line_no)
+                remedy = "replace the literal with a NAME in secret_names"
+                if committed:
+                    remedy += ("; this file is committed — rotate the "
+                               "credential, then rewrite history to remove "
+                               "it")
+                findings.append(
+                    f"line {line_no}, key {key}, shape {shape} — "
+                    f"remedy: {remedy}")
+    return findings
+
+
 def _gates():
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import gates
@@ -487,6 +569,13 @@ def cmd_check(args):
         fail(f"ENV-REGISTRY-INVALID: registry not readable at {shown} — "
              f"remedy: run 'env-registry.sh detect' then 'apply' to create "
              f"it, or pass --manifest <path>")
+    # Leak scan FIRST (highest-consequence risk, plan key_links): a secret
+    # value must never survive into schema/refusal paths.
+    findings = leak_scan(path, text)
+    if findings:
+        for finding in findings:
+            print(finding)
+        sys.exit(2)
     try:
         sections, _env_kind, _surfaces = validate_registry_text(
             text, label=path)

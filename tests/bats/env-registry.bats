@@ -264,9 +264,10 @@ shape_for() {
     echo "family: $fam"
     secret="$(cat "$(leak_dir)/$fam.secret")"
     cp "$(leak_dir)/$fam.txt" "$BATS_TEST_TMPDIR/$fam.txt"
+    rc=0
     bash "$ER" check --manifest "$BATS_TEST_TMPDIR/$fam.txt" \
-      > "$BATS_TEST_TMPDIR/scan-out" 2> "$BATS_TEST_TMPDIR/scan-err"
-    echo $? > "$BATS_TEST_TMPDIR/scan-rc"
+      > "$BATS_TEST_TMPDIR/scan-out" 2> "$BATS_TEST_TMPDIR/scan-err" || rc=$?
+    echo "$rc" > "$BATS_TEST_TMPDIR/scan-rc"
     [ "$(cat "$BATS_TEST_TMPDIR/scan-rc")" -eq 2 ]
     ! grep -qF "$secret" "$BATS_TEST_TMPDIR/scan-out"
     ! grep -qF "$secret" "$BATS_TEST_TMPDIR/scan-err"
@@ -303,9 +304,10 @@ shape_for() {
 @test "B6 secret-shaped KEY renders as a placeholder, bytes absent from both streams" {
   secret="$(cat "$(leak_dir)/secret-key.secret")"
   cp "$(leak_dir)/secret-key.txt" "$BATS_TEST_TMPDIR/secret-key.txt"
+  rc=0
   bash "$ER" check --manifest "$BATS_TEST_TMPDIR/secret-key.txt" \
-    > "$BATS_TEST_TMPDIR/sk-out" 2> "$BATS_TEST_TMPDIR/sk-err"
-  echo $? > "$BATS_TEST_TMPDIR/sk-rc"
+    > "$BATS_TEST_TMPDIR/sk-out" 2> "$BATS_TEST_TMPDIR/sk-err" || rc=$?
+  echo "$rc" > "$BATS_TEST_TMPDIR/sk-rc"
   [ "$(cat "$BATS_TEST_TMPDIR/sk-rc")" -eq 2 ]
   grep -q "non-identifier key at line" "$BATS_TEST_TMPDIR/sk-out"
   ! grep -qF "$secret" "$BATS_TEST_TMPDIR/sk-out"
@@ -315,9 +317,10 @@ shape_for() {
 @test "B7 credential-shaped registry scalar: refusal carries no substring of it" {
   secret="$(cat "$(leak_dir)/credential-kind.secret")"
   cp "$(leak_dir)/credential-kind.txt" "$BATS_TEST_TMPDIR/credential-kind.txt"
+  rc=0
   bash "$ER" check --manifest "$BATS_TEST_TMPDIR/credential-kind.txt" \
-    > "$BATS_TEST_TMPDIR/ck-out" 2> "$BATS_TEST_TMPDIR/ck-err"
-  echo $? > "$BATS_TEST_TMPDIR/ck-rc"
+    > "$BATS_TEST_TMPDIR/ck-out" 2> "$BATS_TEST_TMPDIR/ck-err" || rc=$?
+  echo "$rc" > "$BATS_TEST_TMPDIR/ck-rc"
   [ "$(cat "$BATS_TEST_TMPDIR/ck-rc")" -ne 0 ]
   ! grep -qF "$secret" "$BATS_TEST_TMPDIR/ck-out"
   ! grep -qF "$secret" "$BATS_TEST_TMPDIR/ck-err"
