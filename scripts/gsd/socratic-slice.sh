@@ -51,9 +51,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# shellcheck source=scripts/gsd/fence-data.sh
+. "$SCRIPT_DIR/fence-data.sh" || { echo "socratic: fence-data.sh missing beside socratic-slice.sh" >&2; exit 1; }
+
 START_TOKEN="SOCRATIC_DATA_START"
 END_TOKEN="SOCRATIC_DATA_END"
-ESCAPED_TOKEN="SOCRATIC_DATA_ESCAPED"
 
 warn() { echo "socratic: WARN $*" >&2; }
 status() { echo "socratic: $*" >&2; }
@@ -936,8 +938,10 @@ fi
 # Neutralize delimiter impersonation by SUBSTRING (never whole-line): any
 # emitted line containing either token anywhere has each occurrence
 # rewritten to SOCRATIC_DATA_ESCAPED before emission — rewrite, not drop,
-# so the surrounding ledger entry stays visible to the reviewer.
-NEUTRALIZED_CONTENT="$(printf '%s' "$FULL_CONTENT" | sed -e "s/${START_TOKEN}/${ESCAPED_TOKEN}/g" -e "s/${END_TOKEN}/${ESCAPED_TOKEN}/g")"
+# so the surrounding ledger entry stays visible to the reviewer. The rewrite
+# flows through the shared fence_neutralize (REQ-401b — this script's private
+# sed was the idiom fence-data.sh generalizes).
+NEUTRALIZED_CONTENT="$(printf '%s' "$FULL_CONTENT" | fence_neutralize SOCRATIC)"
 
 printf '%s\n' "$START_TOKEN"
 printf '%s\n' "$NEUTRALIZED_CONTENT"
