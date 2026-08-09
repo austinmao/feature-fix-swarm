@@ -29,6 +29,13 @@
 # proof scenarios; full provenance binding is a recorded follow-up.
 set -euo pipefail
 
+# REQ-301 (locked row 9 / C6): the commit identity bound into canary evidence
+# comes SOLELY from git in this trusted wrapper — never from results.json.
+# Captured at gate ENTRY and re-verified after the completeness check: any
+# drift means the results were judged against a different tree than the one
+# being recorded, so the gate refuses rather than binding the wrong sha.
+CANARY_PRE_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+
 # Default diff-base resolves through base-branch.sh — a hardcoded origin/main
 # diffs against a nonexistent ref on master/trunk repos.
 # Fail-soft (`|| echo main`): on a crippled PATH the gate must still reach its
@@ -156,6 +163,44 @@ if ! jq -e '
   (.summary.networkFailures == 0)
 ' "$RESULTS" >/dev/null 2>&1; then
   echo "canary-gate: FAIL — incomplete or failing summary (need numeric stepsTotal>0, stepsPassed==stepsTotal, stepsFailed==0, consoleErrors==0, networkFailures==0)" >&2
+  exit 1
+fi
+
+# ── spec-008 Phase 3 (REQ-301): typed canary evidence, fail-closed ──────────
+# A durable {run_id, sha, pass, created_at, ended_at, ts} row must land in
+# the evidence store BEFORE PASS is printed. Any failure to record refuses
+# the pass (same posture as REQ-201's WAIVER-UNRECORDED).
+
+CANARY_POST_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+if [ -z "$CANARY_PRE_SHA" ] || [ "$CANARY_PRE_SHA" != "$CANARY_POST_SHA" ]; then
+  echo "canary-gate: CANARY-IDENTITY-DRIFT — HEAD changed between gate entry (${CANARY_PRE_SHA:-unknown}) and evidence recording (${CANARY_POST_SHA:-unknown}); refusing to record" >&2
+  exit 1
+fi
+
+# Timestamps come from the already-validated results.json (createdAt/endedAt).
+# Timestamps are not identity (C6) — the sha above never comes from this file.
+CANARY_CREATED_AT="$(jq -r '.createdAt // empty' "$RESULTS" 2>/dev/null || true)"
+CANARY_ENDED_AT="$(jq -r '.endedAt // empty' "$RESULTS" 2>/dev/null || true)"
+if [ -z "$CANARY_CREATED_AT" ] || [ -z "$CANARY_ENDED_AT" ]; then
+  echo "canary-gate: CANARY-EVIDENCE-UNRECORDED — results.json lacks createdAt/endedAt timestamps; refusing to PASS without a durable record" >&2
+  exit 1
+fi
+
+# Recorder invocation mirrors the waiver-record.sh adapter shape (python3 +
+# lib/gates.py resolved from this script's OWN repo root, never the caller's
+# cwd) but PRESERVES GATES_STORE so tests and runs land in the active store.
+CANARY_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+CANARY_GATE_ROOT="$(git -C "$CANARY_GATE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$CANARY_GATE_ROOT" ] || [ ! -f "$CANARY_GATE_ROOT/lib/gates.py" ]; then
+  echo "canary-gate: CANARY-EVIDENCE-UNRECORDED — cannot resolve lib/gates.py from the gate's own repo; refusing to PASS" >&2
+  exit 1
+fi
+if ! (cd "$CANARY_GATE_ROOT" && env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
+    python3 "$CANARY_GATE_ROOT/lib/gates.py" canary-evidence \
+    --run-id "${GSD_RUN_ID:-unattributed}" --sha "$CANARY_PRE_SHA" \
+    --created-at "$CANARY_CREATED_AT" --ended-at "$CANARY_ENDED_AT" \
+    --pass true); then
+  echo "canary-gate: CANARY-EVIDENCE-UNRECORDED — recorder failed; refusing to PASS without a durable record" >&2
   exit 1
 fi
 

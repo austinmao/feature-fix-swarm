@@ -1352,6 +1352,61 @@ def list_pending(store: Path, run_id: str) -> list[dict]:
                 .get(run_id, {}).get("pending", []))
 
 
+# ── spec-008 Phase 3: typed canary evidence (REQ-301, AC-004) ────────────────
+
+# run_id shape mirrors lib/evidence_events.py's RUN_ID_RE precedent:
+# non-empty, control-free, <=128 chars — permissive enough for the
+# `unattributed` literal the trusted wrapper records when GSD_RUN_ID is unset.
+EVIDENCE_RUN_ID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
+ISO_TS_MAX = 64
+
+
+def _require_iso_ts(value, name: str) -> None:
+    """Bounded, control-free, non-empty timestamp string (stored verbatim —
+    results.json createdAt/endedAt are ISO-8601; the store never reparses)."""
+    if (not isinstance(value, str) or not value.strip() or len(value) > ISO_TS_MAX
+            or any(ord(c) < 0x20 or ord(c) == 0x7f for c in value)):
+        raise ValueError(f"INVALID-CANARY-TIMESTAMP: {name}")
+
+
+def _canary_ns(data: dict) -> list:
+    """Shape guard for the top-level `canary` list (ports _promotions_ns)."""
+    rows = data.setdefault("canary", [])
+    if not isinstance(rows, list):
+        raise ValueError("CANARY-SCHEMA-CONFLICT")
+    return rows
+
+
+def record_canary_evidence(store: Path, run_id, sha, passed, created_at,
+                           ended_at) -> None:
+    """Append one typed canary evidence row under the shared store lock.
+
+    Trust boundary (wall 087faa76): this recorder validates SHAPE, not caller
+    identity — any store-writer can forge rows with or without this CLI, the
+    identical boundary every house evidence record already has. The trusted
+    wrapper (scripts/gsd/canary-gate.sh) is the sole LEGITIMATE producer:
+    `sha` is `git rev-parse HEAD` captured there (C6 — never parsed from
+    third-party results.json). Integrity is guarded by the G2 tamper scan and
+    store permissions, never by this recorder.
+    """
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("INVALID-CANARY-RUN-ID")
+    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+        # 40-hex commit sha ONLY (F5) — digest refs are not canary identity.
+        raise ValueError("INVALID-CANARY-SHA")
+    if not isinstance(passed, bool):
+        raise ValueError("INVALID-CANARY-PASS")
+    _require_iso_ts(created_at, "created_at")
+    _require_iso_ts(ended_at, "ended_at")
+    with _StoreLock(store):
+        data = _load_store(store)
+        rows = _canary_ns(data)
+        rows.append({"run_id": run_id, "sha": sha, "pass": passed,
+                     "created_at": created_at, "ended_at": ended_at,
+                     "ts": _now()})
+        _save_store(store, data)
+
+
 def preflight_check(requirements: list[dict], timeout: int = 30, *,
                     store: Path | None = None, run_id: str | None = None) -> dict:
     """Prove env vars present and services reachable BEFORE an unattended run.
@@ -1881,6 +1936,24 @@ def main(argv: list[str]) -> int:
             print(f"NOTE-DEGRADED-REJECTED: {exc}", file=sys.stderr)
             return 2
         print("DEGRADATION-RECORDED")
+        return 0
+    if cmd == "canary-evidence":
+        parser = argparse.ArgumentParser(prog="gates.py canary-evidence", add_help=False)
+        parser.add_argument("--run-id")
+        parser.add_argument("--sha")
+        parser.add_argument("--pass", dest="passed", choices=("true", "false"))
+        parser.add_argument("--created-at")
+        parser.add_argument("--ended-at")
+        try:
+            ns = parser.parse_args(args)
+            if ns.passed is None:
+                raise ValueError("INVALID-CANARY-PASS")
+            record_canary_evidence(store, ns.run_id, ns.sha, ns.passed == "true",
+                                   ns.created_at, ns.ended_at)
+        except (ValueError, SystemExit, OSError) as exc:
+            print(f"CANARY-EVIDENCE-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("CANARY-EVIDENCE-RECORDED")
         return 0
     if cmd == "map-run":
         if "--get" in args:
