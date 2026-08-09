@@ -145,10 +145,13 @@ fi
 
 # Belt-and-braces invariants (construction guarantees both; a failure here
 # means something rewrote HEAD outside the CAS and is worth a loud FATAL).
-COMMITTED_PATHS="$(git -C "$REPO_ROOT" diff-tree --no-commit-id --name-only -r HEAD)"
+COMMITTED_PATHS="$(git -C "$REPO_ROOT" diff-tree --no-commit-id --name-only -r "$COMMIT")"
 if [ "$COMMITTED_PATHS" != "$REL_PATH" ]; then
-  echo "publish-scanned-handoff: FATAL: commit swept paths beyond the scanned artifact ($COMMITTED_PATHS) — resetting" >&2
-  git -C "$REPO_ROOT" reset --soft HEAD^
+  echo "publish-scanned-handoff: FATAL: commit swept paths beyond the scanned artifact ($COMMITTED_PATHS) — undoing" >&2
+  # CAS-guarded undo: retract exactly OUR commit; if another process already
+  # advanced HEAD past it, refuse rather than resetting their commit away.
+  git -C "$REPO_ROOT" update-ref -m "publish-scanned-handoff: undo $REL_PATH" HEAD "$PARENT" "$COMMIT" \
+    || echo "publish-scanned-handoff: HEAD advanced past the bad commit — manual review required" >&2
   exit 1
 fi
 
@@ -157,10 +160,12 @@ fi
 # are touched).
 git -C "$REPO_ROOT" update-index --add --cacheinfo 100644,"$BLOB","$REL_PATH" || true
 
-COMMITTED_HASH="$(git -C "$REPO_ROOT" rev-parse "HEAD:$REL_PATH" 2>/dev/null || echo "")"
+COMMITTED_HASH="$(git -C "$REPO_ROOT" rev-parse "$COMMIT:$REL_PATH" 2>/dev/null || echo "")"
 if [ "$COMMITTED_HASH" != "$BLOB" ]; then
-  echo "publish-scanned-handoff: FATAL: committed bytes for $REL_PATH do not match the scanned copy (got ${COMMITTED_HASH:-none}, expected $BLOB) — resetting" >&2
-  git -C "$REPO_ROOT" reset --soft HEAD^
+  echo "publish-scanned-handoff: FATAL: committed bytes for $REL_PATH do not match the scanned copy (got ${COMMITTED_HASH:-none}, expected $BLOB) — undoing" >&2
+  # CAS-guarded undo (see above): never reset a commit that isn't ours.
+  git -C "$REPO_ROOT" update-ref -m "publish-scanned-handoff: undo $REL_PATH" HEAD "$PARENT" "$COMMIT" \
+    || echo "publish-scanned-handoff: HEAD advanced past the bad commit — manual review required" >&2
   # Re-stage the known-clean scanned blob so a later commit still has it
   # ready — never leave post-mismatch (potentially tampered) bytes staged.
   git -C "$REPO_ROOT" update-index --add --cacheinfo 100644,"$BLOB","$REL_PATH"
