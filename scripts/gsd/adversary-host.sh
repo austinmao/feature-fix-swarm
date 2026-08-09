@@ -145,7 +145,12 @@ EOF
     : "$ignored"
     adversary_invoke_model_ladder "$exact_host" "$timeout_s" "$preferred_model" "$preferred_effort" "$prompt" "" "" "$preferred_model|$preferred_effort"
     local exact_rc=$?
-    adversary_record_invocation false || return $?
+    # Record only a SUCCESSFUL invocation (mirrors the fallback path): a
+    # failed exact invocation recorded as degraded=false would inflate the
+    # denominator and dilute degraded_ratio() — the REQ-102 gate's input.
+    if [ "$exact_rc" -eq 0 ]; then
+      adversary_record_invocation false || return $?
+    fi
     return "$exact_rc"
   fi
   IFS='|' read -r fallback_model fallback_effort ignored <<EOF
