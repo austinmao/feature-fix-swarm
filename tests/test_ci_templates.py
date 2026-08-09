@@ -715,7 +715,8 @@ def test_deploy_env_binds_inputs_once(wf):
     assert env["SMOKE_TIER"] == "${{ inputs.smoke_tier }}"
     # OQ9: positional run-id for gates.py calls
     assert env["RUN_ID"] == "ffs-${{ github.run_id }}"
-    assert text.count("inputs.artifact_digest") == 3  # 2 declarations + 1 env
+    # the job env binding is the ONLY dotted inputs.artifact_digest reference
+    assert text.count("inputs.artifact_digest") == 1
 
 
 @pytest.mark.parametrize("wf", sorted(DEPLOYS))
@@ -849,10 +850,10 @@ def test_prod_rollback_emitted_never_executed():
     st = emission[0]
     env = env_map(section(st, "env", 8))
     assert env.get("PREVIOUS_DIGEST") == "${{ inputs.previous_digest }}"
-    # the env line above plus the two trigger declarations are the only refs
-    assert len(refs) == 3
-    for ln in refs:
-        assert "previous_digest:" in ln or "PREVIOUS_DIGEST:" in ln
+    # the emission step env binding is the ONLY dotted reference (input
+    # declarations use the bare key, not the dotted consumption form)
+    assert len(refs) == 1
+    assert "PREVIOUS_DIGEST:" in refs[0]
     for line in run_of(st).splitlines():
         if line.strip():
             assert re.search(
