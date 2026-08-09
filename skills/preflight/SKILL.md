@@ -32,6 +32,19 @@ never discovered at run time.
    - every external service the run must reach (DB, gateway, deploy target,
      MCP server), each as a cheap real probe.
 
+   **Seed from the environment registry** (REQ-401 Seam 2): when
+   `config/environments.yaml` exists, run
+
+   ```bash
+   bash scripts/gsd/env-registry.sh seed
+   ```
+
+   It emits candidate rows (names only — every `secret_names` entry as an
+   env row, every non-`none` `base_url` as a cheap probe row) as a JSON
+   array on stdout and writes nothing. Merge them into the authored
+   manifest yourself — additive, never authoritative: per the scan rule
+   below, the authored manifest is the contract.
+
    ```json
    [
      {"kind": "env",   "name": "PGHOST"},
