@@ -6,6 +6,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib-lock.sh"
 . "$SCRIPT_DIR/adversary-host.sh"
 . "$SCRIPT_DIR/model-equivalents.sh"
 
@@ -62,6 +63,19 @@ else
   DEFAULT_RUN_STATE_DIR="$REPO_ROOT/.planning/run-state"
 fi
 unset _git_common
+
+# A drive launched by this runner carries GSD_ACTIVE_DRIVE=1. A headless
+# agent inside that drive re-invoking gsd-run.sh (observed on spec-008
+# phase 1: the codex agent re-ran the runner instead of executing the
+# phase workflow, then read the single-flight refusal as a blocker —
+# sandboxed kill -0 cannot see the live outer runner, so it looked like a
+# dead-pid-with-live-heartbeat foreign owner) gets an INSTRUCTIVE refusal
+# before any gate, probe, or state mutation, instead of a confusing lease
+# error.
+if [ "${GSD_ACTIVE_DRIVE:-0}" = "1" ]; then
+  echo "gsd-run: NESTED-INVOCATION refused — this shell is already inside the active runner's drive session. The runner has already run the ownership gate and plan wall for this phase; execute the phase workflow directly per the skill instructions (spawn the plan executors). Never re-invoke gsd-run.sh from inside a drive." >&2
+  exit 64
+fi
 
 # gsd's mempalace commands call a bare `mempalace` binary in headless mode.
 export PATH="$REPO_ROOT/scripts/gsd:$PATH"
@@ -235,7 +249,13 @@ if [ "$GSD_SKILL_NAME" = gsd-resume-work ]; then
   RESUME_REQUESTED=1
 elif [ -f "$RUN_TUPLE_FILE" ] && [ -f "$RUN_STATUS_FILE" ] \
   && grep -q '^state=failed$' "$RUN_STATUS_FILE" \
-  && grep -q "^skill=$GSD_SKILL_NAME$" "$RUN_STATUS_FILE"; then
+  && grep -q "^skill=$GSD_SKILL_NAME$" "$RUN_STATUS_FILE" \
+  && grep -q "^skill=$GSD_SKILL_NAME$" "$RUN_TUPLE_FILE"; then
+  # The tuple is what resume validates against; a tuple persisted by a
+  # DIFFERENT skill's drive is definitionally not this drive's resume state.
+  # Without this guard a pre-launch refusal (which never persists a tuple)
+  # arms resume against the previous drive's tuple and wedges every fresh
+  # launch on tuple drift.
   RESUME_REQUESTED=1
 fi
 RUN_ID="${GSD_RUN_ID:-}"
@@ -250,6 +270,33 @@ if [ -n "${GSD_RUN_ID:-}" ] && [ "$_safe_run_id" != "$RUN_ID" ]; then
 fi
 RUN_ID="$_safe_run_id"
 unset _safe_run_id
+
+# Coord identity/config (P-22..P-31). RUN_COORD_ID is the claim key and is
+# set ONLY when the caller exported an explicit GSD_RUN_ID -- the auto-derived
+# date+pid RUN_ID (above) is unique per invocation by construction, so
+# claiming it could never return CLAIM-HELD and would buy zero collision
+# protection while showing the run as coordinated in `coord.py status`. When
+# set, RUN_COORD_ID is RUN_ID VERBATIM: never truncated, padded, lowercased
+# or otherwise rewritten to fit coord.py's own CLAIM_ID_RE (64 bytes,
+# alphanumeric-anchored) -- gsd-run.sh:246-251 above already proves RUN_ID
+# fits ITS OWN [A-Za-z0-9_.-]{1,128} superset, and coord.py's exit 2
+# propagates verbatim through the pre-existing `acquire_run_state || exit $?`
+# at the bottom of this file rather than being silently repaired here.
+RUN_COORD_GENERATION=""
+RUN_COORD_TTL=300
+COORD_PY="$SCRIPT_DIR/../coord/coord.py"
+RUN_COORD_ID=""
+[ -z "${GSD_RUN_ID:-}" ] || RUN_COORD_ID="$RUN_ID"
+# Exported only on coordinated runs (P4-W5): an uncoordinated drive's child
+# env stays byte-identical to pre-coordination behavior.
+if [ -n "$RUN_COORD_ID" ]; then
+  export FFS_RUN_ID="$RUN_ID"
+  # The long-lived runner process is the claim's anchor, never a transient
+  # command-substitution subshell (which os.getppid() would otherwise resolve
+  # to and which is already dead by the time a peer checks staleness).
+  export FFS_COORD_ANCHOR_PID="$$"
+fi
+
 RUN_WORKTREE_ROOT="$PROJECT_PRIMARY_ROOT/.claude/worktrees/$RUN_ID"
 CODEX_RUNTIME_HOME=""
 CODEX_CLI_VERSION=""
@@ -262,6 +309,7 @@ BUNDLE_HASH=""
 FFS_SKILL_HASH=""
 SANDBOX_GRANT_CONSUMPTION="none"
 ADVERSARY_DEGRADED=false
+RUNSTORE_ID=""
 SELECTED_CODEX_MODEL=""
 SELECTED_CODEX_EFFORT=""
 SELECTED_CLAUDE_MODEL=""
@@ -283,6 +331,98 @@ write_run_status() {
   atomic_replace "$tmp" "$RUN_STATUS_FILE"
 }
 
+run_state_cli() {
+  PYTHONPATH="$SCRIPT_DIR/../../lib${PYTHONPATH:+:$PYTHONPATH}" python3 -m run_state.cli "$@"
+}
+
+budget_prepare_mapping() {
+  [ -n "${GSD_RUN_ID:-}" ] || return 0
+  # Budget/mapping semantics exist only for LEDGER-shaped run ids (must
+  # mirror gates.py LEDGER_RUN_ID_PAT). A fixture name or this script's own
+  # date-PID fallback id has no grant/budget ledger, so there is nothing to
+  # map or account — skip silently rather than refusing the drive (first
+  # integration run: every non-ledger run exited 78 on
+  # RUN-MAPPING-REJECTED). Run-state/mapping failure for a VALID ledger id
+  # below stays fail-closed.
+  [[ "$GSD_RUN_ID" =~ ^(spec-[0-9]{3}|adhoc-[a-z0-9][a-z0-9-]*|run-[0-9]+)$ ]] || return 0
+  local started gates existing
+  gates="$SCRIPT_DIR/../../lib/gates.py"
+  # A relaunch of the same ledger run (deviation checkpoint, mid-phase
+  # session end) reuses the mapped runstore: one ledger run owns exactly one
+  # runstore across drives, and token accounting stays cumulative. A fresh
+  # record per drive would either die on RUN-MAPPING-CONFLICT (second drive
+  # of phase 2 wedged on this) or fragment the budget across runstores.
+  if existing="$(python3 "$gates" map-run --ledger-run-id "$GSD_RUN_ID" --get 2>/dev/null)" && [ -n "$existing" ]; then
+    local record
+    if record="$(run_state_cli status "$existing" 2>/dev/null)"; then
+      # A runstore that already crossed its budget must not launch another
+      # drive: the crossing wrote its BUDGET-BREACH/quarantine mark, and the
+      # cwd-relative status file cannot carry that refusal across checkouts.
+      # The durable used-vs-budget comparison is the launch-time gate.
+      if ! printf '%s' "$record" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+b, u = r.get("tokens_budget"), (r.get("tokens_used") or 0)
+sys.exit(1 if (b is not None and u >= b) else 0)'; then
+        echo "gsd-run: BUDGET-BREACHED: mapped runstore '$existing' has exhausted its token budget — refusing relaunch (quarantined)" >&2
+        return 78
+      fi
+      RUNSTORE_ID="$existing"
+      return 0
+    fi
+    echo "gsd-run: BUDGET-MAPPING-FAILED: mapped runstore '$existing' is unreadable — refusing a fresh start that would orphan its accounting" >&2
+    return 78
+  fi
+  local -a args=(start --skill fix --objective "$GSD_SKILL_NAME" --worktree "$RUN_WORKTREE_ROOT")
+  [ -z "${GSD_TOKEN_BUDGET:-}" ] || args+=(--tokens "$GSD_TOKEN_BUDGET")
+  started="$(run_state_cli "${args[@]}" 2>&1)" || {
+    echo "gsd-run: BUDGET-MAPPING-FAILED: cannot create run-state record" >&2; return 78; }
+  RUNSTORE_ID="$(printf '%s' "$started" | python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' 2>/dev/null)" || return 78
+  python3 "$gates" map-run --ledger-run-id "$GSD_RUN_ID" --runstore-id "$RUNSTORE_ID" >/dev/null || {
+    echo "gsd-run: BUDGET-MAPPING-FAILED: cannot persist ledger mapping" >&2; return 78; }
+}
+
+budget_account_tail() {
+  local capture="$1" tokens update rc
+  [ -n "$RUNSTORE_ID" ] || return 0
+  # Two anchored trailer shapes, last occurrence in the 10-line tail wins:
+  # single-line 'tokens used: N' AND the live codex CLI's two-line form —
+  # 'tokens used' followed by a comma-grouped count on the next line (the
+  # colon-only parse WARNed BUDGET-ACCOUNTING-UNAVAILABLE on every real
+  # drive). Mid-stream trailer-shaped text stays unread: only the tail.
+  tokens="$(tail -n 10 "$capture" | python3 -c '
+import re, sys
+lines = [l.rstrip("\n") for l in sys.stdin]
+val = None
+for i, l in enumerate(lines):
+    m = re.fullmatch(r"tokens used:?\s*([0-9][0-9,]*)?\s*", l)
+    if not m:
+        continue
+    if m.group(1):
+        val = m.group(1)
+    elif i + 1 < len(lines):
+        m2 = re.fullmatch(r"\s*([0-9][0-9,]*)\s*", lines[i + 1])
+        if m2:
+            val = m2.group(1)
+print(val.replace(",", "") if val else "")
+')"
+  if [ -z "$tokens" ]; then
+    echo "gsd-run: WARN BUDGET-ACCOUNTING-UNAVAILABLE: no parseable token trailer" >&2
+    return 0
+  fi
+  update="$(run_state_cli update "$RUNSTORE_ID" --tokens "$tokens" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] || { [ -n "$update" ] && ! printf '%s\n' "$update" | grep -Eq '^BUDGET-BREACH: [0-9a-f]{12} [0-9]+ [0-9]+$'; }; then
+    # Empty output is the normal non-breach result; malformed non-empty output
+    # is observable but must not rewrite a successful drive outcome.
+    if [ "$rc" -ne 0 ]; then echo "gsd-run: WARN BUDGET-ACCOUNTING-FAILED: cmd_update rc=$rc" >&2; fi
+    return 0
+  fi
+  if printf '%s\n' "$update" | grep -q '^BUDGET-BREACH:'; then
+    echo "gsd-run: BUDGET-BREACH: quarantining subsequent launches" >&2
+    write_run_status quarantined 0 || return 1
+  fi
+}
+
 atomic_replace() {
   python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
 }
@@ -296,164 +436,183 @@ write_heartbeat() {
   fi
 }
 
-file_epoch() {
-  local value
-  value="$(stat -f %m "$1" 2>/dev/null || true)"
-  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    value="$(stat -c %Y "$1" 2>/dev/null || true)"
+# coord_claim_run (P-22, P-24, P-25, P-28). Called INSIDE acquire_run_state,
+# after the run-state pidfile ownership confirmation and BEFORE the heartbeat
+# subshell forks, so the fork's copy of RUN_COORD_GENERATION is already
+# populated when the subshell is created (P-28's whole read-side proof).
+coord_claim_run() {
+  # FIRST: coord.py absent -> silent no-op, no stdout, no stderr (P-25
+  # fail-soft). Probing RUN_COORD_ID first would print a new stderr line in
+  # every coord-less repo and break "byte-identical to today".
+  [ -f "$COORD_PY" ] || return 0
+  # SECOND: coord layer present but no explicit GSD_RUN_ID -> no claim is
+  # attempted, one stderr notice naming the remedy (P-22/P-23). The 31+
+  # pre-existing cases run with no GSD_RUN_ID; this order keeps them silent.
+  if [ -z "$RUN_COORD_ID" ]; then
+    echo "gsd-run: automatic coord claim skipped (no explicit GSD_RUN_ID exported); export a spec-stable GSD_RUN_ID or claim manually per docs/coordination.md" >&2
+    return 0
   fi
-  [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value"
-}
-
-claim_pidfile() {
-  local claimed_epoch
-  claimed_epoch="$(date +%s)"
-  (
-    set -C
-    {
-      printf '%s\n' "$$"
-      printf 'machine=%s\n' "$RUN_MACHINE_ID"
-      printf 'claimed_epoch=%s\n' "$claimed_epoch"
-    } > "$RUN_PID_FILE"
-  ) 2>/dev/null
-}
-
-foreign_lease_epoch() {
-  local claimed="$1" heartbeat best=0
-  heartbeat="$(file_epoch "$RUN_HEARTBEAT_FILE" 2>/dev/null || true)"
-  [[ "$claimed" =~ ^[0-9]+$ ]] && best="$claimed"
-  if [[ "$heartbeat" =~ ^[0-9]+$ ]] && [ "$heartbeat" -gt "$best" ]; then
-    best="$heartbeat"
+  local output rc
+  output="$(python3 "$COORD_PY" claim "$RUN_COORD_ID" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    RUN_COORD_GENERATION="$(printf '%s\n' "$output" | sed -n 's/^CLAIM-OK generation=\([0-9]*\)$/\1/p' | head -1)"
+    # ONE extra subprocess, at acquire only, never per tick: read the
+    # claim's OWN ttl_secs (idempotent re-claims and manual --ttl grants
+    # carry it forward) rather than assuming DEFAULT_TTL_SECS, which is
+    # what P-24b's staleness budget below is measured against.
+    local status_line claim_ttl
+    status_line="$(python3 "$COORD_PY" status 2>/dev/null | grep -F "claim:$RUN_COORD_ID ")"
+    claim_ttl="$(printf '%s\n' "$status_line" | sed -n 's/.*ttl_secs=\([0-9]*\).*/\1/p' | head -1)"
+    if [ -n "$claim_ttl" ]; then
+      RUN_COORD_TTL="$claim_ttl"
+    else
+      echo "gsd-run: could not read claim ttl_secs from coord status; using default ${RUN_COORD_TTL}s" >&2
+    fi
+    return 0
   fi
-  [ "$best" -gt 0 ] && printf '%s\n' "$best"
+  # Never remap a coord exit code to gsd-run.sh's own 75, and never retry
+  # with a modified id -- the caller's exact value already went to coord.py.
+  echo "gsd-run: coord claim failed for $RUN_COORD_ID (rc=$rc): $output" >&2
+  case "$rc" in
+    2) echo "gsd-run: id rejected by coord.py's CLAIM_ID_RE (alphanumeric-anchored, 64-byte cap) -- shorten GSD_RUN_ID and retry; it is never truncated for you" >&2 ;;
+    69) echo "gsd-run: coord store unavailable -- run 'python3 scripts/coord/coord.py doctor', set FFS_COORD_MODE=off, or 'python3 -m pip install --requirement requirements-dev.txt'" >&2 ;;
+  esac
+  return "$rc"
 }
 
-release_reclaim_mutex() {
-  rm -f "$RUN_RECLAIM_DIR/owner"
-  rmdir "$RUN_RECLAIM_DIR" 2>/dev/null || true
+# coord_release_run (P-24). Called from cleanup_runner, on every exit path.
+coord_release_run() {
+  [ -f "$COORD_PY" ] || return 0
+  # Guards implied ownership: RUN_COORD_GENERATION is non-empty only if
+  # coord_claim_run succeeded, which only runs after acquire_run_state's
+  # pidfile ownership confirmation succeeded -- so a second entry (double
+  # cleanup_runner) or an entry by a run that never claimed is a no-op.
+  [ -n "$RUN_COORD_GENERATION" ] || return 0
+  python3 "$COORD_PY" release "$RUN_COORD_ID" --generation "$RUN_COORD_GENERATION" >/dev/null 2>&1 || true
+  RUN_COORD_GENERATION=""
+}
+
+# coord_renew_run (P-24, P-24b, P-26, P-28). Called every heartbeat tick from
+# INSIDE the existing heartbeat subshell -- one call serves both REQ-11's
+# renew and revalidate clauses; no separate claim-check subprocess is added.
+# Local function-return codes only -- NEVER a process exit code and NEVER
+# coord.py's own 0/2/3/4/64/69/75/78 contract -- picked well outside that
+# range so a later reader cannot mistake one for the process exit table:
+#   0  = renew reached the store and succeeded
+#   90 = DETECTED revocation (coord.py claim-renew returned 3 or 4)
+#   91 = DEGRADED: any other coord.py failure, tolerated under P-24b's budget
+# Collapsing 90/91 into a shared "return 0" would make the staleness budget
+# below unmeasurable -- a tolerated failure must never look like a success.
+coord_renew_run() {
+  [ -f "$COORD_PY" ] || return 0
+  # Empty generation only happens for a P-22 no-claim or P-25 no-coord run,
+  # where the heartbeat still ticks but there is no claim to renew or go
+  # stale -- never true for a claimed run, since Task 1's claim call site
+  # runs before this subshell forks and the fork copies the populated value.
+  [ -n "$RUN_COORD_GENERATION" ] || return 0
+  local output rc
+  output="$(python3 "$COORD_PY" claim-renew "$RUN_COORD_ID" --generation "$RUN_COORD_GENERATION" 2>&1)"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3|4)
+      echo "gsd-run: CLAIM-SUPERSEDED renewing $RUN_COORD_ID (coord exit $rc)" >&2
+      printf '%s\n' "$output" >&2
+      return 90
+      ;;
+    *)
+      echo "gsd-run: coord claim-renew warning for $RUN_COORD_ID (rc=$rc); tolerating within the staleness budget" >&2
+      printf '%s\n' "$output" >&2
+      return 91
+      ;;
+  esac
 }
 
 acquire_run_state() {
-  local live_pid="" owner_machine="" claimed_epoch="" heartbeat_epoch=""
-  local heartbeat_secs lease_secs reclaim_lease_secs reclaim_epoch now age
-  local attempt=0 owns_reclaim=0 state_path
   [ ! -L "$RUN_STATE_DIR" ] || {
     echo "gsd-run: refusing symlinked run-state directory: $RUN_STATE_DIR" >&2
-    return 75
+    return 78
   }
   mkdir -p "$RUN_STATE_DIR"
-  for state_path in "$RUN_PID_FILE" "$RUN_STATUS_FILE" "$RUN_HEARTBEAT_FILE" "$RUN_RECLAIM_DIR"; do
-    [ ! -L "$state_path" ] || {
-      echo "gsd-run: refusing symlinked run-state path: $state_path" >&2
-      return 75
-    }
-  done
+  ffs_lock_acquire "$RUN_PID_FILE" "$RUN_HEARTBEAT_FILE" "$RUN_RECLAIM_DIR" \
+    "$RUN_MACHINE_ID" "${GSD_FOREIGN_LEASE_SECS:-120}" "${GSD_RECLAIM_LEASE_SECS:-30}" \
+    "gsd-run" "$RUN_STATUS_FILE" || return $?
+  RUN_STATE_OWNED=1
 
-  lease_secs="${GSD_FOREIGN_LEASE_SECS:-120}"
-  case "$lease_secs" in ''|*[!0-9]*|0) lease_secs=120 ;; esac
-  reclaim_lease_secs="${GSD_RECLAIM_LEASE_SECS:-30}"
-  case "$reclaim_lease_secs" in ''|*[!0-9]*|0) reclaim_lease_secs=30 ;; esac
-
-  # The pidfile is the ownership primitive: noclobber performs an atomic
-  # exclusive create, so contenders can never observe an empty owner lock.
-  # A short-lived reclaim mutex only serializes stale-owner removal.
-  while [ "$attempt" -lt 20 ]; do
-    attempt=$((attempt + 1))
-    if [ -d "$RUN_RECLAIM_DIR" ]; then
-      reclaim_epoch="$(file_epoch "$RUN_RECLAIM_DIR" 2>/dev/null || true)"
-      now="$(date +%s)"
-      if [[ "$reclaim_epoch" =~ ^[0-9]+$ ]] \
-         && [ $((now - reclaim_epoch)) -gt "$reclaim_lease_secs" ]; then
-        release_reclaim_mutex
-        continue
-      fi
-      sleep 0.05
-      continue
-    fi
-    if claim_pidfile; then
-      RUN_STATE_OWNED=1
-      break
-    fi
-    [ ! -L "$RUN_PID_FILE" ] || {
-      echo "gsd-run: refusing symlinked run-state path: $RUN_PID_FILE" >&2
-      return 75
-    }
-    live_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-    owner_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    claimed_epoch="$(sed -n 's/^claimed_epoch=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    if { [ -z "$owner_machine" ] || [ "$owner_machine" = "$RUN_MACHINE_ID" ]; } \
-       && [[ "$live_pid" =~ ^[0-9]+$ ]] && kill -0 "$live_pid" 2>/dev/null; then
-      echo "gsd-run: active drive already owns $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
-      return 75
-    fi
-    if [ -n "$owner_machine" ] && [ "$owner_machine" != "$RUN_MACHINE_ID" ]; then
-      heartbeat_epoch="$(foreign_lease_epoch "$claimed_epoch" 2>/dev/null || true)"
-      now="$(date +%s)"
-      if [[ "$heartbeat_epoch" =~ ^[0-9]+$ ]]; then
-        age=$((now - heartbeat_epoch))
-        if [ "$age" -le "$lease_secs" ]; then
-          echo "gsd-run: foreign owner holds a fresh lease on $RUN_PID_FILE (pid=$live_pid machine=$owner_machine age=${age}s); refusing duplicate launch" >&2
-          return 75
-        fi
-      fi
-    fi
-
-    if ! mkdir "$RUN_RECLAIM_DIR" 2>/dev/null; then
-      sleep 0.05
-      continue
-    fi
-    owns_reclaim=1
-    printf '%s\nmachine=%s\n' "$$" "$RUN_MACHINE_ID" > "$RUN_RECLAIM_DIR/owner"
-
-    # Re-read under the reclaim mutex. Never remove an owner that became
-    # live or refreshed its foreign-machine lease after the first read.
-    live_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-    owner_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    claimed_epoch="$(sed -n 's/^claimed_epoch=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    if { [ -z "$owner_machine" ] || [ "$owner_machine" = "$RUN_MACHINE_ID" ]; } \
-       && [[ "$live_pid" =~ ^[0-9]+$ ]] && kill -0 "$live_pid" 2>/dev/null; then
-      release_reclaim_mutex
-      echo "gsd-run: active drive already owns $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
-      return 75
-    fi
-    if [ -n "$owner_machine" ] && [ "$owner_machine" != "$RUN_MACHINE_ID" ]; then
-      heartbeat_epoch="$(foreign_lease_epoch "$claimed_epoch" 2>/dev/null || true)"
-      now="$(date +%s)"
-      if [[ "$heartbeat_epoch" =~ ^[0-9]+$ ]] && [ $((now - heartbeat_epoch)) -le "$lease_secs" ]; then
-        release_reclaim_mutex
-        echo "gsd-run: foreign owner holds a fresh lease on $RUN_PID_FILE (pid=$live_pid machine=$owner_machine); refusing duplicate launch" >&2
-        return 75
-      fi
-    fi
-    rm -f "$RUN_PID_FILE"
-    if claim_pidfile; then
-      RUN_STATE_OWNED=1
-      release_reclaim_mutex
-      owns_reclaim=0
-      break
-    fi
-    release_reclaim_mutex
-    owns_reclaim=0
-  done
-
-  [ "$RUN_STATE_OWNED" -eq 1 ] || {
-    [ "$owns_reclaim" -eq 0 ] || release_reclaim_mutex
-    echo "gsd-run: run-state ownership remained contended; refusing duplicate launch" >&2
-    return 75
-  }
-
+  local heartbeat_secs
+  # Lock claim/reclaim/lease checks live exclusively in lib-lock.sh.
   write_heartbeat || return 1
   write_run_status probing
   heartbeat_secs="${GSD_HEARTBEAT_SECS:-15}"
   case "$heartbeat_secs" in ''|*[!0-9]*|0) heartbeat_secs=15 ;; esac
+  # AFTER the pidfile ownership confirmation above (a losing pidfile
+  # contender already returned 75 and never reaches here) and BEFORE the
+  # heartbeat subshell forks below -- a claim taken after the fork would
+  # leave the subshell's copy of RUN_COORD_GENERATION empty for the run's
+  # whole life (P-28). `return $?` (never `exit`) lets the pre-existing
+  # `acquire_run_state || exit $?` propagate coord.py's own code verbatim.
+  coord_claim_run || return $?
   (
     heartbeat_sleep=""
     trap '[ -z "$heartbeat_sleep" ] || kill "$heartbeat_sleep" 2>/dev/null || true; exit 0' TERM INT
+    # Subshell-local, seeded to fork time -- the subshell owns the whole
+    # renew loop and is the only reader, so no write-back channel is needed
+    # (P-28). Refreshed on every successful renew below; a tolerated (P-24b
+    # DEGRADED) tick deliberately does NOT refresh it, which is what makes
+    # the staleness budget measurable.
+    _coord_last_renew_success="$(date +%s)"
     while kill -0 "$$" 2>/dev/null; do
       if ! write_heartbeat; then
         echo "gsd-run: heartbeat refresh failed; terminating drive rather than losing its lease" >&2
         kill -TERM "$$" 2>/dev/null || true
         exit 1
+      fi
+      # P-26: one claim-renew call serves both REQ-11's renew and revalidate
+      # clauses; the 15s default tick is deliberately 4x the claim's own 60s
+      # heartbeat assumption, so CLAIM-SUPERSEDED is detected strictly faster
+      # than "at the next phase boundary". No second claim-check call.
+      coord_renew_run
+      _coord_renew_rc=$?
+      if [ "$_coord_renew_rc" -eq 0 ]; then
+        _coord_last_renew_success="$(date +%s)"
+      elif [ "$_coord_renew_rc" -eq 90 ]; then
+        printf 'CLAIM-SUPERSEDED\n' > "$RUN_STATE_DIR/gsd-run.coord-abort" 2>/dev/null || true
+        echo "gsd-run: CLAIM-SUPERSEDED; terminating drive rather than continuing with a revoked claim" >&2
+        # kill -TERM "$$" alone only queues the signal for the parent shell
+        # and bash defers running its trap until the CURRENT foreground
+        # command completes -- so while the stateful drive's pipeline
+        # (run_bounded | tee) is actively running, plain "$$" would not be
+        # dead until that pipeline finishes on its own, defeating the whole
+        # point of a bounded kill. pkill -P "$$" targets ONLY $$'s direct
+        # children (the running `timeout`/tee pipe members), never siblings
+        # or ancestors, which lets that foreground pipeline unblock promptly
+        # so the pending TERM trap on $$ (below) fires within this tick.
+        # This heartbeat subshell is itself one of $$'s children, so the
+        # pkill also TERMs *us* (P4-W4). That self-signal is benign by
+        # ordering: both abort arms have already written their coord-abort
+        # sentinel and diagnostic before the pkill line, and the very next
+        # statements are kill+exit — dying to our own TERM a tick early is
+        # exactly the shutdown we were about to perform.
+        pkill -TERM -P "$$" 2>/dev/null || true
+        kill -TERM "$$" 2>/dev/null || true
+        exit 1
+      elif [ -n "$RUN_COORD_GENERATION" ]; then
+        # P-24b staleness budget: guarded on a non-empty generation so a
+        # P-22 no-claim or P-25 no-coord run (whose heartbeat still ticks)
+        # can never kill itself over a claim it never took.
+        _coord_now="$(date +%s)"
+        if [ $((_coord_now - _coord_last_renew_success)) -ge "$RUN_COORD_TTL" ]; then
+          printf 'CLAIM-STALE\n' > "$RUN_STATE_DIR/gsd-run.coord-abort" 2>/dev/null || true
+          echo "gsd-run: CLAIM-STALE; no successful claim-renew within ttl_secs=$RUN_COORD_TTL; terminating drive" >&2
+          # See the CLAIM-SUPERSEDED arm above for why pkill -P is required
+          # in addition to kill -TERM "$$" -- without it this arm cannot
+          # meet its own "dead within ttl_secs + one tick" mandate while a
+          # stateful drive is actively running in the foreground pipeline.
+          pkill -TERM -P "$$" 2>/dev/null || true
+          kill -TERM "$$" 2>/dev/null || true
+          exit 1
+        fi
       fi
       sleep "$heartbeat_secs" &
       heartbeat_sleep=$!
@@ -589,24 +748,33 @@ cleanup_codex_runtime() {
 }
 
 cleanup_runner() {
-  local rc="$?" auth_rc=0 recorded_pid="" recorded_machine=""
+  local rc="$?" auth_rc=0
   trap - EXIT
   if [ -n "$RUN_HEARTBEAT_PID" ]; then
     kill "$RUN_HEARTBEAT_PID" 2>/dev/null || true
     wait "$RUN_HEARTBEAT_PID" 2>/dev/null || true
   fi
   cleanup_codex_runtime || auth_rc=$?
+  # Every exit path unwinds through this trap (gsd-run.sh:614), so this is
+  # the one release site for normal, non-zero, timeout, external SIGTERM and
+  # the mid-run coord self-kill alike (P-24). The heartbeat subshell has
+  # already been killed above, so no renew can race this release.
+  coord_release_run
   if [ "$auth_rc" -ne 0 ]; then
     echo "gsd-run: OAuth refresh synchronization failed (rc=$auth_rc)" >&2
     [ "$rc" -ne 0 ] || rc="$auth_rc"
   fi
   if [ "$RUN_STATE_OWNED" -eq 1 ]; then
     write_run_status "$([ "$rc" -eq 0 ] && echo completed || echo failed)" "$rc"
-    [ ! -f "$RUN_PID_FILE" ] || recorded_pid="$(head -1 "$RUN_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-    [ ! -f "$RUN_PID_FILE" ] || recorded_machine="$(sed -n 's/^machine=//p' "$RUN_PID_FILE" 2>/dev/null | head -1)"
-    if [ "$recorded_pid" = "$$" ] && [ "$recorded_machine" = "$RUN_MACHINE_ID" ]; then
-      rm -f "$RUN_PID_FILE"
+    # Additive, after the write above (which atomically REPLACES the status
+    # file) -- a coord-abort token written from the heartbeat subshell would
+    # otherwise be clobbered by that replace. One-token sidecar, not a
+    # general channel, and never a route for RUN_COORD_GENERATION.
+    if [ -f "$RUN_STATE_DIR/gsd-run.coord-abort" ]; then
+      printf 'coord_abort=%s\n' "$(cat "$RUN_STATE_DIR/gsd-run.coord-abort" 2>/dev/null)" >> "$RUN_STATUS_FILE"
+      rm -f "$RUN_STATE_DIR/gsd-run.coord-abort"
     fi
+    ffs_lock_release "$RUN_PID_FILE" "$RUN_MACHINE_ID" || true
   fi
   exit "$rc"
 }
@@ -764,7 +932,7 @@ version_in_supported_codex_range() {
 $version
 EOF
   case "$major:$minor:$patch" in *[!0-9:]*|::*|*::) return 1 ;; esac
-  [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 147 ]
+  [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 148 ]
 }
 
 require_supported_codex_cli() {
@@ -777,7 +945,7 @@ require_supported_codex_cli() {
   version="$(printf '%s\n' "$raw" | sed -nE 's/.*[^0-9]([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)"
   if [ -z "$version" ] || ! version_in_supported_codex_range "$version"; then
     CODEX_PREFLIGHT_FATAL=1
-    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.147.0" >&2
+    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.148.0" >&2
     return 78
   fi
   CODEX_CLI_VERSION="$version"
@@ -857,7 +1025,33 @@ prepare_codex_runtime() {
 
   network_bool=false
   [ "$NETWORK_MODE" = enabled ] && network_bool=true
-  writable_json="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1]]))' "$RUN_WORKTREE_ROOT")" || return 1
+  # P-29: also grants the shared .feature-fix-swarm subtree at the main
+  # checkout (git-common-dir's parent), which is where coord.py's store
+  # anchors (coord.py:180-189) -- NOT the run worktree -- so a headless
+  # sandboxed drive's coord writes were unconditionally denied before this
+  # line. The whole subtree is granted, not just coord/: it is gitignored
+  # (no tracked source becomes writable) and this also unblocks the sibling
+  # evidence.json write (lib/gates.py:1372) that was broken for the same
+  # reason.
+  # Spec-008 live fix: a commit inside the LINKED worktree writes git
+  # metadata OUTSIDE the worktree root — its per-worktree git dir
+  # (<common>/worktrees/<run-id>: index.lock, HEAD, logs) and the SHARED
+  # object store (<common>/objects). Without these two roots every
+  # sandboxed `git add`/`git commit` dies with "Unable to create
+  # index.lock: Operation not permitted" and the drive cannot make its
+  # RED/GREEN/SUMMARY commits. Deliberately NARROW: never the whole .git —
+  # hooks/ (arbitrary code executed by the next unsandboxed git call) and
+  # refs/ (other branches) stay non-writable.
+  # The executor also creates/advances phase branches under the gsd/*
+  # namespace (refs/heads/gsd/phase-* + their reflogs). Grant EXACTLY that
+  # namespace — pre-created here because the sandbox cannot mkdir inside
+  # the ungranted refs/heads parent — so main and every other branch ref
+  # stay non-writable.
+  mkdir -p "$GIT_COMMON_DIR/refs/heads/gsd" "$GIT_COMMON_DIR/logs/refs/heads/gsd" || return 1
+  writable_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
+    "$RUN_WORKTREE_ROOT" "$PROJECT_PRIMARY_ROOT/.feature-fix-swarm" \
+    "$GIT_COMMON_DIR/objects" "$GIT_COMMON_DIR/worktrees/$RUN_ID" \
+    "$GIT_COMMON_DIR/refs/heads/gsd" "$GIT_COMMON_DIR/logs/refs/heads/gsd")" || return 1
   {
     printf 'approval_policy = "never"\n'
     printf 'sandbox_mode = "%s"\n' "$REQUESTED_SANDBOX_MODE"
@@ -1057,6 +1251,7 @@ if [ "$_native_rc" -ne 0 ]; then
 fi
 
 ensure_run_worktree || exit $?
+budget_prepare_mapping || exit $?
 
 first="$1"
 shift
@@ -1083,7 +1278,7 @@ $CODEX_SESSION_CONTRACT"
   # Subscription-only: -u OPENAI_API_KEY mirrors the ANTHROPIC_* strip on the
   # claude branch below. Codex prefers an ambient API key over the logged-in
   # session, so an injected key would silently meter the whole drive.
-  RUN=(env -u OPENAI_API_KEY CODEX_HOME="$CODEX_RUNTIME_HOME" "$CODEX_BIN" exec
+  RUN=(env -u OPENAI_API_KEY GSD_ACTIVE_DRIVE=1 CODEX_HOME="$CODEX_RUNTIME_HOME" "$CODEX_BIN" exec
     -c "model=\"$LEAD_MODEL\""
     -c "model_reasoning_effort=\"$LEAD_EFFORT\""
     --sandbox "$REQUESTED_SANDBOX_MODE"
@@ -1104,7 +1299,7 @@ else
   persist_prelaunch_tuple "$LEAD_MODEL" "" || exit $?
   CLAUDE_ARGS=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'
     --permission-mode acceptEdits --model "$LEAD_MODEL" -p "$CMD_STR")
-  RUN=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
+  RUN=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN GSD_ACTIVE_DRIVE=1
     "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}")
 fi
 
@@ -1115,9 +1310,13 @@ fi
 # "why is this phase slow" question unanswerable.
 write_run_status running
 cd "$RUN_WORKTREE_ROOT" || exit 1
+DRIVE_CAPTURE="$(mktemp "${TMPDIR:-/tmp}/ffs-gsd-drive.XXXXXX")" || exit 1
 run_bounded "$TIMEOUT_SECS" "${RUN[@]}" </dev/null 2>&1 \
-  | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' > "$LOG_FILE")
+  | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' > "$LOG_FILE") \
+  | tee "$DRIVE_CAPTURE"
 rc="${PIPESTATUS[0]}"
+budget_account_tail "$DRIVE_CAPTURE" || { rm -f "$DRIVE_CAPTURE"; exit 1; }
+rm -f "$DRIVE_CAPTURE"
 if [ "$rc" -ne 0 ]; then
   echo "gsd-run: stateful drive failed on $SELECTED_HOST (rc=$rc); cross-vendor replay is forbidden" >&2
   echo "gsd-run: fix availability if needed, then resume on $SELECTED_HOST from .planning state; log: $LOG_FILE" >&2

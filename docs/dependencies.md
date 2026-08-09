@@ -7,8 +7,8 @@ what FFS owns from what it installs, invokes, or merely integrates with.
 
 | Component | Version policy | Ownership | Purpose |
 | --- | --- | --- | --- |
-| Claude Code or Codex CLI | At least one current supported host; Codex `>=0.137.0,<0.147.0` | User-installed | Runs the skills and agents |
-| Open GSD Core | Exact `@opengsd/gsd-core@1.9.1` | Upstream-owned; installed through GSD's installer | Plan/execute/verify orchestration, manifests, hooks, and GSD skills |
+| Claude Code or Codex CLI | At least one current supported host; Codex `>=0.137.0,<0.148.0` | User-installed | Runs the skills and agents |
+| Open GSD Core | Exact `@opengsd/gsd-core@1.10.0` | Upstream-owned; installed through GSD's installer | Plan/execute/verify orchestration, manifests, hooks, and GSD skills |
 | Node.js and npm | Node 22+, npm 10+ | User-installed | Reproducible GSD package installation |
 | Python | 3.11+ | User-installed | Installer, gates, state, and verification tools |
 | Git | Current supported release | User-installed | Source control, common-directory locks, and worktrees |
@@ -28,6 +28,26 @@ They do not ship into a consumer repository.
 | [bats-core](https://github.com/bats-core/bats-core) | Contributor-installed | User-installed | Runs `tests/bats/*.bats` — plan-wall, fence, adversary-equivalents, probe-lib |
 | [ShellCheck](https://github.com/koalaman/shellcheck) | Contributor-installed, `-S warning` at repo convention | User-installed | Lints every changed/new shell script; matches `CONTRIBUTING.md` and CI |
 | `slopcheck` | Optional | Not installed by FFS | Package-legitimacy verdict (`OK\|SUS\|SLOP`) consulted by the `feature-implement` install gate; absent binary degrades to `[ASSUMED]`, never a hard failure |
+
+## Coordination layer
+
+| Component | Version policy | Ownership | Purpose |
+| --- | --- | --- | --- |
+| [filelock](https://github.com/tox-dev/filelock) | `>=3.30,<4` (floor-plus-ceiling, not exact-pinned) | Third-party, PyPI-installed via `requirements-dev.txt` — never vendored | Cross-process/cross-session registry mutex (`filelock.FileLock`) and the process-liveness primitives (`filelock._identity.process_alive`/`process_start_token`/`host_name`) `scripts/coord/coord.py` uses to decide whether a claim's holder is provably dead |
+
+`filelock` is MIT-licensed and published by the `tox-dev` GitHub organization.
+The `>=3.30,<4` range deliberately departs from this file's exact-pin
+convention used elsewhere: `filelock` is the first third-party **runtime**
+(not contributor-only) Python dependency this file describes, and its
+version is *probed at runtime* by `coord.py doctor` — via `SoftFileLease`
+(added 3.30.0) and `ReadWriteLock` (added 3.21.0) symbol presence, not a
+version-string parse — rather than trusted as a hard pin. The `<4` ceiling
+guards the one private symbol `coord.py` imports
+(`filelock._identity.process_start_token`), which a major bump could remove
+without a deprecation cycle. Install via `python -m pip install --requirement
+requirements-dev.txt`; a bare `pip install filelock` is not sanctioned
+because the resolver can silently land on a pre-3.30 release that lacks the
+floor-verification symbols.
 
 ## Why GSD is a dependency instead of vendored code
 
@@ -61,7 +81,7 @@ an existing unowned destination rather than overwriting it.
 ### socratic
 
 `socratic` is installed from
-`m4vic/socratic@862b52e898134ba13ac05a43651ba8d1a7f2a28a` via
+`m4vic/socratic@8c7e1fdda5ff6f7755d4855907ddf0022a755493` via
 `scripts/install-socratic.sh`, staged by `stage_socratic()` into
 `.agents/skills/socratic` (with a `.claude/` project-scope symlink) exactly
 like `prompt-master`. Installation is default and skippable with

@@ -57,6 +57,8 @@
 # Exit: always 0.
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib-lock.sh"
 note() { echo "[run-finalizer] $*"; }
 warn() { echo "[run-finalizer] WARN: $*" >&2; }
 
@@ -66,15 +68,20 @@ warn() { echo "[run-finalizer] WARN: $*" >&2; }
 DRY=0
 PR=""
 REPO=""
+FINALIZER_RUN_ID=""
+expect_run_id=0
 for arg in "$@"; do
+  if [ "$expect_run_id" -eq 1 ]; then FINALIZER_RUN_ID="$arg"; expect_run_id=0; continue; fi
   case "$arg" in
     --dry-run) DRY=1 ;;
+    --run-id) expect_run_id=1 ;;
     -*) warn "unknown argument '$arg' — skipping"; exit 0 ;;
     *) if [ -z "$PR" ]; then PR="$arg"
        elif [ -z "$REPO" ]; then REPO="$arg"
        else warn "unexpected extra argument '$arg' — skipping"; exit 0; fi ;;
   esac
 done
+[ "$expect_run_id" -eq 0 ] || { warn "--run-id requires a value"; exit 78; }
 REPO_ARGS=()
 [ -n "$REPO" ] && REPO_ARGS=(--repo "$REPO")
 
@@ -85,6 +92,60 @@ fi
 if [ -z "$PR" ]; then
   warn "usage: run-finalizer.sh [--dry-run] <pr-number> [<owner/repo>] — skipping"
   exit 0
+fi
+
+# The dry run is mutation-free and deliberately does not contend on the real
+# per-user finisher lock.  Every non-dry invocation owns or visibly yields
+# before proof/cleanup can mutate repository state.
+FINISHER_LOCK="$HOME/.cache/feature-fix-swarm/finisher.lock"
+FINISHER_RECLAIM="$HOME/.cache/feature-fix-swarm/finisher.reclaim"
+FINISHER_MACHINE="$(hostname 2>/dev/null || uname -n)"
+FINISHER_OWNED=0
+release_finisher_lock() { [ "$FINISHER_OWNED" -eq 1 ] && ffs_lock_release "$FINISHER_LOCK" "$FINISHER_MACHINE" || true; }
+# A signaled owner must TERMINATE, never resume: with a release-only trap,
+# bash runs the handler and then continues after the interrupted command, so
+# the first finalizer kept doing cleanup WITHOUT ownership while a second
+# acquired the lock (02-VERIFICATION.md GAP 3). The handler clears every
+# trap (no re-entry), surrenders ownership, and re-raises the same signal at
+# this shell's own pid so the process dies by the signal it received —
+# status 128+N, exactly what the script did before any trap existed. The
+# always-0 tail contract is unaffected: the lock phase runs strictly before
+# the first cleanup mutation.
+die_by_signal() {
+  trap - EXIT HUP INT TERM
+  release_finisher_lock
+  kill -s "$1" $$
+}
+if [ "$DRY" -eq 0 ]; then
+  [ ! -L "$HOME/.cache/feature-fix-swarm" ] || { warn "finisher lock directory is symlinked"; exit 78; }
+  mkdir -p "$HOME/.cache/feature-fix-swarm" || { warn "could not create finisher lock directory"; exit 78; }
+  trap release_finisher_lock EXIT
+  trap 'die_by_signal HUP' HUP
+  trap 'die_by_signal INT' INT
+  trap 'die_by_signal TERM' TERM
+  wait_secs="${FINISHER_LOCK_WAIT:-60}"
+  case "$wait_secs" in *[!0-9]*|'') wait_secs=60 ;; esac
+  started="$(date +%s)"
+  while :; do
+    lock_rc=0
+    ffs_lock_acquire "$FINISHER_LOCK" "" "$FINISHER_RECLAIM" "$FINISHER_MACHINE" 120 30 "run-finalizer" || lock_rc=$?
+    if [ "$lock_rc" -eq 0 ]; then FINISHER_OWNED=1; break; fi
+    [ "$lock_rc" -eq 75 ] || { warn "finisher lock refused (rc=$lock_rc)"; exit 78; }
+    [ $(( $(date +%s) - started )) -lt "$wait_secs" ] || {
+      event_id="${FINALIZER_RUN_ID:-${GSD_RUN_ID:-}}"
+      [ -n "$event_id" ] || event_id="unattributed"
+      event_args=(finisher-skipped --run-id "$event_id" --pr "$PR")
+      if [ "$event_id" = unattributed ]; then
+        holder_pid="$(head -1 "$FINISHER_LOCK" 2>/dev/null | tr -d '[:space:]' || true)"
+        event_args+=(--lock-path "$FINISHER_LOCK" --holder-pid "$holder_pid")
+      fi
+      PYTHONPATH="$SCRIPT_DIR/../../lib${PYTHONPATH:+:$PYTHONPATH}" python3 "$SCRIPT_DIR/../../lib/evidence_events.py" "${event_args[@]}" || { warn "finisher-skipped event write failed"; exit 78; }
+      note "finisher-skipped run_id=$event_id pr=$PR"
+      exit 0
+    }
+    sleep 1
+    unset lock_rc
+  done
 fi
 
 run() { # execute a step, or print it under --dry-run; warn-and-continue on failure
@@ -855,6 +916,18 @@ if [ -n "$_gates_py" ]; then
 fi
 # 5. stale worktree metadata
 run git worktree prune
+
+# 6. G12 seam (spec-008 REQ-701): emit the immediate digest at run end.
+# Presence-guarded so fixtures carrying only this lever stay green, and
+# fail-soft via run() — a digest failure can never change finalizer exit
+# status (digest itself exits 0 on every degraded input).
+# GATES_STORE is dropped (waiver-record.sh idiom): a worktree-scoped store
+# override was archived above, and writing the digest cursor beside it would
+# dirty a worktree this finalizer manages (M4). The run-end digest observes
+# the canonical common-dir ledger instead.
+if [ -x "$SCRIPT_DIR/digest.sh" ]; then
+  run env -u GATES_STORE bash "$SCRIPT_DIR/digest.sh" --immediate
+fi
 
 note "finalize complete (fail-soft: any WARN above needs manual attention)"
 exit 0

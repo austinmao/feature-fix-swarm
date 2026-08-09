@@ -24,6 +24,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/scripts/hooks/path-reservation-gate.sh",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

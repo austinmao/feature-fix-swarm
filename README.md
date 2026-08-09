@@ -120,7 +120,7 @@ and execution engine. It owns the `gsd-*` skills, agents, hooks, manifests,
 plan/execute/verify loop, and `.planning` state format.
 
 FFS does not fork or rewrite that engine. It exact-pins
-`@opengsd/gsd-core@1.9.1`, invokes GSD's own installer for complete Claude and
+`@opengsd/gsd-core@1.10.0`, invokes GSD's own installer for complete Claude and
 Codex profiles, and layers controls around it:
 
 | GSD provides | FFS adds |
@@ -140,7 +140,7 @@ on integration, safety, and proof.
 | Dependency | Required? | Installed by FFS? | Why it exists |
 | --- | ---: | ---: | --- |
 | Claude Code or Codex CLI | One required | No | The interactive agent host |
-| Open GSD Core `1.9.1` | Yes, exact pin | Yes, through its upstream installer | Planning, execution, verification, and runtime manifests |
+| Open GSD Core `1.10.0` | Yes, exact pin | Yes, through its upstream installer | Planning, execution, verification, and runtime manifests |
 | Python 3.11+, Node 22+/npm 10+, Git, Bash/zsh | Yes | No | Installer, gates, tests, and worktrees |
 | `prompt-master` at commit `d15eab…` | Yes | Yes, pinned and compatibility-patched | Host-aware prompt refinement without copying an unreviewed moving branch |
 | `socratic` at commit `862b52…` | Yes | Yes, pinned by default; skippable with `FFS_SKIP_SOCRATIC=1` | Pinned question bank the spec, plan-wall, plan-decompose, and review-gate seams slice from |
@@ -197,7 +197,7 @@ the legacy alias bridge.
 
 - macOS with Bash or zsh
 - Ubuntu with Bash
-- Codex CLI `>=0.137.0,<0.147.0` (`0.146.x` is the tested line)
+- Codex CLI `>=0.137.0,<0.148.0` (`0.146.x` and `0.147.x` are the tested lines)
 - Claude Code using the corresponding host-native skills
 - Windows is not currently supported
 
@@ -215,6 +215,7 @@ skill hash, or Codex CLI version drift is an actionable failure.
 | [Pipeline](docs/pipeline.md) | How do the stages connect? |
 | [Commands](docs/commands.md) | What commands and gates are available? |
 | [Configuration](docs/configuration.md) | What can I tune? |
+| [Coordination](docs/coordination.md) | How do sessions avoid colliding on the same spec? |
 | [Model tiers](docs/model-tiers.md) | Which model runs what, and how is provenance enforced? |
 | [Browser proof](docs/browser-proof.md) | What counts as browser-QA evidence? |
 | [Promotion protocol](docs/promotion-protocol.md) | How does staging evidence authorize production? |

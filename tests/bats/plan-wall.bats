@@ -7,16 +7,35 @@
 bats_require_minimum_version 1.5.0
 
 setup() {
-  LEVER="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/gsd/plan-wall.sh"
-  FENCE_LEVER="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/gsd/security-model-fence.sh"
-  REAL_GATES_PY="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/lib/gates.py"
-  REAL_SCHEMA="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/schemas/review-finding.schema.json"
+  ROOT_REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  REAL_GATES_PY="$ROOT_REPO/lib/gates.py"
+  REAL_SCHEMA="$ROOT_REPO/schemas/review-finding.schema.json"
   REPO="$BATS_TEST_TMPDIR/repo"
   # highest-priority GATES_PY candidate — guarantees the fixture's own (v2)
   # gates.py wins over any machine-global FFS install, on any test runner.
-  mkdir -p "$REPO/packages/feature-fix-swarm/lib" "$REPO/schemas" "$REPO/bin"
+  mkdir -p "$REPO/packages/feature-fix-swarm/lib" "$REPO/schemas" "$REPO/bin" "$REPO/lib"
   cp "$REAL_GATES_PY" "$REPO/packages/feature-fix-swarm/lib/gates.py"
+  # waiver-record.sh (see LEVER below) hardcodes $REPO_ROOT/lib/gates.py with
+  # no candidate search, so the fixture needs its own copy at that exact path
+  # too — independent of plan-wall.sh's own GATES_PY resolution above.
+  cp "$REAL_GATES_PY" "$REPO/lib/gates.py"
+  # adversary-host.sh resolves lib/model_requests.py script-relatively
+  # (../../lib from the COPIED scripts/gsd); without it every reviewer rung
+  # fails typed-request resolution and the wall records WALL-UNREVIEWED
+  # instead of ever dispatching the stub.
+  cp "$ROOT_REPO/lib/model_requests.py" "$REPO/lib/model_requests.py"
+  cp "$ROOT_REPO/lib/model_requests.py" "$REPO/packages/feature-fix-swarm/lib/model_requests.py"
   cp "$REAL_SCHEMA" "$REPO/schemas/review-finding.schema.json"
+  # LEVER/FENCE_LEVER run from a fixture-local COPY of scripts/gsd, not the
+  # real repo checkout: both scripts resolve sibling calls (waiver-record.sh)
+  # via their own $SCRIPT_DIR, which is script-relative and cannot be
+  # redirected by GATES_STORE or cwd — running the real repo's copy would
+  # make PLAN_WALL=off write into the developer's real canonical evidence
+  # store no matter what this fixture sets up (see WR-140).
+  cp -r "$ROOT_REPO/scripts" "$REPO/scripts"
+  chmod +x "$REPO"/scripts/gsd/*.sh "$REPO"/scripts/hooks/*.sh 2>/dev/null || true
+  LEVER="$REPO/scripts/gsd/plan-wall.sh"
+  FENCE_LEVER="$REPO/scripts/gsd/security-model-fence.sh"
   cd "$REPO"
   git init -q -b main
   git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -376,7 +395,17 @@ EOF
 
 # ── queue I/O fail-closed (fault injection) ─────────────────────────────────
 
-@test "queue I/O failure (unwritable store) -> blocked verdict + queue_error stamp" {
+@test "queue I/O failure (unwritable store) -> fail-closed refusal, never a silent unvalidated pass" {
+  # Contract history: pre-G4 this asserted `blocked` + queue_error — the
+  # reviewer ran and only the findings-queue write failed. Since phase-1's
+  # G4 degradation accounting (spec-008), every rung records its own
+  # degradation note in the SAME store fail-closed, so an unusable store
+  # now kills every rung BEFORE any review can happen: the wall terminates
+  # WALL-UNREVIEWED with the store failure auditable in the rung trail.
+  # Either way the invariant under test holds: a store I/O failure is
+  # fail-closed (nonzero, no pass verdict), never silently unvalidated.
+  # The queue_error stamp path still exists for a store that becomes
+  # unwritable only after review succeeds.
   stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"leak"}]'
   export GATES_STORE="$REPO/.feature-fix-swarm/evidence.json"
   mkdir -p "$(dirname "$GATES_STORE")"
@@ -386,8 +415,12 @@ EOF
   chmod 644 "$GATES_STORE"
   [ "$status" -eq 1 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.verdict' "$record")" = "blocked" ]
-  [ "$(jq -r '.queue_error' "$record")" = "true" ]
+  verdict="$(jq -r '.verdict' "$record")"
+  [ "$verdict" = "WALL-UNREVIEWED" ] || [ "$verdict" = "blocked" ]
+  [[ "$verdict" != *pass* ]]
+  # the store failure is auditable: either the queue_error stamp (blocked
+  # path) or the per-rung degradation-note rejection (unreviewed path)
+  jq -e '(.queue_error == true) or ((.rung_trail | join(" ")) | contains("NOTE-DEGRADED-REJECTED"))' "$record"
 }
 
 # ── fresh-context contract: payload = brief + plan content ONLY ────────────

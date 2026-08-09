@@ -111,6 +111,15 @@ def test_update_state_complete_sets_state(tmp_path: Path) -> None:
     assert json.loads(status.stdout)["state"] == "complete"
 
 
+def test_update_tokens_emits_a_single_machine_breach_line(tmp_path: Path) -> None:
+    db = tmp_path / "runs.db"
+    env = {"RUN_STATE_DB": str(db)}
+    run_id = json.loads(_run(["start", "--skill", "fix", "--objective", "x", "--tokens", "10"], env_extra=env).stdout)["run_id"]
+    assert _run(["update", run_id, "--tokens", "9"], env_extra=env).stdout == ""
+    assert _run(["update", run_id, "--tokens", "1"], env_extra=env).stdout == f"BUDGET-BREACH: {run_id} 10 10\n"
+    assert _run(["update", run_id, "--tokens", "1"], env_extra=env).stdout == ""
+
+
 def test_feature_audit_pass_keeps_state_active(tmp_path: Path) -> None:
     """v3.0: feature audit pass keeps state=active (canary still pending)."""
     db = tmp_path / "runs.db"

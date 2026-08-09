@@ -42,6 +42,12 @@ the investigation and the fix-specific QA loop.
 
 ## Workflow
 
+Cross-session coordination (spec-009) is inherited, not re-implemented: the
+execute step routes through `/feature-implement --adhoc`, whose Step 1.5
+claim-or-stop claims `adhoc-<slug>` (interactive) or defers to `gsd-run.sh`'s
+own claim (headless). If that claim is REFUSED, another live session owns this
+fix — stop and inspect `python3 scripts/coord/coord.py status`.
+
 ### Step 1: Investigate (root cause, not symptom)
 
 Invoke `/investigate` (or trace inline for small bugs): reproduce, grep every caller

@@ -46,6 +46,10 @@ PLAN_FILE="$PLAN_DIR/${PLAN_FILE##*/}"
 PLAN_ROOT="$(git -C "$PLAN_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$PLAN_DIR")"
 
 if [ "${PLAN_ADVERSARY:-on}" = "off" ]; then
+  if ! "$SCRIPT_DIR/waiver-record.sh" "plan-adversary" "PLAN_ADVERSARY=off"; then
+    echo "[plan-adversary] WAIVER-UNRECORDED — refusing disabled bypass" >&2
+    exit 1
+  fi
   echo "[plan-adversary] disabled (PLAN_ADVERSARY=off) — skipped"
   exit 0
 fi
@@ -114,6 +118,7 @@ $PLAN_CONTENT
 
 Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, unstated assumptions, missing or unfalsifiable acceptance criteria, sequencing hazards (a later task invalidating an earlier one), and security holes in the approach itself. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
 
+ADVERSARY_SEAM=plan-adversary; export ADVERSARY_SEAM
 OUTPUT="$(cd "$PLAN_ROOT" && adversary_invoke_typed_request \
   "$ADVERSARY_KIND" "$FALLBACK_KIND" "${PLAN_ADVERSARY_TIMEOUT:-480}" \
   "$MODEL_REQUEST" "$PROMPT" 2>&1)"

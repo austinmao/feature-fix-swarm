@@ -7,6 +7,53 @@ setup() {
   LIB="$ROOT/scripts/gsd/adversary-host.sh"
   unset FFS_HOST CODEX_SESSION_ID CODEX_THREAD_ID CODEX_AGENT CODEX_CI
   unset CLAUDE_SESSION_ID CLAUDE_CODE
+  unset GSD_RUN_ID GATES_STORE
+}
+
+@test "tripped rungs are skipped centrally while preserving the final candidate" {
+  store="$BATS_TEST_TMPDIR/evidence.json"
+  rung="codex:gpt-5.6-terra:medium"
+  for _ in $(seq 1 20); do
+    GATES_STORE="$store" python3 "$ROOT/lib/gates.py" note-degraded rung-attempt --rung-id "$rung" --outcome fail >/dev/null
+  done
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/recording-codex" <<EOF
+#!/usr/bin/env bash
+last=""; model=""
+while [ "\$#" -gt 0 ]; do case "\$1" in -c) model="\$2"; shift 2;; -o|--output-last-message) last="\$2"; shift 2;; *) shift;; esac; done
+printf '%s\n' "\$model" >> "$BATS_TEST_TMPDIR/models"
+printf 'OK\n' > "\$last"
+EOF
+  chmod +x "$STUB_DIR/recording-codex"
+  run env GATES_STORE="$store" FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=recording-codex PATH="$STUB_DIR:$PATH" bash -c '. "$1"; rungs="gpt-5.6-terra|medium
+gpt-5.6-luna|low"; adversary_invoke_model_ladder codex 10 gpt-5.6-sol high review 5 5 "$rungs"' _ "$LIB"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"SELECTED codex gpt-5.6-terra"* ]]
+  [[ "$output" == *"SELECTED codex gpt-5.6-luna"* ]]
+}
+
+@test "a failed exact-model invocation records no invocation row" {
+  # Review-gate finding (2026-08-09): the exact-host branch recorded
+  # degraded=false even when the invocation FAILED, inflating the
+  # degraded-ratio denominator (REQ-102's prod-gate input). A failed
+  # invocation must record nothing — mirroring the fallback path.
+  store="$BATS_TEST_TMPDIR/evidence.json"
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB_DIR"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STUB_DIR/failing-codex"
+  chmod +x "$STUB_DIR/failing-codex"
+  run env GATES_STORE="$store" GSD_RUN_ID=spec-008 FFS_ADVERSARY_MODEL_PROBE=off \
+    ADVERSARY_BIN_CODEX=failing-codex PATH="$STUB_DIR:$PATH" bash -c \
+    '. "$1"; adversary_invoke_typed_request codex claude 10 "{\"kind\":\"exact\",\"name\":\"gpt-5.6-terra\"}" review' _ "$LIB"
+  [ "$status" -ne 0 ]
+  run python3 - "$store" <<'PY'
+import json, sys, os
+path = sys.argv[1]
+if os.path.exists(path):
+    data = json.load(open(path))
+    rows = data.get("_degradation", {}).get("invocations", [])
+    assert not rows, rows
+PY
+  [ "$status" -eq 0 ]
 }
 
 @test "explicit FFS_HOST wins over ambient markers" {

@@ -17,6 +17,25 @@ below is one sentence, followed by the mechanism that enforces it today.
 11. Environment drift is machine-detected on a recurring basis, not tracked from memory (Enforcement: the parity manifest and its read-only audit lever).
 12. An emergency bypass exists, is restricted to an operator, and is loudly and durably recorded (Enforcement: the evidence ledger's operator-only emergency escape, grant- and reason-gated).
 
+## Plan-wall pass policy: diminishing returns + wall-the-diff (operator decision, 2026-08-08)
+
+The plan wall (`scripts/gsd/plan-wall.sh`) no longer requires zero unresolved
+HIGH findings on plan prose — three consecutive specs (006/007/008) capped at
+their wall round limits with every finding real, narrow, and non-repeating,
+because adversarial judgment-tier review of a security-adjacent DESIGN always
+finds another legitimate contract-completeness gap in text. Two policies
+replace the 0-HIGH criterion: **(b) diminishing returns** — an unresolved
+CRITICAL always blocks; a HIGH-only round passes iff it reported strictly
+fewer new HIGH/CRITICAL findings than the previous round (durable per-round
+counts via `gates.py loop-round --note-count`; missing history is strict:
+blocked). Residual HIGHs ride into execution as pinned executor assumptions —
+left unresolved in the findings-queue and listed in the phase's
+`WALL-RESIDUALS.md`. **(c) wall the diff** — those residuals are closed at
+the executed-diff review: `review-gate-command.sh` feeds every
+`WALL-RESIDUALS.md` to the ship reviewer as review focus, where each finding
+is falsifiable against real code instead of prose. The findings-queue remains
+the authoritative residual record; the manifest is a convenience surface.
+
 ## Accepted risk: loop credential scope (operator decision, 2026-08-07)
 
 The autonomous loop's GitHub credential retains `repo` (including repo

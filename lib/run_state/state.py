@@ -193,12 +193,13 @@ class RunStore:
         finally:
             conn.close()
 
-    def inc_tokens(self, run_id: str, delta: int) -> None:
+    def inc_tokens(self, run_id: str, delta: int) -> tuple[int, int] | None:
         if delta < 0:
             raise ValueError("delta must be non-negative")
         now = _now()
         conn = sqlite3.connect(self.db_path)
         try:
+            before_row = conn.execute("SELECT tokens_used, tokens_budget FROM runs WHERE id = ?", (run_id,)).fetchone()
             conn.execute(
                 "UPDATE runs SET tokens_used = tokens_used + ?, updated_at = ? WHERE id = ?",
                 (delta, now, run_id),
@@ -207,12 +208,14 @@ class RunStore:
                 "SELECT tokens_used, tokens_budget FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
-            if row and row[1] is not None and row[0] >= row[1]:
+            crossed = bool(row and row[1] is not None and before_row[0] < row[1] <= row[0])
+            if crossed:
                 conn.execute(
                     "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'budget_limit_hit', ?, ?)",
                     (run_id, json.dumps({"tokens_used": row[0], "tokens_budget": row[1]}), now),
                 )
             conn.commit()
+            return (row[1], row[0]) if crossed else None
         finally:
             conn.close()
 
