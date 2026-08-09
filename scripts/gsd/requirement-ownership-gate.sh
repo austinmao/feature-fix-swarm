@@ -35,7 +35,10 @@ phase_number = int(sys.argv[2], 10)
 phase_id = f"{phase_number:02d}"
 planning = root / ".planning"
 roadmap_path = planning / "ROADMAP.md"
-id_re = re.compile(r"[A-Z][A-Z0-9]*-[A-Z0-9][A-Z0-9-]*")
+# Lowercase allowed in the id TAIL: spec-007 mints REQ-202a-style
+# sub-requirements; the uppercase-only tail truncated it to REQ-202 and
+# reported a phantom duplicate.
+id_re = re.compile(r"[A-Z][A-Z0-9]*-[A-Z0-9][A-Za-z0-9-]*")
 
 
 def stop(message: str) -> None:
