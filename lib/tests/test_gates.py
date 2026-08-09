@@ -4052,3 +4052,76 @@ def test_cli_sink_reason_hostile_surface_sanitized(tmp_path) -> None:
     assert "\x1b" not in line and "\r" not in line
     reason = line.split(" — ", 1)[1]
     assert len(reason) <= 200 and "remedy:" in reason
+
+
+# ── spec-007 Phase 1 Plan 02 Task 2: live AC-003 against FFS's own registry ──
+# PINNED (df81aa82): the live-registry tests live HERE, after 01-01 landed
+# the full resolver including the env-var branch.
+
+
+def test_live_ffs_registry_refuses_via_manifest_flag(tmp_path) -> None:
+    # AC-003, --manifest form: soft mode parses working-tree bytes (PD-2),
+    # so this case is runnable in ANY topology including the executor
+    # worktree — the live registry's single release/none row must refuse.
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, _registry_text("decoy", "stg-decoy"))
+    _seed_prod_ok(env, repo, surface="release")
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-release", "--artifact", _GOOD_ARTIFACT,
+                 "--manifest", str(live)],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+    assert "release" in r.stdout
+    assert "remedy:" in r.stdout
+
+
+def test_live_ffs_registry_refuses_via_default_resolution(tmp_path) -> None:
+    # AC-003, default-resolution form: derive the MAIN checkout root exactly
+    # as the resolver does (git-common-dir, parent of `.git`) and run with no
+    # flags from that root. A `__file__`-relative registry path is unusable
+    # here — from a linked worktree it lies outside the main checkout and
+    # the resolver is REQUIRED to refuse it.
+    import subprocess as _sp
+    probe = _sp.run(["git", "rev-parse", "--git-common-dir"],
+                    capture_output=True, text=True, cwd=DISPATCH_DIR)
+    assert probe.returncode == 0, probe.stderr
+    common = Path(probe.stdout.strip())
+    assert common.name == ".git", common
+    main_root = common.parent
+    rel = "config/environments.yaml"
+    main_has = _sp.run(["git", "-C", str(main_root), "show", f"HEAD:{rel}"],
+                       capture_output=True, text=True).returncode == 0
+    this_has = _sp.run(["git", "-C", str(DISPATCH_DIR.parent), "show",
+                        f"HEAD:{rel}"],
+                       capture_output=True, text=True).returncode == 0
+    if not main_has and this_has:
+        pytest.skip(
+            "pre-merge worktree topology: this checkout's HEAD carries "
+            f"{rel} but the MAIN checkout's HEAD ({main_root}) does not — "
+            "implicit resolution reads main HEAD only; the must-haves "
+            "AC-003 GATE re-runs this live post-merge")
+    if not main_has:
+        pytest.fail(
+            f"{rel} absent from BOTH main HEAD and this checkout's HEAD — "
+            "01-01 (b5c53b0) committed the registry; it has been lost")
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, main_root, surface="release")
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-release", "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env, cwd=main_root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+
+
+def test_stale_docstring_claim_absent() -> None:
+    # 01-01 removed the later-phase wiring claim from gates.py; assert it
+    # has not returned (absence only, no particular replacement wording).
+    text = (DISPATCH_DIR / "gates.py").read_text()
+    assert "wiring lands Phase 4" not in text
