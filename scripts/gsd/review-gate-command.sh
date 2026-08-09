@@ -109,6 +109,7 @@ adversary_reject_legacy_model_vars GSD_REVIEW_MODEL GSD_REVIEW_EFFORT \
 # helper gives both attempts one overall deadline and never feeds the failed
 # transcript to the fallback reviewer.
 FALLBACK_KIND="$ACTIVE_HOST"
+ADVERSARY_SEAM=review-gate; export ADVERSARY_SEAM
 OUTPUT="$(adversary_invoke_typed_request "$REVIEW_KIND" "$FALLBACK_KIND" \
   "${GSD_REVIEW_TIMEOUT:-600}" "$MODEL_REQUEST" "$PROMPT" 2>&1)"
 rc=$?

@@ -4,6 +4,20 @@ bats_require_minimum_version 1.5.0
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  # Hermetic with respect to an active parent GSD drive: the suite must
+  # produce identical results whether or not it runs inside a live drive, so
+  # scrub every runtime variable gsd-run.sh reads (plus the git redirection
+  # trio) BEFORE any fixture runs. Scrubbing here rather than relying on an
+  # `env -u` invocation incantation is deliberate: the evidence must be
+  # trustworthy for whoever runs the suite next, not only for the person who
+  # remembers the flags. Cases that need one of these set it explicitly.
+  unset GSD_ACTIVE_DRIVE GSD_RUN_ID GSD_RUN_STATE_DIR GSD_MACHINE_ID \
+        GSD_RESUME GSD_TOKEN_BUDGET GSD_HEARTBEAT_SECS GSD_FOREIGN_LEASE_SECS \
+        GSD_RECLAIM_LEASE_SECS GSD_SANDBOX_MODE GSD_NETWORK_MODE \
+        GATES_STORE GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE || true
+  RF_REAL_HOME="${HOME:-}"
+  export HOME="$BATS_TEST_TMPDIR/hermetic-home"
+  mkdir -p "$HOME"
   HARNESS_ROOT="$BATS_TEST_TMPDIR/runner-layout"
   mkdir -p "$HARNESS_ROOT/scripts"
   cp -R "$ROOT/scripts/gsd" "$HARNESS_ROOT/scripts/gsd"
@@ -133,6 +147,7 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   exit 0
 fi
 printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
+printf '%s\n' "\${GSD_ACTIVE_DRIVE-unset}" > "$BATS_TEST_TMPDIR/codex.active-drive"
 printf '%s\n' "\${CODEX_HOME:-}" > "$BATS_TEST_TMPDIR/codex.home"
 pwd -P > "$BATS_TEST_TMPDIR/codex.cwd"
 printf '%s\n' "\${CODEX_HOME:-}"/skills/*/SKILL.md > "$BATS_TEST_TMPDIR/codex.skills"
@@ -175,6 +190,123 @@ EOF
 
 teardown() {
   :
+}
+
+@test "tail token trailer is accounted after a successful drive" {
+  cat > "$STUB_DIR/token-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+echo 'tokens used: 999999'
+echo DRIVE_OK
+echo 'tokens used: 42'
+EOF
+  chmod +x "$STUB_DIR/token-codex"
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 0 ]
+  run python3 -c "import sqlite3; c=sqlite3.connect('$BATS_TEST_TMPDIR/run-state.sqlite'); print(c.execute('select tokens_used from runs').fetchone()[0])"
+  [ "$output" = 42 ]
+}
+
+@test "real codex two-line comma trailer (tokens used / 124,988) is accounted" {
+  # The live codex CLI prints the trailer as TWO lines — 'tokens used' then
+  # a comma-grouped count — not the single-line colon form. First
+  # integration drive WARNed BUDGET-ACCOUNTING-UNAVAILABLE on every real
+  # run while the colon-only fixture stayed green.
+  cat > "$STUB_DIR/token2-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+echo DRIVE_OK
+echo 'tokens used'
+echo '124,988'
+EOF
+  chmod +x "$STUB_DIR/token2-codex"
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token2-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"BUDGET-ACCOUNTING-UNAVAILABLE"* ]]
+  run python3 -c "import sqlite3; c=sqlite3.connect('$BATS_TEST_TMPDIR/run-state.sqlite'); print(c.execute('select tokens_used from runs').fetchone()[0])"
+  [ "$output" = 124988 ]
+}
+
+@test "a relaunch of the same ledger run reuses its mapped runstore (no RUN-MAPPING-CONFLICT, cumulative accounting)" {
+  # A ledger run legitimately spans multiple drives (deviation-checkpoint
+  # relaunches, mid-phase session ends). The first phase-2 drive relaunch
+  # wedged: every drive started a fresh runstore and map-run refused the
+  # remap (RUN-MAPPING-CONFLICT -> exit 78). A relaunch must REUSE the
+  # mapped runstore — one ledger run, one runstore, tokens cumulative.
+  cat > "$STUB_DIR/token-codex" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+echo DRIVE_OK
+echo 'tokens used: 42'
+EOF
+  chmod +x "$STUB_DIR/token-codex"
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 0 ]
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=token-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"RUN-MAPPING"* ]]
+  run python3 -c "import sqlite3; c=sqlite3.connect('$BATS_TEST_TMPDIR/run-state.sqlite'); print(c.execute('select count(*), sum(tokens_used) from runs').fetchone())"
+  [ "$output" = "(1, 84)" ]
+}
+
+@test "a stale tuple from a different skill never arms auto-resume (pre-launch failure wedge)" {
+  # Wedge chain from the first phase-2 gap-plan drive: a PRE-LAUNCH refusal
+  # (codex quota) wrote state=failed for gsd-plan-phase, arming the
+  # auto-resume heuristic; resume then validated against the tuple persisted
+  # by the COMPLETED execute drive (a different skill) and refused every
+  # fresh launch with tuple drift — a permanent wedge. Auto-resume must also
+  # require the stored tuple's skill to match the requested skill.
+  STATE_DIR="$BATS_TEST_TMPDIR/.git/ffs/gsd-run"
+  mkdir -p "$STATE_DIR"
+  printf 'state=failed\npid=1\nmachine=m\nhost=codex\nskill=gsd-quick\nlog=/dev/null\nexit_code=69\nupdated_at=now\n' \
+    > "$STATE_DIR/gsd-run.status"
+  printf 'schema=ffs.gsd-run/v1\nrun_id=spec-008\nruntime=codex\nskill=gsd-OTHER-skill\nsandbox_mode=workspace-write\nnetwork_mode=none\n' \
+    > "$STATE_DIR/gsd-run.tuple"
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick go"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"tuple drift"* ]]
+  run grep '^skill=' "$STATE_DIR/gsd-run.tuple"
+  [ "$output" = "skill=gsd-quick" ]
+}
+
+@test "a mapped runstore that already breached its budget refuses relaunch" {
+  # Review-gate finding (2026-08-09): the breach writes quarantined into the
+  # cwd-relative status file, but relaunch reused the mapped runstore without
+  # ever reading used-vs-budget — a breached run kept launching drives. The
+  # durable comparison is the launch-time gate: used >= budget is exit 78.
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && \
+      rid=\$(PYTHONPATH='$HARNESS_ROOT/lib' python3 -m run_state.cli start --skill fix --objective o --worktree w --tokens 100 | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"run_id\"])') && \
+      PYTHONPATH='$HARNESS_ROOT/lib' python3 -m run_state.cli update \"\$rid\" --tokens 150 >/dev/null 2>&1; \
+      python3 '$HARNESS_ROOT/lib/gates.py' map-run --ledger-run-id spec-008 --runstore-id \"\$rid\" >/dev/null && \
+      bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"BUDGET-BREACHED"* ]]
+}
+
+@test "a mapped ledger run whose runstore record is unreadable fails closed" {
+  # Reuse must never invent state: mapping present but runstore record gone
+  # (pruned db, cross-machine copy) is exit 78, not a silent fresh start
+  # that would orphan the prior drive's accounting.
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && python3 '$HARNESS_ROOT/lib/gates.py' map-run --ledger-run-id spec-008 --runstore-id dddddddddddd >/dev/null && bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"BUDGET-MAPPING-FAILED"* ]]
 }
 
 refresh_gsd_skill_manifest() {
@@ -240,6 +372,23 @@ if __name__ == "__main__":
     sys.exit(main())
 PY
   chmod +x "$dest"
+}
+
+@test "nested invocation from inside an active drive is refused with instructions (exit 64)" {
+  GSD_ACTIVE_DRIVE=1 FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'nested attempt'"
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"NESTED-INVOCATION"* ]]
+  [[ "$output" == *"execute the phase workflow directly"* ]]
+  # refused BEFORE any drive launch or state mutation
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "the launched drive carries GSD_ACTIVE_DRIVE=1 so nested gsd-run self-identifies" {
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'carry the marker'"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/codex.active-drive")" = "1" ]
 }
 
 @test "Codex host runs Codex with the Sonnet-equivalent Terra lead" {
@@ -343,7 +492,7 @@ EOF
       bash "$1" /gsd-quick duplicate >"$2/duplicate.log" 2>&1
       duplicate_rc=$?
       [ "$duplicate_rc" -eq 75 ] || exit 12
-      grep -F "active drive already owns" "$2/duplicate.log" || exit 13
+      grep -F "active owner holds" "$2/duplicate.log" || exit 13
       [ "$(head -1 "$3/gsd-run.pid" | tr -d "[:space:]")" = "$live_pid" ] || exit 14
 
       wait "$first" || exit 15
@@ -364,7 +513,7 @@ EOF
     GSD_RUN_STATE_DIR="$BATS_TEST_TMPDIR/symlink-state" \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
-  [ "$status" -eq 75 ]
+  [ "$status" -eq 78 ]
   [[ "$output" == *"refusing symlinked run-state directory"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
@@ -380,7 +529,7 @@ EOF
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 75 ]
-  [[ "$output" == *"active drive already owns"* ]]
+  [[ "$output" == *"active owner holds"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
 }
 
@@ -886,17 +1035,18 @@ EOF
     *) ACTUAL_COMMON="$(cd "$(cat "$BATS_TEST_TMPDIR/codex.cwd")/$ACTUAL_COMMON" && pwd -P)" ;;
   esac
   [ "$ACTUAL_COMMON" = "$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)" ]
-  # P-29 (04-01): writable_roots now grants the run worktree AND the shared
-  # .feature-fix-swarm subtree at the main checkout -- widened from 1 to 2
-  # entries in the same line this widening lands on. See the dedicated
-  # "coord wiring" case below for the content assertion on each entry.
+  # P-29 (04-01): writable_roots grants the run worktree, the shared
+  # .feature-fix-swarm subtree, and (spec-008 live fix) the two git-metadata
+  # roots a commit inside the linked worktree writes: <common>/objects and
+  # <common>/worktrees/<run-id>. NEVER the whole .git -- hooks/ and refs/
+  # stay non-writable. See the "coord wiring" case for content assertions.
   [ "$(python3 - "$BATS_TEST_TMPDIR/codex.config" <<'PY'
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
 print(len(roots))
 PY
-)" -eq 2 ]
+)" -eq 6 ]
   [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
 }
 
@@ -1380,6 +1530,7 @@ PY
 # fail-soft no-coord-layer path byte-identically.
 
 @test "explicit GSD_RUN_ID holds a coord claim during the drive and releases it after (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   SNAPSHOT="$BATS_TEST_TMPDIR/registry.mid-drive.json"
@@ -1414,6 +1565,7 @@ EOF
 }
 
 @test "a live foreign coord claim holder refuses the launch with coord.py's own exit 3, never gsd-run.sh's pidfile 75" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   ( sleep 30 ) &
   anchor_pid=$!
@@ -1448,7 +1600,11 @@ EOF
 }
 
 @test "a repo without the coord layer runs the drive byte-identically to today (P-25 fail-soft)" {
-  FFS_HOST=codex GSD_RUN_ID=spec-009 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+  # Non-ledger run id: a LEDGER-shaped id (spec-NNN) now legitimately
+  # writes the REQ-703 budget mapping into the evidence store, which this
+  # test's no-store assertion predates. P-25's claim is about the COORD
+  # layer specifically, so the fixture id stays outside the ledger shape.
+  FFS_HOST=codex GSD_RUN_ID=coordless-fixture CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 0 ]
@@ -1495,6 +1651,7 @@ EOF
 # exit-path, sandbox write grant (P-24, P-24b, P-26, P-29) ─────────────────
 
 @test "the heartbeat renews the coord claim; expires_at strictly increases across ticks (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/renew-codex" <<EOF
@@ -1530,6 +1687,7 @@ assert b > a, (a, b)
 }
 
 @test "a generation bump on the live claim aborts a running drive with CLAIM-SUPERSEDED (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/gen-bump-codex" <<EOF
@@ -1571,6 +1729,7 @@ json.dump(d, open(p, \"w\"))
 }
 
 @test "a foreign holder_uuid takeover on the live claim also aborts mid-flight (P-24 exit-3 arm, coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/foreign-take-codex" <<EOF
@@ -1686,6 +1845,7 @@ EOF
 }
 
 @test "the claim is released on the non-zero-drive exit path (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
 
@@ -1700,6 +1860,7 @@ EOF
 }
 
 @test "the claim is released on the run_bounded timeout exit path (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/timeout-codex" <<EOF
@@ -1721,6 +1882,7 @@ EOF
 }
 
 @test "the claim is released when the runner is SIGTERMed externally mid-drive (coord wiring)" {
+  export HOME="$RF_REAL_HOME"  # coord.py needs the real python user-site (filelock >= 3.30)
   cp -R "$ROOT/scripts/coord" "$HARNESS_ROOT/scripts/coord"
   REGISTRY="$BATS_TEST_TMPDIR/.feature-fix-swarm/coord/registry.json"
   cat > "$STUB_DIR/sigterm-codex" <<EOF
@@ -1763,9 +1925,19 @@ EOF
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
-assert len(roots) == 2, roots
+assert len(roots) == 6, roots
 assert any(r.endswith('/.feature-fix-swarm') for r in roots), roots
 assert any('/.claude/worktrees/' in r for r in roots), roots
+assert any(r.endswith('/objects') for r in roots), roots
+assert any('/.git/worktrees/' in r for r in roots), roots
+assert any(r.endswith('/refs/heads/gsd') for r in roots), roots
+assert any(r.endswith('/logs/refs/heads/gsd') for r in roots), roots
+assert not any(r.rstrip('/').endswith('/.git') for r in roots), roots
+assert not any(r.rstrip('/').endswith('/refs/heads') for r in roots), roots
+import os
+for r in roots:
+    if r.endswith('/refs/heads/gsd') or r.endswith('/logs/refs/heads/gsd'):
+        assert os.path.isdir(r), f"granted root must be pre-created: {r}"
 PY
   [ "$status" -eq 0 ]
 }

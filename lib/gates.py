@@ -136,6 +136,170 @@ class _StoreLock:
         self.fd.close()
 
 
+# ── spec-008 Phase 1: degradation evidence ─────────────────────────────────
+
+LEDGER_RUN_ID_PAT = re.compile(r"(?:spec-[0-9]{3}|adhoc-[a-z0-9][a-z0-9-]*|run-[0-9]+)")
+RUNSTORE_ID_PAT = re.compile(r"[0-9a-f]{12}")
+RUNG_ID_PAT = re.compile(r"[^:\s]+:[^:\s]+:[^:\s]+")
+WAIVER_TEXT_MAX = 256
+
+
+def _require_waiver_text(value: str) -> None:
+    if (not isinstance(value, str) or not value.strip() or len(value) > WAIVER_TEXT_MAX
+            or "\x00" in value):
+        raise ValueError("INVALID-WAIVER")
+
+
+def record_waiver(store: Path, run_id: str, gate: str, env_var: str) -> None:
+    """Append one auditable operator waiver under the shared store lock.
+
+    Waivers are intentionally not deduplicated: two switch firings are two
+    distinct bypass events, even when they share their labels.
+    """
+    _require_waiver_text(run_id)
+    _require_waiver_text(gate)
+    _require_waiver_text(env_var)
+    with _StoreLock(store):
+        data = _load_store(store)
+        rows = data.setdefault("waivers", [])
+        if not isinstance(rows, list):
+            raise ValueError("WAIVER-SCHEMA-CONFLICT")
+        rows.append({"run_id": run_id, "gate": gate, "env_var": env_var, "ts": _now()})
+        _save_store(store, data)
+
+
+def _require_ledger_run_id(run_id: str) -> None:
+    if not isinstance(run_id, str) or not LEDGER_RUN_ID_PAT.fullmatch(run_id):
+        raise ValueError("INVALID-LEDGER-RUN-ID")
+
+
+def _degradation_ns(data: dict) -> dict:
+    ns = data.setdefault("_degradation", {"rungs": {}, "invocations": [], "mappings": {}})
+    if not isinstance(ns, dict):
+        raise ValueError("DEGRADATION-SCHEMA-CONFLICT")
+    ns.setdefault("rungs", {})
+    ns.setdefault("invocations", [])
+    ns.setdefault("mappings", {})
+    if not isinstance(ns["rungs"], dict) or not isinstance(ns["invocations"], list) or not isinstance(ns["mappings"], dict):
+        raise ValueError("DEGRADATION-SCHEMA-CONFLICT")
+    return ns
+
+
+def note_degraded(store: Path, kind: str, **payload) -> bool:
+    """Append a validated degradation event; identical invocation replays dedupe."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        ns = _degradation_ns(data)
+        if kind == "rung-attempt":
+            rung, outcome = payload.get("rung_id"), payload.get("outcome")
+            if not isinstance(rung, str) or not RUNG_ID_PAT.fullmatch(rung) or outcome not in ("ok", "fail"):
+                raise ValueError("INVALID-RUNG-ATTEMPT")
+            events = ns["rungs"].setdefault(rung, {"events": [], "opportunities": 0})
+            if not isinstance(events, dict) or not isinstance(events.get("events"), list):
+                raise ValueError("DEGRADATION-SCHEMA-CONFLICT")
+            events["events"].append({"outcome": outcome, "recorded_at": _now()})
+            events["events"] = events["events"][-20:]
+        elif kind == "invocation":
+            run_id, seam, degraded, invocation_id = (payload.get("run_id"), payload.get("seam"),
+                                                       payload.get("degraded"), payload.get("invocation_id"))
+            _require_ledger_run_id(run_id)
+            if not isinstance(seam, str) or not seam.strip() or not isinstance(degraded, bool) or not isinstance(invocation_id, str) or not invocation_id:
+                raise ValueError("INVALID-INVOCATION")
+            for existing in ns["invocations"]:
+                if existing.get("run_id") == run_id and existing.get("invocation_id") == invocation_id:
+                    if existing.get("seam") == seam and existing.get("degraded") is degraded:
+                        return False
+                    raise ValueError("IDEMPOTENCY-CONFLICT")
+            ns["invocations"].append({"run_id": run_id, "seam": seam, "degraded": degraded,
+                                      "invocation_id": invocation_id, "recorded_at": _now()})
+        else:
+            raise ValueError("INVALID-DEGRADATION-KIND")
+        _save_store(store, data)
+    return True
+
+
+def rung_status(store: Path, rung_id: str) -> dict:
+    if not isinstance(rung_id, str) or not RUNG_ID_PAT.fullmatch(rung_id):
+        raise ValueError("INVALID-RUNG-ATTEMPT")
+    ns = _degradation_ns(_load_store(store))
+    entry = ns["rungs"].get(rung_id, {"events": [], "opportunities": 0})
+    events = entry.get("events", []) if isinstance(entry, dict) else []
+    tripped = len(events) == 20 and all(e.get("outcome") == "fail" for e in events if isinstance(e, dict))
+    return {"rung_id": rung_id, "tripped": tripped, "attempts": len(events),
+            "opportunities": entry.get("opportunities", 0) if isinstance(entry, dict) else 0}
+
+
+def probe_check(store: Path, rung_id: str) -> bool:
+    if not isinstance(rung_id, str) or not RUNG_ID_PAT.fullmatch(rung_id):
+        raise ValueError("INVALID-RUNG-ATTEMPT")
+    with _StoreLock(store):
+        data = _load_store(store)
+        ns = _degradation_ns(data)
+        entry = ns["rungs"].setdefault(rung_id, {"events": [], "opportunities": 0})
+        entry["opportunities"] = int(entry.get("opportunities", 0)) + 1
+        due = entry["opportunities"] % 10 == 0
+        _save_store(store, data)
+    return due
+
+
+def reset_rung(store: Path, rung_id: str) -> bool:
+    if not isinstance(rung_id, str) or not RUNG_ID_PAT.fullmatch(rung_id):
+        raise ValueError("INVALID-RUNG-ATTEMPT")
+    with _StoreLock(store):
+        data = _load_store(store)
+        ns = _degradation_ns(data)
+        existed = rung_id in ns["rungs"]
+        ns["rungs"].pop(rung_id, None)
+        _save_store(store, data)
+    return existed
+
+
+def degraded_ratio(store: Path, run_id: str) -> tuple[int, int]:
+    _require_ledger_run_id(run_id)
+    ns = _degradation_ns(_load_store(store))
+    events = [event for event in ns["invocations"] if event.get("run_id") == run_id]
+    return sum(bool(event.get("degraded")) for event in events), len(events)
+
+
+def record_run_mapping(store: Path, ledger_run_id: str, runstore_id: str) -> bool:
+    _require_ledger_run_id(ledger_run_id)
+    if not isinstance(runstore_id, str) or not RUNSTORE_ID_PAT.fullmatch(runstore_id):
+        raise ValueError("INVALID-RUNSTORE-ID")
+    with _StoreLock(store):
+        data = _load_store(store)
+        mappings = _degradation_ns(data)["mappings"]
+        current = mappings.get(ledger_run_id)
+        reverse = next((ledger for ledger, value in mappings.items() if value == runstore_id), None)
+        if (current is not None and current != runstore_id) or (reverse is not None and reverse != ledger_run_id):
+            raise ValueError("RUN-MAPPING-CONFLICT")
+        if current == runstore_id:
+            return False
+        mappings[ledger_run_id] = runstore_id
+        _save_store(store, data)
+    return True
+
+
+def get_run_mapping(store: Path, ledger_run_id: str) -> str | None:
+    """Read the runstore id mapped to a ledger run, or None. A relaunch of
+    the same ledger run reuses this mapping instead of starting a fresh
+    runstore and dying on RUN-MAPPING-CONFLICT — one ledger run spans
+    multiple drives but owns exactly one runstore."""
+    _require_ledger_run_id(ledger_run_id)
+    store = Path(store)
+    if not store.exists():
+        return None
+    value = _degradation_ns(_load_store(store))["mappings"].get(ledger_run_id)
+    return value if isinstance(value, str) else None
+
+
+def _degraded_ratio_allowed(data: dict, run_id: str) -> bool:
+    _require_ledger_run_id(run_id)
+    ns = _degradation_ns(data)
+    events = [event for event in ns["invocations"] if event.get("run_id") == run_id]
+    total = len(events)
+    return total == 0 or sum(bool(event.get("degraded")) for event in events) * 2 <= total
+
+
 def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
                          tests_before: str = "", tests_after: str = "") -> None:
     """Trusted-caller write. Prefer run_gate(), which executes the command
@@ -321,11 +485,14 @@ def scan_test_tampering(diff_text: str) -> list[str]:
     """Flag reward-hacking moves in a unified diff. Empty list = clean."""
     findings: list[str] = []
     in_test_file = False
+    current_path = ""
     for line in diff_text.splitlines():
         if line.startswith("--- ") or line.startswith("+++ "):
             path = line[4:]
             path = path[2:] if path.startswith(("a/", "b/")) else path
             in_test_file = bool(TEST_FILE_PAT.search(path))
+            if line.startswith("+++ "):
+                current_path = path
             if line.startswith("+++ ") and CI_FILE_PAT.search(path):
                 findings.append(f"CI/workflow file edited: {path}")
             if line.startswith("+++ ") and GATE_FILE_PAT.search(path):
@@ -358,6 +525,11 @@ def scan_test_tampering(diff_text: str) -> list[str]:
                 # Heredoc-body stub lines still flag — write stubs via quoted
                 # printf/echo if they must carry exit 0.
                 stripped = line[1:].lstrip()
+                if stripped.startswith("#"):
+                    # A pure comment line cannot alter control flow — the
+                    # CI tamper job flagged doc comments like
+                    # `+#   --immediate ... exit 0` (PR #103 false positive).
+                    continue
                 unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "", line)
                 exempt = (
                     in_test_file
@@ -365,7 +537,11 @@ def scan_test_tampering(diff_text: str) -> list[str]:
                     and not re.search(EXIT0_PAT, unquoted)
                 )
                 if not exempt:
-                    findings.append(f"unconditional exit 0 added: {line.strip()}")
+                    # Path-scoped so consumers (CI tamper job) can allowlist
+                    # files whose CONTRACT is unconditional exit 0 (e.g. the
+                    # digest observability tool) without blinding the
+                    # heuristic everywhere else.
+                    findings.append(f"unconditional exit 0 added [{current_path}]: {line.strip()}")
     return findings
 
 
@@ -883,6 +1059,8 @@ def record_promotion(store: Path, run_id: str, *, from_env: str, to_env: str,
     recorded_at = _now()
     with _StoreLock(store):
         data = _load_store(store)
+        if to_env == "prod" and not _degraded_ratio_allowed(data, run_id):
+            raise ValueError("DEGRADED-REVIEW-RATIO: degraded invocations exceed 50%; remediate review evidence")
         if (not all(isinstance(value, str) and value.strip()
                     for value in (from_env, to_env, surface))
                 or not _evidence_resolves(data, evidence_ids, artifact)):
@@ -931,11 +1109,56 @@ def _valid_promotion_record(data: dict, rec) -> bool:
     return _evidence_resolves(data, evidence_ids, artifact)
 
 
+def _valid_canary_record(rec) -> bool:
+    """Re-validate a persisted canary row on every read (the
+    _valid_promotion_record precedent): a tampered or legacy row degrades to
+    refusal, never a crash. Typed = exactly the recorder's schema semantics —
+    40-hex sha, boolean pass, control-free run_id, bounded timestamps."""
+    import math
+    if not isinstance(rec, dict):
+        return False
+    sha = rec.get("sha")
+    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+        return False
+    if rec.get("pass") is not True and rec.get("pass") is not False:
+        return False
+    run_id = rec.get("run_id")
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        return False
+    for key in ("created_at", "ended_at"):
+        value = rec.get(key)
+        if (not isinstance(value, str) or not value.strip()
+                or len(value) > ISO_TS_MAX):
+            return False
+    ts = rec.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+        return False
+    return True
+
+
+def _canary_bound_ok(data: dict, artifact) -> bool:
+    """REQ-301 read-side binding (pinned decision 1 — STORE-SCOPED): an
+    absent or empty `canary` namespace leaves promotion behavior unchanged;
+    ANY other content makes every candidate canary-bound — satisfied only by
+    a schema-valid typed record with pass true whose sha exact-string-matches
+    the promoted artifact. Sha-less, untyped/legacy, failed, or tampered
+    entries trigger binding but never satisfy it (fail-closed, no raise)."""
+    rows = data.get("canary")
+    if rows is None or (isinstance(rows, list) and not rows):
+        return True
+    if not isinstance(rows, list):
+        return False
+    return any(_valid_canary_record(rec) and rec.get("pass") is True
+               and rec.get("sha") == artifact for rec in rows)
+
+
 def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
                     artifact, now: float | None = None) -> bool:
     """Fail-closed read (mirrors check_grant): True ONLY for an exact,
     unexpired, from_env=='staging' (when to_env=='prod'), to_env, surface,
-    and artifact match. A missing OR malformed `_promotions` namespace
+    and artifact match — and, when the store's canary namespace is non-empty
+    (REQ-301), a typed passing canary record whose sha exact-matches the
+    artifact. A missing OR malformed `_promotions` namespace
     (non-dict top level, non-list run entry, non-dict record, missing/
     non-numeric/non-finite expiry) returns False without raising, crashing,
     or writing — pure read, same posture as check_grant/check_preflight."""
@@ -959,6 +1182,10 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
         if rec.get("surface") != surface:
             continue
         if rec.get("artifact") != artifact:
+            continue
+        if not _canary_bound_ok(data, artifact):
+            # canary-bound store without exact-sha typed pass evidence:
+            # refuse IN ADDITION to (never instead of) the expiry rule below.
             continue
         if effective_now < rec["expires_at"]:
             return True
@@ -1062,6 +1289,7 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
     effective_now = now if now is not None else _now()
     surface_matches = False
     artifact_match_expired = False
+    canary_refused = False
     for rec in records:
         if not _valid_promotion_record(data, rec):
             continue
@@ -1074,6 +1302,17 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
             continue
         if effective_now >= rec["expires_at"]:
             artifact_match_expired = True
+            continue
+        # Fresh, fully-matching promotion — check_promotion still returned
+        # False, so the only remaining refusal is the canary binding
+        # (REQ-301). Unreachable pre-phase-3, which is exactly what keeps
+        # the AC-001 reason ordering byte-identical.
+        canary_refused = True
+    if canary_refused:
+        rows = data.get("canary")
+        if isinstance(rows, list) and any(_valid_canary_record(r) for r in rows):
+            return "CANARY-SHA-MISMATCH"
+        return "CANARY-EVIDENCE-REQUIRED"
     if artifact_match_expired:
         return "PROMOTE-EXPIRED"
     if surface_matches:
@@ -1152,6 +1391,12 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
     if surface is None:
         return check_grant(store, run_id, action, now=now)
 
+    try:
+        if not _degraded_ratio_allowed(_load_store(store), run_id):
+            return False
+    except ValueError:
+        return False
+
     if not artifact:
         record_pending(store, run_id, action,
                        "NO-PROMOTE-EVIDENCE: --artifact is required for a "
@@ -1171,7 +1416,22 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         return False
 
     if check_promotion(store, run_id, "prod", surface, artifact, now=now):
-        return True
+        # REQ-302: a surface whose manifest row declares a rollback command
+        # additionally requires a successful same-run dry-run. Same-run binds
+        # THIS function's own run_id parameter — the run being checked (wall
+        # 7531f885) — never an env default. Undeclared surfaces (every real
+        # FFS surface) make this a structural no-op.
+        declared = _declared_rollback(manifest, surface)
+        if declared is None:
+            return True
+        if _rollback_dryrun_ok(_load_store(store), run_id, surface, declared,
+                               artifact):
+            return True
+        record_pending(store, run_id, action,
+                       f"ROLLBACK-DRYRUN-REQUIRED: surface '{surface}' "
+                       "declares a rollback command; need a same-run "
+                       f"successful dry-run bound to artifact {artifact}")
+        return False
 
     reason = _promote_miss_reason(store, run_id, surface, artifact, now=now)
     record_pending(store, run_id, action,
@@ -1200,6 +1460,166 @@ def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
 def list_pending(store: Path, run_id: str) -> list[dict]:
     return list(_load_store(store).get("_autonomy", {})
                 .get(run_id, {}).get("pending", []))
+
+
+# ── spec-008 Phase 3: typed canary evidence (REQ-301, AC-004) ────────────────
+
+# run_id shape mirrors lib/evidence_events.py's RUN_ID_RE precedent:
+# non-empty, control-free, <=128 chars — permissive enough for the
+# `unattributed` literal the trusted wrapper records when GSD_RUN_ID is unset.
+EVIDENCE_RUN_ID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
+ISO_TS_MAX = 64
+
+
+def _require_iso_ts(value, name: str) -> None:
+    """Bounded, control-free, non-empty timestamp string (stored verbatim —
+    results.json createdAt/endedAt are ISO-8601; the store never reparses)."""
+    if (not isinstance(value, str) or not value.strip() or len(value) > ISO_TS_MAX
+            or any(ord(c) < 0x20 or ord(c) == 0x7f for c in value)):
+        raise ValueError(f"INVALID-CANARY-TIMESTAMP: {name}")
+
+
+def _canary_ns(data: dict) -> list:
+    """Shape guard for the top-level `canary` list (ports _promotions_ns)."""
+    rows = data.setdefault("canary", [])
+    if not isinstance(rows, list):
+        raise ValueError("CANARY-SCHEMA-CONFLICT")
+    return rows
+
+
+def record_canary_evidence(store: Path, run_id, sha, passed, created_at,
+                           ended_at) -> None:
+    """Append one typed canary evidence row under the shared store lock.
+
+    Trust boundary (wall 087faa76): this recorder validates SHAPE, not caller
+    identity — any store-writer can forge rows with or without this CLI, the
+    identical boundary every house evidence record already has. The trusted
+    wrapper (scripts/gsd/canary-gate.sh) is the sole LEGITIMATE producer:
+    `sha` is `git rev-parse HEAD` captured there (C6 — never parsed from
+    third-party results.json). Integrity is guarded by the G2 tamper scan and
+    store permissions, never by this recorder.
+    """
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("INVALID-CANARY-RUN-ID")
+    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+        # 40-hex commit sha ONLY (F5) — digest refs are not canary identity.
+        raise ValueError("INVALID-CANARY-SHA")
+    if not isinstance(passed, bool):
+        raise ValueError("INVALID-CANARY-PASS")
+    _require_iso_ts(created_at, "created_at")
+    _require_iso_ts(ended_at, "ended_at")
+    with _StoreLock(store):
+        data = _load_store(store)
+        rows = _canary_ns(data)
+        rows.append({"run_id": run_id, "sha": sha, "pass": passed,
+                     "created_at": created_at, "ended_at": ended_at,
+                     "ts": _now()})
+        _save_store(store, data)
+
+
+# ── spec-008 Phase 3: rollback dry-run evidence (REQ-302, AC-005) ────────────
+
+def _rollback_ns(data: dict) -> list:
+    """Shape guard for the top-level `rollback_dryrun` list."""
+    rows = data.setdefault("rollback_dryrun", [])
+    if not isinstance(rows, list):
+        raise ValueError("ROLLBACK-DRYRUN-SCHEMA-CONFLICT")
+    return rows
+
+
+def record_rollback_dryrun(store: Path, run_id, surface, command, exit_code,
+                           artifact_sha) -> None:
+    """Append one typed rollback dry-run row under the shared store lock.
+
+    Same trust boundary as record_canary_evidence (wall 087faa76): shape
+    validation only, never caller identity — integrity lives in the G2
+    tamper scan + store perms. Schema keys are fixed verbatim by REQ-302:
+    {run_id, surface, command, exit_code, artifact_sha, ts}.
+    """
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("INVALID-ROLLBACK-RUN-ID")
+    if not isinstance(surface, str) or not surface.strip():
+        raise ValueError("INVALID-ROLLBACK-SURFACE")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("INVALID-ROLLBACK-COMMAND")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise ValueError("INVALID-ROLLBACK-EXIT-CODE")
+    if not _valid_artifact(artifact_sha):
+        raise ValueError("INVALID-ROLLBACK-ARTIFACT")
+    with _StoreLock(store):
+        data = _load_store(store)
+        rows = _rollback_ns(data)
+        rows.append({"run_id": run_id, "surface": surface, "command": command,
+                     "exit_code": exit_code, "artifact_sha": artifact_sha,
+                     "ts": _now()})
+        _save_store(store, data)
+
+
+def _valid_rollback_record(rec) -> bool:
+    """Re-validate a persisted rollback dry-run row on every read."""
+    import math
+    if not isinstance(rec, dict):
+        return False
+    if (not isinstance(rec.get("run_id"), str)
+            or not EVIDENCE_RUN_ID_RE.fullmatch(rec["run_id"])):
+        return False
+    for key in ("surface", "command"):
+        if not isinstance(rec.get(key), str) or not rec[key].strip():
+            return False
+    exit_code = rec.get("exit_code")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return False
+    if not _valid_artifact(rec.get("artifact_sha")):
+        return False
+    ts = rec.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+        return False
+    return True
+
+
+def _declared_rollback(manifest: dict | None, surface: str) -> str | None:
+    """The manifest-declared rollback command for `surface`, or None when no
+    rollback is declared (pinned decision 4 — the parity-manifest row is the
+    declaration seam; no FFS surface declares one, so the gate no-ops by
+    construction). _normalize_manifest validates the key on load, so only a
+    non-empty string ever counts as a declaration here."""
+    if manifest is None:
+        return None
+    entry = manifest.get(surface)
+    if not isinstance(entry, dict):
+        return None
+    rollback = entry.get("rollback")
+    if isinstance(rollback, str) and rollback.strip():
+        return rollback
+    return None
+
+
+def _rollback_dryrun_ok(data: dict, run_id: str, surface: str, command: str,
+                        artifact) -> bool:
+    """True iff a schema-valid rollback dry-run row exists with run_id equal
+    to the run being checked (check_grant_prod's OWN authoritative run_id
+    parameter — wall 7531f885: never an env default or caller-forgeable
+    substitute), matching surface, command string-equal to the
+    manifest-declared rollback command (wall 4e3862e5), exit_code 0, and
+    artifact_sha exactly the promoted artifact."""
+    rows = data.get("rollback_dryrun")
+    if not isinstance(rows, list):
+        return False
+    for rec in rows:
+        if not _valid_rollback_record(rec):
+            continue
+        if rec["run_id"] != run_id:
+            continue
+        if rec["surface"] != surface:
+            continue
+        if rec["command"] != command:
+            continue
+        if rec["exit_code"] != 0:
+            continue
+        if rec["artifact_sha"] != artifact:
+            continue
+        return True
+    return False
 
 
 def preflight_check(requirements: list[dict], timeout: int = 30, *,
@@ -1569,7 +1989,17 @@ def _normalize_manifest(data: dict) -> dict:
             raise ValueError(f"manifest surface {surface!r} needs staging_instance")
         if surface in normalized:
             raise ValueError(f"duplicate manifest surface: {surface}")
-        normalized[surface] = {"staging": staging}
+        entry = {"staging": staging}
+        # Optional rollback declaration (REQ-302, pinned decision 4): preserve
+        # the command string verbatim; absent key = no declaration = gate no-op.
+        if "rollback" in row:
+            rollback = row.get("rollback")
+            if not isinstance(rollback, str) or not rollback.strip():
+                raise ValueError(
+                    f"manifest surface {surface!r} rollback must be a "
+                    "non-empty command string")
+            entry["rollback"] = rollback
+        normalized[surface] = entry
     return normalized
 
 
@@ -1683,6 +2113,110 @@ def main(argv: list[str]) -> int:
         return 2
     cmd, args = argv[0], argv[1:]
     store = _store_path()
+    if cmd == "waiver":
+        parser = argparse.ArgumentParser(prog="gates.py waiver", add_help=False)
+        parser.add_argument("--run-id")
+        parser.add_argument("--gate")
+        parser.add_argument("--env-var")
+        try:
+            ns = parser.parse_args(args)
+            record_waiver(store, ns.run_id, ns.gate, ns.env_var)
+        except (ValueError, SystemExit) as exc:
+            print(f"WAIVER-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("WAIVER-RECORDED")
+        return 0
+    if cmd == "note-degraded":
+        parser = argparse.ArgumentParser(prog="gates.py note-degraded", add_help=False)
+        parser.add_argument("kind", nargs="?")
+        parser.add_argument("--rung-id")
+        parser.add_argument("--outcome")
+        parser.add_argument("--run-id")
+        parser.add_argument("--seam")
+        parser.add_argument("--degraded", choices=("true", "false"))
+        parser.add_argument("--invocation-id")
+        parser.add_argument("--tripped", action="store_true")
+        parser.add_argument("--probe-check")
+        parser.add_argument("--reset-rung")
+        try:
+            ns = parser.parse_args(args)
+            if ns.tripped:
+                data = _degradation_ns(_load_store(store))
+                print(json.dumps([r for r in data["rungs"] if rung_status(store, r)["tripped"]]))
+                return 0
+            if ns.probe_check:
+                print("PROBE-DUE" if probe_check(store, ns.probe_check) else "PROBE-NOT-DUE")
+                return 0
+            if ns.reset_rung:
+                print("RUNG-RESET" if reset_rung(store, ns.reset_rung) else "RUNG-ABSENT")
+                return 0
+            if ns.kind == "rung-attempt":
+                note_degraded(store, ns.kind, rung_id=ns.rung_id, outcome=ns.outcome)
+            elif ns.kind == "invocation":
+                note_degraded(store, ns.kind, run_id=ns.run_id, seam=ns.seam,
+                              degraded=ns.degraded == "true", invocation_id=ns.invocation_id)
+            else:
+                raise ValueError("INVALID-DEGRADATION-KIND")
+        except (ValueError, SystemExit) as exc:
+            print(f"NOTE-DEGRADED-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("DEGRADATION-RECORDED")
+        return 0
+    if cmd == "canary-evidence":
+        parser = argparse.ArgumentParser(prog="gates.py canary-evidence", add_help=False)
+        parser.add_argument("--run-id")
+        parser.add_argument("--sha")
+        parser.add_argument("--pass", dest="passed", choices=("true", "false"))
+        parser.add_argument("--created-at")
+        parser.add_argument("--ended-at")
+        try:
+            ns = parser.parse_args(args)
+            if ns.passed is None:
+                raise ValueError("INVALID-CANARY-PASS")
+            record_canary_evidence(store, ns.run_id, ns.sha, ns.passed == "true",
+                                   ns.created_at, ns.ended_at)
+        except (ValueError, SystemExit, OSError) as exc:
+            print(f"CANARY-EVIDENCE-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("CANARY-EVIDENCE-RECORDED")
+        return 0
+    if cmd == "rollback-dryrun":
+        parser = argparse.ArgumentParser(prog="gates.py rollback-dryrun", add_help=False)
+        parser.add_argument("--run-id")
+        parser.add_argument("--surface")
+        parser.add_argument("--command")
+        parser.add_argument("--exit-code")
+        parser.add_argument("--artifact-sha")
+        try:
+            ns = parser.parse_args(args)
+            if ns.exit_code is None or not re.fullmatch(r"-?[0-9]+", ns.exit_code):
+                raise ValueError("INVALID-ROLLBACK-EXIT-CODE")
+            record_rollback_dryrun(store, ns.run_id, ns.surface, ns.command,
+                                   int(ns.exit_code), ns.artifact_sha)
+        except (ValueError, SystemExit, OSError) as exc:
+            print(f"ROLLBACK-DRYRUN-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("ROLLBACK-DRYRUN-RECORDED")
+        return 0
+    if cmd == "map-run":
+        if "--get" in args:
+            try:
+                mapped = get_run_mapping(store, _flag(args, "--ledger-run-id"))
+            except ValueError as exc:
+                print(f"RUN-MAPPING-REJECTED: {exc}", file=sys.stderr)
+                return 2
+            if mapped is None:
+                return 1
+            print(mapped)
+            return 0
+        try:
+            created = record_run_mapping(store, _flag(args, "--ledger-run-id"),
+                                         _flag(args, "--runstore-id"))
+        except ValueError as exc:
+            print(f"RUN-MAPPING-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("RUN-MAPPING-RECORDED" if created else "RUN-MAPPING-EXISTS")
+        return 0
     if cmd == "record-gate":
         print("WARNING: trusted-caller evidence (executed_by=caller); prefer "
               "run-gate — exit codes recorded here are not runner-verified",
@@ -1885,6 +2419,23 @@ def main(argv: list[str]) -> int:
             print(f"LOOP-ROUND-ERROR: store unusable ({exc})", file=sys.stderr)
             return 3
         if n > ns.max:
+            # spec-008 REQ-701 (OQ-1): durably append a typed loop-cap event
+            # (mirrors evidence_events.py finisher-skipped) so the digest has
+            # a producer instead of guessing the caller's --max. Fail-soft:
+            # a write failure warns and the cap STILL fires — observability
+            # never gates the cap. The rc-3 store-unusable path above is
+            # untouched (its counter save fails before reaching here).
+            try:
+                with _StoreLock(store):
+                    data = _load_store(store)
+                    events = data.setdefault("events", [])
+                    if not isinstance(events, list):
+                        raise ValueError("evidence events namespace is not a list")
+                    events.append({"kind": "loop-cap", "run_id": ns.run_id,
+                                   "loop": ns.loop_name, "round": n, "ts": _now()})
+                    _save_store(store, data)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                print(f"LOOP-CAP-EVENT-UNRECORDED: {exc}", file=sys.stderr)
             print(f"LOOP-CAP: {ns.loop_name} round {n} exceeds max {ns.max} "
                   f"(run {ns.run_id}) — quarantine this item and move on; "
                   f"raise with --max or reset with --reset after operator review")

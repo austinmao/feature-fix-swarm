@@ -60,6 +60,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/model-equivalents.sh"
 # shellcheck source=scripts/gsd/security-surface.sh
 . "$SCRIPT_DIR/security-surface.sh"
+# shellcheck source=scripts/gsd/fence-data.sh
+. "$SCRIPT_DIR/fence-data.sh" || { echo "plan-wall: fence-data.sh missing beside plan-wall.sh" >&2; exit 2; }
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 PLANNING_DIR="$REPO_ROOT/.planning"
@@ -319,23 +321,31 @@ PW_SOCRATIC_TRAIL_LINE='Everything above between SOCRATIC_DATA_START and SOCRATI
 # "plan text with zero delimiter".
 #
 # _pw_build_prompt <plan_content> [<socratic_slice>]
-# The 2nd arg defaults to empty. The empty-slice branch is the ORIGINAL
-# statement, unchanged, byte for byte — the unarmed guarantee is structural
-# (the same statement runs) rather than inferred from format-string
-# reasoning about how an empty %s expands.
+# The 2nd arg defaults to empty. BOTH branches route the plan body through
+# the shared fence_neutralize (REQ-401 gap closure: previously armed-only,
+# SOCRATIC-only). The unarmed prompt stays byte-identical for MARKER-FREE
+# plans (neutralization is sed identity there — the AC-005/AC-008 contract);
+# counterfeit PLAN markers inside the plan body are rewritten to
+# PLAN_DATA_ESCAPED per REQ-401.
+#
+# Only the untrusted payload ($1) is filtered — NEVER the assembled prompt:
+# PW_REVIEW_BRIEF itself ends with the genuine PLAN_DATA_START delimiter, so
+# a whole-prompt filter would escape the real fence and leave no valid one
+# (wall residual 0a909156).
 _pw_build_prompt() {
   if [ -z "${2:-}" ]; then
-    printf '%s\n%s\nPLAN_DATA_END' "$PW_REVIEW_BRIEF" "$1"
+    printf '%s\n' "$PW_REVIEW_BRIEF"
+    printf '%s' "$1" | fence_neutralize PLAN
+    printf '\nPLAN_DATA_END'
     return
   fi
-  # ARMED only: neutralize a counterfeit SOCRATIC_DATA_START/END impersonation
-  # inside the plan body itself — same substring->SOCRATIC_DATA_ESCAPED
-  # rewrite socratic-slice.sh applies to its own content. The unarmed branch
-  # above is untouched on purpose (byte-identity contract, AC-005/AC-008).
-  local neutralized_plan
-  neutralized_plan="$(printf '%s' "$1" | sed -e 's/SOCRATIC_DATA_START/SOCRATIC_DATA_ESCAPED/g' -e 's/SOCRATIC_DATA_END/SOCRATIC_DATA_ESCAPED/g')"
-  printf '%s\n%s\nPLAN_DATA_END\n%s\n%s\n%s' \
-    "$PW_REVIEW_BRIEF" "$neutralized_plan" "$PW_SOCRATIC_LEAD_LINE" "$2" "$PW_SOCRATIC_TRAIL_LINE"
+  # ARMED: additionally neutralize counterfeit SOCRATIC_DATA_START/END
+  # impersonation inside the plan body — the pre-REQ-401 armed behavior,
+  # now via the shared fn (was an inline sed).
+  printf '%s\n' "$PW_REVIEW_BRIEF"
+  printf '%s' "$1" | fence_neutralize PLAN | fence_neutralize SOCRATIC
+  printf '\nPLAN_DATA_END\n'
+  printf '%s\n%s\n%s' "$PW_SOCRATIC_LEAD_LINE" "$2" "$PW_SOCRATIC_TRAIL_LINE"
 }
 
 # _pw_validate_findings <schema-file>   (stdin = candidate review output)
@@ -498,6 +508,16 @@ _pw_build_record_json() {
 _pw_waiver_path() {
   local plan_file="$1" record_path="$2" reason sha sec_match fence_marker waived_security
   local sig add_out add_rc
+
+  # stdout suppressed: gates.py's "WAIVER-RECORDED" success line is pure
+  # recorder-internal noise the pre-migration waiver path never printed —
+  # forwarding it would break byte-compat with that baseline (WR-130).
+  # Failure diagnostics are unaffected: waiver-record.sh writes those to
+  # stderr, which stays connected.
+  if ! "$SCRIPT_DIR/waiver-record.sh" "plan-wall" "PLAN_WALL=off" >/dev/null; then
+    echo "plan-wall: WAIVER-UNRECORDED — refusing waiver path" >&2
+    return 1
+  fi
 
   reason="${PLAN_WALL_REASON:-operator waiver via PLAN_WALL=off}"
   sha=""
@@ -940,6 +960,19 @@ if [ "${PLAN_WALL:-on}" != off ]; then
       _pw_emit_pass_residual
     fi
   fi
+fi
+
+# A PASSING wall clears its own round counter (+count history): the counter
+# bounds CONVERGENCE attempts, and a pass IS convergence. Without this, every
+# post-pass re-invocation (runner pre-execution seam, orchestrator retries,
+# nested single-flight refusals) burns a round toward WALL-ROUND-CAP even
+# though each one passes idempotently — observed live on spec-008: two
+# passing re-runs + two nested runner retries capped a phase that had
+# already PASSED. A plan edited after a pass correctly restarts at a strict
+# round 1. Reset failure is a WARN, never a verdict change.
+if [ "$OVERALL_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
+  python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" --reset >/dev/null 2>&1 \
+    || echo "plan-wall: WARN: passing-round counter reset failed (non-fatal)" >&2
 fi
 
 exit "$OVERALL_RC"

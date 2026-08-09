@@ -8,24 +8,52 @@
 # is parsed as data and never evaluated. Empty/malformed envelopes fail open.
 set -uo pipefail
 
-[ "${CREDENTIAL_OUTPUT_GUARD:-}" = "off" ] && exit 0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The hook protocol is one JSON envelope per line. Do not read to EOF: Codex
-# may retain the write end until this process exits, which otherwise deadlocks
-# until the host's hook timeout. One bounded read preserves fail-open behavior.
-INPUT=""
-IFS= read -r -t 3 INPUT 2>/dev/null || true
-[ -z "$INPUT" ] && exit 0
+if [ "${CREDENTIAL_OUTPUT_GUARD:-}" = "off" ]; then
+  if ! "$SCRIPT_DIR/../gsd/waiver-record.sh" \
+      "credential-output-guard" "CREDENTIAL_OUTPUT_GUARD=off"; then
+    echo "[credential-output-guard] WAIVER-UNRECORDED: bypass refused" >&2
+    exit 2
+  fi
+  exit 0
+fi
 
-CMD=$(printf '%s' "$INPUT" | python3 -c 'import json, sys
+SCAN_FILE=""
+if [ "${1:-}" = "--scan-file" ]; then
+  SCAN_FILE="${2:-}"
+  if [ "$#" -ne 2 ] || [ -z "$SCAN_FILE" ] || [ ! -f "$SCAN_FILE" ]; then
+    echo "credential-output-guard: usage: --scan-file <regular-file>" >&2
+    exit 2
+  fi
+  if [ ! -r "$SCAN_FILE" ]; then
+    echo "credential-output-guard: scan file is unreadable" >&2
+    exit 2
+  fi
+fi
+
+if [ -z "$SCAN_FILE" ]; then
+  # The hook protocol is one JSON envelope per line (origin/main #102). Do
+  # not read to EOF: Codex may retain the write end until this process
+  # exits, which otherwise deadlocks until the host's hook timeout. One
+  # bounded read preserves fail-open behavior. Kept inside the envelope
+  # branch — --scan-file callers feed no stdin and must not stall on read.
+  INPUT=""
+  IFS= read -r -t 3 INPUT 2>/dev/null || true
+  [ -z "$INPUT" ] && exit 0
+
+  CMD=$(printf '%s' "$INPUT" | python3 -c 'import json, sys
 try:
     payload = json.load(sys.stdin).get("tool_input", {})
     print(payload.get("command") or payload.get("cmd") or "")
 except Exception:
     pass' 2>/dev/null) || exit 0
-[ -z "$CMD" ] && exit 0
+  [ -z "$CMD" ] && exit 0
+else
+  CMD="$SCAN_FILE"
+fi
 
-python3 - "$CMD" <<'PY'
+python3 - "$SCAN_FILE" "$CMD" <<'PY'
 import os
 import re
 import shlex
@@ -354,7 +382,20 @@ def unsafe(command, depth=0):
         return False
 
 
-sys.exit(2 if unsafe(sys.argv[1]) else 0)
+def unsafe_file(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return False
+    # File mode deliberately scans bytes as content, not shell syntax. These
+    # cover assignment-shaped secrets and the token families emitted by the
+    # supported secret CLIs without printing matched content.
+    return bool(re.search(r"(?im)\b(?:DOPPLER|RAILWAY|API|SECRET|TOKEN|PASSWORD|KEY)[A-Z0-9_]*\s*[:=]\s*[^\s]{8,}", text)
+                or re.search(r"\b(?:sk|rk|ghp)_[A-Za-z0-9_-]{12,}\b", text))
+
+
+sys.exit(2 if (unsafe_file(sys.argv[1]) if sys.argv[1] else unsafe(sys.argv[2])) else 0)
 PY
 guard_rc=$?
 

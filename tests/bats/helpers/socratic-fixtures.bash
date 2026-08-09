@@ -119,5 +119,8 @@ stage_script_root() {
   repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   mkdir -p "$root/scripts/gsd"
   cp "$repo_root/scripts/gsd/socratic-slice.sh" "$root/scripts/gsd/socratic-slice.sh"
+  # fence-data.sh ships beside socratic-slice.sh (REQ-401b: the slice is a
+  # gate and hard-fails without its fence sibling)
+  cp "$repo_root/scripts/gsd/fence-data.sh" "$root/scripts/gsd/fence-data.sh"
   chmod +x "$root/scripts/gsd/socratic-slice.sh"
 }

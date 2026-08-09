@@ -39,7 +39,21 @@ EOF
 }
 
 @test "kill-switch QA_COVERAGE=off skips" {
-  QA_COVERAGE=off run bash "$SCRIPT" "$RESULTS"
+  # qa-coverage-adversary.sh resolves its waiver-record.sh sibling via its
+  # own $BASH_SOURCE dirname (script-relative, ignores cwd/GATES_STORE) —
+  # running the real repo's copy would write into the developer's real
+  # canonical evidence store. Isolate via a fixture-local copy (see WR-140).
+  local root fixture
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  fixture="$BATS_TEST_TMPDIR/qa-killswitch-fixture"
+  mkdir -p "$fixture/scripts/gsd" "$fixture/lib"
+  cp "$root/scripts/gsd/qa-coverage-adversary.sh" "$fixture/scripts/gsd/qa-coverage-adversary.sh"
+  cp "$root/scripts/gsd/adversary-host.sh" "$fixture/scripts/gsd/adversary-host.sh"
+  cp "$root/scripts/gsd/waiver-record.sh" "$fixture/scripts/gsd/waiver-record.sh"
+  cp "$root/lib/gates.py" "$fixture/lib/gates.py"
+  chmod +x "$fixture"/scripts/gsd/*.sh
+  git -C "$fixture" init -q
+  QA_COVERAGE=off run bash "$fixture/scripts/gsd/qa-coverage-adversary.sh" "$RESULTS"
   [ "$status" -eq 0 ]
   [[ "$output" == *"disabled"* ]]
 }
