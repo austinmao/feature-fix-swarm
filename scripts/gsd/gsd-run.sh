@@ -282,16 +282,20 @@ unset _safe_run_id
 # fits ITS OWN [A-Za-z0-9_.-]{1,128} superset, and coord.py's exit 2
 # propagates verbatim through the pre-existing `acquire_run_state || exit $?`
 # at the bottom of this file rather than being silently repaired here.
-export FFS_RUN_ID="$RUN_ID"
-# The long-lived runner process is the claim's anchor, never a transient
-# command-substitution subshell (which os.getppid() would otherwise resolve
-# to and which is already dead by the time a peer checks staleness).
-export FFS_COORD_ANCHOR_PID="$$"
 RUN_COORD_GENERATION=""
 RUN_COORD_TTL=300
 COORD_PY="$SCRIPT_DIR/../coord/coord.py"
 RUN_COORD_ID=""
 [ -z "${GSD_RUN_ID:-}" ] || RUN_COORD_ID="$RUN_ID"
+# Exported only on coordinated runs (P4-W5): an uncoordinated drive's child
+# env stays byte-identical to pre-coordination behavior.
+if [ -n "$RUN_COORD_ID" ]; then
+  export FFS_RUN_ID="$RUN_ID"
+  # The long-lived runner process is the claim's anchor, never a transient
+  # command-substitution subshell (which os.getppid() would otherwise resolve
+  # to and which is already dead by the time a peer checks staleness).
+  export FFS_COORD_ANCHOR_PID="$$"
+fi
 
 RUN_WORKTREE_ROOT="$PROJECT_PRIMARY_ROOT/.claude/worktrees/$RUN_ID"
 CODEX_RUNTIME_HOME=""
@@ -584,6 +588,12 @@ acquire_run_state() {
         # children (the running `timeout`/tee pipe members), never siblings
         # or ancestors, which lets that foreground pipeline unblock promptly
         # so the pending TERM trap on $$ (below) fires within this tick.
+        # This heartbeat subshell is itself one of $$'s children, so the
+        # pkill also TERMs *us* (P4-W4). That self-signal is benign by
+        # ordering: both abort arms have already written their coord-abort
+        # sentinel and diagnostic before the pkill line, and the very next
+        # statements are kill+exit — dying to our own TERM a tick early is
+        # exactly the shutdown we were about to perform.
         pkill -TERM -P "$$" 2>/dev/null || true
         kill -TERM "$$" 2>/dev/null || true
         exit 1
@@ -922,7 +932,7 @@ version_in_supported_codex_range() {
 $version
 EOF
   case "$major:$minor:$patch" in *[!0-9:]*|::*|*::) return 1 ;; esac
-  [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 147 ]
+  [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 148 ]
 }
 
 require_supported_codex_cli() {
@@ -935,7 +945,7 @@ require_supported_codex_cli() {
   version="$(printf '%s\n' "$raw" | sed -nE 's/.*[^0-9]([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)"
   if [ -z "$version" ] || ! version_in_supported_codex_range "$version"; then
     CODEX_PREFLIGHT_FATAL=1
-    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.147.0" >&2
+    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.148.0" >&2
     return 78
   fi
   CODEX_CLI_VERSION="$version"

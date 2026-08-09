@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Opt-in enum-drift check (spec-005 follow-up e74a7070): DOMAIN_ENUM_ORDER and
-# PACK_ENUM in socratic-slice.sh are frozen at pin 862b52e. Against a REAL
+# PACK_ENUM in socratic-slice.sh are frozen at pin 8c7e1fd. Against a REAL
 # resolved vendor tree, each enum entry must map 1:1 to a file — and the tree
 # must carry no extra domain/pack files the enums don't know. Skips when no
 # vendor tree resolves (CI has none), which is what makes it opt-in: it only
@@ -75,6 +75,9 @@ setup() {
   for d in "$VENDOR_DIR"/packs/*/; do
     [ -f "${d}core.md" ] || continue
     p="$(basename "$d")"
+    # `_template` is upstream's scaffold for authoring a new pack, not a
+    # selectable one — it ships a core.md but must never appear in PACK_ENUM.
+    case "$p" in _*) continue ;; esac
     grep -qx "$p" <<< "$PACKS" || extra="$extra $p"
   done
   [ -z "$extra" ] || { echo "vendor packs missing from enum:$extra"; false; }

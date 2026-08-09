@@ -178,6 +178,20 @@ echo "== HYGIENE =="
 [ -n "$SPEC_DIR" ] && grep -rlE '(pcp_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9]{16,}|Bearer [A-Za-z0-9._-]{20,})' "$SPEC_DIR/evidence/" 2>/dev/null | head -5 || true
 echo "hygiene-scan-done"
 
+echo "== COORD =="
+# Cross-session claims + path leases (spec-009). Redacted output, read-only.
+if [ -f "$ROOT/scripts/coord/coord.py" ]; then
+  # Full session uuids are impersonation tokens (EDGE-006) — truncate to the
+  # same 8-char prefix the PreToolUse guard shows before this lands in a
+  # session-readable status report.
+  python3 "$ROOT/scripts/coord/coord.py" status 2>&1 \
+    | sed -E 's/([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/\1.../g' \
+    || echo "coord-status-rc=$?"
+  echo "coord-scan-done"
+else
+  echo "coord CLI absent (non-FFS repo)"
+fi
+
 echo "== DISK =="
 df -h "${TMPDIR:-/tmp}" | tail -1
 df -h "$ROOT" | tail -1

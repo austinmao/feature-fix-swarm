@@ -35,7 +35,10 @@ bash "$(dirname <this skill>)/scripts/collect-status-facts.sh" "$SPEC_ID"
 Sections: GIT · PLANNING (plans vs SUMMARYs per phase) · RUNNER (status file +
 pid liveness — never trust shell rc or `state=completed` alone) · LEDGER
 (pendings; grants checked via `check-grant`) · EVIDENCE (files + mtimes) ·
-HYGIENE (key-shaped strings in evidence/, filenames only) · DISK.
+HYGIENE (key-shaped strings in evidence/, filenames only) · COORD
+(cross-session claims + path leases from spec-009's `coord.py status`,
+uuid-redacted; a claim on this spec by another live session means DO NOT
+start implementing here) · DISK.
 
 ## Step 3 — Fan-out (task-swarm style; every spawn model-pinned)
 

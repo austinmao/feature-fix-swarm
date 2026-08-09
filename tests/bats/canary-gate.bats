@@ -229,6 +229,26 @@ EOF
   [[ "$output" == *"jq required to parse canary results"* ]]
 }
 
+@test "shell hook under scripts/hooks/ is NOT web-touch (WEB_EXCLUDE)" {
+  mkdir -p scripts/hooks
+  echo '#!/usr/bin/env bash' > scripts/hooks/path-guard.sh
+  git add scripts/hooks/path-guard.sh
+  git commit -q -m "shell hook change"
+  run bash "$SCRIPT" --diff-base "$BASE_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"canary-gate: NOT-NEEDED (no web-touch in diff)"* ]]
+}
+
+@test "plain .ts under hooks/ dir is still web-touch after WEB_EXCLUDE" {
+  mkdir -p src/hooks
+  echo "export const useCart = () => {}" > src/hooks/useCart.ts
+  git add src/hooks/useCart.ts
+  git commit -q -m "react hook change"
+  run bash "$SCRIPT" --diff-base "$BASE_SHA" "$BATS_TEST_TMPDIR/does-not-exist.json"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"web-touch diff but no canary results"* ]]
+}
+
 # ── spec-008 Phase 3 (REQ-301, AC-004): typed canary evidence ────────────────
 # A passing run must durably record {run_id, sha, pass, created_at, ended_at,
 # ts} BEFORE printing PASS; sha comes from `git rev-parse HEAD` in this

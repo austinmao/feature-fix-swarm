@@ -1051,6 +1051,32 @@ print(median * 1000)
   python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < 30.0 else 1)" "$median_ms"
 }
 
+# P3-W2: the test above only exercises the off-mode limb; this one pins the
+# no-store limb (enforce mode, store never created). Budget 60ms: P3-W3
+# measured p95 38.1ms on this limb — 60ms catches a python-launch regression
+# (~100ms+) without flaking on CI jitter.
+@test "REQ-09: no-store latency — 20-rep median under 60ms" {
+  [ ! -e "$STORE" ]
+  starts=()
+  ends=()
+  for _ in $(seq 1 20); do
+    starts+=("$EPOCHREALTIME")
+    printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"'"$REPO"'/docs/a.md"}}' | FFS_COORD_MODE=enforce CLAUDE_PROJECT_DIR="$REPO" bash "$HOOK" >/dev/null 2>&1
+    ends+=("$EPOCHREALTIME")
+  done
+  median_ms=$(python3 -c "
+import sys
+n = 20
+starts = [float(x) for x in sys.argv[1:1+n]]
+ends = [float(x) for x in sys.argv[1+n:1+2*n]]
+deltas = sorted(e - s for s, e in zip(starts, ends))
+median = deltas[n//2] if n % 2 else (deltas[n//2-1] + deltas[n//2]) / 2
+print(median * 1000)
+" "${starts[@]}" "${ends[@]}")
+  echo "measured median: ${median_ms}ms (budget 60ms)"
+  python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < 60.0 else 1)" "$median_ms"
+}
+
 @test "REQ-09: enforce warm-path latency — 20-rep median under 240ms" {
   run acquire_as holder "path:elsewhere/**" exclusive
   [ "$status" -eq 0 ]

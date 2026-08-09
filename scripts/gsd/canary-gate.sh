@@ -75,6 +75,10 @@ if [ "${CANARY_GATE:-on}" = "off" ]; then
 fi
 
 WEB_PATTERN="${CANARY_WEB_PATTERN:-\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(pages|routes|components|emails|templates|public|hooks|stores?|styles?)/|(^|/)app/|(^|/)api/|(^|/)(tailwind|next|nuxt|vite|astro|svelte)\.config\.}"
+# Shell/bats files are never a browser surface even inside web-named dirs
+# (scripts/hooks/*.sh matched the bare hooks/ alternation — false web-touch).
+# Keep in lockstep with browser-proof.sh's WEB_EXCLUDE_RE.
+WEB_EXCLUDE="${CANARY_WEB_EXCLUDE:-\.(sh|bash|bats)$}"
 
 if ! git rev-parse --verify "${DIFF_BASE}^{commit}" >/dev/null 2>&1; then
   echo "canary-gate: FAIL — diff base '${DIFF_BASE}' unresolvable (fetch it or pass --diff-base)" >&2
@@ -90,7 +94,7 @@ WEB_TOUCH="no"
 if [ -n "$DIFF_FILES" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    if echo "$f" | grep -Eq "$WEB_PATTERN"; then
+    if echo "$f" | grep -Eq "$WEB_PATTERN" && ! echo "$f" | grep -Eq "$WEB_EXCLUDE"; then
       WEB_TOUCH="yes"
       break
     fi

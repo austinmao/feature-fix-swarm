@@ -157,7 +157,7 @@ def run_socratic_installer(
 def test_socratic_pin_is_exact() -> None:
     metadata = json.loads((ROOT / "vendor/socratic/pin.json").read_text())
     assert metadata["repository"] == "https://github.com/m4vic/socratic.git"
-    assert metadata["commit"] == "862b52e898134ba13ac05a43651ba8d1a7f2a28a"
+    assert metadata["commit"] == "8c7e1fdda5ff6f7755d4855907ddf0022a755493"
     assert "patch" not in metadata
 
 
@@ -800,7 +800,7 @@ def test_install_invokes_upstream_full_claude_and_codex_profiles(tmp_path: Path)
     calls = (tmp_path / "gsd-installer.log").read_text().splitlines()
     assert calls == ["--claude --global --profile=full", "--codex --global --profile=full"]
     manifest = json.loads((tmp_path / "home/.cache/feature-fix-swarm/install-manifest.json").read_text())
-    assert manifest["gsd"]["version"] == "1.9.1"
+    assert manifest["gsd"]["version"] == "1.10.0"
     assert manifest["gsd"]["profiles"] == {"claude": "full", "codex": "full"}
 
 
@@ -849,7 +849,7 @@ def test_doctor_rejects_unsupported_codex_cli(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake = fake_bin / "codex"
-    fake.write_text("#!/usr/bin/env bash\necho 'codex-cli 0.147.0'\n")
+    fake.write_text("#!/usr/bin/env bash\necho 'codex-cli 0.148.0'\n")
     fake.chmod(0o755)
 
     result = run_setup(
@@ -1144,7 +1144,7 @@ def test_upgrade_rollback_restores_prior_gsd_version_manifests(tmp_path: Path) -
     installed = run_setup(tmp_path, "--scope", "user")
     assert installed.returncode == 0, installed.stderr
     backup_id = next(line.split("=", 1)[1] for line in installed.stdout.splitlines() if line.startswith("backup_id="))
-    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.9.1"
+    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.10.0"
 
     rolled_back = run_setup(tmp_path, "--rollback", backup_id)
 

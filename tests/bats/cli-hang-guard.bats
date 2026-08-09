@@ -100,3 +100,31 @@ envelope() {
   run bash "$HOOK" < "$BATS_TEST_TMPDIR/hook-envelope.json"
   [ "$status" -eq 2 ]
 }
+
+@test "HG-016: host pipe left open does not make the hook wait for EOF" {
+  run python3 -c '
+import json
+import subprocess
+import sys
+
+hook = sys.argv[1]
+payload = json.dumps({"tool_input": {"command": "git status"}}) + "\n"
+proc = subprocess.Popen(
+    ["bash", hook],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+proc.stdin.write(payload)
+proc.stdin.flush()
+try:
+    rc = proc.wait(timeout=1)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait()
+    raise SystemExit("hook waited for EOF instead of consuming the JSON line")
+raise SystemExit(rc)
+' "$HOOK"
+  [ "$status" -eq 0 ]
+}
