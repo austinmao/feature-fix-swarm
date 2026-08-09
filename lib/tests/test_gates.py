@@ -3623,3 +3623,308 @@ def test_env_registry_sentinel_and_surface_folding(tmp_path) -> None:
     # folding did NOT migrate into _prod_surface (promotion records key off
     # the original-case surface)
     assert gates._prod_surface("deploy:prod-Web") == "Web"
+
+
+# ── spec-007 Phase 1: surfaces parser hardening ──────────────────────────────
+# REQ-103 / AC-002: the committed registry is SECURITY INPUT. Reject cases
+# assert ValueError AND that the message names the offending shape.
+
+import pytest  # noqa: E402
+
+
+def test_surfaces_parser_nested_trigger_requires_indent_zero() -> None:
+    # EDGE-001: a nested surfaces: key must not flip parsing
+    nested_only = ("environments:\n"
+                   "  surfaces:\n"
+                   "    - surface: evil\n"
+                   "      staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(nested_only)
+    assert "surfaces" in str(exc.value)
+    # decoy-indented block + real indent-0 block -> real row only
+    decoy_plus_real = ("environments:\n"
+                       "  surfaces:\n"
+                       "    - surface: evil\n"
+                       "      staging_instance: none\n"
+                       "surfaces:\n"
+                       "  - surface: web\n"
+                       "    staging_instance: real-staging\n")
+    assert gates._load_manifest_text(decoy_plus_real) == {
+        "web": {"staging": "real-staging"},
+    }
+
+
+def test_surfaces_parser_flush_appends_row_when_surfaces_not_last() -> None:
+    # EDGE-002: an indent-0 key AFTER the block flushes the in-progress row
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: stg-web\n"
+            "  - surface: api\n"
+            "    staging_instance: stg-api\n"
+            "test_tiers:\n"
+            "  - tier: fast\n")
+    assert gates._load_manifest_text(text) == {
+        "web": {"staging": "stg-web"},
+        "api": {"staging": "stg-api"},
+    }
+
+
+def test_surfaces_parser_single_entry_latch(tmp_path) -> None:
+    # EDGE-013: after the block closes, surface-shaped lines inside later
+    # prose blocks (with verdict-flipping staging values) are never parsed
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: real-staging\n"
+            "environments:\n"
+            "  - surface: web2\n"
+            "    staging_instance: none\n"
+            "  - surface: evil\n"
+            "    staging_instance: none\n")
+    parsed = gates._load_manifest_text(text)
+    assert set(parsed.keys()) == {"web"}
+    assert parsed["web"] == {"staging": "real-staging"}
+
+
+def test_surfaces_parser_blank_and_comment_lines_are_neutral() -> None:
+    # interior blank between rows and mid-row: both rows complete
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "\n"
+            "    staging_instance: stg-web\n"
+            "\n"
+            "  - surface: api\n"
+            "    # mid-row comment\n"
+            "    staging_instance: stg-api\n")
+    assert gates._load_manifest_text(text) == {
+        "web": {"staging": "stg-web"},
+        "api": {"staging": "stg-api"},
+    }
+    # blank-then-DUPLICATE second row: a flush-on-blank latch would never
+    # see the duplicate — the neutral parse MUST reach and reject it
+    dup = ("surfaces:\n"
+           "  - surface: web\n"
+           "    staging_instance: stg-web\n"
+           "\n"
+           "  - surface: web\n"
+           "    staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(dup)
+    assert "duplicate" in str(exc.value) and "web" in str(exc.value)
+
+
+def test_surfaces_parser_second_surfaces_block_rejects() -> None:
+    # duplicate indent-0 surfaces: key rejects; the indented prose spelling
+    # in the same fixture is inert (nonzero indent never triggers/rejects)
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: stg-web\n"
+            "notes:\n"
+            "  surfaces:\n"
+            "surfaces:\n"
+            "  - surface: api\n"
+            "    staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(text)
+    assert "surfaces" in str(exc.value) and "duplicate" in str(exc.value)
+
+
+def test_surfaces_parser_pre_row_field_line_rejects() -> None:
+    # PD-4 (0fdfeee3): an allowlisted field line BEFORE the first
+    # `- surface:` row is REJECTED, never silently ignored
+    direct = ("surfaces:\n"
+              "  staging_instance: none\n"
+              "  - surface: web\n"
+              "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(direct)
+    assert "staging_instance" in str(exc.value)
+    after_comment = ("surfaces:\n"
+                     "  # reviewers see a comment; the gate must not differ\n"
+                     "  staging_instance: none\n"
+                     "  - surface: web\n"
+                     "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc2:
+        gates._load_manifest_text(after_comment)
+    assert "staging_instance" in str(exc2.value)
+
+
+def test_surfaces_parser_inline_comment_sentinel_pd3() -> None:
+    # PD-3 (898818dd): _manifest_scalar already strips unquoted trailing
+    # comments — pinned here (fail-open forbidden), not re-implemented
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: none # explanation\n")
+    parsed = gates._load_manifest_text(text)
+    assert parsed == {"web": {"staging": "none"}}
+    assert gates._surface_has_staging("web", parsed) is False
+    quoted = ("surfaces:\n"
+              "  - surface: web\n"
+              "    staging_instance: \"none # x\"\n")
+    parsed_q = gates._load_manifest_text(quoted)
+    assert parsed_q == {"web": {"staging": "none # x"}}
+    assert gates._surface_has_staging("web", parsed_q) is True
+
+
+def test_surfaces_parser_duplicate_surface_names_reject_folded() -> None:
+    # exact duplicate (existing behavior kept)
+    exact = ("surfaces:\n"
+             "  - surface: web\n"
+             "    staging_instance: a\n"
+             "  - surface: web\n"
+             "    staging_instance: b\n")
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(exact)
+    # folded duplicates, both orders, YAML rows
+    for first, second in (("web", "WEB"), ("WEB", "web")):
+        text = ("surfaces:\n"
+                f"  - surface: {first}\n"
+                "    staging_instance: a\n"
+                f"  - surface: {second}\n"
+                "    staging_instance: b\n")
+        with pytest.raises(ValueError, match="duplicate"):
+            gates._load_manifest_text(text)
+    # JSON surfaces array
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(
+            '{"surfaces": [{"surface": "web", "staging_instance": "a"},'
+            ' {"surface": "WEB", "staging_instance": "b"}]}')
+    # legacy JSON map with no surfaces key (the early-return bypass)
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(
+            '{"web": {"staging": "a"}, "WEB": {"staging": "b"}}')
+    # negative half: near-miss names load
+    ok = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: a\n"
+          "  - surface: web-admin\n"
+          "    staging_instance: b\n")
+    assert set(gates._load_manifest_text(ok)) == {"web", "web-admin"}
+
+
+def test_surfaces_parser_duplicate_field_and_redeclared_surface_reject() -> None:
+    dup_field = ("surfaces:\n"
+                 "  - surface: web\n"
+                 "    staging_instance: a\n"
+                 "    staging_instance: b\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(dup_field)
+    assert "staging_instance" in str(exc.value)
+    # redeclared in-row surface: after row start — the row seeds `surface`
+    # as seen, so both value orders reject
+    for first, second in (("web", "api"), ("api", "web")):
+        text = ("surfaces:\n"
+                f"  - surface: {first}\n"
+                f"    surface: {second}\n"
+                "    staging_instance: a\n")
+        with pytest.raises(ValueError) as exc2:
+            gates._load_manifest_text(text)
+        assert "surface" in str(exc2.value)
+
+
+def test_surfaces_parser_alias_co_presence_rejects_each_alone_loads() -> None:
+    # YAML row: both keys reject whether values agree or differ
+    for staging_val in ("a", "b"):
+        text = ("surfaces:\n"
+                "  - surface: web\n"
+                "    staging_instance: a\n"
+                f"    staging: {staging_val}\n")
+        with pytest.raises(ValueError) as exc:
+            gates._load_manifest_text(text)
+        assert "staging" in str(exc.value)
+    # JSON row form
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(
+            '{"surfaces": [{"surface": "web", "staging_instance": "a",'
+            ' "staging": "a"}]}')
+    # legacy map form
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(
+            '{"web": {"staging_instance": "a", "staging": "a"}}')
+    # each key ALONE parses in all three forms
+    assert gates._load_manifest_text(
+        "surfaces:\n  - surface: web\n    staging_instance: a\n") == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text(
+        "surfaces:\n  - surface: web\n    staging: a\n") == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text(
+        '{"surfaces": [{"surface": "web", "staging": "a"}]}') == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text('{"web": {"staging": "a"}}') == {
+        "web": {"staging": "a"}}
+
+
+def test_surfaces_parser_json_duplicate_keys_reject_at_any_depth() -> None:
+    dup_shapes = [
+        # top-level, both orders
+        '{"web": {"staging": "a"}, "web": {"staging": "b"}}',
+        '{"web": {"staging": "b"}, "web": {"staging": "a"}}',
+        # in-row
+        '{"surfaces": [{"surface": "web", "staging_instance": "a",'
+        ' "staging_instance": "b"}]}',
+        # nested
+        '{"web": {"staging": "a", "staging": "none"}}',
+    ]
+    for shape in dup_shapes:
+        with pytest.raises(ValueError, match="duplicate"):
+            gates._load_manifest_text(shape)
+    # duplicate-free JSON loads unchanged
+    assert gates._load_manifest_text('{"web": {"staging": "stg"}}') == {
+        "web": {"staging": "stg"}}
+
+
+def test_surfaces_parser_tab_indentation_rejects_in_block_only() -> None:
+    tabbed = ("surfaces:\n"
+              "  - surface: web\n"
+              "\tstaging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(tabbed)
+    assert "tab" in str(exc.value).casefold()
+    # a tab-indented surfaces: key OUTSIDE a block is inert (nonzero indent)
+    inert = ("\tsurfaces:\n"
+             "surfaces:\n"
+             "  - surface: web\n"
+             "    staging_instance: stg\n")
+    assert gates._load_manifest_text(inert) == {"web": {"staging": "stg"}}
+
+
+def test_surfaces_parser_unknown_field_rejects_allowlist_loads() -> None:
+    unknown = ("surfaces:\n"
+               "  - surface: web\n"
+               "    staging_instance: none\n"
+               "    sneaky_field: x\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(unknown)
+    assert "sneaky_field" in str(exc.value)
+    # positive halves: all nine allowlisted keys across two rows (alias keys
+    # split between rows), rollback included
+    ok = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: stg-web\n"
+          "    prod_instance: prod-web\n"
+          "    staging_artifact: a1\n"
+          "    prod_artifact: a2\n"
+          "    rollback: make rollback\n"
+          "  - surface: api\n"
+          "    staging: stg-api\n"
+          "    staging_migration_head: m1\n"
+          "    prod_migration_head: m2\n")
+    parsed = gates._load_manifest_text(ok)
+    assert set(parsed) == {"web", "api"}
+    assert parsed["web"]["staging"] == "stg-web"
+    assert parsed["api"]["staging"] == "stg-api"
+
+
+def test_surfaces_parser_crlf_parses_equal_to_lf() -> None:
+    lf = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: none\n")
+    crlf = lf.replace("\n", "\r\n")
+    assert gates._load_manifest_text(crlf) == gates._load_manifest_text(lf)
+
+
+def test_surfaces_parser_regression_live_registry_and_legacy_shape() -> None:
+    # FFS's own registry still loads to the single release row after the
+    # rewrite (the legacy-shape test above stays green unedited)
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
