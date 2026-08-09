@@ -379,7 +379,12 @@ exit 0
 ```
 <!-- openwiki-wiring:ship-stage:end -->
 
-4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke).
+4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke). After
+   ship, run `bash scripts/gsd/promote-emit.sh "$RUN_ID"` — it EMITS (never
+   executes) the staging→prod `gates.py promote` command for the operator/CI
+   deploy workflow when this run consumed a `deploy:staging-*` grant; silent
+   otherwise (REQ-401 Seam 3 — deliberately NOT run-finalizer.sh, whose
+   always-exit-0 post-merge contract would swallow the signal).
 5. **Merge execution (only with a `merge:pr` grant):** if a `/land-and-deploy`
    skill is available in this session, use it to execute the granted merge
    (merge → CI/deploy wait → prod verify); else `gh pr merge` directly. EITHER
@@ -406,6 +411,7 @@ exit 0
    test -f "$REPO_ROOT/scripts/gsd/model-fallback.sh"
    test -f "$REPO_ROOT/scripts/gsd/fallback-rehearsal.sh"
    test -f "$REPO_ROOT/scripts/coord/coord.py"
+   test -f "$REPO_ROOT/scripts/gsd/promote-emit.sh"
    ```
 
 6. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
