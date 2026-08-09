@@ -2408,3 +2408,97 @@ def test_cli_promote_trailing_evidence_flag_returns_typed_rejection(tmp_path, mo
         "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence",
     ])
     assert rc == 1
+
+
+# ── spec-008 Phase 3 (REQ-301): record_canary_evidence recorder validation ───
+# Trust boundary (wall 087faa76): the recorder validates SHAPE, not caller
+# identity — the trusted wrapper (canary-gate.sh) is the sole LEGITIMATE
+# producer; integrity is guarded by the G2 tamper scan + store perms.
+
+_COMMIT_ARTIFACT = "ab" * 20  # bare 40-hex commit sha (F5 — the FFS binding target)
+_ISO_CREATED = "2026-06-13T08:43:44.814Z"
+_ISO_ENDED = "2026-06-13T08:48:02.991Z"
+
+
+def test_canary_recorder_appends_verbatim_schema_row(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    rows = json.loads(store.read_text())["canary"]
+    assert len(rows) == 1
+    rec = rows[0]
+    assert set(rec) == {"run_id", "sha", "pass", "created_at", "ended_at", "ts"}
+    assert rec["run_id"] == "run-1"
+    assert rec["sha"] == _COMMIT_ARTIFACT
+    assert rec["pass"] is True
+    assert rec["created_at"] == _ISO_CREATED
+    assert rec["ended_at"] == _ISO_ENDED
+    assert isinstance(rec["ts"], float)
+
+
+def test_canary_recorder_rejects_non_40_hex_sha(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in ("abc", "Z" * 40, "ab" * 32, "", None,
+                "myapp@sha256:" + "f" * 64):  # digest refs are NOT canary identity
+        with pytest.raises(ValueError, match="INVALID-CANARY-SHA"):
+            gates.record_canary_evidence(store, "run-1", bad, True,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_empty_or_missing_timestamps(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for created, ended in (("", _ISO_ENDED), (_ISO_CREATED, ""), (None, _ISO_ENDED),
+                           (_ISO_CREATED, None), ("   ", _ISO_ENDED),
+                           ("x" * 65, _ISO_ENDED), ("bad\x00ts", _ISO_ENDED)):
+        with pytest.raises(ValueError, match="INVALID-CANARY-TIMESTAMP"):
+            gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                         created, ended)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_malformed_pass_flag(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in (1, 0, "true", "false", None):
+        with pytest.raises(ValueError, match="INVALID-CANARY-PASS"):
+            gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, bad,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_invalid_run_id(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in ("", None, "x" * 129, "bad\x00run"):
+        with pytest.raises(ValueError, match="INVALID-CANARY-RUN-ID"):
+            gates.record_canary_evidence(store, bad, _COMMIT_ARTIFACT, True,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_refuses_namespace_shape_conflict(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"canary": {"not": "a list"}}))
+    with pytest.raises(ValueError, match="CANARY-SCHEMA-CONFLICT"):
+        gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                     _ISO_CREATED, _ISO_ENDED)
+    assert json.loads(store.read_text())["canary"] == {"not": "a list"}
+
+
+def test_cli_canary_evidence_records_and_rejects_typed(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main(["canary-evidence", "--run-id", "run-1",
+                     "--sha", _COMMIT_ARTIFACT, "--pass", "true",
+                     "--created-at", _ISO_CREATED, "--ended-at", _ISO_ENDED])
+    assert rc == 0
+    rows = json.loads((tmp_path / "evidence.json").read_text())["canary"]
+    assert rows[0]["sha"] == _COMMIT_ARTIFACT and rows[0]["pass"] is True
+    rc = gates.main(["canary-evidence", "--run-id", "run-1",
+                     "--sha", "not-a-sha", "--pass", "true",
+                     "--created-at", _ISO_CREATED, "--ended-at", _ISO_ENDED])
+    assert rc == 2
+    assert "CANARY-EVIDENCE-REJECTED" in capsys.readouterr().err
