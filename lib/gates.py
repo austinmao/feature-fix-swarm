@@ -2044,14 +2044,10 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
     return _normalize_manifest({"surfaces": rows})
 
 
-def _load_manifest(path: str) -> dict:
-    """Load a JSON or constrained YAML staging-parity manifest.
-
-    Legacy JSON maps remain accepted. The committed YAML row shape is
-    normalized to the `{surface: {staging: value}}` form consumed by the prod
-    grant precondition. Invalid input raises ValueError so the CLI fails closed.
-    """
-    text = Path(path).read_text()
+def _load_manifest_text(text: str) -> dict:
+    """Text-taking core of _load_manifest (spec-007 REQ-102): the registry
+    resolver feeds it HEAD bytes directly, so implicit resolution never round-
+    trips through the working tree. Every parser hardening lands HERE."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
@@ -2059,6 +2055,114 @@ def _load_manifest(path: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("manifest must parse to an object")
     return _normalize_manifest(data)
+
+
+def _load_manifest(path: str) -> dict:
+    """Load a JSON or constrained YAML staging-parity manifest.
+
+    Legacy JSON maps remain accepted. The committed YAML row shape is
+    normalized to the `{surface: {staging: value}}` form consumed by the prod
+    grant precondition. Invalid input raises ValueError so the CLI fails closed.
+    """
+    return _load_manifest_text(Path(path).read_text())
+
+
+# ── spec-007 Phase 1: env registry resolution (REQ-101/102) ──────────────────
+
+_ENV_REGISTRY_REL = "config/environments.yaml"
+
+
+def _main_checkout_root() -> Path | None:
+    """MAIN-checkout root via the same `git rev-parse --git-common-dir` pin as
+    _store_path (G5): a worktree-local registry must not govern its own prod
+    gate. Non-git cwd or any probe failure returns None (fail closed for the
+    implicit steps — absent, never a fabricated resolution)."""
+    try:
+        probe = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                               capture_output=True, text=True, timeout=5)
+        if probe.returncode == 0:
+            common = Path(probe.stdout.strip())
+            if common.name == ".git":
+                return common.parent
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _is_git_tracked(root: Path, rel: str) -> bool:
+    """True iff `rel` is tracked in the MAIN checkout's index. The pathspec is
+    literal-escaped behind `--` so glob metacharacters in a caller-supplied
+    path (`config/en*.yaml`) can never match a DIFFERENT tracked file. Probe
+    failure returns False — fail closed."""
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--",
+             f":(literal){rel}"],
+            capture_output=True, text=True, timeout=5)
+        return probe.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _head_bytes(root: Path, rel: str) -> str | None:
+    """HEAD bytes of `rel` in the MAIN checkout, or None when HEAD lacks it.
+    PD-2 (2c72f448): for IMPLICIT resolution this probe's success IS existence
+    and its bytes ARE the registry — index and working tree never enter the
+    verdict. `HEAD:<rel>` is an OBJECT spec, not a pathspec — it takes neither
+    the literal escape nor `--`."""
+    try:
+        probe = subprocess.run(["git", "-C", str(root), "show", f"HEAD:{rel}"],
+                               capture_output=True, text=True, timeout=5)
+        if probe.returncode == 0:
+            return probe.stdout
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _resolve_registry(args: list[str]) -> tuple[dict | None, str, str | None, bool]:
+    """Resolve the environment registry for a prod-prefix check-grant.
+
+    Returns (manifest|None, kind, typed refusal reason|None, dirty flag).
+    Implicit default-filename steps parse HEAD bytes with HEAD as the SOLE
+    authority; the working tree is consulted only AFTER the verdict, for the
+    dirty advisory. A resolved-but-unparseable registry is a refusal, never
+    absent (EDGE-005)."""
+    root = _main_checkout_root()
+    if root is None:
+        return None, "absent", None, False
+    head = _head_bytes(root, _ENV_REGISTRY_REL)
+    if head is None:
+        return None, "absent", None, False
+    try:
+        manifest = _load_manifest_text(head)
+    except ValueError as exc:
+        return (None, _ENV_REGISTRY_REL,
+                f"ENV-REGISTRY-INVALID: {_ENV_REGISTRY_REL} (HEAD bytes) "
+                f"failed to parse: {exc}; remedy: fix the registry and "
+                "commit the fix", False)
+    dirty = False
+    try:
+        working = root / _ENV_REGISTRY_REL
+        if working.is_file() and working.read_text() != head:
+            dirty = True
+    except OSError:
+        pass  # unreadable working copy is irrelevant to the HEAD verdict
+    return manifest, _ENV_REGISTRY_REL, None, dirty
+
+
+def _registry_absent_advisory() -> str:
+    """The single ENV-REGISTRY-ABSENT line (REQ-102): names /ffs-init, and
+    names an uncommitted working-tree file at the implicit path when one
+    exists (an untracked registry governs nothing until committed)."""
+    line = ("ENV-REGISTRY-ABSENT: no environment registry resolved "
+            "(run /ffs-init to create config/environments.yaml)")
+    root = _main_checkout_root()
+    if root is not None and (root / _ENV_REGISTRY_REL).is_file():
+        line += (f" — uncommitted {_ENV_REGISTRY_REL} present in the working "
+                 f"tree governs nothing; activate it with git add "
+                 f"{_ENV_REGISTRY_REL} && git commit")
+    return line
 
 
 def _flag(args: list[str], name: str, default: str = "") -> str:
@@ -2556,12 +2660,30 @@ def main(argv: list[str]) -> int:
             manifest_path = _flag(args, "--manifest")
             manifest = None
             if manifest_path:
+                # PINNED (wall 538ffc42): an explicit --manifest takes today's
+                # raw _load_manifest path unchanged — the resolver below adds
+                # the implicit branch BESIDE it, never replacing it.
                 try:
                     manifest = _load_manifest(manifest_path)
                 except (OSError, ValueError) as exc:
                     print(f"CHECK-GRANT-REJECTED: cannot load manifest "
                           f"{manifest_path}: {exc}", file=sys.stderr)
                     return 1
+            else:
+                manifest, _kind, refusal, dirty = _resolve_registry(args)
+                if refusal is not None:
+                    record_pending(store, run_id, action, refusal)
+                    print(f"CHECK-GRANT-REJECTED: {sanitize_reason(refusal)}",
+                          file=sys.stderr)
+                    return 1
+                if dirty:
+                    # single ENV-REGISTRY-DIRTY emission site (REQ-102)
+                    print(f"ENV-REGISTRY-DIRTY: {_ENV_REGISTRY_REL} working "
+                          "tree differs from HEAD; committed bytes govern "
+                          "this verdict", file=sys.stderr)
+                elif manifest is None:
+                    # single ENV-REGISTRY-ABSENT emission site (REQ-102)
+                    print(_registry_absent_advisory(), file=sys.stderr)
             if check_grant_prod(store, run_id, action, artifact, manifest=manifest):
                 print(f"GRANTED: {safe}")
                 return 0
