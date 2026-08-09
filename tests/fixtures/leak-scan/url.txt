@@ -1,0 +1,2 @@
+# SYNTHETIC-NOT-A-REAL-KEY — leak-scan fixture (REQ-202a family: credential-url)
+db_url: postgres://svc:SYNTHpw12345@db.internal.example/app
