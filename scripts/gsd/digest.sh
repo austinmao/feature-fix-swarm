@@ -103,7 +103,10 @@ def fp(obj):
 
 
 def atomic_write_json(path, obj):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # Deliberately NO makedirs: a missing store dir means there is nothing to
+    # observe (e.g. the finalizer just removed a worktree whose GATES_STORE
+    # lived inside it) — recreating it here would resurrect removed
+    # directories. Callers treat the failure as degraded (cursor retained).
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                prefix=".digest-tmp.")
     try:
@@ -308,6 +311,72 @@ def promotion_class(em, ev):
     em.flush("promotion", lines, new_cur)
 
 
+def git(*args_):
+    return _run(["git"] + list(args_))
+
+
+def scan_tamper_class(em):
+    """Decision 2 (OQ-2): cursor is the last-scanned commit sha. Absent =>
+    initialize to current HEAD and emit nothing — no unbounded history scan
+    (documented in docs/digest.md). Present => scan each newer first-parent
+    commit's diff through `gates.py scan-tamper`; findings emit one line per
+    sha; the cursor advances through processed shas."""
+    head = git("rev-parse", "HEAD")
+    if head.returncode != 0:
+        note("scan-tamper: no git HEAD — skipped")
+        return
+    head_sha = head.stdout.strip()
+    cur = em.cursor.get("scan-tamper")
+    if not isinstance(cur, str) or not cur:
+        em.flush("scan-tamper", [], head_sha)
+        return
+    if not GATES_PY or not os.path.exists(GATES_PY):
+        note("scan-tamper: gates.py not found — cursor retained")
+        return
+    lst = git("rev-list", "--reverse", "--first-parent", "%s..HEAD" % cur)
+    if lst.returncode != 0:
+        note("scan-tamper: cursor %s unresolvable — re-initialized to HEAD" % cur[:12])
+        em.flush("scan-tamper", [], head_sha)
+        return
+    lines, last = [], cur
+    for sha in lst.stdout.split():
+        show = git("show", sha, "--format=")
+        if show.returncode != 0:
+            note("scan-tamper: git show %s failed — stopping at last scanned sha" % sha[:12])
+            break
+        scan = _run([sys.executable, GATES_PY, "scan-tamper"], input=show.stdout)
+        if scan.returncode not in (0, 1):
+            note("scan-tamper: scanner failed on %s — stopping at last scanned sha" % sha[:12])
+            break
+        findings = [l for l in scan.stdout.splitlines() if l.strip()]
+        if scan.returncode == 1 and findings:
+            lines.append("scan-tamper " + kv([("sha", sha), ("findings", len(findings))]))
+        last = sha
+    em.flush("scan-tamper", lines, last)
+
+
+def drift_class(em):
+    """Decision 3 (OQ-3): drift = current gh state vs the recorded baseline.
+    Baseline absent => stderr note only; gh unreachable => stderr note,
+    cursor retained, exit 0. The cursor stores the last-EMITTED fingerprint
+    so unchanged drift never re-emits."""
+    if not os.path.exists(BASELINE_PATH):
+        note("drift: no baseline recorded — run digest.sh --record-baseline")
+        return
+    base = load_json(BASELINE_PATH)
+    state = gh_reads()
+    if state is None:
+        note("drift: gh unreachable — cursor retained")
+        return
+    base_fp = fp({"protection": base.get("protection"),
+                  "workflows": base.get("workflows")})
+    state_fp = fp(state)
+    if state_fp == base_fp or em.cursor.get("drift") == state_fp:
+        return
+    em.flush("drift", ["drift " + kv([("fingerprint", state_fp[:12]),
+                                      ("baseline", base_fp[:12])])], state_fp)
+
+
 def immediate():
     ev = load_json(STORE)
     em = Emitter()
@@ -349,12 +418,109 @@ def immediate():
             ("artifact_sha", r.get("artifact_sha", "?")),
             ("ts", r.get("ts", "?"))]))
 
+    scan_tamper_class(em)
+    drift_class(em)
+
     if not em.emitted_any:
         print("no events")
 
 
 def daily():
+    """REQ-702: seven labeled summary fields, cursor-free (a summary, not an
+    event stream). Every degraded source renders `unavailable`; merges,
+    branch and worktree fields come from LOCAL git only."""
     print("digest daily")
+    ev = load_json(STORE)
+
+    # specs completed/quarantined (decision 5: completed counts run-state
+    # `complete` rows; quarantined derives from distinct budget_limit_hit
+    # run ids plus .planning/run-state/gsd-run.status)
+    completed = quarantined = used = budget = None
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            try:
+                completed = conn.execute(
+                    "SELECT COUNT(*) FROM runs WHERE state = 'complete'").fetchone()[0]
+                quarantined = conn.execute(
+                    "SELECT COUNT(DISTINCT run_id) FROM events "
+                    "WHERE event_type = 'budget_limit_hit'").fetchone()[0]
+                used = conn.execute(
+                    "SELECT COALESCE(SUM(tokens_used), 0) FROM runs").fetchone()[0]
+                budget = conn.execute(
+                    "SELECT COALESCE(SUM(tokens_budget), 0) FROM runs").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            completed = quarantined = used = budget = None
+    try:
+        with open(os.path.join(".planning", "run-state", "gsd-run.status"),
+                  encoding="utf-8") as fh:
+            if "quarantined" in fh.read():
+                quarantined = (quarantined or 0) + 1
+    except OSError:
+        pass
+    if completed is None:
+        print("specs: unavailable")
+    else:
+        print("specs: completed=%s quarantined=%s" % (completed, quarantined or 0))
+
+    m = git("log", "--merges", "--format=%h", "-n", "20")
+    if m.returncode == 0:
+        shas = m.stdout.split()
+        print("merges: %d%s" % (len(shas),
+                                " (%s)" % " ".join(shas) if shas else ""))
+    else:
+        print("merges: unavailable")
+
+    inv = degradation_ns(ev).get("invocations")
+    inv = inv if isinstance(inv, list) else []
+    degraded = sum(1 for e in inv if isinstance(e, dict) and e.get("degraded"))
+    print("degraded-review: %d/%d" % (degraded, len(inv)))
+
+    if used is None:
+        print("tokens: unavailable")
+    else:
+        print("tokens: used=%s budget=%s" % (used, budget))
+
+    auto = ev.get("_autonomy")
+    auto = auto if isinstance(auto, dict) else {}
+    pend = sum(len(entry["pending"]) for entry in auto.values()
+               if isinstance(entry, dict) and isinstance(entry.get("pending"), list))
+    print("pending: %d" % pend)
+
+    b = git("branch", "--format=%(refname:short)")
+    w = git("worktree", "list")
+    if b.returncode == 0 and w.returncode == 0:
+        branches = len([x for x in b.stdout.splitlines() if x.strip()])
+        worktrees = len([x for x in w.stdout.splitlines() if x.strip()])
+        print("stranded: branches=%d worktrees=%d"
+              % (max(branches - 1, 0), max(worktrees - 1, 0)))
+    else:
+        print("stranded: unavailable")
+
+    # the one gh-backed field: oldest unmerged PR age
+    line = "oldest-pr: unavailable"
+    try:
+        pr = _run(["gh", "pr", "list", "--state", "open", "--json", "createdAt"])
+        if pr.returncode == 0:
+            items = json.loads(pr.stdout)
+            dates = sorted(i.get("createdAt", "") for i in items
+                           if isinstance(i, dict) and i.get("createdAt"))
+            if not dates:
+                line = "oldest-pr: none"
+            else:
+                from datetime import datetime, timezone
+                try:
+                    dt = datetime.strptime(dates[0], "%Y-%m-%dT%H:%M:%SZ").replace(
+                        tzinfo=timezone.utc)
+                    days = int((datetime.now(timezone.utc) - dt).total_seconds() // 86400)
+                    line = "oldest-pr: %dd" % days
+                except ValueError:
+                    line = "oldest-pr: %s" % dates[0]
+    except Exception:
+        pass
+    print(line)
 
 
 def gh_reads():
@@ -375,7 +541,13 @@ def record_baseline():
     if state is None:
         note("record-baseline: gh failed — baseline NOT written")
         return 1
-    atomic_write_json(BASELINE_PATH, state)
+    try:
+        # the one interactive/operator mode: creating the store dir is fine here
+        os.makedirs(SIDE_DIR, exist_ok=True)
+        atomic_write_json(BASELINE_PATH, state)
+    except OSError as exc:
+        note("record-baseline: write failed (%s)" % exc)
+        return 1
     print("baseline recorded: %s" % BASELINE_PATH)
     return 0
 
