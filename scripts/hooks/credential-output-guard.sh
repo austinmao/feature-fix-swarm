@@ -10,7 +10,11 @@ set -uo pipefail
 
 [ "${CREDENTIAL_OUTPUT_GUARD:-}" = "off" ] && exit 0
 
-INPUT=$(cat 2>/dev/null || true)
+# The hook protocol is one JSON envelope per line. Do not read to EOF: Codex
+# may retain the write end until this process exits, which otherwise deadlocks
+# until the host's hook timeout. One bounded read preserves fail-open behavior.
+INPUT=""
+IFS= read -r -t 3 INPUT 2>/dev/null || true
 [ -z "$INPUT" ] && exit 0
 
 CMD=$(printf '%s' "$INPUT" | python3 -c 'import json, sys
