@@ -282,6 +282,22 @@ EOF
   [ "$output" = "skill=gsd-quick" ]
 }
 
+@test "a mapped runstore that already breached its budget refuses relaunch" {
+  # Review-gate finding (2026-08-09): the breach writes quarantined into the
+  # cwd-relative status file, but relaunch reused the mapped runstore without
+  # ever reading used-vs-budget — a breached run kept launching drives. The
+  # durable comparison is the launch-time gate: used >= budget is exit 78.
+  run env -u GSD_ACTIVE_DRIVE FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=spec-008 \
+    RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && \
+      rid=\$(PYTHONPATH='$HARNESS_ROOT/lib' python3 -m run_state.cli start --skill fix --objective o --worktree w --tokens 100 | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"run_id\"])') && \
+      PYTHONPATH='$HARNESS_ROOT/lib' python3 -m run_state.cli update \"\$rid\" --tokens 150 >/dev/null 2>&1; \
+      python3 '$HARNESS_ROOT/lib/gates.py' map-run --ledger-run-id spec-008 --runstore-id \"\$rid\" >/dev/null && \
+      bash '$SCRIPT' /gsd-quick tokens"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"BUDGET-BREACHED"* ]]
+}
+
 @test "a mapped ledger run whose runstore record is unreadable fails closed" {
   # Reuse must never invent state: mapping present but runstore record gone
   # (pruned db, cross-machine copy) is exit 78, not a silent fresh start

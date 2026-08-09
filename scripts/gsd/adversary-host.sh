@@ -355,7 +355,7 @@ adversary_invoke_model_ladder() {
   local requested_review_cap="${7:-}" ordered_rungs="${8:-}"
   local schema_file="${9:-}" validate_cmd="${10:-}"
   local total attempt_cap started remaining budget model effort output rc
-  local probe_enabled probe_timeout probe_output review_cap rung_source tripped filtered rung candidates all_tripped probe_due
+  local probe_enabled probe_timeout probe_output review_cap rung_source tripped rung candidates all_tripped probe_due
 
   total="${timeout_s%%.*}"
   case "$total" in ''|*[!0-9]*|0) total=1 ;; esac
@@ -373,27 +373,26 @@ adversary_invoke_model_ladder() {
     rung_source="$(adversary_model_ladder "$kind" "$preferred_model" "$preferred_effort")"
   fi
 
-  # Filter before execution on both ordered and built-in ladders. Retain the
-  # original sequence if every option is tripped: fail-closed review outranks
-  # cadence, so this is a normal fallback attempt, never a rate-limited probe.
+  # The tripped-rung filter is applied IN the attempt loop below (skip unless
+  # PROBE-DUE), never by removing rungs from the iterated ladder: a pre-filter
+  # that drops tripped rungs makes the half-open probe unreachable whenever
+  # any untripped sibling exists, so a tripped rung could never recover
+  # (review-gate finding, 2026-08-09). This count only decides all_tripped:
+  # when every option is tripped, fail-closed review outranks cadence and the
+  # ladder runs as normal fallback attempts, never rate-limited probes.
   tripped="$(adversary_tripped_rungs)" || return $?
-  filtered=""
   candidates=0
   while IFS='|' read -r model effort; do
     [ -n "$model" ] || continue
     rung="$kind:$model:${effort:--}"
     if ! printf '%s' "$tripped" | grep -Fq "\"$rung\""; then
-      filtered="${filtered}${model}|${effort}"$'\n'; candidates=$((candidates + 1))
+      candidates=$((candidates + 1))
     fi
   done <<EOF
 $rung_source
 EOF
   all_tripped=0
-  if [ "$candidates" -gt 0 ]; then
-    rung_source="${filtered%$'\n'}"
-  else
-    all_tripped=1
-  fi
+  [ "$candidates" -gt 0 ] || all_tripped=1
 
   while IFS='|' read -r model effort; do
     [ -n "$model" ] || continue

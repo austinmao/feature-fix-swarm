@@ -119,6 +119,17 @@ if ! git -C "$REPO_ROOT" commit --no-verify -m "$ARG" >/dev/null; then
   exit 1
 fi
 
+# The pre-commit staged-path check above is a TOCTOU window: a concurrent
+# `git add` between it and the pathless commit could sweep unrelated (and
+# unscanned) content into this commit. Verify AFTER the fact that the commit
+# touched exactly the scanned artifact path and nothing else.
+COMMITTED_PATHS="$(git -C "$REPO_ROOT" diff-tree --no-commit-id --name-only -r HEAD)"
+if [ "$COMMITTED_PATHS" != "$REL_PATH" ]; then
+  echo "publish-scanned-handoff: FATAL: commit swept paths beyond the scanned artifact ($COMMITTED_PATHS) — resetting" >&2
+  git -C "$REPO_ROOT" reset --soft HEAD^
+  exit 1
+fi
+
 COMMITTED_HASH="$(git -C "$REPO_ROOT" rev-parse "HEAD:$REL_PATH" 2>/dev/null || echo "")"
 if [ "$COMMITTED_HASH" != "$BLOB" ]; then
   echo "publish-scanned-handoff: FATAL: committed bytes for $REL_PATH do not match the scanned copy (got ${COMMITTED_HASH:-none}, expected $BLOB) — resetting" >&2

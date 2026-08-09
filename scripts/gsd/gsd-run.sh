@@ -349,7 +349,20 @@ budget_prepare_mapping() {
   # record per drive would either die on RUN-MAPPING-CONFLICT (second drive
   # of phase 2 wedged on this) or fragment the budget across runstores.
   if existing="$(python3 "$gates" map-run --ledger-run-id "$GSD_RUN_ID" --get 2>/dev/null)" && [ -n "$existing" ]; then
-    if run_state_cli status "$existing" >/dev/null 2>&1; then
+    local record
+    if record="$(run_state_cli status "$existing" 2>/dev/null)"; then
+      # A runstore that already crossed its budget must not launch another
+      # drive: the crossing wrote its BUDGET-BREACH/quarantine mark, and the
+      # cwd-relative status file cannot carry that refusal across checkouts.
+      # The durable used-vs-budget comparison is the launch-time gate.
+      if ! printf '%s' "$record" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+b, u = r.get("tokens_budget"), (r.get("tokens_used") or 0)
+sys.exit(1 if (b is not None and u >= b) else 0)'; then
+        echo "gsd-run: BUDGET-BREACHED: mapped runstore '$existing' has exhausted its token budget — refusing relaunch (quarantined)" >&2
+        return 78
+      fi
       RUNSTORE_ID="$existing"
       return 0
     fi
