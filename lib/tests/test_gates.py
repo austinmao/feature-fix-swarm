@@ -2972,3 +2972,1172 @@ def test_loop_cap_event_write_failure_is_fail_soft(tmp_path, monkeypatch, capsys
     assert "LOOP-CAP:" in captured.out
     assert "LOOP-CAP-EVENT-UNRECORDED" in captured.err
     assert "events" not in json.loads(store.read_text())
+
+
+# ── spec-007 Phase 1: env registry resolution ────────────────────────────────
+# PD-2 taxonomy (2c72f448): IMPLICIT default-filename resolution parses HEAD
+# bytes with HEAD as SOLE authority (index and working tree never enter the
+# verdict); CALLER-SUPPLIED paths parse WORKING-TREE bytes. These cases carry
+# the implicit half; the caller-supplied half lands in the Task-2 section.
+# Isolation: GATES_STORE pinned under tmp_path; FFS_ENV_REGISTRY* deleted.
+# Verdicts asserted via the pending record — stdout reason text is 01-02's.
+
+_ENV_REGISTRY_WEB = (
+    "# schema: ffs.environments/v1\n"
+    "surfaces:\n"
+    "  - surface: web\n"
+    "    staging_instance: none\n"
+)
+
+
+def _env_registry_env(store: Path) -> dict:
+    import os as _os
+    env = dict(_os.environ, GATES_STORE=str(store))
+    env.pop("FFS_ENV_REGISTRY", None)
+    env.pop("FFS_ENV_REGISTRY_REQUIRED", None)
+    return env
+
+
+def _init_registry_repo(tmp_path: Path, text: str = _ENV_REGISTRY_WEB, *,
+                        add: bool = True, commit: bool = True,
+                        rel: str = "config/environments.yaml") -> Path:
+    """Synthetic MAIN checkout holding a registry file at `rel` (pattern:
+    test_store_path_resolves_worktree_to_main_checkout)."""
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    (repo / rel).write_text(text)
+    if add:
+        _sp.run(["git", "add", rel], cwd=repo, check=True)
+    if commit:
+        _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                 "commit", "-q", "-m", "registry"], cwd=repo, check=True)
+    return repo
+
+
+def _seed_prod_ok(env: dict, repo: Path, run_id: str = "run-1",
+                  surface: str = "web") -> None:
+    """Grant + promote seeded so a NO-STAGING-COUNTERPART verdict cannot come
+    from a missing grant or missing promote evidence instead."""
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "run-gate", "stg-web",
+                 "--artifact", _GOOD_ARTIFACT, "--", "true"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = _sp.run(["python3", g, "promote", run_id, "--from", "staging",
+                 "--to", "prod", "--surface", surface,
+                 "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = _sp.run(["python3", g, "grant", run_id,
+                 "--action", f"deploy:prod-{surface}"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _check_grant_prod_cli(env: dict, repo: Path, run_id: str = "run-1",
+                          action: str = "deploy:prod-web",
+                          extra: list[str] | None = None):
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    return _sp.run(["python3", g, "check-grant", run_id, "--action", action,
+                    "--artifact", _GOOD_ARTIFACT] + (extra or []),
+                   capture_output=True, text=True, env=env, cwd=repo)
+
+
+def _pending_reasons(store: Path, run_id: str = "run-1") -> list[str]:
+    return [p["reason"] for p in gates.list_pending(store, run_id)]
+
+
+def _advisory_count(stderr: str, prefix: str) -> int:
+    return sum(1 for ln in stderr.splitlines() if ln.startswith(prefix))
+
+
+def test_env_registry_default_filename_resolution_refuses_in_tracked_repo(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+
+
+def test_env_registry_untracked_file_is_not_authoritative(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, add=False, commit=False)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+    absent = next(ln for ln in r.stderr.splitlines()
+                  if ln.startswith("ENV-REGISTRY-ABSENT:"))
+    assert "config/environments.yaml" in absent and "git commit" in absent
+
+
+def test_env_registry_staged_but_uncommitted_is_absent(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, add=True, commit=False)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+
+
+def test_env_registry_staged_deletion_does_not_disable_gate(tmp_path) -> None:
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    _sp.run(["git", "rm", "-q", "--cached", "config/environments.yaml"],
+            cwd=repo, check=True)
+    (repo / "config/environments.yaml").unlink()
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_working_tree_delete_does_not_disable_gate(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    (repo / "config/environments.yaml").unlink()
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_dirty_working_copy_is_inert(tmp_path) -> None:
+    import subprocess as _sp
+    dirty_text = _ENV_REGISTRY_WEB.replace(
+        "staging_instance: none", "staging_instance: staging-web")
+    for variant in ("unstaged", "staged"):
+        base = tmp_path / variant
+        base.mkdir()
+        store = base / "evidence.json"
+        env = _env_registry_env(store)
+        repo = _init_registry_repo(base)
+        (repo / "config/environments.yaml").write_text(dirty_text)
+        if variant == "staged":
+            _sp.run(["git", "add", "config/environments.yaml"],
+                    cwd=repo, check=True)
+        _seed_prod_ok(env, repo)
+        r = _check_grant_prod_cli(env, repo)
+        # verdict comes from HEAD bytes (staging none), not the dirty copy
+        assert r.returncode == 1, variant + ": " + r.stdout + r.stderr
+        assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+        assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 1, r.stderr
+    # clean-tree run emits zero advisory lines
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    store = clean / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(clean)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+
+
+def test_env_registry_unreadable_working_copy_still_resolves(tmp_path) -> None:
+    # PD-2: HEAD is the sole authority for the implicit step — readability of
+    # the working-tree copy is irrelevant (discriminating twin: a chmod-000
+    # CALLER-SUPPLIED path REJECTS, Task-2 section).
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    (repo / "config/environments.yaml").chmod(0o000)
+    try:
+        _seed_prod_ok(env, repo)
+        r = _check_grant_prod_cli(env, repo)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert any("NO-STAGING-COUNTERPART" in x
+                   for x in _pending_reasons(store))
+    finally:
+        (repo / "config/environments.yaml").chmod(0o644)
+
+
+def test_env_registry_live_ffs_registry_loads() -> None:
+    # FFS's own committed registry parses to exactly one release row.
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
+
+
+# ── Task 2: precedence chain, fail-closed refusals, hard mode, folding ───────
+
+def _registry_text(surface: str, staging: str = "none") -> str:
+    return ("# schema: ffs.environments/v1\n"
+            "surfaces:\n"
+            f"  - surface: {surface}\n"
+            f"    staging_instance: {staging}\n")
+
+
+def _commit_file(repo: Path, rel: str, text: str) -> None:
+    import subprocess as _sp
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(text)
+    _sp.run(["git", "add", rel], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", f"add {rel}"], cwd=repo, check=True)
+
+
+def test_env_registry_precedence_first_verdict_wins(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    _commit_file(repo, "config/parity-manifest.yaml",
+                 "surfaces:\n  - surface: b\n    staging_instance: none\n")
+    _commit_file(repo, "reg-env.yaml", _registry_text("c"))
+    (repo / "reg-flag.yaml").write_text(_registry_text("d"))
+    cases = [
+        # (run_id, surface expected to win, extra argv, env-var value)
+        ("run-11", "d", ["--manifest", "reg-flag.yaml"], "reg-env.yaml"),
+        ("run-12", "c", [], "reg-env.yaml"),
+        ("run-13", "a", [], None),
+        ("run-14", "b", [], None),  # after environments.yaml leaves HEAD
+    ]
+    for run_id, surface, extra, env_reg in cases:
+        if surface == "b":
+            _sp.run(["git", "rm", "-q", "config/environments.yaml"],
+                    cwd=repo, check=True)
+            _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "-m", "drop registry"], cwd=repo, check=True)
+        store = tmp_path / f"ev-{run_id}.json"
+        env = _env_registry_env(store)
+        if env_reg is not None:
+            env["FFS_ENV_REGISTRY"] = env_reg
+        _seed_prod_ok(env, repo, run_id=run_id, surface=surface)
+        r = _check_grant_prod_cli(env, repo, run_id=run_id,
+                                  action=f"deploy:prod-{surface}", extra=extra)
+        assert r.returncode == 1, f"{run_id}: {r.stdout}{r.stderr}"
+        reasons = _pending_reasons(store, run_id)
+        assert any("NO-STAGING-COUNTERPART" in x and f"'{surface}'" in x
+                   for x in reasons), (run_id, reasons)
+
+
+def test_env_registry_manifest_flag_empty_rejects_but_absent_resolves(tmp_path) -> None:
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    # present-but-empty --manifest -> REJECTED (EDGE-011)
+    store = tmp_path / "ev-empty.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="a")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-a",
+                              extra=["--manifest", ""])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "CHECK-GRANT-REJECTED" in r.stderr
+    assert any("ENV-REGISTRY-INVALID" in x for x in _pending_reasons(store))
+    # paired: flag ABSENT on the same fixture still resolves the default file
+    store2 = tmp_path / "ev-absent.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="a")
+    r2 = _check_grant_prod_cli(env2, repo, action="deploy:prod-a")
+    assert r2.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store2))
+
+
+def test_env_registry_env_var_failure_classes_all_reject(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))  # decoy default
+    _commit_file(repo, "reg-000.yaml", _registry_text("c"))
+    (repo / "reg-000.yaml").chmod(0o000)
+    _commit_file(repo, "reg-bad.yaml", "surfaces:\n  - surface: c\n")
+    (repo / "reg-untracked.yaml").write_text(_registry_text("c"))
+    (repo / "reg-staged.yaml").write_text(_registry_text("c"))
+    _sp.run(["git", "add", "reg-staged.yaml"], cwd=repo, check=True)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(_registry_text("c"))
+    cases = {
+        "empty": "",
+        "nonexistent": "reg-nope.yaml",
+        "unreadable": "reg-000.yaml",  # PD-2: caller-supplied parses
+        # WORKING-TREE bytes — the discriminating twin of the implicit
+        # chmod-000 case above, which still resolves from HEAD.
+        "unparseable": "reg-bad.yaml",
+        "untracked": "reg-untracked.yaml",
+        "staged": "reg-staged.yaml",
+        "outside": str(outside),
+    }
+    try:
+        for idx, (name, value) in enumerate(cases.items()):
+            run_id = f"run-2{idx}"
+            store = tmp_path / f"ev-{name}.json"
+            env = _env_registry_env(store)
+            env["FFS_ENV_REGISTRY"] = value
+            _seed_prod_ok(env, repo, run_id=run_id, surface="a")
+            r = _check_grant_prod_cli(env, repo, run_id=run_id,
+                                      action="deploy:prod-a")
+            assert r.returncode == 1, f"{name}: {r.stdout}{r.stderr}"
+            reasons = _pending_reasons(store, run_id)
+            # never falls through to the (valid, different-surface) default
+            assert not any("NO-STAGING-COUNTERPART" in x for x in reasons), name
+            assert any("FFS_ENV_REGISTRY" in x for x in reasons), (name, reasons)
+            if name == "untracked":
+                assert any("git add" in x for x in reasons), reasons
+            if name == "staged":
+                # distinct git-commit remedy, not the git-add one
+                staged = [x for x in reasons if "FFS_ENV_REGISTRY" in x]
+                assert any("git commit" in x and "git add" not in x
+                           for x in staged), reasons
+    finally:
+        (repo / "reg-000.yaml").chmod(0o644)
+
+
+def test_env_registry_env_var_worktree_branch_commit_rejects(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    wt = tmp_path / "wt"
+    _sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+            cwd=repo, check=True)
+    (wt / "reg-side.yaml").write_text(_registry_text("c"))
+    _sp.run(["git", "add", "reg-side.yaml"], cwd=wt, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "side-only registry"], cwd=wt, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    env["FFS_ENV_REGISTRY"] = "reg-side.yaml"
+    _seed_prod_ok(env, wt, surface="a")
+    r = _check_grant_prod_cli(env, wt, action="deploy:prod-a")
+    assert r.returncode == 1, r.stdout + r.stderr
+    reasons = _pending_reasons(store)
+    assert any("FFS_ENV_REGISTRY" in x for x in reasons), reasons
+    assert not any("NO-STAGING-COUNTERPART" in x for x in reasons)
+
+
+def test_env_registry_glob_pathspec_bypass_pinned_at_helper(tmp_path) -> None:
+    # HELPER-level pin (T-01-09): only this level discriminates the
+    # `:(literal)` escape — end-to-end, a glob-interpreted pathspec would
+    # match the TRACKED registry and also reject, hiding the fail-open.
+    repo = _init_registry_repo(tmp_path)  # commits config/environments.yaml
+    for tricky in ("config/en*.yaml", "config/environments?yaml",
+                   "config/[e]nvironments.yaml"):
+        (repo / tricky).write_text(_registry_text("evil"))
+        assert gates._is_git_tracked(repo, tricky) is False, tricky
+    assert gates._is_git_tracked(repo, "config/environments.yaml") is True
+    # end-to-end defense-in-depth only — does NOT discriminate the escape
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    env["FFS_ENV_REGISTRY"] = "config/en*.yaml"
+    _seed_prod_ok(env, repo, surface="web")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-web")
+    assert r.returncode == 1
+
+
+def test_env_registry_committed_unparseable_rejects_in_both_modes(tmp_path) -> None:
+    # EDGE-005: a RESOLVED-but-unparseable registry is a refusal, never absent
+    repo = _init_registry_repo(tmp_path, "surfaces:\n  - surface: web\n")
+    for mode_extra in ([], ["--require-environments"]):
+        store = tmp_path / f"ev-{len(mode_extra)}.json"
+        env = _env_registry_env(store)
+        _seed_prod_ok(env, repo, surface="web")
+        r = _check_grant_prod_cli(env, repo, extra=mode_extra)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert any("ENV-REGISTRY-INVALID" in x for x in _pending_reasons(store))
+
+
+def test_env_registry_worktree_c_discriminator(tmp_path) -> None:
+    # Registry committed ONLY on a linked worktree's branch, invoked from
+    # inside that worktree -> ABSENT (main HEAD is the sole authority; this
+    # exit code flips if `-C <main_root>` is dropped from the probes).
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    wt = tmp_path / "wt"
+    _sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+            cwd=repo, check=True)
+    (wt / "config").mkdir()
+    (wt / "config/environments.yaml").write_text(_ENV_REGISTRY_WEB)
+    _sp.run(["git", "add", "config/environments.yaml"], cwd=wt, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "side-only registry"], cwd=wt, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, wt)
+    r = _check_grant_prod_cli(env, wt)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+
+
+def test_env_registry_absent_advisory_scoped_to_prod_prefix_branch(tmp_path) -> None:
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    g = str(DISPATCH_DIR / "gates.py")
+    # prod action, registry absent, require off -> exit unchanged + exactly 1
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+    assert "/ffs-init" in r.stderr
+    # non-prod action: zero advisory lines, exit code unchanged (REQ-402)
+    import subprocess as _sp2
+    _sp2.run(["python3", g, "grant", "run-1", "--action", "push:origin/main"],
+             capture_output=True, text=True, env=env, cwd=repo)
+    r2 = _sp2.run(["python3", g, "check-grant", "run-1",
+                   "--action", "push:origin/main"],
+                  capture_output=True, text=True, env=env, cwd=repo)
+    assert r2.returncode == 0 and r2.stderr == ""
+    # hotfix:prod-* action: zero advisory lines (audit row 14 untouched)
+    _sp2.run(["python3", g, "grant", "run-1", "--action", "hotfix:prod-web",
+              "--reason", "sev1"],
+             capture_output=True, text=True, env=env, cwd=repo)
+    r3 = _sp2.run(["python3", g, "check-grant", "run-1",
+                   "--action", "hotfix:prod-web"],
+                  capture_output=True, text=True, env=env, cwd=repo)
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert _advisory_count(r3.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r3.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_non_git_directory_triptych(tmp_path) -> None:
+    # not a git repo: implicit file IGNORED, --manifest HONORED, env var
+    # REJECTED (no main root to validate membership against).
+    plain = tmp_path / "plain"
+    (plain / "config").mkdir(parents=True)
+    (plain / "config/environments.yaml").write_text(_ENV_REGISTRY_WEB)
+    # implicit: ignored -> granted
+    store = tmp_path / "ev-implicit.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, plain)
+    r = _check_grant_prod_cli(env, plain)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    # --manifest: honored -> NO-STAGING refusal
+    store2 = tmp_path / "ev-flag.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, plain)
+    r2 = _check_grant_prod_cli(env2, plain,
+                               extra=["--manifest", "config/environments.yaml"])
+    assert r2.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store2))
+    # env var: rejected
+    store3 = tmp_path / "ev-env.json"
+    env3 = _env_registry_env(store3)
+    env3["FFS_ENV_REGISTRY"] = "config/environments.yaml"
+    _seed_prod_ok(env3, plain)
+    r3 = _check_grant_prod_cli(env3, plain)
+    assert r3.returncode == 1
+    assert any("FFS_ENV_REGISTRY" in x for x in _pending_reasons(store3))
+
+
+def test_env_registry_hard_mode_flag_and_env_byte_identical(tmp_path) -> None:
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo)
+    r_flag = _check_grant_prod_cli(env, repo, extra=["--require-environments"])
+    env_hard = dict(env, FFS_ENV_REGISTRY_REQUIRED="1")
+    r_env = _check_grant_prod_cli(env_hard, repo)
+    assert r_flag.returncode == 1 and r_env.returncode == 1
+    assert r_flag.stdout == r_env.stdout and r_flag.stderr == r_env.stderr
+    reasons = _pending_reasons(store)
+    assert any("NO-ENV-REGISTRY" in x and "/ffs-init" in x for x in reasons)
+    # same invocation WITHOUT the flag does not reject
+    r_soft = _check_grant_prod_cli(env, repo)
+    assert r_soft.returncode == 0 and "GRANTED" in r_soft.stdout
+    # non-1 env values leave hard mode OFF
+    for off in ("0", "true", ""):
+        env_off = dict(env, FFS_ENV_REGISTRY_REQUIRED=off)
+        r_off = _check_grant_prod_cli(env_off, repo)
+        assert r_off.returncode == 0, (off, r_off.stdout + r_off.stderr)
+
+
+def test_env_registry_hard_mode_rejects_legacy_and_json_kinds(tmp_path) -> None:
+    import subprocess as _sp
+    # legacy parity-manifest satisfies SOFT mode only
+    base_l = tmp_path / "legacy"
+    base_l.mkdir()
+    repo = base_l / "repo"
+    (repo / "config").mkdir(parents=True)
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "config/parity-manifest.yaml").write_text(
+        "surfaces:\n  - surface: web\n    staging_instance: none\n")
+    _sp.run(["git", "add", "config/parity-manifest.yaml"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "legacy"], cwd=repo, check=True)
+    store = base_l / "ev-soft.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    store2 = base_l / "ev-hard.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo)
+    r2 = _check_grant_prod_cli(env2, repo, extra=["--require-environments"])
+    assert r2.returncode == 1
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store2))
+    # committed JSON registry via env var satisfies SOFT mode only
+    base_j = tmp_path / "jsonkind"
+    base_j.mkdir()
+    repo_j = base_j / "repo"
+    repo_j.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo_j, check=True)
+    (repo_j / "reg.json").write_text('{"web": {"staging": "none"}}')
+    _sp.run(["git", "add", "reg.json"], cwd=repo_j, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "json"], cwd=repo_j, check=True)
+    store3 = base_j / "ev-soft.json"
+    env3 = _env_registry_env(store3)
+    env3["FFS_ENV_REGISTRY"] = "reg.json"
+    _seed_prod_ok(env3, repo_j)
+    r3 = _check_grant_prod_cli(env3, repo_j)
+    assert r3.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store3))
+    store4 = base_j / "ev-hard.json"
+    env4 = _env_registry_env(store4)
+    env4["FFS_ENV_REGISTRY"] = "reg.json"
+    _seed_prod_ok(env4, repo_j)
+    r4 = _check_grant_prod_cli(env4, repo_j, extra=["--require-environments"])
+    assert r4.returncode == 1
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store4))
+
+
+def test_env_registry_hard_mode_manifest_spoofable_comment_bar(tmp_path) -> None:
+    # T-01-07: the v1 marker is a forgeable comment — hard mode reads the
+    # credential from HEAD bytes of a tracked, committed --manifest only.
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    (repo / "reg-forged.yaml").write_text(_registry_text("web"))  # v1 marker, untracked
+    _commit_file(repo, "reg-real.yaml", _registry_text("web"))
+    # untracked v1 --manifest REJECTED under hard mode
+    store = tmp_path / "ev-forged.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="web")
+    r = _check_grant_prod_cli(env, repo, extra=["--manifest", "reg-forged.yaml",
+                                                "--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store))
+    # tracked+committed v1 --manifest ACCEPTED under hard mode (clears the
+    # bar; verdict is then the ordinary manifest guard refusal)
+    store2 = tmp_path / "ev-real.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="web")
+    r2 = _check_grant_prod_cli(env2, repo, extra=["--manifest", "reg-real.yaml",
+                                                 "--require-environments"])
+    assert r2.returncode == 1
+    reasons2 = _pending_reasons(store2)
+    assert any("NO-STAGING-COUNTERPART" in x for x in reasons2), reasons2
+    assert not any("NO-ENV-REGISTRY" in x for x in reasons2)
+    # the same untracked file is HONORED under soft mode
+    store3 = tmp_path / "ev-soft.json"
+    env3 = _env_registry_env(store3)
+    _seed_prod_ok(env3, repo, surface="web")
+    r3 = _check_grant_prod_cli(env3, repo, extra=["--manifest", "reg-forged.yaml"])
+    assert r3.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store3))
+
+
+def test_env_registry_hard_mode_unknown_prod_surface(tmp_path) -> None:
+    repo = _init_registry_repo(tmp_path, _registry_text("web"))
+    # hard mode + no folded row -> UNKNOWN-PROD-SURFACE with remedy in pending
+    store = tmp_path / "ev-hard.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="api")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-api",
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    reasons = _pending_reasons(store)
+    assert any("UNKNOWN-PROD-SURFACE" in x and "remedy" in x
+               for x in reasons), reasons
+    # soft mode unchanged: unknown surface still passes with full seeds
+    store2 = tmp_path / "ev-soft.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="api")
+    r2 = _check_grant_prod_cli(env2, repo, action="deploy:prod-api")
+    assert r2.returncode == 0 and "GRANTED" in r2.stdout
+    # folded lookup: a case-varied action resolves the lowercase row rather
+    # than tripping UNKNOWN (registry declares `release`)
+    base = tmp_path / "release"
+    base.mkdir()
+    repo2 = _init_registry_repo(base, _registry_text("release"))
+    store3 = base / "evidence.json"
+    env3 = _env_registry_env(store3)
+    _seed_prod_ok(env3, repo2, surface="Release")
+    r3 = _check_grant_prod_cli(env3, repo2, action="deploy:prod-Release",
+                               extra=["--require-environments"])
+    assert r3.returncode == 1
+    reasons3 = _pending_reasons(store3)
+    assert any("NO-STAGING-COUNTERPART" in x for x in reasons3), reasons3
+    assert not any("UNKNOWN-PROD-SURFACE" in x for x in reasons3)
+
+
+def test_env_registry_sentinel_and_surface_folding(tmp_path) -> None:
+    # sentinel folds stripped+casefolded (EDGE-014); `none-prod-1` is real
+    for staging in ("NONE", "none ", "None"):
+        store = tmp_path / f"ev-{staging.strip()!r}.json".replace("'", "")
+        _seed_success(store)
+        gates.grant_actions(store, "run-1", ["deploy:prod-web"])
+        gates.record_promotion(store, "run-1", from_env="staging",
+                               to_env="prod", surface="web",
+                               artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"])
+        ok = gates.check_grant_prod(store, "run-1", "deploy:prod-web",
+                                    _GOOD_ARTIFACT,
+                                    manifest={"web": {"staging": staging}})
+        assert ok is False, staging
+        assert any("NO-STAGING-COUNTERPART" in p["reason"]
+                   for p in gates.list_pending(store, "run-1")), staging
+    # none-prod-1 does NOT trip the sentinel
+    store = tmp_path / "ev-real.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-web"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(
+        store, "run-1", "deploy:prod-web", _GOOD_ARTIFACT,
+        manifest={"web": {"staging": "none-prod-1"}}) is True
+    # deploy:prod-Web vs a `web` row trips it (folded surface lookup)
+    store2 = tmp_path / "ev-case.json"
+    _seed_success(store2)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-Web"])
+    gates.record_promotion(store2, "run-1", from_env="staging", to_env="prod",
+                           surface="Web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(
+        store2, "run-1", "deploy:prod-Web", _GOOD_ARTIFACT,
+        manifest={"web": {"staging": "none"}}) is False
+    assert any("NO-STAGING-COUNTERPART" in p["reason"]
+               for p in gates.list_pending(store2, "run-1"))
+    # folding did NOT migrate into _prod_surface (promotion records key off
+    # the original-case surface)
+    assert gates._prod_surface("deploy:prod-Web") == "Web"
+
+
+# ── spec-007 Phase 1: surfaces parser hardening ──────────────────────────────
+# REQ-103 / AC-002: the committed registry is SECURITY INPUT. Reject cases
+# assert ValueError AND that the message names the offending shape.
+
+import pytest  # noqa: E402
+
+
+def test_surfaces_parser_nested_trigger_requires_indent_zero() -> None:
+    # EDGE-001: a nested surfaces: key must not flip parsing
+    nested_only = ("environments:\n"
+                   "  surfaces:\n"
+                   "    - surface: evil\n"
+                   "      staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(nested_only)
+    assert "surfaces" in str(exc.value)
+    # decoy-indented block + real indent-0 block -> real row only
+    decoy_plus_real = ("environments:\n"
+                       "  surfaces:\n"
+                       "    - surface: evil\n"
+                       "      staging_instance: none\n"
+                       "surfaces:\n"
+                       "  - surface: web\n"
+                       "    staging_instance: real-staging\n")
+    assert gates._load_manifest_text(decoy_plus_real) == {
+        "web": {"staging": "real-staging"},
+    }
+
+
+def test_surfaces_parser_flush_appends_row_when_surfaces_not_last() -> None:
+    # EDGE-002: an indent-0 key AFTER the block flushes the in-progress row
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: stg-web\n"
+            "  - surface: api\n"
+            "    staging_instance: stg-api\n"
+            "test_tiers:\n"
+            "  - tier: fast\n")
+    assert gates._load_manifest_text(text) == {
+        "web": {"staging": "stg-web"},
+        "api": {"staging": "stg-api"},
+    }
+
+
+def test_surfaces_parser_single_entry_latch(tmp_path) -> None:
+    # EDGE-013: after the block closes, surface-shaped lines inside later
+    # prose blocks (with verdict-flipping staging values) are never parsed
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: real-staging\n"
+            "environments:\n"
+            "  - surface: web2\n"
+            "    staging_instance: none\n"
+            "  - surface: evil\n"
+            "    staging_instance: none\n")
+    parsed = gates._load_manifest_text(text)
+    assert set(parsed.keys()) == {"web"}
+    assert parsed["web"] == {"staging": "real-staging"}
+
+
+def test_surfaces_parser_blank_and_comment_lines_are_neutral() -> None:
+    # interior blank between rows and mid-row: both rows complete
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "\n"
+            "    staging_instance: stg-web\n"
+            "\n"
+            "  - surface: api\n"
+            "    # mid-row comment\n"
+            "    staging_instance: stg-api\n")
+    assert gates._load_manifest_text(text) == {
+        "web": {"staging": "stg-web"},
+        "api": {"staging": "stg-api"},
+    }
+    # blank-then-DUPLICATE second row: a flush-on-blank latch would never
+    # see the duplicate — the neutral parse MUST reach and reject it
+    dup = ("surfaces:\n"
+           "  - surface: web\n"
+           "    staging_instance: stg-web\n"
+           "\n"
+           "  - surface: web\n"
+           "    staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(dup)
+    assert "duplicate" in str(exc.value) and "web" in str(exc.value)
+
+
+def test_surfaces_parser_second_surfaces_block_rejects() -> None:
+    # duplicate indent-0 surfaces: key rejects; the indented prose spelling
+    # in the same fixture is inert (nonzero indent never triggers/rejects)
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: stg-web\n"
+            "notes:\n"
+            "  surfaces:\n"
+            "surfaces:\n"
+            "  - surface: api\n"
+            "    staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(text)
+    assert "surfaces" in str(exc.value) and "duplicate" in str(exc.value)
+
+
+def test_surfaces_parser_pre_row_field_line_rejects() -> None:
+    # PD-4 (0fdfeee3): an allowlisted field line BEFORE the first
+    # `- surface:` row is REJECTED, never silently ignored
+    direct = ("surfaces:\n"
+              "  staging_instance: none\n"
+              "  - surface: web\n"
+              "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(direct)
+    assert "staging_instance" in str(exc.value)
+    after_comment = ("surfaces:\n"
+                     "  # reviewers see a comment; the gate must not differ\n"
+                     "  staging_instance: none\n"
+                     "  - surface: web\n"
+                     "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc2:
+        gates._load_manifest_text(after_comment)
+    assert "staging_instance" in str(exc2.value)
+
+
+def test_surfaces_parser_inline_comment_sentinel_pd3() -> None:
+    # PD-3 (898818dd): _manifest_scalar already strips unquoted trailing
+    # comments — pinned here (fail-open forbidden), not re-implemented
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: none # explanation\n")
+    parsed = gates._load_manifest_text(text)
+    assert parsed == {"web": {"staging": "none"}}
+    assert gates._surface_has_staging("web", parsed) is False
+    quoted = ("surfaces:\n"
+              "  - surface: web\n"
+              "    staging_instance: \"none # x\"\n")
+    parsed_q = gates._load_manifest_text(quoted)
+    assert parsed_q == {"web": {"staging": "none # x"}}
+    assert gates._surface_has_staging("web", parsed_q) is True
+
+
+def test_surfaces_parser_duplicate_surface_names_reject_folded() -> None:
+    # exact duplicate (existing behavior kept)
+    exact = ("surfaces:\n"
+             "  - surface: web\n"
+             "    staging_instance: a\n"
+             "  - surface: web\n"
+             "    staging_instance: b\n")
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(exact)
+    # folded duplicates, both orders, YAML rows
+    for first, second in (("web", "WEB"), ("WEB", "web")):
+        text = ("surfaces:\n"
+                f"  - surface: {first}\n"
+                "    staging_instance: a\n"
+                f"  - surface: {second}\n"
+                "    staging_instance: b\n")
+        with pytest.raises(ValueError, match="duplicate"):
+            gates._load_manifest_text(text)
+    # JSON surfaces array
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(
+            '{"surfaces": [{"surface": "web", "staging_instance": "a"},'
+            ' {"surface": "WEB", "staging_instance": "b"}]}')
+    # legacy JSON map with no surfaces key (the early-return bypass)
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(
+            '{"web": {"staging": "a"}, "WEB": {"staging": "b"}}')
+    # negative half: near-miss names load
+    ok = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: a\n"
+          "  - surface: web-admin\n"
+          "    staging_instance: b\n")
+    assert set(gates._load_manifest_text(ok)) == {"web", "web-admin"}
+
+
+def test_surfaces_parser_duplicate_field_and_redeclared_surface_reject() -> None:
+    dup_field = ("surfaces:\n"
+                 "  - surface: web\n"
+                 "    staging_instance: a\n"
+                 "    staging_instance: b\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(dup_field)
+    assert "staging_instance" in str(exc.value)
+    # redeclared in-row surface: after row start — the row seeds `surface`
+    # as seen, so both value orders reject
+    for first, second in (("web", "api"), ("api", "web")):
+        text = ("surfaces:\n"
+                f"  - surface: {first}\n"
+                f"    surface: {second}\n"
+                "    staging_instance: a\n")
+        with pytest.raises(ValueError) as exc2:
+            gates._load_manifest_text(text)
+        assert "surface" in str(exc2.value)
+
+
+def test_surfaces_parser_alias_co_presence_rejects_each_alone_loads() -> None:
+    # YAML row: both keys reject whether values agree or differ
+    for staging_val in ("a", "b"):
+        text = ("surfaces:\n"
+                "  - surface: web\n"
+                "    staging_instance: a\n"
+                f"    staging: {staging_val}\n")
+        with pytest.raises(ValueError) as exc:
+            gates._load_manifest_text(text)
+        assert "staging" in str(exc.value)
+    # JSON row form
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(
+            '{"surfaces": [{"surface": "web", "staging_instance": "a",'
+            ' "staging": "a"}]}')
+    # legacy map form
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(
+            '{"web": {"staging_instance": "a", "staging": "a"}}')
+    # each key ALONE parses in all three forms
+    assert gates._load_manifest_text(
+        "surfaces:\n  - surface: web\n    staging_instance: a\n") == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text(
+        "surfaces:\n  - surface: web\n    staging: a\n") == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text(
+        '{"surfaces": [{"surface": "web", "staging": "a"}]}') == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text('{"web": {"staging": "a"}}') == {
+        "web": {"staging": "a"}}
+
+
+def test_surfaces_parser_json_duplicate_keys_reject_at_any_depth() -> None:
+    dup_shapes = [
+        # top-level, both orders
+        '{"web": {"staging": "a"}, "web": {"staging": "b"}}',
+        '{"web": {"staging": "b"}, "web": {"staging": "a"}}',
+        # in-row
+        '{"surfaces": [{"surface": "web", "staging_instance": "a",'
+        ' "staging_instance": "b"}]}',
+        # nested
+        '{"web": {"staging": "a", "staging": "none"}}',
+    ]
+    for shape in dup_shapes:
+        with pytest.raises(ValueError, match="duplicate"):
+            gates._load_manifest_text(shape)
+    # duplicate-free JSON loads unchanged
+    assert gates._load_manifest_text('{"web": {"staging": "stg"}}') == {
+        "web": {"staging": "stg"}}
+
+
+def test_surfaces_parser_tab_indentation_rejects_in_block_only() -> None:
+    tabbed = ("surfaces:\n"
+              "  - surface: web\n"
+              "\tstaging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(tabbed)
+    assert "tab" in str(exc.value).casefold()
+    # a tab-indented surfaces: key OUTSIDE a block is inert (nonzero indent)
+    inert = ("\tsurfaces:\n"
+             "surfaces:\n"
+             "  - surface: web\n"
+             "    staging_instance: stg\n")
+    assert gates._load_manifest_text(inert) == {"web": {"staging": "stg"}}
+
+
+def test_surfaces_parser_unknown_field_rejects_allowlist_loads() -> None:
+    unknown = ("surfaces:\n"
+               "  - surface: web\n"
+               "    staging_instance: none\n"
+               "    sneaky_field: x\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(unknown)
+    assert "sneaky_field" in str(exc.value)
+    # positive halves: all nine allowlisted keys across two rows (alias keys
+    # split between rows), rollback included
+    ok = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: stg-web\n"
+          "    prod_instance: prod-web\n"
+          "    staging_artifact: a1\n"
+          "    prod_artifact: a2\n"
+          "    rollback: make rollback\n"
+          "  - surface: api\n"
+          "    staging: stg-api\n"
+          "    staging_migration_head: m1\n"
+          "    prod_migration_head: m2\n")
+    parsed = gates._load_manifest_text(ok)
+    assert set(parsed) == {"web", "api"}
+    assert parsed["web"]["staging"] == "stg-web"
+    assert parsed["api"]["staging"] == "stg-api"
+
+
+def test_surfaces_parser_crlf_parses_equal_to_lf() -> None:
+    lf = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: none\n")
+    crlf = lf.replace("\n", "\r\n")
+    assert gates._load_manifest_text(crlf) == gates._load_manifest_text(lf)
+
+
+def test_surfaces_parser_regression_live_registry_and_legacy_shape() -> None:
+    # FFS's own registry still loads to the single release row after the
+    # rewrite (the legacy-shape test above stays green unedited)
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
+
+
+# ── spec-007 Phase 1 Plan 02 Task 1: reason_sink + CLI print rule (REQ-104) ──
+# Print rule, ONE condition on ONE input: only the reason arriving through
+# check_grant_prod's reason_sink is eligible; contains `remedy:` → verbatim
+# `NOT-GRANTED: <action> (run <id>) — <reason>` on stdout; otherwise today's
+# promote/grant hint prints unchanged. Resolver refusals never enter the rule
+# — they return on stderr behind CHECK-GRANT-REJECTED before check_grant_prod
+# runs. Wall 3bc9da55: the sink carries sanitize_reason(reason) — the SAME
+# value record_pending stores — never the raw string.
+
+
+def test_cli_prints_typed_reason_with_remedy(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)  # committed registry: web/none
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+    assert "'web'" in r.stdout
+    assert "remedy:" in r.stdout
+    assert "config/environments.yaml" in r.stdout
+
+
+def test_cli_promote_and_grant_hints_unchanged(tmp_path) -> None:
+    import subprocess as _sp
+    # promote-path hint: real staging counterpart, grant seeded, no promote
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, _registry_text("web", "stg-web"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-1", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env, cwd=repo)
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-web", "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "record promote" in r.stdout
+    assert "--from staging --to prod --surface web" in r.stdout
+    assert "remedy:" not in r.stdout
+    # grant-path hint (non-prod): verbatim pending-command text
+    r2 = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                  "push:origin/main"],
+                 capture_output=True, text=True, env=env, cwd=repo)
+    assert r2.returncode == 1
+    assert "record with" in r2.stdout and "pending" in r2.stdout
+    assert "remedy:" not in r2.stdout
+
+
+def test_reason_sink_beats_pending_reread(tmp_path) -> None:
+    # Refuse the SAME action twice in one run for two DIFFERENT reasons.
+    # record_pending dedupes by action, so a list_pending re-read would print
+    # the FIRST reason (NO-PROMOTE-EVIDENCE); the sink must carry the SECOND.
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)  # committed registry: web/none
+    g = str(DISPATCH_DIR / "gates.py")
+    first = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                     "deploy:prod-web"],  # no --artifact
+                    capture_output=True, text=True, env=env, cwd=repo)
+    assert first.returncode == 1
+    assert any("NO-PROMOTE-EVIDENCE" in x for x in _pending_reasons(store))
+    second = _check_grant_prod_cli(env, repo)  # artifact present, staging none
+    assert second.returncode == 1, second.stdout + second.stderr
+    assert "NO-STAGING-COUNTERPART" in second.stdout
+    assert "NO-PROMOTE-EVIDENCE" not in second.stdout
+
+
+def test_reason_budget_64_char_surface(tmp_path) -> None:
+    # sanitize_reason truncates at 200 chars; a 64-char surface still yields
+    # a stored reason containing `remedy:` (surface interpolated exactly
+    # once, never an artifact digest), and the sink carries the SAME value.
+    store = tmp_path / "evidence.json"
+    surface = "s" * 64
+    manifest = {surface: {"staging": "none"}}
+    sink: list[str] = []
+    assert gates.check_grant_prod(store, "run-1", f"deploy:prod-{surface}",
+                                  _GOOD_ARTIFACT, manifest=manifest,
+                                  reason_sink=sink) is False
+    reasons = _pending_reasons(store)
+    assert len(reasons) == 1
+    stored = reasons[0]
+    assert "remedy:" in stored and len(stored) <= 200
+    assert stored.count(surface) == 1
+    assert "sha256" not in stored
+    assert sink == [stored]
+
+
+def test_unknown_prod_surface_reason_reaches_stdout(tmp_path) -> None:
+    # hard mode, committed v1 registry, no matching row → the 01-01
+    # UNKNOWN-PROD-SURFACE reason (already remedy-carrying) reaches stdout
+    # through the same print rule.
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-ghost",
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "UNKNOWN-PROD-SURFACE" in r.stdout
+    assert "remedy:" in r.stdout
+
+
+def test_cli_sink_reason_hostile_surface_sanitized(tmp_path) -> None:
+    # Wall 3bc9da55: a registry-driven refusal whose surface name embeds
+    # control chars (\x1b, \r) reaches stdout stripped/escaped and within the
+    # 200-char reason budget — asserted on the CLI's real output.
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    hostile = "deploy:prod-web\x1b[31mEVIL\rGRANTED: fake"
+    r = _check_grant_prod_cli(env, repo, action=hostile,
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNKNOWN-PROD-SURFACE" in r.stdout
+    assert "\x1b" not in r.stdout
+    line = next(ln for ln in r.stdout.splitlines() if "NOT-GRANTED" in ln)
+    assert "\x1b" not in line and "\r" not in line
+    reason = line.split(" — ", 1)[1]
+    assert len(reason) <= 200 and "remedy:" in reason
+
+
+# ── spec-007 Phase 1 Plan 02 Task 2: live AC-003 against FFS's own registry ──
+# PINNED (df81aa82): the live-registry tests live HERE, after 01-01 landed
+# the full resolver including the env-var branch.
+
+
+def test_live_ffs_registry_refuses_via_manifest_flag(tmp_path) -> None:
+    # AC-003, --manifest form: soft mode parses working-tree bytes (PD-2),
+    # so this case is runnable in ANY topology including the executor
+    # worktree — the live registry's single release/none row must refuse.
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, _registry_text("decoy", "stg-decoy"))
+    _seed_prod_ok(env, repo, surface="release")
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-release", "--artifact", _GOOD_ARTIFACT,
+                 "--manifest", str(live)],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+    assert "release" in r.stdout
+    assert "remedy:" in r.stdout
+
+
+def test_live_ffs_registry_refuses_via_default_resolution(tmp_path) -> None:
+    # AC-003, default-resolution form: derive the MAIN checkout root exactly
+    # as the resolver does (git-common-dir, parent of `.git`) and run with no
+    # flags from that root. A `__file__`-relative registry path is unusable
+    # here — from a linked worktree it lies outside the main checkout and
+    # the resolver is REQUIRED to refuse it.
+    import subprocess as _sp
+    probe = _sp.run(["git", "rev-parse", "--git-common-dir"],
+                    capture_output=True, text=True, cwd=DISPATCH_DIR)
+    assert probe.returncode == 0, probe.stderr
+    common = Path(probe.stdout.strip())
+    assert common.name == ".git", common
+    main_root = common.parent
+    rel = "config/environments.yaml"
+    main_has = _sp.run(["git", "-C", str(main_root), "show", f"HEAD:{rel}"],
+                       capture_output=True, text=True).returncode == 0
+    this_has = _sp.run(["git", "-C", str(DISPATCH_DIR.parent), "show",
+                        f"HEAD:{rel}"],
+                       capture_output=True, text=True).returncode == 0
+    if not main_has and this_has:
+        pytest.skip(
+            "pre-merge worktree topology: this checkout's HEAD carries "
+            f"{rel} but the MAIN checkout's HEAD ({main_root}) does not — "
+            "implicit resolution reads main HEAD only; the must-haves "
+            "AC-003 GATE re-runs this live post-merge")
+    if not main_has:
+        pytest.fail(
+            f"{rel} absent from BOTH main HEAD and this checkout's HEAD — "
+            "01-01 (b5c53b0) committed the registry; it has been lost")
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, main_root, surface="release")
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-release", "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env, cwd=main_root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+
+
+def test_non_ledger_run_id_reaches_registry_refusal(tmp_path) -> None:
+    # AC-003's literal command uses run id `ac003` (not run-<digits>). The
+    # degraded-ratio guard's run-id shape check must be vacuous for such ids
+    # (they can have no degradation events), never a SILENT unrecorded False
+    # — that would refuse without a typed reason (REQ-104) and block the
+    # spec's live gate before the registry check.
+    store = tmp_path / "evidence.json"
+    sink: list[str] = []
+    assert gates.check_grant_prod(
+        store, "ac003", "deploy:prod-release", _GOOD_ARTIFACT,
+        manifest={"release": {"staging": "none"}}, reason_sink=sink) is False
+    assert sink and "NO-STAGING-COUNTERPART" in sink[0]
+    assert any("NO-STAGING-COUNTERPART" in x
+               for x in _pending_reasons(store, "ac003"))
+
+
+def test_stale_docstring_claim_absent() -> None:
+    # 01-01 removed the later-phase wiring claim from gates.py; assert it
+    # has not returned (absence only, no particular replacement wording).
+    text = (DISPATCH_DIR / "gates.py").read_text()
+    assert "wiring lands Phase 4" not in text
