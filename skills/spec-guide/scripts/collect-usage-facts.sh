@@ -30,6 +30,21 @@ for name in spec.md plan.md tasks.md research.md data-model.md quickstart.md; do
   [ -f "$SPEC_DIR/$name" ] && DOCS+=("$SPEC_DIR/$name")
 done
 
+# REQ-401b: the emitted fact stream is doc-derived bytes headed for a model
+# prompt — fence it under the USAGE tag through the shared helper. Candidate
+# chain mirrors the sibling collectors' gates.py resolution. Helper
+# unresolvable -> one stderr warn + unfenced passthrough (AC-007 posture).
+# The stream is PIPED, never captured via command substitution
+# (trailing-newline byte-identity, wall a12a8559).
+COLLECT_USAGE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FENCE_SH=""
+for fc in "$ROOT/packages/feature-fix-swarm/scripts/gsd/fence-data.sh" \
+          "$COLLECT_USAGE_SCRIPT_DIR/../../../scripts/gsd/fence-data.sh" \
+          "$ROOT/scripts/gsd/fence-data.sh"; do
+  [ -f "$fc" ] && FENCE_SH="$fc" && break
+done
+
+emit_usage_facts() {
 echo "== SPEC =="
 echo "spec-id: $SPEC_ID"
 echo "spec-dir: $SPEC_DIR"
@@ -89,3 +104,13 @@ fi
 
 echo "== WORKTREE =="
 git status --porcelain | head -30
+}
+
+if [ -n "$FENCE_SH" ]; then
+  # shellcheck source=/dev/null
+  . "$FENCE_SH"
+  emit_usage_facts | fence_data USAGE
+else
+  echo "collect-usage-facts: WARN fence-data.sh not found in candidate chain; emitting unfenced" >&2
+  emit_usage_facts
+fi
