@@ -1075,11 +1075,56 @@ def _valid_promotion_record(data: dict, rec) -> bool:
     return _evidence_resolves(data, evidence_ids, artifact)
 
 
+def _valid_canary_record(rec) -> bool:
+    """Re-validate a persisted canary row on every read (the
+    _valid_promotion_record precedent): a tampered or legacy row degrades to
+    refusal, never a crash. Typed = exactly the recorder's schema semantics —
+    40-hex sha, boolean pass, control-free run_id, bounded timestamps."""
+    import math
+    if not isinstance(rec, dict):
+        return False
+    sha = rec.get("sha")
+    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+        return False
+    if rec.get("pass") is not True and rec.get("pass") is not False:
+        return False
+    run_id = rec.get("run_id")
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        return False
+    for key in ("created_at", "ended_at"):
+        value = rec.get(key)
+        if (not isinstance(value, str) or not value.strip()
+                or len(value) > ISO_TS_MAX):
+            return False
+    ts = rec.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+        return False
+    return True
+
+
+def _canary_bound_ok(data: dict, artifact) -> bool:
+    """REQ-301 read-side binding (pinned decision 1 — STORE-SCOPED): an
+    absent or empty `canary` namespace leaves promotion behavior unchanged;
+    ANY other content makes every candidate canary-bound — satisfied only by
+    a schema-valid typed record with pass true whose sha exact-string-matches
+    the promoted artifact. Sha-less, untyped/legacy, failed, or tampered
+    entries trigger binding but never satisfy it (fail-closed, no raise)."""
+    rows = data.get("canary")
+    if rows is None or (isinstance(rows, list) and not rows):
+        return True
+    if not isinstance(rows, list):
+        return False
+    return any(_valid_canary_record(rec) and rec.get("pass") is True
+               and rec.get("sha") == artifact for rec in rows)
+
+
 def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
                     artifact, now: float | None = None) -> bool:
     """Fail-closed read (mirrors check_grant): True ONLY for an exact,
     unexpired, from_env=='staging' (when to_env=='prod'), to_env, surface,
-    and artifact match. A missing OR malformed `_promotions` namespace
+    and artifact match — and, when the store's canary namespace is non-empty
+    (REQ-301), a typed passing canary record whose sha exact-matches the
+    artifact. A missing OR malformed `_promotions` namespace
     (non-dict top level, non-list run entry, non-dict record, missing/
     non-numeric/non-finite expiry) returns False without raising, crashing,
     or writing — pure read, same posture as check_grant/check_preflight."""
@@ -1103,6 +1148,10 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
         if rec.get("surface") != surface:
             continue
         if rec.get("artifact") != artifact:
+            continue
+        if not _canary_bound_ok(data, artifact):
+            # canary-bound store without exact-sha typed pass evidence:
+            # refuse IN ADDITION to (never instead of) the expiry rule below.
             continue
         if effective_now < rec["expires_at"]:
             return True
@@ -1206,6 +1255,7 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
     effective_now = now if now is not None else _now()
     surface_matches = False
     artifact_match_expired = False
+    canary_refused = False
     for rec in records:
         if not _valid_promotion_record(data, rec):
             continue
@@ -1218,6 +1268,17 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
             continue
         if effective_now >= rec["expires_at"]:
             artifact_match_expired = True
+            continue
+        # Fresh, fully-matching promotion — check_promotion still returned
+        # False, so the only remaining refusal is the canary binding
+        # (REQ-301). Unreachable pre-phase-3, which is exactly what keeps
+        # the AC-001 reason ordering byte-identical.
+        canary_refused = True
+    if canary_refused:
+        rows = data.get("canary")
+        if isinstance(rows, list) and any(_valid_canary_record(r) for r in rows):
+            return "CANARY-SHA-MISMATCH"
+        return "CANARY-EVIDENCE-REQUIRED"
     if artifact_match_expired:
         return "PROMOTE-EXPIRED"
     if surface_matches:
@@ -1321,7 +1382,22 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         return False
 
     if check_promotion(store, run_id, "prod", surface, artifact, now=now):
-        return True
+        # REQ-302: a surface whose manifest row declares a rollback command
+        # additionally requires a successful same-run dry-run. Same-run binds
+        # THIS function's own run_id parameter — the run being checked (wall
+        # 7531f885) — never an env default. Undeclared surfaces (every real
+        # FFS surface) make this a structural no-op.
+        declared = _declared_rollback(manifest, surface)
+        if declared is None:
+            return True
+        if _rollback_dryrun_ok(_load_store(store), run_id, surface, declared,
+                               artifact):
+            return True
+        record_pending(store, run_id, action,
+                       f"ROLLBACK-DRYRUN-REQUIRED: surface '{surface}' "
+                       "declares a rollback command; need a same-run "
+                       f"successful dry-run bound to artifact {artifact}")
+        return False
 
     reason = _promote_miss_reason(store, run_id, surface, artifact, now=now)
     record_pending(store, run_id, action,
@@ -1350,6 +1426,166 @@ def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
 def list_pending(store: Path, run_id: str) -> list[dict]:
     return list(_load_store(store).get("_autonomy", {})
                 .get(run_id, {}).get("pending", []))
+
+
+# ── spec-008 Phase 3: typed canary evidence (REQ-301, AC-004) ────────────────
+
+# run_id shape mirrors lib/evidence_events.py's RUN_ID_RE precedent:
+# non-empty, control-free, <=128 chars — permissive enough for the
+# `unattributed` literal the trusted wrapper records when GSD_RUN_ID is unset.
+EVIDENCE_RUN_ID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
+ISO_TS_MAX = 64
+
+
+def _require_iso_ts(value, name: str) -> None:
+    """Bounded, control-free, non-empty timestamp string (stored verbatim —
+    results.json createdAt/endedAt are ISO-8601; the store never reparses)."""
+    if (not isinstance(value, str) or not value.strip() or len(value) > ISO_TS_MAX
+            or any(ord(c) < 0x20 or ord(c) == 0x7f for c in value)):
+        raise ValueError(f"INVALID-CANARY-TIMESTAMP: {name}")
+
+
+def _canary_ns(data: dict) -> list:
+    """Shape guard for the top-level `canary` list (ports _promotions_ns)."""
+    rows = data.setdefault("canary", [])
+    if not isinstance(rows, list):
+        raise ValueError("CANARY-SCHEMA-CONFLICT")
+    return rows
+
+
+def record_canary_evidence(store: Path, run_id, sha, passed, created_at,
+                           ended_at) -> None:
+    """Append one typed canary evidence row under the shared store lock.
+
+    Trust boundary (wall 087faa76): this recorder validates SHAPE, not caller
+    identity — any store-writer can forge rows with or without this CLI, the
+    identical boundary every house evidence record already has. The trusted
+    wrapper (scripts/gsd/canary-gate.sh) is the sole LEGITIMATE producer:
+    `sha` is `git rev-parse HEAD` captured there (C6 — never parsed from
+    third-party results.json). Integrity is guarded by the G2 tamper scan and
+    store permissions, never by this recorder.
+    """
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("INVALID-CANARY-RUN-ID")
+    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+        # 40-hex commit sha ONLY (F5) — digest refs are not canary identity.
+        raise ValueError("INVALID-CANARY-SHA")
+    if not isinstance(passed, bool):
+        raise ValueError("INVALID-CANARY-PASS")
+    _require_iso_ts(created_at, "created_at")
+    _require_iso_ts(ended_at, "ended_at")
+    with _StoreLock(store):
+        data = _load_store(store)
+        rows = _canary_ns(data)
+        rows.append({"run_id": run_id, "sha": sha, "pass": passed,
+                     "created_at": created_at, "ended_at": ended_at,
+                     "ts": _now()})
+        _save_store(store, data)
+
+
+# ── spec-008 Phase 3: rollback dry-run evidence (REQ-302, AC-005) ────────────
+
+def _rollback_ns(data: dict) -> list:
+    """Shape guard for the top-level `rollback_dryrun` list."""
+    rows = data.setdefault("rollback_dryrun", [])
+    if not isinstance(rows, list):
+        raise ValueError("ROLLBACK-DRYRUN-SCHEMA-CONFLICT")
+    return rows
+
+
+def record_rollback_dryrun(store: Path, run_id, surface, command, exit_code,
+                           artifact_sha) -> None:
+    """Append one typed rollback dry-run row under the shared store lock.
+
+    Same trust boundary as record_canary_evidence (wall 087faa76): shape
+    validation only, never caller identity — integrity lives in the G2
+    tamper scan + store perms. Schema keys are fixed verbatim by REQ-302:
+    {run_id, surface, command, exit_code, artifact_sha, ts}.
+    """
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("INVALID-ROLLBACK-RUN-ID")
+    if not isinstance(surface, str) or not surface.strip():
+        raise ValueError("INVALID-ROLLBACK-SURFACE")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("INVALID-ROLLBACK-COMMAND")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise ValueError("INVALID-ROLLBACK-EXIT-CODE")
+    if not _valid_artifact(artifact_sha):
+        raise ValueError("INVALID-ROLLBACK-ARTIFACT")
+    with _StoreLock(store):
+        data = _load_store(store)
+        rows = _rollback_ns(data)
+        rows.append({"run_id": run_id, "surface": surface, "command": command,
+                     "exit_code": exit_code, "artifact_sha": artifact_sha,
+                     "ts": _now()})
+        _save_store(store, data)
+
+
+def _valid_rollback_record(rec) -> bool:
+    """Re-validate a persisted rollback dry-run row on every read."""
+    import math
+    if not isinstance(rec, dict):
+        return False
+    if (not isinstance(rec.get("run_id"), str)
+            or not EVIDENCE_RUN_ID_RE.fullmatch(rec["run_id"])):
+        return False
+    for key in ("surface", "command"):
+        if not isinstance(rec.get(key), str) or not rec[key].strip():
+            return False
+    exit_code = rec.get("exit_code")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return False
+    if not _valid_artifact(rec.get("artifact_sha")):
+        return False
+    ts = rec.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+        return False
+    return True
+
+
+def _declared_rollback(manifest: dict | None, surface: str) -> str | None:
+    """The manifest-declared rollback command for `surface`, or None when no
+    rollback is declared (pinned decision 4 — the parity-manifest row is the
+    declaration seam; no FFS surface declares one, so the gate no-ops by
+    construction). _normalize_manifest validates the key on load, so only a
+    non-empty string ever counts as a declaration here."""
+    if manifest is None:
+        return None
+    entry = manifest.get(surface)
+    if not isinstance(entry, dict):
+        return None
+    rollback = entry.get("rollback")
+    if isinstance(rollback, str) and rollback.strip():
+        return rollback
+    return None
+
+
+def _rollback_dryrun_ok(data: dict, run_id: str, surface: str, command: str,
+                        artifact) -> bool:
+    """True iff a schema-valid rollback dry-run row exists with run_id equal
+    to the run being checked (check_grant_prod's OWN authoritative run_id
+    parameter — wall 7531f885: never an env default or caller-forgeable
+    substitute), matching surface, command string-equal to the
+    manifest-declared rollback command (wall 4e3862e5), exit_code 0, and
+    artifact_sha exactly the promoted artifact."""
+    rows = data.get("rollback_dryrun")
+    if not isinstance(rows, list):
+        return False
+    for rec in rows:
+        if not _valid_rollback_record(rec):
+            continue
+        if rec["run_id"] != run_id:
+            continue
+        if rec["surface"] != surface:
+            continue
+        if rec["command"] != command:
+            continue
+        if rec["exit_code"] != 0:
+            continue
+        if rec["artifact_sha"] != artifact:
+            continue
+        return True
+    return False
 
 
 def preflight_check(requirements: list[dict], timeout: int = 30, *,
@@ -1719,7 +1955,17 @@ def _normalize_manifest(data: dict) -> dict:
             raise ValueError(f"manifest surface {surface!r} needs staging_instance")
         if surface in normalized:
             raise ValueError(f"duplicate manifest surface: {surface}")
-        normalized[surface] = {"staging": staging}
+        entry = {"staging": staging}
+        # Optional rollback declaration (REQ-302, pinned decision 4): preserve
+        # the command string verbatim; absent key = no declaration = gate no-op.
+        if "rollback" in row:
+            rollback = row.get("rollback")
+            if not isinstance(rollback, str) or not rollback.strip():
+                raise ValueError(
+                    f"manifest surface {surface!r} rollback must be a "
+                    "non-empty command string")
+            entry["rollback"] = rollback
+        normalized[surface] = entry
     return normalized
 
 
@@ -1881,6 +2127,42 @@ def main(argv: list[str]) -> int:
             print(f"NOTE-DEGRADED-REJECTED: {exc}", file=sys.stderr)
             return 2
         print("DEGRADATION-RECORDED")
+        return 0
+    if cmd == "canary-evidence":
+        parser = argparse.ArgumentParser(prog="gates.py canary-evidence", add_help=False)
+        parser.add_argument("--run-id")
+        parser.add_argument("--sha")
+        parser.add_argument("--pass", dest="passed", choices=("true", "false"))
+        parser.add_argument("--created-at")
+        parser.add_argument("--ended-at")
+        try:
+            ns = parser.parse_args(args)
+            if ns.passed is None:
+                raise ValueError("INVALID-CANARY-PASS")
+            record_canary_evidence(store, ns.run_id, ns.sha, ns.passed == "true",
+                                   ns.created_at, ns.ended_at)
+        except (ValueError, SystemExit, OSError) as exc:
+            print(f"CANARY-EVIDENCE-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("CANARY-EVIDENCE-RECORDED")
+        return 0
+    if cmd == "rollback-dryrun":
+        parser = argparse.ArgumentParser(prog="gates.py rollback-dryrun", add_help=False)
+        parser.add_argument("--run-id")
+        parser.add_argument("--surface")
+        parser.add_argument("--command")
+        parser.add_argument("--exit-code")
+        parser.add_argument("--artifact-sha")
+        try:
+            ns = parser.parse_args(args)
+            if ns.exit_code is None or not re.fullmatch(r"-?[0-9]+", ns.exit_code):
+                raise ValueError("INVALID-ROLLBACK-EXIT-CODE")
+            record_rollback_dryrun(store, ns.run_id, ns.surface, ns.command,
+                                   int(ns.exit_code), ns.artifact_sha)
+        except (ValueError, SystemExit, OSError) as exc:
+            print(f"ROLLBACK-DRYRUN-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        print("ROLLBACK-DRYRUN-RECORDED")
         return 0
     if cmd == "map-run":
         if "--get" in args:

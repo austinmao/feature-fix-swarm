@@ -2408,3 +2408,435 @@ def test_cli_promote_trailing_evidence_flag_returns_typed_rejection(tmp_path, mo
         "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence",
     ])
     assert rc == 1
+
+
+# ── spec-008 Phase 3 (REQ-301): record_canary_evidence recorder validation ───
+# Trust boundary (wall 087faa76): the recorder validates SHAPE, not caller
+# identity — the trusted wrapper (canary-gate.sh) is the sole LEGITIMATE
+# producer; integrity is guarded by the G2 tamper scan + store perms.
+
+_COMMIT_ARTIFACT = "ab" * 20  # bare 40-hex commit sha (F5 — the FFS binding target)
+_ISO_CREATED = "2026-06-13T08:43:44.814Z"
+_ISO_ENDED = "2026-06-13T08:48:02.991Z"
+
+
+def test_canary_recorder_appends_verbatim_schema_row(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    rows = json.loads(store.read_text())["canary"]
+    assert len(rows) == 1
+    rec = rows[0]
+    assert set(rec) == {"run_id", "sha", "pass", "created_at", "ended_at", "ts"}
+    assert rec["run_id"] == "run-1"
+    assert rec["sha"] == _COMMIT_ARTIFACT
+    assert rec["pass"] is True
+    assert rec["created_at"] == _ISO_CREATED
+    assert rec["ended_at"] == _ISO_ENDED
+    assert isinstance(rec["ts"], float)
+
+
+def test_canary_recorder_rejects_non_40_hex_sha(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in ("abc", "Z" * 40, "ab" * 32, "", None,
+                "myapp@sha256:" + "f" * 64):  # digest refs are NOT canary identity
+        with pytest.raises(ValueError, match="INVALID-CANARY-SHA"):
+            gates.record_canary_evidence(store, "run-1", bad, True,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_empty_or_missing_timestamps(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for created, ended in (("", _ISO_ENDED), (_ISO_CREATED, ""), (None, _ISO_ENDED),
+                           (_ISO_CREATED, None), ("   ", _ISO_ENDED),
+                           ("x" * 65, _ISO_ENDED), ("bad\x00ts", _ISO_ENDED)):
+        with pytest.raises(ValueError, match="INVALID-CANARY-TIMESTAMP"):
+            gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                         created, ended)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_malformed_pass_flag(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in (1, 0, "true", "false", None):
+        with pytest.raises(ValueError, match="INVALID-CANARY-PASS"):
+            gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, bad,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_invalid_run_id(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in ("", None, "x" * 129, "bad\x00run"):
+        with pytest.raises(ValueError, match="INVALID-CANARY-RUN-ID"):
+            gates.record_canary_evidence(store, bad, _COMMIT_ARTIFACT, True,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_refuses_namespace_shape_conflict(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"canary": {"not": "a list"}}))
+    with pytest.raises(ValueError, match="CANARY-SCHEMA-CONFLICT"):
+        gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                     _ISO_CREATED, _ISO_ENDED)
+    assert json.loads(store.read_text())["canary"] == {"not": "a list"}
+
+
+def test_cli_canary_evidence_records_and_rejects_typed(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main(["canary-evidence", "--run-id", "run-1",
+                     "--sha", _COMMIT_ARTIFACT, "--pass", "true",
+                     "--created-at", _ISO_CREATED, "--ended-at", _ISO_ENDED])
+    assert rc == 0
+    rows = json.loads((tmp_path / "evidence.json").read_text())["canary"]
+    assert rows[0]["sha"] == _COMMIT_ARTIFACT and rows[0]["pass"] is True
+    rc = gates.main(["canary-evidence", "--run-id", "run-1",
+                     "--sha", "not-a-sha", "--pass", "true",
+                     "--created-at", _ISO_CREATED, "--ended-at", _ISO_ENDED])
+    assert rc == 2
+    assert "CANARY-EVIDENCE-REJECTED" in capsys.readouterr().err
+
+
+# ── spec-008 Phase 3 (REQ-301, AC-004): check_promotion canary sha binding ───
+# Canary-surface classifier (pinned decision 1): binding is STORE-SCOPED — a
+# non-empty canary namespace makes every check_promotion candidate
+# canary-bound (typed pass record with exact-matching sha required; sha-less
+# or untyped entries trigger binding but never satisfy it); an empty
+# namespace leaves promotion behavior unchanged.
+
+_OTHER_COMMIT = "cd" * 20
+
+
+def _seed_promotion(store, run_id: str = "run-1", surface: str = "cp",
+                    artifact: str = _COMMIT_ARTIFACT, **kwargs) -> None:
+    _seed_success(store, artifact=artifact)
+    assert gates.record_promotion(store, run_id, from_env="staging",
+                                  to_env="prod", surface=surface,
+                                  artifact=artifact, evidence_ids=["stg-web"],
+                                  **kwargs) is True
+
+
+def _inject_canary(store, rows) -> None:
+    data = json.loads(store.read_text()) if store.exists() else {}
+    data["canary"] = rows
+    store.write_text(json.dumps(data))
+
+
+def test_ac004_typed_match_allows(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True
+
+
+def test_ac004_sha_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_missing_sha_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    _inject_canary(store, [
+        {"run_id": "run-1", "pass": True, "created_at": _ISO_CREATED,
+         "ended_at": _ISO_ENDED, "ts": 1.0},  # typed kind, no sha at all
+        {"run_id": "run-1", "sha": "shortsha", "pass": True,
+         "created_at": _ISO_CREATED, "ended_at": _ISO_ENDED, "ts": 1.0},
+    ])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_untyped_legacy_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    _inject_canary(store, [{"marker": "legacy-canary"}, "opaque-string", 7])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+    # a tampered non-list namespace also refuses — never raises (pure read)
+    data = json.loads(store.read_text())
+    data["canary"] = {"not": "a list"}
+    store.write_text(json.dumps(data))
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_empty_namespace_unaffected(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True  # absent namespace
+    _inject_canary(store, [])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True  # explicitly empty
+
+
+def test_ac004_freshness_independent(tmp_path) -> None:
+    import time as _t
+    # fresh promotion + mismatched canary → refused (binding refuses)
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+    # expired promotion + exact-matching canary → refused (expires_at intact)
+    store2 = tmp_path / "evidence2.json"
+    _seed_promotion(store2, ttl_hours=1.0)
+    gates.record_canary_evidence(store2, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store2, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT, now=_t.time() + 3601) is False
+
+
+def test_ac004_failed_canary_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, False,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_miss_reason_canary_evidence_required(tmp_path) -> None:
+    # fresh, fully-matching promotion but only untyped canary entries →
+    # check_grant_prod names the refusal CANARY-EVIDENCE-REQUIRED
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    _inject_canary(store, [{"marker": "legacy-canary"}])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("CANARY-EVIDENCE-REQUIRED" in p["reason"] for p in pend)
+
+
+def test_ac004_miss_reason_canary_sha_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("CANARY-SHA-MISMATCH" in p["reason"] for p in pend)
+
+
+def test_ac004_miss_reason_phase1_ordering_preserved(tmp_path) -> None:
+    # canary evidence present but NO promote record at all → the phase-1
+    # NO-PROMOTE-EVIDENCE reason still fires (AC-001 ordering intact) …
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-PROMOTE-EVIDENCE" in p["reason"] for p in pend)
+    assert not any("CANARY" in p["reason"] for p in pend)
+    # … and an EXPIRED promote with a matching canary still classifies as
+    # PROMOTE-EXPIRED, never a canary reason.
+    import time as _t
+    store2 = tmp_path / "evidence2.json"
+    _seed_promotion(store2, ttl_hours=1.0)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store2, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store2, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT, now=_t.time() + 3601) is False
+    pend = gates.list_pending(store2, "run-1")
+    assert any("PROMOTE-EXPIRED" in p["reason"] for p in pend)
+    assert not any("CANARY" in p["reason"] for p in pend)
+
+
+# ── spec-008 Phase 3 (REQ-302, AC-005): rollback_dryrun schema + gate ────────
+# Synthetic surfaces + synthetic manifest dicts only: no real FFS surface
+# declares rollback and no config/ directory exists, so production behavior
+# is a structural no-op (locked row 11 — fallback-rehearsal.sh is NOT wired).
+# "Fresh same-run" = the run_id being checked, i.e. check_grant_prod's OWN
+# authoritative run_id parameter (wall 7531f885) — never an env default.
+
+_ROLLBACK_CMD = "deploy rollback cp"
+_ROLLBACK_MANIFEST = {"cp": {"staging": "stg-cp", "rollback": _ROLLBACK_CMD}}
+
+
+def _grant_and_promote(store, run_id: str = "run-1") -> None:
+    _seed_promotion(store, run_id=run_id)
+    assert gates.grant_actions(store, run_id, ["deploy:prod-cp"]) is True
+
+
+def test_ac005_declared_fresh_pass_allows(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is True
+
+
+def test_ac005_missing_record_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("ROLLBACK-DRYRUN-REQUIRED" in p["reason"] and "cp" in p["reason"]
+               for p in pend)
+
+
+def test_ac005_other_surface_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "db", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_other_run_refuses(tmp_path) -> None:
+    # a stale record from another run_id never satisfies — the same-run
+    # comparison binds check_grant_prod's own run_id parameter
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-2", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_failed_dryrun_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 1,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_command_mismatch_refuses(tmp_path) -> None:
+    # wall 4e3862e5: command must string-equal the manifest-declared command
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", "some other command", 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_sha_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _OTHER_COMMIT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_undeclared_noop(tmp_path) -> None:
+    # no rollback key in the manifest row (every real FFS surface) and the
+    # no-manifest path: the gate is a no-op by construction
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest={"cp": {"staging": "stg-cp"}}) is True
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT, manifest=None) is True
+
+
+def test_ac005_recorder_appends_verbatim_schema_row(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    rows = json.loads(store.read_text())["rollback_dryrun"]
+    assert len(rows) == 1
+    rec = rows[0]
+    assert set(rec) == {"run_id", "surface", "command", "exit_code",
+                        "artifact_sha", "ts"}
+    assert rec["run_id"] == "run-1" and rec["surface"] == "cp"
+    assert rec["command"] == _ROLLBACK_CMD and rec["exit_code"] == 0
+    assert rec["artifact_sha"] == _COMMIT_ARTIFACT
+    assert isinstance(rec["ts"], float)
+
+
+def test_ac005_recorder_rejects_typed(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-RUN-ID"):
+        gates.record_rollback_dryrun(store, "", "cp", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-SURFACE"):
+        gates.record_rollback_dryrun(store, "run-1", "  ", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-COMMAND"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", "", 0,
+                                     _COMMIT_ARTIFACT)
+    for bad_exit in ("0", 0.5, None, True):
+        with pytest.raises(ValueError, match="INVALID-ROLLBACK-EXIT-CODE"):
+            gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD,
+                                         bad_exit, _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-ARTIFACT"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                     "img:latest")
+    assert not store.exists()
+
+
+def test_ac005_recorder_refuses_namespace_shape_conflict(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"rollback_dryrun": {"not": "a list"}}))
+    with pytest.raises(ValueError, match="ROLLBACK-DRYRUN-SCHEMA-CONFLICT"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+
+
+def test_cli_rollback_dryrun_records_and_rejects_typed(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main(["rollback-dryrun", "--run-id", "run-1", "--surface", "cp",
+                     "--command", _ROLLBACK_CMD, "--exit-code", "0",
+                     "--artifact-sha", _COMMIT_ARTIFACT])
+    assert rc == 0
+    rows = json.loads((tmp_path / "evidence.json").read_text())["rollback_dryrun"]
+    assert rows[0]["exit_code"] == 0 and rows[0]["command"] == _ROLLBACK_CMD
+    rc = gates.main(["rollback-dryrun", "--run-id", "run-1", "--surface", "cp",
+                     "--command", _ROLLBACK_CMD, "--exit-code", "zero",
+                     "--artifact-sha", _COMMIT_ARTIFACT])
+    assert rc == 2
+    assert "ROLLBACK-DRYRUN-REJECTED" in capsys.readouterr().err
+
+
+def test_ac005_normalize_manifest_preserves_optional_rollback(tmp_path) -> None:
+    import pytest
+    normalized = gates._normalize_manifest({"surfaces": [
+        {"surface": "cp", "staging_instance": "stg-cp",
+         "rollback": _ROLLBACK_CMD},
+        {"surface": "db", "staging_instance": "stg-db"},
+    ]})
+    assert normalized["cp"] == {"staging": "stg-cp", "rollback": _ROLLBACK_CMD}
+    assert normalized["db"] == {"staging": "stg-db"}  # no rollback key at all
+    for bad in (7, "", "   "):
+        with pytest.raises(ValueError):
+            gates._normalize_manifest({"surfaces": [
+                {"surface": "cp", "staging_instance": "stg-cp",
+                 "rollback": bad}]})

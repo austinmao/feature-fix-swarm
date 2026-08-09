@@ -47,8 +47,10 @@ add_web_commit() {
 }
 
 write_results() { # $1=path $2=status $3=consoleErrors $4=networkFailures
+  # createdAt/endedAt mirror the real @usecanary/cli results.json shape —
+  # REQ-301 records them verbatim, and their absence fails the gate closed.
   cat > "$1" <<EOF
-{"status":"$2","summary":{"stepsTotal":5,"stepsPassed":5,"stepsFailed":0,"consoleErrors":$3,"networkFailures":$4},"steps":[]}
+{"status":"$2","createdAt":"2026-06-13T08:43:44.814Z","endedAt":"2026-06-13T08:48:02.991Z","summary":{"stepsTotal":5,"stepsPassed":5,"stepsFailed":0,"consoleErrors":$3,"networkFailures":$4},"steps":[]}
 EOF
 }
 
@@ -225,4 +227,89 @@ EOF
   PATH="$MINPATH" run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
   [ "$status" -eq 1 ]
   [[ "$output" == *"jq required to parse canary results"* ]]
+}
+
+# ── spec-008 Phase 3 (REQ-301, AC-004): typed canary evidence ────────────────
+# A passing run must durably record {run_id, sha, pass, created_at, ended_at,
+# ts} BEFORE printing PASS; sha comes from `git rev-parse HEAD` in this
+# trusted wrapper (C6 — never from results.json), captured at entry and
+# re-verified after the completeness check. Fail-closed: unrecordable
+# evidence or mid-run HEAD drift refuses PASS.
+
+@test "AC-004: PASS writes one typed canary record" {
+  add_web_commit
+  HEAD_SHA="$(git rev-parse HEAD)"
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  write_results "$RESULTS" passed 0 0
+  STORE="$BATS_TEST_TMPDIR/evidence.json"
+  GATES_STORE="$STORE" GSD_RUN_ID="run-42" run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"canary-gate: PASS"* ]]
+  [ "$(jq -r '.canary | length' "$STORE")" = "1" ]
+  [ "$(jq -r '.canary[0].run_id' "$STORE")" = "run-42" ]
+  [ "$(jq -r '.canary[0].sha' "$STORE")" = "$HEAD_SHA" ]
+  [ "$(jq -r '.canary[0].pass' "$STORE")" = "true" ]
+  [ "$(jq -r '.canary[0].created_at' "$STORE")" = "2026-06-13T08:43:44.814Z" ]
+  [ "$(jq -r '.canary[0].ended_at' "$STORE")" = "2026-06-13T08:48:02.991Z" ]
+  [ "$(jq -r '.canary[0].ts | type' "$STORE")" = "number" ]
+}
+
+@test "AC-004: record write failure fails the gate (no PASS)" {
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  write_results "$RESULTS" passed 0 0
+  RO="$BATS_TEST_TMPDIR/ro"
+  mkdir -p "$RO"
+  chmod 555 "$RO"
+  GATES_STORE="$RO/evidence.json" run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  chmod 755 "$RO"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CANARY-EVIDENCE-UNRECORDED"* ]]
+  [[ "$output" != *"canary-gate: PASS"* ]]
+}
+
+@test "AC-004: absent GSD_RUN_ID records unattributed" {
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  write_results "$RESULTS" passed 0 0
+  STORE="$BATS_TEST_TMPDIR/evidence.json"
+  GATES_STORE="$STORE" run env -u GSD_RUN_ID bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"canary-gate: PASS"* ]]
+  [ "$(jq -r '.canary[0].run_id' "$STORE")" = "unattributed" ]
+}
+
+@test "AC-004: mid-run HEAD drift refuses with no record" {
+  add_web_commit
+  RESULTS="$BATS_TEST_TMPDIR/results.json"
+  write_results "$RESULTS" passed 0 0
+  STORE="$BATS_TEST_TMPDIR/evidence.json"
+  REALGIT="$(command -v git)"
+  STUB="$BATS_TEST_TMPDIR/gitstub"
+  COUNT="$BATS_TEST_TMPDIR/rev-parse-head-count"
+  mkdir -p "$STUB"
+  # First bare `git rev-parse HEAD` (gate-entry capture) passes through to
+  # real git; the second (post-completeness re-verify) returns a different
+  # sha — simulating a commit landing mid-run. All other git calls pass
+  # through untouched.
+  cat > "$STUB/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$#" -eq 2 ] && [ "\$1" = "rev-parse" ] && [ "\$2" = "HEAD" ]; then
+  C="\$(cat "$COUNT" 2>/dev/null || echo 0)"
+  echo "\$((C + 1))" > "$COUNT"
+  if [ "\$C" -ge 1 ]; then
+    echo "0000000000000000000000000000000000000000"
+    exit 0
+  fi
+fi
+exec "$REALGIT" "\$@"
+EOF
+  chmod +x "$STUB/git"
+  GATES_STORE="$STORE" PATH="$STUB:$PATH" run bash "$SCRIPT" --diff-base "$BASE_SHA" "$RESULTS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CANARY-IDENTITY-DRIFT"* ]]
+  [[ "$output" != *"canary-gate: PASS"* ]]
+  if [ -f "$STORE" ]; then
+    [ "$(jq -r '.canary // [] | length' "$STORE")" = "0" ]
+  fi
 }
