@@ -2502,3 +2502,162 @@ def test_cli_canary_evidence_records_and_rejects_typed(tmp_path, monkeypatch, ca
                      "--created-at", _ISO_CREATED, "--ended-at", _ISO_ENDED])
     assert rc == 2
     assert "CANARY-EVIDENCE-REJECTED" in capsys.readouterr().err
+
+
+# ── spec-008 Phase 3 (REQ-301, AC-004): check_promotion canary sha binding ───
+# Canary-surface classifier (pinned decision 1): binding is STORE-SCOPED — a
+# non-empty canary namespace makes every check_promotion candidate
+# canary-bound (typed pass record with exact-matching sha required; sha-less
+# or untyped entries trigger binding but never satisfy it); an empty
+# namespace leaves promotion behavior unchanged.
+
+_OTHER_COMMIT = "cd" * 20
+
+
+def _seed_promotion(store, run_id: str = "run-1", surface: str = "cp",
+                    artifact: str = _COMMIT_ARTIFACT, **kwargs) -> None:
+    _seed_success(store, artifact=artifact)
+    assert gates.record_promotion(store, run_id, from_env="staging",
+                                  to_env="prod", surface=surface,
+                                  artifact=artifact, evidence_ids=["stg-web"],
+                                  **kwargs) is True
+
+
+def _inject_canary(store, rows) -> None:
+    data = json.loads(store.read_text()) if store.exists() else {}
+    data["canary"] = rows
+    store.write_text(json.dumps(data))
+
+
+def test_ac004_typed_match_allows(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True
+
+
+def test_ac004_sha_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_missing_sha_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    _inject_canary(store, [
+        {"run_id": "run-1", "pass": True, "created_at": _ISO_CREATED,
+         "ended_at": _ISO_ENDED, "ts": 1.0},  # typed kind, no sha at all
+        {"run_id": "run-1", "sha": "shortsha", "pass": True,
+         "created_at": _ISO_CREATED, "ended_at": _ISO_ENDED, "ts": 1.0},
+    ])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_untyped_legacy_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    _inject_canary(store, [{"marker": "legacy-canary"}, "opaque-string", 7])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+    # a tampered non-list namespace also refuses — never raises (pure read)
+    data = json.loads(store.read_text())
+    data["canary"] = {"not": "a list"}
+    store.write_text(json.dumps(data))
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_empty_namespace_unaffected(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True  # absent namespace
+    _inject_canary(store, [])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True  # explicitly empty
+
+
+def test_ac004_freshness_independent(tmp_path) -> None:
+    import time as _t
+    # fresh promotion + mismatched canary → refused (binding refuses)
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+    # expired promotion + exact-matching canary → refused (expires_at intact)
+    store2 = tmp_path / "evidence2.json"
+    _seed_promotion(store2, ttl_hours=1.0)
+    gates.record_canary_evidence(store2, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store2, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT, now=_t.time() + 3601) is False
+
+
+def test_ac004_failed_canary_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, False,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_miss_reason_canary_evidence_required(tmp_path) -> None:
+    # fresh, fully-matching promotion but only untyped canary entries →
+    # check_grant_prod names the refusal CANARY-EVIDENCE-REQUIRED
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    _inject_canary(store, [{"marker": "legacy-canary"}])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("CANARY-EVIDENCE-REQUIRED" in p["reason"] for p in pend)
+
+
+def test_ac004_miss_reason_canary_sha_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("CANARY-SHA-MISMATCH" in p["reason"] for p in pend)
+
+
+def test_ac004_miss_reason_phase1_ordering_preserved(tmp_path) -> None:
+    # canary evidence present but NO promote record at all → the phase-1
+    # NO-PROMOTE-EVIDENCE reason still fires (AC-001 ordering intact) …
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-PROMOTE-EVIDENCE" in p["reason"] for p in pend)
+    assert not any("CANARY" in p["reason"] for p in pend)
+    # … and an EXPIRED promote with a matching canary still classifies as
+    # PROMOTE-EXPIRED, never a canary reason.
+    import time as _t
+    store2 = tmp_path / "evidence2.json"
+    _seed_promotion(store2, ttl_hours=1.0)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store2, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store2, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT, now=_t.time() + 3601) is False
+    pend = gates.list_pending(store2, "run-1")
+    assert any("PROMOTE-EXPIRED" in p["reason"] for p in pend)
+    assert not any("CANARY" in p["reason"] for p in pend)
