@@ -75,6 +75,33 @@
 #          ENV-REGISTRY-BUSY fail-fast, nothing interleaved
 #   C20    write-target containment (wall 2965346c): config symlinked
 #          outside the fixture → typed refusal, nothing at the link target
+# Group D (03-02 Task 2 — render verb, REQ-302; audit rows 20/27 LOCKED):
+#   D1  fresh render: exactly 5 ffs-*.yml + .github/dependabot.yml; six-token
+#       substitution; zero {{ residue; ${{ ... }} expressions intact (OQ9)
+#   D2  collision → proposal at .github/ffs-proposals/ (identical basename,
+#       row 20), diff -u on stdout, every original byte-identical, no
+#       proposal-suffixed filename in the workflows dir
+#   D3  byte-identical existing target → up-to-date line, no proposal
+#       (EDGE-007)
+#   D4  dependabot present without github-actions ecosystem → advisory +
+#       untouched; with it → silent skip (wall 3c6cb2e7)
+#   D5  registry missing staging/prod kinds → 3 test workflows + typed skip
+#       advisory naming the missing kind(s), rc 0 (OQ4)
+#   D6  hostile registry value (credential-shaped env name, runtime-
+#       generated) → value-free rc 2, nothing written (walls a173dd6d/6e10a021)
+#   D7  rendered-candidate leak scan: bare hex in a generated template →
+#       rc 2, NOTHING written (walls 9a586ab7 + REQ-202a)
+#   D8  missing registry / missing templates dir → rc 1 typed refusal (OQ7)
+#   D9  proposal-path collision (wall 969c0f3d): existing REGULAR file at the
+#       proposal path is overwritten atomically; a SYMLINK there refuses via
+#       the containment guard, nothing at the link target
+#   D10 validate-ALL-then-write-ALL (walls 9a586ab7 + 1a28ec98): LAST
+#       template carries a bad placeholder → refusal, ZERO files created
+#   D11 both-sides leak scan (wall d118f505): existing workflow carries a
+#       credential-shaped literal → content diff SUPPRESSED, value-free
+#       notice naming finding class + proposal path, secret on NEITHER stream
+#   D12 workflows-dir symlink (walls 6b6bd8bc/2965346c): typed refusal,
+#       nothing at the link target
 # ───────────────────────────────────────────────────────────────────────────
 
 bats_require_minimum_version 1.5.0
@@ -227,9 +254,16 @@ PY
   [[ "$output" == *"config/environments.yaml"* ]]
 }
 
-@test "A11 render is a stub naming phase 3" {
-  run -3 bash "$ER" render
-  [[ "$output" == *"render lands in phase 3 (REQ-302)"* ]]
+@test "A11 render usage: real synopsis, exit legend drops 'not implemented' (03-02/OQ7)" {
+  # Phase 2 pinned render as a stub (rc 3); 03-02 implements it — this case
+  # now pins the UPDATED usage contract instead.
+  run -1 --separate-stderr bash "$ER"
+  [[ "$stderr" == *"render"* ]]
+  [[ "$stderr" == *"ffs-proposals"* ]]
+  [[ "$stderr" != *"not implemented"* ]]
+  [[ "$stderr" != *"stub"* ]]
+  [[ "$stderr" == *"0 ok"* ]]
+  [[ "$stderr" == *"2 leak finding"* ]]
 }
 
 @test "A12 missing and unknown verbs print usage on stderr, nonzero" {
@@ -669,4 +703,248 @@ PY
   [[ "$output" == *"symlink"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/outside/environments.yaml" ]
   [ ! -f "$FIXTURE/.ffs-init.json" ]
+}
+
+# ── Group D: render (REQ-302, 03-02 Task 2) ────────────────────────────────
+
+# Full-shape registry: both staging and prod kinds so all 5 templates render.
+write_render_registry() {  # $1=path
+  cat > "$1" <<'YAML'
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: local
+    kind: local
+  - name: stag
+    kind: staging
+  - name: production
+    kind: prod
+test_tiers:
+  - tier: fast
+    command: true
+  - tier: full
+    command: true
+  - tier: nightly
+    command: true
+YAML
+}
+
+setup_render() {
+  # Pinned fixture idiom: templates/ci/* COPIED into the fixture — render
+  # always runs against the fixture's own tree, never the checkout's.
+  mkdir -p "$FIXTURE/templates/ci"
+  cp "$ROOT"/templates/ci/*.yml "$FIXTURE/templates/ci/"
+  write_render_registry "$FIXTURE/config/environments.yaml"
+}
+
+@test "D1 fresh render: exactly 5 ffs-*.yml + dependabot; substitution clean; \${{ }} intact" {
+  setup_render
+  run -0 bash "$ER" render
+  # exactly 5 workflow files, all ffs-<name>.yml (structural anti-clobber)
+  [ "$(find "$FIXTURE/.github/workflows" -name '*.yml' | wc -l)" -eq 5 ]
+  for n in pr-fast main-full nightly-deep deploy-staging deploy-prod; do
+    [ -f "$FIXTURE/.github/workflows/ffs-$n.yml" ]
+  done
+  # dependabot target sits OUTSIDE workflows/ (wall 3c6cb2e7)
+  [ -f "$FIXTURE/.github/dependabot.yml" ]
+  # six-token substitution with the fixture's registry values
+  grep -q "environment: stag" "$FIXTURE/.github/workflows/ffs-deploy-staging.yml"
+  grep -q "environment: production" "$FIXTURE/.github/workflows/ffs-deploy-prod.yml"
+  grep -q "requirements.txt" "$FIXTURE/.github/workflows/ffs-pr-fast.yml"
+  grep -q "test-tier.sh fast" "$FIXTURE/.github/workflows/ffs-pr-fast.yml"
+  grep -q "test-tier.sh full" "$FIXTURE/.github/workflows/ffs-main-full.yml"
+  grep -q "test-tier.sh nightly" "$FIXTURE/.github/workflows/ffs-nightly-deep.yml"
+  # zero residual {{ }} runs outside ${{ ... }} expressions (wall 1a28ec98)
+  run -1 bash -c 'sed "s/\${{/GHEXPR/g" "$1"/.github/workflows/*.yml | grep -q "{{"' _ "$FIXTURE"
+  # ${{ ... }} expressions survive substitution unmangled (OQ9)
+  grep -q 'ffs-${{ github.run_id }}' "$FIXTURE/.github/workflows/ffs-deploy-prod.yml"
+}
+
+@test "D2 collision: proposal outside workflows dir, diff -u, originals byte-identical" {
+  setup_render
+  mkdir -p "$FIXTURE/.github/workflows"
+  printf 'name: consumer-pr\non: pull_request\n' \
+    > "$FIXTURE/.github/workflows/ffs-pr-fast.yml"
+  printf 'name: consumer-ci\non: push\n' > "$FIXTURE/.github/workflows/ci.yml"
+  printf 'name: consumer-release\non: push\n' \
+    > "$FIXTURE/.github/workflows/release.yml"
+  cp "$FIXTURE/.github/workflows/ffs-pr-fast.yml" "$BATS_TEST_TMPDIR/orig-collide.yml"
+  cp "$FIXTURE/.github/workflows/ci.yml" "$BATS_TEST_TMPDIR/orig-ci.yml"
+  run -0 bash "$ER" render
+  # proposal: IDENTICAL basename under .github/ffs-proposals/ (row 20, OQ8)
+  [ -f "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml" ]
+  grep -q "test-tier.sh fast" "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml"
+  # diff -u markers on stdout
+  [[ "$output" == *"---"* ]]
+  [[ "$output" == *"+++"* ]]
+  # EVERY pre-existing workflow byte-identical
+  cmp -s "$FIXTURE/.github/workflows/ffs-pr-fast.yml" "$BATS_TEST_TMPDIR/orig-collide.yml"
+  cmp -s "$FIXTURE/.github/workflows/ci.yml" "$BATS_TEST_TMPDIR/orig-ci.yml"
+  # workflows dir never contains a proposal-suffixed filename (Pitfall 1)
+  run -1 bash -c 'ls "$1"/.github/workflows/*proposed* 2>/dev/null | grep -q .' _ "$FIXTURE"
+}
+
+@test "D3 byte-identical existing target: up-to-date line, no proposal (EDGE-007)" {
+  setup_render
+  run -0 bash "$ER" render
+  run -0 bash "$ER" render
+  [[ "$output" == *"up-to-date"* ]]
+  [ ! -e "$FIXTURE/.github/ffs-proposals" ]
+}
+
+@test "D4 dependabot: missing github-actions ecosystem → advisory + untouched; present → silent" {
+  setup_render
+  mkdir -p "$FIXTURE/.github"
+  printf 'version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n' \
+    > "$FIXTURE/.github/dependabot.yml"
+  cp "$FIXTURE/.github/dependabot.yml" "$BATS_TEST_TMPDIR/orig-dependabot.yml"
+  run -0 bash "$ER" render
+  [[ "$output" == *"ADVISORY"* ]]
+  [[ "$output" == *"github-actions"* ]]
+  cmp -s "$FIXTURE/.github/dependabot.yml" "$BATS_TEST_TMPDIR/orig-dependabot.yml"
+  # WITH the ecosystem (differing bytes) → silent skip, still untouched
+  printf 'version: 2\nupdates:\n  - package-ecosystem: github-actions\n    directory: /\n    schedule:\n      interval: daily\n' \
+    > "$FIXTURE/.github/dependabot.yml"
+  cp "$FIXTURE/.github/dependabot.yml" "$BATS_TEST_TMPDIR/orig-dependabot2.yml"
+  run -0 bash "$ER" render
+  [[ "$output" != *"dependabot"*"ADVISORY"* ]]
+  [[ "$output" != *"ADVISORY: .github/dependabot.yml"* ]]
+  cmp -s "$FIXTURE/.github/dependabot.yml" "$BATS_TEST_TMPDIR/orig-dependabot2.yml"
+}
+
+@test "D5 registry without staging/prod kinds: 3 test workflows + typed skip advisory, rc 0" {
+  setup_render
+  cat > "$FIXTURE/config/environments.yaml" <<'YAML'
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: local
+    kind: local
+test_tiers:
+  - tier: fast
+    command: true
+YAML
+  run -0 bash "$ER" render
+  [ "$(find "$FIXTURE/.github/workflows" -name '*.yml' | wc -l)" -eq 3 ]
+  [ ! -e "$FIXTURE/.github/workflows/ffs-deploy-staging.yml" ]
+  [ ! -e "$FIXTURE/.github/workflows/ffs-deploy-prod.yml" ]
+  [[ "$output" == *"ADVISORY"* ]]
+  [[ "$output" == *"kind: staging"* ]]
+  [[ "$output" == *"kind: prod"* ]]
+}
+
+@test "D6 hostile registry value: value-free refusal, nothing written (runtime-generated)" {
+  setup_render
+  secret="ghp_$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+  cat > "$FIXTURE/config/environments.yaml" <<YAML
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: local
+    kind: local
+  - name: $secret
+    kind: staging
+  - name: production
+    kind: prod
+test_tiers:
+  - tier: fast
+    command: true
+YAML
+  rc=0
+  bash "$ER" render > "$BATS_TEST_TMPDIR/r-out" 2> "$BATS_TEST_TMPDIR/r-err" || rc=$?
+  [ "$rc" -eq 2 ]
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/r-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/r-err"
+  [ ! -e "$FIXTURE/.github" ]
+}
+
+@test "D7 rendered-candidate leak scan: bare hex outside uses: shape → rc 2, nothing written" {
+  setup_render
+  hexlit="$(python3 -c 'import secrets; print(secrets.token_hex(20))')"
+  printf 'name: evil\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo %s\n' \
+    "$hexlit" > "$FIXTURE/templates/ci/aa-evil.yml"
+  rc=0
+  bash "$ER" render > "$BATS_TEST_TMPDIR/l-out" 2> "$BATS_TEST_TMPDIR/l-err" || rc=$?
+  [ "$rc" -eq 2 ]
+  ! grep -qF "$hexlit" "$BATS_TEST_TMPDIR/l-out"
+  ! grep -qF "$hexlit" "$BATS_TEST_TMPDIR/l-err"
+  # wall 9a586ab7: NOTHING written — not even the clean templates
+  [ ! -e "$FIXTURE/.github" ]
+}
+
+@test "D8 missing registry and missing templates dir: rc 1 typed refusals (OQ7)" {
+  setup_render
+  rm -f "$FIXTURE/config/environments.yaml"
+  run -1 bash "$ER" render
+  [[ "$output" == *"registry"* ]]
+  [[ "$output" == *"remedy"* ]]
+  write_render_registry "$FIXTURE/config/environments.yaml"
+  rm -rf "$FIXTURE/templates/ci"
+  run -1 bash "$ER" render
+  [[ "$output" == *"templates"* ]]
+  [ ! -e "$FIXTURE/.github" ]
+}
+
+@test "D9 proposal-path collision (wall 969c0f3d): regular file overwritten; symlink refuses" {
+  setup_render
+  mkdir -p "$FIXTURE/.github/workflows" "$FIXTURE/.github/ffs-proposals"
+  printf 'name: consumer-pr\n' > "$FIXTURE/.github/workflows/ffs-pr-fast.yml"
+  # (a) EXISTING REGULAR FILE at the proposal path: it is a proposal, not an
+  # authority — overwritten atomically (mkstemp+os.replace)
+  printf 'stale proposal bytes\n' > "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml"
+  run -0 bash "$ER" render
+  ! grep -q "stale proposal bytes" "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml"
+  grep -q "test-tier.sh fast" "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml"
+  # (b) SYMLINK at the proposal path: containment guard refuses, nothing
+  # written at the link target
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  rm -f "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml"
+  ln -s "$BATS_TEST_TMPDIR/outside/steal.yml" "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml"
+  run -1 bash "$ER" render
+  [[ "$output" == *"ENV-REGISTRY-REFUSED"* ]]
+  [[ "$output" == *"symlink"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/outside/steal.yml" ]
+}
+
+@test "D10 validate-ALL-then-write-ALL: bad placeholder in the LAST template → zero files" {
+  setup_render
+  # zz- sorts LAST; malformed lowercase + unknown-uppercase tokens both refuse
+  # (wall 1a28ec98 residual scan covers both drift directions)
+  printf 'name: last\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo {{NOT_A_TOKEN}} {{lower_case}}\n' \
+    > "$FIXTURE/templates/ci/zz-last.yml"
+  run -1 bash "$ER" render
+  [[ "$output" == *"placeholder"* ]]
+  [[ "$output" == *"nothing written"* ]]
+  [ ! -e "$FIXTURE/.github" ]
+}
+
+@test "D11 both-sides leak scan (wall d118f505): existing-side finding suppresses the diff" {
+  setup_render
+  mkdir -p "$FIXTURE/.github/workflows"
+  secret="ghp_$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+  printf 'name: consumer-pr\nenv:\n  TOKEN: %s\n' "$secret" \
+    > "$FIXTURE/.github/workflows/ffs-pr-fast.yml"
+  cp "$FIXTURE/.github/workflows/ffs-pr-fast.yml" "$BATS_TEST_TMPDIR/orig-leaky.yml"
+  rc=0
+  bash "$ER" render > "$BATS_TEST_TMPDIR/s-out" 2> "$BATS_TEST_TMPDIR/s-err" || rc=$?
+  [ "$rc" -eq 2 ]
+  # the secret crosses NEITHER stream — the content diff is suppressed
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/s-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/s-err"
+  # value-free notice names the finding class + the proposal path instead
+  grep -q "suppressed" "$BATS_TEST_TMPDIR/s-out"
+  grep -q "ffs-proposals/ffs-pr-fast.yml" "$BATS_TEST_TMPDIR/s-out"
+  [ -f "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml" ]
+  # the existing consumer workflow stays byte-identical
+  cmp -s "$FIXTURE/.github/workflows/ffs-pr-fast.yml" "$BATS_TEST_TMPDIR/orig-leaky.yml"
+}
+
+@test "D12 symlinked workflows dir (wall 6b6bd8bc): typed refusal, nothing at link target" {
+  setup_render
+  mkdir -p "$FIXTURE/.github" "$BATS_TEST_TMPDIR/outside-wf"
+  ln -s "$BATS_TEST_TMPDIR/outside-wf" "$FIXTURE/.github/workflows"
+  run -1 bash "$ER" render
+  [[ "$output" == *"ENV-REGISTRY-REFUSED"* ]]
+  [[ "$output" == *"symlink"* ]]
+  run -1 bash -c 'ls "$1"/*.yml 2>/dev/null | grep -q .' _ "$BATS_TEST_TMPDIR/outside-wf"
 }
