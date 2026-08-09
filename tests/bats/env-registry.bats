@@ -25,7 +25,25 @@
 #   A13 gh probe OPT-IN (wall 959b7514): plain check makes ZERO gh calls even
 #       with an authed stub on PATH; --probe-gh authed → advisory line;
 #       unauthed → silent skip; rc IDENTICAL in both shapes (EDGE-004)
-# Group B (Task 2 — leak scan) and Group C (Task 3 — detect/apply) follow.
+# Group B (Task 2 — leak scan, REQ-202a; audit rows 10-12; fixtures ONLY
+# under tests/fixtures/leak-scan/ per AC-011):
+#   B1  family-fires ×8: one fixture per family → rc 2, fixed output contract
+#       `line N, key <name>, shape <class> — remedy: replace the literal
+#       with a NAME in secret_names`
+#   B2  substring-absence: stdout and stderr captured to SEPARATE files; the
+#       fixture's secret value appears in NEITHER (REQ-202a mandated test)
+#   B3  whitelist-holds: uses:@40hex pins + sha256:64hex digests interleaved
+#       with registry lines → rc 0, zero findings (ordering pin, row 11)
+#   B4  span-not-line (wall a8f9af82): whitelisted digest AND a second
+#       credential on ONE line → the second credential still flags
+#   B5  committed-finding: fixture repo COMMITS the secret-bearing file →
+#       remedy states rotate-then-rewrite-history (row 10)
+#   B6  key-identifier guard (wall 2f77cf3f): secret-shaped KEY prints as
+#       <non-identifier key at line N>, its bytes absent from both streams
+#   B7  value-free refusal (wall 6e10a021): credential-shaped scalar in a
+#       registry → refusal carries no substring of it on either stream
+#   B8  boundary negatives: hex run of 31 and base64 run of 39 → no finding
+# Group C (Task 3 — detect/apply) follows.
 # ───────────────────────────────────────────────────────────────────────────
 
 bats_require_minimum_version 1.5.0
@@ -206,4 +224,106 @@ PY
   make_gh_stub 1
   PATH="$FIXTURE/bin:$PATH" run -0 bash "$ER" check --probe-gh
   [[ "$output" != *"ADVISORY"* ]]
+}
+
+# ── Group B: leak scan (REQ-202a) ──────────────────────────────────────────
+
+LEAK_FAMILIES="hex base64 assignment url aws prefix jwt pem"
+
+leak_dir() {
+  printf '%s\n' "$ROOT/tests/fixtures/leak-scan"
+}
+
+shape_for() {
+  case "$1" in
+    hex) echo hex-run ;;
+    base64) echo base64-run ;;
+    assignment) echo secret-assignment ;;
+    url) echo credential-url ;;
+    aws) echo aws-access-key ;;
+    prefix) echo provider-token-prefix ;;
+    jwt) echo jwt ;;
+    pem) echo pem-block ;;
+  esac
+}
+
+@test "B1 family-fires x8: each REQ-202a family flags with the fixed contract" {
+  for fam in $LEAK_FAMILIES; do
+    echo "family: $fam"
+    cp "$(leak_dir)/$fam.txt" "$BATS_TEST_TMPDIR/$fam.txt"
+    run -2 bash "$ER" check --manifest "$BATS_TEST_TMPDIR/$fam.txt"
+    [[ "$output" == *"line "* ]]
+    [[ "$output" == *"key "* ]]
+    [[ "$output" == *"shape $(shape_for "$fam")"* ]]
+    [[ "$output" == *"remedy: replace the literal with a NAME in secret_names"* ]]
+  done
+}
+
+@test "B2 substring-absence: secret value in NEITHER stdout NOR stderr" {
+  for fam in $LEAK_FAMILIES; do
+    echo "family: $fam"
+    secret="$(cat "$(leak_dir)/$fam.secret")"
+    cp "$(leak_dir)/$fam.txt" "$BATS_TEST_TMPDIR/$fam.txt"
+    bash "$ER" check --manifest "$BATS_TEST_TMPDIR/$fam.txt" \
+      > "$BATS_TEST_TMPDIR/scan-out" 2> "$BATS_TEST_TMPDIR/scan-err"
+    echo $? > "$BATS_TEST_TMPDIR/scan-rc"
+    [ "$(cat "$BATS_TEST_TMPDIR/scan-rc")" -eq 2 ]
+    ! grep -qF "$secret" "$BATS_TEST_TMPDIR/scan-out"
+    ! grep -qF "$secret" "$BATS_TEST_TMPDIR/scan-err"
+  done
+}
+
+@test "B3 whitelist holds under interleaving: pins and digests are not findings" {
+  run -0 bash "$ER" check --manifest "$(leak_dir)/whitelist-clean.txt"
+  [[ "$output" != *"remedy: replace the literal"* ]]
+}
+
+@test "B4 span-not-line: second credential beside a whitelisted digest still flags" {
+  cp "$(leak_dir)/mixed-span.txt" "$BATS_TEST_TMPDIR/mixed-span.txt"
+  run -2 bash "$ER" check --manifest "$BATS_TEST_TMPDIR/mixed-span.txt"
+  [[ "$output" == *"shape provider-token-prefix"* ]]
+  [ "$(grep -c 'remedy:' <<<"$output")" -eq 1 ]
+  secret="$(cat "$(leak_dir)/mixed-span.secret")"
+  [[ "$output" != *"$secret"* ]]
+}
+
+@test "B5 committed finding: remedy states rotate-then-rewrite-history" {
+  cp "$(leak_dir)/hex.txt" "$FIXTURE/leaky.yaml"
+  git -C "$FIXTURE" add leaky.yaml
+  git -C "$FIXTURE" -c user.email=t@t -c user.name=t commit -q -m leaky
+  run -2 bash "$ER" check --manifest "$FIXTURE/leaky.yaml"
+  [[ "$output" == *"rotate"* ]]
+  [[ "$output" == *"rewrite history"* ]]
+  # uncommitted copy of the same file gets the base remedy only
+  cp "$(leak_dir)/hex.txt" "$BATS_TEST_TMPDIR/hex.txt"
+  run -2 bash "$ER" check --manifest "$BATS_TEST_TMPDIR/hex.txt"
+  [[ "$output" != *"rotate"* ]]
+}
+
+@test "B6 secret-shaped KEY renders as a placeholder, bytes absent from both streams" {
+  secret="$(cat "$(leak_dir)/secret-key.secret")"
+  cp "$(leak_dir)/secret-key.txt" "$BATS_TEST_TMPDIR/secret-key.txt"
+  bash "$ER" check --manifest "$BATS_TEST_TMPDIR/secret-key.txt" \
+    > "$BATS_TEST_TMPDIR/sk-out" 2> "$BATS_TEST_TMPDIR/sk-err"
+  echo $? > "$BATS_TEST_TMPDIR/sk-rc"
+  [ "$(cat "$BATS_TEST_TMPDIR/sk-rc")" -eq 2 ]
+  grep -q "non-identifier key at line" "$BATS_TEST_TMPDIR/sk-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/sk-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/sk-err"
+}
+
+@test "B7 credential-shaped registry scalar: refusal carries no substring of it" {
+  secret="$(cat "$(leak_dir)/credential-kind.secret")"
+  cp "$(leak_dir)/credential-kind.txt" "$BATS_TEST_TMPDIR/credential-kind.txt"
+  bash "$ER" check --manifest "$BATS_TEST_TMPDIR/credential-kind.txt" \
+    > "$BATS_TEST_TMPDIR/ck-out" 2> "$BATS_TEST_TMPDIR/ck-err"
+  echo $? > "$BATS_TEST_TMPDIR/ck-rc"
+  [ "$(cat "$BATS_TEST_TMPDIR/ck-rc")" -ne 0 ]
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/ck-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/ck-err"
+}
+
+@test "B8 boundary negatives: hex run of 31 and base64 run of 39 are not findings" {
+  run -0 bash "$ER" check --manifest "$(leak_dir)/boundary-hex31.txt"
+  run -0 bash "$ER" check --manifest "$(leak_dir)/boundary-b64-39.txt"
 }

@@ -1,0 +1,2 @@
+# SYNTHETIC-NOT-A-REAL-KEY — leak-scan fixture (REQ-202a family: base64-run)
+blob: U1lOVEhFVElDbm90YXJlYWxzZWNyZXRibG9iMTIzNDU2Nzg5MA

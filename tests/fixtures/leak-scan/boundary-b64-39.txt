@@ -1,0 +1,13 @@
+# config/environments.yaml
+# schema: ffs.environments/v1
+# boundary fixture: 39-char base64 run — one short of the >=40 threshold.
+# boundary: QUJDsynthREVGnotGHIJarealKLMNblobPQRSTU
+environments:
+  - name: local
+    kind: local
+test_tiers:
+  - tier: fast
+    command: true
+surfaces:
+  - surface: release
+    staging_instance: none
