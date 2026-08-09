@@ -274,3 +274,31 @@ sys.stdout.buffer.write(data[len(start):-len(end)])
   # shellcheck disable=SC2154 # stderr populated by run --separate-stderr
   [ "$(printf '%s\n' "$stderr" | grep -c 'fence-data.sh')" -eq 1 ]
 }
+
+# ── Task 3: REQ-402 structural presence (grep-level, comment-filtered) ──────
+# The consumer list is EXACTLY the pinned-decision-2 inventory (RESEARCH
+# rows 1-4). collect-estate.py is excluded by design (OQ-6: status metadata,
+# not doc prose; python, so the bash helper does not apply) — assert nothing
+# about it.
+
+@test "REQ-402: every inventoried consumer sources fence-data.sh and calls the shared fence" {
+  for f in \
+    scripts/gsd/plan-wall.sh \
+    scripts/gsd/socratic-slice.sh \
+    skills/spec-status/scripts/collect-status-facts.sh \
+    skills/spec-guide/scripts/collect-usage-facts.sh; do
+    src="$ROOT_REPO/$f"
+    # comment lines filtered first so header prose can never satisfy a count
+    grep -v '^[[:space:]]*#' "$src" | grep -q 'fence-data\.sh' \
+      || { echo "MISSING fence-data.sh source in $f"; return 1; }
+    grep -v '^[[:space:]]*#' "$src" | grep -Eq 'fence_neutralize|fence_data ' \
+      || { echo "MISSING fence call in $f"; return 1; }
+  done
+}
+
+@test "REQ-402: exactly one file defines fence_neutralize (single-implementation guarantee)" {
+  count="$(grep -rEl '^[[:space:]]*fence_neutralize\(\)' \
+    "$ROOT_REPO/scripts" "$ROOT_REPO/skills" | wc -l | tr -d ' ')"
+  [ "$count" -eq 1 ]
+  grep -Eq '^[[:space:]]*fence_neutralize\(\)' "$FENCE_SH"
+}
