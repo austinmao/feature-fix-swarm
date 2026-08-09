@@ -102,6 +102,17 @@
 #       notice naming finding class + proposal path, secret on NEITHER stream
 #   D12 workflows-dir symlink (walls 6b6bd8bc/2965346c): typed refusal,
 #       nothing at the link target
+# Group E (03-02 Task 3 — covers-glob coverage matcher in check; REQ-303,
+# audit row 26 LOCKED, closes the 02-01-PLAN.md:36 deferral):
+#   E1  suite matched by a tier's <prefix>/** glob → check stays 0
+#   E2  discovered suite matching NO tier's covers → check nonzero naming
+#       the suite relpath AND the nearest tier (longest shared leading path
+#       segments; tie → first declared) + remedy
+#   E3  zero discovered suites → vacuous pass (phase-2 fixtures stay green)
+#   E4  walk exclusions honored: a test file under .worktrees/ is NOT
+#       discovered
+#   (live half: A1 now exercises the matcher against FFS's own registry —
+#   lib/** + tests/** cover all live suites incl. tests/test_ci_templates.py)
 # ───────────────────────────────────────────────────────────────────────────
 
 bats_require_minimum_version 1.5.0
@@ -937,6 +948,70 @@ YAML
   [ -f "$FIXTURE/.github/ffs-proposals/ffs-pr-fast.yml" ]
   # the existing consumer workflow stays byte-identical
   cmp -s "$FIXTURE/.github/workflows/ffs-pr-fast.yml" "$BATS_TEST_TMPDIR/orig-leaky.yml"
+}
+
+# ── Group E: covers-glob coverage matcher in check (REQ-303) ───────────────
+
+write_covers_registry() {  # $1=path $2=covers glob for tier fast
+  cat > "$1" <<YAML
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: local
+    kind: local
+test_tiers:
+  - tier: fast
+    command: true
+    covers:
+      - $2
+YAML
+}
+
+@test "E1 suite matched by a <prefix>/** covers glob keeps check green" {
+  write_covers_registry "$FIXTURE/config/environments.yaml" 'tests/**'
+  mkdir -p "$FIXTURE/tests"
+  touch "$FIXTURE/tests/test_alpha.py"
+  run -0 bash "$ER" check
+}
+
+@test "E2 uncovered suite: nonzero naming suite relpath + nearest tier + remedy" {
+  cat > "$FIXTURE/config/environments.yaml" <<'YAML'
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: local
+    kind: local
+test_tiers:
+  - tier: fast
+    command: true
+    covers:
+      - tests/**
+  - tier: deep
+    command: true
+    covers:
+      - lib/other/**
+YAML
+  mkdir -p "$FIXTURE/lib/tests"
+  touch "$FIXTURE/lib/tests/test_beta.py"
+  run -1 bash "$ER" check
+  [[ "$output" == *"lib/tests/test_beta.py"* ]]
+  # nearest tier shares the longest leading path segments (lib) → deep
+  [[ "$output" == *"deep"* ]]
+  [[ "$output" == *"remedy"* ]]
+  [[ "$output" == *"covers"* ]]
+}
+
+@test "E3 zero discovered suites: vacuous pass" {
+  write_covers_registry "$FIXTURE/config/environments.yaml" 'tests/**'
+  run -0 bash "$ER" check
+}
+
+@test "E4 walk exclusions: a test file under .worktrees/ is not discovered" {
+  # covers matches nothing, so IF the file were discovered check would fail
+  write_covers_registry "$FIXTURE/config/environments.yaml" 'docs/**'
+  mkdir -p "$FIXTURE/.worktrees/wt/tests"
+  touch "$FIXTURE/.worktrees/wt/tests/test_hidden.py"
+  run -0 bash "$ER" check
 }
 
 @test "D12 symlinked workflows dir (wall 6b6bd8bc): typed refusal, nothing at link target" {
