@@ -917,5 +917,17 @@ fi
 # 5. stale worktree metadata
 run git worktree prune
 
+# 6. G12 seam (spec-008 REQ-701): emit the immediate digest at run end.
+# Presence-guarded so fixtures carrying only this lever stay green, and
+# fail-soft via run() — a digest failure can never change finalizer exit
+# status (digest itself exits 0 on every degraded input).
+# GATES_STORE is dropped (waiver-record.sh idiom): a worktree-scoped store
+# override was archived above, and writing the digest cursor beside it would
+# dirty a worktree this finalizer manages (M4). The run-end digest observes
+# the canonical common-dir ledger instead.
+if [ -x "$SCRIPT_DIR/digest.sh" ]; then
+  run env -u GATES_STORE bash "$SCRIPT_DIR/digest.sh" --immediate
+fi
+
 note "finalize complete (fail-soft: any WARN above needs manual attention)"
 exit 0

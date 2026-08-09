@@ -83,6 +83,22 @@ if [ -d .planning ]; then
   fi
 fi
 
+# REQ-401b: the emitted fact stream is doc-derived bytes headed for a model
+# prompt — fence it under the STATUS tag through the shared helper. Candidate
+# chain mirrors this collector's gates.py resolution below. Helper
+# unresolvable -> one stderr warn + unfenced passthrough (AC-007 posture:
+# collectors are read-only observability; a staged skill must not die on a
+# missing sibling). The stream is PIPED, never captured via command
+# substitution (trailing-newline byte-identity, wall a12a8559).
+COLLECT_STATUS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FENCE_SH=""
+for fc in "$ROOT/packages/feature-fix-swarm/scripts/gsd/fence-data.sh" \
+          "$COLLECT_STATUS_SCRIPT_DIR/../../../scripts/gsd/fence-data.sh" \
+          "$ROOT/scripts/gsd/fence-data.sh"; do
+  [ -f "$fc" ] && FENCE_SH="$fc" && break
+done
+
+emit_status_facts() {
 echo "== GIT =="
 git branch --show-current
 git log --oneline -8
@@ -165,3 +181,13 @@ echo "hygiene-scan-done"
 echo "== DISK =="
 df -h "${TMPDIR:-/tmp}" | tail -1
 df -h "$ROOT" | tail -1
+}
+
+if [ -n "$FENCE_SH" ]; then
+  # shellcheck source=/dev/null
+  . "$FENCE_SH"
+  emit_status_facts | fence_data STATUS
+else
+  echo "collect-status-facts: WARN fence-data.sh not found in candidate chain; emitting unfenced" >&2
+  emit_status_facts
+fi

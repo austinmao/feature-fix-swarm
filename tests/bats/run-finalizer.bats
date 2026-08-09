@@ -1440,3 +1440,21 @@ assert c['lock_path'] == '$LOCK', c
 assert c['holder_pid'] == $HOLDER_PID, c"
   [ "$status" -eq 0 ]
 }
+
+# ── spec-008 04-02: G12 digest seam at the finalizer tail (REQ-701) ─────────
+
+@test "finalizer tail emits the immediate digest before finalize complete (presence-guarded, fail-soft)" {
+  mock_gh_merged
+  export RUN_STATE_DB="$BATS_TEST_TMPDIR/digest-runs.db"
+  # seed one waiver into the fixture repo's common-dir store — digest.sh
+  # resolves the store from cwd's git-common-dir, so this stays fixture-local
+  python3 - "$WORK/.feature-fix-swarm/evidence.json" <<'EOF'
+import json, sys
+open(sys.argv[1], "w").write(json.dumps({"waivers": [
+    {"run_id": "spec-008", "gate": "g", "env_var": "E=1", "ts": 1.0}]}))
+EOF
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '^waiver run_id=spec-008'
+  echo "$output" | grep -q 'finalize complete'
+}
