@@ -112,23 +112,50 @@ if [ -n "$OTHER_STAGED" ]; then
 fi
 
 BLOB="$(git -C "$REPO_ROOT" hash-object -w "$TMP_COPY")"
-git -C "$REPO_ROOT" update-index --add --cacheinfo 100644,"$BLOB","$REL_PATH"
 
-if ! git -C "$REPO_ROOT" commit --no-verify -m "$ARG" >/dev/null; then
-  echo "publish-scanned-handoff: commit failed for $REL_PATH" >&2
+# Race-free publish (review-gate 2026-08-09): the commit is built in a
+# PRIVATE temp index — the shared index is never written, so a concurrent
+# `git add` cannot inject unscanned bytes into this commit, and HEAD is
+# advanced with a compare-and-swap update-ref that fails instead of
+# clobbering if HEAD moved. Replaces the pathless `git commit --no-verify`,
+# whose stage-to-commit window could sweep unrelated staged content.
+PARENT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+TMP_INDEX="$(mktemp "${TMPDIR:-/tmp}/psh-index.XXXXXX")"
+rm -f "$TMP_INDEX"
+if ! GIT_INDEX_FILE="$TMP_INDEX" git -C "$REPO_ROOT" read-tree "$PARENT" \
+  || ! GIT_INDEX_FILE="$TMP_INDEX" git -C "$REPO_ROOT" update-index --add --cacheinfo 100644,"$BLOB","$REL_PATH"; then
+  rm -f "$TMP_INDEX"
+  echo "publish-scanned-handoff: temp-index build failed for $REL_PATH" >&2
+  exit 1
+fi
+TREE="$(GIT_INDEX_FILE="$TMP_INDEX" git -C "$REPO_ROOT" write-tree)" || {
+  rm -f "$TMP_INDEX"
+  echo "publish-scanned-handoff: write-tree failed for $REL_PATH" >&2
+  exit 1
+}
+rm -f "$TMP_INDEX"
+COMMIT="$(git -C "$REPO_ROOT" commit-tree "$TREE" -p "$PARENT" -m "$ARG")" || {
+  echo "publish-scanned-handoff: commit-tree failed for $REL_PATH" >&2
+  exit 1
+}
+if ! git -C "$REPO_ROOT" update-ref -m "publish-scanned-handoff: $REL_PATH" HEAD "$COMMIT" "$PARENT"; then
+  echo "publish-scanned-handoff: HEAD moved during publish — refusing to clobber; re-run" >&2
   exit 1
 fi
 
-# The pre-commit staged-path check above is a TOCTOU window: a concurrent
-# `git add` between it and the pathless commit could sweep unrelated (and
-# unscanned) content into this commit. Verify AFTER the fact that the commit
-# touched exactly the scanned artifact path and nothing else.
+# Belt-and-braces invariants (construction guarantees both; a failure here
+# means something rewrote HEAD outside the CAS and is worth a loud FATAL).
 COMMITTED_PATHS="$(git -C "$REPO_ROOT" diff-tree --no-commit-id --name-only -r HEAD)"
 if [ "$COMMITTED_PATHS" != "$REL_PATH" ]; then
   echo "publish-scanned-handoff: FATAL: commit swept paths beyond the scanned artifact ($COMMITTED_PATHS) — resetting" >&2
   git -C "$REPO_ROOT" reset --soft HEAD^
   exit 1
 fi
+
+# Keep the SHARED index's entry for the artifact in sync with new HEAD so
+# `git status` stays clean (scoped to exactly this path; no other entries
+# are touched).
+git -C "$REPO_ROOT" update-index --add --cacheinfo 100644,"$BLOB","$REL_PATH" || true
 
 COMMITTED_HASH="$(git -C "$REPO_ROOT" rev-parse "HEAD:$REL_PATH" 2>/dev/null || echo "")"
 if [ "$COMMITTED_HASH" != "$BLOB" ]; then
