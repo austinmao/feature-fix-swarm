@@ -2385,6 +2385,23 @@ def main(argv: list[str]) -> int:
             print(f"LOOP-ROUND-ERROR: store unusable ({exc})", file=sys.stderr)
             return 3
         if n > ns.max:
+            # spec-008 REQ-701 (OQ-1): durably append a typed loop-cap event
+            # (mirrors evidence_events.py finisher-skipped) so the digest has
+            # a producer instead of guessing the caller's --max. Fail-soft:
+            # a write failure warns and the cap STILL fires — observability
+            # never gates the cap. The rc-3 store-unusable path above is
+            # untouched (its counter save fails before reaching here).
+            try:
+                with _StoreLock(store):
+                    data = _load_store(store)
+                    events = data.setdefault("events", [])
+                    if not isinstance(events, list):
+                        raise ValueError("evidence events namespace is not a list")
+                    events.append({"kind": "loop-cap", "run_id": ns.run_id,
+                                   "loop": ns.loop_name, "round": n, "ts": _now()})
+                    _save_store(store, data)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                print(f"LOOP-CAP-EVENT-UNRECORDED: {exc}", file=sys.stderr)
             print(f"LOOP-CAP: {ns.loop_name} round {n} exceeds max {ns.max} "
                   f"(run {ns.run_id}) — quarantine this item and move on; "
                   f"raise with --max or reset with --reset after operator review")

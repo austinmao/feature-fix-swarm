@@ -190,9 +190,132 @@ def evidence_list_class(em, name, rows, line_fn):
     em.flush(name, [line_fn(r) for r in new], list_cursor_value(rows))
 
 
+def degradation_ns(ev):
+    ns = ev.get("_degradation")
+    return ns if isinstance(ns, dict) else {}
+
+
+def events_list_class(em, name, events, line_fn):
+    """A kind-filtered class over the shared top-level `events` list. Each
+    class keeps its OWN {count, last_fp} position over the full list, so a
+    notify failure in one class never stalls the other (Pitfall 4)."""
+    new = list_slice(em.cursor.get(name), events)
+    if new is None:
+        note("%s cursor fingerprint mismatch — re-initialized to end of list" % name)
+        em.flush(name, [], list_cursor_value(events))
+        return
+    em.flush(name, [line_fn(r) for r in new if r.get("kind") == name],
+             list_cursor_value(events))
+
+
+def finisher_line(r):
+    pairs = [("run_id", r.get("run_id", "unattributed")), ("pr", r.get("pr", "?"))]
+    if r.get("run_id") == "unattributed":
+        # lock-trace events carry lock_path/holder_pid instead of a real run
+        # — emitted honestly, no invented join (Pitfall 5).
+        pairs += [("lock_path", r.get("lock_path", "?")),
+                  ("holder_pid", r.get("holder_pid", "?"))]
+    return "finisher-skipped " + kv(pairs + [("ts", r.get("ts", "?"))])
+
+
+def budget_breach_class(em, reverse_map):
+    """Run-state `budget_limit_hit` rows; cursor is the last-emitted sqlite
+    rowid (amended OQ-4) — positional and tie-safe by construction."""
+    cur = em.cursor.get("budget-breach")
+    last_id = cur if isinstance(cur, int) else 0
+    if not os.path.exists(DB_PATH):
+        return  # degraded input: silent skip, cursor retained
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            rows = conn.execute(
+                "SELECT id, run_id, payload_json, created_at FROM events "
+                "WHERE event_type = 'budget_limit_hit' AND id > ? ORDER BY id",
+                (last_id,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        note("run-state db unreadable (%s) — budget-breach cursor retained" % exc)
+        return
+    lines, max_id = [], last_id
+    for rowid, runstore_id, payload_json, created_at in rows:
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+        except ValueError:
+            payload = {}
+        ledger = reverse_map.get(runstore_id)
+        # REQ-703: the ledger id is canonical; an unmapped row emits with its
+        # native runstore id labeled as such — honest, never guessed.
+        pairs = [("run_id", ledger if ledger else "unmapped"),
+                 ("runstore_id", runstore_id),
+                 ("tokens_used", payload.get("tokens_used", "?")),
+                 ("tokens_budget", payload.get("tokens_budget", "?")),
+                 ("created_at", created_at)]
+        lines.append("budget-breach " + kv(pairs))
+        max_id = rowid
+    em.flush("budget-breach", lines, max_id)
+
+
+def tripped_rung_class(em, ev):
+    """A rung is tripped iff its trailing-20 window is all-fail (the same
+    namespace shape gates.py rung_status reads). The cursor is a sha256
+    fingerprint of the WINDOW CONTENT per tripped rung — never a
+    recorded_at comparison (wall ba54308a): two events sharing a timestamp
+    can neither drop nor double-deliver an emission by construction.
+    recorded_at rides in the line for display only. An untripped rung is
+    dropped from the cursor so a reset-then-retrip emits again."""
+    rungs = degradation_ns(ev).get("rungs")
+    rungs = rungs if isinstance(rungs, dict) else {}
+    cur = em.cursor.get("tripped-rung")
+    cur = cur if isinstance(cur, dict) else {}
+    lines, new_cur = [], {}
+    for rung_id in sorted(rungs):
+        entry = rungs.get(rung_id)
+        events = rows_of(entry.get("events")) if isinstance(entry, dict) else []
+        if not (len(events) == 20
+                and all(e.get("outcome") == "fail" for e in events)):
+            continue
+        window_fp = fp(events)
+        new_cur[rung_id] = window_fp
+        if cur.get(rung_id) != window_fp:
+            lines.append("tripped-rung " + kv([
+                ("rung", rung_id), ("attempts", 20),
+                ("recorded_at", events[-1].get("recorded_at", "?"))]))
+    em.flush("tripped-rung", lines, new_cur)
+
+
+def promotion_class(em, ev):
+    promos = ev.get("_promotions")
+    promos = promos if isinstance(promos, dict) else {}
+    cur = em.cursor.get("promotion")
+    cur = cur if isinstance(cur, dict) else {}
+    lines, new_cur = [], {}
+    for run_id in sorted(promos):
+        rows = rows_of(promos.get(run_id))
+        new = list_slice(cur.get(run_id), rows)
+        if new is None:
+            note("promotion cursor fingerprint mismatch for %s — re-initialized" % run_id)
+            new = []
+        for r in new:
+            # `artifact` (commit sha / digest ref) is the gh join key (REQ-703)
+            lines.append("promotion " + kv([
+                ("run_id", run_id),
+                ("from", r.get("from_env", "?")), ("to", r.get("to_env", "?")),
+                ("surface", r.get("surface", "?")),
+                ("artifact", r.get("artifact", "?")),
+                ("recorded_at", r.get("recorded_at", "?"))]))
+        new_cur[run_id] = list_cursor_value(rows)
+    em.flush("promotion", lines, new_cur)
+
+
 def immediate():
     ev = load_json(STORE)
     em = Emitter()
+    mappings = degradation_ns(ev).get("mappings")
+    mappings = mappings if isinstance(mappings, dict) else {}
+    # REQ-703 reverse lookup runstore_id -> ledger_run_id (RESEARCH Pattern 3)
+    reverse_map = {v: k for k, v in mappings.items()
+                   if isinstance(k, str) and isinstance(v, str)}
 
     # class: waiver — append-only `waivers` list; `unattributed` rows emit
     # with that literal label, never a fabricated join (Pitfall 5).
@@ -204,6 +327,27 @@ def immediate():
             ("env_var", r.get("env_var", "?")),
             ("ts", r.get("ts", "?")),
         ]))
+
+    tripped_rung_class(em, ev)
+
+    shared_events = rows_of(ev.get("events"))
+    events_list_class(
+        em, "loop-cap", shared_events,
+        lambda r: "loop-cap " + kv([
+            ("run_id", r.get("run_id", "?")), ("loop", r.get("loop", "?")),
+            ("round", r.get("round", "?")), ("ts", r.get("ts", "?"))]))
+    events_list_class(em, "finisher-skipped", shared_events, finisher_line)
+
+    budget_breach_class(em, reverse_map)
+    promotion_class(em, ev)
+
+    evidence_list_class(
+        em, "rollback-dryrun", rows_of(ev.get("rollback_dryrun")),
+        lambda r: "rollback-dryrun " + kv([
+            ("run_id", r.get("run_id", "?")), ("surface", r.get("surface", "?")),
+            ("exit_code", r.get("exit_code", "?")),
+            ("artifact_sha", r.get("artifact_sha", "?")),
+            ("ts", r.get("ts", "?"))]))
 
     if not em.emitted_any:
         print("no events")
