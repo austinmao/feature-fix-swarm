@@ -2661,3 +2661,182 @@ def test_ac004_miss_reason_phase1_ordering_preserved(tmp_path) -> None:
     pend = gates.list_pending(store2, "run-1")
     assert any("PROMOTE-EXPIRED" in p["reason"] for p in pend)
     assert not any("CANARY" in p["reason"] for p in pend)
+
+
+# ── spec-008 Phase 3 (REQ-302, AC-005): rollback_dryrun schema + gate ────────
+# Synthetic surfaces + synthetic manifest dicts only: no real FFS surface
+# declares rollback and no config/ directory exists, so production behavior
+# is a structural no-op (locked row 11 — fallback-rehearsal.sh is NOT wired).
+# "Fresh same-run" = the run_id being checked, i.e. check_grant_prod's OWN
+# authoritative run_id parameter (wall 7531f885) — never an env default.
+
+_ROLLBACK_CMD = "deploy rollback cp"
+_ROLLBACK_MANIFEST = {"cp": {"staging": "stg-cp", "rollback": _ROLLBACK_CMD}}
+
+
+def _grant_and_promote(store, run_id: str = "run-1") -> None:
+    _seed_promotion(store, run_id=run_id)
+    assert gates.grant_actions(store, run_id, ["deploy:prod-cp"]) is True
+
+
+def test_ac005_declared_fresh_pass_allows(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is True
+
+
+def test_ac005_missing_record_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("ROLLBACK-DRYRUN-REQUIRED" in p["reason"] and "cp" in p["reason"]
+               for p in pend)
+
+
+def test_ac005_other_surface_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "db", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_other_run_refuses(tmp_path) -> None:
+    # a stale record from another run_id never satisfies — the same-run
+    # comparison binds check_grant_prod's own run_id parameter
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-2", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_failed_dryrun_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 1,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_command_mismatch_refuses(tmp_path) -> None:
+    # wall 4e3862e5: command must string-equal the manifest-declared command
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", "some other command", 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_sha_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _OTHER_COMMIT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_undeclared_noop(tmp_path) -> None:
+    # no rollback key in the manifest row (every real FFS surface) and the
+    # no-manifest path: the gate is a no-op by construction
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest={"cp": {"staging": "stg-cp"}}) is True
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT, manifest=None) is True
+
+
+def test_ac005_recorder_appends_verbatim_schema_row(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    rows = json.loads(store.read_text())["rollback_dryrun"]
+    assert len(rows) == 1
+    rec = rows[0]
+    assert set(rec) == {"run_id", "surface", "command", "exit_code",
+                        "artifact_sha", "ts"}
+    assert rec["run_id"] == "run-1" and rec["surface"] == "cp"
+    assert rec["command"] == _ROLLBACK_CMD and rec["exit_code"] == 0
+    assert rec["artifact_sha"] == _COMMIT_ARTIFACT
+    assert isinstance(rec["ts"], float)
+
+
+def test_ac005_recorder_rejects_typed(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-RUN-ID"):
+        gates.record_rollback_dryrun(store, "", "cp", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-SURFACE"):
+        gates.record_rollback_dryrun(store, "run-1", "  ", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-COMMAND"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", "", 0,
+                                     _COMMIT_ARTIFACT)
+    for bad_exit in ("0", 0.5, None, True):
+        with pytest.raises(ValueError, match="INVALID-ROLLBACK-EXIT-CODE"):
+            gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD,
+                                         bad_exit, _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-ARTIFACT"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                     "img:latest")
+    assert not store.exists()
+
+
+def test_ac005_recorder_refuses_namespace_shape_conflict(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"rollback_dryrun": {"not": "a list"}}))
+    with pytest.raises(ValueError, match="ROLLBACK-DRYRUN-SCHEMA-CONFLICT"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+
+
+def test_cli_rollback_dryrun_records_and_rejects_typed(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main(["rollback-dryrun", "--run-id", "run-1", "--surface", "cp",
+                     "--command", _ROLLBACK_CMD, "--exit-code", "0",
+                     "--artifact-sha", _COMMIT_ARTIFACT])
+    assert rc == 0
+    rows = json.loads((tmp_path / "evidence.json").read_text())["rollback_dryrun"]
+    assert rows[0]["exit_code"] == 0 and rows[0]["command"] == _ROLLBACK_CMD
+    rc = gates.main(["rollback-dryrun", "--run-id", "run-1", "--surface", "cp",
+                     "--command", _ROLLBACK_CMD, "--exit-code", "zero",
+                     "--artifact-sha", _COMMIT_ARTIFACT])
+    assert rc == 2
+    assert "ROLLBACK-DRYRUN-REJECTED" in capsys.readouterr().err
+
+
+def test_ac005_normalize_manifest_preserves_optional_rollback(tmp_path) -> None:
+    import pytest
+    normalized = gates._normalize_manifest({"surfaces": [
+        {"surface": "cp", "staging_instance": "stg-cp",
+         "rollback": _ROLLBACK_CMD},
+        {"surface": "db", "staging_instance": "stg-db"},
+    ]})
+    assert normalized["cp"] == {"staging": "stg-cp", "rollback": _ROLLBACK_CMD}
+    assert normalized["db"] == {"staging": "stg-db"}  # no rollback key at all
+    for bad in (7, "", "   "):
+        with pytest.raises(ValueError):
+            gates._normalize_manifest({"surfaces": [
+                {"surface": "cp", "staging_instance": "stg-cp",
+                 "rollback": bad}]})
