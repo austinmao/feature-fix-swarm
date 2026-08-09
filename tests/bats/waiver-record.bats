@@ -84,8 +84,10 @@ add_web_commit() {
 }
 
 write_passing_results() { # $1=path
+  # createdAt/endedAt mirror the real @usecanary/cli results.json shape —
+  # phase-3's typed evidence recorder fail-closes on their absence.
   cat > "$1" <<'EOF'
-{"status":"passed","summary":{"stepsTotal":5,"stepsPassed":5,"stepsFailed":0,"consoleErrors":0,"networkFailures":0},"steps":[]}
+{"status":"passed","createdAt":"2026-06-13T08:43:44.814Z","endedAt":"2026-06-13T08:48:02.991Z","summary":{"stepsTotal":5,"stepsPassed":5,"stepsFailed":0,"consoleErrors":0,"networkFailures":0},"steps":[]}
 EOF
 }
 
