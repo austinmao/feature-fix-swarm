@@ -57,9 +57,11 @@ esac
 
 exec python3 - "$VERB" "$ROOT" "$@" <<'PYEOF'
 import datetime as _dt
+import fcntl
 import json
 import os
 import re
+import secrets as _secrets
 import subprocess
 import sys
 
@@ -483,10 +485,12 @@ def stale_advisories(sections):
                       f"older than 90 days — re-verify and update the date")
 
 
-def gh_probe():
+def gh_probe(stream=None):
     """ADVISORY only, OPT-IN under --probe-gh (wall 959b7514, EDGE-004):
     silently skipped when unauthenticated; ANY failure is a silent skip;
-    the caller's exit code NEVER depends on it."""
+    the caller's exit code NEVER depends on it. detect routes advisories to
+    stderr so stdout stays a valid answers file."""
+    stream = stream or sys.stdout
     try:
         r = subprocess.run(["gh", "auth", "status"], capture_output=True,
                            timeout=15)
@@ -514,7 +518,8 @@ def gh_probe():
                        for rule in rules if isinstance(rule, dict)):
                 print(f"ADVISORY: GitHub environment {name} has no reviewer "
                       f"protection — add required reviewers before prod "
-                      f"deploys (external prerequisite, never a gate)")
+                      f"deploys (external prerequisite, never a gate)",
+                      file=stream)
     except Exception:
         return
 
@@ -587,12 +592,578 @@ def cmd_check(args):
     sys.exit(0)
 
 
+# ── detect (REQ-202): read-only, propose-never-decide ───────────────────────
+
+def kind_guess(name):
+    n = (name or "").lower()
+    if n in ("staging", "stage", "stg"):
+        return "staging"
+    if n in ("prod", "production", "prd"):
+        return "prod"
+    if n in ("preview", "pre"):
+        return "preview"
+    if n == "local":
+        return "local"
+    return "dev"
+
+
+def _read_lines(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return None
+
+
+def _reject_dup_keys(pairs):
+    obj = {}
+    for k, v in pairs:
+        if k in obj:
+            raise ValueError("duplicate JSON key in .ffs-init.json")
+        obj[k] = v
+    return obj
+
+
+def _load_declines(declines_path):
+    try:
+        with open(declines_path, encoding="utf-8") as fh:
+            data = json.load(fh, object_pairs_hook=_reject_dup_keys)
+        return [r for r in (data.get("declines") or []) if isinstance(r, dict)]
+    except Exception:
+        return []
+
+
+def cmd_detect(args):
+    """Zero writes inside the target repo (Pitfall 4): proposal YAML on
+    stdout in the --answers shape; advisories on stderr; no lockfile, no
+    .ffs-init.json touch (it is only READ for the declines filter)."""
+    probe = False
+    for a in args:
+        if a == "--probe-gh":
+            probe = True
+        else:
+            fail("ENV-REGISTRY-INVALID: unknown flag for detect — expected "
+                 "--probe-gh")
+    j = os.path.join
+    atoms = []
+
+    def add(name, kind, heuristic, evidence, confidence, secret_names=None):
+        atoms.append({"heuristic": heuristic, "evidence": evidence,
+                      "name": name, "kind": kind, "confidence": confidence,
+                      "secret_names": list(secret_names or [])})
+
+    # vercel.json / .vercel → prod + preview
+    if os.path.isfile(j(ROOT, "vercel.json")) or os.path.isdir(j(ROOT, ".vercel")):
+        evd = ("vercel.json" if os.path.isfile(j(ROOT, "vercel.json"))
+               else ".vercel/")
+        add("prod", "prod", "vercel", evd, "medium")
+        add("preview", "preview", "vercel", evd, "medium")
+    # wrangler.toml [env.X] → env per section header; the evidence value is
+    # the STABLE (heuristic, evidence) decline key `wrangler.toml:[env.X]`
+    # (audit row 25 example) — line numbers stay out of the key so a shifted
+    # header does not wrongly re-propose a declined env.
+    if os.path.isfile(j(ROOT, "wrangler.toml")):
+        for i, line in enumerate(_read_lines(j(ROOT, "wrangler.toml")) or [], 1):
+            m = re.match(r"^\[env\.([A-Za-z0-9_-]+)\]", line)
+            if m:
+                name = m.group(1)
+                evd = (f"wrangler.toml:"
+                       f"[env.{safe_name(name, f'wrangler.toml:{i}')}]")
+                add(name, kind_guess(name), "wrangler-env", evd, "medium")
+    # fly.toml + fly.X.toml → env per file
+    if os.path.isfile(j(ROOT, "fly.toml")):
+        add("prod", "prod", "fly", "fly.toml", "low")
+    for fn in sorted(os.listdir(ROOT)):
+        m = re.match(r"fly\.([A-Za-z0-9_-]+)\.toml$", fn)
+        if m:
+            add(m.group(1), kind_guess(m.group(1)), "fly",
+                safe_path(fn, "fly detection"), "medium")
+    # docker-compose → local
+    for fn in ("docker-compose.yml", "docker-compose.yaml",
+               "compose.yml", "compose.yaml"):
+        if os.path.isfile(j(ROOT, fn)):
+            add("local", "local", "compose", fn, "high")
+            break
+    # k8s/kustomize overlays → env per dir
+    for base in ("k8s/overlays", "kustomize/overlays"):
+        if os.path.isdir(j(ROOT, base)):
+            for name in sorted(os.listdir(j(ROOT, base))):
+                if os.path.isdir(j(ROOT, base, name)):
+                    evd = f"{base}/{safe_name(name, base)}/"
+                    add(name, kind_guess(name), "k8s-overlay", evd, "medium")
+    # env-suffixed .env.* → env row + secret KEY NAMES only (left of '=');
+    # unreadable file still emits its row, no content read (EDGE-003)
+    for fn in sorted(os.listdir(ROOT)):
+        m = re.match(r"\.env\.([A-Za-z0-9_-]+)$", fn)
+        if not m or m.group(1) in ("example", "sample", "template"):
+            continue
+        suffix = m.group(1)
+        sfn = safe_path(fn, ".env detection")
+        lines = _read_lines(j(ROOT, fn))
+        if lines is None:
+            add(suffix, kind_guess(suffix), "dotenv",
+                f"{sfn}: file present, unread", "low")
+            continue
+        keys = []
+        for line in lines:
+            km = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=",
+                          line)
+            if km:
+                keys.append(safe_name(km.group(1), sfn))
+        add(suffix, kind_guess(suffix), "dotenv", sfn, "medium",
+            secret_names=keys)
+    # workflow environment: keys
+    wfdir = j(ROOT, ".github", "workflows")
+    if os.path.isdir(wfdir):
+        for fn in sorted(os.listdir(wfdir)):
+            if not fn.endswith((".yml", ".yaml")):
+                continue
+            for i, line in enumerate(_read_lines(j(wfdir, fn)) or [], 1):
+                m = re.match(r"\s*environment:\s*([^\s#]+)\s*$", line)
+                if m:
+                    name = m.group(1).strip("'\"")
+                    evd = (f".github/workflows/"
+                           f"{safe_path(fn, 'workflow detection')}:{i}")
+                    add(name, kind_guess(name), "workflow-environment",
+                        evd, "medium")
+    # doppler.yaml → provider + config names
+    for i, line in enumerate(_read_lines(j(ROOT, "doppler.yaml")) or [], 1):
+        m = re.match(r"\s*config:\s*([A-Za-z0-9_-]+)", line)
+        if m:
+            name = m.group(1)
+            evd = f"doppler.yaml:{safe_name(name, f'doppler.yaml:{i}')}"
+            add(name, kind_guess(name), "doppler", evd, "low")
+
+    # declines filter (audit row 32): key = (heuristic, concrete evidence
+    # value) — NEW evidence under a declined heuristic re-proposes.
+    declined = {(r.get("heuristic"), r.get("evidence"))
+                for r in _load_declines(j(ROOT, ".ffs-init.json"))}
+    kept, suppressed = [], 0
+    for a in atoms:
+        if (a["heuristic"], a["evidence"]) in declined:
+            suppressed += 1
+        else:
+            kept.append(a)
+    if suppressed:
+        print(f"ADVISORY: {suppressed} proposal(s) suppressed by declines in "
+              f".ffs-init.json — run 'env-registry.sh apply "
+              f"--reset-declines' to clear them", file=sys.stderr)
+
+    # merge by env name (registry names are unique); evidence values join
+    envs, order = {}, []
+    for a in kept:
+        nm = a["name"]
+        if nm not in envs:
+            envs[nm] = a
+            order.append(nm)
+        else:
+            envs[nm]["evidence"] += "; " + a["evidence"]
+            for k in a["secret_names"]:
+                if k not in envs[nm]["secret_names"]:
+                    envs[nm]["secret_names"].append(k)
+    bare = not order
+    if bare:
+        envs["local"] = {"heuristic": "bare",
+                         "evidence": "no deployment surface detected",
+                         "name": "local", "kind": "local",
+                         "confidence": "high", "secret_names": []}
+        order.append("local")
+
+    # tier classification proposal (REQ-202 four-way rule)
+    tier_rows = []
+    live_ev = nightly_ev = None
+    tests_dir = j(ROOT, "tests")
+    if os.path.isdir(tests_dir):
+        for dirpath, dirnames, filenames in os.walk(tests_dir):
+            rel = os.path.relpath(dirpath, ROOT)
+            for name in list(dirnames) + list(filenames):
+                if live_ev is None and re.search(
+                        r"(-e2e|-live|browser|canary)", name):
+                    live_ev = safe_path(f"{rel}/{name}", "tier scan")
+            for name in filenames:
+                if nightly_ev is None and name.endswith((".py", ".sh", ".bats")):
+                    try:
+                        head = open(j(dirpath, name), encoding="utf-8",
+                                    errors="replace").read(4096)
+                    except OSError:
+                        continue
+                    if "GSD_" in head and "skip" in head.lower():
+                        nightly_ev = safe_path(f"{rel}/{name}", "tier scan")
+        base_cmd = "python3 -m pytest tests/ -q"
+        tier_ev = "tests/"
+    else:
+        base_cmd = "true"
+        tier_ev = "no tests directory found"
+    tier_rows.append({"tier": "fast", "command": base_cmd,
+                      "confidence": "low", "evidence": tier_ev})
+    tier_rows.append({"tier": "full", "command": base_cmd,
+                      "confidence": "low", "evidence": tier_ev})
+    if live_ev:
+        tier_rows.append({"tier": "live",
+                          "command": f"python3 -m pytest {live_ev} -q",
+                          "confidence": "low", "evidence": live_ev})
+    if nightly_ev:
+        tier_rows.append({"tier": "nightly",
+                          "command": f"python3 -m pytest {nightly_ev} -q",
+                          "confidence": "low", "evidence": nightly_ev})
+
+    out = ["# proposal generated by env-registry.sh detect — review, edit,",
+           "# then: env-registry.sh apply --answers <this file> [--yes]",
+           "# every row is a PROPOSAL: detection proposes, never decides "
+           "(verified: null).",
+           "environments:"]
+    for nm in order:
+        a = envs[nm]
+        out.append(f"  # heuristic: {a['heuristic']} — decline key = "
+                   f"(heuristic, evidence)")
+        out.append(f"  - name: {safe_name(a['name'], a['heuristic'])}")
+        out.append(f"    kind: {a['kind']}")
+        out.append("    base_url: none")
+        if a["secret_names"]:
+            out.append("    secret_names:")
+            out.extend(f"      - {k}" for k in a["secret_names"])
+        else:
+            out.append("    secret_names: []")
+        out.append("    verified: null")
+        out.append("    test_tier: fast")
+        out.append(f"    confidence: {a['confidence']}")
+        out.append(f"    evidence: {a['evidence']}")
+    out.append("")
+    out.append("test_tiers:")
+    for t in tier_rows:
+        out.append(f"  - tier: {t['tier']}")
+        out.append(f"    command: {t['command']}")
+        out.append(f"    confidence: {t['confidence']}")
+        out.append(f"    evidence: {t['evidence']}")
+    if not bare:
+        staging_env = next(
+            (envs[nm]["name"] for nm in order
+             if envs[nm]["kind"] == "staging"
+             and _NAME_RE.fullmatch(envs[nm]["name"])), None)
+        out.append("")
+        out.append("surfaces:")
+        out.append("  - surface: release")
+        out.append(f"    staging_instance: {staging_env or 'none'}")
+    print("\n".join(out))
+    if probe:
+        gh_probe(stream=sys.stderr)
+    sys.exit(0)
+
+
+# ── apply (REQ-203, audit row 25): single atomic all-or-nothing writer ──────
+
+def emit_registry(env_rows, tier_rows, surf_rows):
+    """Regenerates the exact phase-1 committed shape: v1 marker on line 2,
+    flat scalars, 2-space indent, no tabs, surfaces block LAST."""
+    out = ["# config/environments.yaml",
+           "# schema: ffs.environments/v1",
+           "# SECRETS BY NAME ONLY — this file is read by CI and by "
+           "autonomous agents;",
+           "# never write a secret VALUE here, only the NAME of where it "
+           "lives.",
+           "",
+           "environments:"]
+    for e in env_rows:
+        out.append(f"  - name: {e.get('name')}")
+        out.append(f"    kind: {e.get('kind')}")
+        out.append(f"    base_url: {e.get('base_url') or 'none'}")
+        sn = e.get("secret_names") or []
+        if sn:
+            out.append("    secret_names:")
+            out.extend(f"      - {k}" for k in sn)
+        else:
+            out.append("    secret_names: []")
+        out.append(f"    verified: {e.get('verified') or 'null'}")
+        out.append(f"    test_tier: {e.get('test_tier') or 'fast'}")
+    out += ["", "test_tiers:"]
+    for t in tier_rows:
+        out.append(f"  - tier: {t.get('tier')}")
+        out.append(f"    command: {t.get('command')}")
+        cov = t.get("covers") or []
+        if cov:
+            out.append("    covers:")
+            out.extend(f"      - {c}" for c in cov)
+    if surf_rows:
+        out += ["", "surfaces:"]
+        for s in surf_rows:
+            out.append(f"  - surface: {s.get('surface')}")
+            out.append(f"    staging_instance: "
+                       f"{s.get('staging_instance') or 'none'}")
+    return "\n".join(out) + "\n"
+
+
+def _assert_contained(target):
+    """Wall 2965346c: before any replace, resolve the realpath of the
+    target's parent and REFUSE unless it is the repo ROOT itself (the
+    registry's parent may also be a real, non-symlink config/ under ROOT).
+    os.path.islink on every path component below ROOT rejects — a
+    repository-controlled symlink can never redirect the atomic write
+    outside the repo."""
+    rel = os.path.relpath(target, ROOT)
+    if rel.startswith("..") or os.path.isabs(rel):
+        fail("ENV-REGISTRY-REFUSED: write target escapes the repo root — "
+             "remedy: run apply from the repository the registry belongs to")
+    cur = ROOT
+    for comp in rel.split(os.sep):
+        cur = os.path.join(cur, comp)
+        if os.path.islink(cur):
+            shown = safe_path(rel, "write-target containment")
+            fail(f"ENV-REGISTRY-REFUSED: write target {shown} crosses a "
+                 f"symlinked path component — remedy: remove the symlink; "
+                 f"apply only writes through real directories under the "
+                 f"repo root")
+    rroot = os.path.realpath(ROOT)
+    parent_real = os.path.realpath(os.path.dirname(target))
+    if parent_real not in (rroot, os.path.join(rroot, "config")):
+        fail("ENV-REGISTRY-REFUSED: write target parent escapes the repo "
+             "root — remedy: restore config/ as a real directory under the "
+             "repository")
+
+
+def _atomic_write(target, data):
+    """mkstemp-in-target-dir + os.replace (gates._save_store idiom).
+
+    Symlink-TOCTOU hardening (walls 739ff957 + 73caf77d): after the
+    containment check, the parent directory fd is opened ONCE with
+    O_DIRECTORY|O_NOFOLLOW, and both the temp-file creation and the rename
+    are anchored to that fd (dir_fd) where the platform supports it — a
+    symlink swapped in AFTER the check cannot redirect the write. Residual
+    window (named): on platforms where os.replace lacks dir_fd support the
+    final rename re-resolves the parent by PATH; the O_NOFOLLOW dirfd open
+    still fails closed if the parent itself became a symlink, but a
+    component ABOVE it re-resolves in that fallback."""
+    parent = os.path.dirname(target)
+    base = os.path.basename(target)
+    if not os.path.isdir(parent):
+        os.mkdir(parent, 0o755)  # only ever ROOT/config, post-containment
+    try:
+        dfd = os.open(parent, os.O_RDONLY
+                      | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
+    except OSError:
+        fail("ENV-REGISTRY-REFUSED: write target parent is not a real "
+             "directory — remedy: restore it under the repo root")
+    tmp = f".{base}.{_secrets.token_hex(8)}.tmp"
+    try:
+        wfd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                      | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+        with os.fdopen(wfd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        if os.replace in os.supports_dir_fd:
+            os.replace(tmp, base, src_dir_fd=dfd, dst_dir_fd=dfd)
+        else:
+            os.replace(os.path.join(parent, tmp), target)
+    except OSError:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        os.close(dfd)
+        fail("ENV-REGISTRY-REFUSED: atomic write failed; nothing replaced — "
+             "remedy: check repo-root permissions and free space")
+    else:
+        os.close(dfd)
+
+
+def _apply_locked(answers_path, registry_path, declines_path, *,
+                  update, force, reset):
+    write_registry = bool(answers_path)
+    answers_declines = []
+    reg_text = None
+    if write_registry:
+        # regenerate guard (audit rows 28/30): --yes must never silently
+        # regenerate an existing registry
+        if os.path.exists(registry_path) and not update and not force:
+            fail("ENV-REGISTRY-REFUSED: config/environments.yaml already "
+                 "exists — remedy: re-run with --update to merge NEW rows "
+                 "only, or --force to regenerate from scratch")
+        try:
+            answers_text = open(answers_path, encoding="utf-8").read()
+        except OSError:
+            fail("ENV-REGISTRY-INVALID: answers file not readable — remedy: "
+                 "pass a readable YAML file to --answers")
+        try:
+            sections = parse_subset(
+                answers_text,
+                ("environments", "test_tiers", "surfaces", "declines"),
+                parse_surfaces=True)
+        except SchemaError as exc:
+            fail(f"ENV-REGISTRY-INVALID: answers: {exc}; nothing written")
+        # required keys, named with their expected shape (EDGE-008)
+        if not sections.get("environments"):
+            fail("ENV-REGISTRY-INVALID: answers missing required key "
+                 "environments — expected a top-level 'environments:' list "
+                 "of rows each with 'name:' and 'kind:'; nothing written")
+        if not sections.get("test_tiers"):
+            fail("ENV-REGISTRY-INVALID: answers missing required key "
+                 "test_tiers — expected a top-level 'test_tiers:' list of "
+                 "rows each with 'tier:' and 'command:'; nothing written")
+        env_rows = sections["environments"]
+        tier_rows = sections["test_tiers"]
+        surf_rows = sections.get("surfaces") or []
+        answers_declines = sections.get("declines") or []
+        for row in env_rows:
+            if not row.get("name") or not row.get("kind"):
+                missing = "name" if not row.get("name") else "kind"
+                fail(f"ENV-REGISTRY-INVALID: answers: environments row at "
+                     f"line {row['_line']} missing key {missing} — expected "
+                     f"'- name: <identifier>' with 'kind: "
+                     f"<local|dev|staging|prod|preview>'; nothing written")
+        for row in tier_rows:
+            if not row.get("tier") or not row.get("command"):
+                missing = "tier" if not row.get("tier") else "command"
+                fail(f"ENV-REGISTRY-INVALID: answers: test_tiers row at "
+                     f"line {row['_line']} missing key {missing} — expected "
+                     f"'- tier: <identifier>' with 'command: <shell "
+                     f"command>'; nothing written")
+        for row in surf_rows:
+            if not row.get("surface"):
+                fail(f"ENV-REGISTRY-INVALID: answers: surfaces row at line "
+                     f"{row['_line']} missing key surface — expected "
+                     f"'- surface: <name>'; nothing written")
+        if update and os.path.exists(registry_path):
+            try:
+                cur_text = open(registry_path, encoding="utf-8").read()
+                cur = parse_subset(
+                    cur_text, ("environments", "test_tiers", "surfaces"),
+                    parse_surfaces=True)
+            except (OSError, SchemaError):
+                fail("ENV-REGISTRY-INVALID: existing registry unreadable or "
+                     "malformed under --update — remedy: fix it via check, "
+                     "or use --force to regenerate")
+            # --update preserves operator fields (audit rows 28/30): existing
+            # rows survive VERBATIM as parsed; only NEW rows are appended.
+            have = {r.get("name") for r in cur.get("environments") or []}
+            env_rows = ((cur.get("environments") or [])
+                        + [r for r in env_rows if r.get("name") not in have])
+            have_t = {r.get("tier") for r in cur.get("test_tiers") or []}
+            tier_rows = ((cur.get("test_tiers") or [])
+                         + [r for r in tier_rows
+                            if r.get("tier") not in have_t])
+            have_s = {r.get("surface") for r in cur.get("surfaces") or []}
+            surf_rows = ((cur.get("surfaces") or [])
+                         + [r for r in surf_rows
+                            if r.get("surface") not in have_s])
+        reg_text = emit_registry(env_rows, tier_rows, surf_rows)
+    # declines candidate (schema ffs.init/v1; first key "schema")
+    today = _dt.date.today().isoformat()
+    if reset:
+        declines = []
+    else:
+        declines = _load_declines(declines_path)
+        have_d = {(r.get("heuristic"), r.get("evidence")) for r in declines}
+        for row in answers_declines:
+            key = (row.get("heuristic"), row.get("evidence"))
+            if row.get("heuristic") and row.get("evidence") \
+                    and key not in have_d:
+                declines.append({"heuristic": row["heuristic"],
+                                 "evidence": row["evidence"],
+                                 "declined_at": row.get("declined_at")
+                                 or today})
+                have_d.add(key)
+    declines_clean = [{"heuristic": r.get("heuristic"),
+                       "evidence": r.get("evidence"),
+                       "declined_at": r.get("declined_at") or today}
+                      for r in declines]
+    declines_text = json.dumps(
+        {"schema": "ffs.init/v1", "declines": declines_clean},
+        indent=2) + "\n"
+    # ── validate EVERYTHING on CANDIDATE bytes, still under the lock ──
+    # (wall ca301d30: validation outside the lock is the TOCTOU)
+    findings = []
+    if reg_text is not None:
+        findings += leak_scan(registry_path, reg_text)
+    findings += leak_scan(declines_path, declines_text)
+    if findings:
+        for finding in findings:
+            print(finding)
+        print("ENV-REGISTRY-INVALID: leak scan failed on candidate bytes; "
+              "nothing written", file=sys.stderr)
+        sys.exit(2)
+    if reg_text is not None:
+        try:
+            validate_registry_text(reg_text, label="candidate")
+        except SchemaError as exc:
+            fail(f"ENV-REGISTRY-INVALID: candidate registry: {exc}; "
+                 f"nothing written")
+    # write-target containment for EVERY target before ANY replace
+    targets = ([registry_path] if reg_text is not None else []) \
+        + [declines_path]
+    for t in targets:
+        _assert_contained(t)
+    # ── the pinned two-replace protocol: registry FIRST, then declines.
+    # Wall 4274a014 (ACCEPTED RESIDUAL by locked adjudication): the window
+    # between the two replaces can expose a fresh registry beside stale
+    # declines; declines are operator-derivable (re-creatable from detect +
+    # operator answers), so NO rollback machinery is built. Any failure
+    # BEFORE the first replace changes NOTHING.
+    if reg_text is not None:
+        _atomic_write(registry_path, reg_text)
+    _atomic_write(declines_path, declines_text)
+    sys.exit(0)
+
+
+def cmd_apply(args):
+    answers_path = None
+    update = force = reset = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--answers":
+            answers_path = args[i + 1] if i + 1 < len(args) else ""
+            i += 2
+        elif a == "--yes":
+            i += 1  # apply is already non-interactive; --yes is accepted
+        elif a == "--update":
+            update = True
+            i += 1
+        elif a == "--force":
+            force = True
+            i += 1
+        elif a == "--reset-declines":
+            reset = True
+            i += 1
+        else:
+            fail("ENV-REGISTRY-INVALID: unknown flag for apply — expected "
+                 "--answers <file>, --yes, --update, --force, "
+                 "--reset-declines")
+    if not answers_path and not reset:
+        fail("ENV-REGISTRY-INVALID: apply needs --answers <file.yaml> (or "
+             "--reset-declines) — remedy: run 'env-registry.sh detect > "
+             "answers.yaml', review it, then re-run apply --answers "
+             "answers.yaml")
+    registry_path = os.path.join(ROOT, REGISTRY_REL)
+    declines_path = os.path.join(ROOT, ".ffs-init.json")
+    lock_path = os.path.join(ROOT, ".ffs-init.lock")
+    # Wall ca301d30 (amending audit row 25): acquire the flock FIRST, then
+    # validate everything on candidate bytes UNDER the lock — validation
+    # outside the lock is the TOCTOU (two concurrent applies each validating
+    # stale state, the later replace silently losing the earlier update).
+    # Wall 73caf77d: O_NOFOLLOW on the lock open — a symlinked lockfile
+    # cannot redirect the open outside the repo.
+    try:
+        lock_fd = os.open(lock_path,
+                          os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        fail("ENV-REGISTRY-REFUSED: cannot open .ffs-init.lock (symlink or "
+             "unwritable repo root) — remedy: remove any symlink at "
+             ".ffs-init.lock and re-run")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        fail("ENV-REGISTRY-BUSY: another apply holds .ffs-init.lock — "
+             "remedy: retry after the concurrent apply completes")
+    try:
+        _apply_locked(answers_path, registry_path, declines_path,
+                      update=update, force=force, reset=reset)
+    finally:
+        os.close(lock_fd)  # release LAST (pinned ordering)
+
+
 if MODE == "check":
     cmd_check(ARGS)
 elif MODE == "detect":
-    fail("ENV-REGISTRY-INVALID: detect is not implemented yet — remedy: "
-         "this build ships check only", 3)
+    cmd_detect(ARGS)
 elif MODE == "apply":
-    fail("ENV-REGISTRY-INVALID: apply is not implemented yet — remedy: "
-         "this build ships check only", 3)
+    cmd_apply(ARGS)
 PYEOF
