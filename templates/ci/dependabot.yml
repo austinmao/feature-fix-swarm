@@ -1,0 +1,11 @@
+# ffs source file: dependabot config (REQ-301, audit row 27 — pin rot).
+# walls d3b57631 + 731b58ce: this file is SOURCE CONTENT only, asserted
+# structurally in this phase; emission and advisory BEHAVIOR belong to
+# render (03-02, REQ-302). It is excluded from workflow-shaped hardening
+# sweeps by explicit filename, never by discovery accident.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

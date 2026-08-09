@@ -8,7 +8,9 @@
 #             stale-verified advisory, and the surfaces block through
 #             lib/gates.py:_load_manifest_text (audit row 18 — NEVER a
 #             re-implemented surfaces parser)
-#   render  — stub; lands in phase 3 (REQ-302)
+#   render  — templates/ci/ → .github/ with structural anti-clobber: only
+#             ffs-<name>.yml targets are ever computed; collisions become
+#             proposals under .github/ffs-proposals/ (REQ-302, audit row 20)
 #   apply   — the single all-or-nothing writer of config/environments.yaml
 #             + .ffs-init.json (audit row 25)
 #
@@ -29,11 +31,15 @@ usage: env-registry.sh <detect|check|render|apply> [flags]
   check   [--manifest <path>] [--probe-gh]
           validate a registry: schema + leak scan + referential integrity +
           stale-verified advisory + gates.py surfaces round-trip
-  render  stub — lands in phase 3 (REQ-302)
+  render  [--manifest <path>]
+          render templates/ci/ against the registry: workflows land ONLY as
+          .github/workflows/ffs-<name>.yml; dependabot as .github/dependabot.yml;
+          a collision becomes .github/ffs-proposals/<same basename> + diff -u —
+          an existing consumer workflow is NEVER edited (REQ-302)
   apply   --answers <file> [--yes] [--update] [--force] [--reset-declines]
           atomic all-or-nothing writer of config/environments.yaml and
           .ffs-init.json (declines, schema ffs.init/v1)
-exit codes: 0 ok · 1 schema/usage/refusal · 2 leak finding · 3 not implemented
+exit codes: 0 ok/up-to-date · 1 schema/usage/refusal · 2 leak finding
 USAGE
 }
 
@@ -44,11 +50,7 @@ if [ -z "$VERB" ]; then
 fi
 shift
 case "$VERB" in
-  detect|check|apply) ;;
-  render)
-    echo "render lands in phase 3 (REQ-302)" >&2
-    exit 3
-    ;;
+  detect|check|render|apply) ;;
   *)
     usage
     exit 1
@@ -57,7 +59,9 @@ esac
 
 exec python3 - "$VERB" "$ROOT" "$@" <<'PYEOF'
 import datetime as _dt
+import difflib
 import fcntl
+import fnmatch
 import json
 import os
 import re
@@ -545,6 +549,85 @@ def validate_registry_text(text, *, label):
     return sections, env_kind, surfaces_map
 
 
+# ── covers-glob coverage matcher (REQ-303; audit row 26 LOCKED, D-coverage:
+# additive inside check — ROW_KEYS/schema untouched; closes the
+# 02-01-PLAN.md:36 deferral) ────────────────────────────────────────────────
+
+_WALK_SKIP = (".git", ".worktrees", "node_modules")
+
+
+def _discover_suites():
+    """Deterministic os.walk under ROOT (skip .git, .worktrees,
+    .claude/worktrees, node_modules): files named test_*.py under tests/ or
+    lib/, plus *.bats under tests/."""
+    suites = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        rel = os.path.relpath(dirpath, ROOT)
+        for d in list(dirnames):
+            drel = d if rel == "." else os.path.join(rel, d)
+            if d in _WALK_SKIP \
+                    or drel == os.path.join(".claude", "worktrees"):
+                dirnames.remove(d)
+        dirnames.sort()
+        if rel == ".":
+            continue
+        top = rel.split(os.sep)[0]
+        for fname in sorted(filenames):
+            if top in ("tests", "lib") and fname.startswith("test_") \
+                    and fname.endswith(".py"):
+                suites.append(os.path.join(rel, fname))
+            elif top == "tests" and fname.endswith(".bats"):
+                suites.append(os.path.join(rel, fname))
+    return sorted(suites)
+
+
+def _covers_match(pat, relpath):
+    """Pinned match rule: `<prefix>/**` matches any relpath under the
+    prefix; anything else is plain fnmatch."""
+    if pat.endswith("/**"):
+        prefix = pat[:-3]
+        return relpath == prefix or relpath.startswith(prefix + "/")
+    return fnmatch.fnmatch(relpath, pat)
+
+
+def _nearest_tier(tier_rows, relpath):
+    """Tier whose covers globs share the longest common leading path
+    segments with the suite; tie → first declared."""
+    parts = relpath.split("/")
+    best, best_len = None, -1
+    for row in tier_rows:
+        score = 0
+        for pat in row.get("covers") or []:
+            prefix = pat[:-3] if pat.endswith("/**") else pat
+            n = 0
+            for a, b in zip(prefix.split("/"), parts):
+                if a != b:
+                    break
+                n += 1
+            score = max(score, n)
+        if score > best_len:  # strict > keeps the first-declared on ties
+            best_len = score
+            best = row
+    return best
+
+
+def check_coverage(sections):
+    """Every discovered suite must match >=1 tier's covers globs; empty
+    discovery is a vacuous pass (phase-2 fixtures stay green)."""
+    tier_rows = sections.get("test_tiers") or []
+    for suite in _discover_suites():
+        if any(_covers_match(pat, suite)
+               for row in tier_rows for pat in (row.get("covers") or [])):
+            continue
+        near = _nearest_tier(tier_rows, suite) or {}
+        s_suite = safe_path(suite, "coverage matcher")
+        s_tier = safe_name(near.get("tier"), "coverage matcher")
+        fail(f"ENV-REGISTRY-INVALID: test suite {s_suite} matches no "
+             f"tier's covers globs (nearest tier: {s_tier}) — remedy: add "
+             f"a covers glob to that tier in config/environments.yaml, or "
+             f"reclassify the suite")
+
+
 def cmd_check(args):
     manifest = None
     manifest_given = False
@@ -586,6 +669,8 @@ def cmd_check(args):
             text, label=path)
     except SchemaError as exc:
         fail(f"ENV-REGISTRY-INVALID: {exc}")
+    # coverage matcher runs AFTER referential integrity (REQ-303, row 26)
+    check_coverage(sections)
     stale_advisories(sections)
     if probe:
         gh_probe()
@@ -892,13 +977,16 @@ def emit_registry(env_rows, tier_rows, surf_rows):
     return "\n".join(out) + "\n"
 
 
-def _assert_contained(target):
+def _assert_contained(target, allowed_parents=("", "config")):
     """Wall 2965346c: before any replace, resolve the realpath of the
-    target's parent and REFUSE unless it is the repo ROOT itself (the
-    registry's parent may also be a real, non-symlink config/ under ROOT).
+    target's parent and REFUSE unless it is one of the allowed real
+    directories under ROOT (apply: ROOT + config/; render REUSES this guard
+    — wall 6b6bd8bc — with .github, .github/workflows, .github/ffs-proposals).
     os.path.islink on every path component below ROOT rejects — a
     repository-controlled symlink can never redirect the atomic write
-    outside the repo."""
+    outside the repo. The walk includes the FINAL component, so a symlink
+    AT the target path (e.g. a planted proposal-path symlink, wall
+    969c0f3d) also refuses."""
     rel = os.path.relpath(target, ROOT)
     if rel.startswith("..") or os.path.isabs(rel):
         fail("ENV-REGISTRY-REFUSED: write target escapes the repo root — "
@@ -910,17 +998,26 @@ def _assert_contained(target):
             shown = safe_path(rel, "write-target containment")
             fail(f"ENV-REGISTRY-REFUSED: write target {shown} crosses a "
                  f"symlinked path component — remedy: remove the symlink; "
-                 f"apply only writes through real directories under the "
+                 f"writes only pass through real directories under the "
                  f"repo root")
     rroot = os.path.realpath(ROOT)
+    # allowed parents are joined UNRESOLVED (a symlinked parent must not
+    # launder itself into the allow-set by resolving to its own realpath)
+    allowed = tuple(os.path.join(rroot, p) if p else rroot
+                    for p in allowed_parents)
     parent_real = os.path.realpath(os.path.dirname(target))
-    if parent_real not in (rroot, os.path.join(rroot, "config")):
+    if parent_real not in allowed:
         fail("ENV-REGISTRY-REFUSED: write target parent escapes the repo "
-             "root — remedy: restore config/ as a real directory under the "
-             "repository")
+             "root — remedy: restore the target's parent as a real "
+             "directory under the repository")
 
 
-def _atomic_write(target, data):
+class WriteError(Exception):
+    """Raised (instead of fail-exiting) when the caller needs to report an
+    honest partial state — see cmd_render Phase B (wall 0bcabdd1)."""
+
+
+def _atomic_write(target, data, *, on_error="fail"):
     """mkstemp-in-target-dir + os.replace (gates._save_store idiom).
 
     Symlink-TOCTOU hardening (walls 739ff957 + 73caf77d): after the
@@ -958,10 +1055,287 @@ def _atomic_write(target, data):
         except OSError:
             pass
         os.close(dfd)
+        if on_error == "raise":
+            raise WriteError(target)
         fail("ENV-REGISTRY-REFUSED: atomic write failed; nothing replaced — "
              "remedy: check repo-root permissions and free space")
     else:
         os.close(dfd)
+
+
+# ── render (REQ-302; audit rows 20/27 LOCKED): templates/ci/ → .github/ ─────
+# Structural anti-clobber (threat T-03-07/T-03-08): targets are computed ONLY
+# as .github/workflows/ffs-<template basename> (+ .github/dependabot.yml for
+# the dependabot source, wall 3c6cb2e7); no other path under the workflows
+# dir is ever opened for write. Collisions become proposals under
+# .github/ffs-proposals/ with the IDENTICAL basename (audit row 20, OQ8).
+
+_TEMPLATES_REL = os.path.join("templates", "ci")
+_WORKFLOWS_REL = os.path.join(".github", "workflows")
+_PROPOSALS_REL = os.path.join(".github", "ffs-proposals")
+_RENDER_PARENTS = (".github", _WORKFLOWS_REL, _PROPOSALS_REL)
+# OQ3 pinned first-found list; none found → requirements.txt, never a refusal
+_LOCKFILE_CANDIDATES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+                        "uv.lock", "requirements-dev.txt", "requirements.txt",
+                        "Cargo.lock")
+# wall 1a28ec98: any {{...}} run surviving substitution outside a ${{ ... }}
+# expression refuses — covers unknown, lowercase, and spaced token drift
+_RESIDUAL_RE = re.compile(r"(?<!\$)\{\{[^}]*\}\}")
+
+
+def _require_render_value(token, value, shape_re, shape_desc):
+    """Phase-2 value-safety heritage (walls a173dd6d/6e10a021): the
+    safe_name/safe_path shapes applied in VALIDATE mode — refuse, never
+    placeholder: a placeholder must never enter a rendered committed file."""
+    if not (isinstance(value, str) and shape_re.fullmatch(value)
+            and not value.startswith("-")):
+        fail(f"ENV-REGISTRY-REFUSED: substitution value for {token} is not "
+             f"{shape_desc} — remedy: fix the registry row; nothing written")
+
+
+def cmd_render(args):
+    manifest = None
+    manifest_given = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--manifest":
+            manifest_given = True
+            manifest = args[i + 1] if i + 1 < len(args) else ""
+            i += 2
+        else:
+            fail("ENV-REGISTRY-INVALID: unknown flag for render — expected "
+                 "--manifest <path>")
+    if manifest_given and not manifest:
+        fail("ENV-REGISTRY-INVALID: --manifest is empty — remedy: pass a "
+             "registry path or omit the flag to resolve "
+             "config/environments.yaml from the repo root")
+    path = manifest or os.path.join(ROOT, REGISTRY_REL)
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        shown = safe_path(os.path.basename(path), "render --manifest")
+        fail(f"ENV-REGISTRY-INVALID: registry not readable at {shown} — "
+             f"remedy: run 'env-registry.sh detect' then 'apply' to create "
+             f"it, or pass --manifest <path>")
+    # Layer 1 of the two-layer value control (threat T-03-09): leak-scan the
+    # registry FIRST — a credential-shaped scalar refuses value-free before
+    # any registry byte can flow toward a rendered file.
+    findings = leak_scan(path, text)
+    if findings:
+        for finding in findings:
+            print(finding)
+        sys.exit(2)
+    try:
+        sections, _env_kind, _surfaces = validate_registry_text(
+            text, label=path)
+    except SchemaError as exc:
+        fail(f"ENV-REGISTRY-INVALID: {exc}")
+
+    # ── six-token substitution values (03-01 inventory, exactly) ──
+    staging_env = next((r.get("name") for r in sections["environments"]
+                        if r.get("kind") == "staging"), None)
+    prod_env = next((r.get("name") for r in sections["environments"]
+                     if r.get("kind") == "prod"), None)
+    lockfile = next((c for c in _LOCKFILE_CANDIDATES
+                     if os.path.isfile(os.path.join(ROOT, c))),
+                    "requirements.txt")
+    values = {"TIER_FAST": "fast", "TIER_FULL": "full",
+              "TIER_NIGHTLY": "nightly", "LOCKFILE_HASH_PATH": lockfile}
+    if staging_env is not None:
+        values["STAGING_ENV"] = staging_env
+    if prod_env is not None:
+        values["PROD_ENV"] = prod_env
+    for tok in ("TIER_FAST", "TIER_FULL", "TIER_NIGHTLY",
+                "STAGING_ENV", "PROD_ENV"):
+        if tok in values:
+            _require_render_value(tok, values[tok], _NAME_RE,
+                                  "identifier-shaped")
+    _require_render_value("LOCKFILE_HASH_PATH", lockfile, _PATH_RE,
+                          "relpath-shaped")
+
+    tdir = os.path.join(ROOT, _TEMPLATES_REL)
+    try:
+        names = sorted(os.listdir(tdir))
+    except OSError:
+        fail("ENV-REGISTRY-INVALID: templates/ci is not readable — remedy: "
+             "run render from a checkout that ships the CI templates")
+    wf_templates = [n for n in names
+                    if n.endswith(".yml") and n != "dependabot.yml"]
+    skip_deploys = staging_env is None or prod_env is None
+    # OQ9: placeholder regex is `{{TOKEN}}` NOT preceded by `$`, so
+    # `${{ ... }}` GitHub expressions can never be mangled.
+    sub_re = re.compile(r"(?<!\$)\{\{(" + "|".join(sorted(values)) + r")\}\}")
+
+    # ── PHASE A (wall 9a586ab7): substitute + guard-validate + leak-scan
+    # EVERY candidate first; ANY failure exits here with NOTHING written.
+    candidates = []  # (template basename, target rel, rendered text)
+    findings = []
+    for fn in wf_templates:
+        shown = safe_path(fn, "render templates")
+        try:
+            ttext = open(os.path.join(tdir, fn), encoding="utf-8").read()
+        except OSError:
+            fail(f"ENV-REGISTRY-INVALID: template {shown} is not readable — "
+                 f"remedy: restore templates/ci; nothing written")
+        if skip_deploys and ("{{STAGING_ENV}}" in ttext
+                             or "{{PROD_ENV}}" in ttext):
+            continue  # OQ4: advisory printed below, exit stays 0
+        rendered = sub_re.sub(lambda m: values[m.group(1)], ttext)
+        for ln, line in enumerate(rendered.splitlines(), 1):
+            if _RESIDUAL_RE.search(line):
+                fail(f"ENV-REGISTRY-REFUSED: template {shown} line {ln} "
+                     f"carries an unresolvable placeholder — expected only "
+                     f"TIER_FAST|TIER_FULL|TIER_NIGHTLY|STAGING_ENV|"
+                     f"PROD_ENV|LOCKFILE_HASH_PATH tokens; nothing written")
+        target_rel = os.path.join(_WORKFLOWS_REL, "ffs-" + fn)
+        findings += leak_scan(os.path.join(ROOT, target_rel), rendered)
+        candidates.append((fn, target_rel, rendered))
+    dep_text = None
+    dep_src = os.path.join(tdir, "dependabot.yml")
+    if os.path.isfile(dep_src):
+        try:
+            dep_text = open(dep_src, encoding="utf-8").read()
+        except OSError:
+            fail("ENV-REGISTRY-INVALID: template dependabot.yml is not "
+                 "readable — remedy: restore templates/ci; nothing written")
+        findings += leak_scan(
+            os.path.join(ROOT, ".github", "dependabot.yml"), dep_text)
+    if findings:
+        for finding in findings:
+            print(finding)
+        print("ENV-REGISTRY-INVALID: leak scan failed on rendered candidate "
+              "bytes; nothing written", file=sys.stderr)
+        sys.exit(2)
+
+    # ── plan every write with ZERO writes so far: collision dispatch and
+    # the BOTH-sides leak scan (wall d118f505) are decided before any byte
+    # lands, and containment refusals leave the repo untouched.
+    existing_leak = False
+
+    def _plan_one(target_rel, rendered, prop_basename):
+        nonlocal existing_leak
+        target = os.path.join(ROOT, target_rel)
+        shown_rel = safe_path(target_rel, "render targets")
+        if not os.path.lexists(target):
+            return {"op": "write", "rel": target_rel, "data": rendered,
+                    "line": f"rendered {shown_rel}"}
+        try:
+            existing = open(target, encoding="utf-8").read()
+        except OSError:
+            fail(f"ENV-REGISTRY-INVALID: existing target {shown_rel} is "
+                 f"not readable — remedy: fix its permissions; nothing "
+                 f"written")
+        if existing == rendered:
+            return {"op": "note", "line": f"up-to-date {shown_rel}"}
+        prop_rel = os.path.join(_PROPOSALS_REL, prop_basename)
+        shown_prop = safe_path(prop_rel, "render proposals")
+        # wall d118f505: the collision diff prints EXISTING-workflow bytes,
+        # so the existing side is leak-scanned BEFORE any diff reaches
+        # stdout; on a finding the content diff is SUPPRESSED and only a
+        # value-free notice (finding class + proposal path) prints.
+        ex_findings = leak_scan(target, existing)
+        if ex_findings:
+            existing_leak = True
+            shape = ex_findings[0].rsplit("shape ", 1)[-1].split(" —", 1)[0]
+            return {"op": "propose", "rel": prop_rel, "data": rendered,
+                    "diff": None,
+                    "line": (f"collision: {shown_rel} differs from the "
+                             f"rendered candidate; content diff suppressed "
+                             f"— the existing file carries a leak finding "
+                             f"(shape {shape})"),
+                    "note": f"proposal: {shown_prop}"}
+        diff = "".join(difflib.unified_diff(
+            existing.splitlines(True), rendered.splitlines(True),
+            fromfile=shown_rel, tofile=shown_prop))
+        return {"op": "propose", "rel": prop_rel, "data": rendered,
+                "diff": diff, "line": None,
+                "note": f"proposal: {shown_prop}"}
+
+    plan = [_plan_one(target_rel, rendered, "ffs-" + fn)
+            for fn, target_rel, rendered in candidates]
+    if dep_text is not None:
+        dep_rel = os.path.join(".github", "dependabot.yml")
+        dep_target = os.path.join(ROOT, dep_rel)
+        if not os.path.lexists(dep_target):
+            plan.append({"op": "write", "rel": dep_rel, "data": dep_text,
+                         "line": f"rendered {dep_rel}"})
+        else:
+            try:
+                dep_existing = open(dep_target, encoding="utf-8").read()
+            except OSError:
+                fail("ENV-REGISTRY-INVALID: existing .github/dependabot.yml "
+                     "is not readable — remedy: fix its permissions; "
+                     "nothing written")
+            if re.search(r"package-ecosystem:\s*['\"]?github-actions",
+                         dep_existing):
+                pass  # wall 3c6cb2e7: pin-rot already covered — silent skip
+            else:
+                plan.append(dict(
+                    _plan_one(dep_rel, dep_text, "dependabot.yml"),
+                    advisory=(
+                        "ADVISORY: .github/dependabot.yml has no "
+                        "github-actions ecosystem — the file is untouched; "
+                        "review the proposal to add pin-rot coverage")))
+    # wall 6b6bd8bc: containment guard (apply's, reused) over EVERY planned
+    # write path before ANY write — includes the FINAL component, so a
+    # symlink planted at a proposal path refuses (wall 969c0f3d).
+    write_ops = [p for p in plan if p["op"] in ("write", "propose")]
+    for p in write_ops:
+        _assert_contained(os.path.join(ROOT, p["rel"]), _RENDER_PARENTS)
+
+    if skip_deploys:
+        for kind, name in (("staging", staging_env), ("prod", prod_env)):
+            if name is None:
+                print(f"ADVISORY: registry declares no kind: {kind} "
+                      f"environment — deploy templates skipped; add the "
+                      f"row and re-run render")
+
+    # ── PHASE B: execute. Each write is mkstemp+os.replace (atomic per
+    # file). Wall 0bcabdd1 — scope of the guarantees, keep the distinction:
+    #   * the all-or-nothing guarantee is scoped to VALIDATION failures
+    #     (schema, leak scan, residual tokens, containment): those exited
+    #     ABOVE with nothing written;
+    #   * a mid-sequence FILESYSTEM failure here leaves earlier files
+    #     complete and atomic, later files untouched, and render exits
+    #     nonzero naming what was and was NOT written — an honest partial
+    #     report, never a false all-or-nothing claim.
+    done_rels = []
+    made_dirs = set()
+    try:
+        for p in plan:
+            if p.get("advisory"):
+                print(p["advisory"])
+            if p["op"] == "note":
+                print(p["line"])
+                continue
+            target = os.path.join(ROOT, p["rel"])
+            parent = os.path.dirname(target)
+            if parent not in made_dirs:
+                os.makedirs(parent, exist_ok=True)
+                made_dirs.add(parent)
+            # wall 969c0f3d: an existing REGULAR file at a proposal path is
+            # overwritten atomically here (it is a proposal, not an
+            # authority); a symlink there was already refused above.
+            _atomic_write(target, p["data"], on_error="raise")
+            done_rels.append(p["rel"])
+            if p.get("diff"):
+                sys.stdout.write(p["diff"])
+            if p.get("line"):
+                print(p["line"])
+            if p.get("note"):
+                print(p["note"])
+    except (OSError, WriteError):
+        done = ", ".join(safe_path(r, "render report")
+                         for r in done_rels) or "none"
+        left = ", ".join(safe_path(q["rel"], "render report")
+                         for q in write_ops if q["rel"] not in done_rels) \
+            or "none"
+        fail(f"ENV-REGISTRY-REFUSED: filesystem failure mid-render — "
+             f"written (complete, atomic): {done}; NOT written: {left} — "
+             f"remedy: fix permissions/space and re-run render (written "
+             f"files will report up-to-date)")
+    sys.exit(2 if existing_leak else 0)
 
 
 def _apply_locked(answers_path, registry_path, declines_path, *,
@@ -1164,6 +1538,8 @@ if MODE == "check":
     cmd_check(ARGS)
 elif MODE == "detect":
     cmd_detect(ARGS)
+elif MODE == "render":
+    cmd_render(ARGS)
 elif MODE == "apply":
     cmd_apply(ARGS)
 PYEOF

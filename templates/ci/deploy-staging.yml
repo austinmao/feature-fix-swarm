@@ -1,0 +1,100 @@
+# ffs template: deploy-staging (REQ-301, audit row 24 locked). Rendered by
+# env-registry.sh render (03-02).
+# wall ebadd63a: NO command-shaped input exists — smoke_tier is a tier NAME,
+# shape-validated in-job, and executed ONLY inside the evidence gate.
+# wall d688023e: run-gate wraps scripts/gsd/test-tier.sh, the sole
+# tier-to-command source; commands come from the committed registry, never
+# from callers.
+name: deploy-staging
+
+on:
+  workflow_call:
+    inputs:
+      surface:
+        type: string
+        required: true
+      artifact_digest:
+        type: string
+        required: true
+      previous_digest:
+        type: string
+        required: false
+      smoke_tier:
+        type: string
+        required: true
+  # wall 9d404c88: workflow_dispatch mirrors the workflow_call inputs
+  # exactly (keys, types, required) so a manual dispatch can supply
+  # everything the steps consume.
+  workflow_dispatch:
+    inputs:
+      surface:
+        type: string
+        required: true
+      artifact_digest:
+        type: string
+        required: true
+      previous_digest:
+        type: string
+        required: false
+      smoke_tier:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffs-deploy-staging-${{ inputs.surface }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: {{STAGING_ENV}}
+    # wall 7f08ccda: job-level permissions REPLACE the workflow-level block,
+    # so contents: read is restated alongside the OIDC escalation.
+    permissions:
+      contents: read
+      id-token: write
+    # wall af9f57b1: expressions never reach run blocks — caller values
+    # cross into shell ONLY via this env mapping, consumed as quoted "$VAR".
+    # wall eb28c568: ARTIFACT_DIGEST is bound ONCE here; the digest that is
+    # gated IS the digest deployed.
+    env:
+      ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+      SURFACE: ${{ inputs.surface }}
+      SMOKE_TIER: ${{ inputs.smoke_tier }}
+      RUN_ID: ffs-${{ github.run_id }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate smoke tier name
+        run: |
+          if ! printf '%s' "$SMOKE_TIER" | grep -Eq '^[a-z][a-z0-9_-]{0,31}$'; then
+            echo "refusing: smoke_tier is not a valid tier name" >&2
+            exit 1
+          fi
+      # CONSUMER DEPLOY STEP — replace this block (wall 4b37c841: deploy
+      # mechanisms are neither runtime inputs nor placeholder tokens; edit
+      # your rendered copy through the normal proposal/review flow).
+      # wall 760b2ad9: your replacement must bind BOTH "$SURFACE" and
+      # "$ARTIFACT_DIGEST" — deploy exactly the gated digest to that surface.
+      # wall 431cd39a: this template block is echo-only and exits 0 so the
+      # smoke gate below is the step that fails this job; a placeholder
+      # failure must never mask the smoke contract.
+      - name: Deploy staging surface
+        continue-on-error: false
+        run: |
+          echo "CONSUMER DEPLOY STEP - replace this block in your rendered copy."
+          echo "Bind both env vars: this run would deploy surface $SURFACE at digest $ARTIFACT_DIGEST."
+          echo "Template form is a deliberate no-op (exit 0) so the smoke gate decides the job outcome."
+      - name: Smoke gate
+        run: python3 lib/gates.py run-gate smoke --artifact "$ARTIFACT_DIGEST" -- bash scripts/gsd/test-tier.sh "$SMOKE_TIER"
+      # ORDER IS THE CONTRACT: deploy, then smoke, then promote. The promote
+      # step carries no if or continue-on-error escape, so a smoke failure
+      # writes NO promotion record.
+      - name: Record promotion
+        run: python3 lib/gates.py promote "$RUN_ID" --from staging --to prod --surface "$SURFACE" --artifact "$ARTIFACT_DIGEST" --evidence smoke
