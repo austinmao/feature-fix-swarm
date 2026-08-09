@@ -1437,12 +1437,17 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
     try:
         if not _degraded_ratio_allowed(data, run_id):
             return False
-    except ValueError:
+    except ValueError as exc:
         # Non-ledger run ids (AC-003's literal `ac003`) cannot have recorded
         # degradation events by construction — the ratio guard is vacuously
         # satisfied. A silent False here refused with NO recorded reason,
         # violating REQ-104 (every refusal carries a typed reason) and
         # blocking the spec's live AC-003 command before the registry check.
+        # A schema CONFLICT is different: a store whose _degradation
+        # namespace is unusable must stay fail-closed (01-VERIFICATION W2),
+        # not vacuously pass the ratio guard.
+        if "DEGRADATION-SCHEMA-CONFLICT" in str(exc):
+            return False
         pass
 
     if not artifact:

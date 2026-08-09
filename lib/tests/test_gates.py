@@ -4090,7 +4090,11 @@ def test_live_ffs_registry_refuses_via_default_resolution(tmp_path) -> None:
     probe = _sp.run(["git", "rev-parse", "--git-common-dir"],
                     capture_output=True, text=True, cwd=DISPATCH_DIR)
     assert probe.returncode == 0, probe.stderr
-    common = Path(probe.stdout.strip())
+    # rev-parse emits a path RELATIVE TO ITS CWD (e.g. "../.git" from lib/);
+    # a bare Path() would later resolve against pytest's cwd and land one
+    # directory too high, falsely skipping this live pin post-merge
+    # (01-VERIFICATION W1). Anchor to the probe's own cwd.
+    common = (Path(DISPATCH_DIR) / probe.stdout.strip()).resolve()
     assert common.name == ".git", common
     main_root = common.parent
     rel = "config/environments.yaml"
