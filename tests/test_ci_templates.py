@@ -343,8 +343,11 @@ def test_style_contract(path):
     # block style only: after removing expressions and placeholders, YAML
     # structure lines carry no flow braces/brackets.
     for ln in structure_lines(stripped):
-        cleaned = EXPRESSION_RE.sub("", ln)
-        cleaned = PLACEHOLDER_RE.sub("", cleaned)
+        # placeholders first: a {{TOKEN}} may nest inside a ${{ ... }}
+        # expression (e.g. hashFiles('{{LOCKFILE_HASH_PATH}}')) and the
+        # non-greedy expression regex would stop at the inner `}}`.
+        cleaned = PLACEHOLDER_RE.sub("", ln)
+        cleaned = EXPRESSION_RE.sub("", cleaned)
         assert not re.search(r"[{}\[\]]", cleaned), f"flow style: {ln!r}"
     # placeholder inventory is closed (wall 4b37c841)
     assert set(PLACEHOLDER_RE.findall(raw)) <= PLACEHOLDER_INVENTORY

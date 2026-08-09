@@ -1,0 +1,41 @@
+# ffs template: pr-fast (REQ-301). Rendered by env-registry.sh render (03-02).
+# Placeholder inventory is closed (wall 4b37c841): only the pinned six-token
+# set is ever substituted; no placeholder or input carries a command.
+# Test commands come ONLY from the committed tier registry via
+# scripts/gsd/test-tier.sh (wall ebadd63a) — a lookup failure (rc 2/3) fails
+# distinctly from a test failure via the two-step form below.
+name: pr-fast
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffs-pr-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Restore dependency cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: ffs-pr-fast-${{ runner.os }}-${{ hashFiles('{{LOCKFILE_HASH_PATH}}') }}
+      # CONSUMER SETUP — dependency install belongs in your rendered copy;
+      # the tier registry stays the only source of test commands.
+      - name: Run fast tier
+        run: bash scripts/gsd/test-tier.sh {{TIER_FAST}} > "$RUNNER_TEMP/tier-cmds" && bash -e "$RUNNER_TEMP/tier-cmds"
