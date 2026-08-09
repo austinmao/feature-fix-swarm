@@ -1075,11 +1075,56 @@ def _valid_promotion_record(data: dict, rec) -> bool:
     return _evidence_resolves(data, evidence_ids, artifact)
 
 
+def _valid_canary_record(rec) -> bool:
+    """Re-validate a persisted canary row on every read (the
+    _valid_promotion_record precedent): a tampered or legacy row degrades to
+    refusal, never a crash. Typed = exactly the recorder's schema semantics —
+    40-hex sha, boolean pass, control-free run_id, bounded timestamps."""
+    import math
+    if not isinstance(rec, dict):
+        return False
+    sha = rec.get("sha")
+    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+        return False
+    if rec.get("pass") is not True and rec.get("pass") is not False:
+        return False
+    run_id = rec.get("run_id")
+    if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
+        return False
+    for key in ("created_at", "ended_at"):
+        value = rec.get(key)
+        if (not isinstance(value, str) or not value.strip()
+                or len(value) > ISO_TS_MAX):
+            return False
+    ts = rec.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+        return False
+    return True
+
+
+def _canary_bound_ok(data: dict, artifact) -> bool:
+    """REQ-301 read-side binding (pinned decision 1 — STORE-SCOPED): an
+    absent or empty `canary` namespace leaves promotion behavior unchanged;
+    ANY other content makes every candidate canary-bound — satisfied only by
+    a schema-valid typed record with pass true whose sha exact-string-matches
+    the promoted artifact. Sha-less, untyped/legacy, failed, or tampered
+    entries trigger binding but never satisfy it (fail-closed, no raise)."""
+    rows = data.get("canary")
+    if rows is None or (isinstance(rows, list) and not rows):
+        return True
+    if not isinstance(rows, list):
+        return False
+    return any(_valid_canary_record(rec) and rec.get("pass") is True
+               and rec.get("sha") == artifact for rec in rows)
+
+
 def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
                     artifact, now: float | None = None) -> bool:
     """Fail-closed read (mirrors check_grant): True ONLY for an exact,
     unexpired, from_env=='staging' (when to_env=='prod'), to_env, surface,
-    and artifact match. A missing OR malformed `_promotions` namespace
+    and artifact match — and, when the store's canary namespace is non-empty
+    (REQ-301), a typed passing canary record whose sha exact-matches the
+    artifact. A missing OR malformed `_promotions` namespace
     (non-dict top level, non-list run entry, non-dict record, missing/
     non-numeric/non-finite expiry) returns False without raising, crashing,
     or writing — pure read, same posture as check_grant/check_preflight."""
@@ -1103,6 +1148,10 @@ def check_promotion(store: Path, run_id: str, to_env: str, surface: str,
         if rec.get("surface") != surface:
             continue
         if rec.get("artifact") != artifact:
+            continue
+        if not _canary_bound_ok(data, artifact):
+            # canary-bound store without exact-sha typed pass evidence:
+            # refuse IN ADDITION to (never instead of) the expiry rule below.
             continue
         if effective_now < rec["expires_at"]:
             return True
@@ -1206,6 +1255,7 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
     effective_now = now if now is not None else _now()
     surface_matches = False
     artifact_match_expired = False
+    canary_refused = False
     for rec in records:
         if not _valid_promotion_record(data, rec):
             continue
@@ -1218,6 +1268,17 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
             continue
         if effective_now >= rec["expires_at"]:
             artifact_match_expired = True
+            continue
+        # Fresh, fully-matching promotion — check_promotion still returned
+        # False, so the only remaining refusal is the canary binding
+        # (REQ-301). Unreachable pre-phase-3, which is exactly what keeps
+        # the AC-001 reason ordering byte-identical.
+        canary_refused = True
+    if canary_refused:
+        rows = data.get("canary")
+        if isinstance(rows, list) and any(_valid_canary_record(r) for r in rows):
+            return "CANARY-SHA-MISMATCH"
+        return "CANARY-EVIDENCE-REQUIRED"
     if artifact_match_expired:
         return "PROMOTE-EXPIRED"
     if surface_matches:
