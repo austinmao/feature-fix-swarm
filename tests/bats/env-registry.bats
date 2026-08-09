@@ -43,7 +43,38 @@
 #   B7  value-free refusal (wall 6e10a021): credential-shaped scalar in a
 #       registry → refusal carries no substring of it on either stream
 #   B8  boundary negatives: hex run of 31 and base64 run of 39 → no finding
-# Group C (Task 3 — detect/apply) follows.
+# Group C (Task 3 — detect/apply/declines; REQ-202/203; audit rows
+# 25/28/30/32 LOCKED):
+#   C1-C6  six fixture trees (vercel/wrangler/fly/compose/k8s/bare) →
+#          proposal rows with per-row confidence: + evidence:; bare →
+#          local-only, surfaces OMITTED
+#   C7     monorepo (vercel+wrangler+fly): all rows, own evidence, none
+#          auto-accepted (verified: null everywhere, EDGE-009)
+#   C8     .env.staging/.env.production → rows + secret KEY NAMES only;
+#          values absent from output; chmod-000 → evidence
+#          "file present, unread" (EDGE-003)
+#   C9     workflow environment: + doppler provider/config → rows
+#   C10    tier classification per REQ-202's four-way rule
+#   C11    porcelain: `git status --porcelain` EMPTY after detect (Pitfall 4)
+#   C12    shared name-safety guard (wall a173dd6d): secret-shaped workflow
+#          env name + secret-shaped registry env name absent from BOTH
+#          streams of detect AND check
+#   C13    apply happy path: registry + .ffs-init.json written; fresh
+#          registry passes check; v1 marker on line 2; surfaces LAST; no tabs
+#   C14    all-or-nothing: missing test_tiers → names key + expected shape,
+#          NEITHER file exists (EDGE-008)
+#   C15    leak-bearing answers → rc 2, neither file changed
+#   C16    declines lifecycle: suppress exactly the keyed (heuristic,
+#          evidence); ONE advisory naming count + --reset-declines; NEW
+#          evidence re-proposed; --reset-declines empties atomically
+#   C17    --update preserves verified: dates + operator-edited scalars,
+#          adds only NEW rows
+#   C18    regenerate guard: apply --yes over existing refuses naming
+#          --update and --force; --force proceeds
+#   C19    lock-before-validate (wall ca301d30): held lock → typed
+#          ENV-REGISTRY-BUSY fail-fast, nothing interleaved
+#   C20    write-target containment (wall 2965346c): config symlinked
+#          outside the fixture → typed refusal, nothing at the link target
 # ───────────────────────────────────────────────────────────────────────────
 
 bats_require_minimum_version 1.5.0
@@ -329,4 +360,313 @@ shape_for() {
 @test "B8 boundary negatives: hex run of 31 and base64 run of 39 are not findings" {
   run -0 bash "$ER" check --manifest "$(leak_dir)/boundary-hex31.txt"
   run -0 bash "$ER" check --manifest "$(leak_dir)/boundary-b64-39.txt"
+}
+
+# ── Group C: detect proposals + apply atomic writer + declines ─────────────
+
+commit_fixture() {
+  git -C "$FIXTURE" add .
+  git -C "$FIXTURE" -c user.email=t@t -c user.name=t commit -q -m fixture
+}
+
+build_vercel() { printf '{}\n' > "$FIXTURE/vercel.json"; }
+build_wrangler() {
+  printf 'name = "app"\n[env.staging]\nroute = "s"\n[env.prod]\nroute = "p"\n' \
+    > "$FIXTURE/wrangler.toml"
+}
+build_fly() {
+  printf 'app = "x"\n' > "$FIXTURE/fly.toml"
+  printf 'app = "x"\n' > "$FIXTURE/fly.staging.toml"
+}
+build_compose() { printf 'services: {}\n' > "$FIXTURE/docker-compose.yml"; }
+build_k8s() {
+  mkdir -p "$FIXTURE/k8s/overlays/staging" "$FIXTURE/k8s/overlays/prod"
+  touch "$FIXTURE/k8s/overlays/staging/kustomization.yaml" \
+        "$FIXTURE/k8s/overlays/prod/kustomization.yaml"
+}
+
+write_answers() {  # $1=path
+  cat > "$1" <<'YAML'
+environments:
+  - name: local
+    kind: local
+  - name: stag
+    kind: staging
+test_tiers:
+  - tier: fast
+    command: true
+surfaces:
+  - surface: release
+    staging_instance: stag
+YAML
+}
+
+@test "C1 vercel fixture proposes prod + preview with evidence" {
+  build_vercel
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: prod"* ]]
+  [[ "$output" == *"- name: preview"* ]]
+  [[ "$output" == *"evidence: vercel.json"* ]]
+  [[ "$output" == *"confidence:"* ]]
+}
+
+@test "C2 wrangler fixture proposes an env per [env.X] section with file:section evidence" {
+  build_wrangler
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: staging"* ]]
+  [[ "$output" == *"- name: prod"* ]]
+  [[ "$output" == *"evidence: wrangler.toml:[env.staging]"* ]]
+  [[ "$output" == *"evidence: wrangler.toml:[env.prod]"* ]]
+}
+
+@test "C3 fly fixture proposes an env per file" {
+  build_fly
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: prod"* ]]
+  [[ "$output" == *"- name: staging"* ]]
+  [[ "$output" == *"fly.toml"* ]]
+  [[ "$output" == *"fly.staging.toml"* ]]
+}
+
+@test "C4 compose fixture proposes local" {
+  build_compose
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: local"* ]]
+  [[ "$output" == *"kind: local"* ]]
+  [[ "$output" == *"evidence: docker-compose.yml"* ]]
+}
+
+@test "C5 k8s overlay dirs propose an env per dir" {
+  build_k8s
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: staging"* ]]
+  [[ "$output" == *"- name: prod"* ]]
+  [[ "$output" == *"k8s/overlays/staging/"* ]]
+}
+
+@test "C6 bare fixture: local-only proposal, surfaces omitted" {
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: local"* ]]
+  [[ "$output" != *$'\n'"surfaces:"* ]]
+  [[ "$output" != *"- name: prod"* ]]
+}
+
+@test "C7 monorepo: all rows with their own evidence, none auto-accepted" {
+  build_vercel; build_wrangler; build_fly
+  run -0 bash "$ER" detect
+  [[ "$output" == *"evidence: vercel.json"* ]]
+  [[ "$output" == *"wrangler.toml:[env.staging]"* ]]
+  [[ "$output" == *"fly.staging.toml"* ]]
+  [[ "$output" == *"- name: preview"* ]]
+  # every proposed row stays a proposal: verified is null everywhere
+  ! grep -E 'verified: [0-9]' <<<"$output"
+}
+
+@test "C8 .env detection: key NAMES only; unreadable file present, unread (EDGE-003)" {
+  printf 'DB_HOST=localhost\nAPI_NAME=stagingvalue1\n' > "$FIXTURE/.env.staging"
+  printf 'PROD_KEY_NAME=prodvalue1\n' > "$FIXTURE/.env.production"
+  chmod 000 "$FIXTURE/.env.production"
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: staging"* ]]
+  [[ "$output" == *"- DB_HOST"* ]]
+  [[ "$output" == *"- API_NAME"* ]]
+  [[ "$output" != *"stagingvalue1"* ]]
+  [[ "$output" != *"prodvalue1"* ]]
+  [[ "$output" == *"- name: production"* ]]
+  [[ "$output" == *"file present, unread"* ]]
+}
+
+@test "C9 workflow environment: keys and doppler config names propose rows" {
+  mkdir -p "$FIXTURE/.github/workflows"
+  printf 'jobs:\n  deploy:\n    environment: production\n' \
+    > "$FIXTURE/.github/workflows/deploy.yml"
+  printf 'setup:\n  - project: app\n    config: stg\n' > "$FIXTURE/doppler.yaml"
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- name: production"* ]]
+  [[ "$output" == *".github/workflows/deploy.yml:3"* ]]
+  [[ "$output" == *"- name: stg"* ]]
+  [[ "$output" == *"doppler.yaml"* ]]
+}
+
+@test "C10 tier classification: e2e dir → live; GSD_ self-skip → nightly; fast+full always" {
+  mkdir -p "$FIXTURE/tests/api-e2e"
+  touch "$FIXTURE/tests/api-e2e/test_smoke.py"
+  cat > "$FIXTURE/tests/test_vendor.py" <<'PY'
+import os, pytest
+if not os.environ.get("GSD_VENDOR_TREE"):
+    pytest.skip("missing vendor tree", allow_module_level=True)
+PY
+  run -0 bash "$ER" detect
+  [[ "$output" == *"- tier: fast"* ]]
+  [[ "$output" == *"- tier: full"* ]]
+  [[ "$output" == *"- tier: live"* ]]
+  [[ "$output" == *"- tier: nightly"* ]]
+}
+
+@test "C11 detect porcelain purity: zero writes inside the target repo" {
+  build_wrangler
+  commit_fixture
+  run -0 bash "$ER" detect
+  run -0 git -C "$FIXTURE" status --porcelain
+  [ -z "$output" ]
+}
+
+@test "C12 shared name-safety guard: secret-shaped names absent from detect AND check" {
+  secret="$(cat "$(leak_dir)/wf-envname.secret")"
+  mkdir -p "$FIXTURE/.github/workflows"
+  printf 'jobs:\n  deploy:\n    environment: %s\n' "$secret" \
+    > "$FIXTURE/.github/workflows/deploy.yml"
+  rc=0
+  bash "$ER" detect > "$BATS_TEST_TMPDIR/d-out" 2> "$BATS_TEST_TMPDIR/d-err" || rc=$?
+  [ "$rc" -eq 0 ]
+  grep -q "non-conforming name" "$BATS_TEST_TMPDIR/d-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/d-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/d-err"
+  # check half: a registry env row whose NAME is secret-shaped
+  write_registry "$FIXTURE/config/environments.yaml"
+  sed -i.bak "s/name: stag\$/name: $secret/" "$FIXTURE/config/environments.yaml"
+  rm -f "$FIXTURE/config/environments.yaml.bak"
+  rc=0
+  bash "$ER" check > "$BATS_TEST_TMPDIR/c-out" 2> "$BATS_TEST_TMPDIR/c-err" || rc=$?
+  [ "$rc" -ne 0 ]
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/c-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/c-err"
+}
+
+@test "C13 apply happy path: both files written, phase-1 byte shape, check green" {
+  rm -f "$FIXTURE/config/environments.yaml"
+  write_answers "$FIXTURE/answers.yaml"
+  run -0 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes
+  [ -f "$FIXTURE/config/environments.yaml" ]
+  [ -f "$FIXTURE/.ffs-init.json" ]
+  run -0 bash "$ER" check
+  [ "$(sed -n 2p "$FIXTURE/config/environments.yaml")" = "# schema: ffs.environments/v1" ]
+  # surfaces block LAST
+  surf_line="$(grep -n '^surfaces:' "$FIXTURE/config/environments.yaml" | cut -d: -f1)"
+  tier_line="$(grep -n '^test_tiers:' "$FIXTURE/config/environments.yaml" | cut -d: -f1)"
+  [ "$surf_line" -gt "$tier_line" ]
+  ! grep -q "$(printf '\t')" "$FIXTURE/config/environments.yaml"
+  run -0 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert list(d)[0]=="schema" and d["schema"]=="ffs.init/v1", d' "$FIXTURE/.ffs-init.json"
+}
+
+@test "C14 all-or-nothing: missing test_tiers names key + shape, NEITHER file exists" {
+  rm -f "$FIXTURE/config/environments.yaml" "$FIXTURE/.ffs-init.json"
+  cat > "$FIXTURE/answers.yaml" <<'YAML'
+environments:
+  - name: local
+    kind: local
+YAML
+  run -1 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes
+  [[ "$output" == *"test_tiers"* ]]
+  [[ "$output" == *"expected"* ]]
+  [ ! -f "$FIXTURE/config/environments.yaml" ]
+  [ ! -f "$FIXTURE/.ffs-init.json" ]
+}
+
+@test "C15 leak-bearing answers: rc 2, neither file changed" {
+  rm -f "$FIXTURE/config/environments.yaml" "$FIXTURE/.ffs-init.json"
+  cp "$(leak_dir)/leak-answers.yaml" "$FIXTURE/answers.yaml"
+  secret="$(cat "$(leak_dir)/leak-answers.secret")"
+  rc=0
+  bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes \
+    > "$BATS_TEST_TMPDIR/la-out" 2> "$BATS_TEST_TMPDIR/la-err" || rc=$?
+  [ "$rc" -eq 2 ]
+  [ ! -f "$FIXTURE/config/environments.yaml" ]
+  [ ! -f "$FIXTURE/.ffs-init.json" ]
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/la-out"
+  ! grep -qF "$secret" "$BATS_TEST_TMPDIR/la-err"
+}
+
+@test "C16 declines lifecycle: keyed suppression, ONE advisory, re-proposal, reset" {
+  build_wrangler
+  rm -f "$FIXTURE/config/environments.yaml"
+  write_answers "$FIXTURE/answers.yaml"
+  cat >> "$FIXTURE/answers.yaml" <<'YAML'
+declines:
+  - heuristic: wrangler-env
+    evidence: wrangler.toml:[env.staging]
+YAML
+  run -0 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes
+  run -0 --separate-stderr bash "$ER" detect
+  [[ "$output" != *"wrangler.toml:[env.staging]"* ]]
+  [[ "$output" == *"wrangler.toml:[env.prod]"* ]]
+  [ "$(grep -c 'ADVISORY' <<<"$stderr")" -eq 1 ]
+  [[ "$stderr" == *"1 proposal"* ]]
+  [[ "$stderr" == *"--reset-declines"* ]]
+  run -0 bash "$ER" apply --reset-declines
+  run -0 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["declines"]==[], d' "$FIXTURE/.ffs-init.json"
+  run -0 --separate-stderr bash "$ER" detect
+  [[ "$output" == *"wrangler.toml:[env.staging]"* ]]
+}
+
+@test "C17 --update preserves verified dates and operator-edited scalars, adds NEW rows" {
+  cat > "$FIXTURE/config/environments.yaml" <<'YAML'
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: local
+    kind: local
+    base_url: operator.example
+    verified: 2026-08-01
+test_tiers:
+  - tier: fast
+    command: true
+surfaces:
+  - surface: release
+    staging_instance: none
+YAML
+  cat > "$FIXTURE/answers.yaml" <<'YAML'
+environments:
+  - name: local
+    kind: local
+  - name: stag2
+    kind: staging
+test_tiers:
+  - tier: fast
+    command: false-should-not-clobber
+YAML
+  run -0 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --update --yes
+  grep -q "verified: 2026-08-01" "$FIXTURE/config/environments.yaml"
+  grep -q "base_url: operator.example" "$FIXTURE/config/environments.yaml"
+  grep -q "name: stag2" "$FIXTURE/config/environments.yaml"
+  grep -q "command: true" "$FIXTURE/config/environments.yaml"
+  ! grep -q "false-should-not-clobber" "$FIXTURE/config/environments.yaml"
+}
+
+@test "C18 regenerate guard: apply --yes over an existing registry refuses; --force proceeds" {
+  write_answers "$FIXTURE/answers.yaml"
+  run -1 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes
+  [[ "$output" == *"--update"* ]]
+  [[ "$output" == *"--force"* ]]
+  run -0 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes --force
+  grep -q "name: stag" "$FIXTURE/config/environments.yaml"
+}
+
+@test "C19 lock-before-validate: a held lock makes a second apply fail fast, typed busy" {
+  write_answers "$FIXTURE/answers.yaml"
+  python3 - "$FIXTURE/.ffs-init.lock" "$FIXTURE/.locked" <<'PY' &
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").write("locked")
+time.sleep(15)
+PY
+  LOCKER=$!
+  for _ in $(seq 100); do [ -f "$FIXTURE/.locked" ] && break; sleep 0.1; done
+  [ -f "$FIXTURE/.locked" ]
+  run -1 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes --force
+  kill "$LOCKER" 2>/dev/null || true
+  [[ "$output" == *"ENV-REGISTRY-BUSY"* ]]
+}
+
+@test "C20 write-target containment: symlinked config/ refuses, nothing at link target" {
+  rm -rf "$FIXTURE/config"
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  ln -s "$BATS_TEST_TMPDIR/outside" "$FIXTURE/config"
+  write_answers "$FIXTURE/answers.yaml"
+  run -1 bash "$ER" apply --answers "$FIXTURE/answers.yaml" --yes
+  [[ "$output" == *"ENV-REGISTRY-REFUSED"* ]]
+  [[ "$output" == *"symlink"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/outside/environments.yaml" ]
+  [ ! -f "$FIXTURE/.ffs-init.json" ]
 }
