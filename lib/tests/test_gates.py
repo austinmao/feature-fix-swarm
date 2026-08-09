@@ -2972,3 +2972,205 @@ def test_loop_cap_event_write_failure_is_fail_soft(tmp_path, monkeypatch, capsys
     assert "LOOP-CAP:" in captured.out
     assert "LOOP-CAP-EVENT-UNRECORDED" in captured.err
     assert "events" not in json.loads(store.read_text())
+
+
+# ── spec-007 Phase 1: env registry resolution ────────────────────────────────
+# PD-2 taxonomy (2c72f448): IMPLICIT default-filename resolution parses HEAD
+# bytes with HEAD as SOLE authority (index and working tree never enter the
+# verdict); CALLER-SUPPLIED paths parse WORKING-TREE bytes. These cases carry
+# the implicit half; the caller-supplied half lands in the Task-2 section.
+# Isolation: GATES_STORE pinned under tmp_path; FFS_ENV_REGISTRY* deleted.
+# Verdicts asserted via the pending record — stdout reason text is 01-02's.
+
+_ENV_REGISTRY_WEB = (
+    "# schema: ffs.environments/v1\n"
+    "surfaces:\n"
+    "  - surface: web\n"
+    "    staging_instance: none\n"
+)
+
+
+def _env_registry_env(store: Path) -> dict:
+    import os as _os
+    env = dict(_os.environ, GATES_STORE=str(store))
+    env.pop("FFS_ENV_REGISTRY", None)
+    env.pop("FFS_ENV_REGISTRY_REQUIRED", None)
+    return env
+
+
+def _init_registry_repo(tmp_path: Path, text: str = _ENV_REGISTRY_WEB, *,
+                        add: bool = True, commit: bool = True,
+                        rel: str = "config/environments.yaml") -> Path:
+    """Synthetic MAIN checkout holding a registry file at `rel` (pattern:
+    test_store_path_resolves_worktree_to_main_checkout)."""
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    (repo / rel).write_text(text)
+    if add:
+        _sp.run(["git", "add", rel], cwd=repo, check=True)
+    if commit:
+        _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                 "commit", "-q", "-m", "registry"], cwd=repo, check=True)
+    return repo
+
+
+def _seed_prod_ok(env: dict, repo: Path, run_id: str = "run-1",
+                  surface: str = "web") -> None:
+    """Grant + promote seeded so a NO-STAGING-COUNTERPART verdict cannot come
+    from a missing grant or missing promote evidence instead."""
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "run-gate", "stg-web",
+                 "--artifact", _GOOD_ARTIFACT, "--", "true"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = _sp.run(["python3", g, "promote", run_id, "--from", "staging",
+                 "--to", "prod", "--surface", surface,
+                 "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = _sp.run(["python3", g, "grant", run_id,
+                 "--action", f"deploy:prod-{surface}"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _check_grant_prod_cli(env: dict, repo: Path, run_id: str = "run-1",
+                          action: str = "deploy:prod-web",
+                          extra: list[str] | None = None):
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    return _sp.run(["python3", g, "check-grant", run_id, "--action", action,
+                    "--artifact", _GOOD_ARTIFACT] + (extra or []),
+                   capture_output=True, text=True, env=env, cwd=repo)
+
+
+def _pending_reasons(store: Path, run_id: str = "run-1") -> list[str]:
+    return [p["reason"] for p in gates.list_pending(store, run_id)]
+
+
+def _advisory_count(stderr: str, prefix: str) -> int:
+    return sum(1 for ln in stderr.splitlines() if ln.startswith(prefix))
+
+
+def test_env_registry_default_filename_resolution_refuses_in_tracked_repo(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+
+
+def test_env_registry_untracked_file_is_not_authoritative(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, add=False, commit=False)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+    absent = next(ln for ln in r.stderr.splitlines()
+                  if ln.startswith("ENV-REGISTRY-ABSENT:"))
+    assert "config/environments.yaml" in absent and "git commit" in absent
+
+
+def test_env_registry_staged_but_uncommitted_is_absent(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, add=True, commit=False)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+
+
+def test_env_registry_staged_deletion_does_not_disable_gate(tmp_path) -> None:
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    _sp.run(["git", "rm", "-q", "--cached", "config/environments.yaml"],
+            cwd=repo, check=True)
+    (repo / "config/environments.yaml").unlink()
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_working_tree_delete_does_not_disable_gate(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    (repo / "config/environments.yaml").unlink()
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_dirty_working_copy_is_inert(tmp_path) -> None:
+    import subprocess as _sp
+    dirty_text = _ENV_REGISTRY_WEB.replace(
+        "staging_instance: none", "staging_instance: staging-web")
+    for variant in ("unstaged", "staged"):
+        base = tmp_path / variant
+        base.mkdir()
+        store = base / "evidence.json"
+        env = _env_registry_env(store)
+        repo = _init_registry_repo(base)
+        (repo / "config/environments.yaml").write_text(dirty_text)
+        if variant == "staged":
+            _sp.run(["git", "add", "config/environments.yaml"],
+                    cwd=repo, check=True)
+        _seed_prod_ok(env, repo)
+        r = _check_grant_prod_cli(env, repo)
+        # verdict comes from HEAD bytes (staging none), not the dirty copy
+        assert r.returncode == 1, variant + ": " + r.stdout + r.stderr
+        assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+        assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 1, r.stderr
+    # clean-tree run emits zero advisory lines
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    store = clean / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(clean)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+
+
+def test_env_registry_unreadable_working_copy_still_resolves(tmp_path) -> None:
+    # PD-2: HEAD is the sole authority for the implicit step — readability of
+    # the working-tree copy is irrelevant (discriminating twin: a chmod-000
+    # CALLER-SUPPLIED path REJECTS, Task-2 section).
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    (repo / "config/environments.yaml").chmod(0o000)
+    try:
+        _seed_prod_ok(env, repo)
+        r = _check_grant_prod_cli(env, repo)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert any("NO-STAGING-COUNTERPART" in x
+                   for x in _pending_reasons(store))
+    finally:
+        (repo / "config/environments.yaml").chmod(0o644)
+
+
+def test_env_registry_live_ffs_registry_loads() -> None:
+    # FFS's own committed registry parses to exactly one release row.
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
