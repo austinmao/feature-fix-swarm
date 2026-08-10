@@ -3993,6 +3993,20 @@ def test_surfaces_parser_unknown_field_structural_rejects_stay() -> None:
     with pytest.raises(ValueError) as exc4:
         gates._load_manifest_text(masked_allowlisted_child)
     assert "indent" in str(exc4.value)
+    # codex round-3b HIGH: a masked nested SEQUENCE must not mint phantom
+    # rows — the first '- surface:' of the block pins the row-starter
+    # indent; a deeper row starter rejects (LF and CRLF)
+    masked_nested_row = ("surfaces:\n"
+                         "  - surface: web\n"
+                         "    staging_instance: stg-web\n"
+                         "    extras: # nested map\n"
+                         "      - surface: evil\n"
+                         "        staging_instance: stg-evil\n")
+    with pytest.raises(ValueError) as exc5:
+        gates._load_manifest_text(masked_nested_row)
+    assert "indent" in str(exc5.value)
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(masked_nested_row.replace("\n", "\r\n"))
 
 
 def test_surfaces_parser_allowlist_loads() -> None:
