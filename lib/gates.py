@@ -2122,6 +2122,8 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
     rows: list[dict[str, str]] = []
     current: dict[str, str] | None = None
     seen_fields: set[str] = set()
+    row_field_indent: int | None = None
+    row_start_indent: int | None = None
     for line_no, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -2155,6 +2157,17 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
                 f"tab-indented line in surfaces block at line {line_no}")
         surface_match = re.fullmatch(r"-\s+surface:\s*(.+)", stripped)
         if surface_match:
+            # first row starter pins the block's row indent; a deeper
+            # '- surface:' is a nested sequence (e.g. under a tolerated
+            # unknown opener) and must never mint a phantom row
+            # (codex #108 round-3b HIGH)
+            if row_start_indent is None:
+                row_start_indent = indent
+            elif indent != row_start_indent:
+                raise ValueError(
+                    f"inconsistent row-starter indent in surfaces block at "
+                    f"line {line_no} (expected {row_start_indent}, got "
+                    f"{indent})")
             if current is not None:
                 rows.append(current)
             current = {
@@ -2163,6 +2176,7 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
             }
             # seed `surface` as seen: a redeclared in-row surface rejects
             seen_fields = {"surface"}
+            row_field_indent = None
             continue
         field_match = re.fullmatch(_MANIFEST_FIELD_PAT, stripped)
         if field_match:
@@ -2173,6 +2187,16 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
                 raise ValueError(
                     f"field line {key!r} before any '- surface:' row at "
                     f"line {line_no}")
+            # first field line pins the row's field indent; any deviation
+            # rejects — a nested block's child (e.g. under a tolerated
+            # unknown opener masked by an inline comment) must never be
+            # consumed as a ROW-level field (codex #108 round-2 HIGH)
+            if row_field_indent is None:
+                row_field_indent = indent
+            elif indent != row_field_indent:
+                raise ValueError(
+                    f"inconsistent field indent in surface row at line "
+                    f"{line_no} (expected {row_field_indent}, got {indent})")
             if key in seen_fields:
                 raise ValueError(
                     f"duplicate field {key!r} in surface row at line "
@@ -2181,6 +2205,37 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
             if key in ("staging_instance", "staging"):
                 current[key] = _manifest_scalar(field_match.group(2),
                                                 line_no=line_no)
+            continue
+        # Consumer-repo extension keys (openclaw#1699): an unknown scalar
+        # `key: value` INSIDE a row is tolerated with a stderr WARN — the
+        # gate only consumes surface + staging keys, and a dropped staging
+        # key fails CLOSED (prod grant refused), so this cannot fail open.
+        # Structural strictness stays: duplicates and field-before-row
+        # reject exactly like allowlisted keys; a value-less nested-map
+        # opener never matches (value required) and still rejects below.
+        # WARN prints key + line only, never the value (A8 value-stripping).
+        extension_match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_-]*):\s*(\S.*)", stripped)
+        if extension_match:
+            key = extension_match.group(1)
+            if current is None:
+                raise ValueError(
+                    f"field line {key!r} before any '- surface:' row at "
+                    f"line {line_no}")
+            if row_field_indent is None:
+                row_field_indent = indent
+            elif indent != row_field_indent:
+                raise ValueError(
+                    f"inconsistent field indent in surface row at line "
+                    f"{line_no} (expected {row_field_indent}, got {indent})")
+            if key in seen_fields:
+                raise ValueError(
+                    f"duplicate field {key!r} in surface row at line "
+                    f"{line_no}")
+            seen_fields.add(key)
+            print(f"WARNING: unknown manifest field {key!r} at line "
+                  f"{line_no} ignored (consumer extension key)",
+                  file=sys.stderr)
             continue
         raise ValueError(
             f"unsupported line in surfaces block at line {line_no}: "
