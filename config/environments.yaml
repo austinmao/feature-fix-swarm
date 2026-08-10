@@ -1,0 +1,33 @@
+# config/environments.yaml
+# schema: ffs.environments/v1
+# SECRETS BY NAME ONLY — this file is read by CI and by autonomous agents;
+# never write a secret VALUE here, only the NAME of where it lives.
+
+environments:
+  - name: local
+    kind: local
+    base_url: none
+    secret_names: []
+    verified: null
+    test_tier: fast
+  - name: ci
+    kind: dev
+    base_url: none
+    secret_names: []
+    verified: null
+    test_tier: full
+
+test_tiers:
+  - tier: fast
+    command: python3 -m pytest lib/tests/test_gates.py -q
+    covers:
+      - lib/**
+  - tier: full
+    command: python3 -m pytest lib/ tests/ -q
+    covers:
+      - lib/**
+      - tests/**
+
+surfaces:
+  - surface: release
+    staging_instance: none

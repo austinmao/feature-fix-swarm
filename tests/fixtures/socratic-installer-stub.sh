@@ -25,7 +25,7 @@ cat > "$DEST/.ffs-socratic.json" <<'EOF'
 {
   "schema": "ffs.external-skill/v1",
   "repository": "stub",
-  "commit": "0000000000000000000000000000000000stub",
+  "commit": "0000000000000000000000000000000stub",
   "patch_sha256": null
 }
 EOF

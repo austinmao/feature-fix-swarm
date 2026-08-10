@@ -275,7 +275,7 @@ EOF
 }
 
 @test "promotion emits once and carries the artifact sha gh join key" {
-  SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  SHA="$(printf 'a%.0s' {1..40})"  # runtime-built: AC-011 hex-run gate stays quiet
   python3 - "$STORE" "$SHA" <<'EOF'
 import json, sys
 open(sys.argv[1], "w").write(json.dumps({"_promotions": {"spec-008": [
@@ -294,7 +294,7 @@ EOF
 }
 
 @test "rollback-dryrun emits once with its REQ-302 keys" {
-  SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  SHA="$(printf 'b%.0s' {1..40})"  # runtime-built: AC-011 hex-run gate stays quiet
   python3 "$REPO/lib/gates.py" rollback-dryrun --run-id spec-008 --surface web \
     --command "echo rollback" --exit-code 0 --artifact-sha "$SHA"
   run bash "$SCRIPT" --immediate

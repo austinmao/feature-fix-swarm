@@ -1,0 +1,4 @@
+# SYNTHETIC-NOT-A-REAL-KEY — span-not-line whitelist fixture (wall a8f9af82):
+# a pinned digest AND a second credential share ONE line; the whitelist
+# exempts only the digest's matched span, so the second credential must flag.
+artifact: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ghp_SYNTHmixed2ndcredential000
