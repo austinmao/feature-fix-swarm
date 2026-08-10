@@ -75,10 +75,11 @@ if [ "${CANARY_GATE:-on}" = "off" ]; then
 fi
 
 WEB_PATTERN="${CANARY_WEB_PATTERN:-\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(pages|routes|components|emails|templates|public|hooks|stores?|styles?)/|(^|/)app/|(^|/)api/|(^|/)(tailwind|next|nuxt|vite|astro|svelte)\.config\.}"
-# Shell/bats files are never a browser surface even inside web-named dirs
-# (scripts/hooks/*.sh matched the bare hooks/ alternation — false web-touch).
+# Shell/bats/YAML files are never a browser surface even inside web-named
+# dirs (scripts/hooks/*.sh matched the bare hooks/ alternation;
+# templates/ci/*.yml matched templates/ — both false web-touch).
 # Keep in lockstep with browser-proof.sh's WEB_EXCLUDE_RE.
-WEB_EXCLUDE="${CANARY_WEB_EXCLUDE:-\.(sh|bash|bats)$}"
+WEB_EXCLUDE="${CANARY_WEB_EXCLUDE:-\.(sh|bash|bats|ya?ml)$}"
 
 if ! git rev-parse --verify "${DIFF_BASE}^{commit}" >/dev/null 2>&1; then
   echo "canary-gate: FAIL — diff base '${DIFF_BASE}' unresolvable (fetch it or pass --diff-base)" >&2

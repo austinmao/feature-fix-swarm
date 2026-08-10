@@ -239,6 +239,16 @@ EOF
   [[ "$output" == *"canary-gate: NOT-NEEDED (no web-touch in diff)"* ]]
 }
 
+@test "workflow YAML under a templates/ dir is NOT web-touch (WEB_EXCLUDE)" {
+  mkdir -p templates/ci
+  echo 'name: ffs-pr-fast' > templates/ci/pr-fast.yml
+  git add templates/ci/pr-fast.yml
+  git commit -q -m "ci template change"
+  run bash "$SCRIPT" --diff-base "$BASE_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"canary-gate: NOT-NEEDED (no web-touch in diff)"* ]]
+}
+
 @test "plain .ts under hooks/ dir is still web-touch after WEB_EXCLUDE" {
   mkdir -p src/hooks
   echo "export const useCart = () => {}" > src/hooks/useCart.ts

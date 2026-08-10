@@ -45,7 +45,7 @@ WEB_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(pages|routes|comp
 # Shell/bats files are never a browser surface even inside web-named dirs
 # (scripts/hooks/*.sh matched the bare hooks/ alternation — false web-touch).
 # Keep in lockstep with canary-gate.sh's WEB_EXCLUDE.
-WEB_EXCLUDE_RE='\.(sh|bash|bats)$'
+WEB_EXCLUDE_RE='\.(sh|bash|bats|ya?ml)$'
 
 WEB_TOUCH="no"
 if [ "${QA_FORCE_BROWSER:-0}" = "1" ]; then
