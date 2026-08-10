@@ -84,7 +84,14 @@ leave the operation at exit `1` until the operator resolves them.
 The same rule applies to managed destinations: an existing path is replaced
 only when it matches the prior install manifest, already matches the new
 source, or is a broken project link. Unmanaged and edited collisions fail
-before canonical FFS paths are changed.
+before canonical FFS paths are changed — by default, a single colliding path
+hard-blocks the entire install, even for skills that never changed.
+
+Pass `--adopt-collisions` to resolve collisions instead of blocking: each
+colliding path is backed up (its location is printed as
+`adopted collision: <path> backed up at <backup path>`), then replaced with
+the vendor copy, while the rest of the install proceeds normally. The default
+behavior is unchanged unless this flag is passed.
 
 ## Backups, rollback, and uninstall
 

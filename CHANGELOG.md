@@ -35,6 +35,12 @@ all skills.
 
 ### Fixed
 
+- `setup.sh`/`ffs_installer.py` hard-blocked the *entire* install whenever a
+  single managed skill path had an edited/unmanaged collision, with no way to
+  proceed for the rest of the skills. New `--adopt-collisions` flag backs up
+  the colliding path (printing the backup location) and installs the vendor
+  copy for just that path, while every other skill installs normally. Default
+  behavior (hard-block, fail-closed) is unchanged unless the flag is passed.
 - `tests/bats/socratic-enum-drift.bats` no longer fails on upstream's
   `packs/_template` scaffold, which ships a `core.md` but is deliberately
   absent from `PACK_ENUM`. The suite is opt-in (`FFS_SOCRATIC_DIR`), so it had

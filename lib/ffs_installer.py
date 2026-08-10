@@ -957,14 +957,20 @@ def managed_fingerprints(manifest: dict[str, Any] | None, scope: str, project: P
     return result
 
 
-def ensure_replaceable(path: Path, expected: str, managed: dict[str, str], *, broken_link_ok: bool = False) -> None:
+def ensure_replaceable(
+    path: Path, expected: str, managed: dict[str, str], *, broken_link_ok: bool = False, adopt: bool = False
+) -> bool:
+    """Return True when `path` is a collision being adopted (--adopt-collisions).
+    Raises when the collision is not replaceable and adoption was not requested."""
     if not lexists(path):
-        return
+        return False
     current = fingerprint(path)
     if current == expected or managed.get(str(path.absolute())) == current:
-        return
+        return False
     if broken_link_ok and path.is_symlink() and not path.exists():
-        return
+        return False
+    if adopt:
+        return True
     raise ActionableError(
         f"preserved edited/unmanaged collision at {path}; move it aside or restore the installed bytes, then retry"
     )
@@ -1666,7 +1672,7 @@ def install_gsd_with_rollback(source: Path, backup: Backup) -> None:
             backup.assume_created(path)
 
 
-def install(source: Path, scope: str, project: Path | None) -> int:
+def install(source: Path, scope: str, project: Path | None, *, adopt_collisions: bool = False) -> int:
     skills = source_skills(source)
     release_version = source_version(source)
     destination_manifest = manifest_path(scope, project)
@@ -1715,6 +1721,7 @@ def install(source: Path, scope: str, project: Path | None) -> int:
             for host in (Path.home() / ".agents", Path.home() / ".claude"):
                 planned.append((host / "skills" / "socratic", fingerprint(socratic), False))
     preflight_fingerprints: dict[str, str] = {}
+    adopted: list[Path] = []
     for path, expected, broken_ok in planned:
         if scope == "project":
             assert project is not None
@@ -1723,7 +1730,8 @@ def install(source: Path, scope: str, project: Path | None) -> int:
             except ValueError as exc:
                 raise ActionableError(f"project install path escapes checkout: {path}") from exc
             safe_project_destination(project, relative)
-        ensure_replaceable(path, expected, managed, broken_link_ok=broken_ok)
+        if ensure_replaceable(path, expected, managed, broken_link_ok=broken_ok, adopt=adopt_collisions):
+            adopted.append(path)
         preflight_fingerprints[str(path.absolute())] = fingerprint(path)
 
     try:
@@ -1878,6 +1886,13 @@ def install(source: Path, scope: str, project: Path | None) -> int:
     print(f"backup_id={backup.backup_id}")
     print(f"installed_scope={scope}")
     print(f"gsd=upstream-installer@{GSD_VERSION}:claude-full,codex-full")
+    if adopted:
+        backup_by_path = {entry["path"]: entry.get("backup") for entry in backup.entries}
+        for path in adopted:
+            relative_backup = backup_by_path.get(str(path.absolute()))
+            if relative_backup:
+                print(f"adopted collision: {path} backed up at {backup.directory / relative_backup}")
+        print(f"adopted_collisions={len(adopted)}")
     # Seam 6 (REQ-401, locked PROJECT.md:20): one hint line only — never a gate,
     # never changes exit codes; presence-only check on the install-target project.
     if project is not None and not (project / "config" / "environments.yaml").exists():
@@ -2485,6 +2500,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--uninstall", action="store_true")
     result.add_argument("--reconcile-consumer", type=Path)
     result.add_argument("--yes", "-y", action="store_true", help="compatibility no-op; installs are non-interactive")
+    result.add_argument(
+        "--adopt-collisions",
+        action="store_true",
+        help=(
+            "on an edited/unmanaged path collision, back up the local copy and "
+            "install the vendor copy instead of hard-blocking the whole install"
+        ),
+    )
     return result
 
 
@@ -2499,6 +2522,10 @@ def parse(argv: list[str]) -> tuple[argparse.Namespace, bool]:
     actions = sum(bool(value) for value in (args.doctor, args.rollback, args.uninstall, args.reconcile_consumer))
     if actions > 1:
         raise InvocationError("choose only one of --doctor, --rollback, --uninstall, or --reconcile-consumer")
+    if args.adopt_collisions and (args.doctor or args.rollback or args.uninstall or args.reconcile_consumer):
+        raise InvocationError(
+            "--adopt-collisions is valid only for an install (not --doctor, --rollback, --uninstall, or --reconcile-consumer)"
+        )
     if args.rollback:
         if args.scope or args.project_dir or args.json:
             raise InvocationError("--rollback accepts only a backup id")
@@ -2548,7 +2575,7 @@ def main(argv: list[str] | None = None) -> int:
                 return doctor(args.scope, project, args.json)
             if args.uninstall:
                 return uninstall(args.scope, project)
-            return install(source, args.scope, project)
+            return install(source, args.scope, project, adopt_collisions=args.adopt_collisions)
     except InvocationError as exc:
         return invalid_report(str(exc), as_json)
     except ActionableError as exc:

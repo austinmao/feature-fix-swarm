@@ -1346,6 +1346,65 @@ def test_project_install_preserves_destination_created_after_preflight(
     assert injected.read_text() == "preserve me\n"
 
 
+def test_project_install_adopts_single_collision_without_blocking_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A single edited/unmanaged collision must not hard-block every other
+    skill by default, and --adopt-collisions must resolve just that one path
+    (backed up) while leaving the rest of the install to proceed normally."""
+    project = tmp_path / "project"
+    init_repo(project)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
+    monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
+    monkeypatch.setenv(
+        "FFS_GSD_INSTALLER", str(ROOT / "tests/fixtures/gsd-installer-stub.py")
+    )
+    monkeypatch.setenv("FFS_GSD_STUB_LOG", str(tmp_path / "gsd-installer.log"))
+
+    assert ffs_installer.install(ROOT, "project", project) == 0
+
+    skill_names = list(ffs_installer.source_skills(ROOT))
+    collided_skill, untouched_skill = skill_names[0], skill_names[1]
+    # Collision detection operates on the whole vendored skill directory (the
+    # unit the manifest tracks), so edit one file inside it.
+    collided_dir = project / ".feature-fix-swarm/vendor/skills" / collided_skill
+    collided_path = collided_dir / "SKILL.md"
+    original_text = collided_path.read_text()
+    collided_path.write_text("locally edited\n")
+
+    # RED: today, ONE colliding path hard-blocks the entire install, even for
+    # skills that never changed.
+    with pytest.raises(
+        ffs_installer.ActionableError,
+        match="preserved edited/unmanaged collision",
+    ):
+        ffs_installer.install(ROOT, "project", project)
+    assert collided_path.read_text() == "locally edited\n"
+
+    capsys.readouterr()
+    exit_code = ffs_installer.install(ROOT, "project", project, adopt_collisions=True)
+    assert exit_code == 0
+
+    out = capsys.readouterr().out
+    assert f"adopted collision: {collided_dir}" in out
+    assert "adopted_collisions=1" in out
+
+    # The collided skill was restored to the vendor bytes...
+    assert collided_path.read_text() == original_text
+    # ...and the untouched skill still installed correctly.
+    untouched_link = project / ".claude/skills" / untouched_skill
+    assert untouched_link.is_symlink()
+
+    # ...and the local edit is recoverable from the printed backup path.
+    backup_line = next(line for line in out.splitlines() if "adopted collision:" in line)
+    backup_path = Path(backup_line.rsplit("backed up at ", 1)[1])
+    assert (backup_path / "SKILL.md").read_text() == "locally edited\n"
+
+
 def test_project_entry_replacement_preserves_creation_during_materialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
