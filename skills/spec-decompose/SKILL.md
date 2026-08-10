@@ -134,6 +134,12 @@ without repeating the requirement ID. This intentionally overrides gsd-core's
 stale template prose that says PLAN requirements cannot be empty—its executor
 otherwise marks repeated IDs complete after the first plan.
 
+### Step 3.5: Plan-length gate
+
+After plans are written for each phase and before the coherence gate, run
+`bash scripts/gsd/plan-length-gate.sh <PHASE_DIR>`. Route every nonzero result
+to a replan; never hand-truncate a plan to satisfy the limit.
+
 ### Step 4: Coherence gate
 
 `python3 lib/gates.py analyze` against the seeded project where applicable; ERROR on
