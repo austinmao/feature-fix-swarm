@@ -3975,6 +3975,24 @@ def test_surfaces_parser_unknown_field_structural_rejects_stay() -> None:
               "      inner: x\n")
     with pytest.raises(ValueError):
         gates._load_manifest_text(nested)
+    # codex round-2 HIGH: a comment-masked nested-map opener is tolerated as
+    # a scalar, and its CHILD must not be consumed as a row-level field —
+    # field indent is pinned by the first field line of the row
+    masked_nested = ("surfaces:\n"
+                     "  - surface: web\n"
+                     "    extras: # nested map\n"
+                     "      staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc3:
+        gates._load_manifest_text(masked_nested)
+    assert "indent" in str(exc3.value)
+    # same shape with an allowlisted opener's child — also rejected
+    masked_allowlisted_child = ("surfaces:\n"
+                                "  - surface: web\n"
+                                "    staging_instance: stg-web\n"
+                                "      prod_instance: deep\n")
+    with pytest.raises(ValueError) as exc4:
+        gates._load_manifest_text(masked_allowlisted_child)
+    assert "indent" in str(exc4.value)
 
 
 def test_surfaces_parser_allowlist_loads() -> None:
