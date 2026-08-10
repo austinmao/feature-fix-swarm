@@ -44,13 +44,12 @@ if not staging:
     sys.exit(0)  # no staging grant → silent, empty stdout
 
 promos = data.get("_promotions") if isinstance(data.get("_promotions"), dict) else {}
-# sig 156cf77a + 1ea31e0b: `_promotions` records are the ONLY run+surface
-# binding the store schema has (fields: surface/artifact/evidence_ids/
-# recorded_at). Evidence claimed by ANY run's promotion records is attributed
-# there and never re-bound by the fallback pool below.
-claimed = {e for recs in promos.values() if isinstance(recs, list)
-           for r in recs if isinstance(r, dict)
-           for e in (r.get("evidence_ids") or []) if isinstance(e, str)}
+# sig 156cf77a + 1ea31e0b (diff review 2026-08-10 hardening): `_promotions`
+# records are the ONLY run+surface binding the store schema has (fields:
+# surface/artifact/evidence_ids/recorded_at). Top-level gate records carry
+# NO ownership, so there is deliberately NO fallback pool over them — an
+# unbound passing artifact from another run/surface must never be emitted;
+# a run whose staging promote was never recorded gets the advisory below.
 
 
 def qualifying(entry):
@@ -68,18 +67,6 @@ def gate_shapes(art, evs):
         if not _ID_RE.fullmatch(e):
             refuse("evidence id", "identifier")
 
-
-# Fallback pool: UNCLAIMED top-level passing artifact-bound records, kept in
-# store insertion order — append order is the only temporal signal the
-# top-level schema carries (gate records have no ts field; sig 7cec17e8).
-pool = []
-for idx, (eid, entry) in enumerate(data.items()):
-    if eid.startswith("_") or eid in claimed or not isinstance(eid, str):
-        continue
-    if qualifying(entry):
-        if not _ID_RE.fullmatch(eid):
-            refuse("evidence id", "identifier")
-        pool.append((idx, eid, entry["gate"]["artifact"]))
 
 out, errs = [], []
 for action in staging:
@@ -100,14 +87,6 @@ for action in staging:
         if all(qualifying(data.get(e, {}))
                and data[e]["gate"]["artifact"] == art for e in evs):
             cands.append((float(r.get("recorded_at") or 0), art, evs))
-    if not cands:
-        by_art = {}
-        for idx, eid, art in pool:
-            gate_shapes(art, [eid])
-            slot = by_art.setdefault(art, [idx, []])
-            slot[0] = idx  # last insertion index for this artifact
-            slot[1].append(eid)
-        cands = [(float(idx), art, evs) for art, (idx, evs) in by_art.items()]
     if not cands:
         # advisory: value-free, ONE stderr line, still exit 0
         errs.append("PROMOTE-EMIT-ADVISORY: staging deploy grant present but "

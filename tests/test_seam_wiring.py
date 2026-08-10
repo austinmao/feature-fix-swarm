@@ -75,6 +75,8 @@ def _emit(store, run="run-42"):
 def test_emit_single_staging_grant(tmp_path):
     data = {"gate-1": _gate(DIG_A)}
     data["_autonomy"] = _grants(["deploy:staging-web"])
+    data["_promotions"] = {"run-42": [_promo("web", DIG_A, ["gate-1"],
+                                             time.time())]}
     store = _write_store(tmp_path, data)
     r = _emit(store)
     assert r.returncode == 0, r.stderr
@@ -144,6 +146,9 @@ def test_grant_without_evidence_one_stderr_advisory(tmp_path):
 def test_two_staging_grants_one_line_each(tmp_path):
     data = {"gate-1": _gate(DIG_A)}
     data["_autonomy"] = _grants(["deploy:staging-web", "deploy:staging-api"])
+    data["_promotions"] = {"run-42": [
+        _promo("web", DIG_A, ["gate-1"], time.time()),
+        _promo("api", DIG_A, ["gate-1"], time.time())]}
     store = _write_store(tmp_path, data)
     r = _emit(store)
     assert r.returncode == 0
@@ -154,14 +159,15 @@ def test_two_staging_grants_one_line_each(tmp_path):
 
 
 def test_emission_binds_to_run_and_surface(tmp_path):
-    # sig 156cf77a: run-77's promotion records claim gate-b/DIG_B; run-42's
-    # emit must fall back to the UNCLAIMED evidence only — DIG_B never appears.
+    # sig 156cf77a: each run's emission uses ONLY its own promotion-bound
+    # rows — run-42 binds DIG_A, run-77 binds DIG_B; neither sees the other.
     data = {"gate-a": _gate(DIG_A), "gate-b": _gate(DIG_B)}
     auto = _grants(["deploy:staging-web"], run="run-42")
     auto.update(_grants(["deploy:staging-web"], run="run-77"))
     data["_autonomy"] = auto
-    data["_promotions"] = {"run-77": [_promo("web", DIG_B, ["gate-b"],
-                                            time.time())]}
+    data["_promotions"] = {
+        "run-42": [_promo("web", DIG_A, ["gate-a"], time.time())],
+        "run-77": [_promo("web", DIG_B, ["gate-b"], time.time())]}
     store = _write_store(tmp_path, data)
     r = _emit(store, run="run-42")
     assert r.returncode == 0, r.stderr
@@ -194,18 +200,19 @@ def test_multiple_artifacts_latest_by_ts_wins_and_skipped_named(tmp_path):
     assert DIG_A in r.stderr  # skipped candidate named — auditable
 
 
-def test_multiple_artifacts_fallback_insertion_order(tmp_path):
-    # sig 7cec17e8 (fallback path): no promotion binding — the store's append
-    # order is the only ts the schema has; the LAST-appended artifact wins.
+def test_unbound_evidence_never_emits_advisory_instead(tmp_path):
+    # sigs 156cf77a + 1ea31e0b (diff review 2026-08-10): top-level gate
+    # records carry no run/surface ownership — with no _promotions binding
+    # they must NOT be emitted (the removed fallback pool could promote an
+    # unrelated run's artifact); the advisory fires and stdout stays empty.
     data = {"gate-a": _gate(DIG_A), "gate-b": _gate(DIG_B)}
     data["_autonomy"] = _grants(["deploy:staging-web"])
     store = _write_store(tmp_path, data)
     r = _emit(store)
     assert r.returncode == 0, r.stderr
-    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
-    assert len(lines) == 1
-    assert DIG_B in lines[0]
-    assert DIG_A in r.stderr  # skipped candidate named
+    assert r.stdout.strip() == ""
+    assert "PROMOTE-EMIT-ADVISORY" in r.stderr
+    assert DIG_A not in r.stdout and DIG_B not in r.stdout
 
 
 def test_injection_proof_metachar_artifact_refused(tmp_path):
@@ -214,6 +221,8 @@ def test_injection_proof_metachar_artifact_refused(tmp_path):
     evil = "x; rm -rf /tmp/pwn @sha256:" + "c" * 64
     data = {"gate-1": _gate(evil)}
     data["_autonomy"] = _grants(["deploy:staging-web"])
+    data["_promotions"] = {"run-42": [_promo("web", evil, ["gate-1"],
+                                             time.time())]}
     store = _write_store(tmp_path, data)
     r = _emit(store)
     assert r.returncode == 1
@@ -535,6 +544,8 @@ def test_ac011_env_i_path_stub_fence_no_egress(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     data = {"gate-1": _gate(DIG_A)}
     data["_autonomy"] = _grants(["deploy:staging-web"])
+    data["_promotions"] = {"run-42": [_promo("web", DIG_A, ["gate-1"],
+                                             time.time())]}
     store = _write_store(tmp_path, data)
     r2 = subprocess.run(
         [*base, f"GATES_STORE={store}", "bash", str(EMIT), "run-42"],
