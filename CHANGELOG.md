@@ -8,6 +8,14 @@ all skills.
 
 ## Unreleased
 
+### Added
+
+- `scripts/gsd/reconcile.sh` provides a one-pass, coord-claimed recovery path for durable lifecycle records, and `docs/healing.md` documents its operator controls and recovery boundaries.
+
+### Changed
+
+- `scripts/gsd/gsd-run.sh` retries one failed drive by default (`FFS_RESPAWN_MAX=1`): rc 124 retries once, while other failures retry only after a zero-commit probe.
+
 ### Changed
 
 - Dependency refresh (2026-08-08): `@opengsd/gsd-core` exact pin `1.9.1` →

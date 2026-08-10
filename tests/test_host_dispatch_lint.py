@@ -46,6 +46,13 @@ def test_feature_implement_declares_the_wall_await_rule() -> None:
     assert "## Wall await rule" in text
 
 
+def test_entrypoint_skills_advertise_the_fail_soft_reconcile_pass() -> None:
+    for name in ("feature-spec", "feature-implement", "task-swarm", "fix", "swarm", "code-uplift", "preflight"):
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        assert "bash scripts/gsd/reconcile.sh" in text, name
+        assert text.index("bash scripts/gsd/reconcile.sh") > text.index("## Host dispatch contract"), name
+
+
 def test_spec_decompose_declares_the_plan_length_gate_step() -> None:
     text = (ROOT / "skills" / "spec-decompose" / "SKILL.md").read_text()
     assert "### Step 3.5: Plan-length gate" in text

@@ -17,6 +17,8 @@ Usage:
   lifecycle.sh ci-failed <run> <reason>
   lifecycle.sh show <run>
   lifecycle.sh validate <run>
+  lifecycle.sh relaunch <run> <reason>
+  lifecycle.sh set-pid <run> <pid>
 USAGE
 }
 
@@ -31,7 +33,7 @@ VERB="${1:-}"
 [ -n "$VERB" ] || { usage; fail 'usage'; }
 shift
 case "$VERB" in
-  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-gh-error|ci-probe-success|ci-ready|ci-failed|show|validate) ;;
+  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-gh-error|ci-probe-success|ci-ready|ci-failed|show|validate|relaunch|set-pid) ;;
   *) usage; fail 'usage' ;;
 esac
 
@@ -127,6 +129,12 @@ def validate(record: dict) -> None:
         fail("invalid-budgets")
 
 
+def save_validated(path: Path, record: dict) -> None:
+    """Keep write verbs from persisting records the reader would reject."""
+    validate(record)
+    save(path, record)
+
+
 def transition(record: dict, target: str, reason: str) -> None:
     source = record.get("state")
     if target not in TRANSITIONS.get(source, set()):
@@ -169,7 +177,7 @@ if verb == "checkpoint":
                       "resume_argv": resume_argv, "budgets": budgets,
                       "waiting_since": now() if state == "waiting" else None,
                       "wake_at": None, "updated_at": now()}
-        save(path, record)
+        save_validated(path, record)
 elif verb == "transition":
     if len(args) != 3:
         fail("usage")
@@ -181,7 +189,7 @@ elif verb == "transition":
         record = load(path)
         source = record["state"]
         transition(record, target, reason)
-        save(path, record)
+        save_validated(path, record)
     print(f"LIFECYCLE:{source}>{target} run={run_id} reason={reason}")
 elif verb == "decrement":
     if len(args) != 2 or args[1] not in BUDGETS:
@@ -223,7 +231,7 @@ elif verb == "wake-checkpoint":
             record["state"] = "failed"
             record["reason"] = "wake-budget-exhausted"
             record["updated_at"] = now()
-            save(path, record)
+            save_validated(path, record)
             print("LIFECYCLE:wake-exhausted")
             raise SystemExit(2)
         record["budgets"]["wakes"] -= 1
@@ -233,7 +241,7 @@ elif verb == "wake-checkpoint":
         record["wake_at"] = wake_at
         record["waiting_since"] = now()
         record["updated_at"] = now()
-        save(path, record)
+        save_validated(path, record)
     print(f"LIFECYCLE:wake-reserved run={run_id}")
 elif verb == "ci-reserve":
     if len(args) != 3:
@@ -255,21 +263,21 @@ elif verb == "ci-reserve":
             print("LIFECYCLE:ci-cas-lost")
         elif record["budgets"].get("ci_reruns", 0) <= 0:
             record["state"] = "failed"; record["reason"] = "ci-rerun-exhausted"; record["updated_at"] = now()
-            save(path, record)
+            save_validated(path, record)
             print("LIFECYCLE:ci-exhausted")
         else:
             record["budgets"]["ci_reruns"] -= 1
             ci["last_classified_attempt"] = attempt
             ci["rerun_pending"] = True
             record["updated_at"] = now()
-            save(path, record)
+            save_validated(path, record)
             print("LIFECYCLE:ci-reserved")
 elif verb == "ci-complete-rerun":
     if len(args) != 1:
         fail("usage")
     path = path_for(args[0])
     with FileLock(f"{path}.lock"):
-        record = load(path); record.setdefault("ci", {})["rerun_pending"] = False; record["updated_at"] = now(); save(path, record)
+        record = load(path); record.setdefault("ci", {})["rerun_pending"] = False; record["updated_at"] = now(); save_validated(path, record)
 elif verb == "ci-gh-error":
     if len(args) != 2:
         fail("usage")
@@ -277,25 +285,25 @@ elif verb == "ci-gh-error":
     with FileLock(f"{path}.lock"):
         record = load(path); ci = record.setdefault("ci", {}); ci["gh_errors"] = int(ci.get("gh_errors", 0)) + 1
         if ci["gh_errors"] >= int(args[1]): record["state"] = "failed"; record["reason"] = "ci-gh-error-exhausted"
-        record["updated_at"] = now(); save(path, record); print(f"LIFECYCLE:ci-gh-errors={ci['gh_errors']}")
+        record["updated_at"] = now(); save_validated(path, record); print(f"LIFECYCLE:ci-gh-errors={ci['gh_errors']}")
 elif verb == "ci-probe-success":
     if len(args) != 1:
         fail("usage")
     path = path_for(args[0])
     with FileLock(f"{path}.lock"):
-        record = load(path); record.setdefault("ci", {})["gh_errors"] = 0; record["updated_at"] = now(); save(path, record)
+        record = load(path); record.setdefault("ci", {})["gh_errors"] = 0; record["updated_at"] = now(); save_validated(path, record)
 elif verb == "ci-ready":
     if len(args) != 1:
         fail("usage")
     path = path_for(args[0])
     with FileLock(f"{path}.lock"):
-        record = load(path); transition(record, "runnable", "ci-pass"); record.setdefault("ci", {})["gh_errors"] = 0; save(path, record)
+        record = load(path); transition(record, "runnable", "ci-pass"); record.setdefault("ci", {})["gh_errors"] = 0; save_validated(path, record)
 elif verb == "ci-failed":
     if len(args) != 2:
         fail("usage")
     path = path_for(args[0])
     with FileLock(f"{path}.lock"):
-        record = load(path); transition(record, "failed", args[1]); save(path, record)
+        record = load(path); transition(record, "failed", args[1]); save_validated(path, record)
 elif verb == "show":
     if len(args) != 1:
         fail("usage")
@@ -304,4 +312,31 @@ elif verb == "validate":
     if len(args) != 1:
         fail("usage")
     validate(load(path_for(args[0])))
+elif verb == "relaunch":
+    if len(args) != 2:
+        fail("usage")
+    run_id, reason = args
+    path = path_for(run_id)
+    with FileLock(f"{path}.lock"):
+        record = load(path)
+        validate(record)
+        if record["state"] not in {"waiting", "runnable"}:
+            fail("not-relaunchable")
+        if record["budgets"]["respawns"] <= 0:
+            record["state"] = "failed"; record["reason"] = "respawn-budget-exhausted"; record["updated_at"] = now()
+            save_validated(path, record)
+            fail("budget-exhausted")
+        record["budgets"]["respawns"] -= 1
+        record["state"] = "running"; record["reason"] = reason; record["launched_at"] = int(dt.datetime.now().timestamp()); record["launcher_pid"] = os.getpid(); record["updated_at"] = now()
+        save_validated(path, record)
+        print(json.dumps(record["resume_argv"]))
+elif verb == "set-pid":
+    if len(args) != 2 or not args[1].isdigit():
+        fail("usage")
+    path = path_for(args[0])
+    with FileLock(f"{path}.lock"):
+        record = load(path); validate(record)
+        if record["state"] != "running":
+            fail("not-running")
+        record["child_pid"] = int(args[1]); record["updated_at"] = now(); save_validated(path, record)
 PYEOF

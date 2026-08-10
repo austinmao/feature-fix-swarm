@@ -19,6 +19,8 @@ allowed-tools:
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 ## When to invoke
 
 - After `/feature-spec` or `/spec-decompose` produced a seeded gsd project (`.planning/`)

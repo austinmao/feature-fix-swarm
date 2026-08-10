@@ -230,7 +230,7 @@ _pw_write_record() {
 # _pw_await reads the pinned plan set only.  It deliberately returns before
 # the driver and its loop-round mutation, so this is a safe foreground poll.
 _pw_await() {
-  local started poll elapsed plan slug rel path sha verdict saw pending unreadable
+  local started poll elapsed remaining sleep_for plan slug rel path sha verdict saw pending unreadable
   started="$SECONDS"
   poll="${PLAN_WALL_AWAIT_POLL:-15}"
   case "$poll" in *[!0-9]*|'') poll=15 ;; esac
@@ -286,7 +286,12 @@ _pw_await() {
       echo "WALL-AWAIT:pending phase=$PHASE_DIR" >&2
       return 75
     fi
-    sleep "$poll"
+    elapsed=$((SECONDS - started))
+    remaining=$((PW_AWAIT_SECS - elapsed))
+    [ "$remaining" -gt 0 ] || return 75
+    sleep_for="$poll"
+    [ "$sleep_for" -le "$remaining" ] || sleep_for="$remaining"
+    sleep "$sleep_for"
   done
 }
 

@@ -1310,13 +1310,37 @@ fi
 # "why is this phase slow" question unanswerable.
 write_run_status running
 cd "$RUN_WORKTREE_ROOT" || exit 1
-DRIVE_CAPTURE="$(mktemp "${TMPDIR:-/tmp}/ffs-gsd-drive.XXXXXX")" || exit 1
-run_bounded "$TIMEOUT_SECS" "${RUN[@]}" </dev/null 2>&1 \
-  | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' > "$LOG_FILE") \
-  | tee "$DRIVE_CAPTURE"
-rc="${PIPESTATUS[0]}"
-budget_account_tail "$DRIVE_CAPTURE" || { rm -f "$DRIVE_CAPTURE"; exit 1; }
-rm -f "$DRIVE_CAPTURE"
+RESPAWN_MAX="${FFS_RESPAWN_MAX:-1}"
+RESPAWN_MIN_SECS="${FFS_RESPAWN_MIN_SECS:-600}"
+RESPAWN_BASE_SHA="$(git -C "$RUN_WORKTREE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+attempt=1
+attempt_timeout="$TIMEOUT_SECS"
+: > "$LOG_FILE"
+while :; do
+  DRIVE_CAPTURE="$(mktemp "${TMPDIR:-/tmp}/ffs-gsd-drive.XXXXXX")" || exit 1
+  run_bounded "$attempt_timeout" "${RUN[@]}" </dev/null 2>&1 \
+    | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' >> "$LOG_FILE") \
+    | tee "$DRIVE_CAPTURE"
+  rc="${PIPESTATUS[0]}"
+  budget_account_tail "$DRIVE_CAPTURE" || { rm -f "$DRIVE_CAPTURE"; exit 1; }
+  rm -f "$DRIVE_CAPTURE"
+  [ "$rc" -eq 0 ] && break
+  [ "$attempt" -le "$RESPAWN_MAX" ] || break
+  grep -qx 'state=quarantined' "$RUN_STATUS_FILE" 2>/dev/null && break
+  should_respawn=0
+  if [ "$rc" -eq 124 ]; then
+    should_respawn=1
+  elif [ -n "$RESPAWN_BASE_SHA" ]; then
+    commit_count="$(git -C "$RUN_WORKTREE_ROOT" rev-list --count "$RESPAWN_BASE_SHA"..HEAD 2>/dev/null)" || commit_count=error
+    [[ "$commit_count" =~ ^[0-9]+$ ]] && [ "$commit_count" -eq 0 ] && should_respawn=1
+  fi
+  [ "$should_respawn" -eq 1 ] || break
+  echo "GSD-RUN:RESPAWN attempt=$((attempt + 1))/$((RESPAWN_MAX + 1)) rc=$rc" >&2
+  printf 'GSD-RUN:RESPAWN attempt=%s/%s rc=%s\n' "$((attempt + 1))" "$((RESPAWN_MAX + 1))" "$rc" >> "$LOG_FILE"
+  attempt=$((attempt + 1))
+  attempt_timeout="$RESPAWN_MIN_SECS"
+  [ "$attempt_timeout" -le "$TIMEOUT_SECS" ] || attempt_timeout="$TIMEOUT_SECS"
+done
 if [ "$rc" -ne 0 ]; then
   echo "gsd-run: stateful drive failed on $SELECTED_HOST (rc=$rc); cross-vendor replay is forbidden" >&2
   echo "gsd-run: fix availability if needed, then resume on $SELECTED_HOST from .planning state; log: $LOG_FILE" >&2

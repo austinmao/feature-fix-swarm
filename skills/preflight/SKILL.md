@@ -12,6 +12,8 @@ version: "2.0.0"
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 An unattended run that stops on a missing env var wasted the whole night.
 Requirements are proven at plan time — while the operator is still present —
 never discovered at run time.
