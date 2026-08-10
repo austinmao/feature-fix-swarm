@@ -2122,6 +2122,7 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
     rows: list[dict[str, str]] = []
     current: dict[str, str] | None = None
     seen_fields: set[str] = set()
+    row_field_indent: int | None = None
     for line_no, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -2163,6 +2164,7 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
             }
             # seed `surface` as seen: a redeclared in-row surface rejects
             seen_fields = {"surface"}
+            row_field_indent = None
             continue
         field_match = re.fullmatch(_MANIFEST_FIELD_PAT, stripped)
         if field_match:
@@ -2173,6 +2175,16 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
                 raise ValueError(
                     f"field line {key!r} before any '- surface:' row at "
                     f"line {line_no}")
+            # first field line pins the row's field indent; any deviation
+            # rejects — a nested block's child (e.g. under a tolerated
+            # unknown opener masked by an inline comment) must never be
+            # consumed as a ROW-level field (codex #108 round-2 HIGH)
+            if row_field_indent is None:
+                row_field_indent = indent
+            elif indent != row_field_indent:
+                raise ValueError(
+                    f"inconsistent field indent in surface row at line "
+                    f"{line_no} (expected {row_field_indent}, got {indent})")
             if key in seen_fields:
                 raise ValueError(
                     f"duplicate field {key!r} in surface row at line "
@@ -2198,6 +2210,12 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
                 raise ValueError(
                     f"field line {key!r} before any '- surface:' row at "
                     f"line {line_no}")
+            if row_field_indent is None:
+                row_field_indent = indent
+            elif indent != row_field_indent:
+                raise ValueError(
+                    f"inconsistent field indent in surface row at line "
+                    f"{line_no} (expected {row_field_indent}, got {indent})")
             if key in seen_fields:
                 raise ValueError(
                     f"duplicate field {key!r} in surface row at line "
