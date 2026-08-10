@@ -2316,6 +2316,25 @@ def _resolve_registry(args: list[str]) -> tuple[dict | None, str, str | None, bo
     Reason strings name the SOURCE token, never an absolute path, and carry
     a remedy."""
     root = _main_checkout_root()
+    # Hard mode (diff review 2026-08-10): PD-2's working-tree parse governs
+    # SOFT mode and the refusal taxonomy only. Under --require-environments /
+    # FFS_ENV_REGISTRY_REQUIRED=1 the VERDICT content for caller-supplied
+    # paths comes from HEAD bytes too — hard mode already demands a tracked,
+    # committed v1 registry, and reading the marker from HEAD while parsing
+    # governing content from a dirty working tree let an uncommitted edit
+    # flip `staging_instance` past the prod refusal.
+    hard = ("--require-environments" in args
+            or os.environ.get("FFS_ENV_REGISTRY_REQUIRED", "").strip() == "1")
+
+    def _hard_content(head_bytes, src):
+        """HEAD-bytes manifest for the hard-mode verdict, or a refusal."""
+        try:
+            return _load_manifest_text(head_bytes), None
+        except ValueError as exc:
+            return None, (f"ENV-REGISTRY-INVALID: {src} committed (HEAD) "
+                          f"bytes failed to parse under "
+                          f"--require-environments: {exc}; remedy: commit a "
+                          "valid registry")
 
     # Step 1: explicit --manifest. None = flag absent; "" = present-empty,
     # REJECTED (EDGE-011, the _flag None sentinel — signature untouched).
@@ -2339,6 +2358,12 @@ def _resolve_registry(args: list[str]) -> tuple[dict | None, str, str | None, bo
                 head = _head_bytes(root, rel)
                 if head is not None and _V1_MARKER.search(head):
                     kind += ":v1"
+                    if hard:
+                        head_manifest, hr = _hard_content(head, "--manifest")
+                        if hr is not None:
+                            return None, kind, hr, False
+                        dirty_caller = head_manifest != manifest
+                        return head_manifest, kind, None, dirty_caller
         return manifest, kind, None, False
 
     # Step 2: $FFS_ENV_REGISTRY — an unaudited one-word control channel
@@ -2388,6 +2413,11 @@ def _resolve_registry(args: list[str]) -> tuple[dict | None, str, str | None, bo
                     f"ENV-REGISTRY-INVALID: {src} failed to parse: {exc}; "
                     "remedy: fix the registry and commit the fix", False)
         kind = src + (":v1" if _V1_MARKER.search(head) else "")
+        if hard and kind.endswith(":v1"):
+            head_manifest, hr = _hard_content(head, src)
+            if hr is not None:
+                return None, kind, hr, False
+            return head_manifest, kind, None, head_manifest != manifest
         return manifest, kind, None, False
 
     # Steps 3-4: implicit default filenames — HEAD bytes, sole authority.
@@ -2967,8 +2997,11 @@ def main(argv: list[str]) -> int:
                           f"{sanitize_reason(hard_refusal)}", file=sys.stderr)
                     return 1
             if dirty:
-                # single ENV-REGISTRY-DIRTY emission site (REQ-102); dirty is
-                # only ever set by the implicit steps, whose kind is the rel
+                # single ENV-REGISTRY-DIRTY emission site (REQ-102); set by
+                # the implicit steps (kind = rel) and, under hard mode, by
+                # caller-supplied sources whose working tree diverges from
+                # the HEAD bytes that govern the verdict (diff review
+                # 2026-08-10)
                 print(f"ENV-REGISTRY-DIRTY: {kind.removesuffix(':v1')} "
                       "working tree differs from HEAD; committed bytes "
                       "govern this verdict", file=sys.stderr)

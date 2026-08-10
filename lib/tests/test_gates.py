@@ -3464,6 +3464,41 @@ def test_env_registry_hard_mode_flag_and_env_byte_identical(tmp_path) -> None:
         assert r_off.returncode == 0, (off, r_off.stdout + r_off.stderr)
 
 
+def test_env_registry_hard_mode_dirty_caller_supplied_head_governs(tmp_path) -> None:
+    # Diff review 2026-08-10: hard mode read the v1 marker from HEAD but
+    # parsed governing content from the working tree, so an uncommitted edit
+    # to a tracked registry could flip `staging_instance: none` past the
+    # prod refusal. Under hard mode, HEAD bytes govern the verdict for
+    # caller-supplied sources too; soft mode keeps PD-2's working-tree read.
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path)   # committed: web / none
+    rel = "config/environments.yaml"
+    dirty = _ENV_REGISTRY_WEB.replace("staging_instance: none",
+                                      "staging_instance: stg-web")
+    (repo / rel).write_text(dirty)         # uncommitted flip
+    store = tmp_path / "evidence.json"
+    for src_extra in (["--manifest", rel], None):
+        store.unlink(missing_ok=True)
+        env = _env_registry_env(store)
+        if src_extra is None:
+            env["FFS_ENV_REGISTRY"] = rel
+        _seed_prod_ok(env, repo)
+        extra = ["--require-environments"] + (src_extra or [])
+        r = _check_grant_prod_cli(env, repo, extra=extra)
+        assert r.returncode == 1, (src_extra, r.stdout + r.stderr)
+        assert any("NO-STAGING-COUNTERPART" in x
+                   for x in _pending_reasons(store)), src_extra
+        assert "ENV-REGISTRY-DIRTY" in r.stderr, src_extra
+        # soft mode: PD-2 working-tree bytes govern — the flip is honored
+        store.unlink(missing_ok=True)
+        env_soft = _env_registry_env(store)
+        if src_extra is None:
+            env_soft["FFS_ENV_REGISTRY"] = rel
+        _seed_prod_ok(env_soft, repo)
+        r_soft = _check_grant_prod_cli(env_soft, repo, extra=src_extra or [])
+        assert r_soft.returncode == 0, (src_extra, r_soft.stdout + r_soft.stderr)
+
+
 def test_env_registry_hard_mode_rejects_legacy_and_json_kinds(tmp_path) -> None:
     import subprocess as _sp
     # legacy parity-manifest satisfies SOFT mode only
