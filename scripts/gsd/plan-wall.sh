@@ -267,7 +267,7 @@ _pw_await() {
           reviewed-pass|adjudicated-pass|pass-residual|WAIVED) ;;
           *) saw=1 ;;
         esac
-        case "$verdict" in blocked) saw=2 ;; esac
+        case "$verdict" in blocked|WALL-ROUND-CAP) saw=2 ;; esac
       done
       [ "$trusted" -eq 1 ] || pending=1
     done

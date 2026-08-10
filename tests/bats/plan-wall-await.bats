@@ -59,3 +59,9 @@ write_record() {
   mkdir elsewhere; cd elsewhere; run bash "$WALL" --await 1 "$REPO/.planning/phases/1-foo"
   [ "$status" -eq 0 ]
 }
+
+@test "await classifies a WALL-ROUND-CAP verdict as decided-blocked (AC-001)" {
+  write_record WALL-ROUND-CAP
+  run bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 20 ]; [[ "$output" == *'WALL-AWAIT:decided-blocked'* ]]
+}
