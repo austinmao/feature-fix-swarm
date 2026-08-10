@@ -2182,6 +2182,31 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
                 current[key] = _manifest_scalar(field_match.group(2),
                                                 line_no=line_no)
             continue
+        # Consumer-repo extension keys (openclaw#1699): an unknown scalar
+        # `key: value` INSIDE a row is tolerated with a stderr WARN — the
+        # gate only consumes surface + staging keys, and a dropped staging
+        # key fails CLOSED (prod grant refused), so this cannot fail open.
+        # Structural strictness stays: duplicates and field-before-row
+        # reject exactly like allowlisted keys; a value-less nested-map
+        # opener never matches (value required) and still rejects below.
+        # WARN prints key + line only, never the value (A8 value-stripping).
+        extension_match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_-]*):\s*(\S.*)", stripped)
+        if extension_match:
+            key = extension_match.group(1)
+            if current is None:
+                raise ValueError(
+                    f"field line {key!r} before any '- surface:' row at "
+                    f"line {line_no}")
+            if key in seen_fields:
+                raise ValueError(
+                    f"duplicate field {key!r} in surface row at line "
+                    f"{line_no}")
+            seen_fields.add(key)
+            print(f"WARNING: unknown manifest field {key!r} at line "
+                  f"{line_no} ignored (consumer extension key)",
+                  file=sys.stderr)
+            continue
         raise ValueError(
             f"unsupported line in surfaces block at line {line_no}: "
             f"{stripped[:60]!r}")
