@@ -25,7 +25,7 @@ write_record() {
 @test "await returns done for each PASS-class record and is read-only" {
   for verdict in reviewed-pass adjudicated-pass pass-residual WAIVED; do
     write_record "$verdict"; cp "$GATES_STORE" before
-    run PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+    run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
     [ "$status" -eq 0 ]; [[ "$output" == *'WALL-AWAIT:done'* ]]; cmp before "$GATES_STORE"
   done
 }
@@ -38,16 +38,16 @@ write_record() {
 
 @test "stale, foreign, malformed and forged records remain pending" {
   write_record reviewed-pass deadbeef
-  run PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
   [ "$status" -eq 75 ]; [[ "$output" == *'WALL-AWAIT:pending'* ]]
   write_record reviewed-pass "$(shasum -a 256 .planning/phases/1-foo/PLAN.md | awk '{print $1}')" other-run
-  run PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
   [ "$status" -eq 75 ]
   printf '{bad' > .planning/run-state/plan-wall-1-foo-plan.json
-  run PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
   [ "$status" -eq 75 ]; [[ "$output" == *'WALL-AWAIT:unreadable-record'* ]]
   jq -n --arg sha "$(shasum -a 256 .planning/phases/1-foo/PLAN.md | awk '{print $1}')" '{run_id:"spec-await",plan_sha256:$sha,verdict:"reviewed-pass"}' > .planning/run-state/plan-wall-1-foo-plan.json
-  run PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
   [ "$status" -eq 75 ]
 }
 
@@ -56,6 +56,6 @@ write_record() {
   run bash "$WALL" --await 5 .planning/phases/empty
   [ "$status" -eq 1 ]; [[ "$output" == *'WALL-AWAIT:no-plans'* ]]
   write_record reviewed-pass
-  cd /; run bash "$WALL" --await 1 "$REPO/.planning/phases/1-foo"
+  mkdir elsewhere; cd elsewhere; run bash "$WALL" --await 1 "$REPO/.planning/phases/1-foo"
   [ "$status" -eq 0 ]
 }

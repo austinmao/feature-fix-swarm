@@ -8,7 +8,7 @@
 # (which this lever cannot wrap — upstream) is closed by
 # gates-test-command.sh's completion backstop instead.
 #
-# Usage: plan-wall.sh <PHASE_DIR|PLAN_FILE>
+# Usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE>
 #   PHASE_DIR  -> enumerates *-PLAN.md + bare PLAN.md (gsd-run.sh:88 globs
 #                 .planning/phases/*/*-PLAN.md — the repo's real naming)
 #   PLAN_FILE  -> reviews exactly that one file
@@ -70,9 +70,24 @@ RUN_STATE_DIR="$PLANNING_DIR/run-state"
 SCHEMA_FILE="$REPO_ROOT/schemas/review-finding.schema.json"
 PW_TIMEOUT="${PLAN_WALL_TIMEOUT:-180}"
 
+PW_AWAIT=0
+PW_AWAIT_SECS=""
+case "${1:-}" in
+  --await)
+    PW_AWAIT=1
+    PW_AWAIT_SECS="${2:-}"
+    case "$PW_AWAIT_SECS" in *[!0-9]*|'')
+      echo "usage: plan-wall.sh --await <seconds> <PHASE_DIR|PLAN_FILE>" >&2
+      exit 2
+      ;;
+    esac
+    shift 2
+    ;;
+esac
+
 TARGET="${1:-}"
 if [ -z "$TARGET" ]; then
-  echo "usage: plan-wall.sh <PHASE_DIR|PLAN_FILE>" >&2
+  echo "usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE>" >&2
   exit 2
 fi
 
@@ -110,7 +125,9 @@ fi
 
 PLAN_FILES=()
 if [ -d "$TARGET" ]; then
-  PHASE_DIR="$TARGET"
+  # Canonicalize an absolute target so /var and /private/var spellings agree
+  # with git's repository root when await compares repo-relative record paths.
+  PHASE_DIR="$(cd "$TARGET" && pwd -P)"
   shopt -s nullglob
   for f in "$PHASE_DIR"/*-PLAN.md; do
     PLAN_FILES+=("$f")
@@ -157,7 +174,7 @@ for _pw_pf in "${PLAN_FILES[@]}"; do
 done
 unset _pw_pf
 
-mkdir -p "$RUN_STATE_DIR" 2>/dev/null || true
+[ "$PW_AWAIT" -eq 1 ] || mkdir -p "$RUN_STATE_DIR" 2>/dev/null || true
 
 # ── small helpers ────────────────────────────────────────────────────────
 
@@ -209,6 +226,77 @@ _pw_write_record() {
   mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
   return 0
 }
+
+# _pw_await reads the pinned plan set only.  It deliberately returns before
+# the driver and its loop-round mutation, so this is a safe foreground poll.
+_pw_await() {
+  local started poll elapsed plan slug rel path sha verdict saw pending unreadable
+  started="$SECONDS"
+  poll="${PLAN_WALL_AWAIT_POLL:-15}"
+  case "$poll" in *[!0-9]*|'') poll=15 ;; esac
+  while :; do
+    pending=0
+    saw=0
+    unreadable=0
+    for plan in "${PLAN_FILES[@]}"; do
+      [ -f "$plan" ] || { echo "WALL-AWAIT:no-plans phase=$PHASE_DIR" >&2; return 1; }
+      slug="$(_pw_slug "$plan")"
+      rel="$(_pw_relpath "$plan")"
+      sha="$(_pw_sha256 "$plan")"
+      local matches=()
+      shopt -s nullglob
+      matches=("$RUN_STATE_DIR/plan-wall-${PHASE_SLUG}-${slug}"*.json)
+      shopt -u nullglob
+      [ "${#matches[@]}" -gt 0 ] || { pending=1; continue; }
+      local trusted=0
+      for path in "${matches[@]}"; do
+        if ! jq -e . "$path" >/dev/null 2>&1; then
+          [ "$unreadable" -eq 1 ] || echo "WALL-AWAIT:unreadable-record file=$path" >&2
+          unreadable=1
+          continue
+        fi
+        if ! jq -e --arg rel "$rel" --arg run "$RUN_ID" --arg sha "$sha" '
+            has("planner_model") and has("reviewer_model") and has("relation") and has("source_plan") and
+            .source_plan == $rel and .run_id == $run and .plan_sha256 == $sha and has("verdict")
+          ' "$path" >/dev/null 2>&1; then
+          continue
+        fi
+        trusted=1
+        verdict="$(jq -r '.verdict' "$path" 2>/dev/null)"
+        case "$verdict" in
+          reviewed-pass|adjudicated-pass|pass-residual|WAIVED) ;;
+          *) saw=1 ;;
+        esac
+        case "$verdict" in blocked) saw=2 ;; esac
+      done
+      [ "$trusted" -eq 1 ] || pending=1
+    done
+    if [ "$pending" -eq 0 ]; then
+      if [ "$saw" -eq 0 ]; then
+        echo "WALL-AWAIT:done phase=$PHASE_DIR"
+        return 0
+      fi
+      if [ "$saw" -eq 2 ]; then
+        echo "WALL-AWAIT:decided-blocked phase=$PHASE_DIR" >&2
+        return 20
+      fi
+    fi
+    elapsed=$((SECONDS - started))
+    if [ "$elapsed" -ge "$PW_AWAIT_SECS" ]; then
+      echo "WALL-AWAIT:pending phase=$PHASE_DIR" >&2
+      return 75
+    fi
+    sleep "$poll"
+  done
+}
+
+if [ "$PW_AWAIT" -eq 1 ]; then
+  if _pw_await; then
+    exit 0
+  else
+    exit $?
+  fi
+fi
 
 _pw_planner_alias() {
   # Default matches the shipped gsd-config template's gsd-planner override
