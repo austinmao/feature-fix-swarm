@@ -14,8 +14,21 @@ setup() {
   git -C "$SCRATCH" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 }
 
-@test "fully-initialized repo: silent, exit 0" {
-  run bash "$SCRIPT"
+@test "fully-initialized repo: silent, exit 0 (hermetic)" {
+  # Construct all three markers from scratch: a copied guard with a stubbed
+  # deps.sh beside it (the guard resolves deps.sh from its own directory),
+  # a project-scope install manifest, and a HEAD-committed registry.
+  local bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$bin" "$SCRATCH/.feature-fix-swarm" "$SCRATCH/config"
+  cp "$SCRIPT" "$bin/init-guard.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/deps.sh"
+  chmod +x "$bin/deps.sh"
+  printf '{}\n' > "$SCRATCH/.feature-fix-swarm/install-manifest.json"
+  printf '# schema: ffs.environments/v1\nenvironments: []\n' > "$SCRATCH/config/environments.yaml"
+  git -C "$SCRATCH" add config/environments.yaml
+  git -C "$SCRATCH" -c user.email=t@t -c user.name=t commit -qm registry
+  cd "$SCRATCH"
+  run bash "$bin/init-guard.sh"
   [ "$status" -eq 0 ]
   [[ "$output" != *"INIT-GUARD:"* ]]
 }

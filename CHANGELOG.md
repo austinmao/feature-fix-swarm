@@ -71,11 +71,11 @@ all skills.
 - `/ffs-init` is now the umbrella initialization (v1.1.0): a new Phase 0
   installs repo-scoped dependencies before the registry flow.
   `scripts/gsd/deps.sh` is the single executable dependency roster
-  (`check | install`, exit 0/1/2; `install` runs only `npm ci` +
+  (`check | install`, exit codes 0/1/2; `install` runs only `npm ci` +
   `pip install --requirement requirements-dev.txt` — never a system package
   manager, never sudo) and `scripts/gsd/init-guard.sh` is the advisory
   pre-init warning every operator entrypoint skill now surfaces via a
-  lint-enforced `## Init gate` section (always exit 0; `--strict` for callers
+  lint-enforced `## Init gate` section (always exits zero; `--strict` for callers
   that want a hard gate). New guide: `docs/initialization.md`; roster↔docs
   drift is blocked by `tests/test_docs_dependency_roster.py`. The README
   dependency table gains the previously undocumented rows (`gh`, `jq`, the
