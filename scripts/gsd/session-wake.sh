@@ -13,8 +13,9 @@ fail() { printf 'SESSION-WAKE:%s\n' "$*" >&2; exit "${2:-1}"; }
 SESSION_WAKE_BANNER_RE='(limit reached|hit your limit|usage limit)[^[:cntrl:]]*(resets?|reset)'
 FFS_SESSION_WAKE_MAX_SECS="${FFS_SESSION_WAKE_MAX_SECS:-21600}"
 FFS_SESSION_WAKE_MAX_ATTEMPTS="${FFS_SESSION_WAKE_MAX_ATTEMPTS:-4}"
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-LIFECYCLE="$ROOT/scripts/gsd/lifecycle.sh"
+# lifecycle.sh lives beside this script — resolving it through the caller's
+# git toplevel breaks when the run worktree is not the FFS checkout.
+LIFECYCLE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lifecycle.sh"
 
 evaluate() {
   local capture="$1" drive_rc="$2" tail banner token epoch

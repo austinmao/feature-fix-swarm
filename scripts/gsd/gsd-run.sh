@@ -1253,6 +1253,9 @@ fi
 ensure_run_worktree || exit $?
 budget_prepare_mapping || exit $?
 
+# Original invocation, preserved for session-wake resume records: the
+# reconciler re-runs this exact runner argv when the wake condition fires.
+GSD_ORIG_ARGV=("scripts/gsd/gsd-run.sh" "$@")
 first="$1"
 shift
 if [ "$SELECTED_HOST" = "codex" ]; then
@@ -1324,6 +1327,20 @@ while :; do
     | tee "$DRIVE_CAPTURE"
   rc="${PIPESTATUS[0]}"
   budget_account_tail "$DRIVE_CAPTURE" || { rm -f "$DRIVE_CAPTURE"; exit 1; }
+  # Session-limit banner in a failed drive: checkpoint a durable waiting(time)
+  # record and yield — the reconciler relaunches at the reset time. Checked
+  # BEFORE the capture is deleted and before any respawn decision (AC-005).
+  if [ "$rc" -ne 0 ] && [ "${FFS_SESSION_WAKE:-on}" != off ] && [ -x "$SCRIPT_DIR/session-wake.sh" ]; then
+    if wake_out="$(bash "$SCRIPT_DIR/session-wake.sh" checkpoint "$DRIVE_CAPTURE" "$rc" \
+        --run-id "$RUN_ID" --resume-argv "${GSD_ORIG_ARGV[@]}" 2>&1)" \
+       && [[ "$wake_out" == *SESSION-WAKE:wake-at:* ]]; then
+      printf '%s\n' "$wake_out" >> "$LOG_FILE"
+      echo "GSD-RUN:SESSION-WAKE checkpointed run=$RUN_ID rc=$rc — resume deferred to reconcile" >&2
+      printf 'GSD-RUN:SESSION-WAKE checkpointed run=%s rc=%s\n' "$RUN_ID" "$rc" >> "$LOG_FILE"
+      rm -f "$DRIVE_CAPTURE"
+      break
+    fi
+  fi
   rm -f "$DRIVE_CAPTURE"
   [ "$rc" -eq 0 ] && break
   [ "$attempt" -le "$RESPAWN_MAX" ] || break

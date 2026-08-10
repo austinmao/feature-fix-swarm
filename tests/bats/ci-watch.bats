@@ -36,3 +36,29 @@ EOF
  mock; bash scripts/gsd/lifecycle.sh ci-reserve ci 1 2 >/dev/null
  run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [[ "$output" == *rerun:42* ]]; [ "$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)" = 1 ]
 }
+@test "rerun budget exhausted fails the record" {
+ bash scripts/gsd/lifecycle.sh checkpoint zero waiting ci ci-completed '{"databaseId":42}' '["scripts/gsd/plan-wall.sh"]' '{"ci_reruns":0}'
+ mock
+ run bash "$CI" evaluate --run-id zero
+ [ "$status" -ne 0 ]
+ [[ "$output" == *'CI-WATCH:rerun-exhausted'* ]]
+ [ "$(jq -r .state .planning/run-state/lifecycle-zero.json)" = failed ]
+ [ "$(jq -r .reason .planning/run-state/lifecycle-zero.json)" = ci-rerun-exhausted ]
+}
+@test "failed rerun command refunds the reservation" {
+ # Same infra-classified failure as mock(), but "gh run rerun" itself fails
+ # so the ci-reserve reservation must be refunded, not leaked.
+ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *--json* ]]; then echo '{"databaseId":42,"status":"completed","conclusion":"failure","attempt":1}'; elif [[ "$*" == *--log-failed* ]]; then echo runner-lost; elif [[ "$*" == *rerun* ]]; then exit 1; fi
+EOF
+ chmod +x "$BIN/gh"
+ pre="$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)"
+ run bash "$CI" evaluate --run-id ci
+ [ "$status" -eq 0 ]
+ [[ "$output" == *'CI-WATCH:gh-error idle'* ]]
+ [ "$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)" = "$pre" ]
+ # a refunded reservation was never spent: reruns_spent unwinds too, or
+ # repeated transient failures would falsely trip reruns_spent>=maximum
+ [ "$(jq -r .ci.reruns_spent .planning/run-state/lifecycle-ci.json)" = 0 ]
+}

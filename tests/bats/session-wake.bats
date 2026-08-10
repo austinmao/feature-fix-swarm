@@ -23,3 +23,16 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; LEVER="$ROOT/scripts/g
   run bash "$LEVER" evaluate "$FIX/claude-limit-ampm-tz.SYNTHETIC.txt" 1; [[ "$output" == *wake-at* ]]
   run bash "$LEVER" evaluate "$FIX/codex-limit.SYNTHETIC.txt" 1; [[ "$output" == *wake-at* ]]
 }
+@test "wake budget exhaustion fails the record" {
+  # First call reserves the sole attempt (budgets.wakes maximum->0, still
+  # waiting). Second call on the same run-id hits wakes<=0 in
+  # lifecycle.sh wake-checkpoint (exit 2), which session-wake.sh's checkpoint
+  # verb re-wraps via fail() -> the process itself exits 1, not 2.
+  run env FFS_SESSION_WAKE_MAX_ATTEMPTS=1 bash "$LEVER" checkpoint "$FIX/claude-limit-24h.SYNTHETIC.txt" 1 --run-id wakebudget
+  [ "$status" -eq 0 ]
+  run env FFS_SESSION_WAKE_MAX_ATTEMPTS=1 bash "$LEVER" checkpoint "$FIX/claude-limit-24h.SYNTHETIC.txt" 1 --run-id wakebudget
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'SESSION-WAKE:wake-exhausted'* ]]
+  run jq -e '.state == "failed" and .reason == "wake-budget-exhausted"' .planning/run-state/lifecycle-wakebudget.json
+  [ "$status" -eq 0 ]
+}

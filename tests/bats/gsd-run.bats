@@ -2176,3 +2176,38 @@ EOF
   [[ "$output" == *"GSD-RUN:RESPAWN budget-exhausted run=$run_id"* ]]
   [[ "$output" != *"GSD-RUN:RESPAWN attempt="* ]]
 }
+
+@test "respawn: session-limit banner checkpoints waiting(time) instead of respawning" {
+  cat > "$STUB_DIR/wake-banner-drive" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+printf 'x\n' >> "$BATS_TEST_TMPDIR/wake-banner-drive.count"
+echo "You have hit your usage limit. Your limit resets 3:30 pm"
+exit 1
+EOF
+  chmod +x "$STUB_DIR/wake-banner-drive"
+
+  FFS_HOST=codex CODEX_BIN=wake-banner-drive CLAUDE_BIN=fake-claude \
+    GSD_RUN_ID=wake-banner-run FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  # exactly one drive attempt: the banner path yields, it never respawns
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/wake-banner-drive.count")" -eq 1 ]
+  [[ "$output" == *"GSD-RUN:SESSION-WAKE checkpointed run=wake-banner-run"* ]]
+  [[ "$output" != *"GSD-RUN:RESPAWN attempt="* ]]
+  record="$BATS_TEST_TMPDIR/.claude/worktrees/wake-banner-run/.planning/run-state/lifecycle-wake-banner-run.json"
+  [ -f "$record" ]
+  [ "$(jq -r .state "$record")" = waiting ]
+  [ "$(jq -r .wake_condition.type "$record")" = time ]
+  [ "$(jq -r '.resume_argv[0]' "$record")" = "scripts/gsd/gsd-run.sh" ]
+  [ "$(jq -r '.resume_argv[1]' "$record")" = "/gsd-quick" ]
+
+  # FFS_SESSION_WAKE=off skips the banner path and restores the respawn decision
+  rm -f "$record" "$BATS_TEST_TMPDIR/wake-banner-drive.count"
+  FFS_HOST=codex CODEX_BIN=wake-banner-drive CLAUDE_BIN=fake-claude \
+    GSD_RUN_ID=wake-banner-run FFS_SESSION_WAKE=off FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ ! -f "$record" ]
+  [[ "$output" != *"GSD-RUN:SESSION-WAKE"* ]]
+}

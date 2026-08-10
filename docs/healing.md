@@ -24,6 +24,9 @@ Wake conditions are `time`, `wall-decided`, `ci-completed`, and `manual`. A reco
 | `FFS_CI_RERUN_MAX` | `2` | Durable CI rerun budget. |
 | `FFS_CI_GH_ERR_MAX` | `5` | Consecutive GitHub API errors allowed before the lifecycle record fails. |
 | `FFS_RECONCILE_STALE_SECS` | `300` | Dead launcher age before stale-running recovery is eligible. |
+| `FFS_SESSION_WAKE` | `on` | Set to `off` to skip banner checkpointing in the runner's failed-drive path. |
+| `FFS_SESSION_WAKE_MAX_SECS` | `21600` | Cap on how far ahead a parsed reset time may schedule the wake. |
+| `FFS_SESSION_WAKE_MAX_ATTEMPTS` | `4` | Durable wake budget (`budgets.wakes`) seeded on first checkpoint. |
 | `PLAN_WALL_AWAIT_POLL` | `15` | Maximum seconds between bounded wall-verdict probes. |
 
 Look for `LIFECYCLE:`, `SESSION-WAKE:`, `CI-WATCH:`, `WALL-AWAIT:`, `RECONCILE:`, and `GSD-RUN:RESPAWN` lines. Normal no-ops use rc 0; lifecycle validation failures use rc 1; an unresolved wall-await returns rc 75 and a decided blocked wall returns rc 20. A reconciler claim already held by another pass is deliberately a typed rc 0 no-op.
@@ -34,7 +37,7 @@ An operator may schedule a pass, for example:
 */5 * * * * cd /path/to/feature-fix-swarm && bash scripts/gsd/reconcile.sh
 ```
 
-FFS never installs that cron entry. The time, CI, and wall mechanisms can be deleted when the respective vendor supplies durable, authenticated delayed-resume, CI completion webhooks, and plan-review callbacks.
+FFS never installs that cron entry. Per-mechanism sunset: the time-wake mechanism can be deleted when the vendor supplies durable, authenticated delayed-resume; the CI mechanism when CI completion webhooks reach the runner; the wall mechanism when plan-review callbacks exist; the respawn loop when the vendor runner reports and retries its own dead executors; the plan-length gate when plan review itself enforces a length budget upstream.
 
 ## Evidence and boundary
 

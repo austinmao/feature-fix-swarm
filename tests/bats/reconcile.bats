@@ -14,6 +14,11 @@ EOF
   export RECONCILE_MARK="$BATS_TEST_TMPDIR/mark"
 }
 
+teardown() {
+  [ -f "$BATS_TEST_TMPDIR/live_pid" ] && kill "$(cat "$BATS_TEST_TMPDIR/live_pid")" 2>/dev/null
+  true
+}
+
 @test "tracer: satisfied time condition relaunches once" {
   now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint tracer waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","verbatim"]' '{"respawns":2}'
   jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-tracer.json > record && mv record .planning/run-state/lifecycle-tracer.json
@@ -141,8 +146,42 @@ EOF
   [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=ci'* ]]
 }
 
+@test "a live running launcher is left alone" {
+  now=$(date +%s)
+  sleep 30 & live_pid=$!
+  echo "$live_pid" > "$BATS_TEST_TMPDIR/live_pid"
+  bash scripts/gsd/lifecycle.sh checkpoint live running start time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","live"]' '{"respawns":2}'
+  jq ".child_pid=$live_pid | .launched_at=1" .planning/run-state/lifecycle-live.json > record && mv record .planning/run-state/lifecycle-live.json
+  before=$(cat .planning/run-state/lifecycle-live.json)
+  # launched_at=1 is ancient, so only kill -0 liveness (not the stale-secs
+  # clock) is what keeps reconcile.sh from treating this launcher as dead.
+  run env FFS_RECONCILE_STALE_SECS=1 bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:still-waiting run=live'* ]]
+  [ "$(cat .planning/run-state/lifecycle-live.json)" = "$before" ]
+  [ "$(jq -r .state .planning/run-state/lifecycle-live.json)" = running ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-live.json)" = 2 ]
+  sleep 0.1; [ ! -e "$RECONCILE_MARK" ]
+}
+
 # "foreign-claimed run is untouched": reconcile.sh's only coord claim key
 # per run is claim_id() -> "reconcile-<run>" (reconcile.sh:26-30) — there is
 # no separate "run's own key" it ever claims, so a foreign hold on that one
 # key is already exercised end-to-end by "claim held by another reconciler
 # is a typed rc 0 no-op" above; no distinguishable second case exists.
+
+@test "a worktree-store record is swept and relaunched" {
+  wt="$REPO/.claude/worktrees/wt-run"
+  mkdir -p "$wt/.planning/run-state"
+  git -C "$REPO" worktree add --detach "$wt" HEAD >/dev/null 2>&1 || { cd "$wt" && git init -q; cd "$REPO"; }
+  now=$(date +%s)
+  ( cd "$wt" && bash "$REPO/scripts/gsd/lifecycle.sh" checkpoint wt-run waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","from-worktree"]' '{"respawns":1}' )
+  rec="$wt/.planning/run-state/lifecycle-wt-run.json"
+  [ -f "$rec" ]
+  jq ".wake_at=$((now-1))" "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RECONCILE:relaunched run=wt-run"* ]]
+  sleep 0.1
+  [ "$(cat "$RECONCILE_MARK")" = from-worktree ]
+  [ "$(jq -r .budgets.respawns "$rec")" = 0 ]
+}

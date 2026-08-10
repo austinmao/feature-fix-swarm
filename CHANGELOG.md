@@ -14,9 +14,7 @@ all skills.
 
 ### Changed
 
-- `scripts/gsd/gsd-run.sh` retries one failed drive by default (`FFS_RESPAWN_MAX=1`): rc 124 retries once, while other failures retry only after a zero-commit probe.
-
-### Changed
+- `scripts/gsd/gsd-run.sh` retries one failed drive by default (`FFS_RESPAWN_MAX=1`): rc 124 retries once, while other failures retry only after a zero-commit probe. A failed drive whose capture carries a vendor session-limit banner is instead checkpointed as a durable `waiting(time)` record (`FFS_SESSION_WAKE=off` disables) and left for `scripts/gsd/reconcile.sh` to relaunch.
 
 - Dependency refresh (2026-08-08): `@opengsd/gsd-core` exact pin `1.9.1` →
   `1.10.0` (constants in `lib/ffs_installer.py`, `scripts/gsd/stage-gsd-skills.py`,

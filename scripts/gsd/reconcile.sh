@@ -60,15 +60,27 @@ due() {
   esac
 }
 
+# life: run lifecycle.sh with its CWD at the record's own store root —
+# lifecycle resolves its record dir from the invoking CWD's git toplevel, so
+# a worktree-store record must be mutated from inside that worktree.
+life() { (cd "$rec_root" && bash "$LIFE" "$@"); }
+
 shopt -s nullglob
-records=("$STATE_DIR"/lifecycle-*.json)
+# Records live in this checkout's store AND in run-worktree stores (the
+# runner cd's into the worktree before the drive, so session-wake and
+# executor checkpoints land there).
+records=("$STATE_DIR"/lifecycle-*.json "$ROOT"/.claude/worktrees/*/.planning/run-state/lifecycle-*.json)
 shopt -u nullglob
 for record in "${records[@]}"; do
   run="${record##*/lifecycle-}"; run="${run%.json}"
-  if ! bash "$LIFE" validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
+  rec_root="${record%/.planning/run-state/*}"
+  if ! life validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
   state="$(jq -r .state "$record")"
   case "$state" in
-    waiting|runnable) eligible=0 ;;
+    waiting) eligible=0 ;;
+    # runnable = wake condition already satisfied (legacy/ci-watch writes it);
+    # launch directly — due() has no verdict for it and would strand the record
+    runnable) eligible=1 ;;
     running) stale_running "$record" || { echo "RECONCILE:still-waiting run=$run"; continue; }; eligible=1 ;;
     *) echo "RECONCILE:still-waiting run=$run"; continue ;;
   esac
@@ -76,7 +88,7 @@ for record in "${records[@]}"; do
   if [ "$eligible" -eq 0 ] && ! due "$record"; then echo "RECONCILE:still-waiting run=$run"; continue; fi
   # ci-watch changes the lifecycle record from waiting to runnable. Re-read
   # after evaluator side effects rather than trusting the old JSON snapshot.
-  if ! bash "$LIFE" validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
+  if ! life validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
   state="$(jq -r .state "$record")"
   case "$state" in waiting|runnable|running) ;; *) echo "RECONCILE:still-waiting run=$run"; continue;; esac
   claim="$(claim_id "$run" || true)"; [ -n "$claim" ] || { echo "RECONCILE:invalid-run-id run=$run"; continue; }
@@ -89,11 +101,11 @@ for record in "${records[@]}"; do
   # progress and the stale-liveness guard is the double-launch protection.
   relaunch_args=("$run" reconcile)
   if [ "$state" = running ]; then
-    bash "$LIFE" transition "$run" waiting stale-launcher >/dev/null || { echo "RECONCILE:invalid-record run=$run"; claim_release "$claim" "$generation"; continue; }
+    life transition "$run" waiting stale-launcher >/dev/null || { echo "RECONCILE:invalid-record run=$run"; claim_release "$claim" "$generation"; continue; }
     relaunch_args+=(--no-charge)
   fi
   relaunch_err="$(mktemp "${TMPDIR:-/tmp}/ffs-reconcile-err.XXXXXX")"
-  argv="$(bash "$LIFE" relaunch "${relaunch_args[@]}" 2>"$relaunch_err")"; rc=$?
+  argv="$(life relaunch "${relaunch_args[@]}" 2>"$relaunch_err")"; rc=$?
   relaunch_err_text="$(cat "$relaunch_err" 2>/dev/null)"; rm -f "$relaunch_err"
   if [ "$rc" -ne 0 ]; then
     if [[ "$argv$relaunch_err_text" == *budget-exhausted* ]]; then echo "RECONCILE:budget-exhausted run=$run"; else echo "RECONCILE:invalid-record run=$run"; fi
@@ -101,12 +113,14 @@ for record in "${records[@]}"; do
   fi
   mapfile -t command < <(printf '%s' "$argv" | jq -r '.[]')
   [ "${#command[@]}" -gt 0 ] || { echo "RECONCILE:invalid-argv run=$run"; claim_release "$claim" "$generation"; continue; }
+  case "${command[0]}" in /*) ;; *) command[0]="$ROOT/${command[0]}" ;; esac
   executable="$(realpath "${command[0]}" 2>/dev/null || true)"
   case "$executable" in "$ROOT/scripts/gsd/"*) ;; *) echo "RECONCILE:invalid-argv run=$run"; claim_release "$claim" "$generation"; continue;; esac
   log="$STATE_DIR/reconcile-$run.log"
-  nohup "${command[@]}" >"$log" 2>&1 < /dev/null & child=$!
+  # the record's run id must reach the relaunched runner — argv carries no env
+  GSD_RUN_ID="$run" nohup "${command[@]}" >"$log" 2>&1 < /dev/null & child=$!
   disown "$child" 2>/dev/null || true
-  bash "$LIFE" set-pid "$run" "$child" >/dev/null || { bash "$LIFE" transition "$run" failed launch-failed >/dev/null 2>&1 || true; echo "RECONCILE:launch-failed run=$run"; claim_release "$claim" "$generation"; continue; }
+  life set-pid "$run" "$child" >/dev/null || { life transition "$run" failed launch-failed >/dev/null 2>&1 || true; echo "RECONCILE:launch-failed run=$run"; claim_release "$claim" "$generation"; continue; }
   echo "RECONCILE:relaunched run=$run pid=$child"
   claim_release "$claim" "$generation"
 done

@@ -38,6 +38,15 @@ case "$VERB" in
   *) usage; fail 'usage' ;;
 esac
 
+# Kill switch: FFS_LIFECYCLE=off gates NEW checkpoints only — recovery of
+# already-written records (relaunch/decrement/transition/...) stays live
+# (EDGE-009: off must never strand an existing waiting record).
+if [ "${FFS_LIFECYCLE:-on}" = off ]; then
+  case "$VERB" in
+    checkpoint|wake-checkpoint) printf 'LIFECYCLE:disabled\n'; exit 0 ;;
+  esac
+fi
+
 exec python3 - "$VERB" "$REPO_ROOT" "$RUN_STATE_DIR" "$@" <<'PYEOF'
 import datetime as dt
 import json
@@ -47,7 +56,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-from filelock import FileLock
+import fcntl
+from contextlib import contextmanager
+
+
+@contextmanager
+def FileLock(lock_path):
+    # stdlib flock: same-host exclusive lock, no third-party runtime dep
+    handle = open(lock_path, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
 
 verb, root, run_state, *args = sys.argv[1:]
 ROOT = Path(root).resolve()
@@ -117,12 +139,20 @@ def validate(record: dict) -> None:
         fail("invalid-wake-condition")
     if not isinstance(record["resume_argv"], list) or not record["resume_argv"]:
         fail("invalid-resume-argv")
-    executable = Path(str(record["resume_argv"][0])).resolve()
+    def _resolve_argv(entry):
+        # relative entries resolve against ROOT, never the caller's CWD —
+        # validation must not depend on where the invoking process sits
+        candidate = Path(str(entry))
+        if not candidate.is_absolute():
+            candidate = ROOT / candidate
+        return candidate.resolve()
+
+    executable = _resolve_argv(record["resume_argv"][0])
     scripts = (ROOT / "scripts" / "gsd").resolve()
     if executable.name in {"bash", "sh"}:
         if len(record["resume_argv"]) < 2:
             fail("invalid-resume-argv")
-        executable = Path(str(record["resume_argv"][1])).resolve()
+        executable = _resolve_argv(record["resume_argv"][1])
     if not executable.is_relative_to(scripts):
         fail("invalid-resume-argv")
     budgets = record["budgets"]
@@ -262,12 +292,13 @@ elif verb == "ci-reserve":
             print("LIFECYCLE:ci-pending")
         elif attempt <= int(ci.get("last_classified_attempt", 0)):
             print("LIFECYCLE:ci-cas-lost")
-        elif record["budgets"].get("ci_reruns", 0) <= 0:
+        elif record["budgets"].get("ci_reruns", 0) <= 0 or int(ci.get("reruns_spent", 0)) >= maximum:
             record["state"] = "failed"; record["reason"] = "ci-rerun-exhausted"; record["updated_at"] = now()
             save_validated(path, record)
             print("LIFECYCLE:ci-exhausted")
         else:
             record["budgets"]["ci_reruns"] -= 1
+            ci["reruns_spent"] = int(ci.get("reruns_spent", 0)) + 1
             ci["last_classified_attempt"] = attempt
             ci["rerun_pending"] = True
             record["updated_at"] = now()
@@ -288,6 +319,9 @@ elif verb == "ci-refund-rerun":
         ci = record.setdefault("ci", {})
         if ci.get("rerun_pending"):
             record["budgets"]["ci_reruns"] += 1
+            # a refunded reservation was never spent — unwind the spent
+            # counter too, or repeated transient failures falsely exhaust
+            ci["reruns_spent"] = max(0, int(ci.get("reruns_spent", 0)) - 1)
             ci["rerun_pending"] = False
         record["updated_at"] = now(); save_validated(path, record)
 elif verb == "ci-gh-error":
