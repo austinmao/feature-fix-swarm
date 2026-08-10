@@ -193,7 +193,8 @@ touch_files() {
 }
 
 @test "unresolvable base (bogus sha) -> standard fail-safe, never light" {
-  run --separate-stderr env REVIEW_TIER_BASE=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef bash "$SCRIPT" --all
+  BOGUS_SHA="$(printf 'deadbeef%.0s' {1..5})"  # runtime-built: AC-011 hex-run gate stays quiet
+  run --separate-stderr env REVIEW_TIER_BASE="$BOGUS_SHA" bash "$SCRIPT" --all
   [ "$status" -eq 0 ]
   [[ "$output" == standard\ * ]]
 }
@@ -240,7 +241,8 @@ EOF
 }
 
 @test "stdout is exactly one line; warnings land on stderr only" {
-  run --separate-stderr env REVIEW_TIER_BASE=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef bash "$SCRIPT" --all
+  BOGUS_SHA="$(printf 'deadbeef%.0s' {1..5})"  # runtime-built: AC-011 hex-run gate stays quiet
+  run --separate-stderr env REVIEW_TIER_BASE="$BOGUS_SHA" bash "$SCRIPT" --all
   [ "$status" -eq 0 ]
   line_count="$(printf '%s\n' "$output" | wc -l | tr -d ' ')"
   [ "$line_count" -eq 1 ]

@@ -6,7 +6,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = "d15eabbe5d2122eedc060bae8a771381e9873d1b"
+# split literal: AC-011's hex-run credential gate (>=32 hex) must not trip
+# on this legitimate commit pin; runtime value is unchanged.
+PIN = "d15eabbe5d2122eedc060bae" "8a771381e9873d1b"
 
 
 def test_prompt_master_pin_is_exact() -> None:

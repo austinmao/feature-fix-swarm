@@ -1878,6 +1878,10 @@ def install(source: Path, scope: str, project: Path | None) -> int:
     print(f"backup_id={backup.backup_id}")
     print(f"installed_scope={scope}")
     print(f"gsd=upstream-installer@{GSD_VERSION}:claude-full,codex-full")
+    # Seam 6 (REQ-401, locked PROJECT.md:20): one hint line only — never a gate,
+    # never changes exit codes; presence-only check on the install-target project.
+    if project is not None and not (project / "config" / "environments.yaml").exists():
+        print("hint: no environment registry — run /ffs-init to create config/environments.yaml")
     if preserved:
         for path in preserved:
             print(

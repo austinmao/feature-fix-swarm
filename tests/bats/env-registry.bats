@@ -175,7 +175,10 @@ case "\$1" in
 esac
 STUB
   chmod +x "$FIXTURE/bin/gh"
-  git -C "$FIXTURE" remote add origin https://github.com/example/fixture.git 2>/dev/null || true
+  # AC-011 localhost-only URL discipline: the owner/repo parse in gh_probe is
+  # host-agnostic ([:/]owner/repo(.git)?$), so a loopback host keeps the
+  # fixture behavior identical while satisfying the network gate.
+  git -C "$FIXTURE" remote add origin http://127.0.0.1/example/fixture.git 2>/dev/null || true
 }
 
 # ── Group A: check tracer ──────────────────────────────────────────────────
@@ -1022,4 +1025,176 @@ YAML
   [[ "$output" == *"ENV-REGISTRY-REFUSED"* ]]
   [[ "$output" == *"symlink"* ]]
   run -1 bash -c 'ls "$1"/*.yml 2>/dev/null | grep -q .' _ "$BATS_TEST_TMPDIR/outside-wf"
+}
+
+# ── Group F (04-01 Task 2 — read-only `seed` verb, INT-003; REQ-401 Seam 2):
+# registry → preflight-manifest candidate rows, names-only, stdout JSON array,
+# writes NOTHING. Additive-never-authoritative: the operator merges into the
+# authored manifest; the authored manifest stays the contract. Fixture
+# base_urls are 127.0.0.1-only (keeps 04-02's AC-011 network gate clean). ──
+
+write_seed_registry() {  # $1=path — non-none base_url + secret_names present
+  cat > "$1" <<'YAML'
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: local
+    kind: local
+    base_url: none
+    secret_names:
+      - PGHOST
+      - PGPASSWORD
+    verified: null
+    test_tier: fast
+  - name: stag
+    kind: staging
+    base_url: http://127.0.0.1:18789
+    secret_names:
+      - PGPASSWORD
+      - API_TOKEN_NAME
+test_tiers:
+  - tier: fast
+    command: true
+surfaces:
+  - surface: release
+    staging_instance: stag
+YAML
+}
+
+@test "F1 seed writes NOTHING: authored manifest byte-unchanged, registry untouched" {
+  write_seed_registry "$FIXTURE/config/environments.yaml"
+  mkdir -p "$FIXTURE/specs/007"
+  printf '[{"kind": "env", "name": "ONLY_IN_MANIFEST"}]\n' \
+    > "$FIXTURE/specs/007/preflight.json"
+  cp "$FIXTURE/specs/007/preflight.json" "$BATS_TEST_TMPDIR/manifest-before"
+  cp "$FIXTURE/config/environments.yaml" "$BATS_TEST_TMPDIR/registry-before"
+  run -0 bash "$ER" seed
+  cmp "$FIXTURE/specs/007/preflight.json" "$BATS_TEST_TMPDIR/manifest-before"
+  cmp "$FIXTURE/config/environments.yaml" "$BATS_TEST_TMPDIR/registry-before"
+  # porcelain: seed leaves the fixture repo untouched
+  run -0 git -C "$FIXTURE" status --porcelain
+}
+
+@test "F2 merge is additive-never-authoritative: manifest-own row SURVIVES, registry rows append" {
+  write_seed_registry "$FIXTURE/config/environments.yaml"
+  printf '[{"kind": "env", "name": "ONLY_IN_MANIFEST"}]\n' \
+    > "$BATS_TEST_TMPDIR/manifest.json"
+  bash "$ER" seed > "$BATS_TEST_TMPDIR/seed.json"
+  python3 - "$BATS_TEST_TMPDIR/manifest.json" "$BATS_TEST_TMPDIR/seed.json" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+seed = json.load(open(sys.argv[2]))
+merged = manifest + [r for r in seed if r not in manifest]
+names = [r["name"] for r in merged]
+assert names[0] == "ONLY_IN_MANIFEST", names   # manifest-own row survives, first
+assert "PGHOST" in names and "API_TOKEN_NAME" in names, names
+assert any(r["kind"] == "probe" for r in merged), merged
+PY
+}
+
+@test "F3 names only: no value key and no secret-value shape in seed output" {
+  write_seed_registry "$FIXTURE/config/environments.yaml"
+  bash "$ER" seed > "$BATS_TEST_TMPDIR/seed-out" 2> "$BATS_TEST_TMPDIR/seed-err"
+  ! grep -qF '"value"' "$BATS_TEST_TMPDIR/seed-out"
+  python3 - "$BATS_TEST_TMPDIR/seed-out" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))
+for r in rows:
+    assert set(r) <= {"kind", "name", "argv"}, r
+PY
+}
+
+@test "F4 env rows in declaration order deduped; probe row ONLY for non-none base_url" {
+  write_seed_registry "$FIXTURE/config/environments.yaml"
+  bash "$ER" seed > "$BATS_TEST_TMPDIR/seed.json"
+  python3 - "$BATS_TEST_TMPDIR/seed.json" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))
+envs = [r["name"] for r in rows if r["kind"] == "env"]
+assert envs == ["PGHOST", "PGPASSWORD", "API_TOKEN_NAME"], envs  # order + dedup
+probes = [r for r in rows if r["kind"] == "probe"]
+assert len(probes) == 1, probes                      # local's base_url none → no probe
+p = probes[0]
+assert p["name"] == "stag-base-url", p
+assert p["argv"] == ["curl", "-sf", "-m", "10",
+                     "http://127.0.0.1:18789", "-o", "/dev/null"], p
+PY
+}
+
+@test "F5 FFS-shaped registry (base_url none, secret_names []) → empty array, rc 0" {
+  # the fixture carries the COPIED live config/environments.yaml — FFS's own
+  # registry hits this env-rows-only/empty path live
+  run -0 bash "$ER" seed
+  [ "$output" = "[]" ]
+}
+
+@test "F6 unresolvable or invalid registry: rc 1, reason on stderr, stdout empty" {
+  rm "$FIXTURE/config/environments.yaml"
+  rc=0
+  bash "$ER" seed > "$BATS_TEST_TMPDIR/f6-out" 2> "$BATS_TEST_TMPDIR/f6-err" || rc=$?
+  [ "$rc" -eq 1 ]
+  [ ! -s "$BATS_TEST_TMPDIR/f6-out" ]
+  grep -q "ENV-REGISTRY-INVALID" "$BATS_TEST_TMPDIR/f6-err"
+  # invalid: missing v1 marker
+  printf 'environments:\n  - name: x\n    kind: local\n' \
+    > "$FIXTURE/config/environments.yaml"
+  rc=0
+  bash "$ER" seed > "$BATS_TEST_TMPDIR/f6b-out" 2> "$BATS_TEST_TMPDIR/f6b-err" || rc=$?
+  [ "$rc" -eq 1 ]
+  [ ! -s "$BATS_TEST_TMPDIR/f6b-out" ]
+  grep -q "ENV-REGISTRY-INVALID" "$BATS_TEST_TMPDIR/f6b-err"
+}
+
+@test "F7 hostile registry value: refused value-free, nothing credential-shaped emitted" {
+  # runtime-generated hostile fixture (AC-011: committed credential shapes live
+  # under tests/fixtures/leak-scan/ ONLY). AKIA shape passes the identifier
+  # guard, so the pre-print leak scan over the emitted candidate bytes is the
+  # backstop → rc 2, stdout empty (phase-2 value-safety heritage, REUSED).
+  hostile="AKIA$(printf 'Q%.0s' $(seq 1 16))"
+  cat > "$FIXTURE/config/environments.yaml" <<YAML
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: stag
+    kind: staging
+    base_url: none
+    secret_names:
+      - $hostile
+test_tiers:
+  - tier: fast
+    command: true
+YAML
+  rc=0
+  bash "$ER" seed > "$BATS_TEST_TMPDIR/f7-out" 2> "$BATS_TEST_TMPDIR/f7-err" || rc=$?
+  [ "$rc" -eq 2 ]
+  [ ! -s "$BATS_TEST_TMPDIR/f7-out" ]
+  ! grep -qF "$hostile" "$BATS_TEST_TMPDIR/f7-out"
+  ! grep -qF "$hostile" "$BATS_TEST_TMPDIR/f7-err"
+  # non-identifier credential-shaped name → safe_name refusal, rc 1, value-free
+  cat > "$FIXTURE/config/environments.yaml" <<'YAML'
+# config/environments.yaml
+# schema: ffs.environments/v1
+environments:
+  - name: stag
+    kind: staging
+    base_url: none
+    secret_names:
+      - "not a var name!"
+test_tiers:
+  - tier: fast
+    command: true
+YAML
+  rc=0
+  bash "$ER" seed > "$BATS_TEST_TMPDIR/f7b-out" 2> "$BATS_TEST_TMPDIR/f7b-err" || rc=$?
+  [ "$rc" -eq 1 ]
+  [ ! -s "$BATS_TEST_TMPDIR/f7b-out" ]
+  ! grep -qF "not a var name!" "$BATS_TEST_TMPDIR/f7b-err"
+}
+
+@test "F8 usage synopsis names seed; other verbs byte-identical in behavior" {
+  run -1 bash "$ER"
+  [[ "$output" == *"seed"* ]]
+  # detect/check dispatch still routes (A-group proves behavior in depth)
+  write_seed_registry "$FIXTURE/config/environments.yaml"
+  run -0 bash "$ER" check
 }

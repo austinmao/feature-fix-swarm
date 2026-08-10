@@ -137,10 +137,46 @@ fi
 # Ledger key for gsd seams: review-gate-command.sh reads GSD_RUN_ID (no
 # hardcoded default) — export it so ship grants key to THIS run.
 export GSD_RUN_ID="$RUN_ID"
+# Seam 1 (REQ-401/402, sig 16ac087d reading): "zero call-site edits" pins
+# gates.py INTERNALS and PRE-EXISTING consumers — review-gate-command.sh
+# gains no flag and inherits hard mode through gates.py's env-var read
+# (lib/gates.py:2941-2945); INT-004 proves it stays byte-unchanged. This
+# skill's OWN prod call sites are the exception: they pass hard mode
+# explicitly (see the check-grant note below). The absent-registry advisory
+# needs no code here — gates.py prints it on the first prod check-grant
+# (soft mode: one stderr line, byte-identical exit codes, REQ-402).
+if [ "$AUTONOMOUS" = "1" ]; then
+  # Ledger-first prod detection (RESEARCH OQ1): any grant of THIS run
+  # matching gates.py PROD_ACTION_PREFIXES; fallback = plan grep; both
+  # miss → no export (fail-soft — phase-3 deploy-prod templates carry the
+  # per-callsite backstop).
+  _FFS_PROD=$(python3 - "$RUN_ID" <<'DETECT'
+import sys
+sys.path.insert(0, "lib")
+import gates
+data = gates._load_store(gates._store_path())
+grants = data.get("_autonomy", {}).get(sys.argv[1], {}).get("grants", {})
+print("1" if any(a.startswith(gates.PROD_ACTION_PREFIXES)
+                 for a in grants if isinstance(a, str)) else "0")
+DETECT
+  ) || _FFS_PROD=0
+  if [ "$_FFS_PROD" != "1" ] && \
+     grep -qE 'deploy:prod-|flip:prod-|migrate:prod-' specs/"$SPEC_ID"*/plan.md 2>/dev/null; then
+    _FFS_PROD=1
+  fi
+  # Belt-and-braces for subprocesses only (sig ba1efa84): no assertion
+  # depends on this export surviving block boundaries — the skill's prod
+  # call sites carry the explicit flag either way.
+  [ "$_FFS_PROD" = "1" ] && export FFS_ENV_REGISTRY_REQUIRED=1
+fi
 ```
 
 At every operator-gated action mid-run (push, merge, deploy, flip, secret-use):
-`check-grant "$RUN_ID" --action "<type:target>"` — proceed on exit 0; otherwise
+`check-grant "$RUN_ID" --action "<type:target>"` — for PROD actions
+(`deploy:prod-*` / `flip:prod-*` / `migrate:prod-*`) under `--autonomous` the
+call is `check-grant "$RUN_ID" --action "<type:prod-target>" --require-environments`
+(sig ba1efa84: deterministic per-call hard mode at this skill's own call
+site) — proceed on exit 0; otherwise
 `pending` + STOP that action path only. Never bypass with prose; never re-ask a
 granted action. (Ship itself is walled inside gsd's `code_review_command` —
 `scripts/gsd/review-gate-command.sh` REVISEs without a `ship:gsd` grant.)
@@ -379,7 +415,12 @@ exit 0
 ```
 <!-- openwiki-wiring:ship-stage:end -->
 
-4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke).
+4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke). After
+   ship, run `bash scripts/gsd/promote-emit.sh "$RUN_ID"` — it EMITS (never
+   executes) the staging→prod `gates.py promote` command for the operator/CI
+   deploy workflow when this run consumed a `deploy:staging-*` grant; silent
+   otherwise (REQ-401 Seam 3 — deliberately NOT run-finalizer.sh, whose
+   always-exit-0 post-merge contract would swallow the signal).
 5. **Merge execution (only with a `merge:pr` grant):** if a `/land-and-deploy`
    skill is available in this session, use it to execute the granted merge
    (merge → CI/deploy wait → prod verify); else `gh pr merge` directly. EITHER
@@ -406,6 +447,7 @@ exit 0
    test -f "$REPO_ROOT/scripts/gsd/model-fallback.sh"
    test -f "$REPO_ROOT/scripts/gsd/fallback-rehearsal.sh"
    test -f "$REPO_ROOT/scripts/coord/coord.py"
+   test -f "$REPO_ROOT/scripts/gsd/promote-emit.sh"
    ```
 
 6. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`

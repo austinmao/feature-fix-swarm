@@ -24,7 +24,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 usage() {
   cat >&2 <<'USAGE'
-usage: env-registry.sh <detect|check|render|apply> [flags]
+usage: env-registry.sh <detect|check|render|apply|seed> [flags]
   detect  [--probe-gh]
           propose registry rows from repo evidence; proposal YAML on stdout
           (a valid --answers file); writes NOTHING inside the repo
@@ -39,6 +39,11 @@ usage: env-registry.sh <detect|check|render|apply> [flags]
   apply   --answers <file> [--yes] [--update] [--force] [--reset-declines]
           atomic all-or-nothing writer of config/environments.yaml and
           .ffs-init.json (declines, schema ffs.init/v1)
+  seed    [--manifest <path>]
+          emit preflight-manifest candidate rows (JSON array, names only)
+          from the registry on stdout; writes NOTHING — merge into the
+          authored manifest, which stays the contract (additive, never
+          authoritative)
 exit codes: 0 ok/up-to-date · 1 schema/usage/refusal · 2 leak finding
 USAGE
 }
@@ -50,7 +55,7 @@ if [ -z "$VERB" ]; then
 fi
 shift
 case "$VERB" in
-  detect|check|render|apply) ;;
+  detect|check|render|apply|seed) ;;
   *)
     usage
     exit 1
@@ -674,6 +679,81 @@ def cmd_check(args):
     stale_advisories(sections)
     if probe:
         gh_probe()
+    sys.exit(0)
+
+
+# ── seed (04-01 Task 2, REQ-401 Seam 2, INT-003): registry → preflight ──────
+# candidate rows, read-only. NO new parser (PROJECT.md:19) — parse_subset/
+# ROW_KEYS reused; check's registry-resolution precedence reused; safe_name
+# validate-mode + the EXISTING leak_scan over the emitted candidate bytes
+# pre-print (phase-2/3 value-safety heritage, REUSED never duplicated).
+# Additive-never-authoritative: stdout emit only, the operator merges into
+# the authored manifest (preflight SKILL.md:93-94 — the manifest stays the
+# contract). exit legend unchanged: 0 ok · 1 schema/usage/refusal · 2 leak.
+
+def cmd_seed(args):
+    manifest = None
+    manifest_given = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--manifest":
+            manifest_given = True
+            manifest = args[i + 1] if i + 1 < len(args) else ""
+            i += 2
+        else:
+            fail("ENV-REGISTRY-INVALID: unknown flag for seed — expected "
+                 "--manifest <path>")
+    if manifest_given and (manifest is None or manifest == ""):
+        fail("ENV-REGISTRY-INVALID: --manifest is empty — remedy: pass a "
+             "registry path or omit the flag to resolve "
+             "config/environments.yaml from the repo root")
+    path = manifest or os.path.join(ROOT, REGISTRY_REL)
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        shown = safe_path(os.path.basename(path), "seed --manifest")
+        fail(f"ENV-REGISTRY-INVALID: registry not readable at {shown} — "
+             f"remedy: run 'env-registry.sh detect' then 'apply' to create "
+             f"it, or pass --manifest <path>")
+    try:
+        sections, _env_kind, _surfaces = validate_registry_text(
+            text, label=path)
+    except SchemaError as exc:
+        fail(f"ENV-REGISTRY-INVALID: {exc}")
+    rows = []
+    seen = set()
+    for row in sections.get("environments") or []:
+        ln = row["_line"]
+        for name in row.get("secret_names") or []:
+            # safe_name VALIDATE mode: non-conforming → value-free refusal
+            # naming key + expected shape, exit 1 (never the bytes)
+            if not (isinstance(name, str) and _NAME_RE.fullmatch(name)):
+                fail(f"ENV-REGISTRY-INVALID: line {ln}, key secret_names — "
+                     f"expected env-var-name shape "
+                     f"[A-Za-z_][A-Za-z0-9_]{{0,63}}")
+            if name not in seen:  # dedup, declaration order
+                seen.add(name)
+                rows.append({"kind": "env", "name": name})
+    for row in sections.get("environments") or []:
+        base_url = row.get("base_url")
+        env_name = row.get("name")
+        if base_url and base_url != "none":
+            # mirrors the gateway-health probe shape (preflight SKILL.md:44-45)
+            rows.append({"kind": "probe",
+                         "name": f"{env_name}-base-url",
+                         "argv": ["curl", "-sf", "-m", "10", base_url,
+                                  "-o", "/dev/null"]})
+    emitted = json.dumps(rows, indent=2) if rows else "[]"
+    # leak-scan the FULL emitted byte-candidate pre-print: a credential-shaped
+    # registry scalar never reaches stdout or stderr (finding → rc 2,
+    # stdout empty; findings are value-free by construction)
+    findings = leak_scan(path, emitted)
+    if findings:
+        for finding in findings:
+            print(finding, file=sys.stderr)
+        sys.exit(2)
+    print(emitted)
     sys.exit(0)
 
 
@@ -1542,4 +1622,6 @@ elif MODE == "render":
     cmd_render(ARGS)
 elif MODE == "apply":
     cmd_apply(ARGS)
+elif MODE == "seed":
+    cmd_seed(ARGS)
 PYEOF
