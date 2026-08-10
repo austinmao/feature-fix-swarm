@@ -1896,3 +1896,32 @@ def test_failure_rollback_preserves_concurrent_project_change(
     assert changed.read_text() == "preserve me\n"
     assert not (home / ".claude/gsd-file-manifest.json").exists()
     assert not (home / ".codex/gsd-file-manifest.json").exists()
+
+
+def test_project_install_hints_ffs_init_when_registry_absent(tmp_path: Path) -> None:
+    # Seam 6 (REQ-401): one stdout hint line when the install-target project
+    # lacks config/environments.yaml; exit code unchanged (clean install = 0).
+    project = tmp_path / "project"
+    init_repo(project)
+
+    result = run_setup(tmp_path, "--scope", "project", "--project-dir", str(project))
+
+    assert result.returncode == 0, result.stderr
+    hint_lines = [l for l in result.stdout.splitlines() if l.startswith("hint:")]
+    assert len(hint_lines) == 1, result.stdout
+    assert "/ffs-init" in hint_lines[0]
+    assert "config/environments.yaml" in hint_lines[0]
+
+
+def test_project_install_no_hint_when_registry_present(tmp_path: Path) -> None:
+    # Presence-only check: any file content suppresses the hint; rc unchanged.
+    project = tmp_path / "project"
+    init_repo(project)
+    registry = project / "config" / "environments.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("environments: []\n")
+
+    result = run_setup(tmp_path, "--scope", "project", "--project-dir", str(project))
+
+    assert result.returncode == 0, result.stderr
+    assert "/ffs-init" not in result.stdout
