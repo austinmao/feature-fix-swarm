@@ -19,4 +19,19 @@ evaluate(){
   run_bounded 60 gh run rerun "$id" --failed >/dev/null 2>&1 || { echo 'CI-WATCH:gh-error idle'; return; }; bash "$LIFE" ci-complete-rerun "$run" >/dev/null; echo "CI-WATCH:rerun:$id"
  else bash "$LIFE" ci-failed "$run" test-failure >/dev/null; echo 'CI-WATCH:test-failure'; return 1; fi
 }
-case "${1:-}" in evaluate) [ "${2:-}" = --run-id ] || fail usage; evaluate "$3";; *) usage; fail usage;; esac
+watch(){
+ local id="$1" interval="${FFS_CI_WATCH_BASE_SECS:-30}" ceiling="${FFS_CI_WATCH_CEILING_SECS:-600}" max="${FFS_CI_WATCH_MAX_SECS:-7200}" start now rc
+ start="$(date +%s)"
+ while :; do
+  now="$(date +%s)"; [ $((now-start)) -lt "$max" ] || { echo 'CI-WATCH:deadline'; return 75; }
+  echo "CI-WATCH:poll databaseId=$id interval=$interval"
+  run_bounded 60 gh run view "$id" --json databaseId,status,conclusion,attempt >/dev/null 2>&1; rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  sleep "$interval"; interval=$((interval * 2)); [ "$interval" -le "$ceiling" ] || interval="$ceiling"
+ done
+}
+case "${1:-}" in
+ evaluate) [ "${2:-}" = --run-id ] || fail usage; evaluate "$3";;
+ watch) [ "${2:-}" = --database-id ] || fail usage; watch "$3";;
+ *) usage; fail usage;;
+esac

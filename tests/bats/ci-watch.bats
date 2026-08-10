@@ -17,3 +17,10 @@ echo '{"databaseId":42,"status":"completed","conclusion":"success","attempt":1}'
 EOF
  chmod +x "$BIN/gh"; run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [[ "$output" == *pass* ]]; [ "$(jq -r .state .planning/run-state/lifecycle-ci.json)" = runnable ]
 }
+@test "watch exposes the shipped thirty second floor" {
+ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+ chmod +x "$BIN/gh"; run bash "$CI" watch --database-id 42; [ "$status" -eq 0 ]; [[ "$output" == *interval=30* ]]
+}
