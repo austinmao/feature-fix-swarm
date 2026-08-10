@@ -38,3 +38,18 @@ def test_all_three_skills_reference_the_doc() -> None:
     for path in SKILL_FILES:
         text = path.read_text()
         assert "docs/promotion-protocol.md" in text, f"{path} does not reference the doc"
+
+
+def test_rules_3_4_5_name_registry_path_and_check_command() -> None:
+    # Seam 4 (REQ-401): rules 3/4/5 pin the concrete enforcement path + command
+    # so the doc can never promise an enforcement lever that drifted away.
+    lines = DOC.read_text().splitlines()
+    rule_lines = [l for l in lines if RULE_LINE.match(l)]
+    for rule_number in (3, 4, 5):
+        line = rule_lines[rule_number - 1]
+        assert "config/environments.yaml" in line, (
+            f"rule {rule_number} missing registry path literal: {line}"
+        )
+        assert "env-registry.sh check" in line, (
+            f"rule {rule_number} missing check-command literal: {line}"
+        )
