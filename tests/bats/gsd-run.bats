@@ -1945,10 +1945,12 @@ PY
 @test "respawn: rc 124 respawns exactly once regardless of commits" {
   cat > "$STUB_DIR/respawn-rc124" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-rc124.count"
-exit 124
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-rc124.count"
+  exit 124
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-rc124"
 
@@ -1964,10 +1966,12 @@ EOF
 @test "respawn: nonzero rc with zero commits respawns once" {
   cat > "$STUB_DIR/respawn-zero-commits" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-zero-commits.count"
-exit 1
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-zero-commits.count"
+  exit 1
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-zero-commits"
 
@@ -1983,13 +1987,15 @@ EOF
 @test "respawn: nonzero rc with a new commit does not respawn" {
   cat > "$STUB_DIR/respawn-with-commit" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-with-commit.count"
-printf 'progress\n' > progress.txt
-git add progress.txt
-git commit -qm 'attempt progress'
-exit 1
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-with-commit.count"
+  printf 'progress\n' > progress.txt
+  git add progress.txt
+  git commit -qm 'attempt progress'
+  exit 1
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-with-commit"
 
@@ -2016,10 +2022,12 @@ EOF
 
   cat > "$STUB_DIR/respawn-git-probe" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-git-probe.count"
-exit 1
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-git-probe.count"
+  exit 1
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-git-probe"
 
@@ -2034,10 +2042,12 @@ EOF
 @test "respawn: FFS_RESPAWN_MAX=0 disables" {
   cat > "$STUB_DIR/respawn-disabled" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-disabled.count"
-exit 124
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-disabled.count"
+  exit 124
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-disabled"
 
@@ -2053,11 +2063,13 @@ EOF
   RUN_STATE="$BATS_TEST_TMPDIR/run-state-quarantine"
   cat > "$STUB_DIR/respawn-quarantine" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-quarantine.count"
-printf 'state=quarantined\n' >> "$RUN_STATE/gsd-run.status"
-exit 124
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-quarantine.count"
+  printf 'state=quarantined\n' >> "$RUN_STATE/gsd-run.status"
+  exit 124
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-quarantine"
 
@@ -2073,13 +2085,15 @@ EOF
 @test "respawn: attempt 1 log lines survive attempt 2" {
   cat > "$STUB_DIR/respawn-log-survival" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-n=0
-[ -f "$BATS_TEST_TMPDIR/respawn-log-survival.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-log-survival.count")
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-log-survival.count"
-echo "MARKER-ATTEMPT-\$((n + 1))"
-exit 124
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  n=0
+  [ -f "$BATS_TEST_TMPDIR/respawn-log-survival.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-log-survival.count")
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-log-survival.count"
+  echo "MARKER-ATTEMPT-\$((n + 1))"
+  exit 124
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-log-survival"
 
@@ -2100,13 +2114,15 @@ EOF
   # file -- a line-oriented record would miscount here.
   cat > "$STUB_DIR/respawn-argv-identical" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-n=0
-[ -f "$BATS_TEST_TMPDIR/respawn-argv-identical.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-argv-identical.count")
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-argv-identical.count"
-printf '%s' "\$@" > "$BATS_TEST_TMPDIR/respawn-argv-identical.attempt-\$((n + 1))"
-exit 124
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  n=0
+  [ -f "$BATS_TEST_TMPDIR/respawn-argv-identical.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-argv-identical.count")
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-argv-identical.count"
+  printf '%s' "\$@" > "$BATS_TEST_TMPDIR/respawn-argv-identical.attempt-\$((n + 1))"
+  exit 124
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-argv-identical"
 
@@ -2124,16 +2140,17 @@ EOF
   RUN_STATE="$BATS_TEST_TMPDIR/run-state-success"
   cat > "$STUB_DIR/respawn-then-success" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-n=0
-[ -f "$BATS_TEST_TMPDIR/respawn-then-success.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-then-success.count")
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-then-success.count"
-if [ "\$n" -eq 0 ]; then
-  exit 124
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  n=0
+  [ -f "$BATS_TEST_TMPDIR/respawn-then-success.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-then-success.count")
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-then-success.count"
+  if [ "\$n" -eq 0 ]; then
+    exit 124
+  fi
+  echo DRIVE_OK
 fi
-echo DRIVE_OK
-exit 0
 EOF
   chmod +x "$STUB_DIR/respawn-then-success"
 
@@ -2160,10 +2177,12 @@ EOF
 
   cat > "$STUB_DIR/respawn-lifecycle" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-lifecycle.count"
-exit 124
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-lifecycle.count"
+  exit 124
+fi
 EOF
   chmod +x "$STUB_DIR/respawn-lifecycle"
 
@@ -2180,11 +2199,13 @@ EOF
 @test "respawn: session-limit banner checkpoints waiting(time) instead of respawning" {
   cat > "$STUB_DIR/wake-banner-drive" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
-if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
-printf 'x\n' >> "$BATS_TEST_TMPDIR/wake-banner-drive.count"
-echo "You have hit your usage limit. Your limit resets 3:30 pm"
-exit 1
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/wake-banner-drive.count"
+  echo "You have hit your usage limit. Your limit resets 3:30 pm"
+  exit 1
+fi
 EOF
   chmod +x "$STUB_DIR/wake-banner-drive"
 

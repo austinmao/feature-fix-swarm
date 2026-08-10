@@ -1345,6 +1345,10 @@ while :; do
   [ "$rc" -eq 0 ] && break
   [ "$attempt" -le "$RESPAWN_MAX" ] || break
   grep -qx 'state=quarantined' "$RUN_STATUS_FILE" 2>/dev/null && break
+  # A coord claim abort (CLAIM-SUPERSEDED / CLAIM-STALE) is a deliberate
+  # kill — another session owns the run now. Respawning would race the new
+  # owner; propagate the abort rc instead.
+  [ ! -f "$RUN_STATE_DIR/gsd-run.coord-abort" ] || break
   should_respawn=0
   if [ "$rc" -eq 124 ]; then
     should_respawn=1
