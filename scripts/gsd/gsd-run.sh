@@ -1339,11 +1339,21 @@ while :; do
   # If this run has a lifecycle record, charge the same durable respawn
   # budget that reconcile.sh uses.  Older/direct gsd-run invocations have no
   # such record and retain their established one-retry behaviour.
-  lifecycle_record="$RUN_STATE_DIR/lifecycle-$RUN_ID.json"
-  if [ -f "$lifecycle_record" ]; then
-    if ! bash "$SCRIPT_DIR/lifecycle.sh" decrement "$RUN_ID" respawns >/dev/null 2>&1; then
-      bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" failed respawn-budget-exhausted >/dev/null 2>&1 || true
-      echo "GSD-RUN:RESPAWN budget-exhausted run=$RUN_ID" >&2
+  # lifecycle.sh resolves its record dir from its CWD's git toplevel, so the
+  # record lives under the run worktree (executor checkpoints) or this repo
+  # root (orchestration-side checkpoints) — never under RUN_STATE_DIR.
+  lifecycle_root=""
+  for _lc_root in "$RUN_WORKTREE_ROOT" "$REPO_ROOT"; do
+    [ -n "$_lc_root" ] && [ -f "$_lc_root/.planning/run-state/lifecycle-$RUN_ID.json" ] && { lifecycle_root="$_lc_root"; break; }
+  done
+  if [ -n "$lifecycle_root" ]; then
+    if ! _dec_err="$(cd "$lifecycle_root" && bash "$SCRIPT_DIR/lifecycle.sh" decrement "$RUN_ID" respawns 2>&1 >/dev/null)"; then
+      if [[ "$_dec_err" == *budget-exhausted* ]]; then
+        (cd "$lifecycle_root" && bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" failed respawn-budget-exhausted >/dev/null 2>&1) || true
+        echo "GSD-RUN:RESPAWN budget-exhausted run=$RUN_ID" >&2
+      else
+        echo "GSD-RUN:RESPAWN lifecycle-error run=$RUN_ID" >&2
+      fi
       break
     fi
   fi

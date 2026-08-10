@@ -92,9 +92,11 @@ for record in "${records[@]}"; do
     bash "$LIFE" transition "$run" waiting stale-launcher >/dev/null || { echo "RECONCILE:invalid-record run=$run"; claim_release "$claim" "$generation"; continue; }
     relaunch_args+=(--no-charge)
   fi
-  argv="$(bash "$LIFE" relaunch "${relaunch_args[@]}")"; rc=$?
+  relaunch_err="$(mktemp "${TMPDIR:-/tmp}/ffs-reconcile-err.XXXXXX")"
+  argv="$(bash "$LIFE" relaunch "${relaunch_args[@]}" 2>"$relaunch_err")"; rc=$?
+  relaunch_err_text="$(cat "$relaunch_err" 2>/dev/null)"; rm -f "$relaunch_err"
   if [ "$rc" -ne 0 ]; then
-    if [[ "$argv" == *budget-exhausted* ]]; then echo "RECONCILE:budget-exhausted run=$run"; else echo "RECONCILE:invalid-record run=$run"; fi
+    if [[ "$argv$relaunch_err_text" == *budget-exhausted* ]]; then echo "RECONCILE:budget-exhausted run=$run"; else echo "RECONCILE:invalid-record run=$run"; fi
     claim_release "$claim" "$generation"; continue
   fi
   mapfile -t command < <(printf '%s' "$argv" | jq -r '.[]')
