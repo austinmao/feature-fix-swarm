@@ -169,7 +169,9 @@ and rollback semantics are in [Installer, migration, and rollback](docs/installe
   to reviewer) before that phase can be marked complete; a skip requires a
   durable, recorded waiver.
 - Project/user installs are manifest- and hash-managed. Edited or unknown files
-  are preserved instead of overwritten.
+  are preserved instead of overwritten; `--adopt-collisions` opts into backing
+  up and replacing a specific colliding path instead of hard-blocking the
+  whole install.
 
 See [Security policy](SECURITY.md) and the
 [public-launch security review](docs/security-audit-2026-08-01.md).

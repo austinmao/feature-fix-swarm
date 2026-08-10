@@ -1369,9 +1369,11 @@ def test_project_install_adopts_single_collision_without_blocking_others(
 
     skill_names = list(ffs_installer.source_skills(ROOT))
     collided_skill, untouched_skill = skill_names[0], skill_names[1]
-    collided_path = (
-        project / ".feature-fix-swarm/vendor/skills" / collided_skill / "SKILL.md"
-    )
+    # Collision detection operates on the whole vendored skill directory (the
+    # unit the manifest tracks), so edit one file inside it.
+    collided_dir = project / ".feature-fix-swarm/vendor/skills" / collided_skill
+    collided_path = collided_dir / "SKILL.md"
+    original_text = collided_path.read_text()
     collided_path.write_text("locally edited\n")
 
     # RED: today, ONE colliding path hard-blocks the entire install, even for
@@ -1388,11 +1390,11 @@ def test_project_install_adopts_single_collision_without_blocking_others(
     assert exit_code == 0
 
     out = capsys.readouterr().out
-    assert f"adopted collision: {collided_path}" in out
+    assert f"adopted collision: {collided_dir}" in out
     assert "adopted_collisions=1" in out
 
-    # The collided path was restored to the vendor bytes...
-    assert collided_path.read_text() != "locally edited\n"
+    # The collided skill was restored to the vendor bytes...
+    assert collided_path.read_text() == original_text
     # ...and the untouched skill still installed correctly.
     untouched_link = project / ".claude/skills" / untouched_skill
     assert untouched_link.is_symlink()
@@ -1400,7 +1402,7 @@ def test_project_install_adopts_single_collision_without_blocking_others(
     # ...and the local edit is recoverable from the printed backup path.
     backup_line = next(line for line in out.splitlines() if "adopted collision:" in line)
     backup_path = Path(backup_line.rsplit("backed up at ", 1)[1])
-    assert backup_path.read_text() == "locally edited\n"
+    assert (backup_path / "SKILL.md").read_text() == "locally edited\n"
 
 
 def test_project_entry_replacement_preserves_creation_during_materialization(
