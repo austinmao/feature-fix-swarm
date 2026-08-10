@@ -2123,6 +2123,7 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
     current: dict[str, str] | None = None
     seen_fields: set[str] = set()
     row_field_indent: int | None = None
+    row_start_indent: int | None = None
     for line_no, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -2156,6 +2157,17 @@ def _parse_parity_manifest_yaml(text: str) -> dict:
                 f"tab-indented line in surfaces block at line {line_no}")
         surface_match = re.fullmatch(r"-\s+surface:\s*(.+)", stripped)
         if surface_match:
+            # first row starter pins the block's row indent; a deeper
+            # '- surface:' is a nested sequence (e.g. under a tolerated
+            # unknown opener) and must never mint a phantom row
+            # (codex #108 round-3b HIGH)
+            if row_start_indent is None:
+                row_start_indent = indent
+            elif indent != row_start_indent:
+                raise ValueError(
+                    f"inconsistent row-starter indent in surfaces block at "
+                    f"line {line_no} (expected {row_start_indent}, got "
+                    f"{indent})")
             if current is not None:
                 rows.append(current)
             current = {
