@@ -3923,14 +3923,93 @@ def test_surfaces_parser_tab_indentation_rejects_in_block_only() -> None:
     assert gates._load_manifest_text(inert) == {"web": {"staging": "stg"}}
 
 
-def test_surfaces_parser_unknown_field_rejects_allowlist_loads() -> None:
+def test_surfaces_parser_unknown_field_warns_and_ignores(capsys) -> None:
+    # openclaw#1699: consumer repos extend surface rows with their own scalar
+    # keys (mirrored, prod_runtime_home, staging_runtime_home) consumed by
+    # their own tooling — the gate only reads surface + staging keys, and a
+    # dropped staging key fails CLOSED (prod grant refused), so tolerating
+    # unknown scalars cannot fail open. WARN on stderr, key + line only,
+    # never the value (A8 value-stripping discipline).
     unknown = ("surfaces:\n"
                "  - surface: web\n"
-               "    staging_instance: none\n"
-               "    sneaky_field: x\n")
+               "    staging_instance: stg-web\n"
+               "    sneaky_field: SENTINEL_VALUE_BYTES\n")
+    parsed = gates._load_manifest_text(unknown)
+    assert parsed == {"web": {"staging": "stg-web"}}
+    err = capsys.readouterr().err
+    assert "sneaky_field" in err and "WARNING" in err
+    assert "SENTINEL_VALUE_BYTES" not in err
+    # the committed openclaw parity-manifest row shape loads verbatim
+    consumer = ("surfaces:\n"
+                "  - surface: web\n"
+                "    staging_instance: stg-web\n"
+                "    mirrored: false\n"
+                "    prod_runtime_home: /opt/prod\n"
+                "    staging_runtime_home: /opt/stg\n")
+    assert gates._load_manifest_text(consumer) == {
+        "web": {"staging": "stg-web"}}
+
+
+def test_surfaces_parser_unknown_field_structural_rejects_stay() -> None:
+    # duplicate unknown key in one row still rejects (same discipline as
+    # allowlisted duplicates)
+    dup = ("surfaces:\n"
+           "  - surface: web\n"
+           "    mirrored: false\n"
+           "    mirrored: true\n")
     with pytest.raises(ValueError) as exc:
-        gates._load_manifest_text(unknown)
-    assert "sneaky_field" in str(exc.value)
+        gates._load_manifest_text(dup)
+    assert "mirrored" in str(exc.value) and "duplicate" in str(exc.value)
+    # unknown key BEFORE any row rejects (PD-4 parity with allowlisted keys)
+    pre_row = ("surfaces:\n"
+               "  mirrored: false\n"
+               "  - surface: web\n"
+               "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc2:
+        gates._load_manifest_text(pre_row)
+    assert "mirrored" in str(exc2.value)
+    # value-less nested-map opener is NOT a tolerated scalar — still rejects
+    nested = ("surfaces:\n"
+              "  - surface: web\n"
+              "    extras:\n"
+              "      inner: x\n")
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(nested)
+    # codex round-2 HIGH: a comment-masked nested-map opener is tolerated as
+    # a scalar, and its CHILD must not be consumed as a row-level field —
+    # field indent is pinned by the first field line of the row
+    masked_nested = ("surfaces:\n"
+                     "  - surface: web\n"
+                     "    extras: # nested map\n"
+                     "      staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc3:
+        gates._load_manifest_text(masked_nested)
+    assert "indent" in str(exc3.value)
+    # same shape with an allowlisted opener's child — also rejected
+    masked_allowlisted_child = ("surfaces:\n"
+                                "  - surface: web\n"
+                                "    staging_instance: stg-web\n"
+                                "      prod_instance: deep\n")
+    with pytest.raises(ValueError) as exc4:
+        gates._load_manifest_text(masked_allowlisted_child)
+    assert "indent" in str(exc4.value)
+    # codex round-3b HIGH: a masked nested SEQUENCE must not mint phantom
+    # rows — the first '- surface:' of the block pins the row-starter
+    # indent; a deeper row starter rejects (LF and CRLF)
+    masked_nested_row = ("surfaces:\n"
+                         "  - surface: web\n"
+                         "    staging_instance: stg-web\n"
+                         "    extras: # nested map\n"
+                         "      - surface: evil\n"
+                         "        staging_instance: stg-evil\n")
+    with pytest.raises(ValueError) as exc5:
+        gates._load_manifest_text(masked_nested_row)
+    assert "indent" in str(exc5.value)
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(masked_nested_row.replace("\n", "\r\n"))
+
+
+def test_surfaces_parser_allowlist_loads() -> None:
     # positive halves: all nine allowlisted keys across two rows (alias keys
     # split between rows), rollback included
     ok = ("surfaces:\n"
