@@ -8,6 +8,12 @@ Usage:
   lifecycle.sh checkpoint <run> <state> <reason> <wake-type> <wake-params-json> <resume-argv-json> <budgets-json>
   lifecycle.sh transition <run> <state> <reason>
   lifecycle.sh decrement <run> <respawns|wakes|ci_reruns>
+  lifecycle.sh wake-checkpoint <run> <wake-at> <resume-argv-json> <max-attempts>
+  lifecycle.sh ci-reserve <run> <attempt> <max-reruns>
+  lifecycle.sh ci-complete-rerun <run>
+  lifecycle.sh ci-gh-error <run> <max-errors>
+  lifecycle.sh ci-ready <run>
+  lifecycle.sh ci-failed <run> <reason>
   lifecycle.sh show <run>
   lifecycle.sh validate <run>
 USAGE
@@ -24,7 +30,7 @@ VERB="${1:-}"
 [ -n "$VERB" ] || { usage; fail 'usage'; }
 shift
 case "$VERB" in
-  checkpoint|transition|decrement|show|validate) ;;
+  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-gh-error|ci-ready|ci-failed|show|validate) ;;
   *) usage; fail 'usage' ;;
 esac
 
@@ -190,6 +196,99 @@ elif verb == "decrement":
         record["budgets"][key] -= 1
         record["updated_at"] = now()
         save(path, record)
+elif verb == "wake-checkpoint":
+    if len(args) != 4:
+        fail("usage")
+    run_id, wake_at_raw, resume_raw, maximum_raw = args
+    try:
+        wake_at, maximum = int(wake_at_raw), int(maximum_raw)
+        resume_argv = json.loads(resume_raw)
+    except (ValueError, json.JSONDecodeError):
+        fail("invalid-wake")
+    if wake_at < 0 or maximum < 0:
+        fail("invalid-wake")
+    path = path_for(run_id)
+    with FileLock(f"{path}.lock"):
+        if path.exists():
+            record = load(path)
+            if record.get("state") != "waiting":
+                fail("illegal-transition")
+        else:
+            record = {"run_id": safe_run_id(run_id), "state": "waiting", "reason": "session-limit",
+                      "wake_condition": {"type": "time", "params": {}}, "resume_argv": resume_argv,
+                      "budgets": {"respawns": 0, "wakes": maximum, "ci_reruns": 0},
+                      "waiting_since": now(), "wake_at": None, "updated_at": now()}
+        if record["budgets"].get("wakes", 0) <= 0:
+            record["state"] = "failed"
+            record["reason"] = "wake-budget-exhausted"
+            record["updated_at"] = now()
+            save(path, record)
+            print("LIFECYCLE:wake-exhausted")
+            raise SystemExit(2)
+        record["budgets"]["wakes"] -= 1
+        record["state"] = "waiting"
+        record["reason"] = "session-limit"
+        record["wake_condition"] = {"type": "time", "params": {"wake_at": wake_at}}
+        record["wake_at"] = wake_at
+        record["waiting_since"] = now()
+        record["updated_at"] = now()
+        save(path, record)
+    print(f"LIFECYCLE:wake-reserved run={run_id}")
+elif verb == "ci-reserve":
+    if len(args) != 3:
+        fail("usage")
+    run_id, attempt_raw, maximum_raw = args
+    try:
+        attempt, maximum = int(attempt_raw), int(maximum_raw)
+    except ValueError:
+        fail("invalid-attempt")
+    path = path_for(run_id)
+    with FileLock(f"{path}.lock"):
+        if not path.exists():
+            fail("missing-record")
+        record = load(path)
+        ci = record.setdefault("ci", {})
+        if ci.get("rerun_pending"):
+            print("LIFECYCLE:ci-pending")
+        elif attempt <= int(ci.get("last_classified_attempt", 0)):
+            print("LIFECYCLE:ci-cas-lost")
+        elif record["budgets"].get("ci_reruns", 0) <= 0:
+            record["state"] = "failed"; record["reason"] = "ci-rerun-exhausted"; record["updated_at"] = now()
+            save(path, record)
+            print("LIFECYCLE:ci-exhausted")
+        else:
+            record["budgets"]["ci_reruns"] -= 1
+            ci["last_classified_attempt"] = attempt
+            ci["rerun_pending"] = True
+            record["updated_at"] = now()
+            save(path, record)
+            print("LIFECYCLE:ci-reserved")
+elif verb == "ci-complete-rerun":
+    if len(args) != 1:
+        fail("usage")
+    path = path_for(args[0])
+    with FileLock(f"{path}.lock"):
+        record = load(path); record.setdefault("ci", {})["rerun_pending"] = False; record["updated_at"] = now(); save(path, record)
+elif verb == "ci-gh-error":
+    if len(args) != 2:
+        fail("usage")
+    path = path_for(args[0])
+    with FileLock(f"{path}.lock"):
+        record = load(path); ci = record.setdefault("ci", {}); ci["gh_errors"] = int(ci.get("gh_errors", 0)) + 1
+        if ci["gh_errors"] >= int(args[1]): record["state"] = "failed"; record["reason"] = "ci-gh-error-exhausted"
+        record["updated_at"] = now(); save(path, record); print(f"LIFECYCLE:ci-gh-errors={ci['gh_errors']}")
+elif verb == "ci-ready":
+    if len(args) != 1:
+        fail("usage")
+    path = path_for(args[0])
+    with FileLock(f"{path}.lock"):
+        record = load(path); transition(record, "runnable", "ci-pass"); record.setdefault("ci", {})["gh_errors"] = 0; save(path, record)
+elif verb == "ci-failed":
+    if len(args) != 2:
+        fail("usage")
+    path = path_for(args[0])
+    with FileLock(f"{path}.lock"):
+        record = load(path); transition(record, "failed", args[1]); save(path, record)
 elif verb == "show":
     if len(args) != 1:
         fail("usage")
