@@ -1941,3 +1941,294 @@ for r in roots:
 PY
   [ "$status" -eq 0 ]
 }
+
+@test "respawn: rc 124 respawns exactly once regardless of commits" {
+  cat > "$STUB_DIR/respawn-rc124" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-rc124.count"
+  exit 124
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-rc124"
+
+  FFS_HOST=codex CODEX_BIN=respawn-rc124 CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 124 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-rc124.count")" -eq 2 ]
+  respawn_lines="$(printf '%s\n' "$output" | grep -c 'GSD-RUN:RESPAWN attempt=2/2 rc=124')"
+  [ "$respawn_lines" -eq 1 ]
+}
+
+@test "respawn: nonzero rc with zero commits respawns once" {
+  cat > "$STUB_DIR/respawn-zero-commits" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-zero-commits.count"
+  exit 1
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-zero-commits"
+
+  FFS_HOST=codex CODEX_BIN=respawn-zero-commits CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 1 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-zero-commits.count")" -eq 2 ]
+  respawn_lines="$(printf '%s\n' "$output" | grep -c 'GSD-RUN:RESPAWN attempt=2/2 rc=1')"
+  [ "$respawn_lines" -eq 1 ]
+}
+
+@test "respawn: nonzero rc with a new commit does not respawn" {
+  cat > "$STUB_DIR/respawn-with-commit" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-with-commit.count"
+  printf 'progress\n' > progress.txt
+  git add progress.txt
+  git commit -qm 'attempt progress'
+  exit 1
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-with-commit"
+
+  FFS_HOST=codex CODEX_BIN=respawn-with-commit CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 1 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-with-commit.count")" -eq 1 ]
+  [[ "$output" != *"GSD-RUN:RESPAWN"* ]]
+}
+
+@test "respawn: git probe failure fails closed" {
+  mkdir -p "$STUB_DIR/gitshim"
+  cat > "$STUB_DIR/gitshim/git" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [ "$a" = "rev-list" ]; then
+    exit 1
+  fi
+done
+exec /usr/bin/git "$@"
+EOF
+  chmod +x "$STUB_DIR/gitshim/git"
+
+  cat > "$STUB_DIR/respawn-git-probe" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-git-probe.count"
+  exit 1
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-git-probe"
+
+  PATH="$STUB_DIR/gitshim:$PATH" FFS_HOST=codex CODEX_BIN=respawn-git-probe CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 1 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-git-probe.count")" -eq 1 ]
+  [[ "$output" != *"GSD-RUN:RESPAWN"* ]]
+}
+
+@test "respawn: FFS_RESPAWN_MAX=0 disables" {
+  cat > "$STUB_DIR/respawn-disabled" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-disabled.count"
+  exit 124
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-disabled"
+
+  FFS_HOST=codex CODEX_BIN=respawn-disabled CLAUDE_BIN=fake-claude FFS_RESPAWN_MAX=0 FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 124 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-disabled.count")" -eq 1 ]
+  [[ "$output" != *"GSD-RUN:RESPAWN"* ]]
+}
+
+@test "respawn: quarantined run status never respawns" {
+  RUN_STATE="$BATS_TEST_TMPDIR/run-state-quarantine"
+  cat > "$STUB_DIR/respawn-quarantine" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-quarantine.count"
+  printf 'state=quarantined\n' >> "$RUN_STATE/gsd-run.status"
+  exit 124
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-quarantine"
+
+  FFS_HOST=codex CODEX_BIN=respawn-quarantine CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 124 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-quarantine.count")" -eq 1 ]
+  [[ "$output" != *"GSD-RUN:RESPAWN"* ]]
+}
+
+@test "respawn: attempt 1 log lines survive attempt 2" {
+  cat > "$STUB_DIR/respawn-log-survival" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  n=0
+  [ -f "$BATS_TEST_TMPDIR/respawn-log-survival.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-log-survival.count")
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-log-survival.count"
+  echo "MARKER-ATTEMPT-\$((n + 1))"
+  exit 124
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-log-survival"
+
+  FFS_HOST=codex CODEX_BIN=respawn-log-survival CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 124 ]
+  log_file="$(ls "$BATS_TEST_TMPDIR"/.planning/logs/gsd-run-*.log)"
+  grep -q 'MARKER-ATTEMPT-1' "$log_file"
+  grep -q 'MARKER-ATTEMPT-2' "$log_file"
+  grep -q 'GSD-RUN:RESPAWN attempt=2/2 rc=124' "$log_file"
+}
+
+@test "respawn: attempt 2 argv is byte-identical to attempt 1 (no cross-vendor replay)" {
+  # Argv (via CODEX_SESSION_CONTRACT) legitimately contains embedded
+  # newlines, so each attempt's full "$@" is recorded to its OWN file
+  # (named by attempt index) rather than appended as a line to a shared
+  # file -- a line-oriented record would miscount here.
+  cat > "$STUB_DIR/respawn-argv-identical" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  n=0
+  [ -f "$BATS_TEST_TMPDIR/respawn-argv-identical.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-argv-identical.count")
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-argv-identical.count"
+  printf '%s' "\$@" > "$BATS_TEST_TMPDIR/respawn-argv-identical.attempt-\$((n + 1))"
+  exit 124
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-argv-identical"
+
+  FFS_HOST=codex CODEX_BIN=respawn-argv-identical CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 124 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-argv-identical.count")" -eq 2 ]
+  [ -s "$BATS_TEST_TMPDIR/respawn-argv-identical.attempt-1" ]
+  [ -s "$BATS_TEST_TMPDIR/respawn-argv-identical.attempt-2" ]
+  cmp -s "$BATS_TEST_TMPDIR/respawn-argv-identical.attempt-1" "$BATS_TEST_TMPDIR/respawn-argv-identical.attempt-2"
+}
+
+@test "respawn: rc 124 attempt 1 then success ends completed" {
+  RUN_STATE="$BATS_TEST_TMPDIR/run-state-success"
+  cat > "$STUB_DIR/respawn-then-success" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  n=0
+  [ -f "$BATS_TEST_TMPDIR/respawn-then-success.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/respawn-then-success.count")
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-then-success.count"
+  if [ "\$n" -eq 0 ]; then
+    exit 124
+  fi
+  echo DRIVE_OK
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-then-success"
+
+  FFS_HOST=codex CODEX_BIN=respawn-then-success CLAUDE_BIN=fake-claude \
+    GSD_RUN_STATE_DIR="$RUN_STATE" FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-then-success.count")" -eq 2 ]
+  respawn_lines="$(printf '%s\n' "$output" | grep -c 'GSD-RUN:RESPAWN attempt=2/2 rc=124')"
+  [ "$respawn_lines" -eq 1 ]
+  grep -qx 'state=completed' "$RUN_STATE/gsd-run.status"
+}
+
+@test "respawn: durable lifecycle respawn budget at zero blocks respawn" {
+  run_id="lifecycle-budget-test"
+  primary_root="$(cd "$BATS_TEST_TMPDIR" && /usr/bin/git rev-parse --show-toplevel)"
+  worktree_root="$primary_root/.claude/worktrees/$run_id"
+  mkdir -p "$primary_root/.claude/worktrees"
+  /usr/bin/git -C "$BATS_TEST_TMPDIR" worktree add --detach "$worktree_root" HEAD >/dev/null
+  run_state="$worktree_root/.planning/run-state"
+  resume_json="[\"bash\",\"$worktree_root/scripts/gsd/gsd-run.sh\",\"/gsd-quick\",\"test\"]"
+  ( cd "$worktree_root" && bash "$HARNESS_ROOT/scripts/gsd/lifecycle.sh" checkpoint "$run_id" running seed manual '{}' "$resume_json" '{"respawns":0,"wakes":0,"ci_reruns":0}' )
+
+  cat > "$STUB_DIR/respawn-lifecycle" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-lifecycle.count"
+  exit 124
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-lifecycle"
+
+  FFS_HOST=codex CODEX_BIN=respawn-lifecycle CLAUDE_BIN=fake-claude \
+    GSD_RUN_ID="$run_id" GSD_RUN_STATE_DIR="$run_state" FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 124 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-lifecycle.count")" -eq 1 ]
+  [[ "$output" == *"GSD-RUN:RESPAWN budget-exhausted run=$run_id"* ]]
+  [[ "$output" != *"GSD-RUN:RESPAWN attempt="* ]]
+}
+
+@test "respawn: session-limit banner checkpoints waiting(time) instead of respawning" {
+  cat > "$STUB_DIR/wake-banner-drive" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/wake-banner-drive.count"
+  echo "You have hit your usage limit. Your limit resets 3:30 pm"
+  exit 1
+fi
+EOF
+  chmod +x "$STUB_DIR/wake-banner-drive"
+
+  FFS_HOST=codex CODEX_BIN=wake-banner-drive CLAUDE_BIN=fake-claude \
+    GSD_RUN_ID=wake-banner-run FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  # exactly one drive attempt: the banner path yields, it never respawns
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/wake-banner-drive.count")" -eq 1 ]
+  [[ "$output" == *"GSD-RUN:SESSION-WAKE checkpointed run=wake-banner-run"* ]]
+  [[ "$output" != *"GSD-RUN:RESPAWN attempt="* ]]
+  record="$BATS_TEST_TMPDIR/.claude/worktrees/wake-banner-run/.planning/run-state/lifecycle-wake-banner-run.json"
+  [ -f "$record" ]
+  [ "$(jq -r .state "$record")" = waiting ]
+  [ "$(jq -r .wake_condition.type "$record")" = time ]
+  [ "$(jq -r '.resume_argv[0]' "$record")" = "scripts/gsd/gsd-run.sh" ]
+  [ "$(jq -r '.resume_argv[1]' "$record")" = "/gsd-quick" ]
+
+  # FFS_SESSION_WAKE=off skips the banner path and restores the respawn decision
+  rm -f "$record" "$BATS_TEST_TMPDIR/wake-banner-drive.count"
+  FFS_HOST=codex CODEX_BIN=wake-banner-drive CLAUDE_BIN=fake-claude \
+    GSD_RUN_ID=wake-banner-run FFS_SESSION_WAKE=off FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ ! -f "$record" ]
+  [[ "$output" != *"GSD-RUN:SESSION-WAKE"* ]]
+}

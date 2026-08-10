@@ -19,6 +19,8 @@ allowed-tools:
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 ## When to invoke
 
 - After `/feature-spec` or `/spec-decompose` produced a seeded gsd project (`.planning/`)
@@ -254,6 +256,17 @@ and move to other runnable work; the cap exists because uncounted
 wall→fix→wall loops have burned 19 rounds/2 days and 38+ turns/a week of
 vendor quota. Only an operator-reviewed findings resolution (or a deliberate
 `PLAN_WALL_MAX_ROUNDS` raise) reopens it.
+
+## Wall await rule
+
+Keep the plan wall in the foreground for phases with one or two plans. A
+phase that may exceed the 600-second tool ceiling MAY background the wall,
+but must then poll `plan-wall.sh --await 300` in the same turn for no more
+than `PLAN_WALL_AWAIT_MAX=6` iterations. Its outcomes are actionable: rc 0
+means every record passed, rc 20 means the wall decided blocked, and rc 75
+means it is still pending. If the turn cannot outlast a pending wall, it MUST
+checkpoint a `waiting(wall-decided)` lifecycle record with `lifecycle.sh`
+before ending.
 
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.

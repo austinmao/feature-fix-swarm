@@ -1253,6 +1253,9 @@ fi
 ensure_run_worktree || exit $?
 budget_prepare_mapping || exit $?
 
+# Original invocation, preserved for session-wake resume records: the
+# reconciler re-runs this exact runner argv when the wake condition fires.
+GSD_ORIG_ARGV=("scripts/gsd/gsd-run.sh" "$@")
 first="$1"
 shift
 if [ "$SELECTED_HOST" = "codex" ]; then
@@ -1310,13 +1313,81 @@ fi
 # "why is this phase slow" question unanswerable.
 write_run_status running
 cd "$RUN_WORKTREE_ROOT" || exit 1
-DRIVE_CAPTURE="$(mktemp "${TMPDIR:-/tmp}/ffs-gsd-drive.XXXXXX")" || exit 1
-run_bounded "$TIMEOUT_SECS" "${RUN[@]}" </dev/null 2>&1 \
-  | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' > "$LOG_FILE") \
-  | tee "$DRIVE_CAPTURE"
-rc="${PIPESTATUS[0]}"
-budget_account_tail "$DRIVE_CAPTURE" || { rm -f "$DRIVE_CAPTURE"; exit 1; }
-rm -f "$DRIVE_CAPTURE"
+RESPAWN_MAX="${FFS_RESPAWN_MAX:-1}"
+RESPAWN_MIN_SECS="${FFS_RESPAWN_MIN_SECS:-600}"
+RESPAWN_BASE_SHA="$(git -C "$RUN_WORKTREE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+RESPAWN_STARTED="$SECONDS"
+attempt=1
+attempt_timeout="$TIMEOUT_SECS"
+: > "$LOG_FILE"
+while :; do
+  DRIVE_CAPTURE="$(mktemp "${TMPDIR:-/tmp}/ffs-gsd-drive.XXXXXX")" || exit 1
+  run_bounded "$attempt_timeout" "${RUN[@]}" </dev/null 2>&1 \
+    | tee >(perl -MPOSIX=strftime -pe '$|=1; print strftime("[%Y-%m-%dT%H:%M:%S] ", localtime)' >> "$LOG_FILE") \
+    | tee "$DRIVE_CAPTURE"
+  rc="${PIPESTATUS[0]}"
+  budget_account_tail "$DRIVE_CAPTURE" || { rm -f "$DRIVE_CAPTURE"; exit 1; }
+  # Session-limit banner in a failed drive: checkpoint a durable waiting(time)
+  # record and yield — the reconciler relaunches at the reset time. Checked
+  # BEFORE the capture is deleted and before any respawn decision (AC-005).
+  if [ "$rc" -ne 0 ] && [ "${FFS_SESSION_WAKE:-on}" != off ] && [ -x "$SCRIPT_DIR/session-wake.sh" ]; then
+    if wake_out="$(bash "$SCRIPT_DIR/session-wake.sh" checkpoint "$DRIVE_CAPTURE" "$rc" \
+        --run-id "$RUN_ID" --resume-argv "${GSD_ORIG_ARGV[@]}" 2>&1)" \
+       && [[ "$wake_out" == *SESSION-WAKE:wake-at:* ]]; then
+      printf '%s\n' "$wake_out" >> "$LOG_FILE"
+      echo "GSD-RUN:SESSION-WAKE checkpointed run=$RUN_ID rc=$rc — resume deferred to reconcile" >&2
+      printf 'GSD-RUN:SESSION-WAKE checkpointed run=%s rc=%s\n' "$RUN_ID" "$rc" >> "$LOG_FILE"
+      rm -f "$DRIVE_CAPTURE"
+      break
+    fi
+  fi
+  rm -f "$DRIVE_CAPTURE"
+  [ "$rc" -eq 0 ] && break
+  [ "$attempt" -le "$RESPAWN_MAX" ] || break
+  grep -qx 'state=quarantined' "$RUN_STATUS_FILE" 2>/dev/null && break
+  # A coord claim abort (CLAIM-SUPERSEDED / CLAIM-STALE) is a deliberate
+  # kill — another session owns the run now. Respawning would race the new
+  # owner; propagate the abort rc instead.
+  [ ! -f "$RUN_STATE_DIR/gsd-run.coord-abort" ] || break
+  should_respawn=0
+  if [ "$rc" -eq 124 ]; then
+    should_respawn=1
+  elif [ -n "$RESPAWN_BASE_SHA" ]; then
+    commit_count="$(git -C "$RUN_WORKTREE_ROOT" rev-list --count "$RESPAWN_BASE_SHA"..HEAD 2>/dev/null)" || commit_count=error
+    [[ "$commit_count" =~ ^[0-9]+$ ]] && [ "$commit_count" -eq 0 ] && should_respawn=1
+  fi
+  [ "$should_respawn" -eq 1 ] || break
+  # If this run has a lifecycle record, charge the same durable respawn
+  # budget that reconcile.sh uses.  Older/direct gsd-run invocations have no
+  # such record and retain their established one-retry behaviour.
+  # lifecycle.sh resolves its record dir from its CWD's git toplevel, so the
+  # record lives under the run worktree (executor checkpoints) or this repo
+  # root (orchestration-side checkpoints) — never under RUN_STATE_DIR.
+  lifecycle_root=""
+  for _lc_root in "$RUN_WORKTREE_ROOT" "$REPO_ROOT"; do
+    [ -n "$_lc_root" ] && [ -f "$_lc_root/.planning/run-state/lifecycle-$RUN_ID.json" ] && { lifecycle_root="$_lc_root"; break; }
+  done
+  if [ -n "$lifecycle_root" ]; then
+    if ! _dec_err="$(cd "$lifecycle_root" && bash "$SCRIPT_DIR/lifecycle.sh" decrement "$RUN_ID" respawns 2>&1 >/dev/null)"; then
+      if [[ "$_dec_err" == *budget-exhausted* ]]; then
+        (cd "$lifecycle_root" && bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" failed respawn-budget-exhausted >/dev/null 2>&1) || true
+        echo "GSD-RUN:RESPAWN budget-exhausted run=$RUN_ID" >&2
+      else
+        echo "GSD-RUN:RESPAWN lifecycle-error run=$RUN_ID" >&2
+      fi
+      break
+    fi
+  fi
+  echo "GSD-RUN:RESPAWN attempt=$((attempt + 1))/$((RESPAWN_MAX + 1)) rc=$rc" >&2
+  printf 'GSD-RUN:RESPAWN attempt=%s/%s rc=%s\n' "$((attempt + 1))" "$((RESPAWN_MAX + 1))" "$rc" >> "$LOG_FILE"
+  attempt=$((attempt + 1))
+  elapsed=$((SECONDS - RESPAWN_STARTED))
+  remaining=$((TIMEOUT_SECS - elapsed))
+  [ "$remaining" -gt 0 ] || remaining=0
+  attempt_timeout="$remaining"
+  [ "$attempt_timeout" -ge "$RESPAWN_MIN_SECS" ] || attempt_timeout="$RESPAWN_MIN_SECS"
+  [ "$attempt_timeout" -le "$TIMEOUT_SECS" ] || attempt_timeout="$TIMEOUT_SECS"
+done
 if [ "$rc" -ne 0 ]; then
   echo "gsd-run: stateful drive failed on $SELECTED_HOST (rc=$rc); cross-vendor replay is forbidden" >&2
   echo "gsd-run: fix availability if needed, then resume on $SELECTED_HOST from .planning state; log: $LOG_FILE" >&2

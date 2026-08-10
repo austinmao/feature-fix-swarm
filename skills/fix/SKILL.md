@@ -20,6 +20,8 @@ allowed-tools:
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 One command. Takes a bug description or symptom, traces root cause, then hands the
 fix to `/feature-implement --adhoc` — the ONE home for walls (model-fallback,
 security fence, preflight/grant checks), the gsd execution loop, the finish tail
