@@ -41,6 +41,16 @@ def test_priority_skills_declare_the_shared_dispatch_contract() -> None:
         assert "## Host dispatch contract" in text, name
 
 
+def test_feature_implement_declares_the_wall_await_rule() -> None:
+    text = (ROOT / "skills" / "feature-implement" / "SKILL.md").read_text()
+    assert "## Wall await rule" in text
+
+
+def test_spec_decompose_declares_the_plan_length_gate_step() -> None:
+    text = (ROOT / "skills" / "spec-decompose" / "SKILL.md").read_text()
+    assert "### Step 3.5: Plan-length gate" in text
+
+
 def test_continue_compact_keeps_compact_builtin_and_dispatches_resume() -> None:
     text = (ROOT / "skills" / "continue-compact" / "SKILL.md").read_text()
     assert "Do not redefine" in text
