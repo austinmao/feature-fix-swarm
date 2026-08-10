@@ -12,6 +12,11 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; LEVER="$ROOT/scripts/g
   forg="$BATS_TEST_TMPDIR/forg"; { printf 'usage limit reached; resets at 23:59\n'; yes noise | head -n 50; } > "$forg"
   run bash "$LEVER" evaluate "$forg" 1; [ "$status" -eq 0 ]; [[ "$output" == *no-banner* ]]
 }
+@test "matched banner without a strict clock is unparseable, never no-banner" {
+  bad="$BATS_TEST_TMPDIR/no-clock"; printf 'usage limit reached; resets at soon\n' > "$bad"
+  run bash "$LEVER" checkpoint "$bad" 1 --run-id malformed
+  [ "$status" -eq 1 ]; [[ "$output" == *SESSION-WAKE:unparseable* ]]; [ ! -e .planning/run-state/lifecycle-malformed.json ]
+}
 @test "no banner, success drive, variants, and wake cap behave safely" {
   empty="$BATS_TEST_TMPDIR/empty"; : > "$empty"; run bash "$LEVER" evaluate "$empty" 1; [[ "$output" == *no-banner* ]]
   run bash "$LEVER" checkpoint "$FIX/claude-limit-24h.SYNTHETIC.txt" 0 --run-id silent; [ "$status" -eq 0 ]; [ ! -e .planning/run-state/lifecycle-silent.json ]

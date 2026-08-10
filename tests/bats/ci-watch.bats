@@ -20,7 +20,19 @@ EOF
 @test "watch exposes the shipped thirty second floor" {
  cat > "$BIN/gh" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+echo '{"databaseId":42,"status":"completed","conclusion":"success","attempt":1}'
 EOF
  chmod +x "$BIN/gh"; run bash "$CI" watch --database-id 42; [ "$status" -eq 0 ]; [[ "$output" == *interval=30* ]]
+}
+@test "successful probe resets durable gh errors" {
+ bash scripts/gsd/lifecycle.sh ci-gh-error ci 5 >/dev/null
+ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '{"databaseId":42,"status":"in_progress","conclusion":null,"attempt":1}'
+EOF
+ chmod +x "$BIN/gh"; run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [ "$(jq -r .ci.gh_errors .planning/run-state/lifecycle-ci.json)" = 0 ]
+}
+@test "pending rerun retries without a second budget spend" {
+ mock; bash scripts/gsd/lifecycle.sh ci-reserve ci 1 2 >/dev/null
+ run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [[ "$output" == *rerun:42* ]]; [ "$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)" = 1 ]
 }

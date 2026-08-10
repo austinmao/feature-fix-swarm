@@ -12,6 +12,7 @@ Usage:
   lifecycle.sh ci-reserve <run> <attempt> <max-reruns>
   lifecycle.sh ci-complete-rerun <run>
   lifecycle.sh ci-gh-error <run> <max-errors>
+  lifecycle.sh ci-probe-success <run>
   lifecycle.sh ci-ready <run>
   lifecycle.sh ci-failed <run> <reason>
   lifecycle.sh show <run>
@@ -30,7 +31,7 @@ VERB="${1:-}"
 [ -n "$VERB" ] || { usage; fail 'usage'; }
 shift
 case "$VERB" in
-  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-gh-error|ci-ready|ci-failed|show|validate) ;;
+  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-gh-error|ci-probe-success|ci-ready|ci-failed|show|validate) ;;
   *) usage; fail 'usage' ;;
 esac
 
@@ -277,6 +278,12 @@ elif verb == "ci-gh-error":
         record = load(path); ci = record.setdefault("ci", {}); ci["gh_errors"] = int(ci.get("gh_errors", 0)) + 1
         if ci["gh_errors"] >= int(args[1]): record["state"] = "failed"; record["reason"] = "ci-gh-error-exhausted"
         record["updated_at"] = now(); save(path, record); print(f"LIFECYCLE:ci-gh-errors={ci['gh_errors']}")
+elif verb == "ci-probe-success":
+    if len(args) != 1:
+        fail("usage")
+    path = path_for(args[0])
+    with FileLock(f"{path}.lock"):
+        record = load(path); record.setdefault("ci", {})["gh_errors"] = 0; record["updated_at"] = now(); save(path, record)
 elif verb == "ci-ready":
     if len(args) != 1:
         fail("usage")
