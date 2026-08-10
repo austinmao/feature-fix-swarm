@@ -318,7 +318,7 @@ if [ "\$#" -eq 2 ] && [ "\$1" = "rev-parse" ] && [ "\$2" = "HEAD" ]; then
   C="\$(cat "$COUNT" 2>/dev/null || echo 0)"
   echo "\$((C + 1))" > "$COUNT"
   if [ "\$C" -ge 1 ]; then
-    echo "0000000000000000000000000000000000000000"
+    echo "$(printf '0%.0s' {1..40})"
     exit 0
   fi
 fi

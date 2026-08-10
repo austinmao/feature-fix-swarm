@@ -37,6 +37,12 @@ jobs:
           python scripts/lint_host_dispatch.py skills/*/SKILL.md
           python scripts/lint_model_routing.py
           python lib/model_requests.py lint templates/model-requests.json
+      - name: Environment registry lint
+        # Seam 5 (REQ-401): repo-state lint on every push AND PR — exit codes
+        # typed by env-registry.sh (0 ok / 1 schema-usage-refusal / 2 leak).
+        # No --probe-gh: the repo lint stays hermetic (EDGE-004 fail-soft is
+        # for consumers).
+        run: bash scripts/gsd/env-registry.sh check
   tamper:
     # G2 (2026-08 red-team): the reward-hacking scanner ran on the honor
     # system — administered by the entity it guards. Run it server-side on

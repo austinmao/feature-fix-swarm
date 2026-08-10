@@ -175,7 +175,10 @@ case "\$1" in
 esac
 STUB
   chmod +x "$FIXTURE/bin/gh"
-  git -C "$FIXTURE" remote add origin https://github.com/example/fixture.git 2>/dev/null || true
+  # AC-011 localhost-only URL discipline: the owner/repo parse in gh_probe is
+  # host-agnostic ([:/]owner/repo(.git)?$), so a loopback host keeps the
+  # fixture behavior identical while satisfying the network gate.
+  git -C "$FIXTURE" remote add origin http://127.0.0.1/example/fixture.git 2>/dev/null || true
 }
 
 # ── Group A: check tracer ──────────────────────────────────────────────────
