@@ -21,12 +21,34 @@ an accidental floating upgrade fails before installation or launch.
 Contributor-only Python tools are exact-pinned in `requirements-dev.txt`.
 They do not ship into a consumer repository.
 
+`bash scripts/gsd/deps.sh check` probes every dependency on this page (and is
+the roster the docs are tested against — `tests/test_docs_dependency_roster.py`);
+`deps.sh install` performs the repo-scoped installs (`npm ci`,
+`pip install --requirement requirements-dev.txt`) and never touches system
+packages. `/ffs-init` runs both as its Phase 0.
+
+## Required command-line tools
+
+| Component | Version policy | Ownership | Purpose |
+| --- | --- | --- | --- |
+| [GitHub CLI (`gh`)](https://cli.github.com) | Current release, authenticated | User-installed | Ship/finalize tail: `assert-merged.sh`, run watching, PR operations — no fallback |
+| [`jq`](https://jqlang.github.io/jq/) | Current release | User-installed | Canary gate and QA-coverage adversary JSON handling |
+| `shasum` or `sha256sum` | Either | System (perl / coreutils) | Evidence and cache-key hashing across the run scripts |
+| `ps` | POSIX | System | Host process detection in `adversary-host.sh` |
+
+Optional tools that degrade fail-soft when absent: `curl` (browser-proof
+readiness probe), `flock` (locking; shell fallback), `timeout`/`gtimeout`
+(bounded runs; python3 fallback), `tmux` (worktree-GC session check),
+`npx`/vitest and `playwright` and `canary` (browser/JS QA lane).
+
 ## Contributor and CI tooling
 
 | Component | Version policy | Ownership | Purpose |
 | --- | --- | --- | --- |
 | [bats-core](https://github.com/bats-core/bats-core) | Contributor-installed | User-installed | Runs `tests/bats/*.bats` — plan-wall, fence, adversary-equivalents, probe-lib |
 | [ShellCheck](https://github.com/koalaman/shellcheck) | Contributor-installed, `-S warning` at repo convention | User-installed | Lints every changed/new shell script; matches `CONTRIBUTING.md` and CI |
+| [pytest](https://pytest.org) + pytest-cov | Exact pins in `requirements-dev.txt` | PyPI via `deps.sh install --optional` | Python test suites under `lib/tests/` and `tests/` |
+| [Bandit](https://github.com/PyCQA/bandit) | Exact pin in `requirements-dev.txt` | PyPI via `deps.sh install --optional` | Scans production Python in CI (`bandit -r lib scripts -lll`) |
 | `slopcheck` | Optional | Not installed by FFS | Package-legitimacy verdict (`OK\|SUS\|SLOP`) consulted by the `feature-implement` install gate; absent binary degrades to `[ASSUMED]`, never a hard failure |
 
 ## Coordination layer
@@ -164,6 +186,13 @@ With only one host, FFS can use a different model on the active vendor but
 marks the provenance degraded. A degraded fallback cannot satisfy a gate that
 requires an exact model or vendor.
 
+### gbrain
+
+[gbrain](https://github.com/garrytan/gbrain) is an optional workspace-memory
+CLI. `learnings-harvest.sh` writes to it when the binary is present and
+healthy; absent, learnings archive locally instead. Every gbrain call site is
+fail-soft — see `docs/gbrain-optional.md`.
+
 ### gstack
 
 [gstack](https://github.com/garrytan/gstack) supplies optional skills used by
@@ -189,9 +218,11 @@ generic built-in role floor keeps basic decomposition usable without them.
 - Direct dependencies remain exact-pinned and lockfile-resolved.
 - GitHub Actions are pinned to full commit SHAs with release comments.
 - Dependabot watches npm and GitHub Actions weekly.
-- `npm audit`, CodeQL, Gitleaks, Bandit, ShellCheck, and OpenSSF Scorecard cover
-  different parts of the release surface; no single scanner is treated as a
-  complete security proof.
+- CodeQL, Bandit, ShellCheck, and OpenSSF Scorecard cover different parts of
+  the release surface; no single scanner is treated as a complete security
+  proof. (`npm audit` is a PR-checklist item, not a CI job; no secret-scanning
+  workflow is wired today — the credential guards under `scripts/` are the
+  in-repo line of defense.)
 - Network-fetched dependencies are never described as trusted merely because
   they are popular. Pins, manifests, hashes, and reviewable diffs establish
   the boundary.
