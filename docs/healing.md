@@ -22,8 +22,11 @@ Wake conditions are `time`, `wall-decided`, `ci-completed`, and `manual`. A reco
 | `FFS_RESPAWN_MAX` | `1` | Number of in-process runner retries. |
 | `FFS_RESPAWN_MIN_SECS` | `600` | Retry timeout floor, capped by the original timeout. |
 | `FFS_CI_RERUN_MAX` | `2` | Durable CI rerun budget. |
+| `FFS_CI_GH_ERR_MAX` | `5` | Consecutive GitHub API errors allowed before the lifecycle record fails. |
+| `FFS_RECONCILE_STALE_SECS` | `300` | Dead launcher age before stale-running recovery is eligible. |
+| `PLAN_WALL_AWAIT_POLL` | `15` | Maximum seconds between bounded wall-verdict probes. |
 
-Look for `LIFECYCLE:`, `SESSION-WAKE:`, `CI-WATCH:`, `RECONCILE:`, and `GSD-RUN:RESPAWN` lines. Normal no-ops use rc 0; lifecycle validation failures use rc 1; an unresolved wall-await returns rc 75 and a decided blocked wall returns rc 20.
+Look for `LIFECYCLE:`, `SESSION-WAKE:`, `CI-WATCH:`, `WALL-AWAIT:`, `RECONCILE:`, and `GSD-RUN:RESPAWN` lines. Normal no-ops use rc 0; lifecycle validation failures use rc 1; an unresolved wall-await returns rc 75 and a decided blocked wall returns rc 20. A reconciler claim already held by another pass is deliberately a typed rc 0 no-op.
 
 An operator may schedule a pass, for example:
 

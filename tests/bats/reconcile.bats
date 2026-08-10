@@ -33,3 +33,26 @@ EOF
   run env FFS_RECONCILE=off bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [ "$output" = RECONCILE:disabled ]
 }
+
+@test "invalid and terminal records are skipped without a launch" {
+  printf '{truncated' > .planning/run-state/lifecycle-bad.json
+  now=$(date +%s)
+  bash scripts/gsd/lifecycle.sh checkpoint done done complete manual '{}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  before=$(cat .planning/run-state/lifecycle-done.json)
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:invalid-record run=bad'* ]]
+  [ "$(cat .planning/run-state/lifecycle-done.json)" = "$before" ]
+  [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "a dead stale running launcher is recovered once" {
+  now=$(date +%s)
+  bash scripts/gsd/lifecycle.sh checkpoint stale running start time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","stale"]' '{"respawns":2}'
+  jq '.child_pid=99999999 | .launched_at=1' .planning/run-state/lifecycle-stale.json > record && mv record .planning/run-state/lifecycle-stale.json
+  run env FFS_RECONCILE_STALE_SECS=1 bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=stale'* ]]
+  sleep 0.1
+  [ "$(cat "$RECONCILE_MARK")" = stale ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-stale.json)" = 2 ]
+}

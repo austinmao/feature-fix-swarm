@@ -88,3 +88,13 @@ setup() {
   run jq -e . "$REPO/.planning/run-state/lifecycle-legal.json"
   [ "$status" -eq 0 ]
 }
+
+@test "write verbs reject a forged resume argv without changing the record" {
+  bash "$LIFECYCLE" checkpoint guarded running start manual '{}' '["scripts/gsd/plan-wall.sh"]' '{"respawns":1}'
+  record="$REPO/.planning/run-state/lifecycle-guarded.json"
+  jq '.resume_argv=["/bin/sh","-c","bad"]' "$record" > "$record.tmp" && mv "$record.tmp" "$record"
+  before="$(cat "$record")"
+  run bash "$LIFECYCLE" decrement guarded respawns
+  [ "$status" -eq 1 ]
+  [ "$(cat "$record")" = "$before" ]
+}

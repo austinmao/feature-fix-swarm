@@ -1313,6 +1313,7 @@ cd "$RUN_WORKTREE_ROOT" || exit 1
 RESPAWN_MAX="${FFS_RESPAWN_MAX:-1}"
 RESPAWN_MIN_SECS="${FFS_RESPAWN_MIN_SECS:-600}"
 RESPAWN_BASE_SHA="$(git -C "$RUN_WORKTREE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+RESPAWN_STARTED="$SECONDS"
 attempt=1
 attempt_timeout="$TIMEOUT_SECS"
 : > "$LOG_FILE"
@@ -1335,10 +1336,25 @@ while :; do
     [[ "$commit_count" =~ ^[0-9]+$ ]] && [ "$commit_count" -eq 0 ] && should_respawn=1
   fi
   [ "$should_respawn" -eq 1 ] || break
+  # If this run has a lifecycle record, charge the same durable respawn
+  # budget that reconcile.sh uses.  Older/direct gsd-run invocations have no
+  # such record and retain their established one-retry behaviour.
+  lifecycle_record="$RUN_STATE_DIR/lifecycle-$RUN_ID.json"
+  if [ -f "$lifecycle_record" ]; then
+    if ! bash "$SCRIPT_DIR/lifecycle.sh" decrement "$RUN_ID" respawns >/dev/null 2>&1; then
+      bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" failed respawn-budget-exhausted >/dev/null 2>&1 || true
+      echo "GSD-RUN:RESPAWN budget-exhausted run=$RUN_ID" >&2
+      break
+    fi
+  fi
   echo "GSD-RUN:RESPAWN attempt=$((attempt + 1))/$((RESPAWN_MAX + 1)) rc=$rc" >&2
   printf 'GSD-RUN:RESPAWN attempt=%s/%s rc=%s\n' "$((attempt + 1))" "$((RESPAWN_MAX + 1))" "$rc" >> "$LOG_FILE"
   attempt=$((attempt + 1))
-  attempt_timeout="$RESPAWN_MIN_SECS"
+  elapsed=$((SECONDS - RESPAWN_STARTED))
+  remaining=$((TIMEOUT_SECS - elapsed))
+  [ "$remaining" -gt 0 ] || remaining=0
+  attempt_timeout="$remaining"
+  [ "$attempt_timeout" -ge "$RESPAWN_MIN_SECS" ] || attempt_timeout="$RESPAWN_MIN_SECS"
   [ "$attempt_timeout" -le "$TIMEOUT_SECS" ] || attempt_timeout="$TIMEOUT_SECS"
 done
 if [ "$rc" -ne 0 ]; then

@@ -11,13 +11,14 @@ Usage:
   lifecycle.sh wake-checkpoint <run> <wake-at> <resume-argv-json> <max-attempts>
   lifecycle.sh ci-reserve <run> <attempt> <max-reruns>
   lifecycle.sh ci-complete-rerun <run>
+  lifecycle.sh ci-refund-rerun <run>
   lifecycle.sh ci-gh-error <run> <max-errors>
   lifecycle.sh ci-probe-success <run>
   lifecycle.sh ci-ready <run>
   lifecycle.sh ci-failed <run> <reason>
   lifecycle.sh show <run>
   lifecycle.sh validate <run>
-  lifecycle.sh relaunch <run> <reason>
+  lifecycle.sh relaunch <run> <reason> [--no-charge]
   lifecycle.sh set-pid <run> <pid>
 USAGE
 }
@@ -33,7 +34,7 @@ VERB="${1:-}"
 [ -n "$VERB" ] || { usage; fail 'usage'; }
 shift
 case "$VERB" in
-  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-gh-error|ci-probe-success|ci-ready|ci-failed|show|validate|relaunch|set-pid) ;;
+  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-refund-rerun|ci-gh-error|ci-probe-success|ci-ready|ci-failed|show|validate|relaunch|set-pid) ;;
   *) usage; fail 'usage' ;;
 esac
 
@@ -204,7 +205,7 @@ elif verb == "decrement":
             fail("budget-exhausted")
         record["budgets"][key] -= 1
         record["updated_at"] = now()
-        save(path, record)
+        save_validated(path, record)
 elif verb == "wake-checkpoint":
     if len(args) != 4:
         fail("usage")
@@ -278,6 +279,17 @@ elif verb == "ci-complete-rerun":
     path = path_for(args[0])
     with FileLock(f"{path}.lock"):
         record = load(path); record.setdefault("ci", {})["rerun_pending"] = False; record["updated_at"] = now(); save_validated(path, record)
+elif verb == "ci-refund-rerun":
+    if len(args) != 1:
+        fail("usage")
+    path = path_for(args[0])
+    with FileLock(f"{path}.lock"):
+        record = load(path); validate(record)
+        ci = record.setdefault("ci", {})
+        if ci.get("rerun_pending"):
+            record["budgets"]["ci_reruns"] += 1
+            ci["rerun_pending"] = False
+        record["updated_at"] = now(); save_validated(path, record)
 elif verb == "ci-gh-error":
     if len(args) != 2:
         fail("usage")
@@ -313,20 +325,22 @@ elif verb == "validate":
         fail("usage")
     validate(load(path_for(args[0])))
 elif verb == "relaunch":
-    if len(args) != 2:
+    if len(args) not in {2, 3} or (len(args) == 3 and args[2] != "--no-charge"):
         fail("usage")
-    run_id, reason = args
+    run_id, reason = args[:2]
+    charge = len(args) == 2
     path = path_for(run_id)
     with FileLock(f"{path}.lock"):
         record = load(path)
         validate(record)
         if record["state"] not in {"waiting", "runnable"}:
             fail("not-relaunchable")
-        if record["budgets"]["respawns"] <= 0:
+        if charge and record["budgets"]["respawns"] <= 0:
             record["state"] = "failed"; record["reason"] = "respawn-budget-exhausted"; record["updated_at"] = now()
             save_validated(path, record)
             fail("budget-exhausted")
-        record["budgets"]["respawns"] -= 1
+        if charge:
+            record["budgets"]["respawns"] -= 1
         record["state"] = "running"; record["reason"] = reason; record["launched_at"] = int(dt.datetime.now().timestamp()); record["launcher_pid"] = os.getpid(); record["updated_at"] = now()
         save_validated(path, record)
         print(json.dumps(record["resume_argv"]))

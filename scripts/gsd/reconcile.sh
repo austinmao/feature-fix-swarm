@@ -22,6 +22,24 @@ quarantined() {
   [ -f "$STATE_DIR/gsd-run.status" ] && grep -qx 'state=quarantined' "$STATE_DIR/gsd-run.status"
 }
 
+claim_id() {
+  # coord accepts at most 64 bytes.  Do not silently truncate a run id: that
+  # would turn two distinct records into the same coordination key.
+  local run="$1" key="reconcile-$1"
+  [ "${#key}" -le 64 ] && printf '%s\n' "$key"
+}
+
+stale_running() {
+  local record="$1" pid launched now stale
+  pid="$(jq -r '.child_pid // .launcher_pid // 0' "$record" 2>/dev/null)"
+  launched="$(jq -r '.launched_at // 0' "$record" 2>/dev/null)"
+  stale="${FFS_RECONCILE_STALE_SECS:-300}"
+  [[ "$pid" =~ ^[0-9]+$ && "$launched" =~ ^[0-9]+$ && "$stale" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null && return 1
+  now="$(date +%s)"
+  [ "$((now - launched))" -ge "$stale" ]
+}
+
 due() {
   local record="$1" type wake now rc
   type="$(jq -r '.wake_condition.type' "$record")"
@@ -49,26 +67,44 @@ for record in "${records[@]}"; do
   run="${record##*/lifecycle-}"; run="${run%.json}"
   if ! bash "$LIFE" validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
   state="$(jq -r .state "$record")"
-  case "$state" in waiting|runnable) ;; *) echo "RECONCILE:still-waiting run=$run"; continue;; esac
+  case "$state" in
+    waiting|runnable) eligible=0 ;;
+    running) stale_running "$record" || { echo "RECONCILE:still-waiting run=$run"; continue; }; eligible=1 ;;
+    *) echo "RECONCILE:still-waiting run=$run"; continue ;;
+  esac
   if quarantined; then echo "RECONCILE:quarantined run=$run"; continue; fi
-  if ! due "$record"; then echo "RECONCILE:still-waiting run=$run"; continue; fi
-  claim="reconcile-$run"; [ "${#claim}" -le 64 ] || { echo "RECONCILE:invalid-run-id run=$run"; continue; }
+  if [ "$eligible" -eq 0 ] && ! due "$record"; then echo "RECONCILE:still-waiting run=$run"; continue; fi
+  # ci-watch changes the lifecycle record from waiting to runnable. Re-read
+  # after evaluator side effects rather than trusting the old JSON snapshot.
+  if ! bash "$LIFE" validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
+  state="$(jq -r .state "$record")"
+  case "$state" in waiting|runnable|running) ;; *) echo "RECONCILE:still-waiting run=$run"; continue;; esac
+  claim="$(claim_id "$run" || true)"; [ -n "$claim" ] || { echo "RECONCILE:invalid-run-id run=$run"; continue; }
   result="$(python3 "$COORD" claim "$claim" 2>&1)"; rc=$?
   if [ "$rc" -eq 3 ]; then echo "RECONCILE:claim-held run=$run"; continue; fi
   if [ "$rc" -ne 0 ]; then echo "RECONCILE:coord-error run=$run"; continue; fi
   generation="$(printf '%s\n' "$result" | sed -n 's/^CLAIM-OK generation=//p' | head -1)"
-  argv="$(bash "$LIFE" relaunch "$run" reconcile)"; rc=$?
+  # A stale running record has already spent its previous budget.  Reset it to
+  # waiting then relaunch without a second charge: the dead child made no
+  # progress and the stale-liveness guard is the double-launch protection.
+  relaunch_args=("$run" reconcile)
+  if [ "$state" = running ]; then
+    bash "$LIFE" transition "$run" waiting stale-launcher >/dev/null || { echo "RECONCILE:invalid-record run=$run"; claim_release "$claim" "$generation"; continue; }
+    relaunch_args+=(--no-charge)
+  fi
+  argv="$(bash "$LIFE" relaunch "${relaunch_args[@]}")"; rc=$?
   if [ "$rc" -ne 0 ]; then
     if [[ "$argv" == *budget-exhausted* ]]; then echo "RECONCILE:budget-exhausted run=$run"; else echo "RECONCILE:invalid-record run=$run"; fi
     claim_release "$claim" "$generation"; continue
   fi
   mapfile -t command < <(printf '%s' "$argv" | jq -r '.[]')
+  [ "${#command[@]}" -gt 0 ] || { echo "RECONCILE:invalid-argv run=$run"; claim_release "$claim" "$generation"; continue; }
   executable="$(realpath "${command[0]}" 2>/dev/null || true)"
   case "$executable" in "$ROOT/scripts/gsd/"*) ;; *) echo "RECONCILE:invalid-argv run=$run"; claim_release "$claim" "$generation"; continue;; esac
   log="$STATE_DIR/reconcile-$run.log"
   nohup "${command[@]}" >"$log" 2>&1 < /dev/null & child=$!
   disown "$child" 2>/dev/null || true
-  bash "$LIFE" set-pid "$run" "$child" >/dev/null || { echo "RECONCILE:launch-failed run=$run"; claim_release "$claim" "$generation"; continue; }
+  bash "$LIFE" set-pid "$run" "$child" >/dev/null || { bash "$LIFE" transition "$run" failed launch-failed >/dev/null 2>&1 || true; echo "RECONCILE:launch-failed run=$run"; claim_release "$claim" "$generation"; continue; }
   echo "RECONCILE:relaunched run=$run pid=$child"
   claim_release "$claim" "$generation"
 done

@@ -13,13 +13,19 @@ evaluate(){
  bash "$LIFE" ci-probe-success "$run" >/dev/null
  status="$(printf %s "$val" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status"))')"; [ "$status" = completed ] || { echo 'CI-WATCH:pending'; return; }
  attempt="$(printf %s "$val" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("attempt",0))')"; last="$(printf %s "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ci",{}).get("last_classified_attempt",0))')"; pending="$(printf %s "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ci",{}).get("rerun_pending",False))')"
- if [ "$pending" = True ]; then run_bounded 60 gh run rerun "$id" --failed >/dev/null 2>&1 || { echo 'CI-WATCH:gh-error idle'; return; }; bash "$LIFE" ci-complete-rerun "$run" >/dev/null; echo "CI-WATCH:rerun:$id"; return; fi
+ if [ "$pending" = True ]; then
+  # A crash after GitHub accepted the rerun leaves pending set, but an
+  # advanced attempt proves it happened; clear it instead of firing twice.
+  if [ "$attempt" -gt "$last" ]; then bash "$LIFE" ci-complete-rerun "$run" >/dev/null; echo 'CI-WATCH:rerun-observed'; return; fi
+  run_bounded 60 gh run rerun "$id" --failed >/dev/null 2>&1 || { bash "$LIFE" ci-refund-rerun "$run" >/dev/null; bash "$LIFE" ci-gh-error "$run" "$ERRMAX" >/dev/null; echo 'CI-WATCH:gh-error idle'; return; }
+  bash "$LIFE" ci-complete-rerun "$run" >/dev/null; echo "CI-WATCH:rerun:$id"; return
+ fi
  [ "$attempt" -gt "$last" ] || { echo 'CI-WATCH:awaiting-attempt'; return; }
  if printf %s "$val" | grep -qi 'success'; then bash "$LIFE" ci-ready "$run" >/dev/null; echo 'CI-WATCH:pass'; return; fi
  log="$(run_bounded 120 gh run view "$id" --log-failed 2>/dev/null)" || { echo 'CI-WATCH:gh-error idle'; return; }
  if printf %s "$log" | grep -Eiq 'runner-lost|system cancellation|startup_failure|network|dns|timeout|429|disk-space'; then
   reservation="$(bash "$LIFE" ci-reserve "$run" "$attempt" "$MAX")"; case "$reservation" in *exhausted*) echo 'CI-WATCH:rerun-exhausted'; return 1;; *cas-lost*) echo 'CI-WATCH:awaiting-attempt'; return;; *ci-pending*) :;; esac
-  run_bounded 60 gh run rerun "$id" --failed >/dev/null 2>&1 || { echo 'CI-WATCH:gh-error idle'; return; }; bash "$LIFE" ci-complete-rerun "$run" >/dev/null; echo "CI-WATCH:rerun:$id"
+  run_bounded 60 gh run rerun "$id" --failed >/dev/null 2>&1 || { bash "$LIFE" ci-refund-rerun "$run" >/dev/null; bash "$LIFE" ci-gh-error "$run" "$ERRMAX" >/dev/null; echo 'CI-WATCH:gh-error idle'; return; }; bash "$LIFE" ci-complete-rerun "$run" >/dev/null; echo "CI-WATCH:rerun:$id"
  else bash "$LIFE" ci-failed "$run" test-failure >/dev/null; echo 'CI-WATCH:test-failure'; return 1; fi
 }
 watch(){
