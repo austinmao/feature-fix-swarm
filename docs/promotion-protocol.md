@@ -6,9 +6,9 @@ below is one sentence, followed by the mechanism that enforces it today.
 
 1. Build the artifact once; promote that same artifact through every environment, never rebuild it per environment (Enforcement: the image-build workflow's build-and-push job).
 2. Pin artifact identity by content digest, never by a mutable tag (Enforcement: the digest resolver, consumed by the rollout script's digest-pin flag).
-3. Keep environment configuration scoped per environment and outside the artifact itself (Enforcement: the environment registry).
-4. Reference secrets by name from the secret store; never bake a secret value into the artifact or the repo (Enforcement: per-environment secret-store configs, referenced from the environment registry).
-5. Declare every environment in the environment registry with a verified date (Enforcement: the environment registry's per-host rows).
+3. Keep environment configuration scoped per environment and outside the artifact itself (Enforcement: the environment registry — config/environments.yaml, checked by bash scripts/gsd/env-registry.sh check).
+4. Reference secrets by name from the secret store; never bake a secret value into the artifact or the repo (Enforcement: per-environment secret-store configs, referenced from the environment registry — config/environments.yaml; bash scripts/gsd/env-registry.sh check exits 2 on any secret-value leak finding).
+5. Declare every environment in the environment registry with a verified date (Enforcement: the environment registry's per-host rows in config/environments.yaml; bash scripts/gsd/env-registry.sh check prints a stale-verified advisory — advisory only, never a gate).
 6. Staging mirrors production topology at reduced scale, using seeded data only (Enforcement: the parity manifest and its read-only audit lever).
 7. Nothing reaches production without recorded proof that the exact artifact already passed the previous environment (Enforcement: the evidence ledger's promotion-evidence type and its pre-grant precondition check).
 8. Promotion proof is bound to the exact artifact identity and expires after a bounded window (Enforcement: the evidence ledger's promotion-record and promotion-check logic, artifact-matching plus TTL).
