@@ -234,7 +234,7 @@ def _validate_metrics(metrics: object) -> dict:
     return accepted
 
 
-def validate_payload(candidate: dict, consumer_identity: tuple[str, ...] = ()) -> dict:
+def validate_payload(candidate: dict, consumer_identity: tuple[str, ...] = (), class_metrics: dict | None = None) -> dict:
     if not isinstance(candidate, dict) or set(candidate) - {"schema", "findings", "metrics"}:
         _reject("invalid-schema")
     if candidate.get("schema") != SCHEMA or not isinstance(candidate.get("findings"), list):
@@ -254,8 +254,8 @@ def validate_payload(candidate: dict, consumer_identity: tuple[str, ...] = ()) -
                 _reject("invalid-schema")
         if "sig_derived" in finding:
             clean["sig_derived"] = _string(finding["sig_derived"], "invalid-signature", HEX16_RE)
-        priority = finding.get("priority", classify_priority(clean))
-        if priority not in {"P0", "P1", "P2", "P3"} or priority != classify_priority(clean):
+        priority = finding.get("priority", classify_priority(clean, class_metrics))
+        if priority not in {"P0", "P1", "P2", "P3"} or priority != classify_priority(clean, class_metrics):
             _reject("invalid-schema")
         clean["priority"] = priority
         fingerprint = finding.get("fingerprint", stable_fingerprint(clean))
@@ -541,7 +541,7 @@ def _run_cli(args: argparse.Namespace) -> int:
     for finding in payload["findings"]:
         finding["priority"] = classify_priority(finding, class_metrics)
         finding["fingerprint"] = stable_fingerprint(finding)
-    accepted = validate_payload(payload, _owner_identity())
+    accepted = validate_payload(payload, _owner_identity(), class_metrics)
     if args.command == "collect":
         sys.stdout.buffer.write(canonical_json(accepted) + b"\n")
         return 0
