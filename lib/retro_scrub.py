@@ -153,16 +153,21 @@ def _matching_finding(event: dict, findings: list[dict]) -> dict | None:
 def collect_payload(events: list[dict], findings: list[dict]) -> dict:
     if not isinstance(events, list) or not isinstance(findings, list):
         _reject("invalid-input")
-    collected: list[dict] = []
+    # Retain the raw signature only long enough to make ordering independent of
+    # input order.  It is never put in the candidate payload.
+    ordered: list[tuple[dict, str]] = []
     for event in events:
         selected = _finding_from_event(event, _matching_finding(event, findings))
         if selected is not None:
-            collected.append(selected)
-    collected.sort(key=lambda item: (
-        item["script"], item["event_class"], item["gate"], item["exit_code"],
-        item["ffs_minor"], item.get("sig_derived", ""),
+            raw_sig = event.get("sig", "")
+            if raw_sig and (not isinstance(raw_sig, str) or not SIG_RE.fullmatch(raw_sig)):
+                _reject("invalid-signature")
+            ordered.append((selected, raw_sig))
+    ordered.sort(key=lambda pair: (
+        pair[0]["script"], pair[0]["event_class"], pair[0]["gate"], pair[0]["exit_code"],
+        pair[0]["ffs_minor"], pair[1],
     ))
-    return {"schema": SCHEMA, "findings": collected}
+    return {"schema": SCHEMA, "findings": [item for item, _raw_sig in ordered]}
 
 
 def classify_priority(finding: dict, class_metrics: dict | None = None) -> str:
@@ -381,14 +386,13 @@ def _run_cli(args: argparse.Namespace) -> int:
         scanned = subprocess.run([str(scanner), str(handoff)], check=False)
         if scanned.returncode != 0:
             _reject("scanner-rejected")
-        output = canonical_json(accepted)
-        # The scanner saw exactly these bytes; only then publish and record.
-        sys.stdout.buffer.write(output + b"\n")
         for finding in accepted["findings"]:
             record_ledger_entry(state_root / "retro-ledger.jsonl", {
                 "status": "accepted", "fingerprint": finding["fingerprint"],
                 "priority": finding["priority"],
             })
+        # The scanner saw exactly these bytes; only then publish successful output.
+        sys.stdout.buffer.write(canonical_json(accepted) + b"\n")
     return 0
 
 
