@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import argparse
+from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -40,7 +41,9 @@ FIX_RE = re.compile(
     r"\.github/workflows/[A-Za-z0-9][A-Za-z0-9_.-]*\.yml)$"
 )
 MODEL_TIERS = frozenset({"haiku", "sonnet", "opus", "gpt-5", "gpt-5-mini", "unknown"})
-SEVERITIES = frozenset({"info", "warning", "error", "critical"})
+SEVERITIES = frozenset({"info", "warning", "error", "critical", "P0", "P1", "P2", "P3"})
+RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+RELEASE_RE = re.compile(r"^##\s+(?:v([0-9]+)\.([0-9]+)\.([0-9]+)|([0-9]+)\.([0-9]+)\.([0-9]+)|\[([0-9]+)\.([0-9]+)\.([0-9]+)\])(?:\s|$)")
 
 
 class RetroReject(ValueError):
@@ -52,12 +55,18 @@ class RetroReject(ValueError):
 
 
 def _reject(code: str) -> None:
+    if not code.startswith("RETRO:"):
+        code = f"RETRO:{code}"
     raise RetroReject(code)
 
 
 def _string(value: object, code: str, pattern: re.Pattern[str] | None = None) -> str:
-    if not isinstance(value, str) or len(value) > 500 or "\x00" in value:
-        _reject(code)
+    if not isinstance(value, str):
+        _reject("invalid-schema")
+    if len(value) > 500:
+        _reject("value-too-long")
+    if "\x00" in value or any(ord(char) < 32 for char in value):
+        _reject("unsafe-value")
     if pattern is not None and not pattern.fullmatch(value):
         _reject(code)
     return value
@@ -65,7 +74,7 @@ def _string(value: object, code: str, pattern: re.Pattern[str] | None = None) ->
 
 def _number(value: object, code: str) -> int | float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        _reject(code)
+        _reject("invalid-schema")
     return value
 
 
@@ -81,7 +90,7 @@ def parse_digest(path: Path) -> list[dict]:
     if not path.exists():
         return []
     try:
-        rows = path.read_text(encoding="utf-8").splitlines()
+        rows = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         _reject("invalid-digest")
     events: list[dict] = []
@@ -136,10 +145,11 @@ def _finding_from_event(event: dict, finding: dict | None = None) -> dict | None
                 _reject("invalid-severity")
             item["severity"] = severity
         if "suggested_fix" in source:
-            item["suggested_fix"] = _string(source["suggested_fix"], "invalid-suggested-fix", FIX_RE)
+            item["suggested_fix"] = _string(source["suggested_fix"], "unsafe-value", FIX_RE)
         if "sig" in source:
-            raw_sig = _string(source["sig"], "invalid-signature", SIG_RE)
-            item["sig_derived"] = hashlib.sha256(raw_sig.encode("ascii")).hexdigest()[:16]
+            raw_sig = source["sig"]
+            if isinstance(raw_sig, str) and SIG_RE.fullmatch(raw_sig):
+                item["sig_derived"] = hashlib.sha256(raw_sig.encode("ascii")).hexdigest()[:16]
     return item
 
 
@@ -149,6 +159,11 @@ def _matching_finding(event: dict, findings: list[dict]) -> dict | None:
         for finding in findings:
             if isinstance(finding, dict) and finding.get("sig") == event_sig:
                 return finding
+    # Findings-queue rows do not necessarily repeat the digest signature.  The
+    # closed script/gate pair is the only fallback correlation we admit.
+    for finding in findings:
+        if isinstance(finding, dict) and finding.get("script") == event.get("script") and finding.get("gate") == event.get("gate"):
+            return finding
     return None
 
 
@@ -161,9 +176,10 @@ def collect_payload(events: list[dict], findings: list[dict]) -> dict:
     for event in events:
         selected = _finding_from_event(event, _matching_finding(event, findings))
         if selected is not None:
-            raw_sig = event.get("sig", "")
+            matched = _matching_finding(event, findings) or {}
+            raw_sig = event.get("sig", matched.get("sig", ""))
             if raw_sig and (not isinstance(raw_sig, str) or not SIG_RE.fullmatch(raw_sig)):
-                _reject("invalid-signature")
+                raw_sig = ""
             ordered.append((selected, raw_sig))
     ordered.sort(key=lambda pair: (
         pair[0]["script"], pair[0]["event_class"], pair[0]["gate"], pair[0]["exit_code"],
@@ -180,12 +196,8 @@ def classify_priority(finding: dict, class_metrics: dict | None = None) -> str:
         return "P1"
     metric = (class_metrics or {}).get(event_class)
     if isinstance(metric, dict):
-        wall = metric.get("wall_seconds")
-        active = metric.get("active_seconds")
-        if (isinstance(wall, (int, float)) and not isinstance(wall, bool)
-                and isinstance(active, (int, float)) and not isinstance(active, bool)
-                and math.isfinite(wall) and math.isfinite(active) and active > 0
-                and wall >= active * 2):
+        ratio = metric.get("wall_active_ratio")
+        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and math.isfinite(ratio) and ratio >= 2:
             return "P1"
     if event_class in P2_CLASSES:
         return "P2"
@@ -207,26 +219,26 @@ def _validate_metrics(metrics: object) -> dict:
     if not isinstance(metrics, dict) or set(metrics) - {
         "wall_seconds", "active_seconds", "wall_active_ratio", "intervention_free"
     }:
-        _reject("invalid-metrics")
+        _reject("invalid-schema")
     accepted: dict = {}
     for name in ("wall_seconds", "active_seconds", "wall_active_ratio"):
         if name in metrics:
-            value = _number(metrics[name], "invalid-metrics")
+            value = _number(metrics[name], "invalid-schema")
             if value < 0 or (name == "wall_active_ratio" and value < 1):
-                _reject("invalid-metrics")
+                _reject("invalid-schema")
             accepted[name] = value
     if "intervention_free" in metrics:
         if not isinstance(metrics["intervention_free"], bool):
-            _reject("invalid-metrics")
+            _reject("invalid-schema")
         accepted["intervention_free"] = metrics["intervention_free"]
     return accepted
 
 
 def validate_payload(candidate: dict, consumer_identity: tuple[str, ...] = ()) -> dict:
     if not isinstance(candidate, dict) or set(candidate) - {"schema", "findings", "metrics"}:
-        _reject("invalid-payload")
+        _reject("invalid-schema")
     if candidate.get("schema") != SCHEMA or not isinstance(candidate.get("findings"), list):
-        _reject("invalid-payload")
+        _reject("invalid-schema")
     identity = tuple(part for part in consumer_identity if isinstance(part, str) and part)
     checked: list[dict] = []
     for finding in candidate["findings"]:
@@ -234,21 +246,21 @@ def validate_payload(candidate: dict, consumer_identity: tuple[str, ...] = ()) -
             "script", "event_class", "gate", "exit_code", "ffs_minor", "model_tier",
             "sig_derived", "severity", "suggested_fix", "priority", "fingerprint",
         }:
-            _reject("invalid-finding")
+            _reject("invalid-schema")
         clean = _finding_from_event(finding)
         assert clean is not None
         for key in ("model_tier", "severity", "suggested_fix"):
             if key in finding and key not in clean:
-                _reject("invalid-finding")
+                _reject("invalid-schema")
         if "sig_derived" in finding:
             clean["sig_derived"] = _string(finding["sig_derived"], "invalid-signature", HEX16_RE)
         priority = finding.get("priority", classify_priority(clean))
         if priority not in {"P0", "P1", "P2", "P3"} or priority != classify_priority(clean):
-            _reject("invalid-priority")
+            _reject("invalid-schema")
         clean["priority"] = priority
         fingerprint = finding.get("fingerprint", stable_fingerprint(clean))
         if not isinstance(fingerprint, str) or fingerprint != stable_fingerprint(clean) or not HEX16_RE.fullmatch(fingerprint):
-            _reject("invalid-fingerprint")
+            _reject("invalid-schema")
         clean["fingerprint"] = fingerprint
         encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"))
         if any(part in encoded for part in identity):
@@ -282,11 +294,17 @@ def secure_payload_copy(payload: dict, directory: Path | None = None) -> Iterato
 
 
 def _secure_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = path.parent.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.getuid():
+    parent = path.parent
+    # The caller has already selected a state root.  Refuse a swapped final
+    # root while avoiding re-walking platform-managed temporary ancestors.
+    try:
+        metadata = parent.lstat()
+    except FileNotFoundError:
+        parent.mkdir(parents=True, mode=0o700)
+        metadata = parent.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         _reject("unsafe-state")
-    os.chmod(path.parent, 0o700)
+    os.chmod(parent, 0o700)
 
 
 def record_ledger_entry(path: Path, entry: dict) -> None:
@@ -318,6 +336,153 @@ def canonical_json(payload: dict) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not RFC3339_RE.fullmatch(value):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _duration(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
+def derive_metrics(events: list[dict]) -> dict:
+    """Derive only facts whose complete prerequisite set is trustworthy."""
+    output: dict = {}
+    if not events:
+        return output
+    times = [_timestamp(event.get("ts")) if isinstance(event, dict) else None for event in events]
+    durations = [_duration(event.get("duration_seconds")) if isinstance(event, dict) else None for event in events]
+    if all(item is not None for item in times):
+        parsed = [item for item in times if item is not None]
+        if all(parsed[index] >= parsed[index - 1] for index in range(1, len(parsed))):
+            output["wall_seconds"] = (parsed[-1] - parsed[0]).total_seconds()
+    if all(item is not None for item in durations):
+        output["active_seconds"] = sum(item for item in durations if item is not None)
+    wall, active = output.get("wall_seconds"), output.get("active_seconds")
+    if isinstance(wall, (int, float)) and isinstance(active, (int, float)) and active > 0 and wall >= active:
+        output["wall_active_ratio"] = wall / active
+    classes: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            classes = []
+            break
+        try:
+            classes.append(_event_class(event.get("event_class", event.get("class"))))
+        except RetroReject:
+            classes = []
+            break
+    if len(classes) == len(events):
+        output["intervention_free"] = "operator-intervention" not in classes
+    return output
+
+
+def derive_class_metrics(events: list[dict]) -> dict[str, dict]:
+    groups: dict[str, list[dict]] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            event_class = _event_class(event.get("event_class", event.get("class")))
+        except RetroReject:
+            continue
+        groups.setdefault(event_class, []).append(event)
+    output = {event_class: derive_metrics(group) for event_class, group in groups.items()}
+    # A class ratio represents elapsed time against one completed class phase,
+    # rather than an unrelated cross-class aggregate.  Keep only derivable data.
+    for event_class, group in groups.items():
+        metric = output[event_class]
+        wall = metric.get("wall_seconds")
+        durations = [_duration(event.get("duration_seconds")) for event in group]
+        if isinstance(wall, (int, float)) and len(group) > 1 and all(value is not None for value in durations):
+            active_phase = min(value for value in durations if value is not None)
+            if active_phase > 0 and wall >= active_phase:
+                metric["wall_active_ratio"] = wall / active_phase
+            else:
+                metric.pop("wall_active_ratio", None)
+    return output
+
+
+def normalize_ffs_minor(changelog_text: str | None) -> str:
+    if not isinstance(changelog_text, str):
+        return "0.0"
+    for line in changelog_text.splitlines():
+        match = RELEASE_RE.match(line)
+        if match:
+            values = [value for value in match.groups() if value is not None]
+            return f"{values[0]}.{values[1]}"
+    return "0.0"
+
+
+def ensure_cache_dir(path: Path) -> None:
+    """Create a private cache directory without traversing symlink components."""
+    target = Path(path)
+    current = Path(target.anchor) if target.is_absolute() else Path(".")
+    for component in target.parts[1:] if target.is_absolute() else target.parts:
+        current = current / component
+        created = False
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            current.mkdir(mode=0o700)
+            info = current.lstat()
+            created = True
+        # macOS exposes /var as a system compatibility symlink to /private/var.
+        # It is outside the caller-controlled cache path, unlike every later
+        # component (notably ~/.cache), which remains fail-closed.
+        system_alias = current == Path("/var")
+        if (stat.S_ISLNK(info.st_mode) and not system_alias) or not stat.S_ISDIR(info.st_mode):
+            _reject("unsafe-state")
+        # System ancestors (for example /private on macOS) are not ours to
+        # chmod; every directory created or owned by this user is private.
+        if created or current == target:
+            os.chmod(current, 0o700)
+
+
+def load_state_file(path: Path, empty: object) -> tuple[object, str | None]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return empty, None
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        return empty, "RETRO:unsafe-state"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return empty, "RETRO:invalid-state"
+
+
+def write_state_atomic(path: Path, payload: bytes) -> None:
+    if not isinstance(payload, bytes):
+        _reject("invalid-state")
+    ensure_cache_dir(path.parent)
+    if os.path.lexists(path):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            _reject("unsafe-state")
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _load_findings(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -334,15 +499,10 @@ def _load_findings(path: Path) -> list[dict]:
 
 def _minor_from_changelog(path: Path) -> str:
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return "0.0"
-    heading = re.compile(r"^#{1,6}\s*(?:\[)?v?([0-9]+)\.([0-9]+)(?:\.[0-9]+)?(?:\])?\s*$", re.I)
-    for line in content.splitlines():
-        match = heading.fullmatch(line.strip())
-        if match:
-            return f"{match.group(1)}.{match.group(2)}"
-    return "0.0"
+    return normalize_ffs_minor(content)
 
 
 def _with_version(events: list[dict], ffs_minor: str) -> list[dict]:
@@ -368,13 +528,18 @@ def _owner_identity() -> tuple[str, ...]:
 
 
 def _run_cli(args: argparse.Namespace) -> int:
-    events = _with_version(parse_digest(Path(args.digest)), _minor_from_changelog(Path(args.changelog)))
+    raw_events = parse_digest(Path(args.digest))
+    events = _with_version(raw_events, _minor_from_changelog(Path(args.changelog)))
     if not events:
         print("RETRO:no-events")
         return 0
     payload = collect_payload(events, _load_findings(Path(args.findings)))
+    metrics = derive_metrics(raw_events)
+    class_metrics = derive_class_metrics(raw_events)
+    if metrics:
+        payload["metrics"] = metrics
     for finding in payload["findings"]:
-        finding["priority"] = classify_priority(finding)
+        finding["priority"] = classify_priority(finding, class_metrics)
         finding["fingerprint"] = stable_fingerprint(finding)
     accepted = validate_payload(payload, _owner_identity())
     if args.command == "collect":
@@ -412,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run_cli(args)
     except RetroReject as exc:
-        print(f"RETRO:{exc.code}", file=sys.stderr)
+        print(exc.code, file=sys.stderr)
         return 1
     except (OSError, subprocess.SubprocessError):
         print("RETRO:local-error", file=sys.stderr)
