@@ -69,6 +69,13 @@ def _number(value: object, code: str) -> int | float:
     return value
 
 
+def _exit_code(value: object) -> int:
+    number = _number(value, "invalid-exit-code")
+    if (isinstance(number, float) and not number.is_integer()) or not 0 <= int(number) <= 255:
+        _reject("invalid-exit-code")
+    return int(number)
+
+
 def parse_digest(path: Path) -> list[dict]:
     """Parse JSONL, tolerating only a malformed final non-empty record."""
     if not path.exists():
@@ -114,14 +121,9 @@ def _finding_from_event(event: dict, finding: dict | None = None) -> dict | None
         "script": _string(script, "invalid-script", SCRIPT_RE),
         "event_class": _event_class(event.get("event_class", event.get("class"))),
         "gate": _string(event.get("gate", "none"), "invalid-gate", TOKEN_RE),
-        "exit_code": _number(event.get("exit_code", 0), "invalid-exit-code"),
+        "exit_code": _exit_code(event.get("exit_code", 0)),
         "ffs_minor": _string(event.get("ffs_minor", "0.0"), "invalid-version", VERSION_RE),
     }
-    if isinstance(item["exit_code"], float) and not item["exit_code"].is_integer():
-        _reject("invalid-exit-code")
-    if not 0 <= int(item["exit_code"]) <= 255:
-        _reject("invalid-exit-code")
-    item["exit_code"] = int(item["exit_code"])
     for source in (event, finding or {}):
         if "model_tier" in source:
             tier = _string(source["model_tier"], "invalid-model-tier")
@@ -195,7 +197,7 @@ def stable_fingerprint(finding: dict) -> str:
         _string(finding.get("script"), "invalid-script", SCRIPT_RE),
         _event_class(finding.get("event_class")),
         _string(finding.get("gate"), "invalid-gate", TOKEN_RE),
-        str(int(_number(finding.get("exit_code"), "invalid-exit-code"))),
+        str(_exit_code(finding.get("exit_code"))),
         _string(finding.get("ffs_minor"), "invalid-version", VERSION_RE),
     )
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
@@ -235,7 +237,7 @@ def validate_payload(candidate: dict, consumer_identity: tuple[str, ...] = ()) -
             _reject("invalid-finding")
         clean = _finding_from_event(finding)
         assert clean is not None
-        for key in ("model_tier", "sig_derived", "severity", "suggested_fix"):
+        for key in ("model_tier", "severity", "suggested_fix"):
             if key in finding and key not in clean:
                 _reject("invalid-finding")
         if "sig_derived" in finding:
