@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# retro.sh — local-only FFS diagnostic collection and analysis boundary.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RETRO_PY="$SCRIPT_DIR/../../lib/retro_scrub.py"
+SCANNER="$SCRIPT_DIR/scan-handoff-credentials.sh"
+GUARD="$SCRIPT_DIR/../hooks/credential-output-guard.sh"
+
+usage() {
+  echo "usage: retro.sh collect|analyze [--digest PATH] [--findings PATH] [--changelog PATH] [--state-root PATH]" >&2
+}
+
+mode="${1:-}"
+case "$mode" in
+  collect|analyze) shift ;;
+  *) usage; exit 2 ;;
+esac
+
+digest=""
+findings=""
+changelog=""
+state_root=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --digest|--findings|--changelog|--state-root)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      case "$1" in
+        --digest) digest="$2" ;;
+        --findings) findings="$2" ;;
+        --changelog) changelog="$2" ;;
+        --state-root) state_root="$2" ;;
+      esac
+      shift 2 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+if [ -n "$digest$findings$changelog$state_root" ] && [ "${RETRO_TEST_SEAM:-}" != "1" ]; then
+  echo "RETRO:seam-rejected" >&2
+  exit 1
+fi
+
+[ -f "$RETRO_PY" ] || { echo "RETRO:missing-module" >&2; exit 1; }
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$repo_root" ] || { echo "RETRO:no-repository" >&2; exit 1; }
+if [ -z "$digest" ]; then
+  digest="$(find "$repo_root/.feature-fix-swarm" -maxdepth 1 -type f -name 'digest-*.jsonl' -print 2>/dev/null | sort | tail -n 1)"
+fi
+[ -n "$digest" ] || { echo "RETRO:no-events"; exit 0; }
+[ -n "$findings" ] || findings="$repo_root/.feature-fix-swarm/findings.json"
+[ -n "$changelog" ] || changelog="$repo_root/CHANGELOG.md"
+[ -n "$state_root" ] || state_root="${HOME}/.cache/feature-fix-swarm"
+
+if [ "$mode" = "collect" ]; then
+  exec python3 "$RETRO_PY" collect --digest "$digest" --findings "$findings" --changelog "$changelog"
+fi
+
+if [ ! -x "$SCANNER" ] || [ ! -x "$GUARD" ]; then
+  echo "RETRO:scanner-unavailable" >&2
+  exit 1
+fi
+exec python3 "$RETRO_PY" analyze --digest "$digest" --findings "$findings" --changelog "$changelog" --state-root "$state_root" --scanner "$SCANNER"
