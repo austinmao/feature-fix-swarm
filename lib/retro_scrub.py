@@ -553,11 +553,15 @@ def _run_cli(args: argparse.Namespace) -> int:
         scanned = subprocess.run([str(scanner), str(handoff)], check=False)
         if scanned.returncode != 0:
             _reject("scanner-rejected")
-        for finding in accepted["findings"]:
-            record_ledger_entry(state_root / "retro-ledger.jsonl", {
-                "status": "accepted", "fingerprint": finding["fingerprint"],
-                "priority": finding["priority"],
-            })
+        # Phase 2 owns the durable filing ledger under the fixed HOME-derived
+        # state root.  Keep the Phase 1 seam's accepted-record behavior only
+        # when it invokes this module directly.
+        if os.environ.get("RETRO_FILING") != "1":
+            for finding in accepted["findings"]:
+                record_ledger_entry(state_root / "retro-ledger.jsonl", {
+                    "status": "accepted", "fingerprint": finding["fingerprint"],
+                    "priority": finding["priority"],
+                })
         # The scanner saw exactly these bytes; only then publish successful output.
         sys.stdout.buffer.write(canonical_json(accepted) + b"\n")
     return 0
