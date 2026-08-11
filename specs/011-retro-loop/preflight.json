@@ -1,0 +1,6 @@
+[
+  {"kind": "probe", "name": "gh-auth", "argv": ["gh", "auth", "status"]},
+  {"kind": "probe", "name": "jq", "argv": ["jq", "--version"]},
+  {"kind": "probe", "name": "bats", "argv": ["bats", "--version"]},
+  {"kind": "probe", "name": "shellcheck", "argv": ["shellcheck", "--version"]}
+]

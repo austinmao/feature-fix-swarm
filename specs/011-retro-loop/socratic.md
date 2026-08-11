@@ -69,11 +69,10 @@ packs: [threat-modeling, operations]
 
 ## Open questions → grants
 
-- One LIVE end-to-end smoke: may the implementation create (then immediately
-  close) ONE real issue on austinmao/feature-fix-swarm to prove PATH-001
-  against the real API, beyond the stubbed E2E? Candidate action:
-  `issue-create:austinmao/feature-fix-swarm` — operator to promote or leave
-  pending (stubbed E2E is sufficient for merge either way).
+- issue-create:austinmao/feature-fix-swarm — one LIVE end-to-end smoke: may
+  the implementation create (then immediately close) ONE real issue to prove
+  PATH-001 against the real API, beyond the stubbed E2E? Operator to promote
+  or leave pending (stubbed E2E is sufficient for merge either way).
 
 ## Top risks
 
