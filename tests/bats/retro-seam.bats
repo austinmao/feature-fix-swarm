@@ -261,6 +261,8 @@ EOF
   RMOCK_BIN="$BATS_TEST_TMPDIR/self-event-bin"
   mkdir -p "$REPO/scripts/gsd" "$REPO/scripts/hooks" "$REPO/lib" "$REPO/.feature-fix-swarm" "$RMOCK_BIN"
   cp "$ROOT/scripts/gsd/retro.sh" "$REPO/scripts/gsd/retro.sh"
+  # fail-soft: absence must stay observable as RED, not error out the harness
+  [ -f "$ROOT/lib/retro_state.py" ] && cp "$ROOT/lib/retro_state.py" "$REPO/lib/retro_state.py"
   cp "$ROOT/lib/retro_scrub.py" "$REPO/lib/retro_scrub.py"
   cp "$ROOT/lib/gates.py" "$REPO/lib/gates.py"
   cp "$ROOT/lib/evidence_events.py" "$REPO/lib/evidence_events.py"
