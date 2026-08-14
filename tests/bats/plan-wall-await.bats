@@ -65,3 +65,39 @@ write_record() {
   run bash "$WALL" --await 1 .planning/phases/1-foo
   [ "$status" -eq 20 ]; [[ "$output" == *'WALL-AWAIT:decided-blocked'* ]]
 }
+
+@test "await accepts a socratic-folded plan_sha256 record (sha:socratic_sha)" {
+  sha="$(shasum -a 256 .planning/phases/1-foo/PLAN.md | awk '{print $1}')"
+  soc="$(printf 'socratic body' | shasum -a 256 | awk '{print $1}')"
+  write_record reviewed-pass "${sha}:${soc}"
+  run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 0 ]; [[ "$output" == *'WALL-AWAIT:done'* ]]
+  write_record blocked "${sha}:${soc}"
+  run bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 20 ]
+  # a fold with the WRONG plan sha stays pending — forgery net intact
+  write_record reviewed-pass "deadbeef:${soc}"
+  run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 75 ]
+  # a fold whose suffix is not a 64-hex digest stays pending
+  write_record reviewed-pass "${sha}:notasha"
+  run env PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 75 ]
+}
+
+@test "await enforces PLAN_WALL_AWAIT_MAX on pending returns, decided always wins" {
+  rm -f .planning/run-state/plan-wall-1-foo-plan.json
+  run env PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 75 ]
+  run env PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 75 ]
+  run env PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 76 ]; [[ "$output" == *'WALL-AWAIT:attempts-exhausted'* ]]
+  # a decided wall still reports through an exhausted counter and resets it
+  write_record reviewed-pass
+  run env PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 0 ]; [[ "$output" == *'WALL-AWAIT:done'* ]]
+  rm -f .planning/run-state/plan-wall-1-foo-plan.json
+  run env PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 75 ]
+}

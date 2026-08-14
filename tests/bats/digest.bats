@@ -444,3 +444,30 @@ EOF
   echo "$output" | grep -q '^oldest-pr: '
   ! echo "$output" | grep -q '^oldest-pr: unavailable'
 }
+
+# ── retro JSONL sink (spec-011 producer seam — digest-<utcdate>.jsonl) ──────
+
+@test "immediate writes schema-true retro rows once; second run appends nothing" {
+  seed_waiver
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  sink=("$REPO"/.feature-fix-swarm/digest-*.jsonl)
+  [ -f "${sink[0]}" ]
+  [ "$(wc -l < "${sink[0]}" | tr -d ' ')" -eq 1 ]
+  jq -e '.script == "gates.py" and .event_class == "gate-warn"
+         and .gate == "canary-gate" and (.exit_code | type == "number")' "${sink[0]}"
+  # every value survives the retro scrub token contract
+  jq -e '.gate | test("^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")' "${sink[0]}"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "${sink[0]}" | tr -d ' ')" -eq 1 ]
+}
+
+@test "retro sink kill switch writes no jsonl file" {
+  seed_waiver
+  run env DIGEST_RETRO_SINK=off bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'waiver '* ]]
+  shopt -s nullglob; sink=("$REPO"/.feature-fix-swarm/digest-*.jsonl); shopt -u nullglob
+  [ "${#sink[@]}" -eq 0 ]
+}

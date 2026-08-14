@@ -185,3 +185,13 @@ EOF
   [ "$(cat "$RECONCILE_MARK")" = from-worktree ]
   [ "$(jq -r .budgets.respawns "$rec")" = 0 ]
 }
+
+@test "terminal failed record reports terminal, never still-waiting" {
+  bash scripts/gsd/lifecycle.sh checkpoint gone waiting wait time '{"wake_at":1}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  bash scripts/gsd/lifecycle.sh transition gone failed test-failure
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:terminal run=gone state=failed'* ]]
+  [[ "$output" != *still-waiting* ]]
+  [ ! -e "$RECONCILE_MARK" ]
+}
