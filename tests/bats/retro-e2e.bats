@@ -201,8 +201,7 @@ SHIM
   chmod +x "$TRIAGE_BIN/gh"
 }
 
-run_triage_contract() { # run_triage_contract <origin> <fixture>
-  triage_checkout "$1" "$2"
+run_triage_contract() {
   skill="$ROOT/skills/retro-triage/SKILL.md"
   [ -f "$skill" ] || { echo "TRIAGE-CONTRACT: missing SKILL.md" >&2; return 1; }
   block="$(awk '/<!-- retro-triage:command:start -->/{on=1;next}/<!-- retro-triage:command:end -->/{on=0}on' "$skill")"
@@ -211,7 +210,8 @@ run_triage_contract() { # run_triage_contract <origin> <fixture>
 }
 
 @test "PATH-005 triage priority and ordering uses the checked-in SKILL.md block" {
-  run run_triage_contract https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
+  run run_triage_contract
   [ "$status" -eq 0 ]
   [[ "$output" == *"priority:P1"* ]]
   [[ "$output" == *"priority:P2"* ]]
@@ -223,7 +223,8 @@ run_triage_contract() { # run_triage_contract <origin> <fixture>
 }
 
 @test "PATH-005 triage missing SKILL.md cannot reach foreign-origin boundary" {
-  run run_triage_contract https://github.com/testorg/testrepo.git "$FIXTURES/triage-issues.json"
+  triage_checkout https://github.com/testorg/testrepo.git "$FIXTURES/triage-issues.json"
+  run run_triage_contract
   [ "$status" -eq 1 ]
   [[ "$output" == *"RETRO-TRIAGE:wrong-origin"* ]]
   [ ! -s "$TRIAGE_GH_LOG" ]
@@ -231,7 +232,8 @@ run_triage_contract() { # run_triage_contract <origin> <fixture>
 }
 
 @test "PATH-005 triage missing SKILL.md cannot emit no-issues result" {
-  run run_triage_contract git@github.com:austinmao/feature-fix-swarm.git "$FIXTURES/triage-empty.json"
+  triage_checkout git@github.com:austinmao/feature-fix-swarm.git "$FIXTURES/triage-empty.json"
+  run run_triage_contract
   [ "$status" -eq 0 ]
   [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
   grep -qx 'api repos/austinmao/feature-fix-swarm --jq .permissions.push' "$TRIAGE_GH_LOG"
