@@ -209,7 +209,12 @@ def select_issue_match(issues: list[dict], *, fingerprint: str, title: str, thre
 
 
 def _gh(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+    # Bounded: every gh call runs while the exclusive RetroLock is held, so a
+    # hung transport must fail typed instead of wedging every other filer.
+    try:
+        return subprocess.run(["gh", *args], capture_output=True, text=True, check=False, timeout=60)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(["gh", *args], 124, "", "gh-timeout")
 
 
 def _query(fingerprint: str, title: str, search: bool = False) -> list[dict]:
@@ -270,11 +275,13 @@ def _file_one(rows: list[dict], finding: dict) -> FilingOutcome:
     floor, cap = max(0, floor), max(0, cap)
     if finding["priority"] == "P3" and occurrences < floor:
         rows.append(_row("accrue", finding, occurrences=occurrences)); return FilingOutcome("accrued")
+    try: threshold = float(os.environ.get("RETRO_TITLE_SIM", "0.8"))
+    except ValueError: threshold = 0.8
     listed = _query(fp, title)
-    match = select_issue_match(listed, fingerprint=fp, title=title, threshold=float(os.environ.get("RETRO_TITLE_SIM", "0.8")))
+    match = select_issue_match(listed, fingerprint=fp, title=title, threshold=threshold)
     if not match:
         searched = _query(fp, title, True)
-        match = select_issue_match(searched, fingerprint=fp, title=title, threshold=float(os.environ.get("RETRO_TITLE_SIM", "0.8")))
+        match = select_issue_match(searched, fingerprint=fp, title=title, threshold=threshold)
     if match: return _comment(rows, finding, match.number, occurrences)
     if sum(1 for row in rows if row.get("action") == "create" and row.get("run_id") == os.environ.get("GSD_RUN_ID", "local")) >= cap:
         rows.append(_row("accrue", finding, outcome="cap", occurrences=occurrences)); return FilingOutcome("cap")
@@ -291,6 +298,9 @@ def _file_one(rows: list[dict], finding: dict) -> FilingOutcome:
     if response.returncode == 0:
         match_num = re.search(r"/(\d+)(?:\s*)$", response.stdout)
         number = int(match_num.group(1)) if match_num else 0
+        # The create supersedes its published intent; keeping both would
+        # inflate the fingerprint's occurrence count by one forever.
+        rows[:] = [row for row in rows if not (row.get("action") == "intent" and row.get("fingerprint") == fp)]
         rows.append(_row("create", finding, issue_number=number, occurrences=occurrences, paced_at=time.time())); return FilingOutcome("created")
     status = next((str(code) for code in (403, 404, 422) if str(code) in response.stderr), None)
     # The failed child made no public create, so retain its typed outcome
