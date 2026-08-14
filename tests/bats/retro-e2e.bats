@@ -190,6 +190,10 @@ if [ "$#" -eq 12 ] && [ "$1" = issue ] && [ "$2" = list ] && \
    [ "$11" = --json ] && [ "$12" = number,title,body,labels ]; then
   printf 'fixture-read\n' >> "$TRIAGE_FIXTURE_READ_LOG"
   cat "$GH_TRIAGE_FIXTURE"
+elif [ "$#" -eq 4 ] && [ "$1" = api ] && \
+     [ "$2" = repos/austinmao/feature-fix-swarm ] && [ "$3" = --jq ] && \
+     [ "$4" = .permissions.push ]; then
+  printf 'true\n'
 else
   exit 64
 fi
@@ -212,7 +216,9 @@ run_triage_contract() { # run_triage_contract <origin> <fixture>
   [[ "$output" == *"priority:P1"* ]]
   [[ "$output" == *"priority:P2"* ]]
   ! [[ "$output" == *"TRIAGE-RAW-CANARY"* ]]
-  [ "$(cat "$TRIAGE_GH_LOG")" = "issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels" ]
+  grep -qx 'api repos/austinmao/feature-fix-swarm --jq .permissions.push' "$TRIAGE_GH_LOG"
+  grep -qx 'issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels' "$TRIAGE_GH_LOG"
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 2 ]
   [ "$(cat "$TRIAGE_FIXTURE_READ_LOG")" = "fixture-read" ]
 }
 
@@ -228,7 +234,9 @@ run_triage_contract() { # run_triage_contract <origin> <fixture>
   run run_triage_contract git@github.com:austinmao/feature-fix-swarm.git "$FIXTURES/triage-empty.json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
-  [ "$(cat "$TRIAGE_GH_LOG")" = "issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels" ]
+  grep -qx 'api repos/austinmao/feature-fix-swarm --jq .permissions.push' "$TRIAGE_GH_LOG"
+  grep -qx 'issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels' "$TRIAGE_GH_LOG"
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 2 ]
   [ "$(cat "$TRIAGE_FIXTURE_READ_LOG")" = "fixture-read" ]
 }
 
