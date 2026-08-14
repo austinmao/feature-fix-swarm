@@ -411,7 +411,11 @@ EOF
     if [ "$probe_enabled" != "off" ]; then
       budget="$probe_timeout"
       [ "$budget" -le "$remaining" ] || budget="$remaining"
-      probe_output="$(adversary_invoke "$kind" "$budget" "$model" "$effort" \
+      # Probe at LOW effort always: the probe tests reachability, not reasoning.
+      # Rung-effort (high/xhigh) probes have a fat latency tail that blows the
+      # probe budget (observed: sol@high >60s vs 19-21s@low). effort is ignored
+      # on the claude branch, so this is uniform-safe.
+      probe_output="$(adversary_invoke "$kind" "$budget" "$model" low \
         'This is a read-only model availability probe. Use no tools. Output exactly: FFS_ADVERSARY_MODEL_READY' 2>&1)"
       rc=$?
       if [ "$rc" -ne 0 ] || ! printf '%s\n' "$probe_output" | grep -qx 'FFS_ADVERSARY_MODEL_READY'; then
