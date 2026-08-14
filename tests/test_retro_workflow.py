@@ -62,7 +62,7 @@ def body(count: int = 1) -> str:
     return "facts remain byte-preserved\n" + BODY_META.format(fp=FP, priority="P1", count=count) + "\n"
 
 
-def snapshot(*, event="issues", action="opened", issue_body=None, comments=None, actor="human", pr=False, truncated=False):
+def snapshot(*, event="issues", action="opened", issue_body=None, comments=None, triggering_comment=None, actor="human", pr=False, truncated=False):
     return {
         "event": event,
         "action": action,
@@ -70,6 +70,7 @@ def snapshot(*, event="issues", action="opened", issue_body=None, comments=None,
         "pull_request": pr,
         "issue": {"number": 31, "body": issue_body if issue_body is not None else body()},
         "comments": comments or [],
+        "triggering_comment": triggering_comment,
         "truncated": truncated,
     }
 
@@ -152,7 +153,7 @@ def test_comment_recount_distinct_human_authors_preserves_body_bytes():
         {"body": COMMENT.format(fp=FP, priority="P1", count=1), "author": {"login": "bob", "type": "User"}},
         {"body": COMMENT.format(fp=FP, priority="P1", count=1), "author": {"login": "github-actions[bot]", "type": "Bot"}},
     ]
-    data = snapshot(event="issue_comment", action="created", comments=comments)
+    data = snapshot(event="issue_comment", action="created", comments=comments, triggering_comment=comments[0])
     decision = run_decision(data)
     assert decision["expected_body"] == data["issue"]["body"]
     assert decision["body"] == body(3)
@@ -160,12 +161,14 @@ def test_comment_recount_distinct_human_authors_preserves_body_bytes():
 
 
 def test_comment_occurrence_forgery_is_bounded_to_one_author():
-    data = snapshot(event="issue_comment", comments=[{"body": COMMENT.format(fp=FP, priority="P1", count=MAX_COUNT), "author": {"login": "forger", "type": "User"}}])
+    comment = {"body": COMMENT.format(fp=FP, priority="P1", count=MAX_COUNT), "author": {"login": "forger", "type": "User"}}
+    data = snapshot(event="issue_comment", comments=[comment], triggering_comment=comment)
     assert run_decision(data)["body"] == body(2)
 
 
 def test_comment_replay_is_deterministic_and_nonempty_has_expected_body():
-    data = snapshot(event="issue_comment", comments=[{"body": COMMENT.format(fp=FP, priority="P1", count=1), "author": {"login": "alice", "type": "User"}}])
+    comment = {"body": COMMENT.format(fp=FP, priority="P1", count=1), "author": {"login": "alice", "type": "User"}}
+    data = snapshot(event="issue_comment", comments=[comment], triggering_comment=comment)
     first, second = run_decision(data), run_decision(data)
     assert first == second
     if any(first[key] for key in ("labels_to_add", "priority_labels_to_remove", "body")):
@@ -176,4 +179,16 @@ def test_comment_bot_pr_thread_skip_and_truncated_snapshots_are_empty():
     assert_empty({"skip": "bot"})
     assert_empty(snapshot(actor="github-actions[bot]"))
     assert_empty(snapshot(event="issue_comment", pr=True))
-    assert_empty(snapshot(event="issue_comment", comments=[{"body": COMMENT.format(fp=FP, priority="P1", count=1), "author": {"login": "a", "type": "User"}}] * 501, truncated=True))
+    comment = {"body": COMMENT.format(fp=FP, priority="P1", count=1), "author": {"login": "a", "type": "User"}}
+    assert_empty(snapshot(event="issue_comment", comments=[comment] * 501, triggering_comment=comment, truncated=True))
+
+
+@pytest.mark.parametrize("triggering_comment", [
+    {"body": "arbitrary prose", "author": {"login": "alice", "type": "User"}},
+    {"body": COMMENT.format(fp="fedcba9876543210", priority="P1", count=1), "author": {"login": "alice", "type": "User"}},
+    {"body": COMMENT.format(fp=FP, priority="P1", count=1), "author": {"login": "ffs[bot]", "type": "Bot"}},
+])
+def test_issue_comment_requires_canonical_matching_human_trigger_before_any_mutation(triggering_comment):
+    # Labels would otherwise be added, so the empty decision proves the gate
+    # runs before every issue_comment mutation category.
+    assert_empty(snapshot(event="issue_comment", triggering_comment=triggering_comment))

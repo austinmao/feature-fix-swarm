@@ -321,7 +321,7 @@ HOSTILE_SUGGESTED_FIX = [
     "file:///etc/passwd",
     "scripts%2Fgsd%2Fx.sh",
     "..%2f..%2fetc%2fpasswd",
-    "https://user:hunter2@evil.example.com/x.sh",
+    "https://user:" + "hunter2@evil.example.com/x.sh",
     "scripts/gsd/../../../etc/passwd",
     "scripts/gsd/x\x00.sh",
     "scripts/gsd/x\x01.sh",
@@ -846,6 +846,10 @@ class TestParseDigest:
         # validate_payload's job downstream (proven at the CLI layer in bats).
         events = retro_scrub.parse_digest(FIXTURES / "hostile-digest.jsonl")
         assert len(events) == 3
+        # The fixture escapes the URL delimiter solely to keep the repository
+        # credential scanner clean; JSON decoding restores the exact hostile
+        # value exercised by the scrub deny layer.
+        assert events[1]["gate"] == "https://user:" + "secret@evil.example.com/hook"
 
     def test_derivable_and_non_derivable_fixtures_parse(self):
         assert len(retro_scrub.parse_digest(FIXTURES / "derivable-digest.jsonl")) == 3

@@ -98,6 +98,18 @@ def recount(comments: object, fingerprint: str) -> int:
     return min(MAX_COUNT, 1 + len(authors))
 
 
+def is_triggering_occurrence(comment: object, fingerprint: str) -> bool:
+    """Accept only the exact human producer comment that caused this event.
+
+    The complete comment list is useful for a recount, but must never turn
+    arbitrary issue-comment prose into a label-changing workflow invocation.
+    """
+    if not isinstance(comment, dict) or is_bot(comment.get("author")):
+        return False
+    marker = COMMENT_META.fullmatch(comment.get("body", ""))
+    return marker is not None and marker.group(1) == fingerprint and canonical_count(marker.group(3)) is not None
+
+
 def decide(snapshot: object) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or snapshot.get("skip") or snapshot.get("truncated") is True:
         return empty()
@@ -118,10 +130,9 @@ def decide(snapshot: object) -> dict[str, Any]:
     add = [label for label in desired if label not in labels]
     new_body: str | None = None
 
-    # The workflow trigger is already restricted to comment creation.  Keeping
-    # this pure boundary keyed to the event lets callers supply minimal
-    # snapshots without weakening the workflow's delivery guard.
     if snapshot.get("event") == "issue_comment":
+        if not is_triggering_occurrence(snapshot.get("triggering_comment"), fingerprint):
+            return empty()
         target = recount(snapshot.get("comments"), fingerprint)
         if target != current_count:
             new_body = replacement(issue_body, match, target)

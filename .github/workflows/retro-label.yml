@@ -46,7 +46,12 @@ jobs:
             fs.writeFileSync(output, JSON.stringify({
               event: context.eventName, action: context.payload.action, actor: context.actor,
               pull_request: Boolean(issue.pull_request), truncated: Number(issue.comments || 0) > 500,
-              issue: {number: issue.number, body: issue.body, labels: issue.labels.map(label => label.name)}, comments,
+              issue: {number: issue.number, body: issue.body, labels: issue.labels.map(label => label.name)},
+              triggering_comment: context.eventName === 'issue_comment' ? {
+                body: context.payload.comment?.body,
+                author: {login: context.payload.comment?.user?.login, type: context.payload.comment?.user?.type},
+              } : null,
+              comments,
             }));
       - name: Decide from snapshot
         run: |
@@ -78,7 +83,12 @@ jobs:
               }
               return {event: context.eventName, action: context.payload.action, actor: context.actor,
                 pull_request: Boolean(live.data.pull_request), truncated: Number(live.data.comments || 0) > 500,
-                issue: {number: issueNumber, body: live.data.body, labels: live.data.labels.map(label => label.name)}, comments};
+                issue: {number: issueNumber, body: live.data.body, labels: live.data.labels.map(label => label.name)},
+                triggering_comment: context.eventName === 'issue_comment' ? {
+                  body: context.payload.comment?.body,
+                  author: {login: context.payload.comment?.user?.login, type: context.payload.comment?.user?.type},
+                } : null,
+                comments};
             };
             const decide = data => {
               const input = path.join(temp, 'refetch-snapshot.json');

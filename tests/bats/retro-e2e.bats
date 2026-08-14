@@ -179,6 +179,7 @@ triage_checkout() { # triage_checkout <origin> <fixture>
   : > "$TRIAGE_GH_LOG"; : > "$TRIAGE_FIXTURE_READ_LOG"
   GH_TRIAGE_FIXTURE="$2"
   export TRIAGE_GH_LOG TRIAGE_FIXTURE_READ_LOG GH_TRIAGE_FIXTURE
+  unset GH_TRIAGE_PERMISSION GH_TRIAGE_LIST_FAIL GH_TRIAGE_REQUIRE_SANITIZED || true
   cat > "$TRIAGE_BIN/gh" <<'SHIM'
 #!/usr/bin/env bash
 set -eu
@@ -188,12 +189,19 @@ if [ "$#" -eq 12 ] && [ "$1" = issue ] && [ "$2" = list ] && \
    [ "$5" = --state ] && [ "$6" = open ] && [ "$7" = --label ] && \
    [ "$8" = source/ffs-retro ] && [ "$9" = --limit ] && [ "${10}" = 200 ] && \
    [ "${11}" = --json ] && [ "${12}" = number,title,body,labels ]; then
+  if [ "${GH_TRIAGE_REQUIRE_SANITIZED:-false}" = true ]; then
+    [ -z "${GH_DEBUG+x}" ] && [ "${GH_HOST:-}" = github.com ] || exit 65
+  fi
+  [ "${GH_TRIAGE_LIST_FAIL:-false}" = true ] && exit 69
   printf 'fixture-read\n' >> "$TRIAGE_FIXTURE_READ_LOG"
   cat "$GH_TRIAGE_FIXTURE"
 elif [ "$#" -eq 4 ] && [ "$1" = api ] && \
      [ "$2" = repos/austinmao/feature-fix-swarm ] && [ "$3" = --jq ] && \
      [ "$4" = .permissions.push ]; then
-  printf 'true\n'
+  if [ "${GH_TRIAGE_REQUIRE_SANITIZED:-false}" = true ]; then
+    [ -z "${GH_DEBUG+x}" ] && [ "${GH_HOST:-}" = github.com ] || exit 65
+  fi
+  printf '%s\n' "${GH_TRIAGE_PERMISSION:-true}"
 else
   exit 64
 fi
@@ -213,13 +221,79 @@ run_triage_contract() {
   triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
   run run_triage_contract
   [ "$status" -eq 0 ]
-  [[ "$output" == *"priority:P1"* ]]
-  [[ "$output" == *"priority:P2"* ]]
+  # The brief must use priority, then lowest issue number, rather than merely
+  # mentioning both priorities somewhere in the output.
+  run python3 - <<'PY' "$output"
+import sys
+
+brief = sys.argv[1]
+assert brief.index("priority:P1") < brief.index("fingerprint:2222222222222222")
+assert brief.index("fingerprint:2222222222222222") < brief.index("priority:P2")
+assert brief.index("fingerprint:3333333333333333") < brief.index("fingerprint:1111111111111111")
+assert brief.count("provenance: unverified-consumer-report") == 3
+assert "issues: issue 12" in brief
+assert "issues: issue 7" in brief
+assert "issues: issue 41" in brief
+PY
+  [ "$status" -eq 0 ]
   ! [[ "$output" == *"TRIAGE-RAW-CANARY"* ]]
+  ! [[ "$output" == *"credential.invalid"* ]]
   grep -qx 'api repos/austinmao/feature-fix-swarm --jq .permissions.push' "$TRIAGE_GH_LOG"
   grep -qx 'issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels' "$TRIAGE_GH_LOG"
   [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 2 ]
   [ "$(cat "$TRIAGE_FIXTURE_READ_LOG")" = "fixture-read" ]
+}
+
+@test "PATH-005 triage rejects non-maintainers before listing issues" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
+  GH_TRIAGE_PERMISSION=false; export GH_TRIAGE_PERMISSION
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:not-maintainer"* ]]
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 1 ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
+}
+
+@test "PATH-005 triage reports list transport failures without consuming the fixture" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
+  GH_TRIAGE_LIST_FAIL=true; export GH_TRIAGE_LIST_FAIL
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:transport-error"* ]]
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 2 ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
+}
+
+@test "PATH-005 triage refuses lookalike origins without calling GitHub" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.evil.git "$FIXTURES/triage-issues.json"
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:wrong-origin"* ]]
+  [ ! -s "$TRIAGE_GH_LOG" ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
+}
+
+@test "PATH-005 triage removes GH_DEBUG and pins the GitHub host at both gh boundaries" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-empty.json"
+  GH_DEBUG=api GH_HOST=attacker.invalid GH_ENTERPRISE_HOST=attacker.invalid \
+    GH_TRIAGE_REQUIRE_SANITIZED=true run run_triage_contract
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
+}
+
+@test "PATH-005 triage skips malformed and duplicate metadata fixtures with a no-links brief" {
+  for fixture in "$FIXTURES/triage-malformed.json" "$FIXTURES/triage-duplicate-metadata.json"; do
+    # This test deliberately creates two independent checkouts under the same
+    # Bats temp directory so each fixture exercises the full origin gate.
+    rm -rf "$BATS_TEST_TMPDIR/triage-repo" "$BATS_TEST_TMPDIR/triage-bin"
+    triage_checkout git@github.com:austinmao/feature-fix-swarm.git "$fixture"
+    run run_triage_contract
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
+    [[ "$output" == *"Machine-derived facts only; do not fetch issue pages."* ]]
+    ! [[ "$output" =~ https?:// ]]
+    ! [[ "$output" == *"ambiguous"* ]]
+  done
 }
 
 @test "PATH-005 triage missing SKILL.md cannot reach foreign-origin boundary" {
