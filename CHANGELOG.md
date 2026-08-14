@@ -10,6 +10,7 @@ all skills.
 
 ### Added
 
+- Consent-gated retro filing now publishes a finite diagnostic allowlist, maintains upstream advisory labels and occurrences, and supports maintainer-only factual triage for human-reviewed specification work.
 - `scripts/gsd/reconcile.sh` provides a one-pass, coord-claimed recovery path for durable lifecycle records, and `docs/healing.md` documents its operator controls and recovery boundaries.
 
 ### Changed
