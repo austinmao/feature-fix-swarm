@@ -367,8 +367,8 @@ adversary_invoke_model_ladder() {
   attempt_cap="${requested_cap:-${FFS_ADVERSARY_ATTEMPT_TIMEOUT:-120}}"
   case "$attempt_cap" in ''|*[!0-9]*|0) attempt_cap=120 ;; esac
   probe_enabled="${FFS_ADVERSARY_MODEL_PROBE:-on}"
-  probe_timeout="${FFS_ADVERSARY_MODEL_PROBE_TIMEOUT:-20}"
-  case "$probe_timeout" in ''|*[!0-9]*|0) probe_timeout=20 ;; esac
+  probe_timeout="${FFS_ADVERSARY_MODEL_PROBE_TIMEOUT:-60}"
+  case "$probe_timeout" in ''|*[!0-9]*|0) probe_timeout=60 ;; esac
   review_cap="${requested_review_cap:-${FFS_ADVERSARY_REVIEW_ATTEMPT_TIMEOUT:-180}}"
   case "$review_cap" in ''|*[!0-9]*|0) review_cap=180 ;; esac
   started="$SECONDS"
