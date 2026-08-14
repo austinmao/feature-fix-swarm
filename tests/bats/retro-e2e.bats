@@ -112,6 +112,88 @@ count_calls() { # count_calls <prefix> -- grep -c prints "0" on no-match but
   printf '%s' "${n:-0}"
 }
 
+# ── CONTRACT-002: Phase 2 canonical occurrence-comment producer ─────────
+
+@test "CONTRACT-002: duplicate observations emit canonical comment bytes with advancing local count and stable replay identity" {
+  fresh_env contract-002
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-exact-single.json"; export GH_LIST_FIXTURE
+
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+  first="$GH_COMMENT_LOG/comment-1.body"
+  [ -f "$first" ]
+  run python3 - "$first" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read()
+match = re.fullmatch(
+    rb"Additional occurrence recorded by ffs-retro\.\n\n"
+    rb"<!-- ffs-retro fingerprint:6f8560bdd33c6f56 priority:P1 occurrences:([1-9][0-9]{0,9}) -->\n",
+    raw,
+)
+assert match, "comment is not the canonical producer bytes"
+count = int(match.group(1))
+assert count <= 2147483647
+print(count)
+PY
+  [ "$status" -eq 0 ]
+  first_count="$output"
+  first_comment="$(cat "$first")"
+
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 2 ]
+  second="$GH_COMMENT_LOG/comment-2.body"
+  run python3 - "$second" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read()
+match = re.fullmatch(
+    rb"Additional occurrence recorded by ffs-retro\.\n\n"
+    rb"<!-- ffs-retro fingerprint:6f8560bdd33c6f56 priority:P1 occurrences:([1-9][0-9]{0,9}) -->\n",
+    raw,
+)
+assert match, "comment is not the canonical producer bytes"
+print(match.group(1).decode())
+PY
+  [ "$status" -eq 0 ]
+  second_count="$output"
+  [ "$second_count" -gt "$first_count" ]
+
+  # A captured producer comment is an immutable replay identity; later observations
+  # cannot retroactively change its bytes.
+  [ "$(cat "$first")" = "$first_comment" ]
+}
+
+# ── PATH-005: maintainer triage boundary (intentionally RED before 03-01) ─
+
+run_triage_contract() {
+  skill="$ROOT/skills/retro-triage/SKILL.md"
+  [ -f "$skill" ] || { echo "TRIAGE-CONTRACT: missing SKILL.md" >&2; return 1; }
+  block="$(awk '/<!-- retro-triage:command:start -->/{on=1;next}/<!-- retro-triage:command:end -->/{on=0}on' "$skill")"
+  [ -n "$block" ] || { echo "TRIAGE-CONTRACT: absent executable block" >&2; return 1; }
+  bash -c "$block"
+}
+
+@test "PATH-005 triage priority and ordering uses the checked-in SKILL.md block" {
+  run run_triage_contract
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"priority:P1"* ]]
+  [[ "$output" == *"priority:P2"* ]]
+  ! [[ "$output" == *"TRIAGE-RAW-CANARY"* ]]
+}
+
+@test "PATH-005 triage missing SKILL.md cannot reach foreign-origin boundary" {
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:wrong-origin"* ]]
+}
+
+@test "PATH-005 triage missing SKILL.md cannot emit no-issues result" {
+  run run_triage_contract
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
+}
+
 # ── REQ-06: exact / search-fallback / closed / lowest-number dedup ─────────
 
 @test "dedup: exact fingerprint match in bounded list -> one comment on the LOWEST issue number, zero creates" {
