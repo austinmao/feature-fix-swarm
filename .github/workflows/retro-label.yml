@@ -1,8 +1,10 @@
 name: retro-label
 
 on:
-  issues: [opened]
-  issue_comment: [created]
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read

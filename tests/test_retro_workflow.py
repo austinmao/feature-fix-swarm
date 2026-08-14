@@ -111,8 +111,8 @@ def test_grammar_canonical_metadata_and_comment_bytes():
 def test_workflow_trigger_permissions_actor_and_comment_guards():
     assert WORKFLOW.is_file(), f"missing workflow source: {WORKFLOW}"
     text = strip_comments(WORKFLOW.read_text(encoding="utf-8"))
-    assert re.search(r"^\s*issues:\s*\[opened\]", text, re.M)
-    assert re.search(r"^\s*issue_comment:\s*\[created\]", text, re.M)
+    assert re.search(r"^\s*issues:\s*\n\s*types:\s*\[opened\]", text, re.M)
+    assert re.search(r"^\s*issue_comment:\s*\n\s*types:\s*\[created\]", text, re.M)
     permissions = section(text, "permissions")
     assert {line.strip() for line in permissions.splitlines() if line.strip()} == {"contents: read", "issues: write"}
     assert "github-actions[bot]" in text
