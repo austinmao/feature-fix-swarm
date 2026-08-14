@@ -243,7 +243,22 @@ PY
 # ── Task 2 (01-02): state root / ledger hygiene, scanner fail-closed ───────
 
 @test "state root is created 0700 and the ledger file is written 0600" {
-  FRESH_STATE="$BATS_TEST_TMPDIR/fresh-state"
+  # Phase 2 REQ-01/AC-001: no-consent is a typed no-op BEFORE collection, so
+  # this Phase 1 test (predating the consent gate) now needs consent granted
+  # under isolated HOME to still reach the state-root ledger write it's
+  # actually checking. Seeded via the real `consent --grant` CLI (not a
+  # hand-written JSON fixture) so the grant path stays exercised too.
+  retro_isolate_home "$BATS_TEST_TMPDIR" fresh-state-mode
+  run bash "$REPO/scripts/gsd/retro.sh" consent --grant
+  [ "$status" -eq 0 ]
+
+  # --state-root must resolve to the SAME directory consent/filing already
+  # use ($RETRO_STATE = $HOME/.cache/feature-fix-swarm, set by
+  # retro_isolate_home) -- confirmed by black-box execution: an unrelated
+  # --state-root now silently makes zero gh calls and writes no ledger,
+  # since production's filing transaction is fixed to the HOME-derived
+  # cache dir (02-01-PLAN interfaces) and consent lives there too.
+  FRESH_STATE="$RETRO_STATE"
   run --separate-stderr bash "$REPO/scripts/gsd/retro.sh" analyze \
     --digest "$FIXTURES/safe-digest.jsonl" --changelog "$CHANGELOG" --state-root "$FRESH_STATE"
   [ "$status" -eq 0 ]
