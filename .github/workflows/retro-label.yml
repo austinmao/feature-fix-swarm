@@ -1,0 +1,126 @@
+name: retro-label
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  reconcile:
+    if: github.actor != 'github-actions[bot]' && !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    concurrency:
+      group: retro-label-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch bounded issue snapshot
+        id: fetch
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const output = path.join(process.env.RUNNER_TEMP, 'snapshot.json');
+            const issue = context.payload.issue;
+            if (context.actor === 'github-actions[bot]' || issue?.pull_request) {
+              fs.writeFileSync(output, JSON.stringify({skip: issue?.pull_request ? 'pr-thread' : 'bot-actor'}));
+              return;
+            }
+            const comments = [];
+            for (let page = 1; page <= 5; page += 1) {
+              const response = await github.rest.issues.listComments({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                per_page: 100, page,
+              });
+              comments.push(...response.data.map(comment => ({
+                body: comment.body, author: {login: comment.user?.login, type: comment.user?.type},
+              })));
+              if (response.data.length < 100) break;
+            }
+            fs.writeFileSync(output, JSON.stringify({
+              event: context.eventName, action: context.payload.action, actor: context.actor,
+              pull_request: Boolean(issue.pull_request), truncated: Number(issue.comments || 0) > 500,
+              issue: {number: issue.number, body: issue.body, labels: issue.labels.map(label => label.name)},
+              triggering_comment: context.eventName === 'issue_comment' ? {
+                body: context.payload.comment?.body,
+                author: {login: context.payload.comment?.user?.login, type: context.payload.comment?.user?.type},
+              } : null,
+              comments,
+            }));
+      - name: Decide from snapshot
+        run: |
+          python3 scripts/gsd/retro_label_decide.py "$RUNNER_TEMP/snapshot.json" > "$RUNNER_TEMP/decision.json"
+      - name: Apply compare-and-skip decision
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const {execFileSync} = require('child_process');
+            const temp = process.env.RUNNER_TEMP;
+            const issueNumber = context.payload.issue.number;
+            const labelSpecs = {
+              'source/ffs-retro': {color: '0e8a16', description: 'Unverified consumer report from ffs-retro'},
+              'triage': {color: 'fbca04', description: 'Maintainer triage required'},
+              'priority/P0': {color: 'b60205', description: 'Highest retro triage priority'},
+              'priority/P1': {color: 'd93f0b', description: 'High retro triage priority'},
+              'priority/P2': {color: 'fbca04', description: 'Normal retro triage priority'},
+              'priority/P3': {color: '0e8a16', description: 'Low retro triage priority'},
+            };
+            const snapshot = async () => {
+              const live = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber});
+              const comments = [];
+              for (let page = 1; page <= 5; page += 1) {
+                const response = await github.rest.issues.listComments({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, per_page: 100, page});
+                comments.push(...response.data.map(comment => ({body: comment.body, author: {login: comment.user?.login, type: comment.user?.type}})));
+                if (response.data.length < 100) break;
+              }
+              return {event: context.eventName, action: context.payload.action, actor: context.actor,
+                pull_request: Boolean(live.data.pull_request), truncated: Number(live.data.comments || 0) > 500,
+                issue: {number: issueNumber, body: live.data.body, labels: live.data.labels.map(label => label.name)},
+                triggering_comment: context.eventName === 'issue_comment' ? {
+                  body: context.payload.comment?.body,
+                  author: {login: context.payload.comment?.user?.login, type: context.payload.comment?.user?.type},
+                } : null,
+                comments};
+            };
+            const decide = data => {
+              const input = path.join(temp, 'refetch-snapshot.json');
+              fs.writeFileSync(input, JSON.stringify(data));
+              return JSON.parse(execFileSync('python3', ['scripts/gsd/retro_label_decide.py', input], {encoding: 'utf8'}));
+            };
+            const isEmpty = decision => !decision.labels_to_add.length && !decision.priority_labels_to_remove.length && decision.body === null;
+            const sameLabels = (left, right) => JSON.stringify([...new Set(left)].sort()) === JSON.stringify([...new Set(right)].sort());
+            const ensureLabel = async name => {
+              try { await github.rest.issues.getLabel({owner: context.repo.owner, repo: context.repo.repo, name}); }
+              catch (error) {
+                if (error.status !== 404) throw error;
+                try { await github.rest.issues.createLabel({owner: context.repo.owner, repo: context.repo.repo, name, ...labelSpecs[name]}); }
+                catch (createError) { if (createError.status !== 422) throw createError; }
+              }
+            };
+            const apply = async decision => {
+              if (isEmpty(decision)) return true;
+              const live = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber});
+              const liveLabels = live.data.labels.map(label => label.name);
+              if (live.data.body !== decision.expected_body || !sameLabels(liveLabels, decision.expected_labels || [])) return false;
+              for (const name of Object.keys(labelSpecs)) await ensureLabel(name);
+              for (const name of decision.priority_labels_to_remove) {
+                await github.rest.issues.removeLabel({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name});
+              }
+              if (decision.labels_to_add.length) await github.rest.issues.addLabels({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: decision.labels_to_add});
+              if (decision.body !== null) await github.rest.issues.update({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: decision.body});
+              return true;
+            };
+            let decision = JSON.parse(fs.readFileSync(path.join(temp, 'decision.json'), 'utf8'));
+            if (await apply(decision)) return;
+            decision = decide(await snapshot()); // exactly one bounded refetch → redecide → reapply retry
+            if (!(await apply(decision))) core.info(`retro-label: skip stale issue ${issueNumber} after second compare-and-skip mismatch`);

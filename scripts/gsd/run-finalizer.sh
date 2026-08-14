@@ -929,5 +929,28 @@ if [ -x "$SCRIPT_DIR/digest.sh" ]; then
   run env -u GATES_STORE bash "$SCRIPT_DIR/digest.sh" --immediate
 fi
 
+# Retro is advisory and runs exactly once, after G12.  macOS has no
+# timeout(1), so the fallback retains a real TERM/KILL bound rather than
+# silently becoming an unbounded background child.
+run_retro_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 10 120 bash "$SCRIPT_DIR/retro.sh" analyze || true
+    return 0
+  fi
+  bash "$SCRIPT_DIR/retro.sh" analyze &
+  local child=$! elapsed=0
+  while kill -0 "$child" 2>/dev/null && [ "$elapsed" -lt 120 ]; do sleep 1; elapsed=$((elapsed + 1)); done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    sleep 10
+    kill -KILL "$child" 2>/dev/null || true
+  fi
+  wait "$child" 2>/dev/null || true
+  return 0
+}
+if [ -x "$SCRIPT_DIR/retro.sh" ]; then
+  run run_retro_bounded
+fi
+
 note "finalize complete (fail-soft: any WARN above needs manual attention)"
 exit 0

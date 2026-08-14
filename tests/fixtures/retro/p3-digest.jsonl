@@ -1,0 +1,1 @@
+{"script": "digest.sh", "event_class": "optimization", "gate": "canary-gate", "exit_code": 0, "ts": "2026-08-11T10:00:00Z", "duration_seconds": 1.0}

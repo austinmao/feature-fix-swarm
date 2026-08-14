@@ -35,6 +35,22 @@ Three question blocks mirror the registry's own structure, asked in ONE
 batched interactive session — the operator answers everything once, then a
 single `apply` writes atomically.
 
+**Consent question (interactive only).** Before the batched answers, run
+`bash "$REPO_ROOT/scripts/gsd/retro.sh" check-consent`. When it reports an
+askable state (absent or consent-major mismatch), explain that FFS may
+automatically file PUBLIC issues to `austinmao/feature-fix-swarm`, containing
+only FFS script names, typed event classes/gates, numeric exit/duration facts,
+model tiers, FFS version, priority/fingerprint, and derived healing metrics —
+never code, paths, repository identity, or free text. Ask once, recommended
+yes: `Enable these public diagnostics? [Y/n]`. Only an explicit interactive
+affirmative invokes `bash "$REPO_ROOT/scripts/gsd/retro.sh" consent --grant`;
+a negative or no answer invokes `consent --revoke` to record the asked decision.
+Current-major granted or revoked decisions suppress the question. `/ffs-init
+--reset` invokes `retro.sh consent --reset` (the CLI performs revoke-first
+under its one lock) and then may re-ask. In every non-interactive mode,
+including `--answers`, `--yes`, detect/check/update/force, do not ask and do
+not grant. This skill never writes consent JSON directly.
+
 **Step 0 — detect.** Run `bash "$REPO_ROOT/scripts/gsd/env-registry.sh"
 detect` and capture stdout. The output is a proposal YAML (and itself a
 valid `--answers` file): every row carries `confidence:` and `evidence:`,
