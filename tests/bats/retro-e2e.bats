@@ -187,7 +187,7 @@ if [ "$#" -eq 12 ] && [ "$1" = issue ] && [ "$2" = list ] && \
    [ "$3" = --repo ] && [ "$4" = austinmao/feature-fix-swarm ] && \
    [ "$5" = --state ] && [ "$6" = open ] && [ "$7" = --label ] && \
    [ "$8" = source/ffs-retro ] && [ "$9" = --limit ] && [ "$10" = 200 ] && \
-   [ "$11" = --json ] && [ "$12" = number,title,body,labels ]; then
+   [ "${11}" = --json ] && [ "${12}" = number,title,body,labels ]; then
   printf 'fixture-read\n' >> "$TRIAGE_FIXTURE_READ_LOG"
   cat "$GH_TRIAGE_FIXTURE"
 elif [ "$#" -eq 4 ] && [ "$1" = api ] && \
