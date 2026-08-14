@@ -219,6 +219,7 @@ skill hash, or Codex CLI version drift is an actionable failure.
 | [Configuration](docs/configuration.md) | What can I tune? |
 | [Coordination](docs/coordination.md) | How do sessions avoid colliding on the same spec? |
 | [Healing](docs/healing.md) | How do waiting runs wake, recover, and remain bounded? |
+| [Retro loop](docs/retro.md) | What may the consent-gated diagnostic loop file, and how is it triaged? |
 | [Model tiers](docs/model-tiers.md) | Which model runs what, and how is provenance enforced? |
 | [Browser proof](docs/browser-proof.md) | What counts as browser-QA evidence? |
 | [Promotion protocol](docs/promotion-protocol.md) | How does staging evidence authorize production? |
