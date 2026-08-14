@@ -28,8 +28,9 @@ Wake conditions are `time`, `wall-decided`, `ci-completed`, and `manual`. A reco
 | `FFS_SESSION_WAKE_MAX_SECS` | `21600` | Cap on how far ahead a parsed reset time may schedule the wake. |
 | `FFS_SESSION_WAKE_MAX_ATTEMPTS` | `4` | Durable wake budget (`budgets.wakes`) seeded on first checkpoint. |
 | `PLAN_WALL_AWAIT_POLL` | `15` | Maximum seconds between bounded wall-verdict probes. |
+| `PLAN_WALL_AWAIT_MAX` | `6` | Pending `--await` returns allowed per phase before rc 76 `WALL-AWAIT:attempts-exhausted`; the counter resets on any decided outcome, so a decided wall always reports through. |
 
-Look for `LIFECYCLE:`, `SESSION-WAKE:`, `CI-WATCH:`, `WALL-AWAIT:`, `RECONCILE:`, and `GSD-RUN:RESPAWN` lines. Normal no-ops use rc 0; lifecycle validation failures use rc 1; an unresolved wall-await returns rc 75 and a decided blocked wall returns rc 20. A reconciler claim already held by another pass is deliberately a typed rc 0 no-op.
+Look for `LIFECYCLE:`, `SESSION-WAKE:`, `CI-WATCH:`, `WALL-AWAIT:`, `RECONCILE:`, and `GSD-RUN:RESPAWN` lines. Normal no-ops use rc 0; lifecycle validation failures use rc 1; an unresolved wall-await returns rc 75 (rc 76 once `PLAN_WALL_AWAIT_MAX` pending returns are spent — checkpoint instead of polling further) and a decided blocked wall returns rc 20. A terminal record (`done`/`failed`/`quarantined`) reports `RECONCILE:terminal run=<id> state=<state>`, never `still-waiting`. A reconciler claim already held by another pass is deliberately a typed rc 0 no-op.
 
 An operator may schedule a pass, for example:
 

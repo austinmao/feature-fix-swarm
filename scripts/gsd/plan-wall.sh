@@ -9,6 +9,9 @@
 # gates-test-command.sh's completion backstop instead.
 #
 # Usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE>
+#   --await rc: 0 done · 20 decided-blocked · 75 pending · 76 attempts-exhausted
+#   (PLAN_WALL_AWAIT_MAX pending returns per phase, default 6; counter resets
+#   on any decided outcome)
 #   PHASE_DIR  -> enumerates *-PLAN.md + bare PLAN.md (gsd-run.sh:88 globs
 #                 .planning/phases/*/*-PLAN.md — the repo's real naming)
 #   PLAN_FILE  -> reviews exactly that one file
@@ -231,6 +234,7 @@ _pw_write_record() {
 # the driver and its loop-round mutation, so this is a safe foreground poll.
 _pw_await() {
   local started poll elapsed remaining sleep_for plan slug rel path sha verdict saw pending unreadable
+  local _pw_await_max _pw_attempts _pw_attempts_file
   started="$SECONDS"
   poll="${PLAN_WALL_AWAIT_POLL:-15}"
   case "$poll" in *[!0-9]*|'') poll=15 ;; esac
@@ -255,9 +259,16 @@ _pw_await() {
           unreadable=1
           continue
         fi
+        # plan_sha256 match is fold-tolerant: socratic-armed dispatches store
+        # "<plan_sha>:<socratic_sha>" (see the fold site in _pw_dispatch_path);
+        # await runs before socratic resolution and from arbitrary CWDs
+        # (reconcile), so it accepts the bare sha OR that exact folded shape.
+        # Ceiling: a stale socratic.md fold still matches — verdict authority
+        # stays with the dispatch path, which recomputes on the folded key.
         if ! jq -e --arg rel "$rel" --arg run "$RUN_ID" --arg sha "$sha" '
             has("planner_model") and has("reviewer_model") and has("relation") and has("source_plan") and
-            .source_plan == $rel and .run_id == $run and .plan_sha256 == $sha and has("verdict")
+            .source_plan == $rel and .run_id == $run and has("verdict") and
+            (.plan_sha256 | type == "string" and (. == $sha or test("^" + $sha + ":[0-9a-f]{64}$")))
           ' "$path" >/dev/null 2>&1; then
           continue
         fi
@@ -273,16 +284,36 @@ _pw_await() {
     done
     if [ "$pending" -eq 0 ]; then
       if [ "$saw" -eq 0 ]; then
+        rm -f "$RUN_STATE_DIR/plan-wall-await-attempts-${PHASE_SLUG}" 2>/dev/null
         echo "WALL-AWAIT:done phase=$PHASE_DIR"
         return 0
       fi
       if [ "$saw" -eq 2 ]; then
+        rm -f "$RUN_STATE_DIR/plan-wall-await-attempts-${PHASE_SLUG}" 2>/dev/null
         echo "WALL-AWAIT:decided-blocked phase=$PHASE_DIR" >&2
         return 20
       fi
     fi
     elapsed=$((SECONDS - started))
     if [ "$elapsed" -ge "$PW_AWAIT_SECS" ]; then
+      # PLAN_WALL_AWAIT_MAX (default 6) caps how many --await CALLS may end
+      # pending for one phase before the caller must checkpoint instead of
+      # keep polling. Records are always checked first above, so a decided
+      # wall reports through (and resets) an exhausted counter — reconcile's
+      # wall-decided probe treats rc 76 exactly like rc 75 (not due yet).
+      _pw_await_max="${PLAN_WALL_AWAIT_MAX:-6}"
+      case "$_pw_await_max" in *[!0-9]*|'') _pw_await_max=6 ;; esac
+      _pw_attempts_file="$RUN_STATE_DIR/plan-wall-await-attempts-${PHASE_SLUG}"
+      if [ -d "$RUN_STATE_DIR" ]; then
+        _pw_attempts="$(cat "$_pw_attempts_file" 2>/dev/null)"
+        case "$_pw_attempts" in *[!0-9]*|'') _pw_attempts=0 ;; esac
+        _pw_attempts=$((_pw_attempts + 1))
+        printf '%s\n' "$_pw_attempts" > "$_pw_attempts_file" 2>/dev/null || true
+        if [ "$_pw_attempts" -gt "$_pw_await_max" ]; then
+          echo "WALL-AWAIT:attempts-exhausted phase=$PHASE_DIR attempts=$_pw_attempts max=$_pw_await_max" >&2
+          return 76
+        fi
+      fi
       echo "WALL-AWAIT:pending phase=$PHASE_DIR" >&2
       return 75
     fi

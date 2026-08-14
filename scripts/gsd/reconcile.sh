@@ -82,6 +82,9 @@ for record in "${records[@]}"; do
     # launch directly — due() has no verdict for it and would strand the record
     runnable) eligible=1 ;;
     running) stale_running "$record" || { echo "RECONCILE:still-waiting run=$run"; continue; }; eligible=1 ;;
+    # done/failed/quarantined are terminal — "still-waiting" would mislabel a
+    # run that just failed as one the reconciler is still going to wake.
+    done|failed|quarantined) echo "RECONCILE:terminal run=$run state=$state"; continue ;;
     *) echo "RECONCILE:still-waiting run=$run"; continue ;;
   esac
   if quarantined; then echo "RECONCILE:quarantined run=$run"; continue; fi
@@ -90,7 +93,11 @@ for record in "${records[@]}"; do
   # after evaluator side effects rather than trusting the old JSON snapshot.
   if ! life validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
   state="$(jq -r .state "$record")"
-  case "$state" in waiting|runnable|running) ;; *) echo "RECONCILE:still-waiting run=$run"; continue;; esac
+  case "$state" in
+    waiting|runnable|running) ;;
+    done|failed|quarantined) echo "RECONCILE:terminal run=$run state=$state"; continue ;;
+    *) echo "RECONCILE:still-waiting run=$run"; continue ;;
+  esac
   claim="$(claim_id "$run" || true)"; [ -n "$claim" ] || { echo "RECONCILE:invalid-run-id run=$run"; continue; }
   result="$(python3 "$COORD" claim "$claim" 2>&1)"; rc=$?
   if [ "$rc" -eq 3 ]; then echo "RECONCILE:claim-held run=$run"; continue; fi

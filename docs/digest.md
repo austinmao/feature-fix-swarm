@@ -16,6 +16,14 @@ scripts/gsd/digest.sh --record-baseline  # operator step: record the drift basel
 
 Event lines go to stdout; diagnostics to stderr.
 
+`--immediate` also appends retro rows (spec-011 schema:
+`{script, event_class, gate, exit_code}`) for the list-backed classes to
+`.feature-fix-swarm/digest-<utcdate>.jsonl` beside the store — the input
+`retro.sh analyze` consumes. Rows ride the same per-class cursor as the text
+lines (a notify failure redelivers both together). `DIGEST_RETRO_SINK=off`
+disables the sink. Custom-cursor classes (`scan-tamper`, `budget-breach`,
+`drift`, `tripped-rung`, `promotion`) are not yet mapped.
+
 ## Event classes (`--immediate`)
 
 Nine classes: `waiver`, `tripped-rung`, `loop-cap`, `budget-breach`,
