@@ -166,32 +166,70 @@ PY
 
 # ── PATH-005: maintainer triage boundary (intentionally RED before 03-01) ─
 
-run_triage_contract() {
+triage_checkout() { # triage_checkout <origin> <fixture>
+  TRIAGE_REPO="$BATS_TEST_TMPDIR/triage-repo"
+  TRIAGE_BIN="$BATS_TEST_TMPDIR/triage-bin"
+  TRIAGE_GH_LOG="$BATS_TEST_TMPDIR/triage-gh.log"
+  TRIAGE_FIXTURE_READ_LOG="$BATS_TEST_TMPDIR/triage-fixture-read.log"
+  mkdir -p "$TRIAGE_REPO" "$TRIAGE_BIN"
+  git -C "$TRIAGE_REPO" init -q
+  git -C "$TRIAGE_REPO" config user.email t@t
+  git -C "$TRIAGE_REPO" config user.name t
+  git -C "$TRIAGE_REPO" remote add origin "$1"
+  : > "$TRIAGE_GH_LOG"; : > "$TRIAGE_FIXTURE_READ_LOG"
+  GH_TRIAGE_FIXTURE="$2"
+  export TRIAGE_GH_LOG TRIAGE_FIXTURE_READ_LOG GH_TRIAGE_FIXTURE
+  cat > "$TRIAGE_BIN/gh" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$TRIAGE_GH_LOG"
+if [ "$#" -eq 12 ] && [ "$1" = issue ] && [ "$2" = list ] && \
+   [ "$3" = --repo ] && [ "$4" = austinmao/feature-fix-swarm ] && \
+   [ "$5" = --state ] && [ "$6" = open ] && [ "$7" = --label ] && \
+   [ "$8" = source/ffs-retro ] && [ "$9" = --limit ] && [ "$10" = 200 ] && \
+   [ "$11" = --json ] && [ "$12" = number,title,body,labels ]; then
+  printf 'fixture-read\n' >> "$TRIAGE_FIXTURE_READ_LOG"
+  cat "$GH_TRIAGE_FIXTURE"
+else
+  exit 64
+fi
+SHIM
+  chmod +x "$TRIAGE_BIN/gh"
+}
+
+run_triage_contract() { # run_triage_contract <origin> <fixture>
+  triage_checkout "$1" "$2"
   skill="$ROOT/skills/retro-triage/SKILL.md"
   [ -f "$skill" ] || { echo "TRIAGE-CONTRACT: missing SKILL.md" >&2; return 1; }
   block="$(awk '/<!-- retro-triage:command:start -->/{on=1;next}/<!-- retro-triage:command:end -->/{on=0}on' "$skill")"
   [ -n "$block" ] || { echo "TRIAGE-CONTRACT: absent executable block" >&2; return 1; }
-  bash -c "$block"
+  (cd "$TRIAGE_REPO" && HOME="$BATS_TEST_TMPDIR/triage-home" PATH="$TRIAGE_BIN:$PATH" bash -c "$block")
 }
 
 @test "PATH-005 triage priority and ordering uses the checked-in SKILL.md block" {
-  run run_triage_contract
+  run run_triage_contract https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"priority:P1"* ]]
   [[ "$output" == *"priority:P2"* ]]
   ! [[ "$output" == *"TRIAGE-RAW-CANARY"* ]]
+  [ "$(cat "$TRIAGE_GH_LOG")" = "issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels" ]
+  [ "$(cat "$TRIAGE_FIXTURE_READ_LOG")" = "fixture-read" ]
 }
 
 @test "PATH-005 triage missing SKILL.md cannot reach foreign-origin boundary" {
-  run run_triage_contract
+  run run_triage_contract https://github.com/testorg/testrepo.git "$FIXTURES/triage-issues.json"
   [ "$status" -eq 1 ]
   [[ "$output" == *"RETRO-TRIAGE:wrong-origin"* ]]
+  [ ! -s "$TRIAGE_GH_LOG" ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
 }
 
 @test "PATH-005 triage missing SKILL.md cannot emit no-issues result" {
-  run run_triage_contract
+  run run_triage_contract git@github.com:austinmao/feature-fix-swarm.git "$FIXTURES/triage-empty.json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
+  [ "$(cat "$TRIAGE_GH_LOG")" = "issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels" ]
+  [ "$(cat "$TRIAGE_FIXTURE_READ_LOG")" = "fixture-read" ]
 }
 
 # ── REQ-06: exact / search-fallback / closed / lowest-number dedup ─────────
