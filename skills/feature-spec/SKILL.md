@@ -14,6 +14,7 @@ version: 2.6.1
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
 At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+At completion, make one opportunistic, fail-soft repo-root-resolved `bash "$REPO_ROOT/scripts/gsd/retro.sh" analyze` pass through the same portable bounded runner as `run-finalizer.sh` (`timeout -k 10 120` when available, otherwise its TERM/KILL watchdog); never block on its result.
 
 Spec-first feature definition pipeline. Chains three speckit phases in sequence and
 enforces that TDD unit tests, BDD behavior scenarios, and E2E test definitions are
