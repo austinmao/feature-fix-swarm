@@ -1004,5 +1004,48 @@ class TestSecurePayloadCopy:
         assert not Path(copy_path).exists()
 
 
+# ===========================================================================
+# _owner_identity — remote-URL parse feeding the consumer-identity deny gate
+# ===========================================================================
+
+class TestOwnerIdentity:
+    @pytest.mark.parametrize("remote,expected", [
+        ("https://github.com/austinmao/feature-fix-swarm.git", ("austinmao", "feature-fix-swarm")),
+        ("https://github.com/austinmao/feature-fix-swarm", ("austinmao", "feature-fix-swarm")),
+        ("git@github.com:austinmao/feature-fix-swarm.git", ("austinmao", "feature-fix-swarm")),
+        ("https://gitlab.example.com/other/repo.git", ()),
+        ("", ()),
+    ])
+    def test_extracts_owner_repo_tuple(self, remote, expected, monkeypatch):
+        class _Done:
+            stdout = remote + "\n"
+        monkeypatch.setattr(retro_scrub.subprocess, "run", lambda *a, **k: _Done())
+        assert retro_scrub._owner_identity() == expected
+
+    def test_git_failure_returns_empty_tuple(self, monkeypatch):
+        def _boom(*a, **k):
+            raise OSError("no git")
+        monkeypatch.setattr(retro_scrub.subprocess, "run", _boom)
+        assert retro_scrub._owner_identity() == ()
+
+
+class TestSecureLedgerParent:
+    def test_symlinked_parent_is_rejected_and_target_untouched(self, tmp_path):
+        target = tmp_path / "attacker"
+        target.mkdir()
+        parent = tmp_path / "state"
+        parent.symlink_to(target)
+        ledger = parent / "retro-ledger.jsonl"
+        with pytest.raises(retro_scrub.RetroReject):
+            retro_scrub.record_ledger_entry(ledger, {"status": "ok"})
+        assert list(target.iterdir()) == []
+
+    def test_regular_file_parent_is_rejected(self, tmp_path):
+        parent = tmp_path / "state"
+        parent.write_text("not a dir")
+        with pytest.raises(retro_scrub.RetroReject):
+            retro_scrub.record_ledger_entry(parent / "retro-ledger.jsonl", {"status": "ok"})
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

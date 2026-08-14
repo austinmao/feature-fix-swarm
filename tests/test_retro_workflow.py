@@ -192,3 +192,33 @@ def test_issue_comment_requires_canonical_matching_human_trigger_before_any_muta
     # Labels would otherwise be added, so the empty decision proves the gate
     # runs before every issue_comment mutation category.
     assert_empty(snapshot(event="issue_comment", triggering_comment=triggering_comment))
+
+
+def test_opened_event_decides_exactly_the_three_required_labels_when_bare():
+    data = snapshot()
+    decision = run_decision(data)
+    assert decision["labels_to_add"] == ["priority/P1", "source/ffs-retro", "triage"]
+    assert decision["priority_labels_to_remove"] == []
+    assert decision["body"] is None
+
+
+def test_opened_event_reconciles_stale_managed_priority_and_preserves_unmanaged():
+    data = snapshot()
+    data["issue"]["labels"] = [
+        {"name": "priority/P2"}, {"name": "source/ffs-retro"}, {"name": "wontfix"},
+    ]
+    decision = run_decision(data)
+    assert decision["labels_to_add"] == ["priority/P1", "triage"]
+    assert decision["priority_labels_to_remove"] == ["priority/P2"]
+    assert "wontfix" not in decision["labels_to_add"]
+    assert "wontfix" not in decision["priority_labels_to_remove"]
+
+
+def test_opened_event_with_all_labels_present_is_idempotent():
+    data = snapshot()
+    data["issue"]["labels"] = [
+        {"name": "priority/P1"}, {"name": "source/ffs-retro"}, {"name": "triage"},
+    ]
+    decision = run_decision(data)
+    assert decision["labels_to_add"] == []
+    assert decision["priority_labels_to_remove"] == []
