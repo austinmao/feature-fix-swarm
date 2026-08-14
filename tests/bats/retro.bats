@@ -119,7 +119,9 @@ EOF
 }
 
 file_mode() { # file_mode <path> — portable (macOS/Linux) octal mode
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  # GNU form first: on Linux `stat -f` is FILESYSTEM stat and exits 0 with
+  # the wrong data, so the BSD form must be the fallback, never the probe.
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 analyze() { # analyze [extra retro.sh analyze args...]

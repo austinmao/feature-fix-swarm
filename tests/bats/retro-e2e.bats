@@ -83,7 +83,7 @@ EOF
   git commit -qm init
 }
 
-file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; } # GNU first: Linux `stat -f` is filesystem stat, rc 0 + wrong data
 
 # analyze_h [extra retro.sh analyze args] -- isolated-HOME + matching
 # --state-root wrapper (see retro-shims.bash header for why both).
