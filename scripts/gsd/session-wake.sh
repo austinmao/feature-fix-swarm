@@ -11,7 +11,7 @@ USAGE
 }
 # $1 = typed token only; $2 = exit code. "$*" would fold the exit code into
 # the typed message ("SESSION-WAKE:wake-exhausted 1"), breaking token matchers.
-fail() { printf 'SESSION-WAKE:%s\n' "$1" >&2; exit "${2:-1}"; }
+fail() { printf 'SESSION-WAKE:%s\n' "${1:-internal-error}" >&2; exit "${2:-1}"; }
 SESSION_WAKE_BANNER_RE='(limit reached|hit your limit|usage limit)[^[:cntrl:]]*(resets?|reset)'
 FFS_SESSION_WAKE_MAX_SECS="${FFS_SESSION_WAKE_MAX_SECS:-21600}"
 FFS_SESSION_WAKE_MAX_ATTEMPTS="${FFS_SESSION_WAKE_MAX_ATTEMPTS:-4}"

@@ -230,8 +230,9 @@ _pw_write_record() {
   return 0
 }
 
-# _pw_await reads the pinned plan set only.  It deliberately returns before
-# the driver and its loop-round mutation, so this is a safe foreground poll.
+# _pw_await reads the pinned plan set and maintains only its own run-scoped
+# attempts counter under run-state; it never touches the evidence store and
+# deliberately returns before the driver and its loop-round mutation.
 _pw_await() {
   local started poll elapsed remaining sleep_for plan slug rel path sha verdict saw pending unreadable
   local _pw_await_max _pw_attempts _pw_attempts_file
@@ -284,12 +285,12 @@ _pw_await() {
     done
     if [ "$pending" -eq 0 ]; then
       if [ "$saw" -eq 0 ]; then
-        rm -f "$RUN_STATE_DIR/plan-wall-await-attempts-${PHASE_SLUG}" 2>/dev/null
+        rm -f "$RUN_STATE_DIR/plan-wall-await-attempts-${RUN_ID}-${PHASE_SLUG}" 2>/dev/null
         echo "WALL-AWAIT:done phase=$PHASE_DIR"
         return 0
       fi
       if [ "$saw" -eq 2 ]; then
-        rm -f "$RUN_STATE_DIR/plan-wall-await-attempts-${PHASE_SLUG}" 2>/dev/null
+        rm -f "$RUN_STATE_DIR/plan-wall-await-attempts-${RUN_ID}-${PHASE_SLUG}" 2>/dev/null
         echo "WALL-AWAIT:decided-blocked phase=$PHASE_DIR" >&2
         return 20
       fi
@@ -303,8 +304,14 @@ _pw_await() {
       # wall-decided probe treats rc 76 exactly like rc 75 (not due yet).
       _pw_await_max="${PLAN_WALL_AWAIT_MAX:-6}"
       case "$_pw_await_max" in *[!0-9]*|'') _pw_await_max=6 ;; esac
-      _pw_attempts_file="$RUN_STATE_DIR/plan-wall-await-attempts-${PHASE_SLUG}"
-      if [ -d "$RUN_STATE_DIR" ]; then
+      _pw_attempts_file="$RUN_STATE_DIR/plan-wall-await-attempts-${RUN_ID}-${PHASE_SLUG}"
+      # PLAN_WALL_AWAIT_COUNT=off: budget-neutral probe for evaluators
+      # (reconcile's wall-decided due() polls every pass and must never spend
+      # the orchestrator's pending-return budget).
+      if [ "${PLAN_WALL_AWAIT_COUNT:-on}" != off ] && [ ! -d "$RUN_STATE_DIR" ]; then
+        echo "WALL-AWAIT:cap-unavailable phase=$PHASE_DIR" >&2
+      fi
+      if [ "${PLAN_WALL_AWAIT_COUNT:-on}" != off ] && [ -d "$RUN_STATE_DIR" ]; then
         _pw_attempts="$(cat "$_pw_attempts_file" 2>/dev/null)"
         case "$_pw_attempts" in *[!0-9]*|'') _pw_attempts=0 ;; esac
         _pw_attempts=$((_pw_attempts + 1))

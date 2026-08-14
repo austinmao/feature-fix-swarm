@@ -49,7 +49,8 @@ due() {
       now="$(date +%s)"; [ "$wake" -le "$now" ]
       ;;
     wall-decided)
-      bash "$ROOT/scripts/gsd/plan-wall.sh" --await 1 "$(jq -r '.wake_condition.params.phase_dir // empty' "$record")" >/dev/null 2>&1; rc=$?
+      # budget-neutral probe: never spend the phase's PLAN_WALL_AWAIT_MAX
+      PLAN_WALL_AWAIT_COUNT=off bash "$ROOT/scripts/gsd/plan-wall.sh" --await 1 "$(jq -r '.wake_condition.params.phase_dir // empty' "$record")" >/dev/null 2>&1; rc=$?
       [ "$rc" -eq 0 ]
       ;;
     ci-completed)
@@ -88,7 +89,16 @@ for record in "${records[@]}"; do
     *) echo "RECONCILE:still-waiting run=$run"; continue ;;
   esac
   if quarantined; then echo "RECONCILE:quarantined run=$run"; continue; fi
-  if [ "$eligible" -eq 0 ] && ! due "$record"; then echo "RECONCILE:still-waiting run=$run"; continue; fi
+  if [ "$eligible" -eq 0 ] && ! due "$record"; then
+    # due()'s evaluator (ci-watch) may have just transitioned the record to a
+    # terminal state — that is not "still waiting", it is finished.
+    state="$(jq -r .state "$record")"
+    case "$state" in
+      done|failed|quarantined) echo "RECONCILE:terminal run=$run state=$state" ;;
+      *) echo "RECONCILE:still-waiting run=$run" ;;
+    esac
+    continue
+  fi
   # ci-watch changes the lifecycle record from waiting to runnable. Re-read
   # after evaluator side effects rather than trusting the old JSON snapshot.
   if ! life validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi

@@ -178,11 +178,6 @@ class Emitter:
                 if rc != 0:
                     note("notify failed for %s (rc=%s) — cursor retained" % (name, rc))
                     return
-        # Retro rows ride the SAME delivery decision as the text lines: a
-        # notify failure above returned before this point, so the retro sink
-        # redelivers exactly when the class redelivers (cursor retained).
-        if retro_rows:
-            self.retro_rows.extend(retro_rows)
         if new_cursor_value is None or self.cursor.get(name) == new_cursor_value:
             return
         self.cursor[name] = new_cursor_value
@@ -190,6 +185,12 @@ class Emitter:
             atomic_write_json(CURSOR_PATH, self.cursor)
         except Exception as exc:
             note("cursor write failed for %s (%s) — class will redeliver" % (name, exc))
+            return
+        # Retro rows are collected only AFTER the cursor advance lands: a
+        # notify failure returned earlier and a cursor-write failure returned
+        # just above, so a redelivering class never double-writes its rows.
+        if retro_rows:
+            self.retro_rows.extend(retro_rows)
 
 
 # ── retro JSONL sink (spec-011 producer seam) ──────────────────────────────
@@ -217,7 +218,10 @@ def retro_row(script, event_class, gate, exit_code=0):
     try:
         code = int(exit_code)
     except (TypeError, ValueError):
-        code = 0
+        code = 1  # unparseable must never read as success
+    # retro_scrub._exit_code rejects outside 0-255 and fail-closes the whole
+    # analyze — clamp here, same reason the token sanitizer exists.
+    code = min(max(code, 0), 255)
     return {"script": script, "event_class": event_class,
             "gate": retro_tok(gate), "exit_code": code}
 
@@ -227,9 +231,10 @@ def retro_sink_write(em):
         return
     sink = os.path.join(SIDE_DIR, "digest-%s.jsonl" % time.strftime("%Y%m%d", time.gmtime()))
     try:
+        payload = "".join(json.dumps(row, sort_keys=True) + "\n"
+                          for row in em.retro_rows)
         with open(sink, "a", encoding="utf-8") as fh:
-            for row in em.retro_rows:
-                fh.write(json.dumps(row, sort_keys=True) + "\n")
+            fh.write(payload)
     except Exception as exc:
         note("retro sink write failed (%s) — rows dropped" % exc)
 
@@ -459,7 +464,7 @@ def immediate():
         lambda r: "loop-cap " + kv([
             ("run_id", r.get("run_id", "?")), ("loop", r.get("loop", "?")),
             ("round", r.get("round", "?")), ("ts", r.get("ts", "?"))]),
-        lambda r: retro_row("plan-wall.sh", "gate-warn", "loop-cap"))
+        lambda r: retro_row("plan-wall.sh", "unrecovered-stall", "loop-cap"))
     events_list_class(em, "finisher-skipped", shared_events, finisher_line,
                       lambda r: retro_row("gsd-run.sh", "gate-warn", "finisher-skipped"))
 

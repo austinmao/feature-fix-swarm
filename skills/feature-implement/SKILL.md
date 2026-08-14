@@ -263,10 +263,13 @@ Keep the plan wall in the foreground for phases with one or two plans. A
 phase that may exceed the 600-second tool ceiling MAY background the wall,
 but must then poll `plan-wall.sh --await 300` in the same turn for no more
 than `PLAN_WALL_AWAIT_MAX=6` iterations. Its outcomes are actionable: rc 0
-means every record passed, rc 20 means the wall decided blocked, and rc 75
-means it is still pending. If the turn cannot outlast a pending wall, it MUST
-checkpoint a `waiting(wall-decided)` lifecycle record with `lifecycle.sh`
-before ending.
+means every record passed, rc 20 means the wall decided blocked, rc 75
+means it is still pending, and rc 76 (`WALL-AWAIT:attempts-exhausted`) means
+the script-enforced pending budget for this phase is spent — stop polling and
+checkpoint. The budget is enforced by `plan-wall.sh` itself (run-scoped
+counter, reset on any decided outcome), not by agent self-restraint. If the
+turn cannot outlast a pending wall, it MUST checkpoint a
+`waiting(wall-decided)` lifecycle record with `lifecycle.sh` before ending.
 
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.

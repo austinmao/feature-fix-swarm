@@ -471,3 +471,44 @@ EOF
   shopt -s nullglob; sink=("$REPO"/.feature-fix-swarm/digest-*.jsonl); shopt -u nullglob
   [ "${#sink[@]}" -eq 0 ]
 }
+
+@test "retro sink rows survive the real consumer scrub (schema integration)" {
+  cp "$ROOT/lib/retro_scrub.py" "$REPO/lib/retro_scrub.py"
+  seed_waiver
+  # hostile gate token + out-of-range exit code — both must be producer-sanitized
+  python3 - "$STORE" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as fh: data = json.load(fh)
+data["waivers"][0]["gate"] = "bad gate!"
+with open(sys.argv[1], "w") as fh: json.dump(data, fh)
+PYEOF
+  SHA="$(printf 'c%.0s' {1..40})"
+  python3 "$REPO/lib/gates.py" rollback-dryrun --run-id spec-008 --surface web \
+    --command "echo rollback" --exit-code 300 --artifact-sha "$SHA"
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  sink=("$REPO"/.feature-fix-swarm/digest-*.jsonl)
+  [ "$(wc -l < "${sink[0]}" | tr -d ' ')" -eq 2 ]
+  run jq -se '.[0].gate == "bad-gate-" and (.[1].exit_code >= 0 and .[1].exit_code <= 255)' "${sink[0]}"
+  [ "$status" -eq 0 ]
+  printf '# changelog\n' > "$REPO/CHANGELOG.md"
+  printf '[]' > "$REPO/.feature-fix-swarm/findings.json"
+  run python3 "$REPO/lib/retro_scrub.py" collect --digest "${sink[0]}" \
+    --findings "$REPO/.feature-fix-swarm/findings.json" --changelog "$REPO/CHANGELOG.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "retro sink appends across runs and never truncates a same-day file" {
+  printf '{"script":"gates.py","event_class":"gate-warn","gate":"sentinel","exit_code":0}\n' \
+    > "$REPO/.feature-fix-swarm/digest-$(date -u +%Y%m%d).jsonl"
+  seed_waiver spec-008 gate-one
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  seed_waiver spec-008 gate-two
+  run bash "$SCRIPT" --immediate
+  [ "$status" -eq 0 ]
+  sink="$REPO/.feature-fix-swarm/digest-$(date -u +%Y%m%d).jsonl"
+  [ "$(wc -l < "$sink" | tr -d ' ')" -eq 3 ]
+  head -1 "$sink" | grep -q sentinel
+  jq -se '[.[].gate] == ["sentinel","gate-one","gate-two"]' "$sink"
+}

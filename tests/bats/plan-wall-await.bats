@@ -101,3 +101,27 @@ write_record() {
   run env PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
   [ "$status" -eq 75 ]
 }
+
+@test "evaluator probe (PLAN_WALL_AWAIT_COUNT=off) is budget-neutral; counter is run-scoped" {
+  rm -f .planning/run-state/plan-wall-1-foo-plan.json
+  for i in 1 2 3 4; do
+    run env PLAN_WALL_AWAIT_COUNT=off PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+    [ "$status" -eq 75 ]
+  done
+  [ ! -f .planning/run-state/plan-wall-await-attempts-spec-await-1-foo ]
+  # a poisoned counter from THIS run does not tax a different run id
+  printf '99\n' > .planning/run-state/plan-wall-await-attempts-spec-await-1-foo
+  run env GSD_RUN_ID=other-run PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 75 ]
+  # while the current run is exhausted
+  run env PLAN_WALL_AWAIT_MAX=2 PLAN_WALL_AWAIT_POLL=1 bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 76 ]
+}
+
+@test "decided-blocked resets an exhausted attempts counter" {
+  printf '99\n' > .planning/run-state/plan-wall-await-attempts-spec-await-1-foo
+  write_record blocked
+  run bash "$WALL" --await 1 .planning/phases/1-foo
+  [ "$status" -eq 20 ]
+  [ ! -f .planning/run-state/plan-wall-await-attempts-spec-await-1-foo ]
+}

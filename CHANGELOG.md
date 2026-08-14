@@ -8,14 +8,14 @@ all skills.
 
 ## Unreleased
 
-### Fixed
-
-- `scripts/gsd/reconcile.sh` reports terminal records (`done`/`failed`/`quarantined`) as `RECONCILE:terminal` instead of mislabeling a just-failed run `still-waiting`; `scripts/gsd/session-wake.sh` typed failure tokens no longer embed the exit code (`SESSION-WAKE:wake-exhausted`, not `wake-exhausted 1`); `plan-wall.sh --await` now recognizes socratic-armed verdict records (folded `plan_sha:socratic_sha` keys) so `wall-decided` wakes fire for socratic-armed phases.
-
 ### Added
 
-- `plan-wall.sh --await` enforces `PLAN_WALL_AWAIT_MAX` (default 6): pending returns beyond the cap exit rc 76 `WALL-AWAIT:attempts-exhausted`; decided outcomes always report through and reset the counter.
+- `plan-wall.sh --await` enforces `PLAN_WALL_AWAIT_MAX` (default 6): pending returns beyond the cap exit rc 76 `WALL-AWAIT:attempts-exhausted`; the counter is run-scoped, evaluator probes (`PLAN_WALL_AWAIT_COUNT=off`) are budget-neutral, and decided outcomes always report through and reset it.
 - `digest.sh --immediate` appends schema-true retro rows to `.feature-fix-swarm/digest-<utcdate>.jsonl` for list-backed event classes — the previously missing producer for `retro.sh analyze` (`DIGEST_RETRO_SINK=off` disables).
+
+### Fixed
+
+- `scripts/gsd/reconcile.sh` reports terminal records (`done`/`failed`/`quarantined`) as `RECONCILE:terminal` instead of mislabeling a just-failed run `still-waiting` — including a record the ci-watch evaluator fails mid-pass; `scripts/gsd/session-wake.sh` typed failure tokens no longer embed the exit code (`SESSION-WAKE:wake-exhausted`, not `wake-exhausted 1`); `plan-wall.sh --await` now recognizes socratic-armed verdict records (folded `plan_sha:socratic_sha` keys) so `wall-decided` wakes fire for socratic-armed phases.
 
 - Consent-gated retro filing now publishes a finite diagnostic allowlist, maintains upstream advisory labels and occurrences, and supports maintainer-only factual triage for human-reviewed specification work.
 - `scripts/gsd/reconcile.sh` provides a one-pass, coord-claimed recovery path for durable lifecycle records, and `docs/healing.md` documents its operator controls and recovery boundaries.
