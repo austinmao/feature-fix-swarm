@@ -457,7 +457,14 @@ EOF
       return 0
     fi
     adversary_note_rung "$rung" fail || return $?
-    echo "adversary-host: $kind model $model unavailable (rc=$rc)" >&2
+    if [ "$rc" -eq 124 ]; then
+      # A probe-passed model that then hits rc=124 is NOT unavailable — the
+      # review attempt exceeded its per-attempt wall cap. Say so, or the
+      # operator chases phantom outages (cost 3 misdiagnosed rounds 2026-08-14).
+      echo "adversary-host: $kind model $model review attempt exceeded ${budget}s cap (rc=124) — raise FFS_ADVERSARY_REVIEW_ATTEMPT_TIMEOUT if this model needs longer" >&2
+    else
+      echo "adversary-host: $kind model $model unavailable (rc=$rc)" >&2
+    fi
     # With an admission probe, a review timeout may be model-specific; try the
     # next candidate if deadline remains. Without a probe, preserve the older
     # dead-CLI inference and cross vendors immediately.
