@@ -185,3 +185,40 @@ EOF
   [ "$(cat "$RECONCILE_MARK")" = from-worktree ]
   [ "$(jq -r .budgets.respawns "$rec")" = 0 ]
 }
+
+@test "terminal failed record reports terminal, never still-waiting" {
+  bash scripts/gsd/lifecycle.sh checkpoint gone waiting wait time '{"wake_at":1}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  bash scripts/gsd/lifecycle.sh transition gone failed test-failure
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:terminal run=gone state=failed'* ]]
+  [[ "$output" != *still-waiting* ]]
+  [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "done and quarantined records report terminal with their state" {
+  bash scripts/gsd/lifecycle.sh checkpoint td done complete manual '{}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  bash scripts/gsd/lifecycle.sh checkpoint tq waiting wait time '{"wake_at":1}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  bash scripts/gsd/lifecycle.sh transition tq quarantined test-quarantine
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:terminal run=td state=done'* ]]
+  [[ "$output" == *'RECONCILE:terminal run=tq state=quarantined'* ]]
+  [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "a record failed by the evaluator mid-pass reports terminal, not still-waiting" {
+  bash scripts/gsd/lifecycle.sh checkpoint cifail waiting wait ci-completed '{}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  cat > scripts/gsd/ci-watch.sh <<'STUB'
+#!/usr/bin/env bash
+# evaluator stub: the CI run failed — transition the record to failed
+run_id="${3:?}"
+bash "$(dirname "$0")/lifecycle.sh" transition "$run_id" failed ci-tests-failed >/dev/null
+STUB
+  chmod +x scripts/gsd/ci-watch.sh
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:terminal run=cifail state=failed'* ]]
+  [[ "$output" != *'still-waiting run=cifail'* ]]
+  [ ! -e "$RECONCILE_MARK" ]
+}

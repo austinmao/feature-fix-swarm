@@ -88,6 +88,6 @@ Its typed outcomes are `RETRO-TRIAGE:wrong-origin`, `RETRO-TRIAGE:not-maintainer
 | --- | --- |
 | `RETRO:no-consent` | Consent is absent, revoked, or no longer current. Use an interactive `/ffs-init` session if you want to answer the consent prompt. |
 | `RETRO:disabled` | `FFS_RETRO=off` or `--no-retro` disabled this pass. Remove the selected kill switch only if you intend to allow future filing. |
-| `RETRO:no-events` | There is no eligible diagnostic input; no filing is needed. |
+| `RETRO:no-events` | There is no eligible diagnostic input; no filing is needed. The production producer is `digest.sh --immediate` (run by the finalizer before retro), which appends schema-true rows to `.feature-fix-swarm/digest-<utcdate>.jsonl`; `DIGEST_RETRO_SINK=off` disables that sink, and a store whose digest cursor is already at end-of-list yields no new rows. |
 | Authentication or known GitHub failure | Check the authenticated GitHub account and repository access, then run a future FFS pass if desired. The loop will not replay a failed write automatically. |
 | `RETRO-TRIAGE:not-maintainer` or `wrong-origin` | Stop: triage is restricted to maintainers in the canonical repository. |

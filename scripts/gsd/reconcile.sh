@@ -49,7 +49,8 @@ due() {
       now="$(date +%s)"; [ "$wake" -le "$now" ]
       ;;
     wall-decided)
-      bash "$ROOT/scripts/gsd/plan-wall.sh" --await 1 "$(jq -r '.wake_condition.params.phase_dir // empty' "$record")" >/dev/null 2>&1; rc=$?
+      # budget-neutral probe: never spend the phase's PLAN_WALL_AWAIT_MAX
+      PLAN_WALL_AWAIT_COUNT=off bash "$ROOT/scripts/gsd/plan-wall.sh" --await 1 "$(jq -r '.wake_condition.params.phase_dir // empty' "$record")" >/dev/null 2>&1; rc=$?
       [ "$rc" -eq 0 ]
       ;;
     ci-completed)
@@ -82,15 +83,31 @@ for record in "${records[@]}"; do
     # launch directly — due() has no verdict for it and would strand the record
     runnable) eligible=1 ;;
     running) stale_running "$record" || { echo "RECONCILE:still-waiting run=$run"; continue; }; eligible=1 ;;
+    # done/failed/quarantined are terminal — "still-waiting" would mislabel a
+    # run that just failed as one the reconciler is still going to wake.
+    done|failed|quarantined) echo "RECONCILE:terminal run=$run state=$state"; continue ;;
     *) echo "RECONCILE:still-waiting run=$run"; continue ;;
   esac
   if quarantined; then echo "RECONCILE:quarantined run=$run"; continue; fi
-  if [ "$eligible" -eq 0 ] && ! due "$record"; then echo "RECONCILE:still-waiting run=$run"; continue; fi
+  if [ "$eligible" -eq 0 ] && ! due "$record"; then
+    # due()'s evaluator (ci-watch) may have just transitioned the record to a
+    # terminal state — that is not "still waiting", it is finished.
+    state="$(jq -r .state "$record")"
+    case "$state" in
+      done|failed|quarantined) echo "RECONCILE:terminal run=$run state=$state" ;;
+      *) echo "RECONCILE:still-waiting run=$run" ;;
+    esac
+    continue
+  fi
   # ci-watch changes the lifecycle record from waiting to runnable. Re-read
   # after evaluator side effects rather than trusting the old JSON snapshot.
   if ! life validate "$run" >/dev/null 2>&1; then echo "RECONCILE:invalid-record run=$run"; continue; fi
   state="$(jq -r .state "$record")"
-  case "$state" in waiting|runnable|running) ;; *) echo "RECONCILE:still-waiting run=$run"; continue;; esac
+  case "$state" in
+    waiting|runnable|running) ;;
+    done|failed|quarantined) echo "RECONCILE:terminal run=$run state=$state"; continue ;;
+    *) echo "RECONCILE:still-waiting run=$run"; continue ;;
+  esac
   claim="$(claim_id "$run" || true)"; [ -n "$claim" ] || { echo "RECONCILE:invalid-run-id run=$run"; continue; }
   result="$(python3 "$COORD" claim "$claim" 2>&1)"; rc=$?
   if [ "$rc" -eq 3 ]; then echo "RECONCILE:claim-held run=$run"; continue; fi

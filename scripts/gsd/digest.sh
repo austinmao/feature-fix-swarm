@@ -43,7 +43,9 @@ DIGEST_MODE="$MODE" DIGEST_GATES_PY="$GATES_PY" python3 - <<'PY'
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import time
 import subprocess
 import sys
 import tempfile
@@ -157,8 +159,9 @@ class Emitter:
     def __init__(self):
         self.cursor = load_json(CURSOR_PATH)
         self.emitted_any = False
+        self.retro_rows = []
 
-    def flush(self, name, lines, new_cursor_value):
+    def flush(self, name, lines, new_cursor_value, retro_rows=None):
         for line in lines:
             print(line)
         if lines:
@@ -182,15 +185,68 @@ class Emitter:
             atomic_write_json(CURSOR_PATH, self.cursor)
         except Exception as exc:
             note("cursor write failed for %s (%s) — class will redeliver" % (name, exc))
+            return
+        # Retro rows are collected only AFTER the cursor advance lands: a
+        # notify failure returned earlier and a cursor-write failure returned
+        # just above, so a redelivering class never double-writes its rows.
+        if retro_rows:
+            self.retro_rows.extend(retro_rows)
 
 
-def evidence_list_class(em, name, rows, line_fn):
+# ── retro JSONL sink (spec-011 producer seam) ──────────────────────────────
+# retro.sh analyze reads the newest .feature-fix-swarm/digest-*.jsonl; until
+# this sink existed nothing ever wrote one, so production retro always ended
+# at RETRO:no-events. Rows are schema-true for lib/retro_scrub.py: allowlisted
+# keys only, token-safe values (an invalid token would fail-close the WHOLE
+# analyze). ponytail: only list-backed classes map for now — scan-tamper/
+# budget-breach/drift use custom cursors; add mappings there if they prove
+# fileable.
+
+RETRO_BAD_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def retro_tok(value):
+    text = RETRO_BAD_TOKEN_RE.sub("-", str(value))[:128]
+    if not text:
+        return "unknown"
+    if not text[0].isalnum():
+        text = ("x" + text)[:128]
+    return text
+
+
+def retro_row(script, event_class, gate, exit_code=0):
+    try:
+        code = int(exit_code)
+    except (TypeError, ValueError):
+        code = 1  # unparseable must never read as success
+    # retro_scrub._exit_code rejects outside 0-255 and fail-closes the whole
+    # analyze — clamp here, same reason the token sanitizer exists.
+    code = min(max(code, 0), 255)
+    return {"script": script, "event_class": event_class,
+            "gate": retro_tok(gate), "exit_code": code}
+
+
+def retro_sink_write(em):
+    if not em.retro_rows or os.environ.get("DIGEST_RETRO_SINK", "on") == "off":
+        return
+    sink = os.path.join(SIDE_DIR, "digest-%s.jsonl" % time.strftime("%Y%m%d", time.gmtime()))
+    try:
+        payload = "".join(json.dumps(row, sort_keys=True) + "\n"
+                          for row in em.retro_rows)
+        with open(sink, "a", encoding="utf-8") as fh:
+            fh.write(payload)
+    except Exception as exc:
+        note("retro sink write failed (%s) — rows dropped" % exc)
+
+
+def evidence_list_class(em, name, rows, line_fn, retro_fn=None):
     new = list_slice(em.cursor.get(name), rows)
     if new is None:
         note("%s cursor fingerprint mismatch — re-initialized to end of list" % name)
         em.flush(name, [], list_cursor_value(rows))
         return
-    em.flush(name, [line_fn(r) for r in new], list_cursor_value(rows))
+    retro = [retro_fn(r) for r in new] if retro_fn else None
+    em.flush(name, [line_fn(r) for r in new], list_cursor_value(rows), retro)
 
 
 def degradation_ns(ev):
@@ -198,7 +254,7 @@ def degradation_ns(ev):
     return ns if isinstance(ns, dict) else {}
 
 
-def events_list_class(em, name, events, line_fn):
+def events_list_class(em, name, events, line_fn, retro_fn=None):
     """A kind-filtered class over the shared top-level `events` list. Each
     class keeps its OWN {count, last_fp} position over the full list, so a
     notify failure in one class never stalls the other (Pitfall 4)."""
@@ -207,8 +263,10 @@ def events_list_class(em, name, events, line_fn):
         note("%s cursor fingerprint mismatch — re-initialized to end of list" % name)
         em.flush(name, [], list_cursor_value(events))
         return
-    em.flush(name, [line_fn(r) for r in new if r.get("kind") == name],
-             list_cursor_value(events))
+    matched = [r for r in new if r.get("kind") == name]
+    retro = [retro_fn(r) for r in matched] if retro_fn else None
+    em.flush(name, [line_fn(r) for r in matched],
+             list_cursor_value(events), retro)
 
 
 def finisher_line(r):
@@ -395,7 +453,8 @@ def immediate():
             ("gate", r.get("gate", "?")),
             ("env_var", r.get("env_var", "?")),
             ("ts", r.get("ts", "?")),
-        ]))
+        ]),
+        lambda r: retro_row("gates.py", "gate-warn", r.get("gate", "waiver")))
 
     tripped_rung_class(em, ev)
 
@@ -404,8 +463,10 @@ def immediate():
         em, "loop-cap", shared_events,
         lambda r: "loop-cap " + kv([
             ("run_id", r.get("run_id", "?")), ("loop", r.get("loop", "?")),
-            ("round", r.get("round", "?")), ("ts", r.get("ts", "?"))]))
-    events_list_class(em, "finisher-skipped", shared_events, finisher_line)
+            ("round", r.get("round", "?")), ("ts", r.get("ts", "?"))]),
+        lambda r: retro_row("plan-wall.sh", "unrecovered-stall", "loop-cap"))
+    events_list_class(em, "finisher-skipped", shared_events, finisher_line,
+                      lambda r: retro_row("gsd-run.sh", "gate-warn", "finisher-skipped"))
 
     budget_breach_class(em, reverse_map)
     promotion_class(em, ev)
@@ -416,10 +477,14 @@ def immediate():
             ("run_id", r.get("run_id", "?")), ("surface", r.get("surface", "?")),
             ("exit_code", r.get("exit_code", "?")),
             ("artifact_sha", r.get("artifact_sha", "?")),
-            ("ts", r.get("ts", "?"))]))
+            ("ts", r.get("ts", "?"))]),
+        lambda r: retro_row("run-finalizer.sh", "gate-warn", "rollback-dryrun",
+                            r.get("exit_code", 0)))
 
     scan_tamper_class(em)
     drift_class(em)
+
+    retro_sink_write(em)
 
     if not em.emitted_any:
         print("no events")

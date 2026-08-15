@@ -32,7 +32,7 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; LEVER="$ROOT/scripts/g
   [ "$status" -eq 0 ]
   run env FFS_SESSION_WAKE_MAX_ATTEMPTS=1 bash "$LEVER" checkpoint "$FIX/claude-limit-24h.SYNTHETIC.txt" 1 --run-id wakebudget
   [ "$status" -eq 1 ]
-  [[ "$output" == *'SESSION-WAKE:wake-exhausted'* ]]
+  printf '%s\n' "$output" | grep -qx 'SESSION-WAKE:wake-exhausted'
   run jq -e '.state == "failed" and .reason == "wake-budget-exhausted"' .planning/run-state/lifecycle-wakebudget.json
   [ "$status" -eq 0 ]
 }
