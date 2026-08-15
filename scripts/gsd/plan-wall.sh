@@ -312,6 +312,9 @@ _pw_await() {
         echo "WALL-AWAIT:cap-unavailable phase=$PHASE_DIR" >&2
       fi
       if [ "${PLAN_WALL_AWAIT_COUNT:-on}" != off ] && [ -d "$RUN_STATE_DIR" ]; then
+        # ponytail: non-atomic read-increment-write — concurrent awaits on one
+        # phase may under-count. The cap is an advisory anti-runaway guard,
+        # not a security boundary; flock it if a real bypass ever matters.
         _pw_attempts="$(cat "$_pw_attempts_file" 2>/dev/null)"
         case "$_pw_attempts" in *[!0-9]*|'') _pw_attempts=0 ;; esac
         _pw_attempts=$((_pw_attempts + 1))
