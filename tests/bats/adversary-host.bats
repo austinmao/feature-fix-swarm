@@ -462,3 +462,18 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -Fqx -- '--output-schema' "$BATS_TEST_TMPDIR/argv.log"
 }
+
+@test "preferred (cross-vendor) rung defaults are at parity with the fallback rung" {
+  # The independent, opposite-vendor reviewer's per-attempt/per-review timeout
+  # floors must not be starved below the same-vendor fallback's — otherwise a
+  # loaded box silently degrades "cross-vendor review" into self-review by
+  # timing out the honest reviewer before the dishonest fallback. This is a
+  # static pin against the DEFAULT values baked into the source: no existing
+  # test invokes adversary_invoke_with_fallback to observe these two defaults
+  # in isolation (every timing test overrides the 3rd positional arg, which
+  # only bounds the overall preferred/fallback split, not these per-rung caps).
+  grep -oE -- 'FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT:-120' "$LIB"
+  grep -oE -- 'FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-240' "$LIB"
+  grep -oE -- 'FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-120' "$LIB"
+  grep -oE -- 'FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-240' "$LIB"
+}
