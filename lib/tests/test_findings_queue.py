@@ -475,7 +475,7 @@ def test_fold_reworded_same_plan_file_folds_with_alias(tmp_path) -> None:
         return " ".join(s.split()).lower()
 
     ratio = difflib.SequenceMatcher(None, norm(a), norm(b)).ratio()
-    assert ratio >= 0.75
+    assert ratio >= gates._FOLD_THRESHOLD
 
     store = tmp_path / "evidence.json"
     sig1, deduped1, _ = gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md")
@@ -505,7 +505,7 @@ def test_fold_below_threshold_new_sig(tmp_path) -> None:
         return " ".join(s.split()).lower()
 
     ratio = difflib.SequenceMatcher(None, norm(a), norm(b)).ratio()
-    assert ratio < 0.75
+    assert ratio < gates._FOLD_THRESHOLD
 
     store = tmp_path / "evidence.json"
     sig1, _, _ = gates.findings_add(store, "api.py", a, plan="phase-1/PLAN.md")
@@ -552,6 +552,52 @@ def test_fold_leaves_unrelated_rows_byte_stable(tmp_path) -> None:
         f for f in gates.findings_list(store) if f["sig"] == unrelated_sig
     )
     assert json.dumps(unrelated_record_after, sort_keys=True) == unrelated_json
+
+
+def test_fold_higher_incoming_severity_does_not_fold(tmp_path) -> None:
+    """A reworded report that ranks MORE severe than the stored candidate
+    must mint a brand-new record, never fold under it — folding a fresh
+    CRITICAL under an unresolved LOW would hide the CRITICAL from the
+    queue."""
+    a = "The auth handler does not validate the session token"
+    b = "The auth handler does not validate session token"
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md", severity="LOW")
+    sig2, deduped2, _ = gates.findings_add(store, "auth.py", b, plan="phase-1/PLAN.md", severity="CRITICAL")
+    assert sig1 != sig2
+    assert deduped2 is False
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig2)
+    assert "aliases" not in record
+
+
+def test_fold_equal_severity_still_folds(tmp_path) -> None:
+    """Equal-severity reworded reports fold exactly as before the guard."""
+    a = "The auth handler does not validate the session token"
+    b = "The auth handler does not validate session token"
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md", severity="HIGH")
+    sig2, deduped2, _ = gates.findings_add(store, "auth.py", b, plan="phase-1/PLAN.md", severity="HIGH")
+    assert sig1 == sig2
+    assert deduped2 is True
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig1)
+    assert b in record.get("aliases", [])
+
+
+def test_fold_double_submit_same_alias_text_dedupes_to_one(tmp_path) -> None:
+    """Re-submitting the SAME reworded text a second time must not append a
+    second alias row — it's still a fold (deduped=True), just no duplicate."""
+    a = "The auth handler does not validate the session token"
+    b = "The auth handler does not validate session token"
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md")
+    sig2, deduped2, _ = gates.findings_add(store, "auth.py", b, plan="phase-1/PLAN.md")
+    sig3, deduped3, _ = gates.findings_add(store, "auth.py", b, plan="phase-1/PLAN.md")
+    assert sig1 == sig2 == sig3
+    assert deduped2 is True
+    assert deduped3 is True
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig1)
+    assert record.get("aliases", []) == [b]
+    assert len(record.get("aliases", [])) == 1
 
 
 # ── v2 (AC-015): metadata + filters ──────────────────────────────────────────
