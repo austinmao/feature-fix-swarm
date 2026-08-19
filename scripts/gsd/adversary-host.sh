@@ -492,8 +492,8 @@ adversary_invoke_with_fallback() {
 
   output="$(adversary_invoke_model_ladder "$preferred" "$primary_budget" \
     "$preferred_model" "$preferred_effort" "$prompt" \
-    "${FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT:-45}" \
-    "${FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-90}" 2>&1)"
+    "${FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT:-120}" \
+    "${FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-240}" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     adversary_record_invocation false || return $?

@@ -41,7 +41,7 @@ setup() {
     "$CODEX_SOURCE_ROOT/agents" "$CODEX_SOURCE_ROOT/gsd-core" \
     "$CODEX_SOURCE_ROOT/hooks" \
     "$GSD_PACKAGE_ROOT/hooks/dist" "$GSD_PACKAGE_ROOT/hooks/sibling" "$TRUSTED_GRANT_DIR" \
-    "$CLAUDE_SKILLS_ROOT/gsd-quick"
+    "$CLAUDE_SKILLS_ROOT/gsd-quick" "$CLAUDE_SKILLS_ROOT/gsd-plan-phase"
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
   printf '%s\n' 'name = "gsd-executor"' 'model = "sonnet"' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml"
   printf '%s\n' '# executor' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.md"
@@ -123,6 +123,7 @@ EOF
 {"version":"1.10.0","files":{"agents/gsd-executor.toml":"$agent_toml_hash","agents/gsd-executor.md":"$agent_md_hash","gsd-core/VERSION":"$version_hash","skills/gsd-quick/SKILL.md":"$quick_skill_hash"}}
 EOF
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$CLAUDE_SKILLS_ROOT/gsd-quick/SKILL.md"
+  printf '%s\n' '---' 'name: gsd-plan-phase' '---' > "$CLAUDE_SKILLS_ROOT/gsd-plan-phase/SKILL.md"
 
   cat > "$STUB_DIR/fake-codex" <<EOF
 #!/usr/bin/env bash
@@ -2231,4 +2232,445 @@ EOF
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
   [ ! -f "$record" ]
   [[ "$output" != *"GSD-RUN:SESSION-WAKE"* ]]
+}
+
+# ── split-brain .planning guard (Part 2b) ──────────────────────────────────
+# Every case below builds its own nested, independently-git-init'd fixture
+# repo (a subdirectory of the outer $BATS_TEST_TMPDIR repo would resolve
+# `git rev-parse --show-toplevel` to the OUTER repo — see the "plan wall
+# blocks execute-phase" test above for why). A commit is required because
+# ensure_run_worktree does `git worktree add --detach ... HEAD`, which needs
+# a resolvable HEAD.
+
+@test "diverged .planning/phases/<slug> across repo and worktree refuses with the typed line and exits 78, drive never launches" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-1
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  # Deterministic, non-flaky mtime ordering — same-second execution could
+  # otherwise tie.
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-DIVERGENCE phase=03-guard newer=repo"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "GSD_PLANNING_SYNC=worktree syncs worktree-onto-repo and proceeds" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-2
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=worktree \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=worktree phase=03-guard"* ]]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "GSD_PLANNING_SYNC=repo syncs repo-onto-worktree and proceeds" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-3
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=repo phase=03-guard"* ]]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  grep -Fq repo-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "GSD_PLANNING_GUARD=off skips the check entirely, even diverged" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-4
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_GUARD=off \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [[ "$output" != *"PLANNING-SYNC"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  # kill switch fully bypasses the guard rather than silently syncing anyway
+  grep -Fq repo-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  ! grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  grep -Fq worktree-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  ! grep -Fq repo-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "identical repo/worktree .planning dirs (the common, first-run case) stay silent" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-5
+  # No pre-created worktree — ensure_run_worktree does the normal one-shot
+  # cp -R seed itself on this plain first invocation.
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [[ "$output" != *"PLANNING-SYNC"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+# ── split-brain .planning guard: hardening round ───────────────────────────
+# Shared fixture builders. Every case still gets its OWN nested, independently
+# git-init'd repo (see the note above the Part 2b block for why a subdirectory
+# of the outer repo will not do).
+
+guard_exec_skill() { # the Claude-side surface /gsd-execute-phase probes for
+  mkdir -p "$CLAUDE_SKILLS_ROOT/gsd-execute-phase"
+  printf '%s\n' '---' 'name: gsd-execute-phase' '---' \
+    > "$CLAUDE_SKILLS_ROOT/gsd-execute-phase/SKILL.md"
+}
+
+guard_repo() { # $1 = repo path — a phase-3 fixture the ownership gate accepts
+  local repo="$1"
+  mkdir -p "$repo/.planning/phases/03-guard"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  cat > "$repo/.planning/ROADMAP.md" <<'EOF'
+# Roadmap
+
+## Phase 3: Guard
+**Requirements:** FR-001
+EOF
+  cat > "$repo/.planning/phases/03-guard/03-01-PLAN.md" <<'EOF'
+---
+phase: 03-guard
+plan: "01"
+requirements: [FR-001]
+---
+seed
+EOF
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm seed
+}
+
+guard_worktree() { # $1 = repo, $2 = run id — prints the worktree path
+  local repo="$1" wt="$1/.claude/worktrees/$2"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$repo" worktree add -q --detach "$wt" HEAD
+  cp -R "$repo/.planning" "$wt/.planning"
+  printf '%s' "$wt"
+}
+
+guard_diverge() { # $1 = repo, $2 = worktree — repo strictly newer
+  printf '%s\n' worktree-side-line >> "$2/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$2/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$1/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$1/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+# Replaces the harness copy of the plan wall with a recorder. Call 1 (the
+# early pre-execution seam) always passes; call 2+ (the post-sync re-run)
+# returns $WALL_STUB_SECOND_RC so a test can prove the re-run is blocking.
+guard_wall_stub() {
+  cat > "$HARNESS_ROOT/scripts/gsd/plan-wall.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "$BATS_TEST_TMPDIR/wall.calls"
+if [ "\$(wc -l < "$BATS_TEST_TMPDIR/wall.calls")" -ge 2 ]; then
+  exit "\${WALL_STUB_SECOND_RC:-0}"
+fi
+exit 0
+EOF
+  chmod +x "$HARNESS_ROOT/scripts/gsd/plan-wall.sh"
+}
+
+guard_wall_calls() {
+  [ -f "$BATS_TEST_TMPDIR/wall.calls" ] || { printf '0'; return 0; }
+  wc -l < "$BATS_TEST_TMPDIR/wall.calls" | tr -d ' '
+}
+
+@test "diverged .planning refuses gsd-execute-phase too (the untested guard arm)" {
+  guard_wall_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/guard-exec"
+  guard_repo "$REPO"
+  RID=guard-exec-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-DIVERGENCE phase=03-guard newer=repo"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "invalid GSD_PLANNING_SYNC fails closed on a diverged phase, no drive launch" {
+  REPO="$BATS_TEST_TMPDIR/guard-bogus"
+  guard_repo "$REPO"
+  RID=guard-bogus-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=bogus \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: invalid GSD_PLANNING_SYNC value: bogus"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  # fail-closed means neither side was touched
+  grep -Fq repo-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  ! grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "identical mtimes on both sides resolve the newer= tie-break to repo" {
+  REPO="$BATS_TEST_TMPDIR/guard-tie"
+  guard_repo "$REPO"
+  RID=guard-tie-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202401010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md" \
+                        "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-DIVERGENCE phase=03-guard newer=repo"* ]]
+}
+
+@test "one-sided phase dir (worktree only) is divergence, not silence" {
+  REPO="$BATS_TEST_TMPDIR/guard-onesided"
+  guard_repo "$REPO"
+  RID=guard-onesided-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  printf '%s\n' worktree-only-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  rm -rf "$REPO/.planning/phases/03-guard"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-DIVERGENCE phase=03-guard newer=worktree"* ]]
+  [ ! -d "$REPO/.planning/phases/03-guard" ]
+}
+
+@test "one-sided phase dir repairs by creating the missing copy under GSD_PLANNING_SYNC" {
+  REPO="$BATS_TEST_TMPDIR/guard-onesided-fix"
+  guard_repo "$REPO"
+  RID=guard-onesided-fix-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  printf '%s\n' worktree-only-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  rm -rf "$REPO/.planning/phases/03-guard"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=worktree \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=worktree phase=03-guard"* ]]
+  grep -Fq worktree-only-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "worktree-direction sync re-runs the plan wall against the replaced repo phase dir" {
+  guard_wall_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/guard-wall-rerun"
+  guard_repo "$REPO"
+  RID=guard-wall-rerun-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=worktree \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=worktree phase=03-guard"* ]]
+  # the content the early wall reviewed was replaced — the wall must run again
+  [ "$(guard_wall_calls)" -eq 2 ]
+  grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "repo-direction sync leaves the reviewed repo copy alone and does not re-run the wall" {
+  guard_wall_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/guard-wall-norerun"
+  guard_repo "$REPO"
+  RID=guard-wall-norerun-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=repo phase=03-guard"* ]]
+  [ "$(guard_wall_calls)" -eq 1 ]
+}
+
+@test "a failing post-sync wall re-run refuses the run with the typed line" {
+  guard_wall_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/guard-wall-fail"
+  guard_repo "$REPO"
+  RID=guard-wall-fail-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=worktree WALL_STUB_SECOND_RC=20 \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC-WALL-FAILED phase=03-guard rc=20"* ]]
+  [ "$(guard_wall_calls)" -eq 2 ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "a traversal phase slug is refused before any path is built from it" {
+  REPO="$BATS_TEST_TMPDIR/guard-slug"
+  guard_repo "$REPO"
+  RID=guard-slug-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+  # sentinels: one inside .planning (where ../evil resolves to) and one well
+  # outside the repo entirely
+  mkdir -p "$REPO/.planning/evil" "$BATS_TEST_TMPDIR/guard-sentinel"
+  printf '%s\n' keep > "$REPO/.planning/evil/marker"
+  printf '%s\n' keep > "$BATS_TEST_TMPDIR/guard-sentinel/marker"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PHASE_ID=../evil GSD_PLANNING_SYNC=worktree \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"gsd-run: PLANNING-GUARD refused: invalid phase slug"* ]]
+  [ -f "$REPO/.planning/evil/marker" ]
+  [ -f "$BATS_TEST_TMPDIR/guard-sentinel/marker" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "a symlinked phase dir is refused rather than followed" {
+  REPO="$BATS_TEST_TMPDIR/guard-symlink"
+  guard_repo "$REPO"
+  RID=guard-symlink-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+  mkdir -p "$BATS_TEST_TMPDIR/guard-symlink-target"
+  rm -rf "$WT/.planning/phases/03-guard"
+  ln -s "$BATS_TEST_TMPDIR/guard-symlink-target" "$WT/.planning/phases/03-guard"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PLANNING-GUARD refused: symlinked planning path"* ]]
+  [ -L "$WT/.planning/phases/03-guard" ]
+  [ ! -e "$BATS_TEST_TMPDIR/guard-symlink-target/03-01-PLAN.md" ]
+}
+
+@test "a failed sync leaves the destination intact and emits a typed failure line" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores the read-only parent that forces the failure"
+  REPO="$BATS_TEST_TMPDIR/guard-syncfail"
+  guard_repo "$REPO"
+  RID=guard-syncfail-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  guard_diverge "$REPO" "$WT"
+  # worktree-direction sync writes into the REPO phases dir; make it read-only
+  chmod 555 "$REPO/.planning/phases"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=worktree \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+  chmod 755 "$REPO/.planning/phases"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC-FAILED direction=worktree phase=03-guard"* ]]
+  # destination survived the failed sync with its original content
+  [ -f "$REPO/.planning/phases/03-guard/03-01-PLAN.md" ]
+  grep -Fq repo-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }

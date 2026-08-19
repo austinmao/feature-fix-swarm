@@ -148,7 +148,7 @@ references to either.
 | `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:23` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
 | `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:78` | `0`/`off` disables the one-shot cross-vendor fallback. Also read by the plan wall's diversity-invariant reviewer selection — its state is stamped into the wall record |
 | `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:172` | `off` skips the cheap pre-review availability probe |
-| `FFS_ADVERSARY_*_TIMEOUT` | 20 / 45 / 90 / 120 / 180 / 240 | `scripts/gsd/adversary-host.sh:170-278` | Per-leg probe and review caps |
+| `FFS_ADVERSARY_*_TIMEOUT` | 20 / 120 / 180 / 240 | `scripts/gsd/adversary-host.sh:170-278` | Per-leg probe and review caps |
 | `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:110,139` | Executable overrides |
 | `PLAN_WALL` | on | `scripts/gsd/plan-wall.sh` | `off` skips the per-phase plan wall — only with a durable, recorded waiver; a skip that cannot record its waiver fails closed |
 | `SPEC_PANEL` | off | spec-authoring panel (last spec-decompose phase) | `on` enables the dual-vendor blind-draft panel at spec authoring; default off pending an EVAL-D fixture pass |
@@ -193,6 +193,7 @@ so one phase's findings never block another phase's wall.
 | `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:443,448` | CLI executable overrides |
 | `GSD_CODEX_CONFIG_ROOT` | `${CODEX_HOME:-$HOME/.codex}` | `scripts/gsd/codex-model-sync.sh:12` | Where generated Codex agent TOMLs land |
 | `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:393` | Where the Claude-side SKILL.md surface lives |
+| `GSD_PLANNING_SYNC` | unset | `scripts/gsd/gsd-run.sh:check_planning_divergence` | Which side wins when `.planning/phases/<slug>` has diverged between the repo and the run worktree. `repo` copies repo→worktree, `worktree` copies worktree→repo (and re-runs the plan wall, since it retires the reviewed repo copy). Unset fails closed with exit 78; any other value fails closed |
 
 ### Kill-switches
 
@@ -206,6 +207,13 @@ All default to on. Set to `off` to disable.
 | `CREDENTIAL_OUTPUT_GUARD` | `scripts/hooks/credential-output-guard.sh:11` | The block on commands that would print secret values |
 | `TDD_GATE_BYPASS=1` | `hooks/tdd-gate.sh:12` | The block on source edits with no paired test |
 | `FFS_HOST_PROCESS_DETECT` | `scripts/gsd/adversary-host.sh:42` | The PPID-walk host-detection fallback |
+| `GSD_PLANNING_GUARD` | `scripts/gsd/gsd-run.sh:check_planning_divergence` | The split-brain `.planning/phases/<slug>` check on `/gsd-plan-phase` and `/gsd-execute-phase` — `off` runs the phase against whatever each side happens to hold |
+
+The `newer=` field on a `GSD-RUN:PLANNING-DIVERGENCE` line is an **advisory
+mtime heuristic**, not a merge decision: it reports which side holds the most
+recently modified differing file (ties resolve to `repo`) and degrades to
+`newer=unknown` if attribution fails. It never relaxes the fail-closed
+refusal — only `GSD_PLANNING_SYNC` does that, and it is you who picks the side.
 
 ### Ralph loop
 
