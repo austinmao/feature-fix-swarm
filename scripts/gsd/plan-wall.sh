@@ -1158,7 +1158,8 @@ if [ "${PLAN_WALL:-on}" != off ]; then
     if [ "$_pw_nc_rc" -ne 0 ] || [ -z "$_pw_prev" ] || [ "$_pw_prev" = none ]; then
       echo "plan-wall: BLOCKED $TARGET (diminishing-returns: no prior round count to compare — first blocking round is strict)" >&2
     elif [ "$PW_ROUND_NEW" -ge "$_pw_prev" ]; then
-      echo "plan-wall: BLOCKED $TARGET (diminishing-returns: $PW_ROUND_NEW new HIGH/CRITICAL this round >= $_pw_prev previous — not converging)" >&2
+      echo "plan-wall: WALL-NO-CONVERGENCE $TARGET ($PW_ROUND_NEW new HIGH/CRITICAL this round >= $_pw_prev previous — quarantining early)" >&2
+      OVERALL_RC=3
     else
       _pw_emit_pass_residual
     fi
