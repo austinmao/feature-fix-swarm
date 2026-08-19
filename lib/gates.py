@@ -65,6 +65,7 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 from __future__ import annotations
 
 import argparse
+import difflib
 import fcntl
 import hashlib
 import json
@@ -1809,18 +1810,59 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
         json.dumps([plan or "", file, _normalize(issue)]).encode()
     ).hexdigest()
     reopened = False
+    result_sig = sig
     with _StoreLock(store):
         data = _load_store(store)
         findings = _findings_ns(data)
         existing = next((f for f in findings if f["sig"] == sig), None)
         deduped = existing is not None
         if existing is None:
-            findings.append({
-                "sig": sig, "file": file, "issue": issue, "resolved": False,
-                "recorded_at": _now(), "severity": severity, "run_id": run_id,
-                "source": source, "plan": plan, "history": [],
-            })
-            _save_store(store, data)
+            # D-1a: similarity fold — before minting a brand-new record,
+            # check whether a reworded-but-near-identical finding already
+            # exists for this (plan, file). Folds onto the highest-ratio
+            # candidate at >= 0.75 (SequenceMatcher over normalized text);
+            # below that, or for a different plan/file, it's a new record
+            # (EDGE-004 exact-normalized dedup above is unaffected — this
+            # only runs on an exact-sig MISS).
+            best = None
+            best_ratio = 0.0
+            norm_issue = _normalize(issue)
+            for candidate in findings:
+                if (candidate.get("plan") or "", candidate.get("file")) != (plan or "", file):
+                    continue
+                ratio = difflib.SequenceMatcher(
+                    None, norm_issue, _normalize(candidate.get("issue", ""))
+                ).ratio()
+                if ratio >= 0.75 and ratio > best_ratio:
+                    best = candidate
+                    best_ratio = ratio
+            if best is not None:
+                best.setdefault("aliases", []).append(issue)
+                if best.get("resolved"):
+                    best.setdefault("history", []).append({
+                        "disposition": best.get("disposition"),
+                        "reason": best.get("reason"),
+                        "resolved_at": best.get("resolved_at"),
+                    })
+                    best["resolved"] = False
+                    best.pop("disposition", None)
+                    best.pop("reason", None)
+                    best.pop("resolved_at", None)
+                    for key, val in (("severity", severity), ("run_id", run_id),
+                                      ("source", source), ("plan", plan)):
+                        if val is not None:
+                            best[key] = val
+                    reopened = True
+                deduped = True
+                result_sig = best["sig"]
+                _save_store(store, data)
+            else:
+                findings.append({
+                    "sig": sig, "file": file, "issue": issue, "resolved": False,
+                    "recorded_at": _now(), "severity": severity, "run_id": run_id,
+                    "source": source, "plan": plan, "history": [],
+                })
+                _save_store(store, data)
         elif existing.get("resolved"):
             existing.setdefault("history", []).append({
                 "disposition": existing.get("disposition"),
@@ -1837,7 +1879,7 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
                     existing[key] = val
             reopened = True
             _save_store(store, data)
-    return sig, deduped, reopened
+    return result_sig, deduped, reopened
 
 
 _VALID_DISPOSITIONS = {"refute", "fix", "waive"}
