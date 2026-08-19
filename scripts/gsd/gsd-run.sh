@@ -704,6 +704,99 @@ print(digest.hexdigest())
 PY
 }
 
+# spec-006: a stale runner-worktree copy of .planning/phases/<slug> must never
+# be reviewed/executed silently against a repo copy that has since diverged.
+# Every branch below is an early `return 0` (silent, no behavior change)
+# unless divergence is actually found. Gated by GSD_PLANNING_GUARD (kill
+# switch) and, on divergence, GSD_PLANNING_SYNC picks a sync direction —
+# unset/empty fails closed with exit 78.
+check_planning_divergence() {
+  local phase_num slug repo_dir wt_dir repo_hash wt_hash newer
+  [ "${GSD_PLANNING_GUARD:-}" != off ] || return 0
+  case "$GSD_SKILL_NAME" in
+    gsd-execute-phase|gsd-plan-phase) ;;
+    *) return 0 ;;
+  esac
+  phase_num="${2:-}"
+  [[ "$phase_num" =~ ^[0-9]+$ ]] || return 0
+  [ -d "$REPO_ROOT/.planning" ] && [ -d "$RUN_WORKTREE_ROOT/.planning" ] || return 0
+  slug="${GSD_PHASE_ID:-}"
+  if [ -z "$slug" ]; then
+    slug="$(python3 - "$REPO_ROOT" "$phase_num" <<'PY'
+import re, sys
+from pathlib import Path
+root, phase_number = sys.argv[1], int(sys.argv[2], 10)
+phases_root = Path(root) / ".planning" / "phases"
+dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^0*{phase_number}-", p.name))
+print(dirs[0].name if dirs else "", end="")
+PY
+)"
+  fi
+  [ -n "$slug" ] || return 0
+  repo_dir="$REPO_ROOT/.planning/phases/$slug"
+  wt_dir="$RUN_WORKTREE_ROOT/.planning/phases/$slug"
+  [ -d "$repo_dir" ] && [ -d "$wt_dir" ] || return 0
+  repo_hash="$(sha256_tree "$repo_dir")" || return 1
+  wt_hash="$(sha256_tree "$wt_dir")" || return 1
+  [ "$repo_hash" = "$wt_hash" ] && return 0
+  # Determine which side is newer: for every relative path where content
+  # differs or the path exists on only one side, attribute that path's mtime
+  # to whichever side(s) hold it. Ties resolve to repo (deterministic).
+  newer="$(python3 - "$repo_dir" "$wt_dir" <<'PY'
+import sys
+from pathlib import Path
+
+def walk(root):
+    return {p.relative_to(root).as_posix(): p for p in root.rglob("*") if p.is_file()}
+
+repo_root, wt_root = Path(sys.argv[1]), Path(sys.argv[2])
+repo_files, wt_files = walk(repo_root), walk(wt_root)
+repo_max = wt_max = 0.0
+for rel in set(repo_files) | set(wt_files):
+    rp, wp = repo_files.get(rel), wt_files.get(rel)
+    if rp is not None and wp is not None:
+        if rp.read_bytes() == wp.read_bytes():
+            continue
+        rm, wm = rp.stat().st_mtime, wp.stat().st_mtime
+        if rm >= wm:
+            repo_max = max(repo_max, rm)
+        else:
+            wt_max = max(wt_max, wm)
+    elif rp is not None:
+        repo_max = max(repo_max, rp.stat().st_mtime)
+    else:
+        wt_max = max(wt_max, wp.stat().st_mtime)
+print("repo" if repo_max >= wt_max else "worktree", end="")
+PY
+)"
+  case "${GSD_PLANNING_SYNC:-}" in
+    '')
+      echo "GSD-RUN:PLANNING-DIVERGENCE phase=$slug newer=$newer" >&2
+      return 78
+      ;;
+    repo)
+      if rm -rf "$wt_dir" && cp -R "$repo_dir" "$wt_dir"; then
+        echo "GSD-RUN:PLANNING-SYNC direction=repo phase=$slug" >&2
+        return 0
+      fi
+      echo "gsd-run: failed to sync .planning repo->worktree for phase $slug" >&2
+      return 1
+      ;;
+    worktree)
+      if rm -rf "$repo_dir" && cp -R "$wt_dir" "$repo_dir"; then
+        echo "GSD-RUN:PLANNING-SYNC direction=worktree phase=$slug" >&2
+        return 0
+      fi
+      echo "gsd-run: failed to sync .planning worktree->repo for phase $slug" >&2
+      return 1
+      ;;
+    *)
+      echo "gsd-run: invalid GSD_PLANNING_SYNC value: ${GSD_PLANNING_SYNC:-}" >&2
+      return 78
+      ;;
+  esac
+}
+
 compute_ffs_skill_hash() {
   local source_skills
   source_skills="$SCRIPT_DIR/../../skills"
@@ -1251,6 +1344,7 @@ if [ "$_native_rc" -ne 0 ]; then
 fi
 
 ensure_run_worktree || exit $?
+check_planning_divergence "$@" || exit $?
 budget_prepare_mapping || exit $?
 
 # Original invocation, preserved for session-wake resume records: the
