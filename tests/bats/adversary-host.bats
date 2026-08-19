@@ -687,3 +687,26 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"flag=0"* ]]
 }
+
+@test "rung provenance works without mktemp or rm on PATH (minimal environment)" {
+  # plan-adversary.bats runs the bounded path with a stripped PATH (no mktemp,
+  # no rm) to prove bounded invocation survives a minimal environment. The
+  # out-of-band rung file must not reintroduce that dependency: a missing
+  # mktemp must not turn a working reviewer into "both hosts unavailable".
+  minimal="$BATS_TEST_TMPDIR/minimal-path"
+  mkdir -p "$minimal"
+  for bin in bash dirname grep cat wc head tail tr env python3 sed; do
+    b="$(command -v "$bin" 2>/dev/null)"
+    [ -n "$b" ] && ln -sf "$b" "$minimal/$bin"
+  done
+  run env PATH="$minimal" bash -c '
+    . "$1"
+    adversary_invoke() { printf "FFS_ADVERSARY_MODEL_READY\n"; printf "VERDICT-BODY\n"; return 0; }
+    adversary_note_rung() { return 0; }
+    adversary_record_invocation() { return 0; }
+    adversary_invoke_with_fallback codex claude 600 gpt-5.6-sol high claude-opus-5 "" review
+  ' _ "$LIB" 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT-BODY"* ]]
+}

@@ -484,6 +484,31 @@ EOF
   return "${rc:-1}"
 }
 
+# Rung-provenance scratch file. mktemp when it exists (it picks the unique name
+# and honours the sticky-bit rules), but NEVER depend on it: bounded invocation
+# is specifically expected to survive a stripped PATH (run-bounded.sh's python3
+# rung exists for that reason, and plan-adversary.bats pins it), and a missing
+# mktemp here would turn a working reviewer into "both hosts unavailable" rc=78.
+# The fallback creates the file under noclobber so it still cannot be made to
+# write through a pre-planted symlink.
+_adversary_rung_file_new() {
+  local f
+  if command -v mktemp >/dev/null 2>&1; then
+    mktemp "${TMPDIR:-/tmp}/adversary-rung.XXXXXX" && return 0
+    return 1
+  fi
+  f="${TMPDIR:-/tmp}/adversary-rung.$$.${RANDOM}${RANDOM}"
+  ( set -C; : > "$f" ) 2>/dev/null || return 1
+  printf '%s' "$f"
+}
+
+# Best-effort: a leaked scratch file in TMPDIR is strictly better than failing a
+# review because `rm` is absent from a minimal PATH.
+_adversary_rung_file_rm() {
+  [ -n "${1:-}" ] || return 0
+  rm -f "$1" 2>/dev/null || :
+}
+
 # adversary_invoke_with_fallback <preferred-kind> <fallback-kind> <overall-timeout>
 #   <preferred-model> <preferred-effort> <fallback-model> <fallback-effort>
 #   <prompt>
@@ -556,7 +581,7 @@ adversary_invoke_with_fallback() {
   # 1 left by an EARLIER call would otherwise survive a clean one.
   # shellcheck disable=SC2034  # read by sourcing callers, not here
   ADVERSARY_LAST_TIER_DESCENT=0
-  rung_file="$(mktemp "${TMPDIR:-/tmp}/adversary-rung.XXXXXX")" || return 78
+  rung_file="$(_adversary_rung_file_new)" || return 78
 
   output="$(ADVERSARY_RUNG_FILE="$rung_file" adversary_invoke_model_ladder \
     "$preferred" "$primary_budget" \
@@ -569,7 +594,7 @@ adversary_invoke_with_fallback() {
     # model that forged a SELECTED line could otherwise have a descent recorded
     # as a clean judgment-tier review.
     _ah_answered_model="$(IFS='|' read -r _ m _ < "$rung_file" 2>/dev/null && printf '%s' "$m")"
-    rm -f "$rung_file"
+    _adversary_rung_file_rm "$rung_file"
     if [ "$_ah_answered_model" = "$preferred_model" ]; then
       adversary_record_invocation false || return $?
     else
@@ -580,7 +605,7 @@ adversary_invoke_with_fallback() {
     printf '%s\n' "$output"
     return 0
   fi
-  rm -f "$rung_file"
+  _adversary_rung_file_rm "$rung_file"
 
   if ! cross_vendor_fallback_enabled; then
     echo "adversary-host: cross-vendor fallback disabled; returning $preferred failure rc=$rc" >&2
@@ -593,7 +618,7 @@ adversary_invoke_with_fallback() {
     echo "adversary-host: overall review deadline exhausted before fallback could start" >&2
     return 124
   fi
-  rung_file="$(mktemp "${TMPDIR:-/tmp}/adversary-rung.XXXXXX")" || return 78
+  rung_file="$(_adversary_rung_file_new)" || return 78
   output="$(ADVERSARY_RUNG_FILE="$rung_file" adversary_invoke_model_ladder \
     "$fallback" "$remaining" \
     "$fallback_model" "$fallback_effort" "$prompt" \
@@ -607,11 +632,11 @@ adversary_invoke_with_fallback() {
       # shellcheck disable=SC2034  # read by sourcing callers, not here
       ADVERSARY_LAST_TIER_DESCENT=1
     fi
-    rm -f "$rung_file"
+    _adversary_rung_file_rm "$rung_file"
     adversary_record_invocation true || return $?
     printf '%s\n' "$output"
     return "$rc"
   fi
-  rm -f "$rung_file"
+  _adversary_rung_file_rm "$rung_file"
   return "$rc"
 }
