@@ -490,10 +490,17 @@ adversary_invoke_with_fallback() {
   [ "$primary_budget" -le "$total" ] || primary_budget="$total"
   start="$SECONDS"
 
+  # The preferred rung is the INDEPENDENT opposite-vendor judgment-tier
+  # reviewer; the fallback is same-vendor self-review. Its review ceiling must
+  # never sit below the fallback's 240 (that inversion silently degraded every
+  # loaded run into self-review) and is deliberately above it: 480 matches the
+  # cap /review-gate already hands its own adversary, so a real 90-100 KB diff
+  # can finish. Both are ceilings — adversary_invoke_model_ladder clamps them
+  # to whatever the overall per-call deadline leaves.
   output="$(adversary_invoke_model_ladder "$preferred" "$primary_budget" \
     "$preferred_model" "$preferred_effort" "$prompt" \
     "${FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT:-120}" \
-    "${FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-240}" 2>&1)"
+    "${FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-480}" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     adversary_record_invocation false || return $?

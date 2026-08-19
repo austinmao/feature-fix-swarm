@@ -463,7 +463,7 @@ EOF
   ! grep -Fqx -- '--output-schema' "$BATS_TEST_TMPDIR/argv.log"
 }
 
-@test "preferred (cross-vendor) rung defaults are at parity with the fallback rung" {
+@test "preferred (cross-vendor) rung defaults are never starved below the fallback rung" {
   # The independent, opposite-vendor reviewer's per-attempt/per-review timeout
   # floors must not be starved below the same-vendor fallback's — otherwise a
   # loaded box silently degrades "cross-vendor review" into self-review by
@@ -490,10 +490,40 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" == *REVIEW-OK* ]]
-  # exactly one rung ran (the preferred one succeeded) and it got 120/240
+  # exactly one rung ran (the preferred one succeeded)
   [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ]
-  [ "$(cat "$log")" = "claude attempt=120 review=240" ]
-  # the same-vendor fallback rung's defaults stay pinned in source
-  grep -oE -- 'FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-120' "$LIB"
-  grep -oE -- 'FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-240' "$LIB"
+  [ "$(cat "$log")" = "claude attempt=120 review=480" ]
+  # Assert the INVARIANT, not the literals: whatever the two rungs are tuned
+  # to, the independent reviewer must never get less than the self-review
+  # fallback. Preferred caps come from the wiring log above; fallback defaults
+  # are read from source (that rung did not run).
+  pref_attempt="$(sed -n 's/.*attempt=\([0-9]*\).*/\1/p' "$log")"
+  pref_review="$(sed -n 's/.*review=\([0-9]*\).*/\1/p' "$log")"
+  fb_attempt="$(grep -oE -- 'FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-[0-9]+' "$LIB" | grep -oE '[0-9]+$')"
+  fb_review="$(grep -oE -- 'FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-[0-9]+' "$LIB" | grep -oE '[0-9]+$')"
+  [ -n "$fb_attempt" ] && [ -n "$fb_review" ]
+  [ "$pref_attempt" -ge "$fb_attempt" ]
+  [ "$pref_review" -ge "$fb_review" ]
+
+  # Host symmetry: FFS runs on Codex as well as Claude, so the same caps must
+  # reach the preferred rung when the orchestrating host is Claude (preferred
+  # = codex). The caps are keyed on preferred-vs-fallback POSITION, never on
+  # vendor identity — a vendor-keyed regression would starve Codex-hosted runs
+  # only, and would be invisible to the Claude-direction assertion above.
+  log2="$BATS_TEST_TMPDIR/ladder-codex.log"
+  run env -u FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT \
+          -u FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT \
+          LADDER_LOG="$log2" \
+    bash -c '
+      . "$1"
+      adversary_invoke_model_ladder() {
+        printf "%s attempt=%s review=%s\n" "$1" "${6:-unset}" "${7:-unset}" >> "$LADDER_LOG"
+        printf "REVIEW-OK\n"
+        return 0
+      }
+      adversary_invoke_with_fallback codex claude 600 gpt-5.6-sol high opus "" review
+    ' _ "$LIB"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$log2")" = "codex attempt=$pref_attempt review=$pref_review" ]
 }
