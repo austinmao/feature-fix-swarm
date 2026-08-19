@@ -257,6 +257,13 @@ wall→fix→wall loops have burned 19 rounds/2 days and 38+ turns/a week of
 vendor quota. Only an operator-reviewed findings resolution (or a deliberate
 `PLAN_WALL_MAX_ROUNDS` raise) reopens it.
 
+Exit 3 is shared by two distinct terminal conditions — `WALL-ROUND-CAP`
+above and `WALL-NO-CONVERGENCE` (the wall quarantines early when a
+diminishing-returns round finds new HIGH/CRITICAL findings that are not
+strictly fewer than the previous round, before the round cap is even hit).
+Distinguish them from the printed line, not the exit code; the operator
+action is identical either way — quarantine and move on.
+
 ## Wall await rule
 
 Keep the plan wall in the foreground for phases with one or two plans. A

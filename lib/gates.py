@@ -1767,6 +1767,17 @@ def _normalize(s: str) -> str:
     return " ".join(s.split()).lower()
 
 
+# D-1a: similarity-fold acceptance threshold (SequenceMatcher ratio,
+# normalized text) — a single named constant so the fold site and its tests
+# stay in agreement instead of each restating the magic number.
+_FOLD_THRESHOLD = 0.75
+
+# Severity rank for the fold guard below — higher number = more severe.
+# None/unknown severities rank 0 (never blocks a fold, never gets folded
+# UNDER by anything but another unranked report).
+_SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
 def _findings_ns(data: dict) -> list:
     """Shape guard: the `findings` key must be a list or absent. A prior
     task entry named `findings` (dict-shaped, like every other top-level
@@ -1820,24 +1831,42 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
             # D-1a: similarity fold — before minting a brand-new record,
             # check whether a reworded-but-near-identical finding already
             # exists for this (plan, file). Folds onto the highest-ratio
-            # candidate at >= 0.75 (SequenceMatcher over normalized text);
-            # below that, or for a different plan/file, it's a new record
-            # (EDGE-004 exact-normalized dedup above is unaffected — this
-            # only runs on an exact-sig MISS).
+            # candidate at >= _FOLD_THRESHOLD (SequenceMatcher over
+            # normalized text); below that, or for a different plan/file,
+            # it's a new record (EDGE-004 exact-normalized dedup above is
+            # unaffected — this only runs on an exact-sig MISS).
+            #
+            # Severity guard: a candidate is skipped when the INCOMING
+            # report ranks strictly higher severity than the candidate's
+            # currently-stored severity — folding a fresh CRITICAL under an
+            # unresolved LOW record would hide the new CRITICAL from the
+            # findings queue. Equal-or-lower incoming severity folds as
+            # before.
             best = None
             best_ratio = 0.0
             norm_issue = _normalize(issue)
+            incoming_rank = _SEVERITY_RANK.get((severity or "").upper(), 0)
             for candidate in findings:
                 if (candidate.get("plan") or "", candidate.get("file")) != (plan or "", file):
+                    continue
+                candidate_rank = _SEVERITY_RANK.get((candidate.get("severity") or "").upper(), 0)
+                if incoming_rank > candidate_rank:
                     continue
                 ratio = difflib.SequenceMatcher(
                     None, norm_issue, _normalize(candidate.get("issue", ""))
                 ).ratio()
-                if ratio >= 0.75 and ratio > best_ratio:
+                if ratio >= _FOLD_THRESHOLD and ratio > best_ratio:
                     best = candidate
                     best_ratio = ratio
             if best is not None:
-                best.setdefault("aliases", []).append(issue)
+                # Alias dedupe: a re-submission of text already known for
+                # this record (its own `issue`, or an alias already on
+                # file) is a no-op fold — no duplicate alias row, and no
+                # store write when nothing else changed either.
+                changed = False
+                if issue != best.get("issue") and issue not in best.get("aliases", []):
+                    best.setdefault("aliases", []).append(issue)
+                    changed = True
                 if best.get("resolved"):
                     best.setdefault("history", []).append({
                         "disposition": best.get("disposition"),
@@ -1853,9 +1882,11 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
                         if val is not None:
                             best[key] = val
                     reopened = True
+                    changed = True
                 deduped = True
                 result_sig = best["sig"]
-                _save_store(store, data)
+                if changed:
+                    _save_store(store, data)
             else:
                 findings.append({
                     "sig": sig, "file": file, "issue": issue, "resolved": False,
