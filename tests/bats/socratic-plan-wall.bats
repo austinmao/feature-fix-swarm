@@ -306,12 +306,19 @@ packs: [operations, threat-modeling, software-design]"
   cd "$BATS_TEST_DIRNAME/../.."
   plan_line="$(grep -n '^> THE PLAN:$' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
   placeholder_line="$(grep -n '^> <SOCRATIC block:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
-  return_line="$(grep -n '^> Return: numbered list' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  return_line="$(grep -n '^> Return findings as a numbered list' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
+  prior_line="$(grep -n '^> <PRIOR_FINDINGS block:' skills/plan-decompose/SKILL.md | head -1 | cut -d: -f1)"
   [ -n "$plan_line" ]
   [ -n "$placeholder_line" ]
   [ -n "$return_line" ]
+  [ -n "$prior_line" ]
   [ "$placeholder_line" -gt "$plan_line" ]
   [ "$placeholder_line" -lt "$return_line" ]
+  # the feed-forward block obeys the same ordering: after the plan content,
+  # before the return/verdict instruction, so the reviewer reads the plan
+  # first and the untrusted reference blocks never displace the contract
+  [ "$prior_line" -gt "$plan_line" ]
+  [ "$prior_line" -lt "$return_line" ]
 }
 
 @test "Step 3 reuses the Step 0 spec directory" {
