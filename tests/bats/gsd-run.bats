@@ -41,7 +41,7 @@ setup() {
     "$CODEX_SOURCE_ROOT/agents" "$CODEX_SOURCE_ROOT/gsd-core" \
     "$CODEX_SOURCE_ROOT/hooks" \
     "$GSD_PACKAGE_ROOT/hooks/dist" "$GSD_PACKAGE_ROOT/hooks/sibling" "$TRUSTED_GRANT_DIR" \
-    "$CLAUDE_SKILLS_ROOT/gsd-quick"
+    "$CLAUDE_SKILLS_ROOT/gsd-quick" "$CLAUDE_SKILLS_ROOT/gsd-plan-phase"
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
   printf '%s\n' 'name = "gsd-executor"' 'model = "sonnet"' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml"
   printf '%s\n' '# executor' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.md"
@@ -123,6 +123,7 @@ EOF
 {"version":"1.10.0","files":{"agents/gsd-executor.toml":"$agent_toml_hash","agents/gsd-executor.md":"$agent_md_hash","gsd-core/VERSION":"$version_hash","skills/gsd-quick/SKILL.md":"$quick_skill_hash"}}
 EOF
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$CLAUDE_SKILLS_ROOT/gsd-quick/SKILL.md"
+  printf '%s\n' '---' 'name: gsd-plan-phase' '---' > "$CLAUDE_SKILLS_ROOT/gsd-plan-phase/SKILL.md"
 
   cat > "$STUB_DIR/fake-codex" <<EOF
 #!/usr/bin/env bash
@@ -2231,4 +2232,165 @@ EOF
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
   [ ! -f "$record" ]
   [[ "$output" != *"GSD-RUN:SESSION-WAKE"* ]]
+}
+
+# ── split-brain .planning guard (Part 2b) ──────────────────────────────────
+# Every case below builds its own nested, independently-git-init'd fixture
+# repo (a subdirectory of the outer $BATS_TEST_TMPDIR repo would resolve
+# `git rev-parse --show-toplevel` to the OUTER repo — see the "plan wall
+# blocks execute-phase" test above for why). A commit is required because
+# ensure_run_worktree does `git worktree add --detach ... HEAD`, which needs
+# a resolvable HEAD.
+
+@test "diverged .planning/phases/<slug> across repo and worktree refuses with the typed line and exits 78, drive never launches" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-1
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  # Deterministic, non-flaky mtime ordering — same-second execution could
+  # otherwise tie.
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-DIVERGENCE phase=03-guard newer=repo"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "GSD_PLANNING_SYNC=worktree syncs worktree-onto-repo and proceeds" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-2
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=worktree \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=worktree phase=03-guard"* ]]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "GSD_PLANNING_SYNC=repo syncs repo-onto-worktree and proceeds" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-3
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=repo phase=03-guard"* ]]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  grep -Fq repo-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "GSD_PLANNING_GUARD=off skips the check entirely, even diverged" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-4
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_GUARD=off \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [[ "$output" != *"PLANNING-SYNC"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+  # kill switch fully bypasses the guard rather than silently syncing anyway
+  grep -Fq repo-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  ! grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  grep -Fq worktree-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  ! grep -Fq repo-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "identical repo/worktree .planning dirs (the common, first-run case) stay silent" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+
+  RID=guard-fixture-5
+  # No pre-created worktree — ensure_run_worktree does the normal one-shot
+  # cp -R seed itself on this plain first invocation.
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
+  [[ "$output" != *"PLANNING-SYNC"* ]]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
