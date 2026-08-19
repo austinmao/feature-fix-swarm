@@ -1767,6 +1767,22 @@ def _normalize(s: str) -> str:
     return " ".join(s.split()).lower()
 
 
+def _canon_plan(plan: str | None) -> str:
+    """Canonicalize a plan-path spelling so the same logical plan folds to
+    one string regardless of which root a wall run started from (absolute
+    `/private/tmp/<worktree>/.planning/phases/X/Y-PLAN.md`, repo-relative
+    `.planning/phases/X/Y-PLAN.md`, and launch-dir-absolute variants all
+    name the same file). None/"" pass through as "" unchanged. A string
+    containing ".planning/" is trimmed to the substring starting at the
+    LAST ".planning/" occurrence (the repo-relative tail). Anything else
+    (no ".planning/" segment) passes through unchanged."""
+    if not plan:
+        return plan or ""
+    marker = ".planning/"
+    idx = plan.rfind(marker)
+    return plan if idx == -1 else plan[idx:]
+
+
 # D-1a: similarity-fold acceptance threshold (SequenceMatcher ratio,
 # normalized text) — a single named constant so the fold site and its tests
 # stay in agreement instead of each restating the magic number.
@@ -1816,9 +1832,20 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
     passed unreviewed (spec-004 fix round finding 6: cross-plan duplicate
     loses scope). Findings recorded with no plan at all keep the prior
     global dedup behavior (plan="" folds identically for every no-plan
-    caller)."""
+    caller).
+
+    `plan` is canonicalized via `_canon_plan` before the signature is
+    computed, before the record is stored, and before it is compared
+    against fold candidates (whose own stored `plan` is canonicalized too)
+    — so the same logical plan reported under different root-relative
+    spellings folds/lists as one continuity, even against pre-existing
+    records stored under an older, differently-spelled plan. This changes
+    the sig for future adds whose callers pass an absolute path
+    (intended); records already in the store keep their existing sigs
+    untouched — nothing is migrated."""
+    plan = _canon_plan(plan)
     sig = hashlib.sha256(
-        json.dumps([plan or "", file, _normalize(issue)]).encode()
+        json.dumps([plan, file, _normalize(issue)]).encode()
     ).hexdigest()
     reopened = False
     result_sig = sig
@@ -1847,7 +1874,7 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
             norm_issue = _normalize(issue)
             incoming_rank = _SEVERITY_RANK.get((severity or "").upper(), 0)
             for candidate in findings:
-                if (candidate.get("plan") or "", candidate.get("file")) != (plan or "", file):
+                if (_canon_plan(candidate.get("plan")), candidate.get("file")) != (plan, file):
                     continue
                 candidate_rank = _SEVERITY_RANK.get((candidate.get("severity") or "").upper(), 0)
                 if incoming_rank > candidate_rank:
@@ -1920,7 +1947,12 @@ def findings_list(store: Path, unresolved: bool = False, *, severity: str | None
                    source: str | None = None, plan: str | None = None) -> list:
     """v2 (AC-015) adds optional severity/source/plan filters (comma-separated
     for severity, e.g. `HIGH,CRITICAL`). Absent filters are no-ops — existing
-    callers (`--unresolved` only) are unaffected."""
+    callers (`--unresolved` only) are unaffected.
+
+    `plan` is compared via `_canon_plan` on both sides — filtering by any
+    spelling of a plan path returns records stored under any other
+    spelling of that same plan (walls run from different roots each mint a
+    different literal string for the identical .planning/ file)."""
     findings = _findings_ns(_load_store(store))
     result = list(findings)
     if unresolved:
@@ -1931,7 +1963,8 @@ def findings_list(store: Path, unresolved: bool = False, *, severity: str | None
     if source:
         result = [f for f in result if f.get("source") == source]
     if plan:
-        result = [f for f in result if f.get("plan") == plan]
+        plan_c = _canon_plan(plan)
+        result = [f for f in result if _canon_plan(f.get("plan")) == plan_c]
     return result
 
 
