@@ -452,6 +452,108 @@ def test_cli_readd_of_resolved_reopens(tmp_path) -> None:
     assert sig in {f["sig"] for f in listed}
 
 
+# ── D-1a: similarity fold (reworded-but-identical findings collapse) ────────
+
+def test_fold_exact_duplicate_unchanged(tmp_path) -> None:
+    """Byte-identical issue text still hits the exact-sig path — exact match
+    takes priority over fold-hunting, and no `aliases` key appears."""
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "a.py", "leaky query")
+    sig2, deduped2, _ = gates.findings_add(store, "a.py", "leaky query")
+    assert sig1 == sig2
+    assert deduped2 is True
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig1)
+    assert "aliases" not in record
+
+
+def test_fold_reworded_same_plan_file_folds_with_alias(tmp_path) -> None:
+    import difflib
+    a = "The auth handler does not validate the session token"
+    b = "The auth handler does not validate session token"
+
+    def norm(s: str) -> str:
+        return " ".join(s.split()).lower()
+
+    ratio = difflib.SequenceMatcher(None, norm(a), norm(b)).ratio()
+    assert ratio >= 0.75
+
+    store = tmp_path / "evidence.json"
+    sig1, deduped1, _ = gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md")
+    sig2, deduped2, _ = gates.findings_add(store, "auth.py", b, plan="phase-1/PLAN.md")
+    assert deduped1 is False
+    assert sig1 == sig2
+    assert deduped2 is True
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig1)
+    assert b in record.get("aliases", [])
+
+
+def test_fold_same_file_different_plan_never_folds(tmp_path) -> None:
+    a = "The auth handler does not validate the session token"
+    b = "The auth handler does not validate session token"
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md")
+    sig2, _, _ = gates.findings_add(store, "auth.py", b, plan="phase-2/PLAN.md")
+    assert sig1 != sig2
+
+
+def test_fold_below_threshold_new_sig(tmp_path) -> None:
+    import difflib
+    a = "API endpoint has no rate limiting"
+    b = "The endpoint lacks any throttling protections"
+
+    def norm(s: str) -> str:
+        return " ".join(s.split()).lower()
+
+    ratio = difflib.SequenceMatcher(None, norm(a), norm(b)).ratio()
+    assert ratio < 0.75
+
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "api.py", a, plan="phase-1/PLAN.md")
+    sig2, deduped2, _ = gates.findings_add(store, "api.py", b, plan="phase-1/PLAN.md")
+    assert sig1 != sig2
+    assert deduped2 is False
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig2)
+    assert "aliases" not in record
+
+
+def test_fold_onto_resolved_record_reopens(tmp_path) -> None:
+    a = "The auth handler does not validate the session token"
+    b = "The auth handler does not validate session token"
+    store = tmp_path / "evidence.json"
+    sig1, _, _ = gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md")
+    assert gates.findings_resolve(store, sig1, disposition="fix", reason="patched")
+
+    sig2, deduped2, reopened2 = gates.findings_add(store, "auth.py", b, plan="phase-1/PLAN.md")
+    assert sig2 == sig1
+    assert deduped2 is True
+    assert reopened2 is True
+
+    record = next(f for f in gates.findings_list(store) if f["sig"] == sig1)
+    assert record["resolved"] is False
+    assert "disposition" not in record
+    assert len(record["history"]) == 1
+    assert record["history"][0]["disposition"] == "fix"
+    assert record["history"][0]["reason"] == "patched"
+    assert b in record.get("aliases", [])
+
+
+def test_fold_leaves_unrelated_rows_byte_stable(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    unrelated_sig, _, _ = gates.findings_add(store, "unrelated.py", "totally unrelated finding")
+    unrelated_record = next(f for f in gates.findings_list(store) if f["sig"] == unrelated_sig)
+    unrelated_json = json.dumps(unrelated_record, sort_keys=True)
+
+    a = "The auth handler does not validate the session token"
+    b = "The auth handler does not validate session token"
+    gates.findings_add(store, "auth.py", a, plan="phase-1/PLAN.md")
+    gates.findings_add(store, "auth.py", b, plan="phase-1/PLAN.md")
+
+    unrelated_record_after = next(
+        f for f in gates.findings_list(store) if f["sig"] == unrelated_sig
+    )
+    assert json.dumps(unrelated_record_after, sort_keys=True) == unrelated_json
+
+
 # ── v2 (AC-015): metadata + filters ──────────────────────────────────────────
 
 def test_add_with_metadata_flags(tmp_path) -> None:
