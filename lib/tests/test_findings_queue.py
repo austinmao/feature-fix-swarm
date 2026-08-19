@@ -11,6 +11,7 @@ severity/source/plan filters, backward-compat store isolation.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -181,6 +182,90 @@ def test_cli_cross_plan_duplicate_surfaces_under_each_plans_own_wall_query(tmp_p
     listed = json.loads(proc.stdout.strip())
     assert len(listed) == 1
     assert listed[0]["plan"] == "phase-2/PLAN.md"
+
+
+# ── plan-path spelling canonicalization (wall convergence fix) ──────────────
+# Live-proof defect: findings-queue `plan` keys were recorded under different
+# literal spellings of the SAME logical plan (absolute
+# `/private/tmp/<worktree>/.planning/phases/X/Y-PLAN.md`, repo-relative
+# `.planning/phases/X/Y-PLAN.md`, launch-dir absolute) because walls run
+# from different roots — splintering one plan's findings into per-spelling
+# subsets that never see each other in the fold or the `list --plan` query.
+
+def test_add_absolute_plan_listed_by_relative_spelling_and_vice_versa(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    abs_plan = "/private/tmp/wt/.planning/phases/p/A-PLAN.md"
+    rel_plan = ".planning/phases/p/A-PLAN.md"
+
+    sig, _, _ = gates.findings_add(store, "shared.py", "issue text", plan=abs_plan)
+    by_rel = gates.findings_list(store, unresolved=True, plan=rel_plan)
+    assert {f["sig"] for f in by_rel} == {sig}
+
+    store2 = tmp_path / "evidence2.json"
+    sig2, _, _ = gates.findings_add(store2, "shared.py", "issue text", plan=rel_plan)
+    by_abs = gates.findings_list(store2, unresolved=True, plan=abs_plan)
+    assert {f["sig"] for f in by_abs} == {sig2}
+
+
+def test_similar_issue_absolute_vs_relative_plan_folds_one_record(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    abs_plan = "/private/tmp/wt/.planning/phases/p/A-PLAN.md"
+    rel_plan = ".planning/phases/p/A-PLAN.md"
+
+    sig1, deduped1, _ = gates.findings_add(
+        store, "shared.py", "Missing null check on user input", plan=abs_plan)
+    sig2, deduped2, _ = gates.findings_add(
+        store, "shared.py", "Missing null check on the user input", plan=rel_plan)
+
+    assert deduped1 is False
+    assert deduped2 is True
+    assert sig1 == sig2
+
+    all_findings = gates.findings_list(store, unresolved=True)
+    assert len(all_findings) == 1
+    assert all_findings[0]["aliases"] == ["Missing null check on the user input"]
+
+
+def test_plan_without_planning_segment_passthrough_sig_unchanged(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    plan = "phase-1/PLAN.md"
+    sig, _, _ = gates.findings_add(store, "f.py", "some issue", plan=plan)
+    expected_sig = hashlib.sha256(
+        json.dumps([plan, "f.py", gates._normalize("some issue")]).encode()
+    ).hexdigest()
+    assert sig == expected_sig
+
+
+def test_legacy_absolute_spelling_record_folds_new_canonical_near_duplicate(tmp_path) -> None:
+    """A record already in the store under an old absolute spelling (as if
+    written before this fix, or by a caller that never canonicalizes) must
+    still catch a new near-duplicate reported under the canonical
+    repo-relative spelling — existing records are never migrated/rewritten,
+    only compared canonically at fold/list time."""
+    store = tmp_path / "evidence.json"
+    legacy_abs_plan = "/private/tmp/othertwerk/.planning/phases/p/A-PLAN.md"
+    rel_plan = ".planning/phases/p/A-PLAN.md"
+
+    legacy_sig = hashlib.sha256(
+        json.dumps([legacy_abs_plan, "shared.py",
+                    gates._normalize("Unbounded query on contacts table")]).encode()
+    ).hexdigest()
+    data = {"findings": [{
+        "sig": legacy_sig, "file": "shared.py",
+        "issue": "Unbounded query on contacts table", "resolved": False,
+        "recorded_at": "2026-01-01T00:00:00Z", "severity": None, "run_id": None,
+        "source": None, "plan": legacy_abs_plan, "history": [],
+    }]}
+    store.write_text(json.dumps(data))
+
+    sig, deduped, _ = gates.findings_add(
+        store, "shared.py", "Unbounded query on the contacts table", plan=rel_plan)
+    assert deduped is True
+    assert sig == legacy_sig
+
+    findings = gates.findings_list(store, unresolved=True)
+    assert len(findings) == 1
+    assert findings[0]["aliases"] == ["Unbounded query on the contacts table"]
 
 
 # ── dedup atomicity ───────────────────────────────────────────────────────────
