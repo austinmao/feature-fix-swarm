@@ -478,6 +478,7 @@ adversary_invoke_with_fallback() {
   local preferred_model="$4" preferred_effort="$5"
   local fallback_model="$6" fallback_effort="$7" prompt="$8"
   local output rc total primary_budget remaining start
+  local pref_attempt pref_review fb_attempt fb_review
 
   total="${timeout_s%%.*}"
   case "$total" in ''|*[!0-9]*|0) total=1 ;; esac
@@ -491,16 +492,33 @@ adversary_invoke_with_fallback() {
   start="$SECONDS"
 
   # The preferred rung is the INDEPENDENT opposite-vendor judgment-tier
-  # reviewer; the fallback is same-vendor self-review. Its review ceiling must
-  # never sit below the fallback's 240 (that inversion silently degraded every
-  # loaded run into self-review) and is deliberately above it: 480 matches the
-  # cap /review-gate already hands its own adversary, so a real 90-100 KB diff
-  # can finish. Both are ceilings — adversary_invoke_model_ladder clamps them
-  # to whatever the overall per-call deadline leaves.
+  # reviewer; the fallback is same-vendor self-review. Its DEFAULT review
+  # ceiling sits above the fallback's 240 — 480, the cap /review-gate already
+  # hands its own adversary — so a real 90-100 KB diff can finish; the old
+  # inversion silently degraded every loaded run into self-review. Both are
+  # ceilings: adversary_invoke_model_ladder clamps them to whatever the
+  # overall per-call deadline leaves.
+  #
+  # Env overrides stay authoritative (an operator may deliberately starve a
+  # rung), but an inversion is announced rather than silent — that failure
+  # mode is invisible from the outside and reads exactly like a healthy
+  # cross-vendor review.
+  pref_attempt="${FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT:-120}"
+  pref_review="${FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-480}"
+  fb_attempt="${FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-120}"
+  fb_review="${FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-240}"
+  case "$pref_review$fb_review$pref_attempt$fb_attempt" in
+    *[!0-9]*|'') ;;   # non-numeric: the ladder's own sanitizer owns this
+    *)
+      if [ "$pref_review" -lt "$fb_review" ] || [ "$pref_attempt" -lt "$fb_attempt" ]; then
+        echo "adversary-host: WARN — preferred ($preferred) rung caps attempt=$pref_attempt review=$pref_review are BELOW the $fallback fallback's attempt=$fb_attempt review=$fb_review; the independent reviewer is starved relative to same-vendor self-review" >&2
+      fi
+      ;;
+  esac
+
   output="$(adversary_invoke_model_ladder "$preferred" "$primary_budget" \
     "$preferred_model" "$preferred_effort" "$prompt" \
-    "${FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT:-120}" \
-    "${FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-480}" 2>&1)"
+    "$pref_attempt" "$pref_review" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     adversary_record_invocation false || return $?
@@ -521,8 +539,7 @@ adversary_invoke_with_fallback() {
   fi
   output="$(adversary_invoke_model_ladder "$fallback" "$remaining" \
     "$fallback_model" "$fallback_effort" "$prompt" \
-    "${FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-120}" \
-    "${FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-240}" 2>&1)"
+    "$fb_attempt" "$fb_review" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     adversary_record_invocation true || return $?

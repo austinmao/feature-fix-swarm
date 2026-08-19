@@ -472,6 +472,10 @@ EOF
   # adversary_invoke_with_fallback actually hands the preferred rung, with no
   # FFS_ADVERSARY_PREFERRED_* set. A source grep would pass even if the
   # defaults were computed and then dropped on the way to the rung.
+  # BOTH rungs are observed in one run: the stub fails the first (preferred)
+  # invocation so the fallback rung actually executes, then succeeds. Reading
+  # the fallback's caps from a source grep instead would keep passing if the
+  # two arguments were swapped on the way to the call.
   log="$BATS_TEST_TMPDIR/ladder.log"
   run env -u FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT \
           -u FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT \
@@ -482,6 +486,7 @@ EOF
       . "$1"
       adversary_invoke_model_ladder() {
         printf "%s attempt=%s review=%s\n" "$1" "${6:-unset}" "${7:-unset}" >> "$LADDER_LOG"
+        [ "$(wc -l < "$LADDER_LOG")" -gt 1 ] || return 7   # fail the preferred rung only
         printf "REVIEW-OK\n"
         return 0
       }
@@ -490,17 +495,17 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" == *REVIEW-OK* ]]
-  # exactly one rung ran (the preferred one succeeded)
-  [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ]
-  [ "$(cat "$log")" = "claude attempt=120 review=480" ]
+  # both rungs ran, preferred first
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 2 ]
+  [ "$(sed -n 1p "$log")" = "claude attempt=120 review=480" ]
+  [ "$(sed -n 2p "$log")" = "codex attempt=120 review=240" ]
   # Assert the INVARIANT, not the literals: whatever the two rungs are tuned
   # to, the independent reviewer must never get less than the self-review
-  # fallback. Preferred caps come from the wiring log above; fallback defaults
-  # are read from source (that rung did not run).
-  pref_attempt="$(sed -n 's/.*attempt=\([0-9]*\).*/\1/p' "$log")"
-  pref_review="$(sed -n 's/.*review=\([0-9]*\).*/\1/p' "$log")"
-  fb_attempt="$(grep -oE -- 'FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-[0-9]+' "$LIB" | grep -oE '[0-9]+$')"
-  fb_review="$(grep -oE -- 'FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-[0-9]+' "$LIB" | grep -oE '[0-9]+$')"
+  # fallback. Both sides come from the observed wiring.
+  pref_attempt="$(sed -n '1s/.*attempt=\([0-9]*\).*/\1/p' "$log")"
+  pref_review="$(sed -n '1s/.*review=\([0-9]*\).*/\1/p' "$log")"
+  fb_attempt="$(sed -n '2s/.*attempt=\([0-9]*\).*/\1/p' "$log")"
+  fb_review="$(sed -n '2s/.*review=\([0-9]*\).*/\1/p' "$log")"
   [ -n "$fb_attempt" ] && [ -n "$fb_review" ]
   [ "$pref_attempt" -ge "$fb_attempt" ]
   [ "$pref_review" -ge "$fb_review" ]
@@ -526,4 +531,28 @@ EOF
 
   [ "$status" -eq 0 ]
   [ "$(cat "$log2")" = "codex attempt=$pref_attempt review=$pref_review" ]
+}
+
+@test "an env-override that starves the preferred rung below the fallback is announced" {
+  # Overrides stay authoritative — an operator may deliberately starve a rung —
+  # but the inversion must not be silent: from the outside a starved preferred
+  # rung is indistinguishable from a healthy cross-vendor review that simply
+  # fell back, which is exactly how the original inversion survived so long.
+  run env FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT=1 \
+          FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT=240 \
+          LADDER_LOG="$BATS_TEST_TMPDIR/inv.log" \
+    bash -c '
+      . "$1"
+      adversary_invoke_model_ladder() {
+        printf "%s attempt=%s review=%s\n" "$1" "${6:-unset}" "${7:-unset}" >> "$LADDER_LOG"
+        printf "REVIEW-OK\n"
+        return 0
+      }
+      adversary_invoke_with_fallback claude codex 600 opus "" gpt-5.6-sol high review
+    ' _ "$LIB"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN"*"BELOW"* ]]
+  # the override is still honoured, not clamped
+  [ "$(cat "$BATS_TEST_TMPDIR/inv.log")" = "claude attempt=120 review=1" ]
 }
