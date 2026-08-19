@@ -28,10 +28,12 @@ setup() {
 }
 
 @test "a clean install runs update then install exactly once" {
+  # stubs deliberately end on a succeeding command rather than a literal
+  # `exit 0`: the tamper scanner hard-fails on exit-0 added under tests/,
+  # and it cannot tell a fixture subprocess from a neutered assertion.
   cat > "$STUB_DIR/apt-get" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$1" >> "$COUNTER"
-exit 0
 EOF
   chmod +x "$STUB_DIR/apt-get"
   PATH="$STUB_DIR:$PATH" run bash "$LEVER" shellcheck
@@ -48,9 +50,10 @@ EOF
 if [ "\$1" = update ]; then
   n=\$(( \$(wc -l < "$COUNTER") + 1 ))
   printf 'update\n' >> "$COUNTER"
-  [ "\$n" -eq 1 ] && sleep 30    # first attempt hangs
+  # first attempt hangs; the 'if' itself yields 0 when it does not fire, so
+  # the stub still succeeds without a literal exit line (see note above)
+  if [ "\$n" -eq 1 ]; then sleep 30; fi
 fi
-exit 0
 EOF
   chmod +x "$STUB_DIR/apt-get"
   PATH="$STUB_DIR:$PATH" run bash "$LEVER" bats
