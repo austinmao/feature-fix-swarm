@@ -362,6 +362,8 @@ adversary_invoke_model_ladder() {
   local total attempt_cap started remaining budget model effort output rc
   local probe_enabled probe_timeout probe_output review_cap rung_source tripped rung candidates all_tripped probe_due
 
+  # shellcheck disable=SC2034  # read by sourcing callers (plan-wall.sh et al), not here
+  ADVERSARY_LAST_TIER_DESCENT=0   # cleared per call; a stale 1 would mislabel a clean review
   total="${timeout_s%%.*}"
   case "$total" in ''|*[!0-9]*|0) total=1 ;; esac
   attempt_cap="${requested_cap:-${FFS_ADVERSARY_ATTEMPT_TIMEOUT:-120}}"
@@ -446,7 +448,15 @@ EOF
     if [ "$rc" -eq 0 ]; then
       adversary_note_rung "$rung" ok || return $?
       if [ "$model" != "$preferred_model" ]; then
+        # A descent to a LOWER rung of the same vendor is a real degradation of
+        # the request: a judgment-tier ask answered by an execution-tier model.
+        # It used to leave only this prose line, so the run recorded a clean
+        # review and degraded_ratio() never saw it. Typed line + flag so both a
+        # log scan and an in-process caller can gate on it.
+        # shellcheck disable=SC2034  # read by sourcing callers, not here
+        ADVERSARY_LAST_TIER_DESCENT=1
         echo "adversary-host: MODEL_FALLBACK — $kind $preferred_model unavailable; selected $model" >&2
+        echo "adversary-host: TIER-DESCENT kind=$kind requested=$preferred_model:${preferred_effort:--} answered=$model:${effort:--}" >&2
       fi
       echo "adversary-host: SELECTED $kind $model ${effort:--}"
       printf '%s\n' "$output"
@@ -477,18 +487,11 @@ adversary_invoke_with_fallback() {
   local preferred="$1" fallback="$2" timeout_s="$3"
   local preferred_model="$4" preferred_effort="$5"
   local fallback_model="$6" fallback_effort="$7" prompt="$8"
-  local output rc total primary_budget remaining start
+  local output rc total primary_budget remaining start fb_reserve
   local pref_attempt pref_review fb_attempt fb_review
 
   total="${timeout_s%%.*}"
   case "$total" in ''|*[!0-9]*|0) total=1 ;; esac
-  # Split the advertised wall evenly so a healthy preferred CLI has enough
-  # time for a substantive diff while a dead CLI still leaves a complete
-  # fallback slice. The previous one-quarter share admitted Claude on a tiny
-  # probe, then killed every real 90-100 KB review before it could answer.
-  primary_budget=$(( total / 2 ))
-  [ "$primary_budget" -ge 1 ] || primary_budget=1
-  [ "$primary_budget" -le "$total" ] || primary_budget="$total"
   start="$SECONDS"
 
   # The preferred rung is the INDEPENDENT opposite-vendor judgment-tier
@@ -516,12 +519,47 @@ adversary_invoke_with_fallback() {
       ;;
   esac
 
+  # The preferred rung is the one that must actually FINISH — it is the
+  # independent, judgment-tier reviewer; the fallback needs only one bounded
+  # attempt. An even split starved the reviewer that matters: on a 540s call
+  # it capped judgment-tier review at 270s, and a timeout there does not fail
+  # loudly — it descends to a weaker rung of the same vendor and still returns
+  # a verdict. Reserve for the fallback the SMALLER of its own review ceiling
+  # and a third of the wall; the preferred rung takes the rest. (An earlier
+  # one-quarter share admitted a reviewer on a tiny probe and then killed
+  # every real 90-100 KB review, so the fallback keeps a floor, not a
+  # smaller fraction.)
+  # reserve = min(fallback's own ceiling, max(total/3, 2)). The floor of 2
+  # matters at tiny deadlines: a proportional third of a 4s wall is 1s, which
+  # is not enough for the fallback to start at all, and a fallback that never
+  # starts is the degradation this whole path exists to avoid.
+  fb_reserve=$(( total / 3 ))
+  [ "$fb_reserve" -ge 2 ] || fb_reserve=2
+  case "$fb_review" in
+    ''|*[!0-9]*) ;;
+    *) [ "$fb_reserve" -le "$fb_review" ] || fb_reserve="$fb_review" ;;
+  esac
+  primary_budget=$(( total - fb_reserve ))
+  [ "$primary_budget" -ge 1 ] || primary_budget=1
+  [ "$primary_budget" -le "$total" ] || primary_budget="$total"
+
   output="$(adversary_invoke_model_ladder "$preferred" "$primary_budget" \
     "$preferred_model" "$preferred_effort" "$prompt" \
     "$pref_attempt" "$pref_review" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    adversary_record_invocation false || return $?
+    # The ladder runs in a command substitution, so its flag cannot reach this
+    # scope — read the answering model off the SELECTED line it prints instead.
+    # A rung below the requested one is a degraded review, not a clean one.
+    if printf '%s\n' "$output" | grep -q "^adversary-host: SELECTED $preferred $preferred_model "; then
+      # shellcheck disable=SC2034  # read by sourcing callers, not here
+      ADVERSARY_LAST_TIER_DESCENT=0
+      adversary_record_invocation false || return $?
+    else
+      # shellcheck disable=SC2034  # read by sourcing callers, not here
+      ADVERSARY_LAST_TIER_DESCENT=1
+      adversary_record_invocation true || return $?
+    fi
     printf '%s\n' "$output"
     return 0
   fi

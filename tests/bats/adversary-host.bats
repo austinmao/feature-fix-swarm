@@ -112,7 +112,7 @@ EOF
   [[ "$output" == *"DEGRADED"* ]]
 }
 
-@test "preferred reviewer receives half of the shared deadline for substantive diffs" {
+@test "preferred reviewer receives the larger share of the shared deadline for substantive diffs" {
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$STUB_DIR"
   cat > "$STUB_DIR/slow-preferred" <<EOF
@@ -555,4 +555,93 @@ EOF
   [[ "$output" == *"WARN"*"BELOW"* ]]
   # the override is still honoured, not clamped
   [ "$(cat "$BATS_TEST_TMPDIR/inv.log")" = "claude attempt=120 review=1" ]
+}
+
+@test "a within-vendor tier descent is recorded as DEGRADED, not as a clean review" {
+  # A judgment-tier request resolves to sol high. When sol fails the ladder
+  # descends to terra medium on the SAME vendor and returns rc=0, so the
+  # caller's record call ran with degraded=false: the run's evidence claimed
+  # judgment-tier adversarial review while an execution-tier model wrote the
+  # verdict, and degraded_ratio() — the REQ-102 gate's input — never saw it.
+  rec="$BATS_TEST_TMPDIR/record.log"
+  run env ADVERSARY_RECORD_LOG="$rec" \
+    bash -c '
+      . "$1"
+      # descend: fail the requested rung, succeed on the next
+      adversary_invoke() {
+        case "$3" in
+          gpt-5.6-sol) return 124 ;;
+          *) printf "FFS_ADVERSARY_MODEL_READY\n"; printf "VERDICT-BODY\n"; return 0 ;;
+        esac
+      }
+      adversary_note_rung() { return 0; }
+      adversary_record_invocation() { printf "degraded=%s\n" "$1" >> "$ADVERSARY_RECORD_LOG"; return 0; }
+      adversary_invoke_with_fallback codex claude 600 gpt-5.6-sol high claude-opus-5 "" review
+    ' _ "$LIB"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SELECTED codex gpt-5.6-terra"* ]]
+  [ "$(cat "$rec")" = "degraded=true" ]
+}
+
+@test "a tier descent emits a typed, caller-gateable signal naming requested and answered models" {
+  run bash -c '
+    . "$1"
+    adversary_invoke() {
+      case "$3" in
+        gpt-5.6-sol) return 124 ;;
+        *) printf "FFS_ADVERSARY_MODEL_READY\n"; printf "VERDICT-BODY\n"; return 0 ;;
+      esac
+    }
+    adversary_note_rung() { return 0; }
+    adversary_record_invocation() { return 0; }
+    adversary_invoke_model_ladder codex 600 gpt-5.6-sol high review >/dev/null
+    printf "flag=%s\n" "${ADVERSARY_LAST_TIER_DESCENT:-unset}"
+  ' _ "$LIB" 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIER-DESCENT"*"requested=gpt-5.6-sol:high"*"answered=gpt-5.6-terra:medium"* ]]
+  # in-process callers gate on the variable, not on parsing stdout
+  [[ "$output" == *"flag=1"* ]]
+}
+
+@test "a rung that answers as requested leaves the descent flag clear" {
+  run bash -c '
+    . "$1"
+    adversary_invoke() { printf "VERDICT-BODY\n"; return 0; }
+    adversary_note_rung() { return 0; }
+    adversary_record_invocation() { return 0; }
+    ADVERSARY_LAST_TIER_DESCENT=1   # stale value from an earlier call must be cleared
+    FFS_ADVERSARY_MODEL_PROBE=off \
+      adversary_invoke_model_ladder codex 600 gpt-5.6-sol high review >/dev/null
+    printf "flag=%s\n" "${ADVERSARY_LAST_TIER_DESCENT:-unset}"
+  ' _ "$LIB" 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"flag=0"* ]]
+  [[ "$output" != *"TIER-DESCENT"* ]]
+}
+
+@test "the preferred rung gets more than half the deadline; the fallback keeps a bounded slice" {
+  # An even split starved the judgment-tier reviewer: it is the one that must
+  # actually finish, while the fallback needs only one bounded attempt.
+  log="$BATS_TEST_TMPDIR/budget.log"
+  run env -u FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT LADDER_LOG="$log" \
+    bash -c '
+      . "$1"
+      adversary_invoke_model_ladder() {
+        printf "%s budget=%s\n" "$1" "$2" >> "$LADDER_LOG"
+        [ "$(wc -l < "$LADDER_LOG")" -gt 1 ] || return 7
+        printf "REVIEW-OK\n"; return 0
+      }
+      adversary_record_invocation() { return 0; }
+      adversary_invoke_with_fallback codex claude 540 gpt-5.6-sol high claude-opus-5 "" review
+    ' _ "$LIB"
+
+  [ "$status" -eq 0 ]
+  preferred_budget="$(sed -n '1s/.*budget=\([0-9]*\).*/\1/p' "$log")"
+  fallback_budget="$(sed -n '2s/.*budget=\([0-9]*\).*/\1/p' "$log")"
+  # strictly more than the old even split, and the fallback still gets a real slice
+  [ "$preferred_budget" -gt 270 ]
+  [ "$fallback_budget" -ge 60 ]
 }
