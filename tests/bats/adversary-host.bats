@@ -467,13 +467,33 @@ EOF
   # The independent, opposite-vendor reviewer's per-attempt/per-review timeout
   # floors must not be starved below the same-vendor fallback's — otherwise a
   # loaded box silently degrades "cross-vendor review" into self-review by
-  # timing out the honest reviewer before the dishonest fallback. This is a
-  # static pin against the DEFAULT values baked into the source: no existing
-  # test invokes adversary_invoke_with_fallback to observe these two defaults
-  # in isolation (every timing test overrides the 3rd positional arg, which
-  # only bounds the overall preferred/fallback split, not these per-rung caps).
-  grep -oE -- 'FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT:-120' "$LIB"
-  grep -oE -- 'FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT:-240' "$LIB"
+  # timing out the honest reviewer before the dishonest fallback. Observed at
+  # the WIRING level: override the ladder and read the caps
+  # adversary_invoke_with_fallback actually hands the preferred rung, with no
+  # FFS_ADVERSARY_PREFERRED_* set. A source grep would pass even if the
+  # defaults were computed and then dropped on the way to the rung.
+  log="$BATS_TEST_TMPDIR/ladder.log"
+  run env -u FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT \
+          -u FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT \
+          -u FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT \
+          -u FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT \
+          LADDER_LOG="$log" \
+    bash -c '
+      . "$1"
+      adversary_invoke_model_ladder() {
+        printf "%s attempt=%s review=%s\n" "$1" "${6:-unset}" "${7:-unset}" >> "$LADDER_LOG"
+        printf "REVIEW-OK\n"
+        return 0
+      }
+      adversary_invoke_with_fallback claude codex 600 opus "" gpt-5.6-sol high review
+    ' _ "$LIB"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *REVIEW-OK* ]]
+  # exactly one rung ran (the preferred one succeeded) and it got 120/240
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ]
+  [ "$(cat "$log")" = "claude attempt=120 review=240" ]
+  # the same-vendor fallback rung's defaults stay pinned in source
   grep -oE -- 'FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT:-120' "$LIB"
   grep -oE -- 'FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT:-240' "$LIB"
 }
