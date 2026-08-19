@@ -710,8 +710,60 @@ PY
 # unless divergence is actually found. Gated by GSD_PLANNING_GUARD (kill
 # switch) and, on divergence, GSD_PLANNING_SYNC picks a sync direction —
 # unset/empty fails closed with exit 78.
+#
+# Set by check_planning_divergence when a sync REPLACED the repo-side phase
+# directory. The plan wall (line ~133) reviewed that directory before this
+# guard ever ran, so a repo-side replacement retires the wall's evidence.
+PLANNING_SYNC_REPO_CHANGED=0
+
+# Phase-directory basename owning phase number $2 under root $1 (empty when
+# none). Mirrors the ^0*{N}- regex the ownership gate and plan wall use.
+resolve_phase_slug() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+from pathlib import Path
+root, phase_number = sys.argv[1], int(sys.argv[2], 10)
+phases_root = Path(root) / ".planning" / "phases"
+dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^0*{phase_number}-", p.name))
+print(dirs[0].name if dirs else "", end="")
+PY
+}
+
+# Copy $1 onto $2 without ever destroying $2 first: stage a sibling temp,
+# stash the live destination, promote, and only then drop the stash. Any
+# failure restores the stash and emits a typed line. $3=direction $4=slug.
+planning_sync_copy() {
+  local src="$1" dest="$2" direction="$3" slug="$4" tmp bak
+  tmp="$dest.tmp.$$"
+  bak="$dest.bak.$$"
+  rm -rf "$tmp" "$bak"
+  mkdir -p "$(dirname "$dest")" || {
+    echo "GSD-RUN:PLANNING-SYNC-FAILED direction=$direction phase=$slug stage=parent" >&2
+    return 1
+  }
+  if ! cp -R "$src" "$tmp"; then
+    rm -rf "$tmp"
+    echo "GSD-RUN:PLANNING-SYNC-FAILED direction=$direction phase=$slug stage=stage" >&2
+    return 1
+  fi
+  if [ -e "$dest" ] && ! mv "$dest" "$bak"; then
+    rm -rf "$tmp"
+    echo "GSD-RUN:PLANNING-SYNC-FAILED direction=$direction phase=$slug stage=stash" >&2
+    return 1
+  fi
+  if ! mv "$tmp" "$dest"; then
+    [ -e "$bak" ] && mv "$bak" "$dest"
+    rm -rf "$tmp"
+    echo "GSD-RUN:PLANNING-SYNC-FAILED direction=$direction phase=$slug stage=promote" >&2
+    return 1
+  fi
+  rm -rf "$bak"
+  return 0
+}
+
 check_planning_divergence() {
-  local phase_num slug repo_dir wt_dir repo_hash wt_hash newer
+  local phase_num slug repo_dir wt_dir repo_hash wt_hash newer guarded
+  local repo_exists=0 wt_exists=0
   [ "${GSD_PLANNING_GUARD:-}" != off ] || return 0
   case "$GSD_SKILL_NAME" in
     gsd-execute-phase|gsd-plan-phase) ;;
@@ -720,34 +772,74 @@ check_planning_divergence() {
   phase_num="${2:-}"
   [[ "$phase_num" =~ ^[0-9]+$ ]] || return 0
   [ -d "$REPO_ROOT/.planning" ] && [ -d "$RUN_WORKTREE_ROOT/.planning" ] || return 0
+  for guarded in "$REPO_ROOT/.planning" "$RUN_WORKTREE_ROOT/.planning"; do
+    [ ! -L "$guarded" ] || {
+      echo "gsd-run: PLANNING-GUARD refused: symlinked planning path: $guarded" >&2
+      return 78
+    }
+  done
   slug="${GSD_PHASE_ID:-}"
   if [ -z "$slug" ]; then
-    slug="$(python3 - "$REPO_ROOT" "$phase_num" <<'PY'
-import re, sys
-from pathlib import Path
-root, phase_number = sys.argv[1], int(sys.argv[2], 10)
-phases_root = Path(root) / ".planning" / "phases"
-dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^0*{phase_number}-", p.name))
-print(dirs[0].name if dirs else "", end="")
-PY
-)"
+    # Resolve from the repo first, then the worktree: a phase directory that
+    # exists on only one side is exactly the one-sided divergence this guard
+    # must catch, so an empty repo-side resolution is not "nothing to check".
+    slug="$(resolve_phase_slug "$REPO_ROOT" "$phase_num")"
+    [ -n "$slug" ] || slug="$(resolve_phase_slug "$RUN_WORKTREE_ROOT" "$phase_num")"
   fi
   [ -n "$slug" ] || return 0
+  # The slug is interpolated into every path this function copies onto or
+  # stashes. Validate BEFORE the first interpolation: a single path segment,
+  # no traversal, fail closed on anything else.
+  if ! [[ "$slug" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$slug" == *..* ]]; then
+    echo "gsd-run: PLANNING-GUARD refused: invalid phase slug" >&2
+    return 78
+  fi
   repo_dir="$REPO_ROOT/.planning/phases/$slug"
   wt_dir="$RUN_WORKTREE_ROOT/.planning/phases/$slug"
-  [ -d "$repo_dir" ] && [ -d "$wt_dir" ] || return 0
-  repo_hash="$(sha256_tree "$repo_dir")" || return 1
-  wt_hash="$(sha256_tree "$wt_dir")" || return 1
-  [ "$repo_hash" = "$wt_hash" ] && return 0
-  # Determine which side is newer: for every relative path where content
-  # differs or the path exists on only one side, attribute that path's mtime
-  # to whichever side(s) hold it. Ties resolve to repo (deterministic).
-  newer="$(python3 - "$repo_dir" "$wt_dir" <<'PY'
-import sys
+  for guarded in "$repo_dir" "$wt_dir"; do
+    [ ! -L "$guarded" ] || {
+      echo "gsd-run: PLANNING-GUARD refused: symlinked planning path: $guarded" >&2
+      return 78
+    }
+  done
+  [ -d "$repo_dir" ] && repo_exists=1
+  [ -d "$wt_dir" ] && wt_exists=1
+  if [ "$repo_exists" -eq 0 ] && [ "$wt_exists" -eq 0 ]; then
+    return 0
+  elif [ "$repo_exists" -eq 1 ] && [ "$wt_exists" -eq 1 ]; then
+    repo_hash="$(sha256_tree "$repo_dir")" || {
+      echo "gsd-run: PLANNING-DIVERGENCE check failed for phase $slug" >&2
+      return 1
+    }
+    wt_hash="$(sha256_tree "$wt_dir")" || {
+      echo "gsd-run: PLANNING-DIVERGENCE check failed for phase $slug" >&2
+      return 1
+    }
+    [ "$repo_hash" = "$wt_hash" ] && return 0
+    # Determine which side is newer: for every relative path where content
+    # differs or the path exists on only one side, attribute that path's mtime
+    # to whichever side(s) hold it. Ties resolve to repo (deterministic).
+    # Advisory only — a failure here degrades to newer=unknown and never
+    # relaxes the fail-closed decision below.
+    newer="$(python3 - "$repo_dir" "$wt_dir" <<'PY'
+import hashlib, sys
 from pathlib import Path
 
+CHUNK = 1 << 20
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(CHUNK), b""):
+            h.update(block)
+    return h.digest()
+
 def walk(root):
-    return {p.relative_to(root).as_posix(): p for p in root.rglob("*") if p.is_file()}
+    return {
+        p.relative_to(root).as_posix(): p
+        for p in root.rglob("*")
+        if p.is_file() and not p.is_symlink()
+    }
 
 repo_root, wt_root = Path(sys.argv[1]), Path(sys.argv[2])
 repo_files, wt_files = walk(repo_root), walk(wt_root)
@@ -755,40 +847,51 @@ repo_max = wt_max = 0.0
 for rel in set(repo_files) | set(wt_files):
     rp, wp = repo_files.get(rel), wt_files.get(rel)
     if rp is not None and wp is not None:
-        if rp.read_bytes() == wp.read_bytes():
+        rs, ws = rp.stat(), wp.stat()
+        if rs.st_size == ws.st_size and digest(rp) == digest(wp):
             continue
-        rm, wm = rp.stat().st_mtime, wp.stat().st_mtime
-        if rm >= wm:
-            repo_max = max(repo_max, rm)
+        if rs.st_mtime >= ws.st_mtime:
+            repo_max = max(repo_max, rs.st_mtime)
         else:
-            wt_max = max(wt_max, wm)
+            wt_max = max(wt_max, ws.st_mtime)
     elif rp is not None:
         repo_max = max(repo_max, rp.stat().st_mtime)
     else:
         wt_max = max(wt_max, wp.stat().st_mtime)
 print("repo" if repo_max >= wt_max else "worktree", end="")
 PY
-)"
+)" || newer=""
+    [ -n "$newer" ] || newer=unknown
+  elif [ "$repo_exists" -eq 1 ]; then
+    # One-sided existence is divergence, not agreement: the missing side was
+    # never reviewed against the side that has content. Fail closed.
+    newer=repo
+  else
+    newer=worktree
+  fi
   case "${GSD_PLANNING_SYNC:-}" in
     '')
       echo "GSD-RUN:PLANNING-DIVERGENCE phase=$slug newer=$newer" >&2
       return 78
       ;;
     repo)
-      if rm -rf "$wt_dir" && cp -R "$repo_dir" "$wt_dir"; then
-        echo "GSD-RUN:PLANNING-SYNC direction=repo phase=$slug" >&2
-        return 0
-      fi
-      echo "gsd-run: failed to sync .planning repo->worktree for phase $slug" >&2
-      return 1
+      [ "$repo_exists" -eq 1 ] || {
+        echo "gsd-run: cannot sync .planning direction=repo phase=$slug: source missing" >&2
+        return 1
+      }
+      planning_sync_copy "$repo_dir" "$wt_dir" repo "$slug" || return 1
+      echo "GSD-RUN:PLANNING-SYNC direction=repo phase=$slug" >&2
+      return 0
       ;;
     worktree)
-      if rm -rf "$repo_dir" && cp -R "$wt_dir" "$repo_dir"; then
-        echo "GSD-RUN:PLANNING-SYNC direction=worktree phase=$slug" >&2
-        return 0
-      fi
-      echo "gsd-run: failed to sync .planning worktree->repo for phase $slug" >&2
-      return 1
+      [ "$wt_exists" -eq 1 ] || {
+        echo "gsd-run: cannot sync .planning direction=worktree phase=$slug: source missing" >&2
+        return 1
+      }
+      planning_sync_copy "$wt_dir" "$repo_dir" worktree "$slug" || return 1
+      PLANNING_SYNC_REPO_CHANGED=1
+      echo "GSD-RUN:PLANNING-SYNC direction=worktree phase=$slug" >&2
+      return 0
       ;;
     *)
       echo "gsd-run: invalid GSD_PLANNING_SYNC value: ${GSD_PLANNING_SYNC:-}" >&2
@@ -1345,6 +1448,20 @@ fi
 
 ensure_run_worktree || exit $?
 check_planning_divergence "$@" || exit $?
+# The plan wall above (pre-execution seam) reviewed the REPO phase directory.
+# A worktree-direction sync just replaced that reviewed content with content
+# no wall has seen, which would launch the executor against unreviewed plans.
+# Re-run the same lever against the synced directory. The repo direction needs
+# no re-run: the repo copy is the one the wall already cleared, and
+# gsd-plan-phase has no wall to retire.
+if [ "$PLANNING_SYNC_REPO_CHANGED" -eq 1 ] && [ "$GSD_SKILL_NAME" = gsd-execute-phase ]; then
+  bash "$PLAN_WALL_LEVER" "$WALL_PHASE_DIR"
+  _resync_wall_rc=$?
+  if [ "$_resync_wall_rc" -ne 0 ]; then
+    echo "GSD-RUN:PLANNING-SYNC-WALL-FAILED phase=$GSD_PHASE_ID rc=$_resync_wall_rc" >&2
+    exit "$_resync_wall_rc"
+  fi
+fi
 budget_prepare_mapping || exit $?
 
 # Original invocation, preserved for session-wake resume records: the
