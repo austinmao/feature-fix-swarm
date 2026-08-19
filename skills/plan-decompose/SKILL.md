@@ -203,8 +203,10 @@ prevents repo-wandering, the other major review-time multiplier):
 > rounds — see the feed-forward instruction below; omitted entirely on round 1
 > or when nothing is still open>
 >
-> Return: numbered list of findings with severity, specific location in plan, and
-> recommended fix. End with exactly one anchored line:
+> Return findings as a numbered list. Each finding's FIRST line must be
+> exactly `N. SEVERITY | plan.md | TITLE` — TITLE a single-line summary with
+> no pipe characters — followed by the recommended fix on any number of
+> further lines. End with exactly one anchored line:
 > `VERDICT: APPROVE`, `VERDICT: APPROVE-WITH-FIXES`, or `VERDICT: REJECT`."
 
 Before assembling the prompt above, resolve `socratic-slice.sh` through the
@@ -244,14 +246,27 @@ continuous run of this skill, so the running set lives in-session.
 An id can only be stable if the fields it hashes are. plan-wall.sh gets that
 from a JSON schema (`schemas/review-finding.schema.json`) its reviewer output
 must validate against; this gate takes free prose, so pin the two fields in
-the prompt instead. Add to the Return contract above: **every finding's first
-line must be exactly `SEVERITY | FILE | TITLE`** — `FILE` the plan path
-exactly as `plan.md`, `TITLE` a single-line defect summary, no pipes — with
-the recommended fix on the following lines. A REPEAT carries its id inside
-the third field and nowhere else: `SEVERITY | FILE | [prior:<sig12>] TITLE`.
-Give the reviewer that literal shape; "prefix the claim" in the quoted lead
-line below is otherwise ambiguous against a three-field grammar, and a
-whole-line prefix would break the parse.
+the prompt instead. Replace the Return contract's "numbered list" wording
+above with ONE grammar — the two are otherwise in direct conflict, and a
+reviewer obeying "numbered list" would make every finding unparseable:
+
+```
+1. SEVERITY | plan.md | TITLE
+   <recommended fix, any number of following lines>
+2. SEVERITY | plan.md | [prior:<sig12>] TITLE
+```
+
+`FILE` is the literal `plan.md`; `TITLE` is a single-line defect summary with
+no pipes; a REPEAT carries its id inside the third field and nowhere else.
+Give the reviewer that literal shape — "prefix the claim" in the quoted lead
+line below is ambiguous against a three-field grammar, and a whole-line
+prefix would break the parse.
+
+Parse the leading `N.` as list formatting, not a field. Then validate `FILE`
+byte-exactly against `plan.md`: a prompt instruction is not validation, and
+accepting whatever the reviewer wrote would let `./plan.md` and `plan.md`
+hash to different ids for one defect and count it NEW every round. Any other
+`FILE` value is UNKEYABLE.
 
 A finding whose first line does not parse into those three fields is
 UNKEYABLE: count it, never assign it an id, never feed it forward, and never
