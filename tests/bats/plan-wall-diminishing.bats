@@ -84,15 +84,36 @@ queue_unresolved_count() {
   [ "$(jq -r '.verdict' .planning/run-state/plan-wall-1-foo-plan.json)" = "pass-residual" ]
 }
 
-@test "equal new-finding count is BLOCKED — not converging" {
+@test "equal new-finding count triggers WALL-NO-CONVERGENCE — quarantining early" {
   stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"missing null check"},{"severity":"HIGH","file":"b.py","claim":"race on init"}]'
   run_wall
   [ "$status" -eq 1 ]
   stub_claude_json '[{"severity":"HIGH","file":"c.py","claim":"unbounded retry"},{"severity":"HIGH","file":"d.py","claim":"toctou on lockfile"}]'
   run_wall
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"BLOCKED"* ]]
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"WALL-NO-CONVERGENCE"* ]]
   [[ "$output" != *"PLAN-WALL-PASS-RESIDUAL"* ]]
+}
+
+@test "round counter is NOT reset on WALL-NO-CONVERGENCE — a real decrease next round still passes" {
+  # round 1: 2 new HIGH -> blocked (first-round strict, no history yet)
+  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"missing null check"},{"severity":"HIGH","file":"b.py","claim":"race on init"}]'
+  run_wall
+  [ "$status" -eq 1 ]
+  # round 2: 2 new HIGH again (2 >= 2 prev) -> WALL-NO-CONVERGENCE, exit 3.
+  # Unlike a PASSING round (which resets the counter), this path must carry
+  # the count forward — the ONLY reset trigger is a passing round.
+  stub_claude_json '[{"severity":"HIGH","file":"c.py","claim":"unbounded retry"},{"severity":"HIGH","file":"d.py","claim":"toctou on lockfile"}]'
+  run_wall
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"WALL-NO-CONVERGENCE"* ]]
+  # round 3: 1 new HIGH — a real decrease vs the un-reset round-2 count of 2
+  # (if round 2 had wiped history the way a pass does, this would fall back
+  # to first-round-strict and BLOCK instead of passing).
+  stub_claude_json '[{"severity":"HIGH","file":"e.py","claim":"one more thing"}]'
+  run_wall
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PLAN-WALL-PASS-RESIDUAL"* ]]
 }
 
 @test "unresolved CRITICAL always blocks — even on a strict decrease" {

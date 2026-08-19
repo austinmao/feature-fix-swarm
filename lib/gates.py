@@ -65,6 +65,7 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 from __future__ import annotations
 
 import argparse
+import difflib
 import fcntl
 import hashlib
 import json
@@ -1766,6 +1767,33 @@ def _normalize(s: str) -> str:
     return " ".join(s.split()).lower()
 
 
+def _canon_plan(plan: str | None) -> str:
+    """Canonicalize a plan-path spelling so the same logical plan folds to
+    one string regardless of which root a wall run started from (absolute
+    `/private/tmp/<worktree>/.planning/phases/X/Y-PLAN.md`, repo-relative
+    `.planning/phases/X/Y-PLAN.md`, and launch-dir-absolute variants all
+    name the same file). None/"" pass through as "" unchanged. A string
+    containing ".planning/" is trimmed to the substring starting at the
+    LAST ".planning/" occurrence (the repo-relative tail). Anything else
+    (no ".planning/" segment) passes through unchanged."""
+    if not plan:
+        return plan or ""
+    marker = ".planning/"
+    idx = plan.rfind(marker)
+    return plan if idx == -1 else plan[idx:]
+
+
+# D-1a: similarity-fold acceptance threshold (SequenceMatcher ratio,
+# normalized text) — a single named constant so the fold site and its tests
+# stay in agreement instead of each restating the magic number.
+_FOLD_THRESHOLD = 0.75
+
+# Severity rank for the fold guard below — higher number = more severe.
+# None/unknown severities rank 0 (never blocks a fold, never gets folded
+# UNDER by anything but another unranked report).
+_SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
 def _findings_ns(data: dict) -> list:
     """Shape guard: the `findings` key must be a list or absent. A prior
     task entry named `findings` (dict-shaped, like every other top-level
@@ -1804,23 +1832,95 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
     passed unreviewed (spec-004 fix round finding 6: cross-plan duplicate
     loses scope). Findings recorded with no plan at all keep the prior
     global dedup behavior (plan="" folds identically for every no-plan
-    caller)."""
+    caller).
+
+    `plan` is canonicalized via `_canon_plan` before the signature is
+    computed, before the record is stored, and before it is compared
+    against fold candidates (whose own stored `plan` is canonicalized too)
+    — so the same logical plan reported under different root-relative
+    spellings folds/lists as one continuity, even against pre-existing
+    records stored under an older, differently-spelled plan. This changes
+    the sig for future adds whose callers pass an absolute path
+    (intended); records already in the store keep their existing sigs
+    untouched — nothing is migrated."""
+    plan = _canon_plan(plan)
     sig = hashlib.sha256(
-        json.dumps([plan or "", file, _normalize(issue)]).encode()
+        json.dumps([plan, file, _normalize(issue)]).encode()
     ).hexdigest()
     reopened = False
+    result_sig = sig
     with _StoreLock(store):
         data = _load_store(store)
         findings = _findings_ns(data)
         existing = next((f for f in findings if f["sig"] == sig), None)
         deduped = existing is not None
         if existing is None:
-            findings.append({
-                "sig": sig, "file": file, "issue": issue, "resolved": False,
-                "recorded_at": _now(), "severity": severity, "run_id": run_id,
-                "source": source, "plan": plan, "history": [],
-            })
-            _save_store(store, data)
+            # D-1a: similarity fold — before minting a brand-new record,
+            # check whether a reworded-but-near-identical finding already
+            # exists for this (plan, file). Folds onto the highest-ratio
+            # candidate at >= _FOLD_THRESHOLD (SequenceMatcher over
+            # normalized text); below that, or for a different plan/file,
+            # it's a new record (EDGE-004 exact-normalized dedup above is
+            # unaffected — this only runs on an exact-sig MISS).
+            #
+            # Severity guard: a candidate is skipped when the INCOMING
+            # report ranks strictly higher severity than the candidate's
+            # currently-stored severity — folding a fresh CRITICAL under an
+            # unresolved LOW record would hide the new CRITICAL from the
+            # findings queue. Equal-or-lower incoming severity folds as
+            # before.
+            best = None
+            best_ratio = 0.0
+            norm_issue = _normalize(issue)
+            incoming_rank = _SEVERITY_RANK.get((severity or "").upper(), 0)
+            for candidate in findings:
+                if (_canon_plan(candidate.get("plan")), candidate.get("file")) != (plan, file):
+                    continue
+                candidate_rank = _SEVERITY_RANK.get((candidate.get("severity") or "").upper(), 0)
+                if incoming_rank > candidate_rank:
+                    continue
+                ratio = difflib.SequenceMatcher(
+                    None, norm_issue, _normalize(candidate.get("issue", ""))
+                ).ratio()
+                if ratio >= _FOLD_THRESHOLD and ratio > best_ratio:
+                    best = candidate
+                    best_ratio = ratio
+            if best is not None:
+                # Alias dedupe: a re-submission of text already known for
+                # this record (its own `issue`, or an alias already on
+                # file) is a no-op fold — no duplicate alias row, and no
+                # store write when nothing else changed either.
+                changed = False
+                if issue != best.get("issue") and issue not in best.get("aliases", []):
+                    best.setdefault("aliases", []).append(issue)
+                    changed = True
+                if best.get("resolved"):
+                    best.setdefault("history", []).append({
+                        "disposition": best.get("disposition"),
+                        "reason": best.get("reason"),
+                        "resolved_at": best.get("resolved_at"),
+                    })
+                    best["resolved"] = False
+                    best.pop("disposition", None)
+                    best.pop("reason", None)
+                    best.pop("resolved_at", None)
+                    for key, val in (("severity", severity), ("run_id", run_id),
+                                      ("source", source), ("plan", plan)):
+                        if val is not None:
+                            best[key] = val
+                    reopened = True
+                    changed = True
+                deduped = True
+                result_sig = best["sig"]
+                if changed:
+                    _save_store(store, data)
+            else:
+                findings.append({
+                    "sig": sig, "file": file, "issue": issue, "resolved": False,
+                    "recorded_at": _now(), "severity": severity, "run_id": run_id,
+                    "source": source, "plan": plan, "history": [],
+                })
+                _save_store(store, data)
         elif existing.get("resolved"):
             existing.setdefault("history", []).append({
                 "disposition": existing.get("disposition"),
@@ -1837,7 +1937,7 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
                     existing[key] = val
             reopened = True
             _save_store(store, data)
-    return sig, deduped, reopened
+    return result_sig, deduped, reopened
 
 
 _VALID_DISPOSITIONS = {"refute", "fix", "waive"}
@@ -1847,7 +1947,12 @@ def findings_list(store: Path, unresolved: bool = False, *, severity: str | None
                    source: str | None = None, plan: str | None = None) -> list:
     """v2 (AC-015) adds optional severity/source/plan filters (comma-separated
     for severity, e.g. `HIGH,CRITICAL`). Absent filters are no-ops — existing
-    callers (`--unresolved` only) are unaffected."""
+    callers (`--unresolved` only) are unaffected.
+
+    `plan` is compared via `_canon_plan` on both sides — filtering by any
+    spelling of a plan path returns records stored under any other
+    spelling of that same plan (walls run from different roots each mint a
+    different literal string for the identical .planning/ file)."""
     findings = _findings_ns(_load_store(store))
     result = list(findings)
     if unresolved:
@@ -1858,7 +1963,8 @@ def findings_list(store: Path, unresolved: bool = False, *, severity: str | None
     if source:
         result = [f for f in result if f.get("source") == source]
     if plan:
-        result = [f for f in result if f.get("plan") == plan]
+        plan_c = _canon_plan(plan)
+        result = [f for f in result if _canon_plan(f.get("plan")) == plan_c]
     return result
 
 
