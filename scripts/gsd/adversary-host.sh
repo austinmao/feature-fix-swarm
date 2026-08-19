@@ -361,6 +361,7 @@ adversary_invoke_model_ladder() {
   local schema_file="${9:-}" validate_cmd="${10:-}"
   local total attempt_cap started remaining budget model effort output rc
   local probe_enabled probe_timeout probe_output review_cap rung_source tripped rung candidates all_tripped probe_due
+  local budget_bound
 
   # shellcheck disable=SC2034  # read by sourcing callers (plan-wall.sh et al), not here
   ADVERSARY_LAST_TIER_DESCENT=0   # cleared per call; a stale 1 would mislabel a clean review
@@ -429,12 +430,14 @@ EOF
       remaining=$(( total - (SECONDS - started) ))
       [ "$remaining" -ge 1 ] || return 124
       budget="$review_cap"
-      [ "$budget" -le "$remaining" ] || budget="$remaining"
+      budget_bound=attempt
+      [ "$budget" -le "$remaining" ] || { budget="$remaining"; budget_bound=deadline; }
     else
       # Hermetic compatibility seam for tests/forensics: invoke the actual
       # review directly, still bounded per attempt.
       budget="$attempt_cap"
-      [ "$budget" -le "$remaining" ] || budget="$remaining"
+      budget_bound=attempt
+      [ "$budget" -le "$remaining" ] || { budget="$remaining"; budget_bound=deadline; }
     fi
 
     output="$(adversary_invoke "$kind" "$budget" "$model" "$effort" "$prompt" "$schema_file" 2>&1)"
@@ -472,6 +475,15 @@ EOF
     fi
     adversary_note_rung "$rung" fail || return $?
     echo "adversary-host: $kind model $model unavailable (rc=$rc)" >&2
+    # Three independent caps clamp this attempt: the caller's deadline
+    # ($total), the review-attempt cap, and the plain attempt cap. rc=124
+    # alone names none of them, so an operator raising a cap cannot tell
+    # whether they raised the one that actually bound the call (spec-360:
+    # three 90s timeouts were blamed on FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT,
+    # which plan-wall never consults). Name the binding constraint.
+    if [ "$rc" -eq 124 ]; then
+      echo "adversary-host: TIMEOUT-CAP kind=$kind model=$model budget=${budget}s bound=$budget_bound total=${total}s review_cap=${review_cap}s attempt_cap=${attempt_cap}s" >&2
+    fi
     # With an admission probe, a review timeout may be model-specific; try the
     # next candidate if deadline remains. Without a probe, preserve the older
     # dead-CLI inference and cross vendors immediately.

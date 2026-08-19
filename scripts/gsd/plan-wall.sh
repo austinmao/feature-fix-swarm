@@ -569,6 +569,26 @@ _pw_extract_payload() {
   printf '%s\n' "$1" | tail -n +2
 }
 
+# _pw_note_answered_rung <rung-file> <requested-model> <requested-effort>
+# The ladder runs inside $( ), so its typed TIER-DESCENT stderr line is
+# captured (unparsed) into the trail file and its ADVERSARY_LAST_TIER_DESCENT
+# flag dies with the subshell — neither reaches the blocking gate that lives
+# HERE. ADVERSARY_RUNG_FILE is the one channel that survives: written by the
+# ladder only, never carrying model bytes, so it also cannot be forged by a
+# reviewer whose output shares stdout with the SELECTED line.
+# Sets PW_ANSWERED_MODEL (empty if the ladder never got that far) and
+# PW_TIER_DESCENT.
+_pw_note_answered_rung() {
+  local rung_file="$1" want_model="$2" want_effort="$3" kind model effort
+  PW_ANSWERED_MODEL=""
+  [ -s "$rung_file" ] || return 0
+  IFS='|' read -r kind model effort < "$rung_file"
+  PW_ANSWERED_MODEL="$model"
+  [ -n "$model" ] && [ "$model" != "$want_model" ] || return 0
+  PW_TIER_DESCENT=true
+  PW_RUNG_TRAIL+=("tier-descent:requested=${want_model}:${want_effort:--} answered=${model}:${effort:--}")
+}
+
 # _pw_select_and_review <prompt> <planner-id> <host> <cross-vendor-fallback: on|off>
 # Sets PW_REVIEWER_MODEL / PW_RELATION / PW_FINDINGS_JSON / PW_RUNG_TRAIL on
 # success (rc 0); on exhaustion (rc 1) only PW_RUNG_TRAIL is populated.
@@ -579,20 +599,23 @@ _pw_extract_payload() {
 # the same vendor as the planner" (spec-004 fix round finding 8).
 _pw_select_and_review() {
   local prompt="$1" planner_id="$2" host="$3" cvf="${4:-on}" opposite trail_file rc out
-  local opp_model opp_effort ordered first_model first_effort
+  local opp_model opp_effort ordered first_model first_effort rung_file
 
   opposite="$(adversary_kind_for_host "$host")"
   if [ "$opposite" = codex ]; then opp_model=gpt-5.6-sol; opp_effort=high
   else opp_model=claude-opus-5; opp_effort=""; fi
 
   trail_file="$(mktemp "${TMPDIR:-/tmp}/pw-trail.XXXXXX")"
-  out="$(adversary_invoke_model_ladder "$opposite" "$PW_TIMEOUT" "$opp_model" "$opp_effort" \
+  rung_file="$(mktemp "${TMPDIR:-/tmp}/pw-rung.XXXXXX")"
+  out="$(ADVERSARY_RUNG_FILE="$rung_file" adversary_invoke_model_ladder "$opposite" "$PW_TIMEOUT" "$opp_model" "$opp_effort" \
     "$prompt" "" "" "" "$SCHEMA_FILE" _pw_validate_findings 2>"$trail_file")"
   rc=$?
   PW_RUNG_TRAIL+=("rule1-opposite-vendor:$opposite:rc=$rc:$(tr '\n' ' ' < "$trail_file")")
   rm -f "$trail_file"
+  _pw_note_answered_rung "$rung_file" "$opp_model" "$opp_effort"
+  rm -f "$rung_file"
   if [ "$rc" -eq 0 ]; then
-    PW_REVIEWER_MODEL="$(_pw_extract_selected_model "$out")"
+    PW_REVIEWER_MODEL="${PW_ANSWERED_MODEL:-$(_pw_extract_selected_model "$out")}"
     PW_FINDINGS_JSON="$(_pw_extract_payload "$out")"
     PW_RELATION="$(_pw_relation "$planner_id" "$PW_REVIEWER_MODEL")"
     return 0
@@ -611,13 +634,16 @@ _pw_select_and_review() {
     first_effort="$(printf '%s' "$ordered" | head -1)"
     first_effort="${first_effort#*|}"
     trail_file="$(mktemp "${TMPDIR:-/tmp}/pw-trail.XXXXXX")"
-    out="$(adversary_invoke_model_ladder "$host" "$PW_TIMEOUT" "$first_model" "$first_effort" \
+    rung_file="$(mktemp "${TMPDIR:-/tmp}/pw-rung.XXXXXX")"
+    out="$(ADVERSARY_RUNG_FILE="$rung_file" adversary_invoke_model_ladder "$host" "$PW_TIMEOUT" "$first_model" "$first_effort" \
       "$prompt" "" "" "$ordered" "$SCHEMA_FILE" _pw_validate_findings 2>"$trail_file")"
     rc=$?
     PW_RUNG_TRAIL+=("rule2-same-vendor-ordered:$host:rc=$rc:$(tr '\n' ' ' < "$trail_file")")
     rm -f "$trail_file"
+    _pw_note_answered_rung "$rung_file" "$first_model" "$first_effort"
+    rm -f "$rung_file"
     if [ "$rc" -eq 0 ]; then
-      PW_REVIEWER_MODEL="$(_pw_extract_selected_model "$out")"
+      PW_REVIEWER_MODEL="${PW_ANSWERED_MODEL:-$(_pw_extract_selected_model "$out")}"
       PW_FINDINGS_JSON="$(_pw_extract_payload "$out")"
       PW_RELATION="$(_pw_relation "$planner_id" "$PW_REVIEWER_MODEL")"
       return 0
@@ -626,11 +652,14 @@ _pw_select_and_review() {
 
   if [ "$host" = codex ] && [ "${PW_PLANNER_EFFORT:-}" = xhigh ]; then
     trail_file="$(mktemp "${TMPDIR:-/tmp}/pw-trail.XXXXXX")"
-    out="$(adversary_invoke_model_ladder codex "$PW_TIMEOUT" "$planner_id" high \
+    rung_file="$(mktemp "${TMPDIR:-/tmp}/pw-rung.XXXXXX")"
+    out="$(ADVERSARY_RUNG_FILE="$rung_file" adversary_invoke_model_ladder codex "$PW_TIMEOUT" "$planner_id" high \
       "$prompt" "" "" "${planner_id}|high" "$SCHEMA_FILE" _pw_validate_findings 2>"$trail_file")"
     rc=$?
     PW_RUNG_TRAIL+=("rule3-same-model-effort:codex:rc=$rc:$(tr '\n' ' ' < "$trail_file")")
     rm -f "$trail_file"
+    _pw_note_answered_rung "$rung_file" "$planner_id" high
+    rm -f "$rung_file"
     if [ "$rc" -eq 0 ]; then
       PW_REVIEWER_MODEL="$planner_id"
       PW_FINDINGS_JSON="$(_pw_extract_payload "$out")"
@@ -665,6 +694,7 @@ _pw_build_record_json() {
     --argjson escalation_enabled "${PW_ESCALATION_ENABLED:-false}" \
     --arg source_plan "${PW_SOURCE_PLAN:-}" \
     --argjson queue_error "${PW_QUEUE_ERROR:-false}" \
+    --argjson tier_descent "${PW_TIER_DESCENT:-false}" \
     --argjson waiver "${PW_WAIVER_JSON:-null}" \
     '{
       planner_model: $planner_model,
@@ -681,6 +711,7 @@ _pw_build_record_json() {
       escalation_enabled: $escalation_enabled,
       source_plan: $source_plan,
       queue_error: $queue_error,
+      tier_descent: $tier_descent,
       waiver: $waiver
     }'
 }
@@ -882,6 +913,7 @@ _pw_dispatch_path() {
       if [ $? -ne 0 ]; then
         PW_REVIEWER_MODEL=""; PW_RELATION=""; PW_VERDICT="blocked"; PW_QUEUE_ERROR=true
         PW_RUNG_TRAIL=()
+        PW_TIER_DESCENT=false
         _pw_write_record "$record_path" "$(_pw_build_record_json)" || {
           echo "plan-wall: FATAL: record write failed at $record_path" >&2; return 1; }
         echo "plan-wall: BLOCKED $plan_file (queue_error on idempotence check)" >&2
@@ -891,6 +923,7 @@ _pw_dispatch_path() {
       if [ "$unresolved_count" = "0" ]; then
         PW_REVIEWER_MODEL=""; PW_RELATION=""; PW_VERDICT="adjudicated-pass"; PW_QUEUE_ERROR=false
         PW_RUNG_TRAIL=()
+        PW_TIER_DESCENT=false
         _pw_write_record "$record_path" "$(_pw_build_record_json)" || {
           echo "plan-wall: FATAL: record write failed at $record_path" >&2; return 1; }
         echo "plan-wall: ADJUDICATED-PASS $plan_file (unchanged plan, zero dispatch)"
@@ -906,6 +939,7 @@ _pw_dispatch_path() {
               '[.[] | select(.severity == "CRITICAL")] | length' 2>/dev/null || echo 1)" = "0" ]; then
           PW_REVIEWER_MODEL=""; PW_RELATION=""; PW_VERDICT="pass-residual"; PW_QUEUE_ERROR=false
           PW_RUNG_TRAIL=()
+          PW_TIER_DESCENT=false
           _pw_write_record "$record_path" "$(_pw_build_record_json)" || {
             echo "plan-wall: FATAL: record write failed at $record_path" >&2; return 1; }
           echo "plan-wall: PASS-RESIDUAL $plan_file (unchanged plan, zero dispatch, $unresolved_count residual finding(s) ride)"
@@ -927,6 +961,7 @@ _pw_dispatch_path() {
     PW_PLANNER_EFFORT=""
   fi
   PW_RUNG_TRAIL=()
+  PW_TIER_DESCENT=false
 
   if ! _pw_select_and_review "$prompt" "$PW_PLANNER_ID" "$host" "$cvf"; then
     PW_REVIEWER_MODEL=""; PW_RELATION=""; PW_VERDICT="WALL-UNREVIEWED"; PW_QUEUE_ERROR=false
@@ -1126,6 +1161,7 @@ for plan_file in "${PLAN_FILES[@]}"; do
   plan_slug="$(_pw_slug "$plan_file")"
   record_path="$(_pw_record_path "$PHASE_SLUG" "$plan_slug" "$plan_file")"
   PW_RUNG_TRAIL=()
+  PW_TIER_DESCENT=false
   if [ "${PLAN_WALL:-on}" = off ]; then
     _pw_waiver_path "$plan_file" "$record_path" || OVERALL_RC=1
   else
