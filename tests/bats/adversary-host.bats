@@ -710,3 +710,54 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT-BODY"* ]]
 }
+
+# ── PR A: which timeout cap actually bound the attempt ──────────────────────
+# Three independent caps clamp a wall review — PLAN_WALL_TIMEOUT (the caller
+# deadline), FFS_ADVERSARY_REVIEW_ATTEMPT_TIMEOUT, and
+# FFS_ADVERSARY_ATTEMPT_TIMEOUT — and a bare "unavailable (rc=124)" says
+# nothing about which one tripped. Raising the wrong one is a no-op that reads
+# as a fix (spec-360: three 90s timeouts were blamed on a preferred-rung cap
+# that plan-wall never consults).
+
+hanging_codex_stub() {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/hanging-codex" <<'EOF'
+#!/usr/bin/env bash
+sleep 30
+EOF
+  chmod +x "$STUB_DIR/hanging-codex"
+}
+
+@test "a per-attempt cap timeout names the attempt cap as the bound" {
+  hanging_codex_stub
+  # generous caller deadline, tight per-attempt cap -> the ATTEMPT cap binds
+  run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=hanging-codex \
+    PATH="$STUB_DIR:$PATH" bash -c \
+    '. "$1"; adversary_invoke_model_ladder codex 60 gpt-5.6-sol high review 2 2 "gpt-5.6-sol|high"' _ "$LIB"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TIMEOUT-CAP"* ]]
+  [[ "$output" == *"bound=attempt"* ]]
+  [[ "$output" == *"budget=2s"* ]]
+}
+
+@test "a caller-deadline timeout names the deadline as the bound" {
+  hanging_codex_stub
+  # tight caller deadline, generous per-attempt cap -> the DEADLINE binds
+  run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=hanging-codex \
+    PATH="$STUB_DIR:$PATH" bash -c \
+    '. "$1"; adversary_invoke_model_ladder codex 2 gpt-5.6-sol high review 60 60 "gpt-5.6-sol|high"' _ "$LIB"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TIMEOUT-CAP"* ]]
+  [[ "$output" == *"bound=deadline"* ]]
+}
+
+@test "a non-timeout rung failure emits no TIMEOUT-CAP line" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB_DIR"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STUB_DIR/failing-codex"
+  chmod +x "$STUB_DIR/failing-codex"
+  run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=failing-codex \
+    PATH="$STUB_DIR:$PATH" bash -c \
+    '. "$1"; adversary_invoke_model_ladder codex 60 gpt-5.6-sol high review 5 5 "gpt-5.6-sol|high"' _ "$LIB"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"TIMEOUT-CAP"* ]]
+}

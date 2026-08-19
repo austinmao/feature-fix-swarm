@@ -789,3 +789,53 @@ EOF
   captured="$BATS_TEST_TMPDIR/captured-stdin.txt"
   ! grep -q "PRIOR_FINDINGS_DATA_START" "$captured"
 }
+
+# ── PR A: tier-descent provenance is observable AT THE WALL ─────────────────
+# spec-360 field evidence: #117's typed TIER-DESCENT line and
+# ADVERSARY_LAST_TIER_DESCENT flag are both invisible to plan-wall, because
+# the wall calls adversary_invoke_model_ladder inside $( ) — the stderr line
+# lands in the trail file (unparsed) and the flag dies with the subshell.
+# The wall is where the BLOCKING gate lives, so that is where a below-tier
+# verdict has to be visible. The rung file is the trustworthy channel: it is
+# written by the ladder only, never carries model bytes, and survives the
+# subshell.
+
+@test "PR A: a rule-1 tier descent is recorded on the wall record, not just stderr" {
+  # host=codex -> rule 1 opposite vendor is claude (stub-friendly). The
+  # preferred rung claude-opus-5 refuses; the ladder descends to sonnet.
+  cat > bin/stub-claude <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+model=""
+for a in "$@"; do
+  case "$prev" in --model) model="$a" ;; esac
+  prev="$a"
+done
+case "$model" in
+  *opus*)   exit 1 ;;
+  *sonnet*) printf '{"findings":[]}\n' ;;
+  *)        exit 1 ;;
+esac
+EOF
+  chmod +x bin/stub-claude
+  FFS_HOST=codex ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+  # the wall must SAY the request was answered below the rung it asked for
+  [ "$(jq -r '.tier_descent' "$record")" = "true" ]
+  trail="$(jq -r '.rung_trail | join(";")' "$record")"
+  [[ "$trail" == *"tier-descent:requested=claude-opus-5"* ]]
+  [[ "$trail" == *"answered=claude-sonnet-5"* ]]
+}
+
+@test "PR A: a first-rung success records tier_descent false" {
+  stub_claude_json '[]'
+  FFS_HOST=codex ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-opus-5" ]
+  [ "$(jq -r '.tier_descent' "$record")" = "false" ]
+  trail="$(jq -r '.rung_trail | join(";")' "$record")"
+  [[ "$trail" != *"tier-descent:"* ]]
+}
