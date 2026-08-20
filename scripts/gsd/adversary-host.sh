@@ -370,8 +370,11 @@ adversary_invoke_model_ladder() {
   attempt_cap="${requested_cap:-${FFS_ADVERSARY_ATTEMPT_TIMEOUT:-120}}"
   case "$attempt_cap" in ''|*[!0-9]*|0) attempt_cap=120 ;; esac
   probe_enabled="${FFS_ADVERSARY_MODEL_PROBE:-on}"
-  probe_timeout="${FFS_ADVERSARY_MODEL_PROBE_TIMEOUT:-20}"
-  case "$probe_timeout" in ''|*[!0-9]*|0) probe_timeout=20 ;; esac
+  # 60, not 20: 20s sits below the cold-start latency of a healthy frontier
+  # rung, so the default itself manufactured phantom outages (openclaw
+  # spec-369, three misdiagnosed review rounds 2026-08-14).
+  probe_timeout="${FFS_ADVERSARY_MODEL_PROBE_TIMEOUT:-60}"
+  case "$probe_timeout" in ''|*[!0-9]*|0) probe_timeout=60 ;; esac
   review_cap="${requested_review_cap:-${FFS_ADVERSARY_REVIEW_ATTEMPT_TIMEOUT:-180}}"
   case "$review_cap" in ''|*[!0-9]*|0) review_cap=180 ;; esac
   started="$SECONDS"
@@ -414,7 +417,12 @@ EOF
     if [ "$probe_enabled" != "off" ]; then
       budget="$probe_timeout"
       [ "$budget" -le "$remaining" ] || budget="$remaining"
-      probe_output="$(adversary_invoke "$kind" "$budget" "$model" "$effort" \
+      # Probe at LOW effort always: the probe tests reachability, not
+      # reasoning. Rung-effort (high/xhigh) probes have a fat latency tail
+      # that blows the probe budget (openclaw measured sol@high >60s vs
+      # 19-21s@low), marking a reachable model unavailable. effort is ignored
+      # on the claude branch, so this is uniform-safe.
+      probe_output="$(adversary_invoke "$kind" "$budget" "$model" low \
         'This is a read-only model availability probe. Use no tools. Output exactly: FFS_ADVERSARY_MODEL_READY' 2>&1)"
       rc=$?
       if [ "$rc" -ne 0 ] || ! printf '%s\n' "$probe_output" | grep -qx 'FFS_ADVERSARY_MODEL_READY'; then
@@ -474,7 +482,14 @@ EOF
       return 0
     fi
     adversary_note_rung "$rung" fail || return $?
-    echo "adversary-host: $kind model $model unavailable (rc=$rc)" >&2
+    if [ "$rc" -eq 124 ] && [ "$probe_enabled" != "off" ]; then
+      # The probe passed, so this model IS reachable — the review attempt
+      # merely outran its per-attempt cap. Reporting it as "unavailable"
+      # sends the operator hunting a phantom outage (openclaw spec-369).
+      echo "adversary-host: $kind model $model review attempt exceeded ${budget}s cap (rc=124)" >&2
+    else
+      echo "adversary-host: $kind model $model unavailable (rc=$rc)" >&2
+    fi
     # Three independent caps clamp this attempt: the caller's deadline
     # ($total), the review-attempt cap, and the plain attempt cap. rc=124
     # alone names none of them, so an operator raising a cap cannot tell
