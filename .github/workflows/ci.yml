@@ -127,10 +127,15 @@ jobs:
           persist-credentials: false
       - name: shellcheck shell surface
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          # ShellCheck ships preinstalled on the ubuntu-latest runner image, so
+          # the apt call this replaces was pure risk for zero benefit — it hung
+          # for 8 minutes and got the job killed twice on PR #119 alone. Only
+          # reach for apt if the image ever stops shipping it.
+          command -v shellcheck >/dev/null 2>&1 || bash scripts/ci/apt-install.sh shellcheck
+          shellcheck --version
           # warning level: the repo's heredoc-heavy SKILL snippets live in md
           # (not linted); this covers the executable shell surface.
-          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh scripts/coord/*.sh tests/fixtures/socratic-installer-stub.sh
+          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh scripts/coord/*.sh scripts/ci/*.sh tests/fixtures/socratic-installer-stub.sh
 
   bats:
     runs-on: ubuntu-latest
@@ -152,7 +157,7 @@ jobs:
           # an absent installed copy is a real finding.
           GSD_FFS_STANDALONE: "1"
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q bats
+          command -v bats >/dev/null 2>&1 || bash scripts/ci/apt-install.sh bats
           # discover every suite (the real coverage lives at
           # scripts/harness/ruflo-host-executor.bats, not tests/bats/)
           mapfile -t SUITES < <(find . -name '*.bats' -not -path './.git/*')
@@ -187,6 +192,6 @@ jobs:
         run: |
           bash -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
           if ! command -v zsh >/dev/null 2>&1; then
-            sudo apt-get update -q && sudo apt-get install -y -q zsh
+            command -v zsh >/dev/null 2>&1 || bash scripts/ci/apt-install.sh zsh
           fi
           zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
