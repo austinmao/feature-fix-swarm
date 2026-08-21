@@ -8,6 +8,13 @@ SKILL_FILES = [
     REPO_ROOT / "skills" / "preflight" / "SKILL.md",
     REPO_ROOT / "skills" / "feature-implement" / "SKILL.md",
 ]
+# Separate from SKILL_FILES above (which asserts a promotion-protocol doc
+# reference — false for a read-only assessment skill). One entry only:
+# widening this to every FFS skill is a follow-up, not this guard's scope —
+# skills/preflight/SKILL.md carries vendor tokens today and would fail it.
+VENDOR_NEUTRAL_SKILL_FILES = [
+    REPO_ROOT / "skills" / "area-status" / "SKILL.md",
+]
 FORBIDDEN = re.compile(
     r"openclaw|doppler|railway|vercel|hetzner|neon|paperclip|glance", re.IGNORECASE
 )
@@ -53,3 +60,24 @@ def test_rules_3_4_5_name_registry_path_and_check_command() -> None:
         assert "env-registry.sh check" in line, (
             f"rule {rule_number} missing check-command literal: {line}"
         )
+
+
+def test_vendor_neutral_skill_files_have_zero_vendor_tokens() -> None:
+    # REQ-10 (spec-380): area-status is bound for an upstream vendor-neutral
+    # package. This is a SEPARATE list from SKILL_FILES above — that list's
+    # three entries are asserted to reference docs/promotion-protocol.md,
+    # which is not true of area-status (a read-only assessment skill with no
+    # promotion semantics), and widening it to every FFS skill would fail on
+    # skills/preflight/SKILL.md today for a reason unrelated to this guard.
+    for path in VENDOR_NEUTRAL_SKILL_FILES:
+        text = path.read_text()
+        matches = FORBIDDEN.findall(text)
+        assert not matches, f"{path}: vendor/product tokens found: {matches}"
+
+
+def test_forbidden_regex_is_non_vacuous() -> None:
+    # Proves the guard above can actually fail: derive a probe token from the
+    # regex's own source (never a transcribed literal, which would be a
+    # second copy that drifts and would also self-match this test file).
+    first_alternative = FORBIDDEN.pattern.split("|")[0]
+    assert FORBIDDEN.search(f"a sentence mentioning {first_alternative} in passing")
