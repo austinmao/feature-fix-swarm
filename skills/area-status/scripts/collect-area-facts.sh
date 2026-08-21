@@ -6,6 +6,7 @@ AREA="${1:-}"
 BASE_OVERRIDE=""
 LAST_EMIT_COUNT=0
 LAST_NONDOC_COUNT=0
+LAST_CITED_SURFACES=()
 
 if [ -z "$AREA" ]; then
   echo "usage: collect-area-facts.sh <area> [--base <ref>]"
@@ -30,12 +31,16 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT" || exit 1
+# SEC-01: fence-data.sh is resolved ONLY from the path beside this installed
+# collector — never from $ROOT (the repo under assessment). $ROOT is
+# attacker-controlled input (a globally-installed collector runs against
+# whatever repo it's pointed at); sourcing a same-named file from there is
+# arbitrary code execution disguised as a "read-only" tool. The single
+# trusted candidate lives in this vendored package's own tree, resolved
+# relative to the collector's own on-disk location, never the target repo.
 FENCE_SH=""
-for candidate in "$ROOT/packages/feature-fix-swarm/scripts/gsd/fence-data.sh" \
-                 "$SCRIPT_DIR/../../../scripts/gsd/fence-data.sh" \
-                 "$ROOT/scripts/gsd/fence-data.sh"; do
-  [ -f "$candidate" ] && FENCE_SH="$candidate" && break
-done
+TRUSTED_FENCE_SH="$SCRIPT_DIR/../../../scripts/gsd/fence-data.sh"
+[ -f "$TRUSTED_FENCE_SH" ] && FENCE_SH="$TRUSTED_FENCE_SH"
 
 sanitize_name() {
   # A visible replacement makes path truncation explicit while preventing a
@@ -140,6 +145,7 @@ emit_code_paths() {
 # gap-round-1 re-run miss the area's real surface a second time.
 emit_cited_surfaces() {
   local nondoc_count="$1"
+  LAST_CITED_SURFACES=()
   echo "== CITED_SURFACES =="
   if [ "$nondoc_count" -ne 0 ]; then
     echo "(skipped: code surface non-empty)"
@@ -159,7 +165,17 @@ emit_cited_surfaces() {
   hit_files="$(mktemp "${TMPDIR:-/tmp}/area-cited-hits.XXXXXX")" || return 1
   # Content match (git grep, fixed-string), not path match: this is the
   # mechanism CODE_SURFACE lacks.
+  # SEC-05b: git grep exit 1 == no match (fine), but exit >1 == operational
+  # error (bad pathspec, unreadable blob) and must NOT be read as "no cited
+  # surfaces" — that would silently drop a real owning surface from the drift
+  # scan. Distinguish the two.
   git grep -lIF -- "$AREA" -- "${search_dirs[@]}" > "$hit_files" 2>/dev/null
+  local ggrc=$?
+  if [ "$ggrc" -gt 1 ]; then
+    echo "SECTION-ERROR: CITED_SURFACES producer failed (git grep)"
+    rm -f "$hit_files"
+    return 1
+  fi
   if [ ! -s "$hit_files" ]; then
     echo "(none)"
     rm -f "$hit_files"
@@ -194,14 +210,22 @@ emit_cited_surfaces() {
   count="$(wc -l < "$resolved" | tr -d ' ')"
   head -30 "$resolved"
   [ "$count" -gt 30 ] && echo "truncated: showing 30 of $count"
+  # SEC-03: capture the FULL resolved list (not just the displayed head -30)
+  # so the POST_EVIDENCE_COMMITS drift scan below can union every cited
+  # surface into its pathspec set, not merely the ones shown in the report.
+  while IFS= read -r cited; do
+    [ -n "$cited" ] && LAST_CITED_SURFACES+=("$cited")
+  done < "$resolved"
   rm -f "$resolved"
   return 0
 }
 
 file_mtime() {
-  # BSD stat's -f must be tried before GNU stat's -c: GNU stat also accepts
-  # -f but with a different meaning, so the order is not interchangeable.
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  # GNU stat's -c must be tried before BSD stat's -f: BSD stat REJECTS -c
+  # (clean fallback), while GNU stat silently ACCEPTS -f with a different
+  # meaning (filesystem status — %m prints the mount point, not an mtime),
+  # so BSD-first never falls through on Linux and returns garbage.
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
 # Freshness timestamp for one evidence path, tracked-commit-time first. A plain
@@ -311,8 +335,16 @@ emit_area_facts() {
   if [ -z "$newest_path" ]; then
     echo "newest-evidence: none"
   else
-    [ "$newest_untracked" -eq 1 ] && echo "uncommitted-evidence: $newest_path"
-    echo "newest-evidence: $newest_path (age-days: $(( (now - newest_time) / 86400 )))"
+    # SEC-02: sanitize before interpolation. An evidence path is an
+    # attacker-influenceable filename (anyone who can add a file to the
+    # target repo controls it); emitting it raw lets an embedded newline
+    # forge a fake section header (e.g. a bogus "== VERDICT_HINT ==" line)
+    # into the fact stream that a fenced consumer never sourced from
+    # untrusted bytes otherwise.
+    local sanitized_newest_path
+    sanitized_newest_path="$(sanitize_name "$newest_path")"
+    [ "$newest_untracked" -eq 1 ] && echo "uncommitted-evidence: $sanitized_newest_path"
+    echo "newest-evidence: $sanitized_newest_path (age-days: $(( (now - newest_time) / 86400 )))"
   fi
 
   echo "== POST_EVIDENCE_COMMITS =="
@@ -322,11 +354,50 @@ emit_area_facts() {
   # only the first left CODE_SURFACE (which matches the token anywhere in
   # the path) drift-scan-blind to any file under an area-named directory
   # whose own filename doesn't repeat the token (gap round, EDGE-007).
+  #
+  # SEC-03: a third source is unioned in — every path CITED_SURFACES
+  # resolved (captured in full in LAST_CITED_SURFACES, not just the
+  # displayed head -30). A surface resolved only via citation carries none
+  # of the area token in its own path or, often, in the commits that touch
+  # it, so a post-evidence fix to that surface is otherwise invisible to
+  # both glob shapes above and to the subject-text scan below.
   local pathspec=":(glob)**/*$AREA*" pathspec_dir=":(glob)**/*$AREA*/**" post_raw post_seen post_count=0
-  echo "pathspec-scanned: $pathspec $pathspec_dir"
+  local all_pathspecs=("$pathspec" "$pathspec_dir")
+  if [ "${#LAST_CITED_SURFACES[@]}" -gt 0 ]; then
+    all_pathspecs+=("${LAST_CITED_SURFACES[@]}")
+    echo "pathspec-scanned: $pathspec $pathspec_dir + ${#LAST_CITED_SURFACES[@]} cited-surface path(s)"
+  else
+    echo "pathspec-scanned: $pathspec $pathspec_dir"
+  fi
   post_raw="$(mktemp "${TMPDIR:-/tmp}/area-post-evidence.XXXXXX")" || return 1
   post_seen="$(mktemp "${TMPDIR:-/tmp}/area-post-seen.XXXXXX")" || { rm -f "$post_raw"; return 1; }
   if [ -n "$newest_time" ]; then
+    # SEC-04: for TRACKED evidence, restrict the scan to the ancestry range
+    # from the evidence commit (`<evidence-sha>..HEAD`) instead of comparing
+    # %ct (committer date, author-supplied and not guaranteed monotonic). A
+    # later commit carrying a same-or-earlier committer date than the
+    # evidence commit is still a later commit in the DAG and must still be
+    # caught; only ancestry proves that reliably. Untracked/uncommitted
+    # evidence has no commit to anchor a range on — the "uncommitted-
+    # evidence:" marker already flags that case as less reliable.
+    # ponytail: mtime-compare stays the ceiling for the untracked case;
+    # upgrade to ancestry once the evidence itself is committed.
+    local range=""
+    if [ "$newest_untracked" -eq 0 ]; then
+      local newest_sha
+      newest_sha="$(git log -1 --format=%H -- "$newest_path" 2>/dev/null)"
+      [ -n "$newest_sha" ] && range="$newest_sha..HEAD"
+    fi
+
+    # SEC-05: each producer's exit status is captured and checked — a real
+    # operational failure (nonzero exit) is distinguished from a legitimate
+    # no-match (empty output, exit 0) and reported as SECTION-ERROR rather
+    # than silently read as "no drift found".
+    local pathspec_hits subject_all subject_hits rc1 rc2 grc
+    pathspec_hits="$(mktemp "${TMPDIR:-/tmp}/area-post-path.XXXXXX")" || { rm -f "$post_raw" "$post_seen"; return 1; }
+    subject_all="$(mktemp "${TMPDIR:-/tmp}/area-post-subj-all.XXXXXX")" || { rm -f "$post_raw" "$post_seen" "$pathspec_hits"; return 1; }
+    subject_hits="$(mktemp "${TMPDIR:-/tmp}/area-post-subj-hit.XXXXXX")" || { rm -f "$post_raw" "$post_seen" "$pathspec_hits" "$subject_all"; return 1; }
+
     # Two sources, unioned: (1) a pathspec-diff scan, which is the only way
     # to see a commit that DELETED or RENAMED an area path out of the
     # resolved surface; (2) a subject-text scan, which is the only way to
@@ -334,17 +405,41 @@ emit_area_facts() {
     # (e.g. an --allow-empty marker or revert). Neither alone is complete —
     # git's history simplification hides a truly empty commit from ANY
     # pathspec-restricted log, no matter how broad the pathspec.
+    # SEC-06 (re-gate new finding): include T (type-change) — turning a cited
+    # code file into a symlink, or vice versa, is a real post-evidence surface
+    # mutation that --diff-filter=ADMR silently drops. C (copy) is off by
+    # default in git log, so ADMRT is the full set of surface-affecting states.
+    git log --format='%ct %h %s' --diff-filter=ADMRT ${range:+"$range"} -- "${all_pathspecs[@]}" > "$pathspec_hits" 2>/dev/null
+    rc1=$?
+    git log --format='%ct %h %s' ${range:+"$range"} > "$subject_all" 2>/dev/null
+    rc2=$?
+    if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+      rm -f "$post_raw" "$post_seen" "$pathspec_hits" "$subject_all" "$subject_hits"
+      echo "SECTION-ERROR: POST_EVIDENCE_COMMITS producer failed (git log)"
+      EMIT_STATUS=1
+      return "$EMIT_STATUS"
+    fi
+    grep -F -- "$AREA" "$subject_all" > "$subject_hits" 2>/dev/null
+    grc=$?
+    if [ "$grc" -gt 1 ]; then
+      rm -f "$post_raw" "$post_seen" "$pathspec_hits" "$subject_all" "$subject_hits"
+      echo "SECTION-ERROR: POST_EVIDENCE_COMMITS producer failed (grep)"
+      EMIT_STATUS=1
+      return "$EMIT_STATUS"
+    fi
+
     while IFS=' ' read -r ct sha rest; do
       [[ "$ct" =~ ^[0-9]+$ ]] || continue
-      [ "$ct" -gt "$newest_time" ] || continue
+      if [ -z "$range" ]; then
+        [ "$ct" -gt "$newest_time" ] || continue
+      fi
       grep -qxF "$sha" "$post_seen" 2>/dev/null && continue
       printf '%s\n' "$sha" >> "$post_seen"
       printf '%s %s\n' "$ct" "$(sanitize_name "$sha $rest")" >> "$post_raw"
       post_count=$((post_count + 1))
-    done < <(
-      git log --format='%ct %h %s' --diff-filter=ADMR -- "$pathspec" "$pathspec_dir" 2>/dev/null
-      git log --format='%ct %h %s' 2>/dev/null | grep -F -- "$AREA"
-    )
+    done < <(cat "$pathspec_hits" "$subject_hits")
+
+    rm -f "$pathspec_hits" "$subject_all" "$subject_hits"
   fi
   if [ "$post_count" -eq 0 ]; then
     echo "(none)"
@@ -355,7 +450,14 @@ emit_area_facts() {
   rm -f "$post_raw" "$post_seen"
 
   echo "== VERDICT_HINT =="
-  if [ "$post_count" -gt 0 ] || [ -z "$newest_path" ]; then
+  # SEC-04b (re-gate): uncommitted (untracked) newest evidence can NEVER yield
+  # MEASURABLE. Its freshness is an mtime, which is attacker-settable to a
+  # future instant — a future mtime becomes the newest_time floor, filters out
+  # every real later commit by %ct, and would otherwise report MEASURABLE. You
+  # cannot prove "no surface commit came after this evidence" when the evidence
+  # itself is not even committed, so this case is UNMEASURED by construction
+  # (the `uncommitted-evidence:` marker above explains why).
+  if [ "$post_count" -gt 0 ] || [ -z "$newest_path" ] || [ "$newest_untracked" -eq 1 ]; then
     echo "VERDICT_HINT: UNMEASURED"
   else
     echo "VERDICT_HINT: MEASURABLE"
