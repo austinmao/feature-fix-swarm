@@ -18,7 +18,7 @@ if os.environ.get("FFS_GSD_STUB_FAIL_RUNTIME") == runtime:
     raise SystemExit(9)
 root.mkdir(parents=True, exist_ok=True)
 (root / "gsd-core").mkdir(exist_ok=True)
-version = os.environ.get("FFS_GSD_STUB_VERSION", "1.10.0")
+version = os.environ.get("FFS_GSD_STUB_VERSION", "1.11.0")
 (root / "gsd-core/VERSION").write_text(version + "\n")
 (root / "gsd-file-manifest.json").write_text(
     json.dumps(

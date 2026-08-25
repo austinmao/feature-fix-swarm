@@ -143,7 +143,7 @@ on integration, safety, and proof.
 | Open GSD Core `1.10.0` | Yes, exact pin | Yes, through its upstream installer | Planning, execution, verification, and runtime manifests |
 | Python 3.11+, Node 22+/npm 10+, Git, Bash/zsh | Yes | No | Installer, gates, tests, and worktrees |
 | `prompt-master` at commit `d15eab…` | Yes | Yes, pinned and compatibility-patched | Host-aware prompt refinement without copying an unreviewed moving branch |
-| `socratic` at commit `862b52…` | Yes | Yes, pinned by default; skippable with `FFS_SKIP_SOCRATIC=1` | Pinned question bank the spec, plan-wall, plan-decompose, and review-gate seams slice from |
+| [`socratic`](https://github.com/m4vic/socratic) at commit `8c7e1f…` | Yes | Yes, pinned by default; skippable with `FFS_SKIP_SOCRATIC=1` | Pinned question bank the spec, plan-wall, plan-decompose, and review-gate seams slice from ([how it is used](docs/socratic.md)) |
 | The opposite host CLI | Recommended | No | Stronger cross-vendor adversarial review; otherwise review is marked degraded |
 | [gstack](https://github.com/garrytan/gstack) | Optional integration | No | Idea shaping, browser QA, investigation, review, and shipping skills |
 | [GitHub Spec Kit](https://github.com/github/spec-kit) | Needed for the full spec bootstrap | No | Produces durable feature specs and plans before FFS decomposition |
@@ -228,11 +228,17 @@ skill hash, or Codex CLI version drift is an actionable failure.
 | [Pipeline](docs/pipeline.md) | How do the stages connect? |
 | [Commands](docs/commands.md) | What commands and gates are available? |
 | [Configuration](docs/configuration.md) | What can I tune? |
+| [Installer, migration, and rollback](docs/installer.md) | How is FFS installed, migrated, and undone? |
+| [Environment registry](docs/environment-registry.md) | What environments exist, and how does `/ffs-init` declare them? |
+| [CI templates and test tiers](docs/ci-templates-and-tiers.md) | Which workflows does FFS propose, and where do CI test commands come from? |
 | [Coordination](docs/coordination.md) | How do sessions avoid colliding on the same spec? |
+| [Cross-session messaging](docs/cross-session-messaging.md) | How does one session hand work to another? |
 | [Healing](docs/healing.md) | How do waiting runs wake, recover, and remain bounded? |
 | [Retro loop](docs/retro.md) | What may the consent-gated diagnostic loop file, and how is it triaged? |
 | [Model tiers](docs/model-tiers.md) | Which model runs what, and how is provenance enforced? |
+| [Socratic](docs/socratic.md) | What is the pinned question bank, and where does it reach a reviewer? |
 | [Browser proof](docs/browser-proof.md) | What counts as browser-QA evidence? |
+| [Digest](docs/digest.md) | How do I see what happened without watching a run? |
 | [Promotion protocol](docs/promotion-protocol.md) | How does staging evidence authorize production? |
 | [Security audit](docs/security-audit-2026-08-01.md) | What was checked before public promotion? |
 | [Public launch checklist](docs/public-launch-checklist.md) | What remains before announcing broadly? |

@@ -95,6 +95,15 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | `/health` | Codebase quality check (dead code, test coverage, lint) |
 | `/goal-wrap [--gates] "objective"` | Bundle current work into a self-contained, anti-drift `/goal "..."` prompt with tracked DONE WHEN proof commands. Use before `/clear`, agent handoff, or switching machines. `--gates` reverts to ask-first behavior (default: full autonomy — commits/push/merge/deploy pre-approved). Degrades gracefully without repowise/gbrain/`/prompt-master`/`/handoff` — see the skill's own "Soft dependencies" table. |
 
+## Environment and CI setup
+
+| Command | What it does |
+|---------|-------------|
+| `/ffs-init [--detect-only\|--answers <file>\|--yes\|--update\|--check\|--force\|--reset-declines]` | One batched session that fills in `config/environments.yaml`: environments, test tiers, and (behind its own gate) surfaces. Decides and writes nothing itself — every write routes through `env-registry.sh apply`. Secrets by NAME only. See [Environment registry](environment-registry.md) |
+| `scripts/gsd/env-registry.sh <detect\|check\|render\|apply\|seed>` | The deterministic owner of the registry: propose rows, validate (schema + leak scan + referential integrity), render `templates/ci/` as `ffs-*.yml` proposals, write atomically, seed preflight rows. Exit 0 ok / 1 schema-usage-refusal / 2 leak |
+| `scripts/gsd/test-tier.sh <fast\|full\|nightly\|live>` | The only source of CI test commands. stdout = registered command lines; exit 2 unknown tier, 3 registry unreadable — a lookup failure fails distinctly from a test failure. See [CI templates and test tiers](ci-templates-and-tiers.md) |
+| `scripts/gsd/promote-emit.sh <run_id>` | Emits — never runs — the staging→prod promote line for each staging grant on a run, bound to `_promotions` records only |
+
 ## Repository Hygiene
 
 | Command | What it does |
@@ -116,7 +125,7 @@ you delete the only copy.
 
 ## gsd-core (Orchestration)
 
-The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.10.0`.
+The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.11.0`.
 Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG package.
 
 | Scenario | Use |
@@ -156,7 +165,10 @@ through `codex exec`; Claude sessions execute through `claude -p`.
 - [TDD & BDD Guide](tdd-bdd-guide.md) — Research-backed best practices (Fowler + MSR 2026), anti-patterns, agent over-mocking warning, Gherkin rules, test pyramid
 - [Pipeline overview](pipeline.md) — Full pipeline diagram with QA Ralph loop
 - [QA Ralph Loop](qa-ralph-loop.md) — Per-phase QA architecture and configuration
-- [Master context](../master-context.md) — Single-file reference for all integrated systems
+- [Dependencies and integrations](dependencies.md) — Every integrated system, who owns it, and how it is pinned
+- [Environment registry](environment-registry.md) — Environments, test tiers, and surfaces in one committed file
+- [CI templates and test tiers](ci-templates-and-tiers.md) — Workflow templates, the render anti-clobber rule, tier lookup
+- [Cross-session messaging](cross-session-messaging.md) — How concurrent sessions coordinate and hand off
 
 ## Machine gates (lib/gates.py)
 

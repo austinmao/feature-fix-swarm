@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.6.0"
+version: "2.7.0"
 allowed-tools:
   - Read
   - Write
@@ -149,6 +149,37 @@ nonzero with its bounded diagnostics—do not enter an open-ended repair loop.
 Then report: phases, plans per phase, wave widths, REQ coverage (every REQ appears
 in exactly one phase and one genuinely-completing plan), gate commands present
 in config.
+
+### Step 4.5: Design-lineage citation gate
+
+Fail-soft. In repos that carry `docs/design-lineage/` (openclaw), every gstack
+artifact matching this spec's number MUST be cited across the spec artifacts
+(`spec.md`/`plan.md`/the decomposed plans), or explicitly dismissed — the
+operator directive is *imperative each spec/plan/tasks reference the matching
+gstack artifacts*. In bare feature-fix-swarm consumers (no
+`docs/design-lineage/`) this is a silent no-op.
+
+```bash
+# resolve the openclaw coverage lever; absent => skip (fail-soft, OSS-generic)
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+LINEAGE_LEVER="$ROOT/scripts/gstack/lineage-coverage-check.sh"
+if [ -x "$LINEAGE_LEVER" ] && [ -d "$ROOT/docs/design-lineage" ]; then
+  if bash "$LINEAGE_LEVER" "$SPEC_ARG" "$SPEC_DIR"; then
+    echo "design-lineage: all matching artifacts cited/dismissed ✓"
+  else
+    echo "BLOCKED: uncited design-lineage artifacts (listed above). Cite each in"
+    echo "the spec artifacts, or dismiss with"
+    echo "  <!-- lineage-dismissed: <basename> — <reason> -->"
+    echo "then re-run /spec-decompose. (openclaw also hard-gates this at the"
+    echo "tasks.md checkbox flip via lineage-coverage-gate.sh.)"
+    # HARD stop — do not finalize a decomposition whose spec leaves prior gstack
+    # design lineage uncited. Operator override only: LINEAGE_GATE_BYPASS=1.
+    [ "${LINEAGE_GATE_BYPASS:-0}" = "1" ] || exit 1
+  fi
+else
+  echo "design-lineage: no docs/design-lineage/ lever here — skipped (fail-soft)"
+fi
+```
 
 ### Step 5: Next step
 

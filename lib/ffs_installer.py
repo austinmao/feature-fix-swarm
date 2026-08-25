@@ -31,7 +31,7 @@ from typing import Any, Iterator
 INSTALL_SCHEMA = "ffs.install/v1"
 DOCTOR_SCHEMA = "ffs.doctor/v1"
 BACKUP_SCHEMA = "ffs.backup/v1"
-GSD_VERSION = "1.10.0"
+GSD_VERSION = "1.11.0"
 CODEX_MIN_VERSION = (0, 137, 0)
 CODEX_MAX_VERSION = (0, 148, 0)
 

@@ -8,7 +8,7 @@ what FFS owns from what it installs, invokes, or merely integrates with.
 | Component | Version policy | Ownership | Purpose |
 | --- | --- | --- | --- |
 | Claude Code or Codex CLI | At least one current supported host; Codex `>=0.137.0,<0.148.0` | User-installed | Runs the skills and agents |
-| Open GSD Core | Exact `@opengsd/gsd-core@1.10.0` | Upstream-owned; installed through GSD's installer | Plan/execute/verify orchestration, manifests, hooks, and GSD skills |
+| Open GSD Core | Exact `@opengsd/gsd-core@1.11.0` | Upstream-owned; installed through GSD's installer | Plan/execute/verify orchestration, manifests, hooks, and GSD skills |
 | Node.js and npm | Node 22+, npm 10+ | User-installed | Reproducible GSD package installation |
 | Python | 3.11+ | User-installed | Installer, gates, state, and verification tools |
 | Git | Current supported release | User-installed | Source control, common-directory locks, and worktrees |
@@ -102,6 +102,10 @@ an existing unowned destination rather than overwriting it.
 
 ### socratic
 
+What socratic is, why it was adopted, and where its output actually reaches a
+reviewer are covered in [Socratic](socratic.md). This section owns the install
+and pin mechanics only.
+
 `socratic` is installed from
 `m4vic/socratic@8c7e1fdda5ff6f7755d4855907ddf0022a755493` via
 `scripts/install-socratic.sh`, staged by `stage_socratic()` into
@@ -176,6 +180,12 @@ field is `null` here because no patch has been needed at this commit.
    the 1:1 enum↔file mapping against a REAL resolved vendor tree (it skips
    wherever no tree resolves, i.e. on CI) — run it on any machine with the
    new pin installed to catch drift mechanically.
+
+Upstream also ships a `grades/` directory (`mvp`, `production`, `enterprise`
+readiness gates) that FFS's frontmatter does not model — the slicer reads
+`domains`, `depth`, and `packs` only. A bump that touches only `grades/` is
+therefore inert here and needs no enum amendment. See
+[Socratic](socratic.md#known-gaps).
 
 ## Optional integrations
 
