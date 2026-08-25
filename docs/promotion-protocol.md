@@ -2,7 +2,10 @@
 
 Twelve rules for moving a change from development through staging into production
 without rebuilding it, guessing at drift, or shipping unproven artifacts. Each rule
-below is one sentence, followed by the mechanism that enforces it today.
+below is one sentence, followed by the mechanism that enforces it today. Rules 3,
+4, and 5 are enforced by the environment registry — its schema, `/ffs-init`, and
+the `env-registry.sh` verbs are documented in
+[Environment registry](environment-registry.md).
 
 1. Build the artifact once; promote that same artifact through every environment, never rebuild it per environment (Enforcement: the image-build workflow's build-and-push job).
 2. Pin artifact identity by content digest, never by a mutable tag (Enforcement: the digest resolver, consumed by the rollout script's digest-pin flag).

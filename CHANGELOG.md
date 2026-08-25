@@ -12,6 +12,21 @@ all skills.
 
 - `plan-wall.sh --await` enforces `PLAN_WALL_AWAIT_MAX` (default 6): pending returns beyond the cap exit rc 76 `WALL-AWAIT:attempts-exhausted`; the counter is run-scoped, evaluator probes (`PLAN_WALL_AWAIT_COUNT=off`) are budget-neutral, and decided outcomes always report through and reset it.
 - `digest.sh --immediate` appends schema-true retro rows to `.feature-fix-swarm/digest-<utcdate>.jsonl` for list-backed event classes — the previously missing producer for `retro.sh analyze` (`DIGEST_RETRO_SINK=off` disables).
+- Documentation for the spec-007/008 feature surface, which had shipped without
+  any `docs/` coverage: `docs/environment-registry.md` (the
+  `config/environments.yaml` schema, `/ffs-init`'s modes, all five
+  `env-registry.sh` verbs, the exit-code and leak-scan taxonomies, the detection
+  heuristics, and `.ffs-init.json` decline semantics),
+  `docs/ci-templates-and-tiers.md` (`templates/ci/*`, the render anti-clobber
+  rule and its closed six-token placeholder set, `test-tier.sh`,
+  `review-tier.sh`, `promote-emit.sh`), `docs/cross-session-messaging.md` (how
+  sessions actually hand work over — claims, the pinned evidence store,
+  single-flight locks, the copy-scan-then-publish handoff order, and the fact
+  that no mailbox exists), and `docs/socratic.md` (what the pinned question bank
+  is, why it was adopted below the star gate, the four seams it reaches, its
+  containment and controls, and what `evals/socratic-ab.md` did *not* measure).
+  README's documentation index gained rows for these plus the previously
+  unindexed installer and digest guides.
 
 ### Fixed
 
@@ -19,6 +34,12 @@ all skills.
 
 - Consent-gated retro filing now publishes a finite diagnostic allowlist, maintains upstream advisory labels and occurrences, and supports maintainer-only factual triage for human-reviewed specification work.
 - `scripts/gsd/reconcile.sh` provides a one-pass, coord-claimed recovery path for durable lifecycle records, and `docs/healing.md` documents its operator controls and recovery boundaries.
+- `README.md` advertised the socratic pin as `862b52…`; the actual pin has been
+  `8c7e1fd…` since the 2026-08-08 dependency refresh. The row now carries the
+  correct commit, a link to the upstream repository, and a pointer to
+  `docs/socratic.md`. `docs/dependencies.md` additionally records that
+  upstream's `grades/` surface is present but unmodelled by FFS's slicer, so a
+  bump touching only `grades/` needs no enum amendment.
 
 ### Changed
 
