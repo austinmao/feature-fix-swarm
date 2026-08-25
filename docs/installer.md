@@ -49,6 +49,13 @@ no repo-local copy shadows them. These are manifest-tracked like skills, so
 `--reconcile-consumer` likewise ships `lib/gates.py` and
 `lib/runtime_proof.py` so vendored consumers stop running stale gate logic.
 
+A pre-existing hand-copied file at the managed path (the old workaround for
+this gap) is an unmanaged collision: the install blocks and preserves it
+unless you pass `--adopt-collisions`, which backs it up and stages the fresh
+bytes. Project-scope installs do not stage the home-path runtime — a machine
+using only project scope should also run `--scope user` (or
+`--reconcile-consumer`) once so the ladder's `~/.claude` rung resolves.
+
 For one transition release, `bash setup.sh` still means `--scope user` and
 prints a deprecation warning. Scripts and documentation should use the
 explicit form now.

@@ -2083,3 +2083,17 @@ def test_managed_lib_destinations_cover_every_script_ladder_reference() -> None:
     assert referenced, "expected at least one ladder reference"
     missing = referenced - dests
     assert not missing, f"scripts resolve managed-lib paths the installer never stages: {sorted(missing)}"
+
+
+def test_staged_socratic_slice_executes_outside_the_repo(tmp_path: Path) -> None:
+    # the slice hard-sources its sibling fence-data.sh at startup — staging
+    # the script without the sibling is dead on arrival (pass-1 review HIGH)
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    staged = tmp_path / "home/.claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh"
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    result = subprocess.run(
+        ["bash", str(staged)], cwd=outside, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    assert "fence-data.sh missing" not in result.stderr

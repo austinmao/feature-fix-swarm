@@ -43,10 +43,13 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     ("lib/gates.py", "gates.py"),
     ("lib/runtime_proof.py", "runtime_proof.py"),
     ("scripts/gsd/socratic-slice.sh", "scripts/gsd/socratic-slice.sh"),
+    # socratic-slice.sh hard-sources this sibling at startup; without it the
+    # staged copy is dead on arrival
+    ("scripts/gsd/fence-data.sh", "scripts/gsd/fence-data.sh"),
 )
 
 
-def managed_lib_root() -> "Path":
+def managed_lib_root() -> Path:
     return Path.home() / ".claude" / "lib" / "feature-fix-swarm"
 
 
@@ -1232,7 +1235,13 @@ def replace_tree(
 
 
 def replace_file(source: Path, destination: Path, backup: Backup) -> None:
+    if not source.is_file():
+        raise ActionableError(f"managed lib runtime source missing from install tree: {source}")
     if fingerprint(source) == fingerprint(destination):
+        # content already current — still repair mode drift (the skill
+        # ladders exec socratic-slice.sh directly, so the x bit is contractual
+        # and invisible to the content fingerprint)
+        shutil.copymode(source, destination)
         return
     backup.before(destination)
     if lexists(destination):
