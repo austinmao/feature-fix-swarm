@@ -80,6 +80,10 @@ an existing unowned destination rather than overwriting it.
 
 ### socratic
 
+What socratic is, why it was adopted, and where its output actually reaches a
+reviewer are covered in [Socratic](socratic.md). This section owns the install
+and pin mechanics only.
+
 `socratic` is installed from
 `m4vic/socratic@8c7e1fdda5ff6f7755d4855907ddf0022a755493` via
 `scripts/install-socratic.sh`, staged by `stage_socratic()` into
@@ -154,6 +158,12 @@ field is `null` here because no patch has been needed at this commit.
    the 1:1 enum↔file mapping against a REAL resolved vendor tree (it skips
    wherever no tree resolves, i.e. on CI) — run it on any machine with the
    new pin installed to catch drift mechanically.
+
+Upstream also ships a `grades/` directory (`mvp`, `production`, `enterprise`
+readiness gates) that FFS's frontmatter does not model — the slicer reads
+`domains`, `depth`, and `packs` only. A bump that touches only `grades/` is
+therefore inert here and needs no enum amendment. See
+[Socratic](socratic.md#known-gaps).
 
 ## Optional integrations
 
