@@ -23,6 +23,94 @@ def _load(name: str):
 gates = _load("gates")
 
 
+# ── spec-008 Phase 2: durable operator waivers (RED) ───────────────────────
+
+def test_waiver_rows_are_validated_and_append_without_deduplication(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_waiver(store, "spec-008", "canary-gate", "CANARY_GATE=off")
+    gates.record_waiver(store, "spec-008", "canary-gate", "CANARY_GATE=off")
+    rows = json.loads(store.read_text())["waivers"]
+    assert len(rows) == 2
+    assert {"run_id", "gate", "env_var", "ts"} == set(rows[0])
+
+
+def test_waiver_rejects_blank_or_oversized_values_without_partial_row(tmp_path) -> None:
+    import pytest
+
+    store = tmp_path / "evidence.json"
+    with pytest.raises(ValueError, match="INVALID-WAIVER"):
+        gates.record_waiver(store, "", "canary-gate", "CANARY_GATE=off")
+    with pytest.raises(ValueError, match="INVALID-WAIVER"):
+        gates.record_waiver(store, "spec-008", "x" * 257, "CANARY_GATE=off")
+    assert not store.exists()
+
+
+# ── spec-008 Phase 1: degradation evidence + ratio guard (RED) ─────────────
+
+def test_degradation_events_are_validated_idempotent_and_ratio_scoped(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_degraded(store, "rung-attempt", rung_id="vendor:model:high",
+                               outcome="fail") is True
+    assert gates.note_degraded(store, "invocation", run_id="spec-008",
+                               seam="review-gate", degraded=True,
+                               invocation_id="review-1") is True
+    assert gates.note_degraded(store, "invocation", run_id="spec-008",
+                               seam="review-gate", degraded=True,
+                               invocation_id="review-1") is False
+    assert gates.degraded_ratio(store, "spec-008") == (1, 1)
+    try:
+        gates.note_degraded(store, "invocation", run_id="spec-008",
+                             seam="review-gate", degraded=False,
+                             invocation_id="review-1")
+    except ValueError as exc:
+        assert "IDEMPOTENCY-CONFLICT" in str(exc)
+    else:
+        raise AssertionError("conflicting replay must fail closed")
+    try:
+        gates.degraded_ratio(store, "not-a-ledger-id")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("ratio reads must reject non-ledger ids")
+
+
+def test_degradation_rung_status_probe_and_reset_are_locked_contracts(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    rung = "vendor:model:high"
+    for _ in range(20):
+        gates.note_degraded(store, "rung-attempt", rung_id=rung, outcome="fail")
+    assert gates.rung_status(store, rung)["tripped"] is True
+    assert [gates.probe_check(store, rung) for _ in range(10)] == [False] * 9 + [True]
+    assert gates.reset_rung(store, rung) is True
+    assert gates.rung_status(store, rung)["tripped"] is False
+
+
+def test_run_mapping_is_shape_checked_idempotent_and_conflict_rejecting(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    runstore = "a" * 12
+    assert gates.record_run_mapping(store, "spec-008", runstore) is True
+    assert gates.record_run_mapping(store, "spec-008", runstore) is False
+    import pytest
+    with pytest.raises(ValueError, match="RUN-MAPPING-CONFLICT"):
+        gates.record_run_mapping(store, "spec-008", "b" * 12)
+    with pytest.raises(ValueError, match="INVALID-RUNSTORE-ID"):
+        gates.record_run_mapping(store, "spec-009", "not-a-uuid")
+
+
+def test_run_mapping_is_readable_for_relaunch_reuse(tmp_path) -> None:
+    # A relaunch of the same ledger run must be able to READ its existing
+    # mapping and reuse the runstore instead of starting a fresh record and
+    # dying on RUN-MAPPING-CONFLICT (first phase-2 drive relaunch wedged on
+    # exactly this). Missing mapping reads as None, never raises.
+    store = tmp_path / "evidence.json"
+    assert gates.get_run_mapping(store, "spec-008") is None
+    gates.record_run_mapping(store, "spec-008", "a" * 12)
+    assert gates.get_run_mapping(store, "spec-008") == "a" * 12
+    import pytest
+    with pytest.raises(ValueError):
+        gates.get_run_mapping(store, "not-ledger-shaped")
+
+
 # ── Stream A: completion authority ───────────────────────────────────────────
 
 def test_verify_done_requires_recorded_evidence(tmp_path) -> None:
@@ -108,10 +196,97 @@ def test_scan_tamper_flags_exit_zero_and_ci_edits() -> None:
     assert "exit 0" in joined
 
 
-def test_scan_tamper_clean_diff_returns_empty() -> None:
+def test_scan_tamper_exit_zero_fixture_allowlist() -> None:
+    # F1 (PR #94 audit): bats stub fixtures and @test titles are not gate
+    # bypasses. Exemptions are narrow — the exit-0 class only, and only for
+    # @test title lines or lines carrying an explicit `tamper-ok:` note.
     diff = (
-        "--- a/lib/gates.py\n"
-        "+++ b/lib/gates.py\n"
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        '+@test "hook exits 0 when store absent (exit 0 fast path)" {\n'
+        "+  printf 'exit 0\\n' > \"$STUBDIR/python3\"  # tamper-ok: stub fixture\n"
+    )
+    assert gates.scan_test_tampering(diff) == []
+
+
+def test_scan_tamper_comment_line_exit_zero_not_flagged() -> None:
+    # PR #103 CI false positive: doc comments like `+#   --immediate ... exit 0`
+    # were flagged — a pure comment line cannot alter control flow.
+    diff = (
+        "--- a/scripts/gsd/digest.sh\n"
+        "+++ b/scripts/gsd/digest.sh\n"
+        "+#   --immediate  poll stores, emit new events, exit 0 always\n"  # tamper-ok: quoted scanner fixture
+        "+  # cursor retained on notify failure; exit 0\n"  # tamper-ok: quoted scanner fixture
+    )
+    assert gates.scan_test_tampering(diff) == []
+
+
+def test_scan_tamper_exit_zero_finding_carries_path() -> None:
+    # Findings are path-scoped so the CI tamper job can allowlist files whose
+    # CONTRACT is unconditional exit 0 without blinding the heuristic.
+    diff = (
+        "--- a/scripts/gsd/whatever.sh\n"
+        "+++ b/scripts/gsd/whatever.sh\n"
+        "+exit 0\n"  # tamper-ok: quoted scanner fixture
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("[scripts/gsd/whatever.sh]" in f for f in findings)
+
+
+def test_scan_tamper_unannotated_exit_zero_in_test_body_still_flags() -> None:
+    diff = (
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        "+  exit 0\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
+def test_scan_tamper_one_liner_test_disable_still_flags() -> None:
+    # review-gate round 2 HIGH: `@test "x" { exit 0; }` disables the test —
+    # the exit 0 is control flow (outside quotes), so the title exemption
+    # must not apply.
+    diff = (
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        '+@test "x" { exit 0; }\n'
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
+def test_scan_tamper_annotated_executable_exit_zero_still_flags() -> None:
+    # `exit 0  # tamper-ok:` as a statement (unquoted) is control flow —
+    # the annotation only covers exit 0 written as quoted DATA.
+    diff = (
+        "--- a/tests/bats/x.bats\n"
+        "+++ b/tests/bats/x.bats\n"
+        "+  exit 0  # tamper-ok: trust me\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
+def test_scan_tamper_annotation_never_exempts_non_test_files() -> None:
+    # review-gate HIGH: `exit 0 # tamper-ok:` in a gate/CI/impl script must
+    # still flag — the allowlist is test-fixture-only.
+    diff = (
+        "--- a/scripts/gsd/canary-gate.sh\n"
+        "+++ b/scripts/gsd/canary-gate.sh\n"
+        "+exit 0  # tamper-ok: nice try\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    assert any("exit 0" in f for f in findings)
+
+
+def test_scan_tamper_clean_diff_returns_empty() -> None:
+    # neutral path: lib/gates.py itself is now a (warn-tier) finding by
+    # design — G2 flags gate-implementation edits; see
+    # test_scan_tamper_flags_gate_and_ledger_file_edits.
+    diff = (
+        "--- a/lib/helpers.py\n"
+        "+++ b/lib/helpers.py\n"
         "+def helper():\n"
         "+    return 1\n"
     )
@@ -129,11 +304,162 @@ def test_impl_task_may_not_touch_test_files() -> None:
 
 # ── Stream E: no-progress detection ──────────────────────────────────────────
 
+def test_scan_tamper_flags_gate_and_ledger_file_edits() -> None:
+    diff = (
+        "--- a/lib/gates.py\n+++ b/lib/gates.py\n+x = 1\n"
+        "--- a/.feature-fix-swarm/evidence.json\n"
+        "+++ b/.feature-fix-swarm/evidence.json\n+{}\n"
+        "--- a/lib/other.py\n+++ b/lib/other.py\n+y = 2\n"
+    )
+    findings = gates.scan_test_tampering(diff)
+    gate_hits = [f for f in findings if f.startswith("gate/ledger file edited")]
+    assert len(gate_hits) == 2
+    assert not any("other.py" in f for f in gate_hits)
+
+
+def test_store_path_env_always_wins(monkeypatch) -> None:
+    monkeypatch.setenv("GATES_STORE", "/tmp/custom/ev.json")
+    assert gates._store_path() == gates.Path("/tmp/custom/ev.json")
+
+
+def test_store_path_resolves_worktree_to_main_checkout(tmp_path, monkeypatch) -> None:
+    """G5: from a linked worktree the DEFAULT store must resolve to the MAIN
+    checkout's .feature-fix-swarm/evidence.json, not the worktree's cwd."""
+    import subprocess as sp
+    main = tmp_path / "main"
+    main.mkdir()
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=main, check=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-q", "--allow-empty", "-m", "init"], cwd=main, check=True)
+    wt = tmp_path / "wt"
+    sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+           cwd=main, check=True)
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(wt)
+    resolved = gates._store_path()
+    assert resolved == main / ".feature-fix-swarm" / "evidence.json"
+    # from the main checkout itself, behavior is the historic relative default
+    monkeypatch.chdir(main)
+    assert str(gates._store_path()).endswith(".feature-fix-swarm/evidence.json")
+
+
 def test_no_progress_when_same_failure_repeats() -> None:
     assert gates.no_progress(["FAILED test_a - AssertionError",
                               "FAILED test_a - AssertionError"]) is True
     assert gates.no_progress(["FAILED test_a", "FAILED test_b"]) is False
     assert gates.no_progress(["FAILED test_a"]) is False
+
+
+def test_no_progress_catches_oscillating_signatures() -> None:
+    """2026-08 red-team G3: an A,B,A,B loop never trips a consecutive-pair
+    test — the two recorded burn incidents ran 19 and 38 rounds on exactly
+    this shape. Revisiting ANY earlier signature is no-progress."""
+    assert gates.no_progress(["sig A", "sig B", "sig A"]) is True
+    assert gates.no_progress(["sig A", "sig B", "sig C", "sig B"]) is True
+    # a genuinely new failure is still progress
+    assert gates.no_progress(["sig A", "sig B", "sig C"]) is False
+
+
+def test_loop_round_counts_durably_and_resets(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.loop_round(store, "run-1", "wall:p1") == 1
+    assert gates.loop_round(store, "run-1", "wall:p1") == 2
+    # independent loops and runs do not share counters
+    assert gates.loop_round(store, "run-1", "wall:p2") == 1
+    assert gates.loop_round(store, "run-2", "wall:p1") == 1
+    gates.reset_loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round(store, "run-1", "wall:p1") == 1
+    # reset-all drops every counter for the run, others untouched
+    gates.reset_loop_round(store, "run-1", None)
+    assert gates.loop_round(store, "run-1", "wall:p2") == 1
+    assert gates.loop_round(store, "run-2", "wall:p1") == 2
+
+
+def test_reset_loop_round_noop_leaves_store_byte_identical(tmp_path) -> None:
+    # run-finalizer sweeps loop-round counters on EVERY landed run; a store
+    # with no counters must not be rewritten (run-finalizer.bats pins
+    # "evidence store untouched" against the literal prior bytes).
+    import json
+    store = tmp_path / "evidence.json"
+    store.write_text('{"k":"v"}')
+    gates.reset_loop_round(store, "run-1", None)
+    gates.reset_loop_round(store, "run-1", "wall:p1")
+    assert store.read_text() == '{"k":"v"}'
+    # a store that has OTHER runs' counters is also untouched by a no-op reset
+    gates.loop_round(store, "run-2", "wall:p1")
+    before = store.read_text()
+    gates.reset_loop_round(store, "run-1", None)
+    assert store.read_text() == before
+    assert json.loads(before)["k"] == "v"
+
+
+def test_loop_round_note_count_records_and_returns_prev(tmp_path) -> None:
+    """Wall policy (b) (2026-08-08 operator decision): the plan wall passes on
+    zero-CRITICAL + strict round-over-round decrease in new HIGH/CRITICAL
+    findings. That comparison needs per-round count history stored beside the
+    round counter."""
+    store = tmp_path / "evidence.json"
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 7) == (1, None)
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 4) == (2, 7)
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 4) == (3, 4)
+    # re-noting the SAME round overwrites (idempotent re-run of one round)
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 2) == (3, 4)
+    # independent loops do not share history
+    gates.loop_round(store, "run-1", "wall:p2")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p2", 9) == (1, None)
+
+
+def test_loop_round_note_count_requires_active_round(tmp_path) -> None:
+    import pytest as _pytest
+    store = tmp_path / "evidence.json"
+    with _pytest.raises(ValueError):
+        gates.loop_round_note_count(store, "run-1", "wall:p1", 3)
+
+
+def test_reset_loop_round_clears_count_history(tmp_path) -> None:
+    """A named reset must drop the count history WITH the round counter —
+    a stale pre-reset count would otherwise fake a round-over-round
+    decrease on the first post-reset round."""
+    store = tmp_path / "evidence.json"
+    gates.loop_round(store, "run-1", "wall:p1")
+    gates.loop_round_note_count(store, "run-1", "wall:p1", 5)
+    gates.reset_loop_round(store, "run-1", "wall:p1")
+    gates.loop_round(store, "run-1", "wall:p1")
+    # fresh round 1: prev must be None, not the pre-reset round-0 ghost
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 3) == (1, None)
+    # reset-all drops history too
+    gates.loop_round_note_count(store, "run-1", "wall:p1", 3)
+    gates.reset_loop_round(store, "run-1", None)
+    gates.loop_round(store, "run-1", "wall:p1")
+    assert gates.loop_round_note_count(store, "run-1", "wall:p1", 1) == (1, None)
+
+
+def test_reset_loop_round_creates_no_debris_on_missing_or_corrupt_store(tmp_path) -> None:
+    import pytest as _pytest
+    # missing store: reset is a silent no-op — must not resurrect the parent
+    # dir or drop a .lock (run-finalizer step 4b runs AFTER worktree removal)
+    gone = tmp_path / "removed-worktree" / "custom-gates" / "evidence.json"
+    gates.reset_loop_round(gone, "run-1", None)
+    assert not gone.parent.exists()
+    # corrupt store: the error still surfaces (CLI maps it to rc 3), but no
+    # .lock may be created on the way out
+    corrupt = tmp_path / "evidence.json"
+    corrupt.write_text("GATES-VERSION")
+    with _pytest.raises(ValueError):
+        gates.reset_loop_round(corrupt, "run-1", None)
+    assert not (tmp_path / "evidence.lock").exists()
+
+
+def test_loop_round_shape_guard_refuses_conflicting_store(tmp_path) -> None:
+    import json
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"_loops": "not-a-dict"}))
+    import pytest
+    with pytest.raises(SystemExit):
+        gates.loop_round(store, "run-1", "wall:p1")
 
 
 # ── Stream G: spec/tasks coherence analyze ───────────────────────────────────
@@ -911,8 +1237,8 @@ def test_preflight_env_and_probe(tmp_path, monkeypatch) -> None:
     res = gates.preflight_check([
         {"kind": "env", "name": "FFS_TEST_PRESENT"},
         {"kind": "env", "name": "FFS_TEST_MISSING"},
-        {"kind": "probe", "name": "true-probe", "cmd": "true"},
-        {"kind": "probe", "name": "false-probe", "cmd": "false"},
+        {"kind": "probe", "name": "true-probe", "argv": ["true"]},
+        {"kind": "probe", "name": "false-probe", "argv": ["false"]},
     ])
     assert res["pass"] is False
     by = {r["name"]: r for r in res["results"]}
@@ -920,6 +1246,106 @@ def test_preflight_env_and_probe(tmp_path, monkeypatch) -> None:
     assert by["true-probe"]["ok"] and not by["false-probe"]["ok"]
     # secret value must never appear anywhere in the result
     assert "value-should-never-print" not in json.dumps(res)
+
+
+def test_preflight_probe_rejects_shell_command_strings(tmp_path) -> None:
+    marker = tmp_path / "shell-command-ran"
+    res = gates.preflight_check([
+        {
+            "kind": "probe",
+            "name": "legacy-shell-command",
+            "cmd": f"touch {marker}",
+        },
+    ])
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "INVALID: probe requires a non-empty argv string array"
+    assert not marker.exists()
+
+
+def test_preflight_probe_rejects_invalid_argv_shapes() -> None:
+    for argv in (None, [], "true", ["true", 1], [""]):
+        res = gates.preflight_check([
+            {"kind": "probe", "name": "invalid-argv", "argv": argv},
+        ])
+        assert res["pass"] is False
+        assert res["results"][0]["detail"].startswith("INVALID:")
+
+
+def test_preflight_probe_inherits_environment_without_recording_value(monkeypatch) -> None:
+    secret = "postgresql://private-value"
+    monkeypatch.setenv("FFS_TEST_DATABASE_URL", secret)
+    res = gates.preflight_check([
+        {
+            "kind": "probe",
+            "name": "database",
+            "argv": [
+                "python3",
+                "-c",
+                "import os,sys; sys.exit(0 if os.environ.get('FFS_TEST_DATABASE_URL') else 1)",
+            ],
+        },
+    ])
+
+    assert res["pass"] is True
+    assert secret not in json.dumps(res)
+
+
+def test_preflight_probe_rejects_environment_placeholders(monkeypatch) -> None:
+    def unexpected_run(command, **kwargs):
+        raise AssertionError(f"placeholder command executed: {command}")
+
+    monkeypatch.setattr(gates.subprocess, "run", unexpected_run)
+    for placeholder in ("$DATABASE_URL", "${DATABASE_URL}"):
+        res = gates.preflight_check([
+            {"kind": "probe", "name": "database", "argv": ["psql", placeholder]},
+        ])
+        assert res["pass"] is False
+        assert res["results"][0]["detail"] == (
+            "INVALID: environment placeholders are not allowed in probe argv"
+        )
+
+
+def test_preflight_probe_reports_timeout_without_raising(monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        raise gates.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    res = gates.preflight_check([
+        {"kind": "probe", "name": "slow", "argv": ["slow-command"]},
+    ], timeout=7)
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "timeout after 7s"
+
+
+def test_preflight_probe_reports_missing_executable_without_raising(monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    res = gates.preflight_check([
+        {"kind": "probe", "name": "missing", "argv": ["missing-command"]},
+    ])
+
+    assert res["pass"] is False
+    assert res["results"][0]["detail"] == "executable unavailable"
+
+
+def test_shipped_preflight_manifest_uses_valid_probe_argv() -> None:
+    manifest = json.loads(
+        (DISPATCH_DIR.parent / "specs/003-orchestration-hardening/preflight.json")
+        .read_text(encoding="utf-8")
+    )
+
+    probes = [requirement for requirement in manifest if requirement.get("kind") == "probe"]
+    assert probes
+    for probe in probes:
+        assert "cmd" not in probe
+        assert isinstance(probe.get("argv"), list)
+        assert probe["argv"]
+        assert all(isinstance(arg, str) and arg and "\0" not in arg for arg in probe["argv"])
+        assert not any(arg == ".planning" or arg.startswith(".planning/") for arg in probe["argv"])
 
 
 def test_preflight_empty_requirements_fails(tmp_path) -> None:
@@ -937,7 +1363,7 @@ def test_cli_preflight_records_and_check(tmp_path, monkeypatch) -> None:
     manifest = tmp_path / "preflight.json"
     manifest.write_text(json.dumps([
         {"kind": "env", "name": "FFS_PF_OK"},
-        {"kind": "probe", "name": "echo", "cmd": "true"},
+        {"kind": "probe", "name": "echo", "argv": ["true"]},
     ]))
     r = _sp.run(["python3", g, "preflight", str(manifest), "--run", "run-9"],
                 capture_output=True, text=True, env=env)
@@ -2066,3 +2492,1770 @@ def test_cli_promote_trailing_evidence_flag_returns_typed_rejection(tmp_path, mo
         "--surface", "web", "--artifact", _GOOD_ARTIFACT, "--evidence",
     ])
     assert rc == 1
+
+
+# ── spec-008 Phase 3 (REQ-301): record_canary_evidence recorder validation ───
+# Trust boundary (wall 087faa76): the recorder validates SHAPE, not caller
+# identity — the trusted wrapper (canary-gate.sh) is the sole LEGITIMATE
+# producer; integrity is guarded by the G2 tamper scan + store perms.
+
+_COMMIT_ARTIFACT = "ab" * 20  # bare 40-hex commit sha (F5 — the FFS binding target)
+_ISO_CREATED = "2026-06-13T08:43:44.814Z"
+_ISO_ENDED = "2026-06-13T08:48:02.991Z"
+
+
+def test_canary_recorder_appends_verbatim_schema_row(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    rows = json.loads(store.read_text())["canary"]
+    assert len(rows) == 1
+    rec = rows[0]
+    assert set(rec) == {"run_id", "sha", "pass", "created_at", "ended_at", "ts"}
+    assert rec["run_id"] == "run-1"
+    assert rec["sha"] == _COMMIT_ARTIFACT
+    assert rec["pass"] is True
+    assert rec["created_at"] == _ISO_CREATED
+    assert rec["ended_at"] == _ISO_ENDED
+    assert isinstance(rec["ts"], float)
+
+
+def test_canary_recorder_rejects_non_40_hex_sha(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in ("abc", "Z" * 40, "ab" * 32, "", None,
+                "myapp@sha256:" + "f" * 64):  # digest refs are NOT canary identity
+        with pytest.raises(ValueError, match="INVALID-CANARY-SHA"):
+            gates.record_canary_evidence(store, "run-1", bad, True,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_empty_or_missing_timestamps(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for created, ended in (("", _ISO_ENDED), (_ISO_CREATED, ""), (None, _ISO_ENDED),
+                           (_ISO_CREATED, None), ("   ", _ISO_ENDED),
+                           ("x" * 65, _ISO_ENDED), ("bad\x00ts", _ISO_ENDED)):
+        with pytest.raises(ValueError, match="INVALID-CANARY-TIMESTAMP"):
+            gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                         created, ended)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_malformed_pass_flag(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in (1, 0, "true", "false", None):
+        with pytest.raises(ValueError, match="INVALID-CANARY-PASS"):
+            gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, bad,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_rejects_invalid_run_id(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    for bad in ("", None, "x" * 129, "bad\x00run"):
+        with pytest.raises(ValueError, match="INVALID-CANARY-RUN-ID"):
+            gates.record_canary_evidence(store, bad, _COMMIT_ARTIFACT, True,
+                                         _ISO_CREATED, _ISO_ENDED)
+    assert not store.exists()
+
+
+def test_canary_recorder_refuses_namespace_shape_conflict(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"canary": {"not": "a list"}}))
+    with pytest.raises(ValueError, match="CANARY-SCHEMA-CONFLICT"):
+        gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                     _ISO_CREATED, _ISO_ENDED)
+    assert json.loads(store.read_text())["canary"] == {"not": "a list"}
+
+
+def test_cli_canary_evidence_records_and_rejects_typed(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main(["canary-evidence", "--run-id", "run-1",
+                     "--sha", _COMMIT_ARTIFACT, "--pass", "true",
+                     "--created-at", _ISO_CREATED, "--ended-at", _ISO_ENDED])
+    assert rc == 0
+    rows = json.loads((tmp_path / "evidence.json").read_text())["canary"]
+    assert rows[0]["sha"] == _COMMIT_ARTIFACT and rows[0]["pass"] is True
+    rc = gates.main(["canary-evidence", "--run-id", "run-1",
+                     "--sha", "not-a-sha", "--pass", "true",
+                     "--created-at", _ISO_CREATED, "--ended-at", _ISO_ENDED])
+    assert rc == 2
+    assert "CANARY-EVIDENCE-REJECTED" in capsys.readouterr().err
+
+
+# ── spec-008 Phase 3 (REQ-301, AC-004): check_promotion canary sha binding ───
+# Canary-surface classifier (pinned decision 1): binding is STORE-SCOPED — a
+# non-empty canary namespace makes every check_promotion candidate
+# canary-bound (typed pass record with exact-matching sha required; sha-less
+# or untyped entries trigger binding but never satisfy it); an empty
+# namespace leaves promotion behavior unchanged.
+
+_OTHER_COMMIT = "cd" * 20
+
+
+def _seed_promotion(store, run_id: str = "run-1", surface: str = "cp",
+                    artifact: str = _COMMIT_ARTIFACT, **kwargs) -> None:
+    _seed_success(store, artifact=artifact)
+    assert gates.record_promotion(store, run_id, from_env="staging",
+                                  to_env="prod", surface=surface,
+                                  artifact=artifact, evidence_ids=["stg-web"],
+                                  **kwargs) is True
+
+
+def _inject_canary(store, rows) -> None:
+    data = json.loads(store.read_text()) if store.exists() else {}
+    data["canary"] = rows
+    store.write_text(json.dumps(data))
+
+
+def test_ac004_typed_match_allows(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True
+
+
+def test_ac004_sha_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_missing_sha_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    _inject_canary(store, [
+        {"run_id": "run-1", "pass": True, "created_at": _ISO_CREATED,
+         "ended_at": _ISO_ENDED, "ts": 1.0},  # typed kind, no sha at all
+        {"run_id": "run-1", "sha": "shortsha", "pass": True,
+         "created_at": _ISO_CREATED, "ended_at": _ISO_ENDED, "ts": 1.0},
+    ])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_untyped_legacy_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    _inject_canary(store, [{"marker": "legacy-canary"}, "opaque-string", 7])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+    # a tampered non-list namespace also refuses — never raises (pure read)
+    data = json.loads(store.read_text())
+    data["canary"] = {"not": "a list"}
+    store.write_text(json.dumps(data))
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_empty_namespace_unaffected(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True  # absent namespace
+    _inject_canary(store, [])
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is True  # explicitly empty
+
+
+def test_ac004_freshness_independent(tmp_path) -> None:
+    import time as _t
+    # fresh promotion + mismatched canary → refused (binding refuses)
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+    # expired promotion + exact-matching canary → refused (expires_at intact)
+    store2 = tmp_path / "evidence2.json"
+    _seed_promotion(store2, ttl_hours=1.0)
+    gates.record_canary_evidence(store2, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store2, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT, now=_t.time() + 3601) is False
+
+
+def test_ac004_failed_canary_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, False,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_promotion(store, "run-1", "prod", "cp",
+                                 _COMMIT_ARTIFACT) is False
+
+
+def test_ac004_miss_reason_canary_evidence_required(tmp_path) -> None:
+    # fresh, fully-matching promotion but only untyped canary entries →
+    # check_grant_prod names the refusal CANARY-EVIDENCE-REQUIRED
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    _inject_canary(store, [{"marker": "legacy-canary"}])
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("CANARY-EVIDENCE-REQUIRED" in p["reason"] for p in pend)
+
+
+def test_ac004_miss_reason_canary_sha_mismatch(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _seed_promotion(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store, "run-1", _OTHER_COMMIT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("CANARY-SHA-MISMATCH" in p["reason"] for p in pend)
+
+
+def test_ac004_miss_reason_phase1_ordering_preserved(tmp_path) -> None:
+    # canary evidence present but NO promote record at all → the phase-1
+    # NO-PROMOTE-EVIDENCE reason still fires (AC-001 ordering intact) …
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("NO-PROMOTE-EVIDENCE" in p["reason"] for p in pend)
+    assert not any("CANARY" in p["reason"] for p in pend)
+    # … and an EXPIRED promote with a matching canary still classifies as
+    # PROMOTE-EXPIRED, never a canary reason.
+    import time as _t
+    store2 = tmp_path / "evidence2.json"
+    _seed_promotion(store2, ttl_hours=1.0)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-cp"])
+    gates.record_canary_evidence(store2, "run-1", _COMMIT_ARTIFACT, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    assert gates.check_grant_prod(store2, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT, now=_t.time() + 3601) is False
+    pend = gates.list_pending(store2, "run-1")
+    assert any("PROMOTE-EXPIRED" in p["reason"] for p in pend)
+    assert not any("CANARY" in p["reason"] for p in pend)
+
+
+# ── spec-008 Phase 3 (REQ-302, AC-005): rollback_dryrun schema + gate ────────
+# Synthetic surfaces + synthetic manifest dicts only: no real FFS surface
+# declares rollback and no config/ directory exists, so production behavior
+# is a structural no-op (locked row 11 — fallback-rehearsal.sh is NOT wired).
+# "Fresh same-run" = the run_id being checked, i.e. check_grant_prod's OWN
+# authoritative run_id parameter (wall 7531f885) — never an env default.
+
+_ROLLBACK_CMD = "deploy rollback cp"
+_ROLLBACK_MANIFEST = {"cp": {"staging": "stg-cp", "rollback": _ROLLBACK_CMD}}
+
+
+def _grant_and_promote(store, run_id: str = "run-1") -> None:
+    _seed_promotion(store, run_id=run_id)
+    assert gates.grant_actions(store, run_id, ["deploy:prod-cp"]) is True
+
+
+def test_ac005_declared_fresh_pass_allows(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is True
+
+
+def test_ac005_missing_record_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("ROLLBACK-DRYRUN-REQUIRED" in p["reason"] and "cp" in p["reason"]
+               for p in pend)
+
+
+def test_ac005_other_surface_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "db", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_other_run_refuses(tmp_path) -> None:
+    # a stale record from another run_id never satisfies — the same-run
+    # comparison binds check_grant_prod's own run_id parameter
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-2", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_failed_dryrun_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 1,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_command_mismatch_refuses(tmp_path) -> None:
+    # wall 4e3862e5: command must string-equal the manifest-declared command
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", "some other command", 0,
+                                 _COMMIT_ARTIFACT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_sha_mismatch_refuses(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _OTHER_COMMIT)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest=_ROLLBACK_MANIFEST) is False
+
+
+def test_ac005_undeclared_noop(tmp_path) -> None:
+    # no rollback key in the manifest row (every real FFS surface) and the
+    # no-manifest path: the gate is a no-op by construction
+    store = tmp_path / "evidence.json"
+    _grant_and_promote(store)
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT,
+                                  manifest={"cp": {"staging": "stg-cp"}}) is True
+    assert gates.check_grant_prod(store, "run-1", "deploy:prod-cp",
+                                  _COMMIT_ARTIFACT, manifest=None) is True
+
+
+def test_ac005_recorder_appends_verbatim_schema_row(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                 _COMMIT_ARTIFACT)
+    rows = json.loads(store.read_text())["rollback_dryrun"]
+    assert len(rows) == 1
+    rec = rows[0]
+    assert set(rec) == {"run_id", "surface", "command", "exit_code",
+                        "artifact_sha", "ts"}
+    assert rec["run_id"] == "run-1" and rec["surface"] == "cp"
+    assert rec["command"] == _ROLLBACK_CMD and rec["exit_code"] == 0
+    assert rec["artifact_sha"] == _COMMIT_ARTIFACT
+    assert isinstance(rec["ts"], float)
+
+
+def test_ac005_recorder_rejects_typed(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-RUN-ID"):
+        gates.record_rollback_dryrun(store, "", "cp", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-SURFACE"):
+        gates.record_rollback_dryrun(store, "run-1", "  ", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-COMMAND"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", "", 0,
+                                     _COMMIT_ARTIFACT)
+    for bad_exit in ("0", 0.5, None, True):
+        with pytest.raises(ValueError, match="INVALID-ROLLBACK-EXIT-CODE"):
+            gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD,
+                                         bad_exit, _COMMIT_ARTIFACT)
+    with pytest.raises(ValueError, match="INVALID-ROLLBACK-ARTIFACT"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                     "img:latest")
+    assert not store.exists()
+
+
+def test_ac005_recorder_refuses_namespace_shape_conflict(tmp_path) -> None:
+    import pytest
+    store = tmp_path / "evidence.json"
+    store.write_text(json.dumps({"rollback_dryrun": {"not": "a list"}}))
+    with pytest.raises(ValueError, match="ROLLBACK-DRYRUN-SCHEMA-CONFLICT"):
+        gates.record_rollback_dryrun(store, "run-1", "cp", _ROLLBACK_CMD, 0,
+                                     _COMMIT_ARTIFACT)
+
+
+def test_cli_rollback_dryrun_records_and_rejects_typed(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("GATES_STORE", str(tmp_path / "evidence.json"))
+    rc = gates.main(["rollback-dryrun", "--run-id", "run-1", "--surface", "cp",
+                     "--command", _ROLLBACK_CMD, "--exit-code", "0",
+                     "--artifact-sha", _COMMIT_ARTIFACT])
+    assert rc == 0
+    rows = json.loads((tmp_path / "evidence.json").read_text())["rollback_dryrun"]
+    assert rows[0]["exit_code"] == 0 and rows[0]["command"] == _ROLLBACK_CMD
+    rc = gates.main(["rollback-dryrun", "--run-id", "run-1", "--surface", "cp",
+                     "--command", _ROLLBACK_CMD, "--exit-code", "zero",
+                     "--artifact-sha", _COMMIT_ARTIFACT])
+    assert rc == 2
+    assert "ROLLBACK-DRYRUN-REJECTED" in capsys.readouterr().err
+
+
+def test_ac005_normalize_manifest_preserves_optional_rollback(tmp_path) -> None:
+    import pytest
+    normalized = gates._normalize_manifest({"surfaces": [
+        {"surface": "cp", "staging_instance": "stg-cp",
+         "rollback": _ROLLBACK_CMD},
+        {"surface": "db", "staging_instance": "stg-db"},
+    ]})
+    assert normalized["cp"] == {"staging": "stg-cp", "rollback": _ROLLBACK_CMD}
+    assert normalized["db"] == {"staging": "stg-db"}  # no rollback key at all
+    for bad in (7, "", "   "):
+        with pytest.raises(ValueError):
+            gates._normalize_manifest({"surfaces": [
+                {"surface": "cp", "staging_instance": "stg-cp",
+                 "rollback": bad}]})
+
+
+# ── spec-008 Phase 4: durable loop-cap event producer (REQ-701 OQ-1) ────────
+
+def test_loop_cap_appends_durable_typed_event(tmp_path, monkeypatch, capsys) -> None:
+    """The cap branch appends one {kind, run_id, loop, round, ts} row to the
+    top-level events list so the digest has a durable producer; sub-cap
+    rounds append nothing."""
+    store = tmp_path / "evidence.json"
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 0
+    assert json.loads(store.read_text()).get("events", []) == []
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 1
+    assert "LOOP-CAP:" in capsys.readouterr().out
+    events = json.loads(store.read_text())["events"]
+    assert len(events) == 1
+    ev = events[0]
+    assert set(ev) == {"kind", "run_id", "loop", "round", "ts"}
+    assert ev["kind"] == "loop-cap"
+    assert ev["run_id"] == "spec-008"
+    assert ev["loop"] == "wall:p1"
+    assert ev["round"] == 2
+    assert isinstance(ev["ts"], float)
+
+
+def test_loop_cap_event_write_failure_is_fail_soft(tmp_path, monkeypatch, capsys) -> None:
+    """Decision 1: event-write failure warns on stderr but the cap STILL
+    returns 1 with its LOOP-CAP line intact — observability never gates
+    the cap. The rc-3 store-unusable path is untouched (counter save fails
+    first there)."""
+    store = tmp_path / "evidence.json"
+    monkeypatch.setenv("GATES_STORE", str(store))
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 0
+    real_save = gates._save_store
+    calls = {"n": 0}
+
+    def flaky(path, data):
+        calls["n"] += 1
+        if calls["n"] == 2:  # call 1 = counter save, call 2 = event append
+            raise OSError("disk full")
+        real_save(path, data)
+
+    monkeypatch.setattr(gates, "_save_store", flaky)
+    assert gates.main(["loop-round", "spec-008", "wall:p1", "--max", "1"]) == 1
+    captured = capsys.readouterr()
+    assert "LOOP-CAP:" in captured.out
+    assert "LOOP-CAP-EVENT-UNRECORDED" in captured.err
+    assert "events" not in json.loads(store.read_text())
+
+
+# ── spec-007 Phase 1: env registry resolution ────────────────────────────────
+# PD-2 taxonomy (2c72f448): IMPLICIT default-filename resolution parses HEAD
+# bytes with HEAD as SOLE authority (index and working tree never enter the
+# verdict); CALLER-SUPPLIED paths parse WORKING-TREE bytes. These cases carry
+# the implicit half; the caller-supplied half lands in the Task-2 section.
+# Isolation: GATES_STORE pinned under tmp_path; FFS_ENV_REGISTRY* deleted.
+# Verdicts asserted via the pending record — stdout reason text is 01-02's.
+
+_ENV_REGISTRY_WEB = (
+    "# schema: ffs.environments/v1\n"
+    "surfaces:\n"
+    "  - surface: web\n"
+    "    staging_instance: none\n"
+)
+
+
+def _env_registry_env(store: Path) -> dict:
+    import os as _os
+    env = dict(_os.environ, GATES_STORE=str(store))
+    env.pop("FFS_ENV_REGISTRY", None)
+    env.pop("FFS_ENV_REGISTRY_REQUIRED", None)
+    return env
+
+
+def _init_registry_repo(tmp_path: Path, text: str = _ENV_REGISTRY_WEB, *,
+                        add: bool = True, commit: bool = True,
+                        rel: str = "config/environments.yaml") -> Path:
+    """Synthetic MAIN checkout holding a registry file at `rel` (pattern:
+    test_store_path_resolves_worktree_to_main_checkout)."""
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    (repo / rel).write_text(text)
+    if add:
+        _sp.run(["git", "add", rel], cwd=repo, check=True)
+    if commit:
+        _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                 "commit", "-q", "-m", "registry"], cwd=repo, check=True)
+    return repo
+
+
+def _seed_prod_ok(env: dict, repo: Path, run_id: str = "run-1",
+                  surface: str = "web") -> None:
+    """Grant + promote seeded so a NO-STAGING-COUNTERPART verdict cannot come
+    from a missing grant or missing promote evidence instead."""
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "run-gate", "stg-web",
+                 "--artifact", _GOOD_ARTIFACT, "--", "true"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = _sp.run(["python3", g, "promote", run_id, "--from", "staging",
+                 "--to", "prod", "--surface", surface,
+                 "--artifact", _GOOD_ARTIFACT, "--evidence", "stg-web"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = _sp.run(["python3", g, "grant", run_id,
+                 "--action", f"deploy:prod-{surface}"],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _check_grant_prod_cli(env: dict, repo: Path, run_id: str = "run-1",
+                          action: str = "deploy:prod-web",
+                          extra: list[str] | None = None):
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    return _sp.run(["python3", g, "check-grant", run_id, "--action", action,
+                    "--artifact", _GOOD_ARTIFACT] + (extra or []),
+                   capture_output=True, text=True, env=env, cwd=repo)
+
+
+def _pending_reasons(store: Path, run_id: str = "run-1") -> list[str]:
+    return [p["reason"] for p in gates.list_pending(store, run_id)]
+
+
+def _advisory_count(stderr: str, prefix: str) -> int:
+    return sum(1 for ln in stderr.splitlines() if ln.startswith(prefix))
+
+
+def test_env_registry_default_filename_resolution_refuses_in_tracked_repo(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+
+
+def test_env_registry_untracked_file_is_not_authoritative(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, add=False, commit=False)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+    absent = next(ln for ln in r.stderr.splitlines()
+                  if ln.startswith("ENV-REGISTRY-ABSENT:"))
+    assert "config/environments.yaml" in absent and "git commit" in absent
+
+
+def test_env_registry_staged_but_uncommitted_is_absent(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, add=True, commit=False)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+
+
+def test_env_registry_staged_deletion_does_not_disable_gate(tmp_path) -> None:
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    _sp.run(["git", "rm", "-q", "--cached", "config/environments.yaml"],
+            cwd=repo, check=True)
+    (repo / "config/environments.yaml").unlink()
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_working_tree_delete_does_not_disable_gate(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    (repo / "config/environments.yaml").unlink()
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_dirty_working_copy_is_inert(tmp_path) -> None:
+    import subprocess as _sp
+    dirty_text = _ENV_REGISTRY_WEB.replace(
+        "staging_instance: none", "staging_instance: staging-web")
+    for variant in ("unstaged", "staged"):
+        base = tmp_path / variant
+        base.mkdir()
+        store = base / "evidence.json"
+        env = _env_registry_env(store)
+        repo = _init_registry_repo(base)
+        (repo / "config/environments.yaml").write_text(dirty_text)
+        if variant == "staged":
+            _sp.run(["git", "add", "config/environments.yaml"],
+                    cwd=repo, check=True)
+        _seed_prod_ok(env, repo)
+        r = _check_grant_prod_cli(env, repo)
+        # verdict comes from HEAD bytes (staging none), not the dirty copy
+        assert r.returncode == 1, variant + ": " + r.stdout + r.stderr
+        assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+        assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 1, r.stderr
+    # clean-tree run emits zero advisory lines
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    store = clean / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(clean)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-DIRTY:") == 0
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 0
+
+
+def test_env_registry_unreadable_working_copy_still_resolves(tmp_path) -> None:
+    # PD-2: HEAD is the sole authority for the implicit step — readability of
+    # the working-tree copy is irrelevant (discriminating twin: a chmod-000
+    # CALLER-SUPPLIED path REJECTS, Task-2 section).
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    (repo / "config/environments.yaml").chmod(0o000)
+    try:
+        _seed_prod_ok(env, repo)
+        r = _check_grant_prod_cli(env, repo)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert any("NO-STAGING-COUNTERPART" in x
+                   for x in _pending_reasons(store))
+    finally:
+        (repo / "config/environments.yaml").chmod(0o644)
+
+
+def test_env_registry_live_ffs_registry_loads() -> None:
+    # FFS's own committed registry parses to exactly one release row.
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
+
+
+# ── Task 2: precedence chain, fail-closed refusals, hard mode, folding ───────
+
+def _registry_text(surface: str, staging: str = "none") -> str:
+    return ("# schema: ffs.environments/v1\n"
+            "surfaces:\n"
+            f"  - surface: {surface}\n"
+            f"    staging_instance: {staging}\n")
+
+
+def _commit_file(repo: Path, rel: str, text: str) -> None:
+    import subprocess as _sp
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(text)
+    _sp.run(["git", "add", rel], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", f"add {rel}"], cwd=repo, check=True)
+
+
+def test_env_registry_precedence_first_verdict_wins(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    _commit_file(repo, "config/parity-manifest.yaml",
+                 "surfaces:\n  - surface: b\n    staging_instance: none\n")
+    _commit_file(repo, "reg-env.yaml", _registry_text("c"))
+    (repo / "reg-flag.yaml").write_text(_registry_text("d"))
+    cases = [
+        # (run_id, surface expected to win, extra argv, env-var value)
+        ("run-11", "d", ["--manifest", "reg-flag.yaml"], "reg-env.yaml"),
+        ("run-12", "c", [], "reg-env.yaml"),
+        ("run-13", "a", [], None),
+        ("run-14", "b", [], None),  # after environments.yaml leaves HEAD
+    ]
+    for run_id, surface, extra, env_reg in cases:
+        if surface == "b":
+            _sp.run(["git", "rm", "-q", "config/environments.yaml"],
+                    cwd=repo, check=True)
+            _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-q", "-m", "drop registry"], cwd=repo, check=True)
+        store = tmp_path / f"ev-{run_id}.json"
+        env = _env_registry_env(store)
+        if env_reg is not None:
+            env["FFS_ENV_REGISTRY"] = env_reg
+        _seed_prod_ok(env, repo, run_id=run_id, surface=surface)
+        r = _check_grant_prod_cli(env, repo, run_id=run_id,
+                                  action=f"deploy:prod-{surface}", extra=extra)
+        assert r.returncode == 1, f"{run_id}: {r.stdout}{r.stderr}"
+        reasons = _pending_reasons(store, run_id)
+        assert any("NO-STAGING-COUNTERPART" in x and f"'{surface}'" in x
+                   for x in reasons), (run_id, reasons)
+
+
+def test_env_registry_manifest_flag_empty_rejects_but_absent_resolves(tmp_path) -> None:
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    # present-but-empty --manifest -> REJECTED (EDGE-011)
+    store = tmp_path / "ev-empty.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="a")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-a",
+                              extra=["--manifest", ""])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "CHECK-GRANT-REJECTED" in r.stderr
+    assert any("ENV-REGISTRY-INVALID" in x for x in _pending_reasons(store))
+    # paired: flag ABSENT on the same fixture still resolves the default file
+    store2 = tmp_path / "ev-absent.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="a")
+    r2 = _check_grant_prod_cli(env2, repo, action="deploy:prod-a")
+    assert r2.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store2))
+
+
+def test_env_registry_env_var_failure_classes_all_reject(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))  # decoy default
+    _commit_file(repo, "reg-000.yaml", _registry_text("c"))
+    (repo / "reg-000.yaml").chmod(0o000)
+    _commit_file(repo, "reg-bad.yaml", "surfaces:\n  - surface: c\n")
+    (repo / "reg-untracked.yaml").write_text(_registry_text("c"))
+    (repo / "reg-staged.yaml").write_text(_registry_text("c"))
+    _sp.run(["git", "add", "reg-staged.yaml"], cwd=repo, check=True)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(_registry_text("c"))
+    cases = {
+        "empty": "",
+        "nonexistent": "reg-nope.yaml",
+        "unreadable": "reg-000.yaml",  # PD-2: caller-supplied parses
+        # WORKING-TREE bytes — the discriminating twin of the implicit
+        # chmod-000 case above, which still resolves from HEAD.
+        "unparseable": "reg-bad.yaml",
+        "untracked": "reg-untracked.yaml",
+        "staged": "reg-staged.yaml",
+        "outside": str(outside),
+    }
+    try:
+        for idx, (name, value) in enumerate(cases.items()):
+            run_id = f"run-2{idx}"
+            store = tmp_path / f"ev-{name}.json"
+            env = _env_registry_env(store)
+            env["FFS_ENV_REGISTRY"] = value
+            _seed_prod_ok(env, repo, run_id=run_id, surface="a")
+            r = _check_grant_prod_cli(env, repo, run_id=run_id,
+                                      action="deploy:prod-a")
+            assert r.returncode == 1, f"{name}: {r.stdout}{r.stderr}"
+            reasons = _pending_reasons(store, run_id)
+            # never falls through to the (valid, different-surface) default
+            assert not any("NO-STAGING-COUNTERPART" in x for x in reasons), name
+            assert any("FFS_ENV_REGISTRY" in x for x in reasons), (name, reasons)
+            if name == "untracked":
+                assert any("git add" in x for x in reasons), reasons
+            if name == "staged":
+                # distinct git-commit remedy, not the git-add one
+                staged = [x for x in reasons if "FFS_ENV_REGISTRY" in x]
+                assert any("git commit" in x and "git add" not in x
+                           for x in staged), reasons
+    finally:
+        (repo / "reg-000.yaml").chmod(0o644)
+
+
+def test_env_registry_env_var_worktree_branch_commit_rejects(tmp_path) -> None:
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    wt = tmp_path / "wt"
+    _sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+            cwd=repo, check=True)
+    (wt / "reg-side.yaml").write_text(_registry_text("c"))
+    _sp.run(["git", "add", "reg-side.yaml"], cwd=wt, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "side-only registry"], cwd=wt, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    env["FFS_ENV_REGISTRY"] = "reg-side.yaml"
+    _seed_prod_ok(env, wt, surface="a")
+    r = _check_grant_prod_cli(env, wt, action="deploy:prod-a")
+    assert r.returncode == 1, r.stdout + r.stderr
+    reasons = _pending_reasons(store)
+    assert any("FFS_ENV_REGISTRY" in x for x in reasons), reasons
+    assert not any("NO-STAGING-COUNTERPART" in x for x in reasons)
+
+
+def test_env_registry_glob_pathspec_bypass_pinned_at_helper(tmp_path) -> None:
+    # HELPER-level pin (T-01-09): only this level discriminates the
+    # `:(literal)` escape — end-to-end, a glob-interpreted pathspec would
+    # match the TRACKED registry and also reject, hiding the fail-open.
+    repo = _init_registry_repo(tmp_path)  # commits config/environments.yaml
+    for tricky in ("config/en*.yaml", "config/environments?yaml",
+                   "config/[e]nvironments.yaml"):
+        (repo / tricky).write_text(_registry_text("evil"))
+        assert gates._is_git_tracked(repo, tricky) is False, tricky
+    assert gates._is_git_tracked(repo, "config/environments.yaml") is True
+    # end-to-end defense-in-depth only — does NOT discriminate the escape
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    env["FFS_ENV_REGISTRY"] = "config/en*.yaml"
+    _seed_prod_ok(env, repo, surface="web")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-web")
+    assert r.returncode == 1
+
+
+def test_env_registry_committed_unparseable_rejects_in_both_modes(tmp_path) -> None:
+    # EDGE-005: a RESOLVED-but-unparseable registry is a refusal, never absent
+    repo = _init_registry_repo(tmp_path, "surfaces:\n  - surface: web\n")
+    for mode_extra in ([], ["--require-environments"]):
+        store = tmp_path / f"ev-{len(mode_extra)}.json"
+        env = _env_registry_env(store)
+        _seed_prod_ok(env, repo, surface="web")
+        r = _check_grant_prod_cli(env, repo, extra=mode_extra)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert any("ENV-REGISTRY-INVALID" in x for x in _pending_reasons(store))
+
+
+def test_env_registry_worktree_c_discriminator(tmp_path) -> None:
+    # Registry committed ONLY on a linked worktree's branch, invoked from
+    # inside that worktree -> ABSENT (main HEAD is the sole authority; this
+    # exit code flips if `-C <main_root>` is dropped from the probes).
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    wt = tmp_path / "wt"
+    _sp.run(["git", "worktree", "add", "-q", str(wt), "-b", "side"],
+            cwd=repo, check=True)
+    (wt / "config").mkdir()
+    (wt / "config/environments.yaml").write_text(_ENV_REGISTRY_WEB)
+    _sp.run(["git", "add", "config/environments.yaml"], cwd=wt, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "side-only registry"], cwd=wt, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, wt)
+    r = _check_grant_prod_cli(env, wt)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+
+
+def test_env_registry_absent_advisory_scoped_to_prod_prefix_branch(tmp_path) -> None:
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    g = str(DISPATCH_DIR / "gates.py")
+    # prod action, registry absent, require off -> exit unchanged + exactly 1
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 0 and "GRANTED" in r.stdout
+    assert _advisory_count(r.stderr, "ENV-REGISTRY-ABSENT:") == 1
+    assert "/ffs-init" in r.stderr
+    # non-prod action: zero advisory lines, exit code unchanged (REQ-402)
+    import subprocess as _sp2
+    _sp2.run(["python3", g, "grant", "run-1", "--action", "push:origin/main"],
+             capture_output=True, text=True, env=env, cwd=repo)
+    r2 = _sp2.run(["python3", g, "check-grant", "run-1",
+                   "--action", "push:origin/main"],
+                  capture_output=True, text=True, env=env, cwd=repo)
+    assert r2.returncode == 0 and r2.stderr == ""
+    # hotfix:prod-* action: zero advisory lines (audit row 14 untouched)
+    _sp2.run(["python3", g, "grant", "run-1", "--action", "hotfix:prod-web",
+              "--reason", "sev1"],
+             capture_output=True, text=True, env=env, cwd=repo)
+    r3 = _sp2.run(["python3", g, "check-grant", "run-1",
+                   "--action", "hotfix:prod-web"],
+                  capture_output=True, text=True, env=env, cwd=repo)
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert _advisory_count(r3.stderr, "ENV-REGISTRY-ABSENT:") == 0
+    assert _advisory_count(r3.stderr, "ENV-REGISTRY-DIRTY:") == 0
+
+
+def test_env_registry_non_git_directory_triptych(tmp_path) -> None:
+    # not a git repo: implicit file IGNORED, --manifest HONORED, env var
+    # REJECTED (no main root to validate membership against).
+    plain = tmp_path / "plain"
+    (plain / "config").mkdir(parents=True)
+    (plain / "config/environments.yaml").write_text(_ENV_REGISTRY_WEB)
+    # implicit: ignored -> granted
+    store = tmp_path / "ev-implicit.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, plain)
+    r = _check_grant_prod_cli(env, plain)
+    assert r.returncode == 0 and "GRANTED" in r.stdout, r.stdout + r.stderr
+    # --manifest: honored -> NO-STAGING refusal
+    store2 = tmp_path / "ev-flag.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, plain)
+    r2 = _check_grant_prod_cli(env2, plain,
+                               extra=["--manifest", "config/environments.yaml"])
+    assert r2.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store2))
+    # env var: rejected
+    store3 = tmp_path / "ev-env.json"
+    env3 = _env_registry_env(store3)
+    env3["FFS_ENV_REGISTRY"] = "config/environments.yaml"
+    _seed_prod_ok(env3, plain)
+    r3 = _check_grant_prod_cli(env3, plain)
+    assert r3.returncode == 1
+    assert any("FFS_ENV_REGISTRY" in x for x in _pending_reasons(store3))
+
+
+def test_env_registry_hard_mode_flag_and_env_byte_identical(tmp_path) -> None:
+    import subprocess as _sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo)
+    r_flag = _check_grant_prod_cli(env, repo, extra=["--require-environments"])
+    env_hard = dict(env, FFS_ENV_REGISTRY_REQUIRED="1")
+    r_env = _check_grant_prod_cli(env_hard, repo)
+    assert r_flag.returncode == 1 and r_env.returncode == 1
+    assert r_flag.stdout == r_env.stdout and r_flag.stderr == r_env.stderr
+    reasons = _pending_reasons(store)
+    assert any("NO-ENV-REGISTRY" in x and "/ffs-init" in x for x in reasons)
+    # same invocation WITHOUT the flag does not reject
+    r_soft = _check_grant_prod_cli(env, repo)
+    assert r_soft.returncode == 0 and "GRANTED" in r_soft.stdout
+    # non-1 env values leave hard mode OFF
+    for off in ("0", "true", ""):
+        env_off = dict(env, FFS_ENV_REGISTRY_REQUIRED=off)
+        r_off = _check_grant_prod_cli(env_off, repo)
+        assert r_off.returncode == 0, (off, r_off.stdout + r_off.stderr)
+
+
+def test_env_registry_hard_mode_dirty_caller_supplied_head_governs(tmp_path) -> None:
+    # Diff review 2026-08-10: hard mode read the v1 marker from HEAD but
+    # parsed governing content from the working tree, so an uncommitted edit
+    # to a tracked registry could flip `staging_instance: none` past the
+    # prod refusal. Under hard mode, HEAD bytes govern the verdict for
+    # caller-supplied sources too; soft mode keeps PD-2's working-tree read.
+    import subprocess as _sp
+    repo = _init_registry_repo(tmp_path)   # committed: web / none
+    rel = "config/environments.yaml"
+    dirty = _ENV_REGISTRY_WEB.replace("staging_instance: none",
+                                      "staging_instance: stg-web")
+    (repo / rel).write_text(dirty)         # uncommitted flip
+    store = tmp_path / "evidence.json"
+    for src_extra in (["--manifest", rel], None):
+        store.unlink(missing_ok=True)
+        env = _env_registry_env(store)
+        if src_extra is None:
+            env["FFS_ENV_REGISTRY"] = rel
+        _seed_prod_ok(env, repo)
+        extra = ["--require-environments"] + (src_extra or [])
+        r = _check_grant_prod_cli(env, repo, extra=extra)
+        assert r.returncode == 1, (src_extra, r.stdout + r.stderr)
+        assert any("NO-STAGING-COUNTERPART" in x
+                   for x in _pending_reasons(store)), src_extra
+        assert "ENV-REGISTRY-DIRTY" in r.stderr, src_extra
+        # soft mode: PD-2 working-tree bytes govern — the flip is honored
+        store.unlink(missing_ok=True)
+        env_soft = _env_registry_env(store)
+        if src_extra is None:
+            env_soft["FFS_ENV_REGISTRY"] = rel
+        _seed_prod_ok(env_soft, repo)
+        r_soft = _check_grant_prod_cli(env_soft, repo, extra=src_extra or [])
+        assert r_soft.returncode == 0, (src_extra, r_soft.stdout + r_soft.stderr)
+
+
+def test_env_registry_hard_mode_rejects_legacy_and_json_kinds(tmp_path) -> None:
+    import subprocess as _sp
+    # legacy parity-manifest satisfies SOFT mode only
+    base_l = tmp_path / "legacy"
+    base_l.mkdir()
+    repo = base_l / "repo"
+    (repo / "config").mkdir(parents=True)
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "config/parity-manifest.yaml").write_text(
+        "surfaces:\n  - surface: web\n    staging_instance: none\n")
+    _sp.run(["git", "add", "config/parity-manifest.yaml"], cwd=repo, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "legacy"], cwd=repo, check=True)
+    store = base_l / "ev-soft.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store))
+    store2 = base_l / "ev-hard.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo)
+    r2 = _check_grant_prod_cli(env2, repo, extra=["--require-environments"])
+    assert r2.returncode == 1
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store2))
+    # committed JSON registry via env var satisfies SOFT mode only
+    base_j = tmp_path / "jsonkind"
+    base_j.mkdir()
+    repo_j = base_j / "repo"
+    repo_j.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo_j, check=True)
+    (repo_j / "reg.json").write_text('{"web": {"staging": "none"}}')
+    _sp.run(["git", "add", "reg.json"], cwd=repo_j, check=True)
+    _sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "json"], cwd=repo_j, check=True)
+    store3 = base_j / "ev-soft.json"
+    env3 = _env_registry_env(store3)
+    env3["FFS_ENV_REGISTRY"] = "reg.json"
+    _seed_prod_ok(env3, repo_j)
+    r3 = _check_grant_prod_cli(env3, repo_j)
+    assert r3.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store3))
+    store4 = base_j / "ev-hard.json"
+    env4 = _env_registry_env(store4)
+    env4["FFS_ENV_REGISTRY"] = "reg.json"
+    _seed_prod_ok(env4, repo_j)
+    r4 = _check_grant_prod_cli(env4, repo_j, extra=["--require-environments"])
+    assert r4.returncode == 1
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store4))
+
+
+def test_env_registry_hard_mode_manifest_spoofable_comment_bar(tmp_path) -> None:
+    # T-01-07: the v1 marker is a forgeable comment — hard mode reads the
+    # credential from HEAD bytes of a tracked, committed --manifest only.
+    repo = _init_registry_repo(tmp_path, _registry_text("a"))
+    (repo / "reg-forged.yaml").write_text(_registry_text("web"))  # v1 marker, untracked
+    _commit_file(repo, "reg-real.yaml", _registry_text("web"))
+    # untracked v1 --manifest REJECTED under hard mode
+    store = tmp_path / "ev-forged.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="web")
+    r = _check_grant_prod_cli(env, repo, extra=["--manifest", "reg-forged.yaml",
+                                                "--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert any("NO-ENV-REGISTRY" in x for x in _pending_reasons(store))
+    # tracked+committed v1 --manifest ACCEPTED under hard mode (clears the
+    # bar; verdict is then the ordinary manifest guard refusal)
+    store2 = tmp_path / "ev-real.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="web")
+    r2 = _check_grant_prod_cli(env2, repo, extra=["--manifest", "reg-real.yaml",
+                                                 "--require-environments"])
+    assert r2.returncode == 1
+    reasons2 = _pending_reasons(store2)
+    assert any("NO-STAGING-COUNTERPART" in x for x in reasons2), reasons2
+    assert not any("NO-ENV-REGISTRY" in x for x in reasons2)
+    # the same untracked file is HONORED under soft mode
+    store3 = tmp_path / "ev-soft.json"
+    env3 = _env_registry_env(store3)
+    _seed_prod_ok(env3, repo, surface="web")
+    r3 = _check_grant_prod_cli(env3, repo, extra=["--manifest", "reg-forged.yaml"])
+    assert r3.returncode == 1
+    assert any("NO-STAGING-COUNTERPART" in x for x in _pending_reasons(store3))
+
+
+def test_env_registry_hard_mode_unknown_prod_surface(tmp_path) -> None:
+    repo = _init_registry_repo(tmp_path, _registry_text("web"))
+    # hard mode + no folded row -> UNKNOWN-PROD-SURFACE with remedy in pending
+    store = tmp_path / "ev-hard.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, repo, surface="api")
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-api",
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    reasons = _pending_reasons(store)
+    assert any("UNKNOWN-PROD-SURFACE" in x and "remedy" in x
+               for x in reasons), reasons
+    # soft mode unchanged: unknown surface still passes with full seeds
+    store2 = tmp_path / "ev-soft.json"
+    env2 = _env_registry_env(store2)
+    _seed_prod_ok(env2, repo, surface="api")
+    r2 = _check_grant_prod_cli(env2, repo, action="deploy:prod-api")
+    assert r2.returncode == 0 and "GRANTED" in r2.stdout
+    # folded lookup: a case-varied action resolves the lowercase row rather
+    # than tripping UNKNOWN (registry declares `release`)
+    base = tmp_path / "release"
+    base.mkdir()
+    repo2 = _init_registry_repo(base, _registry_text("release"))
+    store3 = base / "evidence.json"
+    env3 = _env_registry_env(store3)
+    _seed_prod_ok(env3, repo2, surface="Release")
+    r3 = _check_grant_prod_cli(env3, repo2, action="deploy:prod-Release",
+                               extra=["--require-environments"])
+    assert r3.returncode == 1
+    reasons3 = _pending_reasons(store3)
+    assert any("NO-STAGING-COUNTERPART" in x for x in reasons3), reasons3
+    assert not any("UNKNOWN-PROD-SURFACE" in x for x in reasons3)
+
+
+def test_env_registry_sentinel_and_surface_folding(tmp_path) -> None:
+    # sentinel folds stripped+casefolded (EDGE-014); `none-prod-1` is real
+    for staging in ("NONE", "none ", "None"):
+        store = tmp_path / f"ev-{staging.strip()!r}.json".replace("'", "")
+        _seed_success(store)
+        gates.grant_actions(store, "run-1", ["deploy:prod-web"])
+        gates.record_promotion(store, "run-1", from_env="staging",
+                               to_env="prod", surface="web",
+                               artifact=_GOOD_ARTIFACT, evidence_ids=["stg-web"])
+        ok = gates.check_grant_prod(store, "run-1", "deploy:prod-web",
+                                    _GOOD_ARTIFACT,
+                                    manifest={"web": {"staging": staging}})
+        assert ok is False, staging
+        assert any("NO-STAGING-COUNTERPART" in p["reason"]
+                   for p in gates.list_pending(store, "run-1")), staging
+    # none-prod-1 does NOT trip the sentinel
+    store = tmp_path / "ev-real.json"
+    _seed_success(store)
+    gates.grant_actions(store, "run-1", ["deploy:prod-web"])
+    gates.record_promotion(store, "run-1", from_env="staging", to_env="prod",
+                           surface="web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(
+        store, "run-1", "deploy:prod-web", _GOOD_ARTIFACT,
+        manifest={"web": {"staging": "none-prod-1"}}) is True
+    # deploy:prod-Web vs a `web` row trips it (folded surface lookup)
+    store2 = tmp_path / "ev-case.json"
+    _seed_success(store2)
+    gates.grant_actions(store2, "run-1", ["deploy:prod-Web"])
+    gates.record_promotion(store2, "run-1", from_env="staging", to_env="prod",
+                           surface="Web", artifact=_GOOD_ARTIFACT,
+                           evidence_ids=["stg-web"])
+    assert gates.check_grant_prod(
+        store2, "run-1", "deploy:prod-Web", _GOOD_ARTIFACT,
+        manifest={"web": {"staging": "none"}}) is False
+    assert any("NO-STAGING-COUNTERPART" in p["reason"]
+               for p in gates.list_pending(store2, "run-1"))
+    # folding did NOT migrate into _prod_surface (promotion records key off
+    # the original-case surface)
+    assert gates._prod_surface("deploy:prod-Web") == "Web"
+
+
+# ── spec-007 Phase 1: surfaces parser hardening ──────────────────────────────
+# REQ-103 / AC-002: the committed registry is SECURITY INPUT. Reject cases
+# assert ValueError AND that the message names the offending shape.
+
+import pytest  # noqa: E402
+
+
+def test_surfaces_parser_nested_trigger_requires_indent_zero() -> None:
+    # EDGE-001: a nested surfaces: key must not flip parsing
+    nested_only = ("environments:\n"
+                   "  surfaces:\n"
+                   "    - surface: evil\n"
+                   "      staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(nested_only)
+    assert "surfaces" in str(exc.value)
+    # decoy-indented block + real indent-0 block -> real row only
+    decoy_plus_real = ("environments:\n"
+                       "  surfaces:\n"
+                       "    - surface: evil\n"
+                       "      staging_instance: none\n"
+                       "surfaces:\n"
+                       "  - surface: web\n"
+                       "    staging_instance: real-staging\n")
+    assert gates._load_manifest_text(decoy_plus_real) == {
+        "web": {"staging": "real-staging"},
+    }
+
+
+def test_surfaces_parser_flush_appends_row_when_surfaces_not_last() -> None:
+    # EDGE-002: an indent-0 key AFTER the block flushes the in-progress row
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: stg-web\n"
+            "  - surface: api\n"
+            "    staging_instance: stg-api\n"
+            "test_tiers:\n"
+            "  - tier: fast\n")
+    assert gates._load_manifest_text(text) == {
+        "web": {"staging": "stg-web"},
+        "api": {"staging": "stg-api"},
+    }
+
+
+def test_surfaces_parser_single_entry_latch(tmp_path) -> None:
+    # EDGE-013: after the block closes, surface-shaped lines inside later
+    # prose blocks (with verdict-flipping staging values) are never parsed
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: real-staging\n"
+            "environments:\n"
+            "  - surface: web2\n"
+            "    staging_instance: none\n"
+            "  - surface: evil\n"
+            "    staging_instance: none\n")
+    parsed = gates._load_manifest_text(text)
+    assert set(parsed.keys()) == {"web"}
+    assert parsed["web"] == {"staging": "real-staging"}
+
+
+def test_surfaces_parser_blank_and_comment_lines_are_neutral() -> None:
+    # interior blank between rows and mid-row: both rows complete
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "\n"
+            "    staging_instance: stg-web\n"
+            "\n"
+            "  - surface: api\n"
+            "    # mid-row comment\n"
+            "    staging_instance: stg-api\n")
+    assert gates._load_manifest_text(text) == {
+        "web": {"staging": "stg-web"},
+        "api": {"staging": "stg-api"},
+    }
+    # blank-then-DUPLICATE second row: a flush-on-blank latch would never
+    # see the duplicate — the neutral parse MUST reach and reject it
+    dup = ("surfaces:\n"
+           "  - surface: web\n"
+           "    staging_instance: stg-web\n"
+           "\n"
+           "  - surface: web\n"
+           "    staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(dup)
+    assert "duplicate" in str(exc.value) and "web" in str(exc.value)
+
+
+def test_surfaces_parser_second_surfaces_block_rejects() -> None:
+    # duplicate indent-0 surfaces: key rejects; the indented prose spelling
+    # in the same fixture is inert (nonzero indent never triggers/rejects)
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: stg-web\n"
+            "notes:\n"
+            "  surfaces:\n"
+            "surfaces:\n"
+            "  - surface: api\n"
+            "    staging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(text)
+    assert "surfaces" in str(exc.value) and "duplicate" in str(exc.value)
+
+
+def test_surfaces_parser_pre_row_field_line_rejects() -> None:
+    # PD-4 (0fdfeee3): an allowlisted field line BEFORE the first
+    # `- surface:` row is REJECTED, never silently ignored
+    direct = ("surfaces:\n"
+              "  staging_instance: none\n"
+              "  - surface: web\n"
+              "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(direct)
+    assert "staging_instance" in str(exc.value)
+    after_comment = ("surfaces:\n"
+                     "  # reviewers see a comment; the gate must not differ\n"
+                     "  staging_instance: none\n"
+                     "  - surface: web\n"
+                     "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc2:
+        gates._load_manifest_text(after_comment)
+    assert "staging_instance" in str(exc2.value)
+
+
+def test_surfaces_parser_inline_comment_sentinel_pd3() -> None:
+    # PD-3 (898818dd): _manifest_scalar already strips unquoted trailing
+    # comments — pinned here (fail-open forbidden), not re-implemented
+    text = ("surfaces:\n"
+            "  - surface: web\n"
+            "    staging_instance: none # explanation\n")
+    parsed = gates._load_manifest_text(text)
+    assert parsed == {"web": {"staging": "none"}}
+    assert gates._surface_has_staging("web", parsed) is False
+    quoted = ("surfaces:\n"
+              "  - surface: web\n"
+              "    staging_instance: \"none # x\"\n")
+    parsed_q = gates._load_manifest_text(quoted)
+    assert parsed_q == {"web": {"staging": "none # x"}}
+    assert gates._surface_has_staging("web", parsed_q) is True
+
+
+def test_surfaces_parser_duplicate_surface_names_reject_folded() -> None:
+    # exact duplicate (existing behavior kept)
+    exact = ("surfaces:\n"
+             "  - surface: web\n"
+             "    staging_instance: a\n"
+             "  - surface: web\n"
+             "    staging_instance: b\n")
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(exact)
+    # folded duplicates, both orders, YAML rows
+    for first, second in (("web", "WEB"), ("WEB", "web")):
+        text = ("surfaces:\n"
+                f"  - surface: {first}\n"
+                "    staging_instance: a\n"
+                f"  - surface: {second}\n"
+                "    staging_instance: b\n")
+        with pytest.raises(ValueError, match="duplicate"):
+            gates._load_manifest_text(text)
+    # JSON surfaces array
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(
+            '{"surfaces": [{"surface": "web", "staging_instance": "a"},'
+            ' {"surface": "WEB", "staging_instance": "b"}]}')
+    # legacy JSON map with no surfaces key (the early-return bypass)
+    with pytest.raises(ValueError, match="duplicate"):
+        gates._load_manifest_text(
+            '{"web": {"staging": "a"}, "WEB": {"staging": "b"}}')
+    # negative half: near-miss names load
+    ok = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: a\n"
+          "  - surface: web-admin\n"
+          "    staging_instance: b\n")
+    assert set(gates._load_manifest_text(ok)) == {"web", "web-admin"}
+
+
+def test_surfaces_parser_duplicate_field_and_redeclared_surface_reject() -> None:
+    dup_field = ("surfaces:\n"
+                 "  - surface: web\n"
+                 "    staging_instance: a\n"
+                 "    staging_instance: b\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(dup_field)
+    assert "staging_instance" in str(exc.value)
+    # redeclared in-row surface: after row start — the row seeds `surface`
+    # as seen, so both value orders reject
+    for first, second in (("web", "api"), ("api", "web")):
+        text = ("surfaces:\n"
+                f"  - surface: {first}\n"
+                f"    surface: {second}\n"
+                "    staging_instance: a\n")
+        with pytest.raises(ValueError) as exc2:
+            gates._load_manifest_text(text)
+        assert "surface" in str(exc2.value)
+
+
+def test_surfaces_parser_alias_co_presence_rejects_each_alone_loads() -> None:
+    # YAML row: both keys reject whether values agree or differ
+    for staging_val in ("a", "b"):
+        text = ("surfaces:\n"
+                "  - surface: web\n"
+                "    staging_instance: a\n"
+                f"    staging: {staging_val}\n")
+        with pytest.raises(ValueError) as exc:
+            gates._load_manifest_text(text)
+        assert "staging" in str(exc.value)
+    # JSON row form
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(
+            '{"surfaces": [{"surface": "web", "staging_instance": "a",'
+            ' "staging": "a"}]}')
+    # legacy map form
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(
+            '{"web": {"staging_instance": "a", "staging": "a"}}')
+    # each key ALONE parses in all three forms
+    assert gates._load_manifest_text(
+        "surfaces:\n  - surface: web\n    staging_instance: a\n") == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text(
+        "surfaces:\n  - surface: web\n    staging: a\n") == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text(
+        '{"surfaces": [{"surface": "web", "staging": "a"}]}') == {
+        "web": {"staging": "a"}}
+    assert gates._load_manifest_text('{"web": {"staging": "a"}}') == {
+        "web": {"staging": "a"}}
+
+
+def test_surfaces_parser_json_duplicate_keys_reject_at_any_depth() -> None:
+    dup_shapes = [
+        # top-level, both orders
+        '{"web": {"staging": "a"}, "web": {"staging": "b"}}',
+        '{"web": {"staging": "b"}, "web": {"staging": "a"}}',
+        # in-row
+        '{"surfaces": [{"surface": "web", "staging_instance": "a",'
+        ' "staging_instance": "b"}]}',
+        # nested
+        '{"web": {"staging": "a", "staging": "none"}}',
+    ]
+    for shape in dup_shapes:
+        with pytest.raises(ValueError, match="duplicate"):
+            gates._load_manifest_text(shape)
+    # duplicate-free JSON loads unchanged
+    assert gates._load_manifest_text('{"web": {"staging": "stg"}}') == {
+        "web": {"staging": "stg"}}
+
+
+def test_surfaces_parser_tab_indentation_rejects_in_block_only() -> None:
+    tabbed = ("surfaces:\n"
+              "  - surface: web\n"
+              "\tstaging_instance: none\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(tabbed)
+    assert "tab" in str(exc.value).casefold()
+    # a tab-indented surfaces: key OUTSIDE a block is inert (nonzero indent)
+    inert = ("\tsurfaces:\n"
+             "surfaces:\n"
+             "  - surface: web\n"
+             "    staging_instance: stg\n")
+    assert gates._load_manifest_text(inert) == {"web": {"staging": "stg"}}
+
+
+def test_surfaces_parser_unknown_field_warns_and_ignores(capsys) -> None:
+    # openclaw#1699: consumer repos extend surface rows with their own scalar
+    # keys (mirrored, prod_runtime_home, staging_runtime_home) consumed by
+    # their own tooling — the gate only reads surface + staging keys, and a
+    # dropped staging key fails CLOSED (prod grant refused), so tolerating
+    # unknown scalars cannot fail open. WARN on stderr, key + line only,
+    # never the value (A8 value-stripping discipline).
+    unknown = ("surfaces:\n"
+               "  - surface: web\n"
+               "    staging_instance: stg-web\n"
+               "    sneaky_field: SENTINEL_VALUE_BYTES\n")
+    parsed = gates._load_manifest_text(unknown)
+    assert parsed == {"web": {"staging": "stg-web"}}
+    err = capsys.readouterr().err
+    assert "sneaky_field" in err and "WARNING" in err
+    assert "SENTINEL_VALUE_BYTES" not in err
+    # the committed openclaw parity-manifest row shape loads verbatim
+    consumer = ("surfaces:\n"
+                "  - surface: web\n"
+                "    staging_instance: stg-web\n"
+                "    mirrored: false\n"
+                "    prod_runtime_home: /opt/prod\n"
+                "    staging_runtime_home: /opt/stg\n")
+    assert gates._load_manifest_text(consumer) == {
+        "web": {"staging": "stg-web"}}
+
+
+def test_surfaces_parser_unknown_field_structural_rejects_stay() -> None:
+    # duplicate unknown key in one row still rejects (same discipline as
+    # allowlisted duplicates)
+    dup = ("surfaces:\n"
+           "  - surface: web\n"
+           "    mirrored: false\n"
+           "    mirrored: true\n")
+    with pytest.raises(ValueError) as exc:
+        gates._load_manifest_text(dup)
+    assert "mirrored" in str(exc.value) and "duplicate" in str(exc.value)
+    # unknown key BEFORE any row rejects (PD-4 parity with allowlisted keys)
+    pre_row = ("surfaces:\n"
+               "  mirrored: false\n"
+               "  - surface: web\n"
+               "    staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc2:
+        gates._load_manifest_text(pre_row)
+    assert "mirrored" in str(exc2.value)
+    # value-less nested-map opener is NOT a tolerated scalar — still rejects
+    nested = ("surfaces:\n"
+              "  - surface: web\n"
+              "    extras:\n"
+              "      inner: x\n")
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(nested)
+    # codex round-2 HIGH: a comment-masked nested-map opener is tolerated as
+    # a scalar, and its CHILD must not be consumed as a row-level field —
+    # field indent is pinned by the first field line of the row
+    masked_nested = ("surfaces:\n"
+                     "  - surface: web\n"
+                     "    extras: # nested map\n"
+                     "      staging_instance: stg-web\n")
+    with pytest.raises(ValueError) as exc3:
+        gates._load_manifest_text(masked_nested)
+    assert "indent" in str(exc3.value)
+    # same shape with an allowlisted opener's child — also rejected
+    masked_allowlisted_child = ("surfaces:\n"
+                                "  - surface: web\n"
+                                "    staging_instance: stg-web\n"
+                                "      prod_instance: deep\n")
+    with pytest.raises(ValueError) as exc4:
+        gates._load_manifest_text(masked_allowlisted_child)
+    assert "indent" in str(exc4.value)
+    # codex round-3b HIGH: a masked nested SEQUENCE must not mint phantom
+    # rows — the first '- surface:' of the block pins the row-starter
+    # indent; a deeper row starter rejects (LF and CRLF)
+    masked_nested_row = ("surfaces:\n"
+                         "  - surface: web\n"
+                         "    staging_instance: stg-web\n"
+                         "    extras: # nested map\n"
+                         "      - surface: evil\n"
+                         "        staging_instance: stg-evil\n")
+    with pytest.raises(ValueError) as exc5:
+        gates._load_manifest_text(masked_nested_row)
+    assert "indent" in str(exc5.value)
+    with pytest.raises(ValueError):
+        gates._load_manifest_text(masked_nested_row.replace("\n", "\r\n"))
+
+
+def test_surfaces_parser_allowlist_loads() -> None:
+    # positive halves: all nine allowlisted keys across two rows (alias keys
+    # split between rows), rollback included
+    ok = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: stg-web\n"
+          "    prod_instance: prod-web\n"
+          "    staging_artifact: a1\n"
+          "    prod_artifact: a2\n"
+          "    rollback: make rollback\n"
+          "  - surface: api\n"
+          "    staging: stg-api\n"
+          "    staging_migration_head: m1\n"
+          "    prod_migration_head: m2\n")
+    parsed = gates._load_manifest_text(ok)
+    assert set(parsed) == {"web", "api"}
+    assert parsed["web"]["staging"] == "stg-web"
+    assert parsed["api"]["staging"] == "stg-api"
+
+
+def test_surfaces_parser_crlf_parses_equal_to_lf() -> None:
+    lf = ("surfaces:\n"
+          "  - surface: web\n"
+          "    staging_instance: none\n")
+    crlf = lf.replace("\n", "\r\n")
+    assert gates._load_manifest_text(crlf) == gates._load_manifest_text(lf)
+
+
+def test_surfaces_parser_regression_live_registry_and_legacy_shape() -> None:
+    # FFS's own registry still loads to the single release row after the
+    # rewrite (the legacy-shape test above stays green unedited)
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    assert gates._load_manifest(str(live)) == {"release": {"staging": "none"}}
+
+
+# ── spec-007 Phase 1 Plan 02 Task 1: reason_sink + CLI print rule (REQ-104) ──
+# Print rule, ONE condition on ONE input: only the reason arriving through
+# check_grant_prod's reason_sink is eligible; contains `remedy:` → verbatim
+# `NOT-GRANTED: <action> (run <id>) — <reason>` on stdout; otherwise today's
+# promote/grant hint prints unchanged. Resolver refusals never enter the rule
+# — they return on stderr behind CHECK-GRANT-REJECTED before check_grant_prod
+# runs. Wall 3bc9da55: the sink carries sanitize_reason(reason) — the SAME
+# value record_pending stores — never the raw string.
+
+
+def test_cli_prints_typed_reason_with_remedy(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)  # committed registry: web/none
+    _seed_prod_ok(env, repo)
+    r = _check_grant_prod_cli(env, repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+    assert "'web'" in r.stdout
+    assert "remedy:" in r.stdout
+    assert "config/environments.yaml" in r.stdout
+
+
+def test_cli_promote_and_grant_hints_unchanged(tmp_path) -> None:
+    import subprocess as _sp
+    # promote-path hint: real staging counterpart, grant seeded, no promote
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, _registry_text("web", "stg-web"))
+    g = str(DISPATCH_DIR / "gates.py")
+    _sp.run(["python3", g, "grant", "run-1", "--action", "deploy:prod-web"],
+            capture_output=True, text=True, env=env, cwd=repo)
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-web", "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "record promote" in r.stdout
+    assert "--from staging --to prod --surface web" in r.stdout
+    assert "remedy:" not in r.stdout
+    # grant-path hint (non-prod): verbatim pending-command text
+    r2 = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                  "push:origin/main"],
+                 capture_output=True, text=True, env=env, cwd=repo)
+    assert r2.returncode == 1
+    assert "record with" in r2.stdout and "pending" in r2.stdout
+    assert "remedy:" not in r2.stdout
+
+
+def test_reason_sink_beats_pending_reread(tmp_path) -> None:
+    # Refuse the SAME action twice in one run for two DIFFERENT reasons.
+    # record_pending dedupes by action, so a list_pending re-read would print
+    # the FIRST reason (NO-PROMOTE-EVIDENCE); the sink must carry the SECOND.
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)  # committed registry: web/none
+    g = str(DISPATCH_DIR / "gates.py")
+    first = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                     "deploy:prod-web"],  # no --artifact
+                    capture_output=True, text=True, env=env, cwd=repo)
+    assert first.returncode == 1
+    assert any("NO-PROMOTE-EVIDENCE" in x for x in _pending_reasons(store))
+    second = _check_grant_prod_cli(env, repo)  # artifact present, staging none
+    assert second.returncode == 1, second.stdout + second.stderr
+    assert "NO-STAGING-COUNTERPART" in second.stdout
+    assert "NO-PROMOTE-EVIDENCE" not in second.stdout
+
+
+def test_reason_budget_64_char_surface(tmp_path) -> None:
+    # sanitize_reason truncates at 200 chars; a 64-char surface still yields
+    # a stored reason containing `remedy:` (surface interpolated exactly
+    # once, never an artifact digest), and the sink carries the SAME value.
+    store = tmp_path / "evidence.json"
+    surface = "s" * 64
+    manifest = {surface: {"staging": "none"}}
+    sink: list[str] = []
+    assert gates.check_grant_prod(store, "run-1", f"deploy:prod-{surface}",
+                                  _GOOD_ARTIFACT, manifest=manifest,
+                                  reason_sink=sink) is False
+    reasons = _pending_reasons(store)
+    assert len(reasons) == 1
+    stored = reasons[0]
+    assert "remedy:" in stored and len(stored) <= 200
+    assert stored.count(surface) == 1
+    assert "sha256" not in stored
+    assert sink == [stored]
+
+
+def test_unknown_prod_surface_reason_reaches_stdout(tmp_path) -> None:
+    # hard mode, committed v1 registry, no matching row → the 01-01
+    # UNKNOWN-PROD-SURFACE reason (already remedy-carrying) reaches stdout
+    # through the same print rule.
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    r = _check_grant_prod_cli(env, repo, action="deploy:prod-ghost",
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT-GRANTED" in r.stdout
+    assert "UNKNOWN-PROD-SURFACE" in r.stdout
+    assert "remedy:" in r.stdout
+
+
+def test_cli_sink_reason_hostile_surface_sanitized(tmp_path) -> None:
+    # Wall 3bc9da55: a registry-driven refusal whose surface name embeds
+    # control chars (\x1b, \r) reaches stdout stripped/escaped and within the
+    # 200-char reason budget — asserted on the CLI's real output.
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path)
+    hostile = "deploy:prod-web\x1b[31mEVIL\rGRANTED: fake"
+    r = _check_grant_prod_cli(env, repo, action=hostile,
+                              extra=["--require-environments"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNKNOWN-PROD-SURFACE" in r.stdout
+    assert "\x1b" not in r.stdout
+    line = next(ln for ln in r.stdout.splitlines() if "NOT-GRANTED" in ln)
+    assert "\x1b" not in line and "\r" not in line
+    reason = line.split(" — ", 1)[1]
+    assert len(reason) <= 200 and "remedy:" in reason
+
+
+# ── spec-007 Phase 1 Plan 02 Task 2: live AC-003 against FFS's own registry ──
+# PINNED (df81aa82): the live-registry tests live HERE, after 01-01 landed
+# the full resolver including the env-var branch.
+
+
+def test_live_ffs_registry_refuses_via_manifest_flag(tmp_path) -> None:
+    # AC-003, --manifest form: soft mode parses working-tree bytes (PD-2),
+    # so this case is runnable in ANY topology including the executor
+    # worktree — the live registry's single release/none row must refuse.
+    import subprocess as _sp
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    repo = _init_registry_repo(tmp_path, _registry_text("decoy", "stg-decoy"))
+    _seed_prod_ok(env, repo, surface="release")
+    live = DISPATCH_DIR.parent / "config" / "environments.yaml"
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-release", "--artifact", _GOOD_ARTIFACT,
+                 "--manifest", str(live)],
+                capture_output=True, text=True, env=env, cwd=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+    assert "release" in r.stdout
+    assert "remedy:" in r.stdout
+
+
+def test_live_ffs_registry_refuses_via_default_resolution(tmp_path) -> None:
+    # AC-003, default-resolution form: derive the MAIN checkout root exactly
+    # as the resolver does (git-common-dir, parent of `.git`) and run with no
+    # flags from that root. A `__file__`-relative registry path is unusable
+    # here — from a linked worktree it lies outside the main checkout and
+    # the resolver is REQUIRED to refuse it.
+    import subprocess as _sp
+    probe = _sp.run(["git", "rev-parse", "--git-common-dir"],
+                    capture_output=True, text=True, cwd=DISPATCH_DIR)
+    assert probe.returncode == 0, probe.stderr
+    # rev-parse emits a path RELATIVE TO ITS CWD (e.g. "../.git" from lib/);
+    # a bare Path() would later resolve against pytest's cwd and land one
+    # directory too high, falsely skipping this live pin post-merge
+    # (01-VERIFICATION W1). Anchor to the probe's own cwd.
+    common = (Path(DISPATCH_DIR) / probe.stdout.strip()).resolve()
+    assert common.name == ".git", common
+    main_root = common.parent
+    rel = "config/environments.yaml"
+    main_has = _sp.run(["git", "-C", str(main_root), "show", f"HEAD:{rel}"],
+                       capture_output=True, text=True).returncode == 0
+    this_has = _sp.run(["git", "-C", str(DISPATCH_DIR.parent), "show",
+                        f"HEAD:{rel}"],
+                       capture_output=True, text=True).returncode == 0
+    if not main_has and this_has:
+        pytest.skip(
+            "pre-merge worktree topology: this checkout's HEAD carries "
+            f"{rel} but the MAIN checkout's HEAD ({main_root}) does not — "
+            "implicit resolution reads main HEAD only; the must-haves "
+            "AC-003 GATE re-runs this live post-merge")
+    if not main_has:
+        pytest.fail(
+            f"{rel} absent from BOTH main HEAD and this checkout's HEAD — "
+            "01-01 (b5c53b0) committed the registry; it has been lost")
+    store = tmp_path / "evidence.json"
+    env = _env_registry_env(store)
+    _seed_prod_ok(env, main_root, surface="release")
+    g = str(DISPATCH_DIR / "gates.py")
+    r = _sp.run(["python3", g, "check-grant", "run-1", "--action",
+                 "deploy:prod-release", "--artifact", _GOOD_ARTIFACT],
+                capture_output=True, text=True, env=env, cwd=main_root)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NO-STAGING-COUNTERPART" in r.stdout
+
+
+def test_non_ledger_run_id_reaches_registry_refusal(tmp_path) -> None:
+    # AC-003's literal command uses run id `ac003` (not run-<digits>). The
+    # degraded-ratio guard's run-id shape check must be vacuous for such ids
+    # (they can have no degradation events), never a SILENT unrecorded False
+    # — that would refuse without a typed reason (REQ-104) and block the
+    # spec's live gate before the registry check.
+    store = tmp_path / "evidence.json"
+    sink: list[str] = []
+    assert gates.check_grant_prod(
+        store, "ac003", "deploy:prod-release", _GOOD_ARTIFACT,
+        manifest={"release": {"staging": "none"}}, reason_sink=sink) is False
+    assert sink and "NO-STAGING-COUNTERPART" in sink[0]
+    assert any("NO-STAGING-COUNTERPART" in x
+               for x in _pending_reasons(store, "ac003"))
+
+
+def test_stale_docstring_claim_absent() -> None:
+    # 01-01 removed the later-phase wiring claim from gates.py; assert it
+    # has not returned (absence only, no particular replacement wording).
+    text = (DISPATCH_DIR / "gates.py").read_text()
+    assert "wiring lands Phase 4" not in text

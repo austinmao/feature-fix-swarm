@@ -20,6 +20,8 @@ allowed-tools:
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 One command. Takes a bug description or symptom, traces root cause, then hands the
 fix to `/feature-implement --adhoc` — the ONE home for walls (model-fallback,
 security fence, preflight/grant checks), the gsd execution loop, the finish tail
@@ -41,6 +43,12 @@ the investigation and the fix-specific QA loop.
 | `--no-finish` | Pass through — skip the finish tail (review-gate/ship). **Operator-accepted-risk**; provably minimal blast radius only. Replaces v3.x `--no-review-gate`/`--no-audit` (retired). |
 
 ## Workflow
+
+Cross-session coordination (spec-009) is inherited, not re-implemented: the
+execute step routes through `/feature-implement --adhoc`, whose Step 1.5
+claim-or-stop claims `adhoc-<slug>` (interactive) or defers to `gsd-run.sh`'s
+own claim (headless). If that claim is REFUSED, another live session owns this
+fix — stop and inspect `python3 scripts/coord/coord.py status`.
 
 ### Step 1: Investigate (root cause, not symptom)
 

@@ -66,10 +66,10 @@ JSON output has schema `ffs.doctor/v1`. Exit codes are stable:
   collision, or different project/user versions.
 - `2`: invalid invocation or an internal installer failure.
 
-Doctor also requires upstream `gsd-file-manifest.json` ownership at GSD 1.9.1
+Doctor also requires upstream `gsd-file-manifest.json` ownership at GSD 1.10.0
 with full profiles in both the Claude and Codex config roots. If Codex CLI is
-installed, its supported range is `>=0.137.0,<0.147.0`; `0.146.x` is the tested
-line.
+installed, its supported range is `>=0.137.0,<0.148.0`; `0.146.x` and `0.147.x`
+are the tested lines.
 
 ## Safe migration
 
@@ -84,7 +84,14 @@ leave the operation at exit `1` until the operator resolves them.
 The same rule applies to managed destinations: an existing path is replaced
 only when it matches the prior install manifest, already matches the new
 source, or is a broken project link. Unmanaged and edited collisions fail
-before canonical FFS paths are changed.
+before canonical FFS paths are changed — by default, a single colliding path
+hard-blocks the entire install, even for skills that never changed.
+
+Pass `--adopt-collisions` to resolve collisions instead of blocking: each
+colliding path is backed up (its location is printed as
+`adopted collision: <path> backed up at <backup path>`), then replaced with
+the vendor copy, while the rest of the install proceeds normally. The default
+behavior is unchanged unless this flag is passed.
 
 ## Backups, rollback, and uninstall
 
@@ -117,7 +124,7 @@ rolled back with the emitted ID.
 
 ## GSD ownership
 
-`setup.sh` verifies the exact `@opengsd/gsd-core@1.9.1` package and runs:
+`setup.sh` verifies the exact `@opengsd/gsd-core@1.10.0` package and runs:
 
 ```text
 gsd-core --claude --global --profile=full

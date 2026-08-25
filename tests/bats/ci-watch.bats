@@ -1,0 +1,64 @@
+#!/usr/bin/env bats
+setup() {
+ ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; CI="$ROOT/scripts/gsd/ci-watch.sh"; REPO="$BATS_TEST_TMPDIR/repo"; BIN="$BATS_TEST_TMPDIR/bin"
+ mkdir -p "$REPO/.planning/run-state" "$REPO/scripts/gsd" "$BIN"; cp "$ROOT/scripts/gsd/lifecycle.sh" "$ROOT/scripts/gsd/run-bounded.sh" "$REPO/scripts/gsd/"; cd "$REPO"; git init -q -b main; git -c user.email=t -c user.name=t commit -q --allow-empty -m init; export PATH="$BIN:$PATH"
+ bash scripts/gsd/lifecycle.sh checkpoint ci waiting ci ci-completed '{"databaseId":42}' '["scripts/gsd/plan-wall.sh"]' '{"ci_reruns":2}'
+}
+mock(){ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *--json* ]]; then echo '{"databaseId":42,"status":"completed","conclusion":"failure","attempt":1}'; elif [[ "$*" == *--log-failed* ]]; then echo runner-lost; elif [[ "$*" == *rerun* ]]; then echo "$*" >> "$BATS_TEST_TMPDIR/reruns"; fi
+EOF
+chmod +x "$BIN/gh"; }
+@test "uses pinned id and rerun budget is durable" { mock; run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [[ "$output" == *rerun:42* ]]; [ "$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)" = 1 ]; }
+@test "success becomes runnable" {
+ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '{"databaseId":42,"status":"completed","conclusion":"success","attempt":1}'
+EOF
+ chmod +x "$BIN/gh"; run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [[ "$output" == *pass* ]]; [ "$(jq -r .state .planning/run-state/lifecycle-ci.json)" = runnable ]
+}
+@test "watch exposes the shipped thirty second floor" {
+ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '{"databaseId":42,"status":"completed","conclusion":"success","attempt":1}'
+EOF
+ chmod +x "$BIN/gh"; run bash "$CI" watch --database-id 42; [ "$status" -eq 0 ]; [[ "$output" == *interval=30* ]]
+}
+@test "successful probe resets durable gh errors" {
+ bash scripts/gsd/lifecycle.sh ci-gh-error ci 5 >/dev/null
+ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '{"databaseId":42,"status":"in_progress","conclusion":null,"attempt":1}'
+EOF
+ chmod +x "$BIN/gh"; run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [ "$(jq -r .ci.gh_errors .planning/run-state/lifecycle-ci.json)" = 0 ]
+}
+@test "pending rerun retries without a second budget spend" {
+ mock; bash scripts/gsd/lifecycle.sh ci-reserve ci 1 2 >/dev/null
+ run bash "$CI" evaluate --run-id ci; [ "$status" -eq 0 ]; [[ "$output" == *rerun:42* ]]; [ "$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)" = 1 ]
+}
+@test "rerun budget exhausted fails the record" {
+ bash scripts/gsd/lifecycle.sh checkpoint zero waiting ci ci-completed '{"databaseId":42}' '["scripts/gsd/plan-wall.sh"]' '{"ci_reruns":0}'
+ mock
+ run bash "$CI" evaluate --run-id zero
+ [ "$status" -ne 0 ]
+ [[ "$output" == *'CI-WATCH:rerun-exhausted'* ]]
+ [ "$(jq -r .state .planning/run-state/lifecycle-zero.json)" = failed ]
+ [ "$(jq -r .reason .planning/run-state/lifecycle-zero.json)" = ci-rerun-exhausted ]
+}
+@test "failed rerun command refunds the reservation" {
+ # Same infra-classified failure as mock(), but "gh run rerun" itself fails
+ # so the ci-reserve reservation must be refunded, not leaked.
+ cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *--json* ]]; then echo '{"databaseId":42,"status":"completed","conclusion":"failure","attempt":1}'; elif [[ "$*" == *--log-failed* ]]; then echo runner-lost; elif [[ "$*" == *rerun* ]]; then exit 1; fi
+EOF
+ chmod +x "$BIN/gh"
+ pre="$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)"
+ run bash "$CI" evaluate --run-id ci
+ [ "$status" -eq 0 ]
+ [[ "$output" == *'CI-WATCH:gh-error idle'* ]]
+ [ "$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)" = "$pre" ]
+ # a refunded reservation was never spent: reruns_spent unwinds too, or
+ # repeated transient failures would falsely trip reruns_spent>=maximum
+ [ "$(jq -r .ci.reruns_spent .planning/run-state/lifecycle-ci.json)" = 0 ]
+}

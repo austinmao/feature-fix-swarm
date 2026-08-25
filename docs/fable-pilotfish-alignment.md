@@ -93,11 +93,17 @@ Executable home (v4.5.1): `scripts/gsd/model-equivalents.sh` — sourceable lib
 consumer (model-fallback.sh's codex-sol probe leg included) should source
 rather than re-deriving this table by hand:
 
-| OpenAI | $/1M in/out | Claude-side equivalent | FFS use |
-|---|---|---|---|
-| `gpt-5.6-sol` | $5/$30 | opus / fable | adversarial gates (plan-adversary, review-gate) @ `xhigh`; `max` for escalated disputes |
-| `gpt-5.6-terra` | $2.50/$15 | sonnet | qa-coverage-adversary @ `high` (gap-finder, not judge) |
-| `gpt-5.6-luna` | $1/$6 | haiku | cheap mechanical review passes (unused today) |
+| OpenAI | $/1M in/out | Claude-side equivalent | Effort | FFS use |
+|---|---|---|---|---|
+| `gpt-5.6-sol` | $5/$30 | fable (frontier) | `xhigh` | planning; adversarial gates at the frontier rung |
+| `gpt-5.6-sol` | $5/$30 | opus (judgment) | `high` | plan-adversary, review-gate, plan-wall reviews; `max` for escalated disputes |
+| `gpt-5.6-terra` | $2.50/$15 | sonnet | `medium` | qa-coverage-adversary (gap-finder, not judge) |
+| `gpt-5.6-luna` | $1/$6 | haiku | `low` | cheap mechanical review passes (unused today) |
+
+Sol is the Codex resolution for both `frontier` and `judgment` — spec 004's
+4-tier split regains distinction between them the only way Codex allows: the
+`xhigh`/`high` effort split (`scripts/gsd/model-equivalents.sh`), not a
+separate model.
 
 Correction (v4.5.1): the effort set stated here as `none|low|medium|high|xhigh|max`
 was imprecise. Codex CLI 0.144's API-validated `model_reasoning_effort` enum is

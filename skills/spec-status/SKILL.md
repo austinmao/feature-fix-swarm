@@ -1,7 +1,7 @@
 ---
 name: spec-status
 description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan out volume, execution, and judgment roles over git, .planning, gates, runner state, evidence, and hygiene; write a status report and host-native handoff."
-version: "1.1.1"
+version: "1.1.2"
 ---
 
 # /spec-status [NNN] [--continue-compact] [--no-handoff]
@@ -35,7 +35,10 @@ bash "$(dirname <this skill>)/scripts/collect-status-facts.sh" "$SPEC_ID"
 Sections: GIT · PLANNING (plans vs SUMMARYs per phase) · RUNNER (status file +
 pid liveness — never trust shell rc or `state=completed` alone) · LEDGER
 (pendings; grants checked via `check-grant`) · EVIDENCE (files + mtimes) ·
-HYGIENE (key-shaped strings in evidence/, filenames only) · DISK.
+HYGIENE (key-shaped strings in evidence/, filenames only) · COORD
+(cross-session claims + path leases from spec-009's `coord.py status`,
+uuid-redacted; a claim on this spec by another live session means DO NOT
+start implementing here) · DISK.
 
 ## Step 3 — Fan-out (task-swarm style; every spawn model-pinned)
 
@@ -49,8 +52,9 @@ HYGIENE (key-shaped strings in evidence/, filenames only) · DISK.
 
 Resolve `volume` to Codex Luna low / Claude Haiku, `execution` to Codex Terra
 medium / Claude Sonnet, and `judgment` to Codex Sol high / Claude Opus.
-Synthesis uses judgment unless the thin orchestrator can reconcile the reports
-inline. Producer ≠ reviewer holds: the synthesizer never re-litigates scouts;
+(`frontier` — Codex Sol xhigh / Claude Fable — is the planning-only tier and
+has no role in this status fan-out.) Synthesis uses judgment unless the thin
+orchestrator can reconcile the reports inline. Producer ≠ reviewer holds: the synthesizer never re-litigates scouts;
 it reconciles contradictions and says which report won.
 
 ## Step 4 — Report
@@ -75,6 +79,25 @@ Print the headline + Next 3 inline; the file carries the rest.
 - `--continue-compact`: invoke `/continue-compact` INSTEAD of bare `/handoff`
   (it chains handoff → context-save → compact command block; never trigger
   `/compact` yourself — present the block for the operator).
+
+Before committing any status artifact or produced handoff, run the shared
+copy-then-scan-then-publish harness on each — it never scans a git index
+blob, only a private temp copy made before anything is staged:
+
+```bash handoff-scan
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+bash "$REPO_ROOT/scripts/gsd/publish-scanned-handoff.sh" \
+  "$STATUS_PATH" --commit "docs(status): save spec status report" || exit $?
+if [ -n "${HANDOFF_PATH:-}" ]; then
+  bash "$REPO_ROOT/scripts/gsd/publish-scanned-handoff.sh" \
+    "$HANDOFF_PATH" --commit "docs(handoff): save durable handoff" || exit $?
+fi
+```
+
+A finding stops the commit for that artifact with nothing added to the
+index or object database; a missing scanner warns once per artifact and
+continues. `HANDOFF_PATH` stays unset under `--no-handoff`, so the second
+call never runs — preserving that flag's behavior.
 
 ## Constraints
 

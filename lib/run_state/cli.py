@@ -78,7 +78,10 @@ def cmd_update(args: argparse.Namespace) -> int:
     if args.phase:
         store.update_phase(args.run_id, args.phase)
     if args.tokens is not None:
-        store.inc_tokens(args.run_id, args.tokens)
+        breach = store.inc_tokens(args.run_id, args.tokens)
+        if breach is not None:
+            limit, spent = breach
+            print(f"BUDGET-BREACH: {args.run_id} {limit} {spent}")
     if args.state:
         store.update_state(args.run_id, args.state)
     return 0

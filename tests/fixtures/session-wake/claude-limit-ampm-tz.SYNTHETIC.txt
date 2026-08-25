@@ -1,0 +1,4 @@
+SYNTHETIC fixture — reconstructed; replace with a live vendor capture when observed.
+Times are interpreted in the host local timezone; suffixes are deliberately ignored.
+noise
+Claude hit your limit; it resets at 11:45 PM PST.

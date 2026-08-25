@@ -7,8 +7,10 @@
 # "ultra"/"max" are CLI-accepted aliases that do NOT appear in the enum —
 # canonical top is xhigh. See docs/fable-pilotfish-alignment.md (v4.5.1 note).
 #
-# Map (docs/fable-pilotfish-alignment.md ~L90-98, plan-adversary.sh defaults):
-#   fable  -> gpt-5.6-sol   / high
+# Map (docs/fable-pilotfish-alignment.md ~L90-98, plan-adversary.sh defaults;
+# effort split per spec-004 AC-004 — frontier (fable) regains the one bit of
+# distinction the model-collapse lost):
+#   fable  -> gpt-5.6-sol   / xhigh
 #   opus   -> gpt-5.6-sol   / high
 #   sonnet -> gpt-5.6-terra / medium
 #   haiku  -> gpt-5.6-luna  / low
@@ -32,7 +34,8 @@ codex_equiv_model() {
 
 codex_equiv_effort() {
   case "$1" in
-    *fable*|*opus*) echo "high" ;;
+    *fable*) echo "xhigh" ;;
+    *opus*) echo "high" ;;
     *sonnet*) echo "medium" ;;
     *haiku*) echo "low" ;;
     *) echo "$1"; return 1 ;;

@@ -88,11 +88,23 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 | Command | What it does |
 |---------|-------------|
 | `/spec-status [NNN] [--continue-compact] [--no-handoff]` | Read-only "where are we?" status check for a spec run — fans out over git, `.planning/`, gates ledger, runner state, evidence, and hygiene; writes a status report + `/handoff` (chains `/continue-compact` instead with that flag) |
+| `/spec-guide [NNN] [--no-live] [--output PATH]` | Produce developer, admin, and user instructions for a spec, map every step to its real browser/API/MCP/chat/email/CLI/webhook/worker vehicle, execute those proofs, and write `<spec-dir>/usage-guide.md`; design changes require `/design-review` |
 | `/continue-compact` | Save a durable handoff and produce the exact host-native resume command before the built-in `/compact`; Codex invokes the skill as `$continue-compact` |
 | `/retro` | Weekly retrospective of what shipped, what broke, what to improve |
 | `/checkpoint` | Save progress mid-session for resume later |
 | `/health` | Codebase quality check (dead code, test coverage, lint) |
 | `/goal-wrap [--gates] "objective"` | Bundle current work into a self-contained, anti-drift `/goal "..."` prompt with tracked DONE WHEN proof commands. Use before `/clear`, agent handoff, or switching machines. `--gates` reverts to ask-first behavior (default: full autonomy — commits/push/merge/deploy pre-approved). Degrades gracefully without repowise/gbrain/`/prompt-master`/`/handoff` — see the skill's own "Soft dependencies" table. |
+
+## Repository Hygiene
+
+| Command | What it does |
+|---------|-------------|
+| `/git-branch-consolidate` | Read-only audit of every branch and worktree — is the content already landed, what does it still owe, does it have tests, is its spec/plan/tasks trail complete. Emits an ordered merge set, cleanup set, and testing gaps to `.planning/ESTATE-<UTC>.md`; never checks out, merges, or deletes |
+| `/git-branch-cleanup` | Triage branches against the base branch, merge only CI-green non-gated PRs, prune merged refs + worktrees. Squash-merge and operator-gate aware; owns the deletion approval flow |
+
+**Pair order:** `/git-branch-consolidate` audits and decides, then hands its
+`delete-safe` set to `/git-branch-cleanup` to execute. Land before cleanup, or
+you delete the only copy.
 
 ## Environment Variables
 
@@ -104,7 +116,7 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 
 ## gsd-core (Orchestration)
 
-The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.9.1`.
+The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.10.0`.
 Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG package.
 
 | Scenario | Use |
@@ -122,8 +134,16 @@ the phase's PLAN frontmatter to own every ROADMAP requirement exactly once.
 Preparatory plans use `requirements: []`; an ID goes only on the final plan that
 genuinely completes it. Headless execution enforces this before any model probe.
 
+Also before execution — after the ownership gate, before any task starts —
+`scripts/gsd/plan-wall.sh` reviews the phase's plan(s) with a model distinct
+from the one that wrote it (producer≠reviewer, always on; see
+[Model tiers](model-tiers.md#the-plan-wall)). HIGH/CRITICAL findings block
+until adjudicated; `PLAN_WALL=off` skips only with a recorded waiver.
+
 Completion authority is gates.py, never gsd self-report: `workflow.test_command` =
-`scripts/gsd/gates-test-command.sh` (run-gate + strict verify-done),
+`scripts/gsd/gates-test-command.sh` (run-gate + strict verify-done + plan-wall
+completion backstop — a phase can start unwalled but cannot COMPLETE without a
+passing wall record),
 `workflow.code_review_command` = `scripts/gsd/review-gate-command.sh` (grant wall + codex),
 and the `gsd-phase-evidence-gate.sh` PreToolUse hook blocks ROADMAP/STATE phase flips
 without evidence.
@@ -156,5 +176,8 @@ Completion authority for autonomous runs — evidence, not agent self-report.
 | `gates.py proof RUN T040 T041 … [--defer "name: reason"]… [--strict] [--out path]` | Emit the per-run proof artifact (`proof-<run>.json`): one claim per task with evidence cmd, real exit, sha256 of stored log material, live-vs-structural kind; named deferrals; go/no-go verdict. Exit 1 on no-go (v3.15.0) |
 | `gates.py scan-tamper < diff` | Flag reward-hacking moves: deleted asserts, added skips, `exit 0`, CI edits. Exit 1 on findings |
 | `gates.py analyze spec.md tasks.md` | Spec↔tasks coherence gate (spec-kit analyze analog); `/feature-implement` refuses to start on findings |
+| `gates.py findings-queue add ... [--severity S] [--source wall\|review-gate] [--plan PATH]` | Record a review finding (plan-wall, review-gate, or manual); re-adding a RESOLVED signature reopens it |
+| `gates.py findings-queue resolve ... --disposition refute\|fix\|waive --reason "…"` | Resolve a finding; disposition and reason are required and kept in history |
+| `gates.py findings-queue list [--unresolved] [--severity ...] [--source ...] [--plan ...]` | Filtered finding listing; the plan wall's blocking check is `list --unresolved --source wall --severity HIGH,CRITICAL --plan <plan>` |
 
 Gate ladder (cheap→expensive, fail-fast): compile → typecheck → lint → unit → integration → e2e → LLM review. Truth score is computed by `phase-score` at every phase gate; < 0.95 after max retries → rollback to phase checkpoint. No-progress is enforced by `note-failure` in the retry loop. LLM review rounds capped at 2/phase. `record-gate` still exists for humans but warns at runtime and is rejected under strict mode. Optional PreToolUse hook `hooks/tdd-gate.sh` blocks source writes with no matching test file.

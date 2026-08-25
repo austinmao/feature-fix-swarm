@@ -5,15 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm
@@ -21,30 +27,128 @@ jobs:
         run: npm ci
       - name: Run python test suites
         run: |
-          python -m pip install --quiet pytest
+          python -m pip install --quiet --requirement requirements-dev.txt
           python -m pytest lib/ tests/ -q
+      - name: Scan production Python
+        run: bandit -r lib scripts -x lib/tests,lib/run_state/tests -lll -q
       - name: SKILL.md verify blocks (anti-rot)
         run: |
           python scripts/verify-skill-blocks.py
           python scripts/lint_host_dispatch.py skills/*/SKILL.md
           python scripts/lint_model_routing.py
           python lib/model_requests.py lint templates/model-requests.json
+      - name: Environment registry lint
+        # Seam 5 (REQ-401): repo-state lint on every push AND PR — exit codes
+        # typed by env-registry.sh (0 ok / 1 schema-usage-refusal / 2 leak).
+        # No --probe-gh: the repo lint stays hermetic (EDGE-004 fail-soft is
+        # for consumers).
+        run: bash scripts/gsd/env-registry.sh check
+  tamper:
+    # G2 (2026-08 red-team): the reward-hacking scanner ran on the honor
+    # system — administered by the entity it guards. Run it server-side on
+    # every PR diff. Hard-fail signals are the ones that weaken TESTS —
+    # deleted asserts, weakened assertions, test skips, and zero-exit
+    # additions inside test files (the actual reward-hacking vector).
+    # Zero-exit additions in PRODUCT scripts and path-edit signals
+    # (CI/workflow, gate/ledger files) print as warnings only — in THIS
+    # repo those scripts are the product: fail-open hooks, observability
+    # tools whose locked contract is always-zero exit, and the finalizer's
+    # always-zero tail all add such lines legitimately (first hit: PR #103,
+    # where every hard finding was a documented contract). The scanner
+    # path-scopes its findings so this split stays greppable. (Wording
+    # note: this comment deliberately avoids the scanner's own literal
+    # patterns — it scans added lines, comments included, and flagged the
+    # first version of itself.)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: scan PR diff for reward-hacking moves
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # Operator override, visible in the PR audit trail: applying the
+          # `tamper-reviewed` label downgrades enforcement to warnings for a
+          # PR whose findings a human (or a documented multi-round review)
+          # has adjudicated as false positives. Findings still print. First
+          # use: PR #103 — 41 findings, 0 true positives (fixture stubs,
+          # docs prose, contract-required zero-exits, one environmental
+          # skip guard, one verified fixture refactor).
+          TAMPER_REVIEWED: ${{ contains(github.event.pull_request.labels.*.name, 'tamper-reviewed') && '1' || '' }}
+        run: |
+          git fetch -q origin "$BASE_REF"
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
+          python3 lib/gates.py scan-tamper < /tmp/pr.diff > /tmp/findings.txt || true
+          cat /tmp/findings.txt
+          # Hard-fail: test-weakening classes anywhere + zero-exit added in
+          # a test path. Product-script zero-exit and path-edit signals are
+          # warnings (see job comment).
+          if grep -E '^TAMPER:' /tmp/findings.txt \
+            | grep -vE '^TAMPER: (CI/workflow file edited|gate/ledger file edited)' \
+            | grep -vE '^TAMPER: unconditional exit 0 added \[(scripts/|docs/|specs/|lib/gates\.py)' \
+            | grep -q .; then
+            if [ -n "$TAMPER_REVIEWED" ]; then
+              echo "::warning::tamper findings above — enforcement waived by the tamper-reviewed label"
+            else
+              echo "::error::tamper findings above — deleted/weakened asserts, skips, or test-path exit-0 in this diff"
+              exit 1
+            fi
+          fi
+      - name: forbidden-paths-check against the PR base (REQ-10)
+        # REQ-10/AC-010 protects the PARALLEL program's files (lib/gates.py,
+        # plan-wall.sh, run-finalizer.sh) from SPEC-009's OWN diffs ("wired
+        # into the phase gates"). Scoped to 009-* head branches accordingly:
+        # unscoped, this step permanently froze those files against the very
+        # program that owns them (first hit: PR #96, the operator-directed
+        # 2026-08-08 wall-policy change). Live cross-session protection stays
+        # with the claims/lease PreToolUse guard, which is dynamic — this
+        # static list only ever described spec-009's obligations.
+        if: startsWith(github.head_ref, '009')
+        # The base ref is passed EXPLICITLY, so P-30's hard-fail arm governs
+        # here: if fetch-depth:0 above is ever narrowed, or the base fetch
+        # fails, this step goes red naming the unresolvable ref rather than
+        # quietly checking only the (empty, on a fresh checkout) working
+        # tree. No || true, no continue-on-error, no fallback ref — each of
+        # those would restore exactly the fail-open this hard-fail arm
+        # exists to remove.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/coord/forbidden-paths-check.sh --base "origin/$BASE_REF"
 
   shellcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: shellcheck shell surface
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          # ShellCheck ships preinstalled on the ubuntu-latest runner image, so
+          # the apt call this replaces was pure risk for zero benefit — it hung
+          # for 8 minutes and got the job killed twice on PR #119 alone. Only
+          # reach for apt if the image ever stops shipping it.
+          command -v shellcheck >/dev/null 2>&1 || bash scripts/ci/apt-install.sh shellcheck
+          shellcheck --version
           # warning level: the repo's heredoc-heavy SKILL snippets live in md
           # (not linted); this covers the executable shell surface.
-          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh
+          shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh scripts/coord/*.sh scripts/ci/*.sh tests/fixtures/socratic-installer-stub.sh
 
   bats:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install python coord-layer dependencies (filelock)
+        run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Run bats suites
         env:
           # This IS the packaged repo — there is no consumer-installed copy of the
@@ -53,7 +157,7 @@ jobs:
           # an absent installed copy is a real finding.
           GSD_FFS_STANDALONE: "1"
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q bats
+          command -v bats >/dev/null 2>&1 || bash scripts/ci/apt-install.sh bats
           # discover every suite (the real coverage lives at
           # scripts/harness/ruflo-host-executor.bats, not tests/bats/)
           mapfile -t SUITES < <(find . -name '*.bats' -not -path './.git/*')
@@ -63,28 +167,31 @@ jobs:
           bats --print-output-on-failure "${SUITES[@]}"
 
   host-shell-matrix:
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: python -m pip install --quiet pytest
+      - run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Scoped installer and prompt-master compatibility
         run: python -m pytest -q tests/test_installer.py tests/test_prompt_master_patch.py
       - name: Bash and zsh parser checks
         shell: bash
         run: |
-          bash -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh
+          bash -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
           if ! command -v zsh >/dev/null 2>&1; then
-            sudo apt-get update -q && sudo apt-get install -y -q zsh
+            command -v zsh >/dev/null 2>&1 || bash scripts/ci/apt-install.sh zsh
           fi
-          zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh
+          zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh

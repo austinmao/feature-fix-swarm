@@ -37,6 +37,10 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${QA_COVERAGE:-on}" = "off" ]; then
+  if ! "$SCRIPT_DIR/waiver-record.sh" "qa-coverage-adversary" "QA_COVERAGE=off"; then
+    echo "[qa-coverage-adversary] WAIVER-UNRECORDED — refusing disabled bypass" >&2
+    exit 1
+  fi
   echo "[qa-coverage-adversary] disabled (QA_COVERAGE=off) — skipped"
   exit 0
 fi
@@ -87,6 +91,7 @@ else
 fi
 export ADVERSARY_BIN_CODEX ADVERSARY_BIN_CLAUDE
 
+ADVERSARY_SEAM=qa-coverage-adversary; export ADVERSARY_SEAM
 OUTPUT="$(adversary_invoke_typed_request "$ADVERSARY_KIND" "$FALLBACK_KIND" \
   "${QA_COVERAGE_TIMEOUT:-300}" "$MODEL_REQUEST" "$PROMPT" 2>&1)"
 rc=$?

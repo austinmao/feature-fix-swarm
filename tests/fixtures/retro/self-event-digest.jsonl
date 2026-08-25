@@ -1,0 +1,2 @@
+{"script": "retro.sh", "event_class": "dead-executor", "gate": "review-gate", "exit_code": 1, "ts": "2026-08-11T09:59:00Z", "duration_seconds": 1.0}
+{"script": "consume-danger-grant.py", "event_class": "dead-executor", "gate": "review-gate", "exit_code": 1, "ts": "2026-08-11T10:00:00Z", "duration_seconds": 1.0}

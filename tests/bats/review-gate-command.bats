@@ -193,3 +193,43 @@ EOF
   echo "$output" | python3 -m json.tool >/dev/null
   [[ "$output" == *'"verdict":"APPROVED"'* ]]
 }
+
+@test "wall policy (c): WALL-RESIDUALS.md feeds the reviewer prompt as review focus" {
+  # the prompt travels via STDIN to the reviewer CLI — capture it
+  cat > "$STUB_DIR/focus-codex" <<EOF
+#!/usr/bin/env bash
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/focus-codex"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<'EOF'
+# Wall residuals — 01-degradation
+- abc123def456 HIGH lib/foo.py — invocation events lack an idempotency key (plan: 01-01-PLAN.md)
+EOF
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=focus-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  # residual text reached the reviewer, framed as focus + untrusted data
+  grep -F 'invocation events lack an idempotency key' "$BATS_TEST_TMPDIR/codex.stdin"
+  grep -F 'REVIEW FOCUS' "$BATS_TEST_TMPDIR/codex.stdin"
+  grep -F 'RESIDUALS START' "$BATS_TEST_TMPDIR/codex.stdin"
+  # the diff itself still present after the focus block
+  grep -F 'DIFF START' "$BATS_TEST_TMPDIR/codex.stdin"
+}
+
+@test "wall policy (c): no residual manifest -> prompt has no residual section" {
+  cat > "$STUB_DIR/focus-codex" <<EOF
+#!/usr/bin/env bash
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/focus-codex"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=focus-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  ! grep -F 'RESIDUALS START' "$BATS_TEST_TMPDIR/codex.stdin"
+}

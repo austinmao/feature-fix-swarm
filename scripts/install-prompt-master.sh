@@ -9,11 +9,14 @@ PIN_FILE="$ROOT/vendor/prompt-master/pin.json"
 PATCH_FILE="$ROOT/vendor/prompt-master/codex-gpt56.patch"
 DEST=""
 SOURCE=""
+usage() {
+  echo "usage: install-prompt-master.sh --dest <path> [--source <url>]" >&2
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --dest) DEST="${2:-}"; shift 2 ;;
-    --source) SOURCE="${2:-}"; shift 2 ;;
+    --dest) [ "$#" -ge 2 ] || { usage; exit 2; }; DEST="$2"; shift 2 ;;
+    --source) [ "$#" -ge 2 ] || { usage; exit 2; }; SOURCE="$2"; shift 2 ;;
     *) echo "prompt-master installer: unknown argument $1" >&2; exit 2 ;;
   esac
 done

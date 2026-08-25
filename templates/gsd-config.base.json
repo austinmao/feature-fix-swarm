@@ -12,9 +12,10 @@
     "gsd-phase-researcher": "sonnet",
     "gsd-project-researcher": "sonnet",
     "gsd-research-synthesizer": "haiku",
-    "gsd-codebase-mapper": "haiku",
+    "gsd-codebase-mapper": "sonnet",
     "gsd-verifier": "opus",
     "gsd-code-reviewer": "opus",
+    "gsd-security-auditor": "opus",
     "gsd-integration-checker": "sonnet",
     "gsd-nyquist-auditor": "sonnet"
   },

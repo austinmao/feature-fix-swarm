@@ -26,6 +26,8 @@ metadata:
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 One command. Pass task descriptions, get model classification, parallel execution,
 and a structured result. No spec pipeline, no `.planning/` prerequisite.
 

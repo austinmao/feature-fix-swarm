@@ -1,0 +1,4 @@
+SYNTHETIC fixture — reconstructed; replace with a live vendor capture when observed.
+Times are interpreted in the host local timezone; suffixes are deliberately ignored.
+noise
+Codex usage limit reached; reset at 10:15.

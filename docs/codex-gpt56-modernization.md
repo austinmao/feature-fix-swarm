@@ -8,8 +8,8 @@ copy or rewrite GSD source artifacts.
 
 | Component | Supported | Notes |
 |---|---|---|
-| GSD Core | `@opengsd/gsd-core@1.9.1` | Exact pin; both Claude and Codex profiles are installed |
-| Codex CLI | `>=0.137.0,<0.147.0` | Tested on `0.146.x`; doctor and `gsd-run` fail outside the range |
+| GSD Core | `@opengsd/gsd-core@1.10.0` | Exact pin; both Claude and Codex profiles are installed |
+| Codex CLI | `>=0.137.0,<0.148.0` | Tested on `0.146.x` and `0.147.x`; doctor and `gsd-run` fail outside the range |
 | Node.js / npm | Node 22+ / npm 10+ | Required by the pinned GSD installer |
 | Shell | macOS zsh, Ubuntu bash | Windows is not supported by this release |
 | Claude Code | Current OAuth-backed CLI | Used for Claude-native runs and cross-vendor review |
@@ -121,7 +121,7 @@ resume under the same consumed grant only while that exact binding remains
 unexpired; a completed run cannot reuse it.
 
 The temporary Codex home receives every manifest-owned GSD agent and skill,
-plus the complete hook tree from the fixed `@opengsd/gsd-core@1.9.1` package.
+plus the complete hook tree from the fixed `@opengsd/gsd-core@1.10.0` package.
 The installed canonical registrations and hook hashes must match that package.
 Only those registrations are rewritten and smoke-executed, using an absolute,
 ownership-checked Node binary and a minimal `PATH`. `auth.json` must be owned by
@@ -142,11 +142,15 @@ that requested an exact reviewer such as Fable.
 Model selection is intentionally typed:
 
 ```json
+{"kind":"tier","name":"frontier"}
 {"kind":"tier","name":"judgment"}
 {"kind":"tier","name":"execution"}
 {"kind":"tier","name":"volume"}
 {"kind":"exact","id":"gpt-5.6-sol"}
 ```
+
+`frontier` (spec 004) is the planning-only tier added alongside the original
+three; it is not reachable through dynamic escalation.
 
 Raw vendor model identifiers outside `kind: "exact"` fail lint. Default role
 assignments live in `templates/model-requests.json`; the reproducible 18-case

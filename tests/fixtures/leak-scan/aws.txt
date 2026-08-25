@@ -1,0 +1,2 @@
+# SYNTHETIC-NOT-A-REAL-KEY — leak-scan fixture (REQ-202a family: aws-access-key)
+aws_key_id: AKIASYNTHETICNOTREAL

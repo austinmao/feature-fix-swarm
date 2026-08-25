@@ -19,6 +19,8 @@ allowed-tools:
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 ## When to invoke
 
 - After `/feature-spec` or `/spec-decompose` produced a seeded gsd project (`.planning/`)
@@ -80,6 +82,48 @@ done
 [ -z "$GATES_PY" ] && { echo "ERROR: gates.py not found — run setup.sh"; exit 1; }
 ```
 
+### Step 1.5: Cross-session claim (spec-009 — claim-or-stop)
+
+Exactly one session may implement a run id. Autonomous/headless runs SKIP the
+skill-level claim: `gsd-run.sh` takes, renews, and releases the claim itself
+(P-22..P-24b) once `GSD_RUN_ID` is exported in Step 2 — a second claim here
+would collide with the runner's own and refuse the launch.
+
+```bash
+COORD_PY="$(git rev-parse --show-toplevel 2>/dev/null)/scripts/coord/coord.py"
+if [ "$AUTONOMOUS" != "1" ] && [ -f "$COORD_PY" ]; then
+  # 4h TTL: an interactive session has no heartbeat daemon, so the TTL must
+  # outlive a working session leg (review-gate round 2 HIGH — a 300s default
+  # expires mid-run and re-opens the two-writer window). Belt: re-claim
+  # (idempotent, refreshes the clock) at every step boundary below. Backstop:
+  # anchor-pid staleness reclaims instantly if this session dies.
+  FFS_RUN_ID="$RUN_ID" FFS_COORD_ANCHOR_PID=$PPID python3 "$COORD_PY" claim "$RUN_ID" --ttl 14400 --heartbeat 3600
+  _claim_rc=$?
+  case $_claim_rc in
+    0) ;;  # claimed — see capture note below
+    3|4) echo "[feature-implement] STOP: '$RUN_ID' is held by another live session — do not implement it here. Inspect: python3 \"$COORD_PY\" status"; exit $_claim_rc ;;
+    *) echo "[feature-implement] WARN: coord store unavailable (rc=$_claim_rc) — proceeding UNCLAIMED; diagnose with: python3 \"$COORD_PY\" doctor" ;;
+  esac
+fi
+```
+
+On success the claim prints `session=<uuid>` and `CLAIM-OK generation=<N>`.
+**Capture both**: every later coord call for this run (renew, release) must
+carry `FFS_COORD_SESSION=<that uuid>` and `--generation <that N>` — a call
+without them is a foreign contender, not the holder. The claim is released in
+Step 7 (and on ANY stop/abort path before it); missed releases expire by TTL +
+anchor-pid staleness, so a crashed session never wedges the run id.
+
+**Renewal discipline (interactive runs):** at every step boundary that
+follows (each phase start in Step 4, each gap round, the Step 6 finish tail),
+re-run the SAME claim command with `FFS_COORD_SESSION=<captured uuid>` —
+re-claim by the holder is idempotent and refreshes the TTL clock. If a
+re-claim ever returns 3/4 (superseded after an expiry), STOP: another session
+may hold the run now; inspect `coord.py status` before touching anything.
+
+Consumer repos without `scripts/coord/coord.py` skip silently (fail-soft) —
+coordination is an FFS-repo capability until the coord CLI ships in setup.sh.
+
 ### Step 2: Walls (fail-closed, --autonomous only)
 
 ```bash
@@ -95,10 +139,46 @@ fi
 # Ledger key for gsd seams: review-gate-command.sh reads GSD_RUN_ID (no
 # hardcoded default) — export it so ship grants key to THIS run.
 export GSD_RUN_ID="$RUN_ID"
+# Seam 1 (REQ-401/402, sig 16ac087d reading): "zero call-site edits" pins
+# gates.py INTERNALS and PRE-EXISTING consumers — review-gate-command.sh
+# gains no flag and inherits hard mode through gates.py's env-var read
+# (lib/gates.py:2941-2945); INT-004 proves it stays byte-unchanged. This
+# skill's OWN prod call sites are the exception: they pass hard mode
+# explicitly (see the check-grant note below). The absent-registry advisory
+# needs no code here — gates.py prints it on the first prod check-grant
+# (soft mode: one stderr line, byte-identical exit codes, REQ-402).
+if [ "$AUTONOMOUS" = "1" ]; then
+  # Ledger-first prod detection (RESEARCH OQ1): any grant of THIS run
+  # matching gates.py PROD_ACTION_PREFIXES; fallback = plan grep; both
+  # miss → no export (fail-soft — phase-3 deploy-prod templates carry the
+  # per-callsite backstop).
+  _FFS_PROD=$(python3 - "$RUN_ID" <<'DETECT'
+import sys
+sys.path.insert(0, "lib")
+import gates
+data = gates._load_store(gates._store_path())
+grants = data.get("_autonomy", {}).get(sys.argv[1], {}).get("grants", {})
+print("1" if any(a.startswith(gates.PROD_ACTION_PREFIXES)
+                 for a in grants if isinstance(a, str)) else "0")
+DETECT
+  ) || _FFS_PROD=0
+  if [ "$_FFS_PROD" != "1" ] && \
+     grep -qE 'deploy:prod-|flip:prod-|migrate:prod-' specs/"$SPEC_ID"*/plan.md 2>/dev/null; then
+    _FFS_PROD=1
+  fi
+  # Belt-and-braces for subprocesses only (sig ba1efa84): no assertion
+  # depends on this export surviving block boundaries — the skill's prod
+  # call sites carry the explicit flag either way.
+  [ "$_FFS_PROD" = "1" ] && export FFS_ENV_REGISTRY_REQUIRED=1
+fi
 ```
 
 At every operator-gated action mid-run (push, merge, deploy, flip, secret-use):
-`check-grant "$RUN_ID" --action "<type:target>"` — proceed on exit 0; otherwise
+`check-grant "$RUN_ID" --action "<type:target>"` — for PROD actions
+(`deploy:prod-*` / `flip:prod-*` / `migrate:prod-*`) under `--autonomous` the
+call is `check-grant "$RUN_ID" --action "<type:prod-target>" --require-environments`
+(sig ba1efa84: deterministic per-call hard mode at this skill's own call
+site) — proceed on exit 0; otherwise
 `pending` + STOP that action path only. Never bypass with prose; never re-ask a
 granted action. (Ship itself is walled inside gsd's `code_review_command` —
 `scripts/gsd/review-gate-command.sh` REVISEs without a `ship:gsd` grant.)
@@ -152,6 +232,51 @@ it. Preparatory/enabling plans use an explicit `requirements: []`. Rechecking
 an earlier invariant belongs in `must_haves`, not repeated requirement ownership.
 The headless runner repeats this wall before its model probe so direct runner
 calls cannot bypass it.
+
+Immediately after the ownership gate clears, run the per-phase blocking plan
+review wall (spec-004 AC-005 — every `*-PLAN.md` / bare `PLAN.md` under phase
+N must clear a fresh adversarial review before execution starts):
+
+```bash
+PHASE_DIR="$(ls -d .planning/phases/*-* 2>/dev/null | grep -E "^\.planning/phases/0*${N}-" | head -1)"
+[ -n "$PHASE_DIR" ] && export GSD_PHASE_ID="$(basename "$PHASE_DIR")" && bash scripts/gsd/plan-wall.sh "$PHASE_DIR"
+```
+
+STOP on nonzero. `PLAN_WALL=off` skips ONLY with a durable waiver record
+(AC-008) — a skip that cannot write its waiver record fails closed. The
+headless runner (`gsd-run.sh`) invokes the SAME lever again at its own
+pre-execution seam (beside `requirement-ownership-gate.sh`), so a direct
+runner call cannot bypass this wall either.
+
+Exit 3 = `WALL-ROUND-CAP` (durable per-phase round cap, default
+`PLAN_WALL_MAX_ROUNDS=3`): this is TERMINAL for the phase, not a retryable
+BLOCKED — do NOT start another fix round. Quarantine the phase (record the
+open findings + the printed unblock commands in the run report / pendings)
+and move to other runnable work; the cap exists because uncounted
+wall→fix→wall loops have burned 19 rounds/2 days and 38+ turns/a week of
+vendor quota. Only an operator-reviewed findings resolution (or a deliberate
+`PLAN_WALL_MAX_ROUNDS` raise) reopens it.
+
+Exit 3 is shared by two distinct terminal conditions — `WALL-ROUND-CAP`
+above and `WALL-NO-CONVERGENCE` (the wall quarantines early when a
+diminishing-returns round finds new HIGH/CRITICAL findings that are not
+strictly fewer than the previous round, before the round cap is even hit).
+Distinguish them from the printed line, not the exit code; the operator
+action is identical either way — quarantine and move on.
+
+## Wall await rule
+
+Keep the plan wall in the foreground for phases with one or two plans. A
+phase that may exceed the 600-second tool ceiling MAY background the wall,
+but must then poll `plan-wall.sh --await 300` in the same turn for no more
+than `PLAN_WALL_AWAIT_MAX=6` iterations. Its outcomes are actionable: rc 0
+means every record passed, rc 20 means the wall decided blocked, rc 75
+means it is still pending, and rc 76 (`WALL-AWAIT:attempts-exhausted`) means
+the script-enforced pending budget for this phase is spent — stop polling and
+checkpoint. The budget is enforced by `plan-wall.sh` itself (run-scoped
+counter, reset on any decided outcome), not by agent self-restraint. If the
+turn cannot outlast a pending wall, it MUST checkpoint a
+`waiting(wall-decided)` lifecycle record with `lifecycle.sh` before ending.
 
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.
@@ -313,7 +438,12 @@ exit 0
 ```
 <!-- openwiki-wiring:ship-stage:end -->
 
-4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke).
+4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke). After
+   ship, run `bash scripts/gsd/promote-emit.sh "$RUN_ID"` — it EMITS (never
+   executes) the staging→prod `gates.py promote` command for the operator/CI
+   deploy workflow when this run consumed a `deploy:staging-*` grant; silent
+   otherwise (REQ-401 Seam 3 — deliberately NOT run-finalizer.sh, whose
+   always-exit-0 post-merge contract would swallow the signal).
 5. **Merge execution (only with a `merge:pr` grant):** if a `/land-and-deploy`
    skill is available in this session, use it to execute the granted merge
    (merge → CI/deploy wait → prod verify); else `gh pr merge` directly. EITHER
@@ -339,6 +469,8 @@ exit 0
    test -f "$REPO_ROOT/scripts/gsd/assert-merged.sh"
    test -f "$REPO_ROOT/scripts/gsd/model-fallback.sh"
    test -f "$REPO_ROOT/scripts/gsd/fallback-rehearsal.sh"
+   test -f "$REPO_ROOT/scripts/coord/coord.py"
+   test -f "$REPO_ROOT/scripts/gsd/promote-emit.sh"
    ```
 
 6. **Learnings harvest (fail-soft, run-end):** `bash scripts/gsd/learnings-harvest.sh`
@@ -348,11 +480,20 @@ exit 0
 
 Consumed grants + artifacts (sha/PR#) go in the report.
 
-### Step 7: Report
+### Step 7: Release claim + report
+
+Interactive claims only (the headless runner releases its own on every exit
+path): release the Step 1.5 claim FIRST, so a stop mid-report never strands it:
+
+```bash
+[ "$AUTONOMOUS" = "1" ] || [ ! -f "$COORD_PY" ] || \
+  FFS_RUN_ID="$RUN_ID" FFS_COORD_ANCHOR_PID=$PPID FFS_COORD_SESSION="<uuid captured at claim>" \
+  python3 "$COORD_PY" release "$RUN_ID" --generation "<generation captured at claim>" || true
+```
 
 Phases executed, verifier verdicts, gap rounds, gate evidence ids, consumed grants,
 pendings (for one-command morning resume), files changed. Include the delegation
-histogram `tiers={judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`
+histogram `tiers={frontier:N,judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`
 (spawns by typed request and resolved model; `inline-mechanical` = host
 trip-wire drains, target 0) — verify
 with `python3 lib/gates.py delegation-audit <session-transcript.jsonl>`.

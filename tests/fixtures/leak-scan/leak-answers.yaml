@@ -1,0 +1,9 @@
+# SYNTHETIC-NOT-A-REAL-KEY — leak-bearing ANSWERS fixture: apply must scan
+# candidate bytes pre-replace and write NOTHING (all-or-nothing, row 25).
+environments:
+  - name: local
+    kind: local
+    base_url: ghp_SYNTHETICanswersleak00000000
+test_tiers:
+  - tier: fast
+    command: true
