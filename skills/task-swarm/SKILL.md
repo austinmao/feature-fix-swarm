@@ -19,6 +19,20 @@ allowed-tools:
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+## Init gate
+
+Before any other step, run the advisory init guard and relay its output
+verbatim:
+
+```bash
+bash "$(git rev-parse --show-toplevel)/scripts/gsd/init-guard.sh" || true
+```
+
+If it printed `INIT-GUARD:` warnings, offer `/ffs-init` before proceeding in
+interactive sessions (declining proceeds anyway); headless, spawned, and
+autonomous runs relay the warnings once and continue. Advisory only — never
+a block, never an exit-code change.
+
 At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
 
 One command from free-text instruction to shipped, canaried change. It is the

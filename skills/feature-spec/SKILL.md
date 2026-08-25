@@ -13,6 +13,20 @@ version: 2.7.0
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+## Init gate
+
+Before any other step, run the advisory init guard and relay its output
+verbatim:
+
+```bash
+bash "$(git rev-parse --show-toplevel)/scripts/gsd/init-guard.sh" || true
+```
+
+If it printed `INIT-GUARD:` warnings, offer `/ffs-init` before proceeding in
+interactive sessions (declining proceeds anyway); headless, spawned, and
+autonomous runs relay the warnings once and continue. Advisory only — never
+a block, never an exit-code change.
+
 At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
 At completion, make one opportunistic, fail-soft repo-root-resolved `bash "$REPO_ROOT/scripts/gsd/retro.sh" analyze` pass through the same portable bounded runner as `run-finalizer.sh` (`timeout -k 10 120` when available, otherwise its TERM/KILL watchdog); never block on its result.
 

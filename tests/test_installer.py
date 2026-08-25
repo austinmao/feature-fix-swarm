@@ -801,7 +801,7 @@ def test_install_invokes_upstream_full_claude_and_codex_profiles(tmp_path: Path)
     calls = (tmp_path / "gsd-installer.log").read_text().splitlines()
     assert calls == ["--claude --global --profile=full", "--codex --global --profile=full"]
     manifest = json.loads((tmp_path / "home/.cache/feature-fix-swarm/install-manifest.json").read_text())
-    assert manifest["gsd"]["version"] == "1.10.0"
+    assert manifest["gsd"]["version"] == "1.11.0"
     assert manifest["gsd"]["profiles"] == {"claude": "full", "codex": "full"}
 
 
@@ -1148,7 +1148,7 @@ def test_upgrade_rollback_restores_prior_gsd_version_manifests(tmp_path: Path) -
     installed = run_setup(tmp_path, "--scope", "user")
     assert installed.returncode == 0, installed.stderr
     backup_id = next(line.split("=", 1)[1] for line in installed.stdout.splitlines() if line.startswith("backup_id="))
-    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.10.0"
+    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.11.0"
 
     rolled_back = run_setup(tmp_path, "--rollback", backup_id)
 

@@ -13,9 +13,30 @@ all skills.
 - `/feature-implement --autonomous` gets a bounded, grant-gated rc-3 auto-continue: on `WALL-ROUND-CAP`/`WALL-NO-CONVERGENCE`, a phase with zero unresolved HIGH/CRITICAL wall findings, an operator `wall-reset:<phase-slug>` grant, and an unspent `PLAN_WALL_AUTO_RESET_MAX` budget (default 1) gets exactly one wall reset + re-run before quarantine goes terminal; enforced in `scripts/gsd/gsd-run.sh` (`_gsd_run_wall_gate` — the actual `--autonomous` runner seam), documented in `skills/feature-implement/SKILL.md`. `/feature-spec` Step 6 MAX-AUTH enumeration now mints one `wall-reset:<phase-slug>` grant per phase directory (autonomy-grant 1.4.0 adds the gate type). Interactive sessions never mint the grant, so their exit-3 stop is unchanged.
 - Fix-round mutation contract (feature-implement 2.14.0, plan-decompose 1.7.0): a wall/plan-gate fix round must rewrite or delete the defective plan text — never append a correction block leaving the original standing, which next-round reviewers re-notice and the findings queue counts as REOPEN=NEW, tripping the diminishing-returns rule (root cause of the spec-385 no-convergence quarantines).
 - `docs/configuration.md` now documents the previously missing-but-read `PLAN_WALL_TIMEOUT`, `PLAN_WALL_MAX_ROUNDS`, `PLAN_WALL_REASON`, `PLAN_WALL_AWAIT_MAX/POLL/COUNT` knobs plus the new `PLAN_WALL_AUTO_RESET_MAX`.
+- spec-decompose 2.7.0 — Step 4.5 design-lineage citation gate: in repos
+  carrying `docs/design-lineage/` (openclaw), decomposition hard-blocks unless
+  every gstack artifact matching the spec's number is cited across the spec
+  artifacts or dismissed with `<!-- lineage-dismissed: <basename> — <reason> -->`
+  (operator override: `LINEAGE_GATE_BYPASS=1`); silent fail-soft no-op in repos
+  without the lever. Ported from the pre-gsd-core v3.22.0 WIP.
 
 - `plan-wall.sh --await` enforces `PLAN_WALL_AWAIT_MAX` (default 6): pending returns beyond the cap exit rc 76 `WALL-AWAIT:attempts-exhausted`; the counter is run-scoped, evaluator probes (`PLAN_WALL_AWAIT_COUNT=off`) are budget-neutral, and decided outcomes always report through and reset it.
 - `digest.sh --immediate` appends schema-true retro rows to `.feature-fix-swarm/digest-<utcdate>.jsonl` for list-backed event classes — the previously missing producer for `retro.sh analyze` (`DIGEST_RETRO_SINK=off` disables).
+- Documentation for the spec-007/008 feature surface, which had shipped without
+  any `docs/` coverage: `docs/environment-registry.md` (the
+  `config/environments.yaml` schema, `/ffs-init`'s modes, all five
+  `env-registry.sh` verbs, the exit-code and leak-scan taxonomies, the detection
+  heuristics, and `.ffs-init.json` decline semantics),
+  `docs/ci-templates-and-tiers.md` (`templates/ci/*`, the render anti-clobber
+  rule and its closed six-token placeholder set, `test-tier.sh`,
+  `review-tier.sh`, `promote-emit.sh`), `docs/cross-session-messaging.md` (how
+  sessions actually hand work over — claims, the pinned evidence store,
+  single-flight locks, the copy-scan-then-publish handoff order, and the fact
+  that no mailbox exists), and `docs/socratic.md` (what the pinned question bank
+  is, why it was adopted below the star gate, the four seams it reaches, its
+  containment and controls, and what `evals/socratic-ab.md` did *not* measure).
+  README's documentation index gained rows for these plus the previously
+  unindexed installer and digest guides.
 
 ### Fixed
 
@@ -23,8 +44,19 @@ all skills.
 
 - Consent-gated retro filing now publishes a finite diagnostic allowlist, maintains upstream advisory labels and occurrences, and supports maintainer-only factual triage for human-reviewed specification work.
 - `scripts/gsd/reconcile.sh` provides a one-pass, coord-claimed recovery path for durable lifecycle records, and `docs/healing.md` documents its operator controls and recovery boundaries.
+- `README.md` advertised the socratic pin as `862b52…`; the actual pin has been
+  `8c7e1fd…` since the 2026-08-08 dependency refresh. The row now carries the
+  correct commit, a link to the upstream repository, and a pointer to
+  `docs/socratic.md`. `docs/dependencies.md` additionally records that
+  upstream's `grades/` surface is present but unmodelled by FFS's slicer, so a
+  bump touching only `grades/` needs no enum amendment.
 
 ### Changed
+
+- `@opengsd/gsd-core` exact pin `1.10.0` → `1.11.0` (constants in
+  `lib/ffs_installer.py`, `scripts/gsd/stage-gsd-skills.py`,
+  `scripts/gsd/codex-runtime-bundle.py`, plus lockfile, fixtures, bats
+  harness, and docs). Full installer suite green against the new package.
 
 - `scripts/gsd/gsd-run.sh` retries one failed drive by default (`FFS_RESPAWN_MAX=1`): rc 124 retries once, while other failures retry only after a zero-commit probe. A failed drive whose capture carries a vendor session-limit banner is instead checkpointed as a durable `waiting(time)` record (`FFS_SESSION_WAKE=off` disables) and left for `scripts/gsd/reconcile.sh` to relaunch.
 
@@ -53,6 +85,11 @@ all skills.
 
 ### Fixed
 
+- `skills/ffs-init/SKILL.md` still described exit 3 as a "render stub" although
+  `render` has been fully implemented since spec 007, and never documented the
+  `seed` verb `/preflight` depends on — both corrected. `docs/dependencies.md`
+  no longer credits Gitleaks or `npm audit` with covering the release surface
+  (neither exists as a CI job; `npm audit` is a PR-checklist item).
 - `setup.sh`/`ffs_installer.py` hard-blocked the *entire* install whenever a
   single managed skill path had an edited/unmanaged collision, with no way to
   proceed for the rest of the skills. New `--adopt-collisions` flag backs up
@@ -67,6 +104,18 @@ all skills.
 
 ### Added
 
+- `/ffs-init` is now the umbrella initialization (v1.1.0): a new Phase 0
+  installs repo-scoped dependencies before the registry flow.
+  `scripts/gsd/deps.sh` is the single executable dependency roster
+  (`check | install`, exit codes 0/1/2; `install` runs only `npm ci` +
+  `pip install --requirement requirements-dev.txt` — never a system package
+  manager, never sudo) and `scripts/gsd/init-guard.sh` is the advisory
+  pre-init warning every operator entrypoint skill now surfaces via a
+  lint-enforced `## Init gate` section (always exits zero; `--strict` for callers
+  that want a hard gate). New guide: `docs/initialization.md`; roster↔docs
+  drift is blocked by `tests/test_docs_dependency_roster.py`. The README
+  dependency table gains the previously undocumented rows (`gh`, `jq`, the
+  POSIX tool floor, `filelock`, the optional QA lane).
 - Post-spec-005 hygiene: opt-in enum-drift suite
   (`tests/bats/socratic-enum-drift.bats`) asserting
   `DOMAIN_ENUM_ORDER`/`PACK_ENUM` map 1:1 to a REAL resolved socratic vendor
