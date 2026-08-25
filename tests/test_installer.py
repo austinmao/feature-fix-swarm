@@ -1988,3 +1988,112 @@ def test_project_install_no_hint_when_registry_present(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "/ffs-init" not in result.stdout
+
+
+# --- managed lib runtime delivery (gates.py was previously undeliverable) ---
+
+MANAGED_LIB_EXPECTED = {
+    "lib/gates.py": ".claude/lib/feature-fix-swarm/gates.py",
+    "lib/runtime_proof.py": ".claude/lib/feature-fix-swarm/runtime_proof.py",
+    "scripts/gsd/socratic-slice.sh": ".claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh",
+}
+
+
+def test_user_install_stages_managed_lib_runtime(tmp_path: Path) -> None:
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.returncode == 0, result.stderr
+    home = tmp_path / "home"
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    for source_rel, dest_rel in MANAGED_LIB_EXPECTED.items():
+        staged = home / dest_rel
+        assert staged.is_file() and not staged.is_symlink(), dest_rel
+        assert staged.read_bytes() == (ROOT / source_rel).read_bytes(), dest_rel
+        assert str(staged) in manifest["paths"], dest_rel
+    # the skill ladders exec socratic-slice.sh directly (no interpreter prefix);
+    # gates.py is always python3-prefixed, so only the script needs the x bit
+    assert (home / ".claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh").stat().st_mode & 0o100
+
+
+def test_doctor_flags_stale_managed_gates(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    staged = tmp_path / "home/.claude/lib/feature-fix-swarm/gates.py"
+    staged.write_text("# stale drifted copy\n")
+
+    report = json.loads(run_setup(tmp_path, "--doctor", "--scope", "user", "--json").stdout)
+    drifted = [
+        check
+        for check in report["checks"]
+        if check["id"] == "managed-path" and check["status"] == "fail" and "gates.py" in check["message"]
+    ]
+    assert drifted, report["checks"]
+
+
+def test_uninstall_removes_managed_lib_runtime(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    staged = tmp_path / "home/.claude/lib/feature-fix-swarm/gates.py"
+    assert staged.is_file()
+
+    result = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert result.returncode == 0, result.stderr
+    assert not staged.exists()
+
+
+def test_user_install_blocks_then_adopts_stale_unmanaged_gates(tmp_path: Path) -> None:
+    # the exact legacy state the delivery gap left behind: a hand-copied,
+    # stale, unmanaged managed-path gates.py
+    stale = tmp_path / "home/.claude/lib/feature-fix-swarm/gates.py"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("# stale hand-copied gates.py\n")
+
+    blocked = run_setup(tmp_path, "--scope", "user")
+    assert blocked.returncode != 0
+    assert "gates.py" in blocked.stderr
+    assert stale.read_text() == "# stale hand-copied gates.py\n"
+
+    adopted = run_setup(tmp_path, "--scope", "user", "--adopt-collisions")
+    assert adopted.returncode == 0, adopted.stderr
+    assert "adopted collision" in adopted.stdout
+    assert stale.read_bytes() == (ROOT / "lib/gates.py").read_bytes()
+
+
+def test_user_install_lib_runtime_is_idempotent(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    staged = tmp_path / "home/.claude/lib/feature-fix-swarm/gates.py"
+    before = staged.stat().st_mtime_ns
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    # fingerprint-equal early return: second install must not rewrite the file
+    assert staged.stat().st_mtime_ns == before
+
+
+def test_managed_lib_destinations_cover_every_script_ladder_reference() -> None:
+    # kills the "easy fake pass": staging files to a path nothing reads.
+    # every $HOME/.claude/lib/feature-fix-swarm/<rel> the shipped scripts and
+    # skills resolve must be in the installer's destination set.
+    import re
+
+    installer = (ROOT / "lib/ffs_installer.py").read_text()
+    dests = set(re.findall(r'"((?:scripts/gsd/)?[a-z_-]+\.(?:py|sh))"\),', installer))
+    referenced = set()
+    pattern = re.compile(r"\.claude/lib/feature-fix-swarm/([A-Za-z0-9_./-]+\.(?:py|sh))")
+    for base in ("scripts", "skills"):
+        for path in (ROOT / base).rglob("*"):
+            if path.is_file() and path.suffix in {".sh", ".py", ".md", ".bats"}:
+                referenced.update(pattern.findall(path.read_text(errors="ignore")))
+    assert referenced, "expected at least one ladder reference"
+    missing = referenced - dests
+    assert not missing, f"scripts resolve managed-lib paths the installer never stages: {sorted(missing)}"
+
+
+def test_staged_socratic_slice_executes_outside_the_repo(tmp_path: Path) -> None:
+    # the slice hard-sources its sibling fence-data.sh at startup — staging
+    # the script without the sibling is dead on arrival (pass-1 review HIGH)
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    staged = tmp_path / "home/.claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh"
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    result = subprocess.run(
+        ["bash", str(staged)], cwd=outside, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    assert "fence-data.sh missing" not in result.stderr
