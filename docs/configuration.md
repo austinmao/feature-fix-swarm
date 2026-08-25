@@ -152,7 +152,10 @@ references to either.
 | `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:110,139` | Executable overrides |
 | `ADVERSARY_LAST_TIER_DESCENT` | `0` | `scripts/gsd/adversary-host.sh` | Read-only signal, not an input. Set to `1` when the reviewer that answered sat on a LOWER rung than the one requested (e.g. a judgment-tier ask answered by `gpt-5.6-terra` medium). Such a review is recorded as **degraded** and prints `adversary-host: TIER-DESCENT kind=… requested=… answered=…` to stderr; in-process callers that source this lib can gate on the variable |
 | `PLAN_WALL` | on | `scripts/gsd/plan-wall.sh` | `off` skips the per-phase plan wall — only with a durable, recorded waiver; a skip that cannot record its waiver fails closed |
+| `PLAN_WALL_MAX_ROUNDS` | `3` | `scripts/gsd/plan-wall.sh:40` | Round cap per phase. Hitting it exits 3 with the distinct verdict `WALL-ROUND-CAP` (not `BLOCKED`, which would invite another fix round) and prints the one-command unblock: resolve the open findings, then `gates.py loop-round <RUN_ID> wall:<PHASE> --reset --max 1` |
 | `SPEC_PANEL` | off | spec-authoring panel (last spec-decompose phase) | `on` enables the dual-vendor blind-draft panel at spec authoring; default off pending an EVAL-D fixture pass |
+| `FFS_ENV_REGISTRY` | unset | `lib/gates.py:2372` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
+| `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:2326` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
 
 `findings-queue` (`lib/gates.py`) resolutions now require a disposition:
 `gates.py findings-queue resolve --disposition refute|fix|waive --reason "…"`.
