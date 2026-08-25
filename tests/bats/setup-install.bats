@@ -29,6 +29,8 @@ setup() {
   cmp -s scripts/gsd/scope-drift-gate.sh "$target/scripts/gsd/scope-drift-gate.sh"
   cmp -s scripts/gsd/sync-drift-check.sh "$target/scripts/gsd/sync-drift-check.sh"
   cmp -s lib/model_requests.py "$target/lib/model_requests.py"
+  cmp -s lib/gates.py "$target/lib/gates.py"
+  cmp -s lib/runtime_proof.py "$target/lib/runtime_proof.py"
   cmp -s scripts/hooks/credential-output-guard.sh "$target/scripts/hooks/credential-output-guard.sh"
 }
 
