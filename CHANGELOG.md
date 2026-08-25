@@ -10,6 +10,9 @@ all skills.
 
 ### Added
 
+- `/feature-implement --autonomous` gets a bounded, grant-gated rc-3 auto-continue: on `WALL-ROUND-CAP`/`WALL-NO-CONVERGENCE`, a phase with zero unresolved HIGH/CRITICAL wall findings, an operator `wall-reset:<phase-slug>` grant, and an unspent `PLAN_WALL_AUTO_RESET_MAX` budget (default 1) gets exactly one wall reset + re-run before quarantine goes terminal; enforced in `scripts/gsd/gsd-run.sh` (`_gsd_run_wall_gate` — the actual `--autonomous` runner seam), documented in `skills/feature-implement/SKILL.md`. `/feature-spec` Step 6 MAX-AUTH enumeration now mints one `wall-reset:<phase-slug>` grant per phase directory (autonomy-grant 1.4.0 adds the gate type). Interactive sessions never mint the grant, so their exit-3 stop is unchanged.
+- Fix-round mutation contract (feature-implement 2.14.0, plan-decompose 1.7.0): a wall/plan-gate fix round must rewrite or delete the defective plan text — never append a correction block leaving the original standing, which next-round reviewers re-notice and the findings queue counts as REOPEN=NEW, tripping the diminishing-returns rule (root cause of the spec-385 no-convergence quarantines).
+- `docs/configuration.md` now documents the previously missing-but-read `PLAN_WALL_TIMEOUT`, `PLAN_WALL_MAX_ROUNDS`, `PLAN_WALL_REASON`, `PLAN_WALL_AWAIT_MAX/POLL/COUNT` knobs plus the new `PLAN_WALL_AUTO_RESET_MAX`.
 - spec-decompose 2.7.0 — Step 4.5 design-lineage citation gate: in repos
   carrying `docs/design-lineage/` (openclaw), decomposition hard-blocks unless
   every gstack artifact matching the spec's number is cited across the spec

@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.6.1
+version: 2.7.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -732,7 +732,14 @@ stalling. Build the ledger NOW — by default with zero stops:
 1. Walk tasks.md + plan.md and enumerate EVERY operator-gated action the run will
    perform, in typed `type:target` form (`push:origin/main`, `merge:pr`,
    `deploy:vercel-web`, `flip:FLAG`, `restart:svc`, `secret-use:NAME`,
-   `migrate:desc`). Walk the artifacts — never enumerate from memory.
+   `migrate:desc`). Walk the artifacts — never enumerate from memory. ALSO
+   walk `.planning/phases/*-*` (seeded by Step 4) and add
+   `wall-reset:<phase-slug>` for EVERY phase directory — one entry per phase,
+   exact basename, no wildcards — so `/feature-implement --autonomous` can
+   clear the bounded rc-3 auto-continue (see feature-implement "Autonomous
+   rc-3 bounded auto-continue") without stopping. A phase added or renamed
+   after grant time has no grant and correctly quarantines — same floor as
+   every other gate type.
 2. **Default (MAX-AUTH):** record ALL enumerated actions immediately — no stop.
    Launching without `--gated` IS the approval (the launch notice announced it
    at minute 1, while the operator was present); the enumerated list with a

@@ -85,3 +85,42 @@ def test_every_shipped_skill_passes_host_dispatch_lint() -> None:
     for path in sorted((ROOT / "skills").glob("*/SKILL.md")):
         failures.extend(f"{path.parent.name}: {item}" for item in lint_skill_text(path.read_text()))
     assert failures == []
+
+
+def test_feature_implement_declares_autonomous_rc3_auto_continue() -> None:
+    text = (ROOT / "skills" / "feature-implement" / "SKILL.md").read_text()
+    assert "### Autonomous rc-3 bounded auto-continue" in text
+    assert "wall-autoreset:" in text
+    assert "PLAN_WALL_AUTO_RESET_MAX" in text
+
+
+def test_autonomy_grant_declares_wall_reset_type() -> None:
+    text = (ROOT / "skills" / "autonomy-grant" / "SKILL.md").read_text()
+    assert "`wall-reset`" in text
+
+
+def test_feature_spec_max_auth_enumerates_wall_reset_per_phase() -> None:
+    text = (ROOT / "skills" / "feature-spec" / "SKILL.md").read_text()
+    assert "wall-reset:<phase-slug>" in text
+
+
+def test_fix_round_mutation_contract_present_in_wall_skills() -> None:
+    for name in ("feature-implement", "plan-decompose"):
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        assert "mutation contract" in text.lower(), name
+
+
+def test_configuration_docs_cover_plan_wall_knobs() -> None:
+    text = (ROOT / "docs" / "configuration.md").read_text()
+    for var in ("PLAN_WALL_AUTO_RESET_MAX", "PLAN_WALL_MAX_ROUNDS",
+                "PLAN_WALL_TIMEOUT", "PLAN_WALL_AWAIT_MAX"):
+        assert var in text, var
+
+
+def test_gsd_run_wraps_wall_calls_in_auto_continue_gate() -> None:
+    text = (ROOT / "scripts" / "gsd" / "gsd-run.sh").read_text()
+    assert "_gsd_run_wall_gate" in text
+    assert "wall-autoreset:" in text
+    # both wall call sites must route through the gate, none may bypass it
+    assert 'bash "$PLAN_WALL_LEVER"' not in text.replace(
+        '  bash "$PLAN_WALL_LEVER" "$phase_dir"', "")

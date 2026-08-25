@@ -1,7 +1,7 @@
 ---
 name: autonomy-grant
 description: "Pre-approve the operator gates an unattended run will hit — prod push, deploy, merge, DNS — so the run proceeds through them without stopping. Use at plan approval, while the operator is present, to build the typed approval ledger that /feature-implement --autonomous checks mechanically."
-version: "1.3.0"
+version: "1.4.0"
 ---
 
 # /autonomy-grant
@@ -40,6 +40,7 @@ unapproved external gates.
    | `flip` | `flip:HOLALUMINA_301_TO_GETGLANCE` |
    | `restart` | `restart:tenant-gateway` |
    | `secret-use` | `secret-use:RAILWAY_API_TOKEN` |
+   | `wall-reset` | `wall-reset:04-b3-specs` (target = phase-slug, `basename` of the phase dir; one grant per phase — no wildcards) |
    | `migrate` | `migrate:add-column-x` |
 
 2. **Present the list to the operator** — one screen, one decision. Include

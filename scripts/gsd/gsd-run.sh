@@ -80,6 +80,99 @@ fi
 # gsd's mempalace commands call a bare `mempalace` binary in headless mode.
 export PATH="$REPO_ROOT/scripts/gsd:$PATH"
 
+# ── wall rc-3 bounded auto-continue ─────────────────────────────────────────
+# plan-wall.sh exit 3 (WALL-ROUND-CAP or WALL-NO-CONVERGENCE) is TERMINAL by
+# default. This runner IS the --autonomous headless path — a bare `|| exit`
+# kills the process before any agent turn could apply the operator unblock
+# recipe plan-wall itself prints (resolve findings -> loop-round --reset ->
+# re-run). When that recipe's precondition is machine-verifiably met (zero
+# unresolved HIGH/CRITICAL wall findings for the phase) AND the operator
+# pre-granted `wall-reset:<phase-slug>` in the run's autonomy ledger, run the
+# recipe here, exactly once per phase per run:
+#   bounded by the durable `wall-autoreset:<slug>` loop-round counter
+#   (PLAN_WALL_AUTO_RESET_MAX, default 1 — never replenished mid-run; only
+#   the run finalizer's loop sweep clears it), and the budget is spent
+#   regardless of the re-run's outcome; raising PLAN_WALL_AUTO_RESET_MAX is
+#   a deliberate, visible escape mirroring PLAN_WALL_MAX_ROUNDS — never a
+#   silent off-switch. ANY nonzero rc from the re-run is
+#   quarantine-terminal — post-reset the wall's prior-count sidecar is gone,
+#   so its diminishing-returns comparison is strict: only a hard
+#   zero-unresolved pass clears, a fresh HIGH surfaces as rc 1 and must also
+#   terminate or the uncounted wall->fix->wall loop this cap exists to
+#   prevent would restart. No grant (interactive sessions never mint one) =
+#   every skip path falls through to the unchanged quarantine, fail-closed.
+_gsd_run_wall_gate() {
+  local phase_dir="$1" slug rc gates_py c open plan_rel n f
+  bash "$PLAN_WALL_LEVER" "$phase_dir"
+  rc=$?
+  [ "$rc" -eq 3 ] || return "$rc"
+  slug="$(basename "$phase_dir")"
+  if [ -z "${GSD_RUN_ID:-}" ]; then
+    echo "gsd-run: WALL-AUTO-CONTINUE skipped (no GSD_RUN_ID) — quarantine stands" >&2
+    return "$rc"
+  fi
+  gates_py=""
+  for c in \
+    "$REPO_ROOT/packages/feature-fix-swarm/lib/gates.py" \
+    "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
+    "$REPO_ROOT/lib/gates.py"; do
+    [ -f "$c" ] && gates_py="$c" && break
+  done
+  if [ -z "$gates_py" ]; then
+    echo "gsd-run: WALL-AUTO-CONTINUE skipped (gates.py not found) — quarantine stands" >&2
+    return "$rc"
+  fi
+  # Zero unresolved HIGH/CRITICAL wall findings across every plan in the
+  # phase — the wall's own printed unblock precondition. A failed,
+  # unparseable, or non-numeric queue answer counts as an open finding, and
+  # a phase with NO enumerable plan files skips too: zero plans checked is
+  # zero evidence, not a pass (fail-closed).
+  local plans=0
+  open=0
+  for f in "$phase_dir"/*-PLAN.md "$phase_dir"/PLAN.md; do
+    [ -f "$f" ] || continue
+    plans=$((plans + 1))
+    plan_rel="${f#"$REPO_ROOT"/}"
+    n="$(python3 "$gates_py" findings-queue list --unresolved --source wall \
+      --severity HIGH,CRITICAL --plan "$plan_rel" 2>/dev/null \
+      | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null)"
+    case "$n" in ''|*[!0-9]*) n=1 ;; esac
+    open=$((open + n))
+  done
+  if [ "$plans" -eq 0 ]; then
+    echo "gsd-run: WALL-AUTO-CONTINUE skipped (phase=$slug has no enumerable plan files — nothing verified) — quarantine stands" >&2
+    return "$rc"
+  fi
+  if [ "$open" -ne 0 ]; then
+    echo "gsd-run: WALL-AUTO-CONTINUE skipped (phase=$slug has $open unresolved HIGH/CRITICAL finding(s)) — quarantine stands" >&2
+    return "$rc"
+  fi
+  if ! python3 "$gates_py" check-grant "$GSD_RUN_ID" --action "wall-reset:$slug" >/dev/null 2>&1; then
+    echo "gsd-run: WALL-AUTO-CONTINUE skipped (no wall-reset:$slug grant for run $GSD_RUN_ID) — quarantine stands" >&2
+    return "$rc"
+  fi
+  local lr_rc=0
+  python3 "$gates_py" loop-round "$GSD_RUN_ID" "wall-autoreset:$slug" \
+      --max "${PLAN_WALL_AUTO_RESET_MAX:-1}" >/dev/null 2>&1 || lr_rc=$?
+  if [ "$lr_rc" -ne 0 ]; then
+    if [ "$lr_rc" -eq 1 ]; then
+      echo "gsd-run: WALL-AUTO-CONTINUE skipped (autoreset budget spent for phase=$slug) — quarantine stands" >&2
+    else
+      echo "gsd-run: WALL-AUTO-CONTINUE skipped (autoreset counter store unusable, rc=$lr_rc) — quarantine stands" >&2
+    fi
+    return "$rc"
+  fi
+  echo "gsd-run: WALL-AUTO-CONTINUE phase=$slug — zero unresolved findings, wall-reset:$slug granted; resetting wall round and re-running once" >&2
+  if ! python3 "$gates_py" loop-round "$GSD_RUN_ID" "wall:$slug" --reset --max 1 >/dev/null 2>&1; then
+    echo "gsd-run: WALL-AUTO-CONTINUE aborted (wall round-counter reset failed) — quarantine stands" >&2
+    return "$rc"
+  fi
+  bash "$PLAN_WALL_LEVER" "$phase_dir"
+  rc=$?
+  [ "$rc" -eq 0 ] || echo "gsd-run: WALL-AUTO-CONTINUE exhausted (re-run rc=$rc) — quarantine terminal" >&2
+  return "$rc"
+}
+
 # execute-plan marks every PLAN frontmatter requirement complete without
 # checking whether another plan still owns work for that ID. Guard the whole
 # phase before even probing a model so an unsafe plan cannot mutate state.
@@ -130,7 +223,7 @@ PY
   fi
   GSD_PHASE_ID="$(basename "$WALL_PHASE_DIR")"
   export GSD_PHASE_ID
-  bash "$PLAN_WALL_LEVER" "$WALL_PHASE_DIR" || exit $?
+  _gsd_run_wall_gate "$WALL_PHASE_DIR" || exit $?
   # Advisory scope-drift re-anchor (once per phase start, never per turn):
   # deterministic diff-vs-declared-surface + PHASE GOAL line. Fail-soft.
   DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"
@@ -1455,7 +1548,7 @@ check_planning_divergence "$@" || exit $?
 # no re-run: the repo copy is the one the wall already cleared, and
 # gsd-plan-phase has no wall to retire.
 if [ "$PLANNING_SYNC_REPO_CHANGED" -eq 1 ] && [ "$GSD_SKILL_NAME" = gsd-execute-phase ]; then
-  bash "$PLAN_WALL_LEVER" "$WALL_PHASE_DIR"
+  _gsd_run_wall_gate "$WALL_PHASE_DIR"
   _resync_wall_rc=$?
   if [ "$_resync_wall_rc" -ne 0 ]; then
     echo "GSD-RUN:PLANNING-SYNC-WALL-FAILED phase=$GSD_PHASE_ID rc=$_resync_wall_rc" >&2
