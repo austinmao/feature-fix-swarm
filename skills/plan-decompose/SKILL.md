@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
 description: "Create and decompose a lightweight plan with opposite-first review, one bounded read-only active-host fallback, and bounded self-repair; returns success or an evidence-backed terminal block."
-version: "1.6.0"
+version: "1.7.0"
 permissions:
   filesystem: write
   network: false
@@ -393,6 +393,16 @@ pair.
   that policy replaced. The residual list below is what keeps it honest.
 - Verdict APPROVE-WITH-FIXES with HIGH findings: apply HIGH fixes to `plan.md`, continue.
 - Verdict APPROVE: continue.
+
+**Fix-round mutation contract.** Both repair paths above (REJECT/CRITICAL and
+APPROVE-WITH-FIXES) apply their fix by rewriting or deleting the defective
+text IN `plan.md` — never by appending a correction block after text a
+finding named while leaving that original text in place. The next-round
+reviewer re-reads the whole plan fresh each round; unremoved original prose
+gets re-noticed and re-reported, which the finding-id logic above counts as
+REPEAT/REOPEN — inflating the round's NEW count and defeating the
+pass-with-residuals comparison the same way appended-not-removed text defeats
+plan-wall.sh's own diminishing-returns policy (b).
 
 If the final allowed review still returns REJECT or CRITICAL, write the terminal
 blocked artifact defined in the ownership contract and exit 1. Never emit a

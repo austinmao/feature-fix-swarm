@@ -152,6 +152,13 @@ references to either.
 | `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:110,139` | Executable overrides |
 | `ADVERSARY_LAST_TIER_DESCENT` | `0` | `scripts/gsd/adversary-host.sh` | Read-only signal, not an input. Set to `1` when the reviewer that answered sat on a LOWER rung than the one requested (e.g. a judgment-tier ask answered by `gpt-5.6-terra` medium). Such a review is recorded as **degraded** and prints `adversary-host: TIER-DESCENT kind=… requested=… answered=…` to stderr; in-process callers that source this lib can gate on the variable |
 | `PLAN_WALL` | on | `scripts/gsd/plan-wall.sh` | `off` skips the per-phase plan wall — only with a durable, recorded waiver; a skip that cannot record its waiver fails closed |
+| `PLAN_WALL_TIMEOUT` | `180` | `scripts/gsd/plan-wall.sh` | Per-plan reviewer dispatch budget (seconds) |
+| `PLAN_WALL_MAX_ROUNDS` | `3` | `scripts/gsd/plan-wall.sh` | Durable per-phase round cap; hitting it emits `WALL-ROUND-CAP` (exit 3) — terminal, not a retryable BLOCKED |
+| `PLAN_WALL_REASON` | operator waiver text | `scripts/gsd/plan-wall.sh` | Waiver reason recorded when `PLAN_WALL=off`; must be non-empty |
+| `PLAN_WALL_AWAIT_MAX` | `6` | `scripts/gsd/plan-wall.sh` | Caps how many `--await` calls may end pending per phase; resets on any decided outcome |
+| `PLAN_WALL_AWAIT_POLL` | `15` | `scripts/gsd/plan-wall.sh` | Poll interval (seconds) while backgrounded awaiting a decided wall outcome |
+| `PLAN_WALL_AWAIT_COUNT` | on | `scripts/gsd/plan-wall.sh` | `off` makes an `--await` probe budget-neutral (for evaluators) — does not consume `PLAN_WALL_AWAIT_MAX` |
+| `PLAN_WALL_AUTO_RESET_MAX` | `1` | `scripts/gsd/gsd-run.sh` (`_gsd_run_wall_gate`) | Per-phase-per-run budget for the `--autonomous` rc-3 bounded auto-continue; consumed via the durable `wall-autoreset:<phase-slug>` loop-round counter, spent regardless of the re-run's outcome, never replenished mid-run. Requires an operator `wall-reset:<phase-slug>` grant |
 | `SPEC_PANEL` | off | spec-authoring panel (last spec-decompose phase) | `on` enables the dual-vendor blind-draft panel at spec authoring; default off pending an EVAL-D fixture pass |
 
 `findings-queue` (`lib/gates.py`) resolutions now require a disposition:

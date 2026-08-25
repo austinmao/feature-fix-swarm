@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.13.0"
+version: "2.14.0"
 allowed-tools:
   - Read
   - Edit
@@ -263,6 +263,51 @@ diminishing-returns round finds new HIGH/CRITICAL findings that are not
 strictly fewer than the previous round, before the round cap is even hit).
 Distinguish them from the printed line, not the exit code; the operator
 action is identical either way — quarantine and move on.
+
+### Fix-round mutation contract
+
+Every fix round between a wall BLOCKED verdict and the next wall invocation
+must mutate the plan/task body directly — rewrite or delete the defective
+text the finding points at. Never leave the original text standing and
+append a correction block after it: the wall's reviewer dispatch re-reads
+the WHOLE plan file each round, so appended-but-not-removed defective prose
+gets re-noticed and re-reported. A re-report of a previously RESOLVED
+finding is a REOPEN, and the findings queue counts a REOPEN as NEW — which
+inflates this round's new-HIGH/CRITICAL count and can by itself trip the
+wall's diminishing-returns rule (new ≥ prior → `WALL-NO-CONVERGENCE`). The
+fix IS the edit to the plan; `findings-queue resolve` records the
+adjudication, it does not substitute for one.
+
+### Autonomous rc-3 bounded auto-continue
+
+`--autonomous` runs get exactly ONE bounded, grant-gated retry before a
+quarantine becomes terminal — `gsd-run.sh` enforces this in code
+(`_gsd_run_wall_gate`; it is the runner behind every `--autonomous`
+invocation, and no agent turn exists between its two wall calls for an
+interactive prose recipe to govern). On exit 3, before quarantine:
+
+1. Every plan under the phase must have zero unresolved HIGH/CRITICAL wall
+   findings (`findings-queue list --unresolved --source wall --severity
+   HIGH,CRITICAL --plan <plan>`). Any unresolved finding anywhere in the
+   phase → quarantine (unchanged).
+2. Zero unresolved AND `gates.py check-grant "$RUN_ID" --action
+   wall-reset:<phase-slug>` passes AND the durable per-phase budget
+   (`gates.py loop-round "$RUN_ID" wall-autoreset:<phase-slug> --max
+   ${PLAN_WALL_AUTO_RESET_MAX:-1}`) is not capped → proceed; either check
+   failing → quarantine (unchanged).
+3. `gates.py loop-round "$RUN_ID" wall:<phase-slug> --reset --max 1`, then
+   re-run the wall on the phase exactly once.
+4. ANY nonzero exit from that re-run — a second rc 3 OR a plain rc 1
+   BLOCKED — is quarantine terminal. The reset also cleared the round's
+   prior-count history, so the re-run's diminishing-returns comparison has
+   no baseline and is strict: only a hard zero-unresolved pass clears it.
+   The `wall-autoreset:<phase-slug>` budget is spent regardless of which
+   exit code comes back — this recipe never runs twice for the same phase
+   in the same run.
+
+Interactive sessions never mint a `wall-reset` grant, so the gate falls
+through to the unchanged terminal quarantine there — exit 3 stays the stop
+described above.
 
 ## Wall await rule
 

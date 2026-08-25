@@ -10,6 +10,10 @@ all skills.
 
 ### Added
 
+- `/feature-implement --autonomous` gets a bounded, grant-gated rc-3 auto-continue: on `WALL-ROUND-CAP`/`WALL-NO-CONVERGENCE`, a phase with zero unresolved HIGH/CRITICAL wall findings, an operator `wall-reset:<phase-slug>` grant, and an unspent `PLAN_WALL_AUTO_RESET_MAX` budget (default 1) gets exactly one wall reset + re-run before quarantine goes terminal; enforced in `scripts/gsd/gsd-run.sh` (`_gsd_run_wall_gate` — the actual `--autonomous` runner seam), documented in `skills/feature-implement/SKILL.md`. `/feature-spec` Step 6 MAX-AUTH enumeration now mints one `wall-reset:<phase-slug>` grant per phase directory (autonomy-grant 1.4.0 adds the gate type). Interactive sessions never mint the grant, so their exit-3 stop is unchanged.
+- Fix-round mutation contract (feature-implement 2.14.0, plan-decompose 1.7.0): a wall/plan-gate fix round must rewrite or delete the defective plan text — never append a correction block leaving the original standing, which next-round reviewers re-notice and the findings queue counts as REOPEN=NEW, tripping the diminishing-returns rule (root cause of the spec-385 no-convergence quarantines).
+- `docs/configuration.md` now documents the previously missing-but-read `PLAN_WALL_TIMEOUT`, `PLAN_WALL_MAX_ROUNDS`, `PLAN_WALL_REASON`, `PLAN_WALL_AWAIT_MAX/POLL/COUNT` knobs plus the new `PLAN_WALL_AUTO_RESET_MAX`.
+
 - `plan-wall.sh --await` enforces `PLAN_WALL_AWAIT_MAX` (default 6): pending returns beyond the cap exit rc 76 `WALL-AWAIT:attempts-exhausted`; the counter is run-scoped, evaluator probes (`PLAN_WALL_AWAIT_COUNT=off`) are budget-neutral, and decided outcomes always report through and reset it.
 - `digest.sh --immediate` appends schema-true retro rows to `.feature-fix-swarm/digest-<utcdate>.jsonl` for list-backed event classes — the previously missing producer for `retro.sh analyze` (`DIGEST_RETRO_SINK=off` disables).
 
