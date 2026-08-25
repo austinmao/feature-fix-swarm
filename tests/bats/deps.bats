@@ -26,7 +26,7 @@ make_stub_path() {
   local repo="$BATS_TEST_TMPDIR/repo" home="$BATS_TEST_TMPDIR/home" tool
   mkdir -p "$repo/node_modules/@opengsd/gsd-core" "$home"
   git -C "$repo" init -q
-  printf '{"version": "1.10.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
+  printf '{"version": "1.11.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
   for skill in prompt-master socratic; do
     mkdir -p "$home/.agents/skills/$skill"
     touch "$home/.agents/skills/$skill/SKILL.md"

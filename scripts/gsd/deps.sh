@@ -27,7 +27,20 @@ fail() {
 }
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside a git repository"
-GSD_VERSION="1.10.0"
+# pin follows the repo's own package.json (the committed lockfile source of
+# truth) so gsd-core bumps can't strand a stale hardcode here; the literal is
+# the fallback for scratch/consumer repos without a package.json.
+GSD_VERSION="$(python3 - "$REPO_ROOT" <<'PYEOF' 2>/dev/null
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "package.json"
+try:
+    d = json.loads(p.read_text())
+    print(d.get("dependencies", {}).get("@opengsd/gsd-core") or d.get("devDependencies", {}).get("@opengsd/gsd-core") or "")
+except OSError:
+    print("")
+PYEOF
+)"
+GSD_VERSION="${GSD_VERSION:-1.11.0}"
 
 # roster rows: name|kind|required|remedy
 # kinds: binary (command -v; comma = any-of), npm, pip, pin
