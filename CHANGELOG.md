@@ -82,6 +82,11 @@ all skills.
 
 ### Fixed
 
+- `skills/ffs-init/SKILL.md` still described exit 3 as a "render stub" although
+  `render` has been fully implemented since spec 007, and never documented the
+  `seed` verb `/preflight` depends on — both corrected. `docs/dependencies.md`
+  no longer credits Gitleaks or `npm audit` with covering the release surface
+  (neither exists as a CI job; `npm audit` is a PR-checklist item).
 - `setup.sh`/`ffs_installer.py` hard-blocked the *entire* install whenever a
   single managed skill path had an edited/unmanaged collision, with no way to
   proceed for the rest of the skills. New `--adopt-collisions` flag backs up
@@ -96,6 +101,18 @@ all skills.
 
 ### Added
 
+- `/ffs-init` is now the umbrella initialization (v1.1.0): a new Phase 0
+  installs repo-scoped dependencies before the registry flow.
+  `scripts/gsd/deps.sh` is the single executable dependency roster
+  (`check | install`, exit codes 0/1/2; `install` runs only `npm ci` +
+  `pip install --requirement requirements-dev.txt` — never a system package
+  manager, never sudo) and `scripts/gsd/init-guard.sh` is the advisory
+  pre-init warning every operator entrypoint skill now surfaces via a
+  lint-enforced `## Init gate` section (always exits zero; `--strict` for callers
+  that want a hard gate). New guide: `docs/initialization.md`; roster↔docs
+  drift is blocked by `tests/test_docs_dependency_roster.py`. The README
+  dependency table gains the previously undocumented rows (`gh`, `jq`, the
+  POSIX tool floor, `filelock`, the optional QA lane).
 - Post-spec-005 hygiene: opt-in enum-drift suite
   (`tests/bats/socratic-enum-drift.bats`) asserting
   `DOMAIN_ENUM_ORDER`/`PACK_ENUM` map 1:1 to a REAL resolved socratic vendor

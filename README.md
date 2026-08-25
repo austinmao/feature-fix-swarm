@@ -148,6 +148,16 @@ on integration, safety, and proof.
 | [gstack](https://github.com/garrytan/gstack) | Optional integration | No | Idea shaping, browser QA, investigation, review, and shipping skills |
 | [GitHub Spec Kit](https://github.com/github/spec-kit) | Needed for the full spec bootstrap | No | Produces durable feature specs and plans before FFS decomposition |
 | External agent catalogs | Optional | No | Adds specialized roles; FFS discovers local roles and retains a generic floor |
+| GitHub CLI (`gh`) | Yes | No | Ship/finalize tail (`assert-merged`, run watching) has no fallback without it |
+| `jq` | Yes | No | Canary gate and QA-coverage adversary JSON handling |
+| POSIX tool floor: `shasum`/`sha256sum`, `ps`; optional `curl`, `flock`, `timeout`/`gtimeout`, `tmux` | Required floor; optional extras degrade fail-soft | No | Evidence hashing, host detection, readiness probes, locking, bounded runs, worktree GC |
+| `filelock` (Python, `>=3.30,<4`) | Yes | Yes, via `deps.sh install` | Coordination-layer locks and liveness probes (`scripts/coord/coord.py`) |
+| Optional QA lane: `npx`/vitest, `playwright`, `canary`; optional tooling: `bats`, `shellcheck`, `slopcheck`, `gbrain` | Optional | No | Browser-proof QA, contributor tests/lint, package-legitimacy verdicts, workspace memory |
+
+`bash scripts/gsd/deps.sh check` is the executable form of this table — it
+probes every row and prints the exact install command for anything missing;
+`/ffs-init` runs it first and auto-installs the repo-scoped rows. See
+[Initialization](docs/initialization.md).
 
 The complete ownership, pinning, update, and degradation rules are documented
 in [Dependencies and integrations](docs/dependencies.md). Installation details
@@ -212,6 +222,7 @@ skill hash, or Codex CLI version drift is an actionable failure.
 | Guide | What it answers |
 | --- | --- |
 | [Getting started](docs/getting-started.md) | How do I reach a first dry run? |
+| [Initialization](docs/initialization.md) | What does /ffs-init set up, and what if I skip it? |
 | [Choosing a command](docs/choosing-a-command.md) | Which workflow fits this job? |
 | [Dependencies and integrations](docs/dependencies.md) | What is installed, who owns it, and why? |
 | [Pipeline](docs/pipeline.md) | How do the stages connect? |

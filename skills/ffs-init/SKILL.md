@@ -1,10 +1,10 @@
 ---
 name: ffs-init
-description: "Initialize or refresh the FFS environment registry (config/environments.yaml): propose rows from repo evidence, review them in one batched session, apply atomically, validate, update in place. Never leaks a secret VALUE (names only) and never re-asks a declined proposal."
-version: "1.0.0"
+description: "Umbrella FFS initialization: install repo-scoped dependencies (Phase 0), then build or refresh the environment registry (config/environments.yaml) — propose rows from repo evidence, review them in one batched session, apply atomically, validate, update in place. Never leaks a secret VALUE (names only) and never re-asks a declined proposal."
+version: "1.1.0"
 ---
 
-# /ffs-init [--detect-only|--answers <file>|--yes|--update|--check|--force|--reset-declines]
+# /ffs-init [--detect-only|--answers <file>|--yes|--update|--check|--force|--reset-declines|--skip-deps]
 
 ## Host dispatch contract
 
@@ -13,11 +13,40 @@ version: "1.0.0"
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
-Collects operator answers for the environment registry. This skill DECIDES
-nothing and WRITES nothing: `scripts/gsd/env-registry.sh` owns detection,
-validation, and the atomic write. Every write in this skill's flow routes
-through `env-registry.sh apply` — the skill itself never touches
-`config/environments.yaml` or `.ffs-init.json`, in any mode, ever.
+Two phases: Phase 0 installs repo-scoped dependencies (below), then the
+registry flow collects operator answers for the environment registry.
+
+For the REGISTRY the skill DECIDES nothing and WRITES nothing:
+`scripts/gsd/env-registry.sh` owns detection, validation, and the atomic
+write. Every registry write in this skill's flow routes through
+`env-registry.sh apply` — the skill itself never touches
+`config/environments.yaml` or `.ffs-init.json`, in any mode, ever. Phase 0's
+only writes are the ones `deps.sh install` makes (`node_modules/` from the
+committed lockfile, pip packages from `requirements-dev.txt`) and, on an
+explicit confirm, whatever `setup.sh` installs under its own manifest.
+
+## Phase 0 — dependencies (runs first; `--skip-deps` skips it)
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+bash "$REPO_ROOT/scripts/gsd/deps.sh" check
+```
+
+1. Run `deps.sh check` and relay its report. Exit 0 with nothing missing →
+   phase done, continue to the registry flow.
+2. Repo-scoped rows missing (`@opengsd/gsd-core`, `filelock`) → run
+   `bash "$REPO_ROOT/scripts/gsd/deps.sh" install` (interactive: let its
+   npm-ci confirm reach the operator; non-interactive modes pass `--yes`).
+3. No FFS install manifest (neither `.feature-fix-swarm/install-manifest.json`
+   nor the user-scope cache copy) → OFFER `bash setup.sh --scope user` (or
+   `--scope project --project-dir <repo>`) with an explicit confirm — it
+   mutates `~/.claude`/`~/.agents`, so it is never run silently.
+4. Missing SYSTEM tools (jq, gh, bats, shellcheck, …) are reported with their
+   exact install command from the roster and left to the operator — this
+   skill never runs a system package manager and never uses sudo.
+
+`--detect-only` and `--check` skip Phase 0 entirely (they are read-only
+modes and must stay hermetic).
 
 ## Script invocation idiom
 
@@ -26,7 +55,7 @@ resolve it relative to this skill file:
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-bash "$REPO_ROOT/scripts/gsd/env-registry.sh" <detect|check|render|apply> [flags]
+bash "$REPO_ROOT/scripts/gsd/env-registry.sh" <detect|check|render|apply|seed> [flags]
 ```
 
 ## Interactive session (default, one batched pass)
@@ -108,7 +137,9 @@ check` and reporting its result to the operator.
   prefixes)
 - `2` — leak finding (guard convention; check on the resolved registry,
   apply on candidate bytes)
-- `3` — render stub: stderr `render lands in phase 3 (REQ-302)`
+(`render` is fully implemented — workflows land only as
+`.github/workflows/ffs-<name>.yml`, collisions divert to
+`.github/ffs-proposals/` with a `diff -u`. There is no exit 3.)
 
 Any concurrent `apply` fails FAST, never interleaves:
 
@@ -215,6 +246,16 @@ bash "$REPO_ROOT/scripts/gsd/env-registry.sh" apply --reset-declines
 
 Clears recorded declines so suppressed proposals surface again on the next
 `detect`.
+
+### `seed` (read-only, consumed by `/preflight`)
+
+```bash
+bash "$REPO_ROOT/scripts/gsd/env-registry.sh" seed
+```
+
+Emits preflight-manifest candidate rows (JSON array, secret NAMES only) from
+the resolved registry. Additive and never authoritative — `/preflight` uses
+it to seed `specs/NNN/preflight.json`; it writes nothing.
 
 ### `--force` (regenerate from scratch)
 
