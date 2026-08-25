@@ -1,0 +1,2 @@
+# SYNTHETIC-NOT-A-REAL-KEY — leak-scan fixture (REQ-202a family: provider-token-prefix)
+gh_token: ghp_SYNTHETICnotarealtokenvalue00

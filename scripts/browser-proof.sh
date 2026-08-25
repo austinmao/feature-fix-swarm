@@ -42,13 +42,17 @@ done
 # browser-relevant logic in plain .ts (hooks/useCart.ts, tailwind.config.ts)
 # must not slip past. QA_FORCE_BROWSER=1 forces WEB-TOUCH:yes regardless.
 WEB_RE='\.(tsx|jsx|vue|svelte|astro|html|css|scss|less)$|(^|/)(pages|routes|components|emails|templates|public|hooks|stores?|styles?)/|(^|/)app/|(^|/)api/|(^|/)(tailwind|next|nuxt|vite|astro|svelte)\.config\.'
+# Shell/bats files are never a browser surface even inside web-named dirs
+# (scripts/hooks/*.sh matched the bare hooks/ alternation — false web-touch).
+# Keep in lockstep with canary-gate.sh's WEB_EXCLUDE.
+WEB_EXCLUDE_RE='\.(sh|bash|bats|ya?ml)$'
 
 WEB_TOUCH="no"
 if [ "${QA_FORCE_BROWSER:-0}" = "1" ]; then
   WEB_TOUCH="yes"
 else
   for f in $DIFF_FILES; do
-    if echo "$f" | grep -qE "$WEB_RE"; then WEB_TOUCH="yes"; break; fi
+    if echo "$f" | grep -qE "$WEB_RE" && ! echo "$f" | grep -qE "$WEB_EXCLUDE_RE"; then WEB_TOUCH="yes"; break; fi
   done
 fi
 echo "WEB-TOUCH:$WEB_TOUCH"

@@ -1,0 +1,14 @@
+[
+  {"kind": "probe", "name": "git-present", "argv": ["git", "--version"]},
+  {"kind": "probe", "name": "python3-present", "argv": ["python3", "--version"]},
+  {"kind": "probe", "name": "pytest-present", "argv": ["python3", "-m", "pytest", "--version"]},
+  {"kind": "probe", "name": "bats-present", "argv": ["bats", "--version"]},
+  {"kind": "probe", "name": "shellcheck-present", "argv": ["shellcheck", "--version"]},
+  {"kind": "probe", "name": "node-present-for-gsd-tools", "argv": ["node", "--version"]},
+  {"kind": "probe", "name": "codex-present-for-opposite-host-gates", "argv": ["codex", "--version"]},
+  {"kind": "probe", "name": "gh-authenticated-for-ship-pr", "argv": ["gh", "auth", "status"]},
+  {"kind": "probe", "name": "timeout-tool-for-run-bounded", "argv": ["bash", "-c", "command -v timeout || command -v gtimeout"]},
+  {"kind": "probe", "name": "evidence-store-resolvable", "argv": ["python3", "-c", "import subprocess; p=subprocess.run(['git','rev-parse','--git-common-dir'],capture_output=True,text=True); print(p.stdout.strip()); exit(0 if p.returncode==0 else 1)"]},
+  {"kind": "probe", "name": "sqlite3-for-run-state", "argv": ["python3", "-c", "import sqlite3; print(sqlite3.sqlite_version)"]},
+  {"kind": "probe", "name": "cache-dir-writable-for-finisher-lock", "argv": ["bash", "-c", "mkdir -p ~/.cache/feature-fix-swarm && touch ~/.cache/feature-fix-swarm/.preflight-probe && rm ~/.cache/feature-fix-swarm/.preflight-probe"]}
+]

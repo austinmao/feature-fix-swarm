@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://feature-fix-swarm/schemas/review-finding.schema.json",
+  "title": "review-finding",
+  "description": "Shared finding schema emitted by any reviewer dispatch. Root is an OBJECT with a single `findings` array; an empty array is a SUCCESSFUL zero-findings review, not a failure. The object root and the all-properties-in-`required` shape are mandated by OpenAI structured outputs (`--output-schema`), which rejects an array root with 'schema must be a JSON Schema of type object' and rejects a partial `required` with \"'required' is required to be supplied and to be an array including every key in properties\". Optional fields are therefore expressed as nullable, never as absent. Zero-byte/non-JSON output is a rung failure at the dispatch layer, not a schema violation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "findings"
+  ],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "severity",
+          "file",
+          "claim",
+          "line",
+          "repro",
+          "vendor",
+          "confidence"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "CRITICAL",
+              "HIGH",
+              "MEDIUM",
+              "LOW"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "repo-relative path"
+          },
+          "claim": {
+            "type": "string"
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "repro": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vendor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "anthropic",
+              "openai",
+              null
+            ]
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    }
+  }
+}

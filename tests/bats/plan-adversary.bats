@@ -97,7 +97,21 @@ JSON
 }
 
 @test "kill-switch PLAN_ADVERSARY=off skips" {
-  PLAN_ADVERSARY=off run bash "$SCRIPT" "$HIGH"
+  # plan-adversary.sh resolves its waiver-record.sh sibling via its own
+  # $BASH_SOURCE dirname (script-relative, ignores cwd/GATES_STORE) — running
+  # the real repo's copy would write into the developer's real canonical
+  # evidence store. Isolate via a fixture-local copy (see WR-140).
+  local root fixture
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  fixture="$BATS_TEST_TMPDIR/pa-killswitch-fixture"
+  mkdir -p "$fixture/scripts/gsd" "$fixture/lib"
+  cp "$root/scripts/gsd/plan-adversary.sh" "$fixture/scripts/gsd/plan-adversary.sh"
+  cp "$root/scripts/gsd/adversary-host.sh" "$fixture/scripts/gsd/adversary-host.sh"
+  cp "$root/scripts/gsd/waiver-record.sh" "$fixture/scripts/gsd/waiver-record.sh"
+  cp "$root/lib/gates.py" "$fixture/lib/gates.py"
+  chmod +x "$fixture"/scripts/gsd/*.sh
+  git -C "$fixture" init -q
+  PLAN_ADVERSARY=off run bash "$fixture/scripts/gsd/plan-adversary.sh" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"disabled"* ]]
 }

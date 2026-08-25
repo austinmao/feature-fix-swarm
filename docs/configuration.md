@@ -146,10 +146,22 @@ references to either.
 | `QA_COVERAGE_MODEL_REQUEST` / `_TIMEOUT` | `{"kind":"tier","name":"execution"}` / `300` | `scripts/gsd/qa-coverage-adversary.sh` | Typed QA-coverage adversary request and budget |
 | `GSD_DRIFT_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/scope-drift-gate.sh` | Typed optional drift-judge request |
 | `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:23` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
-| `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:78` | `0`/`off` disables the one-shot cross-vendor fallback |
+| `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:78` | `0`/`off` disables the one-shot cross-vendor fallback. Also read by the plan wall's diversity-invariant reviewer selection — its state is stamped into the wall record |
 | `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:172` | `off` skips the cheap pre-review availability probe |
-| `FFS_ADVERSARY_*_TIMEOUT` | 20 / 45 / 90 / 120 / 180 / 240 | `scripts/gsd/adversary-host.sh:170-278` | Per-leg probe and review caps |
+| `FFS_ADVERSARY_*_TIMEOUT` | 20 / 120 / 180 / 240 / 480 | `scripts/gsd/adversary-host.sh:170-278` | Per-leg probe and review caps (ceilings — always clamped to the call's overall deadline). The preferred rung is the independent opposite-vendor reviewer and gets the 480 review ceiling; the same-vendor fallback keeps 240. The invariant `preferred >= fallback` holds for the DEFAULTS, asserted on both host directions in `tests/bats/adversary-host.bats`. An explicit env override stays authoritative and CAN invert it — adversary-host prints a `WARN ... BELOW ...` line naming both rungs' caps when it does, rather than clamping |
 | `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:110,139` | Executable overrides |
+| `ADVERSARY_LAST_TIER_DESCENT` | `0` | `scripts/gsd/adversary-host.sh` | Read-only signal, not an input. Set to `1` when the reviewer that answered sat on a LOWER rung than the one requested (e.g. a judgment-tier ask answered by `gpt-5.6-terra` medium). Such a review is recorded as **degraded** and prints `adversary-host: TIER-DESCENT kind=… requested=… answered=…` to stderr; in-process callers that source this lib can gate on the variable |
+| `PLAN_WALL` | on | `scripts/gsd/plan-wall.sh` | `off` skips the per-phase plan wall — only with a durable, recorded waiver; a skip that cannot record its waiver fails closed |
+| `SPEC_PANEL` | off | spec-authoring panel (last spec-decompose phase) | `on` enables the dual-vendor blind-draft panel at spec authoring; default off pending an EVAL-D fixture pass |
+
+`findings-queue` (`lib/gates.py`) resolutions now require a disposition:
+`gates.py findings-queue resolve --disposition refute|fix|waive --reason "…"`.
+`refute` and `fix` clear the finding; `waive` records it accepted-as-is. Adding
+a finding whose signature matches a RESOLVED one reopens it (prior disposition
+kept in history) — a refuted-then-recurring finding blocks again rather than
+staying silently cleared. The plan wall's HIGH/CRITICAL blocking check reads
+`findings-queue list --unresolved --source wall --severity HIGH,CRITICAL --plan <plan>`,
+so one phase's findings never block another phase's wall.
 
 ### Browser QA
 
@@ -182,6 +194,7 @@ references to either.
 | `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:443,448` | CLI executable overrides |
 | `GSD_CODEX_CONFIG_ROOT` | `${CODEX_HOME:-$HOME/.codex}` | `scripts/gsd/codex-model-sync.sh:12` | Where generated Codex agent TOMLs land |
 | `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:393` | Where the Claude-side SKILL.md surface lives |
+| `GSD_PLANNING_SYNC` | unset | `scripts/gsd/gsd-run.sh:check_planning_divergence` | Which side wins when `.planning/phases/<slug>` has diverged between the repo and the run worktree. `repo` copies repo→worktree, `worktree` copies worktree→repo (and re-runs the plan wall, since it retires the reviewed repo copy). Unset fails closed with exit 78; any other value fails closed |
 
 ### Kill-switches
 
@@ -190,10 +203,18 @@ All default to on. Set to `off` to disable.
 | Var | Consumer | Disables |
 |---|---|---|
 | `DELEGATION_ENFORCER` | `scripts/hooks/delegation-enforcer.sh:25` | Auto-pinning `model` on unpinned sub-agent spawns |
+| `SECURITY_MODEL_FENCE` | `scripts/gsd/security-model-fence.sh` | The `fable → opus` demotion of `gsd-planner`/`gsd-plan-checker` on security-touching specs |
 | `CLI_HANG_GUARD` | `scripts/hooks/cli-hang-guard.sh:22` | The block on unbounded `codex exec` / `claude -p` calls |
 | `CREDENTIAL_OUTPUT_GUARD` | `scripts/hooks/credential-output-guard.sh:11` | The block on commands that would print secret values |
 | `TDD_GATE_BYPASS=1` | `hooks/tdd-gate.sh:12` | The block on source edits with no paired test |
 | `FFS_HOST_PROCESS_DETECT` | `scripts/gsd/adversary-host.sh:42` | The PPID-walk host-detection fallback |
+| `GSD_PLANNING_GUARD` | `scripts/gsd/gsd-run.sh:check_planning_divergence` | The split-brain `.planning/phases/<slug>` check on `/gsd-plan-phase` and `/gsd-execute-phase` — `off` runs the phase against whatever each side happens to hold |
+
+The `newer=` field on a `GSD-RUN:PLANNING-DIVERGENCE` line is an **advisory
+mtime heuristic**, not a merge decision: it reports which side holds the most
+recently modified differing file (ties resolve to `repo`) and degrades to
+`newer=unknown` if attribution fails. It never relaxes the fail-closed
+refusal — only `GSD_PLANNING_SYNC` does that, and it is you who picks the side.
 
 ### Ralph loop
 
@@ -206,8 +227,12 @@ All default to on. Set to `off` to disable.
 ## Model-request migration
 
 FFS 5.0 removes raw runtime model overrides. Use one of the typed `*_MODEL_REQUEST`
-variables above with either `{"kind":"tier","name":"judgment|execution|volume"}`
-or `{"kind":"exact","id":"vendor-model-id"}`. The retired
+variables above with either `{"kind":"tier","name":"frontier|judgment|execution|volume"}`
+or `{"kind":"exact","id":"vendor-model-id"}`. `frontier` is not reachable through
+dynamic escalation and is not a legal target for any of the `*_MODEL_REQUEST`
+variables above today — those all resolve within judgment/execution/volume; it
+is a valid request only where a role is explicitly pinned to it (`gsd-planner`).
+The retired
 `PLAN_ADVERSARY_MODEL`, `PLAN_ADVERSARY_EFFORT`, `PLAN_ADVERSARY_CLAUDE_MODEL`,
 `QA_COVERAGE_MODEL`, and corresponding raw review/drift variables fail closed
 with remediation instead of silently selecting a billing or provenance path.

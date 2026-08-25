@@ -80,6 +80,14 @@ def test_inc_tokens_does_not_change_state(tmp_path: Path) -> None:
     assert store.get_run(run_id).state == "active"
 
 
+def test_inc_tokens_reports_only_the_budget_crossing(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x", tokens_budget=500)
+    assert store.inc_tokens(run_id, 499) is None
+    assert store.inc_tokens(run_id, 1) == (500, 500)
+    assert store.inc_tokens(run_id, 1) is None
+
+
 def test_list_active_runs(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs.db")
     a = store.create_run(skill="fix", objective="bug A")

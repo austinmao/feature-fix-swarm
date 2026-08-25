@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # run-finalizer.sh — run-end estate cleanup after a verified merge.
 # Fixtures: real git repos in $BATS_TEST_TMPDIR (local bare origin), gh mocked.
+# Callers (`feature-implement` and the finish tail) tolerate a pre-mutation
+# nonzero: lock tampering and evidence persistence intentionally fail closed.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -12,6 +14,9 @@ setup() {
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
          GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
   unset FFS_RUN_FINALIZER || true
+  # ambient GSD_RUN_ID (exported by feature-implement autonomous runs) rekeys
+  # the archive dir away from the pr${PR} default these fixtures assert on
+  unset GSD_RUN_ID || true
 
   # repo with a bare origin, main + squash-merged feature branch
   ORIGIN="$BATS_TEST_TMPDIR/origin.git"
@@ -74,6 +79,19 @@ fi
 exit 64
 EOF
   chmod +x "$MOCK_BIN/gh"
+}
+
+@test "finisher-skipped evidence CLI validates inputs before one atomic event row" {
+  EVENT="$REPO_ROOT/lib/evidence_events.py"
+  STORE="$BATS_TEST_TMPDIR/evidence.json"
+  run env GATES_STORE="$STORE" python3 "$EVENT" finisher-skipped --run-id spec-008 --pr 12
+  [ "$status" -eq 0 ]
+  run python3 -c "import json; d=json.load(open('$STORE')); e=d['events']; assert len(e)==1; assert set(e[0]) == {'kind','run_id','pr','ts'}; assert e[0]['pr'] == 12 and isinstance(e[0]['ts'], (int,float))"
+  [ "$status" -eq 0 ]
+  before="$(cksum "$STORE")"
+  run env GATES_STORE="$STORE" python3 "$EVENT" finisher-skipped --run-id $'bad\nrun' --pr +12
+  [ "$status" -ne 0 ]
+  [ "$(cksum "$STORE")" = "$before" ]
 }
 
 @test "kill-switch FFS_RUN_FINALIZER=off -> no-op, exit 0" {
@@ -1106,6 +1124,21 @@ SCRIPT
   esac
 }
 
+@test "coverage: GSD_RUN_ID=spec-005 lands under its own rekeyed run-key dir, not pr<N>" {
+  mock_gh_merged
+  WT="$BATS_TEST_TMPDIR/wt-feat"
+  git worktree add -q "$WT" feat/x
+  mkdir -p "$WT/.feature-fix-swarm"
+  echo '{"w":"1"}' > "$WT/.feature-fix-swarm/evidence.json"
+  GSD_RUN_ID="spec-005" run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [ ! -d "$WT" ]
+  ARCHIVE_ROOT="$WORK/.feature-fix-swarm/archive"
+  [ ! -d "$ARCHIVE_ROOT/pr1" ]
+  [ -d "$ARCHIVE_ROOT/spec-005" ]
+  [ -f "$ARCHIVE_ROOT/spec-005/feat-x/evidence.json" ]
+}
+
 @test "coverage: GSD_RUN_ID with slashes and dots is sanitized into its own run-key dir, not pr<N>" {
   mock_gh_merged
   WT="$BATS_TEST_TMPDIR/wt-feat"
@@ -1161,4 +1194,267 @@ SCRIPT
   [ -d "$WT" ]
   [[ "$output" == *"could not be resolved after"* ]]
   git show-ref --verify -q refs/heads/feat/x
+}
+
+# ---------------------------------------------------------------------------
+# AC-009 / GAP 3 — signal semantics of the finisher lock owner (RF-201/RF-202)
+#
+# Every case below sets HOME to a per-test tmp directory: the finisher lock
+# path is derived from HOME at runtime, so this is the only thing standing
+# between the suite and the invoking user's real
+# ~/.cache/feature-fix-swarm/finisher.lock.
+#
+# Launch discipline: the finalizer runs in its OWN process group (python3
+# os.setsid exec wrapper; macOS ships no setsid binary) and signals are
+# delivered to the WHOLE GROUP. Bash defers a trapped signal handler until
+# the foreground child (the parked gh stub) exits, so a TERM to the
+# finalizer pid alone would sit deferred for the stub's entire sleep; the
+# group TERM kills the stub too, the foreground call returns, and the
+# deferred handler then fires promptly.
+# ---------------------------------------------------------------------------
+
+_rf_setsid_launch() { # $1=output file; launches $LEVER 1 in its own pgid; sets RF_PID
+  python3 -c 'import os,sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])' bash "$LEVER" 1 > "$1" 2>&1 &
+  RF_PID=$!
+}
+
+_rf_parked_gh_stub() { # gh stub: record entry, then park well past the test horizon
+  cat > "$MOCK_BIN/gh" <<EOF
+#!/usr/bin/env bash
+echo entered > "$BATS_TEST_TMPDIR/gh-entered"
+sleep 120
+exit 0
+EOF
+  chmod +x "$MOCK_BIN/gh"
+}
+
+@test "RF-201: signaled lock owner releases and dies by the signal instead of resuming cleanup" {
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME"
+  LOCK="$HOME/.cache/feature-fix-swarm/finisher.lock"
+  _rf_parked_gh_stub
+  OUT="$BATS_TEST_TMPDIR/rf201.out"
+  _rf_setsid_launch "$OUT"
+  # park point: inside the first gh call, strictly after lock acquisition
+  for _ in $(seq 1 100); do
+    [ -f "$BATS_TEST_TMPDIR/gh-entered" ] && [ -f "$LOCK" ] && break
+    sleep 0.2
+  done
+  [ -f "$BATS_TEST_TMPDIR/gh-entered" ]
+  [ -f "$LOCK" ]
+  kill -TERM -- "-$RF_PID"
+  st=0; wait "$RF_PID" || st=$?
+  [ "$st" -eq 143 ]                       # 128+15: died BY the signal, not exit 0
+  ! grep -q "MERGED — finalizing" "$OUT"  # no post-gh cleanup output
+  [ ! -f "$LOCK" ]                        # ownership released on the way out
+}
+
+@test "RF-202: after the owner is signaled away, a second finalizer acquires and is the only cleanup actor" {
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME"
+  LOCK="$HOME/.cache/feature-fix-swarm/finisher.lock"
+  _rf_parked_gh_stub
+  OUT="$BATS_TEST_TMPDIR/rf202-first.out"
+  _rf_setsid_launch "$OUT"
+  for _ in $(seq 1 100); do
+    [ -f "$BATS_TEST_TMPDIR/gh-entered" ] && [ -f "$LOCK" ] && break
+    sleep 0.2
+  done
+  [ -f "$LOCK" ]
+  kill -TERM -- "-$RF_PID"
+  st=0; wait "$RF_PID" || st=$?
+  [ ! -f "$LOCK" ]
+  # first finalizer performed no cleanup: branch survives
+  git show-ref --verify -q refs/heads/feat/x
+  ! grep -q "deleted local branch" "$OUT"
+  # second finalizer with a normal gh stub is the only cleanup actor
+  mock_gh_merged
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"finalize complete"* ]]
+  [[ "$output" == *"deleted local branch 'feat/x'"* ]]
+  [ ! -f "$LOCK" ]
+}
+
+# ---------------------------------------------------------------------------
+# AC-009 / GAP 5 — the finalizer-adapter lock matrix (RF-210..RF-216).
+# lib-lock.bats proves the helper in isolation; these prove the same
+# transitions THROUGH run-finalizer.sh: bounded wait, marked yield, default
+# and override bounds, stale reclaim, tamper refusal, event-failure refusal,
+# and the attribution chain.
+#
+# Caller inventory (grep of skills/ and scripts/, 2026-08-08):
+#   - skills/feature-implement/SKILL.md finish tail — invokes
+#     `bash scripts/gsd/run-finalizer.sh <pr-number>` fail-soft; tolerates a
+#     pre-mutation nonzero (78 is a new exit class on that seam).
+#   - scripts/coord/forbidden-paths-check.sh — path REFERENCE only, no exec.
+#   - scripts/gsd/plan-wall.sh — comment reference only, no exec.
+# Every case sets HOME to a per-test tmp dir (the lock path derives from
+# HOME at runtime) so the invoking user's real finisher.lock is untouched.
+# ---------------------------------------------------------------------------
+
+_rf_fixture_home() { # fixture HOME + lock/holder helpers for the matrix
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.cache/feature-fix-swarm"
+  LOCK="$HOME/.cache/feature-fix-swarm/finisher.lock"
+  MACHINE="$(hostname 2>/dev/null || uname -n)"
+}
+
+_rf_hold_lock_live() { # seed the lock with a live holder process; sets HOLDER_PID
+  sleep 120 &
+  HOLDER_PID=$!
+  printf '%s\nmachine=%s\nclaimed_epoch=%s\n' "$HOLDER_PID" "$MACHINE" "$(date +%s)" > "$LOCK"
+}
+
+_rf_sentinel_gh_stub() { # gh stub that records any invocation — cleanup marker
+  cat > "$MOCK_BIN/gh" <<EOF
+#!/usr/bin/env bash
+echo invoked >> "$BATS_TEST_TMPDIR/gh-sentinel"
+exit 64
+EOF
+  chmod +x "$MOCK_BIN/gh"
+}
+
+teardown_rf_holder() { [ -n "${HOLDER_PID:-}" ] && kill "$HOLDER_PID" 2>/dev/null; wait "$HOLDER_PID" 2>/dev/null || true; }
+
+@test "RF-210: contender against a live holder yields at its bound with one marked row and zero cleanup" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  STORE="$BATS_TEST_TMPDIR/rf210-store.json"
+  run env GATES_STORE="$STORE" FINISHER_LOCK_WAIT=1 bash "$LEVER" --run-id spec-rf210 7
+  teardown_rf_holder
+  [ "$status" -eq 0 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]                # no gh cleanup ran
+  git show-ref --verify -q refs/heads/feat/x              # no branch mutation
+  [ -f .planning/run-state/gsd-run.pid ]                  # no run-state cleanup
+  [ -d "$BATS_TEST_TMPDIR/work/.feature-fix-swarm" ]      # no archive mutation
+  [[ "$output" == *"finisher-skipped run_id=spec-rf210 pr=7"* ]]
+  run python3 -c "
+import json
+d = json.load(open('$STORE'))
+rows = [e for e in d['events'] if e['kind'] == 'finisher-skipped']
+assert len(rows) == 1, rows
+assert rows[0]['run_id'] == 'spec-rf210' and rows[0]['pr'] == 7, rows"
+  [ "$status" -eq 0 ]
+}
+
+@test "RF-211: the wait bound defaults to 60 — pinned in source and by a contender still waiting seconds in" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  # source pin: the comment-stripped default in the wait normalization line
+  grep -vE '^\s*#' "$LEVER" | grep -q 'FINISHER_LOCK_WAIT:-60'
+  # behavioral pin: no override -> still waiting (not yielded) several seconds in
+  env GATES_STORE="$BATS_TEST_TMPDIR/rf211-store.json" bash "$LEVER" 7 > "$BATS_TEST_TMPDIR/rf211.out" 2>&1 &
+  CONTENDER=$!
+  sleep 3
+  kill -0 "$CONTENDER" 2>/dev/null
+  alive=$?
+  kill "$CONTENDER" 2>/dev/null; wait "$CONTENDER" 2>/dev/null || true
+  teardown_rf_holder
+  [ "$alive" -eq 0 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]
+}
+
+@test "RF-212: a non-numeric FINISHER_LOCK_WAIT normalizes to the default instead of yielding immediately" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  env GATES_STORE="$BATS_TEST_TMPDIR/rf212-store.json" FINISHER_LOCK_WAIT=abc bash "$LEVER" 7 > "$BATS_TEST_TMPDIR/rf212.out" 2>&1 &
+  CONTENDER=$!
+  sleep 3
+  kill -0 "$CONTENDER" 2>/dev/null
+  alive=$?
+  kill "$CONTENDER" 2>/dev/null; wait "$CONTENDER" 2>/dev/null || true
+  teardown_rf_holder
+  [ "$alive" -eq 0 ]
+  ! grep -q "finisher-skipped" "$BATS_TEST_TMPDIR/rf212.out"
+}
+
+@test "RF-213: a dead-pid lock is reclaimed and the finalizer proceeds normally" {
+  _rf_fixture_home
+  # dead holder: a real pid that has provably exited
+  sleep 0.01 &
+  DEAD_PID=$!
+  wait "$DEAD_PID" 2>/dev/null || true
+  printf '%s\nmachine=%s\nclaimed_epoch=%s\n' "$DEAD_PID" "$MACHINE" "$(date +%s)" > "$LOCK"
+  mock_gh_merged
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"finalize complete"* ]]
+  [ ! -f "$LOCK" ]
+}
+
+@test "RF-214: a symlinked lock path returns 78 with no cleanup" {
+  _rf_fixture_home
+  touch "$BATS_TEST_TMPDIR/decoy"
+  ln -s "$BATS_TEST_TMPDIR/decoy" "$LOCK"
+  _rf_sentinel_gh_stub
+  run bash "$LEVER" 7
+  [ "$status" -eq 78 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]
+  git show-ref --verify -q refs/heads/feat/x
+}
+
+@test "RF-215: a failed finisher-skipped event write returns 78 with no cleanup and no marked-exit notice" {
+  [ "$(id -u)" -ne 0 ] || skip "root can write anywhere; unwritable-store fixture is meaningless"
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  RO="$BATS_TEST_TMPDIR/ro-store"
+  mkdir -p "$RO"
+  chmod 555 "$RO"
+  CHMOD_RESTORE_PATHS+=("$RO")
+  run env GATES_STORE="$RO/store.json" FINISHER_LOCK_WAIT=1 bash "$LEVER" --run-id spec-rf215 7
+  teardown_rf_holder
+  [ "$status" -eq 78 ]
+  [ ! -f "$BATS_TEST_TMPDIR/gh-sentinel" ]
+  ! grep -q "finisher-skipped run_id=" <<<"$output"
+  git show-ref --verify -q refs/heads/feat/x
+}
+
+@test "RF-216: yield attribution resolves --run-id, then GSD_RUN_ID, then the unattributed trace fallback" {
+  _rf_fixture_home
+  _rf_hold_lock_live
+  _rf_sentinel_gh_stub
+  SA="$BATS_TEST_TMPDIR/rf216-a.json"; SB="$BATS_TEST_TMPDIR/rf216-b.json"; SC="$BATS_TEST_TMPDIR/rf216-c.json"
+  run env GATES_STORE="$SA" FINISHER_LOCK_WAIT=1 bash "$LEVER" --run-id spec-rfa 7
+  [ "$status" -eq 0 ]
+  run env GATES_STORE="$SB" FINISHER_LOCK_WAIT=1 GSD_RUN_ID=spec-rfb bash "$LEVER" 7
+  [ "$status" -eq 0 ]
+  run env GATES_STORE="$SC" FINISHER_LOCK_WAIT=1 bash "$LEVER" 7
+  teardown_rf_holder
+  [ "$status" -eq 0 ]
+  run python3 -c "
+import json
+a = json.load(open('$SA'))['events'][0]
+b = json.load(open('$SB'))['events'][0]
+c = json.load(open('$SC'))['events'][0]
+assert a['run_id'] == 'spec-rfa', a
+assert b['run_id'] == 'spec-rfb', b
+assert c['run_id'] == 'unattributed', c
+assert c['lock_path'] == '$LOCK', c
+assert c['holder_pid'] == $HOLDER_PID, c"
+  [ "$status" -eq 0 ]
+}
+
+# ── spec-008 04-02: G12 digest seam at the finalizer tail (REQ-701) ─────────
+
+@test "finalizer tail emits the immediate digest before finalize complete (presence-guarded, fail-soft)" {
+  mock_gh_merged
+  export RUN_STATE_DB="$BATS_TEST_TMPDIR/digest-runs.db"
+  # seed one waiver into the fixture repo's common-dir store — digest.sh
+  # resolves the store from cwd's git-common-dir, so this stays fixture-local
+  python3 - "$WORK/.feature-fix-swarm/evidence.json" <<'EOF'
+import json, sys
+open(sys.argv[1], "w").write(json.dumps({"waivers": [
+    {"run_id": "spec-008", "gate": "g", "env_var": "E=1", "ts": 1.0}]}))
+EOF
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '^waiver run_id=spec-008'
+  echo "$output" | grep -q 'finalize complete'
 }

@@ -1,0 +1,224 @@
+#!/usr/bin/env bats
+
+setup() {
+  ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; REPO="$BATS_TEST_TMPDIR/repo"
+  mkdir -p "$REPO/.planning/run-state" "$REPO/scripts/gsd" "$REPO/scripts/coord"
+  cp "$ROOT/scripts/gsd/lifecycle.sh" "$ROOT/scripts/gsd/reconcile.sh" "$REPO/scripts/gsd/"
+  cp "$ROOT/scripts/coord/coord.py" "$REPO/scripts/coord/"
+  cat > "$REPO/scripts/gsd/resume-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${RECONCILE_MARK:?}"
+EOF
+  chmod +x "$REPO/scripts/gsd/"*.sh
+  cd "$REPO"; git init -q -b main; git -c user.email=t -c user.name=t commit -q --allow-empty -m init
+  export RECONCILE_MARK="$BATS_TEST_TMPDIR/mark"
+}
+
+teardown() {
+  [ -f "$BATS_TEST_TMPDIR/live_pid" ] && kill "$(cat "$BATS_TEST_TMPDIR/live_pid")" 2>/dev/null
+  true
+}
+
+@test "tracer: satisfied time condition relaunches once" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint tracer waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","verbatim"]' '{"respawns":2}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-tracer.json > record && mv record .planning/run-state/lifecycle-tracer.json
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *RECONCILE:relaunched* ]]
+  sleep 0.1; [ "$(cat "$RECONCILE_MARK")" = verbatim ]; [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-tracer.json)" = 1 ]
+}
+
+@test "unsatisfied record stays byte identical" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint later waiting wait time "{\"wake_at\":$((now+3600))}" '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  jq ".wake_at=$((now+3600))" .planning/run-state/lifecycle-later.json > record && mv record .planning/run-state/lifecycle-later.json
+  before=$(cat .planning/run-state/lifecycle-later.json); run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [ "$(cat .planning/run-state/lifecycle-later.json)" = "$before" ]; [[ "$output" == *still-waiting* ]]
+}
+
+@test "kill switch is a typed no-op" {
+  run env FFS_RECONCILE=off bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [ "$output" = RECONCILE:disabled ]
+}
+
+@test "invalid and terminal records are skipped without a launch" {
+  printf '{truncated' > .planning/run-state/lifecycle-bad.json
+  now=$(date +%s)
+  bash scripts/gsd/lifecycle.sh checkpoint done done complete manual '{}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  before=$(cat .planning/run-state/lifecycle-done.json)
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:invalid-record run=bad'* ]]
+  [ "$(cat .planning/run-state/lifecycle-done.json)" = "$before" ]
+  [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "a dead stale running launcher is recovered once" {
+  now=$(date +%s)
+  bash scripts/gsd/lifecycle.sh checkpoint stale running start time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","stale"]' '{"respawns":2}'
+  jq '.child_pid=99999999 | .launched_at=1' .planning/run-state/lifecycle-stale.json > record && mv record .planning/run-state/lifecycle-stale.json
+  run env FFS_RECONCILE_STALE_SECS=1 bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=stale'* ]]
+  sleep 0.1
+  [ "$(cat "$RECONCILE_MARK")" = stale ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-stale.json)" = 2 ]
+}
+
+@test "claim held by another reconciler is a typed rc 0 no-op" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint held waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","held"]' '{"respawns":2}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-held.json > record && mv record .planning/run-state/lifecycle-held.json
+  # FFS_COORD_ANCHOR_PID pinned to this test's own durable pid (alive for the
+  # whole test) makes coord.py see this claim as a live foreign holder — the
+  # same idiom used by tests/bats/coord-claim.bats for a not-reclaimable claim.
+  run env FFS_COORD_ANCHOR_PID="$$" python3 scripts/coord/coord.py claim reconcile-held
+  [ "$status" -eq 0 ]
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:claim-held run=held'* ]]
+  sleep 0.1; [ ! -e "$RECONCILE_MARK" ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-held.json)" = 2 ]
+}
+
+@test "budget at zero transitions record to failed without relaunch" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint zero waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","zero"]' '{"respawns":0}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-zero.json > record && mv record .planning/run-state/lifecycle-zero.json
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:budget-exhausted run=zero'* ]]
+  [ "$(jq -r .state .planning/run-state/lifecycle-zero.json)" = failed ]
+  sleep 0.1; [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "idempotence: two sequential passes launch once and charge once" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint idem waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","idem"]' '{"respawns":2}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-idem.json > record && mv record .planning/run-state/lifecycle-idem.json
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=idem'* ]]
+  sleep 0.2
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *still-waiting* ]]
+  [ "$(wc -l < "$RECONCILE_MARK" | tr -d ' ')" = 1 ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-idem.json)" = 1 ]
+}
+
+@test "FFS_LIFECYCLE=off still recovers an existing record" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint offed waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","offed"]' '{"respawns":2}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-offed.json > record && mv record .planning/run-state/lifecycle-offed.json
+  run env FFS_LIFECYCLE=off bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=offed'* ]]
+  sleep 0.1; [ "$(cat "$RECONCILE_MARK")" = offed ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-offed.json)" = 1 ]
+}
+
+@test "time round trip: reset 3s out relaunches after expiry with verbatim argv" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint roundtrip waiting wait time "{\"wake_at\":$((now+3))}" '["scripts/gsd/resume-stub.sh","verbatim","args"]' '{"respawns":2}'
+  jq ".wake_at=$((now+3))" .planning/run-state/lifecycle-roundtrip.json > record && mv record .planning/run-state/lifecycle-roundtrip.json
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:still-waiting run=roundtrip'* ]]
+  sleep 4
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=roundtrip'* ]]
+  sleep 0.1
+  expected="$(jq -r '.resume_argv[1:] | join(" ")' .planning/run-state/lifecycle-roundtrip.json)"
+  [ "$(cat "$RECONCILE_MARK")" = "$expected" ]
+}
+
+@test "ci round trip: infra failure reruns then success relaunches" {
+  # Local to this test only: bring in ci-watch.sh + its run-bounded helper and
+  # stub gh on PATH, mirroring tests/bats/ci-watch.bats's setup idiom.
+  cp "$ROOT/scripts/gsd/ci-watch.sh" "$ROOT/scripts/gsd/run-bounded.sh" "$REPO/scripts/gsd/"
+  chmod +x "$REPO/scripts/gsd/"*.sh
+  BIN="$BATS_TEST_TMPDIR/bin"; mkdir -p "$BIN"; export PATH="$BIN:$PATH"
+  bash scripts/gsd/lifecycle.sh checkpoint ci waiting ci ci-completed '{"databaseId":42}' '["scripts/gsd/resume-stub.sh","ci"]' '{"respawns":2,"ci_reruns":2}'
+  cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *--json* ]]; then echo '{"databaseId":42,"status":"completed","conclusion":"failure","attempt":1}'; elif [[ "$*" == *--log-failed* ]]; then echo runner-lost; elif [[ "$*" == *rerun* ]]; then :; fi
+EOF
+  chmod +x "$BIN/gh"
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:still-waiting run=ci'* ]]
+  [ "$(jq -r .budgets.ci_reruns .planning/run-state/lifecycle-ci.json)" = 1 ]
+  [ "$(jq -r .state .planning/run-state/lifecycle-ci.json)" = waiting ]
+
+  cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '{"databaseId":42,"status":"completed","conclusion":"success","attempt":2}'
+EOF
+  chmod +x "$BIN/gh"
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=ci'* ]]
+}
+
+@test "a live running launcher is left alone" {
+  now=$(date +%s)
+  sleep 30 & live_pid=$!
+  echo "$live_pid" > "$BATS_TEST_TMPDIR/live_pid"
+  bash scripts/gsd/lifecycle.sh checkpoint live running start time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","live"]' '{"respawns":2}'
+  jq ".child_pid=$live_pid | .launched_at=1" .planning/run-state/lifecycle-live.json > record && mv record .planning/run-state/lifecycle-live.json
+  before=$(cat .planning/run-state/lifecycle-live.json)
+  # launched_at=1 is ancient, so only kill -0 liveness (not the stale-secs
+  # clock) is what keeps reconcile.sh from treating this launcher as dead.
+  run env FFS_RECONCILE_STALE_SECS=1 bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:still-waiting run=live'* ]]
+  [ "$(cat .planning/run-state/lifecycle-live.json)" = "$before" ]
+  [ "$(jq -r .state .planning/run-state/lifecycle-live.json)" = running ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-live.json)" = 2 ]
+  sleep 0.1; [ ! -e "$RECONCILE_MARK" ]
+}
+
+# "foreign-claimed run is untouched": reconcile.sh's only coord claim key
+# per run is claim_id() -> "reconcile-<run>" (reconcile.sh:26-30) — there is
+# no separate "run's own key" it ever claims, so a foreign hold on that one
+# key is already exercised end-to-end by "claim held by another reconciler
+# is a typed rc 0 no-op" above; no distinguishable second case exists.
+
+@test "a worktree-store record is swept and relaunched" {
+  wt="$REPO/.claude/worktrees/wt-run"
+  mkdir -p "$wt/.planning/run-state"
+  git -C "$REPO" worktree add --detach "$wt" HEAD >/dev/null 2>&1 || { cd "$wt" && git init -q; cd "$REPO"; }
+  now=$(date +%s)
+  ( cd "$wt" && bash "$REPO/scripts/gsd/lifecycle.sh" checkpoint wt-run waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","from-worktree"]' '{"respawns":1}' )
+  rec="$wt/.planning/run-state/lifecycle-wt-run.json"
+  [ -f "$rec" ]
+  jq ".wake_at=$((now-1))" "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RECONCILE:relaunched run=wt-run"* ]]
+  sleep 0.1
+  [ "$(cat "$RECONCILE_MARK")" = from-worktree ]
+  [ "$(jq -r .budgets.respawns "$rec")" = 0 ]
+}
+
+@test "terminal failed record reports terminal, never still-waiting" {
+  bash scripts/gsd/lifecycle.sh checkpoint gone waiting wait time '{"wake_at":1}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  bash scripts/gsd/lifecycle.sh transition gone failed test-failure
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:terminal run=gone state=failed'* ]]
+  [[ "$output" != *still-waiting* ]]
+  [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "done and quarantined records report terminal with their state" {
+  bash scripts/gsd/lifecycle.sh checkpoint td done complete manual '{}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  bash scripts/gsd/lifecycle.sh checkpoint tq waiting wait time '{"wake_at":1}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  bash scripts/gsd/lifecycle.sh transition tq quarantined test-quarantine
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:terminal run=td state=done'* ]]
+  [[ "$output" == *'RECONCILE:terminal run=tq state=quarantined'* ]]
+  [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "a record failed by the evaluator mid-pass reports terminal, not still-waiting" {
+  bash scripts/gsd/lifecycle.sh checkpoint cifail waiting wait ci-completed '{}' '["scripts/gsd/resume-stub.sh"]' '{"respawns":1}'
+  cat > scripts/gsd/ci-watch.sh <<'STUB'
+#!/usr/bin/env bash
+# evaluator stub: the CI run failed — transition the record to failed
+run_id="${3:?}"
+bash "$(dirname "$0")/lifecycle.sh" transition "$run_id" failed ci-tests-failed >/dev/null
+STUB
+  chmod +x scripts/gsd/ci-watch.sh
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:terminal run=cifail state=failed'* ]]
+  [[ "$output" != *'still-waiting run=cifail'* ]]
+  [ ! -e "$RECONCILE_MARK" ]
+}

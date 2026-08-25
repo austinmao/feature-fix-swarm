@@ -1,0 +1,4 @@
+# SYNTHETIC-NOT-A-REAL-KEY — leak-scan fixture (REQ-202a family: pem-block)
+-----BEGIN RSA PRIVATE KEY-----
+MIISYNTHETICNOTREAL
+-----END RSA PRIVATE KEY-----

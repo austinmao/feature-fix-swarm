@@ -19,6 +19,8 @@ allowed-tools:
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
+At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
 One command from free-text instruction to shipped, canaried change. It is the
 lightweight sibling of `/feature-spec`: no speckit specify/plan/clarify ceremony,
 but the same operational spine after planning. Pure sequencing front-end —
@@ -52,6 +54,12 @@ review stop.
 ```
 
 ## Procedure
+
+Cross-session coordination (spec-009) is inherited, not re-implemented: the
+execution step routes through `/feature-implement`, whose Step 1.5
+claim-or-stop claims the run id (interactive) or defers to `gsd-run.sh`'s own
+claim (headless). A REFUSED claim means another live session owns this work —
+stop and inspect `python3 scripts/coord/coord.py status`.
 
 ### Step 0 — continuity + recall (fail-soft)
 
@@ -122,7 +130,7 @@ you are blocked on input only the user can provide.
 
 feature-implement's proof artifact + final report are the record. Add this
 skill's wrapper line to `.feature-fix-swarm/results.md`:
-`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed} tiers={judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`.
+`TASK-SWARM "<task slug>" spec={NNN} outcome={shipped|stopped:<action>|failed} tiers={frontier:N,judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`.
 The `tiers=` histogram counts host-native subagent spawns by typed request and resolved model over the
 whole run (`inline-mechanical` = trip-wire work the host drained inline —
 see `feature-spec` SKILL.md § Orchestrator self-discipline; target 0).

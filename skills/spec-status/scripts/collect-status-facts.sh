@@ -54,7 +54,14 @@ PLANNING_KIND=""
 if [ -d .planning ]; then
   ACTIVE_SPEC_IDS="$(planning_spec_ids .planning)"
   ACTIVE_SPEC_ID_COUNT="$(printf '%s\n' "$ACTIVE_SPEC_IDS" | sed '/^$/d' | wc -l | tr -d ' ')"
-  if [ "$ACTIVE_SPEC_ID_COUNT" -gt 1 ]; then
+  ACTIVE_HAS_REQUESTED=0
+  if printf '%s\n' "$ACTIVE_SPEC_IDS" | grep -qx "$SPEC_ID"; then
+    ACTIVE_HAS_REQUESTED=1
+  fi
+  # Only fail closed when the conflict actually involves the requested spec.
+  # An active tree holding several unrelated identities must not block
+  # resolving an explicitly-requested spec from its archive.
+  if [ "$ACTIVE_SPEC_ID_COUNT" -gt 1 ] && [ "$ACTIVE_HAS_REQUESTED" -eq 1 ]; then
     echo "conflicting active planning identities: ${ACTIVE_SPEC_IDS//$'\n'/, }"
     exit 1
   fi
@@ -76,6 +83,22 @@ if [ -d .planning ]; then
   fi
 fi
 
+# REQ-401b: the emitted fact stream is doc-derived bytes headed for a model
+# prompt — fence it under the STATUS tag through the shared helper. Candidate
+# chain mirrors this collector's gates.py resolution below. Helper
+# unresolvable -> one stderr warn + unfenced passthrough (AC-007 posture:
+# collectors are read-only observability; a staged skill must not die on a
+# missing sibling). The stream is PIPED, never captured via command
+# substitution (trailing-newline byte-identity, wall a12a8559).
+COLLECT_STATUS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FENCE_SH=""
+for fc in "$ROOT/packages/feature-fix-swarm/scripts/gsd/fence-data.sh" \
+          "$COLLECT_STATUS_SCRIPT_DIR/../../../scripts/gsd/fence-data.sh" \
+          "$ROOT/scripts/gsd/fence-data.sh"; do
+  [ -f "$fc" ] && FENCE_SH="$fc" && break
+done
+
+emit_status_facts() {
 echo "== GIT =="
 git branch --show-current
 git log --oneline -8
@@ -155,6 +178,30 @@ echo "== HYGIENE =="
 [ -n "$SPEC_DIR" ] && grep -rlE '(pcp_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9]{16,}|Bearer [A-Za-z0-9._-]{20,})' "$SPEC_DIR/evidence/" 2>/dev/null | head -5 || true
 echo "hygiene-scan-done"
 
+echo "== COORD =="
+# Cross-session claims + path leases (spec-009). Redacted output, read-only.
+if [ -f "$ROOT/scripts/coord/coord.py" ]; then
+  # Full session uuids are impersonation tokens (EDGE-006) — truncate to the
+  # same 8-char prefix the PreToolUse guard shows before this lands in a
+  # session-readable status report.
+  python3 "$ROOT/scripts/coord/coord.py" status 2>&1 \
+    | sed -E 's/([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/\1.../g' \
+    || echo "coord-status-rc=$?"
+  echo "coord-scan-done"
+else
+  echo "coord CLI absent (non-FFS repo)"
+fi
+
 echo "== DISK =="
 df -h "${TMPDIR:-/tmp}" | tail -1
 df -h "$ROOT" | tail -1
+}
+
+if [ -n "$FENCE_SH" ]; then
+  # shellcheck source=/dev/null
+  . "$FENCE_SH"
+  emit_status_facts | fence_data STATUS
+else
+  echo "collect-status-facts: WARN fence-data.sh not found in candidate chain; emitting unfenced" >&2
+  emit_status_facts
+fi

@@ -1,7 +1,7 @@
 ---
 name: verify-review
 description: "Verify a code review before acting on it. Use when Claude, Codex, review-gate, or a human reviewer returns a verdict (PASS, FIX_FIRST, REQUEST_CHANGES, CRITICAL finding) and you must decide whether to merge, fix, or push back — spot-check the load-bearing claims against current HEAD first."
-version: "1.1.0"
+version: "1.2.0"
 ---
 
 # /verify-review
@@ -36,7 +36,16 @@ Ported from the fable-agent-orchestration `review-verifier` skill (Apache-2.0).
 2. **Open the cited files at CURRENT HEAD.** Not the diff the reviewer saw —
    the code as it exists now. `git log --oneline -3 -- <file>` tells you if it
    moved since the review.
-3. **Classify each claim:**
+3. **Pin the ref the claim was measured against.** Name the exact ref the
+   reviewer's verdict describes and record it in the output. When your
+   checkout is behind the integration ref, record the behind-count alongside
+   it — a verdict measured against an unnamed ref is not a verification
+   result, because nobody can reproduce which tree it described.
+4. **Scan for fixes that landed after the claimed evidence.** List commits
+   touching the cited surface that are newer than the evidence the review
+   carries. A nonempty list means the review describes a tree that no longer
+   exists on that surface.
+5. **Classify each claim:**
 
    | Verdict | Meaning | Action |
    |---|---|---|
@@ -45,12 +54,16 @@ Ported from the fable-agent-orchestration `review-verifier` skill (Apache-2.0).
    | `STALE` | reviewer read old code; already fixed/moved | discard, record why |
    | `WRONG` | claim does not match current code | discard, record why |
    | `CONFIRMED_PASS` | (for a PASS) sampled claims checked out | proceed |
+   | `UNMEASURED` | the evidence predates commits touching the claimed surface — never measured at HEAD in either direction | measure first, then classify |
 
-4. **For a PASS**, don't skip verification — spot-check the 1-2 claims that
+   `UNMEASURED` outranks a colour: it is not a weak blocker and not a soft
+   pass, and reporting it as either is the specific failure this row exists
+   to prevent.
+6. **For a PASS**, don't skip verification — spot-check the 1-2 claims that
    would hurt most if wrong (the "no injection found" on a query-building
    diff; the "tests cover the new branch" on an auth change).
-5. **For a FIX_FIRST**, reproduce or inspect the failure BEFORE changing code.
-6. **Record discards.** A `STALE`/`WRONG` discard without a written reason is
+7. **For a FIX_FIRST**, reproduce or inspect the failure BEFORE changing code.
+8. **Record discards.** A `STALE`/`WRONG` discard without a written reason is
    indistinguishable from ignoring the review.
 
 ## Output
@@ -71,3 +84,4 @@ Decision: merge | fix-first | push back
   second unverified opinion, not verification.
 - Treating "CI green + reviewer PASS" as proof: neither checked the claim
   that matters unless you confirmed which claims were checked.
+- Forwarding a verdict whose ref was never pinned.

@@ -18,8 +18,10 @@ setup() {
 
 # --- Codex side --------------------------------------------------------------
 
-@test "model-fallback codex probe strips OPENAI_API_KEY" {
-  run grep -n -B2 'codex exec' "$REPO_ROOT/scripts/gsd/model-fallback.sh"
+@test "model-probe-lib codex probe strips OPENAI_API_KEY" {
+  # spec-004 moved the cached probe from model-fallback.sh into
+  # model-probe-lib.sh; the strip must live where the probe lives.
+  run grep -n -B2 'codex exec' "$REPO_ROOT/scripts/gsd/model-probe-lib.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"-u OPENAI_API_KEY"* ]]
 }
@@ -40,11 +42,12 @@ setup() {
 
 # --- Claude side (already guarded — lock it in) -------------------------------
 
-@test "model-fallback claude probe strips ANTHROPIC_API_KEY" {
-  run grep -n 'claude' "$REPO_ROOT/scripts/gsd/model-fallback.sh"
+@test "model-probe-lib claude probe strips ANTHROPIC_API_KEY" {
+  # spec-004: probe extracted to model-probe-lib.sh (see codex test above).
+  run grep -n 'claude' "$REPO_ROOT/scripts/gsd/model-probe-lib.sh"
   [ "$status" -eq 0 ]
   run grep -c 'env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN' \
-    "$REPO_ROOT/scripts/gsd/model-fallback.sh"
+    "$REPO_ROOT/scripts/gsd/model-probe-lib.sh"
   [ "$output" -ge 1 ]
 }
 

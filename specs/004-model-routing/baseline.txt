@@ -1,0 +1,13 @@
+# Phase 0 baseline — 2026-08-03T15:33:32Z @ 2b5d037
+## pytest
+........................................................................ [ 71%]
+........................................................................ [ 85%]
+........................................................................ [ 99%]
+..                                                                       [100%]
+506 passed in 30.10s
+## bats
+ok 456 python runner helper drift is fail-closed
+ok 457 allowlisted fork: exit 0, reported FORKED with reason
+ok 458 missing consumer copy: warn MISSING, exit 0
+ok 459 allowlisted-but-identical file flagged stale allowlist entry
+ok 460 missing consumer dir is a loud usage error

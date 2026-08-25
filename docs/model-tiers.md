@@ -21,16 +21,17 @@ self-review. Worse, a reviewer *shown the author's reasoning* scores no
 better than self-review (F1 23.8% vs 24.6%) — statistically indistinguishable
 — while a fully-fresh reviewer scores 28.6%. Context poisons the review.
 
-## The approach: three workload tiers
+## The approach: four workload tiers
 
-| Request | Codex resolution | Default effort | Runs |
-|---|---|---|---|
-| **judgment** | `gpt-5.6-sol` | high | Planning, checking, debugging, verification, code/security review |
-| **execution** | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research, integration, Nyquist work |
-| **volume** | `gpt-5.6-luna` | low | Mapping, synthesis, and status collection |
+| Request | Claude resolution | Codex resolution | Default effort | Runs |
+|---|---|---|---|---|
+| **frontier** | `claude-fable-5` | `gpt-5.6-sol` | xhigh | Planning only — the single low-volume, highest-leverage seat |
+| **judgment** | `claude-opus-5` | `gpt-5.6-sol` | high | Checking, debugging, verification, code/security review |
+| **execution** | `claude-sonnet-5` | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research, integration, Nyquist work |
+| **volume** | `claude-haiku-4-5-20251001` | `gpt-5.6-luna` | low | Mapping, synthesis, and status collection — bounded-context inputs only |
 
 Defaults are declared in `templates/model-requests.json`. A request is either
-`{"kind":"tier","name":"judgment|execution|volume"}` or
+`{"kind":"tier","name":"frontier|judgment|execution|volume"}` or
 `{"kind":"exact","id":"…"}`. Raw vendor IDs outside an exact request
 fail validation. Exact requests never silently substitute another model;
 optional fallback is available only for tier requests and records degraded
@@ -38,9 +39,48 @@ adversary provenance. FFS infers the supported CLI from the exact ID (`gpt-*`
 and `oN*` use Codex; `claude-*` uses Claude); any other vendor fails before a
 CLI is launched.
 
-Read the assignments as the producer/reviewer rule in action: executors use
-the execution tier while their verification and security reviewers use
-judgment. Never use the same resolved model on both sides of a check.
+`frontier` is deliberately unreachable through dynamic escalation
+(`dynamic_routing.tier_models` keeps exactly three rungs — light/standard/heavy
+mapped to volume/execution/judgment): escalation must never auto-select the
+most expensive tier. A role only reaches frontier through an explicit pin
+(today: `gsd-planner`).
+
+Read the assignments as the producer/reviewer rule in action: the planner
+runs on frontier while its plan reviewer runs on judgment or a distinct model
+at the plan wall (below); executors run on execution while their verification
+and security reviewers run on judgment. Never use the same resolved model on
+both sides of a check.
+
+### Diversity invariant
+
+Every adversarial seat — plan wall included — picks a reviewer down this
+ladder: cross-vendor beats same-vendor-different-model beats
+same-model-different-effort. The record never implies diversity it didn't
+get: it stores the actual `relation` (`cross-vendor | same-vendor | self`)
+between the producer's resolved model/vendor and the reviewer's, computed
+from what each side actually resolved to — not from the tier names, which can
+collapse (Codex-host frontier-vs-judgment both resolve to `gpt-5.6-sol`, so
+that pairing is `self` even though the tiers differ).
+
+## The plan wall
+
+Every phase's plan (`*-PLAN.md` / `PLAN.md`) clears an adversarial review
+before its phase can execute — `scripts/gsd/plan-wall.sh`. It always runs (no
+blast-radius tiering), selects its reviewer via the diversity-invariant
+algorithm above, and blocks on unresolved HIGH/CRITICAL findings
+(`findings-queue`, `--source wall`). An unchanged plan whose findings are all
+resolved passes without a new dispatch (`adjudicated-pass`); a changed plan
+re-dispatches. Reviewer exhaustion is `WALL-UNREVIEWED` — blocking, not
+advisory.
+
+`PLAN_WALL=off` skips the wall only with a durable, recorded waiver; a skip
+that cannot record its waiver fails closed. Independent of the wall, a
+completion backstop (`scripts/gsd/gates-test-command.sh`) asserts a wall
+record exists with a passing verdict before any phase can be marked
+COMPLETE — a phase can start unwalled but can never finish that way. See
+[Configuration](configuration.md#model-routing) for the `PLAN_WALL` knob and
+[Commands](commands.md#gsd-core-orchestration) for where the wall sits in the
+phase flow.
 
 ## Producer never reviews producer
 
@@ -75,13 +115,25 @@ an untyped model request:
 
 | Claude | Codex | Effort |
 |---|---|---|
-| fable, opus | `gpt-5.6-sol` | `high` |
+| fable | `gpt-5.6-sol` | `xhigh` |
+| opus | `gpt-5.6-sol` | `high` |
 | sonnet | `gpt-5.6-terra` | `medium` |
 | haiku | `gpt-5.6-luna` | `low` |
 
-The reverse map collapses `sol → opus`, never `sol → fable`. An explicit exact
-Fable request is not this compatibility mapping: it never falls back and its
-provenance gate cannot be satisfied by Sol or Opus.
+Both aliases resolve to the same Codex model — Sol has no separate frontier
+rung — so the effort split is the only bit of distinction the alias map can
+regain; `codex_equiv_effort` carries it (`*fable*` → `xhigh`, `*opus*` →
+`high`). The reverse map collapses `sol → opus`, never `sol → fable`: a
+Codex-host degrade must not silently select the most expensive Claude model.
+An explicit exact Fable request is not this compatibility mapping: it never
+falls back and its provenance gate cannot be satisfied by Sol or Opus.
+
+**`GSD_LEAD_MODEL=fable` is unchanged and deliberate.** It keeps its exact
+`claude-fable-5` request semantics, including host-pinning and fail-closed
+guards — an operator naming fable wants Fable, and a tier conversion would
+silently substitute `gpt-5.6-sol@xhigh` on a Codex host. The tier system adds
+`{"kind":"tier","name":"frontier"}` as the portable spelling alongside it,
+not a replacement for it.
 
 ## Legacy Fable fallback lever
 
@@ -113,6 +165,7 @@ planning off fable when the spec is security-touching.
 - **Affects**: `gsd-planner` and `gsd-plan-checker` only (`:7, :61`)
 - **Change**: `fable → opus` (`:61`)
 - **Untouched**: executor and verifier (`:9`)
+- **Kill-switch**: `SECURITY_MODEL_FENCE=off` disables the demotion entirely
 
 The reasoning is cost-asymmetric, not capability-based. Fable handles
 security work fine (<5% classifier false-refusal after Anthropic's 2026-06
@@ -158,7 +211,8 @@ relies on (they inform the skill prose, not new config knobs):
 
 Every tier above is a default, not a law. See
 [Configuration](configuration.md#model_overrides) for how to repin a role,
-and the kill-switches for the fence and fallback.
+and the kill-switches for the fence (`SECURITY_MODEL_FENCE=off`), fallback,
+and plan wall (`PLAN_WALL=off`, waiver-recorded).
 
 One rule to preserve when you edit: **every sub-agent spawn carries an
 explicit `model` pin.** Relying on inherit is a bug — an unpinned build agent

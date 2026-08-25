@@ -60,6 +60,21 @@ def test_lower_effort_is_rejected_on_any_mandatory_regression(mutation: dict) ->
     assert choose_lower_effort([first, second], higher="high", lower="medium") == "high"
 
 
+def test_legal_tier_set_includes_frontier() -> None:
+    result = _result(1)
+    result["tier"] = "frontier"
+    result["model_id"] = "gpt-5.6-sol"
+    result["effort"] = "xhigh"
+    validate_result(result)
+
+
+def test_unknown_tier_is_rejected() -> None:
+    result = _result(1)
+    result["tier"] = "premium"
+    with pytest.raises(EvalResultError, match="tier"):
+        validate_result(result)
+
+
 def test_result_schema_requires_reproducibility_metadata() -> None:
     result = _result(1)
     validate_result(result)

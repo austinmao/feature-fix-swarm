@@ -1,0 +1,584 @@
+#!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
+
+# retro-e2e.bats — spec-011 Phase 2 Wave 0 independent RED acceptance:
+# dedup/search/similarity matching (REQ-06), caps/P3/pacing/write-outcome
+# policy (REQ-07), and race/idempotency behavior over a scriptable `gh`
+# PATH shim. Authored directly from
+# .planning/phases/02-filing-consent-seams/{02-VALIDATION,02-01-PLAN,
+# 02-02-PLAN}.md, .planning/REQUIREMENTS.md, and specs/011-retro-loop/
+# {spec.md,edge-coverage.md} WITHOUT reading lib/retro_state.py (absent) or
+# the internals of scripts/gsd/retro.sh / lib/retro_scrub.py beyond
+# black-box execution. See tests/bats/helpers/retro-shims.bash for the
+# shared harness and its documented ambiguity resolutions (isolated-HOME
+# strategy, consent.json version scheme, gh --search detection, and the
+# dynamic title-similarity construction this file's boundary tests use).
+#
+# Fingerprints baked into the static tests/fixtures/retro/gh-*.json files
+# below were derived by running the REAL (Phase 1) `retro.sh analyze`
+# black-box over the paired digest fixture with changelog-release.md
+# (ffs_minor "1.4") -- not guessed, not read from lib/retro_scrub.py.
+#
+# Guard-chain note: no bare `exit 0` literal appears anywhere in this file
+# (this repo's tamper scan hard-fails that even inside a heredoc stub) --
+# every shim/stub either falls off the end or uses a nonzero `exit N`.
+
+load 'helpers/retro-shims'
+
+setup() {
+  ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  REPO="$BATS_TEST_TMPDIR/repo"
+  MOCK_BIN="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$REPO/scripts/gsd" "$REPO/scripts/hooks" "$REPO/lib" "$REPO/.feature-fix-swarm" "$MOCK_BIN"
+
+  cp "$ROOT/scripts/gsd/retro.sh" "$REPO/scripts/gsd/retro.sh"
+  # fail-soft: absence must stay observable as RED, not error out the harness
+  [ -f "$ROOT/lib/retro_state.py" ] && cp "$ROOT/lib/retro_state.py" "$REPO/lib/retro_state.py"
+  cp "$ROOT/lib/retro_scrub.py" "$REPO/lib/retro_scrub.py"
+  cp "$ROOT/lib/gates.py" "$REPO/lib/gates.py"
+  cp "$ROOT/lib/evidence_events.py" "$REPO/lib/evidence_events.py"
+  cp -R "$ROOT/lib/run_state" "$REPO/lib/run_state"
+  chmod +x "$REPO/scripts/gsd/retro.sh"
+
+  FIXTURES="$ROOT/tests/fixtures/retro"
+
+  cat > "$REPO/scripts/gsd/scan-handoff-credentials.sh" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+FILE="$1"
+printf '%s\n' "$FILE" >> "$SCANNER_LOG"
+if [ -f "${SCANNER_FAIL_FLAG:-/nonexistent-scanner-fail-flag}" ]; then
+  exit 1
+fi
+true
+EOF
+  chmod +x "$REPO/scripts/gsd/scan-handoff-credentials.sh"
+  SCANNER_LOG="$BATS_TEST_TMPDIR/scanner-calls.log"
+  : > "$SCANNER_LOG"
+  export SCANNER_LOG
+
+  cat > "$REPO/scripts/hooks/credential-output-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+true
+EOF
+  chmod +x "$REPO/scripts/hooks/credential-output-guard.sh"
+
+  build_gh_shim "$MOCK_BIN"
+  export PATH="$MOCK_BIN:$PATH"
+
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
+         GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+  export GATES_STORE="$REPO/.feature-fix-swarm/evidence.json"
+  export RUN_STATE_DB="$BATS_TEST_TMPDIR/runs.db"
+  export RETRO_TEST_SEAM=1
+
+  cd "$REPO" || return 1
+  git init -q
+  git config user.email t@t
+  git config user.name t
+  git remote add origin https://github.com/testorg/testrepo.git
+  echo init > README.md
+  git add README.md
+  git commit -qm init
+}
+
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; } # GNU first: Linux `stat -f` is filesystem stat, rc 0 + wrong data
+
+# analyze_h [extra retro.sh analyze args] -- isolated-HOME + matching
+# --state-root wrapper (see retro-shims.bash header for why both).
+analyze_h() {
+  run --separate-stderr bash "$REPO/scripts/gsd/retro.sh" analyze \
+    --changelog "$FIXTURES/changelog-release.md" --state-root "$RETRO_STATE" "$@"
+}
+
+fresh_env() { # fresh_env <label> -- isolated HOME + granted consent + clean gh call log
+  retro_isolate_home "$BATS_TEST_TMPDIR" "$1"
+  retro_seed_consent "$FIXTURES/consent-granted.json"
+  GH_CALL_LOG="$BATS_TEST_TMPDIR/gh-calls-$1.log"; : > "$GH_CALL_LOG"
+  GH_CREATE_LOG="$BATS_TEST_TMPDIR/gh-create-$1"
+  GH_COMMENT_LOG="$BATS_TEST_TMPDIR/gh-comment-$1"
+  GH_NEXT_ISSUE_FILE="$BATS_TEST_TMPDIR/gh-next-issue-$1"
+  GH_COMMENT_COUNT_FILE="$BATS_TEST_TMPDIR/gh-comment-count-$1"
+  export GH_CALL_LOG GH_CREATE_LOG GH_COMMENT_LOG GH_NEXT_ISSUE_FILE GH_COMMENT_COUNT_FILE
+  unset GH_AUTH_FAIL GH_WRITE_FAIL_CODE GH_LIST_FIXTURE GH_SEARCH_FIXTURE GH_TIMING_LOG || true
+}
+
+count_calls() { # count_calls <prefix> -- grep -c prints "0" on no-match but
+  # still exits 1, so capture output rather than relying on `||` (which
+  # would append a SECOND "0", corrupting a later `-eq` comparison).
+  local n
+  n="$(grep -c "^$1" "$GH_CALL_LOG" 2>/dev/null)"
+  printf '%s' "${n:-0}"
+}
+
+# ── CONTRACT-002: Phase 2 canonical occurrence-comment producer ─────────
+
+@test "CONTRACT-002: duplicate observations emit canonical comment bytes with advancing local count and stable replay identity" {
+  fresh_env contract-002
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-exact-single.json"; export GH_LIST_FIXTURE
+
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+  first="$GH_COMMENT_LOG/comment-1.body"
+  [ -f "$first" ]
+  run python3 - "$first" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read()
+match = re.fullmatch(
+    rb"Additional occurrence recorded by ffs-retro\.\n\n"
+    rb"<!-- ffs-retro fingerprint:6f8560bdd33c6f56 priority:P1 occurrences:([1-9][0-9]{0,9}) -->\n",
+    raw,
+)
+assert match, "comment is not the canonical producer bytes"
+count = int(match.group(1))
+assert count <= 2147483647
+print(count)
+PY
+  [ "$status" -eq 0 ]
+  first_count="$output"
+  first_comment="$(cat "$first")"
+
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 2 ]
+  second="$GH_COMMENT_LOG/comment-2.body"
+  run python3 - "$second" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read()
+match = re.fullmatch(
+    rb"Additional occurrence recorded by ffs-retro\.\n\n"
+    rb"<!-- ffs-retro fingerprint:6f8560bdd33c6f56 priority:P1 occurrences:([1-9][0-9]{0,9}) -->\n",
+    raw,
+)
+assert match, "comment is not the canonical producer bytes"
+print(match.group(1).decode())
+PY
+  [ "$status" -eq 0 ]
+  second_count="$output"
+  [ "$second_count" -gt "$first_count" ]
+
+  # A captured producer comment is an immutable replay identity; later observations
+  # cannot retroactively change its bytes.
+  [ "$(cat "$first")" = "$first_comment" ]
+}
+
+# ── PATH-005: maintainer triage boundary (intentionally RED before 03-01) ─
+
+triage_checkout() { # triage_checkout <origin> <fixture>
+  TRIAGE_REPO="$BATS_TEST_TMPDIR/triage-repo"
+  TRIAGE_BIN="$BATS_TEST_TMPDIR/triage-bin"
+  TRIAGE_GH_LOG="$BATS_TEST_TMPDIR/triage-gh.log"
+  TRIAGE_FIXTURE_READ_LOG="$BATS_TEST_TMPDIR/triage-fixture-read.log"
+  mkdir -p "$TRIAGE_REPO" "$TRIAGE_BIN"
+  git -C "$TRIAGE_REPO" init -q
+  git -C "$TRIAGE_REPO" config user.email t@t
+  git -C "$TRIAGE_REPO" config user.name t
+  git -C "$TRIAGE_REPO" remote add origin "$1"
+  : > "$TRIAGE_GH_LOG"; : > "$TRIAGE_FIXTURE_READ_LOG"
+  GH_TRIAGE_FIXTURE="$2"
+  export TRIAGE_GH_LOG TRIAGE_FIXTURE_READ_LOG GH_TRIAGE_FIXTURE
+  unset GH_TRIAGE_PERMISSION GH_TRIAGE_LIST_FAIL GH_TRIAGE_REQUIRE_SANITIZED || true
+  cat > "$TRIAGE_BIN/gh" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$TRIAGE_GH_LOG"
+if [ "$#" -eq 12 ] && [ "$1" = issue ] && [ "$2" = list ] && \
+   [ "$3" = --repo ] && [ "$4" = austinmao/feature-fix-swarm ] && \
+   [ "$5" = --state ] && [ "$6" = open ] && [ "$7" = --label ] && \
+   [ "$8" = source/ffs-retro ] && [ "$9" = --limit ] && [ "${10}" = 200 ] && \
+   [ "${11}" = --json ] && [ "${12}" = number,title,body,labels ]; then
+  if [ "${GH_TRIAGE_REQUIRE_SANITIZED:-false}" = true ]; then
+    [ -z "${GH_DEBUG+x}" ] && [ "${GH_HOST:-}" = github.com ] || exit 65
+  fi
+  [ "${GH_TRIAGE_LIST_FAIL:-false}" = true ] && exit 69
+  printf 'fixture-read\n' >> "$TRIAGE_FIXTURE_READ_LOG"
+  cat "$GH_TRIAGE_FIXTURE"
+elif [ "$#" -eq 4 ] && [ "$1" = api ] && \
+     [ "$2" = repos/austinmao/feature-fix-swarm ] && [ "$3" = --jq ] && \
+     [ "$4" = .permissions.push ]; then
+  if [ "${GH_TRIAGE_REQUIRE_SANITIZED:-false}" = true ]; then
+    [ -z "${GH_DEBUG+x}" ] && [ "${GH_HOST:-}" = github.com ] || exit 65
+  fi
+  printf '%s\n' "${GH_TRIAGE_PERMISSION:-true}"
+else
+  exit 64
+fi
+SHIM
+  chmod +x "$TRIAGE_BIN/gh"
+}
+
+run_triage_contract() {
+  skill="$ROOT/skills/retro-triage/SKILL.md"
+  [ -f "$skill" ] || { echo "TRIAGE-CONTRACT: missing SKILL.md" >&2; return 1; }
+  block="$(awk '/<!-- retro-triage:command:start -->/{on=1;next}/<!-- retro-triage:command:end -->/{on=0}on' "$skill")"
+  [ -n "$block" ] || { echo "TRIAGE-CONTRACT: absent executable block" >&2; return 1; }
+  (cd "$TRIAGE_REPO" && HOME="$BATS_TEST_TMPDIR/triage-home" PATH="$TRIAGE_BIN:$PATH" bash -c "$block")
+}
+
+@test "PATH-005 triage priority and ordering uses the checked-in SKILL.md block" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
+  run run_triage_contract
+  [ "$status" -eq 0 ]
+  # The brief must use priority, then lowest issue number, rather than merely
+  # mentioning both priorities somewhere in the output.
+  run python3 - <<'PY' "$output"
+import sys
+
+brief = sys.argv[1]
+assert brief.index("priority:P1") < brief.index("fingerprint:2222222222222222")
+assert brief.index("fingerprint:2222222222222222") < brief.index("priority:P2")
+assert brief.index("fingerprint:3333333333333333") < brief.index("fingerprint:1111111111111111")
+assert brief.count("provenance: unverified-consumer-report") == 3
+assert "issues: issue 12" in brief
+assert "issues: issue 7" in brief
+assert "issues: issue 41" in brief
+PY
+  [ "$status" -eq 0 ]
+  ! [[ "$output" == *"TRIAGE-RAW-CANARY"* ]]
+  ! [[ "$output" == *"credential.invalid"* ]]
+  grep -qx 'api repos/austinmao/feature-fix-swarm --jq .permissions.push' "$TRIAGE_GH_LOG"
+  grep -qx 'issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels' "$TRIAGE_GH_LOG"
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 2 ]
+  [ "$(cat "$TRIAGE_FIXTURE_READ_LOG")" = "fixture-read" ]
+}
+
+@test "PATH-005 triage rejects non-maintainers before listing issues" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
+  GH_TRIAGE_PERMISSION=false; export GH_TRIAGE_PERMISSION
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:not-maintainer"* ]]
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 1 ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
+}
+
+@test "PATH-005 triage reports list transport failures without consuming the fixture" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-issues.json"
+  GH_TRIAGE_LIST_FAIL=true; export GH_TRIAGE_LIST_FAIL
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:transport-error"* ]]
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 2 ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
+}
+
+@test "PATH-005 triage refuses lookalike origins without calling GitHub" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.evil.git "$FIXTURES/triage-issues.json"
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:wrong-origin"* ]]
+  [ ! -s "$TRIAGE_GH_LOG" ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
+}
+
+@test "PATH-005 triage removes GH_DEBUG and pins the GitHub host at both gh boundaries" {
+  triage_checkout https://github.com/austinmao/feature-fix-swarm.git "$FIXTURES/triage-empty.json"
+  GH_DEBUG=api GH_HOST=attacker.invalid GH_ENTERPRISE_HOST=attacker.invalid \
+    GH_TRIAGE_REQUIRE_SANITIZED=true run run_triage_contract
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
+}
+
+@test "PATH-005 triage skips malformed and duplicate metadata fixtures with a no-links brief" {
+  for fixture in "$FIXTURES/triage-malformed.json" "$FIXTURES/triage-duplicate-metadata.json"; do
+    # This test deliberately creates two independent checkouts under the same
+    # Bats temp directory so each fixture exercises the full origin gate.
+    rm -rf "$BATS_TEST_TMPDIR/triage-repo" "$BATS_TEST_TMPDIR/triage-bin"
+    triage_checkout git@github.com:austinmao/feature-fix-swarm.git "$fixture"
+    run run_triage_contract
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
+    [[ "$output" == *"Machine-derived facts only; do not fetch issue pages."* ]]
+    ! [[ "$output" =~ https?:// ]]
+    ! [[ "$output" == *"ambiguous"* ]]
+  done
+}
+
+@test "PATH-005 triage missing SKILL.md cannot reach foreign-origin boundary" {
+  triage_checkout https://github.com/testorg/testrepo.git "$FIXTURES/triage-issues.json"
+  run run_triage_contract
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RETRO-TRIAGE:wrong-origin"* ]]
+  [ ! -s "$TRIAGE_GH_LOG" ]
+  [ ! -s "$TRIAGE_FIXTURE_READ_LOG" ]
+}
+
+@test "PATH-005 triage missing SKILL.md cannot emit no-issues result" {
+  triage_checkout git@github.com:austinmao/feature-fix-swarm.git "$FIXTURES/triage-empty.json"
+  run run_triage_contract
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RETRO-TRIAGE:no-issues"* ]]
+  grep -qx 'api repos/austinmao/feature-fix-swarm --jq .permissions.push' "$TRIAGE_GH_LOG"
+  grep -qx 'issue list --repo austinmao/feature-fix-swarm --state open --label source/ffs-retro --limit 200 --json number,title,body,labels' "$TRIAGE_GH_LOG"
+  [ "$(wc -l < "$TRIAGE_GH_LOG")" -eq 2 ]
+  [ "$(cat "$TRIAGE_FIXTURE_READ_LOG")" = "fixture-read" ]
+}
+
+# ── REQ-06: exact / search-fallback / closed / lowest-number dedup ─────────
+
+@test "dedup: exact fingerprint match in bounded list -> one comment on the LOWEST issue number, zero creates" {
+  fresh_env exact-lowest
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-exact-multiple.json"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+  grep '^issue comment' "$GH_CALL_LOG" | grep -qE '(^| )501($| )'
+  ! grep '^issue comment' "$GH_CALL_LOG" | grep -qE '(^| )777($| )'
+}
+
+@test "dedup: match only via search fallback (list lacks it, search has it) -> comment, zero creates, search actually called" {
+  fresh_env search-fallback
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_SEARCH_FIXTURE="$FIXTURES/gh-search-fallback-match.json"
+  export GH_LIST_FIXTURE GH_SEARCH_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+  grep '^issue comment' "$GH_CALL_LOG" | grep -qE '(^| )888($| )'
+  grep -q -- '--search' "$GH_CALL_LOG"
+}
+
+@test "dedup EDGE-007: closed-issue exact match -> comment on the closed issue, never reopened" {
+  fresh_env closed-exact
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-exact-closed.json"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+  grep '^issue comment' "$GH_CALL_LOG" | grep -qE '(^| )601($| )'
+  ! grep -qi 'reopen' "$GH_CALL_LOG"
+  ! grep -qi -- '--state open' "$GH_CALL_LOG"
+}
+
+# ── REQ-06: title similarity boundary (inclusive 0.8) ───────────────────────
+#
+# The compared title is generated by not-yet-written production code, so it
+# is captured from a REAL create call first, then used to construct exact
+# ratio-0.8 / ratio-0.75 variants at run time (see
+# tests/bats/helpers/retro_similar_title.py) instead of guessing a static
+# fixture title.
+
+capture_real_title() { # capture_real_title <label> -> writes $CAPTURED_TITLE
+  fresh_env "cap-$1"
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+  CAPTURED_TITLE_FILE="$GH_CREATE_LOG/create-1.title"
+  [ -f "$CAPTURED_TITLE_FILE" ]
+  [ -s "$CAPTURED_TITLE_FILE" ]
+}
+
+@test "dedup: title similarity ratio exactly RETRO_TITLE_SIM (0.8, inclusive) -> comment" {
+  capture_real_title sim08
+
+  SIM_TITLE_FILE="$BATS_TEST_TMPDIR/sim08-title.txt"
+  python3 "$ROOT/tests/bats/helpers/retro_similar_title.py" \
+    "$CAPTURED_TITLE_FILE" 4 5 "$SIM_TITLE_FILE"
+  SIM_TITLE="$(cat "$SIM_TITLE_FILE")"
+
+  LIST_FIXTURE="$BATS_TEST_TMPDIR/gh-list-sim08.json"
+  python3 - "$SIM_TITLE" "$LIST_FIXTURE" <<'PY'
+import json, sys
+title, out = sys.argv[1], sys.argv[2]
+json.dump([{"number": 42, "title": title, "body": "no metadata comment here", "state": "OPEN"}], open(out, "w"))
+PY
+
+  fresh_env sim08-hit
+  GH_LIST_FIXTURE="$LIST_FIXTURE"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+  grep '^issue comment' "$GH_CALL_LOG" | grep -qE '(^| )42($| )'
+}
+
+@test "dedup: title similarity just below threshold (0.75) -> proceeds to create after re-query" {
+  capture_real_title simbelow
+
+  SIM_TITLE_FILE="$BATS_TEST_TMPDIR/sim075-title.txt"
+  python3 "$ROOT/tests/bats/helpers/retro_similar_title.py" \
+    "$CAPTURED_TITLE_FILE" 3 4 "$SIM_TITLE_FILE"
+  SIM_TITLE="$(cat "$SIM_TITLE_FILE")"
+
+  LIST_FIXTURE="$BATS_TEST_TMPDIR/gh-list-sim075.json"
+  python3 - "$SIM_TITLE" "$LIST_FIXTURE" <<'PY'
+import json, sys
+title, out = sys.argv[1], sys.argv[2]
+json.dump([{"number": 43, "title": title, "body": "no metadata comment here", "state": "OPEN"}], open(out, "w"))
+PY
+
+  fresh_env sim075-miss
+  GH_LIST_FIXTURE="$LIST_FIXTURE"; GH_SEARCH_FIXTURE="$LIST_FIXTURE"
+  export GH_LIST_FIXTURE GH_SEARCH_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+  [ "$(count_calls 'issue comment')" -eq 0 ]
+}
+
+# ── REQ-07: create cap ───────────────────────────────────────────────────
+
+@test "cap: RETRO_MAX_NEW_ISSUES=3 permits exactly 3 creates on 4 distinct new findings; 4th accrues in the ledger" {
+  fresh_env cap3
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"; export GH_LIST_FIXTURE
+  RETRO_MAX_NEW_ISSUES=3 analyze_h --digest "$FIXTURES/cap-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 3 ]
+  LEDGER="$RETRO_STATE/retro-ledger.jsonl"
+  [ -f "$LEDGER" ]
+  # the 4th finding did not create, but is not silently dropped either
+  python3 -c "
+import json
+rows = [json.loads(l) for l in open('$LEDGER') if l.strip()]
+fps = {r.get('fingerprint') for r in rows}
+assert 'd37613c4267ccc77' in fps, rows  # 4th cap-digest finding's fingerprint
+creates = [r for r in rows if r.get('action') == 'create']
+assert len(creates) == 3, rows
+"
+}
+
+@test "cap: RETRO_MAX_NEW_ISSUES=0 -> comments only path allowed, zero creates (EDGE-009, cap floors at comments-only)" {
+  fresh_env cap0
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-exact-single.json"; export GH_LIST_FIXTURE
+  RETRO_MAX_NEW_ISSUES=0 analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+}
+
+# ── REQ-07: P3 occurrence floor ─────────────────────────────────────────
+
+@test "P3 floor: occurrences 1 and 2 accrue with no create; the 3rd occurrence creates (RETRO_P3_OCCURRENCE_FLOOR=3)" {
+  fresh_env p3floor
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"; export GH_LIST_FIXTURE
+
+  RETRO_P3_OCCURRENCE_FLOOR=3 analyze_h --digest "$FIXTURES/p3-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+
+  RETRO_P3_OCCURRENCE_FLOOR=3 analyze_h --digest "$FIXTURES/p3-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+
+  RETRO_P3_OCCURRENCE_FLOOR=3 analyze_h --digest "$FIXTURES/p3-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+}
+
+# ── REQ-07: persisted >=2s pacing ────────────────────────────────────────
+
+@test "pacing: two consecutive writes are at least 2s apart per the persisted timestamp" {
+  fresh_env pacing
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_TIMING_LOG="$BATS_TEST_TMPDIR/gh-timing-pacing.log"; : > "$GH_TIMING_LOG"
+  export GH_LIST_FIXTURE GH_TIMING_LOG
+  # two distinct new findings in one run -> two writes (creates) governed by
+  # the SAME persisted pacing timestamp without releasing the lock.
+  analyze_h --digest "$FIXTURES/cap-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$GH_TIMING_LOG")" -ge 2 ]
+  [ "$(gh_pacing_ok "$GH_TIMING_LOG" 2)" = "ok" ]
+}
+
+# ── REQ-07: known write-failure outcomes are fail-soft, no retry ────────
+
+@test "gh write 403 -> typed value-free ledger row, rc 0, exactly one write attempt (no retry)" {
+  fresh_env write403
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_WRITE_FAIL_CODE=403
+  export GH_LIST_FIXTURE GH_WRITE_FAIL_CODE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+  LEDGER="$RETRO_STATE/retro-ledger.jsonl"
+  [ -f "$LEDGER" ]
+  [ "$(wc -l < "$LEDGER")" -eq 1 ]
+  ! grep -q 'WRITE-FAIL-MARKER' "$LEDGER"
+  python3 -c "import json; json.loads(open('$RETRO_STATE/retro-ledger.jsonl').read().strip())"
+}
+
+@test "gh write 422 -> typed value-free ledger row, rc 0, exactly one write attempt (no retry)" {
+  fresh_env write422
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_WRITE_FAIL_CODE=422
+  export GH_LIST_FIXTURE GH_WRITE_FAIL_CODE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+  LEDGER="$RETRO_STATE/retro-ledger.jsonl"
+  [ -f "$LEDGER" ]
+  [ "$(wc -l < "$LEDGER")" -eq 1 ]
+  ! grep -q 'WRITE-FAIL-MARKER' "$LEDGER"
+}
+
+# ── REQ-06 idempotency / PATH-002 shape: rerun over already-filed payload ──
+
+@test "idempotency: rerun over an already-filed payload -> comments only, zero new creates" {
+  fresh_env idempotent
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+
+  # simulate gh now reflecting the created issue on rerun
+  RERUN_LIST="$BATS_TEST_TMPDIR/gh-list-idempotent-rerun.json"
+  cp "$GH_CREATE_LOG/create-1.title" "$BATS_TEST_TMPDIR/created-title.txt"
+  python3 - "$BATS_TEST_TMPDIR/created-title.txt" "$RERUN_LIST" <<'PY'
+import json, sys
+title, out = sys.argv[1], sys.argv[2]
+title = open(title).read()
+body = "Automatically filed by ffs-retro.\n\n<!-- ffs-retro fingerprint:6f8560bdd33c6f56 priority:P1 occurrences:1 -->"
+json.dump([{"number": 1, "title": title, "body": body, "state": "OPEN"}], open(out, "w"))
+PY
+  : > "$GH_CALL_LOG"
+  GH_LIST_FIXTURE="$RERUN_LIST"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+}
+
+# ── REQ-06/07: local ledger create record consulted BEFORE gh queries ──────
+
+@test "dedup ordering: a rerun consults the local ledger create record before any gh list/search query" {
+  fresh_env ledgerfirst
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+
+  # rerun: gh list/search fixtures deliberately still say "nothing exists"
+  # (unset -> shim defaults to []) -- read-after-write lag simulation. If
+  # the local ledger create record were NOT consulted first, this would
+  # incorrectly create a duplicate.
+  : > "$GH_CALL_LOG"
+  unset GH_LIST_FIXTURE GH_SEARCH_FIXTURE || true
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 1 ]
+  [ "$(count_calls 'issue list')" -eq 0 ]
+}
+
+# ── REQ-06 read-after-write lag: dedup holds even when gh list omits the
+#    just-created issue ──────────────────────────────────────────────────
+
+@test "dedup survives read-after-write lag: gh list never reflects the created issue, still zero duplicate creates" {
+  fresh_env lag
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"; export GH_LIST_FIXTURE
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 1 ]
+
+  : > "$GH_CALL_LOG"
+  # gh list/search fixtures stay EMPTY on rerun -- the created issue never
+  # appears (index lag). Local ledger dedup must still hold.
+  analyze_h --digest "$FIXTURES/single-p1-digest.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+}

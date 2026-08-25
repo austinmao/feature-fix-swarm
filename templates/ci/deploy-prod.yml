@@ -1,0 +1,126 @@
+# ffs template: deploy-prod (REQ-301, audit rows 22/24 locked). Rendered by
+# env-registry.sh render (03-02).
+# wall 792e5b5b — authoritative control chain: branch protection on the
+# default branch plus the {{PROD_ENV}} GitHub Environment's required
+# reviewers approve the RUN (binding github.sha); check-grant
+# --require-environments then executes from that approved sha's own bytes as
+# same-trust-domain defense-in-depth — an actor who can rewrite lib/gates.py
+# on a protected branch already holds a stronger capability than the gate.
+# Reviewer protection on {{PROD_ENV}} is an EXTERNAL prerequisite (audit
+# row 22); this template never creates it.
+# wall ebadd63a: NO command-shaped input; smoke_tier is a NAME executed only
+# inside the evidence gate (wall d688023e).
+name: deploy-prod
+
+on:
+  workflow_call:
+    inputs:
+      surface:
+        type: string
+        required: true
+      artifact_digest:
+        type: string
+        required: true
+      previous_digest:
+        type: string
+        required: true
+      smoke_tier:
+        type: string
+        required: true
+  # wall 9d404c88: workflow_dispatch mirrors the workflow_call inputs
+  # exactly (keys, types, required) so a manual dispatch can supply
+  # everything the steps consume.
+  workflow_dispatch:
+    inputs:
+      surface:
+        type: string
+        required: true
+      artifact_digest:
+        type: string
+        required: true
+      previous_digest:
+        type: string
+        required: true
+      smoke_tier:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffs-deploy-prod-${{ inputs.surface }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: {{PROD_ENV}}
+    # wall 7f08ccda: job-level permissions REPLACE the workflow-level block,
+    # so contents: read is restated alongside the OIDC escalation.
+    permissions:
+      contents: read
+      id-token: write
+    # wall af9f57b1: expressions never reach run blocks — caller values
+    # cross into shell ONLY via env mappings, consumed as quoted "$VAR".
+    # wall eb28c568: ARTIFACT_DIGEST is bound ONCE here; the digest that is
+    # granted IS the digest deployed.
+    env:
+      ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+      SURFACE: ${{ inputs.surface }}
+      SMOKE_TIER: ${{ inputs.smoke_tier }}
+      RUN_ID: ffs-${{ github.run_id }}
+    steps:
+      - name: Check out approved sha
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      # wall c6a42b43: refuse before granting — the run must sit on the
+      # default branch the trust chain above protects.
+      - name: Refuse non-default-branch runs
+        env:
+          RUN_REF: ${{ github.ref }}
+          DEFAULT_BRANCH_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$RUN_REF" != "$DEFAULT_BRANCH_REF" ]; then
+            echo "refusing: prod deploys run only from the default branch" >&2
+            exit 1
+          fi
+      - name: Check prod grant
+        run: python3 lib/gates.py check-grant "$RUN_ID" --action "deploy:prod-$SURFACE" --artifact "$ARTIFACT_DIGEST" --require-environments
+      - name: Validate smoke tier name
+        run: |
+          if ! printf '%s' "$SMOKE_TIER" | grep -Eq '^[a-z][a-z0-9_-]{0,31}$'; then
+            echo "refusing: smoke_tier is not a valid tier name" >&2
+            exit 1
+          fi
+      # CONSUMER DEPLOY STEP — replace this block (wall 4b37c841: deploy
+      # mechanisms are neither runtime inputs nor placeholder tokens; edit
+      # your rendered copy through the normal proposal/review flow).
+      # wall 760b2ad9: your replacement must bind BOTH "$SURFACE" and
+      # "$ARTIFACT_DIGEST" — deploy exactly the granted digest to that
+      # surface.
+      # wall 431cd39a: this template block is echo-only and exits 0 so the
+      # smoke gate below is the step that fails this job; a placeholder
+      # failure must never mask the smoke contract.
+      - name: Deploy prod surface
+        continue-on-error: false
+        run: |
+          echo "CONSUMER DEPLOY STEP - replace this block in your rendered copy."
+          echo "Bind both env vars: this run would deploy surface $SURFACE at digest $ARTIFACT_DIGEST."
+          echo "Template form is a deliberate no-op (exit 0) so the smoke gate decides the job outcome."
+      - name: Smoke gate
+        run: python3 lib/gates.py run-gate smoke --artifact "$ARTIFACT_DIGEST" -- bash scripts/gsd/test-tier.sh "$SMOKE_TIER"
+      # Rollback is EMITTED, never executed (PROJECT.md non-negotiable):
+      # every line below writes only to GITHUB_OUTPUT or GITHUB_STEP_SUMMARY.
+      - name: Emit rollback command
+        id: rollback
+        if: failure()
+        env:
+          PREVIOUS_DIGEST: ${{ inputs.previous_digest }}
+        run: |
+          echo "rollback_surface=$SURFACE" >> "$GITHUB_OUTPUT"
+          echo "rollback_digest=$PREVIOUS_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Smoke failed: rollback target emitted as step outputs; execute it only through the granted deploy flow." >> "$GITHUB_STEP_SUMMARY"

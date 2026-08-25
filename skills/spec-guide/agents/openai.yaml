@@ -1,0 +1,4 @@
+interface:
+  display_name: "Spec Guide"
+  short_description: "Create verified role-based feature instructions"
+  default_prompt: "Use $spec-guide to create and verify developer, admin, and user instructions for the current spec."

@@ -1,0 +1,15 @@
+# config/environments.yaml
+# schema: ffs.environments/v1
+# whitelist fixture (audit row 11): pinned-action uses: and sha256: digests
+# interleave with registry lines — zero findings expected.
+# uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
+environments:
+  - name: local
+    kind: local
+# uses: actions/setup-python@fedcba9876543210fedcba9876543210fedcba98
+test_tiers:
+  - tier: fast
+    command: true # sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+surfaces:
+  - surface: release
+    staging_instance: none

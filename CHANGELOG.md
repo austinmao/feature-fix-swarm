@@ -6,6 +6,186 @@ on a per-skill basis. Each skill in `skills/` carries its own version field in
 its SKILL.md frontmatter; this CHANGELOG aggregates user-facing changes across
 all skills.
 
+## Unreleased
+
+### Added
+
+- `plan-wall.sh --await` enforces `PLAN_WALL_AWAIT_MAX` (default 6): pending returns beyond the cap exit rc 76 `WALL-AWAIT:attempts-exhausted`; the counter is run-scoped, evaluator probes (`PLAN_WALL_AWAIT_COUNT=off`) are budget-neutral, and decided outcomes always report through and reset it.
+- `digest.sh --immediate` appends schema-true retro rows to `.feature-fix-swarm/digest-<utcdate>.jsonl` for list-backed event classes — the previously missing producer for `retro.sh analyze` (`DIGEST_RETRO_SINK=off` disables).
+
+### Fixed
+
+- `scripts/gsd/reconcile.sh` reports terminal records (`done`/`failed`/`quarantined`) as `RECONCILE:terminal` instead of mislabeling a just-failed run `still-waiting` — including a record the ci-watch evaluator fails mid-pass; `scripts/gsd/session-wake.sh` typed failure tokens no longer embed the exit code (`SESSION-WAKE:wake-exhausted`, not `wake-exhausted 1`); `plan-wall.sh --await` now recognizes socratic-armed verdict records (folded `plan_sha:socratic_sha` keys) so `wall-decided` wakes fire for socratic-armed phases.
+
+- Consent-gated retro filing now publishes a finite diagnostic allowlist, maintains upstream advisory labels and occurrences, and supports maintainer-only factual triage for human-reviewed specification work.
+- `scripts/gsd/reconcile.sh` provides a one-pass, coord-claimed recovery path for durable lifecycle records, and `docs/healing.md` documents its operator controls and recovery boundaries.
+
+### Changed
+
+- `scripts/gsd/gsd-run.sh` retries one failed drive by default (`FFS_RESPAWN_MAX=1`): rc 124 retries once, while other failures retry only after a zero-commit probe. A failed drive whose capture carries a vendor session-limit banner is instead checkpointed as a durable `waiting(time)` record (`FFS_SESSION_WAKE=off` disables) and left for `scripts/gsd/reconcile.sh` to relaunch.
+
+- Dependency refresh (2026-08-08): `@opengsd/gsd-core` exact pin `1.9.1` →
+  `1.10.0` (constants in `lib/ffs_installer.py`, `scripts/gsd/stage-gsd-skills.py`,
+  `scripts/gsd/codex-runtime-bundle.py`, plus lockfile, fixtures, and docs);
+  `pytest` `9.0.3` → `9.1.1`; vendored `socratic` pin `862b52e` → `8c7e1fd`
+  (upstream added an opt-in `grades/` readiness-gate surface — additive, inert
+  unless a grade is named). `npm audit fix` cleared one high (`ip-address`
+  SSRF) and one moderate (`hono`) transitive advisory. The `gsd-manifests`
+  doctor message now interpolates `GSD_VERSION` instead of repeating the
+  literal, so it cannot drift from the pin again.
+- Codex CLI supported range widened to `>=0.137.0,<0.148.0` (was `<0.147.0`),
+  admitting the `0.147.x` line. Not a blind ceiling bump: `0.147.0` was
+  installed to a scratch prefix and exercised against FFS's exact `gsd-run`
+  invocation — `codex exec -c model=… -c model_reasoning_effort=… --sandbox
+  workspace-write --color never` — inside an *unfamiliar* fresh git project,
+  the precise condition upstream's new explicit-project-trust requirement
+  (openai/codex#36960) would have rejected. The drive returned `PROBE_OK`
+  with rc 0, and `--version` still parses. `0.147.0` also removes
+  `codex exec --full-auto`, which FFS has never used (it already passes
+  `--sandbox workspace-write`, the documented replacement). Both range sites
+  moved together — `CODEX_MAX_VERSION` in `lib/ffs_installer.py` and the
+  independent `version_in_supported_codex_range` predicate in
+  `scripts/gsd/gsd-run.sh` — plus their two out-of-range test fixtures.
+
+### Fixed
+
+- `setup.sh`/`ffs_installer.py` hard-blocked the *entire* install whenever a
+  single managed skill path had an edited/unmanaged collision, with no way to
+  proceed for the rest of the skills. New `--adopt-collisions` flag backs up
+  the colliding path (printing the backup location) and installs the vendor
+  copy for just that path, while every other skill installs normally. Default
+  behavior (hard-block, fail-closed) is unchanged unless the flag is passed.
+- `tests/bats/socratic-enum-drift.bats` no longer fails on upstream's
+  `packs/_template` scaffold, which ships a `core.md` but is deliberately
+  absent from `PACK_ENUM`. The suite is opt-in (`FFS_SOCRATIC_DIR`), so it had
+  never been exercised in CI; it failed identically against both the old and
+  new socratic pins, confirming a suite bug rather than vendor drift.
+
+### Added
+
+- Post-spec-005 hygiene: opt-in enum-drift suite
+  (`tests/bats/socratic-enum-drift.bats`) asserting
+  `DOMAIN_ENUM_ORDER`/`PACK_ENUM` map 1:1 to a REAL resolved socratic vendor
+  tree (skips where none resolves, so CI is unaffected); spec-005 retro note
+  (`specs/005-socratic-integration/retro.md`).
+
+### Changed
+
+- `lib/ffs_installer.py`: `stage_prompt_master`/`stage_socratic` deduplicated
+  into one `_stage_external_skill()` with a uniform env contract —
+  prompt-master gains `FFS_PROMPT_MASTER_INSTALLER` for parity with the
+  socratic seam; `legacy_skill_names()` now recognizes a stray legacy
+  `socratic` dir as managed during migration.
+
+### Fixed
+
+- `scripts/gsd/plan-wall.sh`: fixed the schema-validator defect (rc=97) that
+  forced every WAIVED verdict in the spec-005 run — the vendor clause in
+  `_pw_validate_findings` piped into the enum array without an `as` binding,
+  so `.vendor` indexed the enum array and jq errored, rejecting EVERY finding
+  that carried the prompt-mandated `vendor` key as schema-invalid. Fixture
+  stubs never set `vendor`, so only real model output hit it. Regression
+  tests cover the full-shape finding and the out-of-enum vendor rejection.
+- `scripts/install-prompt-master.sh`: `--dest`/`--source` with a missing
+  value now exits 2 with a usage line (previously died via failed `shift 2`
+  under `set -e`), matching `install-socratic.sh`.
+
+- Added a fourth model-request tier, `frontier` (spec 004,
+  `specs/004-model-routing/`), splitting the collapsed `judgment` tier that
+  planning and review previously shared. `gsd-planner` moves to `frontier`
+  (Claude Fable / Codex Sol @ xhigh); `gsd-plan-checker` and other
+  review/verification roles stay on `judgment` (Claude Opus / Codex Sol @
+  high) — the two now resolve to genuinely different models on Claude, and to
+  a different effort on Codex, closing a same-model self-review gap in the
+  plan gate. Added an always-on per-phase plan wall
+  (`scripts/gsd/plan-wall.sh`, kill-switch `PLAN_WALL=off` with a durable
+  waiver) that dispatches an adversarial review of each phase's plan to a
+  model distinct from the planner's before that phase can execute, selected
+  by a diversity-invariant algorithm (cross-vendor beats same-vendor
+  different-model beats same-model different-effort); a completion backstop
+  in `scripts/gsd/gates-test-command.sh` additionally refuses to let a phase
+  finish without a passing wall record. `findings-queue` (`lib/gates.py`)
+  gained typed dispositions (`refute|fix|waive` with a required reason) and
+  reopens a finding whose signature recurs after resolution. Added
+  `SECURITY_MODEL_FENCE=off` as an explicit kill-switch for the existing
+  security-spec planning fence.
+- Added `/git-branch-consolidate` v1.0.0 and `/git-branch-cleanup` v1.0.0, a
+  repository-hygiene pair for reconciling a sprawling branch estate back down
+  to one `origin/main`. Consolidate is read-only: its deterministic collector
+  (`skills/git-branch-consolidate/scripts/collect-estate.py`) classifies every
+  branch and worktree by whether the base branch already carries the content,
+  what work is still owed, whether tests exist, and whether the
+  spec/plan/tasks trail is complete, then writes an ordered merge set, cleanup
+  set, and testing-gap list to `.planning/ESTATE-<UTC>.md` without ever
+  checking out, fetching, merging, or deleting. Cleanup owns the acting half:
+  CI-gated merges of non-gated PRs under the pinned merge protocol, then
+  pruning merged refs and their worktrees. Both treat merged-PR state and
+  residual-code emptiness as authoritative rather than `git branch --merged`,
+  which reports every squash-merged branch as unmerged; remote deletion is
+  compare-and-delete via `--force-with-lease` only. Consolidate hands its
+  `delete-safe` set to cleanup and never the reverse — land before cleanup, or
+  you delete the only copy.
+- Added `/spec-guide` v1.0.0 to generate developer, admin, and user
+  instructions for a delivered spec and verify every step through its actual
+  browser, API/MCP, chat, email, CLI, webhook, worker, database, or design
+  surface. Its deterministic collector inventories source and evidence names
+  without reading evidence contents, and the installer ships the skill to both
+  Claude and Codex discovery roots.
+- Added a pinned `socratic` question bank (spec 005,
+  `specs/005-socratic-integration/`), vendored via `vendor/socratic/pin.json`
+  and `scripts/install-socratic.sh` and staged by `stage_socratic()` into
+  `.agents/skills/socratic` as a managed external skill with fingerprint
+  tracking, skippable with `FFS_SKIP_SOCRATIC=1`. Added
+  `scripts/gsd/socratic-slice.sh`, the single deterministic emitter that
+  turns a spec's `socratic.md` frontmatter into a delimited, domain-scoped
+  slice, with two deliberately different postures: fail-soft at consumption
+  time, so a missing vendor tree or an unknown domain degrades to a thinner
+  slice, and fail-closed under `--validate` at authoring time, so an invalid
+  spec is rejected outright. `/feature-spec` Step 1.5 now authors
+  `specs/NNN/socratic.md` with zero operator prompts, routing open questions
+  to typed `gates.py` PENDING actions rather than into the MAX-AUTH
+  auto-grant enumeration. Three reviewer seams are armed by the resulting
+  slice — `plan-wall.sh`, `plan-decompose` Step 3, and `review-gate`'s honest
+  verifier, the last of which audits each ASSUME entry to held, violated, or
+  unverifiable and routes violated entries into the normal findings queue at
+  HIGH. Every seam is fail-soft: with no vendor tree installed, each prompt
+  stays byte-identical to its pre-feature form, and `SOCRATIC=off` disables
+  arming for a single run through that same path.
+
+### Fixed
+
+- `/spec-status NNN` now resolves the unique `spec-NNN` archive when the active
+  `.planning/` tree carries several *unrelated* identities. The conflicting
+  active identities check previously fail-closed on any multi-identity tree,
+  which blocked status for an explicitly-requested archived spec whenever the
+  root project had moved on. A conflict that includes the requested spec still
+  fails closed — active planning must not be ambiguous about the spec you
+  asked for. Regression test covers the live shape that exposed this: a
+  `.planning/` root naming two other specs while `spec-NNN` sits in the
+  archive.
+
+### Security
+
+- Updated the pinned pytest development tool to 9.0.3 after GitHub's
+  post-merge dependency refresh identified GHSA-6w46-j5rx-g56g in 9.0.2.
+- Preflight probes now require a structured `argv` array and execute without
+  an implicit shell. Legacy `cmd` strings and environment placeholders fail
+  closed; migrate each command to one literal argument per JSON array item and
+  let invoked programs read secrets from their inherited environment.
+- Remediated one high and two moderate transitive npm advisories while keeping
+  the direct GSD 1.9.1 pin exact.
+- CI actions are immutable-SHA pinned with least-privilege permissions; CodeQL,
+  Bandit, OpenSSF Scorecard, and Dependabot coverage were added.
+
+### Documentation
+
+- Reframed the README around audience, problem, outcome, quick start, and the
+  GSD/FFS ownership boundary; added dependency, security, contribution,
+  support, conduct, issue, and pull-request guidance.
+- Removed stale internal GSD planning state and superseded Ruflo spike output
+  from the public source tree. Reproducible model-evaluation evidence and
+  test-referenced specifications remain tracked.
+
 ## v5.0.5 — Durable finalization and archive-aware status (2026-08-01)
 
 ### Fixed

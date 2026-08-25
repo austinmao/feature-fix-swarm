@@ -1,0 +1,11 @@
+[
+  {"kind": "probe", "name": "git-present", "argv": ["git", "--version"]},
+  {"kind": "probe", "name": "python3-present", "argv": ["python3", "--version"]},
+  {"kind": "probe", "name": "pytest-present", "argv": ["python3", "-m", "pytest", "--version"]},
+  {"kind": "probe", "name": "node-present-for-gsd-tools", "argv": ["node", "--version"]},
+  {"kind": "probe", "name": "bats-present", "argv": ["bats", "--version"]},
+  {"kind": "probe", "name": "shellcheck-present", "argv": ["shellcheck", "--version"]},
+  {"kind": "probe", "name": "codex-present-for-opposite-host-gates", "argv": ["codex", "--version"]},
+  {"kind": "probe", "name": "socratic-upstream-reachable-at-pin", "argv": ["git", "ls-remote", "https://github.com/m4vic/socratic.git", "HEAD"]},
+  {"kind": "probe", "name": "gh-authenticated-for-ship-pr", "argv": ["gh", "auth", "status"]}
+]

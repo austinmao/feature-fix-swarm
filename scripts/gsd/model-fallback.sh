@@ -88,64 +88,19 @@ PLANNING_DIR="${1:-.planning}"
 CONFIG="$PLANNING_DIR/config.json"
 [ -f "$CONFIG" ] || { echo "[model-fallback] ERROR: $CONFIG not found" >&2; exit 1; }
 
-CACHE_DIR="${GSD_FALLBACK_CACHE:-$HOME/.cache/gsd-model-probe}"
-mkdir -p "$CACHE_DIR"
-
-# Wall-clock bound for the real-CLI probes. This lever runs as a WALL at the
-# top of /feature-implement — an unbounded probe hang stalls the run before
-# phase 1 (2026-07-12 dead-codex forensics: this was the only site with no
-# timeout on ANY branch). A bounded/refused probe reads as "unavailable",
-# which is the lever's existing fail-soft direction.
-. "$(dirname "${BASH_SOURCE[0]}")/run-bounded.sh"
-PROBE_TIMEOUT="${GSD_MODEL_PROBE_TIMEOUT:-120}"
+# Probe machinery (probe_claude_model, probe_codex_model, CACHE_DIR,
+# PROBE_TIMEOUT, run_bounded) lives in model-probe-lib.sh (spec-004 AC-009
+# prerequisite — extracted so `setup.sh --doctor` can reuse the identical
+# cached probes side-effect-free, without this file's config-mutation
+# machinery). Re-sourced here so this lever's own behaviour, cache file
+# names, and env var contract stay byte-for-byte unchanged (pinned by the
+# pre-existing tests/bats/model-fallback.bats).
+. "$(dirname "${BASH_SOURCE[0]}")/model-probe-lib.sh"
 
 MARKER="$PLANNING_DIR/fable-fallback.json"
 FABLE="claude-fable-5"
 OPUS="claude-opus-5"
 CODEX_SOL="gpt-5.6-sol"
-
-probe_claude_model() {
-  # exit 0 = available, 1 = unavailable. 24h cache per model (cache file name).
-  local model="$1" cache="$CACHE_DIR/$1.status"
-  if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -1440 2>/dev/null)" ]; then
-    [ "$(cat "$cache")" = "ok" ]; return
-  fi
-  local cmd="${GSD_MODEL_PROBE_CMD:-}"
-  if [ -n "$cmd" ]; then
-    if $cmd "$model" >/dev/null 2>&1; then echo ok > "$cache"; else echo fail > "$cache"; fi
-  else
-    if run_bounded "$PROBE_TIMEOUT" env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
-        claude -p "ok" --model "$model" --max-turns 1 </dev/null >/dev/null 2>&1; then
-      echo ok > "$cache"
-    else
-      echo fail > "$cache"
-    fi
-  fi
-  [ "$(cat "$cache")" = "ok" ]
-}
-
-probe_codex_model() {
-  # Separate cache key from probe_claude_model (distinct cache filename per model).
-  local model="$1" cache="$CACHE_DIR/$1.status"
-  if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -1440 2>/dev/null)" ]; then
-    [ "$(cat "$cache")" = "ok" ]; return
-  fi
-  local cmd="${GSD_MODEL_PROBE_CMD_CODEX:-}"
-  if [ -n "$cmd" ]; then
-    if $cmd "$model" >/dev/null 2>&1; then echo ok > "$cache"; else echo fail > "$cache"; fi
-  else
-    # Subscription-only: strip BOTH vendors' API keys. The codex CLI prefers
-    # OPENAI_API_KEY over the logged-in ChatGPT session when one is present,
-    # which silently bills the probe to a metered key instead of the plan.
-    if run_bounded "$PROBE_TIMEOUT" env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u OPENAI_API_KEY \
-        codex exec -c "model=\"$model\"" -c 'sandbox_mode="read-only"' "ok" </dev/null >/dev/null 2>&1; then
-      echo ok > "$cache"
-    else
-      echo fail > "$cache"
-    fi
-  fi
-  [ "$(cat "$cache")" = "ok" ]
-}
 
 # Match BOTH value forms: gsd-core alias "fable" and full ID "claude-fable-5"
 # (the alias grep is exact-quoted, so it does NOT match inside the full ID).

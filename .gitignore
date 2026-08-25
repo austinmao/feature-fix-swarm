@@ -1,9 +1,18 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+.DS_Store
+*.tsbuildinfo
+.wrangler/
 .context/
 .feature-fix-swarm/
 node_modules/
 .codex/
-.planning/logs/
-.planning/run-state/
+.memsearch/
+.claude/worktrees/
+.worktrees/
+spike-results/
+# GSD project/run state belongs to the consuming repository. The FFS source
+# repository keeps reusable templates and evaluation evidence, not stale runs.
+.planning/

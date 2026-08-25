@@ -1,0 +1,59 @@
+# ffs template: main-full (REQ-301). Rendered by env-registry.sh render (03-02).
+# Placeholder inventory is closed (wall 4b37c841); tier commands come only
+# from the committed registry via scripts/gsd/test-tier.sh (wall ebadd63a).
+name: main-full
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffs-main-full-${{ github.ref }}
+
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Restore dependency cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: ffs-main-full-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('{{LOCKFILE_HASH_PATH}}') }}
+      # CONSUMER SETUP — dependency install belongs in your rendered copy;
+      # the tier registry stays the only source of test commands.
+      - name: Run full tier
+        run: bash scripts/gsd/test-tier.sh {{TIER_FULL}} > "$RUNNER_TEMP/tier-cmds" && bash -e "$RUNNER_TEMP/tier-cmds"
+      - name: Upload tier command transcript
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ffs-full-tier-cmds-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/tier-cmds
+          retention-days: 7
+  report:
+    needs: full
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Summarize full tier
+        run: echo "full tier and transcript upload complete" >> "$GITHUB_STEP_SUMMARY"

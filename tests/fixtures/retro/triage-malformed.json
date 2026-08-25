@@ -1,0 +1,6 @@
+[
+  {"number": 1, "title": "bad fingerprint", "body": "<!-- ffs-retro fingerprint:NOTHEX priority:P1 occurrences:1 -->", "labels": []},
+  {"number": 2, "title": "bad count", "body": "<!-- ffs-retro fingerprint:1111111111111111 priority:P1 occurrences:01 -->", "labels": []},
+  {"number": 3, "title": "overflow", "body": "<!-- ffs-retro fingerprint:1111111111111111 priority:P1 occurrences:2147483648 -->", "labels": []},
+  {"number": 4, "title": "prose lookalike", "body": "ffs-retro fingerprint:1111111111111111 priority:P1 occurrences:1", "labels": []}
+]

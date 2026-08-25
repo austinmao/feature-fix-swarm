@@ -11,6 +11,7 @@ from lib.model_requests import ModelRequestError, resolve_request, validate_docu
 @pytest.mark.parametrize(
     ("name", "model", "effort"),
     [
+        ("frontier", "gpt-5.6-sol", "xhigh"),
         ("judgment", "gpt-5.6-sol", "high"),
         ("execution", "gpt-5.6-terra", "medium"),
         ("volume", "gpt-5.6-luna", "low"),
@@ -37,6 +38,7 @@ def test_exact_request_preserves_vendor_id_and_never_falls_back() -> None:
 @pytest.mark.parametrize(
     ("name", "model"),
     [
+        ("frontier", "claude-fable-5"),
         ("judgment", "claude-opus-5"),
         ("execution", "claude-sonnet-5"),
         ("volume", "claude-haiku-4-5-20251001"),
@@ -64,6 +66,20 @@ def test_invalid_or_raw_model_requests_fail_closed(model_request: object) -> Non
         resolve_request(model_request)
 
 
+def test_unknown_tier_error_message_names_all_four_tiers() -> None:
+    with pytest.raises(ModelRequestError, match="frontier\\|judgment\\|execution\\|volume"):
+        resolve_request({"kind": "tier", "name": "premium"})
+
+
+def test_exact_request_round_trip_is_byte_compatible_across_hosts() -> None:
+    for host in ("codex", "claude"):
+        resolved = resolve_request({"kind": "exact", "id": "claude-fable-5"}, host=host)
+        assert resolved["kind"] == "exact"
+        assert resolved["model"] == "claude-fable-5"
+        assert resolved["exact_provenance"] is True
+        assert resolved["fallback_allowed"] is False
+
+
 def test_document_lint_rejects_raw_vendor_ids_outside_exact(tmp_path: Path) -> None:
     path = tmp_path / "models.json"
     path.write_text(json.dumps({"planner": {"model": "gpt-5.6-sol"}}))
@@ -89,9 +105,9 @@ def test_shipped_role_defaults_use_typed_requests() -> None:
     validate_document(path)
     data = json.loads(path.read_text())
     assert data["orchestrator"] == {"kind": "tier", "name": "execution"}
-    assert data["gsd-planner"] == {"kind": "tier", "name": "judgment"}
+    assert data["gsd-planner"] == {"kind": "tier", "name": "frontier"}
     assert data["gsd-executor"] == {"kind": "tier", "name": "execution"}
-    assert data["gsd-codebase-mapper"] == {"kind": "tier", "name": "volume"}
+    assert data["gsd-codebase-mapper"] == {"kind": "tier", "name": "execution"}
 
 
 def test_adversary_runtime_surfaces_expose_only_typed_model_overrides() -> None:
