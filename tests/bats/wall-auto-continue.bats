@@ -38,6 +38,11 @@ STUB
   GATE_SRC="$BATS_TEST_TMPDIR/gate-fn.sh"
   sed -n '/^_gsd_run_wall_gate() {/,/^}/p' "$ROOT/scripts/gsd/gsd-run.sh" > "$GATE_SRC"
   [ -s "$GATE_SRC" ]
+  # a truncated extraction (e.g. a future col-0 "}" inside the body) must
+  # fail loudly here, not silently test a partial function
+  bash -n "$GATE_SRC"
+  [ "$(tail -n1 "$GATE_SRC")" = "}" ]
+  grep -q 'return "$rc"' "$GATE_SRC"
 }
 
 run_gate() {
@@ -109,4 +114,62 @@ run_gate() {
   printf '3\n' > "$WALL_RC_QUEUE"
   run -3 bash -c "unset GSD_RUN_ID; source '$GATE_SRC'; _gsd_run_wall_gate '$PHASE_DIR'"
   [[ "$output" == *"skipped (no GSD_RUN_ID)"* ]]
+}
+
+@test "resolved finding no longer blocks: adjudication clears the precondition" {
+  out="$(python3 "$GATES" findings-queue add "f.py" "bad" --severity HIGH \
+    --run-id "$GSD_RUN_ID" --source wall --plan ".planning/phases/04-foo/01-PLAN.md")"
+  sig="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  python3 "$GATES" findings-queue resolve "$sig" --disposition fix --reason "fixed in commit"
+  python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
+  printf '3\n0\n' > "$WALL_RC_QUEUE"
+  run -0 run_gate
+  [[ "$output" == *"WALL-AUTO-CONTINUE phase=04-foo"* ]]
+  [ "$(grep -c called "$WALL_CALL_LOG")" -eq 2 ]
+}
+
+@test "unresolved CRITICAL blocks (severity CSV second element)" {
+  python3 "$GATES" findings-queue add "f.py" "worse" --severity CRITICAL \
+    --run-id "$GSD_RUN_ID" --source wall --plan ".planning/phases/04-foo/01-PLAN.md"
+  python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
+  printf '3\n' > "$WALL_RC_QUEUE"
+  run -3 run_gate
+  [[ "$output" == *"unresolved HIGH/CRITICAL"* ]]
+  [ "$(grep -c called "$WALL_CALL_LOG")" -eq 1 ]
+}
+
+@test "PLAN.md fallback name is checked too" {
+  rm "$PHASE_DIR/01-PLAN.md"
+  printf '%s\n' plan > "$PHASE_DIR/PLAN.md"
+  python3 "$GATES" findings-queue add "f.py" "bad" --severity HIGH \
+    --run-id "$GSD_RUN_ID" --source wall --plan ".planning/phases/04-foo/PLAN.md"
+  python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
+  printf '3\n' > "$WALL_RC_QUEUE"
+  run -3 run_gate
+  [[ "$output" == *"unresolved HIGH/CRITICAL"* ]]
+}
+
+@test "phase with no plan files fails closed even with a grant" {
+  rm "$PHASE_DIR/01-PLAN.md"
+  python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
+  printf '3\n' > "$WALL_RC_QUEUE"
+  run -3 run_gate
+  [[ "$output" == *"no enumerable plan files"* ]]
+  [ "$(grep -c called "$WALL_CALL_LOG")" -eq 1 ]
+}
+
+@test "garbage findings-queue output fails closed, not a crash" {
+  mkdir -p "$WORK/packages/feature-fix-swarm/lib"
+  cat > "$WORK/packages/feature-fix-swarm/lib/gates.py" <<'PYSTUB'
+import sys
+if "findings-queue" in sys.argv:
+    print("TRACEBACK garbage not json")
+    sys.exit(0)
+sys.exit(0)
+PYSTUB
+  python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
+  printf '3\n' > "$WALL_RC_QUEUE"
+  run -3 run_gate
+  [[ "$output" == *"unresolved HIGH/CRITICAL"* ]]
+  [ "$(grep -c called "$WALL_CALL_LOG")" -eq 1 ]
 }

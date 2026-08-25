@@ -302,8 +302,10 @@ interactive prose recipe to govern). On exit 3, before quarantine:
    prior-count history, so the re-run's diminishing-returns comparison has
    no baseline and is strict: only a hard zero-unresolved pass clears it.
    The `wall-autoreset:<phase-slug>` budget is spent regardless of which
-   exit code comes back — this recipe never runs twice for the same phase
-   in the same run.
+   exit code comes back — at the default `PLAN_WALL_AUTO_RESET_MAX=1` this
+   recipe never runs twice for the same phase in the same run; raising the
+   knob is a deliberate, visible escape mirroring `PLAN_WALL_MAX_ROUNDS`,
+   never a silent off-switch.
 
 Interactive sessions never mint a `wall-reset` grant, so the gate falls
 through to the unchanged terminal quarantine there — exit 3 stays the stop
