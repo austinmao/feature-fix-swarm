@@ -116,7 +116,7 @@ you delete the only copy.
 
 ## gsd-core (Orchestration)
 
-The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.10.0`.
+The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.11.0`.
 Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG package.
 
 | Scenario | Use |
