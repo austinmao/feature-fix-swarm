@@ -761,3 +761,69 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" != *"TIMEOUT-CAP"* ]]
 }
+
+# ── PR B: probe hardening ported from openclaw's spec-369 ──────────────────
+# openclaw (a downstream FFS consumer) hit three misdiagnosed review rounds on
+# 2026-08-14 and fixed them locally. Per the third-party policy those fixes
+# belong upstream, not in a consumer fork.
+
+@test "the availability probe runs at LOW effort regardless of the rung's effort" {
+  # A probe tests reachability, not reasoning. Probing at the rung's own
+  # effort (high/xhigh) has a fat latency tail that blows the probe budget
+  # (openclaw measurement: sol@high >60s vs 19-21s@low), so a reachable model
+  # gets marked unavailable purely because its probe was too expensive.
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/recording-codex" <<EOF
+#!/usr/bin/env bash
+last=""; effort=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -c) case "\$2" in model_reasoning_effort=*) effort="\${2#model_reasoning_effort=}" ;; esac; shift 2 ;;
+    -o|--output-last-message) last="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "\${effort//\"/}" >> "$BATS_TEST_TMPDIR/efforts"
+printf 'FFS_ADVERSARY_MODEL_READY\n' > "\$last"
+EOF
+  chmod +x "$STUB_DIR/recording-codex"
+  run env ADVERSARY_BIN_CODEX=recording-codex PATH="$STUB_DIR:$PATH" bash -c \
+    '. "$1"; adversary_invoke_model_ladder codex 60 gpt-5.6-sol high review 30 30 "gpt-5.6-sol|high"' _ "$LIB"
+  [ "$status" -eq 0 ]
+  # first invocation is the probe, second is the review itself
+  [ "$(head -1 "$BATS_TEST_TMPDIR/efforts")" = "low" ]
+  [ "$(sed -n 2p "$BATS_TEST_TMPDIR/efforts")" = "high" ]
+}
+
+@test "the probe budget defaults to 60s, not 20s" {
+  # 20s is below the observed cold-start latency of a healthy frontier rung,
+  # so the default itself manufactured phantom outages.
+  run bash -c '. "$1"; grep -n "FFS_ADVERSARY_MODEL_PROBE_TIMEOUT:-" "$1"' _ "$LIB"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"FFS_ADVERSARY_MODEL_PROBE_TIMEOUT:-60"* ]]
+}
+
+@test "a probe-passed model that then times out is not reported as unavailable" {
+  # rc=124 after a PASSING probe means the review attempt exceeded its
+  # per-attempt cap — the model is reachable. Calling that "unavailable"
+  # sends the operator hunting a phantom outage.
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/probe-ok-then-hang" <<'EOF'
+#!/usr/bin/env bash
+last=""
+prompt="$(cat)"
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o|--output-last-message) last="$2"; shift 2 ;; *) shift ;; esac
+done
+case "$prompt" in
+  *availability\ probe*) printf 'FFS_ADVERSARY_MODEL_READY\n' > "$last" ;;
+  *) sleep 30 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/probe-ok-then-hang"
+  run env ADVERSARY_BIN_CODEX=probe-ok-then-hang PATH="$STUB_DIR:$PATH" bash -c \
+    '. "$1"; adversary_invoke_model_ladder codex 60 gpt-5.6-sol high review 2 2 "gpt-5.6-sol|high"' _ "$LIB"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"review attempt exceeded"* ]]
+  [[ "$output" != *"gpt-5.6-sol unavailable"* ]]
+}
