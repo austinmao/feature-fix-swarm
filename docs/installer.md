@@ -41,6 +41,14 @@ User installs are hash-managed copies in both `~/.agents/skills` and
 `~/.claude/skills`. Their manifest is
 `~/.cache/feature-fix-swarm/install-manifest.json`.
 
+User installs also stage the managed lib runtime at
+`~/.claude/lib/feature-fix-swarm/` — `gates.py`, `runtime_proof.py`, and
+`scripts/gsd/socratic-slice.sh` — the paths the shipped scripts resolve when
+no repo-local copy shadows them. These are manifest-tracked like skills, so
+`--doctor` flags a drifted/stale copy and `--uninstall` removes them.
+`--reconcile-consumer` likewise ships `lib/gates.py` and
+`lib/runtime_proof.py` so vendored consumers stop running stale gate logic.
+
 For one transition release, `bash setup.sh` still means `--scope user` and
 prints a deprecation warning. Scripts and documentation should use the
 explicit form now.

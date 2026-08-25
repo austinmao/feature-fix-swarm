@@ -35,6 +35,20 @@ GSD_VERSION = "1.11.0"
 CODEX_MIN_VERSION = (0, 137, 0)
 CODEX_MAX_VERSION = (0, 148, 0)
 
+# Runtime files the shipped scripts resolve at ~/.claude/lib/feature-fix-swarm/
+# (see plan-wall.sh / gsd-run.sh / qa-swarm.sh resolution ladders). Before
+# these were staged here, no install path delivered gates.py at all — the
+# managed copy went silently stale while doctor reported PASS.
+MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
+    ("lib/gates.py", "gates.py"),
+    ("lib/runtime_proof.py", "runtime_proof.py"),
+    ("scripts/gsd/socratic-slice.sh", "scripts/gsd/socratic-slice.sh"),
+)
+
+
+def managed_lib_root() -> "Path":
+    return Path.home() / ".claude" / "lib" / "feature-fix-swarm"
+
 
 class InvocationError(Exception):
     pass
@@ -1217,6 +1231,16 @@ def replace_tree(
     shutil.copytree(source, destination, symlinks=True)
 
 
+def replace_file(source: Path, destination: Path, backup: Backup) -> None:
+    if fingerprint(source) == fingerprint(destination):
+        return
+    backup.before(destination)
+    if lexists(destination):
+        remove_path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+
+
 def replace_link(
     destination: Path,
     target: Path,
@@ -1720,6 +1744,10 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
         if socratic:
             for host in (Path.home() / ".agents", Path.home() / ".claude"):
                 planned.append((host / "skills" / "socratic", fingerprint(socratic), False))
+        for source_rel, dest_rel in MANAGED_LIB_FILES:
+            planned.append(
+                (managed_lib_root() / dest_rel, fingerprint(source / source_rel), False)
+            )
     preflight_fingerprints: dict[str, str] = {}
     adopted: list[Path] = []
     for path, expected, broken_ok in planned:
@@ -1821,6 +1849,8 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
             if socratic:
                 for host in (Path.home() / ".agents", Path.home() / ".claude"):
                     replace_tree(socratic, host / "skills" / "socratic", backup)
+            for source_rel, dest_rel in MANAGED_LIB_FILES:
+                replace_file(source / source_rel, managed_lib_root() / dest_rel, backup)
             codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
             legacy_roots = [codex_home / "skills"]
 
@@ -2473,6 +2503,8 @@ def reconcile_consumer(source: Path, target: Path) -> int:
         "scripts/hooks/cli-hang-guard.sh",
         "scripts/hooks/credential-output-guard.sh",
         "lib/model_requests.py",
+        "lib/gates.py",
+        "lib/runtime_proof.py",
     ]
     # spec-004 INT-003: plan-wall.sh (already covered by the scripts/gsd/*.sh
     # glob above) resolves its schema at $REPO_ROOT/schemas/*.json — a

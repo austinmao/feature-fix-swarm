@@ -1988,3 +1988,52 @@ def test_project_install_no_hint_when_registry_present(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "/ffs-init" not in result.stdout
+
+
+# --- managed lib runtime delivery (gates.py was previously undeliverable) ---
+
+MANAGED_LIB_EXPECTED = {
+    "lib/gates.py": ".claude/lib/feature-fix-swarm/gates.py",
+    "lib/runtime_proof.py": ".claude/lib/feature-fix-swarm/runtime_proof.py",
+    "scripts/gsd/socratic-slice.sh": ".claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh",
+}
+
+
+def test_user_install_stages_managed_lib_runtime(tmp_path: Path) -> None:
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.returncode == 0, result.stderr
+    home = tmp_path / "home"
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    for source_rel, dest_rel in MANAGED_LIB_EXPECTED.items():
+        staged = home / dest_rel
+        assert staged.is_file() and not staged.is_symlink(), dest_rel
+        assert staged.read_bytes() == (ROOT / source_rel).read_bytes(), dest_rel
+        assert str(staged) in manifest["paths"], dest_rel
+    # the skill ladders exec socratic-slice.sh directly (no interpreter prefix);
+    # gates.py is always python3-prefixed, so only the script needs the x bit
+    assert (home / ".claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh").stat().st_mode & 0o100
+
+
+def test_doctor_flags_stale_managed_gates(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    staged = tmp_path / "home/.claude/lib/feature-fix-swarm/gates.py"
+    staged.write_text("# stale drifted copy\n")
+
+    report = json.loads(run_setup(tmp_path, "--doctor", "--scope", "user", "--json").stdout)
+    drifted = [
+        check
+        for check in report["checks"]
+        if check["id"] == "managed-path" and check["status"] == "fail" and "gates.py" in check["message"]
+    ]
+    assert drifted, report["checks"]
+
+
+def test_uninstall_removes_managed_lib_runtime(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    staged = tmp_path / "home/.claude/lib/feature-fix-swarm/gates.py"
+    assert staged.is_file()
+
+    result = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert result.returncode == 0, result.stderr
+    assert not staged.exists()
