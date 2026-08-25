@@ -10,6 +10,13 @@ all skills.
 
 ### Added
 
+- spec-decompose 2.7.0 — Step 4.5 design-lineage citation gate: in repos
+  carrying `docs/design-lineage/` (openclaw), decomposition hard-blocks unless
+  every gstack artifact matching the spec's number is cited across the spec
+  artifacts or dismissed with `<!-- lineage-dismissed: <basename> — <reason> -->`
+  (operator override: `LINEAGE_GATE_BYPASS=1`); silent fail-soft no-op in repos
+  without the lever. Ported from the pre-gsd-core v3.22.0 WIP.
+
 - `plan-wall.sh --await` enforces `PLAN_WALL_AWAIT_MAX` (default 6): pending returns beyond the cap exit rc 76 `WALL-AWAIT:attempts-exhausted`; the counter is run-scoped, evaluator probes (`PLAN_WALL_AWAIT_COUNT=off`) are budget-neutral, and decided outcomes always report through and reset it.
 - `digest.sh --immediate` appends schema-true retro rows to `.feature-fix-swarm/digest-<utcdate>.jsonl` for list-backed event classes — the previously missing producer for `retro.sh analyze` (`DIGEST_RETRO_SINK=off` disables).
 
