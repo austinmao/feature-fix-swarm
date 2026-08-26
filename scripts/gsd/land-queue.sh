@@ -247,6 +247,17 @@ ITEM_STARTED="$QUEUE_STARTED"
 journal --kind intent --step collect --detail "bounded three-source intake"
 DOC="$WORKTMP/queue-doc.json"
 COLLECT_ARGS=(collect --repo "$REPO" --base "$BASE")
+# REQ-201 three-source union: every new intake passes the canonical takeover
+# record glob (takeover-record.py writes <resolved-store-parent>/takeover/
+# <run-id>.json, and STORE_DIR is exactly that resolved parent) plus the
+# collect-estate source.  LAND_QUEUE_ESTATE_JSON is a hermetic-test seam that
+# feeds the SAME estate source through the collector's --estate-json input.
+COLLECT_ARGS+=(--takeover-glob "$STORE_DIR/takeover/*.json")
+if [ -n "${LAND_QUEUE_ESTATE_JSON:-}" ]; then
+  COLLECT_ARGS+=(--estate-json "$LAND_QUEUE_ESTATE_JSON")
+else
+  COLLECT_ARGS+=(--use-estate)
+fi
 for branch in ${EXPLICIT[@]+"${EXPLICIT[@]}"}; do
   COLLECT_ARGS+=(--explicit "$branch")
 done
@@ -259,11 +270,20 @@ if ! run_bounded 300 python3 "$COLLECTOR" "${COLLECT_ARGS[@]}" > "$DOC" </dev/nu
 fi
 journal --kind result --step collect --status ok
 COUNT="$(read_scalar "$DOC" "" count)"
+GUARD_ITEMS="$COUNT"
+TRUNCATED="$(read_scalar "$DOC" "" truncated)" || TRUNCATED="false"
+if [ "$TRUNCATED" = "true" ]; then
+  # REQ-201/REQ-204: the collector observed more items than its cap and
+  # sliced the list; restore the over-cap truth so the guard's named
+  # max-items outcome trips before any lifecycle effect, instead of the
+  # queue silently landing a sliced list.
+  GUARD_ITEMS=$((COUNT + 1))
+fi
 
 # e846ec0c: consulted immediately before STARTING every external effect.
 require_go() { # $1 step label; nonzero return records a queue terminal
   local verdict
-  verdict="$(bash "$GUARD" allow --store "$LQ" --items "$COUNT" \
+  verdict="$(bash "$GUARD" allow --store "$LQ" --items "$GUARD_ITEMS" \
     --queue-started "$QUEUE_STARTED" --item-started "$ITEM_STARTED" \
     --round "${ITEM_ROUND:-1}")" || true
   case "$verdict" in

@@ -84,7 +84,7 @@ Queue-level terminals (at most one per run):
 
 | Terminal | Meaning |
 |---|---|
-| `QUEUE-ABORTED:systemic:<class>` | two consecutive enumerated systemic failures tripped the breaker (class-agnostic); untouched items become `SKIPPED:queue-aborted` |
+| `QUEUE-ABORTED:systemic:<class>` | two consecutive enumerated systemic failures tripped the breaker (class-agnostic), or a guard cap/wall verdict named the class (`max-items` — including an intake whose true item count exceeded the 10-item cap — `round-cap`, `item-wall`, `queue-wall`); untouched items become `SKIPPED:queue-aborted` |
 | `QUEUE-ABORTED:operator-stop` | STOP marker observed before an effect |
 | `QUEUE-DRAINED:operator-drain` | DRAIN marker honored at an item boundary |
 | `QUEUE-REFUSED:queue-live` | another live queue holds `<store>/land-queue/queue.lock` |
