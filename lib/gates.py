@@ -2115,6 +2115,86 @@ def takeover_state(store: Path, run_id: str) -> dict:
     }
 
 
+def _snapshot_data(fd: int) -> dict:
+    """Load one inherited, already-captured takeover snapshot.
+
+    Unlike the older descriptor-pinned interface this never stats or opens a
+    live pathname.  The transaction owns the torn-read and identity checks;
+    this command is deliberately only a pure consumer of its immutable bytes.
+    """
+    duplicate = os.dup(fd)
+    try:
+        os.lseek(duplicate, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(duplicate, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > 1024 * 1024:
+                raise ValueError("TAKEOVER-SNAPSHOT-TOO-LARGE")
+    finally:
+        os.close(duplicate)
+    try:
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("TAKEOVER-SNAPSHOT-MALFORMED") from exc
+    if not isinstance(data, dict):
+        raise ValueError("TAKEOVER-SNAPSHOT-NONOBJECT")
+    return data
+
+
+def takeover_authority_view(data: dict, run_id: str, actions: list[str]) -> dict:
+    """Return all wall authority predicates from one immutable data object.
+
+    This is intentionally data-only: no store locks, save calls, pending rows,
+    promotion writes, or registry/path resolution are reachable from it.
+    """
+    _require_ledger_run_id(run_id)
+    auto_root = data.get("_autonomy", {})
+    if not isinstance(auto_root, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    auto = auto_root.get(run_id, {})
+    if not isinstance(auto, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    grants = auto.get("grants", {})
+    if not isinstance(grants, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    now = _now()
+    preflight = auto.get("preflight", {})
+    preflight_ok = (isinstance(preflight, dict) and preflight.get("pass") is True
+                    and isinstance(preflight.get("checked_at"), (int, float))
+                    and not isinstance(preflight.get("checked_at"), bool)
+                    and 0 <= now - preflight["checked_at"] < 24 * 3600)
+    grant_results = {}
+    for action in sorted(set(actions) | {"ship:gsd"} | set(grants)):
+        entry = grants.get(action)
+        grant_results[action] = bool(isinstance(entry, dict)
+                                     and isinstance(entry.get("expires_at"), (int, float))
+                                     and not isinstance(entry.get("expires_at"), bool)
+                                     and now < entry["expires_at"])
+    findings = data.get("_findings", [])
+    if not isinstance(findings, list):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    unresolved = [row for row in findings if isinstance(row, dict)
+                  and not row.get("resolved")
+                  and row.get("severity") in ("HIGH", "CRITICAL")]
+    return {
+        "takeover_expected": auto.get("takeover_expected") is True,
+        "state": {
+            "grants": [dict(action=a, **v) for a, v in grants.items()
+                       if isinstance(a, str) and isinstance(v, dict)],
+            "takeover_created_at": auto.get("takeover_created_at"),
+            "takeover_dirty_digest": auto.get("takeover_dirty_digest"),
+        },
+        "preflight_ok": preflight_ok,
+        "grant_results": grant_results,
+        "unresolved_findings": unresolved,
+        "takeover_created_at": auto.get("takeover_created_at"),
+        "takeover_dirty_digest": auto.get("takeover_dirty_digest"),
+    }
+
+
 def record_takeover_expectation(store: Path, run_id: str, created_at: int | None = None,
                                 dirty_digest: str | None = None) -> None:
     _require_ledger_run_id(run_id)
@@ -2784,6 +2864,20 @@ def main(argv: list[str]) -> int:
             print("usage: gates.py store-path", file=sys.stderr)
             return 2
         print(_resolved_store_path())
+        return 0
+    if cmd == "takeover-evaluate":
+        parser = argparse.ArgumentParser(prog="gates.py takeover-evaluate", add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--snapshot-fd", required=True, type=int)
+        parser.add_argument("--action", action="append", default=[])
+        try:
+            ns = parser.parse_args(args)
+            print(json.dumps(takeover_authority_view(_snapshot_data(ns.snapshot_fd),
+                                                    ns.run_id, ns.action),
+                             sort_keys=True))
+        except (ValueError, OSError, json.JSONDecodeError, SystemExit) as exc:
+            print(f"TAKEOVER-EVALUATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
         return 0
     # Descriptor flags are a deliberately narrow read-only interface for the
     # takeover wall.  They are rejected everywhere else so an inherited fd can

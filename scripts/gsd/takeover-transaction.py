@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
+import json
 import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 _SPEC = importlib.util.spec_from_file_location("takeover_io", Path(__file__).with_name("takeover-io.py"))
@@ -20,6 +24,56 @@ def inheritable(fd: int) -> str:
     return str(fd)
 
 
+def _record_binds(record_fd: int, store: str, run_id: str) -> bool:
+    """Validate hostile record claims before any evidence bytes are read."""
+    st = os.fstat(record_fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > 1024 * 1024:
+        return False
+    os.lseek(record_fd, 0, os.SEEK_SET)
+    raw = os.read(record_fd, st.st_size + 1)
+    if len(raw) != st.st_size:
+        return False
+    try:
+        row = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (isinstance(row, dict) and row.get("ids", {}).get("run_id") == run_id
+            and row.get("gates_store") == store
+            and row.get("gates_store_anchor") == hashlib.sha256(store.encode()).hexdigest())
+
+
+def _snapshot_bytes(raw: bytes) -> tuple[int, str]:
+    parsed = json.loads(raw.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("non-object evidence")
+    snap_fd, snap_name = tempfile.mkstemp(prefix=".takeover-snapshot-", dir="/tmp")
+    try:
+        os.fchmod(snap_fd, 0o400)
+        os.write(snap_fd, raw)
+        os.fsync(snap_fd)
+        readonly = os.open(snap_name, os.O_RDONLY)
+    finally:
+        os.close(snap_fd)
+        os.unlink(snap_name)
+    return readonly, hashlib.sha256(raw).hexdigest()
+
+
+def _capture_snapshot(evidence_fd: int) -> tuple[int, str]:
+    """Capture immutable evidence bytes, rejecting every torn read."""
+    for _ in range(3):
+        before = os.fstat(evidence_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
+            raise ValueError("invalid evidence")
+        os.lseek(evidence_fd, 0, os.SEEK_SET)
+        raw = os.read(evidence_fd, before.st_size)
+        after = os.fstat(evidence_fd)
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                and len(raw) == before.st_size):
+            return _snapshot_bytes(raw)
+    raise ValueError("torn evidence")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--script", required=True)
@@ -30,14 +84,14 @@ def main() -> int:
     # List mode carries no run id; a present run id must still be exact.
     if ns.run_id and (not ns.run_id.startswith("spec-") or "/" in ns.run_id):
         return 1
-    store_fd = evidence_fd = takeover_fd = record_fd = None
+    store_fd = evidence_fd = takeover_fd = record_fd = snapshot_fd = None
     owner_lock = None
     try:
         if not os.path.isdir(os.path.dirname(ns.store)):
-            env = dict(os.environ)
-            env["TAKEOVER_TRANSACTION"] = "1"
-            wall_args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
-            os.execve("/bin/bash", ["bash", ns.script, *wall_args], env)
+            # A missing canonical store is the explicit no-record case.  Make
+            # only its parent so the descriptor bootstrap can pass an empty,
+            # immutable authority snapshot to the wall.
+            os.makedirs(os.path.dirname(ns.store), mode=0o700, exist_ok=True)
         store_fd = _IO.open_store_directory(ns.store)
         try:
             evidence_fd = _IO.open_regular(store_fd, "evidence.json")
@@ -50,11 +104,21 @@ def main() -> int:
                 record_fd = _IO.open_regular(takeover_fd, record_name)
             except FileNotFoundError:
                 record_fd = None
+        if record_fd is not None and not _record_binds(record_fd, ns.store, ns.run_id):
+            raise ValueError("record mismatch")
+        if evidence_fd is not None:
+            snapshot_fd, digest = _capture_snapshot(evidence_fd)
+        elif record_fd is not None:
+            raise ValueError("record without authority")
+        else:
+            snapshot_fd, digest = _snapshot_bytes(b"{}")
         env = dict(os.environ)
         env["TAKEOVER_TRANSACTION"] = "1"
         if evidence_fd is not None:
             env.update({"TAKEOVER_STORE_DIR_FD": inheritable(store_fd),
                         "TAKEOVER_EVIDENCE_FD": inheritable(evidence_fd)})
+        env["TAKEOVER_SNAPSHOT_FD"] = inheritable(snapshot_fd)
+        env["TAKEOVER_SNAPSHOT_SHA256"] = digest
         if takeover_fd is not None:
             env["TAKEOVER_DIR_FD"] = inheritable(takeover_fd)
         if record_fd is not None:
@@ -70,14 +134,14 @@ def main() -> int:
     except _IO.LockBusy:
         print("TAKEOVER-REFUSED:runner-live\nUnblock (operator): bash scripts/gsd/takeover-check.sh --run-id " + ns.run_id)
         return 1
-    except (_IO.UnsafeTakeoverPath, OSError):
+    except (_IO.UnsafeTakeoverPath, OSError, ValueError, json.JSONDecodeError):
         # The shell cannot regain control after an exec bootstrap failure.
         # Preserve the wall's fail-closed operator grammar here.
         print("TAKEOVER-REFUSED:record-mismatch\nUnblock (operator): /spec-status")
         return 1
     finally:
         # exec never returns; close only on rejection.
-        for fd in (record_fd, takeover_fd, evidence_fd, store_fd):
+        for fd in (snapshot_fd, record_fd, takeover_fd, evidence_fd, store_fd):
             if fd is not None:
                 try:
                     os.close(fd)

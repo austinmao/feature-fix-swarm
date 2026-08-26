@@ -31,6 +31,10 @@ gate() {
   esac
   python3 "$GP" "$@"
 }
+evaluate() {
+  [ -n "${TAKEOVER_SNAPSHOT_FD:-}" ] || return 1
+  python3 "$GP" takeover-evaluate "$RUN_ID" --snapshot-fd "$TAKEOVER_SNAPSHOT_FD" "$@"
+}
 sq() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"; }
 remedy_for() {
   case "$1" in
@@ -70,12 +74,18 @@ if [ "$LIST" -eq 1 ]; then
 fi
 expectation_present() {
   local expectation
-  expectation="$(gate takeover-expectation "$RUN_ID" 2>/dev/null || true)"
-  [[ "$expectation" == *'"takeover_expected": true'* ]]
+  expectation="$(evaluate 2>/dev/null)" || return 2
+  python3 - "$expectation" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]).get('takeover_expected')
+raise SystemExit(0 if value is True else 1)
+PY
 }
 none_or_missing() {
   if expectation_present; then
     refuse missing-record
+  elif [ "$?" -eq 2 ]; then
+    refuse record-mismatch
   fi
   if [ "$MODE" = json ]; then
     python3 - "$RUN_ID" <<'PY'
@@ -189,7 +199,14 @@ PY
 # A bound record unlocks one and only one live-state read. All authority facts
 # below are taken from this JSON snapshot; no later check reopens the ledger.
 record_entry_matches || refuse record-mismatch
-state="$(gate takeover-state "$RUN_ID" 2>/dev/null)" || refuse preflight-stale
+evaluation="$(evaluate --action ship:gsd 2>/dev/null)" || refuse record-mismatch
+state="$(python3 - "$evaluation" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1])
+assert isinstance(d.get('state'),dict)
+print(json.dumps(d['state'],separators=(',',':')))
+PY
+)" || refuse record-mismatch
 clock_and_wip="$(TAKEOVER_NOW="${TAKEOVER_NOW:-}" python3 - "$META" "$state" 2>&1 <<'PY'
 import hashlib,json,os,subprocess,sys,time
 meta,state=json.loads(sys.argv[1]),json.loads(sys.argv[2])
@@ -234,7 +251,11 @@ esac
 
 # This floor is intentionally record-independent. Empty record collections
 # cannot select a check off; record rows can only add constraints below.
-gate check-preflight "$RUN_ID" >/dev/null 2>&1 || refuse preflight-stale
+python3 - "$evaluation" <<'PY' >/dev/null
+import json,sys
+d=json.loads(sys.argv[1]); raise SystemExit(0 if d.get('preflight_ok') is True else 1)
+PY
+if [ "$?" -ne 0 ]; then refuse preflight-stale; fi
 required_actions="$(python3 - "$META" "$state" <<'PY'
 import json,sys
 meta,state=map(json.loads,sys.argv[1:])
@@ -251,9 +272,13 @@ PY
 )" || refuse record-mismatch
 while IFS= read -r action; do
   [ -n "$action" ] || continue
-  gate check-grant "$RUN_ID" --action "$action" >/dev/null 2>&1 || refuse grant-expired "$action"
+  python3 - "$evaluation" "$action" <<'PY' >/dev/null
+import json,sys
+d=json.loads(sys.argv[1]); raise SystemExit(0 if d.get('grant_results',{}).get(sys.argv[2]) is True else 1)
+PY
+  [ "$?" -eq 0 ] || refuse grant-expired "$action"
 done <<< "$required_actions"
-if python3 - "$state" <<'PY'
+if python3 - "$evaluation" <<'PY'
 import json,sys
 try: raise SystemExit(0 if json.loads(sys.argv[1]).get('unresolved_findings') else 1)
 except Exception: raise SystemExit(1)
