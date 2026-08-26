@@ -411,3 +411,14 @@ PY
   [ -z "$(find "$(dirname "$STORE")/takeover" -name 'spec-006.json' -print -quit)" ]
   [ -n "$(find "$(dirname "$STORE")/takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
 }
+
+# Plan 01-05 Task 2 RED: lock names are hostile too.  A FIFO must never turn
+# contention handling into a blocking read of an attacker-controlled payload.
+@test "FIFO takeover lock refuses in bounded time without reading the FIFO" {
+  write_live_takeover_fixture "$(date +%s)"
+  local store_dir="$(dirname "$STORE")"
+  mkfifo "$store_dir/.takeover-check.lock"
+  run timeout 2 env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 1 ]
+  assert_single_refusal runner-live
+}
