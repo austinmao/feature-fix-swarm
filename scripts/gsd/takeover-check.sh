@@ -265,6 +265,10 @@ d=json.loads(sys.argv[1])
 rows=d['forbid']+d['pre']
 actions=[]
 for row in rows:
+  if isinstance(row,dict) and isinstance(row.get('kind'),str) and isinstance(row.get('value'),str) and 'action' not in row:
+    # Producer identity preconditions are display-only context for a cold
+    # session, not deterministic action prohibitions.
+    continue
   action=row.get('action') if isinstance(row,dict) else row
   if not isinstance(action,str) or not action: raise SystemExit(1)
   actions.append(action)
