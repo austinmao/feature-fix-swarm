@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
@@ -562,10 +563,24 @@ def _cli() -> int:
             created = data.get("created_at")
             branch = git_state.get("branch", "")
             command = resume.get("command", "")
-            if not isinstance(rid, str) or not isinstance(created, (int, float)) or not isinstance(branch, str) or not isinstance(command, str):
+            if not isinstance(rid, str) or not isinstance(branch, str) or not isinstance(command, str):
                 continue
-            rows.append((_inert(rid), str(max(0, int(time.time() - created))), _inert(branch), _inert(command)))
-        except (OSError, ValueError, UnicodeError, json.JSONDecodeError, UnsafeTakeoverPath):
+            # WR-02: the active filename is the displayed identity; a record
+            # whose embedded run_id disagrees is deceptive and is skipped.
+            if rid != name.removesuffix(".json"):
+                continue
+            # CR-04: booleans and non-finite timestamps must never reach the
+            # age arithmetic — one hostile record killed the whole listing.
+            if (isinstance(created, bool) or not isinstance(created, (int, float))
+                    or not math.isfinite(created)):
+                continue
+            try:
+                age = str(max(0, int(time.time() - created)))
+            except OverflowError:
+                continue
+            rows.append((_inert(rid), age, _inert(branch), _inert(command)))
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError,
+                UnsafeTakeoverPath, OverflowError):
             continue
     for row in sorted(rows):
         print("\t".join(row))

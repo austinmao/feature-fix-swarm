@@ -74,7 +74,13 @@ def _record_binds(record_fd: int, store: str, run_id: str) -> bool:
         row = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
-    return (isinstance(row, dict) and row.get("ids", {}).get("run_id") == run_id
+    if not isinstance(row, dict):
+        return False
+    # CR-03: hostile-but-valid JSON may carry any nested shape; require an
+    # object before lookup so a non-dict ids maps to the closed decoy-store
+    # refusal instead of an AttributeError traceback.
+    ids = row.get("ids")
+    return (isinstance(ids, dict) and ids.get("run_id") == run_id
             and row.get("gates_store") == store
             and row.get("gates_store_anchor") == hashlib.sha256(store.encode()).hexdigest())
 
