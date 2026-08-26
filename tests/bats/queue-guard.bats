@@ -7,6 +7,11 @@
 # and reconciled $JOURNAL to the canonical skills/land-queue location.
 
 setup() {
+  # Hermetic supported-host identity for every fixture: managed sandboxes
+  # deny `ps`/`sysctl`, so the suite supplies its own deterministic process
+  # and boot identity (mirrors tests/bats/takeover-check.bats).  Production
+  # inertness is proven there by the fail-closed unset-seam denied-PATH case.
+  export TAKEOVER_TEST_IDENTITY="bats-boot-1"
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   GUARD="$ROOT/scripts/gsd/queue-guard.sh"
   JOURNAL="$ROOT/skills/land-queue/scripts/queue-journal.py"

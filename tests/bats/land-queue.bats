@@ -5,6 +5,11 @@
 # stays a typed RED contract for 02-03.
 
 setup() {
+  # Hermetic supported-host identity for every fixture: managed sandboxes
+  # deny `ps`/`sysctl`, so the suite supplies its own deterministic process
+  # and boot identity (mirrors tests/bats/takeover-check.bats).  Production
+  # inertness is proven there by the fail-closed unset-seam denied-PATH case.
+  export TAKEOVER_TEST_IDENTITY="bats-boot-1"
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; QUEUE="$ROOT/scripts/gsd/land-queue.sh"
   ORIGIN="$BATS_TEST_TMPDIR/origin.git"; WORK="$BATS_TEST_TMPDIR/work"; LINKED="$BATS_TEST_TMPDIR/linked"
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
