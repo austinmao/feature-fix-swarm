@@ -144,6 +144,12 @@ coordination is an FFS-repo capability until the coord CLI ships in setup.sh.
 if [ "$AUTONOMOUS" = "1" ]; then
   python3 "$GATES_PY" check-preflight "$RUN_ID" || {
     echo "[feature-implement] ERROR: no fresh preflight for $RUN_ID — run /preflight first."; exit 1; }
+  # TAKEOVER-WALL-START: tests extract this exact autonomous seam.
+  TAKEOVER_WALL="$(git rev-parse --show-toplevel)/scripts/gsd/takeover-check.sh"
+  TAKEOVER_VERDICT="$(bash "$TAKEOVER_WALL" --run-id "$RUN_ID")" || {
+    printf '%s\n' "$TAKEOVER_VERDICT"; exit 1; }
+  printf '%s\n' "$TAKEOVER_VERDICT"
+  # TAKEOVER-WALL-END
 fi
 # Legacy Claude config wall: rewrite unavailable non-exact Fable pins to Opus.
 # Typed exact requests fail closed and never use this compatibility fallback.
@@ -196,6 +202,10 @@ site) — proceed on exit 0; otherwise
 `pending` + STOP that action path only. Never bypass with prose; never re-ask a
 granted action. (Ship itself is walled inside gsd's `code_review_command` —
 `scripts/gsd/review-gate-command.sh` REVISEs without a `ship:gsd` grant.)
+
+For a cold handoff, `scripts/gsd/takeover-check.sh --list` shows only the
+discoverable record metadata. Stored resume text is display-only and is never
+executed by this skill or the wall.
 
 ### Step 3: Ensure gsd project (spec mode) / skip (adhoc mode)
 

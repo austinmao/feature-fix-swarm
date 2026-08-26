@@ -2039,6 +2039,46 @@ def _store_path() -> Path:
     return Path(".feature-fix-swarm/evidence.json")
 
 
+def _resolved_store_path() -> Path:
+    """Canonical evidence file identity without reading or creating it."""
+    return _store_path().expanduser().resolve(strict=False)
+
+
+def takeover_state(store: Path, run_id: str) -> dict:
+    """Return only the typed ledger facts a takeover record may carry."""
+    _require_ledger_run_id(run_id)
+    data = _load_store(store)
+    auto = data.get("_autonomy", {}).get(run_id, {})
+    if not isinstance(auto, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    grants = auto.get("grants", {})
+    if not isinstance(grants, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    grant_rows = [dict(action=action, **entry) for action, entry in grants.items()
+                  if isinstance(action, str) and isinstance(entry, dict)]
+    findings = findings_list(store, unresolved=True)
+    return {
+        "preflight": auto.get("preflight", {}),
+        "grants": grant_rows,
+        "pendings": auto.get("pending", []),
+        "promotions": data.get("_promotions", {}).get(run_id, []),
+        "unresolved_findings": [row for row in findings
+                                if row.get("severity") in ("HIGH", "CRITICAL")],
+        "takeover_expected": bool(auto.get("takeover_expected", False)),
+    }
+
+
+def record_takeover_expectation(store: Path, run_id: str) -> None:
+    _require_ledger_run_id(run_id)
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        if not isinstance(auto, dict):
+            raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+        auto["takeover_expected"] = True
+        _save_store(store, data)
+
+
 # ── delegation-audit: orchestrator discipline (advisory, never blocks) ───────
 # Build-type spawn descriptions — an Agent/Task spawn matching this with no
 # explicit model pin inherits the orchestrator tier (premium-cost bug).
@@ -2678,7 +2718,43 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
+    # These identity accessors deliberately precede _load_store callers: a
+    # wall can establish which ledger it is talking about before trusting any
+    # ledger content.
+    if cmd == "store-dir":
+        if args:
+            print("usage: gates.py store-dir", file=sys.stderr)
+            return 2
+        print(_resolved_store_path().parent)
+        return 0
+    if cmd == "store-path":
+        if args:
+            print("usage: gates.py store-path", file=sys.stderr)
+            return 2
+        print(_resolved_store_path())
+        return 0
     store = _store_path()
+    if cmd == "takeover-state":
+        if len(args) != 1:
+            print("usage: gates.py takeover-state <run-id>", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(takeover_state(store, args[0]), sort_keys=True))
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            print(f"TAKEOVER-STATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if cmd == "takeover-expect":
+        if len(args) != 1:
+            print("usage: gates.py takeover-expect <run-id>", file=sys.stderr)
+            return 2
+        try:
+            record_takeover_expectation(store, args[0])
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            print(f"TAKEOVER-EXPECT-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        print("TAKEOVER-EXPECTED")
+        return 0
     if cmd == "waiver":
         parser = argparse.ArgumentParser(prog="gates.py waiver", add_help=False)
         parser.add_argument("--run-id")
