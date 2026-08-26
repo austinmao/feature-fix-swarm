@@ -29,6 +29,7 @@ jobs:
         run: |
           python -m pip install --quiet --requirement requirements-dev.txt
           python -m pytest lib/ tests/ -q
+          python -m pytest tests/contracts/land_queue_gates_contract.py -q
       - name: Scan production Python
         run: bandit -r lib scripts -x lib/tests,lib/run_state/tests -lll -q
       - name: SKILL.md verify blocks (anti-rot)
