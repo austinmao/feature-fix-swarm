@@ -2068,7 +2068,8 @@ def takeover_state(store: Path, run_id: str) -> dict:
     }
 
 
-def record_takeover_expectation(store: Path, run_id: str) -> None:
+def record_takeover_expectation(store: Path, run_id: str, created_at: int | None = None,
+                                dirty_digest: str | None = None) -> None:
     _require_ledger_run_id(run_id)
     with _StoreLock(store):
         data = _load_store(store)
@@ -2076,6 +2077,10 @@ def record_takeover_expectation(store: Path, run_id: str) -> None:
         if not isinstance(auto, dict):
             raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
         auto["takeover_expected"] = True
+        if created_at is not None:
+            auto["takeover_created_at"] = created_at
+        if dirty_digest is not None:
+            auto["takeover_dirty_digest"] = dirty_digest
         _save_store(store, data)
 
 
@@ -2745,12 +2750,16 @@ def main(argv: list[str]) -> int:
             return 1
         return 0
     if cmd == "takeover-expect":
-        if len(args) != 1:
-            print("usage: gates.py takeover-expect <run-id>", file=sys.stderr)
-            return 2
+        parser = argparse.ArgumentParser(prog="gates.py takeover-expect", add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--created-at", type=int)
+        parser.add_argument("--dirty-digest")
         try:
-            record_takeover_expectation(store, args[0])
-        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            ns = parser.parse_args(args)
+            if ns.dirty_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", ns.dirty_digest):
+                raise ValueError("INVALID-TAKEOVER-DIRTY-DIGEST")
+            record_takeover_expectation(store, ns.run_id, ns.created_at, ns.dirty_digest)
+        except (ValueError, OSError, json.JSONDecodeError, SystemExit) as exc:
             print(f"TAKEOVER-EXPECT-REJECTED: {exc}", file=sys.stderr)
             return 1
         print("TAKEOVER-EXPECTED")

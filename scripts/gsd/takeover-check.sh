@@ -18,10 +18,9 @@ done
 [ -f "$GP" ] || { echo 'TAKEOVER-REFUSED:decoy-store'; exit 1; }
 [ "$LIST" -eq 1 ] || [[ "$RUN_ID" =~ ^spec-[0-9]{3}$ ]] || usage
 
-# Only these two identity accessors are allowed to see the authoritative
-# resolver before a record has proved its store binding.  In particular,
-# inherited GATES_STORE is deliberately absent from every wall gates call.
-gate() { env -u GATES_STORE python3 "$GP" "$@"; }
+# Store selection is configuration: producer and consumer inherit one
+# legitimate GATES_STORE and derive all authority from that same resolver.
+gate() { python3 "$GP" "$@"; }
 sq() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"; }
 remedy_for() {
   case "$1" in
@@ -50,10 +49,6 @@ PY
 
 CANON_STORE="$(gate store-path 2>/dev/null)" || refuse decoy-store
 STORE_DIR="$(gate store-dir 2>/dev/null)" || refuse decoy-store
-if [ -n "${GATES_STORE:-}" ]; then
-  inherited="$(python3 "$GP" store-path 2>/dev/null || true)"
-  [ "$inherited" = "$CANON_STORE" ] || refuse env-mismatch
-fi
 DIR="$STORE_DIR/takeover"
 if [ "$LIST" -eq 1 ]; then
   [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 0

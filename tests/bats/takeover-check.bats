@@ -36,8 +36,8 @@ setup() {
 @test "PATH-001 collector creates a record accepted by the wall" {
   run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -eq 0 ]
-  [ -f "$REPO/.feature-fix-swarm/takeover/spec-006.json" ]
-  run env -u GATES_STORE bash "$WALL" --run-id spec-006
+  [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
   [ "$output" = "TAKEOVER-OK" ]
 }
@@ -77,7 +77,7 @@ EOF
 @test "record schema keeps typed empty collections and deterministic forbid boundary" {
   run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -eq 0 ]
-  run python3 - "$REPO/.feature-fix-swarm/takeover/spec-006.json" <<'PY'
+  run python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1]))
 for key in ("grants", "pendings", "promotions", "unresolved_findings", "phases", "evidence", "forbid"):

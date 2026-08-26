@@ -207,14 +207,14 @@ else
 fi
 
 # The record is deliberately produced by this deterministic path, not by any
-# scout text above.  The helper strips GATES_STORE before every ledger lookup
-# and renders the Markdown only from the committed JSON object.
+# scout text above. The inherited GATES_STORE is the effective store for the
+# writer and its ledger calls; it is deliberately not replaced with a default.
 TAKEOVER_GP=""
 for c in "$ROOT/packages/feature-fix-swarm/lib/gates.py" "$ROOT/lib/gates.py" "$COLLECT_STATUS_SCRIPT_DIR/../../../lib/gates.py"; do
   [ -f "$c" ] && TAKEOVER_GP="$c" && break
 done
 if [ -n "$TAKEOVER_GP" ]; then
-  env -u GATES_STORE python3 "$COLLECT_STATUS_SCRIPT_DIR/../../../scripts/gsd/takeover-record.py" \
+  python3 "$COLLECT_STATUS_SCRIPT_DIR/../../../scripts/gsd/takeover-record.py" \
     --gates "$TAKEOVER_GP" --spec-id "$SPEC_ID" --run-id "$EXPECTED_RUN_ID" || exit $?
 else
   echo "takeover record refused: gates.py unavailable" >&2
