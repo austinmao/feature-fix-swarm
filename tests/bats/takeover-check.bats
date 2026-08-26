@@ -688,3 +688,32 @@ assert runner['pid'] is None and runner['process_state'] == 'malformed' and runn
 PY
   [ "$status" -eq 0 ]
 }
+
+# Plan 01-07 RED: the wall must hand every authority predicate one immutable
+# snapshot.  The command intentionally does not exist until the GREEN change.
+@test "immutable authority evaluator reads a supplied snapshot without mutating it" {
+  local snapshot="$BATS_TEST_TMPDIR/snapshot.json"
+  python3 - "$snapshot" <<'PY'
+import hashlib,json,sys,time
+now=int(time.time())
+json.dump({'_autonomy':{'spec-006':{'takeover_expected':True,
+  'takeover_created_at':now,'takeover_dirty_digest':hashlib.sha256(b'').hexdigest(),
+  'preflight':{'pass':True,'checked_at':now},
+  'grants':{'ship:gsd':{'granted_at':now,'expires_at':now+3600}}}},'_findings':[]},open(sys.argv[1],'w'))
+PY
+  exec {snapshot_fd}<"$snapshot"
+  local before
+  before="$(shasum -a 256 "$snapshot")"
+  run python3 "$GATES" takeover-evaluate spec-006 --snapshot-fd "$snapshot_fd" --action ship:gsd
+  exec {snapshot_fd}<&-
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"takeover_expected": true'* ]]
+  [ "$(shasum -a 256 "$snapshot")" = "$before" ]
+}
+
+@test "corrupt authority never downgrades to TAKEOVER-NONE" {
+  mkdir -p "$(dirname "$STORE")"
+  printf '{not-json\n' > "$STORE"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
