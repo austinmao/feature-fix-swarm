@@ -105,7 +105,10 @@ def main() -> int:
             except FileNotFoundError:
                 record_fd = None
         if record_fd is not None and not _record_binds(record_fd, ns.store, ns.run_id):
-            raise ValueError("record mismatch")
+            # A present record that fails binding is the decoy case; keep the
+            # wall's exact operator grammar for it (never record-mismatch).
+            print("TAKEOVER-REFUSED:decoy-store\nUnblock (operator): /spec-status")
+            return 1
         if evidence_fd is not None:
             snapshot_fd, digest = _capture_snapshot(evidence_fd)
         elif record_fd is not None:
