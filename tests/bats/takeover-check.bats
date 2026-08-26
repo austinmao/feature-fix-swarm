@@ -493,6 +493,52 @@ PY
   [[ "$output" == *short-write-ok* ]]
 }
 
+# 01-VERIFICATION gap RED: owner-lock publication is the same full-write
+# transaction as staging.  A short write must complete the payload before
+# fsync/link, and a zero-progress write must never publish the canonical
+# lock name.
+@test "owner lock short write seams complete the payload and zero progress never publishes" {
+  local dir="$BATS_TEST_TMPDIR/lock-write-dir"
+  mkdir -p "$dir"
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$dir" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]
+dir_fd = os.open(work, os.O_RDONLY)
+lockname = ".takeover-check.lock"
+io_mod.boot_session_id = lambda: "boot-1"
+io_mod.process_identity = lambda pid: io_mod.ProcessIdentity(pid, "boot-1", "start-1", "S")
+real_write = os.write
+os.write = lambda fd, view: real_write(fd, bytes(view)[:7])
+try:
+    lock = io_mod.OwnerLock(dir_fd, "spec-006")
+    assert lock._publish(), "publication failed under the short-write seam"
+finally:
+    os.write = real_write
+payload = json.load(open(os.path.join(work, lockname)))
+assert payload["pid"] == os.getpid() and payload["run_id"] == "spec-006", payload
+lock.cleanup()
+assert not os.path.exists(os.path.join(work, lockname))
+os.write = lambda fd, view: 0
+try:
+    try:
+        io_mod.OwnerLock(dir_fd, "spec-006")._publish()
+    finally:
+        os.write = real_write
+except OSError:
+    pass
+else:
+    raise AssertionError("zero-progress lock write did not raise")
+assert not os.path.exists(os.path.join(work, lockname)), "zero-progress attempt published the canonical lock name"
+leftovers = [n for n in os.listdir(work) if n.startswith(".takeover-lock.")]
+assert not leftovers, "stranded lock temps: %r" % leftovers
+print("owner-lock-write-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *owner-lock-write-ok* ]]
+}
+
 # Plan 01-06 Task 2 RED: every staging fault removes exactly the attempt-owned
 # stage and never the final sibling.  Per WALL-RESIDUALS b80300b4 a directory
 # fsync failure AFTER the atomic rename is a typed FSYNC-FAIL while the
