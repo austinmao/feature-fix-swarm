@@ -1,12 +1,20 @@
 """Wave-0 contract for the Phase-2 collector (REQ-201..203, EDGE-005).
 
 The fixture deliberately uses a bare file-protocol origin and real worktrees.
-It loads the future collector only at test time so its absence is a typed RED
+It loads the collector only at test time so its absence is a typed RED
 failure instead of a pytest collection error.
+
+Plan 02-01 completed the Wave-0 placeholder harness into the GREEN-side
+assertions below.  Every test still fails RED while the collector is absent
+(``load_collector`` keeps its typed RED-EXPECTED path); once
+``skills/land-queue/scripts/collect-queue.py`` ships, each test asserts the
+real behavior named by its requirement scenario.
 """
 from __future__ import annotations
 
 import importlib.util
+import itertools
+import json
 import os
 import subprocess
 import sys
@@ -63,32 +71,331 @@ def load_collector():
     return module
 
 
-@pytest.mark.parametrize("requirement, scenario", [
-    ("REQ-201", "fetch-first and three-source union"),
-    ("REQ-201", "docs-only disposition is landable"),
-    ("REQ-201", "head/run/spec identity conflicts block"),
-    ("REQ-201", "empty intake is deterministic"),
-    ("REQ-202", "transitive overlap components serialize oldest-first"),
-    ("REQ-202", "disjoint residual-file ordering is stable"),
-    ("REQ-203", "already-landed is skipped at item start"),
-    ("REQ-203", "gone branch with reachable head reconciles landed"),
-    ("REQ-203", "gone branch without proof blocks source-missing"),
-    ("REQ-203", "one-rebase merge-tree conflict blocks"),
-    ("EDGE-005", "external merge is rechecked before dispatch"),
-])
-def test_collector_contracts_use_real_git_facts(real_git_estate, requirement, scenario):
-    """Named requirement matrix; future assertions execute public collector helpers."""
+def _sanity(real_git_estate) -> Path:
+    """The original Wave-0 real-Git fixture facts, preserved verbatim."""
     work = real_git_estate["work"]
     assert (work / ".git").exists()
     assert git(work, "remote", "get-url", "origin").startswith("/")
     assert git(work, "diff", "--name-only", "main...spec/201-docs") == "docs.md"
     assert ESTATE.is_file(), "collect-estate remains real first-party authority"
+    return work
+
+
+# ── REQ-201 ───────────────────────────────────────────────────────────────
+
+
+def test_req201_fetch_first_and_three_source_union(real_git_estate, tmp_path):
+    """REQ-201: fetch-first and three-source union."""
+    work = _sanity(real_git_estate)
+    head = real_git_estate["head"]
     module = load_collector()
-    pytest.fail(f"RED-EXPECTED: {requirement} missing collector behavior: {scenario}; loaded={module.__name__}")
+
+    # A second explicit branch with production files.
+    git(work, "checkout", "-b", "spec/201-code", "main")
+    (work / "tool.py").write_text("x = 1\n")
+    (work / "tests").mkdir()
+    (work / "tests" / "test_tool.py").write_text("ok\n")
+    git(work, "add", "tool.py", "tests/test_tool.py")
+    git(work, "commit", "-m", "code")
+    git(work, "push", "origin", "spec/201-code")
+    git(work, "checkout", "main")
+
+    # Prove fetch-first: drop remote truth locally; collect must restore it.
+    git(work, "update-ref", "-d", "refs/remotes/origin/main")
+
+    takeover_dir = tmp_path / "takeover"
+    takeover_dir.mkdir()
+    (takeover_dir / "spec-201.json").write_text(json.dumps({
+        "branch": "spec/201-docs", "head": head,
+        "ids": {"run_id": "spec-201"}, "spec_id": "201"}))
+    estate = [{"branch": "spec/201-docs", "disposition": "docs-only",
+               "landed": False, "residual_files": 1, "spec_id": "201"}]
+
+    doc = module.collect(repo=str(work), base="main",
+                         explicit=["spec/201-docs", "spec/201-code"],
+                         takeover_glob=str(takeover_dir / "*.json"),
+                         estate=estate)
+    assert doc["fetched"] is True
+    assert git(work, "rev-parse", "refs/remotes/origin/main")  # fetch restored remote truth
+    assert doc["conflicts"] == []
+    assert [i["branch"] for i in doc["items"]] == ["spec/201-docs", "spec/201-code"]
+
+    docs_item, code_item = doc["items"]
+    assert docs_item["head"] == head
+    assert docs_item["sources"] == ["estate", "explicit", "takeover"]
+    assert docs_item["run_id"] == "spec-201"
+    assert docs_item["spec_id"] == "201"
+    assert docs_item["changed_files"] == ["docs.md"]
+    assert docs_item["production_files"] == []           # root-level Markdown
+    assert docs_item["production_touch"] is False
+
+    assert code_item["sources"] == ["explicit"]
+    assert code_item["changed_files"] == ["tests/test_tool.py", "tool.py"]
+    assert code_item["production_files"] == ["tool.py"]  # tests/ is non-production
+    assert code_item["production_touch"] is True
+    assert code_item["head"] == git(work, "rev-parse", "spec/201-code")
 
 
-def test_coverage_contract_targets_only_stable_dynamic_module_name(real_git_estate):
-    # This is intentionally a normal failing test until Plan 01 supplies the API.
+def test_req201_docs_only_disposition_is_landable(real_git_estate):
+    """REQ-201: docs-only disposition is landable; eligibility ignores landed."""
+    work = _sanity(real_git_estate)
+    module = load_collector()
+    assert module.LANDABLE_DISPOSITIONS == {"merge-ready", "review-then-land", "docs-only"}
+    estate = [
+        # landed=True must NOT exclude a landable disposition (REQ-201).
+        {"branch": "spec/201-docs", "disposition": "docs-only", "landed": True},
+        {"branch": "spec/attention", "disposition": "pr-needs-attention", "landed": False},
+        {"branch": "spec/stale", "disposition": "stale-abandoned", "landed": False},
+        {"branch": "spec/residue", "disposition": "delete-safe", "landed": True},
+    ]
+    doc = module.collect(repo=str(work), base="main", estate=estate, fetch=False)
+    assert [i["branch"] for i in doc["items"]] == ["spec/201-docs"]
+    assert doc["items"][0]["sources"] == ["estate"]
+
+
+def test_req201_identity_conflicts_block(real_git_estate, tmp_path):
+    """REQ-201: head/run/spec identity conflicts block without a merged record."""
+    work = _sanity(real_git_estate)
+    module = load_collector()
+
+    takeover_dir = tmp_path / "takeover"
+    takeover_dir.mkdir()
+    wrong_head = "0" * 40
+    (takeover_dir / "a.json").write_text(json.dumps({
+        "branch": "spec/201-docs", "head": wrong_head, "ids": {"run_id": "spec-201"}}))
+    doc = module.collect(repo=str(work), base="main",
+                         explicit=["spec/201-docs"],
+                         takeover_glob=str(takeover_dir / "*.json"), fetch=False)
+    assert doc["items"] == []
+    [conflict] = doc["conflicts"]
+    assert conflict["status"] == "BLOCKED:identity-conflict"
+    assert conflict["branch"] == "spec/201-docs"
+    assert conflict["unblock"]
+    # No richest-record merge: the conflict carries no merged authority fields.
+    assert "head" not in conflict and "run_id" not in conflict and "spec_id" not in conflict
+    # Source records are preserved, each still carrying its own claim.
+    heads = {c.get("head") for c in conflict["candidates"] if c.get("head")}
+    assert wrong_head in heads
+
+    # run-id disagreement between two takeover records also blocks.
+    head = real_git_estate["head"]
+    (takeover_dir / "a.json").write_text(json.dumps({
+        "branch": "spec/201-docs", "head": head, "ids": {"run_id": "spec-201"}}))
+    (takeover_dir / "b.json").write_text(json.dumps({
+        "branch": "spec/201-docs", "head": head, "ids": {"run_id": "spec-999"}}))
+    doc = module.collect(repo=str(work), base="main",
+                         takeover_glob=str(takeover_dir / "*.json"), fetch=False)
+    assert doc["items"] == []
+    assert doc["conflicts"][0]["status"] == "BLOCKED:identity-conflict"
+
+
+def test_req201_empty_intake_is_deterministic(real_git_estate, capsys):
+    """REQ-201: empty intake is deterministic (byte-identical serialization)."""
+    work = _sanity(real_git_estate)
+    module = load_collector()
+    rc1 = module.main(["collect", "--repo", str(work), "--base", "main", "--no-fetch"])
+    out1 = capsys.readouterr().out
+    rc2 = module.main(["collect", "--repo", str(work), "--base", "main", "--no-fetch"])
+    out2 = capsys.readouterr().out
+    assert rc1 == 0 and rc2 == 0
+    assert out1 == out2
+    doc = json.loads(out1)
+    assert doc["items"] == [] and doc["count"] == 0 and doc["conflicts"] == []
+
+
+# ── REQ-202 ───────────────────────────────────────────────────────────────
+
+
+def _item(branch: str, files: list[str], epoch: int) -> dict:
+    return {"branch": branch, "head": "f" * 40, "changed_files": list(files),
+            "production_files": [], "production_touch": False,
+            "residual_count": len(files), "committed_epoch": epoch,
+            "sources": ["explicit"], "run_id": None, "spec_id": None}
+
+
+def test_req202_transitive_overlap_components_serialize_oldest_first(real_git_estate):
+    """REQ-202: A~B and B~C form one component even when A does not touch C."""
+    _sanity(real_git_estate)
+    module = load_collector()
+    a = _item("spec/a", ["f1", "f2"], 300)
+    b = _item("spec/b", ["f2", "f3"], 100)
+    c = _item("spec/c", ["f3", "f4"], 200)   # no overlap with a — transitive via b
+    d = _item("spec/d", ["z1"], 50)          # disjoint singleton
+    for perm in itertools.permutations([a, b, c, d]):
+        ordered = [i["branch"] for i in module.order_queue(list(perm))]
+        assert ordered == ["spec/b", "spec/c", "spec/a", "spec/d"], perm
+
+
+def test_req202_disjoint_residual_file_ordering_is_stable(real_git_estate):
+    """REQ-202: disjoint singletons sort by residual-file count, then branch."""
+    _sanity(real_git_estate)
+    module = load_collector()
+    three = _item("spec/three", ["a", "b", "c"], 10)
+    one = _item("spec/one", ["x"], 999)
+    two = _item("spec/two", ["y", "z"], 5)
+    tie = _item("spec/aaa-tie", ["q"], 500)   # count ties with spec/one
+    for perm in itertools.permutations([three, one, two, tie]):
+        ordered = [i["branch"] for i in module.order_queue(list(perm))]
+        assert ordered == ["spec/aaa-tie", "spec/one", "spec/two", "spec/three"], perm
+
+
+# ── REQ-203 / EDGE-005 ────────────────────────────────────────────────────
+
+
+def test_req203_already_landed_is_skipped_at_item_start(real_git_estate):
+    """REQ-203: already-landed is skipped at item start."""
+    work = _sanity(real_git_estate)
+    head = real_git_estate["head"]
+    module = load_collector()
+    git(work, "merge", "--no-ff", "-m", "land", "spec/201-docs")
+    git(work, "push", "origin", "main")
+    res = module.precheck(repo=str(work), base="main",
+                          branch="spec/201-docs", head=head)
+    assert res["status"] == "SKIPPED:already-landed"
+
+
+def test_req203_gone_branch_with_reachable_head_reconciles_landed(real_git_estate):
+    """REQ-203: gone branch with recorded head reachable from base reconciles LANDED."""
+    work = _sanity(real_git_estate)
+    linked = real_git_estate["linked"]
+    head = real_git_estate["head"]
+    module = load_collector()
+    git(work, "merge", "--no-ff", "-m", "land", "spec/201-docs")
+    git(work, "push", "origin", "main")
+    git(work, "worktree", "remove", "--force", str(linked))
+    git(work, "branch", "-d", "spec/201-docs")
+    git(work, "push", "origin", "--delete", "spec/201-docs")
+    res = module.precheck(repo=str(work), base="main",
+                          branch="spec/201-docs", head=head)
+    assert res["status"] == "LANDED"
+    assert res["merge_sha"] == head
+
+
+def test_req203_gone_branch_without_proof_blocks_source_missing(real_git_estate):
+    """REQ-203: gone branch without proof blocks source-missing.
+
+    Also proves the 221c8690 binding: squash-merge landed-ness reconciles via
+    gh PR state MERGED + a mergeCommit reachable from base, never via
+    ancestor-of-source-head alone.
+    """
+    work = _sanity(real_git_estate)
+    linked = real_git_estate["linked"]
+    head = real_git_estate["head"]
+    module = load_collector()
+    git(work, "worktree", "remove", "--force", str(linked))
+    git(work, "branch", "-D", "spec/201-docs")
+    git(work, "push", "origin", "--delete", "spec/201-docs")
+
+    res = module.precheck(repo=str(work), base="main",
+                          branch="spec/201-docs", head=head)
+    assert res["status"] == "BLOCKED:source-missing"
+    assert res["unblock"]
+
+    # A MERGED PR whose merge commit is NOT reachable from base is no proof.
+    res = module.precheck(repo=str(work), base="main",
+                          branch="spec/201-docs", head=head,
+                          pr_state={"state": "MERGED", "merge_commit": "0" * 40})
+    assert res["status"] == "BLOCKED:source-missing"
+
+    # Simulate a squash landing: equivalent content, new SHA, pushed to base.
+    (work / "docs.md").write_text("docs only\n")
+    git(work, "add", "docs.md")
+    git(work, "commit", "-m", "squash: docs")
+    squash_sha = git(work, "rev-parse", "HEAD")
+    git(work, "push", "origin", "main")
+    res = module.precheck(repo=str(work), base="main",
+                          branch="spec/201-docs", head=head,
+                          pr_state={"state": "MERGED", "merge_commit": squash_sha})
+    assert res["status"] == "LANDED"
+    assert res["merge_sha"] == squash_sha
+
+
+def test_req203_one_rebase_merge_tree_conflict_blocks(real_git_estate):
+    """REQ-203: after the one trial rebase, a merge-tree conflict blocks."""
+    work = _sanity(real_git_estate)
+    head = real_git_estate["head"]
+    module = load_collector()
+    (work / "docs.md").write_text("conflicting base content\n")
+    git(work, "add", "docs.md")
+    git(work, "commit", "-m", "conflict")
+    git(work, "push", "origin", "main")
+    res = module.precheck(repo=str(work), base="main",
+                          branch="spec/201-docs", head=head)
+    assert res["status"] == "BLOCKED:conflict"
+    assert "rebase" in res["unblock"]
+
+
+def test_edge005_external_merge_is_rechecked_before_dispatch(real_git_estate, tmp_path):
+    """EDGE-005: an external merge is discovered at item start, model-free."""
+    work = _sanity(real_git_estate)
+    origin = real_git_estate["origin"]
+    module = load_collector()
+
+    # An external actor lands the branch on origin/main behind our back.
+    ext = tmp_path / "ext"
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    subprocess.run(["git", "clone", "-q", str(origin), str(ext)], check=True, env=env)
+    git(ext, "config", "user.email", "ext@example.invalid")
+    git(ext, "config", "user.name", "External")
+    git(ext, "merge", "--no-ff", "-m", "external land", "origin/spec/201-docs")
+    git(ext, "push", "origin", "main")
+
+    # Our checkout has NOT observed that merge; the precheck must fetch and
+    # reconcile from authority alone (no model/reviewer seam even exists).
+    res = module.precheck(repo=str(work), base="main",
+                          branch="spec/201-docs", head=real_git_estate["head"])
+    assert res["status"] == "SKIPPED:already-landed"
+    assert set(res) <= {"status", "reason", "unblock", "branch", "head", "base", "merge_sha"}
+
+
+# ── coverage / public API contract ────────────────────────────────────────
+
+
+def test_coverage_contract_targets_only_stable_dynamic_module_name(real_git_estate, capsys, tmp_path):
     module = load_collector()
     assert module.__name__ == "collect_queue"
-    pytest.fail("RED-EXPECTED: REQ-201 stable collect_queue coverage contract needs public collection API")
+    for name in ("collect", "precheck", "order_queue", "production_files",
+                 "main", "get_scalar", "emit_array0"):
+        assert callable(getattr(module, name)), name
+
+    # Closed non-production allowlist; everything else is production-touching.
+    assert module.production_files([
+        "tests/a.py", "lib/tests/b.py", "docs/c.md", ".planning/d.md",
+        "specs/e.md", "README.md", "src/x.py", "nested/readme.md",
+    ]) == ["src/x.py", "nested/readme.md"]
+
+    # Hostile values reach argv/stdout byte-exact through the accessors.
+    hostile = ["has space.txt", "tab\tname.txt", "glob*?.txt", "-leading-dash",
+               "semi;colon.txt", "$(touch marker).txt", "embedded\nnewline.txt"]
+    doc = {"schema": 1, "count": 1, "base": "main", "fetched": False,
+           "conflicts": [],
+           "items": [{"branch": "spec/x", "head": "a" * 40,
+                      "changed_files": hostile, "production_files": [],
+                      "production_touch": False, "residual_count": len(hostile),
+                      "committed_epoch": 1, "sources": ["explicit"],
+                      "run_id": None, "spec_id": None,
+                      "reason": "bad\nnewline"}]}
+    path = tmp_path / "doc.json"
+    path.write_text(json.dumps(doc))
+
+    rc = module.main(["emit-array0", "--doc", str(path), "--item", "0",
+                      "--field", "changed_files"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == "".join(f"{v}\0" for v in hostile)
+    assert not (tmp_path / "marker").exists()
+
+    rc = module.main(["get-scalar", "--doc", str(path), "--item", "0",
+                      "--field", "branch"])
+    out = capsys.readouterr().out
+    assert rc == 0 and out == "spec/x\n"
+
+    # Scalars fail closed: embedded newline and non-allowlisted fields refuse.
+    rc = module.main(["get-scalar", "--doc", str(path), "--item", "0",
+                      "--field", "reason"])
+    captured = capsys.readouterr()
+    assert rc != 0 and captured.out == ""
+    rc = module.main(["get-scalar", "--doc", str(path), "--item", "0",
+                      "--field", "__class__"])
+    captured = capsys.readouterr()
+    assert rc != 0 and captured.out == ""
