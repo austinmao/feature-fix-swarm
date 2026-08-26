@@ -2027,15 +2027,45 @@ PY
 @test "findings-open refuses on an otherwise-valid record with one unresolved HIGH finding" {
   local now="$(date +%s)"
   write_live_takeover_fixture "$now"
-  python3 - "$STORE" <<'PY'
+  # 01-gaps3 CR-01: seed through the PRODUCTION writer, never a private
+  # namespace — the queue `findings-queue add` persists is the queue the
+  # wall's authority evaluator must read.
+  run env GATES_STORE="$STORE" python3 "$GATES" findings-queue add src/x.py 'open finding' --severity HIGH --run-id spec-006
+  [ "$status" -eq 0 ]
+  # The pure evaluator must surface the production-queued finding.
+  exec {snapshot_fd}<"$STORE"
+  run python3 "$GATES" takeover-evaluate spec-006 --snapshot-fd "$snapshot_fd" --action ship:gsd
+  exec {snapshot_fd}<&-
+  [ "$status" -eq 0 ]
+  run python3 - "$output" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1]))
-d['_findings']=[{'id':'f1','severity':'HIGH','resolved':False,'issue':'open finding'}]
-json.dump(d,open(sys.argv[1],'w'))
+rows=json.loads(sys.argv[1])['unresolved_findings']
+assert len(rows)==1 and rows[0]['severity']=='HIGH' and not rows[0]['resolved'], rows
 PY
+  [ "$status" -eq 0 ]
   run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
   assert_single_refusal findings-open
   [[ "$output" == *'findings-queue list --unresolved'* ]]
+}
+
+@test "pure evaluator fails closed on a non-conforming findings namespace" {
+  local snapshot="$BATS_TEST_TMPDIR/snapshot.json"
+  for shape in '"nope"' '[1]' '[{"severity":"HIGH","resolved":false},null]'; do
+    python3 - "$snapshot" "$shape" <<'PY'
+import json,sys,time
+now=int(time.time())
+json.dump({'_autonomy':{'spec-006':{'takeover_expected':True,
+  'preflight':{'pass':True,'checked_at':now},
+  'grants':{'ship:gsd':{'granted_at':now,'expires_at':now+3600}}}},
+  'findings':json.loads(sys.argv[2])},open(sys.argv[1],'w'))
+PY
+    exec {snapshot_fd}<"$snapshot"
+    run python3 "$GATES" takeover-evaluate spec-006 --snapshot-fd "$snapshot_fd" --action ship:gsd
+    exec {snapshot_fd}<&-
+    [ "$status" -eq 1 ] || { echo "shape=$shape unexpectedly passed: $output" >&3; return 1; }
+    [[ "$output" == *'TAKEOVER-EVALUATE-REJECTED'* ]] || { echo "shape=$shape output: $output" >&3; return 1; }
+    [[ "$output" != *Traceback* ]]
+  done
 }
 
 @test "poison action refuses with a shell-quoted rendered remedy that never executes" {
