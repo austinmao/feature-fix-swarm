@@ -36,7 +36,7 @@ store,record,canonical,created,head=sys.argv[1:]
 state={"_autonomy":{"spec-006":{"takeover_expected":True,
        "takeover_created_at":int(created),
        "takeover_dirty_digest":hashlib.sha256(b"").hexdigest(),
-       "preflight":{"pass":True,"created_at":int(created)},
+       "preflight":{"pass":True,"checked_at":int(created)},
        "grants":{"ship:gsd":{"granted_at":int(created),"expires_at":4102444800}}}},
        "_findings":[]}
 with open(store,"w") as f: json.dump(state,f)
@@ -54,8 +54,21 @@ PY
 assert_single_refusal() {
   local reason="$1"
   [ "$status" -eq 1 ]
-  [ "$(printf '%s\n' "$output" | grep -c "^TAKEOVER-REFUSED:${reason}$")" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c "^TAKEOVER-REFUSED:${reason}$")" -eq 1 ] || { echo "$output" >&3; return 1; }
   [ "$(printf '%s\n' "$output" | grep -c '^Unblock (operator): ')" -eq 1 ]
+}
+
+seed_live_authority() {
+  local now="$(date +%s)"
+  python3 - "$STORE" "$now" <<'PY'
+import json,os,sys
+p,now=sys.argv[1],int(sys.argv[2])
+d=json.load(open(p)) if os.path.exists(p) else {}
+auto=d.setdefault('_autonomy',{}).setdefault('spec-006',{})
+auto['preflight']={'pass':True,'checked_at':now}
+auto['grants']={'ship:gsd':{'granted_at':now,'expires_at':now+86400}}
+json.dump(d,open(p,'w'))
+PY
 }
 
 @test "store-dir and store-path resolve without loading the ledger" {
@@ -71,6 +84,7 @@ assert_single_refusal() {
 }
 
 @test "PATH-001 collector creates a record accepted by the wall" {
+  seed_live_authority
   run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -eq 0 ]
   [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
@@ -101,13 +115,8 @@ assert_single_refusal() {
 }
 
 @test "wall JSON output shares the successful verdict" {
-  local canonical
-  canonical="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$REPO/.feature-fix-swarm/evidence.json")"
-  mkdir -p "$REPO/.feature-fix-swarm/takeover"
-  cat > "$REPO/.feature-fix-swarm/takeover/spec-006.json" <<EOF
-{"schema_version":1,"created_at":$(date +%s),"ids":{"spec_id":"006","run_id":"spec-006"},"gates_store":"$canonical","gates_store_anchor":"$(printf %s "$canonical" | shasum -a 256 | awk '{print $1}')","git_state":{"branch":"006-takeover","head":"$(git rev-parse HEAD)","upstream":""},"preflight":{},"grants":[],"pendings":[],"promotions":[],"runner":{},"unresolved_findings":[],"phases":[],"evidence":[],"forbid":[],"resume":{"command":"","preconditions":[]}}
-EOF
-  run env -u GATES_STORE bash "$WALL" --run-id spec-006 --json
+  write_live_takeover_fixture "$(date +%s)"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006 --json
   [ "$status" -eq 0 ]
   [[ "$output" == *'"verdict":"TAKEOVER-OK"'* ]]
 }
@@ -167,6 +176,7 @@ EOF
 }
 
 @test "reclaims a same-boot dead-owner takeover lock before checking" {
+  seed_live_authority
   run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -eq 0 ]
   local store_dir
@@ -297,42 +307,53 @@ PY
 # Plan 01-04 RED: a record is evidence, never the selector for the live
 # check floor. These use a deterministic clock seam added by the GREEN change.
 @test "refusal floor checks fresh preflight and required ship grant despite empty record fields" {
-  write_live_takeover_fixture 1700000000
-  python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  python3 - "$STORE" "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
 import json,sys
-p=sys.argv[1]; d=json.load(open(p)); d['preflight']={}; d['grants']=[]
+p=sys.argv[2]; store=json.load(open(sys.argv[1])); store['_autonomy']['spec-006']['preflight']={}
+json.dump(store,open(sys.argv[1],'w'))
+d=json.load(open(p)); d['preflight']={}; d['grants']=[]
 json.dump(d,open(p,'w'))
 PY
-  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700000001 bash "$WALL" --run-id spec-006
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
   assert_single_refusal preflight-stale
   [[ "$output" == *$'Unblock (operator): /preflight'* ]]
 }
 
 @test "record mismatch is rejected before live authority when binding metadata disagrees" {
-  write_live_takeover_fixture 1700000000
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
   python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
 import json,sys
 p=sys.argv[1]; d=json.load(open(p)); d['created_at'] += 1; json.dump(d,open(p,'w'))
 PY
-  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700000001 bash "$WALL" --run-id spec-006
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
   assert_single_refusal record-mismatch
 }
 
 @test "inclusive 72-hour ledger age refuses while one second under reaches later checks" {
-  write_live_takeover_fixture 1700000000
-  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700259200 bash "$WALL" --run-id spec-006
+  local now="$(date +%s)"
+  local created="$((now - 259200))"
+  write_live_takeover_fixture "$created"
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$now" bash "$WALL" --run-id spec-006
   assert_single_refusal grant-expired
   [[ "$output" == *'Unblock (operator): /spec-status'* ]]
 
-  write_live_takeover_fixture 1700000000
-  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700259199 bash "$WALL" --run-id spec-006
+  write_live_takeover_fixture "$((now - 259199))"
+  python3 - "$STORE" "$now" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['_autonomy']['spec-006']['preflight']['checked_at']=int(sys.argv[2]); json.dump(d,open(p,'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$now" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
   [ "$output" = TAKEOVER-OK ]
 }
 
 @test "exact dirty baseline rejects an added untracked entry" {
-  write_live_takeover_fixture 1700000000
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
   printf 'new\n' > added-untracked.txt
-  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700000001 bash "$WALL" --run-id spec-006
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
   assert_single_refusal dirty-worktree
 }

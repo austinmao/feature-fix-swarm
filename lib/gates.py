@@ -2065,6 +2065,11 @@ def takeover_state(store: Path, run_id: str) -> dict:
         "unresolved_findings": [row for row in findings
                                 if row.get("severity") in ("HIGH", "CRITICAL")],
         "takeover_expected": bool(auto.get("takeover_expected", False)),
+        # These values are the ledger-owned counterparts to the untrusted
+        # record copies.  A takeover consumer uses this one state snapshot to
+        # establish both record age and the exact authorized WIP baseline.
+        "takeover_created_at": auto.get("takeover_created_at"),
+        "takeover_dirty_digest": auto.get("takeover_dirty_digest"),
     }
 
 
@@ -2747,6 +2752,22 @@ def main(argv: list[str]) -> int:
             print(json.dumps(takeover_state(store, args[0]), sort_keys=True))
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             print(f"TAKEOVER-STATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if cmd == "takeover-expectation":
+        if len(args) != 1:
+            print("usage: gates.py takeover-expectation <run-id>", file=sys.stderr)
+            return 2
+        try:
+            _require_ledger_run_id(args[0])
+            data = _load_store(store)
+            auto = data.get("_autonomy", {}).get(args[0], {})
+            if not isinstance(auto, dict):
+                raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+            print(json.dumps({"takeover_expected": bool(auto.get("takeover_expected", False))},
+                             sort_keys=True))
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            print(f"TAKEOVER-EXPECTATION-REJECTED: {exc}", file=sys.stderr)
             return 1
         return 0
     if cmd == "takeover-expect":

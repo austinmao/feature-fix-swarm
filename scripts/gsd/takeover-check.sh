@@ -24,11 +24,11 @@ gate() { python3 "$GP" "$@"; }
 sq() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"; }
 remedy_for() {
   case "$1" in
-    env-mismatch) printf 'unset GATES_STORE' ;; decoy-store|missing-record|record-mismatch) printf '/spec-status' ;;
+    env-mismatch) printf 'unset GATES_STORE' ;; decoy-store|missing-record|record-mismatch|stale-record) printf '/spec-status' ;;
     runner-live) printf 'bash scripts/gsd/takeover-check.sh --run-id %s' "$(sq "$RUN_ID")" ;;
     mid-rebase) printf 'git rebase --continue' ;; branch-gone) printf 'git fetch --prune origin' ;;
     dirty-worktree) printf '/adopt-wip' ;; preflight-stale) printf '/preflight' ;;
-    grant-expired) printf 'python3 %s grant %s --action %s' "$(sq "$GP")" "$(sq "$RUN_ID")" "$(sq "${2:-ship:gsd}")" ;;
+    grant-expired) if [ "${2:-}" = stale-record ]; then printf '/spec-status'; else printf 'python3 %s grant %s --action %s' "$(sq "$GP")" "$(sq "$RUN_ID")" "$(sq "${2:-ship:gsd}")"; fi ;;
     findings-open) printf 'python3 %s findings-queue list --unresolved' "$(sq "$GP")" ;;
     poison/*) printf "python3 %s pending %s --action %s --reason 'takeover record forbids action'" "$(sq "$GP")" "$(sq "$RUN_ID")" "$(sq "${1#poison/}")" ;;
     *) printf '/spec-status' ;;
@@ -62,9 +62,15 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1],'spec-*.json'))):
 PY
   exit 0
 fi
-if [ ! -d "$DIR" ] || [ -L "$DIR" ]; then
-  state="$(gate takeover-state "$RUN_ID" 2>/dev/null || true)"
-  [[ "$state" == *'"takeover_expected": true'* ]] && refuse missing-record
+expectation_present() {
+  local expectation
+  expectation="$(gate takeover-expectation "$RUN_ID" 2>/dev/null || true)"
+  [[ "$expectation" == *'"takeover_expected": true'* ]]
+}
+none_or_missing() {
+  if expectation_present; then
+    refuse missing-record
+  fi
   if [ "$MODE" = json ]; then
     python3 - "$RUN_ID" <<'PY'
 import json,sys
@@ -74,12 +80,15 @@ PY
     echo TAKEOVER-NONE
   fi
   exit 0
+}
+if [ ! -d "$DIR" ] || [ -L "$DIR" ]; then
+  # With no record, an expectation bit is the only ledger fact that is
+  # relevant. Do not start the live authority catalog on this no-op branch.
+  none_or_missing
 fi
 RECORD="$DIR/$RUN_ID.json"
 if [ ! -e "$RECORD" ]; then
-  state="$(gate takeover-state "$RUN_ID" 2>/dev/null || true)"
-  [[ "$state" == *'"takeover_expected": true'* ]] && refuse missing-record
-  echo TAKEOVER-NONE; exit 0
+  none_or_missing
 fi
 
 # Validate exactly the bytes opened once. O_NONBLOCK makes FIFO/device input
@@ -101,7 +110,10 @@ try:
  for k in ('grants','forbid','unresolved_findings'):
   if not isinstance(d.get(k),list): raise ValueError()
  if not isinstance(d.get('resume'),dict) or not isinstance(d['resume'].get('preconditions'),list): raise ValueError()
- print(json.dumps({'created_at':d.get('created_at'),'mtime':st.st_mtime,'git':d.get('git_state',{}),'grants':d['grants'],'forbid':d['forbid'],'preflight':d.get('preflight',{}),'findings':d['unresolved_findings'],'pre':d['resume']['preconditions']},separators=(',',':')))
+ git_state=d.get('git_state',{})
+ if not isinstance(git_state,dict) or not isinstance(git_state.get('dirty'),list): raise ValueError()
+ if not all(isinstance(x,str) for x in git_state['dirty']): raise ValueError()
+ print(json.dumps({'created_at':d.get('created_at'),'git':git_state,'grants':d['grants'],'forbid':d['forbid'],'preflight':d.get('preflight',{}),'findings':d['unresolved_findings'],'pre':d['resume']['preconditions']},separators=(',',':')))
 except RuntimeError: print('DECOY')
 except Exception: print('BAD')
 PY
@@ -149,47 +161,90 @@ import json,sys; print(json.loads(sys.argv[1])['git'].get('upstream',''))
 PY
 )"
 [ -z "$upstream" ] || git rev-parse --verify "$upstream" >/dev/null 2>&1 || refuse branch-gone
-dirty="$(git status --porcelain -z --untracked-files=all 2>/dev/null | python3 -c 'import sys; rows=sys.stdin.buffer.read().split(b"\0"); print("1" if any(r and not (r.startswith(b"?? .feature-fix-swarm/") or r.startswith(b"?? .feature-fix-swarm")) for r in rows) else "")')"
-record_dirty="$(python3 - "$META" <<'PY'
-import json,sys; print('1' if json.loads(sys.argv[1])['git'].get('dirty') else '0')
-PY
-)"
-{ [ "$record_dirty" = 1 ] && [ -n "$dirty" ]; } || { [ "$record_dirty" = 0 ] && [ -z "$dirty" ]; } || refuse dirty-worktree
 
-age="$(python3 - "$META" <<'PY'
-import json,sys,time
-d=json.loads(sys.argv[1]); c=d['created_at']; m=d['mtime'];
-try: print(int(time.time()-min(float(c),float(m))))
-except Exception: print(999999999)
+# A bound record unlocks one and only one live-state read. All authority facts
+# below are taken from this JSON snapshot; no later check reopens the ledger.
+state="$(gate takeover-state "$RUN_ID" 2>/dev/null)" || refuse preflight-stale
+clock_and_wip="$(TAKEOVER_NOW="${TAKEOVER_NOW:-}" python3 - "$META" "$state" 2>&1 <<'PY'
+import hashlib,json,os,subprocess,sys,time
+meta,state=json.loads(sys.argv[1]),json.loads(sys.argv[2])
+now_raw=os.environ.get('TAKEOVER_NOW','')
+try: now=int(now_raw) if now_raw else int(time.time())
+except ValueError: raise SystemExit('record-mismatch')
+created=state.get('takeover_created_at')
+digest=state.get('takeover_dirty_digest')
+record_created=meta.get('created_at')
+try:
+    if isinstance(created,bool) or not isinstance(created,(int,float)) or int(created) > now: raise ValueError
+    created=int(created)
+except (TypeError,ValueError): raise SystemExit('record-mismatch')
+if record_created != created: raise SystemExit('record-created')
+if not isinstance(digest,str) or len(digest) != 64: raise SystemExit('record-digest-shape')
+rows=subprocess.run(['git','status','--porcelain=v2','-z','--untracked-files=all'],capture_output=True).stdout.split(b'\0')
+kept=[]
+for row in rows:
+    if not row: continue
+    # The writer stores the exact NUL records.  Exclude its own bookkeeping by
+    # path on both producer and consumer, including both rename paths.
+    path = row[2:] if row.startswith(b'? ') else row.rsplit(b' ',1)[-1]
+    if path.startswith(b'.feature-fix-swarm/') or path == b'.feature-fix-swarm': continue
+    kept.append(row)
+kept.sort()
+live_digest=hashlib.sha256(b'\0'.join(kept)).hexdigest()
+record_dirty=meta['git']['dirty']
+try: record_digest=hashlib.sha256('\0'.join(sorted(record_dirty)).encode('utf-8','surrogateescape')).hexdigest()
+except UnicodeEncodeError: raise SystemExit('record-mismatch')
+if record_digest != digest: raise SystemExit('record-digest')
+if live_digest != digest: raise SystemExit('dirty-worktree')
+if now-created >= 259200: raise SystemExit('stale-record')
+print('ok')
 PY
-)"
-[ "$age" -lt 259200 ] 2>/dev/null || refuse grant-expired
-state="$(gate takeover-state "$RUN_ID" 2>/dev/null || true)"
-[ -n "$state" ] || refuse preflight-stale
-# Only a recorded preflight assertion triggers the live predicate; absence is
-# retained for backward-compatible discovery records from the tracer.
-if [ "$(python3 - "$META" <<'PY'
-import json,sys; print(bool(json.loads(sys.argv[1])['preflight']))
+)" || case "$clock_and_wip" in
+  *dirty-worktree*) refuse dirty-worktree ;;
+  *stale-record*) refuse grant-expired stale-record ;;
+  *) refuse record-mismatch ;;
+esac
+
+# This floor is intentionally record-independent. Empty record collections
+# cannot select a check off; record rows can only add constraints below.
+gate check-preflight "$RUN_ID" >/dev/null 2>&1 || refuse preflight-stale
+required_actions="$(python3 - "$META" "$state" <<'PY'
+import json,sys
+meta,state=map(json.loads,sys.argv[1:])
+live={r.get('action'):r for r in state.get('grants',[]) if isinstance(r,dict) and isinstance(r.get('action'),str)}
+record={r.get('action'):r for r in meta.get('grants',[]) if isinstance(r,dict) and isinstance(r.get('action'),str)}
+if set(record) != set(live): raise SystemExit('record-mismatch')
+for action,row in record.items():
+    live_row=live[action]
+    if row.get('granted_at') != live_row.get('granted_at') or row.get('expires_at') != live_row.get('expires_at'):
+        raise SystemExit('record-mismatch')
+actions={'ship:gsd'} | set(live)
+print('\n'.join(sorted(actions)))
 PY
-)" = True ]; then gate check-preflight "$RUN_ID" >/dev/null 2>&1 || refuse preflight-stale; fi
-live_actions="$(python3 - "$state" <<'PY'
-import json,sys,time
-try: print('\n'.join(x.get('action','') for x in json.loads(sys.argv[1]).get('grants',[]) if isinstance(x,dict)))
-except Exception: pass
-PY
-)"
-while IFS= read -r action; do [ -z "$action" ] && continue; gate check-grant "$RUN_ID" --action "$action" >/dev/null 2>&1 || refuse grant-expired "$action"; done <<< "$live_actions"
+)" || refuse record-mismatch
+while IFS= read -r action; do
+  [ -n "$action" ] || continue
+  gate check-grant "$RUN_ID" --action "$action" >/dev/null 2>&1 || refuse grant-expired "$action"
+done <<< "$required_actions"
 if python3 - "$state" <<'PY'
 import json,sys
 try: raise SystemExit(0 if json.loads(sys.argv[1]).get('unresolved_findings') else 1)
 except Exception: raise SystemExit(1)
 PY
 then refuse findings-open; fi
-for action in $(python3 - "$META" <<'PY'
+poison_actions="$(python3 - "$META" <<'PY'
 import json,sys
-d=json.loads(sys.argv[1]); print('\n'.join(str(x) for x in d['forbid']+d['pre']))
+d=json.loads(sys.argv[1])
+rows=d['forbid']+d['pre']
+actions=[]
+for row in rows:
+  action=row.get('action') if isinstance(row,dict) else row
+  if not isinstance(action,str) or not action: raise SystemExit(1)
+  actions.append(action)
+print('\n'.join(sorted(set(actions))))
 PY
-); do refuse "poison/$action"; done
+)" || refuse record-mismatch
+while IFS= read -r action; do [ -z "$action" ] || refuse "poison/$action"; done <<< "$poison_actions"
 
 # Atomic consume under the held lock makes a second normal contender observe
 # missing-record rather than a second success.
