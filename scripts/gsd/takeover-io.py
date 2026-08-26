@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -350,26 +351,49 @@ def validate_final(directory_fd: int, name: str) -> None:
 
 
 def replace_bytes(directory_fd: int, name: str, payload: bytes) -> None:
-    """Atomically replace one regular sibling through the held directory fd."""
+    """Atomically replace one regular sibling through the held directory fd.
+
+    The stage is unique per attempt (strong randomness plus O_EXCL), written by
+    a full-write loop, and removed by the single outer ``finally`` after any
+    write, fsync, validation, or replace failure.  Per WALL-RESIDUALS b80300b4
+    a directory-fsync error AFTER the atomic rename is a typed FSYNC-FAIL
+    nonzero failure while the completed rename stands; the no-mutation
+    contract covers pre-rename failures only.
+    """
     validate_final(directory_fd, name)
-    tmp = f".{name}.{os.getpid()}.tmp"
+    stage = f".{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp, flags, 0o600, dir_fd=directory_fd)
+    fd = -1
     try:
-        os.write(fd, payload)
+        fd = os.open(stage, flags, 0o600, dir_fd=directory_fd)
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write made no progress")
+            view = view[written:]
+        os.fchmod(fd, 0o600)
         os.fsync(fd)
-    finally:
         os.close(fd)
-    try:
+        fd = -1
         validate_final(directory_fd, name)
-        os.replace(tmp, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        os.fsync(directory_fd)
-    except BaseException:
+        os.replace(stage, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         try:
-            os.unlink(tmp, dir_fd=directory_fd)
-        except FileNotFoundError:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise OSError(f"FSYNC-FAIL: directory fsync after publishing {name}: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(stage, dir_fd=directory_fd)
+        except OSError:
             pass
-        raise
+
+
+def _inert(text: str) -> str:
+    """Map C0/C1 control bytes to spaces so displayed fields stay inert."""
+    return "".join(" " if ord(ch) < 32 or 127 <= ord(ch) <= 159 else ch for ch in text)
 
 
 def _cli() -> int:
@@ -386,7 +410,7 @@ def _cli() -> int:
         return 0
     rows: list[tuple[str, str, str, str]] = []
     for name in os.listdir(ns.takeover_fd):
-        if not name.startswith("spec-") or not name.endswith(".json"):
+        if not re.fullmatch(r"spec-[0-9]{3}\.json", name):
             continue
         try:
             fd = open_regular(ns.takeover_fd, name)
@@ -394,14 +418,20 @@ def _cli() -> int:
                 data = json.loads(read_regular(fd).decode("utf-8"))
             finally:
                 os.close(fd)
-            rid = data.get("ids", {}).get("run_id")
+            if not isinstance(data, dict):
+                continue
+            ids = data.get("ids")
+            git_state = data.get("git_state")
+            resume = data.get("resume")
+            if not isinstance(ids, dict) or not isinstance(git_state, dict) or not isinstance(resume, dict):
+                continue
+            rid = ids.get("run_id")
             created = data.get("created_at")
-            branch = data.get("git_state", {}).get("branch", "")
-            command = data.get("resume", {}).get("command", "")
+            branch = git_state.get("branch", "")
+            command = resume.get("command", "")
             if not isinstance(rid, str) or not isinstance(created, (int, float)) or not isinstance(branch, str) or not isinstance(command, str):
                 continue
-            inert = "".join(" " if ord(ch) < 32 or 127 <= ord(ch) <= 159 else ch for ch in command)
-            rows.append((rid, str(max(0, int(time.time() - created))), branch.replace("\n", " "), inert))
+            rows.append((_inert(rid), str(max(0, int(time.time() - created))), _inert(branch), _inert(command)))
         except (OSError, ValueError, UnicodeError, json.JSONDecodeError, UnsafeTakeoverPath):
             continue
     for row in sorted(rows):
