@@ -120,9 +120,10 @@ STUB
 }
 
 no_reviewer_path() { # PATH with no codex/claude anywhere but sane core tools
+  rm -f "$MOCK_BIN/codex" "$MOCK_BIN/claude"
   ln -sf "$(command -v python3)" "$MOCK_BIN/python3"
   ln -sf "$(command -v bash)" "$MOCK_BIN/bash"
-  printf '%s' "$MOCK_BIN:/usr/bin:/bin"
+  printf '%s' "$MOCK_BIN:/usr/bin:/bin:/usr/sbin"
 }
 
 
@@ -757,6 +758,7 @@ PYEOF
   # a findings artifact is recorded — executable presence alone never counts.
   RUN_ID=run-90
   : > "$EVENTS"
+  write_children  # restore the reviewer stub removed by no_reviewer_path
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --posture floor --run-id "$RUN_ID" spec/item-a

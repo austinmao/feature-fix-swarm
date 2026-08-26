@@ -303,6 +303,79 @@ def _degradation_ns(data: dict) -> dict:
     return ns
 
 
+# ── spec-006 Phase 2 (REQ-209): review-invocation Git binding ──────────────
+# Mirrors skills/land-queue/scripts/collect-queue.py's closed classifier: a
+# changed path is non-production ONLY under these prefixes or as a root-level
+# Markdown file; everything else fails conservatively as production-touching.
+REVIEW_NON_PRODUCTION_PREFIXES = ("tests/", "lib/tests/", "docs/",
+                                  ".planning/", "specs/")
+REVIEW_OID_PAT = re.compile(r"[0-9a-f]{40}")
+
+
+def _is_production_path(path: str) -> bool:
+    if path.startswith(REVIEW_NON_PRODUCTION_PREFIXES):
+        return False
+    if "/" not in path and path.endswith(".md"):
+        return False
+    return True
+
+
+def _computed_changed_files(repo: str, baseline: str, head: str) -> list[str]:
+    """5d794fab: the changed-file set comes from Git authority — the
+    merge-base with the recorded baseline commit, then the three-dot
+    name-only diff. Any git failure fails the binding closed."""
+    try:
+        mb = subprocess.run(["git", "-C", repo, "merge-base", baseline, head],
+                            capture_output=True, text=True, timeout=60)
+        if mb.returncode != 0:
+            raise ValueError("INVALID-REVIEW-BINDING: merge-base failed for "
+                             "the recorded baseline")
+        diff = subprocess.run(
+            ["git", "-C", repo, "diff", "--no-renames", "--name-only", "-z",
+             f"{mb.stdout.strip()}...{head}"],
+            capture_output=True, text=True, timeout=60)
+        if diff.returncode != 0:
+            raise ValueError("INVALID-REVIEW-BINDING: changed-file diff failed")
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("INVALID-REVIEW-BINDING: git authority unavailable")
+    return [entry for entry in diff.stdout.split("\0") if entry]
+
+
+def _review_binding(payload: dict) -> dict | None:
+    """Validate + compute the REQ-209 binding. Caller-supplied file lists are
+    advisory ONLY: they union into (never substitute for) the computed set,
+    so a caller can widen but never shrink what the event records."""
+    supplied = {k: payload.get(k) for k in ("branch", "head", "baseline", "repo")}
+    advisory_changed = payload.get("changed_files") or []
+    advisory_prod = payload.get("production_files") or []
+    if all(value is None for value in supplied.values()):
+        if advisory_changed or advisory_prod:
+            raise ValueError("INVALID-REVIEW-BINDING: advisory files require "
+                             "the full git binding")
+        return None
+    branch, head, baseline, repo = (supplied[k] for k in
+                                    ("branch", "head", "baseline", "repo"))
+    if not all(isinstance(v, str) and v for v in (branch, head, baseline, repo)):
+        raise ValueError("INVALID-REVIEW-BINDING: branch, head, baseline, and "
+                         "repo are all required")
+    if not REVIEW_OID_PAT.fullmatch(head) or not REVIEW_OID_PAT.fullmatch(baseline):
+        raise ValueError("INVALID-REVIEW-BINDING: head and baseline must be "
+                         "full 40-hex commit shas")
+    for advisory in (advisory_changed, advisory_prod):
+        if (isinstance(advisory, str)
+                or not all(isinstance(f, str) and f and "\0" not in f
+                           for f in advisory)):
+            raise ValueError("INVALID-REVIEW-BINDING: advisory file lists "
+                             "must be lists of paths")
+    computed = _computed_changed_files(repo, baseline, head)
+    changed = sorted(set(computed) | set(advisory_changed) | set(advisory_prod))
+    production = sorted({f for f in changed if _is_production_path(f)}
+                        | set(advisory_prod))
+    return {"branch": branch, "head": head, "baseline": baseline,
+            "changed_files": changed, "production_files": production,
+            "production_touch": bool(production)}
+
+
 def note_degraded(store: Path, kind: str, **payload) -> bool:
     """Append a validated degradation event; identical invocation replays dedupe."""
     with _StoreLock(store):
@@ -323,13 +396,17 @@ def note_degraded(store: Path, kind: str, **payload) -> bool:
             _require_ledger_run_id(run_id)
             if not isinstance(seam, str) or not seam.strip() or not isinstance(degraded, bool) or not isinstance(invocation_id, str) or not invocation_id:
                 raise ValueError("INVALID-INVOCATION")
+            binding = _review_binding(payload)
             for existing in ns["invocations"]:
                 if existing.get("run_id") == run_id and existing.get("invocation_id") == invocation_id:
                     if existing.get("seam") == seam and existing.get("degraded") is degraded:
                         return False
                     raise ValueError("IDEMPOTENCY-CONFLICT")
-            ns["invocations"].append({"run_id": run_id, "seam": seam, "degraded": degraded,
-                                      "invocation_id": invocation_id, "recorded_at": _now()})
+            event = {"run_id": run_id, "seam": seam, "degraded": degraded,
+                     "invocation_id": invocation_id, "recorded_at": _now()}
+            if binding:
+                event.update(binding)
+            ns["invocations"].append(event)
         else:
             raise ValueError("INVALID-DEGRADATION-KIND")
         _save_store(store, data)
@@ -416,6 +493,18 @@ def _degraded_ratio_allowed(data: dict, run_id: str) -> bool:
     events = [event for event in ns["invocations"] if event.get("run_id") == run_id]
     total = len(events)
     return total == 0 or sum(bool(event.get("degraded")) for event in events) * 2 <= total
+
+
+def _degraded_prod_touch(data: dict, run_id: str) -> bool:
+    """True iff any degraded review for THIS run touches production
+    (REQ-209): critical evidence is never averaged away. Legacy degraded
+    events without the 02-03 binding fields are conservatively
+    production-touching — absent evidence never weakens the gate."""
+    _require_ledger_run_id(run_id)
+    ns = _degradation_ns(data)
+    return any(event.get("degraded") and event.get("production_touch", True)
+               for event in ns["invocations"]
+               if event.get("run_id") == run_id)
 
 
 def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
@@ -1563,6 +1652,15 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         # A schema CONFLICT is different: a store whose _degradation
         # namespace is unusable must stay fail-closed (01-VERIFICATION W2),
         # not vacuously pass the ratio guard.
+        if "DEGRADATION-SCHEMA-CONFLICT" in str(exc):
+            return False
+        pass
+    try:
+        # REQ-209: ANY degraded production-touching review for this run
+        # refuses production promotion regardless of the aggregate ratio.
+        if _degraded_prod_touch(data, run_id):
+            return False
+    except ValueError as exc:
         if "DEGRADATION-SCHEMA-CONFLICT" in str(exc):
             return False
         pass
@@ -3603,6 +3701,12 @@ def main(argv: list[str]) -> int:
         parser.add_argument("--seam")
         parser.add_argument("--degraded", choices=("true", "false"))
         parser.add_argument("--invocation-id")
+        parser.add_argument("--branch")
+        parser.add_argument("--head")
+        parser.add_argument("--baseline")
+        parser.add_argument("--repo")
+        parser.add_argument("--changed-file", action="append")
+        parser.add_argument("--production-file", action="append")
         parser.add_argument("--tripped", action="store_true")
         parser.add_argument("--probe-check")
         parser.add_argument("--reset-rung")
@@ -3621,8 +3725,16 @@ def main(argv: list[str]) -> int:
             if ns.kind == "rung-attempt":
                 note_degraded(store, ns.kind, rung_id=ns.rung_id, outcome=ns.outcome)
             elif ns.kind == "invocation":
+                extra = {}
+                if any((ns.branch, ns.head, ns.baseline, ns.repo,
+                        ns.changed_file, ns.production_file)):
+                    extra = dict(branch=ns.branch, head=ns.head,
+                                 baseline=ns.baseline, repo=ns.repo,
+                                 changed_files=ns.changed_file or [],
+                                 production_files=ns.production_file or [])
                 note_degraded(store, ns.kind, run_id=ns.run_id, seam=ns.seam,
-                              degraded=ns.degraded == "true", invocation_id=ns.invocation_id)
+                              degraded=ns.degraded == "true",
+                              invocation_id=ns.invocation_id, **extra)
             else:
                 raise ValueError("INVALID-DEGRADATION-KIND")
         except (ValueError, SystemExit) as exc:

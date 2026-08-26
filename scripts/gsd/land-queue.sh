@@ -362,6 +362,24 @@ materialize_skipped() { # $1 first untouched item index
 
 base_sha() { git -C "$REPO" ls-remote origin "refs/heads/$BASE" 2>/dev/null | cut -f1; }
 
+# REQ-209: every review invocation is durably recorded against gates.py with
+# its full Git binding. gates.py recomputes the changed-file set itself from
+# the merge-base diff (5d794fab) — the collector's list rides along advisory
+# and widen-only.
+note_review_invocation() { # $1 degraded true|false, $2 branch, $3 head, $4 baseline
+  local inv args f
+  inv="review-$QUEUE_ID-$IDX-r${ITEM_ROUND:-1}"
+  args=(note-degraded invocation --run-id "$RUN_ID" --seam land-queue-review
+    --degraded "$1" --invocation-id "$inv")
+  if [ -n "$4" ]; then
+    args+=(--repo "$REPO" --branch "$2" --head "$3" --baseline "$4")
+    for f in ${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}; do
+      args+=(--changed-file "$f")
+    done
+  fi
+  python3 "$GATES" "${args[@]}" >/dev/null
+}
+
 drop_worktree() { # $1 worktree path
   git -C "$REPO" worktree remove --force "$1" >/dev/null 2>&1 || true
 }
@@ -373,6 +391,7 @@ land_one_item() {
   local branch="$ITEM_BRANCH" head="$ITEM_HEAD" spec_id="$ITEM_SPEC"
   local probe status reason unblock merge_sha wt prepared pr remote_head reviewed
   local now_head reviewer fi_bin am rf ci_rc errf eff_rc
+  local baseline findings ci_state rollup_count mergeable
 
   # ponytail: v1 runs exactly one round per item; the guard still sees the
   # real round number, and REQ-204's cap trips if a retry loop ever appears.
@@ -495,26 +514,50 @@ land_one_item() {
   fi
   reviewed="$prepared"
 
-  # 5. cross-vendor review of the pinned head.
+  # 5. cross-vendor review of the pinned head (REQ-209 / 37bc43d9).
   require_go "review $branch" || return 2
   journal --kind intent --step review --item "$branch" --detail "$reviewed"
   reviewer="$(command -v codex || command -v claude || true)"
+  baseline="$(git -C "$REPO" rev-parse "refs/remotes/origin/$BASE" 2>/dev/null)" || baseline=""
   if [ -z "$reviewer" ]; then
     journal --kind result --step review --item "$branch" --status missing
-    block_item "BLOCKED:reviewer-missing" "no opposite-vendor reviewer CLI on PATH" \
-      "install an opposite-vendor reviewer CLI (codex or claude)"
-    return 1
+    # e846ec0c: STOP is consulted before the degradation-recording effect.
+    require_go "degrade $branch" || return 2
+    if [ "$POSTURE" = "floor" ]; then
+      # Floor: no same-host substitute, ever — the degraded posture is
+      # recorded AND the item blocks (37bc43d9).
+      note_review_invocation true "$branch" "$reviewed" "$baseline" || true
+      block_item "BLOCKED:no-cross-vendor-reviewer" \
+        "floor posture requires an opposite-vendor reviewer and none is on PATH" \
+        "install an opposite-vendor reviewer CLI (codex or claude), then re-run the queue"
+      return 1
+    fi
+    # Zero: merge stays permitted ONLY with a durably recorded degradation
+    # event bound to run/invocation/branch/head/baseline; an unrecordable
+    # degradation fails closed rather than silently raising privilege.
+    if ! note_review_invocation true "$branch" "$reviewed" "$baseline"; then
+      block_item "BLOCKED:degradation-unrecorded" \
+        "zero posture requires a recorded degradation event and gates.py refused it" \
+        "re-run with a ledger-shaped --run-id (spec-NNN, run-N, or adhoc-*)"
+      return 1
+    fi
+    journal --kind result --step review --item "$branch" --status degraded
+  else
+    errf="$WORKTMP/err-review-$IDX"
+    findings="$LQ/reviews/$QUEUE_ID-pr-$pr.txt"
+    mkdir -p "$LQ/reviews"
+    run_bounded 900 "$reviewer" review "$pr" "$reviewed" </dev/null >"$findings" 2>"$errf"
+    eff_rc=$?
+    if [ "$eff_rc" -ne 0 ]; then
+      journal --kind result --step review --item "$branch" --status failed
+      fail_item reviewer "$eff_rc" "$errf" review "BLOCKED:review" \
+        "address reviewer findings for PR $pr, then re-run the queue"
+      return $?
+    fi
+    # 37bc43d9: a satisfied review is rc 0 PLUS its findings artifact.
+    journal --kind result --step review --item "$branch" --status ok --detail "$findings"
+    note_review_invocation false "$branch" "$reviewed" "$baseline" || true
   fi
-  errf="$WORKTMP/err-review-$IDX"
-  run_bounded 900 "$reviewer" review "$pr" "$reviewed" </dev/null 2>"$errf"
-  eff_rc=$?
-  if [ "$eff_rc" -ne 0 ]; then
-    journal --kind result --step review --item "$branch" --status failed
-    fail_item reviewer "$eff_rc" "$errf" review "BLOCKED:review" \
-      "address reviewer findings for PR $pr, then re-run the queue"
-    return $?
-  fi
-  journal --kind result --step review --item "$branch" --status ok
 
   # 6. bounded CI watch — the exact REQ-210 contract.
   require_go "ci $branch" || return 2
@@ -533,6 +576,32 @@ land_one_item() {
         "fix failing checks on PR $pr, then re-run the queue"
     fi
     return $?
+  fi
+  # REQ-210: a green watch alone is not enough — the rollup must be nonempty
+  # and the PR must not be CONFLICTING before merge may be considered.
+  errf="$WORKTMP/err-cistate-$IDX"
+  ci_state="$(gh pr view "$pr" --json statusCheckRollup,mergeable \
+    -q '(.statusCheckRollup | length | tostring) + " " + .mergeable' 2>"$errf")"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
+    journal --kind result --step ci --item "$branch" --status error
+    fail_item gh "$eff_rc" "$errf" ci-state "BLOCKED:ci-state" \
+      "gh pr view $pr --json statusCheckRollup,mergeable failed"
+    return $?
+  fi
+  rollup_count="${ci_state%% *}"
+  mergeable="${ci_state#* }"
+  if [ "$rollup_count" = "0" ]; then
+    journal --kind result --step ci --item "$branch" --status empty
+    block_item "BLOCKED:ci-empty" "PR $pr reports an empty check suite" \
+      "configure required checks for PR $pr, then re-run the queue"
+    return 1
+  fi
+  if [ "$mergeable" = "CONFLICTING" ]; then
+    journal --kind result --step ci --item "$branch" --status conflict
+    block_item "BLOCKED:merge-conflict" "PR $pr is CONFLICTING against $BASE" \
+      "git -C $REPO rebase origin/$BASE $branch, then re-run the queue"
+    return 1
   fi
   journal --kind result --step ci --item "$branch" --status ok
 

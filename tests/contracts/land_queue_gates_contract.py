@@ -66,6 +66,8 @@ def _note(gates, store, run_id, inv, degraded, repo=None, baseline=None, head=No
 
 
 def _events(store, run_id):
+    if not Path(store).exists():
+        return []  # nothing was ever persisted — fail-closed leaves no store
     data = json.loads(Path(store).read_text())
     return [e for e in data["_degradation"]["invocations"] if e.get("run_id") == run_id]
 
