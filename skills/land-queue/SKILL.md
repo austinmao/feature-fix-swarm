@@ -33,13 +33,19 @@ bash scripts/gsd/land-queue.sh --resume QUEUE-ID
 - **Explicit inputs:** positional branch names. Identity is
   `(branch, head SHA)`; any head/run/spec disagreement between sources is a
   typed `BLOCKED:identity-conflict`, never a merged record.
-- **`--resume QUEUE-ID`:** re-enter a crashed queue from its journal. LANDED
-  entries are never re-executed; every nonterminal entry is reconciled
-  against merge authority (`gh pr view` by its recorded idempotency key)
-  before anything replays. A satisfied merge key becomes reconciled LANDED
-  with zero merge calls; a finalizer intent without a terminal re-runs
-  run-finalizer idempotently and only then appends LANDED; anything else is
-  `BLOCKED:resume-incomplete` with a re-run remedy.
+- **`--resume QUEUE-ID`:** re-enter a crashed queue from its journal. Every
+  nonterminal item is enumerated (not only dangling intents); LANDED
+  entries are never re-executed. Each item is reconciled against merged
+  authority (`assert-merged.sh` plus `gh pr view` by its recorded
+  idempotency key) before anything replays: a satisfied merge key becomes
+  reconciled LANDED with zero merge calls, and a finalizer intent without a
+  terminal re-runs run-finalizer idempotently and only then appends LANDED.
+  Items whose effects provably did not happen — never-ran intents and
+  crash-between-steps items — re-enter the normal serial lifecycle and are
+  retried to their own terminals; the takeover/estate intake sources stay
+  closed so no new item joins a resumed queue. Only an unreachable merge
+  authority parks an item `BLOCKED:resume-incomplete` with a one-command
+  remedy.
 - **`--posture zero|floor`** (default `zero`): review posture for this run.
   `floor` blocks without an opposite-vendor reviewer
   (`BLOCKED:no-cross-vendor-reviewer`) — executable presence never counts; a
@@ -110,7 +116,7 @@ inbox prints `HUMAN-INBOX: empty`.
 | `BLOCKED:gh-auth` | `gh auth login`, then re-run |
 | `BLOCKED:head-drift` / `BLOCKED:head-moved` | re-run so the current head is reviewed before merge |
 | `BLOCKED:grant-missing` | `python3 lib/gates.py grant <run-id> --action merge:pr-<N> --reason '<why>'` |
-| `BLOCKED:resume-incomplete` | re-run `land-queue.sh` for the item |
+| `BLOCKED:resume-incomplete` | `bash scripts/gsd/assert-merged.sh <pr>`, then re-run `--resume QUEUE-ID` |
 | `PARALLEL-UNSUPPORTED:v1-serial-only` | drop `--parallel`; v1 is strictly serial |
 
 ## Authority boundaries

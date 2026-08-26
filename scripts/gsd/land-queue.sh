@@ -136,34 +136,48 @@ emit_report() { # typed ITEM/REVERT/HUMAN-INBOX rows from the journal
   fi
 }
 
+RESUME_RETRY=()
 resume_reconcile() {
-  # REQ-208 / 8c88ebfa (01-08 two-phase intent): before any new effect, scan
-  # for intents lacking results and classify each against merge authority by
-  # its recorded idempotency key.  A satisfied key is NEVER re-executed.
-  local dang item step pr head merge_sha errf
-  dang="$WORKTMP/dangling"
-  python3 "$JOURNAL" read-dangling --store "$LQ" --queue-id "$QUEUE_ID" > "$dang" \
+  # REQ-208 / 8c88ebfa (01-08 two-phase intent): before any new effect,
+  # enumerate EVERY nonterminal queue item (LANDED and other terminals are
+  # skipped) and classify each against merged authority — assert-merged.sh
+  # plus gh — by its recorded idempotency key.  A satisfied key is NEVER
+  # re-executed; an effect proven not to have happened re-enters the normal
+  # serial lifecycle below instead of parking.
+  local rows item step pr head merge_sha errf am rf am_rc
+  rows="$WORKTMP/nonterminal"
+  python3 "$JOURNAL" read-nonterminal --store "$LQ" --queue-id "$QUEUE_ID" > "$rows" \
     || { echo "QUEUE-ERROR:store"; exit 70; }
-  local rf
+  am="$(command -v assert-merged.sh || printf '%s\n' "$SCRIPT_DIR/assert-merged.sh")"
   while IFS= read -r -d '' item && IFS= read -r -d '' step \
       && IFS= read -r -d '' pr && IFS= read -r -d '' head; do
-    if [ "$step" = "merge" ] && [ -n "$pr" ]; then
-      errf="$WORKTMP/err-resume"
-      merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid 2>"$errf")" || merge_sha=""
-      if [ -n "$merge_sha" ]; then
-        # effect-already-happened: adopt the authority's outcome — no re-merge.
-        journal --kind result --step merge --item "$item" --status reconciled
-        journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
-        continue
-      fi
+    merge_sha=""
+    if [ -n "$pr" ]; then
+      # assert-merged.sh is the merged-state authority for the resume path:
+      # rc 0 = MERGED, rc 1/2 = provably not landed, anything else = unknown.
+      am_rc=0
+      "$am" "$pr" || am_rc=$?
+      case "$am_rc" in
+        0)
+          errf="$WORKTMP/err-resume"
+          merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid 2>"$errf")" || merge_sha=""
+          ;;
+        1|2) merge_sha="" ;;
+        *)
+          # Authority unreachable: never guess, never retry a maybe-merged
+          # effect — a typed terminal with a one-command unblock.
+          journal --kind terminal --step terminal --item "$item" \
+            --status "BLOCKED:resume-incomplete" \
+            --reason "merge authority unavailable for PR $pr during resume" \
+            --unblock "bash scripts/gsd/assert-merged.sh $pr, then re-run --resume $QUEUE_ID"
+          continue ;;
+      esac
     fi
-    if [ "$step" = "finalize" ] && [ -n "$pr" ]; then
-      # 865d06d4: a finalizer intent without a terminal means the merge is
-      # already authority-confirmed. Recovery re-runs the finalizer
-      # idempotently and only then appends LANDED — never a second merge.
-      errf="$WORKTMP/err-resume-fin"
-      merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid 2>"$errf")" || merge_sha=""
-      if [ -n "$merge_sha" ]; then
+    if [ -n "$merge_sha" ]; then
+      if [ "$step" = "finalize" ]; then
+        # 865d06d4: a finalizer intent without a terminal means the merge is
+        # already authority-confirmed.  Recovery re-runs the finalizer
+        # idempotently and only then appends LANDED — never a second merge.
         rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
         if "$rf" --run-id "$RUN_ID" "$pr"; then
           journal --kind result --step finalize --item "$item" --status reconciled
@@ -174,29 +188,43 @@ resume_reconcile() {
             --reason "recovery finalizer failed for PR $pr" \
             --unblock "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
         fi
-        continue
+      else
+        # effect-already-happened: adopt the authority's outcome — no re-merge.
+        if [ -n "$step" ]; then
+          journal --kind result --step "$step" --item "$item" --status reconciled
+        fi
+        journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
       fi
+      continue
     fi
-    # effect-never-ran (or no key): typed completion plus a Human-inbox
-    # terminal.  ponytail: v1 resume reconciles the journal; it does not
-    # re-drive the lifecycle — re-running the queue picks the item up fresh.
-    journal --kind result --step "$step" --item "$item" --status never-ran
-    journal --kind terminal --step terminal --item "$item" --status "BLOCKED:resume-incomplete" \
-      --reason "crashed before the $step effect was observed" \
-      --unblock "re-run land-queue.sh for $item"
-  done < "$dang"
+    # Effect provably never ran (no recorded key, or the authority denies
+    # the merge): close any dangling intent, then re-enter the serial
+    # lifecycle for this item instead of parking it (REQ-208).
+    if [ -n "$step" ]; then
+      journal --kind result --step "$step" --item "$item" --status never-ran
+    fi
+    RESUME_RETRY+=("$item")
+  done < "$rows"
 }
 
+RESUMING=0
 if [ -n "$RESUME" ]; then
+  RESUMING=1
   QUEUE_ID="$RESUME"
   resume_reconcile
-  echo "LAND-QUEUE REPORT queue=$QUEUE_ID resumed"
-  emit_report
-  exit 0
+  if [ "${#RESUME_RETRY[@]}" -eq 0 ]; then
+    echo "LAND-QUEUE REPORT queue=$QUEUE_ID resumed"
+    emit_report
+    exit 0
+  fi
+  # Items whose effects provably did not happen re-enter the normal serial
+  # lifecycle as this resumed queue's only inputs; the takeover/estate
+  # intake sources stay closed so no new item can join a resumed queue.
+  EXPLICIT=(${RESUME_RETRY[@]+"${RESUME_RETRY[@]}"})
+else
+  python3 "$JOURNAL" init --store "$LQ" --queue-id "$QUEUE_ID" --run-id "$RUN_ID" \
+    || { echo "QUEUE-ERROR:store"; exit 70; }
 fi
-
-python3 "$JOURNAL" init --store "$LQ" --queue-id "$QUEUE_ID" --run-id "$RUN_ID" \
-  || { echo "QUEUE-ERROR:store"; exit 70; }
 
 QUEUE_TERMINAL=""
 
@@ -247,16 +275,19 @@ ITEM_STARTED="$QUEUE_STARTED"
 journal --kind intent --step collect --detail "bounded three-source intake"
 DOC="$WORKTMP/queue-doc.json"
 COLLECT_ARGS=(collect --repo "$REPO" --base "$BASE")
-# REQ-201 three-source union: every new intake passes the canonical takeover
+# REQ-201 three-source union: every NEW intake passes the canonical takeover
 # record glob (takeover-record.py writes <resolved-store-parent>/takeover/
 # <run-id>.json, and STORE_DIR is exactly that resolved parent) plus the
 # collect-estate source.  LAND_QUEUE_ESTATE_JSON is a hermetic-test seam that
 # feeds the SAME estate source through the collector's --estate-json input.
-COLLECT_ARGS+=(--takeover-glob "$STORE_DIR/takeover/*.json")
-if [ -n "${LAND_QUEUE_ESTATE_JSON:-}" ]; then
-  COLLECT_ARGS+=(--estate-json "$LAND_QUEUE_ESTATE_JSON")
-else
-  COLLECT_ARGS+=(--use-estate)
+# A resumed queue re-collects only its own retry items (REQ-208).
+if [ "$RESUMING" -eq 0 ]; then
+  COLLECT_ARGS+=(--takeover-glob "$STORE_DIR/takeover/*.json")
+  if [ -n "${LAND_QUEUE_ESTATE_JSON:-}" ]; then
+    COLLECT_ARGS+=(--estate-json "$LAND_QUEUE_ESTATE_JSON")
+  else
+    COLLECT_ARGS+=(--use-estate)
+  fi
 fi
 for branch in ${EXPLICIT[@]+"${EXPLICIT[@]}"}; do
   COLLECT_ARGS+=(--explicit "$branch")

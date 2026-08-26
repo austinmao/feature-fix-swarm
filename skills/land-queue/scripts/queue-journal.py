@@ -259,6 +259,45 @@ def cmd_read_dangling(ns) -> int:
     return 0
 
 
+def cmd_read_nonterminal(ns) -> int:
+    """NUL-emit item, dangling-step, pr, head for EVERY item lacking a
+    terminal — the complete per-item resume projection (REQ-208).
+
+    dangling-step is the item's latest intent lacking a result (empty when
+    the item has no dangling intent, e.g. a crash between steps); pr/head
+    come from that intent's idempotency key, else from the item's latest
+    keyed intent, so resume can reconcile against merge authority before
+    deciding whether an effect must be retried.
+    """
+    doc = _load(_doc_path(ns.store, ns.queue_id))
+    events = doc["events"]
+    resolved = {(e.get("item"), e.get("step"))
+                for e in events if e.get("kind") == "result"}
+    terminal_items = {e.get("item")
+                      for e in events if e.get("kind") == "terminal"}
+    order, dangling, keyed = [], {}, {}
+    for event in events:
+        item = event.get("item")
+        if not item or item in terminal_items:
+            continue
+        if item not in dangling:
+            order.append(item)
+            dangling[item] = None
+        if event.get("kind") != "intent":
+            continue
+        if event.get("key"):
+            keyed[item] = event
+        if (item, event.get("step")) not in resolved:
+            dangling[item] = event
+    for item in order:
+        intent = dangling[item] or keyed.get(item) or {}
+        step = dangling[item].get("step", "") if dangling[item] else ""
+        for value in (item, step, str(intent.get("pr", "") or ""),
+                      str(intent.get("head", "") or "")):
+            sys.stdout.write(str(value) + "\0")
+    return 0
+
+
 def cmd_count_terminals(ns) -> int:
     """Durable per-item terminal counter (EDGE-010 quarantine park)."""
     doc = _load(_doc_path(ns.store, ns.queue_id))
@@ -344,7 +383,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     for name in ("init", "append", "events", "read-terminals", "read-dangling",
-                 "count-terminals", "read-report"):
+                 "read-nonterminal", "count-terminals", "read-report"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
         p.add_argument("--queue-id", required=True)
@@ -374,6 +413,7 @@ def main(argv=None) -> int:
     handlers = {"init": cmd_init, "append": cmd_append, "events": cmd_events,
                 "read-terminals": cmd_read_terminals,
                 "read-dangling": cmd_read_dangling,
+                "read-nonterminal": cmd_read_nonterminal,
                 "count-terminals": cmd_count_terminals,
                 "read-report": cmd_read_report,
                 "lock-acquire": cmd_lock_acquire, "lock-release": cmd_lock_release}
