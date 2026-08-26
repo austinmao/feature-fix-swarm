@@ -2248,11 +2248,17 @@ def takeover_authority_view(data: dict, run_id: str, actions: list[str]) -> dict
                                      and not isinstance(entry.get("expires_at"), bool)
                                      and math.isfinite(entry["expires_at"])
                                      and now < entry["expires_at"])
-    findings = data.get("_findings", [])
-    if not isinstance(findings, list):
+    # CR-01 (01-gaps3): read the CANONICAL findings namespace — the same
+    # top-level `findings` list every findings-queue writer persists.  A
+    # non-list namespace or any non-dict row is a schema conflict, refused
+    # fail-closed: a silently skipped hostile row would be an open finding
+    # the wall never sees.
+    findings = data.get("findings", [])
+    if not isinstance(findings, list) or any(
+            not isinstance(row, dict) for row in findings):
         raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
-    unresolved = [row for row in findings if isinstance(row, dict)
-                  and not row.get("resolved")
+    unresolved = [row for row in findings
+                  if not row.get("resolved")
                   and row.get("severity") in ("HIGH", "CRITICAL")]
     return {
         "takeover_expected": auto.get("takeover_expected") is True,

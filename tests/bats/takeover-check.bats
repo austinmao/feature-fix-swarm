@@ -47,7 +47,7 @@ state={"_autonomy":{"spec-006":{"takeover_expected":True,
        "takeover_dirty_digest":hashlib.sha256(b"").hexdigest(),
        "preflight":{"pass":True,"checked_at":int(created)},
        "grants":{"ship:gsd":{"granted_at":int(created),"expires_at":4102444800}}}},
-       "_findings":[]}
+       "findings":[]}
 with open(store,"w") as f: json.dump(state,f)
 record_data={"schema_version":1,"created_at":int(created),
  "ids":{"spec_id":"006","run_id":"spec-006"},"gates_store":canonical,
@@ -989,7 +989,7 @@ now=int(time.time())
 json.dump({'_autonomy':{'spec-006':{'takeover_expected':True,
   'takeover_created_at':now,'takeover_dirty_digest':hashlib.sha256(b'').hexdigest(),
   'preflight':{'pass':True,'checked_at':now},
-  'grants':{'ship:gsd':{'granted_at':now,'expires_at':now+3600}}}},'_findings':[]},open(sys.argv[1],'w'))
+  'grants':{'ship:gsd':{'granted_at':now,'expires_at':now+3600}}}},'findings':[]},open(sys.argv[1],'w'))
 PY
   exec {snapshot_fd}<"$snapshot"
   local before
@@ -1091,7 +1091,7 @@ json.dump({'_autonomy': {'spec-006': {'takeover_expected': True,
     'hotfix:prod-web': {'granted_at': now, 'expires_at': now + 3600,
                         'reason': 'sev1 rollback'},
     'push:origin/main': {'granted_at': now - 7200, 'expires_at': now - 3600}}}},
-  '_findings': []}, open(sys.argv[1], 'w'))
+  'findings': []}, open(sys.argv[1], 'w'))
 PY
   exec {snapshot_fd}<"$snapshot"
   local before
