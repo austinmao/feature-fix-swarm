@@ -1,52 +1,46 @@
-# Handoff — spec-006 autonomous run supervision (updated: phase-1 executing)
+# Handoff — spec-006 autonomous run supervision (3rd update: gap round 2)
 
-Date: 2026-08-26 (second update). Supersedes the earlier version of this file.
-Task: F4 — run spec-006 (autonomous-landing) through the FFS pipeline; live proof of the #129 wall auto-continue gate. Follow-ups F1–F3 done (see git history: FFS #132/#133, openclaw #1809).
+Date: 2026-08-26. Task: F4 — spec-006 through FFS pipeline; #129 wall-gate live proof. F1-F3 done (FFS #132/#133, openclaw #1809).
 
-## Critical correction to the previous handoff
+## HEADLINE: #129 proven live, BOTH paths
 
-The old relaunch recipe was BROKEN: `gsd-run.sh /feature-implement` is invalid — `scripts/gsd/gsd-run.sh:18-22` accepts ONLY `/gsd-*` commands. Pid 54480 died at launch (`gsd-run: unsupported GSD command`). `/feature-implement` is skill-level orchestration done by the supervising session itself; only per-phase execution goes headless:
+- Skip path ×3: `WALL-AUTO-CONTINUE skipped (phase=… has N unresolved HIGH/CRITICAL finding(s)) — quarantine stands` (rounds with unadjudicated findings).
+- **Continue path ×1**: after WALL-ROUND-CAP with all findings adjudicated: `gsd-run: WALL-AUTO-CONTINUE phase=01-takeover-record-wall — zero unresolved findings, wall-reset:01-takeover-record-wall granted; resetting wall round and re-running once` → re-run gave ADJUDICATED-PASS ×5 (zero dispatch) → execution proceeded. Grant + budget machinery worked exactly as designed. wall-autoreset budget for phase 01 now SPENT (1/1) — no second auto-continue this run.
 
-```bash
-cd /tmp/wt-006 && env GSD_RUN_ID=spec-006 GSD_PLANNING_SYNC=worktree TIMEOUT=28800 \
-  bash scripts/gsd/gsd-run.sh /gsd-execute-phase <N> >> /tmp/wt-006/implement-006.log 2>&1
-```
+## Correct recipes (old handoff's /feature-implement recipe was broken)
 
-## Wall history, phase 1 (01-takeover-record-wall) — #129 live proof
+- Per-phase execution: `cd /tmp/wt-006 && env GSD_RUN_ID=spec-006 GSD_PLANNING_SYNC=worktree TIMEOUT=28800 bash scripts/gsd/gsd-run.sh /gsd-execute-phase <N> [--gaps-only] >> /tmp/wt-006/implement-006.log 2>&1` (gsd-run accepts ONLY /gsd-* commands).
+- Gap planning: same with `/gsd-plan-phase <N> --gaps`.
+- Fix-round pattern (used 3×): findings-queue list --unresolved → gsd-planner agent, findings verbatim + fix shapes + mutation contract (rewrite in place, never append) → spot-check → `findings-queue resolve <full-64-char-sig> --disposition fix|refute|waive --reason …` → rsync BOTH stores → relaunch.
+- Two stores, keep synced or launch clobbers edits: authoritative `.claude/worktrees/spec-006/.planning` (launch syncs worktree→repo), working `/tmp/wt-006/.planning`.
 
-- Round 1: BLOCKED rc 1, 6 HIGH (first blocking round strict).
-- Fix round 1: gsd-planner agent rewrote both plans in place (fix-round mutation contract); 6 findings resolved (disposition fix).
-- Round 2: 7 new HIGH ≥ 6 prior → WALL-NO-CONVERGENCE rc 3 → **`gsd-run: WALL-AUTO-CONTINUE skipped (phase=01-takeover-record-wall has 7 unresolved HIGH/CRITICAL finding(s)) — quarantine stands`** — the #129 gate executing its fail-closed skip path live. Typed stderr line, no paste-prompt stop.
-- Fix round 2: 7 findings (6 new + 1 REOPEN d6baec66) rewritten via second planner agent; resolved ×7.
-- Round 3/3: **PLAN-WALL-PASS-RESIDUAL** (4 new < 7 prior — converged). Runner's own in-run wall recheck: PASS-RESIDUAL "unchanged plan, zero dispatch" (no double review cost).
-- The auto-continue CONTINUE path (reset + one re-run) was never needed — wall converged inside its round budget. Gate proof obtained is the skip path + the grant/budget machinery armed.
+## Phase-1 history (compressed)
 
-Findings queue is source of truth (`gates.py findings-queue list`). 13 resolved this session; 5 unresolved ride as executor assumptions — regenerated manifest at `.planning/phases/01-takeover-record-wall/WALL-RESIDUALS.md` (original clobbered by a worktree→repo planning sync; regeneration is queue-derived, content-identical).
+1. Wall rounds 1-3 + fix rounds: 6→7 HIGH fixed via plan rewrites; round 3 PASS-RESIDUAL. STATE.md was missing (headless Codex question) → seeded from gsd template both stores.
+2. Execution round 1 (plans 01-01/01-02, 8 commits): verifier 6/18 — executor STUBBED security paths (hardcoded empty record fields, boolean dirty-compare, helper-pid lock).
+3. Gap round 1: plans 01-03/04/05; ownership dedup needed (01-01/01-02 → `requirements: []`, 101/102/105→01-03, 104→01-04, 103/106→01-05 — gate PASS roadmap=6 plans=5). Wall on gap plans: 2 more fix rounds (7 + 12 findings), round 3 non-convergent (10 new ≥ 7) → adjudicated 11 (4 refute with plan-text proof, 7 waive as BINDING executor assumptions appended to WALL-RESIDUALS.md) → auto-continue fired (see headline).
+4. Executor branch-safety stop: wanted agent-* branch, sandbox only allows refs/heads/gsd → set `workflow.use_worktrees=false` in both config.json → sequential mode works.
+5. Gap execution: 01-03 (RED/GREEN, 18 bats), 01-04 (+4 commits), 01-05 (+4 commits), executor suite 28 bats green. Mechanical criteria re-check by supervisor: takeover-check.bats 28 ok, verify-skill-blocks rc0, lint_host_dispatch rc0.
+6. /gsd-verify-work stopped at human-UAT checkpoint (headless) — abandoned; used execute-phase completion tail instead. Tail short-circuited on STALE pre-gap VERIFICATION.md → archived it (01-VERIFICATION.md.pre-gaps in worktree) → fresh verify ran.
+7. Fresh verification: **3/13 must-haves, 5 blocking gap groups, review 14 issues (9 blockers)** — corrupt-authority fail-open, macOS lock contention, git/rebase bypasses, first-run collector regressions, hostile-input coverage. Real defects, honest verifier.
 
-## Current state (at handoff)
+## IN FLIGHT at handoff
 
-- Phase-1 execution LIVE: runner pid via `.git/ffs/gsd-run/gsd-run.pid` (FFS main checkout), Codex host `gpt-5.6-terra`, executing 01-01-PLAN.md in run worktree `.claude/worktrees/spec-006`. Log: `/tmp/wt-006/implement-006.log` (+ `.planning/logs/gsd-run-*.log`).
-- Watch: `pgrep -f "gsd-run.sh /gsd-execute-phase"` for liveness (stale log ≠ dead run); one Codex ERROR line about full-history forked agents appeared then execution continued ("collab: Wait") — watch for recurrence.
-- STATE.md: was missing → Codex asked interactively → seeded from gsd template in BOTH stores (run worktree authoritative + /tmp/wt-006). If any future headless stop asks a question, answer by fixing the artifact and relaunching — same pattern.
-- Two planning stores: run worktree `.claude/worktrees/spec-006/.planning` (AUTHORITATIVE — launch syncs worktree→repo) and `/tmp/wt-006/.planning`. ANY manual plan edit must land in BOTH (edit /tmp side, rsync to worktree, verify hashes) or the next launch clobbers it.
-- Baseline (pre-phase-1, commit 54b4593): pytest tests/ lib/ = **1202 passed**; bats tests/bats = **1264 ok**. Recorded at `/tmp/wt-006/.planning/logs/baseline-pre-phase1.txt`. Phase-3 success criteria diff against these numbers.
-- Grants (run spec-006, TTL 72h from 2026-08-26 ~00:11): wall-reset:01/02/03 phase slugs, push:origin/006-autonomous-landing, merge:pr. None consumed yet. Preflight PREFLIGHT-OK (<24h).
-- Fix-round pattern (proven ×2): dump unresolved via findings-queue list → spawn gsd-planner agent with findings verbatim + required fix shapes + mutation contract (rewrite in place, never append) → spot-check edits + ownership frontmatter → `findings-queue resolve <full-sig> --disposition fix --reason ...` (full 64-char sig, 8-char prefix rejected) → rsync both stores → relaunch.
+`/gsd-plan-phase 1 --gaps` (gap round 2 of 2 — the skill's LAST; task bo6h7p22i, appending to /tmp/wt-006/implement-006.log). After it: execute `--gaps-only`, then completion tail (archive stale VERIFICATION first if tail short-circuits again). **HARD STOP after this round regardless of outcome** (skill: max 2 gap rounds, then report). If wall quarantines the new gap plans non-convergent at cap: terminal (auto-continue budget spent) — report honestly.
 
-## Remaining work
+## State
 
-1. Supervise phase-1 execution to completion (2 plans, waves). On runner exit: check SUMMARYs, STATE.md updates, gates-test-command evidence.
-2. Phases 2 (4 plans) and 3 (4 plans): same per-phase loop — ownership gate → launch `/gsd-execute-phase N` → wall rounds with fix-round pattern as needed.
-3. Finish tail per feature-implement SKILL.md: review-gate wall (`review-gate-command.sh` REVISE without ship:gsd grant), push (grant exists), PR + merge (grant exists), run-finalizer — harvest `.planning` BEFORE finalizer removes the run worktree (memory: run-finalizer-removes-orchestration-worktree).
-4. Final honest report: all four follow-ups, wall behavior observed (skip-path proof + convergence), grants consumed, verified vs inferred.
+- Run worktree `.claude/worktrees/spec-006` branch `gsd/phase-01-takeover-record-wall`: 16 implementation commits (8 original + 8 gap). Artifacts: scripts/gsd/takeover-record.py, scripts/gsd/takeover-check.sh, tests/bats/takeover-check.bats.
+- Baseline (pre-phase-1 @ 54b4593): pytest 1202 passed, bats 1264 ok (`/tmp/wt-006/.planning/logs/baseline-pre-phase1.txt`).
+- Findings ledger: 41 wall findings adjudicated this session (23 fix, 4 refute, 7 waive, rest earlier-run stale entries untouched). Queue = source of truth.
+- Grants: wall-reset:01 budget SPENT; wall-reset:02/03 + push:origin/006-autonomous-landing + merge:pr unconsumed, TTL to ~2026-08-29.
+- Phases 2 (4 plans) + 3 (4 plans) NOT started.
+- FFS main checkout: main @ 7e9017b (handoff commits only, not pushed). Codex quota burn substantial this session (~10 drive launches + 3 planner agents).
 
 ## Leftovers (report-only)
 
-- ecc-tools PR #131 bot re-opens on close (operator: disable GitHub App).
-- openclaw upstream-port of #1784 plan-wall/gates fork.
-- #132 deferred hardening (replace_file/replace_tree atomicity, symlink hygiene, uninstall empty-dir sweep).
-- Peer session did openclaw local cleanup 2026-08-26 (main ff'd to 0a7de6d18; oc-resync worktree removed per my release). openclaw 371-shared-tenant-blog: 275 no-remote commits, upstream [gone] — never -D (memory saved).
+ecc-tools #131 bot re-opens; openclaw port of #1784; #132 deferred hardening; openclaw 371 = 275 no-remote commits, never -D (memory saved).
 
 ## Resume Prompt
 
-/prompt-master Resume spec-006 supervision per docs/handoffs/2026-08-26-spec-006-autonomous-run.md: pgrep "gsd-run.sh /gsd-execute-phase", tail /tmp/wt-006/implement-006.log; if phase done, verify SUMMARYs + run next phase via the recipe; on wall rc-3 use the fix-round pattern; keep both planning stores synced; finish tail then honest final report.
+/prompt-master Resume spec-006 per docs/handoffs/2026-08-26-spec-006-autonomous-run.md: check task bo6h7p22i / tail /tmp/wt-006/implement-006.log; drive gap round 2 (plan → execute --gaps-only → completion tail, archive stale VERIFICATION.md if tail short-circuits); HARD STOP after round 2 either way; then phase 2 only on verify pass; keep stores synced; honest final report.
