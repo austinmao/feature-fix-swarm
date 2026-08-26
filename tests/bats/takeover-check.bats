@@ -447,6 +447,220 @@ PY
   [ "$status" -eq 0 ]
 }
 
+# Plan 01-06 Task 2 RED: staging is a full-write transaction.  Partial and
+# zero-progress writes must never publish truncated bytes.
+@test "short write seams complete the payload and zero progress is rejected" {
+  local dir="$BATS_TEST_TMPDIR/stage-dir"
+  mkdir -p "$dir"
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$dir" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]
+dir_fd = os.open(work, os.O_RDONLY)
+payload = b'{"payload":"' + b'x' * 96 + b'"}\n'
+real_write = os.write
+os.write = lambda fd, view: real_write(fd, bytes(view)[:7])
+try:
+    io_mod.replace_bytes(dir_fd, "spec-006.json", payload)
+finally:
+    os.write = real_write
+with open(os.path.join(work, "spec-006.json"), "rb") as fh:
+    data = fh.read()
+assert data == payload, "short writes were not completed: %d of %d bytes" % (len(data), len(payload))
+os.write = lambda fd, view: 0
+try:
+    try:
+        io_mod.replace_bytes(dir_fd, "spec-007.json", b"{}\n")
+    finally:
+        os.write = real_write
+except OSError:
+    pass
+else:
+    raise AssertionError("zero-progress write did not raise")
+assert not os.path.exists(os.path.join(work, "spec-007.json")), "zero-progress attempt published a file"
+leftovers = [n for n in os.listdir(work) if n.endswith(".tmp")]
+assert not leftovers, "stranded stages: %r" % leftovers
+print("short-write-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *short-write-ok* ]]
+}
+
+# Plan 01-06 Task 2 RED: every staging fault removes exactly the attempt-owned
+# stage and never the final sibling.  Per WALL-RESIDUALS b80300b4 a directory
+# fsync failure AFTER the atomic rename is a typed FSYNC-FAIL while the
+# completed rename stands; the no-mutation contract is scoped to pre-rename
+# failures only.
+@test "stage faults unlink only the attempt-owned stage and keep the final sibling" {
+  local dir="$BATS_TEST_TMPDIR/stage-dir"
+  mkdir -p "$dir"
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$dir" <<'PY'
+import importlib.util, os, stat, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]
+dir_fd = os.open(work, os.O_RDONLY)
+name = "spec-006.json"
+old = b'{"generation":"old"}\n'
+io_mod.replace_bytes(dir_fd, name, old)
+
+def final_bytes():
+    with open(os.path.join(work, name), "rb") as fh:
+        return fh.read()
+
+def no_stage(label):
+    leftovers = [n for n in os.listdir(work) if n.endswith(".tmp")]
+    assert not leftovers, "%s left stranded stages: %r" % (label, leftovers)
+
+real_write, real_fsync, real_replace = os.write, os.fsync, os.replace
+real_validate = io_mod.validate_final
+
+def expect_failure(label, exc=OSError):
+    try:
+        io_mod.replace_bytes(dir_fd, name, b'{"generation":"hostile"}\n')
+    except exc:
+        pass
+    else:
+        raise AssertionError("%s did not raise" % label)
+
+def boom(*a, **k):
+    raise OSError("injected fault")
+
+os.write = boom
+try:
+    expect_failure("write fault")
+finally:
+    os.write = real_write
+no_stage("write fault"); assert final_bytes() == old
+
+os.fsync = boom
+try:
+    expect_failure("fsync fault")
+finally:
+    os.fsync = real_fsync
+no_stage("fsync fault"); assert final_bytes() == old
+
+calls = {"n": 0}
+def late_validate(directory_fd, target):
+    calls["n"] += 1
+    if calls["n"] > 1:
+        raise io_mod.UnsafeTakeoverPath("injected validation fault")
+    return real_validate(directory_fd, target)
+io_mod.validate_final = late_validate
+try:
+    expect_failure("validation fault", io_mod.UnsafeTakeoverPath)
+finally:
+    io_mod.validate_final = real_validate
+no_stage("validation fault"); assert final_bytes() == old
+
+stages = []
+def failing_replace(src, dst, **kw):
+    st = os.stat(src, dir_fd=kw.get("src_dir_fd"), follow_symlinks=False)
+    assert stat.S_IMODE(st.st_mode) == 0o600, "stage is not 0600"
+    stages.append(src)
+    raise OSError("injected replace")
+os.replace = failing_replace
+try:
+    expect_failure("replace fault one")
+    expect_failure("replace fault two")
+finally:
+    os.replace = real_replace
+no_stage("replace fault"); assert final_bytes() == old
+assert len(set(stages)) == 2, "stage names are reused across attempts: %r" % stages
+
+fsynced = {"n": 0}
+def late_fsync(fd):
+    fsynced["n"] += 1
+    if fsynced["n"] > 1:
+        raise OSError("injected directory fsync")
+    return real_fsync(fd)
+durable = b'{"generation":"durable"}\n'
+os.fsync = late_fsync
+try:
+    try:
+        io_mod.replace_bytes(dir_fd, name, durable)
+    except OSError as exc:
+        assert "FSYNC-FAIL" in str(exc), "directory fsync failure is untyped: %r" % exc
+    else:
+        raise AssertionError("directory fsync fault did not raise")
+finally:
+    os.fsync = real_fsync
+no_stage("directory fsync fault")
+assert final_bytes() == durable, "completed rename was rolled back"
+
+fresh = b'{"generation":"fresh"}\n'
+io_mod.replace_bytes(dir_fd, name, fresh)
+assert final_bytes() == fresh
+mode = stat.S_IMODE(os.stat(os.path.join(work, name)).st_mode)
+assert mode == 0o600, oct(mode)
+no_stage("retry")
+print("stage-faults-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *stage-faults-ok* ]]
+}
+
+# Plan 01-06 Task 2 RED: a predictable stranded stage from a crashed prior
+# attempt must never block a fresh attempt-owned stage.
+@test "retry after a stranded stage from a crashed attempt succeeds" {
+  local dir="$BATS_TEST_TMPDIR/stage-dir"
+  mkdir -p "$dir"
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$dir" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]
+dir_fd = os.open(work, os.O_RDONLY)
+stranded = ".spec-006.json.%d.tmp" % os.getpid()
+with open(os.path.join(work, stranded), "wb") as fh:
+    fh.write(b"stranded")
+payload = b'{"generation":"retry"}\n'
+io_mod.replace_bytes(dir_fd, "spec-006.json", payload)
+with open(os.path.join(work, "spec-006.json"), "rb") as fh:
+    assert fh.read() == payload
+extra = [n for n in os.listdir(work) if n.endswith(".tmp") and n != stranded]
+assert not extra, "retry left its own stage behind: %r" % extra
+print("stranded-retry-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *stranded-retry-ok* ]]
+}
+
+# Plan 01-06 Task 2 RED: discovery accepts only exact active names whose
+# decoded root is an object with typed fields; consumed names, deceptive
+# prefixes/suffixes, non-object JSON, special files, and control bytes are
+# skipped or sanitized without traceback, blocking, or command execution.
+@test "list skips non-object, consumed, and deceptive names without traceback" {
+  local dir="$REPO/.feature-fix-swarm/takeover"
+  mkdir -p "$dir"
+  printf '[1,2]\n' > "$dir/spec-001.json"
+  printf 'null\n' > "$dir/spec-002.json"
+  printf '"scalar"\n' > "$dir/spec-003.json"
+  printf '{"broken":\n' > "$dir/spec-004.json"
+  printf '%s\n' '{"created_at":1,"ids":"not-a-dict","git_state":{},"resume":{}}' > "$dir/spec-005.json"
+  local valid='{"created_at":1,"ids":{"run_id":"RID"},"git_state":{"branch":"b"},"resume":{"command":"echo ok"}}'
+  printf '%s\n' "${valid/RID/spec-006}" > "$dir/spec-006.consumed.1.json"
+  printf '%s\n' "${valid/RID/spec-06}" > "$dir/spec-06.json"
+  printf '%s\n' "${valid/RID/spec-0666}" > "$dir/spec-0666.json"
+  printf '%s\n' "${valid/RID/xspec-007}" > "$dir/xspec-007.json"
+  printf '%s\n' "${valid/RID/spec-007}" > "$dir/spec-007.json.bak"
+  printf '%s\n' "${valid/RID/spec-008}" > "$dir/.spec-008.json.99.tmp"
+  printf '%s\n' "${valid/RID/spec-010}" > "$BATS_TEST_TMPDIR/outside-record"
+  ln -s "$BATS_TEST_TMPDIR/outside-record" "$dir/spec-010.json"
+  mkfifo "$dir/spec-011.json"
+  printf '%s\n' '{"created_at":1,"ids":{"run_id":"spec-009"},"git_state":{"branch":"b\tbr\u0001anch"},"resume":{"command":"run\u001b[31m me"}}' > "$dir/spec-009.json"
+  run timeout 5 env -u GATES_STORE bash "$WALL" --list
+  [ "$status" -eq 0 ]
+  [[ "$output" != *Traceback* ]]
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
+  [[ "$output" == spec-009$'\t'* ]]
+  [ "$(printf '%s' "$output" | awk -F'\t' '{print NF}')" -eq 4 ]
+  [[ "$output" != *$'\x1b'* ]]
+  [[ "$output" != *consumed* ]]
+  [[ "$output" != *spec-006* ]]
+}
+
 @test "runner snapshot preserves missing and malformed PID states" {
   mkdir -p "$REPO/.planning/run-state"
   printf 'running\n' > "$REPO/.planning/run-state/gsd-run.status"
