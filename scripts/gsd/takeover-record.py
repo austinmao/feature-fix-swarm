@@ -47,10 +47,47 @@ def dirty_entries() -> list[str]:
     return sorted(row.decode("utf-8", "surrogateescape") for row in raw.split(b"\0") if row)
 
 
+# Runner state files are tiny by contract; anything larger is hostile.
+RUNNER_READ_LIMIT = 4096
+
+
+def _runner_state_read(state_dir: Path, name: str) -> str | None:
+    """Bounded no-follow read of one runner-state file (CR-02).
+
+    Reuses the takeover-io hostile-open discipline: descriptor-relative
+    openat with O_NOFOLLOW|O_NONBLOCK and a current-uid regular-file fstat
+    check.  Returns None when the entry is absent and "" (a typed unknown,
+    never target content) when it is a symlink, non-regular, other-uid, or
+    oversized — the target's bytes are never read or persisted.
+    """
+    try:
+        dir_fd = os.open(str(state_dir), _IO._dir_flags())
+    except OSError:
+        return None
+    try:
+        try:
+            fd = _IO.open_regular(dir_fd, name)
+        except FileNotFoundError:
+            return None
+        except (UnsafeTakeoverPath, OSError):
+            return ""
+        try:
+            if os.fstat(fd).st_size > RUNNER_READ_LIMIT:
+                return ""
+            return _IO.read_regular(fd).decode("utf-8", "replace")
+        except (UnsafeTakeoverPath, OSError):
+            return ""
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+
+
 def runner_snapshot(root: Path) -> dict:
     state = root / ".planning" / "run-state"
-    status = (state / "gsd-run.status").read_text(errors="replace").strip() if (state / "gsd-run.status").is_file() else "unknown"
-    pid_text = (state / "gsd-run.pid").read_text(errors="replace").strip() if (state / "gsd-run.pid").is_file() else ""
+    status_text = _runner_state_read(state, "gsd-run.status")
+    status = status_text.strip() if status_text and status_text.strip() else "unknown"
+    pid_text = (_runner_state_read(state, "gsd-run.pid") or "").strip()
     try:
         pid = int(pid_text) if pid_text else None
     except ValueError:
@@ -157,7 +194,17 @@ def main() -> int:
         "resume": {"command": f"/spec-status {args.spec_id}",
                    "preconditions": resume_preconditions(args.run_id, store_path, head)},
     }
+    pad = int(os.environ.get("TAKEOVER_TEST_RECORD_PAD", "0") or "0")
+    if pad:
+        # Test-only cap-boundary seam (same pattern as TAKEOVER_FAULT_BEFORE_JSON);
+        # inert unless explicitly set by a fixture.
+        record["_pad"] = "x" * pad
     raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if len(raw) > _IO.MAX_BYTES:
+        # WR-01: the consumer hard-rejects records over MAX_BYTES; publishing
+        # one would strand an expectation every wall invocation refuses.
+        # Refuse BEFORE Markdown, expectation, or JSON exist.
+        refuse(f"serialized record is {len(raw)} bytes; consumer cap is {_IO.MAX_BYTES}")
     markdown = "# Takeover record\n\ngeneration: %s\n\n```json\n%s```\n" % (created, json.dumps(record, indent=2, sort_keys=True))
     digest = hashlib.sha256("\0".join(dirty).encode("utf-8", "surrogateescape")).hexdigest()
     with takeover_directory(store_path) as directory_fd:
