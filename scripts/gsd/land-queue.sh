@@ -1,0 +1,460 @@
+#!/usr/bin/env bash
+# land-queue.sh — serial production landing queue (spec-006 phase 2, plan 01).
+#
+# One item at a time, every side effect journaled intent-before-effect, all
+# privileged truths delegated to existing authorities:
+#   collect-queue.py   intake + authority-only item prechecks (same code path)
+#   queue-journal.py   durable event journal + queue-wide OwnerLock
+#   queue-guard.sh     allow/stop + drain decisions (STOP before EVERY effect)
+#   gates.py           exact merge:pr-N grant truth
+#   assert-merged.sh   terminal merged-state truth
+#   run-finalizer.sh   deletion/cleanup truth
+#
+# Binding residuals honored here: 71193d25 (queue-wide OwnerLock held for the
+# run; contention = QUEUE-REFUSED:queue-live), f1bc7cad (push prepared head;
+# REVIEWED_OID must equal pushed sha AND PR head at pin time), e846ec0c (STOP
+# checked before starting every external effect), 71c46cda (DRAIN per store,
+# honored once, consumed under the lock).
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+COLLECTOR="$ROOT/skills/land-queue/scripts/collect-queue.py"
+JOURNAL="$ROOT/skills/land-queue/scripts/queue-journal.py"
+GUARD="$SCRIPT_DIR/queue-guard.sh"
+GATES="$ROOT/lib/gates.py"
+# shellcheck source=scripts/gsd/run-bounded.sh
+. "$SCRIPT_DIR/run-bounded.sh"
+
+usage() {
+  echo "usage: land-queue.sh [--repo DIR] [--base NAME] [--run-id ID] [--drain] [--resume QUEUE-ID] [BRANCH...]" >&2
+  exit 2
+}
+
+REPO="$PWD" BASE="main" RUN_ID="" DRAIN=0 RESUME=""
+EXPLICIT=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --contract-probe) exit 0 ;;
+    --repo) REPO="${2:?--repo requires a value}"; shift 2 ;;
+    --base) BASE="${2:?--base requires a value}"; shift 2 ;;
+    --run-id) RUN_ID="${2:?--run-id requires a value}"; shift 2 ;;
+    --drain) DRAIN=1; shift ;;
+    --resume) RESUME="${2:?--resume requires a value}"; shift 2 ;;
+    --parallel|--parallel=*)
+      # EDGE-007: parsed but always refused, before any lane could launch.
+      echo "PARALLEL-UNSUPPORTED:v1-serial-only"
+      exit 2 ;;
+    --*) usage ;;
+    *) EXPLICIT+=("$1"); shift ;;
+  esac
+done
+[ -n "$RUN_ID" ] || RUN_ID="land-queue-$(date +%s)-$$"
+
+if [ -n "$RESUME" ]; then
+  # ponytail: resume reconciliation ships with the plan 02-02 failure
+  # machine; refuse loudly rather than re-execute anything blind.
+  echo "RESUME-UNAVAILABLE: --resume arrives with the plan 02-02 failure machine" >&2
+  exit 2
+fi
+
+STORE_DIR="$(python3 "$GATES" store-dir)"
+LQ="$STORE_DIR/land-queue"
+mkdir -p "$LQ"
+
+if [ "$DRAIN" -eq 1 ]; then
+  : > "$LQ/DRAIN"
+  echo "DRAIN-REQUESTED: a running queue will drain at its next item boundary"
+  exit 0
+fi
+
+# 71193d25: exactly one queue per store — a queue-wide OwnerLock bound to
+# this runner's pid, held for the whole run.
+if ! python3 "$JOURNAL" lock-acquire --store "$LQ" --run-id "$RUN_ID" --pid $$; then
+  echo "QUEUE-REFUSED:queue-live"
+  exit 75
+fi
+
+WORKTMP="$(mktemp -d "${TMPDIR:-/tmp}/land-queue.XXXXXX")"
+cleanup() {
+  python3 "$JOURNAL" lock-release --store "$LQ" --pid $$ >/dev/null 2>&1 || true
+  rm -rf "$WORKTMP"
+}
+trap cleanup EXIT INT TERM
+
+QUEUE_ID="$RUN_ID"
+journal() { python3 "$JOURNAL" append --store "$LQ" --queue-id "$QUEUE_ID" "$@"; }
+
+python3 "$JOURNAL" init --store "$LQ" --queue-id "$QUEUE_ID" --run-id "$RUN_ID"
+
+QUEUE_TERMINAL=""
+
+# 71c46cda: a stale DRAIN marker at startup is honored once, then consumed
+# under the held lock.
+if bash "$GUARD" drain-consume --store "$LQ" >/dev/null; then
+  journal --kind terminal --step terminal --status "QUEUE-DRAINED:operator-drain" \
+    --detail "stale drain marker consumed at startup"
+  echo "QUEUE-DRAINED:operator-drain"
+  exit 0
+fi
+
+# ── accessor discipline ───────────────────────────────────────────────────
+# Collector/journal data crosses into shell ONLY through the closed scalar /
+# NUL-array accessors, captured in owner-private temp files (umask 077) and
+# read with quoted `IFS= read -r`.  Never eval, never word-split serialized
+# data.
+
+read_scalar() { # $1 doc-file, $2 item-index-or-empty, $3 field
+  local tmp value
+  tmp="$(mktemp "$WORKTMP/scalar.XXXXXX")"
+  if [ -n "$2" ]; then
+    python3 "$COLLECTOR" get-scalar --doc "$1" --item "$2" --field "$3" > "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+  else
+    python3 "$COLLECTOR" get-scalar --doc "$1" --field "$3" > "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+  fi
+  IFS= read -r value < "$tmp" || true
+  rm -f "$tmp"
+  printf '%s\n' "$value"
+}
+
+CHANGED_FILES=()
+load_changed_files() { # $1 doc-file, $2 item-index
+  local tmp value
+  tmp="$(mktemp "$WORKTMP/array.XXXXXX")"
+  python3 "$COLLECTOR" emit-array0 --doc "$1" --item "$2" --field changed_files > "$tmp" \
+    || { rm -f "$tmp"; return 1; }
+  CHANGED_FILES=()
+  while IFS= read -r -d '' value; do CHANGED_FILES+=("$value"); done < "$tmp"
+  rm -f "$tmp"
+}
+
+# ── bounded intake: the queue clock starts here ───────────────────────────
+QUEUE_STARTED="$(date +%s)"
+ITEM_STARTED="$QUEUE_STARTED"
+journal --kind intent --step collect --detail "bounded three-source intake"
+DOC="$WORKTMP/queue-doc.json"
+COLLECT_ARGS=(collect --repo "$REPO" --base "$BASE")
+for branch in ${EXPLICIT[@]+"${EXPLICIT[@]}"}; do
+  COLLECT_ARGS+=(--explicit "$branch")
+done
+if ! run_bounded 300 python3 "$COLLECTOR" "${COLLECT_ARGS[@]}" > "$DOC" </dev/null; then
+  journal --kind result --step collect --status failed
+  journal --kind terminal --step terminal --status "QUEUE-ABORTED:systemic:collect" \
+    --detail "bounded intake collection failed"
+  echo "QUEUE-ABORTED:systemic:collect"
+  exit 1
+fi
+journal --kind result --step collect --status ok
+COUNT="$(read_scalar "$DOC" "" count)"
+
+# e846ec0c: consulted immediately before STARTING every external effect.
+require_go() { # $1 step label; nonzero return records a queue terminal
+  local verdict
+  verdict="$(bash "$GUARD" allow --store "$LQ" --items "$COUNT" \
+    --queue-started "$QUEUE_STARTED" --item-started "$ITEM_STARTED" --round 1)" || true
+  case "$verdict" in
+    ALLOW) return 0 ;;
+    STOP:operator-stop)
+      journal --kind terminal --step terminal --status "QUEUE-ABORTED:operator-stop" --detail "$1"
+      QUEUE_TERMINAL="QUEUE-ABORTED:operator-stop"
+      return 1 ;;
+    *)
+      # ponytail: wall/cap verdicts map to a queue-level systemic abort in
+      # 02-01; the 02-02 failure machine refines per-item wall handling.
+      journal --kind terminal --step terminal \
+        --status "QUEUE-ABORTED:systemic:${verdict#STOP:}" --detail "$1"
+      QUEUE_TERMINAL="QUEUE-ABORTED:systemic:${verdict#STOP:}"
+      return 1 ;;
+  esac
+}
+
+block_item() { # $1 status, $2 detail/unblock
+  journal --kind terminal --step terminal --item "$ITEM_BRANCH" --status "$1" --detail "$2"
+}
+
+drop_worktree() { # $1 worktree path
+  git -C "$REPO" worktree remove --force "$1" >/dev/null 2>&1 || true
+}
+
+land_one_item() {
+  # Returns 0 LANDED, 1 item terminal recorded (queue continues),
+  # 2 queue terminal recorded (queue stops).  Runs with errexit inert
+  # (invoked as an `if` condition), so every failure is checked explicitly.
+  local branch="$ITEM_BRANCH" head="$ITEM_HEAD" spec_id="$ITEM_SPEC"
+  local probe status unblock merge_sha wt prepared pr remote_head reviewed
+  local now_head reviewer fi_bin am rf ci_rc
+
+  # 1. item-start precheck — the SAME collector code path as intake, never a
+  #    shell reimplementation; authority-only, zero model calls.
+  journal --kind intent --step precheck --item "$branch" \
+    --detail "files=${#CHANGED_FILES[@]}"
+  probe="$WORKTMP/precheck-$IDX.json"
+  if ! python3 "$COLLECTOR" precheck --repo "$REPO" --base "$BASE" \
+      --branch "$branch" --head "$head" > "$probe"; then
+    journal --kind result --step precheck --item "$branch" --status error
+    block_item "BLOCKED:precheck-error" "collect-queue.py precheck failed for $branch"
+    return 1
+  fi
+  status="$(read_scalar "$probe" "" status)" || status=""
+  journal --kind result --step precheck --item "$branch" --status "$status"
+  case "$status" in
+    OK) ;;
+    LANDED)
+      merge_sha="$(read_scalar "$probe" "" merge_sha)" || merge_sha=""
+      block_item "LANDED" "$merge_sha"
+      return 1 ;;
+    SKIPPED:*|BLOCKED:*)
+      unblock="$(read_scalar "$probe" "" unblock)" || unblock=""
+      block_item "$status" "$unblock"
+      return 1 ;;
+    *)
+      block_item "BLOCKED:precheck-error" "unrecognized precheck status"
+      return 1 ;;
+  esac
+
+  # 2. rebase onto the fetched base, in a private worktree, with real Git.
+  require_go "rebase $branch" || return 2
+  journal --kind intent --step rebase --item "$branch"
+  wt="$WORKTMP/wt-$IDX"
+  if ! git -C "$REPO" worktree add -q "$wt" "$branch"; then
+    journal --kind result --step rebase --item "$branch" --status error
+    block_item "BLOCKED:worktree" "git -C $REPO worktree add failed for $branch"
+    return 1
+  fi
+  if ! git -C "$wt" -c rebase.autostash=true rebase -q "origin/$BASE"; then
+    git -C "$wt" rebase --abort >/dev/null 2>&1 || true
+    journal --kind result --step rebase --item "$branch" --status conflict
+    block_item "BLOCKED:conflict" "git -C $REPO rebase origin/$BASE $branch"
+    drop_worktree "$wt"
+    return 1
+  fi
+  journal --kind result --step rebase --item "$branch" --status ok
+
+  # 3. autonomous implementation child.
+  require_go "implement $branch" || { drop_worktree "$wt"; return 2; }
+  journal --kind intent --step implement --item "$branch"
+  fi_bin="$(command -v feature-implement || true)"
+  if [ -z "$fi_bin" ]; then
+    journal --kind result --step implement --item "$branch" --status missing
+    block_item "BLOCKED:implement-missing" "provide a feature-implement dispatcher on PATH"
+    drop_worktree "$wt"
+    return 1
+  fi
+  if ! (cd "$wt" && "$fi_bin" "$spec_id" --autonomous); then
+    journal --kind result --step implement --item "$branch" --status failed
+    block_item "BLOCKED:implement" "re-run feature-implement $spec_id --autonomous and fix its failure"
+    drop_worktree "$wt"
+    return 1
+  fi
+  journal --kind result --step implement --item "$branch" --status ok
+
+  # 4. f1bc7cad: push the prepared local head to the PR branch BEFORE
+  #    review/CI; the reviewed OID must equal the pushed sha AND the PR head.
+  require_go "push $branch" || { drop_worktree "$wt"; return 2; }
+  journal --kind intent --step push --item "$branch"
+  prepared="$(git -C "$wt" rev-parse HEAD)"
+  if ! git -C "$wt" push -q --force-with-lease origin "HEAD:refs/heads/$branch"; then
+    journal --kind result --step push --item "$branch" --status failed
+    block_item "BLOCKED:push" "git push --force-with-lease origin HEAD:refs/heads/$branch failed"
+    drop_worktree "$wt"
+    return 1
+  fi
+  journal --kind result --step push --item "$branch" --status ok
+  drop_worktree "$wt"
+
+  if ! pr="$(gh pr view "$branch" --json number -q .number)"; then
+    block_item "BLOCKED:pr-missing" "open a PR for $branch, then re-run the queue"
+    return 1
+  fi
+  if ! remote_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid)"; then
+    block_item "BLOCKED:pr-head" "gh pr view $pr --json headRefOid failed"
+    return 1
+  fi
+  if [ "$remote_head" != "$prepared" ]; then
+    block_item "BLOCKED:head-drift" "PR $pr head $remote_head is not the pushed $prepared"
+    return 1
+  fi
+  reviewed="$prepared"
+
+  # 5. cross-vendor review of the pinned head.
+  require_go "review $branch" || return 2
+  journal --kind intent --step review --item "$branch" --detail "$reviewed"
+  reviewer="$(command -v codex || command -v claude || true)"
+  if [ -z "$reviewer" ]; then
+    journal --kind result --step review --item "$branch" --status missing
+    block_item "BLOCKED:reviewer-missing" "install an opposite-vendor reviewer CLI (codex or claude)"
+    return 1
+  fi
+  if ! run_bounded 900 "$reviewer" review "$pr" "$reviewed" </dev/null; then
+    journal --kind result --step review --item "$branch" --status failed
+    block_item "BLOCKED:review" "address reviewer findings for PR $pr, then re-run the queue"
+    return 1
+  fi
+  journal --kind result --step review --item "$branch" --status ok
+
+  # 6. bounded CI watch — the exact REQ-210 contract.
+  require_go "ci $branch" || return 2
+  journal --kind intent --step ci --item "$branch"
+  run_bounded 1200 gh pr checks "$pr" --watch --interval 10 </dev/null
+  ci_rc=$?
+  if [ "$ci_rc" -ne 0 ]; then
+    if [ "$ci_rc" -eq 124 ]; then
+      journal --kind result --step ci --item "$branch" --status timeout
+      block_item "BLOCKED:ci-timeout" "gh pr checks $pr --watch (bounded 1200s) timed out"
+    else
+      journal --kind result --step ci --item "$branch" --status failed
+      block_item "BLOCKED:ci" "fix failing checks on PR $pr, then re-run the queue"
+    fi
+    return 1
+  fi
+  journal --kind result --step ci --item "$branch" --status ok
+
+  # 7. pre-merge precheck — the same collector code path, again.
+  journal --kind intent --step precheck-merge --item "$branch"
+  probe="$WORKTMP/precheck-merge-$IDX.json"
+  if ! python3 "$COLLECTOR" precheck --repo "$REPO" --base "$BASE" \
+      --branch "$branch" --head "$reviewed" > "$probe"; then
+    journal --kind result --step precheck-merge --item "$branch" --status error
+    block_item "BLOCKED:precheck-error" "pre-merge collect-queue.py precheck failed"
+    return 1
+  fi
+  status="$(read_scalar "$probe" "" status)" || status=""
+  journal --kind result --step precheck-merge --item "$branch" --status "$status"
+  case "$status" in
+    OK) ;;
+    LANDED)
+      merge_sha="$(read_scalar "$probe" "" merge_sha)" || merge_sha=""
+      block_item "LANDED" "$merge_sha"
+      return 1 ;;
+    SKIPPED:*|BLOCKED:*)
+      unblock="$(read_scalar "$probe" "" unblock)" || unblock=""
+      block_item "$status" "$unblock"
+      return 1 ;;
+    *)
+      block_item "BLOCKED:precheck-error" "unrecognized pre-merge precheck status"
+      return 1 ;;
+  esac
+
+  # 8. head stability re-read: any drift is a typed abort — never a re-pin
+  #    under the existing grant (f1bc7cad).
+  if ! now_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid)"; then
+    block_item "BLOCKED:pr-head" "gh pr view $pr --json headRefOid failed"
+    return 1
+  fi
+  if [ "$now_head" != "$reviewed" ]; then
+    block_item "BLOCKED:head-drift" "PR $pr head moved to $now_head after review of $reviewed"
+    return 1
+  fi
+
+  # 9. exact grant, pinned merge, merged assertion, finalization.
+  require_go "merge $branch" || return 2
+  journal --kind intent --step grant --item "$branch" --detail "merge:pr-$pr"
+  if ! python3 "$GATES" check-grant "$RUN_ID" --action "merge:pr-$pr" >/dev/null; then
+    journal --kind result --step grant --item "$branch" --status missing
+    block_item "BLOCKED:grant-missing" "python3 lib/gates.py grant $RUN_ID --action merge:pr-$pr --reason '<operator reason>'"
+    return 1
+  fi
+  journal --kind result --step grant --item "$branch" --status ok
+
+  journal --kind intent --step merge --item "$branch" --detail "$reviewed"
+  if ! gh pr merge "$pr" --squash --match-head-commit "$reviewed"; then
+    journal --kind result --step merge --item "$branch" --status failed
+    block_item "BLOCKED:merge" "inspect gh pr merge output for PR $pr, then re-run the queue"
+    return 1
+  fi
+  journal --kind result --step merge --item "$branch" --status ok
+
+  am="$(command -v assert-merged.sh || printf '%s\n' "$SCRIPT_DIR/assert-merged.sh")"
+  if ! "$am" "$pr"; then
+    block_item "BLOCKED:not-merged" "bash scripts/gsd/assert-merged.sh $pr"
+    return 1
+  fi
+  if ! merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid)"; then
+    block_item "BLOCKED:merge-sha" "gh pr view $pr --json mergeCommit failed"
+    return 1
+  fi
+  if [ -z "$merge_sha" ]; then
+    block_item "BLOCKED:merge-sha" "PR $pr reports no merge commit"
+    return 1
+  fi
+
+  require_go "finalize $branch" || return 2
+  journal --kind intent --step finalize --item "$branch"
+  rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
+  if ! "$rf" --run-id "$RUN_ID" "$pr"; then
+    journal --kind result --step finalize --item "$branch" --status failed
+    block_item "BLOCKED:finalizer" "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
+    return 1
+  fi
+  journal --kind result --step finalize --item "$branch" --status ok
+
+  # LANDED only after finalization completes.
+  journal --kind terminal --step terminal --item "$branch" --status LANDED --detail "$merge_sha"
+  return 0
+}
+
+# ── strictly serial item loop ─────────────────────────────────────────────
+i=0
+while [ "$i" -lt "$COUNT" ]; do
+  IDX="$i"
+  i=$((i + 1))
+
+  # 71c46cda: DRAIN honored once at the item boundary, consumed under the lock.
+  if bash "$GUARD" drain-consume --store "$LQ" >/dev/null; then
+    journal --kind terminal --step terminal --status "QUEUE-DRAINED:operator-drain" \
+      --detail "drained at item boundary before index $IDX"
+    QUEUE_TERMINAL="QUEUE-DRAINED:operator-drain"
+    break
+  fi
+
+  ITEM_BRANCH="$(read_scalar "$DOC" "$IDX" branch)"
+  ITEM_HEAD="$(read_scalar "$DOC" "$IDX" head)"
+  ITEM_SPEC="$(read_scalar "$DOC" "$IDX" spec_id)" || ITEM_SPEC="$ITEM_BRANCH"
+  load_changed_files "$DOC" "$IDX" || CHANGED_FILES=()
+  ITEM_STARTED="$(date +%s)"
+
+  require_go "item $ITEM_BRANCH" || break
+
+  if land_one_item; then
+    :
+  else
+    item_rc=$?
+    if [ "$item_rc" -eq 2 ]; then
+      break
+    fi
+  fi
+done
+
+# ── report ────────────────────────────────────────────────────────────────
+echo "LAND-QUEUE REPORT queue=$QUEUE_ID items=$COUNT"
+TERMS="$WORKTMP/terminals"
+python3 "$JOURNAL" read-terminals --store "$LQ" --queue-id "$QUEUE_ID" > "$TERMS"
+inbox=0
+while IFS= read -r -d '' t_item && IFS= read -r -d '' t_status && IFS= read -r -d '' t_detail; do
+  if [ -z "$t_item" ]; then
+    continue  # queue-level terminal; echoed below
+  fi
+  printf 'ITEM %s %s %s\n' "$t_item" "$t_status" "$t_detail"
+  case "$t_status" in
+    LANDED) ;;
+    *)
+      inbox=$((inbox + 1))
+      printf 'HUMAN-INBOX: %s %s unblock: %s\n' "$t_item" "$t_status" "$t_detail"
+      ;;
+  esac
+done < "$TERMS"
+if [ "$inbox" -eq 0 ]; then
+  echo "HUMAN-INBOX: empty"
+fi
+
+if [ -n "$QUEUE_TERMINAL" ]; then
+  echo "$QUEUE_TERMINAL"
+  case "$QUEUE_TERMINAL" in
+    QUEUE-DRAINED:*) exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
+exit 0
