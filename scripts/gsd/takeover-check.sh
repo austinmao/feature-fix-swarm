@@ -6,6 +6,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 GP="$SCRIPT_ROOT/lib/gates.py"
 RUN_ID="${GSD_RUN_ID:-}"; MODE=text; LIST=0; LOCK=""
+ORIGINAL_ARGS=("$@")
 usage() { echo "usage: takeover-check.sh --run-id spec-NNN [--json] | --list" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -20,7 +21,16 @@ done
 
 # Store selection is configuration: producer and consumer inherit one
 # legitimate GATES_STORE and derive all authority from that same resolver.
-gate() { python3 "$GP" "$@"; }
+gate() {
+  case "$1" in
+    takeover-state|takeover-expectation|check-preflight|check-grant)
+      if [ -n "${TAKEOVER_STORE_DIR_FD:-}" ] && [ -n "${TAKEOVER_EVIDENCE_FD:-}" ]; then
+        python3 "$GP" "$@" --store-dir-fd "$TAKEOVER_STORE_DIR_FD" --store-fd "$TAKEOVER_EVIDENCE_FD"
+        return
+      fi ;;
+  esac
+  python3 "$GP" "$@"
+}
 sq() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"; }
 remedy_for() {
   case "$1" in
@@ -49,17 +59,13 @@ PY
 
 CANON_STORE="$(gate store-path 2>/dev/null)" || refuse decoy-store
 STORE_DIR="$(gate store-dir 2>/dev/null)" || refuse decoy-store
-DIR="$STORE_DIR/takeover"
+if [ "${TAKEOVER_TRANSACTION:-}" != 1 ]; then
+  exec python3 "$SCRIPT_ROOT/scripts/gsd/takeover-transaction.py" \
+    --script "$0" --store "$CANON_STORE" --run-id "$RUN_ID" -- "${ORIGINAL_ARGS[@]}" || refuse record-mismatch
+fi
 if [ "$LIST" -eq 1 ]; then
-  [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 0
-  python3 - "$DIR" <<'PY'
-import glob,json,os,sys,time
-for path in sorted(glob.glob(os.path.join(sys.argv[1],'spec-*.json'))):
- try:
-  if os.path.islink(path) or not os.path.isfile(path): continue
-  d=json.load(open(path)); print('%s\t%s\t%s\t%s'%(d['ids']['run_id'],int(time.time()-d['created_at']),d['git_state'].get('branch',''),d.get('resume',{}).get('command','').replace('\n',' ').replace('\r',' ')))
- except (OSError,ValueError,KeyError,TypeError): pass
-PY
+  [ -n "${TAKEOVER_DIR_FD:-}" ] || exit 0
+  python3 "$SCRIPT_ROOT/scripts/gsd/takeover-io.py" list --takeover-fd "$TAKEOVER_DIR_FD"
   exit 0
 fi
 expectation_present() {
@@ -81,28 +87,24 @@ PY
   fi
   exit 0
 }
-if [ ! -d "$DIR" ] || [ -L "$DIR" ]; then
+if [ -z "${TAKEOVER_DIR_FD:-}" ]; then
   # With no record, an expectation bit is the only ledger fact that is
   # relevant. Do not start the live authority catalog on this no-op branch.
   none_or_missing
 fi
-RECORD="$DIR/$RUN_ID.json"
-if [ ! -e "$RECORD" ]; then
+if [ -z "${TAKEOVER_RECORD_FD:-}" ]; then
   none_or_missing
 fi
 
 # Validate exactly the bytes opened once. O_NONBLOCK makes FIFO/device input
 # bounded; O_NOFOLLOW and fstat close both symlink and type confusion paths.
-META="$(python3 - "$RECORD" "$CANON_STORE" "$RUN_ID" <<'PY'
+META="$(python3 - "$TAKEOVER_RECORD_FD" "$CANON_STORE" "$RUN_ID" <<'PY'
 import hashlib,json,os,stat,sys
-p,store,rid=sys.argv[1:]
+fd,store,rid=sys.argv[1:]
 try:
- fd=os.open(p,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
- try:
-  st=os.fstat(fd)
-  if not stat.S_ISREG(st.st_mode) or st.st_size>1024*1024 or st.st_uid!=os.getuid(): raise ValueError()
-  raw=os.read(fd,1024*1024+1)
- finally: os.close(fd)
+ fd=int(fd); st=os.fstat(fd)
+ if not stat.S_ISREG(st.st_mode) or st.st_size>1024*1024 or st.st_uid!=os.getuid(): raise ValueError()
+ os.lseek(fd,0,os.SEEK_SET); raw=os.read(fd,1024*1024+1)
  if len(raw)>1024*1024: raise ValueError()
  d=json.loads(raw.decode('utf-8'))
  if not isinstance(d,dict) or d.get('ids',{}).get('run_id')!=rid: raise ValueError()
@@ -120,6 +122,16 @@ PY
 )"
 [ "$META" = DECOY ] && refuse decoy-store
 [ "$META" != BAD ] || refuse decoy-store
+
+record_entry_matches() {
+  python3 - "$TAKEOVER_DIR_FD" "$TAKEOVER_RECORD_NAME" "$TAKEOVER_RECORD_FD" <<'PY'
+import os,sys
+try:
+ entry=os.stat(sys.argv[2],dir_fd=int(sys.argv[1]),follow_symlinks=False); opened=os.fstat(int(sys.argv[3]))
+ raise SystemExit(0 if (entry.st_dev,entry.st_ino)==(opened.st_dev,opened.st_ino) else 1)
+except OSError: raise SystemExit(1)
+PY
+}
 
 # O_EXCL ownership is held through all subsequent checks and record consume.
 LOCK="$STORE_DIR/.takeover-check.lock"
@@ -164,6 +176,7 @@ PY
 
 # A bound record unlocks one and only one live-state read. All authority facts
 # below are taken from this JSON snapshot; no later check reopens the ledger.
+record_entry_matches || refuse record-mismatch
 state="$(gate takeover-state "$RUN_ID" 2>/dev/null)" || refuse preflight-stale
 clock_and_wip="$(TAKEOVER_NOW="${TAKEOVER_NOW:-}" python3 - "$META" "$state" 2>&1 <<'PY'
 import hashlib,json,os,subprocess,sys,time
@@ -250,7 +263,9 @@ while IFS= read -r action; do [ -z "$action" ] || refuse "poison/$action"; done 
 
 # Atomic consume under the held lock makes a second normal contender observe
 # missing-record rather than a second success.
-mv "$RECORD" "$DIR/$RUN_ID.consumed.$(date +%s).json" || refuse missing-record
+python3 "$SCRIPT_ROOT/scripts/gsd/takeover-io.py" consume \
+  --takeover-fd "$TAKEOVER_DIR_FD" --record-fd "$TAKEOVER_RECORD_FD" \
+  --name "$TAKEOVER_RECORD_NAME" >/dev/null || refuse record-mismatch
 if [ "$MODE" = json ]; then
   python3 - "$RUN_ID" <<'PY'
 import json,sys

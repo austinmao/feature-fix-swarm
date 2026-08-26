@@ -70,6 +70,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import re
 import subprocess
 import sys
@@ -99,11 +100,52 @@ EXIT0_PAT = re.compile(r"\bexit 0\b|sys\.exit\(0\)|process\.exit\(0\)")
 
 # ── Stream A: completion authority ───────────────────────────────────────────
 
+_PINNED_STORE_DATA: dict | None = None
+
+
 def _load_store(store: Path) -> dict:
+    """Load the normal store, or the per-process descriptor-pinned snapshot."""
+    if _PINNED_STORE_DATA is not None:
+        return _PINNED_STORE_DATA
     if not Path(store).exists():
         return {}
     with open(store) as f:
         return json.load(f)
+
+
+def _load_pinned_store(store_dir_fd: int, store_fd: int) -> dict:
+    """Read evidence from inherited descriptors after entry identity recheck.
+
+    This deliberately does not use a pathname fallback: a renamed store or a
+    replaced evidence entry is an authority mismatch, not a reason to look up
+    a newer ledger.
+    """
+    try:
+        directory = os.fstat(store_dir_fd)
+        evidence = os.fstat(store_fd)
+        entry = os.stat("evidence.json", dir_fd=store_dir_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError("TAKEOVER-FD-MISMATCH") from exc
+    if (not stat.S_ISDIR(directory.st_mode) or not stat.S_ISREG(evidence.st_mode)
+            or directory.st_uid != os.getuid() or evidence.st_uid != os.getuid()
+            or evidence.st_size > 1024 * 1024 or entry.st_dev != evidence.st_dev
+            or entry.st_ino != evidence.st_ino):
+        raise ValueError("TAKEOVER-FD-MISMATCH")
+    duplicate = os.dup(store_fd)
+    try:
+        os.lseek(duplicate, 0, os.SEEK_SET)
+        raw = os.read(duplicate, 1024 * 1024 + 1)
+    finally:
+        os.close(duplicate)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("TAKEOVER-FD-MISMATCH")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("TAKEOVER-FD-MISMATCH") from exc
+    if not isinstance(data, dict):
+        raise ValueError("TAKEOVER-FD-MISMATCH")
+    return data
 
 
 def _save_store(store: Path, data: dict) -> None:
@@ -2743,7 +2785,41 @@ def main(argv: list[str]) -> int:
             return 2
         print(_resolved_store_path())
         return 0
-    store = _store_path()
+    # Descriptor flags are a deliberately narrow read-only interface for the
+    # takeover wall.  They are rejected everywhere else so an inherited fd can
+    # never become authority for a mutation command.
+    pinned_commands = {"takeover-state", "takeover-expectation", "check-preflight", "check-grant"}
+    pinned_values: dict[str, int] = {}
+    cleaned: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("--store-dir-fd", "--store-fd"):
+            if i + 1 >= len(args):
+                print(f"{args[i]} requires a value", file=sys.stderr)
+                return 2
+            try:
+                pinned_values[args[i]] = int(args[i + 1])
+            except ValueError:
+                print("TAKEOVER-FD-MISMATCH", file=sys.stderr)
+                return 1
+            i += 2
+        else:
+            cleaned.append(args[i])
+            i += 1
+    if pinned_values:
+        if cmd not in pinned_commands or set(pinned_values) != {"--store-dir-fd", "--store-fd"}:
+            print("TAKEOVER-FD-FLAGS-REJECTED", file=sys.stderr)
+            return 2
+        global _PINNED_STORE_DATA
+        try:
+            _PINNED_STORE_DATA = _load_pinned_store(pinned_values["--store-dir-fd"], pinned_values["--store-fd"])
+        except ValueError as exc:
+            print(f"TAKEOVER-STATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        args = cleaned
+        store = Path("/descriptor-pinned-evidence.json")
+    else:
+        store = _store_path()
     if cmd == "takeover-state":
         if len(args) != 1:
             print("usage: gates.py takeover-state <run-id>", file=sys.stderr)
