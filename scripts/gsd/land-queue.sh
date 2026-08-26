@@ -52,13 +52,6 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$RUN_ID" ] || RUN_ID="land-queue-$(date +%s)-$$"
 
-if [ -n "$RESUME" ]; then
-  # ponytail: resume reconciliation ships with the plan 02-02 failure
-  # machine; refuse loudly rather than re-execute anything blind.
-  echo "RESUME-UNAVAILABLE: --resume arrives with the plan 02-02 failure machine" >&2
-  exit 2
-fi
-
 STORE_DIR="$(python3 "$GATES" store-dir)"
 LQ="$STORE_DIR/land-queue"
 mkdir -p "$LQ"
@@ -81,12 +74,91 @@ cleanup() {
   python3 "$JOURNAL" lock-release --store "$LQ" --pid $$ >/dev/null 2>&1 || true
   rm -rf "$WORKTMP"
 }
-trap cleanup EXIT INT TERM
+on_signal() { # phase-01 signal pattern: owner-only release, then terminate
+  # immediately with exit 128+signum — no journal/effect/report code runs
+  # after a signal-path release.
+  local signum="$1"
+  trap - EXIT
+  cleanup
+  exit $((128 + signum))
+}
+trap cleanup EXIT
+trap 'on_signal 1' HUP
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
 
 QUEUE_ID="$RUN_ID"
-journal() { python3 "$JOURNAL" append --store "$LQ" --queue-id "$QUEUE_ID" "$@"; }
+# EDGE-006: any journal validation/write failure is immediate infrastructure
+# QUEUE-ERROR:store — it bypasses classification and stops the queue before
+# another effect runs.
+journal() {
+  python3 "$JOURNAL" append --store "$LQ" --queue-id "$QUEUE_ID" "$@" \
+    || { echo "QUEUE-ERROR:store"; exit 70; }
+}
 
-python3 "$JOURNAL" init --store "$LQ" --queue-id "$QUEUE_ID" --run-id "$RUN_ID"
+emit_report() { # ITEM/HUMAN-INBOX rows from the journal's terminal events
+  local terms inbox t_item t_status t_detail
+  terms="$WORKTMP/terminals"
+  python3 "$JOURNAL" read-terminals --store "$LQ" --queue-id "$QUEUE_ID" > "$terms" \
+    || { echo "QUEUE-ERROR:store"; exit 70; }
+  inbox=0
+  while IFS= read -r -d '' t_item && IFS= read -r -d '' t_status && IFS= read -r -d '' t_detail; do
+    if [ -z "$t_item" ]; then
+      continue  # queue-level terminal; echoed by the caller
+    fi
+    printf 'ITEM %s %s %s\n' "$t_item" "$t_status" "$t_detail"
+    case "$t_status" in
+      LANDED) ;;
+      *)
+        inbox=$((inbox + 1))
+        printf 'HUMAN-INBOX: %s %s unblock: %s\n' "$t_item" "$t_status" "$t_detail"
+        ;;
+    esac
+  done < "$terms"
+  if [ "$inbox" -eq 0 ]; then
+    echo "HUMAN-INBOX: empty"
+  fi
+}
+
+resume_reconcile() {
+  # REQ-208 / 8c88ebfa (01-08 two-phase intent): before any new effect, scan
+  # for intents lacking results and classify each against merge authority by
+  # its recorded idempotency key.  A satisfied key is NEVER re-executed.
+  local dang item step pr head merge_sha errf
+  dang="$WORKTMP/dangling"
+  python3 "$JOURNAL" read-dangling --store "$LQ" --queue-id "$QUEUE_ID" > "$dang" \
+    || { echo "QUEUE-ERROR:store"; exit 70; }
+  while IFS= read -r -d '' item && IFS= read -r -d '' step \
+      && IFS= read -r -d '' pr && IFS= read -r -d '' head; do
+    if [ "$step" = "merge" ] && [ -n "$pr" ]; then
+      errf="$WORKTMP/err-resume"
+      merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid 2>"$errf")" || merge_sha=""
+      if [ -n "$merge_sha" ]; then
+        # effect-already-happened: adopt the authority's outcome — no re-merge.
+        journal --kind result --step merge --item "$item" --status reconciled
+        journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
+        continue
+      fi
+    fi
+    # effect-never-ran (or no key): typed completion plus a Human-inbox
+    # terminal.  ponytail: v1 resume reconciles the journal; it does not
+    # re-drive the lifecycle — re-running the queue picks the item up fresh.
+    journal --kind result --step "$step" --item "$item" --status never-ran
+    journal --kind terminal --step terminal --item "$item" --status "BLOCKED:resume-incomplete" \
+      --detail "re-run land-queue.sh for $item"
+  done < "$dang"
+}
+
+if [ -n "$RESUME" ]; then
+  QUEUE_ID="$RESUME"
+  resume_reconcile
+  echo "LAND-QUEUE REPORT queue=$QUEUE_ID resumed"
+  emit_report
+  exit 0
+fi
+
+python3 "$JOURNAL" init --store "$LQ" --queue-id "$QUEUE_ID" --run-id "$RUN_ID" \
+  || { echo "QUEUE-ERROR:store"; exit 70; }
 
 QUEUE_TERMINAL=""
 
@@ -430,7 +502,7 @@ land_one_item() {
   fi
   journal --kind result --step grant --item "$branch" --status ok
 
-  journal --kind intent --step merge --item "$branch" --detail "$reviewed"
+  journal --kind intent --step merge --item "$branch" --pr "$pr" --head "$reviewed"
   errf="$WORKTMP/err-merge-$IDX"
   gh pr merge "$pr" --squash --match-head-commit "$reviewed" 2>"$errf"
   eff_rc=$?
@@ -507,25 +579,7 @@ done
 
 # ── report ────────────────────────────────────────────────────────────────
 echo "LAND-QUEUE REPORT queue=$QUEUE_ID items=$COUNT"
-TERMS="$WORKTMP/terminals"
-python3 "$JOURNAL" read-terminals --store "$LQ" --queue-id "$QUEUE_ID" > "$TERMS"
-inbox=0
-while IFS= read -r -d '' t_item && IFS= read -r -d '' t_status && IFS= read -r -d '' t_detail; do
-  if [ -z "$t_item" ]; then
-    continue  # queue-level terminal; echoed below
-  fi
-  printf 'ITEM %s %s %s\n' "$t_item" "$t_status" "$t_detail"
-  case "$t_status" in
-    LANDED) ;;
-    *)
-      inbox=$((inbox + 1))
-      printf 'HUMAN-INBOX: %s %s unblock: %s\n' "$t_item" "$t_status" "$t_detail"
-      ;;
-  esac
-done < "$TERMS"
-if [ "$inbox" -eq 0 ]; then
-  echo "HUMAN-INBOX: empty"
-fi
+emit_report
 
 if [ -n "$QUEUE_TERMINAL" ]; then
   echo "$QUEUE_TERMINAL"

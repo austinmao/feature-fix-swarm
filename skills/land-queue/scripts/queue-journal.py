@@ -22,6 +22,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,13 @@ SCHEMA = 1
 MAX_FIELD = 4096
 MAX_JOURNAL_BYTES = 4 * 1024 * 1024
 KINDS = frozenset({"intent", "result", "terminal"})
+# Closed action vocabulary (REQ-213): every journaled step names one of the
+# queue's enumerated lifecycle actions — nothing free-form is ever persisted.
+STEPS = frozenset({"collect", "precheck", "rebase", "implement", "push",
+                   "review", "ci", "precheck-merge", "grant", "merge",
+                   "finalize", "terminal"})
+PR_RE = re.compile(r"^[0-9]{1,9}$")
+OID_RE = re.compile(r"^[0-9a-f]{40}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _IO = None
@@ -56,8 +64,16 @@ def _io():
 
 def _store_dir(store: str) -> Path:
     path = Path(store)
-    if path.is_symlink() or not path.is_dir():
+    try:
+        st = os.lstat(path)
+    except OSError:
         raise JournalError(f"QUEUE-ERROR:store unsafe store directory {store}")
+    # retro_state-patterned trust checks: a real directory, owned by us (or
+    # root), never a symlink, never group/world-writable.
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise JournalError(f"QUEUE-ERROR:store unsafe store directory {store}")
+    if st.st_uid not in (os.getuid(), 0) or st.st_mode & 0o022:
+        raise JournalError(f"QUEUE-ERROR:store untrusted store directory {store}")
     return path
 
 
@@ -69,9 +85,29 @@ def _doc_path(store: str, queue_id: str) -> Path:
 
 def _load(path: Path) -> dict:
     try:
-        raw = path.read_bytes()
+        st = os.lstat(path)
     except FileNotFoundError:
         raise JournalError(f"QUEUE-ERROR:store journal missing: {path.name}")
+    except OSError as exc:
+        raise JournalError(f"QUEUE-ERROR:store unreadable journal: {exc}")
+    if stat.S_ISLNK(st.st_mode):
+        raise JournalError(f"QUEUE-ERROR:store symlinked journal: {path.name}")
+    if not stat.S_ISREG(st.st_mode):
+        raise JournalError(f"QUEUE-ERROR:store non-regular journal: {path.name}")
+    if st.st_uid != os.getuid():
+        raise JournalError(f"QUEUE-ERROR:store foreign-owned journal: {path.name}")
+    if st.st_size > MAX_JOURNAL_BYTES:
+        raise JournalError("QUEUE-ERROR:store oversized journal")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise JournalError(f"QUEUE-ERROR:store unreadable journal: {exc}")
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise JournalError(
+                    f"QUEUE-ERROR:store non-regular journal: {path.name}")
+            raw = handle.read(MAX_JOURNAL_BYTES + 1)
     except OSError as exc:
         raise JournalError(f"QUEUE-ERROR:store unreadable journal: {exc}")
     if len(raw) > MAX_JOURNAL_BYTES:
@@ -113,7 +149,7 @@ def _save(path: Path, doc: dict) -> None:
 
 def _field(value, name: str) -> str:
     text = "" if value is None else str(value)
-    if len(text) > MAX_FIELD or "\0" in text:
+    if len(text) > MAX_FIELD or any(ch in text for ch in ("\0", "\r", "\n")):
         raise JournalError(f"QUEUE-ERROR:store hostile or oversized {name} field")
     return text
 
@@ -152,6 +188,8 @@ def cmd_init(ns) -> int:
 def cmd_append(ns) -> int:
     if ns.kind not in KINDS:
         raise JournalError("QUEUE-ERROR:store invalid event kind")
+    if ns.step not in STEPS:
+        raise JournalError("QUEUE-ERROR:store unknown step action")
     path = _doc_path(ns.store, ns.queue_id)
     doc = _load(path)
     event = {"seq": len(doc["events"]) + 1, "ts": int(time.time()),
@@ -162,6 +200,22 @@ def cmd_append(ns) -> int:
         event["status"] = _field(ns.status, "status")
     if ns.detail is not None:
         event["detail"] = _field(ns.detail, "detail")
+    # REQ-213 / 8c88ebfa: the effect's idempotency key (PR number + head OID)
+    # lives in the intent itself, validated closed, before the effect runs.
+    if ns.pr is not None or ns.head is not None:
+        if ns.pr is None or ns.head is None:
+            raise JournalError(
+                "QUEUE-ERROR:store idempotency key requires both --pr and --head")
+        if not PR_RE.match(ns.pr):
+            raise JournalError("QUEUE-ERROR:store malformed pr number")
+        if not OID_RE.match(ns.head):
+            raise JournalError("QUEUE-ERROR:store malformed head oid")
+        event["pr"] = int(ns.pr)
+        event["head"] = ns.head
+        event["key"] = f"pr-{ns.pr}@{ns.head}"
+    if ns.kind == "intent" and ns.step == "merge" and "key" not in event:
+        raise JournalError(
+            "QUEUE-ERROR:store merge intent requires an idempotency key")
     doc["events"].append(event)
     _save(path, doc)
     return 0
@@ -170,6 +224,32 @@ def cmd_append(ns) -> int:
 def cmd_events(ns) -> int:
     doc = _load(_doc_path(ns.store, ns.queue_id))
     print(json.dumps(doc, sort_keys=True))
+    return 0
+
+
+def cmd_read_dangling(ns) -> int:
+    """NUL-emit item, step, pr, head for each intent lacking its result.
+
+    Startup recovery (01-08 two-phase intent): the runner resolves each
+    record against merge authority by its idempotency key and never
+    re-executes an effect whose key is already satisfied.
+    """
+    doc = _load(_doc_path(ns.store, ns.queue_id))
+    events = doc["events"]
+    resolved = {(e.get("item"), e.get("step"))
+                for e in events if e.get("kind") == "result"}
+    terminal_items = {e.get("item")
+                      for e in events if e.get("kind") == "terminal"}
+    for event in events:
+        if event.get("kind") != "intent" or not event.get("item"):
+            continue
+        if (event.get("item"), event.get("step")) in resolved:
+            continue
+        if event.get("item") in terminal_items:
+            continue
+        for value in (event.get("item", ""), event.get("step", ""),
+                      event.get("pr", ""), event.get("head", "")):
+            sys.stdout.write(str(value) + "\0")
     return 0
 
 
@@ -223,7 +303,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="queue-journal.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    for name in ("init", "append", "events", "read-terminals"):
+    for name in ("init", "append", "events", "read-terminals", "read-dangling"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
         p.add_argument("--queue-id", required=True)
@@ -235,6 +315,8 @@ def main(argv=None) -> int:
             p.add_argument("--item")
             p.add_argument("--status")
             p.add_argument("--detail")
+            p.add_argument("--pr")
+            p.add_argument("--head")
     for name in ("lock-acquire", "lock-release"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
@@ -245,6 +327,7 @@ def main(argv=None) -> int:
     ns = parser.parse_args(argv)
     handlers = {"init": cmd_init, "append": cmd_append, "events": cmd_events,
                 "read-terminals": cmd_read_terminals,
+                "read-dangling": cmd_read_dangling,
                 "lock-acquire": cmd_lock_acquire, "lock-release": cmd_lock_release}
     try:
         return handlers[ns.cmd](ns)
