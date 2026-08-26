@@ -219,3 +219,39 @@ PY
   [ "$(cat "$store_dir/takeover/spec-006.json")" = old-json ]
   [ "$(cat "$BATS_TEST_TMPDIR/external")" = external ]
 }
+
+@test "writer JSON symlink preserves Markdown sibling and external target" {
+  local store_dir="$(dirname "$STORE")"
+  mkdir -p "$store_dir/takeover"
+  printf old-markdown > "$store_dir/takeover/spec-006.md"
+  printf external > "$BATS_TEST_TMPDIR/external-json"
+  ln -sf "$BATS_TEST_TMPDIR/external-json" "$store_dir/takeover/spec-006.json"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -ne 0 ]
+  [ "$(cat "$store_dir/takeover/spec-006.md")" = old-markdown ]
+  [ "$(cat "$BATS_TEST_TMPDIR/external-json")" = external ]
+}
+
+@test "writer fault retains expectation and stale Markdown is generation-detectable" {
+  local store_dir="$(dirname "$STORE")"
+  mkdir -p "$store_dir/takeover"
+  printf '# Takeover record\n\ngeneration: old\n' > "$store_dir/takeover/spec-006.md"
+  run env TAKEOVER_FAULT_AFTER_JSON=1 GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -ne 0 ]
+  [ -f "$store_dir/takeover/spec-006.json" ]
+  [ "$(cat "$store_dir/takeover/spec-006.md")" = $'# Takeover record\n\ngeneration: old' ]
+  run python3 - "$STORE" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['_autonomy']['spec-006']['takeover_expected'] is True
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "writer produces regular 0600 artifact siblings" {
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  local store_dir="$(dirname "$STORE")/takeover"
+  [ "$(stat -f '%Lp' "$store_dir/spec-006.json")" = 600 ]
+  [ "$(stat -f '%Lp' "$store_dir/spec-006.md")" = 600 ]
+  [ -z "$(find "$store_dir" -name '.spec-006.*.tmp' -print -quit)" ]
+}
