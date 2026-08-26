@@ -3,7 +3,6 @@
 set -uo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 GP="$SCRIPT_ROOT/lib/gates.py"
 RUN_ID="${GSD_RUN_ID:-}"; MODE=text; LIST=0
 ORIGINAL_ARGS=("$@")
@@ -215,13 +214,37 @@ PY
 }
 trap cleanup EXIT HUP INT TERM
 
-[ ! -d "$ROOT/.git/rebase-merge" ] && [ ! -d "$ROOT/.git/rebase-apply" ] || refuse mid-rebase
-branch="$(git branch --show-current 2>/dev/null || true)"; head="$(git rev-parse HEAD 2>/dev/null || true)"
+# Rebase state comes exclusively from Git-resolved administrative paths so
+# ordinary and linked worktrees are both exact; query errors fail closed.
+REBASE_MERGE="$(git rev-parse --git-path rebase-merge 2>/dev/null)" || refuse record-mismatch
+REBASE_APPLY="$(git rev-parse --git-path rebase-apply 2>/dev/null)" || refuse record-mismatch
+[ ! -d "$REBASE_MERGE" ] && [ ! -d "$REBASE_APPLY" ] || refuse mid-rebase
+branch="$(git branch --show-current 2>/dev/null)" || refuse record-mismatch
+head="$(git rev-parse "HEAD^{commit}" 2>/dev/null)" || refuse record-mismatch
+# The exact recorded full HEAD is always compared, including a recorded
+# detached state (empty branch), which still pins the exact commit.
 if ! python3 - "$META" "$branch" "$head" <<'PY'
 import json,sys
-d=json.loads(sys.argv[1]); g=d['git']; raise SystemExit(0 if (not g.get('branch') or (g.get('branch')==sys.argv[2] and g.get('head')==sys.argv[3])) else 1)
+g=json.loads(sys.argv[1])['git']
+recorded_branch=g.get('branch') or ''
+recorded_head=g.get('head') or ''
+current_branch,current_head=sys.argv[2],sys.argv[3]
+if recorded_branch:
+    ok = current_branch == recorded_branch and current_head == recorded_head
+else:
+    ok = current_branch == '' and current_head == recorded_head
+raise SystemExit(0 if ok else 1)
 PY
 then refuse branch-gone; fi
+recorded_branch="$(python3 - "$META" <<'PY'
+import json,sys; print(json.loads(sys.argv[1])['git'].get('branch') or '')
+PY
+)"
+# A named recorded branch and upstream validate against local refs only; the
+# wall never fetches (EDGE-002).
+if [ -n "$recorded_branch" ]; then
+  git rev-parse --verify --quiet "refs/heads/$recorded_branch" >/dev/null 2>&1 || refuse branch-gone
+fi
 upstream="$(python3 - "$META" <<'PY'
 import json,sys; print(json.loads(sys.argv[1])['git'].get('upstream',''))
 PY
@@ -287,7 +310,17 @@ try: record_digest=hashlib.sha256('\0'.join(sorted(record_dirty)).encode('utf-8'
 except UnicodeEncodeError: raise SystemExit('record-mismatch')
 if record_digest != digest: raise SystemExit('record-digest')
 if live_digest != digest: raise SystemExit('dirty-worktree')
-if now-created >= 259200: raise SystemExit('stale-record')
+# EDGE-001 precision backstops: a forged future-leaning created_at cannot buy
+# freshness past the record artifact mtime or the ledger grant anchors.
+anchors=[created]
+try: anchors.append(int(os.fstat(int(os.environ['TAKEOVER_RECORD_FD'])).st_mtime))
+except (KeyError,ValueError,OSError): raise SystemExit('record-mismatch')
+for row in state.get('grants',[]):
+    if isinstance(row,dict):
+        granted=row.get('granted_at')
+        if isinstance(granted,(int,float)) and not isinstance(granted,bool):
+            anchors.append(int(granted))
+if now-min(anchors) >= 259200: raise SystemExit('stale-record')
 print('ok')
 PY
 )" || case "$clock_and_wip" in
