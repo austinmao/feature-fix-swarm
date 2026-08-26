@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # Wave-0 lifecycle contract.  Real local Git only; no first-party PATH shadows.
-# Plan 02-01 completed the [PATH-003] placeholder into its GREEN-side
-# assertions; every other selector stays a typed RED contract for 02-02/02-03.
+# Plan 02-01 completed [PATH-003]; plan 02-02 completed [RESUME], [RED-ITEM],
+# [SYSTEMIC], and [EDGE-007] into GREEN-side assertions; every other selector
+# stays a typed RED contract for 02-03.
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; QUEUE="$ROOT/scripts/gsd/land-queue.sh"
@@ -16,6 +17,16 @@ setup() {
 }
 
 red() { local tag="$1"; shift; test -f "$LINKED/.git"; git -C "$WORK" diff --name-only main...spec/queue | grep -qx item.txt; printf 'RED-EXPECTED: [%s] %s\n' "$tag" "$*" >&2; [ -f "$QUEUE" ] && bash "$QUEUE" --contract-probe; return 1; }
+
+stub_env() {
+  MOCK_BIN="$BATS_TEST_TMPDIR/boundaries"; mkdir -p "$MOCK_BIN"
+  export CALL_LOG="$BATS_TEST_TMPDIR/calls"; : > "$CALL_LOG"
+  export EVENTS="$BATS_TEST_TMPDIR/events"; : > "$EVENTS"
+  export GH_ORIGIN="$ORIGIN"
+  export GH_STATE="$BATS_TEST_TMPDIR/gh-state"; mkdir -p "$GH_STATE"
+  export GATES_STORE="$BATS_TEST_TMPDIR/gates/evidence.json"; mkdir -p "$BATS_TEST_TMPDIR/gates"
+}
+
 
 @test "[PATH-003] serial happy lifecycle drains ordered real-Git items" {
   if [ ! -f "$QUEUE" ]; then
@@ -200,12 +211,238 @@ EOF2
   [ ! -e "$BATS_TEST_TMPDIR/pwned" ]
 }
 @test "[PATH-004] red item continues then systemic class aborts and materializes skipped" { red PATH-004 "per-item terminal and systemic continuation contract absent"; }
-@test "[RESUME] crash after merge reconciles without second merge" { red RESUME "journal authority resume reconciliation absent"; }
+@test "[RESUME] crash after merge reconciles without second merge" {
+  test -f "$LINKED/.git"
+  stub_env
+  git checkout -qb spec/item-a main
+  echo alpha > a.txt; git add -- a.txt; git commit -qm item-a; git push -q origin spec/item-a
+  git checkout -qb spec/item-b main
+  echo beta > b.txt; git add -- b.txt; git commit -qm item-b; git push -q origin spec/item-b
+  git checkout -q main
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  OID_B="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-b)"
+
+  LQ="$BATS_TEST_TMPDIR/gates/land-queue"; mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  RUN_ID=resume1
+  python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID"
+  # Crash simulation (REQ-208 / 8c88ebfa): two merge intents journaled with
+  # their idempotency keys, results never observed.  item-a's merge actually
+  # happened at the authority; item-b's never ran.
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step merge --item spec/item-a --pr 301 --head "$OID_A"
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step merge --item spec/item-b --pr 302 --head "$OID_B"
+  MERGE_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)"
+  printf '%s\n' "$MERGE_A" > "$GH_STATE/merge-301"
+  : > "$GH_STATE/merge-302"
+
+  cat > "$MOCK_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' gh "$@" >> "${CALL_LOG:?}"
+printf 'gh %s\n' "$*" >> "${EVENTS:?}"
+case "${1:-} ${2:-}" in
+  "pr view")
+    target="$3"; shift 3
+    [ "$*" = "--json mergeCommit -q .mergeCommit.oid" ] || { echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64; }
+    cat "${GH_STATE:?}/merge-$target" ;;
+  "pr merge")
+    echo "SECOND-MERGE-FORBIDDEN" >&2; exit 97 ;;
+  *) echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
+esac
+STUB
+  for b in codex claude feature-implement assert-merged.sh run-finalizer.sh; do
+    printf '#!/usr/bin/env bash\nprintf "%%s\\0" "$0" "$@" >> "${CALL_LOG:?}"\nexit 64\n' > "$MOCK_BIN/$b"
+  done
+  chmod +x "$MOCK_BIN"/*
+
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" --resume "$RUN_ID"
+  [ "$status" -eq 0 ]
+
+  # Reconciled against merge authority: NO second merge attempt anywhere.
+  ! grep -q "gh pr merge" "$EVENTS"
+  grep -q "ITEM spec/item-a LANDED $MERGE_A" <<<"$output"
+  grep -q "ITEM spec/item-b BLOCKED:resume-incomplete" <<<"$output"
+
+  python3 - "$LQ/$RUN_ID.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+ev = doc["events"]
+a = [f'{e["kind"]}:{e["step"]}:{e.get("status","")}' for e in ev if e.get("item") == "spec/item-a"]
+assert "result:merge:reconciled" in a, a
+assert a[-1].startswith("terminal:terminal:LANDED"), a
+b = [f'{e["kind"]}:{e["step"]}:{e.get("status","")}' for e in ev if e.get("item") == "spec/item-b"]
+assert "result:merge:never-ran" in b, b
+# append-only: the crashed intents are still present and ordered
+seqs = [e["seq"] for e in ev]
+assert seqs == sorted(seqs), seqs
+assert [e["kind"] for e in ev].count("intent") == 2
+PYEOF
+  # The resume held and released the single-flight owner lock.
+  [ ! -f "$LQ/queue.lock" ]
+}
 @test "[EDGE-005] item-start precheck recognizes external landing" { red EDGE-005 "item-start authority recheck absent"; }
-@test "[EDGE-007] parallel option refuses before lane launch" { red EDGE-007 "PARALLEL-UNSUPPORTED:v1-serial-only absent"; }
+@test "[EDGE-007] parallel option refuses before lane launch" {
+  test -f "$LINKED/.git"
+  stub_env
+  for b in gh codex claude feature-implement assert-merged.sh run-finalizer.sh; do
+    printf '#!/usr/bin/env bash\nprintf "%%s\\0" "$0" "$@" >> "${CALL_LOG:?}"\nexit 64\n' > "$MOCK_BIN/$b"
+    chmod +x "$MOCK_BIN/$b"
+  done
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --parallel 2 spec/queue
+  [ "$status" -eq 2 ]
+  [ "$output" = "PARALLEL-UNSUPPORTED:v1-serial-only" ]
+  [ ! -s "$CALL_LOG" ]
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --parallel=4 spec/queue
+  [ "$status" -eq 2 ]
+  [ "$output" = "PARALLEL-UNSUPPORTED:v1-serial-only" ]
+  [ ! -s "$CALL_LOG" ]
+}
 @test "[EDGE-010] quarantine requeues once after base advance" { red EDGE-010 "bounded quarantine requeue absent"; }
-@test "[RED-ITEM] first dispatch follows rebase and autonomous implement" { red RED-ITEM "rebase then feature-implement ordering absent"; }
-@test "[SYSTEMIC] only enumerated consecutive classes circuit break" { red SYSTEMIC "systemic class table absent"; }
+@test "[RED-ITEM] first dispatch follows rebase and autonomous implement" {
+  test -f "$LINKED/.git"
+  git -C "$WORK" diff --name-only main...spec/queue | grep -qx item.txt
+  stub_env
+  # A dispatchable branch (spec/queue itself is held by the linked worktree).
+  git checkout -qb spec/item-a main
+  echo alpha > a.txt; git add -- a.txt; git commit -qm item-a; git push -q origin spec/item-a
+  git checkout -q main
+  cat > "$MOCK_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' gh "$@" >> "${CALL_LOG:?}"
+echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64
+STUB
+  cat > "$MOCK_BIN/feature-implement" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' feature-implement "$@" >> "${CALL_LOG:?}"
+printf 'implement %s\n' "$*" >> "${EVENTS:?}"
+echo "red item: unit tests failed in suite alpha" >&2
+exit 1
+STUB
+  cat > "$MOCK_BIN/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
+echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64
+STUB
+  chmod +x "$MOCK_BIN"/*
+
+  RUN_ID=reditem
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+
+  # The red item is a terminal item block, never a queue abort.
+  grep -q "ITEM spec/item-a BLOCKED:implement" <<<"$output"
+  ! grep -q "QUEUE-ABORTED" <<<"$output"
+
+  # Dispatch order: rebase intent+result precede the implement intent, and
+  # the implement child ran exactly once, autonomously.
+  grep -qx "implement spec/item-a --autonomous" "$EVENTS"
+  [ "$(grep -c '^implement ' "$EVENTS")" -eq 1 ]
+  python3 - "$BATS_TEST_TMPDIR/gates/land-queue/$RUN_ID.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+names = [f'{e["kind"]}:{e["step"]}' for e in doc["events"] if e.get("item") == "spec/item-a"]
+assert names.index("intent:rebase") < names.index("result:rebase") < names.index("intent:implement"), names
+assert "result:implement" in names, names
+term = [e for e in doc["events"] if e["kind"] == "terminal" and e.get("item") == "spec/item-a"]
+assert term and term[0]["status"] == "BLOCKED:implement", term
+PYEOF
+}
+@test "[SYSTEMIC] only enumerated consecutive classes circuit break" {
+  test -f "$LINKED/.git"
+  stub_env
+  git checkout -qb spec/item-a main
+  echo alpha > a.txt; git add -- a.txt; git commit -qm item-a; git push -q origin spec/item-a
+  git checkout -qb spec/item-b main
+  echo beta > b.txt; git add -- b.txt; git commit -qm item-b; git push -q origin spec/item-b
+  git checkout -qb spec/item-c main
+  echo gamma > c.txt; git add -- c.txt; git commit -qm item-c; git push -q origin spec/item-c
+  git checkout -q main
+
+  cat > "$MOCK_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' gh "$@" >> "${CALL_LOG:?}"
+printf 'gh %s\n' "$*" >> "${EVENTS:?}"
+case "${1:-} ${2:-}" in
+  "pr view")
+    target="$3"; shift 3
+    case "$* $target" in
+      "--json number -q .number spec/item-a") echo 201 ;;
+      "--json number -q .number spec/item-b")
+        # second systemic observation: the gh boundary is unauthenticated
+        echo "gh: Not logged in to any GitHub hosts" >&2
+        exit 1 ;;
+      "--json headRefOid -q .headRefOid 201")
+        git --git-dir "${GH_ORIGIN:?}" rev-parse refs/heads/spec/item-a ;;
+      *) echo "UNSTUBBED-BOUNDARY:view $target $*" >&2; exit 64 ;;
+    esac ;;
+  *) echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
+esac
+STUB
+  cat > "$MOCK_BIN/feature-implement" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' feature-implement "$@" >> "${CALL_LOG:?}"
+printf 'implement %s\n' "$*" >> "${EVENTS:?}"
+exit 0
+STUB
+  cat > "$MOCK_BIN/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
+printf 'codex %s\n' "$*" >> "${EVENTS:?}"
+# first systemic observation: the reviewer wall-clock times out (rc 124)
+exit 124
+STUB
+  chmod +x "$MOCK_BIN"/*
+
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id sysa spec/item-a spec/item-b spec/item-c
+  [ "$status" -eq 1 ]
+
+  # 6e4616bc stricter reading: two CONSECUTIVE enumerated systemic failures
+  # abort even across DIFFERENT classes (reviewer-unreachable then gh-auth).
+  grep -q "QUEUE-ABORTED:systemic:gh-auth" <<<"$output"
+  grep -q "ITEM spec/item-a BLOCKED:reviewer-unreachable" <<<"$output"
+  grep -q "ITEM spec/item-b BLOCKED:gh-auth" <<<"$output"
+  # The third item is never dispatched after the circuit breaks.
+  ! grep -q "implement spec/item-c" "$EVENTS"
+
+  # Item-local defect classes NEVER abort, however many items hit them.
+  cat > "$MOCK_BIN/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
+printf 'codex %s\n' "$*" >> "${EVENTS:?}"
+echo "2 blocking review findings" >&2
+exit 2
+STUB
+  cat > "$MOCK_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' gh "$@" >> "${CALL_LOG:?}"
+printf 'gh %s\n' "$*" >> "${EVENTS:?}"
+case "${1:-} ${2:-}" in
+  "pr view")
+    target="$3"; shift 3
+    case "$* $target" in
+      "--json number -q .number spec/item-a") echo 201 ;;
+      "--json number -q .number spec/item-b") echo 202 ;;
+      "--json headRefOid -q .headRefOid 201")
+        git --git-dir "${GH_ORIGIN:?}" rev-parse refs/heads/spec/item-a ;;
+      "--json headRefOid -q .headRefOid 202")
+        git --git-dir "${GH_ORIGIN:?}" rev-parse refs/heads/spec/item-b ;;
+      *) echo "UNSTUBBED-BOUNDARY:view $target $*" >&2; exit 64 ;;
+    esac ;;
+  *) echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
+esac
+STUB
+  chmod +x "$MOCK_BIN"/*
+  export GATES_STORE="$BATS_TEST_TMPDIR/gates2/evidence.json"; mkdir -p "$BATS_TEST_TMPDIR/gates2"
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id sysb spec/item-a spec/item-b
+  [ "$status" -eq 0 ]
+  ! grep -q "QUEUE-ABORTED" <<<"$output"
+  grep -q "ITEM spec/item-a BLOCKED:review" <<<"$output"
+  grep -q "ITEM spec/item-b BLOCKED:review" <<<"$output"
+}
 @test "[REVIEW] floor and zero reviewer modes bind degradation" { red REVIEW "cross-vendor degradation policy absent"; }
 @test "[CI] timeout shim requires literal 1200 and gh watch interval 10" { red CI "bounded CI watch contract absent"; }
 @test "[HEAD] merge pins review-time head and refuses drift" { red HEAD "review-time OID head drift refusal absent"; }
