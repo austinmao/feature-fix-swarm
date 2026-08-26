@@ -135,7 +135,7 @@ PY
 
 # O_EXCL ownership is held through all subsequent checks and record consume.
 LOCK="$STORE_DIR/.takeover-check.lock"
-if ! python3 - "$LOCK" "$RUN_ID" <<'PY'
+if [ "${TAKEOVER_LOCK_HELD:-}" != 1 ] && ! python3 - "$LOCK" "$RUN_ID" <<'PY'
 import json,os,sys,time
 p,r=sys.argv[1:]
 boot=open('/proc/sys/kernel/random/boot_id').read().strip() if os.path.exists('/proc/sys/kernel/random/boot_id') else 'unknown'
@@ -158,7 +158,19 @@ for _ in range(2):
 else: raise SystemExit(1)
 PY
 then refuse runner-live; fi
-cleanup() { [ -n "$LOCK" ] && rm -f "$LOCK"; }
+cleanup() {
+  if [ "${TAKEOVER_LOCK_HELD:-}" = 1 ]; then
+    python3 - "$TAKEOVER_STORE_DIR_FD" "$TAKEOVER_LOCK_DEV" "$TAKEOVER_LOCK_INO" <<'PY'
+import os,sys
+try:
+ st=os.stat('.takeover-check.lock',dir_fd=int(sys.argv[1]),follow_symlinks=False)
+ if (st.st_dev,st.st_ino)==(int(sys.argv[2]),int(sys.argv[3])): os.unlink('.takeover-check.lock',dir_fd=int(sys.argv[1]))
+except OSError: pass
+PY
+  else
+    [ -n "$LOCK" ] && rm -f "$LOCK"
+  fi
+}
 trap cleanup EXIT HUP INT TERM
 
 [ ! -d "$ROOT/.git/rebase-merge" ] && [ ! -d "$ROOT/.git/rebase-apply" ] || refuse mid-rebase

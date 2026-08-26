@@ -30,6 +30,7 @@ def main() -> int:
     if not ns.run_id.startswith("spec-") or "/" in ns.run_id:
         return 1
     store_fd = evidence_fd = takeover_fd = record_fd = None
+    owner_lock = None
     try:
         if not os.path.isdir(os.path.dirname(ns.store)):
             env = dict(os.environ)
@@ -56,10 +57,18 @@ def main() -> int:
         if takeover_fd is not None:
             env["TAKEOVER_DIR_FD"] = inheritable(takeover_fd)
         if record_fd is not None:
+            owner_lock = _IO.OwnerLock(store_fd, ns.run_id)
+            owner_lock.acquire()
             env["TAKEOVER_RECORD_FD"] = inheritable(record_fd)
             env["TAKEOVER_RECORD_NAME"] = record_name
+            env["TAKEOVER_LOCK_HELD"] = "1"
+            env["TAKEOVER_LOCK_DEV"] = str(owner_lock.identity[0])
+            env["TAKEOVER_LOCK_INO"] = str(owner_lock.identity[1])
         wall_args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
         os.execve("/bin/bash", ["bash", ns.script, *wall_args], env)
+    except _IO.LockBusy:
+        print("TAKEOVER-REFUSED:runner-live\nUnblock (operator): bash scripts/gsd/takeover-check.sh --run-id " + ns.run_id)
+        return 1
     except (_IO.UnsafeTakeoverPath, OSError):
         # The shell cannot regain control after an exec bootstrap failure.
         # Preserve the wall's fail-closed operator grammar here.

@@ -120,6 +120,116 @@ def consume_exact(directory_fd: int, name: str, fd: int) -> str:
         raise
 
 
+def _boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return "unknown"
+
+
+def _process_start(pid: int) -> str:
+    try:
+        # Field 22, after the comm field which may itself contain spaces.
+        tail = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return tail[19]
+    except (OSError, IndexError):
+        return "unknown"
+
+
+class LockBusy(RuntimeError):
+    pass
+
+
+class OwnerLock:
+    """Link-published, descriptor-relative owner lock for the wall lifetime."""
+    name = ".takeover-check.lock"
+
+    def __init__(self, directory_fd: int, run_id: str):
+        self.directory_fd = directory_fd
+        self.run_id = run_id
+        self.identity: tuple[int, int] | None = None
+
+    def _payload(self) -> bytes:
+        payload = {"pid": os.getpid(), "pid_start_time": _process_start(os.getpid()),
+                   "boot_session_id": _boot_id(), "claimed_at": int(time.time()),
+                   "run_id": self.run_id}
+        return json.dumps(payload, separators=(",", ":")).encode()
+
+    def _live(self, payload: dict) -> bool:
+        try:
+            pid = int(payload["pid"])
+            start = str(payload["pid_start_time"])
+            boot = str(payload["boot_session_id"])
+        except (KeyError, TypeError, ValueError):
+            return True  # malformed locks receive grace before a later retry
+        if boot != _boot_id():
+            return False
+        if _process_start(pid) != start or start == "unknown":
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def acquire(self) -> None:
+        for _ in range(3):
+            temp = f".takeover-lock.{os.getpid()}.{time.time_ns()}"
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
+                         dir_fd=self.directory_fd)
+            try:
+                os.write(fd, self._payload())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.link(temp, self.name, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
+                st = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
+                self.identity = (st.st_dev, st.st_ino)
+                os.unlink(temp, dir_fd=self.directory_fd)
+                os.fsync(self.directory_fd)
+                return
+            except FileExistsError:
+                os.unlink(temp, dir_fd=self.directory_fd)
+            try:
+                judged_fd = open_regular(self.directory_fd, self.name)
+                try:
+                    judged = os.fstat(judged_fd)
+                    raw = read_regular(judged_fd)
+                finally:
+                    os.close(judged_fd)
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                    stale = not isinstance(payload, dict) or not self._live(payload)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    stale = time.time() - judged.st_mtime > 1
+                if not stale:
+                    raise LockBusy("runner-live")
+                current = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
+                if not same_identity(current, judged):
+                    continue
+                tomb = f".takeover-check.tombstone.{os.getpid()}.{time.time_ns()}"
+                os.rename(self.name, tomb, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
+                tomb_st = os.stat(tomb, dir_fd=self.directory_fd, follow_symlinks=False)
+                if not same_identity(tomb_st, judged):
+                    # Lost election: never unlink an entry we did not judge.
+                    continue
+                os.unlink(tomb, dir_fd=self.directory_fd)
+            except (UnsafeTakeoverPath, OSError):
+                raise LockBusy("runner-live")
+        raise LockBusy("runner-live")
+
+    def cleanup(self) -> None:
+        if self.identity is None:
+            return
+        try:
+            current = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == self.identity:
+                os.unlink(self.name, dir_fd=self.directory_fd)
+        except FileNotFoundError:
+            pass
+
+
 @contextmanager
 def takeover_directory(store_path: str):
     """Yield a held fd for ``<resolved-store-parent>/takeover``.
