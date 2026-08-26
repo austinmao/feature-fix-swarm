@@ -1228,3 +1228,155 @@ PYEOF
   ! grep -q "^implement " "$EVENTS"
   ! grep -q "gh pr merge" "$EVENTS"
 }
+
+# ── Phase 3 Wave-0 RED contract: posture resolution (03-04) ───────────────
+# The landed Phase 2 seam is the --posture flag only ("Phase 3 owns the
+# committed configuration").  These selectors pin the Phase 3 resolution:
+# default zero < config (--posture) < env (FFS_AUTONOMY_POSTURE), stricter-
+# only (floor may override zero, zero may never override floor), invalid
+# input advises and falls through, provenance is printed exactly once as
+# `POSTURE-RESOLVED: <posture> source=<default|config|env>`, and every
+# Task 1 posture consumer honors the RESOLVED posture.  Until that lands,
+# each missing assertion reports the typed behavioral marker below.
+
+posture_no_hit() { # errexit-safe negation: fail when the pattern IS present
+  if grep "$@"; then return 1; fi
+  return 0
+}
+
+posture_red() { # $1 why — typed marker for the missing Phase 3 seam
+  echo "EXPECTED-RED:POSTURE:missing-posture-resolution"
+  echo "RED: $1"
+  return 1
+}
+
+@test "[POSTURE] env floor strengthens default zero on a missing-reviewer item" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+  RUN_ID=run-301
+  FFS_AUTONOMY_POSTURE=floor PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output" \
+    || posture_red "FFS_AUTONOMY_POSTURE=floor did not strengthen the run: the missing-reviewer item was not floor-blocked"
+}
+
+@test "[POSTURE] env zero cannot weaken explicit floor and provenance names floor" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+  RUN_ID=run-302
+  FFS_AUTONOMY_POSTURE=zero PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --posture floor --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  # stricter-only: the committed floor holds even when env asks for zero
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+  grep -q "POSTURE-RESOLVED: floor" <<<"$output" \
+    || posture_red "no POSTURE-RESOLVED provenance line names the surviving floor posture"
+}
+
+@test "[POSTURE] invalid env value advises and falls through to zero" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+  RUN_ID=run-303
+  FFS_AUTONOMY_POSTURE=bananas PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  # fell through to zero: the degraded path proceeds to the grant boundary
+  grep -q "ITEM spec/item-a BLOCKED:grant-missing" <<<"$output"
+  grep -q "POSTURE-INVALID: bananas" <<<"$output" \
+    || posture_red "an invalid FFS_AUTONOMY_POSTURE value produced no advisory before falling through"
+}
+
+@test "[POSTURE] resolution provenance is printed exactly once for default zero" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+  RUN_ID=run-304
+  PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "^POSTURE-RESOLVED:" <<<"$output")" -eq 1 ] \
+    || posture_red "expected exactly one POSTURE-RESOLVED provenance line, found $(grep -c "^POSTURE-RESOLVED:" <<<"$output")"
+  grep -q "POSTURE-RESOLVED: zero source=default" <<<"$output" \
+    || posture_red "default resolution does not record zero with source=default"
+}
+
+@test "[POSTURE] same missing-reviewer fixture diverges under env zero and env floor" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+
+  # floor first: nothing may land, so the fixture stays identical for zero
+  RUN_ID=run-305
+  FFS_AUTONOMY_POSTURE=floor PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output" \
+    || posture_red "env floor did not block the missing-reviewer item that env zero is allowed to land"
+
+  # zero second: the SAME fixture lands with a durably recorded degradation
+  RUN_ID=run-306
+  : > "$EVENTS"
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  FFS_AUTONOMY_POSTURE=zero PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  python3 - "$GATES_STORE" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+ev = [e for e in data["_degradation"]["invocations"] if e.get("run_id") == "run-306"]
+assert len(ev) == 1 and ev[0]["degraded"] is True, ev
+PYEOF
+}
+
+@test "[POSTURE] resolved env floor disables the zero-only quarantine requeue" {
+  test -f "$LINKED/.git"
+  stub_env
+  # item-a permanently conflicts with main; item-b lands and advances the
+  # base — under resolved floor the conflict item must still requeue NEVER.
+  mk_branch spec/item-a README.md alpha-side
+  git checkout -q main; echo mainline > README.md
+  git add -- README.md; git commit -qm mainline; git push -q origin main
+  mk_branch spec/item-b b.txt beta
+  write_gh
+  write_children
+  RUN_ID=run-307
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-102 --reason t >/dev/null
+  FFS_AUTONOMY_POSTURE=floor PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a spec/item-b
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-b LANDED" <<<"$output"
+  grep -q "ITEM spec/item-a BLOCKED:conflict" <<<"$output"
+  rc=0
+  python3 - "$LQ/$RUN_ID.json" >/dev/null 2>&1 <<'PYEOF' || rc=$?
+import json, sys
+doc = json.load(open(sys.argv[1]))
+pre = [e for e in doc["events"] if e.get("item") == "spec/item-a"
+       and e["kind"] == "intent" and e["step"] == "precheck"]
+assert len(pre) == 1, pre
+PYEOF
+  [ "$rc" -eq 0 ] \
+    || posture_red "the conflict item was requeued under env floor: quarantine auto-requeue is a zero-posture-only consumer"
+}

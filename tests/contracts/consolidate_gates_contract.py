@@ -1,0 +1,141 @@
+"""Direct Wave-0 contract for the queue-derived consolidate:estate grant.
+
+Filename intentionally avoids pytest's default test_*.py rules (convention:
+land_queue_gates_contract.py) — evidence is always the explicitly named
+direct path.
+
+Phase 3 contract (REQ/T-03-02): a consolidation may run only under an exact
+queue-derived grant scope `consolidate:estate:<sha256(target tuples)>` with
+TTL <= 8h, refused on scope substitution and on expiry at the effect
+boundary.  The generic exact-match/expiry machinery already landed in
+Phase 2 (GREEN below); the consolidate-specific scope-format requirement and
+8h TTL cap have NOT (RED below, typed marker
+EXPECTED-RED:GRANT:missing-consolidate-grant).
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+GATES_PATH = ROOT / "lib" / "gates.py"
+MARKER = "EXPECTED-RED:GRANT:missing-consolidate-grant"
+CAP_HOURS = 8.0
+
+
+def gates_module():
+    if not GATES_PATH.is_file():
+        pytest.fail("lib/gates.py target is absent")
+    spec = importlib.util.spec_from_file_location("consolidate_real_gates", GATES_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def queue_scope(tuples: list[tuple[str, str]]) -> str:
+    """The queue-derived exact scope: sha256 over the canonical serialized
+    (branch_ref, expected_tip_oid) tuples — never a hand-typed constant."""
+    canon = json.dumps(sorted([list(t) for t in tuples]),
+                       separators=(",", ":")).encode()
+    return "consolidate:estate:" + hashlib.sha256(canon).hexdigest()
+
+
+TUPLES = [("spec/merged", "a" * 40)]
+OTHER_TUPLES = [("spec/other", "b" * 40)]
+
+
+def _red(cond: bool, why: str) -> None:
+    """Behavioral RED: emit the exact typed marker line, then fail."""
+    if not cond:
+        print(MARKER)
+        pytest.fail(why)
+
+
+# ── GREEN: generic exact-match machinery already landed in Phase 2 ────────
+
+def test_exact_scope_matches_and_substitution_is_refused(tmp_path):
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    scope = queue_scope(TUPLES)
+    assert gates.grant_actions(store, "run-1", [scope], ttl_hours=CAP_HOURS)
+    assert gates.check_grant(store, "run-1", scope) is True
+    # scope substitution: a DIFFERENT queue-derived manifest never matches
+    assert gates.check_grant(store, "run-1", queue_scope(OTHER_TUPLES)) is False
+    # run substitution never matches either
+    assert gates.check_grant(store, "run-2", scope) is False
+
+
+def test_expiry_is_refused_at_the_effect_boundary(tmp_path):
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    scope = queue_scope(TUPLES)
+    assert gates.grant_actions(store, "run-1", [scope], ttl_hours=CAP_HOURS)
+    granted = json.loads(store.read_text())["_autonomy"]["run-1"]["grants"][scope]
+    at = granted["granted_at"]
+    assert gates.check_grant(store, "run-1", scope, now=at + CAP_HOURS * 3600 - 1)
+    assert gates.check_grant(store, "run-1", scope,
+                             now=at + CAP_HOURS * 3600 + 1) is False
+
+
+def test_free_prose_action_is_rejected(tmp_path):
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    assert gates.grant_actions(store, "run-1", ["delete all the branches"]) is False
+
+
+# ── RED: consolidate-specific enforcement Phase 3 must add ────────────────
+
+def test_consolidate_ttl_is_capped_at_8h(tmp_path):
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    scope = queue_scope(TUPLES)
+    accepted = gates.grant_actions(store, "run-1", [scope], ttl_hours=9.0)
+    _red(accepted is False,
+         "a consolidate:estate grant with TTL 9h was accepted; the "
+         "consolidate cap is 8h (T-03-02)")
+
+
+def test_bare_consolidate_estate_without_queue_scope_is_rejected(tmp_path):
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    accepted = gates.grant_actions(store, "run-1", ["consolidate:estate"],
+                                   ttl_hours=CAP_HOURS)
+    _red(accepted is False,
+         "a bare consolidate:estate grant (no queue-derived sha256 scope) "
+         "was accepted; the scope must pin the exact target manifest")
+
+
+def test_default_ttl_cannot_outlive_the_8h_cap(tmp_path):
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    scope = queue_scope(TUPLES)
+    accepted = gates.grant_actions(store, "run-1", [scope])  # default TTL
+    if accepted:
+        live_past_cap = gates.check_grant(store, "run-1", scope,
+                                          now=json.loads(store.read_text())
+                                          ["_autonomy"]["run-1"]["grants"][scope]
+                                          ["granted_at"] + CAP_HOURS * 3600 + 1)
+        _red(live_past_cap is False,
+             "a consolidate:estate grant under the default TTL is still "
+             "valid past the 8h cap")
+
+
+def test_cli_refuses_over_cap_consolidate_grant(tmp_path):
+    scope = queue_scope(TUPLES)
+    env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    proc = subprocess.run(
+        [sys.executable, str(GATES_PATH), "grant", "run-cli",
+         "--action", scope, "--ttl-hours", "24", "--reason", "contract"],
+        capture_output=True, text=True, env=env, cwd=tmp_path)
+    _red(proc.returncode != 0,
+         "the gates.py CLI accepted a consolidate:estate grant with a 24h "
+         "TTL; consolidate grants are capped at 8h")
