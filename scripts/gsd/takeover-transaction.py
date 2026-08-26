@@ -7,9 +7,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 _SPEC = importlib.util.spec_from_file_location("takeover_io", Path(__file__).with_name("takeover-io.py"))
@@ -18,10 +20,35 @@ _IO = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _IO
 _SPEC.loader.exec_module(_IO)
 
+_GATES_SPEC = importlib.util.spec_from_file_location(
+    "takeover_gates", Path(__file__).resolve().parents[2] / "lib" / "gates.py")
+assert _GATES_SPEC and _GATES_SPEC.loader
+_GATES = importlib.util.module_from_spec(_GATES_SPEC)
+sys.modules[_GATES_SPEC.name] = _GATES
+_GATES_SPEC.loader.exec_module(_GATES)
+
 
 def inheritable(fd: int) -> str:
     os.set_inheritable(fd, True)
     return str(fd)
+
+
+def _read_log(kind: str) -> None:
+    log = os.environ.get("TAKEOVER_READ_LOG")
+    if log:
+        with open(log, "a") as fh:
+            fh.write(kind + "\n")
+
+
+def recover_takeover_transaction(store: str, store_dir_fd: int, takeover_dir_fd: int,
+                                 run_id: str) -> dict:
+    """Pre-absence durable-intent discovery and bounded recovery dispatch.
+
+    Runs after canonical store/takeover binding and BEFORE record discovery
+    can choose the no-record fast path, so an unreconciled transaction can
+    never be misread as absence (TAKEOVER-NONE) or missing-record.
+    """
+    return _GATES.recover_takeover_transaction(store, store_dir_fd, takeover_dir_fd, run_id)
 
 
 def _record_binds(record_fd: int, store: str, run_id: str) -> bool:
@@ -100,6 +127,18 @@ def main() -> int:
         takeover_fd = _IO.open_takeover(store_fd)
         record_name = f"{ns.run_id}.json"
         if takeover_fd is not None and ns.run_id:
+            recovery = recover_takeover_transaction(ns.store, store_fd, takeover_fd, ns.run_id)
+            outcome = recovery.get("outcome")
+            if outcome == "recovered-success":
+                # Recovery emitted TAKEOVER-OK for the completed transaction.
+                return 0
+            if outcome == "superseded":
+                # Recovery emitted the typed TAKEOVER-SUPERSEDED result.
+                return 1
+            if outcome in ("locked-out", "unexplained"):
+                print("TAKEOVER-REFUSED:record-mismatch\nUnblock (operator): /spec-status")
+                return 1
+        if takeover_fd is not None and ns.run_id:
             try:
                 record_fd = _IO.open_regular(takeover_fd, record_name)
             except FileNotFoundError:
@@ -111,6 +150,7 @@ def main() -> int:
             return 1
         if evidence_fd is not None:
             snapshot_fd, digest = _capture_snapshot(evidence_fd)
+            _read_log("pre-decision")
         elif record_fd is not None:
             raise ValueError("record without authority")
         else:
@@ -127,6 +167,20 @@ def main() -> int:
         if record_fd is not None:
             owner_lock = _IO.OwnerLock(store_fd, ns.run_id)
             owner_lock.acquire()
+
+            def _signal_cleanup(signum, frame):
+                owner_lock.cleanup()
+                sys.exit(1)
+
+            for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+                signal.signal(signum, _signal_cleanup)
+            pause = os.environ.get("TAKEOVER_TEST_PAUSE_AFTER_LOCK")
+            if pause:
+                open(os.path.join(pause, "ready"), "w").close()
+                deadline = time.monotonic() + 30
+                while (not os.path.exists(os.path.join(pause, "release"))
+                       and time.monotonic() < deadline):
+                    time.sleep(0.05)
             env["TAKEOVER_RECORD_FD"] = inheritable(record_fd)
             env["TAKEOVER_RECORD_NAME"] = record_name
             env["TAKEOVER_LOCK_HELD"] = "1"

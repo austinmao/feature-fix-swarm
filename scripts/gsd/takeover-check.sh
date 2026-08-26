@@ -5,7 +5,7 @@ set -uo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 GP="$SCRIPT_ROOT/lib/gates.py"
-RUN_ID="${GSD_RUN_ID:-}"; MODE=text; LIST=0; LOCK=""
+RUN_ID="${GSD_RUN_ID:-}"; MODE=text; LIST=0
 ORIGINAL_ARGS=("$@")
 usage() { echo "usage: takeover-check.sh --run-id spec-NNN [--json] | --list" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do
@@ -62,7 +62,6 @@ PY
 }
 
 CANON_STORE="$(gate store-path 2>/dev/null)" || refuse decoy-store
-STORE_DIR="$(gate store-dir 2>/dev/null)" || refuse decoy-store
 if [ "${TAKEOVER_TRANSACTION:-}" != 1 ]; then
   exec python3 "$SCRIPT_ROOT/scripts/gsd/takeover-transaction.py" \
     --script "$0" --store "$CANON_STORE" --run-id "$RUN_ID" -- "${ORIGINAL_ARGS[@]}" || refuse record-mismatch
@@ -201,43 +200,18 @@ except OSError: raise SystemExit(1)
 PY
 }
 
-# O_EXCL ownership is held through all subsequent checks and record consume.
-LOCK="$STORE_DIR/.takeover-check.lock"
-if [ "${TAKEOVER_LOCK_HELD:-}" != 1 ] && ! python3 - "$LOCK" "$RUN_ID" <<'PY'
-import json,os,sys,time
-p,r=sys.argv[1:]
-boot=open('/proc/sys/kernel/random/boot_id').read().strip() if os.path.exists('/proc/sys/kernel/random/boot_id') else 'unknown'
-payload={'pid':os.getpid(),'pid_start_time':str(int(time.time())),'boot_session_id':boot,'claimed_at':int(time.time()),'run_id':r}
-for _ in range(2):
- try:
-  fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-  os.write(fd,json.dumps(payload).encode()); os.close(fd); break
- except FileExistsError:
-  try:
-   old=json.load(open(p)); pid=int(old.get('pid',0)); stale=(old.get('boot_session_id') != boot)
-   if not stale:
-    try: os.kill(pid,0)
-    except OSError: stale=True
-   if not stale: raise SystemExit(1)
-   tomb=p+'.tombstone.%s.%s'%(os.getpid(),time.time_ns())
-   os.replace(p,tomb); os.unlink(tomb)
-  except FileNotFoundError: continue
-  except (ValueError,TypeError,json.JSONDecodeError): raise SystemExit(1)
-else: raise SystemExit(1)
-PY
-then refuse runner-live; fi
+# Owner ownership is acquired by the descriptor bootstrap through the
+# serialized, crash-released OwnerLock; a record path without the held-lock
+# marker is a bootstrap fault, never a success path.
+[ "${TAKEOVER_LOCK_HELD:-}" = 1 ] || refuse record-mismatch
 cleanup() {
-  if [ "${TAKEOVER_LOCK_HELD:-}" = 1 ]; then
-    python3 - "$TAKEOVER_STORE_DIR_FD" "$TAKEOVER_LOCK_DEV" "$TAKEOVER_LOCK_INO" <<'PY'
+  python3 - "$TAKEOVER_STORE_DIR_FD" "$TAKEOVER_LOCK_DEV" "$TAKEOVER_LOCK_INO" <<'PY'
 import os,sys
 try:
  st=os.stat('.takeover-check.lock',dir_fd=int(sys.argv[1]),follow_symlinks=False)
  if (st.st_dev,st.st_ino)==(int(sys.argv[2]),int(sys.argv[3])): os.unlink('.takeover-check.lock',dir_fd=int(sys.argv[1]))
 except OSError: pass
 PY
-  else
-    [ -n "$LOCK" ] && rm -f "$LOCK"
-  fi
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -383,16 +357,34 @@ PY
 )" || refuse record-mismatch
 while IFS= read -r action; do [ -z "$action" ] || refuse "poison/$action"; done <<< "$poison_actions"
 
-# Atomic consume under the held lock makes a second normal contender observe
-# missing-record rather than a second success.
-python3 "$SCRIPT_ROOT/scripts/gsd/takeover-io.py" consume \
-  --takeover-fd "$TAKEOVER_DIR_FD" --record-fd "$TAKEOVER_RECORD_FD" \
-  --name "$TAKEOVER_RECORD_NAME" >/dev/null || refuse record-mismatch
+# The success transaction is one bounded descriptor-relative gates.py command
+# sharing the canonical evidence.lock with every ordinary _StoreLock writer:
+# one post-decision read, a full policy re-gate under the lock, a durable
+# fsynced intent, exact record consume, and field-preserving expectation
+# clearing — TAKEOVER-OK is emitted before the intent is deleted.
+if [ -n "${TAKEOVER_TEST_PAUSE_BEFORE_CONSUME:-}" ]; then
+  : > "$TAKEOVER_TEST_PAUSE_BEFORE_CONSUME/ready"
+  for _ in $(seq 1 600); do
+    [ -e "$TAKEOVER_TEST_PAUSE_BEFORE_CONSUME/release" ] && break
+    sleep 0.05
+  done
+fi
+[ -n "${TAKEOVER_STORE_DIR_FD:-}" ] && [ -n "${TAKEOVER_EVIDENCE_FD:-}" ] || refuse record-mismatch
+consume_out="$(python3 "$GP" takeover-consume "$RUN_ID" --consumed-at "$(date +%s)" \
+  --store-dir-fd "$TAKEOVER_STORE_DIR_FD" --store-fd "$TAKEOVER_EVIDENCE_FD" \
+  --takeover-dir-fd "$TAKEOVER_DIR_FD" --record-fd "$TAKEOVER_RECORD_FD" \
+  --record-name "$TAKEOVER_RECORD_NAME" --snapshot-sha256 "$TAKEOVER_SNAPSHOT_SHA256" \
+  --deadline-ms 1000)" || {
+  case "$consume_out" in
+    REFUSED:*) refuse "${consume_out#REFUSED:}" ;;
+    *) refuse record-mismatch ;;
+  esac
+}
 if [ "$MODE" = json ]; then
   python3 - "$RUN_ID" <<'PY'
 import json,sys
 print(json.dumps({'schema_version':1,'run_id':sys.argv[1],'verdict':'TAKEOVER-OK','reason':None,'remedy':None},separators=(',',':')))
 PY
 else
-  echo TAKEOVER-OK
+  printf '%s\n' "$consume_out"
 fi

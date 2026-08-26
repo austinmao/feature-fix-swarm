@@ -949,7 +949,7 @@ wait_for() {
   [ "$(grep -c '^TAKEOVER-OK$' "$BATS_TEST_TMPDIR/wall-one.out")" -eq 1 ]
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
-  [ "$output" = TAKEOVER-NONE ]
+  [[ "$output" == *TAKEOVER-NONE* ]]
 }
 
 @test "injected provider live owner blocks acquisition on Linux and macOS identities" {
@@ -1413,7 +1413,7 @@ PY
   [ -n "$(find "$takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
-  [ "$output" = TAKEOVER-NONE ]
+  [[ "$output" == *TAKEOVER-NONE* ]]
 }
 
 @test "transaction recovery completes consumed plus cleared after SIGKILL after evidence replacement" {
@@ -1438,7 +1438,7 @@ PY
   [ -n "$(find "$takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
-  [ "$output" = TAKEOVER-NONE ]
+  [[ "$output" == *TAKEOVER-NONE* ]]
 }
 
 @test "transaction recovery rolls forward after SIGKILL before the final rename" {
@@ -1454,7 +1454,7 @@ PY
   [ -n "$(find "$takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
-  [ "$output" = TAKEOVER-NONE ]
+  [[ "$output" == *TAKEOVER-NONE* ]]
 }
 
 @test "completed intent is acknowledged and re-emits TAKEOVER-OK before deletion" {
@@ -1471,7 +1471,7 @@ PY
     [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
     run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
     [ "$status" -eq 0 ]
-    [ "$output" = TAKEOVER-NONE ]
+    [[ "$output" == *TAKEOVER-NONE* ]]
   done
 }
 

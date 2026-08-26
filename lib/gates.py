@@ -65,16 +65,19 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import fcntl
 import hashlib
 import json
 import os
+import signal
 import stat
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Cheap deterministic gates run before expensive behavioral/LLM gates
@@ -163,21 +166,91 @@ def _save_store(store: Path, data: dict) -> None:
             os.unlink(tmp)
 
 
+def _lock_seam_hold(fd: int) -> None:
+    """Test-only event seam: publish the held lock identity, await release."""
+    seam = os.environ.get("GATES_TEST_HOLD_LOCK")
+    if not seam:
+        return
+    st = os.fstat(fd)
+    with open(os.path.join(seam, "held"), "w") as fh:
+        fh.write("%d:%d" % (st.st_dev, st.st_ino))
+    deadline = time.monotonic() + 30
+    while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 class _StoreLock:
-    """Advisory flock serializing read-modify-write across parallel tasks."""
+    """Advisory flock serializing read-modify-write across parallel tasks.
+
+    Every ordinary writer and the takeover consume transaction lock the SAME
+    canonical inode, derived exactly as ``Path(store).with_suffix('.lock')``
+    (``evidence.lock``).  Ordinary writers open by path and block; takeover
+    opens the same basename descriptor-relative to its retained store
+    directory fd and polls nonblocking under a deadline.  Both directions go
+    through one shared safe open helper so they can never lock two different
+    inodes for one store.
+    """
+
+    LOCK_BASENAME = Path("evidence.json").with_suffix(".lock").name
 
     def __init__(self, store: Path):
         self.path = Path(store).with_suffix(".lock")
+        self.fd: int | None = None
+
+    @staticmethod
+    def _validated(fd: int) -> int:
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                raise ValueError("EVIDENCE-LOCK-UNSAFE")
+            os.fchmod(fd, 0o600)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @classmethod
+    def open_lock_path(cls, path: Path) -> int:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        return cls._validated(fd)
+
+    @classmethod
+    def open_lock_at(cls, store_dir_fd: int) -> int:
+        """Open the exact canonical lock basename relative to a held store fd."""
+        fd = os.open(cls.LOCK_BASENAME, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                     0o600, dir_fd=store_dir_fd)
+        cls._validated(fd)
+        entry = os.stat(cls.LOCK_BASENAME, dir_fd=store_dir_fd, follow_symlinks=False)
+        held = os.fstat(fd)
+        if (entry.st_dev, entry.st_ino) != (held.st_dev, held.st_ino):
+            os.close(fd)
+            raise ValueError("EVIDENCE-LOCK-UNSAFE")
+        return fd
+
+    @staticmethod
+    def acquire_deadline(fd: int, deadline_ms: int) -> bool:
+        deadline = time.monotonic() + deadline_ms / 1000.0
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.01)
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fd = open(self.path, "w")
+        self.fd = self.open_lock_path(self.path)
         fcntl.flock(self.fd, fcntl.LOCK_EX)
+        _lock_seam_hold(self.fd)
         return self
 
     def __exit__(self, *exc):
-        fcntl.flock(self.fd, fcntl.LOCK_UN)
-        self.fd.close()
+        if self.fd is not None:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
 
 
 # ── spec-008 Phase 1: degradation evidence ─────────────────────────────────
@@ -2211,6 +2284,486 @@ def record_takeover_expectation(store: Path, run_id: str, created_at: int | None
         _save_store(store, data)
 
 
+# ── Plan 01-08: canonical-lock consume transaction and crash recovery ────────
+
+TAKEOVER_INTENT_VERSION = 1
+TAKEOVER_INTENT_PHASES = ("prepared", "record-provisional", "evidence-replaced",
+                          "record-consumed", "acknowledged", "superseded")
+
+
+class _TakeoverRefusal(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _takeover_kill_at(tag: str) -> None:
+    """Test-only crash seam: SIGKILL this process at an exact boundary."""
+    if os.environ.get("TAKEOVER_KILL_AT") == tag:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _takeover_read_log(kind: str) -> None:
+    log = os.environ.get("TAKEOVER_READ_LOG")
+    if log:
+        with open(log, "a") as fh:
+            fh.write(kind + "\n")
+
+
+def _takeover_pause_locked(lock_fd: int) -> None:
+    """Test-only event seam inside the held canonical evidence.lock."""
+    seam = os.environ.get("TAKEOVER_TEST_PAUSE_LOCKED")
+    if not seam:
+        return
+    st = os.fstat(lock_fd)
+    with open(os.path.join(seam, "held"), "w") as fh:
+        fh.write("%d:%d" % (st.st_dev, st.st_ino))
+    deadline = time.monotonic() + 30
+    while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _read_evidence_at(store_dir_fd: int) -> tuple[bytes, os.stat_result]:
+    """Bounded no-follow read of the current canonical evidence entry."""
+    fd = os.open("evidence.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                 dir_fd=store_dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 1024 * 1024:
+            raise _TakeoverRefusal("record-mismatch")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > 1024 * 1024:
+                raise _TakeoverRefusal("record-mismatch")
+        return b"".join(chunks), st
+    finally:
+        os.close(fd)
+
+
+def _entry_is_fd(dir_fd: int, name: str, fd: int) -> bool:
+    try:
+        entry = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    held = os.fstat(fd)
+    return (entry.st_dev, entry.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _replace_bytes_at(dir_fd: int, name: str, payload: bytes) -> None:
+    """Atomic descriptor-relative replace: stage, fsync file, rename, fsync dir."""
+    stage = ".%s.%d.%d.tmp" % (name, os.getpid(), time.time_ns())
+    fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o600, dir_fd=dir_fd)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(stage, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(stage, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    os.fsync(dir_fd)
+
+
+def _git_checked(args: list[str]) -> str:
+    """Run one read-only git probe; any query error fails closed."""
+    try:
+        proc = subprocess.run(["git", *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise _TakeoverRefusal("record-mismatch")
+    if proc.returncode != 0:
+        raise _TakeoverRefusal("record-mismatch")
+    return proc.stdout.strip()
+
+
+def _live_dirty_digest() -> str:
+    """Exact live WIP digest over NUL-delimited porcelain-v2 bytes (-uall)."""
+    try:
+        status = subprocess.run(["git", "status", "--porcelain=v2", "-z",
+                                 "--untracked-files=all"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise _TakeoverRefusal("dirty-worktree")
+    if status.returncode:
+        raise _TakeoverRefusal("dirty-worktree")
+    kept = []
+    for row in status.stdout.split(b"\0"):
+        if not row:
+            continue
+        path = row[2:] if row.startswith(b"? ") else row.rsplit(b" ", 1)[-1]
+        if path.startswith(b".feature-fix-swarm/") or path == b".feature-fix-swarm":
+            continue
+        kept.append(row)
+    kept.sort()
+    return hashlib.sha256(b"\0".join(kept)).hexdigest()
+
+
+def _regate_policy(record: dict, run_id: str, evidence: dict) -> None:
+    """Full policy re-gate under the held canonical evidence.lock.
+
+    Runs immediately before intent creation and the consume rename: branch,
+    full HEAD, upstream, rebase-in-progress via `git rev-parse --git-path`,
+    dirty state via `git status --porcelain=v2 -z --untracked-files=all`,
+    evidence digest (checked by the caller), and record identity (checked by
+    the caller).  Any drift from the basis of the authority-snapshot verdict
+    is a typed refusal and a clean abort with no mutation.
+    """
+    git_state = record.get("git_state")
+    if not isinstance(git_state, dict):
+        raise _TakeoverRefusal("record-mismatch")
+    for probe in ("rebase-merge", "rebase-apply"):
+        admin = _git_checked(["rev-parse", "--git-path", probe])
+        if admin and os.path.isdir(admin):
+            raise _TakeoverRefusal("mid-rebase")
+    current_branch = _git_checked(["branch", "--show-current"])
+    current_head = _git_checked(["rev-parse", "HEAD^{commit}"])
+    recorded_branch = git_state.get("branch") or ""
+    recorded_head = git_state.get("head") or ""
+    if recorded_branch:
+        if current_branch != recorded_branch or current_head != recorded_head:
+            raise _TakeoverRefusal("branch-gone")
+    else:
+        # A recorded detached state still pins the exact full HEAD.
+        if current_branch != "" or current_head != recorded_head:
+            raise _TakeoverRefusal("branch-gone")
+    upstream = git_state.get("upstream") or ""
+    if upstream:
+        probe = subprocess.run(["git", "rev-parse", "--verify", "--quiet", upstream],
+                               capture_output=True, text=True)
+        if probe.returncode != 0:
+            raise _TakeoverRefusal("branch-gone")
+    auto = evidence.get("_autonomy", {})
+    row = auto.get(run_id, {}) if isinstance(auto, dict) else {}
+    ledger_digest = row.get("takeover_dirty_digest") if isinstance(row, dict) else None
+    if not isinstance(ledger_digest, str) or _live_dirty_digest() != ledger_digest:
+        raise _TakeoverRefusal("dirty-worktree")
+
+
+def _intent_name(run_id: str) -> str:
+    return ".takeover-transaction.%s.json" % run_id
+
+
+def _write_intent_excl(takeover_dir_fd: int, name: str, payload: dict) -> None:
+    raw = json.dumps(payload, indent=2).encode()
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o600, dir_fd=takeover_dir_fd)
+    try:
+        os.write(fd, raw)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.fsync(takeover_dir_fd)
+
+
+def _advance_intent(takeover_dir_fd: int, name: str, payload: dict, phase: str) -> None:
+    payload["phase"] = phase
+    _replace_bytes_at(takeover_dir_fd, name, json.dumps(payload, indent=2).encode())
+
+
+def _delete_intent(takeover_dir_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=takeover_dir_fd)
+    except FileNotFoundError:
+        pass
+    os.fsync(takeover_dir_fd)
+
+
+def _intent_valid(intent, run_id: str, store_path) -> bool:
+    if not isinstance(intent, dict) or intent.get("version") != TAKEOVER_INTENT_VERSION:
+        return False
+    if intent.get("run_id") != run_id:
+        return False
+    for key in ("active_name", "provisional_name", "consumed_name"):
+        name = intent.get(key)
+        if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+            return False
+    for key in ("original_sha256", "desired_sha256"):
+        value = intent.get(key)
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            return False
+    rid = intent.get("record_identity")
+    if (not isinstance(rid, dict) or not isinstance(rid.get("dev"), int)
+            or not isinstance(rid.get("ino"), int)):
+        return False
+    generation = intent.get("evidence_generation")
+    if (not isinstance(generation, dict) or not isinstance(generation.get("inode"), int)
+            or not isinstance(generation.get("content_sha256"), str)):
+        return False
+    if intent.get("phase") not in TAKEOVER_INTENT_PHASES:
+        return False
+    if store_path is not None:
+        anchor = hashlib.sha256(str(store_path).encode()).hexdigest()
+        if intent.get("store_anchor") != anchor:
+            return False
+    return True
+
+
+def recover_takeover_transaction(store_path, store_dir_fd: int, takeover_dir_fd: int,
+                                 run_id: str, deadline_ms: int = 1000,
+                                 lock_fd: int | None = None, emit=print) -> dict:
+    """Reconcile a durable takeover intent before record absence can mean NONE.
+
+    Classification trusts actual on-disk state, never the recorded phase
+    alone, and every recognized outcome terminates in exactly one of
+    active+original or consumed+cleared.
+
+    Trust boundary (WALL-RESIDUALS f2b6bf7b, accepted residual): canonical
+    evidence.lock is ADVISORY.  The inode-plus-content-digest generation
+    check below detects cooperating-writer succession only — a valid
+    parseable successor ledger at a new generation, which only a legitimate
+    holder of the canonical lock produces.  Writer authentication is out of
+    the threat model: the store is same-uid local state, so any process of
+    this user could fabricate a "successor"; that adversary already owns the
+    store outright.
+    """
+    intent_name = _intent_name(run_id)
+    try:
+        ifd = os.open(intent_name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                      dir_fd=takeover_dir_fd)
+    except FileNotFoundError:
+        return {"outcome": "none"}
+    try:
+        st = os.fstat(ifd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 4 * 1024 * 1024:
+            return {"outcome": "unexplained"}
+        raw = os.read(ifd, 4 * 1024 * 1024 + 1)
+    finally:
+        os.close(ifd)
+    own_lock = lock_fd is None
+    if own_lock:
+        try:
+            lock_fd = _StoreLock.open_lock_at(store_dir_fd)
+        except (OSError, ValueError):
+            return {"outcome": "locked-out"}
+        if not _StoreLock.acquire_deadline(lock_fd, deadline_ms):
+            os.close(lock_fd)
+            return {"outcome": "locked-out"}
+    try:
+        try:
+            intent = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"outcome": "unexplained"}
+        if not _intent_valid(intent, run_id, store_path):
+            return {"outcome": "unexplained"}
+        active_name = intent["active_name"]
+        provisional_name = intent["provisional_name"]
+        consumed_name = intent["consumed_name"]
+        rid = intent["record_identity"]
+        try:
+            cur, cur_st = _read_evidence_at(store_dir_fd)
+        except (_TakeoverRefusal, OSError):
+            return {"outcome": "unexplained"}
+        cur_sha = hashlib.sha256(cur).hexdigest()
+        location = None
+        for name in (active_name, provisional_name, consumed_name):
+            try:
+                entry = os.stat(name, dir_fd=takeover_dir_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if (entry.st_dev, entry.st_ino) == (rid["dev"], rid["ino"]):
+                location = name
+                break
+        if cur_sha == intent["original_sha256"]:
+            # Original expectation bytes: restore the exact record to active.
+            if location is None:
+                return {"outcome": "unexplained"}
+            if location != active_name:
+                os.rename(location, active_name, src_dir_fd=takeover_dir_fd,
+                          dst_dir_fd=takeover_dir_fd)
+                os.fsync(takeover_dir_fd)
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "rolled-back"}
+        if cur_sha == intent["desired_sha256"]:
+            # Cleared expectation bytes: complete to consumed and acknowledge
+            # the recovered success — never a silent TAKEOVER-NONE.
+            if location is None:
+                return {"outcome": "unexplained"}
+            if location != consumed_name:
+                os.rename(location, consumed_name, src_dir_fd=takeover_dir_fd,
+                          dst_dir_fd=takeover_dir_fd)
+                os.fsync(takeover_dir_fd)
+            _advance_intent(takeover_dir_fd, intent_name, intent, "acknowledged")
+            emit("TAKEOVER-OK")
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "recovered-success"}
+        generation = intent["evidence_generation"]
+        try:
+            successor = json.loads(cur.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            successor = None
+        if (isinstance(successor, dict) and cur_st.st_ino != generation["inode"]
+                and cur_sha != generation["content_sha256"]):
+            # Legitimate locked-writer succession (see trust boundary above).
+            # WALL-RESIDUALS 0b877051: sweep the provisional name so recovery
+            # terminates in exactly one of active/consumed.
+            if location == provisional_name:
+                try:
+                    os.stat(active_name, dir_fd=takeover_dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    os.rename(provisional_name, active_name, src_dir_fd=takeover_dir_fd,
+                              dst_dir_fd=takeover_dir_fd)
+                else:
+                    os.rename(provisional_name,
+                              "%s.superseded.%d.json" % (run_id, time.time_ns()),
+                              src_dir_fd=takeover_dir_fd, dst_dir_fd=takeover_dir_fd)
+                os.fsync(takeover_dir_fd)
+            _advance_intent(takeover_dir_fd, intent_name, intent, "superseded")
+            # WALL-RESIDUALS 2e3a4b2b: intent deletion is permitted after ANY
+            # terminal acknowledgment; the rerun evaluates the successor state
+            # through the ordinary wall.
+            emit("TAKEOVER-SUPERSEDED")
+            emit("Unblock (operator): bash scripts/gsd/takeover-check.sh --run-id " + run_id)
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "superseded"}
+        # Unexplained mutation: neither original, desired, nor a valid
+        # locked-writer successor generation.  Refuse and retain the intent.
+        return {"outcome": "unexplained"}
+    finally:
+        if own_lock and lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
+
+
+def takeover_consume(run_id: str, consumed_at: int, store_dir_fd: int, store_fd,
+                     takeover_dir_fd: int, record_fd: int, record_name: str,
+                     snapshot_sha256: str, deadline_ms: int, emit=print) -> dict:
+    """One bounded record/ledger mutation transaction under canonical evidence.lock.
+
+    Acquires the exact `_StoreLock` inode before any record rename, performs
+    the sole post-decision authority read under that lock, revalidates the
+    pre-decision digest, re-runs the full policy gate, durably prepares a
+    cross-file intent, consumes the exact record, clears only this run's
+    expectation fields, acknowledges, emits TAKEOVER-OK, and only then
+    deletes the intent.
+    """
+    _require_ledger_run_id(run_id)
+    lock_fd = None
+    try:
+        try:
+            lock_fd = _StoreLock.open_lock_at(store_dir_fd)
+        except (OSError, ValueError):
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        if not _StoreLock.acquire_deadline(lock_fd, deadline_ms):
+            # Bounded timeout: record, evidence, and intent namespace untouched.
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        _takeover_pause_locked(lock_fd)
+        try:
+            # The sole post-decision authority read, under the held lock.
+            raw, evidence_st = _read_evidence_at(store_dir_fd)
+            _takeover_read_log("post-decision")
+            if hashlib.sha256(raw).hexdigest() != snapshot_sha256:
+                raise _TakeoverRefusal("record-mismatch")
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise _TakeoverRefusal("record-mismatch")
+            if not isinstance(data, dict):
+                raise _TakeoverRefusal("record-mismatch")
+            if not _entry_is_fd(takeover_dir_fd, record_name, record_fd):
+                raise _TakeoverRefusal("record-mismatch")
+            os.lseek(record_fd, 0, os.SEEK_SET)
+            record_raw = os.read(record_fd, 1024 * 1024 + 1)
+            try:
+                record = json.loads(record_raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise _TakeoverRefusal("record-mismatch")
+            if not isinstance(record, dict):
+                raise _TakeoverRefusal("record-mismatch")
+            _regate_policy(record, run_id, data)
+        except _TakeoverRefusal as refusal:
+            return {"outcome": "refused", "reason": refusal.reason}
+
+        # Desired bytes derive from CURRENT data; unrelated fields survive.
+        auto_root = data.setdefault("_autonomy", {})
+        if not isinstance(auto_root, dict):
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        row = auto_root.setdefault(run_id, {})
+        if not isinstance(row, dict):
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        row["takeover_expected"] = False
+        row["takeover_consumed_at"] = int(consumed_at)
+        desired = json.dumps(data, indent=2).encode()
+        record_st = os.fstat(record_fd)
+        nonce = time.time_ns()
+        provisional_name = ".%s.provisional.%d.json" % (run_id, nonce)
+        consumed_name = "%s.consumed.%d.json" % (run_id, nonce)
+        intent_name = _intent_name(run_id)
+        intent = {
+            "version": TAKEOVER_INTENT_VERSION,
+            "run_id": run_id,
+            "store_anchor": record.get("gates_store_anchor"),
+            "evidence_identity": {"dev": evidence_st.st_dev, "ino": evidence_st.st_ino},
+            "evidence_generation": {"inode": evidence_st.st_ino,
+                                    "content_sha256": snapshot_sha256},
+            "record_identity": {"dev": record_st.st_dev, "ino": record_st.st_ino},
+            "active_name": record_name,
+            "provisional_name": provisional_name,
+            "consumed_name": consumed_name,
+            "original_sha256": hashlib.sha256(raw).hexdigest(),
+            "desired_sha256": hashlib.sha256(desired).hexdigest(),
+            "original_b64": base64.b64encode(raw).decode("ascii"),
+            "desired_b64": base64.b64encode(desired).decode("ascii"),
+            "phase": "prepared",
+        }
+        try:
+            _write_intent_excl(takeover_dir_fd, intent_name, intent)
+        except FileExistsError:
+            # An unreconciled intent means recovery must run first.
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        try:
+            os.rename(record_name, provisional_name, src_dir_fd=takeover_dir_fd,
+                      dst_dir_fd=takeover_dir_fd)
+            os.fsync(takeover_dir_fd)
+            _takeover_kill_at("after-provisional-rename")
+            _advance_intent(takeover_dir_fd, intent_name, intent, "record-provisional")
+            _replace_bytes_at(store_dir_fd, "evidence.json", desired)
+            _takeover_kill_at("after-evidence-replace")
+            _advance_intent(takeover_dir_fd, intent_name, intent, "evidence-replaced")
+            _takeover_kill_at("before-final-rename")
+            os.rename(provisional_name, consumed_name, src_dir_fd=takeover_dir_fd,
+                      dst_dir_fd=takeover_dir_fd)
+            os.fsync(takeover_dir_fd)
+            _advance_intent(takeover_dir_fd, intent_name, intent, "record-consumed")
+            _takeover_kill_at("after-record-consumed")
+            _advance_intent(takeover_dir_fd, intent_name, intent, "acknowledged")
+            _takeover_kill_at("after-acknowledged")
+            emit("TAKEOVER-OK")
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "ok"}
+        except Exception:
+            # Caught faults use the same idempotent recovery routine as a
+            # process restart, never a separate in-memory compensation path.
+            recovered = recover_takeover_transaction(
+                None, store_dir_fd, takeover_dir_fd, run_id,
+                deadline_ms=deadline_ms, lock_fd=lock_fd, emit=emit)
+            if recovered.get("outcome") == "recovered-success":
+                return {"outcome": "ok", "recovered": True}
+            return {"outcome": "refused", "reason": "record-mismatch"}
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
+
+
 # ── delegation-audit: orchestrator discipline (advisory, never blocks) ───────
 # Build-type spawn descriptions — an Agent/Task spawn matching this with no
 # explicit model pin inherits the orchestrator tier (premium-cost bug).
@@ -2879,6 +3432,31 @@ def main(argv: list[str]) -> int:
             print(f"TAKEOVER-EVALUATE-REJECTED: {exc}", file=sys.stderr)
             return 1
         return 0
+    if cmd == "takeover-consume":
+        # Internal success transaction: shares canonical evidence.lock with
+        # every ordinary _StoreLock writer via retained descriptors.
+        parser = argparse.ArgumentParser(prog="gates.py takeover-consume", add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--consumed-at", required=True, type=int)
+        parser.add_argument("--store-dir-fd", required=True, type=int)
+        parser.add_argument("--store-fd", type=int)
+        parser.add_argument("--takeover-dir-fd", required=True, type=int)
+        parser.add_argument("--record-fd", required=True, type=int)
+        parser.add_argument("--record-name", required=True)
+        parser.add_argument("--snapshot-sha256", required=True)
+        parser.add_argument("--deadline-ms", type=int, default=1000)
+        try:
+            ns = parser.parse_args(args)
+            result = takeover_consume(ns.run_id, ns.consumed_at, ns.store_dir_fd,
+                                      ns.store_fd, ns.takeover_dir_fd, ns.record_fd,
+                                      ns.record_name, ns.snapshot_sha256, ns.deadline_ms)
+        except (SystemExit, Exception):
+            print("REFUSED:record-mismatch")
+            return 1
+        if result.get("outcome") == "ok":
+            return 0
+        print("REFUSED:%s" % result.get("reason", "record-mismatch"))
+        return 1
     # Descriptor flags are a deliberately narrow read-only interface for the
     # takeover wall.  They are rejected everywhere else so an inherited fd can
     # never become authority for a mutation command.

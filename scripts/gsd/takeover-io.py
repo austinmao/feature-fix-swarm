@@ -7,6 +7,7 @@ does not participate in store selection.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -89,10 +90,12 @@ def _dir_flags() -> int:
 
 
 def _trusted(st: os.stat_result) -> bool:
-    return stat.S_ISDIR(st.st_mode) and (
-        st.st_uid == os.getuid()
-        or (st.st_uid == 0 and not (st.st_mode & 0o022))
-    )
+    # Full safe_path: every component must be a directory owned by the current
+    # user or root and carry no group or world write bit, regardless of owner
+    # (WALL-RESIDUALS cacd9f1a).
+    return (stat.S_ISDIR(st.st_mode)
+            and st.st_uid in (os.getuid(), 0)
+            and not (st.st_mode & 0o022))
 
 
 def _regular_current_user(st: os.stat_result) -> bool:
@@ -209,18 +212,76 @@ class LockBusy(RuntimeError):
     pass
 
 
+class ReclaimElection:
+    """Serialized stale-reclaim election on one stable kernel-lock inode.
+
+    The inode is inert: it carries no ownership state of its own and is never
+    unlinked.  Ownership is the kernel flock, which is released on close,
+    exit, or SIGKILL, so a crashed reclaimer can never strand the election.
+    """
+    name = ".takeover-check.reclaim.lock"
+
+    def __init__(self, directory_fd: int):
+        self.directory_fd = directory_fd
+        self.fd: int | None = None
+
+    def __enter__(self):
+        fd = os.open(self.name, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                     0o600, dir_fd=self.directory_fd)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                raise UnsafeTakeoverPath("unsafe reclaim election inode")
+            os.fchmod(fd, 0o600)
+            deadline = time.monotonic() + 1.5
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise LockBusy("runner-live")
+                    time.sleep(0.02)
+        except BaseException:
+            os.close(fd)
+            raise
+        self.fd = fd
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)  # the kernel releases the flock; the inode stays
+            self.fd = None
+
+
 class OwnerLock:
-    """Link-published, descriptor-relative owner lock for the wall lifetime."""
+    """Link-published, descriptor-relative owner lock for the wall lifetime.
+
+    Liveness judgments reuse Plan 01-06's portable identity provider
+    (``process_identity``/``process_liveness``): zombie owners are dead,
+    same-PID/different-start owners are stale, prior-boot owners are gone,
+    and any unprovable identity is treated as live, never stale.
+    """
     name = ".takeover-check.lock"
 
     def __init__(self, directory_fd: int, run_id: str):
         self.directory_fd = directory_fd
         self.run_id = run_id
         self.identity: tuple[int, int] | None = None
+        self._pre_move_hook = None  # test seam: runs inside the held election
 
     def _payload(self) -> bytes:
-        payload = {"pid": os.getpid(), "pid_start_time": _process_start(os.getpid()),
-                   "boot_session_id": _boot_id(), "claimed_at": int(time.time()),
+        try:
+            identity = process_identity(os.getpid())
+            start = identity.pid_start_time or "unknown"
+            boot = identity.boot_session_id or boot_session_id()
+        except UnsafeTakeoverPath:
+            # An unobservable self-identity still publishes: an unknown start
+            # is judged live by every contender, never stale.
+            start = "unknown"
+            boot = boot_session_id()
+        payload = {"pid": os.getpid(), "pid_start_time": start,
+                   "boot_session_id": boot, "claimed_at": int(time.time()),
                    "run_id": self.run_id}
         return json.dumps(payload, separators=(",", ":")).encode()
 
@@ -231,37 +292,77 @@ class OwnerLock:
             boot = str(payload["boot_session_id"])
         except (KeyError, TypeError, ValueError):
             return True  # malformed locks receive grace before a later retry
-        if boot != _boot_id():
-            return False
-        if _process_start(pid) != start or start == "unknown":
-            return False
         try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+            if boot != boot_session_id():
+                return False  # a prior boot cannot hold a live owner
+            identity = process_identity(pid)
+        except UnsafeTakeoverPath:
+            return True  # unprovable owners are live, never stale
+        if not process_liveness(identity):
+            return False  # dead and zombie owners are reclaimable
+        if start == "unknown" or identity.pid_start_time is None:
+            return True  # unknown start identity is never treated as stale
+        return identity.pid_start_time == start  # start drift means PID reuse
 
-    def acquire(self) -> None:
-        for _ in range(3):
-            temp = f".takeover-lock.{os.getpid()}.{time.time_ns()}"
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
-                         dir_fd=self.directory_fd)
+    def _publish(self) -> bool:
+        temp = f".takeover-lock.{os.getpid()}.{time.time_ns()}"
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                     0o600, dir_fd=self.directory_fd)
+        try:
+            os.write(fd, self._payload())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(temp, self.name, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
+        except FileExistsError:
+            os.unlink(temp, dir_fd=self.directory_fd)
+            return False
+        st = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
+        self.identity = (st.st_dev, st.st_ino)
+        os.unlink(temp, dir_fd=self.directory_fd)
+        os.fsync(self.directory_fd)
+        return True
+
+    def _reclaim(self, judged: os.stat_result) -> None:
+        """Move one judged-stale inode aside under the serialized election."""
+        with ReclaimElection(self.directory_fd):
+            if self._pre_move_hook is not None:
+                self._pre_move_hook()
             try:
-                os.write(fd, self._payload())
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            try:
-                os.link(temp, self.name, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
-                st = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
-                self.identity = (st.st_dev, st.st_ino)
-                os.unlink(temp, dir_fd=self.directory_fd)
+                current = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return  # already reclaimed; retry publication
+            if not same_identity(current, judged):
+                return  # a replacement owner appeared; re-judge it next round
+            tomb = f".takeover-check.tombstone.{os.getpid()}.{time.time_ns()}"
+            os.rename(self.name, tomb, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
+            tomb_st = os.stat(tomb, dir_fd=self.directory_fd, follow_symlinks=False)
+            if not same_identity(tomb_st, judged):
+                # A replacement published inside the move window was moved by
+                # mistake: restore it by link and never delete its inode.
+                try:
+                    os.link(tomb, self.name, src_dir_fd=self.directory_fd,
+                            dst_dir_fd=self.directory_fd)
+                except FileExistsError:
+                    return  # the name was reoccupied; the inode stays linked
+                os.unlink(tomb, dir_fd=self.directory_fd)
                 os.fsync(self.directory_fd)
                 return
-            except FileExistsError:
-                os.unlink(temp, dir_fd=self.directory_fd)
+            os.unlink(tomb, dir_fd=self.directory_fd)
+            os.fsync(self.directory_fd)
+
+    def acquire(self) -> None:
+        for _ in range(4):
+            if self._publish():
+                return
             try:
                 judged_fd = open_regular(self.directory_fd, self.name)
+            except FileNotFoundError:
+                continue  # the owner vanished between attempts; republish
+            except (UnsafeTakeoverPath, OSError):
+                raise LockBusy("runner-live")
+            try:
                 try:
                     judged = os.fstat(judged_fd)
                     raw = read_regular(judged_fd)
@@ -274,16 +375,9 @@ class OwnerLock:
                     stale = time.time() - judged.st_mtime > 1
                 if not stale:
                     raise LockBusy("runner-live")
-                current = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
-                if not same_identity(current, judged):
-                    continue
-                tomb = f".takeover-check.tombstone.{os.getpid()}.{time.time_ns()}"
-                os.rename(self.name, tomb, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
-                tomb_st = os.stat(tomb, dir_fd=self.directory_fd, follow_symlinks=False)
-                if not same_identity(tomb_st, judged):
-                    # Lost election: never unlink an entry we did not judge.
-                    continue
-                os.unlink(tomb, dir_fd=self.directory_fd)
+                self._reclaim(judged)
+            except LockBusy:
+                raise
             except (UnsafeTakeoverPath, OSError):
                 raise LockBusy("runner-live")
         raise LockBusy("runner-live")
