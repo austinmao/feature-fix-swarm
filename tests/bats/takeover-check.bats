@@ -67,7 +67,7 @@ setup() {
   canonical="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$REPO/.feature-fix-swarm/evidence.json")"
   mkdir -p "$REPO/.feature-fix-swarm/takeover"
   cat > "$REPO/.feature-fix-swarm/takeover/spec-006.json" <<EOF
-{"schema_version":1,"created_at":1,"ids":{"spec_id":"006","run_id":"spec-006"},"gates_store":"$canonical","gates_store_anchor":"$(printf %s "$canonical" | shasum -a 256 | awk '{print $1}')","git_state":{"branch":"006-takeover","head":"$(git rev-parse HEAD)","upstream":""},"preflight":{},"grants":[],"pendings":[],"promotions":[],"runner":{},"unresolved_findings":[],"phases":[],"evidence":[],"forbid":[],"resume":{"command":"","preconditions":[]}}
+{"schema_version":1,"created_at":$(date +%s),"ids":{"spec_id":"006","run_id":"spec-006"},"gates_store":"$canonical","gates_store_anchor":"$(printf %s "$canonical" | shasum -a 256 | awk '{print $1}')","git_state":{"branch":"006-takeover","head":"$(git rev-parse HEAD)","upstream":""},"preflight":{},"grants":[],"pendings":[],"promotions":[],"runner":{},"unresolved_findings":[],"phases":[],"evidence":[],"forbid":[],"resume":{"command":"","preconditions":[]}}
 EOF
   run env -u GATES_STORE bash "$WALL" --run-id spec-006 --json
   [ "$status" -eq 0 ]
