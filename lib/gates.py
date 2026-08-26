@@ -4242,4 +4242,16 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Queue-consumed evidence-store I/O/schema failure surface (spec-006
+        # REQ-206): note-failure and check-grant reserve rc 75 with the exact
+        # GATES-STORE-ERROR token so the queue's systemic classifier can tell
+        # a broken store from a semantic refusal.  Semantic refusals return
+        # normally above and keep their existing rc/tokens; every other
+        # command keeps its historical crash behavior.
+        if sys.argv[1:2] and sys.argv[1] in ("note-failure", "check-grant"):
+            print(f"GATES-STORE-ERROR: {exc}", file=sys.stderr)
+            sys.exit(75)
+        raise

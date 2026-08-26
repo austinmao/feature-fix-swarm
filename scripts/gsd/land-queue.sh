@@ -154,7 +154,8 @@ COUNT="$(read_scalar "$DOC" "" count)"
 require_go() { # $1 step label; nonzero return records a queue terminal
   local verdict
   verdict="$(bash "$GUARD" allow --store "$LQ" --items "$COUNT" \
-    --queue-started "$QUEUE_STARTED" --item-started "$ITEM_STARTED" --round 1)" || true
+    --queue-started "$QUEUE_STARTED" --item-started "$ITEM_STARTED" \
+    --round "${ITEM_ROUND:-1}")" || true
   case "$verdict" in
     ALLOW) return 0 ;;
     STOP:operator-stop)
@@ -171,8 +172,47 @@ require_go() { # $1 step label; nonzero return records a queue terminal
   esac
 }
 
-block_item() { # $1 status, $2 detail/unblock
+# ── failure classification, no-progress, and breaker accounting ───────────
+# REQ-205/REQ-206: every observed effect failure is classified through the
+# guard's closed boundary table and recorded durably so consecutive systemic
+# failures trip the breaker (6e4616bc: class-agnostic, two consecutive).
+
+record_class() { # $1 class; returns 2 when the breaker trips
+  local verdict rrc
+  verdict="$(bash "$GUARD" record --store "$LQ" --queue-id "$QUEUE_ID" --class "$1")"
+  rrc=$?
+  if [ "$rrc" -eq 5 ]; then
+    journal --kind terminal --step terminal --status "$verdict" \
+      --detail "two consecutive systemic failures (6e4616bc)"
+    QUEUE_TERMINAL="$verdict"
+    return 2
+  fi
+  [ "$rrc" -eq 0 ] || echo "QUEUE-GUARD-WARN: record rc $rrc" >&2
+  return 0
+}
+
+block_item() { # $1 status, $2 detail/unblock — an item-local terminal
   journal --kind terminal --step terminal --item "$ITEM_BRANCH" --status "$1" --detail "$2"
+  record_class local
+}
+
+fail_item() { # $1 boundary, $2 rc, $3 stderr-file, $4 gate, $5 status, $6 unblock
+  # Returns 1 (item terminal, queue continues) or 2 (breaker tripped).
+  local class np_rc status="$5"
+  cat -- "$3" >&2 || true
+  class="$(bash "$GUARD" classify-subprocess --boundary "$1" --rc "$2" \
+    --stderr-file "$3" 2>/dev/null)" || class=local
+  bash "$GUARD" note-failure --queue-id "$QUEUE_ID" --item "$ITEM_BRANCH" \
+    --gate "$4" --stderr-file "$3" >/dev/null 2>"$WORKTMP/np.err"
+  np_rc=$?
+  if [ "$np_rc" -eq 6 ]; then status="BLOCKED:no-progress"; fi
+  if [ "$np_rc" -eq 75 ]; then cat -- "$WORKTMP/np.err" >&2 || true; class="store-error"; fi
+  case "$class" in
+    reviewer-unreachable|store-error|gh-auth|network) status="BLOCKED:$class" ;;
+  esac
+  journal --kind terminal --step terminal --item "$ITEM_BRANCH" --status "$status" --detail "$6"
+  record_class "$class" || return 2
+  return 1
 }
 
 drop_worktree() { # $1 worktree path
@@ -185,7 +225,11 @@ land_one_item() {
   # (invoked as an `if` condition), so every failure is checked explicitly.
   local branch="$ITEM_BRANCH" head="$ITEM_HEAD" spec_id="$ITEM_SPEC"
   local probe status unblock merge_sha wt prepared pr remote_head reviewed
-  local now_head reviewer fi_bin am rf ci_rc
+  local now_head reviewer fi_bin am rf ci_rc errf eff_rc
+
+  # ponytail: v1 runs exactly one round per item; the guard still sees the
+  # real round number, and REQ-204's cap trips if a retry loop ever appears.
+  require_go "round $ITEM_ROUND $branch" || return 2
 
   # 1. item-start precheck — the SAME collector code path as intake, never a
   #    shell reimplementation; authority-only, zero model calls.
@@ -243,11 +287,15 @@ land_one_item() {
     drop_worktree "$wt"
     return 1
   fi
-  if ! (cd "$wt" && "$fi_bin" "$spec_id" --autonomous); then
+  errf="$WORKTMP/err-implement-$IDX"
+  (cd "$wt" && "$fi_bin" "$spec_id" --autonomous) 2>"$errf"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
     journal --kind result --step implement --item "$branch" --status failed
-    block_item "BLOCKED:implement" "re-run feature-implement $spec_id --autonomous and fix its failure"
     drop_worktree "$wt"
-    return 1
+    fail_item implement "$eff_rc" "$errf" implement "BLOCKED:implement" \
+      "re-run feature-implement $spec_id --autonomous and fix its failure"
+    return $?
   fi
   journal --kind result --step implement --item "$branch" --status ok
 
@@ -256,22 +304,34 @@ land_one_item() {
   require_go "push $branch" || { drop_worktree "$wt"; return 2; }
   journal --kind intent --step push --item "$branch"
   prepared="$(git -C "$wt" rev-parse HEAD)"
-  if ! git -C "$wt" push -q --force-with-lease origin "HEAD:refs/heads/$branch"; then
+  errf="$WORKTMP/err-push-$IDX"
+  git -C "$wt" push -q --force-with-lease origin "HEAD:refs/heads/$branch" 2>"$errf"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
     journal --kind result --step push --item "$branch" --status failed
-    block_item "BLOCKED:push" "git push --force-with-lease origin HEAD:refs/heads/$branch failed"
     drop_worktree "$wt"
-    return 1
+    fail_item git "$eff_rc" "$errf" push "BLOCKED:push" \
+      "git push --force-with-lease origin HEAD:refs/heads/$branch failed"
+    return $?
   fi
   journal --kind result --step push --item "$branch" --status ok
   drop_worktree "$wt"
 
-  if ! pr="$(gh pr view "$branch" --json number -q .number)"; then
-    block_item "BLOCKED:pr-missing" "open a PR for $branch, then re-run the queue"
-    return 1
+  errf="$WORKTMP/err-prview-$IDX"
+  pr="$(gh pr view "$branch" --json number -q .number 2>"$errf")"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
+    fail_item gh "$eff_rc" "$errf" pr-view "BLOCKED:pr-missing" \
+      "open a PR for $branch, then re-run the queue"
+    return $?
   fi
-  if ! remote_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid)"; then
-    block_item "BLOCKED:pr-head" "gh pr view $pr --json headRefOid failed"
-    return 1
+  errf="$WORKTMP/err-prhead-$IDX"
+  remote_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid 2>"$errf")"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
+    fail_item gh "$eff_rc" "$errf" pr-head "BLOCKED:pr-head" \
+      "gh pr view $pr --json headRefOid failed"
+    return $?
   fi
   if [ "$remote_head" != "$prepared" ]; then
     block_item "BLOCKED:head-drift" "PR $pr head $remote_head is not the pushed $prepared"
@@ -288,27 +348,34 @@ land_one_item() {
     block_item "BLOCKED:reviewer-missing" "install an opposite-vendor reviewer CLI (codex or claude)"
     return 1
   fi
-  if ! run_bounded 900 "$reviewer" review "$pr" "$reviewed" </dev/null; then
+  errf="$WORKTMP/err-review-$IDX"
+  run_bounded 900 "$reviewer" review "$pr" "$reviewed" </dev/null 2>"$errf"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
     journal --kind result --step review --item "$branch" --status failed
-    block_item "BLOCKED:review" "address reviewer findings for PR $pr, then re-run the queue"
-    return 1
+    fail_item reviewer "$eff_rc" "$errf" review "BLOCKED:review" \
+      "address reviewer findings for PR $pr, then re-run the queue"
+    return $?
   fi
   journal --kind result --step review --item "$branch" --status ok
 
   # 6. bounded CI watch — the exact REQ-210 contract.
   require_go "ci $branch" || return 2
   journal --kind intent --step ci --item "$branch"
-  run_bounded 1200 gh pr checks "$pr" --watch --interval 10 </dev/null
+  errf="$WORKTMP/err-ci-$IDX"
+  run_bounded 1200 gh pr checks "$pr" --watch --interval 10 </dev/null 2>"$errf"
   ci_rc=$?
   if [ "$ci_rc" -ne 0 ]; then
     if [ "$ci_rc" -eq 124 ]; then
       journal --kind result --step ci --item "$branch" --status timeout
-      block_item "BLOCKED:ci-timeout" "gh pr checks $pr --watch (bounded 1200s) timed out"
+      fail_item ci-watch "$ci_rc" "$errf" ci "BLOCKED:ci-timeout" \
+        "gh pr checks $pr --watch (bounded 1200s) timed out"
     else
       journal --kind result --step ci --item "$branch" --status failed
-      block_item "BLOCKED:ci" "fix failing checks on PR $pr, then re-run the queue"
+      fail_item ci-watch "$ci_rc" "$errf" ci "BLOCKED:ci" \
+        "fix failing checks on PR $pr, then re-run the queue"
     fi
-    return 1
+    return $?
   fi
   journal --kind result --step ci --item "$branch" --status ok
 
@@ -340,9 +407,13 @@ land_one_item() {
 
   # 8. head stability re-read: any drift is a typed abort — never a re-pin
   #    under the existing grant (f1bc7cad).
-  if ! now_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid)"; then
-    block_item "BLOCKED:pr-head" "gh pr view $pr --json headRefOid failed"
-    return 1
+  errf="$WORKTMP/err-prhead2-$IDX"
+  now_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid 2>"$errf")"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
+    fail_item gh "$eff_rc" "$errf" pr-head "BLOCKED:pr-head" \
+      "gh pr view $pr --json headRefOid failed"
+    return $?
   fi
   if [ "$now_head" != "$reviewed" ]; then
     block_item "BLOCKED:head-drift" "PR $pr head moved to $now_head after review of $reviewed"
@@ -360,10 +431,14 @@ land_one_item() {
   journal --kind result --step grant --item "$branch" --status ok
 
   journal --kind intent --step merge --item "$branch" --detail "$reviewed"
-  if ! gh pr merge "$pr" --squash --match-head-commit "$reviewed"; then
+  errf="$WORKTMP/err-merge-$IDX"
+  gh pr merge "$pr" --squash --match-head-commit "$reviewed" 2>"$errf"
+  eff_rc=$?
+  if [ "$eff_rc" -ne 0 ]; then
     journal --kind result --step merge --item "$branch" --status failed
-    block_item "BLOCKED:merge" "inspect gh pr merge output for PR $pr, then re-run the queue"
-    return 1
+    fail_item gh "$eff_rc" "$errf" merge "BLOCKED:merge" \
+      "inspect gh pr merge output for PR $pr, then re-run the queue"
+    return $?
   fi
   journal --kind result --step merge --item "$branch" --status ok
 
@@ -391,8 +466,9 @@ land_one_item() {
   fi
   journal --kind result --step finalize --item "$branch" --status ok
 
-  # LANDED only after finalization completes.
+  # LANDED only after finalization completes; success resets the breaker.
   journal --kind terminal --step terminal --item "$branch" --status LANDED --detail "$merge_sha"
+  record_class success
   return 0
 }
 
@@ -415,6 +491,7 @@ while [ "$i" -lt "$COUNT" ]; do
   ITEM_SPEC="$(read_scalar "$DOC" "$IDX" spec_id)" || ITEM_SPEC="$ITEM_BRANCH"
   load_changed_files "$DOC" "$IDX" || CHANGED_FILES=()
   ITEM_STARTED="$(date +%s)"
+  ITEM_ROUND=1
 
   require_go "item $ITEM_BRANCH" || break
 
