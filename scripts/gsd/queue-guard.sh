@@ -86,13 +86,13 @@ case "$cmd" in
     fi
     if [ -n "$item_started" ]; then
       case "$item_started" in *[!0-9]*) usage ;; esac
-      if [ $((now - item_started)) -gt "$ITEM_WALL_SECONDS" ]; then
+      if [ $((now - item_started)) -ge "$ITEM_WALL_SECONDS" ]; then
         echo "STOP:item-wall"; exit 3
       fi
     fi
     if [ -n "$queue_started" ]; then
       case "$queue_started" in *[!0-9]*) usage ;; esac
-      if [ $((now - queue_started)) -gt "$QUEUE_WALL_SECONDS" ]; then
+      if [ $((now - queue_started)) -ge "$QUEUE_WALL_SECONDS" ]; then
         echo "STOP:queue-wall"; exit 3
       fi
     fi
