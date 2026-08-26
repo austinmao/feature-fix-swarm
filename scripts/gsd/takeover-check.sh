@@ -119,11 +119,24 @@ LOCK="$STORE_DIR/.takeover-check.lock"
 if ! python3 - "$LOCK" "$RUN_ID" <<'PY'
 import json,os,sys,time
 p,r=sys.argv[1:]
-try:
- fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
- payload={'pid':os.getpid(),'pid_start_time':str(int(time.time())),'boot_session_id':open('/proc/sys/kernel/random/boot_id').read().strip() if os.path.exists('/proc/sys/kernel/random/boot_id') else 'unknown','claimed_at':int(time.time()),'run_id':r}
- os.write(fd,json.dumps(payload).encode()); os.close(fd)
-except FileExistsError: raise SystemExit(1)
+boot=open('/proc/sys/kernel/random/boot_id').read().strip() if os.path.exists('/proc/sys/kernel/random/boot_id') else 'unknown'
+payload={'pid':os.getpid(),'pid_start_time':str(int(time.time())),'boot_session_id':boot,'claimed_at':int(time.time()),'run_id':r}
+for _ in range(2):
+ try:
+  fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+  os.write(fd,json.dumps(payload).encode()); os.close(fd); break
+ except FileExistsError:
+  try:
+   old=json.load(open(p)); pid=int(old.get('pid',0)); stale=(old.get('boot_session_id') != boot)
+   if not stale:
+    try: os.kill(pid,0)
+    except OSError: stale=True
+   if not stale: raise SystemExit(1)
+   tomb=p+'.tombstone.%s.%s'%(os.getpid(),time.time_ns())
+   os.replace(p,tomb); os.unlink(tomb)
+  except FileNotFoundError: continue
+  except (ValueError,TypeError,json.JSONDecodeError): raise SystemExit(1)
+else: raise SystemExit(1)
 PY
 then refuse runner-live; fi
 cleanup() { [ -n "$LOCK" ] && rm -f "$LOCK"; }
