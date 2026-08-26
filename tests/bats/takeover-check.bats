@@ -257,6 +257,44 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c '^Unblock (operator): /spec-status$')" -eq 1 ]
 }
 
+@test "malformed nested ids shapes refuse decoy-store with no traceback through the full wall" {
+  # 01-gaps3 CR-03: {"ids":[]} raised AttributeError in record binding and
+  # escaped the closed refusal grammar as a traceback.
+  mkdir -p "$REPO/.feature-fix-swarm/takeover"
+  for ids in '[]' '"scalar"' 'null' '0' '{"run_id":"spec-999"}'; do
+    printf '{"schema_version":1,"created_at":1,"ids":%s,"gates_store":"/x","gates_store_anchor":"y"}\n' "$ids" \
+      > "$REPO/.feature-fix-swarm/takeover/spec-006.json"
+    run env -u GATES_STORE bash "$WALL" --run-id spec-006
+    [ "$status" -eq 1 ] || { echo "ids=$ids status=$status out=$output" >&3; return 1; }
+    [ "$(printf '%s\n' "$output" | grep -c '^TAKEOVER-REFUSED:decoy-store$')" -eq 1 ] || { echo "ids=$ids out=$output" >&3; return 1; }
+    [[ "$output" != *Traceback* ]] || { echo "ids=$ids leaked a traceback" >&3; return 1; }
+  done
+}
+
+@test "hostile list timestamps and deceptive embedded run ids never crash or mislabel discovery" {
+  # 01-gaps3 CR-04/WR-02: one non-finite created_at killed the entire listing
+  # via uncaught OverflowError, and a record whose embedded ids.run_id differs
+  # from its active filename mislabeled the discovery surface.
+  local dir="$REPO/.feature-fix-swarm/takeover"
+  mkdir -p "$dir"
+  local valid='{"created_at":CREATED,"ids":{"run_id":"RID"},"git_state":{"branch":"b"},"resume":{"command":"echo ok"}}'
+  local hostile
+  hostile="${valid/RID/spec-001}"; printf '%s\n' "${hostile/CREATED/1e309}" > "$dir/spec-001.json"
+  hostile="${valid/RID/spec-002}"; printf '%s\n' "${hostile/CREATED/-1e309}" > "$dir/spec-002.json"
+  hostile="${valid/RID/spec-003}"; printf '%s\n' "${hostile/CREATED/NaN}" > "$dir/spec-003.json"
+  hostile="${valid/RID/spec-004}"; printf '%s\n' "${hostile/CREATED/true}" > "$dir/spec-004.json"
+  # Deceptive embedded identity: the filename is the active identity.
+  hostile="${valid/RID/spec-999}"; printf '%s\n' "${hostile/CREATED/1}" > "$dir/spec-007.json"
+  # One valid record must survive every hostile sibling.
+  hostile="${valid/RID/spec-008}"; printf '%s\n' "${hostile/CREATED/1}" > "$dir/spec-008.json"
+  run timeout 5 env -u GATES_STORE -u GSD_RUN_ID bash "$WALL" --list
+  [ "$status" -eq 0 ]
+  [[ "$output" != *Traceback* ]]
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
+  [[ "$output" == spec-008$'\t'* ]]
+  [[ "$output" != *spec-999* ]]
+}
+
 @test "rejects --rearm as usage without mutating the record" {
   mkdir -p "$REPO/.feature-fix-swarm/takeover"
   printf '{"ids":{"run_id":"spec-006"}}\n' > "$REPO/.feature-fix-swarm/takeover/spec-006.json"
