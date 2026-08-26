@@ -105,3 +105,25 @@ EOF
   grep -q 'version: "1.2.0"' "$ROOT/skills/spec-status/SKILL.md"
   grep -q 'deterministic forbid' "$ROOT/skills/spec-status/SKILL.md"
 }
+
+# Phase 01-02 RED contract: a refusal is an operator-facing, closed grammar
+# verdict.  This deliberately uses a malformed bound store so no ledger read
+# is needed to prove the rendering contract.
+@test "refuses decoy-store with exactly one safe operator remedy" {
+  mkdir -p "$REPO/.feature-fix-swarm/takeover"
+  cat > "$REPO/.feature-fix-swarm/takeover/spec-006.json" <<'EOF'
+{"schema_version":1,"created_at":1,"ids":{"spec_id":"006","run_id":"spec-006"},"gates_store":"/decoy/evidence.json","gates_store_anchor":"bad","git_state":{"branch":"006-takeover","head":"x","upstream":""},"preflight":{},"grants":[],"pendings":[],"promotions":[],"runner":{},"unresolved_findings":[],"phases":[],"evidence":[],"forbid":[],"resume":{"command":"","preconditions":[]}}
+EOF
+  run env -u GATES_STORE bash "$WALL" --run-id spec-006
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^TAKEOVER-REFUSED:decoy-store$')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^Unblock (operator): /spec-status$')" -eq 1 ]
+}
+
+@test "rejects --rearm as usage without mutating the record" {
+  mkdir -p "$REPO/.feature-fix-swarm/takeover"
+  printf '{"ids":{"run_id":"spec-006"}}\n' > "$REPO/.feature-fix-swarm/takeover/spec-006.json"
+  run env -u GATES_STORE bash "$WALL" --run-id spec-006 --rearm
+  [ "$status" -eq 2 ]
+  [ -f "$REPO/.feature-fix-swarm/takeover/spec-006.json" ]
+}
