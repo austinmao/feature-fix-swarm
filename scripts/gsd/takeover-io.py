@@ -57,6 +57,12 @@ def process_identity(pid: int | None) -> ProcessIdentity:
         return ProcessIdentity(pid, boot_session_id(), None, "dead")
     except PermissionError:
         raise UnsafeTakeoverPath("unobservable positive process identity")
+    seam = os.environ.get("TAKEOVER_TEST_IDENTITY")
+    if seam:
+        # Test-only hermeticity seam (see _boot_id): a kill(0)-live pid gets a
+        # deterministic supported-host identity so fixtures never shell to
+        # `ps`.  Unset in production, this branch is inert.
+        return ProcessIdentity(pid, seam, seam, "S")
     try:
         stat_text = Path(f"/proc/{pid}/stat").read_text()
         tail = stat_text.rsplit(") ", 1)[1].split()
@@ -185,6 +191,14 @@ def consume_exact(directory_fd: int, name: str, fd: int) -> str:
 
 
 def _boot_id() -> str:
+    # Test-only hermeticity seam: managed sandboxes deny `ps`/`sysctl`, so
+    # acceptance fixtures export TAKEOVER_TEST_IDENTITY to supply one
+    # deterministic boot/start identity.  It is honored only when explicitly
+    # set; unset (production) the real platform probes below decide and any
+    # unobservable identity still fails closed via boot_session_id().
+    seam = os.environ.get("TAKEOVER_TEST_IDENTITY")
+    if seam:
+        return seam
     try:
         value = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         if value:

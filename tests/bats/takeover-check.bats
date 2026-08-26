@@ -4,6 +4,11 @@
 # collector/wall boundary with a private evidence store and local git only.
 
 setup() {
+  # Hermetic supported-host identity for every fixture: managed sandboxes
+  # deny `ps`/`sysctl`, so the suite supplies its own deterministic process
+  # and boot identity.  Production inertness is proven by the fail-closed
+  # test that unsets this seam under a denied PATH.
+  export TAKEOVER_TEST_IDENTITY="bats-boot-1"
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   COLLECTOR="$ROOT/skills/spec-status/scripts/collect-status-facts.sh"
   WALL="$ROOT/scripts/gsd/takeover-check.sh"
