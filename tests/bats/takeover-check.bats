@@ -21,6 +21,43 @@ setup() {
   git checkout -qb 006-takeover
 }
 
+# A complete, bound record plus its matching authoritative ledger row.  Tests
+# deliberately alter one fact after this helper so a refusal cannot be caused
+# by an accidentally malformed fixture.
+write_live_takeover_fixture() {
+  local now="${1:-1700000000}"
+  local record="$(dirname "$STORE")/takeover/spec-006.json"
+  local canonical
+  canonical="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$STORE")"
+  mkdir -p "$(dirname "$record")"
+  python3 - "$STORE" "$record" "$canonical" "$now" "$(git rev-parse HEAD)" <<'PY'
+import hashlib,json,sys
+store,record,canonical,created,head=sys.argv[1:]
+state={"_autonomy":{"spec-006":{"takeover_expected":True,
+       "takeover_created_at":int(created),
+       "takeover_dirty_digest":hashlib.sha256(b"").hexdigest(),
+       "preflight":{"pass":True,"created_at":int(created)},
+       "grants":{"ship:gsd":{"granted_at":int(created),"expires_at":4102444800}}}},
+       "_findings":[]}
+with open(store,"w") as f: json.dump(state,f)
+record_data={"schema_version":1,"created_at":int(created),
+ "ids":{"spec_id":"006","run_id":"spec-006"},"gates_store":canonical,
+ "gates_store_anchor":hashlib.sha256(canonical.encode()).hexdigest(),
+ "git_state":{"branch":"006-takeover","head":head,"upstream":"","dirty":[]},
+ "preflight":{"pass":True},"grants":[{"action":"ship:gsd","granted_at":int(created),"expires_at":4102444800}],
+ "pendings":[],"promotions":[],"runner":{},"unresolved_findings":[],"phases":[],"evidence":[],
+ "forbid":[],"resume":{"command":"/spec-status 006","preconditions":[]}}
+with open(record,"w") as f: json.dump(record_data,f)
+PY
+}
+
+assert_single_refusal() {
+  local reason="$1"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c "^TAKEOVER-REFUSED:${reason}$")" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^Unblock (operator): ')" -eq 1 ]
+}
+
 @test "store-dir and store-path resolve without loading the ledger" {
   mkdir -p "$BATS_TEST_TMPDIR/store"
   local resolved_store
@@ -255,4 +292,47 @@ PY
   [ "$(stat -f '%Lp' "$store_dir/spec-006.json")" = 600 ]
   [ "$(stat -f '%Lp' "$store_dir/spec-006.md")" = 600 ]
   [ -z "$(find "$store_dir" -name '.spec-006.*.tmp' -print -quit)" ]
+}
+
+# Plan 01-04 RED: a record is evidence, never the selector for the live
+# check floor. These use a deterministic clock seam added by the GREEN change.
+@test "refusal floor checks fresh preflight and required ship grant despite empty record fields" {
+  write_live_takeover_fixture 1700000000
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['preflight']={}; d['grants']=[]
+json.dump(d,open(p,'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700000001 bash "$WALL" --run-id spec-006
+  assert_single_refusal preflight-stale
+  [[ "$output" == *$'Unblock (operator): /preflight'* ]]
+}
+
+@test "record mismatch is rejected before live authority when binding metadata disagrees" {
+  write_live_takeover_fixture 1700000000
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['created_at'] += 1; json.dump(d,open(p,'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700000001 bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
+
+@test "inclusive 72-hour ledger age refuses while one second under reaches later checks" {
+  write_live_takeover_fixture 1700000000
+  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700259200 bash "$WALL" --run-id spec-006
+  assert_single_refusal grant-expired
+  [[ "$output" == *'Unblock (operator): /spec-status'* ]]
+
+  write_live_takeover_fixture 1700000000
+  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700259199 bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+}
+
+@test "exact dirty baseline rejects an added untracked entry" {
+  write_live_takeover_fixture 1700000000
+  printf 'new\n' > added-untracked.txt
+  run env GATES_STORE="$STORE" TAKEOVER_NOW=1700000001 bash "$WALL" --run-id spec-006
+  assert_single_refusal dirty-worktree
 }
