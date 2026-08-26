@@ -9,6 +9,10 @@ setup() {
   # and boot identity.  Production inertness is proven by the fail-closed
   # test that unsets this seam under a denied PATH.
   export TAKEOVER_TEST_IDENTITY="bats-boot-1"
+  # Hermetic run identity: never depend on an ambient GSD_RUN_ID exported by
+  # the invoking shell; cases that need one set it explicitly (01-VERIFICATION
+  # gap: list mode must be display-only under any ambient run id).
+  unset GSD_RUN_ID
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   COLLECTOR="$ROOT/skills/spec-status/scripts/collect-status-facts.sh"
   WALL="$ROOT/scripts/gsd/takeover-check.sh"
@@ -147,10 +151,16 @@ PY
 {"created_at":1,"ids":{"run_id":"$id"},"git_state":{"branch":"b"},"resume":{"command":"echo \u001b[31minert"}}
 EOF
   done
-  run env -u GATES_STORE bash "$WALL" --list
+  run env -u GATES_STORE -u GSD_RUN_ID bash "$WALL" --list
   [ "$status" -eq 0 ]
   [[ "$output" == spec-006$'\t'* ]]
   [[ "$output" == *$'\nspec-007\t'* ]]
+  local baseline="$output"
+  # 01-VERIFICATION gap: an ambient run id must not select records, alter
+  # verdicts, or suppress rows in display-only list mode.
+  run env -u GATES_STORE GSD_RUN_ID=spec-006 bash "$WALL" --list
+  [ "$status" -eq 0 ]
+  [ "$output" = "$baseline" ]
 }
 
 @test "spec-status documents the 1.2 takeover writer contract" {
@@ -542,6 +552,189 @@ print("owner-lock-write-ok")
 PY
   [ "$status" -eq 0 ]
   [[ "$output" == *owner-lock-write-ok* ]]
+}
+
+# 01-gaps2 RED: the durable intent is published through the same full-write
+# transaction as staging and the owner lock — a short write completes the
+# payload before fsync, and zero progress never leaves a truncated intent.
+@test "durable intent short write seams complete the payload and zero progress never publishes" {
+  local dir="$BATS_TEST_TMPDIR/intent-dir"
+  mkdir -p "$dir"
+  run python3 - "$GATES" "$dir" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("takeover_gates", sys.argv[1])
+g = importlib.util.module_from_spec(spec); sys.modules[spec.name] = g; spec.loader.exec_module(g)
+work = sys.argv[2]
+dir_fd = os.open(work, os.O_RDONLY)
+name = ".takeover-transaction.spec-006.json"
+payload = {"phase": "intent", "run_id": "spec-006", "pad": "x" * 96}
+real_write = os.write
+os.write = lambda fd, view: real_write(fd, bytes(view)[:7])
+try:
+    g._write_intent_excl(dir_fd, name, payload)
+finally:
+    os.write = real_write
+with open(os.path.join(work, name), "rb") as fh:
+    data = fh.read()
+assert json.loads(data) == payload, "short writes were not completed: %d bytes" % len(data)
+os.unlink(os.path.join(work, name))
+os.write = lambda fd, view: 0
+try:
+    try:
+        g._write_intent_excl(dir_fd, name, payload)
+    finally:
+        os.write = real_write
+except OSError:
+    pass
+else:
+    raise AssertionError("zero-progress intent write did not raise")
+assert not os.path.exists(os.path.join(work, name)), "zero-progress attempt left a truncated durable intent"
+print("intent-write-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *intent-write-ok* ]]
+}
+
+# 01-gaps2 RED: the immutable authority snapshot must retain the complete
+# evidence bytes under a short-write fault and reject zero progress.
+@test "authority snapshot short write seams complete the payload and zero progress is rejected" {
+  run python3 - "$ROOT/scripts/gsd/takeover-transaction.py" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("takeover_transaction", sys.argv[1])
+mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = mod; spec.loader.exec_module(mod)
+raw = b'{"payload":"' + b"x" * 96 + b'"}'
+real_write = os.write
+os.write = lambda fd, view: real_write(fd, bytes(view)[:7])
+try:
+    snap_fd, digest = mod._snapshot_bytes(raw)
+finally:
+    os.write = real_write
+data = os.read(snap_fd, len(raw) + 1)
+os.close(snap_fd)
+assert data == raw, "short writes were not completed: %d of %d bytes" % (len(data), len(raw))
+os.write = lambda fd, view: 0
+try:
+    try:
+        mod._snapshot_bytes(raw)
+    finally:
+        os.write = real_write
+except OSError:
+    pass
+else:
+    raise AssertionError("zero-progress snapshot write did not raise")
+print("snapshot-write-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *snapshot-write-ok* ]]
+}
+
+# 01-gaps2 RED: descriptor reads that consume payload bytes must loop to the
+# exact fstat size and refuse short data instead of silently accepting it.
+@test "read_regular loops short reads to the exact size and rejects early EOF" {
+  local dir="$BATS_TEST_TMPDIR/read-dir"
+  mkdir -p "$dir"
+  python3 -c 'open("'"$dir"'/spec-006.json","w").write("{\"payload\":\"" + "x"*96 + "\"}")'
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$dir" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]
+dir_fd = os.open(work, os.O_RDONLY)
+with open(os.path.join(work, "spec-006.json"), "rb") as fh:
+    expected = fh.read()
+fd = io_mod.open_regular(dir_fd, "spec-006.json")
+real_read = os.read
+os.read = lambda f, n: real_read(f, min(n, 7))
+try:
+    data = io_mod.read_regular(fd)
+finally:
+    os.read = real_read
+    os.close(fd)
+assert data == expected, "short reads were not completed: %d of %d bytes" % (len(data), len(expected))
+fd = io_mod.open_regular(dir_fd, "spec-006.json")
+calls = {"n": 0}
+def eof_read(f, n):
+    calls["n"] += 1
+    return real_read(f, min(n, 7)) if calls["n"] == 1 else b""
+os.read = eof_read
+try:
+    try:
+        io_mod.read_regular(fd)
+    finally:
+        os.read = real_read
+        os.close(fd)
+except io_mod.UnsafeTakeoverPath:
+    pass
+else:
+    raise AssertionError("early-EOF short data was accepted")
+print("read-exact-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *read-exact-ok* ]]
+}
+
+# 01-gaps2 RED: a delivered signal must release the owner lock AND terminate
+# the wall with the conventional 128+signum; it must never fall through into
+# continued policy execution or a success verdict after cleanup.
+@test "post-exec SIGTERM releases the owner lock and terminates without a verdict" {
+  write_live_takeover_fixture "$(date +%s)"
+  local ev="$BATS_TEST_TMPDIR/ev-post-exec-term"; mkdir -p "$ev"
+  env GATES_STORE="$STORE" TAKEOVER_TEST_PAUSE_BEFORE_CONSUME="$ev" bash "$WALL" --run-id spec-006 \
+    > "$BATS_TEST_TMPDIR/wall-post-term.out" 2>&1 &
+  local wall=$!
+  wait_for "$ev/ready"
+  [ -e "$BATS_TEST_TMPDIR/.takeover-check.lock" ]
+  kill -TERM "$wall"
+  local rc=0; wait "$wall" || rc=$?
+  [ "$rc" -eq 143 ]
+  ! grep -q 'TAKEOVER-OK' "$BATS_TEST_TMPDIR/wall-post-term.out"
+  [ ! -e "$BATS_TEST_TMPDIR/.takeover-check.lock" ]
+  [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
+}
+
+# 01-gaps2 RED: grant expiry must be a finite forward bound — non-finite,
+# absent, or mistyped expiry values are refusals, never approvals.
+@test "non-finite or absent grant expiry is denied by the pure evaluator" {
+  run python3 - "$GATES" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("takeover_gates", sys.argv[1])
+g = importlib.util.module_from_spec(spec); sys.modules[spec.name] = g; spec.loader.exec_module(g)
+cases = {"inf": float("inf"), "nan": float("nan"), "null": None, "string": "inf", "bool": True}
+for label, exp in cases.items():
+    data = {"_autonomy": {"spec-006": {"grants": {"ship:gsd": {"granted_at": 1, "expires_at": exp}}}}}
+    view = g.takeover_authority_view(data, "spec-006", ["ship:gsd"])
+    assert view["grant_results"]["ship:gsd"] is False, "expiry %s was approved" % label
+data = {"_autonomy": {"spec-006": {"grants": {"ship:gsd": {"granted_at": 1}}}}}
+view = g.takeover_authority_view(data, "spec-006", ["ship:gsd"])
+assert view["grant_results"]["ship:gsd"] is False, "absent expiry was approved"
+print("expiry-finite-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *expiry-finite-ok* ]]
+}
+
+# 01-gaps2 RED: hostile forbid actions must be length-capped and rendered
+# through the C0/C1 inert map before reaching refusal tokens or the terminal.
+@test "control-bearing and oversized forbid actions render sanitized and bounded" {
+  write_live_takeover_fixture "$(date +%s)"
+  local record="$(dirname "$STORE")/takeover/spec-006.json"
+  python3 - "$record" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as fh:
+    d = json.load(fh)
+d["forbid"] = [{"action": "esc\x1b[31mred\nsplit" + "A" * 200000,
+                "probe": "p\x1b]0;title\x07", "reason": "r\nline"}]
+with open(path, "w") as fh:
+    json.dump(d, fh)
+PY
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 1 ]
+  [[ "$output" != *$'\x1b'* ]]
+  [ "$(printf '%s\n' "$output" | grep -c '^TAKEOVER-REFUSED:poison/')" -eq 1 ]
+  local reason_line
+  reason_line="$(printf '%s\n' "$output" | grep '^TAKEOVER-REFUSED:poison/')"
+  [ "${#reason_line}" -le 160 ]
 }
 
 # Plan 01-06 Task 2 RED: every staging fault removes exactly the attempt-owned
