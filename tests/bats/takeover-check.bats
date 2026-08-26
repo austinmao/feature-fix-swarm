@@ -921,3 +921,633 @@ PY
   assert_single_refusal grant-expired
   [[ "$output" == *"--action ship:gsd"* ]]
 }
+
+# ── Plan 01-08 Task 1 RED: canonical evidence.lock, consume transaction, and
+# durable cross-file crash recovery.  Event control uses file-based ready/
+# release events; every wait is bounded so a missing seam fails fast.
+
+wait_for() {
+  local target="$1" ticks=$(( ${2:-4} * 20 ))
+  while [ ! -e "$target" ] && [ "$ticks" -gt 0 ]; do sleep 0.05; ticks=$((ticks - 1)); done
+  [ -e "$target" ]
+}
+
+@test "two event-controlled walls produce one success and one runner-live" {
+  write_live_takeover_fixture "$(date +%s)"
+  local ev="$BATS_TEST_TMPDIR/ev-two-walls"; mkdir -p "$ev"
+  env GATES_STORE="$STORE" TAKEOVER_TEST_PAUSE_AFTER_LOCK="$ev" bash "$WALL" --run-id spec-006 \
+    > "$BATS_TEST_TMPDIR/wall-one.out" 2>&1 &
+  local first=$!
+  wait_for "$ev/ready"
+  local begin="$(date +%s)"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal runner-live
+  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  : > "$ev/release"
+  local first_status=0; wait "$first" || first_status=$?
+  [ "$first_status" -eq 0 ]
+  [ "$(grep -c '^TAKEOVER-OK$' "$BATS_TEST_TMPDIR/wall-one.out")" -eq 1 ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-NONE ]
+}
+
+@test "injected provider live owner blocks acquisition on Linux and macOS identities" {
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$BATS_TEST_TMPDIR/lockdir-live" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]; os.makedirs(work, exist_ok=True)
+dfd = os.open(work, os.O_RDONLY)
+
+def plant(payload):
+    path = os.path.join(work, ".takeover-check.lock")
+    try: os.unlink(path)
+    except FileNotFoundError: pass
+    with open(path, "w") as fh: json.dump(payload, fh)
+
+def expect_busy(label):
+    lock = io_mod.OwnerLock(dfd, "spec-006")
+    try:
+        lock.acquire()
+    except io_mod.LockBusy:
+        pass
+    else:
+        raise AssertionError(label + " acquired over a live owner")
+
+io_mod.boot_session_id = lambda: "boot-1"
+for label, start in (("linux", "12345"), ("macos", "Mon Aug 25 10:00:00 2026")):
+    io_mod.process_identity = lambda pid, _s=start: io_mod.ProcessIdentity(pid, "boot-1", _s, "S")
+    plant({"pid": 4242, "pid_start_time": start, "boot_session_id": "boot-1",
+           "claimed_at": 1, "run_id": "spec-006"})
+    expect_busy(label)
+
+def unobservable(pid):
+    raise io_mod.UnsafeTakeoverPath("unobservable")
+io_mod.process_identity = unobservable
+plant({"pid": 4242, "pid_start_time": "12345", "boot_session_id": "boot-1",
+       "claimed_at": 1, "run_id": "spec-006"})
+expect_busy("unprovable")
+
+io_mod.process_identity = lambda pid: io_mod.ProcessIdentity(pid, "boot-1", "77", "S")
+plant({"pid": 4242, "pid_start_time": "unknown", "boot_session_id": "boot-1",
+       "claimed_at": 1, "run_id": "spec-006"})
+expect_busy("unknown-recorded-start")
+print("live-owner-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *live-owner-ok* ]]
+}
+
+@test "PID reuse and zombie owners are stale while prior-boot owners are reclaimed" {
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$BATS_TEST_TMPDIR/lockdir-stale" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]; os.makedirs(work, exist_ok=True)
+dfd = os.open(work, os.O_RDONLY)
+lockpath = os.path.join(work, ".takeover-check.lock")
+
+def plant(payload):
+    try: os.unlink(lockpath)
+    except FileNotFoundError: pass
+    with open(lockpath, "w") as fh: json.dump(payload, fh)
+
+def expect_reclaim(label):
+    lock = io_mod.OwnerLock(dfd, "spec-006")
+    lock.acquire()
+    payload = json.load(open(lockpath))
+    assert payload["run_id"] == "spec-006", (label, payload)
+    assert set(payload) == {"pid", "pid_start_time", "boot_session_id", "claimed_at", "run_id"}, payload
+    lock.cleanup()
+
+io_mod.boot_session_id = lambda: "boot-1"
+# same-PID different-start owner is stale
+io_mod.process_identity = lambda pid: io_mod.ProcessIdentity(pid, "boot-1", "222", "S")
+plant({"pid": 4242, "pid_start_time": "111", "boot_session_id": "boot-1",
+       "claimed_at": 1, "run_id": "spec-006"})
+expect_reclaim("pid-reuse")
+# zombie owner is dead
+io_mod.process_identity = lambda pid: io_mod.ProcessIdentity(pid, "boot-1", "111", "zombie")
+plant({"pid": 4242, "pid_start_time": "111", "boot_session_id": "boot-1",
+       "claimed_at": 1, "run_id": "spec-006"})
+expect_reclaim("zombie")
+# prior-boot owner is gone
+io_mod.process_identity = lambda pid: io_mod.ProcessIdentity(pid, "boot-1", "111", "S")
+plant({"pid": 4242, "pid_start_time": "111", "boot_session_id": "boot-0",
+       "claimed_at": 1, "run_id": "spec-006"})
+expect_reclaim("prior-boot")
+print("stale-matrix-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *stale-matrix-ok* ]]
+}
+
+@test "signal cleanup removes only the owning lock inode and spares substitutes" {
+  write_live_takeover_fixture "$(date +%s)"
+  local ev="$BATS_TEST_TMPDIR/ev-term"; mkdir -p "$ev"
+  env GATES_STORE="$STORE" TAKEOVER_TEST_PAUSE_AFTER_LOCK="$ev" bash "$WALL" --run-id spec-006 \
+    > "$BATS_TEST_TMPDIR/wall-term.out" 2>&1 &
+  local wall=$!
+  wait_for "$ev/ready"
+  [ -e "$BATS_TEST_TMPDIR/.takeover-check.lock" ]
+  kill -TERM "$wall"
+  local rc=0; wait "$wall" || rc=$?
+  [ "$rc" -ne 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/.takeover-check.lock" ]
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$BATS_TEST_TMPDIR/lockdir-sub" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]; os.makedirs(work, exist_ok=True)
+dfd = os.open(work, os.O_RDONLY)
+lock = io_mod.OwnerLock(dfd, "spec-006")
+lock.acquire()
+path = os.path.join(work, ".takeover-check.lock")
+os.unlink(path)
+with open(path, "w") as fh: fh.write("substitute")
+lock.cleanup()
+assert open(path).read() == "substitute"
+print("substitute-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *substitute-ok* ]]
+}
+
+@test "replacement published during reclaim is restored and never deleted" {
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$BATS_TEST_TMPDIR/reclaim-race" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]; os.makedirs(work, exist_ok=True)
+dfd = os.open(work, os.O_RDONLY)
+lockname = ".takeover-check.lock"
+io_mod.boot_session_id = lambda: "boot-1"
+io_mod.process_identity = lambda pid: (
+    io_mod.ProcessIdentity(pid, "boot-1", "gone", "dead") if pid == 999
+    else io_mod.ProcessIdentity(pid, "boot-1", "live-start", "S"))
+stale = {"pid": 999, "pid_start_time": "x", "boot_session_id": "boot-1", "claimed_at": 1, "run_id": "spec-006"}
+replacement = {"pid": 4242, "pid_start_time": "live-start", "boot_session_id": "boot-1",
+               "claimed_at": 2, "run_id": "spec-007"}
+
+def plant(payload):
+    with open(os.path.join(work, lockname), "w") as fh: json.dump(payload, fh)
+
+def swap_in_replacement():
+    os.unlink(os.path.join(work, lockname))
+    plant(replacement)
+
+# pre-move identity: replacement lands after judging, before the move
+plant(stale)
+lock = io_mod.OwnerLock(dfd, "spec-006")
+fired = {"n": 0}
+def pre_move():
+    if fired["n"] == 0:
+        fired["n"] += 1
+        swap_in_replacement()
+lock._pre_move_hook = pre_move
+try:
+    lock.acquire()
+except io_mod.LockBusy:
+    pass
+else:
+    raise AssertionError("acquired over a live replacement")
+assert json.load(open(os.path.join(work, lockname)))["run_id"] == "spec-007"
+
+# post-move verify + link restore: replacement lands inside the move window
+os.unlink(os.path.join(work, lockname))
+plant(stale)
+lock2 = io_mod.OwnerLock(dfd, "spec-006")
+real_rename = os.rename
+state = {"swapped": False}
+def racy_rename(src, dst, **kw):
+    if not state["swapped"] and ".takeover-check.tombstone" in dst:
+        state["swapped"] = True
+        swap_in_replacement()
+    return real_rename(src, dst, **kw)
+os.rename = racy_rename
+try:
+    try:
+        lock2.acquire()
+    except io_mod.LockBusy:
+        pass
+    else:
+        raise AssertionError("acquired over a restored live replacement")
+finally:
+    os.rename = real_rename
+assert json.load(open(os.path.join(work, lockname)))["run_id"] == "spec-007"
+leftovers = [n for n in os.listdir(work) if "tombstone" in n]
+assert not leftovers, leftovers
+print("reclaim-restore-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *reclaim-restore-ok* ]]
+}
+
+@test "SIGKILL while holding the reclaim election frees it for a later contender" {
+  local dir="$BATS_TEST_TMPDIR/election"; mkdir -p "$dir"
+  python3 - "$dir" <<'PY' &
+import fcntl, os, sys, time
+work = sys.argv[1]
+fd = os.open(os.path.join(work, ".takeover-check.reclaim.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(os.path.join(work, "holder-ready"), "w").close()
+time.sleep(30)
+PY
+  local holder=$!
+  wait_for "$dir/holder-ready"
+  kill -9 "$holder"
+  wait "$holder" 2>/dev/null || true
+  run python3 - "$ROOT/scripts/gsd/takeover-io.py" "$dir" <<'PY'
+import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+work = sys.argv[2]
+dfd = os.open(work, os.O_RDONLY)
+io_mod.boot_session_id = lambda: "boot-1"
+io_mod.process_identity = lambda pid: (
+    io_mod.ProcessIdentity(pid, "boot-1", "gone", "dead") if pid == 999
+    else io_mod.ProcessIdentity(pid, "boot-1", "live", "S"))
+with open(os.path.join(work, ".takeover-check.lock"), "w") as fh:
+    json.dump({"pid": 999, "pid_start_time": "x", "boot_session_id": "boot-1",
+               "claimed_at": 1, "run_id": "spec-006"}, fh)
+begin = time.monotonic()
+lock = io_mod.OwnerLock(dfd, "spec-006")
+lock.acquire()
+assert time.monotonic() - begin < 5
+lock.cleanup()
+with open(os.path.join(work, ".takeover-check.lock"), "w") as fh:
+    json.dump({"pid": 4242, "pid_start_time": "live", "boot_session_id": "boot-1",
+               "claimed_at": 2, "run_id": "spec-007"}, fh)
+try:
+    io_mod.OwnerLock(dfd, "spec-006").acquire()
+except io_mod.LockBusy:
+    pass
+else:
+    raise AssertionError("deleted a live replacement owner")
+assert json.load(open(os.path.join(work, ".takeover-check.lock")))["run_id"] == "spec-007"
+print("election-recovery-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *election-recovery-ok* ]]
+}
+
+@test "safe_path refuses a group-writable store component before lock or artifact access" {
+  local base="$BATS_TEST_TMPDIR/gw"
+  STORE="$base/depth/evidence.json"
+  mkdir -p "$base/depth"
+  write_live_takeover_fixture "$(date +%s)"
+  chmod g+w "$base"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+  [ ! -e "$base/depth/.takeover-check.lock" ]
+  [ -f "$base/depth/takeover/spec-006.json" ]
+  chmod g-w "$base"
+}
+
+@test "pre-opened record swapped before revalidation refuses with zero success" {
+  write_live_takeover_fixture "$(date +%s)"
+  local ev="$BATS_TEST_TMPDIR/ev-swap"; mkdir -p "$ev"
+  env GATES_STORE="$STORE" TAKEOVER_TEST_PAUSE_AFTER_LOCK="$ev" bash "$WALL" --run-id spec-006 \
+    > "$BATS_TEST_TMPDIR/wall-swap.out" 2>&1 &
+  local wall=$!
+  wait_for "$ev/ready"
+  local record="$(dirname "$STORE")/takeover/spec-006.json"
+  mv "$record" "$record.peer"
+  cp "$record.peer" "$record"
+  : > "$ev/release"
+  local rc=0; wait "$wall" || rc=$?
+  [ "$rc" -ne 0 ]
+  grep -q 'TAKEOVER-REFUSED:record-mismatch' "$BATS_TEST_TMPDIR/wall-swap.out"
+  ! grep -q 'TAKEOVER-OK' "$BATS_TEST_TMPDIR/wall-swap.out"
+  [ -f "$record" ]
+  [ -z "$(find "$(dirname "$STORE")/takeover" -name 'spec-006.consumed.*' -print -quit)" ]
+}
+
+@test "ordinary writer holding canonical evidence.lock forces a bounded pre-rename refusal" {
+  write_live_takeover_fixture "$(date +%s)"
+  local hold="$BATS_TEST_TMPDIR/hold"; mkdir -p "$hold"
+  env GATES_STORE="$STORE" GATES_TEST_HOLD_LOCK="$hold" python3 "$GATES" note-degraded rung-attempt \
+    --rung-id test:test:test --outcome ok > /dev/null 2>&1 &
+  local writer=$!
+  wait_for "$hold/held"
+  local begin="$(date +%s)"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
+  [ ! -e "$(dirname "$STORE")/takeover/.takeover-transaction.spec-006.json" ]
+  run python3 - "$STORE" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))['_autonomy']['spec-006']
+assert row['takeover_expected'] is True and 'takeover_consumed_at' not in row
+PY
+  [ "$status" -eq 0 ]
+  run python3 - "$(dirname "$STORE")/evidence.lock" "$(cat "$hold/held")" <<'PY'
+import os,sys
+st=os.stat(sys.argv[1])
+assert "%d:%d" % (st.st_dev, st.st_ino) == sys.argv[2], (st.st_dev, st.st_ino, sys.argv[2])
+PY
+  [ "$status" -eq 0 ]
+  : > "$hold/release"
+  local rc=0; wait "$writer" || rc=$?
+  [ "$rc" -eq 0 ]
+}
+
+@test "ordinary writer after consume blocks until commit and keeps the consumed expectation" {
+  write_live_takeover_fixture "$(date +%s)"
+  local ev="$BATS_TEST_TMPDIR/ev-locked"; mkdir -p "$ev"
+  env GATES_STORE="$STORE" TAKEOVER_TEST_PAUSE_LOCKED="$ev" bash "$WALL" --run-id spec-006 \
+    > "$BATS_TEST_TMPDIR/wall-locked.out" 2>&1 &
+  local wall=$!
+  wait_for "$ev/held"
+  env GATES_STORE="$STORE" python3 "$GATES" note-degraded rung-attempt \
+    --rung-id test:test:test --outcome ok > "$BATS_TEST_TMPDIR/writer.out" 2>&1 &
+  local writer=$!
+  sleep 0.5
+  run python3 - "$STORE" <<'PY'
+import json,sys
+assert '_degradation' not in json.load(open(sys.argv[1]))
+PY
+  [ "$status" -eq 0 ]
+  : > "$ev/release"
+  local rc=0; wait "$wall" || rc=$?
+  [ "$rc" -eq 0 ]
+  grep -q '^TAKEOVER-OK$' "$BATS_TEST_TMPDIR/wall-locked.out"
+  rc=0; wait "$writer" || rc=$?
+  [ "$rc" -eq 0 ]
+  run python3 - "$STORE" "$(cat "$ev/held")" "$(dirname "$STORE")/evidence.lock" <<'PY'
+import json,os,sys
+d=json.load(open(sys.argv[1]))
+row=d['_autonomy']['spec-006']
+assert row['takeover_expected'] is False
+assert isinstance(row.get('takeover_consumed_at'), int)
+assert 'test:test:test' in json.dumps(d['_degradation'])
+st=os.stat(sys.argv[3])
+assert "%d:%d" % (st.st_dev, st.st_ino) == sys.argv[2]
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "stale snapshot digest mismatch preserves the concurrent update and a rerun redecides" {
+  write_live_takeover_fixture "$(date +%s)"
+  local ev="$BATS_TEST_TMPDIR/ev-stale"; mkdir -p "$ev"
+  env GATES_STORE="$STORE" TAKEOVER_TEST_PAUSE_AFTER_LOCK="$ev" bash "$WALL" --run-id spec-006 \
+    > "$BATS_TEST_TMPDIR/wall-stale.out" 2>&1 &
+  local wall=$!
+  wait_for "$ev/ready"
+  run env GATES_STORE="$STORE" python3 "$GATES" note-degraded rung-attempt --rung-id test:test:test --outcome ok
+  [ "$status" -eq 0 ]
+  : > "$ev/release"
+  local rc=0; wait "$wall" || rc=$?
+  [ "$rc" -ne 0 ]
+  grep -q 'TAKEOVER-REFUSED:record-mismatch' "$BATS_TEST_TMPDIR/wall-stale.out"
+  [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
+  run python3 - "$STORE" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert 'test:test:test' in json.dumps(d.get('_degradation', {}))
+assert d['_autonomy']['spec-006']['takeover_expected'] is True
+PY
+  [ "$status" -eq 0 ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+}
+
+@test "caught pre-rename fault and post-rename fault recover to one canonical pair" {
+  write_live_takeover_fixture "$(date +%s)"
+  run python3 - "$GATES" "$STORE" <<'PY'
+import hashlib, importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("gates_lib", sys.argv[1])
+gates = importlib.util.module_from_spec(spec); sys.modules[spec.name] = gates; spec.loader.exec_module(gates)
+store = sys.argv[2]; store_dir = os.path.dirname(store)
+takeover = os.path.join(store_dir, "takeover")
+
+def consume(emit):
+    sdfd = os.open(store_dir, os.O_RDONLY)
+    tfd = os.open(takeover, os.O_RDONLY)
+    rfd = os.open(os.path.join(takeover, "spec-006.json"), os.O_RDONLY)
+    with open(store, "rb") as fh:
+        sha = hashlib.sha256(fh.read()).hexdigest()
+    try:
+        return gates.takeover_consume("spec-006", 1700000000, sdfd, None, tfd, rfd,
+                                      "spec-006.json", sha, 1000, emit=emit)
+    finally:
+        for fd in (rfd, tfd, sdfd):
+            os.close(fd)
+
+def fail_nth(name, n):
+    real = getattr(os, name)
+    state = {"n": 0}
+    def wrap(*a, **k):
+        state["n"] += 1
+        if state["n"] == n:
+            raise OSError("injected %s fault" % name)
+        return real(*a, **k)
+    return real, wrap
+
+original = open(store, "rb").read()
+
+# pre-rename fault: the provisional record rename fails; nothing may mutate
+real, wrap = fail_nth("rename", 1); os.rename = wrap
+emitted = []
+try:
+    out = consume(emitted.append)
+finally:
+    os.rename = real
+assert out == {"outcome": "refused", "reason": "record-mismatch"}, out
+assert not emitted, emitted
+assert open(store, "rb").read() == original
+names = set(n for n in os.listdir(takeover) if not n.endswith(".md"))
+assert names == {"spec-006.json"}, names
+
+# post-rename fault: intent phase advance fails after the provisional rename;
+# recovery restores active plus original
+real, wrap = fail_nth("replace", 1); os.replace = wrap
+emitted = []
+try:
+    out = consume(emitted.append)
+finally:
+    os.replace = real
+assert out == {"outcome": "refused", "reason": "record-mismatch"}, out
+assert open(store, "rb").read() == original
+names = set(n for n in os.listdir(takeover) if not n.endswith(".md"))
+assert names == {"spec-006.json"}, names
+
+# final-rename fault: evidence already desired; recovery rolls forward and
+# acknowledges the recovered success
+real, wrap = fail_nth("rename", 2); os.rename = wrap
+emitted = []
+try:
+    out = consume(emitted.append)
+finally:
+    os.rename = real
+assert out["outcome"] == "ok", out
+assert "TAKEOVER-OK" in emitted, emitted
+row = json.load(open(store))["_autonomy"]["spec-006"]
+assert row["takeover_expected"] is False and row["takeover_consumed_at"] == 1700000000
+names = [n for n in os.listdir(takeover) if not n.endswith(".md")]
+assert not os.path.exists(os.path.join(takeover, "spec-006.json"))
+consumed = [n for n in names if n.startswith("spec-006.consumed.")]
+assert len(consumed) == 1 and len(names) == 1, names
+print("caught-faults-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *caught-faults-ok* ]]
+}
+
+@test "transaction recovery restores active plus original after SIGKILL after the provisional rename" {
+  write_live_takeover_fixture "$(date +%s)"
+  local takeover="$(dirname "$STORE")/takeover"
+  run env GATES_STORE="$STORE" TAKEOVER_KILL_AT=after-provisional-rename bash "$WALL" --run-id spec-006
+  [ "$status" -ne 0 ]
+  [ -f "$takeover/.takeover-transaction.spec-006.json" ]
+  [ ! -e "$takeover/spec-006.json" ]
+  local begin="$(date +%s)"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+  [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
+  [ -n "$(find "$takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-NONE ]
+}
+
+@test "transaction recovery completes consumed plus cleared after SIGKILL after evidence replacement" {
+  write_live_takeover_fixture "$(date +%s)"
+  local takeover="$(dirname "$STORE")/takeover"
+  run env GATES_STORE="$STORE" TAKEOVER_KILL_AT=after-evidence-replace bash "$WALL" --run-id spec-006
+  [ "$status" -ne 0 ]
+  [ -f "$takeover/.takeover-transaction.spec-006.json" ]
+  local begin="$(date +%s)"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+  run python3 - "$STORE" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))['_autonomy']['spec-006']
+assert row['takeover_expected'] is False
+assert isinstance(row.get('takeover_consumed_at'), int)
+PY
+  [ "$status" -eq 0 ]
+  [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
+  [ -n "$(find "$takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-NONE ]
+}
+
+@test "transaction recovery rolls forward after SIGKILL before the final rename" {
+  write_live_takeover_fixture "$(date +%s)"
+  local takeover="$(dirname "$STORE")/takeover"
+  run env GATES_STORE="$STORE" TAKEOVER_KILL_AT=before-final-rename bash "$WALL" --run-id spec-006
+  [ "$status" -ne 0 ]
+  [ -f "$takeover/.takeover-transaction.spec-006.json" ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+  [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
+  [ -n "$(find "$takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-NONE ]
+}
+
+@test "completed intent is acknowledged and re-emits TAKEOVER-OK before deletion" {
+  local takeover="$(dirname "$STORE")/takeover"
+  for hook in after-record-consumed after-acknowledged; do
+    rm -rf "$takeover" "$STORE" "$(dirname "$STORE")/evidence.lock"
+    write_live_takeover_fixture "$(date +%s)"
+    run env GATES_STORE="$STORE" TAKEOVER_KILL_AT="$hook" bash "$WALL" --run-id spec-006
+    [ "$status" -ne 0 ]
+    [ -f "$takeover/.takeover-transaction.spec-006.json" ]
+    run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+    [ "$status" -eq 0 ]
+    [ "$output" = TAKEOVER-OK ]
+    [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
+    run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+    [ "$status" -eq 0 ]
+    [ "$output" = TAKEOVER-NONE ]
+  done
+}
+
+@test "legitimate locked writer supersedes a crashed intent and the rerun proceeds normally" {
+  write_live_takeover_fixture "$(date +%s)"
+  local takeover="$(dirname "$STORE")/takeover"
+  run env GATES_STORE="$STORE" TAKEOVER_KILL_AT=after-provisional-rename bash "$WALL" --run-id spec-006
+  [ "$status" -ne 0 ]
+  run env GATES_STORE="$STORE" python3 "$GATES" note-degraded rung-attempt --rung-id test:test:test --outcome ok
+  [ "$status" -eq 0 ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^TAKEOVER-SUPERSEDED$')" -eq 1 ]
+  [[ "$output" == *'Unblock (operator): bash scripts/gsd/takeover-check.sh --run-id spec-006'* ]]
+  [ -f "$takeover/spec-006.json" ]
+  [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+}
+
+@test "unexplained in-place mutation refuses record-mismatch and transaction recovery retains the intent" {
+  write_live_takeover_fixture "$(date +%s)"
+  local takeover="$(dirname "$STORE")/takeover"
+  run env GATES_STORE="$STORE" TAKEOVER_KILL_AT=after-provisional-rename bash "$WALL" --run-id spec-006
+  [ "$status" -ne 0 ]
+  python3 - "$STORE" <<'PY'
+import sys
+with open(sys.argv[1], "r+") as fh:
+    fh.write('{"_autonomy": {"spec-006": {"takeover_expected": true, "tampered": true}}}')
+    fh.truncate()
+PY
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+  [ -f "$takeover/.takeover-transaction.spec-006.json" ]
+  [ ! -e "$takeover/spec-006.json" ]
+}
+
+@test "under-lock policy re-gate refuses -uall untracked drift before any mutation" {
+  grep -q -- '--untracked-files=all' "$GATES"
+  write_live_takeover_fixture "$(date +%s)"
+  local ev="$BATS_TEST_TMPDIR/ev-regate"; mkdir -p "$ev"
+  env GATES_STORE="$STORE" TAKEOVER_TEST_PAUSE_BEFORE_CONSUME="$ev" bash "$WALL" --run-id spec-006 \
+    > "$BATS_TEST_TMPDIR/wall-regate.out" 2>&1 &
+  local wall=$!
+  wait_for "$ev/ready"
+  mkdir -p "$REPO/untracked-dir"
+  printf 'drift\n' > "$REPO/untracked-dir/inner.txt"
+  : > "$ev/release"
+  local rc=0; wait "$wall" || rc=$?
+  [ "$rc" -ne 0 ]
+  grep -q 'TAKEOVER-REFUSED:dirty-worktree' "$BATS_TEST_TMPDIR/wall-regate.out"
+  local takeover="$(dirname "$STORE")/takeover"
+  [ -f "$takeover/spec-006.json" ]
+  [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
+  run python3 - "$STORE" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['_autonomy']['spec-006']['takeover_expected'] is True
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "success under canonical evidence.lock consumes one pre-decision and one post-decision read" {
+  write_live_takeover_fixture "$(date +%s)"
+  local log="$BATS_TEST_TMPDIR/reads.log"
+  run env GATES_STORE="$STORE" TAKEOVER_READ_LOG="$log" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+  [ "$(cat "$log")" = $'pre-decision\npost-decision' ]
+  rm -f "$log"
+  rm -rf "$(dirname "$STORE")/takeover"
+  python3 - "$STORE" <<'PY'
+import json,sys
+json.dump({'_autonomy':{'spec-006':{'takeover_expected':True}}},open(sys.argv[1],'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_READ_LOG="$log" bash "$WALL" --run-id spec-006
+  assert_single_refusal missing-record
+  [ "$(cat "$log")" = "pre-decision" ]
+}
