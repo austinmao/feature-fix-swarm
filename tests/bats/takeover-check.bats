@@ -127,3 +127,15 @@ EOF
   [ "$status" -eq 2 ]
   [ -f "$REPO/.feature-fix-swarm/takeover/spec-006.json" ]
 }
+
+@test "reclaims a same-boot dead-owner takeover lock before checking" {
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  local store_dir
+  store_dir="$(env -u GATES_STORE python3 "$GATES" store-dir)"
+  printf '{"pid":2147483647,"pid_start_time":"0","boot_session_id":"unknown","claimed_at":1,"run_id":"spec-006"}\n' > "$store_dir/.takeover-check.lock"
+  run env -u GATES_STORE bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = "TAKEOVER-OK" ]
+  [ ! -e "$store_dir/.takeover-check.lock" ]
+}
