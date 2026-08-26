@@ -438,40 +438,45 @@ STUB
   # their idempotency keys, results never observed.  item-a's merge actually
   # happened at the authority; item-b's never ran.
   python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
-    --kind intent --step merge --item spec/item-a --pr 301 --head "$OID_A"
+    --kind intent --step merge --item spec/item-a --pr 101 --head "$OID_A"
   python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
-    --kind intent --step merge --item spec/item-b --pr 302 --head "$OID_B"
+    --kind intent --step merge --item spec/item-b --pr 102 --head "$OID_B"
   MERGE_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)"
-  printf '%s\n' "$MERGE_A" > "$GH_STATE/merge-301"
-  : > "$GH_STATE/merge-302"
+  printf '%s\n' "$MERGE_A" > "$GH_STATE/merge-101"
+  : > "$GH_STATE/merge-102"
 
-  cat > "$MOCK_BIN/gh" <<'STUB'
+  write_gh
+  write_children
+  # assert-merged.sh answers per-PR from the same authority state gh serves;
+  # resume must consult the merged-state authority BEFORE deciding whether
+  # an effect happened (02-03 key link: resume reconciliation before retry).
+  cat > "$MOCK_BIN/assert-merged.sh" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\0' gh "$@" >> "${CALL_LOG:?}"
-printf 'gh %s\n' "$*" >> "${EVENTS:?}"
-case "${1:-} ${2:-}" in
-  "pr view")
-    target="$3"; shift 3
-    [ "$*" = "--json mergeCommit -q .mergeCommit.oid" ] || { echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64; }
-    cat "${GH_STATE:?}/merge-$target" ;;
-  "pr merge")
-    echo "SECOND-MERGE-FORBIDDEN" >&2; exit 97 ;;
-  *) echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
-esac
+printf '%s\0' assert-merged.sh "$@" >> "${CALL_LOG:?}"
+printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
+[ -s "${GH_STATE:?}/merge-$1" ] && exit 0
+exit 2
 STUB
-  for b in codex claude feature-implement assert-merged.sh run-finalizer.sh; do
-    printf '#!/usr/bin/env bash\nprintf "%%s\\0" "$0" "$@" >> "${CALL_LOG:?}"\nexit 64\n' > "$MOCK_BIN/$b"
-  done
   chmod +x "$MOCK_BIN"/*
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-102 --reason t >/dev/null
 
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" --resume "$RUN_ID"
   [ "$status" -eq 0 ]
 
-  # Reconciled against merge authority: NO second merge attempt anywhere.
-  ! grep -q "gh pr merge" "$EVENTS"
+  # item-a: merge authority satisfied — reconciled LANDED, NO second merge.
   grep -q "ITEM spec/item-a LANDED $MERGE_A" <<<"$output"
-  grep -q "ITEM spec/item-b BLOCKED:resume-incomplete" <<<"$output"
+  grep -q "assert-merged 101" "$EVENTS"
+  ! grep -q "gh pr merge 101" "$EVENTS"
+
+  # item-b: the merge effect provably never happened — resume re-enters the
+  # normal serial lifecycle and retries it to LANDED instead of parking it.
+  grep -q "assert-merged 102" "$EVENTS"
+  MERGE_B="$(cat "$GH_STATE/merge-102")"
+  [ -n "$MERGE_B" ]
+  grep -q "ITEM spec/item-b LANDED $MERGE_B" <<<"$output"
+  ! grep -q "BLOCKED:resume-incomplete" <<<"$output"
+  [ "$(grep -c "gh pr merge 102" "$EVENTS")" -eq 1 ]
 
   python3 - "$LQ/$RUN_ID.json" <<'PYEOF'
 import json, sys
@@ -482,13 +487,50 @@ assert "result:merge:reconciled" in a, a
 assert a[-1].startswith("terminal:terminal:LANDED"), a
 b = [f'{e["kind"]}:{e["step"]}:{e.get("status","")}' for e in ev if e.get("item") == "spec/item-b"]
 assert "result:merge:never-ran" in b, b
+# the retry drove the FULL lifecycle: precheck through finalize, then LANDED
+for step in ("precheck", "rebase", "implement", "push", "review", "ci", "merge", "finalize"):
+    assert f"intent:{step}:" in b, (step, b)
+assert b[-1].startswith("terminal:terminal:LANDED"), b
 # append-only: the crashed intents are still present and ordered
 seqs = [e["seq"] for e in ev]
 assert seqs == sorted(seqs), seqs
-assert [e["kind"] for e in ev].count("intent") == 2
 PYEOF
   # The resume held and released the single-flight owner lock.
   [ ! -f "$LQ/queue.lock" ]
+}
+@test "[RESUME] non-dangling nonterminal item re-enters the lifecycle" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  RUN_ID=resume2
+  python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID"
+  # Crash BETWEEN steps: rebase intent AND result journaled, no dangling
+  # intent, no terminal — a dangling-intent reader alone never surfaces this
+  # item, yet REQ-208 requires resume to enumerate every nonterminal item.
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step rebase --item spec/item-a
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind result --step rebase --item spec/item-a --status ok
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" --resume "$RUN_ID"
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  ! grep -q "BLOCKED:resume-incomplete" <<<"$output"
+  python3 - "$LQ/$RUN_ID.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+ev = [e for e in doc["events"] if e.get("item") == "spec/item-a"]
+names = [f'{e["kind"]}:{e["step"]}' for e in ev]
+# the retry re-entered the full lifecycle from its start
+assert names.count("intent:precheck") == 1, names
+assert "intent:merge" in names, names
+assert ev[-1]["kind"] == "terminal" and ev[-1]["status"] == "LANDED", ev[-1]
+PYEOF
 }
 @test "[EDGE-005] item-start precheck recognizes external landing" {
   test -f "$LINKED/.git"
