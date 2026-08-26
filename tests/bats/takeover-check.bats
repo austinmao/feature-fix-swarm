@@ -54,9 +54,10 @@ setup() {
 }
 
 @test "writer refuses a planted output symlink without changing its target" {
-  mkdir -p "$REPO/.feature-fix-swarm/takeover"
+  local store_dir="$(dirname "$STORE")"
+  mkdir -p "$store_dir/takeover"
   printf sentinel > "$BATS_TEST_TMPDIR/target"
-  ln -s "$BATS_TEST_TMPDIR/target" "$REPO/.feature-fix-swarm/takeover/spec-006.json"
+  ln -s "$BATS_TEST_TMPDIR/target" "$store_dir/takeover/spec-006.json"
   run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -ne 0 ]
   [ "$(cat "$BATS_TEST_TMPDIR/target")" = sentinel ]
@@ -132,9 +133,9 @@ EOF
   run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -eq 0 ]
   local store_dir
-  store_dir="$(env -u GATES_STORE python3 "$GATES" store-dir)"
+  store_dir="$(env GATES_STORE="$STORE" python3 "$GATES" store-dir)"
   printf '{"pid":2147483647,"pid_start_time":"0","boot_session_id":"unknown","claimed_at":1,"run_id":"spec-006"}\n' > "$store_dir/.takeover-check.lock"
-  run env -u GATES_STORE bash "$WALL" --run-id spec-006
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
   [ "$output" = "TAKEOVER-OK" ]
   [ ! -e "$store_dir/.takeover-check.lock" ]
