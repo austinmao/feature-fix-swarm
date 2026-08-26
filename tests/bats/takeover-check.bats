@@ -378,3 +378,36 @@ PY
   run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
   assert_single_refusal record-mismatch
 }
+
+# Plan 01-05 RED: the wall must use held descriptors rather than reopening
+# hostile names.  These contracts intentionally name the new transaction
+# boundary; they fail until the fd bootstrap exists.
+@test "fd transaction rejects a symlinked takeover directory without following it" {
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  mkdir -p "$(dirname "$STORE")"
+  printf '{}' > "$STORE"
+  ln -s "$BATS_TEST_TMPDIR/outside" "$(dirname "$STORE")/takeover"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 1 ]
+  assert_single_refusal record-mismatch
+}
+
+@test "fd transaction keeps absent expectation lookup pinned to its original evidence fd" {
+  local now="$(date +%s)"
+  mkdir -p "$(dirname "$STORE")"
+  python3 - "$STORE" "$now" <<'PY'
+import json,sys
+json.dump({'_autonomy':{'spec-006':{'takeover_expected':True}}},open(sys.argv[1],'w'))
+PY
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal missing-record
+}
+
+@test "fd transaction consumes only the originally opened regular record" {
+  write_live_takeover_fixture "$(date +%s)"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+  [ -z "$(find "$(dirname "$STORE")/takeover" -name 'spec-006.json' -print -quit)" ]
+  [ -n "$(find "$(dirname "$STORE")/takeover" -name 'spec-006.consumed.*.json' -print -quit)" ]
+}
