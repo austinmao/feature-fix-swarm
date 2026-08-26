@@ -357,3 +357,24 @@ PY
   run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
   assert_single_refusal dirty-worktree
 }
+
+@test "hostile NUL-delimited filename remains one dirty entry" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  local hostile=$'tab\tquote"\nnewline'
+  printf 'hostile\n' > "$hostile"
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal dirty-worktree
+}
+
+@test "live grant clock divergence refuses record-mismatch" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  python3 - "$STORE" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['_autonomy']['spec-006']['grants']['ship:gsd']['granted_at'] += 1
+json.dump(d,open(p,'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
