@@ -31,6 +31,11 @@ stub_env() {
   export GH_STATE="$BATS_TEST_TMPDIR/gh-state"; mkdir -p "$GH_STATE"
   export GATES_STORE="$BATS_TEST_TMPDIR/gates/evidence.json"; mkdir -p "$BATS_TEST_TMPDIR/gates"
   export LQ="$BATS_TEST_TMPDIR/gates/land-queue"
+  # Hermetic estate source: inject an empty estate document through the
+  # collector's --estate-json seam so fixture repo branches never join the
+  # queue uninvited.  The default --use-estate wiring is proven by [INTAKE].
+  export LAND_QUEUE_ESTATE_JSON="$BATS_TEST_TMPDIR/estate.json"
+  printf '{"branches": []}\n' > "$LAND_QUEUE_ESTATE_JSON"
 }
 
 mk_branch() { # $1 branch, $2 file, $3 content — commit on a new branch off main
@@ -166,6 +171,8 @@ no_reviewer_path() { # PATH with no codex/claude anywhere but sane core tools
   export GH_ORIGIN="$ORIGIN"
   export GH_STATE="$BATS_TEST_TMPDIR/gh-state"; mkdir -p "$GH_STATE"
   export GATES_STORE="$BATS_TEST_TMPDIR/gates/evidence.json"; mkdir -p "$BATS_TEST_TMPDIR/gates"
+  export LAND_QUEUE_ESTATE_JSON="$BATS_TEST_TMPDIR/estate.json"
+  printf '{"branches": []}\n' > "$LAND_QUEUE_ESTATE_JSON"
 
   # Deny-by-default vendor/effect-child boundaries; only the exact expected
   # argv shapes are serviced, everything else exits 64.
@@ -1128,4 +1135,54 @@ PYEOF
     [ "$output" = "PARALLEL-UNSUPPORTED:v1-serial-only" ]
     [ ! -s "$CALL_LOG" ]
   done
+}
+@test "[INTAKE] new queue unions takeover records and estate dispositions" {
+  test -f "$LINKED/.git"
+  stub_env
+  # Takeover source: a canonical record under <store-dir>/takeover/ names a
+  # branch that exists ONLY on origin, so no other source can supply it.
+  git checkout -qb spec/item-a main
+  echo alpha > a.txt; git add -- a.txt; git commit -qm item-a; git push -q origin spec/item-a
+  git checkout -q main
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  git branch -qD spec/item-a
+  TSTORE="$(python3 "$ROOT/lib/gates.py" store-dir)"
+  mkdir -p "$TSTORE/takeover"
+  printf '{"branch":"spec/item-a","head":"%s","run_id":"spec-006","spec_id":"006"}\n' \
+    "$OID_A" > "$TSTORE/takeover/spec-006.json"
+  # Estate source: the REAL collect-estate discovery over the fixture repo
+  # (local git only) finds spec/item-b and spec/queue as review-then-land.
+  mk_branch spec/item-b b.txt beta
+  unset LAND_QUEUE_ESTATE_JSON
+  write_gh
+  write_children
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --run-id spec-006
+  [ "$status" -eq 0 ]
+  # No explicit inputs were given: every item below arrived through the
+  # takeover glob (item-a) or the estate source (item-b, spec/queue).
+  grep -q "^ITEM spec/item-a " <<<"$output"
+  grep -q "^ITEM spec/item-b " <<<"$output"
+  grep -q "^ITEM spec/queue " <<<"$output"
+  ! grep -q "QUEUE-ABORTED" <<<"$output"
+}
+@test "[INTAKE] truncated intake fails with the named max-items outcome" {
+  test -f "$LINKED/.git"
+  stub_env
+  branches=()
+  for i in 01 02 03 04 05 06 07 08 09 10 11; do
+    mk_branch "spec/it-$i" "f$i.txt" "x$i"
+    branches+=("spec/it-$i")
+  done
+  write_gh
+  write_children
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id trunc1 "${branches[@]}"
+  # An 11-item intake must trip the named max-items outcome, never proceed
+  # silently with a sliced 10-item list.
+  [ "$status" -eq 1 ]
+  grep -q "QUEUE-ABORTED:systemic:max-items" <<<"$output"
+  [ "$(grep -c "^ITEM .* SKIPPED:queue-aborted" <<<"$output")" -eq 10 ]
+  # No lifecycle effect ever started.
+  ! grep -q "^implement " "$EVENTS"
+  ! grep -q "gh pr merge" "$EVENTS"
 }
