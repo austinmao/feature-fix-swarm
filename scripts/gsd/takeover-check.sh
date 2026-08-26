@@ -180,7 +180,9 @@ try:
 except (TypeError,ValueError): raise SystemExit('record-mismatch')
 if record_created != created: raise SystemExit('record-created')
 if not isinstance(digest,str) or len(digest) != 64: raise SystemExit('record-digest-shape')
-rows=subprocess.run(['git','status','--porcelain=v2','-z','--untracked-files=all'],capture_output=True).stdout.split(b'\0')
+status=subprocess.run(['git','status','--porcelain=v2','-z','--untracked-files=all'],capture_output=True)
+if status.returncode: raise SystemExit('dirty-worktree')
+rows=status.stdout.split(b'\0')
 kept=[]
 for row in rows:
     if not row: continue
