@@ -81,11 +81,69 @@ value=json.loads(sys.argv[1]).get('takeover_expected')
 raise SystemExit(0 if value is True else 1)
 PY
 }
+# Read-only canonical-store probe for the absence verdict.  It reuses the
+# takeover-io no-follow walk so no pathname open of evidence.json happens
+# outside the trusted-path discipline (WALL-RESIDUALS 6be15e6c).
+canonical_absence_state() {
+  python3 - "$SCRIPT_ROOT/scripts/gsd/takeover-io.py" "$1" "$RUN_ID" <<'PY'
+import importlib.util,json,os,sys
+spec=importlib.util.spec_from_file_location("takeover_io",sys.argv[1])
+io_mod=importlib.util.module_from_spec(spec); sys.modules[spec.name]=io_mod; spec.loader.exec_module(io_mod)
+store,run_id=sys.argv[2],sys.argv[3]
+def out(v):
+    print(v); raise SystemExit(0)
+try:
+    try:
+        dir_fd=io_mod.open_store_directory(store)
+    except (FileNotFoundError,NotADirectoryError):
+        out('NONE')
+    takeover_fd=io_mod.open_takeover(dir_fd)
+    if takeover_fd is not None:
+        try:
+            os.close(io_mod.open_regular(takeover_fd,run_id+'.json'))
+            out('RECORD')
+        except FileNotFoundError:
+            pass
+    try:
+        evidence_fd=io_mod.open_regular(dir_fd,'evidence.json')
+    except FileNotFoundError:
+        out('NONE')
+    data=json.loads(io_mod.read_regular(evidence_fd).decode('utf-8'))
+    if not isinstance(data,dict): out('CORRUPT')
+    auto=data.get('_autonomy',{})
+    if not isinstance(auto,dict): out('CORRUPT')
+    row=auto.get(run_id,{})
+    if not isinstance(row,dict): out('CORRUPT')
+    out('EXPECTED' if row.get('takeover_expected') is True else 'NONE')
+except SystemExit:
+    raise
+except Exception:
+    out('CORRUPT')
+PY
+}
 none_or_missing() {
   if expectation_present; then
     refuse missing-record
   elif [ "$?" -eq 2 ]; then
     refuse record-mismatch
+  fi
+  # REQ-105 empty edge: TAKEOVER-NONE is decided only against the canonical
+  # repo-rooted store.  A divergent inherited GATES_STORE cannot manufacture
+  # the no-op verdict; it is ignored for this decision with exactly one typed
+  # warning naming the ignored value.  Expectation or authority failure in
+  # the canonical store never downgrades to NONE.
+  if [ -n "${GATES_STORE:-}" ]; then
+    local canonical_default canonical_state
+    canonical_default="$(env -u GATES_STORE python3 "$GP" store-path 2>/dev/null)" || refuse record-mismatch
+    if [ "$canonical_default" != "$CANON_STORE" ]; then
+      printf 'TAKEOVER-WARN:gates-store-ignored %s\n' "$GATES_STORE" >&2
+      canonical_state="$(canonical_absence_state "$canonical_default")" || refuse record-mismatch
+      case "$canonical_state" in
+        NONE) ;;
+        EXPECTED) refuse missing-record ;;
+        *) refuse record-mismatch ;;
+      esac
+    fi
   fi
   if [ "$MODE" = json ]; then
     python3 - "$RUN_ID" <<'PY'
@@ -199,7 +257,22 @@ PY
 # A bound record unlocks one and only one live-state read. All authority facts
 # below are taken from this JSON snapshot; no later check reopens the ledger.
 record_entry_matches || refuse record-mismatch
-evaluation="$(evaluate --action ship:gsd 2>/dev/null)" || refuse record-mismatch
+# The resume-action set is the wall's fixed typed class table ({ship:gsd})
+# unioned with validated additive record grant rows; the pure evaluator must
+# return a verdict for every one of them.
+record_grant_actions="$(python3 - "$META" <<'PY'
+import json,sys
+rows=json.loads(sys.argv[1]).get('grants',[])
+names=sorted({r.get('action') for r in rows
+              if isinstance(r,dict) and isinstance(r.get('action'),str) and r.get('action')})
+print('\n'.join(names))
+PY
+)" || refuse record-mismatch
+eval_actions=(--action ship:gsd)
+while IFS= read -r action; do
+  [ -n "$action" ] && eval_actions+=(--action "$action")
+done <<< "$record_grant_actions"
+evaluation="$(evaluate "${eval_actions[@]}" 2>/dev/null)" || refuse record-mismatch
 state="$(python3 - "$evaluation" <<'PY'
 import json,sys
 d=json.loads(sys.argv[1])
@@ -272,11 +345,19 @@ PY
 )" || refuse record-mismatch
 while IFS= read -r action; do
   [ -n "$action" ] || continue
+  # A missing verdict is an evaluator/schema fault, not a denial: refuse it
+  # as record-mismatch so it can never be retried as a grant remedy.
   python3 - "$evaluation" "$action" <<'PY' >/dev/null
 import json,sys
-d=json.loads(sys.argv[1]); raise SystemExit(0 if d.get('grant_results',{}).get(sys.argv[2]) is True else 1)
+results=json.loads(sys.argv[1]).get('grant_results',{})
+if sys.argv[2] not in results: raise SystemExit(2)
+raise SystemExit(0 if results[sys.argv[2]] is True else 1)
 PY
-  [ "$?" -eq 0 ] || refuse grant-expired "$action"
+  case "$?" in
+    0) ;;
+    2) refuse record-mismatch ;;
+    *) refuse grant-expired "$action" ;;
+  esac
 done <<< "$required_actions"
 if python3 - "$evaluation" <<'PY'
 import json,sys
