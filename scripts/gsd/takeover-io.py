@@ -309,10 +309,25 @@ class OwnerLock:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                      0o600, dir_fd=self.directory_fd)
         try:
-            os.write(fd, self._payload())
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            try:
+                # Same full-write discipline as replace_bytes(): the canonical
+                # lock name is linked only from a completely written, fsynced
+                # payload, and zero progress is a hard failure.
+                view = memoryview(self._payload())
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError("short write made no progress")
+                    view = view[written:]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except BaseException:
+            try:
+                os.unlink(temp, dir_fd=self.directory_fd)
+            except OSError:
+                pass
+            raise
         try:
             os.link(temp, self.name, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
         except FileExistsError:
