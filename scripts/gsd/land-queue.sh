@@ -28,11 +28,11 @@ GATES="$ROOT/lib/gates.py"
 . "$SCRIPT_DIR/run-bounded.sh"
 
 usage() {
-  echo "usage: land-queue.sh [--repo DIR] [--base NAME] [--run-id ID] [--drain] [--resume QUEUE-ID] [BRANCH...]" >&2
+  echo "usage: land-queue.sh [--repo DIR] [--base NAME] [--run-id ID] [--posture zero|floor] [--drain] [--resume QUEUE-ID] [BRANCH...]" >&2
   exit 2
 }
 
-REPO="$PWD" BASE="main" RUN_ID="" DRAIN=0 RESUME=""
+REPO="$PWD" BASE="main" RUN_ID="" DRAIN=0 RESUME="" POSTURE="zero"
 EXPLICIT=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +42,13 @@ while [ $# -gt 0 ]; do
     --run-id) RUN_ID="${2:?--run-id requires a value}"; shift 2 ;;
     --drain) DRAIN=1; shift ;;
     --resume) RESUME="${2:?--resume requires a value}"; shift 2 ;;
+    --posture)
+      # Research-resolved narrow input seam: zero default, floor stricter.
+      # Phase 3 owns the committed configuration; nothing is read from disk.
+      case "${2:-}" in
+        zero|floor) POSTURE="$2"; shift 2 ;;
+        *) usage ;;
+      esac ;;
     --parallel|--parallel=*)
       # EDGE-007: parsed but always refused, before any lane could launch.
       echo "PARALLEL-UNSUPPORTED:v1-serial-only"
@@ -96,25 +103,34 @@ journal() {
     || { echo "QUEUE-ERROR:store"; exit 70; }
 }
 
-emit_report() { # ITEM/HUMAN-INBOX rows from the journal's terminal events
-  local terms inbox t_item t_status t_detail
-  terms="$WORKTMP/terminals"
-  python3 "$JOURNAL" read-terminals --store "$LQ" --queue-id "$QUEUE_ID" > "$terms" \
+emit_report() { # typed ITEM/REVERT/HUMAN-INBOX rows from the journal
+  # REQ-211/REQ-214: LANDED rows carry the merge SHA plus a concrete revert
+  # command; every other terminal renders its reason and one-command unblock
+  # into the Human inbox. Rows come deduplicated (last terminal per item).
+  local rows inbox t_item t_status t_detail t_reason t_unblock
+  rows="$WORKTMP/report-rows"
+  python3 "$JOURNAL" read-report --store "$LQ" --queue-id "$QUEUE_ID" > "$rows" \
     || { echo "QUEUE-ERROR:store"; exit 70; }
   inbox=0
-  while IFS= read -r -d '' t_item && IFS= read -r -d '' t_status && IFS= read -r -d '' t_detail; do
+  while IFS= read -r -d '' t_item && IFS= read -r -d '' t_status \
+      && IFS= read -r -d '' t_detail && IFS= read -r -d '' t_reason \
+      && IFS= read -r -d '' t_unblock; do
     if [ -z "$t_item" ]; then
       continue  # queue-level terminal; echoed by the caller
     fi
-    printf 'ITEM %s %s %s\n' "$t_item" "$t_status" "$t_detail"
     case "$t_status" in
-      LANDED) ;;
+      LANDED)
+        printf 'ITEM %s LANDED %s\n' "$t_item" "$t_detail"
+        printf 'REVERT: %s git revert %s\n' "$t_item" "$t_detail"
+        ;;
       *)
+        printf 'ITEM %s %s %s\n' "$t_item" "$t_status" "$t_reason"
         inbox=$((inbox + 1))
-        printf 'HUMAN-INBOX: %s %s unblock: %s\n' "$t_item" "$t_status" "$t_detail"
+        printf 'HUMAN-INBOX: %s %s reason: %s unblock: %s\n' \
+          "$t_item" "$t_status" "$t_reason" "$t_unblock"
         ;;
     esac
-  done < "$terms"
+  done < "$rows"
   if [ "$inbox" -eq 0 ]; then
     echo "HUMAN-INBOX: empty"
   fi
@@ -128,6 +144,7 @@ resume_reconcile() {
   dang="$WORKTMP/dangling"
   python3 "$JOURNAL" read-dangling --store "$LQ" --queue-id "$QUEUE_ID" > "$dang" \
     || { echo "QUEUE-ERROR:store"; exit 70; }
+  local rf
   while IFS= read -r -d '' item && IFS= read -r -d '' step \
       && IFS= read -r -d '' pr && IFS= read -r -d '' head; do
     if [ "$step" = "merge" ] && [ -n "$pr" ]; then
@@ -140,12 +157,33 @@ resume_reconcile() {
         continue
       fi
     fi
+    if [ "$step" = "finalize" ] && [ -n "$pr" ]; then
+      # 865d06d4: a finalizer intent without a terminal means the merge is
+      # already authority-confirmed. Recovery re-runs the finalizer
+      # idempotently and only then appends LANDED — never a second merge.
+      errf="$WORKTMP/err-resume-fin"
+      merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid 2>"$errf")" || merge_sha=""
+      if [ -n "$merge_sha" ]; then
+        rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
+        if "$rf" --run-id "$RUN_ID" "$pr"; then
+          journal --kind result --step finalize --item "$item" --status reconciled
+          journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
+        else
+          journal --kind result --step finalize --item "$item" --status failed
+          journal --kind terminal --step terminal --item "$item" --status "BLOCKED:finalizer" \
+            --reason "recovery finalizer failed for PR $pr" \
+            --unblock "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
+        fi
+        continue
+      fi
+    fi
     # effect-never-ran (or no key): typed completion plus a Human-inbox
     # terminal.  ponytail: v1 resume reconciles the journal; it does not
     # re-drive the lifecycle — re-running the queue picks the item up fresh.
     journal --kind result --step "$step" --item "$item" --status never-ran
     journal --kind terminal --step terminal --item "$item" --status "BLOCKED:resume-incomplete" \
-      --detail "re-run land-queue.sh for $item"
+      --reason "crashed before the $step effect was observed" \
+      --unblock "re-run land-queue.sh for $item"
   done < "$dang"
 }
 
@@ -263,15 +301,36 @@ record_class() { # $1 class; returns 2 when the breaker trips
   return 0
 }
 
-block_item() { # $1 status, $2 detail/unblock — an item-local terminal
-  journal --kind terminal --step terminal --item "$ITEM_BRANCH" --status "$1" --detail "$2"
+# ── typed terminal writer (REQ-214) ───────────────────────────────────────
+# EVERY item terminal flows through term_item: LANDED carries the merge SHA
+# as detail; every non-LANDED terminal carries a separate nonempty reason and
+# a one-command unblock. Resume, precheck, guard, and abort paths share it.
+LAST_TERMINAL_STATUS=""
+term_item() { # $1 status, $2 detail, $3 reason, $4 unblock — for CURRENT item
+  term_for "$ITEM_BRANCH" "$@"
+}
+term_for() { # $1 item, $2 status, $3 detail, $4 reason, $5 unblock
+  local args=(--kind terminal --step terminal --item "$1" --status "$2")
+  [ -n "${3:-}" ] && args+=(--detail "$3")
+  if [ "$2" != "LANDED" ]; then
+    args+=(--reason "${4:-$2}")
+    args+=(--unblock "${5:-re-run scripts/gsd/land-queue.sh}")
+  fi
+  journal "${args[@]}"
+  LAST_TERMINAL_STATUS="$2"
+}
+
+block_item() { # $1 status, $2 reason, $3 unblock — an item-local terminal
+  term_item "$1" "" "$2" "$3"
   record_class local
 }
 
 fail_item() { # $1 boundary, $2 rc, $3 stderr-file, $4 gate, $5 status, $6 unblock
   # Returns 1 (item terminal, queue continues) or 2 (breaker tripped).
-  local class np_rc status="$5"
+  local class np_rc status="$5" reason
   cat -- "$3" >&2 || true
+  reason="$(head -n 1 -- "$3" 2>/dev/null | head -c 200 | tr -d '\0\r')"
+  [ -n "$reason" ] || reason="$1 boundary failed rc $2"
   class="$(bash "$GUARD" classify-subprocess --boundary "$1" --rc "$2" \
     --stderr-file "$3" 2>/dev/null)" || class=local
   bash "$GUARD" note-failure --queue-id "$QUEUE_ID" --item "$ITEM_BRANCH" \
@@ -282,10 +341,26 @@ fail_item() { # $1 boundary, $2 rc, $3 stderr-file, $4 gate, $5 status, $6 unblo
   case "$class" in
     reviewer-unreachable|store-error|gh-auth|network) status="BLOCKED:$class" ;;
   esac
-  journal --kind terminal --step terminal --item "$ITEM_BRANCH" --status "$status" --detail "$6"
+  term_item "$status" "" "$reason" "$6"
   record_class "$class" || return 2
   return 1
 }
+
+# PATH-004: after a systemic queue abort every untouched item still gets a
+# durable, reportable terminal instead of silently vanishing.
+materialize_skipped() { # $1 first untouched item index
+  local j branch
+  j="$1"
+  while [ "$j" -lt "$COUNT" ]; do
+    branch="$(read_scalar "$DOC" "$j" branch)" || break
+    term_for "$branch" "SKIPPED:queue-aborted" "" \
+      "queue aborted before this item started" \
+      "re-run scripts/gsd/land-queue.sh after clearing the systemic failure"
+    j=$((j + 1))
+  done
+}
+
+base_sha() { git -C "$REPO" ls-remote origin "refs/heads/$BASE" 2>/dev/null | cut -f1; }
 
 drop_worktree() { # $1 worktree path
   git -C "$REPO" worktree remove --force "$1" >/dev/null 2>&1 || true
@@ -296,7 +371,7 @@ land_one_item() {
   # 2 queue terminal recorded (queue stops).  Runs with errexit inert
   # (invoked as an `if` condition), so every failure is checked explicitly.
   local branch="$ITEM_BRANCH" head="$ITEM_HEAD" spec_id="$ITEM_SPEC"
-  local probe status unblock merge_sha wt prepared pr remote_head reviewed
+  local probe status reason unblock merge_sha wt prepared pr remote_head reviewed
   local now_head reviewer fi_bin am rf ci_rc errf eff_rc
 
   # ponytail: v1 runs exactly one round per item; the guard still sees the
@@ -311,7 +386,8 @@ land_one_item() {
   if ! python3 "$COLLECTOR" precheck --repo "$REPO" --base "$BASE" \
       --branch "$branch" --head "$head" > "$probe"; then
     journal --kind result --step precheck --item "$branch" --status error
-    block_item "BLOCKED:precheck-error" "collect-queue.py precheck failed for $branch"
+    block_item "BLOCKED:precheck-error" "collect-queue.py precheck failed for $branch" \
+      "python3 skills/land-queue/scripts/collect-queue.py precheck --repo $REPO --base $BASE --branch $branch"
     return 1
   fi
   status="$(read_scalar "$probe" "" status)" || status=""
@@ -319,15 +395,19 @@ land_one_item() {
   case "$status" in
     OK) ;;
     LANDED)
+      # EDGE-005: an external landing reconciles here with authority proof.
       merge_sha="$(read_scalar "$probe" "" merge_sha)" || merge_sha=""
-      block_item "LANDED" "$merge_sha"
+      term_item "LANDED" "$merge_sha" "" ""
+      record_class success
       return 1 ;;
     SKIPPED:*|BLOCKED:*)
+      reason="$(read_scalar "$probe" "" reason)" || reason=""
       unblock="$(read_scalar "$probe" "" unblock)" || unblock=""
-      block_item "$status" "$unblock"
+      block_item "$status" "$reason" "$unblock"
       return 1 ;;
     *)
-      block_item "BLOCKED:precheck-error" "unrecognized precheck status"
+      block_item "BLOCKED:precheck-error" "unrecognized precheck status" \
+        "python3 skills/land-queue/scripts/collect-queue.py precheck --repo $REPO --base $BASE --branch $branch"
       return 1 ;;
   esac
 
@@ -337,13 +417,15 @@ land_one_item() {
   wt="$WORKTMP/wt-$IDX"
   if ! git -C "$REPO" worktree add -q "$wt" "$branch"; then
     journal --kind result --step rebase --item "$branch" --status error
-    block_item "BLOCKED:worktree" "git -C $REPO worktree add failed for $branch"
+    block_item "BLOCKED:worktree" "git worktree add failed for $branch" \
+      "git -C $REPO worktree add <dir> $branch"
     return 1
   fi
   if ! git -C "$wt" -c rebase.autostash=true rebase -q "origin/$BASE"; then
     git -C "$wt" rebase --abort >/dev/null 2>&1 || true
     journal --kind result --step rebase --item "$branch" --status conflict
-    block_item "BLOCKED:conflict" "git -C $REPO rebase origin/$BASE $branch"
+    block_item "BLOCKED:conflict" "rebase of $branch onto origin/$BASE conflicts" \
+      "git -C $REPO rebase origin/$BASE $branch"
     drop_worktree "$wt"
     return 1
   fi
@@ -355,7 +437,8 @@ land_one_item() {
   fi_bin="$(command -v feature-implement || true)"
   if [ -z "$fi_bin" ]; then
     journal --kind result --step implement --item "$branch" --status missing
-    block_item "BLOCKED:implement-missing" "provide a feature-implement dispatcher on PATH"
+    block_item "BLOCKED:implement-missing" "no feature-implement dispatcher on PATH" \
+      "install a feature-implement dispatcher on PATH, then re-run the queue"
     drop_worktree "$wt"
     return 1
   fi
@@ -406,7 +489,8 @@ land_one_item() {
     return $?
   fi
   if [ "$remote_head" != "$prepared" ]; then
-    block_item "BLOCKED:head-drift" "PR $pr head $remote_head is not the pushed $prepared"
+    block_item "BLOCKED:head-drift" "PR $pr head $remote_head is not the pushed $prepared" \
+      "re-run the queue so review pins the current PR head"
     return 1
   fi
   reviewed="$prepared"
@@ -417,7 +501,8 @@ land_one_item() {
   reviewer="$(command -v codex || command -v claude || true)"
   if [ -z "$reviewer" ]; then
     journal --kind result --step review --item "$branch" --status missing
-    block_item "BLOCKED:reviewer-missing" "install an opposite-vendor reviewer CLI (codex or claude)"
+    block_item "BLOCKED:reviewer-missing" "no opposite-vendor reviewer CLI on PATH" \
+      "install an opposite-vendor reviewer CLI (codex or claude)"
     return 1
   fi
   errf="$WORKTMP/err-review-$IDX"
@@ -457,7 +542,8 @@ land_one_item() {
   if ! python3 "$COLLECTOR" precheck --repo "$REPO" --base "$BASE" \
       --branch "$branch" --head "$reviewed" > "$probe"; then
     journal --kind result --step precheck-merge --item "$branch" --status error
-    block_item "BLOCKED:precheck-error" "pre-merge collect-queue.py precheck failed"
+    block_item "BLOCKED:precheck-error" "pre-merge collect-queue.py precheck failed" \
+      "python3 skills/land-queue/scripts/collect-queue.py precheck --repo $REPO --base $BASE --branch $branch"
     return 1
   fi
   status="$(read_scalar "$probe" "" status)" || status=""
@@ -466,14 +552,17 @@ land_one_item() {
     OK) ;;
     LANDED)
       merge_sha="$(read_scalar "$probe" "" merge_sha)" || merge_sha=""
-      block_item "LANDED" "$merge_sha"
+      term_item "LANDED" "$merge_sha" "" ""
+      record_class success
       return 1 ;;
     SKIPPED:*|BLOCKED:*)
+      reason="$(read_scalar "$probe" "" reason)" || reason=""
       unblock="$(read_scalar "$probe" "" unblock)" || unblock=""
-      block_item "$status" "$unblock"
+      block_item "$status" "$reason" "$unblock"
       return 1 ;;
     *)
-      block_item "BLOCKED:precheck-error" "unrecognized pre-merge precheck status"
+      block_item "BLOCKED:precheck-error" "unrecognized pre-merge precheck status" \
+        "python3 skills/land-queue/scripts/collect-queue.py precheck --repo $REPO --base $BASE --branch $branch"
       return 1 ;;
   esac
 
@@ -488,7 +577,9 @@ land_one_item() {
     return $?
   fi
   if [ "$now_head" != "$reviewed" ]; then
-    block_item "BLOCKED:head-drift" "PR $pr head moved to $now_head after review of $reviewed"
+    # REQ-210: never re-pin to the moved head under the existing grant.
+    block_item "BLOCKED:head-moved" "PR $pr head moved to $now_head after review of $reviewed" \
+      "re-run the queue so the new head is reviewed before merge"
     return 1
   fi
 
@@ -497,7 +588,8 @@ land_one_item() {
   journal --kind intent --step grant --item "$branch" --detail "merge:pr-$pr"
   if ! python3 "$GATES" check-grant "$RUN_ID" --action "merge:pr-$pr" >/dev/null; then
     journal --kind result --step grant --item "$branch" --status missing
-    block_item "BLOCKED:grant-missing" "python3 lib/gates.py grant $RUN_ID --action merge:pr-$pr --reason '<operator reason>'"
+    block_item "BLOCKED:grant-missing" "no exact merge grant for merge:pr-$pr in run $RUN_ID" \
+      "python3 lib/gates.py grant $RUN_ID --action merge:pr-$pr --reason '<operator reason>'"
     return 1
   fi
   journal --kind result --step grant --item "$branch" --status ok
@@ -516,35 +608,43 @@ land_one_item() {
 
   am="$(command -v assert-merged.sh || printf '%s\n' "$SCRIPT_DIR/assert-merged.sh")"
   if ! "$am" "$pr"; then
-    block_item "BLOCKED:not-merged" "bash scripts/gsd/assert-merged.sh $pr"
+    block_item "BLOCKED:not-merged" "assert-merged.sh does not confirm PR $pr as MERGED" \
+      "bash scripts/gsd/assert-merged.sh $pr"
     return 1
   fi
   if ! merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid)"; then
-    block_item "BLOCKED:merge-sha" "gh pr view $pr --json mergeCommit failed"
+    block_item "BLOCKED:merge-sha" "gh pr view $pr --json mergeCommit failed" \
+      "gh pr view $pr --json mergeCommit -q .mergeCommit.oid"
     return 1
   fi
   if [ -z "$merge_sha" ]; then
-    block_item "BLOCKED:merge-sha" "PR $pr reports no merge commit"
+    block_item "BLOCKED:merge-sha" "PR $pr reports no merge commit" \
+      "gh pr view $pr --json mergeCommit -q .mergeCommit.oid"
     return 1
   fi
 
   require_go "finalize $branch" || return 2
-  journal --kind intent --step finalize --item "$branch"
+  # 865d06d4: the finalizer intent carries the idempotency key so crash
+  # recovery can complete it and only then append LANDED.
+  journal --kind intent --step finalize --item "$branch" --pr "$pr" --head "$reviewed"
   rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
   if ! "$rf" --run-id "$RUN_ID" "$pr"; then
     journal --kind result --step finalize --item "$branch" --status failed
-    block_item "BLOCKED:finalizer" "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
+    block_item "BLOCKED:finalizer" "run-finalizer failed for PR $pr" \
+      "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
     return 1
   fi
   journal --kind result --step finalize --item "$branch" --status ok
 
   # LANDED only after finalization completes; success resets the breaker.
-  journal --kind terminal --step terminal --item "$branch" --status LANDED --detail "$merge_sha"
+  term_item "LANDED" "$merge_sha" "" ""
   record_class success
   return 0
 }
 
 # ── strictly serial item loop ─────────────────────────────────────────────
+QUAR_IDX=()
+QUAR_BASE=()
 i=0
 while [ "$i" -lt "$COUNT" ]; do
   IDX="$i"
@@ -565,17 +665,62 @@ while [ "$i" -lt "$COUNT" ]; do
   ITEM_STARTED="$(date +%s)"
   ITEM_ROUND=1
 
-  require_go "item $ITEM_BRANCH" || break
+  if ! require_go "item $ITEM_BRANCH"; then
+    case "$QUEUE_TERMINAL" in
+      QUEUE-ABORTED:systemic:*) materialize_skipped "$IDX" ;;
+    esac
+    break
+  fi
 
   if land_one_item; then
     :
   else
     item_rc=$?
     if [ "$item_rc" -eq 2 ]; then
+      case "$QUEUE_TERMINAL" in
+        QUEUE-ABORTED:systemic:*) materialize_skipped "$i" ;;
+      esac
       break
+    fi
+    # EDGE-010: a conflict quarantine is eligible for exactly one
+    # zero-posture requeue after the base advances.
+    if [ "$POSTURE" = "zero" ] && [ "$LAST_TERMINAL_STATUS" = "BLOCKED:conflict" ]; then
+      QUAR_IDX+=("$IDX")
+      QUAR_BASE+=("$(base_sha)")
     fi
   fi
 done
+
+# ── EDGE-010: bounded quarantine requeue (zero posture only) ──────────────
+# Requeue once, only when the base advanced since the quarantine, and only
+# while the durable journal counter shows fewer than two conflict terminals
+# — the second quarantine parks permanently.
+if [ -z "$QUEUE_TERMINAL" ] && [ "$POSTURE" = "zero" ] && [ "${#QUAR_IDX[@]}" -gt 0 ]; then
+  k=0
+  while [ "$k" -lt "${#QUAR_IDX[@]}" ]; do
+    IDX="${QUAR_IDX[$k]}"
+    quar_base="${QUAR_BASE[$k]}"
+    k=$((k + 1))
+    now_base="$(base_sha)"
+    [ -n "$now_base" ] && [ "$now_base" != "$quar_base" ] || continue
+    ITEM_BRANCH="$(read_scalar "$DOC" "$IDX" branch)"
+    conflicts="$(python3 "$JOURNAL" count-terminals --store "$LQ" --queue-id "$QUEUE_ID" \
+      --item "$ITEM_BRANCH" --status "BLOCKED:conflict")" || conflicts=2
+    [ "$conflicts" -lt 2 ] || continue
+    ITEM_HEAD="$(read_scalar "$DOC" "$IDX" head)"
+    ITEM_SPEC="$(read_scalar "$DOC" "$IDX" spec_id)" || ITEM_SPEC="$ITEM_BRANCH"
+    load_changed_files "$DOC" "$IDX" || CHANGED_FILES=()
+    ITEM_STARTED="$(date +%s)"
+    ITEM_ROUND=2
+    require_go "requeue $ITEM_BRANCH" || break
+    if ! land_one_item; then
+      item_rc=$?
+      if [ "$item_rc" -eq 2 ]; then
+        break
+      fi
+    fi
+  done
+fi
 
 # ── report ────────────────────────────────────────────────────────────────
 echo "LAND-QUEUE REPORT queue=$QUEUE_ID items=$COUNT"

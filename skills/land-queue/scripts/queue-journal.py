@@ -200,6 +200,12 @@ def cmd_append(ns) -> int:
         event["status"] = _field(ns.status, "status")
     if ns.detail is not None:
         event["detail"] = _field(ns.detail, "detail")
+    # REQ-214: non-LANDED terminals carry a separate reason and a
+    # one-command unblock; both validate through the same closed field rule.
+    if ns.reason is not None:
+        event["reason"] = _field(ns.reason, "reason")
+    if ns.unblock is not None:
+        event["unblock"] = _field(ns.unblock, "unblock")
     # REQ-213 / 8c88ebfa: the effect's idempotency key (PR number + head OID)
     # lives in the intent itself, validated closed, before the effect runs.
     if ns.pr is not None or ns.head is not None:
@@ -253,12 +259,46 @@ def cmd_read_dangling(ns) -> int:
     return 0
 
 
+def cmd_count_terminals(ns) -> int:
+    """Durable per-item terminal counter (EDGE-010 quarantine park)."""
+    doc = _load(_doc_path(ns.store, ns.queue_id))
+    count = sum(1 for event in doc["events"]
+                if event.get("kind") == "terminal"
+                and event.get("item") == ns.item
+                and event.get("status") == ns.status)
+    print(count)
+    return 0
+
+
 def cmd_read_terminals(ns) -> int:
     doc = _load(_doc_path(ns.store, ns.queue_id))
     for event in doc["events"]:
         if event.get("kind") != "terminal":
             continue
         for field in ("item", "status", "detail"):
+            sys.stdout.write(str(event.get(field, "")) + "\0")
+    return 0
+
+
+def cmd_read_report(ns) -> int:
+    """NUL-emit item,status,detail,reason,unblock for report rendering.
+
+    Item terminals are deduplicated to the LAST terminal per item (a
+    requeued quarantine reports its parked outcome once); queue-level
+    terminals pass through untouched.
+    """
+    doc = _load(_doc_path(ns.store, ns.queue_id))
+    terminals = [e for e in doc["events"] if e.get("kind") == "terminal"]
+    last = {}
+    for idx, event in enumerate(terminals):
+        item = event.get("item", "")
+        if item:
+            last[item] = idx
+    for idx, event in enumerate(terminals):
+        item = event.get("item", "")
+        if item and last[item] != idx:
+            continue
+        for field in ("item", "status", "detail", "reason", "unblock"):
             sys.stdout.write(str(event.get(field, "")) + "\0")
     return 0
 
@@ -303,7 +343,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="queue-journal.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    for name in ("init", "append", "events", "read-terminals", "read-dangling"):
+    for name in ("init", "append", "events", "read-terminals", "read-dangling",
+                 "count-terminals", "read-report"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
         p.add_argument("--queue-id", required=True)
@@ -315,8 +356,13 @@ def main(argv=None) -> int:
             p.add_argument("--item")
             p.add_argument("--status")
             p.add_argument("--detail")
+            p.add_argument("--reason")
+            p.add_argument("--unblock")
             p.add_argument("--pr")
             p.add_argument("--head")
+        if name == "count-terminals":
+            p.add_argument("--item", required=True)
+            p.add_argument("--status", required=True)
     for name in ("lock-acquire", "lock-release"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
@@ -328,6 +374,8 @@ def main(argv=None) -> int:
     handlers = {"init": cmd_init, "append": cmd_append, "events": cmd_events,
                 "read-terminals": cmd_read_terminals,
                 "read-dangling": cmd_read_dangling,
+                "count-terminals": cmd_count_terminals,
+                "read-report": cmd_read_report,
                 "lock-acquire": cmd_lock_acquire, "lock-release": cmd_lock_release}
     try:
         return handlers[ns.cmd](ns)
