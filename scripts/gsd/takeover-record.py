@@ -97,16 +97,17 @@ def main() -> int:
     markdown = "# Takeover record\n\ngeneration: %s\n\n```json\n%s```\n" % (created, json.dumps(record, indent=2, sort_keys=True))
     digest = hashlib.sha256("\0".join(dirty).encode("utf-8", "surrogateescape")).hexdigest()
     with takeover_directory(store_path) as directory_fd:
-        # Validate and commit the authoritative record before expectation. A
-        # crash after JSON therefore remains observable as stale Markdown.
+        # Validate both siblings before the expectation mutation. A crash after
+        # the authoritative JSON replace is then fail-closed and the old
+        # Markdown remains detectably stale by its generation stamp.
         validate_final(directory_fd, f"{args.run_id}.json")
         validate_final(directory_fd, f"{args.run_id}.md")
+        subprocess.check_call([sys.executable, args.gates, "takeover-expect", args.run_id,
+                               "--created-at", str(created), "--dirty-digest", digest], env=env)
         replace_bytes(directory_fd, f"{args.run_id}.json", raw)
         if os.environ.get("TAKEOVER_FAULT_AFTER_JSON") == "1":
             return 75
         replace_bytes(directory_fd, f"{args.run_id}.md", markdown.encode())
-    subprocess.check_call([sys.executable, args.gates, "takeover-expect", args.run_id,
-                           "--created-at", str(created), "--dirty-digest", digest], env=env)
     return 0
 
 
