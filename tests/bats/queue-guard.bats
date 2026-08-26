@@ -65,9 +65,26 @@ STUB
   [ "$status" -eq 3 ]
   [ "$output" = "STOP:item-wall" ]
 
+  # REQ-204 boundary contract: walls trip AT the boundary, not one past it.
+  run bash "$GUARD" allow --store "$STORE" --items 2 --queue-started $((now - 10)) --item-started $((now - 5400)) --round 1 --now "$now"
+  [ "$status" -eq 3 ]
+  [ "$output" = "STOP:item-wall" ]
+
+  run bash "$GUARD" allow --store "$STORE" --items 2 --queue-started $((now - 10)) --item-started $((now - 5399)) --round 1 --now "$now"
+  [ "$status" -eq 0 ]
+  [ "$output" = "ALLOW" ]
+
   run bash "$GUARD" allow --store "$STORE" --items 2 --queue-started $((now - 28801)) --item-started $((now - 5)) --round 1 --now "$now"
   [ "$status" -eq 3 ]
   [ "$output" = "STOP:queue-wall" ]
+
+  run bash "$GUARD" allow --store "$STORE" --items 2 --queue-started $((now - 28800)) --item-started $((now - 5)) --round 1 --now "$now"
+  [ "$status" -eq 3 ]
+  [ "$output" = "STOP:queue-wall" ]
+
+  run bash "$GUARD" allow --store "$STORE" --items 2 --queue-started $((now - 28799)) --item-started $((now - 5)) --round 1 --now "$now"
+  [ "$status" -eq 0 ]
+  [ "$output" = "ALLOW" ]
 
   # Operator STOP marker wins even when every cap is satisfied.
   touch "$STORE/STOP"
