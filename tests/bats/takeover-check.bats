@@ -1551,3 +1551,229 @@ PY
   assert_single_refusal missing-record
   [ "$(cat "$log")" = "pre-decision" ]
 }
+
+# ── Plan 01-08 Task 2 RED: exact Git identity and the complete otherwise-valid
+# refusal/remedy matrix.  Every case starts from a fully valid baseline and
+# mutates exactly one invariant so no earlier check can cause the refusal.
+
+reset_fixture_state() {
+  rm -rf "$(dirname "$STORE")/takeover"
+  rm -f "$STORE" "$(dirname "$STORE")/evidence.lock" "$(dirname "$STORE")/.takeover-check.lock"
+}
+
+@test "runner-live refuses an otherwise-valid record while the recorded owner is live" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  sleep 30 &
+  local keeper=$!
+  python3 - "$ROOT/scripts/gsd/takeover-io.py" "$(dirname "$STORE")/.takeover-check.lock" "$keeper" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+pid = int(sys.argv[3])
+identity = io_mod.process_identity(pid)
+payload = {"pid": pid, "pid_start_time": identity.pid_start_time or "unknown",
+           "boot_session_id": identity.boot_session_id, "claimed_at": 1, "run_id": "spec-006"}
+with open(sys.argv[2], "w") as fh:
+    json.dump(payload, fh)
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  kill "$keeper" 2>/dev/null || true
+  assert_single_refusal runner-live
+  [[ "$output" == *'Unblock (operator): bash scripts/gsd/takeover-check.sh --run-id spec-006'* ]]
+  [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
+}
+
+@test "mid-rebase refuses an otherwise-valid record with the exact continue remedy" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  mkdir -p "$REPO/.git/rebase-merge"
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal mid-rebase
+  [[ "$output" == *'Unblock (operator): git rebase --continue'* ]]
+  rm -rf "$REPO/.git/rebase-merge"
+}
+
+@test "linked worktree rebase state is resolved through git rev-parse --git-path" {
+  local now="$(date +%s)"
+  local wt="$BATS_TEST_TMPDIR/wt"
+  git worktree add -q -b wt-branch "$wt"
+  cd "$wt"
+  write_live_takeover_fixture "$now"
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" "$(git branch --show-current)" "$(git rev-parse HEAD)" <<'PY'
+import json,sys
+p,branch,head=sys.argv[1:]
+d=json.load(open(p)); d['git_state']['branch']=branch; d['git_state']['head']=head
+json.dump(d,open(p,'w'))
+PY
+  mkdir -p "$REPO/.git/worktrees/wt/rebase-apply"
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal mid-rebase
+}
+
+@test "git administrative path query failure fails closed as record-mismatch" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  local realgit; realgit="$(command -v git)"
+  local stub="$BATS_TEST_TMPDIR/gitstub"; mkdir -p "$stub"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'for arg in "$@"; do [ "$arg" = "--git-path" ] && exit 128; done\n'
+    printf 'exec %s "$@"\n' "$realgit"
+  } > "$stub/git"
+  chmod +x "$stub/git"
+  run env PATH="$stub:$PATH" GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
+
+@test "branch-gone covers renamed local branch, missing upstream, and named HEAD mismatch" {
+  local now="$(date +%s)"
+  # recorded local branch no longer exists
+  write_live_takeover_fixture "$now"
+  git branch -m 006-takeover 006-renamed
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal branch-gone
+  [[ "$output" == *'Unblock (operator): git fetch --prune origin'* ]]
+  git branch -m 006-renamed 006-takeover
+  # missing recorded upstream ref refuses without a crash or network call
+  reset_fixture_state
+  write_live_takeover_fixture "$now"
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['git_state']['upstream']='refs/remotes/origin/nope'
+json.dump(d,open(p,'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal branch-gone
+  # named branch with a different recorded full HEAD
+  reset_fixture_state
+  write_live_takeover_fixture "$now"
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['git_state']['head']='a'*40
+json.dump(d,open(p,'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal branch-gone
+}
+
+@test "recorded detached HEAD must match the exact current commit" {
+  local now="$(date +%s)"
+  # valid recorded detached state at the exact current commit passes
+  write_live_takeover_fixture "$now"
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['git_state']['branch']=''
+json.dump(d,open(p,'w'))
+PY
+  git checkout -q --detach
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+  # empty recorded branch with a different full HEAD refuses branch-gone
+  git checkout -q 006-takeover
+  git commit -q --allow-empty -m drift
+  reset_fixture_state
+  write_live_takeover_fixture "$now"
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" "$(git rev-parse 'HEAD~1')" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['git_state']['branch']=''; d['git_state']['head']=sys.argv[2]
+json.dump(d,open(p,'w'))
+PY
+  git checkout -q --detach
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal branch-gone
+  git checkout -q 006-takeover
+}
+
+@test "older record mtime and older ledger grant anchor each defeat a forged created_at" {
+  local now="$(date +%s)"
+  # fresh created_at, old record artifact mtime
+  write_live_takeover_fixture "$now"
+  touch -t 202501010000 "$(dirname "$STORE")/takeover/spec-006.json"
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal grant-expired
+  [[ "$output" == *'Unblock (operator): /spec-status'* ]]
+  # fresh created_at, old ledger grant anchor
+  reset_fixture_state
+  write_live_takeover_fixture "$now"
+  python3 - "$STORE" "$(dirname "$STORE")/takeover/spec-006.json" "$now" <<'PY'
+import json,sys
+old=int(sys.argv[3])-259300
+store=json.load(open(sys.argv[1]))
+store['_autonomy']['spec-006']['grants']['ship:gsd']['granted_at']=old
+json.dump(store,open(sys.argv[1],'w'))
+d=json.load(open(sys.argv[2]))
+for row in d['grants']:
+    if row['action']=='ship:gsd': row['granted_at']=old
+json.dump(d,open(sys.argv[2],'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal grant-expired
+  [[ "$output" == *'Unblock (operator): /spec-status'* ]]
+}
+
+@test "a genuinely expired grant refuses with the exact re-grant remedy and no mutation" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  python3 - "$STORE" "$(dirname "$STORE")/takeover/spec-006.json" "$now" <<'PY'
+import json,sys
+exp=int(sys.argv[3])-10
+store=json.load(open(sys.argv[1]))
+store['_autonomy']['spec-006']['grants']['ship:gsd']['expires_at']=exp
+json.dump(store,open(sys.argv[1],'w'))
+d=json.load(open(sys.argv[2]))
+for row in d['grants']:
+    if row['action']=='ship:gsd': row['expires_at']=exp
+json.dump(d,open(sys.argv[2],'w'))
+PY
+  local before; before="$(shasum -a 256 "$STORE" | awk '{print $1}')"
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal grant-expired
+  [[ "$output" == *"--action ship:gsd"* ]]
+  [ "$(shasum -a 256 "$STORE" | awk '{print $1}')" = "$before" ]
+}
+
+@test "findings-open refuses on an otherwise-valid record with one unresolved HIGH finding" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  python3 - "$STORE" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+d['_findings']=[{'id':'f1','severity':'HIGH','resolved':False,'issue':'open finding'}]
+json.dump(d,open(sys.argv[1],'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal findings-open
+  [[ "$output" == *'findings-queue list --unresolved'* ]]
+}
+
+@test "poison action refuses with a shell-quoted rendered remedy that never executes" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['forbid']=[{'action':'push origin main','probe':'mid-rebase','reason':'forbidden'}]
+json.dump(d,open(p,'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^TAKEOVER-REFUSED:poison/push origin main$')" -eq 1 ]
+  [[ "$output" == *"--action 'push origin main'"* ]]
+  [[ "$output" == *"'takeover record forbids action'"* ]]
+  [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
+}
+
+@test "own live ship grant passes and liveness-check.sh is never invoked" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  local stub="$BATS_TEST_TMPDIR/liveness-stub"; mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\ntouch "%s/liveness-called"\n' "$stub" > "$stub/liveness-check.sh"
+  chmod +x "$stub/liveness-check.sh"
+  run env PATH="$stub:$PATH" GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [ "$output" = TAKEOVER-OK ]
+  [ ! -e "$stub/liveness-called" ]
+  ! grep -q 'liveness-check' "$WALL"
+}
