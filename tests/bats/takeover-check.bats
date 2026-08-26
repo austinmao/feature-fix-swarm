@@ -717,3 +717,207 @@ PY
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   assert_single_refusal record-mismatch
 }
+
+# WALL-RESIDUALS e32e9020 (binding): "exactly one pre-decision evidence read"
+# counts SUCCESSFUL captures consumed by the decision.  Torn-capture retries
+# (<=3) are failed capture attempts, never decision reads.
+@test "torn capture retries are capture attempts and one pre-decision evidence read is consumed" {
+  local evidence="$BATS_TEST_TMPDIR/evidence.json"
+  printf '{"_autonomy":{}}' > "$evidence"
+  run python3 - "$ROOT/scripts/gsd/takeover-transaction.py" "$evidence" <<'PY'
+import hashlib, importlib.util, os, sys, types
+spec = importlib.util.spec_from_file_location("takeover_transaction", sys.argv[1])
+mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = mod; spec.loader.exec_module(mod)
+evidence_fd = os.open(sys.argv[2], os.O_RDONLY)
+real_fstat, real_read = os.fstat, os.read
+
+def install(torn_attempts):
+    calls = {"fstat": 0, "reads": 0}
+    def fake_fstat(fd):
+        st = real_fstat(fd)
+        if fd != evidence_fd:
+            return st
+        calls["fstat"] += 1
+        attempt = (calls["fstat"] + 1) // 2
+        is_after = calls["fstat"] % 2 == 0
+        if is_after and attempt <= torn_attempts:
+            return types.SimpleNamespace(st_mode=st.st_mode, st_size=st.st_size,
+                                         st_dev=st.st_dev, st_ino=st.st_ino,
+                                         st_mtime_ns=st.st_mtime_ns + 1)
+        return st
+    def fake_read(fd, n):
+        if fd == evidence_fd:
+            calls["reads"] += 1
+        return real_read(fd, n)
+    os.fstat, os.read = fake_fstat, fake_read
+    return calls
+
+# Two torn attempts, then a clean capture: the decision consumes exactly one
+# snapshot even though three bounded capture attempts read evidence bytes.
+calls = install(2)
+try:
+    snap_fd, digest = mod._capture_snapshot(evidence_fd)
+finally:
+    os.fstat, os.read = real_fstat, real_read
+assert calls["reads"] == 3, calls
+with open(sys.argv[2], "rb") as fh:
+    assert digest == hashlib.sha256(fh.read()).hexdigest()
+os.lseek(snap_fd, 0, os.SEEK_SET)
+assert os.read(snap_fd, 65536) == b'{"_autonomy":{}}'
+os.close(snap_fd)
+
+# Persistently torn: three capture attempts, zero consumed snapshots, refusal.
+calls = install(4)
+try:
+    try:
+        mod._capture_snapshot(evidence_fd)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("persistently torn capture became a snapshot")
+finally:
+    os.fstat, os.read = real_fstat, real_read
+assert calls["reads"] == 3, calls
+print("torn-capture-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *torn-capture-ok* ]]
+}
+
+# WALL-RESIDUALS 79ac0c38 (binding): the pure evaluator must APPROVE a valid
+# production grant and a valid hotfix grant, alongside the denial contracts,
+# without mutating the authority bytes it was handed.
+@test "pure grant evaluation approves valid production and hotfix grants without mutation" {
+  local snapshot="$BATS_TEST_TMPDIR/snapshot.json"
+  python3 - "$snapshot" <<'PY'
+import hashlib, json, sys, time
+now = int(time.time())
+json.dump({'_autonomy': {'spec-006': {'takeover_expected': True,
+  'takeover_created_at': now, 'takeover_dirty_digest': hashlib.sha256(b'').hexdigest(),
+  'preflight': {'pass': True, 'checked_at': now},
+  'grants': {
+    'ship:gsd': {'granted_at': now, 'expires_at': now + 3600},
+    'deploy:prod-web': {'granted_at': now, 'expires_at': now + 3600},
+    'hotfix:prod-web': {'granted_at': now, 'expires_at': now + 3600,
+                        'reason': 'sev1 rollback'},
+    'push:origin/main': {'granted_at': now - 7200, 'expires_at': now - 3600}}}},
+  '_findings': []}, open(sys.argv[1], 'w'))
+PY
+  exec {snapshot_fd}<"$snapshot"
+  local before
+  before="$(shasum -a 256 "$snapshot")"
+  run python3 "$GATES" takeover-evaluate spec-006 --snapshot-fd "$snapshot_fd" \
+    --action deploy:prod-web --action hotfix:prod-web --action migrate:prod-db
+  exec {snapshot_fd}<&-
+  [ "$status" -eq 0 ]
+  run python3 - "$output" <<'PY'
+import json, sys
+results = json.loads(sys.argv[1])["grant_results"]
+assert results["deploy:prod-web"] is True, results     # valid production grant approved
+assert results["hotfix:prod-web"] is True, results     # valid hotfix grant approved
+assert results["ship:gsd"] is True, results
+assert results["push:origin/main"] is False, results   # expired ordinary grant denied
+assert results["migrate:prod-db"] is False, results    # ungranted production action denied
+PY
+  [ "$status" -eq 0 ]
+  [ "$(shasum -a 256 "$snapshot")" = "$before" ]
+}
+
+# Plan 01-07 Task 2 RED: the autonomous feature seam is the literal byte
+# range between TAKEOVER-WALL-START and TAKEOVER-WALL-END in the production
+# skill, executed against the real wall, never a copied approximation.
+build_seam_harness() {
+  mkdir -p "$REPO/scripts/gsd" "$REPO/lib"
+  ln -sf "$ROOT/scripts/gsd/takeover-check.sh" "$REPO/scripts/gsd/takeover-check.sh"
+  ln -sf "$ROOT/scripts/gsd/takeover-transaction.py" "$REPO/scripts/gsd/takeover-transaction.py"
+  ln -sf "$ROOT/scripts/gsd/takeover-io.py" "$REPO/scripts/gsd/takeover-io.py"
+  ln -sf "$ROOT/lib/gates.py" "$REPO/lib/gates.py"
+  SEAM="$BATS_TEST_TMPDIR/seam.sh"
+  {
+    printf '#!/usr/bin/env bash\nset -uo pipefail\nRUN_ID=spec-006\n'
+    printf 'echo preflight-ok\n'
+    sed -n '/TAKEOVER-WALL-START/,/TAKEOVER-WALL-END/p' "$ROOT/skills/feature-implement/SKILL.md"
+    printf 'echo later-execution\n'
+  } > "$SEAM"
+  grep -q 'TAKEOVER-WALL-START' "$SEAM"
+  grep -q 'takeover-check.sh' "$SEAM"
+}
+
+@test "feature seam refusal stops after preflight and never reaches later execution" {
+  build_seam_harness
+  run env -u GATES_STORE python3 "$GATES" takeover-expect spec-006
+  [ "$status" -eq 0 ]
+  run env -u GATES_STORE bash "$SEAM"
+  [ "$status" -ne 0 ]
+  [ "$output" = $'preflight-ok\nTAKEOVER-REFUSED:missing-record\nUnblock (operator): /spec-status' ]
+}
+
+@test "feature seam TAKEOVER-NONE continues past preflight to later execution" {
+  build_seam_harness
+  run env -u GATES_STORE bash "$SEAM"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'preflight-ok\nTAKEOVER-NONE\nlater-execution' ]
+}
+
+# Plan 01-07 Task 2 RED (REQ-105 empty edge): TAKEOVER-NONE is decided only
+# against the canonical repo-rooted store.  A divergent inherited GATES_STORE
+# is ignored for that decision with exactly one typed warning naming it.
+@test "divergent GATES_STORE is ignored with one typed warning for TAKEOVER-NONE" {
+  local override="$BATS_TEST_TMPDIR/elsewhere/evidence.json"
+  mkdir -p "$(dirname "$override")"
+  printf '{}' > "$override"
+  run env GATES_STORE="$override" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ]
+  [[ "$output" == *TAKEOVER-NONE* ]]
+  [ "$(printf '%s\n' "$output" | grep -c 'TAKEOVER-WARN:gates-store-ignored')" -eq 1 ]
+  [[ "$output" == *"$override"* ]]
+  [ "$(env GATES_STORE="$override" bash "$WALL" --run-id spec-006 2>/dev/null)" = TAKEOVER-NONE ]
+}
+
+@test "divergent GATES_STORE cannot hide a canonical expectation behind TAKEOVER-NONE" {
+  run env -u GATES_STORE python3 "$GATES" takeover-expect spec-006
+  [ "$status" -eq 0 ]
+  local override="$BATS_TEST_TMPDIR/elsewhere/evidence.json"
+  mkdir -p "$(dirname "$override")"
+  printf '{}' > "$override"
+  run env GATES_STORE="$override" bash "$WALL" --run-id spec-006
+  assert_single_refusal missing-record
+  [ "$(printf '%s\n' "$output" | grep -c 'TAKEOVER-WARN:gates-store-ignored')" -eq 1 ]
+}
+
+@test "divergent GATES_STORE with corrupt canonical authority refuses instead of TAKEOVER-NONE" {
+  mkdir -p "$REPO/.feature-fix-swarm"
+  printf '{not-json\n' > "$REPO/.feature-fix-swarm/evidence.json"
+  local override="$BATS_TEST_TMPDIR/elsewhere/evidence.json"
+  mkdir -p "$(dirname "$override")"
+  printf '{}' > "$override"
+  run env GATES_STORE="$override" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
+
+@test "absence evaluator failure propagates as record-mismatch never TAKEOVER-NONE" {
+  mkdir -p "$(dirname "$STORE")"
+  printf '{"_autonomy": []}' > "$STORE"
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
+
+# Plan 01-07 Task 2 RED: the wall-derived typed resume action (ship:gsd) must
+# receive a pure grant verdict even when the record omits its grants row —
+# record omissions add refusals, never remove checks.
+@test "record omitting its ship grant row still demands a resume action verdict" {
+  local now="$(date +%s)"
+  write_live_takeover_fixture "$now"
+  python3 - "$STORE" "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json, sys
+store = json.load(open(sys.argv[1]))
+store['_autonomy']['spec-006']['grants'] = {}
+json.dump(store, open(sys.argv[1], 'w'))
+record = json.load(open(sys.argv[2]))
+record['grants'] = []
+json.dump(record, open(sys.argv[2], 'w'))
+PY
+  run env GATES_STORE="$STORE" TAKEOVER_NOW="$((now + 1))" bash "$WALL" --run-id spec-006
+  assert_single_refusal grant-expired
+  [[ "$output" == *"--action ship:gsd"* ]]
+}
