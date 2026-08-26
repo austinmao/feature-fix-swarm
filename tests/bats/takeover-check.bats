@@ -280,19 +280,25 @@ PY
   [ "$(cat "$BATS_TEST_TMPDIR/external-json")" = external ]
 }
 
-@test "writer fault retains expectation and stale Markdown is generation-detectable" {
+# WALL-RESIDUALS fbc53626: JSON is the sole authoritative sibling and its
+# rename is the commit point.  A writer fault between siblings must leave
+# expectation-without-record (refused by the wall), never a trusted record.
+@test "writer fault between siblings leaves expectation without an authoritative record" {
   local store_dir="$(dirname "$STORE")"
   mkdir -p "$store_dir/takeover"
   printf '# Takeover record\n\ngeneration: old\n' > "$store_dir/takeover/spec-006.md"
-  run env TAKEOVER_FAULT_AFTER_JSON=1 GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  run env TAKEOVER_FAULT_BEFORE_JSON=1 GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -ne 0 ]
-  [ -f "$store_dir/takeover/spec-006.json" ]
-  [ "$(cat "$store_dir/takeover/spec-006.md")" = $'# Takeover record\n\ngeneration: old' ]
+  [ ! -e "$store_dir/takeover/spec-006.json" ]
+  grep -q '^generation: ' "$store_dir/takeover/spec-006.md"
+  ! grep -q '^generation: old$' "$store_dir/takeover/spec-006.md"
   run python3 - "$STORE" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))['_autonomy']['spec-006']['takeover_expected'] is True
 PY
   [ "$status" -eq 0 ]
+  run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  assert_single_refusal missing-record
 }
 
 @test "writer produces regular 0600 artifact siblings" {

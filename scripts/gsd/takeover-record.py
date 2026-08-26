@@ -157,23 +157,24 @@ def main() -> int:
         "resume": {"command": f"/spec-status {args.spec_id}",
                    "preconditions": resume_preconditions(args.run_id, store_path, head)},
     }
-    # The expectation is written immediately before the sole authoritative
-    # replace: a crash here fails closed as expected-without-record.
     raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
     markdown = "# Takeover record\n\ngeneration: %s\n\n```json\n%s```\n" % (created, json.dumps(record, indent=2, sort_keys=True))
     digest = hashlib.sha256("\0".join(dirty).encode("utf-8", "surrogateescape")).hexdigest()
     with takeover_directory(store_path) as directory_fd:
-        # Validate both siblings before the expectation mutation. A crash after
-        # the authoritative JSON replace is then fail-closed and the old
-        # Markdown remains detectably stale by its generation stamp.
+        # JSON is the sole authoritative sibling; Markdown is derived advisory
+        # (WALL-RESIDUALS fbc53626).  Publish Markdown first, then the
+        # expectation, then the JSON rename as the single commit point.  A
+        # crash between siblings leaves expectation-without-record, which the
+        # wall refuses; old-JSON+new-MD is tolerated advisory drift because no
+        # consumer trusts a record whose ledger expectation does not match.
         validate_final(directory_fd, f"{args.run_id}.json")
         validate_final(directory_fd, f"{args.run_id}.md")
+        replace_bytes(directory_fd, f"{args.run_id}.md", markdown.encode())
         subprocess.check_call([sys.executable, args.gates, "takeover-expect", args.run_id,
                                "--created-at", str(created), "--dirty-digest", digest], env=env)
-        replace_bytes(directory_fd, f"{args.run_id}.json", raw)
-        if os.environ.get("TAKEOVER_FAULT_AFTER_JSON") == "1":
+        if os.environ.get("TAKEOVER_FAULT_BEFORE_JSON") == "1":
             return 75
-        replace_bytes(directory_fd, f"{args.run_id}.md", markdown.encode())
+        replace_bytes(directory_fd, f"{args.run_id}.json", raw)
     return 0
 
 
