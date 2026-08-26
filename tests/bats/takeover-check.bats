@@ -235,7 +235,9 @@ EOF
   # verdicts, or suppress rows in display-only list mode.
   run env -u GATES_STORE GSD_RUN_ID=spec-006 bash "$WALL" --list
   [ "$status" -eq 0 ]
-  [ "$output" = "$baseline" ]
+  # Compare with the wall-clock age column masked: the two runs may straddle
+  # a second boundary, and this test is about row selection, not age.
+  [ "$(printf '%s\n' "$output" | cut -f1,3,4)" = "$(printf '%s\n' "$baseline" | cut -f1,3,4)" ]
 }
 
 @test "spec-status documents the 1.2 takeover writer contract" {
