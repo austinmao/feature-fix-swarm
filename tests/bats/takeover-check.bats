@@ -123,6 +123,81 @@ PY
   [ "$(cat "$BATS_TEST_TMPDIR/target")" = sentinel ]
 }
 
+@test "writer never follows planted runner-state symlinks into local files" {
+  # 01-gaps3 CR-02: a repository-controlled gsd-run.status/pid symlink must
+  # never have its target's content read or persisted into takeover artifacts.
+  seed_live_authority
+  mkdir -p "$REPO/.planning/run-state"
+  printf 'SECRET-MATERIAL' > "$BATS_TEST_TMPDIR/secret"
+  ln -s "$BATS_TEST_TMPDIR/secret" "$REPO/.planning/run-state/gsd-run.status"
+  printf '99999' > "$BATS_TEST_TMPDIR/pid-secret"
+  ln -s "$BATS_TEST_TMPDIR/pid-secret" "$REPO/.planning/run-state/gsd-run.pid"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  local record="$(dirname "$STORE")/takeover/spec-006.json"
+  [ -f "$record" ]
+  run grep SECRET-MATERIAL "$record"
+  [ "$status" -ne 0 ]
+  run grep SECRET-MATERIAL "$(dirname "$STORE")/takeover/spec-006.md"
+  [ "$status" -ne 0 ]
+  run python3 - "$record" <<'PY'
+import json,sys
+runner=json.load(open(sys.argv[1]))["runner"]
+assert runner["status"]=="unknown", runner
+assert runner["pid"] is None, runner
+PY
+  [ "$status" -eq 0 ]
+}
+
+write_padded_record() {
+  # Direct production writer invocation with the cap-boundary pad seam.
+  local store="$1" pad="$2"
+  mkdir -p "$(dirname "$store")"
+  run env GATES_STORE="$store" TAKEOVER_TEST_RECORD_PAD="$pad" \
+    python3 "$ROOT/scripts/gsd/takeover-record.py" --gates "$GATES" --spec-id 006 --run-id spec-006
+}
+
+@test "writer publishes a record of exactly the consumer cap" {
+  # Measure the base serialized size and the per-pad-byte overhead, then pad
+  # to exactly MAX_BYTES.  Store directory names share one length so the
+  # embedded store path never skews the measurement.
+  write_padded_record "$BATS_TEST_TMPDIR/m1/evidence.json" 0
+  [ "$status" -eq 0 ]
+  local base; base="$(wc -c < "$BATS_TEST_TMPDIR/m1/takeover/spec-006.json")"
+  write_padded_record "$BATS_TEST_TMPDIR/m2/evidence.json" 1
+  [ "$status" -eq 0 ]
+  local padded; padded="$(wc -c < "$BATS_TEST_TMPDIR/m2/takeover/spec-006.json")"
+  local overhead=$((padded - base - 1))
+  write_padded_record "$BATS_TEST_TMPDIR/mA/evidence.json" $((1048576 - base - overhead))
+  [ "$status" -eq 0 ]
+  [ "$(wc -c < "$BATS_TEST_TMPDIR/mA/takeover/spec-006.json")" -eq 1048576 ]
+  # The wall's consumer accepts a record of exactly the cap.
+  run python3 - "$BATS_TEST_TMPDIR/mA/takeover/spec-006.json" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))["ids"]["run_id"]=="spec-006"
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "writer refuses a record one byte over the consumer cap before any publication" {
+  write_padded_record "$BATS_TEST_TMPDIR/m1/evidence.json" 0
+  [ "$status" -eq 0 ]
+  local base; base="$(wc -c < "$BATS_TEST_TMPDIR/m1/takeover/spec-006.json")"
+  write_padded_record "$BATS_TEST_TMPDIR/m2/evidence.json" 1
+  [ "$status" -eq 0 ]
+  local padded; padded="$(wc -c < "$BATS_TEST_TMPDIR/m2/takeover/spec-006.json")"
+  local overhead=$((padded - base - 1))
+  write_padded_record "$BATS_TEST_TMPDIR/mB/evidence.json" $((1048576 - base - overhead + 1))
+  [ "$status" -eq 1 ]
+  [[ "$output" == *TAKEOVER-WRITER-REFUSED* ]]
+  # Nothing was published: no Markdown, no JSON, and no ledger expectation.
+  [ ! -e "$BATS_TEST_TMPDIR/mB/takeover/spec-006.json" ]
+  [ ! -e "$BATS_TEST_TMPDIR/mB/takeover/spec-006.md" ]
+  run env GATES_STORE="$BATS_TEST_TMPDIR/mB/evidence.json" python3 "$GATES" takeover-state spec-006
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"takeover_expected": false'* ]]
+}
+
 @test "wall JSON output shares the successful verdict" {
   write_live_takeover_fixture "$(date +%s)"
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006 --json
