@@ -73,3 +73,35 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *'"verdict":"TAKEOVER-OK"'* ]]
 }
+
+@test "record schema keeps typed empty collections and deterministic forbid boundary" {
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  run python3 - "$REPO/.feature-fix-swarm/takeover/spec-006.json" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1]))
+for key in ("grants", "pendings", "promotions", "unresolved_findings", "phases", "evidence", "forbid"):
+    assert isinstance(d[key], list), key
+assert d["forbid"] == []
+assert isinstance(d["resume"]["preconditions"], list)
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "list is deterministic display-only metadata" {
+  mkdir -p "$REPO/.feature-fix-swarm/takeover"
+  for id in spec-007 spec-006; do
+    cat > "$REPO/.feature-fix-swarm/takeover/$id.json" <<EOF
+{"created_at":1,"ids":{"run_id":"$id"},"git_state":{"branch":"b"},"resume":{"command":"echo \u001b[31minert"}}
+EOF
+  done
+  run env -u GATES_STORE bash "$WALL" --list
+  [ "$status" -eq 0 ]
+  [[ "$output" == spec-006$'\t'* ]]
+  [[ "$output" == *$'\nspec-007\t'* ]]
+}
+
+@test "spec-status documents the 1.2 takeover writer contract" {
+  grep -q 'version: "1.2.0"' "$ROOT/skills/spec-status/SKILL.md"
+  grep -q 'deterministic forbid' "$ROOT/skills/spec-status/SKILL.md"
+}
