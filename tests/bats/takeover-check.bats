@@ -422,3 +422,49 @@ PY
   [ "$status" -eq 1 ]
   assert_single_refusal runner-live
 }
+
+# Plan 01-06 RED: the producer is only useful to a cold session when evidence
+# and resumption facts are real, typed, and rooted in the selected spec.
+@test "fresh collector records sorted evidence and typed resume preconditions" {
+  mkdir -p "$REPO/specs/006-autonomous-landing/evidence/nested"
+  printf '{"proof":true}\n' > "$REPO/specs/006-autonomous-landing/evidence/z-proof.json"
+  printf 'note\n' > "$REPO/specs/006-autonomous-landing/evidence/nested/a-note.txt"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  run python3 - "$(dirname "$STORE")/takeover/spec-006.json" "$STORE" <<'PY'
+import json,sys
+record=json.load(open(sys.argv[1]))
+assert record['evidence'] == [
+    'specs/006-autonomous-landing/evidence/nested/a-note.txt',
+    'specs/006-autonomous-landing/evidence/z-proof.json',
+]
+resume=record['resume']
+assert isinstance(resume['command'], str) and resume['command'].startswith('/spec-status 006')
+assert isinstance(resume['preconditions'], list) and resume['preconditions']
+assert any(row.get('kind') == 'gates_store' for row in resume['preconditions'])
+assert any(row.get('kind') == 'git_head' for row in resume['preconditions'])
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "runner snapshot preserves missing and malformed PID states" {
+  mkdir -p "$REPO/.planning/run-state"
+  printf 'running\n' > "$REPO/.planning/run-state/gsd-run.status"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  run python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+runner=json.load(open(sys.argv[1]))['runner']
+assert runner['pid'] is None and runner['process_state'] == 'missing' and runner['live'] is False
+PY
+  [ "$status" -eq 0 ]
+  printf 'not-a-pid\n' > "$REPO/.planning/run-state/gsd-run.pid"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  run python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+runner=json.load(open(sys.argv[1]))['runner']
+assert runner['pid'] is None and runner['process_state'] == 'malformed' and runner['live'] is False
+PY
+  [ "$status" -eq 0 ]
+}
