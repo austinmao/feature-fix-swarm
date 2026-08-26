@@ -139,3 +139,83 @@ EOF
   [ "$output" = "TAKEOVER-OK" ]
   [ ! -e "$store_dir/.takeover-check.lock" ]
 }
+
+# Plan 01-03 RED contracts.  Keep these on the real collector/writer path: an
+# override is an authority selection, never a fixture-only alternate path.
+@test "live record facts are complete and dirty baseline is normalized" {
+  mkdir -p "$REPO/.planning/run-state" "$REPO/.planning/phases/01-demo"
+  printf 'stopped\n' > "$REPO/.planning/run-state/gsd-run.status"
+  printf '999999\n' > "$REPO/.planning/run-state/gsd-run.pid"
+  touch "$REPO/.planning/phases/01-demo/01-01-PLAN.md"
+  touch "$REPO/.planning/phases/01-demo/01-01-SUMMARY.md"
+  printf 'uncommitted\n' > dirty.txt
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  local record
+  record="$(dirname "$STORE")/takeover/spec-006.json"
+  [ -f "$record" ]
+  run python3 - "$record" <<'PY'
+import hashlib,json,sys
+d=json.load(open(sys.argv[1]))
+assert d['runner']['status'] == 'stopped'
+assert d['runner']['pid'] == 999999
+assert d['phases'] and d['phases'][0]['plan'] == '.planning/phases/01-demo/01-01-PLAN.md'
+assert d['git_state']['dirty'] == sorted(d['git_state']['dirty']) and d['git_state']['dirty']
+assert d['resume']['command'].startswith('/spec-status 006')
+PY
+  [ "$status" -eq 0 ]
+  run python3 - "$STORE" <<'PY'
+import hashlib,json,sys
+d=json.load(open(sys.argv[1])); row=d['_autonomy']['spec-006']
+assert row['takeover_expected'] is True
+assert row['takeover_created_at'] > 0
+assert len(row['takeover_dirty_digest']) == 64
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "collector override keeps record markdown and expectation in one store" {
+  local default_store="$REPO/.feature-fix-swarm/evidence.json"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
+  [ -f "$(dirname "$STORE")/takeover/spec-006.md" ]
+  [ ! -e "$REPO/.feature-fix-swarm/takeover/spec-006.json" ]
+  run python3 - "$STORE" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['_autonomy']['spec-006']['takeover_expected']
+PY
+  [ "$status" -eq 0 ]
+  [ ! -e "$default_store" ]
+}
+
+@test "deterministic forbid ignores prose and reports named mid-rebase probe" {
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  run python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['forbid'] == []
+PY
+  [ "$status" -eq 0 ]
+  mkdir -p "$REPO/.git/rebase-merge"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -eq 0 ]
+  run python3 - "$(dirname "$STORE")/takeover/spec-006.json" <<'PY'
+import json,sys
+rows=json.load(open(sys.argv[1]))['forbid']
+assert rows == [{'action':'mid-rebase','probe':'mid-rebase','reason':'git rebase is in progress'}]
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "writer pair symlink preserves regular sibling and external target" {
+  local store_dir="$(dirname "$STORE")"
+  mkdir -p "$store_dir/takeover"
+  printf old-json > "$store_dir/takeover/spec-006.json"
+  printf external > "$BATS_TEST_TMPDIR/external"
+  ln -sf "$BATS_TEST_TMPDIR/external" "$store_dir/takeover/spec-006.md"
+  run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
+  [ "$status" -ne 0 ]
+  [ "$(cat "$store_dir/takeover/spec-006.json")" = old-json ]
+  [ "$(cat "$BATS_TEST_TMPDIR/external")" = external ]
+}
