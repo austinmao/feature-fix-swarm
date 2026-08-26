@@ -9,10 +9,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -21,6 +24,63 @@ class UnsafeTakeoverPath(RuntimeError):
 
 
 MAX_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int | None
+    boot_session_id: str | None
+    pid_start_time: str | None
+    process_state: str
+
+
+def boot_session_id() -> str:
+    """Return the current boot identity without treating an error as a reboot."""
+    value = _boot_id()
+    if value == "unknown":
+        raise UnsafeTakeoverPath("unobservable boot identity")
+    return value
+
+
+def process_identity(pid: int | None) -> ProcessIdentity:
+    if pid is None:
+        return ProcessIdentity(None, None, None, "missing")
+    if pid <= 0:
+        return ProcessIdentity(None, None, None, "malformed")
+    # A definitive ESRCH is safe to classify before asking the platform for
+    # richer identity.  EPERM and other outcomes remain unobservable/fatal.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return ProcessIdentity(pid, boot_session_id(), None, "dead")
+    except PermissionError:
+        raise UnsafeTakeoverPath("unobservable positive process identity")
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+        tail = stat_text.rsplit(") ", 1)[1].split()
+        state, started = tail[0], tail[19]
+        return ProcessIdentity(pid, boot_session_id(), started, "zombie" if state == "Z" else state)
+    except FileNotFoundError:
+        # macOS has no procfs.  `ps` provides a state code and lstart gives a
+        # stable per-process incarnation value without parsing locale prose.
+        try:
+            out = subprocess.run(["ps", "-o", "state=", "-o", "lstart=", "-p", str(pid)],
+                                 text=True, capture_output=True, check=False)
+        except OSError as exc:
+            raise UnsafeTakeoverPath("unobservable positive process identity") from exc
+        if out.returncode or not out.stdout.strip():
+            return ProcessIdentity(pid, boot_session_id(), None, "dead")
+        fields = out.stdout.strip().split(maxsplit=1)
+        if len(fields) != 2:
+            raise UnsafeTakeoverPath("unobservable positive process identity")
+        state, started = fields
+        return ProcessIdentity(pid, boot_session_id(), started, "zombie" if state.startswith("Z") else state)
+    except (OSError, IndexError):
+        raise UnsafeTakeoverPath("unobservable positive process identity")
+
+
+def process_liveness(identity: ProcessIdentity) -> bool:
+    return identity.pid is not None and identity.process_state not in ("dead", "zombie", "missing", "malformed")
 
 
 def _dir_flags() -> int:
@@ -122,8 +182,16 @@ def consume_exact(directory_fd: int, name: str, fd: int) -> str:
 
 def _boot_id() -> str:
     try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        value = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if value:
+            return value
     except OSError:
+        pass
+    try:
+        value = subprocess.run(["sysctl", "-n", "kern.boottime"], text=True,
+                               capture_output=True, check=True).stdout.strip()
+        return value or "unknown"
+    except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 
@@ -244,7 +312,14 @@ def takeover_directory(store_path: str):
     fd = os.open("/", _dir_flags())
     try:
         for part in parent.parts[1:]:
-            next_fd = os.open(part, _dir_flags(), dir_fd=fd)
+            try:
+                next_fd = os.open(part, _dir_flags(), dir_fd=fd)
+            except FileNotFoundError:
+                # This is the writer's deliberately narrow first-run write:
+                # create only missing components below the already canonical
+                # absolute store path, then immediately reopen no-follow.
+                os.mkdir(part, 0o700, dir_fd=fd)
+                next_fd = os.open(part, _dir_flags(), dir_fd=fd)
             os.close(fd)
             fd = next_fd
             if not _trusted(os.fstat(fd)):
