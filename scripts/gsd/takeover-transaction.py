@@ -27,7 +27,8 @@ def main() -> int:
     ap.add_argument("--run-id", required=True)
     ap.add_argument("args", nargs=argparse.REMAINDER)
     ns = ap.parse_args()
-    if not ns.run_id.startswith("spec-") or "/" in ns.run_id:
+    # List mode carries no run id; a present run id must still be exact.
+    if ns.run_id and (not ns.run_id.startswith("spec-") or "/" in ns.run_id):
         return 1
     store_fd = evidence_fd = takeover_fd = record_fd = None
     owner_lock = None
@@ -44,7 +45,7 @@ def main() -> int:
             evidence_fd = None
         takeover_fd = _IO.open_takeover(store_fd)
         record_name = f"{ns.run_id}.json"
-        if takeover_fd is not None:
+        if takeover_fd is not None and ns.run_id:
             try:
                 record_fd = _IO.open_regular(takeover_fd, record_name)
             except FileNotFoundError:
