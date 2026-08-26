@@ -735,6 +735,52 @@ PY
   [ "$status" -eq 0 ]
 }
 
+# 01-VERIFICATION gap: fixtures export TAKEOVER_TEST_IDENTITY (see setup) so
+# identity never shells to sandbox-forbidden `ps`/`sysctl`.  Production stays
+# fail-closed: with the seam unset and the platform probes denied, identity
+# is unobservable and raises instead of guessing.
+@test "identity seam is deterministic for fixtures while unset seam fails closed" {
+  local shim="$BATS_TEST_TMPDIR/deny-bin"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\nexit 126\n' > "$shim/ps"
+  printf '#!/bin/sh\nexit 126\n' > "$shim/sysctl"
+  chmod +x "$shim/ps" "$shim/sysctl"
+  run env -u TAKEOVER_TEST_IDENTITY PATH="$shim:$PATH" python3 - "$ROOT/scripts/gsd/takeover-io.py" <<'PY'
+import importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("takeover_io", sys.argv[1])
+io_mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = io_mod; spec.loader.exec_module(io_mod)
+
+# Simulate the macOS no-procfs branch on every platform so the denied `ps`
+# and `sysctl` shims are the only identity sources left.
+real_read_text = Path.read_text
+def no_proc(self, *a, **k):
+    if str(self).startswith("/proc/"):
+        raise FileNotFoundError(str(self))
+    return real_read_text(self, *a, **k)
+Path.read_text = no_proc
+
+for label, probe in (("boot", io_mod.boot_session_id),
+                     ("process", lambda: io_mod.process_identity(os.getpid()))):
+    try:
+        probe()
+    except io_mod.UnsafeTakeoverPath:
+        pass
+    else:
+        raise AssertionError(label + " identity did not fail closed under denied probes")
+
+# With the seam explicitly set, the same denied environment is deterministic.
+os.environ["TAKEOVER_TEST_IDENTITY"] = "seam-boot"
+assert io_mod.boot_session_id() == "seam-boot"
+identity = io_mod.process_identity(os.getpid())
+assert identity == io_mod.ProcessIdentity(os.getpid(), "seam-boot", "seam-boot", "S"), identity
+assert io_mod.process_liveness(identity)
+print("identity-seam-ok")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *identity-seam-ok* ]]
+}
+
 # Plan 01-07 RED: the wall must hand every authority predicate one immutable
 # snapshot.  The command intentionally does not exist until the GREEN change.
 @test "immutable authority evaluator reads a supplied snapshot without mutating it" {
