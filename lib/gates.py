@@ -70,6 +70,7 @@ import difflib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import signal
 import stat
@@ -2245,6 +2246,7 @@ def takeover_authority_view(data: dict, run_id: str, actions: list[str]) -> dict
         grant_results[action] = bool(isinstance(entry, dict)
                                      and isinstance(entry.get("expires_at"), (int, float))
                                      and not isinstance(entry.get("expires_at"), bool)
+                                     and math.isfinite(entry["expires_at"])
                                      and now < entry["expires_at"])
     findings = data.get("_findings", [])
     if not isinstance(findings, list):
@@ -2456,15 +2458,49 @@ def _intent_name(run_id: str) -> str:
     return ".takeover-transaction.%s.json" % run_id
 
 
+def _read_exact(fd: int, expected: int) -> bytes | None:
+    """Loop a descriptor read to exactly the expected byte count.
+
+    Returns None when EOF arrives early or extra bytes appear past the
+    fstat size: short or grown data is never accepted as payload bytes."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while total < expected:
+        chunk = os.read(fd, min(65536, expected - total))
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        total += len(chunk)
+    if os.read(fd, 1):
+        return None
+    return b"".join(chunks)
+
+
 def _write_intent_excl(takeover_dir_fd: int, name: str, payload: dict) -> None:
     raw = json.dumps(payload, indent=2).encode()
     fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                  0o600, dir_fd=takeover_dir_fd)
     try:
-        os.write(fd, raw)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        try:
+            # Same full-write discipline as _replace_bytes_at: the durable
+            # intent is fsynced only from a completely written payload and
+            # zero progress is a hard failure, never a truncated publish.
+            view = memoryview(raw)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write made no progress")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        try:
+            os.unlink(name, dir_fd=takeover_dir_fd)
+        except OSError:
+            pass
+        raise
     os.fsync(takeover_dir_fd)
 
 
@@ -2539,7 +2575,9 @@ def recover_takeover_transaction(store_path, store_dir_fd: int, takeover_dir_fd:
         st = os.fstat(ifd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > 4 * 1024 * 1024:
             return {"outcome": "unexplained"}
-        raw = os.read(ifd, 4 * 1024 * 1024 + 1)
+        raw = _read_exact(ifd, st.st_size)
+        if raw is None:
+            return {"outcome": "unexplained"}
     finally:
         os.close(ifd)
     own_lock = lock_fd is None
@@ -2677,8 +2715,12 @@ def takeover_consume(run_id: str, consumed_at: int, store_dir_fd: int, store_fd,
                 raise _TakeoverRefusal("record-mismatch")
             if not _entry_is_fd(takeover_dir_fd, record_name, record_fd):
                 raise _TakeoverRefusal("record-mismatch")
-            os.lseek(record_fd, 0, os.SEEK_SET)
-            record_raw = os.read(record_fd, 1024 * 1024 + 1)
+            record_st = os.fstat(record_fd)
+            if not stat.S_ISREG(record_st.st_mode) or record_st.st_size > 1024 * 1024:
+                raise _TakeoverRefusal("record-mismatch")
+            record_raw = _read_exact(record_fd, record_st.st_size)
+            if record_raw is None:
+                raise _TakeoverRefusal("record-mismatch")
             try:
                 record = json.loads(record_raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):

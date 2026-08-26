@@ -132,10 +132,20 @@ def read_regular(fd: int) -> bytes:
     if not _regular_current_user(st):
         raise UnsafeTakeoverPath("unsafe regular file")
     os.lseek(fd, 0, os.SEEK_SET)
-    data = os.read(fd, MAX_BYTES + 1)
-    if len(data) > MAX_BYTES:
+    # Full-read loop to the exact fstat size: a short kernel read is retried,
+    # early EOF is a hard failure, and growth past the validated size is
+    # rejected — short data is never silently accepted (01-VERIFICATION gap).
+    chunks: list[bytes] = []
+    total = 0
+    while total < st.st_size:
+        chunk = os.read(fd, min(65536, st.st_size - total))
+        if not chunk:
+            raise UnsafeTakeoverPath("short read")
+        chunks.append(chunk)
+        total += len(chunk)
+    if os.read(fd, 1):
         raise UnsafeTakeoverPath("oversized file")
-    return data
+    return b"".join(chunks)
 
 
 def open_store_directory(store_path: str) -> int:

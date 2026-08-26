@@ -16,6 +16,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -f "$GP" ] || { echo 'TAKEOVER-REFUSED:decoy-store'; exit 1; }
+# List mode is display-only metadata: an ambient GSD_RUN_ID must never select
+# records, drive recovery, or acquire the owner lock (01-VERIFICATION gap).
+if [ "$LIST" -eq 1 ]; then RUN_ID=""; fi
 [ "$LIST" -eq 1 ] || [[ "$RUN_ID" =~ ^spec-[0-9]{3}$ ]] || usage
 
 # Store selection is configuration: producer and consumer inherit one
@@ -170,8 +173,16 @@ fd,store,rid=sys.argv[1:]
 try:
  fd=int(fd); st=os.fstat(fd)
  if not stat.S_ISREG(st.st_mode) or st.st_size>1024*1024 or st.st_uid!=os.getuid(): raise ValueError()
- os.lseek(fd,0,os.SEEK_SET); raw=os.read(fd,1024*1024+1)
- if len(raw)>1024*1024: raise ValueError()
+ os.lseek(fd,0,os.SEEK_SET)
+ # Full-read loop to the exact fstat size: short data or growth past the
+ # opened size is never accepted as the record bytes (01-VERIFICATION gap).
+ chunks=[]; total=0
+ while total<st.st_size:
+  c=os.read(fd,min(65536,st.st_size-total))
+  if not c: raise ValueError()
+  chunks.append(c); total+=len(c)
+ if os.read(fd,1): raise ValueError()
+ raw=b''.join(chunks)
  d=json.loads(raw.decode('utf-8'))
  if not isinstance(d,dict) or d.get('ids',{}).get('run_id')!=rid: raise ValueError()
  if d.get('gates_store')!=store or d.get('gates_store_anchor')!=hashlib.sha256(store.encode()).hexdigest(): raise RuntimeError('decoy')
@@ -181,6 +192,21 @@ try:
  git_state=d.get('git_state',{})
  if not isinstance(git_state,dict) or not isinstance(git_state.get('dirty'),list): raise ValueError()
  if not all(isinstance(x,str) for x in git_state['dirty']): raise ValueError()
+ # Hostile forbid/precondition strings are capped and rendered through the
+ # same C0/C1 inert map used for rid/branch/command display fields BEFORE
+ # they are compared or reach refusal tokens (01-VERIFICATION gap).
+ def _inert(s): return ''.join(' ' if ord(ch)<32 or 127<=ord(ch)<=159 else ch for ch in s)[:128]
+ def _scrub(rows):
+  out=[]
+  for row in rows:
+   if isinstance(row,dict):
+    row={k:(_inert(v) if k in ('action','probe','reason') and isinstance(v,str) else v) for k,v in row.items()}
+   elif isinstance(row,str):
+    row=_inert(row)
+   out.append(row)
+  return out
+ d['forbid']=_scrub(d['forbid'])
+ d['resume']['preconditions']=_scrub(d['resume']['preconditions'])
  print(json.dumps({'created_at':d.get('created_at'),'git':git_state,'grants':d['grants'],'forbid':d['forbid'],'preflight':d.get('preflight',{}),'findings':d['unresolved_findings'],'pre':d['resume']['preconditions']},separators=(',',':')))
 except RuntimeError: print('DECOY')
 except Exception: print('BAD')
@@ -212,7 +238,13 @@ try:
 except OSError: pass
 PY
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+# A delivered signal must stop the wall after lock cleanup, never fall through
+# into continued policy execution: exit fires the EXIT trap (cleanup) and the
+# process terminates with the conventional 128+signum (01-VERIFICATION gap).
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Rebase state comes exclusively from Git-resolved administrative paths so
 # ordinary and linked worktrees are both exact; query errors fail closed.

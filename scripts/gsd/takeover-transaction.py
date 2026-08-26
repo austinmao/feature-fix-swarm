@@ -57,9 +57,19 @@ def _record_binds(record_fd: int, store: str, run_id: str) -> bool:
     if not stat.S_ISREG(st.st_mode) or st.st_size > 1024 * 1024:
         return False
     os.lseek(record_fd, 0, os.SEEK_SET)
-    raw = os.read(record_fd, st.st_size + 1)
-    if len(raw) != st.st_size:
+    # Full-read loop to the exact fstat size: a short kernel read must never
+    # be judged as a binding failure or truncated claim data.
+    chunks: list[bytes] = []
+    total = 0
+    while total < st.st_size:
+        chunk = os.read(record_fd, min(65536, st.st_size - total))
+        if not chunk:
+            return False
+        chunks.append(chunk)
+        total += len(chunk)
+    if os.read(record_fd, 1):
         return False
+    raw = b"".join(chunks)
     try:
         row = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -76,7 +86,15 @@ def _snapshot_bytes(raw: bytes) -> tuple[int, str]:
     snap_fd, snap_name = tempfile.mkstemp(prefix=".takeover-snapshot-", dir="/tmp")
     try:
         os.fchmod(snap_fd, 0o400)
-        os.write(snap_fd, raw)
+        # Same full-write discipline as replace_bytes/OwnerLock: the immutable
+        # snapshot holds the complete evidence bytes and zero progress is a
+        # hard failure, never a truncated authority snapshot.
+        view = memoryview(raw)
+        while view:
+            written = os.write(snap_fd, view)
+            if written <= 0:
+                raise OSError("short write made no progress")
+            view = view[written:]
         os.fsync(snap_fd)
         readonly = os.open(snap_name, os.O_RDONLY)
     finally:
@@ -170,7 +188,9 @@ def main() -> int:
 
             def _signal_cleanup(signum, frame):
                 owner_lock.cleanup()
-                sys.exit(1)
+                # Conventional signal exit: cleanup then terminate, never
+                # continued execution (01-VERIFICATION gap).
+                sys.exit(128 + signum)
 
             for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
                 signal.signal(signum, _signal_cleanup)
