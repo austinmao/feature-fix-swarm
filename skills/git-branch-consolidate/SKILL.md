@@ -311,8 +311,15 @@ if [ "$MODE" = "execute" ]; then
       exit 1
     fi
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      LOCAL_OID="$(git rev-parse -q --verify "refs/heads/$T_BRANCH" 2>/dev/null || true)"
-      if [ -n "$LOCAL_OID" ] && [ "$LOCAL_OID" != "$T_OID" ]; then
+      # CR-06: the local ref must EXIST and equal the expected OID — a ref
+      # the queue's earlier finalizer already removed is exactly the race
+      # window, and the finalizer can still delete the remote branch, so
+      # absence is never success.  No remote-only carve-out exists.
+      if ! LOCAL_OID="$(git rev-parse -q --verify "refs/heads/$T_BRANCH" 2>/dev/null)"; then
+        echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is missing, expected $T_OID"
+        exit 1
+      fi
+      if [ "$LOCAL_OID" != "$T_OID" ]; then
         echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is $LOCAL_OID, expected $T_OID"
         exit 1
       fi
