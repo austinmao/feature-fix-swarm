@@ -2629,3 +2629,50 @@ terms = [e for e in doc["events"] if e.get("kind") == "terminal"
 assert terms and terms[-1]["status"] == "BLOCKED:identity-conflict", terms
 PYEOF
 }
+
+
+@test "[L1] resume merge-satisfied adopt runs the idempotent finalizer before LANDED" {
+  # L1 (ship round 5): the resume adopt branch (merge authority satisfied,
+  # non-finalize step) journaled LANDED with cleanup silently skipped.  It
+  # must run the SAME require_go-fenced idempotent finalizer the finalize
+  # branch runs, and only then append LANDED.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  OWNER=run-971
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  python3 "$JR" init --store "$LQ" --queue-id q-971 --run-id "$OWNER"
+  python3 "$JR" record-manifest --store "$LQ" --queue-id q-971 --item spec/item-a
+  # crash after the merge effect: intent recorded, result never observed
+  python3 "$JR" append --store "$LQ" --queue-id q-971 \
+    --kind intent --step merge --item spec/item-a --pr 101 --head "$OID_A"
+  MERGE_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)"
+  printf '%s\n' "$MERGE_A" > "$GH_STATE/merge-101"
+  write_gh
+  write_children
+  cat > "$MOCK_BIN/assert-merged.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' assert-merged.sh "$@" >> "${CALL_LOG:?}"
+printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
+[ -s "${GH_STATE:?}/merge-$1" ] && exit 0
+exit 2
+STUB
+  chmod +x "$MOCK_BIN"/*
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --resume q-971
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED $MERGE_A" <<<"$output"
+  # the finalizer ran under the OWNER run id before LANDED
+  grep -q "finalize --run-id $OWNER 101" "$EVENTS"
+  python3 - "$LQ/q-971.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+rows = [f'{e["kind"]}:{e["step"]}:{e.get("status","")}'
+        for e in doc["events"] if e.get("item") == "spec/item-a"]
+assert "result:merge:reconciled" in rows, rows
+fin = rows.index("result:finalize:reconciled")
+assert rows[-1].startswith("terminal:terminal:LANDED"), rows
+assert fin < len(rows) - 1, rows
+PYEOF
+}

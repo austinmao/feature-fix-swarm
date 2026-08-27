@@ -352,30 +352,28 @@ resume_reconcile() {
       esac
     fi
     if [ -n "$merge_sha" ]; then
-      if [ "$step" = "finalize" ]; then
-        # 865d06d4: a finalizer intent without a terminal means the merge is
-        # already authority-confirmed.  Recovery re-runs the finalizer
-        # idempotently and only then appends LANDED — never a second merge.
-        rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
-        # CR-05: STOP/deadline consulted immediately before the recovery
-        # finalizer MUTATION as well — a fence pass at classification time
-        # is never authority to mutate later.
-        require_go "resume-finalize $item" || return 1
-        if "$rf" --run-id "$RUN_ID" "$pr" ${REPO_SLUG:+"$REPO_SLUG"}; then
-          journal --kind result --step finalize --item "$item" --status reconciled
-          journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
-        else
-          journal --kind result --step finalize --item "$item" --status failed
-          journal --kind terminal --step terminal --item "$item" --status "BLOCKED:finalizer" \
-            --reason "recovery finalizer failed for PR $pr" \
-            --unblock "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
-        fi
-      else
+      if [ -n "$step" ] && [ "$step" != "finalize" ]; then
         # effect-already-happened: adopt the authority's outcome — no re-merge.
-        if [ -n "$step" ]; then
-          journal --kind result --step "$step" --item "$item" --status reconciled
-        fi
+        journal --kind result --step "$step" --item "$item" --status reconciled
+      fi
+      # 865d06d4 / L1 (ship round 5): a merge-satisfied recovery ALWAYS
+      # re-runs the idempotent finalizer before LANDED — the adopt branch
+      # previously journaled LANDED with cleanup silently skipped, so a
+      # crash after merge but before finalize left the estate unclean
+      # while reporting the same terminal as the finalize branch.
+      rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
+      # CR-05: STOP/deadline consulted immediately before the recovery
+      # finalizer MUTATION as well — a fence pass at classification time
+      # is never authority to mutate later.
+      require_go "resume-finalize $item" || return 1
+      if "$rf" --run-id "$RUN_ID" "$pr" ${REPO_SLUG:+"$REPO_SLUG"}; then
+        journal --kind result --step finalize --item "$item" --status reconciled
         journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
+      else
+        journal --kind result --step finalize --item "$item" --status failed
+        journal --kind terminal --step terminal --item "$item" --status "BLOCKED:finalizer" \
+          --reason "recovery finalizer failed for PR $pr" \
+          --unblock "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
       fi
       continue
     fi
