@@ -10,6 +10,7 @@ setup() {
   # and boot identity (mirrors tests/bats/takeover-check.bats).  Production
   # inertness is proven there by the fail-closed unset-seam denied-PATH case.
   export TAKEOVER_TEST_IDENTITY="bats-boot-1"
+  export FFS_HOST=claude
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; QUEUE="$ROOT/scripts/gsd/land-queue.sh"
   ORIGIN="$BATS_TEST_TMPDIR/origin.git"; WORK="$BATS_TEST_TMPDIR/work"; LINKED="$BATS_TEST_TMPDIR/linked"
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
@@ -131,6 +132,24 @@ STUB
 
 no_reviewer_path() { # PATH with no codex/claude anywhere but sane core tools
   rm -f "$MOCK_BIN/codex" "$MOCK_BIN/claude"
+  ln -sf "$(command -v python3)" "$MOCK_BIN/python3"
+  ln -sf "$(command -v bash)" "$MOCK_BIN/bash"
+  printf '%s' "$MOCK_BIN:/usr/bin:/bin:/usr/sbin"
+}
+
+write_vendor_stub() { # $1 vendor CLI name — happy logging reviewer stub
+  cat > "$MOCK_BIN/$1" <<STUB
+#!/usr/bin/env bash
+printf '%s\0' $1 "\$@" >> "\${CALL_LOG:?}"
+printf '$1 %s\n' "\$*" >> "\${EVENTS:?}"
+exit 0
+STUB
+  chmod +x "$MOCK_BIN/$1"
+}
+
+same_vendor_only_path() { # $1 vendor to keep — hermetic PATH with ONLY it
+  rm -f "$MOCK_BIN/codex" "$MOCK_BIN/claude"
+  write_vendor_stub "$1"
   ln -sf "$(command -v python3)" "$MOCK_BIN/python3"
   ln -sf "$(command -v bash)" "$MOCK_BIN/bash"
   printf '%s' "$MOCK_BIN:/usr/bin:/bin:/usr/sbin"
@@ -784,6 +803,72 @@ STUB
   grep -q "ITEM spec/item-a BLOCKED:review" <<<"$output"
   grep -q "ITEM spec/item-b BLOCKED:review" <<<"$output"
 }
+@test "[REVIEW] floor on a codex host refuses when only codex is installed" {
+  # CR-05 / 37bc43d9: floor's defining guarantee is an OPPOSITE-vendor
+  # reviewer — the producing host's own CLI never satisfies it.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(same_vendor_only_path codex)"
+  RUN_ID=run-cr05a
+  FFS_HOST=codex PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main \
+    --posture floor --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+  posture_no_hit -q "^codex review" "$EVENTS"
+  python3 - "$GATES_STORE" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+ev = [e for e in data["_degradation"]["invocations"]
+      if e.get("run_id") == "run-cr05a"]
+assert len(ev) == 1 and ev[0]["degraded"] is True, ev
+PYEOF
+}
+
+@test "[REVIEW] floor on a claude host refuses when only claude is installed" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(same_vendor_only_path claude)"
+  RUN_ID=run-cr05b
+  FFS_HOST=claude PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main \
+    --posture floor --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+  posture_no_hit -q "^claude review" "$EVENTS"
+}
+
+@test "[REVIEW] zero posture same-vendor fallback reviews but records degraded=true" {
+  # CR-05: under zero the same-vendor CLI may still review, but the
+  # invocation is durably recorded as DEGRADED — never as a clean review.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(same_vendor_only_path codex)"
+  RUN_ID=run-cr05c
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  FFS_HOST=codex PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  grep -q "^codex review" "$EVENTS"
+  python3 - "$GATES_STORE" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+ev = [e for e in data["_degradation"]["invocations"]
+      if e.get("run_id") == "run-cr05c"]
+assert len(ev) == 1 and ev[0]["degraded"] is True, ev
+PYEOF
+}
+
 @test "[REVIEW] floor and zero reviewer modes bind degradation" {
   test -f "$LINKED/.git"
   stub_env
