@@ -852,23 +852,30 @@ if [ -z "$QUEUE_TERMINAL" ] && [ "$AUTONOMY_POSTURE" = "zero" ] && [ "${#QUAR_ID
   done
 fi
 
-# ── spec-006 Phase 3 (REQ-301/302): deterministic consolidate grant ───────
-# Runs ONLY at the all-items-terminal point (the emit_report hook boundary):
-# the validated queue-journal read-landed-tuples projection is the sole
-# manifest source — never estate prose, scouts, resume strings, or shell
-# arguments.  The NUL transport goes straight from the journal accessor to
-# gates.py grant-consolidate, so no shell word-splitting ever touches target
-# identity; the TTL is bounded by the recorded queue wall and the 8h cap.
-# Grant derivation never rewrites the queue outcome: on any refusal the
-# landed report stands and the consolidation simply has no grant to run
-# under (fail closed, REQ-302).
-if [ -z "$QUEUE_TERMINAL" ]; then
-  LANDED_TUPLES="$WORKTMP/landed-tuples"
-  if python3 "$JOURNAL" read-landed-tuples --store "$LQ" --queue-id "$QUEUE_ID"       > "$LANDED_TUPLES" 2>/dev/null && [ -s "$LANDED_TUPLES" ]; then
-    if ! python3 "$GATES" grant-consolidate "$RUN_ID" --queue-id "$QUEUE_ID"         --queue-timeout-seconds "${QUEUE_WALL_SECONDS:-28800}"         --ttl-hours 8 < "$LANDED_TUPLES"; then
-      echo "CONSOLIDATE-GRANT-SKIPPED: queue-derived grant refused; landed report stands"
-    fi
+# ── spec-006 Phase 3 (REQ-301/302, CR-03/WR-02): consolidate grant ────────
+# Idempotent post-terminal derivation, invoked at every all-items-terminal
+# boundary.  gates.py grant-consolidate loads the named queue journal
+# ITSELF, verifies the run/queue binding and that every item is terminal,
+# and derives the canonical tuples from the journal's read-landed-tuples
+# projection — never estate prose, scouts, resume strings, shell arguments,
+# or stdin.  The grant is bound to the journal's ORIGINAL run id and its
+# TTL is clipped to the original queue deadline, so a resumed queue can
+# never silently extend authority (WR-02).  Grant derivation never rewrites
+# the queue outcome: on any refusal the landed report stands and the
+# consolidation simply has no grant to run under (fail closed, REQ-302).
+derive_consolidate_grant() {
+  local orig_run
+  orig_run="$(python3 "$JOURNAL" read-run-id --store "$LQ" --queue-id "$QUEUE_ID" 2>/dev/null)" || return 0
+  [ -n "$orig_run" ] || return 0
+  if ! python3 "$GATES" grant-consolidate "$orig_run" --queue-id "$QUEUE_ID" \
+      --journal-store "$LQ" \
+      --queue-timeout-seconds "${QUEUE_WALL_SECONDS:-28800}" --ttl-hours 8; then
+    echo "CONSOLIDATE-GRANT-SKIPPED: queue-derived grant refused; landed report stands"
   fi
+}
+
+if [ -z "$QUEUE_TERMINAL" ]; then
+  derive_consolidate_grant
 fi
 
 # ── report ────────────────────────────────────────────────────────────────

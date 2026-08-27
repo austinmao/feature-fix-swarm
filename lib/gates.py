@@ -1164,7 +1164,8 @@ def _now() -> float:
 def grant_actions(store: Path, run_id: str, actions: list[str], *,
                   ttl_hours: float = GRANT_DEFAULT_TTL_HOURS,
                   granted_by: str = "operator",
-                  reason: str | None = None) -> bool:
+                  reason: str | None = None,
+                  _allow_consolidate: bool = False) -> bool:
     """Record operator-approved actions for a run. Actions must be typed
     ('type:target', e.g. 'push:origin/main') — free prose never matches at
     run time, so it is rejected here rather than silently failing at 3am.
@@ -1179,6 +1180,12 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
         return False  # inf/0/negative/absurd TTL = effectively non-expiring
     for a in actions:
         if a.startswith("consolidate:"):
+            # Queue-derived ONLY (CR-03): consolidate:* is never an ordinary
+            # operator grant — the sole mint path is grant_consolidate_estate,
+            # which passes the private _allow_consolidate capability after
+            # deriving and validating the tuples from the queue journal.
+            if not _allow_consolidate:
+                return False
             # Queue-derived exact scope + 8h cap (REQ-301/302, T-03-07):
             # only consolidate:estate:<sha256(target tuples)> may exist.
             if not CONSOLIDATE_SCOPE_PAT.match(a):
@@ -1285,7 +1292,8 @@ def grant_consolidate_estate(store: Path, run_id: str, tuples, *,
         return None  # TTL never outlives the recorded queue wall
     scope = consolidate_scope(normalized)
     ok = grant_actions(store, run_id, [scope], ttl_hours=float(ttl_hours),
-                       granted_by="queue", reason=f"queue:{queue_id}")
+                       granted_by="queue", reason=f"queue:{queue_id}",
+                       _allow_consolidate=True)
     return scope if ok else None
 
 
@@ -4170,53 +4178,92 @@ def main(argv: list[str]) -> int:
             print(f"  MISSING-EVIDENCE: {m}")
         return 0 if art["verdict"] == "go" else 1
     if cmd == "grant-consolidate":
-        # spec-006 Phase 3: queue-derived consolidate:estate minting.  Tuples
-        # arrive as NUL-delimited (branch, head, pr, merge) quads on stdin —
-        # the queue-journal read-landed-tuples transport — so no shell ever
-        # word-splits or re-parses target identity.
+        # spec-006 Phase 3 (CR-03): queue-derived consolidate:estate minting.
+        # The named queue journal is the ONLY target-manifest source: this
+        # command loads the journal ITSELF through the production accessor,
+        # verifies the run/queue binding and that every item reached a
+        # terminal, and derives the canonical tuples from the journal's
+        # read-landed-tuples projection.  stdin is never read — no caller
+        # can inject target identity (WR-02: the grant TTL is additionally
+        # clipped to the journal's original queue deadline, so a resumed or
+        # re-run derivation can never silently extend authority).
         if not args:
             print("usage: gates.py grant-consolidate RUN_ID --queue-id ID "
-                  "[--ttl-hours H] [--queue-timeout-seconds S]", file=sys.stderr)
+                  "--journal-store DIR [--ttl-hours H] "
+                  "[--queue-timeout-seconds S]", file=sys.stderr)
             return 2
         run_id = args[0]
         queue_id = _flag(args, "--queue-id")
+        journal_store = _flag(args, "--journal-store")
+
+        def _cg_reject(reason: str) -> int:
+            print(f"CONSOLIDATE-GRANT-REJECTED: {sanitize_reason(reason)}",
+                  file=sys.stderr)
+            return 1
+        if not journal_store:
+            return _cg_reject("--journal-store is required: the queue "
+                              "journal is the only tuple source")
         try:
             ttl = float(_flag(args, "--ttl-hours", str(CONSOLIDATE_MAX_TTL_HOURS)))
             timeout_s = float(_flag(args, "--queue-timeout-seconds",
                                     str(CONSOLIDATE_QUEUE_WALL_SECONDS)))
         except ValueError:
-            print("CONSOLIDATE-GRANT-REJECTED: --ttl-hours and "
-                  "--queue-timeout-seconds must be numeric", file=sys.stderr)
-            return 1
-        raw = sys.stdin.buffer.read(1 << 20)
-        parts = raw.split(b"\0")
-        if parts and parts[-1] == b"":
-            parts.pop()
-        if not parts or len(parts) % 4:
-            print("CONSOLIDATE-GRANT-REJECTED: stdin must carry NUL-delimited "
-                  "(branch, head, pr, merge) quads", file=sys.stderr)
-            return 1
+            return _cg_reject("--ttl-hours and --queue-timeout-seconds "
+                              "must be numeric")
+        import importlib.util as _ilu
+        qj_path = (Path(__file__).resolve().parents[1] / "skills"
+                   / "land-queue" / "scripts" / "queue-journal.py")
+        spec = _ilu.spec_from_file_location("land_queue_journal", qj_path)
+        if spec is None or spec.loader is None:
+            return _cg_reject("queue-journal accessor unavailable")
+        qj = _ilu.module_from_spec(spec)
         try:
-            fields = [part.decode("utf-8") for part in parts]
-        except UnicodeDecodeError:
-            print("CONSOLIDATE-GRANT-REJECTED: non-UTF-8 tuple field",
-                  file=sys.stderr)
-            return 1
-        quads = [tuple(fields[i:i + 4]) for i in range(0, len(fields), 4)]
+            spec.loader.exec_module(qj)
+        except Exception:
+            return _cg_reject("queue-journal accessor failed to load")
+        try:
+            doc = qj._load(qj._doc_path(journal_store, queue_id))
+        except qj.JournalError as exc:
+            return _cg_reject(str(exc))
+        if doc.get("run_id") != run_id:
+            return _cg_reject(f"run/queue binding: journal {queue_id} is "
+                              "owned by a different run id")
+        live = qj.nonterminal_items(doc)
+        if live:
+            return _cg_reject("queue is not all-items-terminal: "
+                              + ", ".join(sorted(live)[:5]))
+        try:
+            quads = qj.landed_tuples(doc)
+        except qj.JournalError as exc:
+            return _cg_reject(str(exc))
+        created_at = doc.get("created_at")
+        if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
+            return _cg_reject("journal carries no numeric created_at")
+        remaining_h = (created_at + timeout_s - _now()) / 3600.0
+        if remaining_h <= 0:
+            return _cg_reject("original queue deadline has passed; a late "
+                              "derivation never re-opens authority")
         scope = grant_consolidate_estate(store, run_id, quads,
                                          queue_id=queue_id,
                                          queue_timeout_seconds=timeout_s,
-                                         ttl_hours=ttl)
+                                         ttl_hours=min(ttl, remaining_h))
         if scope is None:
-            print("CONSOLIDATE-GRANT-REJECTED: empty/malformed/duplicate "
-                  "target tuples, bad queue id, or TTL above the queue "
-                  "timeout/8h cap", file=sys.stderr)
-            return 1
-        print(f"GRANTED: {scope} (run {run_id}, queue {queue_id}, ttl {ttl}h)")
+            return _cg_reject("empty/malformed/duplicate target tuples, bad "
+                              "queue id, or TTL above the queue timeout/8h cap")
+        print(f"GRANTED: {scope} (run {run_id}, queue {queue_id}, ttl "
+              f"{min(ttl, remaining_h):.4g}h)")
         return 0
     if cmd == "grant":
         run_id = args[0]
         actions = [args[i + 1] for i, a in enumerate(args) if a == "--action"]
+        if any(a.startswith("consolidate:") for a in actions):
+            # CR-03: the queue-derived authority boundary — a consolidate:*
+            # grant is mintable ONLY by land-queue's grant-consolidate at its
+            # all-items-terminal boundary, never by the public operator path.
+            print("GRANT-REJECTED: consolidate:* actions are queue-derived "
+                  "only — minted exclusively by grant-consolidate from the "
+                  "terminal queue journal, never by the generic grant path")
+            return 1
         ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
         reason = _flag(args, "--reason") or None
         if not grant_actions(store, run_id, actions, ttl_hours=ttl, reason=reason):

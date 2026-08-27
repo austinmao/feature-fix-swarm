@@ -95,7 +95,8 @@ def test_exact_scope_matches_and_substitution_is_refused(tmp_path):
     gates = gates_module()
     store = tmp_path / "evidence.json"
     scope = queue_scope(TUPLES)
-    assert gates.grant_actions(store, "run-1", [scope], ttl_hours=CAP_HOURS)
+    assert gates.grant_actions(store, "run-1", [scope], ttl_hours=CAP_HOURS,
+                               _allow_consolidate=True)
     assert gates.check_grant(store, "run-1", scope) is True
     # scope substitution: a DIFFERENT queue-derived manifest never matches
     assert gates.check_grant(store, "run-1", queue_scope(OTHER_TUPLES)) is False
@@ -107,7 +108,8 @@ def test_expiry_is_refused_at_the_effect_boundary(tmp_path):
     gates = gates_module()
     store = tmp_path / "evidence.json"
     scope = queue_scope(TUPLES)
-    assert gates.grant_actions(store, "run-1", [scope], ttl_hours=CAP_HOURS)
+    assert gates.grant_actions(store, "run-1", [scope], ttl_hours=CAP_HOURS,
+                               _allow_consolidate=True)
     granted = json.loads(store.read_text())["_autonomy"]["run-1"]["grants"][scope]
     at = granted["granted_at"]
     assert gates.check_grant(store, "run-1", scope, now=at + CAP_HOURS * 3600 - 1)
@@ -127,7 +129,8 @@ def test_consolidate_ttl_is_capped_at_8h(tmp_path):
     gates = gates_module()
     store = tmp_path / "evidence.json"
     scope = queue_scope(TUPLES)
-    accepted = gates.grant_actions(store, "run-1", [scope], ttl_hours=9.0)
+    accepted = gates.grant_actions(store, "run-1", [scope], ttl_hours=9.0,
+                                   _allow_consolidate=True)
     _red(accepted is False,
          "a consolidate:estate grant with TTL 9h was accepted; the "
          "consolidate cap is 8h (T-03-02)")
@@ -137,7 +140,8 @@ def test_bare_consolidate_estate_without_queue_scope_is_rejected(tmp_path):
     gates = gates_module()
     store = tmp_path / "evidence.json"
     accepted = gates.grant_actions(store, "run-1", ["consolidate:estate"],
-                                   ttl_hours=CAP_HOURS)
+                                   ttl_hours=CAP_HOURS,
+                                   _allow_consolidate=True)
     _red(accepted is False,
          "a bare consolidate:estate grant (no queue-derived sha256 scope) "
          "was accepted; the scope must pin the exact target manifest")
@@ -147,7 +151,8 @@ def test_default_ttl_cannot_outlive_the_8h_cap(tmp_path):
     gates = gates_module()
     store = tmp_path / "evidence.json"
     scope = queue_scope(TUPLES)
-    accepted = gates.grant_actions(store, "run-1", [scope])  # default TTL
+    accepted = gates.grant_actions(store, "run-1", [scope],
+                                   _allow_consolidate=True)  # default TTL
     if accepted:
         live_past_cap = gates.check_grant(store, "run-1", scope,
                                           now=json.loads(store.read_text())
