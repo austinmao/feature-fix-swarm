@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Machine gates for human-out-of-loop runs (v4 hardening).
 
 Completion authority lives HERE, not in agent self-report:
@@ -65,15 +66,20 @@ Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import fcntl
 import hashlib
 import json
+import math
 import os
+import signal
+import stat
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Cheap deterministic gates run before expensive behavioral/LLM gates
@@ -99,11 +105,52 @@ EXIT0_PAT = re.compile(r"\bexit 0\b|sys\.exit\(0\)|process\.exit\(0\)")
 
 # ── Stream A: completion authority ───────────────────────────────────────────
 
+_PINNED_STORE_DATA: dict | None = None
+
+
 def _load_store(store: Path) -> dict:
+    """Load the normal store, or the per-process descriptor-pinned snapshot."""
+    if _PINNED_STORE_DATA is not None:
+        return _PINNED_STORE_DATA
     if not Path(store).exists():
         return {}
     with open(store) as f:
         return json.load(f)
+
+
+def _load_pinned_store(store_dir_fd: int, store_fd: int) -> dict:
+    """Read evidence from inherited descriptors after entry identity recheck.
+
+    This deliberately does not use a pathname fallback: a renamed store or a
+    replaced evidence entry is an authority mismatch, not a reason to look up
+    a newer ledger.
+    """
+    try:
+        directory = os.fstat(store_dir_fd)
+        evidence = os.fstat(store_fd)
+        entry = os.stat("evidence.json", dir_fd=store_dir_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError("TAKEOVER-FD-MISMATCH") from exc
+    if (not stat.S_ISDIR(directory.st_mode) or not stat.S_ISREG(evidence.st_mode)
+            or directory.st_uid != os.getuid() or evidence.st_uid != os.getuid()
+            or evidence.st_size > 1024 * 1024 or entry.st_dev != evidence.st_dev
+            or entry.st_ino != evidence.st_ino):
+        raise ValueError("TAKEOVER-FD-MISMATCH")
+    duplicate = os.dup(store_fd)
+    try:
+        os.lseek(duplicate, 0, os.SEEK_SET)
+        raw = os.read(duplicate, 1024 * 1024 + 1)
+    finally:
+        os.close(duplicate)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("TAKEOVER-FD-MISMATCH")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("TAKEOVER-FD-MISMATCH") from exc
+    if not isinstance(data, dict):
+        raise ValueError("TAKEOVER-FD-MISMATCH")
+    return data
 
 
 def _save_store(store: Path, data: dict) -> None:
@@ -121,21 +168,91 @@ def _save_store(store: Path, data: dict) -> None:
             os.unlink(tmp)
 
 
+def _lock_seam_hold(fd: int) -> None:
+    """Test-only event seam: publish the held lock identity, await release."""
+    seam = os.environ.get("GATES_TEST_HOLD_LOCK")
+    if not seam:
+        return
+    st = os.fstat(fd)
+    with open(os.path.join(seam, "held"), "w") as fh:
+        fh.write("%d:%d" % (st.st_dev, st.st_ino))
+    deadline = time.monotonic() + 30
+    while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 class _StoreLock:
-    """Advisory flock serializing read-modify-write across parallel tasks."""
+    """Advisory flock serializing read-modify-write across parallel tasks.
+
+    Every ordinary writer and the takeover consume transaction lock the SAME
+    canonical inode, derived exactly as ``Path(store).with_suffix('.lock')``
+    (``evidence.lock``).  Ordinary writers open by path and block; takeover
+    opens the same basename descriptor-relative to its retained store
+    directory fd and polls nonblocking under a deadline.  Both directions go
+    through one shared safe open helper so they can never lock two different
+    inodes for one store.
+    """
+
+    LOCK_BASENAME = Path("evidence.json").with_suffix(".lock").name
 
     def __init__(self, store: Path):
         self.path = Path(store).with_suffix(".lock")
+        self.fd: int | None = None
+
+    @staticmethod
+    def _validated(fd: int) -> int:
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                raise ValueError("EVIDENCE-LOCK-UNSAFE")
+            os.fchmod(fd, 0o600)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @classmethod
+    def open_lock_path(cls, path: Path) -> int:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        return cls._validated(fd)
+
+    @classmethod
+    def open_lock_at(cls, store_dir_fd: int) -> int:
+        """Open the exact canonical lock basename relative to a held store fd."""
+        fd = os.open(cls.LOCK_BASENAME, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                     0o600, dir_fd=store_dir_fd)
+        cls._validated(fd)
+        entry = os.stat(cls.LOCK_BASENAME, dir_fd=store_dir_fd, follow_symlinks=False)
+        held = os.fstat(fd)
+        if (entry.st_dev, entry.st_ino) != (held.st_dev, held.st_ino):
+            os.close(fd)
+            raise ValueError("EVIDENCE-LOCK-UNSAFE")
+        return fd
+
+    @staticmethod
+    def acquire_deadline(fd: int, deadline_ms: int) -> bool:
+        deadline = time.monotonic() + deadline_ms / 1000.0
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.01)
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fd = open(self.path, "w")
+        self.fd = self.open_lock_path(self.path)
         fcntl.flock(self.fd, fcntl.LOCK_EX)
+        _lock_seam_hold(self.fd)
         return self
 
     def __exit__(self, *exc):
-        fcntl.flock(self.fd, fcntl.LOCK_UN)
-        self.fd.close()
+        if self.fd is not None:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
 
 
 # ── spec-008 Phase 1: degradation evidence ─────────────────────────────────
@@ -187,6 +304,79 @@ def _degradation_ns(data: dict) -> dict:
     return ns
 
 
+# ── spec-006 Phase 2 (REQ-209): review-invocation Git binding ──────────────
+# Mirrors skills/land-queue/scripts/collect-queue.py's closed classifier: a
+# changed path is non-production ONLY under these prefixes or as a root-level
+# Markdown file; everything else fails conservatively as production-touching.
+REVIEW_NON_PRODUCTION_PREFIXES = ("tests/", "lib/tests/", "docs/",
+                                  ".planning/", "specs/")
+REVIEW_OID_PAT = re.compile(r"[0-9a-f]{40}")
+
+
+def _is_production_path(path: str) -> bool:
+    if path.startswith(REVIEW_NON_PRODUCTION_PREFIXES):
+        return False
+    if "/" not in path and path.endswith(".md"):
+        return False
+    return True
+
+
+def _computed_changed_files(repo: str, baseline: str, head: str) -> list[str]:
+    """5d794fab: the changed-file set comes from Git authority — the
+    merge-base with the recorded baseline commit, then the three-dot
+    name-only diff. Any git failure fails the binding closed."""
+    try:
+        mb = subprocess.run(["git", "-C", repo, "merge-base", baseline, head],
+                            capture_output=True, text=True, timeout=60)
+        if mb.returncode != 0:
+            raise ValueError("INVALID-REVIEW-BINDING: merge-base failed for "
+                             "the recorded baseline")
+        diff = subprocess.run(
+            ["git", "-C", repo, "diff", "--no-renames", "--name-only", "-z",
+             f"{mb.stdout.strip()}...{head}"],
+            capture_output=True, text=True, timeout=60)
+        if diff.returncode != 0:
+            raise ValueError("INVALID-REVIEW-BINDING: changed-file diff failed")
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("INVALID-REVIEW-BINDING: git authority unavailable")
+    return [entry for entry in diff.stdout.split("\0") if entry]
+
+
+def _review_binding(payload: dict) -> dict | None:
+    """Validate + compute the REQ-209 binding. Caller-supplied file lists are
+    advisory ONLY: they union into (never substitute for) the computed set,
+    so a caller can widen but never shrink what the event records."""
+    supplied = {k: payload.get(k) for k in ("branch", "head", "baseline", "repo")}
+    advisory_changed = payload.get("changed_files") or []
+    advisory_prod = payload.get("production_files") or []
+    if all(value is None for value in supplied.values()):
+        if advisory_changed or advisory_prod:
+            raise ValueError("INVALID-REVIEW-BINDING: advisory files require "
+                             "the full git binding")
+        return None
+    branch, head, baseline, repo = (supplied[k] for k in
+                                    ("branch", "head", "baseline", "repo"))
+    if not all(isinstance(v, str) and v for v in (branch, head, baseline, repo)):
+        raise ValueError("INVALID-REVIEW-BINDING: branch, head, baseline, and "
+                         "repo are all required")
+    if not REVIEW_OID_PAT.fullmatch(head) or not REVIEW_OID_PAT.fullmatch(baseline):
+        raise ValueError("INVALID-REVIEW-BINDING: head and baseline must be "
+                         "full 40-hex commit shas")
+    for advisory in (advisory_changed, advisory_prod):
+        if (isinstance(advisory, str)
+                or not all(isinstance(f, str) and f and "\0" not in f
+                           for f in advisory)):
+            raise ValueError("INVALID-REVIEW-BINDING: advisory file lists "
+                             "must be lists of paths")
+    computed = _computed_changed_files(repo, baseline, head)
+    changed = sorted(set(computed) | set(advisory_changed) | set(advisory_prod))
+    production = sorted({f for f in changed if _is_production_path(f)}
+                        | set(advisory_prod))
+    return {"branch": branch, "head": head, "baseline": baseline,
+            "changed_files": changed, "production_files": production,
+            "production_touch": bool(production)}
+
+
 def note_degraded(store: Path, kind: str, **payload) -> bool:
     """Append a validated degradation event; identical invocation replays dedupe."""
     with _StoreLock(store):
@@ -207,13 +397,25 @@ def note_degraded(store: Path, kind: str, **payload) -> bool:
             _require_ledger_run_id(run_id)
             if not isinstance(seam, str) or not seam.strip() or not isinstance(degraded, bool) or not isinstance(invocation_id, str) or not invocation_id:
                 raise ValueError("INVALID-INVOCATION")
+            binding = _review_binding(payload)
+            candidate = {"run_id": run_id, "seam": seam, "degraded": degraded,
+                         "invocation_id": invocation_id}
+            if binding:
+                candidate.update(binding)
             for existing in ns["invocations"]:
                 if existing.get("run_id") == run_id and existing.get("invocation_id") == invocation_id:
-                    if existing.get("seam") == seam and existing.get("degraded") is degraded:
+                    # H1 (ship round 5): an idempotent replay must be the FULL
+                    # canonical event — binding fields included.  A differing
+                    # binding under the same idempotency key fails closed
+                    # instead of silently deduping a later reviewed head onto
+                    # the first head's recorded evidence.
+                    prior = {k: v for k, v in existing.items()
+                             if k != "recorded_at"}
+                    if (json.dumps(prior, sort_keys=True)
+                            == json.dumps(candidate, sort_keys=True)):
                         return False
                     raise ValueError("IDEMPOTENCY-CONFLICT")
-            ns["invocations"].append({"run_id": run_id, "seam": seam, "degraded": degraded,
-                                      "invocation_id": invocation_id, "recorded_at": _now()})
+            ns["invocations"].append(dict(candidate, recorded_at=_now()))
         else:
             raise ValueError("INVALID-DEGRADATION-KIND")
         _save_store(store, data)
@@ -302,6 +504,18 @@ def _degraded_ratio_allowed(data: dict, run_id: str) -> bool:
     return total == 0 or sum(bool(event.get("degraded")) for event in events) * 2 <= total
 
 
+def _degraded_prod_touch(data: dict, run_id: str) -> bool:
+    """True iff any degraded review for THIS run touches production
+    (REQ-209): critical evidence is never averaged away. Legacy degraded
+    events without the 02-03 binding fields are conservatively
+    production-touching — absent evidence never weakens the gate."""
+    _require_ledger_run_id(run_id)
+    ns = _degradation_ns(data)
+    return any(event.get("degraded") and event.get("production_touch", True)
+               for event in ns["invocations"]
+               if event.get("run_id") == run_id)
+
+
 def record_gate_evidence(store: Path, task_id: str, *, exit_code: int, cmd: str,
                          tests_before: str = "", tests_after: str = "") -> None:
     """Trusted-caller write. Prefer run_gate(), which executes the command
@@ -358,10 +572,13 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800, *,
 def run_red(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> bool:
     """Execute the RED test command; store a proof only if it REALLY failed
     (nonzero exit from the runner itself). Returns True iff RED proven."""
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # WR-01 (round 3): capture BYTES and decode with an explicit fail-closed
+    # policy (errors="replace") — text=True crashed the gate with
+    # UnicodeDecodeError on arbitrary child output, writing no record at all.
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if proc.returncode == 0:
         return False
-    tail = (proc.stdout + proc.stderr)[-2000:]
+    tail = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")[-2000:]
     with _StoreLock(store):
         data = _load_store(store)
         entry = data.setdefault(task_id, {})
@@ -924,6 +1141,20 @@ ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S+$")
 GRANT_DEFAULT_TTL_HOURS = 72.0  # multi-day runs; 24h expired mid-run
 GRANT_MAX_TTL_HOURS = 168.0  # 7 days — non-finite/zero/negative/huger rejected
 
+# spec-006 Phase 3 (REQ-301/302, T-03-06/07): consolidate:estate grants are
+# queue-derived ONLY — the scope pins the exact target manifest as a sha256
+# over the canonical sorted (branch ref, expected tip OID) tuples, and the
+# TTL never exceeds the 8h queue wall.  A bare `consolidate:estate` (or any
+# other consolidate:* shape) is refused at mint time so it can never match
+# at the effect boundary.
+CONSOLIDATE_SCOPE_PAT = re.compile(r"^consolidate:estate:[0-9a-f]{64}$")
+CONSOLIDATE_MAX_TTL_HOURS = 8.0
+CONSOLIDATE_QUEUE_WALL_SECONDS = 28800.0  # queue-guard.sh QUEUE_WALL_SECONDS
+_CONSOLIDATE_OID_PAT = re.compile(r"^[0-9a-f]{40}$")
+_CONSOLIDATE_PR_PAT = re.compile(r"^[0-9]{1,9}$")
+_CONSOLIDATE_BRANCH_PAT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+_CONSOLIDATE_QUEUE_ID_PAT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 # Artifact identity (spec-295 EDGE-006): an immutable OCI digest reference
 # (name[:tag]@sha256:<64hex> — tag optional, digest mandatory and
 # authoritative) or a 40-hex commit sha. A mutable tag WITHOUT a digest
@@ -944,7 +1175,8 @@ def _now() -> float:
 def grant_actions(store: Path, run_id: str, actions: list[str], *,
                   ttl_hours: float = GRANT_DEFAULT_TTL_HOURS,
                   granted_by: str = "operator",
-                  reason: str | None = None) -> bool:
+                  reason: str | None = None,
+                  _allow_consolidate: bool = False) -> bool:
     """Record operator-approved actions for a run. Actions must be typed
     ('type:target', e.g. 'push:origin/main') — free prose never matches at
     run time, so it is rejected here rather than silently failing at 3am.
@@ -957,6 +1189,20 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
         return False
     if not math.isfinite(ttl_hours) or not 0 < ttl_hours <= GRANT_MAX_TTL_HOURS:
         return False  # inf/0/negative/absurd TTL = effectively non-expiring
+    for a in actions:
+        if a.startswith("consolidate:"):
+            # Queue-derived ONLY (CR-03): consolidate:* is never an ordinary
+            # operator grant — the sole mint path is grant_consolidate_estate,
+            # which passes the private _allow_consolidate capability after
+            # deriving and validating the tuples from the queue journal.
+            if not _allow_consolidate:
+                return False
+            # Queue-derived exact scope + 8h cap (REQ-301/302, T-03-07):
+            # only consolidate:estate:<sha256(target tuples)> may exist.
+            if not CONSOLIDATE_SCOPE_PAT.match(a):
+                return False
+            if ttl_hours > CONSOLIDATE_MAX_TTL_HOURS:
+                return False
     clean_reason = sanitize_reason(reason) if isinstance(reason, str) else ""
     granted_at = _now()
     with _StoreLock(store):
@@ -988,6 +1234,86 @@ def check_grant(store: Path, run_id: str, action: str,
     if not entry:
         return False
     return (now if now is not None else _now()) < entry.get("expires_at", 0)
+
+
+def consolidate_scope(tuples, *, repo_root: str, base: str) -> str:
+    """Exact queue-derived scope for a consolidation target manifest:
+    sha256 over the canonical JSON of [physical repo root, base branch,
+    SORTED FULL tuples (branch ref, expected tip OID, normalized PR number,
+    observed merge commit)].  All four tuple fields, so a grant minted for
+    one merged PR can never authorize a different PR or merge commit
+    sharing the same head (CR-04); repository identity + base, so a grant
+    proven in one repository can never be replayed against another
+    (CR-07).  The Step 4-A controller and the Wave-0 contracts compute the
+    same serialization, so scope equality is byte-exact."""
+    canon = json.dumps([repo_root, base,
+                        sorted([[t[0], t[1], str(int(str(t[2]))), t[3]]
+                                for t in tuples])],
+                       separators=(",", ":")).encode()
+    return "consolidate:estate:" + hashlib.sha256(canon).hexdigest()
+
+
+def grant_consolidate_estate(store: Path, run_id: str, tuples, *,
+                             queue_id: str, repo_root: str, base: str,
+                             queue_timeout_seconds: float = CONSOLIDATE_QUEUE_WALL_SECONDS,
+                             ttl_hours: float = CONSOLIDATE_MAX_TTL_HOURS):
+    """Mint the queue-derived consolidate:estate grant (REQ-301/302).
+
+    Accepts ONLY validated canonical target tuples
+    (branch ref, expected tip OID, PR#, observed merge commit) — the closed
+    queue-journal read-landed-tuples projection — never estate prose, scout
+    output, resume strings, or arbitrary shell arguments.  Tuples are sorted
+    for the canonical digest; duplicate (branch, head) keys, empty input,
+    malformed fields, and any TTL above the recorded queue timeout or the
+    8h cap are rejected.  Returns the granted scope string, or None
+    (fail closed, no write) on any validation failure."""
+    import math
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    if not isinstance(queue_id, str) or not _CONSOLIDATE_QUEUE_ID_PAT.match(queue_id):
+        return None
+    # CR-07: the scope binds one physical repository root + base branch.
+    if not isinstance(repo_root, str) or not repo_root.strip():
+        return None
+    if not isinstance(base, str) or not base.strip():
+        return None
+    if not isinstance(tuples, (list, tuple)) or not tuples:
+        return None
+    seen = set()
+    normalized = []
+    for t in tuples:
+        if not isinstance(t, (list, tuple)) or len(t) != 4:
+            return None
+        branch, head, pr, merge = t
+        if not isinstance(branch, str) or not _CONSOLIDATE_BRANCH_PAT.match(branch):
+            return None
+        if not isinstance(head, str) or not _CONSOLIDATE_OID_PAT.match(head):
+            return None
+        if isinstance(pr, bool) or not isinstance(pr, (int, str)) \
+                or not _CONSOLIDATE_PR_PAT.match(str(pr)):
+            return None
+        if not isinstance(merge, str) or not _CONSOLIDATE_OID_PAT.match(merge):
+            return None
+        key = (branch, head)
+        if key in seen:
+            return None  # duplicate targets are refused, never coalesced
+        seen.add(key)
+        normalized.append((branch, head, int(pr), merge))
+    if isinstance(queue_timeout_seconds, bool) \
+            or not isinstance(queue_timeout_seconds, (int, float)) \
+            or not math.isfinite(queue_timeout_seconds) or queue_timeout_seconds <= 0:
+        return None
+    if isinstance(ttl_hours, bool) or not isinstance(ttl_hours, (int, float)) \
+            or not math.isfinite(ttl_hours) \
+            or not 0 < ttl_hours <= CONSOLIDATE_MAX_TTL_HOURS:
+        return None
+    if ttl_hours * 3600 > queue_timeout_seconds:
+        return None  # TTL never outlives the recorded queue wall
+    scope = consolidate_scope(normalized, repo_root=repo_root, base=base)
+    ok = grant_actions(store, run_id, [scope], ttl_hours=float(ttl_hours),
+                       granted_by="queue", reason=f"queue:{queue_id}",
+                       _allow_consolidate=True)
+    return scope if ok else None
 
 
 def _valid_artifact(artifact) -> bool:
@@ -1347,14 +1673,63 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
 
 
 def _check_hotfix_bypass(store: Path, run_id: str, action: str,
-                         *, now: float | None = None) -> bool:
+                         *, now: float | None = None,
+                         posture: str | None = None) -> bool:
     """The ONE sanctioned promote-precondition escape (REQ-07/EDGE-004): a
     hotfix:prod-* action authorizes ONLY on an operator grant carrying a
     non-empty reason — deliberately does NOT call check_promotion, since
     bypassing the promote requirement is the entire point of the escape.
     No autonomous code path may call grant_actions on a hotfix:prod- action
     (process control, V4 access control) — the only way a hotfix grant
-    exists is an explicit operator `grant ... --reason`."""
+    exists is an explicit operator `grant ... --reason`.
+
+    CR-01 / Rule 12a: the bypass is POSTURE-DEPENDENT, and the run's
+    DURABLE posture record (written by note_posture before any queue
+    effect) is the only posture evidence honored.  A caller value —
+    the `posture` kwarg or the AUTONOMY_POSTURE environment variable —
+    is NEVER authorization evidence: with a durable record it may only
+    agree (a conflict fails closed); without one it is an unbacked
+    autonomy claim and fails closed outright.  Only when neither a durable
+    record nor any caller claim exists (a manual operator flow, no
+    resolver ran) does the committed zero default apply.  floor forbids
+    the bypass entirely; zero keeps the grant+reason contract; any other
+    recorded value fails closed.  The durable bypass record carries the
+    effective posture."""
+    claimed = (posture if posture is not None
+               else os.environ.get("AUTONOMY_POSTURE", ""))
+    claimed = (claimed or "").strip()
+    rec = (_load_store(store).get("_autonomy", {})
+           .get(run_id, {}).get("posture"))
+    durable = rec.get("posture") if isinstance(rec, dict) else None
+    if isinstance(durable, str) and durable:
+        if claimed and claimed != durable:
+            record_pending(store, run_id, action,
+                           "HOTFIX-POSTURE-REFUSED: caller posture claim "
+                           "conflicts with the run's durable posture "
+                           "evidence; a caller value is never "
+                           "authorization evidence — fail closed")
+            return False
+        effective = durable
+    elif claimed:
+        record_pending(store, run_id, action,
+                       "HOTFIX-POSTURE-REFUSED: caller-supplied posture has "
+                       "no durable evidence for this run; only the ledger "
+                       "record written by the queue's resolver authorizes "
+                       "— fail closed")
+        return False
+    else:
+        effective = "zero"
+    if effective != "zero":
+        if effective == "floor":
+            refusal = ("HOTFIX-POSTURE-REFUSED: floor posture forbids the "
+                       "hotfix:prod-* emergency bypass; land through the "
+                       "full promote path or have the operator resolve the "
+                       "posture to zero")
+        else:
+            refusal = ("HOTFIX-POSTURE-REFUSED: unvalidated effective "
+                       "posture never loosens the bypass; fail closed")
+        record_pending(store, run_id, action, refusal)
+        return False
     if not check_grant(store, run_id, action, now=now):
         record_pending(store, run_id, action,
                        "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
@@ -1368,11 +1743,43 @@ def _check_hotfix_bypass(store: Path, run_id: str, action: str,
                        "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
                        "grant carrying a non-empty --reason")
         return False
-    record_hotfix_bypass(store, run_id, action, reason)
+    record_hotfix_bypass(store, run_id, action, reason, posture=effective)
     return True
 
 
-def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> bool:
+def note_posture(store: Path, run_id: str, posture: str, source: str) -> bool:
+    """Persist the run's resolved autonomy posture + provenance (CR-01).
+
+    Written by the queue BEFORE any effect; the ONLY posture evidence
+    _check_hotfix_bypass will honor.  Identical replays are idempotent;
+    a conflicting re-record returns False (no write) — the durable posture
+    is immutable per run, so a weaker later claim can never overwrite a
+    stricter recorded one (or vice versa).  Invalid inputs raise."""
+    if posture not in ("zero", "floor"):
+        raise ValueError("INVALID-POSTURE: posture must be zero|floor")
+    if source not in ("default", "config", "env"):
+        raise ValueError("INVALID-POSTURE: source must be default|config|env")
+    if not isinstance(run_id, str) or not run_id.strip() \
+            or len(run_id) > 256 or "\x00" in run_id:
+        raise ValueError("INVALID-POSTURE: malformed run id")
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        existing = auto.get("posture")
+        if existing is not None:
+            if (isinstance(existing, dict)
+                    and existing.get("posture") == posture
+                    and existing.get("source") == source):
+                return True  # idempotent replay
+            return False  # conflicting re-record: fail closed, no write
+        auto["posture"] = {"posture": posture, "source": source,
+                           "recorded_at": _now()}
+        _save_store(store, data)
+    return True
+
+
+def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str,
+                         *, posture: str = "zero") -> bool:
     """Durable audit record for a hotfix:prod-* bypass (REQ-07/EDGE-004) —
     mirrors record_pending's lock/save shape. Append-only: each bypass
     (even a repeat during the same incident) gets its own entry, unlike
@@ -1384,6 +1791,7 @@ def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> 
         auto.setdefault("hotfix_bypasses", []).append({
             "action": action,
             "reason": sanitize_reason(reason),
+            "posture": posture,
             "recorded_at": _now(),
         })
         _save_store(store, data)
@@ -1450,6 +1858,15 @@ def check_grant_prod(store: Path, run_id: str, action: str, artifact,
         if "DEGRADATION-SCHEMA-CONFLICT" in str(exc):
             return False
         pass
+    try:
+        # REQ-209: ANY degraded production-touching review for this run
+        # refuses production promotion regardless of the aggregate ratio.
+        if _degraded_prod_touch(data, run_id):
+            return False
+    except ValueError as exc:
+        if "DEGRADATION-SCHEMA-CONFLICT" in str(exc):
+            return False
+        pass
 
     if not artifact:
         return _refuse("NO-PROMOTE-EVIDENCE: --artifact is required for a "
@@ -1504,6 +1921,13 @@ def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
     """An unlisted gate hit mid-run: STOP, but leave a durable record so the
     morning resume is one `grant` command (long-run-continuity port)."""
     if not ACTION_PAT.match(action):
+        return False
+    if _PINNED_STORE_DATA is not None:
+        # M1 (ship round 5): a descriptor-pinned store is a READ-ONLY
+        # snapshot — writing the pending record would hit the unwritable
+        # sentinel path (Errno 30 -> rc 75 GATES-STORE-ERROR) and mask the
+        # typed refusal.  The refusal itself carries the verdict; every
+        # caller of this seam skips the durability side effect under fds.
         return False
     with _StoreLock(store):
         data = _load_store(store)
@@ -2037,6 +2461,663 @@ def _store_path() -> Path:
     except (OSError, subprocess.SubprocessError):
         pass
     return Path(".feature-fix-swarm/evidence.json")
+
+
+def _resolved_store_path() -> Path:
+    """Canonical evidence file identity without reading or creating it."""
+    return _store_path().expanduser().resolve(strict=False)
+
+
+def takeover_state(store: Path, run_id: str) -> dict:
+    """Return only the typed ledger facts a takeover record may carry."""
+    _require_ledger_run_id(run_id)
+    data = _load_store(store)
+    auto = data.get("_autonomy", {}).get(run_id, {})
+    if not isinstance(auto, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    grants = auto.get("grants", {})
+    if not isinstance(grants, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    grant_rows = [dict(action=action, **entry) for action, entry in grants.items()
+                  if isinstance(action, str) and isinstance(entry, dict)]
+    findings = findings_list(store, unresolved=True)
+    return {
+        "preflight": auto.get("preflight", {}),
+        "grants": grant_rows,
+        "pendings": auto.get("pending", []),
+        "promotions": data.get("_promotions", {}).get(run_id, []),
+        "unresolved_findings": [row for row in findings
+                                if row.get("severity") in ("HIGH", "CRITICAL")],
+        "takeover_expected": bool(auto.get("takeover_expected", False)),
+        # These values are the ledger-owned counterparts to the untrusted
+        # record copies.  A takeover consumer uses this one state snapshot to
+        # establish both record age and the exact authorized WIP baseline.
+        "takeover_created_at": auto.get("takeover_created_at"),
+        "takeover_dirty_digest": auto.get("takeover_dirty_digest"),
+    }
+
+
+def _snapshot_data(fd: int) -> dict:
+    """Load one inherited, already-captured takeover snapshot.
+
+    Unlike the older descriptor-pinned interface this never stats or opens a
+    live pathname.  The transaction owns the torn-read and identity checks;
+    this command is deliberately only a pure consumer of its immutable bytes.
+    """
+    duplicate = os.dup(fd)
+    try:
+        os.lseek(duplicate, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(duplicate, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > 1024 * 1024:
+                raise ValueError("TAKEOVER-SNAPSHOT-TOO-LARGE")
+    finally:
+        os.close(duplicate)
+    try:
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("TAKEOVER-SNAPSHOT-MALFORMED") from exc
+    if not isinstance(data, dict):
+        raise ValueError("TAKEOVER-SNAPSHOT-NONOBJECT")
+    return data
+
+
+def takeover_authority_view(data: dict, run_id: str, actions: list[str]) -> dict:
+    """Return all wall authority predicates from one immutable data object.
+
+    This is intentionally data-only: no store locks, save calls, pending rows,
+    promotion writes, or registry/path resolution are reachable from it.
+    """
+    _require_ledger_run_id(run_id)
+    auto_root = data.get("_autonomy", {})
+    if not isinstance(auto_root, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    auto = auto_root.get(run_id, {})
+    if not isinstance(auto, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    grants = auto.get("grants", {})
+    if not isinstance(grants, dict):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    now = _now()
+    preflight = auto.get("preflight", {})
+    preflight_ok = (isinstance(preflight, dict) and preflight.get("pass") is True
+                    and isinstance(preflight.get("checked_at"), (int, float))
+                    and not isinstance(preflight.get("checked_at"), bool)
+                    and 0 <= now - preflight["checked_at"] < 24 * 3600)
+    grant_results = {}
+    for action in sorted(set(actions) | {"ship:gsd"} | set(grants)):
+        entry = grants.get(action)
+        grant_results[action] = bool(isinstance(entry, dict)
+                                     and isinstance(entry.get("expires_at"), (int, float))
+                                     and not isinstance(entry.get("expires_at"), bool)
+                                     and math.isfinite(entry["expires_at"])
+                                     and now < entry["expires_at"])
+    # CR-01 (01-gaps3): read the CANONICAL findings namespace — the same
+    # top-level `findings` list every findings-queue writer persists.  A
+    # non-list namespace or any non-dict row is a schema conflict, refused
+    # fail-closed: a silently skipped hostile row would be an open finding
+    # the wall never sees.
+    findings = data.get("findings", [])
+    if not isinstance(findings, list) or any(
+            not isinstance(row, dict) for row in findings):
+        raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+    unresolved = [row for row in findings
+                  if not row.get("resolved")
+                  and row.get("severity") in ("HIGH", "CRITICAL")]
+    return {
+        "takeover_expected": auto.get("takeover_expected") is True,
+        "state": {
+            "grants": [dict(action=a, **v) for a, v in grants.items()
+                       if isinstance(a, str) and isinstance(v, dict)],
+            "takeover_created_at": auto.get("takeover_created_at"),
+            "takeover_dirty_digest": auto.get("takeover_dirty_digest"),
+        },
+        "preflight_ok": preflight_ok,
+        "grant_results": grant_results,
+        "unresolved_findings": unresolved,
+        "takeover_created_at": auto.get("takeover_created_at"),
+        "takeover_dirty_digest": auto.get("takeover_dirty_digest"),
+    }
+
+
+def record_takeover_expectation(store: Path, run_id: str, created_at: int | None = None,
+                                dirty_digest: str | None = None) -> None:
+    _require_ledger_run_id(run_id)
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        if not isinstance(auto, dict):
+            raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+        auto["takeover_expected"] = True
+        if created_at is not None:
+            auto["takeover_created_at"] = created_at
+        if dirty_digest is not None:
+            auto["takeover_dirty_digest"] = dirty_digest
+        _save_store(store, data)
+
+
+# ── Plan 01-08: canonical-lock consume transaction and crash recovery ────────
+
+TAKEOVER_INTENT_VERSION = 1
+TAKEOVER_INTENT_PHASES = ("prepared", "record-provisional", "evidence-replaced",
+                          "record-consumed", "acknowledged", "superseded")
+
+
+class _TakeoverRefusal(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _takeover_kill_at(tag: str) -> None:
+    """Test-only crash seam: SIGKILL this process at an exact boundary."""
+    if os.environ.get("TAKEOVER_KILL_AT") == tag:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _takeover_read_log(kind: str) -> None:
+    log = os.environ.get("TAKEOVER_READ_LOG")
+    if log:
+        with open(log, "a") as fh:
+            fh.write(kind + "\n")
+
+
+def _takeover_pause_locked(lock_fd: int) -> None:
+    """Test-only event seam inside the held canonical evidence.lock."""
+    seam = os.environ.get("TAKEOVER_TEST_PAUSE_LOCKED")
+    if not seam:
+        return
+    st = os.fstat(lock_fd)
+    with open(os.path.join(seam, "held"), "w") as fh:
+        fh.write("%d:%d" % (st.st_dev, st.st_ino))
+    deadline = time.monotonic() + 30
+    while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _read_evidence_at(store_dir_fd: int) -> tuple[bytes, os.stat_result]:
+    """Bounded no-follow read of the current canonical evidence entry."""
+    fd = os.open("evidence.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                 dir_fd=store_dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 1024 * 1024:
+            raise _TakeoverRefusal("record-mismatch")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > 1024 * 1024:
+                raise _TakeoverRefusal("record-mismatch")
+        return b"".join(chunks), st
+    finally:
+        os.close(fd)
+
+
+def _entry_is_fd(dir_fd: int, name: str, fd: int) -> bool:
+    try:
+        entry = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    held = os.fstat(fd)
+    return (entry.st_dev, entry.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _replace_bytes_at(dir_fd: int, name: str, payload: bytes) -> None:
+    """Atomic descriptor-relative replace: stage, fsync file, rename, fsync dir."""
+    stage = ".%s.%d.%d.tmp" % (name, os.getpid(), time.time_ns())
+    fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o600, dir_fd=dir_fd)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(stage, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(stage, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    os.fsync(dir_fd)
+
+
+def _git_checked(args: list[str]) -> str:
+    """Run one read-only git probe; any query error fails closed."""
+    try:
+        proc = subprocess.run(["git", *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise _TakeoverRefusal("record-mismatch")
+    if proc.returncode != 0:
+        raise _TakeoverRefusal("record-mismatch")
+    return proc.stdout.strip()
+
+
+def _live_dirty_digest() -> str:
+    """Exact live WIP digest over NUL-delimited porcelain-v2 bytes (-uall)."""
+    try:
+        status = subprocess.run(["git", "status", "--porcelain=v2", "-z",
+                                 "--untracked-files=all"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise _TakeoverRefusal("dirty-worktree")
+    if status.returncode:
+        raise _TakeoverRefusal("dirty-worktree")
+    kept = []
+    for row in status.stdout.split(b"\0"):
+        if not row:
+            continue
+        path = row[2:] if row.startswith(b"? ") else row.rsplit(b" ", 1)[-1]
+        if path.startswith(b".feature-fix-swarm/") or path == b".feature-fix-swarm":
+            continue
+        kept.append(row)
+    kept.sort()
+    return hashlib.sha256(b"\0".join(kept)).hexdigest()
+
+
+def _regate_policy(record: dict, run_id: str, evidence: dict) -> None:
+    """Full policy re-gate under the held canonical evidence.lock.
+
+    Runs immediately before intent creation and the consume rename: branch,
+    full HEAD, upstream, rebase-in-progress via `git rev-parse --git-path`,
+    dirty state via `git status --porcelain=v2 -z --untracked-files=all`,
+    evidence digest (checked by the caller), and record identity (checked by
+    the caller).  Any drift from the basis of the authority-snapshot verdict
+    is a typed refusal and a clean abort with no mutation.
+    """
+    git_state = record.get("git_state")
+    if not isinstance(git_state, dict):
+        raise _TakeoverRefusal("record-mismatch")
+    for probe in ("rebase-merge", "rebase-apply"):
+        admin = _git_checked(["rev-parse", "--git-path", probe])
+        if admin and os.path.isdir(admin):
+            raise _TakeoverRefusal("mid-rebase")
+    current_branch = _git_checked(["branch", "--show-current"])
+    current_head = _git_checked(["rev-parse", "HEAD^{commit}"])
+    recorded_branch = git_state.get("branch") or ""
+    recorded_head = git_state.get("head") or ""
+    if recorded_branch:
+        if current_branch != recorded_branch or current_head != recorded_head:
+            raise _TakeoverRefusal("branch-gone")
+    else:
+        # A recorded detached state still pins the exact full HEAD.
+        if current_branch != "" or current_head != recorded_head:
+            raise _TakeoverRefusal("branch-gone")
+    upstream = git_state.get("upstream") or ""
+    if upstream:
+        probe = subprocess.run(["git", "rev-parse", "--verify", "--quiet", upstream],
+                               capture_output=True, text=True)
+        if probe.returncode != 0:
+            raise _TakeoverRefusal("branch-gone")
+    auto = evidence.get("_autonomy", {})
+    row = auto.get(run_id, {}) if isinstance(auto, dict) else {}
+    ledger_digest = row.get("takeover_dirty_digest") if isinstance(row, dict) else None
+    if not isinstance(ledger_digest, str) or _live_dirty_digest() != ledger_digest:
+        raise _TakeoverRefusal("dirty-worktree")
+
+
+def _intent_name(run_id: str) -> str:
+    return ".takeover-transaction.%s.json" % run_id
+
+
+def _read_exact(fd: int, expected: int) -> bytes | None:
+    """Loop a descriptor read to exactly the expected byte count.
+
+    Returns None when EOF arrives early or extra bytes appear past the
+    fstat size: short or grown data is never accepted as payload bytes."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while total < expected:
+        chunk = os.read(fd, min(65536, expected - total))
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        total += len(chunk)
+    if os.read(fd, 1):
+        return None
+    return b"".join(chunks)
+
+
+def _write_intent_excl(takeover_dir_fd: int, name: str, payload: dict) -> None:
+    raw = json.dumps(payload, indent=2).encode()
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o600, dir_fd=takeover_dir_fd)
+    try:
+        try:
+            # Same full-write discipline as _replace_bytes_at: the durable
+            # intent is fsynced only from a completely written payload and
+            # zero progress is a hard failure, never a truncated publish.
+            view = memoryview(raw)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write made no progress")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        try:
+            os.unlink(name, dir_fd=takeover_dir_fd)
+        except OSError:
+            pass
+        raise
+    os.fsync(takeover_dir_fd)
+
+
+def _advance_intent(takeover_dir_fd: int, name: str, payload: dict, phase: str) -> None:
+    payload["phase"] = phase
+    _replace_bytes_at(takeover_dir_fd, name, json.dumps(payload, indent=2).encode())
+
+
+def _delete_intent(takeover_dir_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=takeover_dir_fd)
+    except FileNotFoundError:
+        pass
+    os.fsync(takeover_dir_fd)
+
+
+def _intent_valid(intent, run_id: str, store_path) -> bool:
+    if not isinstance(intent, dict) or intent.get("version") != TAKEOVER_INTENT_VERSION:
+        return False
+    if intent.get("run_id") != run_id:
+        return False
+    for key in ("active_name", "provisional_name", "consumed_name"):
+        name = intent.get(key)
+        if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+            return False
+    for key in ("original_sha256", "desired_sha256"):
+        value = intent.get(key)
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            return False
+    rid = intent.get("record_identity")
+    if (not isinstance(rid, dict) or not isinstance(rid.get("dev"), int)
+            or not isinstance(rid.get("ino"), int)):
+        return False
+    generation = intent.get("evidence_generation")
+    if (not isinstance(generation, dict) or not isinstance(generation.get("inode"), int)
+            or not isinstance(generation.get("content_sha256"), str)):
+        return False
+    if intent.get("phase") not in TAKEOVER_INTENT_PHASES:
+        return False
+    if store_path is not None:
+        anchor = hashlib.sha256(str(store_path).encode()).hexdigest()
+        if intent.get("store_anchor") != anchor:
+            return False
+    return True
+
+
+def recover_takeover_transaction(store_path, store_dir_fd: int, takeover_dir_fd: int,
+                                 run_id: str, deadline_ms: int = 1000,
+                                 lock_fd: int | None = None, emit=print) -> dict:
+    """Reconcile a durable takeover intent before record absence can mean NONE.
+
+    Classification trusts actual on-disk state, never the recorded phase
+    alone, and every recognized outcome terminates in exactly one of
+    active+original or consumed+cleared.
+
+    Trust boundary (WALL-RESIDUALS f2b6bf7b, accepted residual): canonical
+    evidence.lock is ADVISORY.  The inode-plus-content-digest generation
+    check below detects cooperating-writer succession only — a valid
+    parseable successor ledger at a new generation, which only a legitimate
+    holder of the canonical lock produces.  Writer authentication is out of
+    the threat model: the store is same-uid local state, so any process of
+    this user could fabricate a "successor"; that adversary already owns the
+    store outright.
+    """
+    intent_name = _intent_name(run_id)
+    try:
+        ifd = os.open(intent_name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                      dir_fd=takeover_dir_fd)
+    except FileNotFoundError:
+        return {"outcome": "none"}
+    try:
+        st = os.fstat(ifd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 4 * 1024 * 1024:
+            return {"outcome": "unexplained"}
+        raw = _read_exact(ifd, st.st_size)
+        if raw is None:
+            return {"outcome": "unexplained"}
+    finally:
+        os.close(ifd)
+    own_lock = lock_fd is None
+    if own_lock:
+        try:
+            lock_fd = _StoreLock.open_lock_at(store_dir_fd)
+        except (OSError, ValueError):
+            return {"outcome": "locked-out"}
+        if not _StoreLock.acquire_deadline(lock_fd, deadline_ms):
+            os.close(lock_fd)
+            return {"outcome": "locked-out"}
+    try:
+        try:
+            intent = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"outcome": "unexplained"}
+        if not _intent_valid(intent, run_id, store_path):
+            return {"outcome": "unexplained"}
+        active_name = intent["active_name"]
+        provisional_name = intent["provisional_name"]
+        consumed_name = intent["consumed_name"]
+        rid = intent["record_identity"]
+        try:
+            cur, cur_st = _read_evidence_at(store_dir_fd)
+        except (_TakeoverRefusal, OSError):
+            return {"outcome": "unexplained"}
+        cur_sha = hashlib.sha256(cur).hexdigest()
+        location = None
+        for name in (active_name, provisional_name, consumed_name):
+            try:
+                entry = os.stat(name, dir_fd=takeover_dir_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if (entry.st_dev, entry.st_ino) == (rid["dev"], rid["ino"]):
+                location = name
+                break
+        if cur_sha == intent["original_sha256"]:
+            # Original expectation bytes: restore the exact record to active.
+            if location is None:
+                return {"outcome": "unexplained"}
+            if location != active_name:
+                os.rename(location, active_name, src_dir_fd=takeover_dir_fd,
+                          dst_dir_fd=takeover_dir_fd)
+                os.fsync(takeover_dir_fd)
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "rolled-back"}
+        if cur_sha == intent["desired_sha256"]:
+            # Cleared expectation bytes: complete to consumed and acknowledge
+            # the recovered success — never a silent TAKEOVER-NONE.
+            if location is None:
+                return {"outcome": "unexplained"}
+            if location != consumed_name:
+                os.rename(location, consumed_name, src_dir_fd=takeover_dir_fd,
+                          dst_dir_fd=takeover_dir_fd)
+                os.fsync(takeover_dir_fd)
+            _advance_intent(takeover_dir_fd, intent_name, intent, "acknowledged")
+            emit("TAKEOVER-OK")
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "recovered-success"}
+        generation = intent["evidence_generation"]
+        try:
+            successor = json.loads(cur.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            successor = None
+        if (isinstance(successor, dict) and cur_st.st_ino != generation["inode"]
+                and cur_sha != generation["content_sha256"]):
+            # Legitimate locked-writer succession (see trust boundary above).
+            # WALL-RESIDUALS 0b877051: sweep the provisional name so recovery
+            # terminates in exactly one of active/consumed.
+            if location == provisional_name:
+                try:
+                    os.stat(active_name, dir_fd=takeover_dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    os.rename(provisional_name, active_name, src_dir_fd=takeover_dir_fd,
+                              dst_dir_fd=takeover_dir_fd)
+                else:
+                    os.rename(provisional_name,
+                              "%s.superseded.%d.json" % (run_id, time.time_ns()),
+                              src_dir_fd=takeover_dir_fd, dst_dir_fd=takeover_dir_fd)
+                os.fsync(takeover_dir_fd)
+            _advance_intent(takeover_dir_fd, intent_name, intent, "superseded")
+            # WALL-RESIDUALS 2e3a4b2b: intent deletion is permitted after ANY
+            # terminal acknowledgment; the rerun evaluates the successor state
+            # through the ordinary wall.
+            emit("TAKEOVER-SUPERSEDED")
+            emit("Unblock (operator): bash scripts/gsd/takeover-check.sh --run-id " + run_id)
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "superseded"}
+        # Unexplained mutation: neither original, desired, nor a valid
+        # locked-writer successor generation.  Refuse and retain the intent.
+        return {"outcome": "unexplained"}
+    finally:
+        if own_lock and lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
+
+
+def takeover_consume(run_id: str, consumed_at: int, store_dir_fd: int, store_fd,
+                     takeover_dir_fd: int, record_fd: int, record_name: str,
+                     snapshot_sha256: str, deadline_ms: int, emit=print) -> dict:
+    """One bounded record/ledger mutation transaction under canonical evidence.lock.
+
+    Acquires the exact `_StoreLock` inode before any record rename, performs
+    the sole post-decision authority read under that lock, revalidates the
+    pre-decision digest, re-runs the full policy gate, durably prepares a
+    cross-file intent, consumes the exact record, clears only this run's
+    expectation fields, acknowledges, emits TAKEOVER-OK, and only then
+    deletes the intent.
+    """
+    _require_ledger_run_id(run_id)
+    lock_fd = None
+    try:
+        try:
+            lock_fd = _StoreLock.open_lock_at(store_dir_fd)
+        except (OSError, ValueError):
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        if not _StoreLock.acquire_deadline(lock_fd, deadline_ms):
+            # Bounded timeout: record, evidence, and intent namespace untouched.
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        _takeover_pause_locked(lock_fd)
+        try:
+            # The sole post-decision authority read, under the held lock.
+            raw, evidence_st = _read_evidence_at(store_dir_fd)
+            _takeover_read_log("post-decision")
+            if hashlib.sha256(raw).hexdigest() != snapshot_sha256:
+                raise _TakeoverRefusal("record-mismatch")
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise _TakeoverRefusal("record-mismatch")
+            if not isinstance(data, dict):
+                raise _TakeoverRefusal("record-mismatch")
+            if not _entry_is_fd(takeover_dir_fd, record_name, record_fd):
+                raise _TakeoverRefusal("record-mismatch")
+            record_st = os.fstat(record_fd)
+            if not stat.S_ISREG(record_st.st_mode) or record_st.st_size > 1024 * 1024:
+                raise _TakeoverRefusal("record-mismatch")
+            record_raw = _read_exact(record_fd, record_st.st_size)
+            if record_raw is None:
+                raise _TakeoverRefusal("record-mismatch")
+            try:
+                record = json.loads(record_raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise _TakeoverRefusal("record-mismatch")
+            if not isinstance(record, dict):
+                raise _TakeoverRefusal("record-mismatch")
+            _regate_policy(record, run_id, data)
+        except _TakeoverRefusal as refusal:
+            return {"outcome": "refused", "reason": refusal.reason}
+
+        # Desired bytes derive from CURRENT data; unrelated fields survive.
+        auto_root = data.setdefault("_autonomy", {})
+        if not isinstance(auto_root, dict):
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        row = auto_root.setdefault(run_id, {})
+        if not isinstance(row, dict):
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        row["takeover_expected"] = False
+        row["takeover_consumed_at"] = int(consumed_at)
+        desired = json.dumps(data, indent=2).encode()
+        record_st = os.fstat(record_fd)
+        nonce = time.time_ns()
+        provisional_name = ".%s.provisional.%d.json" % (run_id, nonce)
+        consumed_name = "%s.consumed.%d.json" % (run_id, nonce)
+        intent_name = _intent_name(run_id)
+        intent = {
+            "version": TAKEOVER_INTENT_VERSION,
+            "run_id": run_id,
+            "store_anchor": record.get("gates_store_anchor"),
+            "evidence_identity": {"dev": evidence_st.st_dev, "ino": evidence_st.st_ino},
+            "evidence_generation": {"inode": evidence_st.st_ino,
+                                    "content_sha256": snapshot_sha256},
+            "record_identity": {"dev": record_st.st_dev, "ino": record_st.st_ino},
+            "active_name": record_name,
+            "provisional_name": provisional_name,
+            "consumed_name": consumed_name,
+            "original_sha256": hashlib.sha256(raw).hexdigest(),
+            "desired_sha256": hashlib.sha256(desired).hexdigest(),
+            "original_b64": base64.b64encode(raw).decode("ascii"),
+            "desired_b64": base64.b64encode(desired).decode("ascii"),
+            "phase": "prepared",
+        }
+        try:
+            _write_intent_excl(takeover_dir_fd, intent_name, intent)
+        except FileExistsError:
+            # An unreconciled intent means recovery must run first.
+            return {"outcome": "refused", "reason": "record-mismatch"}
+        try:
+            os.rename(record_name, provisional_name, src_dir_fd=takeover_dir_fd,
+                      dst_dir_fd=takeover_dir_fd)
+            os.fsync(takeover_dir_fd)
+            _takeover_kill_at("after-provisional-rename")
+            _advance_intent(takeover_dir_fd, intent_name, intent, "record-provisional")
+            _replace_bytes_at(store_dir_fd, "evidence.json", desired)
+            _takeover_kill_at("after-evidence-replace")
+            _advance_intent(takeover_dir_fd, intent_name, intent, "evidence-replaced")
+            _takeover_kill_at("before-final-rename")
+            os.rename(provisional_name, consumed_name, src_dir_fd=takeover_dir_fd,
+                      dst_dir_fd=takeover_dir_fd)
+            os.fsync(takeover_dir_fd)
+            _advance_intent(takeover_dir_fd, intent_name, intent, "record-consumed")
+            _takeover_kill_at("after-record-consumed")
+            _advance_intent(takeover_dir_fd, intent_name, intent, "acknowledged")
+            _takeover_kill_at("after-acknowledged")
+            emit("TAKEOVER-OK")
+            _delete_intent(takeover_dir_fd, intent_name)
+            return {"outcome": "ok"}
+        except Exception:
+            # Caught faults use the same idempotent recovery routine as a
+            # process restart, never a separate in-memory compensation path.
+            recovered = recover_takeover_transaction(
+                None, store_dir_fd, takeover_dir_fd, run_id,
+                deadline_ms=deadline_ms, lock_fd=lock_fd, emit=emit)
+            if recovered.get("outcome") == "recovered-success":
+                return {"outcome": "ok", "recovered": True}
+            return {"outcome": "refused", "reason": "record-mismatch"}
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
 
 
 # ── delegation-audit: orchestrator discipline (advisory, never blocks) ───────
@@ -2678,7 +3759,136 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
-    store = _store_path()
+    # These identity accessors deliberately precede _load_store callers: a
+    # wall can establish which ledger it is talking about before trusting any
+    # ledger content.
+    if cmd == "store-dir":
+        if args:
+            print("usage: gates.py store-dir", file=sys.stderr)
+            return 2
+        print(_resolved_store_path().parent)
+        return 0
+    if cmd == "store-path":
+        if args:
+            print("usage: gates.py store-path", file=sys.stderr)
+            return 2
+        print(_resolved_store_path())
+        return 0
+    if cmd == "takeover-evaluate":
+        parser = argparse.ArgumentParser(prog="gates.py takeover-evaluate", add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--snapshot-fd", required=True, type=int)
+        parser.add_argument("--action", action="append", default=[])
+        try:
+            ns = parser.parse_args(args)
+            print(json.dumps(takeover_authority_view(_snapshot_data(ns.snapshot_fd),
+                                                    ns.run_id, ns.action),
+                             sort_keys=True))
+        except (ValueError, OSError, json.JSONDecodeError, SystemExit) as exc:
+            print(f"TAKEOVER-EVALUATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if cmd == "takeover-consume":
+        # Internal success transaction: shares canonical evidence.lock with
+        # every ordinary _StoreLock writer via retained descriptors.
+        parser = argparse.ArgumentParser(prog="gates.py takeover-consume", add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--consumed-at", required=True, type=int)
+        parser.add_argument("--store-dir-fd", required=True, type=int)
+        parser.add_argument("--store-fd", type=int)
+        parser.add_argument("--takeover-dir-fd", required=True, type=int)
+        parser.add_argument("--record-fd", required=True, type=int)
+        parser.add_argument("--record-name", required=True)
+        parser.add_argument("--snapshot-sha256", required=True)
+        parser.add_argument("--deadline-ms", type=int, default=1000)
+        try:
+            ns = parser.parse_args(args)
+            result = takeover_consume(ns.run_id, ns.consumed_at, ns.store_dir_fd,
+                                      ns.store_fd, ns.takeover_dir_fd, ns.record_fd,
+                                      ns.record_name, ns.snapshot_sha256, ns.deadline_ms)
+        except (SystemExit, Exception):
+            print("REFUSED:record-mismatch")
+            return 1
+        if result.get("outcome") == "ok":
+            return 0
+        print("REFUSED:%s" % result.get("reason", "record-mismatch"))
+        return 1
+    # Descriptor flags are a deliberately narrow read-only interface for the
+    # takeover wall.  They are rejected everywhere else so an inherited fd can
+    # never become authority for a mutation command.
+    pinned_commands = {"takeover-state", "takeover-expectation", "check-preflight", "check-grant"}
+    pinned_values: dict[str, int] = {}
+    cleaned: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("--store-dir-fd", "--store-fd"):
+            if i + 1 >= len(args):
+                print(f"{args[i]} requires a value", file=sys.stderr)
+                return 2
+            try:
+                pinned_values[args[i]] = int(args[i + 1])
+            except ValueError:
+                print("TAKEOVER-FD-MISMATCH", file=sys.stderr)
+                return 1
+            i += 2
+        else:
+            cleaned.append(args[i])
+            i += 1
+    if pinned_values:
+        if cmd not in pinned_commands or set(pinned_values) != {"--store-dir-fd", "--store-fd"}:
+            print("TAKEOVER-FD-FLAGS-REJECTED", file=sys.stderr)
+            return 2
+        global _PINNED_STORE_DATA
+        try:
+            _PINNED_STORE_DATA = _load_pinned_store(pinned_values["--store-dir-fd"], pinned_values["--store-fd"])
+        except ValueError as exc:
+            print(f"TAKEOVER-STATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        args = cleaned
+        store = Path("/descriptor-pinned-evidence.json")
+    else:
+        store = _store_path()
+    if cmd == "takeover-state":
+        if len(args) != 1:
+            print("usage: gates.py takeover-state <run-id>", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(takeover_state(store, args[0]), sort_keys=True))
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            print(f"TAKEOVER-STATE-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if cmd == "takeover-expectation":
+        if len(args) != 1:
+            print("usage: gates.py takeover-expectation <run-id>", file=sys.stderr)
+            return 2
+        try:
+            _require_ledger_run_id(args[0])
+            data = _load_store(store)
+            auto = data.get("_autonomy", {}).get(args[0], {})
+            if not isinstance(auto, dict):
+                raise ValueError("TAKEOVER-STATE-SCHEMA-CONFLICT")
+            print(json.dumps({"takeover_expected": bool(auto.get("takeover_expected", False))},
+                             sort_keys=True))
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            print(f"TAKEOVER-EXPECTATION-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if cmd == "takeover-expect":
+        parser = argparse.ArgumentParser(prog="gates.py takeover-expect", add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--created-at", type=int)
+        parser.add_argument("--dirty-digest")
+        try:
+            ns = parser.parse_args(args)
+            if ns.dirty_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", ns.dirty_digest):
+                raise ValueError("INVALID-TAKEOVER-DIRTY-DIGEST")
+            record_takeover_expectation(store, ns.run_id, ns.created_at, ns.dirty_digest)
+        except (ValueError, OSError, json.JSONDecodeError, SystemExit) as exc:
+            print(f"TAKEOVER-EXPECT-REJECTED: {exc}", file=sys.stderr)
+            return 1
+        print("TAKEOVER-EXPECTED")
+        return 0
     if cmd == "waiver":
         parser = argparse.ArgumentParser(prog="gates.py waiver", add_help=False)
         parser.add_argument("--run-id")
@@ -2692,6 +3902,42 @@ def main(argv: list[str]) -> int:
             return 2
         print("WAIVER-RECORDED")
         return 0
+    if cmd == "read-posture":
+        # H2 (ship round 5): expose the durable per-run posture record so a
+        # resumed queue adopts the owner run's posture instead of
+        # re-resolving to a default-zero substitution.
+        if len(args) != 1:
+            print("usage: gates.py read-posture <run-id>", file=sys.stderr)
+            return 2
+        rec = (_load_store(store).get("_autonomy", {})
+               .get(args[0], {}).get("posture"))
+        if isinstance(rec, dict) and rec.get("posture") in ("zero", "floor"):
+            print(f"{rec['posture']} {rec.get('source', 'config')}")
+            return 0
+        print("POSTURE-ABSENT", file=sys.stderr)
+        return 1
+    if cmd == "note-posture":
+        # CR-01: durable posture + provenance under the run id — written by
+        # the queue BEFORE any effect; the only posture evidence the hotfix
+        # bypass will honor.
+        parser = argparse.ArgumentParser(prog="gates.py note-posture",
+                                         add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--posture", required=True)
+        parser.add_argument("--source", required=True)
+        try:
+            ns = parser.parse_args(args)
+            ok = note_posture(store, ns.run_id, ns.posture, ns.source)
+        except (ValueError, SystemExit) as exc:
+            print(f"POSTURE-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        if not ok:
+            print("POSTURE-REJECTED: conflicting durable posture already "
+                  "recorded for this run (immutable per run)",
+                  file=sys.stderr)
+            return 1
+        print("POSTURE-RECORDED")
+        return 0
     if cmd == "note-degraded":
         parser = argparse.ArgumentParser(prog="gates.py note-degraded", add_help=False)
         parser.add_argument("kind", nargs="?")
@@ -2701,6 +3947,12 @@ def main(argv: list[str]) -> int:
         parser.add_argument("--seam")
         parser.add_argument("--degraded", choices=("true", "false"))
         parser.add_argument("--invocation-id")
+        parser.add_argument("--branch")
+        parser.add_argument("--head")
+        parser.add_argument("--baseline")
+        parser.add_argument("--repo")
+        parser.add_argument("--changed-file", action="append")
+        parser.add_argument("--production-file", action="append")
         parser.add_argument("--tripped", action="store_true")
         parser.add_argument("--probe-check")
         parser.add_argument("--reset-rung")
@@ -2716,17 +3968,28 @@ def main(argv: list[str]) -> int:
             if ns.reset_rung:
                 print("RUNG-RESET" if reset_rung(store, ns.reset_rung) else "RUNG-ABSENT")
                 return 0
+            wrote = True
             if ns.kind == "rung-attempt":
                 note_degraded(store, ns.kind, rung_id=ns.rung_id, outcome=ns.outcome)
             elif ns.kind == "invocation":
-                note_degraded(store, ns.kind, run_id=ns.run_id, seam=ns.seam,
-                              degraded=ns.degraded == "true", invocation_id=ns.invocation_id)
+                extra = {}
+                if any((ns.branch, ns.head, ns.baseline, ns.repo,
+                        ns.changed_file, ns.production_file)):
+                    extra = dict(branch=ns.branch, head=ns.head,
+                                 baseline=ns.baseline, repo=ns.repo,
+                                 changed_files=ns.changed_file or [],
+                                 production_files=ns.production_file or [])
+                wrote = note_degraded(store, ns.kind, run_id=ns.run_id, seam=ns.seam,
+                                      degraded=ns.degraded == "true",
+                                      invocation_id=ns.invocation_id, **extra)
             else:
                 raise ValueError("INVALID-DEGRADATION-KIND")
         except (ValueError, SystemExit) as exc:
             print(f"NOTE-DEGRADED-REJECTED: {exc}", file=sys.stderr)
             return 2
-        print("DEGRADATION-RECORDED")
+        # H1 (ship round 5): a no-write idempotent replay is surfaced
+        # distinctly — never the same token as a real write.
+        print("DEGRADATION-RECORDED" if wrote else "DEGRADATION-REPLAY")
         return 0
     if cmd == "canary-evidence":
         parser = argparse.ArgumentParser(prog="gates.py canary-evidence", add_help=False)
@@ -3061,9 +4324,150 @@ def main(argv: list[str]) -> int:
         for m in art["missing"]:
             print(f"  MISSING-EVIDENCE: {m}")
         return 0 if art["verdict"] == "go" else 1
+    if cmd == "grant-consolidate":
+        # spec-006 Phase 3 (CR-03): queue-derived consolidate:estate minting.
+        # The named queue journal is the ONLY target-manifest source: this
+        # command loads the journal ITSELF through the production accessor,
+        # verifies the run/queue binding and that every item reached a
+        # terminal, and derives the canonical tuples from the journal's
+        # read-landed-tuples projection.  stdin is never read — no caller
+        # can inject target identity (WR-02: the grant TTL is additionally
+        # clipped to the journal's original queue deadline, so a resumed or
+        # re-run derivation can never silently extend authority).
+        if not args:
+            print("usage: gates.py grant-consolidate RUN_ID --queue-id ID "
+                  "--journal-store DIR [--ttl-hours H]", file=sys.stderr)
+            return 2
+        run_id = args[0]
+        queue_id = _flag(args, "--queue-id")
+        journal_store = _flag(args, "--journal-store")
+        # CR-04 (round 2): --repo/--base are VERIFICATION-ONLY — the
+        # journal-recorded binding is the sole authority; caller values
+        # that differ byte-for-byte refuse before any grant write.
+        repo_arg = _flag(args, "--repo", "")
+        base_arg = _flag(args, "--base", "")
+
+        def _cg_reject(reason: str) -> int:
+            print(f"CONSOLIDATE-GRANT-REJECTED: {sanitize_reason(reason)}",
+                  file=sys.stderr)
+            return 1
+        if not journal_store:
+            return _cg_reject("--journal-store is required: the queue "
+                              "journal is the only tuple source")
+        if "--queue-timeout-seconds" in args:
+            # CR-02 (round 2): the queue deadline is journal-immutable - a
+            # caller-controlled timeout is deadline authority and is removed
+            # from the production mint path entirely.
+            return _cg_reject("--queue-timeout-seconds is not accepted: "
+                              "grant lifetime derives only from the "
+                              "journal-recorded immutable deadline field")
+        try:
+            ttl = float(_flag(args, "--ttl-hours", str(CONSOLIDATE_MAX_TTL_HOURS)))
+        except ValueError:
+            return _cg_reject("--ttl-hours must be numeric")
+        import importlib.util as _ilu
+        qj_path = (Path(__file__).resolve().parents[1] / "skills"
+                   / "land-queue" / "scripts" / "queue-journal.py")
+        spec = _ilu.spec_from_file_location("land_queue_journal", qj_path)
+        if spec is None or spec.loader is None:
+            return _cg_reject("queue-journal accessor unavailable")
+        qj = _ilu.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(qj)
+        except Exception:
+            return _cg_reject("queue-journal accessor failed to load")
+        try:
+            doc = qj._load(qj._doc_path(journal_store, queue_id))
+        except qj.JournalError as exc:
+            return _cg_reject(str(exc))
+        if doc.get("run_id") != run_id:
+            return _cg_reject(f"run/queue binding: journal {queue_id} is "
+                              "owned by a different run id")
+        # CR-03: the durable intake manifest is the item universe — a
+        # journal that never recorded one cannot prove completeness and a
+        # declared item without a terminal (even with ZERO events) refuses.
+        if not isinstance(doc.get("manifest"), list):
+            return _cg_reject("journal records no intake manifest; a "
+                              "manifest-less journal never mints authority")
+        live = qj.nonterminal_items(doc)
+        if live:
+            return _cg_reject("queue is not all-items-terminal: "
+                              + ", ".join(sorted(live)[:5]))
+        try:
+            quads = qj.landed_tuples(doc)
+        except qj.JournalError as exc:
+            return _cg_reject(str(exc))
+        created_at = doc.get("created_at")
+        if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
+            return _cg_reject("journal carries no numeric created_at")
+        deadline = doc.get("deadline")
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            # CR-02: grant lifetime derives ONLY from the journal-recorded
+            # immutable absolute deadline; a journal without one (written
+            # before the deadline field existed) fails closed rather than
+            # trusting any caller-supplied window.
+            return _cg_reject("journal records no absolute deadline; a "
+                              "deadline-less journal never mints authority")
+        # defense in depth: even a tampered oversized deadline never exceeds
+        # the real queue wall measured from created_at.
+        effective_deadline = min(float(deadline),
+                                 created_at + CONSOLIDATE_QUEUE_WALL_SECONDS)
+        timeout_s = effective_deadline - created_at
+        if timeout_s <= 0:
+            return _cg_reject("journal deadline precedes its creation time")
+        remaining_h = (effective_deadline - _now()) / 3600.0
+        if remaining_h <= 0:
+            return _cg_reject("original queue deadline has passed; a late "
+                              "derivation never re-opens authority")
+        # CR-07/CR-04: one physical repository root, recorded by the queue
+        # journal at init — the repository that CREATED the queue, never the
+        # repository a caller points at.  Proofs and effects can never split
+        # across checkouts, and a terminal journal can never be replayed to
+        # mint deletion authority for a different repository or base.
+        repo_root = doc.get("repo_root")
+        base = doc.get("base")
+        if (not isinstance(repo_root, str) or not repo_root
+                or not isinstance(base, str) or not base):
+            return _cg_reject("journal records no repository binding "
+                              "(repo_root/base); an unbound journal never "
+                              "mints authority")
+        if repo_arg:
+            caller_top = subprocess.run(
+                ["git", "-C", repo_arg, "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True)
+            if caller_top.returncode != 0 or not caller_top.stdout.strip():
+                return _cg_reject(f"--repo is not a git repository: {repo_arg}")
+            caller_root = os.path.realpath(caller_top.stdout.strip())
+            if caller_root != repo_root:
+                return _cg_reject("caller --repo differs from the "
+                                  "journal-recorded repository root; a "
+                                  "queue journal only mints for the "
+                                  "repository that created it")
+        if base_arg and base_arg != base:
+            return _cg_reject("caller --base differs byte-for-byte from the "
+                              "journal-recorded base branch")
+        scope = grant_consolidate_estate(store, run_id, quads,
+                                         queue_id=queue_id,
+                                         repo_root=repo_root, base=base,
+                                         queue_timeout_seconds=timeout_s,
+                                         ttl_hours=min(ttl, remaining_h))
+        if scope is None:
+            return _cg_reject("empty/malformed/duplicate target tuples, bad "
+                              "queue id, or TTL above the queue timeout/8h cap")
+        print(f"GRANTED: {scope} (run {run_id}, queue {queue_id}, ttl "
+              f"{min(ttl, remaining_h):.4g}h)")
+        return 0
     if cmd == "grant":
         run_id = args[0]
         actions = [args[i + 1] for i, a in enumerate(args) if a == "--action"]
+        if any(a.startswith("consolidate:") for a in actions):
+            # CR-03: the queue-derived authority boundary — a consolidate:*
+            # grant is mintable ONLY by land-queue's grant-consolidate at its
+            # all-items-terminal boundary, never by the public operator path.
+            print("GRANT-REJECTED: consolidate:* actions are queue-derived "
+                  "only — minted exclusively by grant-consolidate from the "
+                  "terminal queue journal, never by the generic grant path")
+            return 1
         ttl = float(_flag(args, "--ttl-hours", str(GRANT_DEFAULT_TTL_HOURS)))
         reason = _flag(args, "--reason") or None
         if not grant_actions(store, run_id, actions, ttl_hours=ttl, reason=reason):
@@ -3340,4 +4744,16 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Queue-consumed evidence-store I/O/schema failure surface (spec-006
+        # REQ-206): note-failure and check-grant reserve rc 75 with the exact
+        # GATES-STORE-ERROR token so the queue's systemic classifier can tell
+        # a broken store from a semantic refusal.  Semantic refusals return
+        # normally above and keep their existing rc/tokens; every other
+        # command keeps its historical crash behavior.
+        if sys.argv[1:2] and sys.argv[1] in ("note-failure", "check-grant"):
+            print(f"GATES-STORE-ERROR: {exc}", file=sys.stderr)
+            sys.exit(75)
+        raise

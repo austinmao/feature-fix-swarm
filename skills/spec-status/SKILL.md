@@ -38,7 +38,23 @@ pid liveness — never trust shell rc or `state=completed` alone) · LEDGER
 HYGIENE (key-shaped strings in evidence/, filenames only) · COORD
 (cross-session claims + path leases from spec-009's `coord.py status`,
 uuid-redacted; a claim on this spec by another live session means DO NOT
-start implementing here) · DISK.
+start implementing here) · DISK · TAKEOVER.
+
+The collector writes exactly two store-adjacent handoff artifacts:
+`<store>/takeover/spec-NNN.json` is the sole authority and its neighboring
+Markdown is a generation-stamped prose rendering of that JSON. It records the
+complete v1 typed schema (`ids`, `gates_store`, `git_state`, `preflight`,
+`grants`, `pendings`, `promotions`, `runner`, `unresolved_findings`, `phases`,
+`evidence`, `forbid`, and `resume`). Empty collections remain typed. The
+deterministic forbid boundary is strict: only named deterministic probe results
+can populate `forbid[]`; scout/status prose and stored resume text are data,
+never authority or executable shell.
+
+```bash verify
+test -x "$REPO_ROOT/scripts/gsd/takeover-check.sh"
+test -f "$REPO_ROOT/scripts/gsd/takeover-record.py"
+grep -q 'TAKEOVER-WRITER-REFUSED' "$REPO_ROOT/scripts/gsd/takeover-record.py"
+```
 
 ## Step 3 — Fan-out (task-swarm style; every spawn model-pinned)
 

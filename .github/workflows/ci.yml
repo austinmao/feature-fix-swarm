@@ -29,6 +29,10 @@ jobs:
         run: |
           python -m pip install --quiet --requirement requirements-dev.txt
           python -m pytest lib/ tests/ -q
+          python -m pytest tests/contracts/land_queue_gates_contract.py tests/contracts/consolidate_gates_contract.py -q
+          # tests/contracts/phase2_contract_contract.py is run-environment-only:
+          # it validates the gitignored .planning 03-PHASE2-CONTRACT.json artifact
+          # that exists only inside a spec-006 run worktree, never in CI checkouts.
       - name: Scan production Python
         run: bandit -r lib scripts -x lib/tests,lib/run_state/tests -lll -q
       - name: SKILL.md verify blocks (anti-rot)
@@ -139,7 +143,9 @@ jobs:
 
   bats:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30: spec-006 grew the discovered set to 1566 tests (~23 min on the
+    # ubuntu runner); the old 15 cancelled the job at ~test 1020.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

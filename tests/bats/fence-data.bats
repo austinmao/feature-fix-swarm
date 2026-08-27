@@ -6,7 +6,8 @@
 #   - the plan-wall REQ-401 gap closure (UNARMED branch neutralizes
 #     counterfeit PLAN markers — previously armed-only, SOCRATIC-only)
 #   - hostile-doc store-authority fixture (grant-shaped doc line mints
-#     nothing; ledger byte-identical; check-grant still refuses)
+#     nothing; only the spec-006 takeover expectation is written;
+#     check-grant is a byte-identical read and still refuses)
 #   - REQ-402 structural presence (consumers provably call the shared fn)
 
 bats_require_minimum_version 1.5.0
@@ -191,7 +192,7 @@ make_status_fixture() {
 # ── Task 2: hostile-doc store-authority fixture (INT-004/PATH-004,
 #    spec.md BDD "the grant ledger is byte-identical"; wall 033d672f) ───────
 
-@test "hostile run-status doc: counterfeit END escaped, ledger byte-identical, check-grant still refuses" {
+@test "hostile run-status doc: counterfeit END escaped, no grant minted, check-grant still refuses" {
   COLLECTOR="$ROOT_REPO/skills/spec-status/scripts/collect-status-facts.sh"
   make_status_fixture
   # grant-shaped line + counterfeit END delimiter smuggled through the
@@ -218,8 +219,20 @@ make_status_fixture() {
   # rewrite, not drop
   [[ "$output" == *"grant merge:pr approved"* ]]
   [[ "$output" == *"attacker facts after the fake end"* ]]
-  # store bytes untouched by the ingest
-  cmp "$STORE" "$BATS_TEST_TMPDIR/evidence.json.orig"
+  # spec-006 phase 1: the collector deliberately writes the takeover
+  # expectation — the ONLY sanctioned store mutation. The hostile doc
+  # line still mints nothing: no grant material may reach the store.
+  python3 - "$STORE" <<'PY'
+import json, sys
+store = json.load(open(sys.argv[1]))
+assert set(store) == {"_autonomy"}, sorted(store)
+run_keys = store["_autonomy"]["spec-340"]
+allowed = {"takeover_expected", "takeover_created_at", "takeover_dirty_digest"}
+assert set(run_keys) <= allowed, sorted(run_keys)
+raw = open(sys.argv[1]).read()
+assert "merge:pr" not in raw and "approved" not in raw, raw
+PY
+  cp "$STORE" "$BATS_TEST_TMPDIR/evidence.json.post-collect"
   # the AUTHORITY PATH itself: the grant-shaped doc line minted nothing
   # through the real grant read (wall 033d672f)
   run env GATES_STORE="$STORE" python3 \
@@ -227,7 +240,7 @@ make_status_fixture() {
     check-grant spec-340 --action merge:pr
   [ "$status" -eq 1 ]
   [[ "$output" == *"NOT-GRANTED"* ]]
-  cmp "$STORE" "$BATS_TEST_TMPDIR/evidence.json.orig"
+  cmp "$STORE" "$BATS_TEST_TMPDIR/evidence.json.post-collect"
 }
 
 # ── Task 2: trailing-newline byte-identity (wall a12a8559) ──────────────────
@@ -268,11 +281,15 @@ sys.stdout.buffer.write(data[len(start):-len(end)])
   make_status_fixture
   run --separate-stderr env -u GSD_RUN_ID -u GATES_STORE \
     bash "$ISO/collect-status-facts.sh" 340
-  [ "$status" -eq 0 ]
+  # spec-006 phase 1: the unfenced fact stream is still emitted with one
+  # warn, but the authority-bearing takeover record refuses (typed,
+  # fail-closed) when gates.py is also unresolvable in full isolation.
+  [ "$status" -eq 1 ]
   [ "$(printf '%s\n' "$output" | grep -c 'STATUS_DATA_START')" -eq 0 ]
   [[ "$output" == *"== GIT =="* ]]
   # shellcheck disable=SC2154 # stderr populated by run --separate-stderr
   [ "$(printf '%s\n' "$stderr" | grep -c 'fence-data.sh')" -eq 1 ]
+  [[ "$stderr" == *"takeover record refused: gates.py unavailable"* ]]
 }
 
 # ── Task 3: REQ-402 structural presence (grep-level, comment-filtered) ──────

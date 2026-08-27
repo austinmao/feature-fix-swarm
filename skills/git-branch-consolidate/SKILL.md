@@ -88,6 +88,353 @@ Order matters: **land before cleanup**, or you delete the only copy.
 4. Detached-HEAD build worktrees whose `head` is an ancestor of the base branch
    are pure scratch: `git worktree remove`, no branch to delete.
 
+## Step 4-A — Autonomous consolidation (spec-006 Phase 3, REQ-301/302/305)
+
+`--autonomous` closes the queue-to-estate loop WITHOUT widening MAX-AUTH:
+authority is an exact queue-derived `consolidate:estate:<sha256(target
+tuples)>` grant minted by the landed queue itself (land-queue.sh at its
+all-items-terminal boundary, via `queue-journal.py read-landed-tuples` and
+`gates.py grant-consolidate`), never prose, scouts, or shell arguments.
+
+**Report-only is the default.** Every run rebuilds the canonical target set
+`(branch ref, expected tip OID, PR#, observed merge commit)` from the durable
+queue journal's `read-landed-tuples` projection for the exact queue id (the
+intake collector carries no PR/merge identity and is never consulted),
+refreshes `collect-estate.py`, requires `landed==true`, checks the
+exact scope-aware grant, and runs `assert-merged.sh` once per target PR —
+then prints the evidence and the PLANNED `run-finalizer.sh` delegation and
+deletes nothing.  Explicit `--execute` (activated after the Phase 3
+checkpoint review) reruns the exact scope-aware grant check, rereads the
+local ref OID (when run inside a git worktree) and the PR head OID
+immediately before EVERY effect, and delegates each deletion exactly once to
+`bash scripts/gsd/run-finalizer.sh` — the sole deletion owner, whose
+merged-head proof holds the only sanctioned `git branch -D`.  The finalizer
+is fail-soft: the block prints its exit code and the observed ref
+postcondition rather than treating rc 0 alone as deletion proof.
+Execution is idempotent after the queue's own cleanup (WR-01): a missing
+local ref is accepted only in the defined already-finalized state — the
+exact PR head re-verified against the journal-pinned OID — reporting
+completion when the remote ref is gone too, and otherwise delegating the
+remaining remote cleanup to the finalizer under the journal-pinned
+identity.  A drifted or unreadable head still refuses before any effect.
+
+Environment contract: `CONSOLIDATE_RUN_ID` (queue run id owning the grant),
+`CONSOLIDATE_EVIDENCE_DIR` (must contain `grant`, `fresh-estate`,
+`target-set`, `assert-merged`), optional `CONSOLIDATE_QUEUE_ID` (journal
+queue id, default the run id), `CONSOLIDATE_QUEUE_STORE` (land-queue journal
+store, default `$(lib/gates.py store-dir)/land-queue`), `CONSOLIDATE_REPO`
+(default `.`) and `CONSOLIDATE_BASE` (default `main`).  Run from the
+repository root.
+
+<!-- PHASE3_CONSOLIDATE_BEGIN -->
+```bash
+set -euo pipefail
+
+# ── mode: report-only unless an EXPLICIT --execute is passed ─────────────
+MODE="report-only"
+for ARG in "$@"; do
+  case "$ARG" in
+    --execute) MODE="execute" ;;
+    --autonomous) : ;;
+    *) echo "CONSOLIDATE-REFUSED:unknown-flag $ARG"; exit 1 ;;
+  esac
+done
+
+RUN_ID="${CONSOLIDATE_RUN_ID:?CONSOLIDATE_RUN_ID (queue run id) is required}"
+EVIDENCE_DIR="${CONSOLIDATE_EVIDENCE_DIR:?CONSOLIDATE_EVIDENCE_DIR is required}"
+REPO="${CONSOLIDATE_REPO:-.}"
+BASE="${CONSOLIDATE_BASE:-main}"
+
+# ── one physical repository (CR-07): resolve, validate, pin cwd ──────────
+# Tool paths stay anchored to the invoking checkout; every repo-sensitive
+# proof and effect below runs from the SAME resolved physical root that is
+# baked into the grant scope — proofs and deletions can never split across
+# checkouts.
+TOOLS="$PWD"
+REPO_ROOT="$( { cd -- "$REPO" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null; } || true )"
+if [ -z "$REPO_ROOT" ]; then
+  echo "CONSOLIDATE-REFUSED:repo CONSOLIDATE_REPO is not a git repository: $REPO"
+  exit 1
+fi
+REPO_ROOT="$( cd -- "$REPO_ROOT" && pwd -P )"
+cd -- "$REPO_ROOT"
+
+# ── evidence conjunction: every member present, refused BY NAME ──────────
+for EV in grant fresh-estate target-set assert-merged; do
+  if [ ! -f "$EVIDENCE_DIR/$EV" ]; then
+    echo "CONSOLIDATE-REFUSED:missing-evidence $EV"
+    exit 1
+  fi
+done
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/consolidate-4a.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+# ── canonical manifest: the durable queue journal is the ONLY source ─────
+# (CR-01) The intake collector cannot carry PR/merge identity and returns an
+# empty item list in production; consolidation identity comes exclusively
+# from the journal read-landed-tuples projection for this exact queue id.
+QUEUE_ID="${CONSOLIDATE_QUEUE_ID:-$RUN_ID}"
+QUEUE_STORE="${CONSOLIDATE_QUEUE_STORE:-}"
+if [ -z "$QUEUE_STORE" ]; then
+  QUEUE_STORE="$("$TOOLS/lib/gates.py" store-dir)/land-queue"
+fi
+if ! "$TOOLS/skills/land-queue/scripts/queue-journal.py" read-landed-tuples   --store "$QUEUE_STORE" --queue-id "$QUEUE_ID" > "$WORK/tuples"; then
+  echo "CONSOLIDATE-REFUSED:target-set queue journal read failed for queue $QUEUE_ID"
+  exit 1
+fi
+"$TOOLS/skills/git-branch-consolidate/scripts/collect-estate.py"   --repo "$REPO_ROOT" --base "$BASE" > "$WORK/estate.json"
+
+# ── canonical tuple validation + exact target-set digest (no shell JSON) ─
+if ! python3 - "$WORK/tuples" "$WORK/estate.json" "$BASE" "$REPO_ROOT" "$WORK/plan" <<'PYVALIDATE'
+import hashlib, json, re, sys
+tuples_path, estate_path, base, repo_root, out_path = sys.argv[1:6]
+OID = re.compile(r"^[0-9a-f]{40}$")
+PRN = re.compile(r"^[0-9]{1,9}$")
+def refuse(reason):
+    print("CONSOLIDATE-REFUSED:" + reason)
+    sys.exit(3)
+try:
+    raw = open(tuples_path, "rb").read()
+except Exception:
+    refuse("target-set journal projection unreadable")
+parts = raw.split(b"\0")
+if parts and parts[-1] == b"":
+    parts.pop()
+if not parts:
+    refuse("target-set empty target set")
+if len(parts) % 4:
+    refuse("target-set malformed journal projection")
+try:
+    fields = [part.decode("utf-8") for part in parts]
+except UnicodeDecodeError:
+    refuse("target-set malformed journal projection")
+seen, tuples = set(), []
+for i in range(0, len(fields), 4):
+    b, h, pr, m = fields[i:i + 4]
+    if not b or any(c.isspace() for c in b):
+        refuse("target-set malformed branch ref")
+    if b == base:
+        refuse("target-set base branch is never a deletion target: " + b)
+    if not OID.match(h):
+        refuse("target-set malformed expected tip OID for " + b)
+    if not PRN.match(pr):
+        refuse("target-set malformed PR number for " + b)
+    if not OID.match(m):
+        refuse("not-landed no observed merge commit for " + b)
+    key = (b, h)
+    if key in seen:
+        refuse("duplicate-target " + b)
+    seen.add(key)
+    tuples.append((b, h, str(int(pr)), m))
+try:
+    est = json.load(open(estate_path))
+except Exception:
+    refuse("fresh-estate estate output unreadable")
+# CR-02: fail closed — exactly ONE estate row per target, with the literal
+# boolean true.  A missing record is not positive fresh evidence.
+by_branch, dup = {}, set()
+for rec in (est.get("branches") or []) if isinstance(est, dict) else []:
+    if isinstance(rec, dict) and isinstance(rec.get("branch"), str):
+        if rec["branch"] in by_branch:
+            dup.add(rec["branch"])
+        by_branch[rec["branch"]] = rec
+for b, h, pr, m in tuples:
+    if b in dup:
+        refuse("fresh-estate duplicate estate rows for " + b)
+    rec = by_branch.get(b)
+    if rec is None:
+        refuse("fresh-estate target missing for " + b)
+    if rec.get("landed") is not True:
+        refuse("fresh-estate landed!=true for " + b)
+digest = hashlib.sha256(json.dumps(
+    [repo_root, base, sorted([[b, h, p, m] for b, h, p, m in tuples])],
+    separators=(",", ":")).encode()).hexdigest()
+with open(out_path, "w") as fh:
+    fh.write(digest + "\n")
+    for b, h, pr, m in tuples:
+        fh.write("\t".join((b, h, pr, m)) + "\n")
+PYVALIDATE
+then
+  exit 1
+fi
+
+read -r DIGEST < "$WORK/plan"
+SCOPE="consolidate:estate:$DIGEST"
+
+# ── exact target-set equality: rebuilt digest vs the granted manifest ────
+if [ -n "${CONSOLIDATE_SCOPE:-}" ] && [ "$SCOPE" != "$CONSOLIDATE_SCOPE" ]; then
+  echo "CONSOLIDATE-REFUSED:target-set mismatch rebuilt scope $SCOPE != granted scope $CONSOLIDATE_SCOPE"
+  exit 1
+fi
+
+# ── exact scope-aware grant check (queue-derived scope, never substituted)
+if ! "$TOOLS/lib/gates.py" check-grant "$RUN_ID" --action "$SCOPE"; then
+  echo "CONSOLIDATE-REFUSED:grant no exact unexpired queue-derived grant for scope $SCOPE"
+  exit 1
+fi
+
+# ── one green assert-merged per canonical target PR ──────────────────────
+while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
+  if ! "$TOOLS/scripts/gsd/assert-merged.sh" "$T_PR"; then
+    echo "CONSOLIDATE-REFUSED:assert-merged PR $T_PR is not proven merged (branch $T_BRANCH)"
+    exit 1
+  fi
+done < <(tail -n +2 "$WORK/plan")
+
+# ── post-proof tip confirmation: observed PR head must equal expected OID ─
+while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
+  OBSERVED="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
+    echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable"
+    exit 1
+  }
+  if [ "$OBSERVED" != "$T_OID" ]; then
+    echo "CONSOLIDATE-REFUSED:oid-drift branch $T_BRANCH tip moved from $T_OID to $OBSERVED after proof"
+    exit 1
+  fi
+done < <(tail -n +2 "$WORK/plan")
+
+# ── evidence report + finalizer delegation plan ──────────────────────────
+echo "CONSOLIDATE REPORT mode=$MODE run=$RUN_ID"
+echo "EVIDENCE grant=ok scope=$SCOPE"
+echo "EVIDENCE fresh-estate=ok landed=true for every target"
+echo "EVIDENCE target-set=ok digest=$DIGEST"
+while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
+  echo "EVIDENCE assert-merged=ok pr=$T_PR"
+  echo "EVIDENCE tip-oid=confirmed pr=$T_PR oid=$T_OID"
+  echo "TARGET branch=$T_BRANCH oid=$T_OID pr=$T_PR merge=$T_MERGE"
+  echo "PLANNED-FINALIZER: bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID --expected-head $T_OID $T_PR"
+done < <(tail -n +2 "$WORK/plan")
+
+if [ "$MODE" = "execute" ]; then
+  # ── execute: immediate pre-effect rechecks, then finalizer-only delegation
+  # Races between proof and effect fail closed: the exact scope-aware grant
+  # and the target tip OID are rechecked immediately before EVERY effect.
+  DELEGATION_FAILED=0
+  while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
+    if ! "$TOOLS/lib/gates.py" check-grant "$RUN_ID" --action "$SCOPE" < /dev/null; then
+      echo "CONSOLIDATE-REFUSED:grant expired, revoked, or scope-substituted at the effect boundary (scope $SCOPE)"
+      exit 1
+    fi
+    ALREADY_FINALIZED=0
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      # CR-06/WR-01: inside a git worktree the pre-effect fence requires the
+      # local ref to exist AND match — except in the DEFINED already-finalized
+      # state the queue's own fail-soft finalizer produces.  Blind absence is
+      # never success: a missing local ref is accepted ONLY after the exact
+      # PR head re-verifies against the journal-pinned OID, and then
+      #   remote ref also gone -> the target is proven finished: report
+      #                           completion, delegate nothing;
+      #   remote ref survives  -> remaining remote cleanup routes through
+      #                           run-finalizer.sh under the journal-pinned
+      #                           identity (its merged-head proof still owns
+      #                           the only sanctioned deletion).
+      if LOCAL_OID="$(git rev-parse -q --verify "refs/heads/$T_BRANCH" 2>/dev/null)"; then
+        if [ "$LOCAL_OID" != "$T_OID" ]; then
+          echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is $LOCAL_OID, expected $T_OID"
+          exit 1
+        fi
+        # CR-04 (round 3): the LIVE remote ref must ALSO equal the pinned
+        # OID.  The historical PR headRefOid and the local ref can both
+        # match while the remote branch NAME was recreated or advanced with
+        # new, unmerged work — a name-only remote delete would destroy it.
+        REMOTE_ROW="$(git ls-remote origin "refs/heads/$T_BRANCH" < /dev/null)" || {
+          echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH unreadable at the pre-effect fence"
+          exit 1
+        }
+        if [ -n "$REMOTE_ROW" ]; then
+          REMOTE_OID="$(printf '%s\n' "$REMOTE_ROW" | head -1 | cut -f1)"
+          if [ "$REMOTE_OID" != "$T_OID" ]; then
+            echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH is $REMOTE_OID, expected $T_OID"
+            exit 1
+          fi
+        fi
+      else
+        HEAD_ABSENT="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
+          echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable while local refs/heads/$T_BRANCH is missing"
+          exit 1
+        }
+        if [ "$HEAD_ABSENT" != "$T_OID" ]; then
+          echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is missing and PR $T_PR head moved from $T_OID to $HEAD_ABSENT"
+          exit 1
+        fi
+        REMOTE_ROW="$(git ls-remote origin "refs/heads/$T_BRANCH" < /dev/null)" || {
+          echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH unreadable while the local ref is missing"
+          exit 1
+        }
+        if [ -z "$REMOTE_ROW" ]; then
+          echo "POSTCONDITION branch=$T_BRANCH already-finalized (local and remote refs gone; PR $T_PR head $T_OID verified)"
+          ALREADY_FINALIZED=1
+        else
+          # CR-04 (round 3): a surviving remote row is delegable ONLY when
+          # its live OID equals the journal-pinned OID — any drift refuses
+          # before the finalizer is reached.
+          REMOTE_OID="$(printf '%s\n' "$REMOTE_ROW" | head -1 | cut -f1)"
+          if [ "$REMOTE_OID" != "$T_OID" ]; then
+            echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH is $REMOTE_OID, expected $T_OID (local ref missing)"
+            exit 1
+          fi
+          echo "REMOTE-CLEANUP-REMAINING branch=$T_BRANCH local ref gone, remote survives; delegating to run-finalizer.sh under the journal-pinned identity"
+        fi
+      fi
+    fi
+    if [ "$ALREADY_FINALIZED" -eq 1 ]; then
+      continue
+    fi
+    REREAD="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
+      echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable at the effect boundary"
+      exit 1
+    }
+    if [ "$REREAD" != "$T_OID" ]; then
+      echo "CONSOLIDATE-REFUSED:oid-drift branch $T_BRANCH tip moved from $T_OID to $REREAD between check and effect"
+      exit 1
+    fi
+    # sole deletion owner: delegate exactly as the landed Phase 2 caller does;
+    # the finalizer is fail-soft, so rc alone is never treated as deletion
+    # proof.  CR-04: the journal-pinned OID rides along as --expected-head so
+    # the finalizer's remote cleanup is compare-and-delete, never name-only.
+    FIN_RC=0
+    bash "$TOOLS/scripts/gsd/run-finalizer.sh" --run-id "$RUN_ID" --expected-head "$T_OID" "$T_PR" < /dev/null || FIN_RC=$?
+    echo "DELEGATED run-finalizer.sh rc=$FIN_RC pr=$T_PR branch=$T_BRANCH"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if git rev-parse -q --verify "refs/heads/$T_BRANCH" >/dev/null 2>&1; then
+        echo "POSTCONDITION branch=$T_BRANCH still-present (finalizer kept or refused it)"
+      else
+        echo "POSTCONDITION branch=$T_BRANCH ref-gone"
+      fi
+    else
+      echo "POSTCONDITION branch=$T_BRANCH not-observable (no git worktree at cwd)"
+    fi
+    [ "$FIN_RC" -eq 0 ] || DELEGATION_FAILED=1
+  done < <(tail -n +2 "$WORK/plan")
+  if [ "$DELEGATION_FAILED" -ne 0 ]; then
+    echo "CONSOLIDATE-DELEGATION-INCOMPLETE: a finalizer delegation returned nonzero; inspect postconditions above"
+    exit 1
+  fi
+  echo "execute complete: every deletion was delegated to run-finalizer.sh"
+  exit 0
+fi
+
+echo "report-only: no deletion performed; run-finalizer.sh not invoked"
+```
+<!-- PHASE3_CONSOLIDATE_END -->
+
+```bash verify
+# Phase 3 autonomous-consolidation levers exist and stay wired
+test -f "$REPO_ROOT/skills/git-branch-consolidate/SKILL.md"
+test -f "$REPO_ROOT/scripts/gsd/land-queue.sh"
+test -f "$REPO_ROOT/skills/land-queue/scripts/queue-journal.py"
+test -x "$REPO_ROOT/lib/gates.py"
+test -x "$REPO_ROOT/skills/land-queue/scripts/collect-queue.py"
+test -x "$REPO_ROOT/skills/git-branch-consolidate/scripts/collect-estate.py"
+test -f "$REPO_ROOT/scripts/gsd/assert-merged.sh"
+test -f "$REPO_ROOT/scripts/gsd/run-finalizer.sh"
+grep -q "PHASE3_CONSOLIDATE_END" "$REPO_ROOT/skills/git-branch-consolidate/SKILL.md"
+grep -q "read-landed-tuples" "$REPO_ROOT/skills/land-queue/scripts/queue-journal.py"
+grep -q "grant-consolidate" "$REPO_ROOT/scripts/gsd/land-queue.sh"
+grep -q "consolidate:estate" "$REPO_ROOT/lib/gates.py"
+```
+
 ## Constraints
 
 - READ-ONLY until Step 4, which requires explicit per-step approval.

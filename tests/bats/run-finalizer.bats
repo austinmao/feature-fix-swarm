@@ -185,6 +185,73 @@ EOF
   ! git ls-remote --exit-code origin refs/heads/feat/x
 }
 
+@test "CR-04: --expected-head compare-and-delete removes an unmoved remote" {
+  mock_gh_merged
+  run bash "$LEVER" --expected-head "$FEAT_OID" 1
+  [ "$status" -eq 0 ]
+  ! git ls-remote --exit-code origin refs/heads/feat/x
+}
+
+@test "CR-04: a remote tip moved past the expected head SURVIVES the fence" {
+  mock_gh_merged
+  # new, unmerged work lands on the remote branch name after the merged PR
+  git checkout -q feat/x
+  echo z > z.txt; git add z.txt; git commit -qm "new remote work"
+  MOVED_OID="$(git rev-parse feat/x)"
+  git push -q origin feat/x
+  git checkout -q main
+  run bash "$LEVER" --expected-head "$FEAT_OID" 1
+  [ "$status" -eq 0 ]
+  [ "$(git ls-remote origin refs/heads/feat/x | cut -f1)" = "$MOVED_OID" ]
+  [[ "$output" == *"NOT deleting"* ]]
+}
+
+@test "CR-04: without --expected-head the merged PR head is the fence — moved remote survives" {
+  mock_gh_merged
+  git checkout -q feat/x
+  echo z > z.txt; git add z.txt; git commit -qm "new remote work"
+  MOVED_OID="$(git rev-parse feat/x)"
+  git push -q origin feat/x
+  git checkout -q main
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [ "$(git ls-remote origin refs/heads/feat/x | cut -f1)" = "$MOVED_OID" ]
+}
+
+@test "CR-04: check/delete race — the lease rejects a remote moved after the read" {
+  mock_gh_merged
+  # the remote really moves; a git shim serves the STALE expected OID to the
+  # pre-push read only, so the push's --force-with-lease compare-and-delete
+  # is the only thing standing between the race and data loss.
+  git checkout -q feat/x
+  echo z > z.txt; git add z.txt; git commit -qm "race work"
+  MOVED_OID="$(git rev-parse feat/x)"
+  git push -q origin feat/x
+  git checkout -q main
+  REAL_GIT="$(PATH=/usr/bin:/bin command -v git)"
+  cat > "$MOCK_BIN/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "ls-remote" ]; then
+  case "\$*" in *"refs/heads/feat/x"*)
+    printf '%s\trefs/heads/feat/x\n' "$FEAT_OID"; exit 0 ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+  chmod +x "$MOCK_BIN/git"
+  run bash "$LEVER" --expected-head "$FEAT_OID" 1
+  rm -f "$MOCK_BIN/git"
+  [ "$status" -eq 0 ]
+  [ "$("$REAL_GIT" -C "$WORK" ls-remote origin refs/heads/feat/x | cut -f1)" = "$MOVED_OID" ]
+}
+
+@test "CR-04: malformed --expected-head refuses before any mutation" {
+  mock_gh_merged
+  run bash "$LEVER" --expected-head not-a-sha 1
+  [ "$status" -eq 78 ]
+  git ls-remote --exit-code origin refs/heads/feat/x >/dev/null
+}
+
 @test "clean worktree on feature branch removed before branch delete" {
   mock_gh_merged
   WT="$BATS_TEST_TMPDIR/wt-feat"
@@ -1457,4 +1524,47 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '^waiver run_id=spec-008'
   echo "$output" | grep -q 'finalize complete'
+}
+
+
+@test "H3: local ref advanced between landed-tip proof and delete SURVIVES (atomic compare-and-delete)" {
+  # H3 (ship round 5): the landed-tip proof read and the branch delete must
+  # be one atomic compare-and-delete.  A name-only `git branch -D` deletes
+  # whatever the ref points at NOW — interleaved work pushed between the
+  # rev-parse and the delete would be destroyed.  The shim advances feat/x
+  # the moment the finalizer reads its tip, returning the stale OID.
+  mock_gh_merged
+  REALGIT="$(command -v git)"
+  RACE_DONE="$BATS_TEST_TMPDIR/race-done"
+  cat > "$MOCK_BIN/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1 \$2" = "rev-parse refs/heads/feat/x" ]; then
+  old="\$("$REALGIT" rev-parse refs/heads/feat/x)"
+  if [ ! -f "$RACE_DONE" ]; then
+    tree="\$("$REALGIT" rev-parse "refs/heads/feat/x^{tree}")"
+    new="\$("$REALGIT" commit-tree "\$tree" -p "\$old" -m "interleaved work")"
+    "$REALGIT" update-ref refs/heads/feat/x "\$new"
+    touch "$RACE_DONE"
+  fi
+  echo "\$old"
+  exit 0
+fi
+exec "$REALGIT" "\$@"
+EOF
+  chmod +x "$MOCK_BIN/git"
+  run bash "$LEVER" 1
+  rm -f "$MOCK_BIN/git"
+  [ "$status" -eq 0 ]
+  # the race fired and the advanced branch SURVIVES with a typed refusal
+  [ -f "$RACE_DONE" ]
+  git show-ref --verify -q refs/heads/feat/x
+  [[ "$output" == *"NOT deleting"* ]]
+}
+
+@test "H3: unraced squash delete still lands through the compare-and-delete path" {
+  mock_gh_merged
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  ! git show-ref --verify -q refs/heads/feat/x
+  [[ "$output" == *"landed"* ]]
 }

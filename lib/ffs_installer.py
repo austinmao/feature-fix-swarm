@@ -285,7 +285,7 @@ def read_json(path: Path) -> dict[str, Any] | None:
     return value
 
 
-def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o644) -> None:
+def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -299,7 +299,7 @@ def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o644) -> None:
             os.unlink(temporary)
 
 
-def write_json_file(path: Path, value: dict[str, Any], mode: int = 0o644) -> None:
+def write_json_file(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
     flags = (
         os.O_WRONLY
         | os.O_CREAT

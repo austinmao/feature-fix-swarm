@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# spec-status deterministic collector — READ-ONLY. Emits labeled fact sections
-# for the spec-status skill's subagents to interpret. Never mutates anything.
+# spec-status deterministic collector — read-only fact emission plus ONE
+# deliberate write at the end: it invokes scripts/gsd/takeover-record.py to
+# publish the versioned takeover record (ledger expectation + record
+# siblings under the effective gates store).  Everything before that final
+# step only reads (L3, ship round 5).
 # Usage: collect-status-facts.sh <spec-id-or-slug-prefix>   (run from repo/worktree root)
 set -u
 SPEC="${1:-}"
@@ -204,4 +207,19 @@ if [ -n "$FENCE_SH" ]; then
 else
   echo "collect-status-facts: WARN fence-data.sh not found in candidate chain; emitting unfenced" >&2
   emit_status_facts
+fi
+
+# The record is deliberately produced by this deterministic path, not by any
+# scout text above. The inherited GATES_STORE is the effective store for the
+# writer and its ledger calls; it is deliberately not replaced with a default.
+TAKEOVER_GP=""
+for c in "$ROOT/packages/feature-fix-swarm/lib/gates.py" "$ROOT/lib/gates.py" "$COLLECT_STATUS_SCRIPT_DIR/../../../lib/gates.py"; do
+  [ -f "$c" ] && TAKEOVER_GP="$c" && break
+done
+if [ -n "$TAKEOVER_GP" ]; then
+  python3 "$COLLECT_STATUS_SCRIPT_DIR/../../../scripts/gsd/takeover-record.py" \
+    --gates "$TAKEOVER_GP" --spec-id "$SPEC_ID" --run-id "$EXPECTED_RUN_ID" || exit $?
+else
+  echo "takeover record refused: gates.py unavailable" >&2
+  exit 1
 fi

@@ -58,6 +58,7 @@ all skills.
 
 ### Added
 
+- spec-006 Phase 3 closes the autonomous landing loop: `/git-branch-consolidate --autonomous` (Step 4-A) consumes the landed queue's own evidence and stays report-only by default — deletion requires explicit `--execute` plus all four proofs (queue-derived exact-scope `consolidate:estate` grant, fresh `landed==true` estate evidence, exact target-set tuple proof, green `assert-merged` per target PR) and is delegated solely to `scripts/gsd/run-finalizer.sh` under its merged-head proof. A new monotonic autonomy posture (`zero` committed default; `FFS_AUTONOMY_POSTURE=floor` stricter-only) governs promotion privilege — see `docs/autonomy-posture.md` and promotion-protocol Rules 12a/12b.
 - Installer now delivers the managed lib runtime: `setup.sh --scope user` stages
   `gates.py`, `runtime_proof.py`, and `scripts/gsd/socratic-slice.sh` under
   `~/.claude/lib/feature-fix-swarm/` (manifest-tracked — doctor flags drift,
