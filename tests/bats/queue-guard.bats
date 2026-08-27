@@ -418,6 +418,44 @@ STUB
   [ ! -s "$CALL_LOG" ]
 }
 
+@test "[JOURNAL] resolved results are attempt-scoped — a reopened item's crashed intent stays dangling" {
+  # LOW-3 (round 4): the resolved set pooled results across the item's
+  # ENTIRE history, so an attempt-1 result satisfied the identically-named
+  # step of a reopened attempt-2 intent.  A crashed attempt-2 finalize then
+  # looked resolved and resume never reconciled it against merge authority.
+  # Results are scoped to events AFTER the item's last terminal.
+  STORE="$BATS_TEST_TMPDIR/jstore"; mkdir -p "$STORE"
+  OID="$(git -C "$WORK" rev-parse HEAD)"
+  python3 "$JOURNAL" init --store "$STORE" --queue-id q1 --run-id q1
+  # attempt 1: intent + result, then a quarantine terminal closes it
+  python3 "$JOURNAL" append --store "$STORE" --queue-id q1 \
+    --kind intent --step finalize --item spec/a --pr 101 --head "$OID"
+  python3 "$JOURNAL" append --store "$STORE" --queue-id q1 \
+    --kind result --step finalize --item spec/a --status ok
+  python3 "$JOURNAL" append --store "$STORE" --queue-id q1 \
+    --kind terminal --step terminal --item spec/a --status "BLOCKED:conflict" \
+    --reason r --unblock u
+  # attempt 2 reopens with a fresh intent and crashes before its result
+  python3 "$JOURNAL" append --store "$STORE" --queue-id q1 \
+    --kind intent --step finalize --item spec/a --pr 101 --head "$OID"
+
+  # read-dangling surfaces the attempt-2 intent — the attempt-1 result
+  # must not satisfy it
+  python3 "$JOURNAL" read-dangling --store "$STORE" --queue-id q1 \
+    > "$BATS_TEST_TMPDIR/dangling"
+  tr '\0' '\n' < "$BATS_TEST_TMPDIR/dangling" > "$BATS_TEST_TMPDIR/dangling.l"
+  grep -qx "spec/a" "$BATS_TEST_TMPDIR/dangling.l"
+  grep -qx "finalize" "$BATS_TEST_TMPDIR/dangling.l"
+  grep -qx "$OID" "$BATS_TEST_TMPDIR/dangling.l"
+
+  # read-nonterminal projects the same dangling STEP, never an empty one
+  python3 "$JOURNAL" read-nonterminal --store "$STORE" --queue-id q1 \
+    > "$BATS_TEST_TMPDIR/nonterm"
+  tr '\0' '\n' < "$BATS_TEST_TMPDIR/nonterm" > "$BATS_TEST_TMPDIR/nonterm.l"
+  grep -qx "spec/a" "$BATS_TEST_TMPDIR/nonterm.l"
+  grep -qx "finalize" "$BATS_TEST_TMPDIR/nonterm.l"
+}
+
 @test "[GUARD] allow honors the recorded absolute --deadline over the reproduced wall" {
   # LOW-2 (round 4): the resume path loads the journal's IMMUTABLE recorded
   # deadline but the guard only ever REPRODUCED it from --queue-started.

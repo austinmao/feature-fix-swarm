@@ -224,6 +224,22 @@ def effective_terminal_items(events) -> set:
     return set(last)
 
 
+def _last_terminal_index(events) -> dict:
+    """Index of each item's LAST terminal event (LOW-3, round 4).
+
+    Events at or before that index belong to a CLOSED attempt: its results
+    must never satisfy a reopened attempt's identically-named step, and its
+    intents/keys are already accounted by the terminal — otherwise a
+    crashed attempt-2 finalize looks resolved and resume never reconciles
+    it against merge authority.
+    """
+    last = {}
+    for idx, event in enumerate(events):
+        if event.get("kind") == "terminal" and event.get("item"):
+            last[event["item"]] = idx
+    return last
+
+
 def canonical_repo_root(repo: str) -> str:
     """Physical git toplevel of `repo`, realpath-canonicalized (CR-04)."""
     proc = subprocess.run(["git", "-C", repo, "rev-parse", "--show-toplevel"],
@@ -353,12 +369,19 @@ def cmd_read_dangling(ns) -> int:
     """
     doc = _load(_doc_path(ns.store, ns.queue_id))
     events = doc["events"]
+    # LOW-3 (round 4): results and intents are ATTEMPT-scoped — only
+    # events after the item's last terminal participate.
+    last_term = _last_terminal_index(events)
     resolved = {(e.get("item"), e.get("step"))
-                for e in events if e.get("kind") == "result"}
+                for idx, e in enumerate(events)
+                if e.get("kind") == "result"
+                and idx > last_term.get(e.get("item"), -1)}
     # CR-03 (round 3): sequence-ordered — a later intent reopens the item.
     terminal_items = effective_terminal_items(events)
-    for event in events:
+    for idx, event in enumerate(events):
         if event.get("kind") != "intent" or not event.get("item"):
+            continue
+        if idx <= last_term.get(event["item"], -1):
             continue
         if (event.get("item"), event.get("step")) in resolved:
             continue
@@ -382,8 +405,16 @@ def cmd_read_nonterminal(ns) -> int:
     """
     doc = _load(_doc_path(ns.store, ns.queue_id))
     events = doc["events"]
+    # LOW-3 (round 4): results, dangling intents, and idempotency keys are
+    # ATTEMPT-scoped — only events after the item's last terminal
+    # participate.  A closed attempt's result must never satisfy a
+    # reopened attempt's identically-named step, and its keys must never
+    # let resume conclude the NEW attempt's effect already happened.
+    last_term = _last_terminal_index(events)
     resolved = {(e.get("item"), e.get("step"))
-                for e in events if e.get("kind") == "result"}
+                for idx, e in enumerate(events)
+                if e.get("kind") == "result"
+                and idx > last_term.get(e.get("item"), -1)}
     # CR-03 (round 3): sequence-ordered — a later intent reopens the item,
     # so a crashed second-round attempt after a quarantine terminal resumes.
     terminal_items = effective_terminal_items(events)
@@ -394,13 +425,15 @@ def cmd_read_nonterminal(ns) -> int:
         if item not in terminal_items:
             order.append(item)
             dangling[item] = None
-    for event in events:
+    for idx, event in enumerate(events):
         item = event.get("item")
         if not item or item in terminal_items:
             continue
         if item not in dangling:
             order.append(item)
             dangling[item] = None
+        if idx <= last_term.get(item, -1):
+            continue
         if event.get("kind") != "intent":
             continue
         if event.get("key"):
