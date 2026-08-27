@@ -139,6 +139,20 @@ EVIDENCE_DIR="${CONSOLIDATE_EVIDENCE_DIR:?CONSOLIDATE_EVIDENCE_DIR is required}"
 REPO="${CONSOLIDATE_REPO:-.}"
 BASE="${CONSOLIDATE_BASE:-main}"
 
+# ── one physical repository (CR-07): resolve, validate, pin cwd ──────────
+# Tool paths stay anchored to the invoking checkout; every repo-sensitive
+# proof and effect below runs from the SAME resolved physical root that is
+# baked into the grant scope — proofs and deletions can never split across
+# checkouts.
+TOOLS="$PWD"
+REPO_ROOT="$( { cd -- "$REPO" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null; } || true )"
+if [ -z "$REPO_ROOT" ]; then
+  echo "CONSOLIDATE-REFUSED:repo CONSOLIDATE_REPO is not a git repository: $REPO"
+  exit 1
+fi
+REPO_ROOT="$( cd -- "$REPO_ROOT" && pwd -P )"
+cd -- "$REPO_ROOT"
+
 # ── evidence conjunction: every member present, refused BY NAME ──────────
 for EV in grant fresh-estate target-set assert-merged; do
   if [ ! -f "$EVIDENCE_DIR/$EV" ]; then
@@ -157,18 +171,18 @@ trap 'rm -rf "$WORK"' EXIT
 QUEUE_ID="${CONSOLIDATE_QUEUE_ID:-$RUN_ID}"
 QUEUE_STORE="${CONSOLIDATE_QUEUE_STORE:-}"
 if [ -z "$QUEUE_STORE" ]; then
-  QUEUE_STORE="$(lib/gates.py store-dir)/land-queue"
+  QUEUE_STORE="$("$TOOLS/lib/gates.py" store-dir)/land-queue"
 fi
-if ! skills/land-queue/scripts/queue-journal.py read-landed-tuples   --store "$QUEUE_STORE" --queue-id "$QUEUE_ID" > "$WORK/tuples"; then
+if ! "$TOOLS/skills/land-queue/scripts/queue-journal.py" read-landed-tuples   --store "$QUEUE_STORE" --queue-id "$QUEUE_ID" > "$WORK/tuples"; then
   echo "CONSOLIDATE-REFUSED:target-set queue journal read failed for queue $QUEUE_ID"
   exit 1
 fi
-skills/git-branch-consolidate/scripts/collect-estate.py   --repo "$REPO" --base "$BASE" > "$WORK/estate.json"
+"$TOOLS/skills/git-branch-consolidate/scripts/collect-estate.py"   --repo "$REPO_ROOT" --base "$BASE" > "$WORK/estate.json"
 
 # ── canonical tuple validation + exact target-set digest (no shell JSON) ─
-if ! python3 - "$WORK/tuples" "$WORK/estate.json" "$BASE" "$WORK/plan" <<'PYVALIDATE'
+if ! python3 - "$WORK/tuples" "$WORK/estate.json" "$BASE" "$REPO_ROOT" "$WORK/plan" <<'PYVALIDATE'
 import hashlib, json, re, sys
-tuples_path, estate_path, base, out_path = sys.argv[1:5]
+tuples_path, estate_path, base, repo_root, out_path = sys.argv[1:6]
 OID = re.compile(r"^[0-9a-f]{40}$")
 PRN = re.compile(r"^[0-9]{1,9}$")
 def refuse(reason):
@@ -227,8 +241,9 @@ for b, h, pr, m in tuples:
         refuse("fresh-estate target missing for " + b)
     if rec.get("landed") is not True:
         refuse("fresh-estate landed!=true for " + b)
-digest = hashlib.sha256(json.dumps(sorted([[b, h, p, m] for b, h, p, m in tuples]),
-                                   separators=(",", ":")).encode()).hexdigest()
+digest = hashlib.sha256(json.dumps(
+    [repo_root, base, sorted([[b, h, p, m] for b, h, p, m in tuples])],
+    separators=(",", ":")).encode()).hexdigest()
 with open(out_path, "w") as fh:
     fh.write(digest + "\n")
     for b, h, pr, m in tuples:
@@ -248,14 +263,14 @@ if [ -n "${CONSOLIDATE_SCOPE:-}" ] && [ "$SCOPE" != "$CONSOLIDATE_SCOPE" ]; then
 fi
 
 # ── exact scope-aware grant check (queue-derived scope, never substituted)
-if ! lib/gates.py check-grant "$RUN_ID" --action "$SCOPE"; then
+if ! "$TOOLS/lib/gates.py" check-grant "$RUN_ID" --action "$SCOPE"; then
   echo "CONSOLIDATE-REFUSED:grant no exact unexpired queue-derived grant for scope $SCOPE"
   exit 1
 fi
 
 # ── one green assert-merged per canonical target PR ──────────────────────
 while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
-  if ! scripts/gsd/assert-merged.sh "$T_PR"; then
+  if ! "$TOOLS/scripts/gsd/assert-merged.sh" "$T_PR"; then
     echo "CONSOLIDATE-REFUSED:assert-merged PR $T_PR is not proven merged (branch $T_BRANCH)"
     exit 1
   fi
@@ -291,7 +306,7 @@ if [ "$MODE" = "execute" ]; then
   # and the target tip OID are rechecked immediately before EVERY effect.
   DELEGATION_FAILED=0
   while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
-    if ! lib/gates.py check-grant "$RUN_ID" --action "$SCOPE" < /dev/null; then
+    if ! "$TOOLS/lib/gates.py" check-grant "$RUN_ID" --action "$SCOPE" < /dev/null; then
       echo "CONSOLIDATE-REFUSED:grant expired, revoked, or scope-substituted at the effect boundary (scope $SCOPE)"
       exit 1
     fi
@@ -313,7 +328,7 @@ if [ "$MODE" = "execute" ]; then
     # sole deletion owner: delegate exactly as the landed Phase 2 caller does;
     # the finalizer is fail-soft, so rc alone is never treated as deletion proof
     FIN_RC=0
-    bash scripts/gsd/run-finalizer.sh --run-id "$RUN_ID" "$T_PR" < /dev/null || FIN_RC=$?
+    bash "$TOOLS/scripts/gsd/run-finalizer.sh" --run-id "$RUN_ID" "$T_PR" < /dev/null || FIN_RC=$?
     echo "DELEGATED run-finalizer.sh rc=$FIN_RC pr=$T_PR branch=$T_BRANCH"
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       if git rev-parse -q --verify "refs/heads/$T_BRANCH" >/dev/null 2>&1; then

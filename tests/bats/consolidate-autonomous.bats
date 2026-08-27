@@ -169,8 +169,10 @@ esac'
     printf 'ok\n' > "$CONSOLIDATE_EVIDENCE_DIR/$e"
   done
   export GRANT_FILE="$BATS_TEST_TMPDIR/grants"
+  export CONSOLIDATE_REPO="$WORK"
+  REPO_PHYS="$(cd "$WORK" && pwd -P)"
   MAIN_OID="$(git -C "$WORK" rev-parse refs/heads/main)"
-  TARGET_HASH="$(python3 -c "import hashlib,json,sys;print(hashlib.sha256(json.dumps([['spec/merged','$MERGED_OID','201','$MAIN_OID']],separators=(',',':')).encode()).hexdigest())")"
+  TARGET_HASH="$(python3 -c "import hashlib,json,sys;print(hashlib.sha256(json.dumps(['$REPO_PHYS','main',[['spec/merged','$MERGED_OID','201','$MAIN_OID']]],separators=(',',':')).encode()).hexdigest())")"
   export CONSOLIDATE_RUN_ID="run-0304"
   printf '%s consolidate:estate:%s\n' "$CONSOLIDATE_RUN_ID" "$TARGET_HASH" > "$GRANT_FILE"
   export CONSOLIDATE_SCOPE="consolidate:estate:$TARGET_HASH"
@@ -522,6 +524,7 @@ PYEOF
   export CONSOLIDATE_REPO="$REPO_B"
   run run_block --execute
   [ "$status" -eq 1 ]
+  grep -qiE "target-set mismatch|grant" <<<"$output"
   [ ! -s "$EFFECTS" ]
 }
 
@@ -544,13 +547,14 @@ known = {"gh", "codex", "claude", "git",
          "skills/git-branch-consolidate/scripts/collect-estate.py",
          "lib/gates.py", "scripts/gsd/assert-merged.sh",
          "scripts/gsd/run-finalizer.sh"}
-tmpdir = sys.argv[2]
+import os
+tmpdirs = (sys.argv[2], os.path.realpath(sys.argv[2]))
 calls = open(sys.argv[1], "rb").read().split(b"\0")
 tokens = [c.decode() for c in calls if c]
 argv0s = {t for t in tokens if t in known or "/" in t}
 bad = {t for t in argv0s
-       if t not in known and not t.startswith(tmpdir)
-       and not t.startswith("spec/")}
+       if t not in known and not t.startswith(tmpdirs)
+       and not t.startswith(("spec/", "refs/"))}
 assert not bad, f"escaped the stub sandbox: {sorted(bad)}"
 PYEOF
 }

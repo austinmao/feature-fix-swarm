@@ -868,7 +868,7 @@ derive_consolidate_grant() {
   orig_run="$(python3 "$JOURNAL" read-run-id --store "$LQ" --queue-id "$QUEUE_ID" 2>/dev/null)" || return 0
   [ -n "$orig_run" ] || return 0
   if ! python3 "$GATES" grant-consolidate "$orig_run" --queue-id "$QUEUE_ID" \
-      --journal-store "$LQ" \
+      --journal-store "$LQ" --repo "$REPO" --base "$BASE" \
       --queue-timeout-seconds "${QUEUE_WALL_SECONDS:-28800}" --ttl-hours 8; then
     echo "CONSOLIDATE-GRANT-SKIPPED: queue-derived grant refused; landed report stands"
   fi

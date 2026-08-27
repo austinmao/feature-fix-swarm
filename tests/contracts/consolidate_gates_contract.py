@@ -168,7 +168,8 @@ def test_generic_grant_actions_refuses_consolidate_scopes(tmp_path):
     action — only the queue-derived grant_consolidate_estate path may."""
     gates = gates_module()
     store = tmp_path / "evidence.json"
-    scope = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)])
+    scope = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)],
+                                    repo_root="/r", base="main")
     assert gates.grant_actions(store, "run-1", [scope], ttl_hours=1.0) is False
     assert gates.check_grant(store, "run-1", scope) is False
 
@@ -194,11 +195,18 @@ def test_generic_grant_cli_refuses_consolidate_with_typed_reason(tmp_path):
     assert check.returncode != 0, "a refused grant is still checkable"
 
 
+def make_repo(tmp_path):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    return os.path.realpath(repo)
+
+
 def _grant_consolidate(tmp_path, run_id, queue_id, journal_store, stdin=b""):
     env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
     return subprocess.run(
         [sys.executable, str(GATES_PATH), "grant-consolidate", run_id,
-         "--queue-id", queue_id, "--journal-store", str(journal_store)],
+         "--queue-id", queue_id, "--journal-store", str(journal_store),
+         "--repo", str(tmp_path / "repo"), "--base", "main"],
         input=stdin, capture_output=True, env=env, cwd=tmp_path)
 
 
@@ -206,13 +214,15 @@ def test_grant_consolidate_derives_tuples_from_the_named_journal(tmp_path):
     """CR-03: grant-consolidate loads the named queue journal itself and
     derives the canonical tuples from it — hostile stdin is ignored."""
     gates = gates_module()
+    repo_root = make_repo(tmp_path)
     journal = make_journal(tmp_path)
     proc = _grant_consolidate(tmp_path, "run-q", "q-cr03", journal,
                               stdin=b"evil\x00" + b"9" * 40 + b"\x001\x00"
                               + b"8" * 40 + b"\x00")
     assert proc.returncode == 0, proc.stderr
     expected = gates.consolidate_scope(
-        [("spec/merged", "a" * 40, 201, "b" * 40)])
+        [("spec/merged", "a" * 40, 201, "b" * 40)],
+        repo_root=repo_root, base="main")
     assert expected in proc.stdout.decode(), \
         "granted scope is not derived from the journal projection"
     env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
@@ -226,6 +236,7 @@ def test_grant_consolidate_refuses_run_binding_mismatch(tmp_path):
     """CR-03: the caller-supplied run id must equal the journal's recorded
     run id — a substituted run id never grafts queue authority."""
     gates = gates_module()
+    repo_root = make_repo(tmp_path)
     journal = make_journal(tmp_path)
     valid_stdin = b"spec/merged\x00" + b"a" * 40 + b"\x00201\x00" \
         + b"b" * 40 + b"\x00"
@@ -233,7 +244,8 @@ def test_grant_consolidate_refuses_run_binding_mismatch(tmp_path):
                               stdin=valid_stdin)
     assert proc.returncode != 0, \
         "grant-consolidate minted under a run id the journal never recorded"
-    scope = gates.consolidate_scope([("spec/merged", "a" * 40, 201, "b" * 40)])
+    scope = gates.consolidate_scope([("spec/merged", "a" * 40, 201, "b" * 40)],
+                                    repo_root=repo_root, base="main")
     for run in ("run-SUBSTITUTED", "run-q"):
         env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
         check = subprocess.run(
@@ -245,6 +257,7 @@ def test_grant_consolidate_refuses_run_binding_mismatch(tmp_path):
 def test_grant_consolidate_refuses_a_nonterminal_queue(tmp_path):
     """CR-03: minting requires the whole queue to be items-terminal — a
     dangling item means the queue is still live."""
+    make_repo(tmp_path)
     journal = make_journal(tmp_path, nonterminal_item="spec/live")
     valid_stdin = b"spec/merged\x00" + b"a" * 40 + b"\x00201\x00" \
         + b"b" * 40 + b"\x00"
@@ -260,8 +273,10 @@ def test_scope_differs_when_only_pr_differs():
     must produce different scopes -- otherwise a grant minted for one merged
     PR authorizes finalizing a different PR with the same head."""
     gates = gates_module()
-    a = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)])
-    b = gates.consolidate_scope([("spec/a", "a" * 40, 18, "b" * 40)])
+    a = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)],
+                                repo_root="/r", base="main")
+    b = gates.consolidate_scope([("spec/a", "a" * 40, 18, "b" * 40)],
+                                repo_root="/r", base="main")
     assert a != b, ("scope collision: PR number is not part of the "
                     "canonical consolidate scope")
 
@@ -269,8 +284,10 @@ def test_scope_differs_when_only_pr_differs():
 def test_scope_differs_when_only_merge_commit_differs():
     """CR-04: same collision requirement for the observed merge commit."""
     gates = gates_module()
-    a = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)])
-    b = gates.consolidate_scope([("spec/a", "a" * 40, 17, "c" * 40)])
+    a = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)],
+                                repo_root="/r", base="main")
+    b = gates.consolidate_scope([("spec/a", "a" * 40, 17, "c" * 40)],
+                                repo_root="/r", base="main")
     assert a != b, ("scope collision: the observed merge commit is not part "
                     "of the canonical consolidate scope")
 
@@ -282,9 +299,11 @@ def test_minted_grant_never_matches_a_pr_substituted_scope(tmp_path):
     gates = gates_module()
     store = tmp_path / "evidence.json"
     minted = gates.grant_consolidate_estate(
-        store, "run-1", [("spec/a", "a" * 40, 17, "b" * 40)], queue_id="q1")
+        store, "run-1", [("spec/a", "a" * 40, 17, "b" * 40)], queue_id="q1",
+        repo_root="/r", base="main")
     assert minted, "queue-derived mint refused a valid canonical tuple"
-    substituted = gates.consolidate_scope([("spec/a", "a" * 40, 18, "c" * 40)])
+    substituted = gates.consolidate_scope([("spec/a", "a" * 40, 18, "c" * 40)],
+                                          repo_root="/r", base="main")
     assert substituted != minted
     assert gates.check_grant(store, "run-1", substituted) is False
 

@@ -1225,22 +1225,25 @@ def check_grant(store: Path, run_id: str, action: str,
     return (now if now is not None else _now()) < entry.get("expires_at", 0)
 
 
-def consolidate_scope(tuples) -> str:
+def consolidate_scope(tuples, *, repo_root: str, base: str) -> str:
     """Exact queue-derived scope for a consolidation target manifest:
-    sha256 over the canonical JSON of the SORTED FULL tuples
-    (branch ref, expected tip OID, normalized PR number, observed merge
-    commit) — all four fields, so a grant minted for one merged PR can
-    never authorize a different PR or merge commit sharing the same head
-    (CR-04).  The Step 4-A controller and the Wave-0 contracts compute the
+    sha256 over the canonical JSON of [physical repo root, base branch,
+    SORTED FULL tuples (branch ref, expected tip OID, normalized PR number,
+    observed merge commit)].  All four tuple fields, so a grant minted for
+    one merged PR can never authorize a different PR or merge commit
+    sharing the same head (CR-04); repository identity + base, so a grant
+    proven in one repository can never be replayed against another
+    (CR-07).  The Step 4-A controller and the Wave-0 contracts compute the
     same serialization, so scope equality is byte-exact."""
-    canon = json.dumps(sorted([[t[0], t[1], str(int(str(t[2]))), t[3]]
-                               for t in tuples]),
+    canon = json.dumps([repo_root, base,
+                        sorted([[t[0], t[1], str(int(str(t[2]))), t[3]]
+                                for t in tuples])],
                        separators=(",", ":")).encode()
     return "consolidate:estate:" + hashlib.sha256(canon).hexdigest()
 
 
 def grant_consolidate_estate(store: Path, run_id: str, tuples, *,
-                             queue_id: str,
+                             queue_id: str, repo_root: str, base: str,
                              queue_timeout_seconds: float = CONSOLIDATE_QUEUE_WALL_SECONDS,
                              ttl_hours: float = CONSOLIDATE_MAX_TTL_HOURS):
     """Mint the queue-derived consolidate:estate grant (REQ-301/302).
@@ -1257,6 +1260,11 @@ def grant_consolidate_estate(store: Path, run_id: str, tuples, *,
     if not isinstance(run_id, str) or not run_id:
         return None
     if not isinstance(queue_id, str) or not _CONSOLIDATE_QUEUE_ID_PAT.match(queue_id):
+        return None
+    # CR-07: the scope binds one physical repository root + base branch.
+    if not isinstance(repo_root, str) or not repo_root.strip():
+        return None
+    if not isinstance(base, str) or not base.strip():
         return None
     if not isinstance(tuples, (list, tuple)) or not tuples:
         return None
@@ -1290,7 +1298,7 @@ def grant_consolidate_estate(store: Path, run_id: str, tuples, *,
         return None
     if ttl_hours * 3600 > queue_timeout_seconds:
         return None  # TTL never outlives the recorded queue wall
-    scope = consolidate_scope(normalized)
+    scope = consolidate_scope(normalized, repo_root=repo_root, base=base)
     ok = grant_actions(store, run_id, [scope], ttl_hours=float(ttl_hours),
                        granted_by="queue", reason=f"queue:{queue_id}",
                        _allow_consolidate=True)
@@ -4195,6 +4203,8 @@ def main(argv: list[str]) -> int:
         run_id = args[0]
         queue_id = _flag(args, "--queue-id")
         journal_store = _flag(args, "--journal-store")
+        repo_arg = _flag(args, "--repo", ".")
+        base_arg = _flag(args, "--base", "main")
 
         def _cg_reject(reason: str) -> int:
             print(f"CONSOLIDATE-GRANT-REJECTED: {sanitize_reason(reason)}",
@@ -4243,8 +4253,19 @@ def main(argv: list[str]) -> int:
         if remaining_h <= 0:
             return _cg_reject("original queue deadline has passed; a late "
                               "derivation never re-opens authority")
+        # CR-07: one physical repository root, resolved here and baked into
+        # the scope, so proofs and effects can never split across checkouts.
+        toplevel = subprocess.run(
+            ["git", "-C", repo_arg, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True)
+        if toplevel.returncode != 0 or not toplevel.stdout.strip():
+            return _cg_reject(f"--repo is not a git repository: {repo_arg}")
+        repo_root = os.path.realpath(toplevel.stdout.strip())
+        if not base_arg.strip():
+            return _cg_reject("--base must be non-empty")
         scope = grant_consolidate_estate(store, run_id, quads,
                                          queue_id=queue_id,
+                                         repo_root=repo_root, base=base_arg,
                                          queue_timeout_seconds=timeout_s,
                                          ttl_hours=min(ttl, remaining_h))
         if scope is None:
