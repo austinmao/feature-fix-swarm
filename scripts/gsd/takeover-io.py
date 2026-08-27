@@ -99,10 +99,19 @@ def _dir_flags() -> int:
 def _trusted(st: os.stat_result) -> bool:
     # Full safe_path: every component must be a directory owned by the current
     # user or root and carry no group or world write bit, regardless of owner
-    # (WALL-RESIDUALS cacd9f1a).
-    return (stat.S_ISDIR(st.st_mode)
-            and st.st_uid in (os.getuid(), 0)
-            and not (st.st_mode & 0o022))
+    # (WALL-RESIDUALS cacd9f1a), with ONE adjudicated carve-out (2026-08-27
+    # ship round, recorded in phase-1 WALL-RESIDUALS): a ROOT-owned sticky
+    # world-writable directory (POSIX shared tmp — /tmp is 1777) is a trusted
+    # PARENT component. Sticky semantics already block the rename/replace
+    # attack this walk guards (non-owners cannot unlink or rename another
+    # user's entries), and any attacker-owned directory injected below it
+    # still fails the ownership check at its own level. Without the carve-out
+    # every store under a standard linux tmpdir is refused outright.
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    if st.st_uid == 0 and (st.st_mode & stat.S_ISVTX) and (st.st_mode & 0o022):
+        return True
+    return st.st_uid in (os.getuid(), 0) and not (st.st_mode & 0o022)
 
 
 def _regular_current_user(st: os.stat_result) -> bool:

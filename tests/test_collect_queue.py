@@ -39,7 +39,7 @@ def real_git_estate(tmp_path: Path) -> dict[str, Path | str]:
     env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
     for key in ("GH_TOKEN", "GITHUB_TOKEN", "GIT_ASKPASS"):
         env.pop(key, None)
-    subprocess.run(["git", "init", "--bare", str(origin)], check=True, env=env, stdout=subprocess.PIPE)
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True, env=env, stdout=subprocess.PIPE)
     subprocess.run(["git", "init", "-b", "main", str(work)], check=True, env=env, stdout=subprocess.PIPE)
     git(work, "config", "user.email", "wave0@example.invalid")
     git(work, "config", "user.name", "Wave 0")

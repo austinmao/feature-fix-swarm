@@ -70,7 +70,7 @@ printf 'finalize %s\n' "$*" >> "${EVENTS:?}"
 printf 'run-finalizer.sh %s\n' "$PWD" >> "${CWD_LOG:-/dev/null}"
 exit 0
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
 }
 
 write_gh() { # full happy gh authority for spec/item-a=101 spec/item-b=102
@@ -313,7 +313,7 @@ printf '%s\0' run-finalizer.sh "$@" >> "${CALL_LOG:?}"
 printf 'finalize %s\n' "$*" >> "${EVENTS:?}"
 exit 0
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
 
   RUN_ID=adhoc-queue-wave0
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason wave0 >/dev/null
@@ -403,7 +403,7 @@ case "$1" in
 esac
 exit 0
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
 
   # Scenario A — REQ-207: a twice-failing local gate is BLOCKED:no-progress
   # while items one and three still land (local weather never stops the queue).
@@ -457,7 +457,7 @@ case "${1:-} ${2:-}" in
   *) echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
 esac
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id adhoc-p4b spec/item-a spec/item-b spec/item-c
   [ "$status" -eq 1 ]
@@ -520,7 +520,7 @@ printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
 [ -s "${GH_STATE:?}/merge-$1" ] && exit 0
 exit 2
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-102 --reason t >/dev/null
 
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
@@ -625,7 +625,7 @@ if [ "$1" = "spec/item-a" ]; then
 fi
 exit 0
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   RUN_ID=adhoc-e5a
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
@@ -729,7 +729,7 @@ STUB
 printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
 echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
 
   RUN_ID=adhoc-reditem
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
@@ -797,7 +797,7 @@ printf 'codex %s\n' "$*" >> "${EVENTS:?}"
 # first systemic observation: the reviewer wall-clock times out (rc 124)
 exit 124
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
 
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id adhoc-sysa spec/item-a spec/item-b spec/item-c
@@ -838,7 +838,7 @@ case "${1:-} ${2:-}" in
   *) echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
 esac
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   export GATES_STORE="$BATS_TEST_TMPDIR/gates2/evidence.json"; mkdir -p "$BATS_TEST_TMPDIR/gates2"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id adhoc-sysb spec/item-a spec/item-b
@@ -1937,7 +1937,7 @@ if [ "$1" = "spec/item-a" ]; then
 fi
 exit 0
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   RUN_ID=adhoc-dr1
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
@@ -1981,7 +1981,7 @@ if [ "$1" = "spec/item-a" ]; then
 fi
 exit 0
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   RUN_ID=adhoc-dr2
   ( cd "$WORK" && python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null )
   cd "$REPO_B"
@@ -2046,7 +2046,7 @@ printf 'implement %s\n' "$*" >> "${EVENTS:?}"
 echo "compile explosion in module core" >&2
 exit 1
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   RUN_ID=adhoc-hi1
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a
@@ -2665,7 +2665,7 @@ printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
 [ -s "${GH_STATE:?}/merge-$1" ] && exit 0
 exit 2
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --resume q-971
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a LANDED $MERGE_A" <<<"$output"
@@ -2719,7 +2719,7 @@ printf '%s\0' assert-merged.sh "$@" >> "${CALL_LOG:?}"
 printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
 exit 2
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   RUN_ID=run-410
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
@@ -2761,7 +2761,7 @@ printf '%s\0' run-finalizer.sh "$@" >> "${CALL_LOG:?}"
 printf 'finalize %s\n' "$*" >> "${EVENTS:?}"
 exit 1
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
 
   # normal path: merge confirmed, finalizer fails -> typed terminal
   RUN_ID=run-412
@@ -2792,7 +2792,7 @@ printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
 [ -s "${GH_STATE:?}/merge-$1" ] && exit 0
 exit 2
 STUB
-  chmod +x "$MOCK_BIN"/*
+  find "$MOCK_BIN" -maxdepth 1 -type f -exec chmod +x {} +
   : > "$EVENTS"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --resume q-t1d
   [ "$status" -eq 0 ]
