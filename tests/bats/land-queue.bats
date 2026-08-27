@@ -1649,6 +1649,43 @@ STUB
   ! grep -q "^finalize" "$EVENTS"
 }
 
+@test "[REPO-BIND] a non-github.com forge origin derives no slug — gh authorities run unbound in the target root" {
+  # F1 (round 4): the old slug derivation was HOST-LOSING — an origin of
+  # `git@ghe.corp:acme/widgets.git` derived `acme/widgets`, and gh's
+  # `--repo OWNER/REPO` form re-binds that authority to gh's DEFAULT host
+  # (github.com), addressing a repository on the wrong forge entirely.  A
+  # slug is derived ONLY when the origin host IS gh's default host
+  # (github.com / $GH_HOST); any other forge host derives nothing and the
+  # cwd pin alone carries the repository binding.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  git -C "$WORK" remote set-url origin git@ghe.corp:acme/widgets.git
+  git -C "$WORK" config url."$ORIGIN".insteadOf git@ghe.corp:acme/widgets.git
+  write_gh
+  write_children
+  # rewrap gh: ANY --repo argv under a GHE-shaped origin IS the
+  # host-rebinding bug — refuse it loudly
+  mv "$MOCK_BIN/gh" "$MOCK_BIN/gh-real"
+  cat > "$MOCK_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  [ "$a" = "--repo" ] && { echo "UNSTUBBED-BOUNDARY:gh --repo re-binds a ghe.corp origin to github.com: $*" >&2; exit 64; }
+done
+exec "${0%/gh}/gh-real" "$@"
+STUB
+  chmod +x "$MOCK_BIN/gh"
+  RUN_ID=adhoc-ghe1
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  GH_HOST= PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  # no positional slug rode the merged-state or finalizer authorities either
+  grep -qx "assert-merged 101" "$EVENTS"
+  grep -qx "finalize --run-id $RUN_ID 101" "$EVENTS"
+}
+
 @test "[POSTURE] production touch is auditable through review policy" {
   # 7c59d7a0: end-to-end through the REAL landing controller — it records a
   # bound degradation event and the production authority refuses promotion.

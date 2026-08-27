@@ -97,16 +97,26 @@ if [ "$DRAIN" -eq 0 ]; then
   # rewrites, and the slug must derive from the immutable configured remote
   _origin_url="$(git -C "$REPO_ROOT" config --get remote.origin.url 2>/dev/null || true)"
   case "$_origin_url" in
-    *://*) _slug="${_origin_url%.git}"; _slug="${_slug#*://}"; _slug="${_slug#*@}"; _slug="${_slug#*/}" ;;
-    *@*:*) _slug="${_origin_url%.git}"; _slug="${_slug##*:}" ;;
-    *) _slug="" ;;
+    *://*) _rest="${_origin_url%.git}"; _rest="${_rest#*://}"; _rest="${_rest#*@}"
+           _host="${_rest%%/*}"; _slug="${_rest#*/}" ;;
+    *@*:*) _rest="${_origin_url%.git}"; _host="${_rest#*@}"; _host="${_host%%:*}"
+           _slug="${_rest##*:}" ;;
+    *) _host="" _slug="" ;;
   esac
-  case "$_slug" in
-    # exactly owner/repo — deeper forge paths or malformed shapes derive
-    # nothing and the cwd pin alone carries the binding
-    */*) case "$_slug" in */*/*|/*|*/) ;; *) REPO_SLUG="$_slug" ;; esac ;;
+  # F1 (round 4): a bare OWNER/REPO slug re-binds gh to its DEFAULT host, so
+  # deriving one from a non-default forge host (GHE) silently addressed a
+  # repository on github.com instead.  A slug is derived ONLY when the
+  # origin host IS gh's default host (github.com, or $GH_HOST when set);
+  # any other host derives nothing and the cwd pin carries the binding.
+  case "$_host" in
+    github.com|"${GH_HOST:-github.com}")
+      case "$_slug" in
+        # exactly owner/repo — deeper forge paths or malformed shapes derive
+        # nothing and the cwd pin alone carries the binding
+        */*) case "$_slug" in */*/*|/*|*/) ;; *) REPO_SLUG="$_slug" ;; esac ;;
+      esac ;;
   esac
-  unset _origin_url _slug
+  unset _origin_url _rest _host _slug
   [ -z "$REPO_SLUG" ] || GH_BIND=(--repo "$REPO_SLUG")
 fi
 
