@@ -111,6 +111,12 @@ immediately before EVERY effect, and delegates each deletion exactly once to
 merged-head proof holds the only sanctioned `git branch -D`.  The finalizer
 is fail-soft: the block prints its exit code and the observed ref
 postcondition rather than treating rc 0 alone as deletion proof.
+Execution is idempotent after the queue's own cleanup (WR-01): a missing
+local ref is accepted only in the defined already-finalized state — the
+exact PR head re-verified against the journal-pinned OID — reporting
+completion when the remote ref is gone too, and otherwise delegating the
+remaining remote cleanup to the finalizer under the journal-pinned
+identity.  A drifted or unreadable head still refuses before any effect.
 
 Environment contract: `CONSOLIDATE_RUN_ID` (queue run id owning the grant),
 `CONSOLIDATE_EVIDENCE_DIR` (must contain `grant`, `fresh-estate`,
@@ -310,19 +316,47 @@ if [ "$MODE" = "execute" ]; then
       echo "CONSOLIDATE-REFUSED:grant expired, revoked, or scope-substituted at the effect boundary (scope $SCOPE)"
       exit 1
     fi
+    ALREADY_FINALIZED=0
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      # CR-06: the local ref must EXIST and equal the expected OID — a ref
-      # the queue's earlier finalizer already removed is exactly the race
-      # window, and the finalizer can still delete the remote branch, so
-      # absence is never success.  No remote-only carve-out exists.
-      if ! LOCAL_OID="$(git rev-parse -q --verify "refs/heads/$T_BRANCH" 2>/dev/null)"; then
-        echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is missing, expected $T_OID"
-        exit 1
+      # CR-06/WR-01: inside a git worktree the pre-effect fence requires the
+      # local ref to exist AND match — except in the DEFINED already-finalized
+      # state the queue's own fail-soft finalizer produces.  Blind absence is
+      # never success: a missing local ref is accepted ONLY after the exact
+      # PR head re-verifies against the journal-pinned OID, and then
+      #   remote ref also gone -> the target is proven finished: report
+      #                           completion, delegate nothing;
+      #   remote ref survives  -> remaining remote cleanup routes through
+      #                           run-finalizer.sh under the journal-pinned
+      #                           identity (its merged-head proof still owns
+      #                           the only sanctioned deletion).
+      if LOCAL_OID="$(git rev-parse -q --verify "refs/heads/$T_BRANCH" 2>/dev/null)"; then
+        if [ "$LOCAL_OID" != "$T_OID" ]; then
+          echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is $LOCAL_OID, expected $T_OID"
+          exit 1
+        fi
+      else
+        HEAD_ABSENT="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
+          echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable while local refs/heads/$T_BRANCH is missing"
+          exit 1
+        }
+        if [ "$HEAD_ABSENT" != "$T_OID" ]; then
+          echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is missing and PR $T_PR head moved from $T_OID to $HEAD_ABSENT"
+          exit 1
+        fi
+        REMOTE_ROW="$(git ls-remote origin "refs/heads/$T_BRANCH" < /dev/null)" || {
+          echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH unreadable while the local ref is missing"
+          exit 1
+        }
+        if [ -z "$REMOTE_ROW" ]; then
+          echo "POSTCONDITION branch=$T_BRANCH already-finalized (local and remote refs gone; PR $T_PR head $T_OID verified)"
+          ALREADY_FINALIZED=1
+        else
+          echo "REMOTE-CLEANUP-REMAINING branch=$T_BRANCH local ref gone, remote survives; delegating to run-finalizer.sh under the journal-pinned identity"
+        fi
       fi
-      if [ "$LOCAL_OID" != "$T_OID" ]; then
-        echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is $LOCAL_OID, expected $T_OID"
-        exit 1
-      fi
+    fi
+    if [ "$ALREADY_FINALIZED" -eq 1 ]; then
+      continue
     fi
     REREAD="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
       echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable at the effect boundary"
