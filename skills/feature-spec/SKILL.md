@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.7.0
+version: 2.8.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -191,7 +191,26 @@ Scenario: <error path name>
 ## E2E Test Paths
 - PATH-001: <critical user journey in one sentence>
 - PATH-002: …
+
+## Scope ledger
+source: <path to the design doc this spec consumes> (sha256: <hash>) | none
+slices:
+- slice 0: <name> — CONSUMED (this spec)
+- slice 1: <name> — CONSUMED (this spec)
+- slice 2: <name> — DEFERRED
+- slice N: <name> — DEFERRED
 ```
+
+**Scope ledger rules (D7, 2026-08-27):** when the spec is seeded from a
+design doc (an office-hours/GStack design doc, an RFC, any multi-slice
+source), the ledger names the doc (path + `shasum -a 256`), enumerates
+EVERY slice/phase the doc defines, and marks each CONSUMED (this spec
+covers it) or DEFERRED (left for a later spec). A spec with no source doc
+writes `source: none` and lists its own scope as one consumed slice. This
+is what makes partial coverage LOUD at completion time: a spec that
+consumes slices 0–1 of a 7-slice doc must say so here, and every completion
+report downstream prints the coverage line from this ledger. Deferred
+slices get no stub files — report-only.
 
 **BDD scenario rules:**
 - One `When` per scenario — if you need two `When`s, write two scenarios
@@ -482,6 +501,8 @@ After it completes, open `specs/${SPEC_ID}/spec.md` and verify:
 - Each BDD scenario has exactly ONE `When` clause
 - Each `Given` is a precondition (state), not an action
 - Each `Then` is stakeholder-observable, not an internal assertion
+- `## Scope ledger` — source doc path + sha256 (or `source: none`); every
+  slice of the source doc enumerated and marked CONSUMED or DEFERRED
 
 If any check fails, **fix it now** before proceeding to Step 2.
 
@@ -834,7 +855,7 @@ Print:
 Artifacts:
   specs/NNN/spec.md          — requirements + BDD scenarios + acceptance criteria + E2E paths
   specs/NNN/plan.md          — unit test list + TDD test map + integration tests + phase gates
-  specs/NNN/tasks.md         — swarm-decomposed tasks with roster [agent:] tags + review-gates
+  .planning/ROADMAP.md       — gsd decomposition: phases + REQ coverage (spec-decompose; tasks.md only on the legacy /plan-decompose path)
   specs/NNN/preflight.json   — env/service manifest, PREFLIGHT-PASS recorded for run spec-NNN
   specs/NNN/socratic.md      — domain set + assumption ledger + risks (branch a) OR
   specs/NNN/socratic.md.unvalidated — written but NOT validated, helper unavailable (branch c)
@@ -854,6 +875,14 @@ Test contracts baked in:
 
 Agent over-mocking check: verify no agent-generated test mocks the thing it's testing.
 See docs/tdd-bdd-guide.md for full TDD/BDD reference.
+
+When the Scope ledger names a source doc, ALWAYS print (from the ledger, and
+repeat it verbatim in any handoff):
+
+```
+DESIGN-DOC COVERAGE: N of M slices consumed; unconsumed: [slice 2 <name>, …]
+  next: /feature-spec "slice 2: <name> — from <design-doc path>"
+```
 
 Next:
   /feature-implement NNN --autonomous   — unattended: swarm impl → QA → review-gate → ship → canary

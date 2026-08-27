@@ -40,7 +40,11 @@
 # - Fail-soft: every step warns and continues; ALWAYS exits 0. A cleanup
 #   failure must never block, un-merge, or fail a finished run.
 #
-# Usage: run-finalizer.sh [--dry-run] <pr-number> [<owner/repo>]
+# Usage: run-finalizer.sh [--dry-run] [--archive-planning] <pr-number> [<owner/repo>]
+#   --archive-planning (D8, 2026-08-27): after the merge is verified, move
+#   the run's .planning/phases/<dir>s to .planning/archive/<run-id>/ (one
+#   commit when tracked) — untracked phase dirs left in place have caused
+#   untracked-overwrite merge aborts on later runs (spec-388, 11 files).
 # Kill-switch: FFS_RUN_FINALIZER=off
 # Env: FFS_LEDGER_ARCHIVE_DIR overrides the ledger archive root (default:
 #      <main-repo-root>/.feature-fix-swarm/archive). Must be absolute. If it
@@ -66,6 +70,7 @@ warn() { echo "[run-finalizer] WARN: $*" >&2; }
 # --dry-run turned a stray arg into `--repo --dry-run`, which failed gh and
 # skipped cleanup SILENTLY (observed on the first live run, PR #62).
 DRY=0
+ARCHIVE_PLANNING=0
 PR=""
 REPO=""
 FINALIZER_RUN_ID=""
@@ -74,6 +79,7 @@ for arg in "$@"; do
   if [ "$expect_run_id" -eq 1 ]; then FINALIZER_RUN_ID="$arg"; expect_run_id=0; continue; fi
   case "$arg" in
     --dry-run) DRY=1 ;;
+    --archive-planning) ARCHIVE_PLANNING=1 ;;
     --run-id) expect_run_id=1 ;;
     -*) warn "unknown argument '$arg' — skipping"; exit 0 ;;
     *) if [ -z "$PR" ]; then PR="$arg"
@@ -914,6 +920,33 @@ if [ -n "$_gates_py" ]; then
   run python3 "$_gates_py" loop-round "${GSD_RUN_ID:-pr${PR}}" --reset-all \
     || note "loop-round reset failed (non-fatal)"
 fi
+# 4c. --archive-planning (D8): sweep the landed run's phase dirs out of
+# .planning/phases so a later run's merge never trips over stale untracked
+# files. Fail-soft like everything here.
+if [ "$ARCHIVE_PLANNING" -eq 1 ] && [ -d .planning/phases ]; then
+  _ap_run="${FINALIZER_RUN_ID:-${GSD_RUN_ID:-pr${PR}}}"
+  case "$_ap_run" in
+    *[!A-Za-z0-9._-]*|'') warn "--archive-planning: unsafe run id '$_ap_run' — skipping" ;;
+    *)
+      _ap_dest=".planning/archive/$_ap_run"
+      _ap_moved=0
+      run mkdir -p "$_ap_dest"
+      for _ap_d in .planning/phases/*/; do
+        [ -d "$_ap_d" ] || continue
+        run mv "$_ap_d" "$_ap_dest/" && _ap_moved=$((_ap_moved + 1))
+      done
+      if [ "$_ap_moved" -gt 0 ]; then
+        note "archived $_ap_moved phase dir(s) to $_ap_dest"
+        # one commit when git tracked the moved content (scoped paths only)
+        if [ -n "$(git ls-files .planning/phases .planning/archive 2>/dev/null | head -1)" ]; then
+          run git add -- .planning/phases "$_ap_dest"
+          run git commit -m "chore(finalizer): archive .planning phases for $_ap_run"
+        fi
+      fi
+      ;;
+  esac
+fi
+
 # 5. stale worktree metadata
 run git worktree prune
 

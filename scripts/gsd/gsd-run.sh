@@ -81,12 +81,14 @@ fi
 export PATH="$REPO_ROOT/scripts/gsd:$PATH"
 
 # ── wall rc-3 bounded auto-continue ─────────────────────────────────────────
-# plan-wall.sh exit 3 (WALL-ROUND-CAP or WALL-NO-CONVERGENCE) is TERMINAL by
+# plan-wall.sh exit 3 (WALL-ROUND-CAP) is TERMINAL by
 # default. This runner IS the --autonomous headless path — a bare `|| exit`
 # kills the process before any agent turn could apply the operator unblock
 # recipe plan-wall itself prints (resolve findings -> loop-round --reset ->
 # re-run). When that recipe's precondition is machine-verifiably met (zero
-# unresolved HIGH/CRITICAL wall findings for the phase) AND the operator
+# unresolved CRITICAL wall findings for the phase — residual HIGHs are OPEN
+# by design under the one-round wall's PASS-RESIDUAL, so they must never
+# block the recipe) AND the operator
 # pre-granted `wall-reset:<phase-slug>` in the run's autonomy ledger, run the
 # recipe here, exactly once per phase per run:
 #   bounded by the durable `wall-autoreset:<slug>` loop-round counter
@@ -95,11 +97,10 @@ export PATH="$REPO_ROOT/scripts/gsd:$PATH"
 #   regardless of the re-run's outcome; raising PLAN_WALL_AUTO_RESET_MAX is
 #   a deliberate, visible escape mirroring PLAN_WALL_MAX_ROUNDS — never a
 #   silent off-switch. ANY nonzero rc from the re-run is
-#   quarantine-terminal — post-reset the wall's prior-count sidecar is gone,
-#   so its diminishing-returns comparison is strict: only a hard
-#   zero-unresolved pass clears, a fresh HIGH surfaces as rc 1 and must also
-#   terminate or the uncounted wall->fix->wall loop this cap exists to
-#   prevent would restart. No grant (interactive sessions never mint one) =
+#   quarantine-terminal — post-reset the wall restarts at round 1 of its
+#   one-round policy: a pass (including PASS-RESIDUAL) clears, a fresh
+#   CRITICAL surfaces as rc 1 and must terminate or the uncounted
+#   wall->fix->wall loop this cap exists to prevent would restart. No grant (interactive sessions never mint one) =
 #   every skip path falls through to the unchanged quarantine, fail-closed.
 _gsd_run_wall_gate() {
   local phase_dir="$1" slug rc gates_py c open plan_rel n f
@@ -122,8 +123,11 @@ _gsd_run_wall_gate() {
     echo "gsd-run: WALL-AUTO-CONTINUE skipped (gates.py not found) — quarantine stands" >&2
     return "$rc"
   fi
-  # Zero unresolved HIGH/CRITICAL wall findings across every plan in the
-  # phase — the wall's own printed unblock precondition. A failed,
+  # Zero unresolved CRITICAL wall findings across every plan in the phase —
+  # the wall's blocking severity. HIGHs are deliberately excluded: under the
+  # one-round wall they ride as PASS-RESIDUAL assumptions and are open on
+  # every pass-residual phase, so counting them would make auto-continue
+  # permanently unreachable. A failed,
   # unparseable, or non-numeric queue answer counts as an open finding, and
   # a phase with NO enumerable plan files skips too: zero plans checked is
   # zero evidence, not a pass (fail-closed).
@@ -134,7 +138,7 @@ _gsd_run_wall_gate() {
     plans=$((plans + 1))
     plan_rel="${f#"$REPO_ROOT"/}"
     n="$(python3 "$gates_py" findings-queue list --unresolved --source wall \
-      --severity HIGH,CRITICAL --plan "$plan_rel" 2>/dev/null \
+      --severity CRITICAL --plan "$plan_rel" 2>/dev/null \
       | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null)"
     case "$n" in ''|*[!0-9]*) n=1 ;; esac
     open=$((open + n))
@@ -144,7 +148,7 @@ _gsd_run_wall_gate() {
     return "$rc"
   fi
   if [ "$open" -ne 0 ]; then
-    echo "gsd-run: WALL-AUTO-CONTINUE skipped (phase=$slug has $open unresolved HIGH/CRITICAL finding(s)) — quarantine stands" >&2
+    echo "gsd-run: WALL-AUTO-CONTINUE skipped (phase=$slug has $open unresolved CRITICAL finding(s)) — quarantine stands" >&2
     return "$rc"
   fi
   if ! python3 "$gates_py" check-grant "$GSD_RUN_ID" --action "wall-reset:$slug" >/dev/null 2>&1; then

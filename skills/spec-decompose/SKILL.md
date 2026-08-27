@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.7.0"
+version: "2.8.0"
 allowed-tools:
   - Read
   - Write
@@ -52,7 +52,11 @@ Otherwise translate the FFS spec into gsd's planning inputs:
 - `.planning/REQUIREMENTS.md` — one `REQ-NN` per user story / acceptance criterion
   from `spec.md` (verbatim ACs; testable phrasing)
 - `.planning/ROADMAP.md` — phases from `plan.md`'s phase breakdown; each phase lists
-  its REQ ids + literal success criteria (commands that must exit 0)
+  its REQ ids + literal success criteria (commands that must succeed, rc 0). On
+  ceremony tier `light` (below), cap the ROADMAP at 2 phases — MERGE
+  plan.md's breakdown into at most two coherent phases rather than dropping
+  content; ceremony cost is phases × plans × rounds, and phase count is the
+  multiplier this cap controls.
 - `.planning/config.json` — copy `templates/gsd-config.base.json`; MUST carry
   `workflow.test_command = bash scripts/gsd/gates-test-command.sh` and
   `workflow.code_review_command = bash scripts/gsd/review-gate-command.sh`
@@ -67,6 +71,35 @@ Otherwise translate the FFS spec into gsd's planning inputs:
   test suite for this spec (e.g. `bash scripts/tests/specNNN-*.test.sh && bats
   tests/bats/specNNN-*.bats`). `gates-test-command.sh` refuses to run without
   it in repos lacking `lib/tests` — vacuous evidence is worse than no evidence.
+
+#### Ceremony tier (size-aware review budget, D3 2026-08-27)
+
+Before writing ROADMAP.md, estimate the spec's size from `plan.md`: count the
+files it names/implies and estimate LOC (round UP when the plan doesn't
+quantify — an unquantified plan is not evidence of smallness). Then classify:
+
+```bash
+TIER_LINE="$(bash scripts/gsd/seed-ceremony-tier.sh specs/NNN-*/spec.md specs/NNN-*/plan.md <est-files> <est-loc>)"
+printf '%s\n' "$TIER_LINE" > .planning/ceremony-tier
+```
+
+Act on the first word of `$TIER_LINE`:
+
+- `full` — per-phase walls (unchanged pipeline). Emit the budget line:
+  `[spec-decompose] ceremony: full (<reason>) — N phases, M plans, N per-phase walls (~M dispatches)`.
+- `light` — cap ROADMAP at 2 phases (merge, above) and ONE run-level wall
+  (`plan-wall.sh --run`, invoked by feature-implement before its phase
+  loop). Emit: `[spec-decompose] ceremony: light — 2 phases, M plans, 1
+  run-level wall (~M dispatches)`.
+- `adhoc` — this spec is adhoc-sized. Print: `adhoc-sized — recommend
+  /feature-implement --adhoc`. Interactive session: STOP and ask for
+  confirmation before continuing decomposition. Autonomous/headless
+  (spawned `SESSION_KIND`, or driven by gsd-run headless): print the
+  recommendation and CONTINUE as `light` — do not stall an unattended run
+  on a question nobody will answer.
+
+`FFS_CEREMONY_TIER=full|light|adhoc` is the operator's hard override; the
+classifier is advisory and always exits 0.
 
 Pilot-proven reference shapes: spec 002's `.planning/` on branch `002-gsd-replaces-ruflo`.
 
@@ -134,11 +167,16 @@ without repeating the requirement ID. This intentionally overrides gsd-core's
 stale template prose that says PLAN requirements cannot be empty—its executor
 otherwise marks repeated IDs complete after the first plan.
 
-### Step 3.5: Plan-length gate
+### Step 3.5: Plan-length gate (advisory)
 
 After plans are written for each phase and before the coherence gate, run
-`bash scripts/gsd/plan-length-gate.sh <PHASE_DIR>`. Route every nonzero result
-to a replan; never hand-truncate a plan to satisfy the limit.
+`bash scripts/gsd/plan-length-gate.sh <PHASE_DIR>`. It WARNs and exits 0 on
+oversize plans (D6 2026-08-27 — the condense/replan round it used to force
+removed zero content on spec-387 and cost a full round); log the WARN lines
+in the report and continue. `FFS_PLAN_LENGTH_ENFORCE=1` restores blocking;
+under it, route a nonzero to a replan — never hand-truncate a plan to
+satisfy the limit. Usage/infra errors (`no-plans`, `unreadable`) are hard
+failures either way — fix the invocation, not the plan.
 
 ### Step 4: Coherence gate
 

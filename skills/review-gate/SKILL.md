@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.11.0"
+version: "1.12.0"
 ---
 
 # /review-gate
@@ -549,6 +549,15 @@ refutation. LOW/MEDIUM findings skip this (they don't block anyway).
 Rationale: autonomous runs stall on false-positive gate failures; adversarial
 kill-mandates cut them without weakening the gate (cross-model refuter
 preferred).
+
+**Stale-reopen auto-refute (D4, 2026-08-27):** a reviewer REOPEN of a
+previously-dispositioned finding (resolved:refute / resolved:waive /
+resolved:fix) that carries NO new file:line evidence beyond what the
+dispositioning round already saw is auto-refutable — cite the prior
+disposition and close it without a fresh adjudication round. Only a reopen
+with new evidence (a different file:line, a repro the disposition never
+addressed) or a genuinely new defect class earns fresh adjudication.
+Reviewer re-imagination of an adjudicated finding is noise, not signal.
 
 **Round cap:** at most 2 LLM review rounds per phase — empirically rounds 1-2
 capture ~75% of reachable improvement; further rounds burn budget without

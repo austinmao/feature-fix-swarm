@@ -1,7 +1,7 @@
 ---
 name: spec-status
 description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan out volume, execution, and judgment roles over git, .planning, gates, runner state, evidence, and hygiene; write a status report and host-native handoff."
-version: "1.1.2"
+version: "1.2.0"
 ---
 
 # /spec-status [NNN] [--continue-compact] [--no-handoff]
@@ -69,6 +69,10 @@ Write `.planning/STATUS-<UTC yyyymmdd-HHMM>.md`:
   one-command unblock.
 - **Hygiene/risk** — secret-shaped strings, TTL expiries, disk, drift.
 - **Next 3 actions** — from the risk assessor, reconciled.
+- **Design-doc coverage** — when `specs/<NNN>/spec.md` has a `## Scope
+  ledger` with a source doc: `DESIGN-DOC COVERAGE: N of M slices consumed;
+  unconsumed: [list]; next: /feature-spec "slice N: …"` (D7 — partial
+  coverage must never be silent in a handoff).
 
 Print the headline + Next 3 inline; the file carries the rest.
 

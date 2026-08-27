@@ -9,6 +9,15 @@
 # gates-test-command.sh's completion backstop instead.
 #
 # Usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE>
+#        plan-wall.sh --run [phases-root]   (default .planning/phases)
+#   --run walls EVERY phase dir under the root that has plan files, in one
+#   invocation, under ONE global `wall:run` round counter (per-phase round
+#   counters are not consumed). Per-plan records stay keyed by each plan's
+#   real parent phase slug, and residuals land per phase dir — the
+#   gates-test-command.sh per-phase completion backstop and the
+#   review-gate residual glob are satisfied unchanged. Plan-less subdirs
+#   are skipped (a later-planned phase is still walled by the per-phase
+#   seam); zero plans under the root -> exit 2. --run --await is refused.
 #   --await rc: 0 done · 20 decided-blocked · 75 pending · 76 attempts-exhausted
 #   (PLAN_WALL_AWAIT_MAX pending returns per phase, default 6; counter resets
 #   on any decided outcome)
@@ -21,18 +30,17 @@
 # WAIVED). One durable record per plan under .planning/run-state/, numbered
 # suffix on a slug collision between two DIFFERENT plan files.
 #
-# Wall policy (b)+(c) — operator decision 2026-08-08, after specs 006/007/008
-# all capped at their walls (finding trajectories 6/4/4 rounds, every finding
-# real-narrow-non-repeating: adversarial review of plan PROSE never reaches
-# 0-HIGH on security-adjacent designs).
-#   (b) diminishing returns: an unresolved CRITICAL always blocks; when every
-#       block is HIGH-only, the phase PASSES iff this round found STRICTLY
-#       FEWER new HIGH/CRITICAL findings than the previous round (per-round
-#       counts via `gates.py loop-round --note-count`). Missing history —
-#       first blocking round, counter unavailable, post-reset — is strict:
-#       blocked. On pass, residual HIGHs stay UNRESOLVED in findings-queue
-#       and are listed in <PHASE_DIR>/WALL-RESIDUALS.md as pinned executor
-#       assumptions.
+# Wall policy (b)+(c) — operator decision 2026-08-27 (supersedes the
+# 2026-08-08 diminishing-returns rule, which proved structurally
+# unsatisfiable: NEW findings per round are reviewer-imagination-bound, not
+# defect-bound: specs 388, 006, 381 and 385 each failed to converge, on top
+# of the 006/007/008 wall caps the 2026-08-08 policy already cited).
+#   (b) one round, terminal: round 1 is the review. Zero unresolved
+#       CRITICAL -> the phase PASSES immediately; unresolved HIGHs pass as
+#       PASS-RESIDUAL (stay UNRESOLVED in findings-queue, listed in
+#       <PHASE_DIR>/WALL-RESIDUALS.md as pinned executor assumptions). An
+#       unresolved CRITICAL blocks and buys exactly ONE repair round; a
+#       CRITICAL surviving the repair round -> WALL-ROUND-CAP quarantine.
 #   (c) wall the diff: those residuals are closed at the EXECUTED-DIFF review
 #       (review-gate-command.sh feeds WALL-RESIDUALS.md to the ship reviewer
 #       as review focus), where findings are falsifiable against real code.
@@ -40,9 +48,10 @@
 #   PLAN_WALL=off        skip with a durable waiver record (AC-008/EDGE-007)
 #   PLAN_WALL_REASON     waiver reason (non-empty; default supplied)
 #   PLAN_WALL_TIMEOUT    overall per-plan reviewer dispatch budget (default 180s)
-#   PLAN_WALL_MAX_ROUNDS wall invocations allowed per phase per run (default 3;
-#                        durable counter — cap-hit exits 3 with WALL-ROUND-CAP,
-#                        a quarantine verdict, not a retryable BLOCKED)
+#   PLAN_WALL_MAX_ROUNDS wall invocations allowed per phase per run (default 2:
+#                        review + one CRITICAL-repair round; durable counter —
+#                        cap-hit exits 3 with WALL-ROUND-CAP, a quarantine
+#                        verdict, not a retryable BLOCKED)
 #   GSD_RUN_ID           run id stamped into every record (else derived)
 #
 # Selection algorithm (plan.md "Reviewer selection"): rule 1 opposite-vendor
@@ -88,9 +97,19 @@ case "${1:-}" in
     ;;
 esac
 
+PW_RUN_MODE=0
+if [ "${1:-}" = "--run" ]; then
+  PW_RUN_MODE=1
+  shift
+  if [ "$PW_AWAIT" -eq 1 ] || [ "${1:-}" = "--await" ]; then
+    echo "usage: plan-wall.sh --run [phases-root] (--await is per-phase only)" >&2
+    exit 2
+  fi
+fi
+
 TARGET="${1:-}"
-if [ -z "$TARGET" ]; then
-  echo "usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE>" >&2
+if [ -z "$TARGET" ] && [ "$PW_RUN_MODE" -eq 0 ]; then
+  echo "usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE> | --run [phases-root]" >&2
   exit 2
 fi
 
@@ -123,6 +142,79 @@ if [ -z "$RUN_ID" ]; then
   [ -n "$BRANCH_NNN" ] && RUN_ID="spec-${BRANCH_NNN}"
 fi
 [ -n "$RUN_ID" ] || RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+
+# ── run mode: wall every planned phase under one global round counter ─────
+# Each phase dir is delegated to a fresh self-invocation (full per-phase
+# machinery: plan glob, records keyed by the real phase slug, per-phase
+# WALL-RESIDUALS.md, sha-unchanged idempotence). PLAN_WALL_RUN_CHILD=1
+# tells the child to skip its own per-phase round counter — the run-level
+# `wall:run` counter here is the only round authority for a --run pass.
+if [ "$PW_RUN_MODE" -eq 1 ]; then
+  # Default root honors GSD_PROJECT planning isolation (consumers namespace
+  # planning as .planning/<project>/phases). An explicit root arg always wins;
+  # with GSD_PROJECT unset, or its dir absent, this is the plain path.
+  RUN_ROOT="${TARGET:-}"
+  if [ -z "$RUN_ROOT" ]; then
+    RUN_ROOT="$PLANNING_DIR/phases"
+    if [ -n "${GSD_PROJECT:-}" ] && [ -d "$PLANNING_DIR/${GSD_PROJECT}/phases" ]; then
+      RUN_ROOT="$PLANNING_DIR/${GSD_PROJECT}/phases"
+    fi
+  fi
+  if [ ! -d "$RUN_ROOT" ]; then
+    echo "plan-wall: --run: phases root not found: $RUN_ROOT" >&2
+    exit 2
+  fi
+  PW_RUN_DIRS=()
+  shopt -s nullglob
+  for _pw_d in "$RUN_ROOT"/*/; do
+    _pw_d="${_pw_d%/}"
+    _pw_has_plan=0
+    for _pw_f in "$_pw_d"/*-PLAN.md; do _pw_has_plan=1; break; done
+    [ "$_pw_has_plan" -eq 0 ] && [ -f "$_pw_d/PLAN.md" ] && _pw_has_plan=1
+    [ "$_pw_has_plan" -eq 1 ] && PW_RUN_DIRS+=("$_pw_d")
+  done
+  shopt -u nullglob
+  if [ "${#PW_RUN_DIRS[@]}" -eq 0 ]; then
+    echo "plan-wall: --run: zero plan files under $RUN_ROOT — nothing to wall" >&2
+    exit 2
+  fi
+  PW_MAX_ROUNDS="${PLAN_WALL_MAX_ROUNDS:-2}"
+  case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=2 ;; esac
+  [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
+  PW_ROUND=""
+  if [ "${PLAN_WALL:-on}" != off ]; then
+    _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" \
+        --max "$PW_MAX_ROUNDS" 2>&1)"
+    _pw_lr_rc=$?
+    printf '%s\n' "$_pw_lr_out" >&2
+    if [ "$_pw_lr_rc" -ne 0 ] && printf '%s' "$_pw_lr_out" | grep -q '^LOOP-CAP:'; then
+      echo "plan-wall: WALL-ROUND-CAP --run — $PW_MAX_ROUNDS run-level wall rounds exhausted" >&2
+      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:run --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      exit 3
+    elif [ "$_pw_lr_rc" -ne 0 ]; then
+      echo "plan-wall: WARN: round counter unavailable (loop-round rc=$_pw_lr_rc) — proceeding without cap this invocation" >&2
+    fi
+    PW_ROUND="$(printf '%s' "$_pw_lr_out" | sed -n 's|^LOOP-ROUND: .* round \([0-9][0-9]*\)/.*|\1|p' | head -1)"
+  fi
+  RUN_RC=0
+  for _pw_d in "${PW_RUN_DIRS[@]}"; do
+    PLAN_WALL_RUN_CHILD=1 bash "${BASH_SOURCE[0]}" "$_pw_d" || RUN_RC=1
+  done
+  if [ "$RUN_RC" -ne 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
+    if [ -n "$PW_ROUND" ] && [ "$PW_ROUND" -ge "$PW_MAX_ROUNDS" ]; then
+      echo "plan-wall: WALL-ROUND-CAP --run — block on the final allowed run round ($PW_ROUND/$PW_MAX_ROUNDS): quarantine and move on" >&2
+      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:run --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      RUN_RC=3
+    else
+      echo "plan-wall: BLOCKED --run — one repair round remains (round ${PW_ROUND:-?}/$PW_MAX_ROUNDS)" >&2
+    fi
+  fi
+  if [ "$RUN_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
+    python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" --reset >/dev/null 2>&1 \
+      || echo "plan-wall: WARN: passing run-round counter reset failed (non-fatal)" >&2
+  fi
+  exit "$RUN_RC"
+fi
 
 # ── phase + plan discovery ────────────────────────────────────────────────
 
@@ -427,6 +519,8 @@ Output ONLY a JSON object (no prose, no markdown code fences) with a single "fin
 {"findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW","file":"<repo-relative path>","claim":"<one-sentence defect>","line":<integer or null>,"repro":"<string or null>","vendor":null,"confidence":null}]}
 
 Every key shown above must be present on every element; use null for ones you have no value for.
+
+CRITICAL is reserved for a defect whose execution as planned causes irreversible loss, destructive or unrecoverable state, or a security breach, and the finding must cite the exact plan step where it occurs; every other defect is at most HIGH.
 
 {"findings":[]} means you found nothing — that is a clean, successful review, not a failure.
 
@@ -1015,19 +1109,6 @@ _pw_dispatch_path() {
         queue_error=true
         break
       fi
-      # Wall policy (b): count NEW HIGH/CRITICAL findings this invocation.
-      # `add` reports dedup atomically — a re-report of a still-unresolved
-      # finding is a residual, not new; a REOPEN (previously resolved,
-      # re-reported) counts as new (the fix did not hold). An unparseable
-      # add result counts as new — fail closed toward blocking.
-      case "$sev" in
-        HIGH|CRITICAL)
-          _pw_is_new="$(printf '%s' "$add_out" | jq -r \
-            'if (.deduped == false) or (.reopened == true) then "1" else "0" end' \
-            2>/dev/null || echo 1)"
-          [ "$_pw_is_new" = "0" ] || PW_ROUND_NEW=$((PW_ROUND_NEW + 1))
-          ;;
-      esac
     done < <(printf '%s' "$PW_FINDINGS_JSON" | jq -c '.findings[]')
   fi
 
@@ -1048,10 +1129,9 @@ _pw_dispatch_path() {
   PW_QUEUE_ERROR=false
   unresolved_count="$(printf '%s' "$unresolved" | jq 'length' 2>/dev/null || echo 1)"
   if [ "$unresolved_count" != "0" ]; then
-    # Wall policy (b) (2026-08-08 operator decision): an unresolved CRITICAL
-    # always blocks; unresolved HIGHs defer to the PHASE-level
-    # diminishing-returns comparison in the driver. An unparseable severity
-    # scan counts as CRITICAL — fail closed.
+    # Wall policy (b): an unresolved CRITICAL always blocks; unresolved
+    # HIGHs pass as residuals (driver emits the phase-level PASS-RESIDUAL).
+    # An unparseable severity scan counts as CRITICAL — fail closed.
     critical_count="$(printf '%s' "$unresolved" | jq \
       '[.[] | select(.severity == "CRITICAL")] | length' 2>/dev/null || echo 1)"
     PW_VERDICT="blocked"
@@ -1062,9 +1142,9 @@ _pw_dispatch_path() {
       return 1
     fi
     # HIGH-only: verdict recorded as blocked (true at plan level right now);
-    # the driver either confirms the block or rewrites this record to
-    # pass-residual after the round-count comparison.
-    echo "plan-wall: RESIDUAL-HIGH $plan_file ($unresolved_count unresolved HIGH finding(s) — phase-level diminishing-returns decision pending)" >&2
+    # the driver rewrites this record to pass-residual (policy (b) one-round
+    # pass) unless another plan in the phase carries a hard block.
+    echo "plan-wall: RESIDUAL-HIGH $plan_file ($unresolved_count unresolved HIGH finding(s) — riding as residuals unless the phase hard-blocks)" >&2
     return 2
   fi
 
@@ -1088,14 +1168,19 @@ _pw_dispatch_path() {
 # No off-switch by design: raising PLAN_WALL_MAX_ROUNDS is the escape, and
 # it leaves the raised value visible in the invocation rather than a silent
 # waiver. PLAN_WALL=off (operator waiver) never counts a round.
-PW_MAX_ROUNDS="${PLAN_WALL_MAX_ROUNDS:-3}"
-case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=3 ;; esac
-[ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=3
-if [ "${PLAN_WALL:-on}" != off ]; then
+PW_MAX_ROUNDS="${PLAN_WALL_MAX_ROUNDS:-2}"
+case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=2 ;; esac
+[ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
+PW_ROUND=""
+if [ "${PLAN_WALL:-on}" != off ] && [ "${PLAN_WALL_RUN_CHILD:-0}" != 1 ]; then
   _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
       --max "$PW_MAX_ROUNDS" 2>&1)"
   _pw_lr_rc=$?
   printf '%s\n' "$_pw_lr_out" >&2
+  # Current round number, parsed from the durable counter's own output (fail
+  # open: unparseable -> empty -> the final-round fast-quarantine below is
+  # skipped and the LOOP-CAP pre-check above stays the only cap authority).
+  PW_ROUND="$(printf '%s' "$_pw_lr_out" | sed -n 's|^LOOP-ROUND: .* round \([0-9][0-9]*\)/.*|\1|p' | head -1)"
   if [ "$_pw_lr_rc" -ne 0 ] && printf '%s' "$_pw_lr_out" | grep -q '^LOOP-CAP:'; then
     echo "plan-wall: WALL-ROUND-CAP $TARGET — $PW_MAX_ROUNDS wall rounds exhausted for this phase without convergence" >&2
     echo "plan-wall: quarantine this phase and move on. Unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:$PHASE_SLUG --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
@@ -1129,7 +1214,7 @@ _pw_emit_pass_residual() {
   {
     echo "# Wall residuals — $PHASE_SLUG ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
     echo
-    echo "Wall policy (b) diminishing-returns pass: these unresolved HIGH findings"
+    echo "Wall policy (b) round-1 pass: these unresolved HIGH findings"
     echo "ride into execution as PINNED EXECUTOR ASSUMPTIONS. They are closed by the"
     echo "executed-diff review (policy (c)), not by plan re-litigation — do not"
     echo "resolve without a fix; treat each as a constraint the diff must satisfy"
@@ -1148,12 +1233,11 @@ _pw_emit_pass_residual() {
       echo "plan-wall: WARN: verdict rewrite failed for $rp" >&2
     fi
   done
-  echo "plan-wall: PLAN-WALL-PASS-RESIDUAL: $total HIGH ride as executor assumptions ($PW_ROUND_NEW new this round < $_pw_prev previous; manifest: $PHASE_DIR/WALL-RESIDUALS.md)"
+  echo "plan-wall: PLAN-WALL-PASS-RESIDUAL: $total HIGH ride as executor assumptions, closed at the executed-diff review (manifest: $PHASE_DIR/WALL-RESIDUALS.md)"
   OVERALL_RC=0
 }
 
 OVERALL_RC=0
-PW_ROUND_NEW=0
 PW_HARD_BLOCK=false
 PW_SOFT_RECORDS=()
 PW_SOFT_PLANS=()
@@ -1179,32 +1263,22 @@ for plan_file in "${PLAN_FILES[@]}"; do
   fi
 done
 
-# ── wall policy (b): diminishing-returns phase verdict (operator decision
-# 2026-08-08) ── note this round's NEW HIGH/CRITICAL count regardless of
-# verdict — the NEXT round's comparison needs history even when this round
-# blocks. Then, when every block is HIGH-only (zero CRITICAL, no queue/plan
-# infrastructure failure), pass iff this round found STRICTLY FEWER new
-# HIGH/CRITICAL than the previous round. Missing history (first blocking
-# round, counter unavailable, post-reset) is STRICT: blocked — the policy
-# never invents a comparison it cannot read back.
+# ── wall policy (b): one-round phase verdict (operator decision 2026-08-27)
+# ── HIGH-only blocks pass immediately as PASS-RESIDUAL (no round history, no
+# comparison). A hard block (CRITICAL, queue error, unreviewed) on the FINAL
+# allowed round quarantines directly with WALL-ROUND-CAP — BLOCKED would
+# invite a repair round that no longer exists; earlier rounds stay BLOCKED
+# (rc 1), which buys exactly the remaining repair round(s).
 if [ "${PLAN_WALL:-on}" != off ]; then
-  _pw_nc_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
-      --note-count "$PW_ROUND_NEW" 2>&1)"
-  _pw_nc_rc=$?
-  _pw_prev=""
-  if [ "$_pw_nc_rc" -eq 0 ]; then
-    _pw_prev="$(printf '%s' "$_pw_nc_out" | sed -n 's/.*prev=\([0-9a-z]*\)$/\1/p')"
-  else
-    printf '%s\n' "$_pw_nc_out" >&2
-  fi
   if [ "$PW_HARD_BLOCK" = false ] && [ "${#PW_SOFT_RECORDS[@]}" -gt 0 ]; then
-    if [ "$_pw_nc_rc" -ne 0 ] || [ -z "$_pw_prev" ] || [ "$_pw_prev" = none ]; then
-      echo "plan-wall: BLOCKED $TARGET (diminishing-returns: no prior round count to compare — first blocking round is strict)" >&2
-    elif [ "$PW_ROUND_NEW" -ge "$_pw_prev" ]; then
-      echo "plan-wall: WALL-NO-CONVERGENCE $TARGET ($PW_ROUND_NEW new HIGH/CRITICAL this round >= $_pw_prev previous — quarantining early)" >&2
+    _pw_emit_pass_residual
+  elif [ "$PW_HARD_BLOCK" = true ]; then
+    if [ -n "$PW_ROUND" ] && [ "$PW_ROUND" -ge "$PW_MAX_ROUNDS" ]; then
+      echo "plan-wall: WALL-ROUND-CAP $TARGET — hard block on the final allowed round ($PW_ROUND/$PW_MAX_ROUNDS): quarantine this phase and move on" >&2
+      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:$PHASE_SLUG --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
       OVERALL_RC=3
     else
-      _pw_emit_pass_residual
+      echo "plan-wall: BLOCKED $TARGET — one repair round remains (round ${PW_ROUND:-?}/$PW_MAX_ROUNDS); a CRITICAL surviving it quarantines the phase (exit 3)" >&2
     fi
   fi
 fi

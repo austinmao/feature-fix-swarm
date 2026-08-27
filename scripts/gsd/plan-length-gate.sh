@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Enforce the planning artifact size ceiling before coherence review.
+# Planning artifact size ceiling. ADVISORY by default (D6, 2026-08-27):
+# violations print PLAN-LENGTH:WARN:... and exit 0 — the condense/replan
+# round the blocking gate forced removed zero content on spec-387 and cost a
+# full round. FFS_PLAN_LENGTH_ENFORCE=1 restores blocking. Usage/infra error
+# paths stay hard failures either way.
 set -u
 
 usage() {
@@ -31,13 +35,18 @@ else
 fi
 [ "${#plans[@]}" -gt 0 ] || fail 'no-plans'
 
+ENFORCE="${FFS_PLAN_LENGTH_ENFORCE:-0}"
 violations=0
 for plan in "${plans[@]}"; do
   lines="$(wc -l < "$plan")" || fail "unreadable:$plan"
   lines="${lines//[[:space:]]/}"
   if [ "$lines" -gt "$LIMIT" ]; then
-    printf 'PLAN-LENGTH:%s:%s:%s\n' "$plan" "$lines" "$LIMIT" >&2
+    if [ "$ENFORCE" = 1 ]; then
+      printf 'PLAN-LENGTH:%s:%s:%s\n' "$plan" "$lines" "$LIMIT" >&2
+    else
+      printf 'PLAN-LENGTH:WARN:%s:%s:%s\n' "$plan" "$lines" "$LIMIT" >&2
+    fi
     violations=1
   fi
 done
-[ "$violations" -eq 0 ] || exit 1
+[ "$violations" -eq 0 ] || [ "$ENFORCE" != 1 ] || exit 1
