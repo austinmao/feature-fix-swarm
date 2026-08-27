@@ -4490,3 +4490,37 @@ def test_note_degraded_cli_surfaces_replay_distinctly(tmp_path) -> None:
                        capture_output=True, text=True, env=env)
     assert conflict.returncode == 2
     assert "IDEMPOTENCY-CONFLICT" in conflict.stderr
+
+
+# ── spec-006 ship round 5 (M1): pinned-fd check-grant refusal seam ──────────
+
+def test_m1_pinned_fd_check_grant_refuses_typed_not_granted(tmp_path) -> None:
+    """M1 (ship round 5): under --store-dir-fd/--store-fd (a read-only
+    descriptor-pinned snapshot) an unGRANTED prod action must refuse with
+    the typed NOT-GRANTED rc 1 — the pending-record write is skipped, never
+    attempted against the unwritable sentinel path (Errno 30 -> rc 75
+    GATES-STORE-ERROR)."""
+    import os as _os
+    import subprocess as _sp
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    store = store_dir / "evidence.json"
+    store.write_text("{}")
+    g = str(DISPATCH_DIR / "gates.py")
+    dir_fd = _os.open(store_dir, _os.O_RDONLY)
+    ev_fd = _os.open(store, _os.O_RDONLY)
+    try:
+        r = _sp.run(["python3", g, "check-grant", "run-7",
+                     "--action", "deploy:prod-release",
+                     "--artifact", _GOOD_ARTIFACT,
+                     "--store-dir-fd", str(dir_fd), "--store-fd", str(ev_fd)],
+                    capture_output=True, text=True,
+                    pass_fds=(dir_fd, ev_fd), cwd=tmp_path)
+    finally:
+        _os.close(dir_fd)
+        _os.close(ev_fd)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "NOT-GRANTED" in r.stdout, r.stdout
+    assert "GATES-STORE-ERROR" not in r.stderr, r.stderr
+    # the pinned snapshot is untouched — no pending record was written
+    assert store.read_text() == "{}"

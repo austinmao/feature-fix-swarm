@@ -1922,6 +1922,13 @@ def record_pending(store: Path, run_id: str, action: str, reason: str) -> bool:
     morning resume is one `grant` command (long-run-continuity port)."""
     if not ACTION_PAT.match(action):
         return False
+    if _PINNED_STORE_DATA is not None:
+        # M1 (ship round 5): a descriptor-pinned store is a READ-ONLY
+        # snapshot — writing the pending record would hit the unwritable
+        # sentinel path (Errno 30 -> rc 75 GATES-STORE-ERROR) and mask the
+        # typed refusal.  The refusal itself carries the verdict; every
+        # caller of this seam skips the durability side effect under fds.
+        return False
     with _StoreLock(store):
         data = _load_store(store)
         auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
