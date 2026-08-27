@@ -150,7 +150,16 @@ fi
 # tells the child to skip its own per-phase round counter — the run-level
 # `wall:run` counter here is the only round authority for a --run pass.
 if [ "$PW_RUN_MODE" -eq 1 ]; then
-  RUN_ROOT="${TARGET:-$PLANNING_DIR/phases}"
+  # Default root honors GSD_PROJECT planning isolation (consumers namespace
+  # planning as .planning/<project>/phases). An explicit root arg always wins;
+  # with GSD_PROJECT unset, or its dir absent, this is the plain path.
+  RUN_ROOT="${TARGET:-}"
+  if [ -z "$RUN_ROOT" ]; then
+    RUN_ROOT="$PLANNING_DIR/phases"
+    if [ -n "${GSD_PROJECT:-}" ] && [ -d "$PLANNING_DIR/${GSD_PROJECT}/phases" ]; then
+      RUN_ROOT="$PLANNING_DIR/${GSD_PROJECT}/phases"
+    fi
+  fi
   if [ ! -d "$RUN_ROOT" ]; then
     echo "plan-wall: --run: phases root not found: $RUN_ROOT" >&2
     exit 2

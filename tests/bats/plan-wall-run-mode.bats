@@ -172,3 +172,35 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" != *"WALL-ROUND-CAP"* ]]
 }
+
+@test "--run default root honors GSD_PROJECT planning isolation" {
+  # consumer layout: .planning/<project>/phases/<phase>/
+  mkdir -p ".planning/projA/phases/01-iso"
+  echo "Phase iso: a plain widget under project isolation" > .planning/projA/phases/01-iso/PLAN.md
+  stub_alpha_high
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT=projA \
+    run bash "$LEVER" --run
+  [ "$status" -eq 0 ]
+  # walled the isolated phase, NOT the top-level ones
+  ls .planning/run-state/plan-wall-01-iso-*.json
+  ! ls .planning/run-state/plan-wall-01-alpha-*.json 2>/dev/null
+}
+
+@test "--run with GSD_PROJECT set but no isolated dir falls back to the plain root" {
+  stub_alpha_high
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT=absent \
+    run bash "$LEVER" --run
+  [ "$status" -eq 0 ]
+  ls .planning/run-state/plan-wall-01-alpha-*.json
+}
+
+@test "--run explicit root arg beats GSD_PROJECT" {
+  mkdir -p ".planning/projA/phases/01-iso"
+  echo "Phase iso: a plain widget" > .planning/projA/phases/01-iso/PLAN.md
+  stub_alpha_high
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT=projA \
+    run bash "$LEVER" --run .planning/phases
+  [ "$status" -eq 0 ]
+  ls .planning/run-state/plan-wall-01-alpha-*.json
+  ! ls .planning/run-state/plan-wall-01-iso-*.json 2>/dev/null
+}
