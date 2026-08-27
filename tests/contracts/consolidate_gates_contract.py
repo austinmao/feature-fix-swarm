@@ -289,6 +289,20 @@ def test_minted_grant_never_matches_a_pr_substituted_scope(tmp_path):
     assert gates.check_grant(store, "run-1", substituted) is False
 
 
+def test_scope_binds_repository_identity_and_base():
+    """CR-07: the canonical scope must include the physical repository root
+    and the base branch — a grant proven in repository A must never check
+    out in repository B (or against another base)."""
+    gates = gates_module()
+    t = [("spec/a", "a" * 40, 17, "b" * 40)]
+    one = gates.consolidate_scope(t, repo_root="/repo/one", base="main")
+    two = gates.consolidate_scope(t, repo_root="/repo/two", base="main")
+    other_base = gates.consolidate_scope(t, repo_root="/repo/one",
+                                         base="develop")
+    assert one != two, "scope ignores repository identity"
+    assert one != other_base, "scope ignores the base branch"
+
+
 def test_cli_refuses_over_cap_consolidate_grant(tmp_path):
     scope = queue_scope(TUPLES)
     env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))

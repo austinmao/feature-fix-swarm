@@ -511,6 +511,20 @@ for j, t in enumerate(tokens):
 PYEOF
 }
 
+@test "[REPO] proofs and effects bind to one physical repository" {
+  # CR-07: a grant scoped to the fixture repository must refuse when the
+  # run is pointed at a DIFFERENT physical repository — before any effect.
+  fixture_sane; build_sandbox
+  extract_block
+  REPO_B="$BATS_TEST_TMPDIR/repo-b"
+  git init -q -b main "$REPO_B"
+  ( cd "$REPO_B" && echo b > f.txt && git add f.txt && git commit -qm b )
+  export CONSOLIDATE_REPO="$REPO_B"
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  [ ! -s "$EFFECTS" ]
+}
+
 @test "[SANDBOX] no absolute, traversing, or unknown slash-qualified escape" {
   fixture_sane; build_sandbox
   extract_block
