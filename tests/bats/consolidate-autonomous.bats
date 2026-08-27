@@ -17,6 +17,7 @@ setup() {
   # tests/bats/takeover-check.bats).
   export TAKEOVER_TEST_IDENTITY="bats-boot-1"
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  export REAL_ROOT="$ROOT"
   SKILL="$ROOT/skills/git-branch-consolidate/SKILL.md"
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
   export GIT_AUTHOR_NAME=wave0 GIT_AUTHOR_EMAIL=wave0@example.invalid
@@ -157,6 +158,15 @@ JSON
   export ESTATE_DOC="$BATS_TEST_TMPDIR/estate-doc.json"
   printf '{"branches": []}\n' > "$ESTATE_DOC"
 
+  # REAL durable queue journal (CR-01/WR-01): the default happy manifest is
+  # built through the production accessor, never a synthetic document.
+  export QJ_STORE="$BATS_TEST_TMPDIR/lqstore"
+  mkdir -p "$QJ_STORE"; chmod 700 "$QJ_STORE"
+  export CONSOLIDATE_QUEUE_STORE="$QJ_STORE"
+  export CONSOLIDATE_QUEUE_ID="run-0304"
+  make_real_journal run-0304 run-0304 \
+    spec/merged "$MERGED_OID" 201 "$(git -C "$WORK" rev-parse refs/heads/main)"
+
   # four evidence inputs, all present by default
   export CONSOLIDATE_EVIDENCE_DIR="$BATS_TEST_TMPDIR/evidence"
   mkdir -p "$CONSOLIDATE_EVIDENCE_DIR"
@@ -169,6 +179,19 @@ JSON
   export CONSOLIDATE_RUN_ID="run-0304"
   printf '%s consolidate:estate:%s\n' "$CONSOLIDATE_RUN_ID" "$TARGET_HASH" > "$GRANT_FILE"
   export CONSOLIDATE_SCOPE="consolidate:estate:$TARGET_HASH"
+}
+
+make_real_journal() { # $1 queue-id, $2 run-id, then (branch head pr merge)*
+  local qid="$1" rid="$2" jrnl="$REAL_ROOT/skills/land-queue/scripts/queue-journal.py"
+  shift 2
+  python3 "$jrnl" init --store "$QJ_STORE" --queue-id "$qid" --run-id "$rid"
+  while [ $# -gt 0 ]; do
+    python3 "$jrnl" append --store "$QJ_STORE" --queue-id "$qid" \
+      --kind intent --step merge --item "$1" --pr "$3" --head "$2"
+    python3 "$jrnl" append --store "$QJ_STORE" --queue-id "$qid" \
+      --kind terminal --step terminal --item "$1" --status LANDED --detail "$4"
+    shift 4
+  done
 }
 
 # ── the production seam: marker-delimited Step 4-A block ──────────────────
@@ -404,6 +427,33 @@ am = first("scripts/gsd/assert-merged.sh")
 gh = first("gh")
 fin = first("scripts/gsd/run-finalizer.sh")
 assert grant < am < gh < fin, (grant, am, gh, fin, tokens)
+PYEOF
+}
+
+@test "[JOURNAL] target manifest comes from the durable queue journal for the exact queue id" {
+  # CR-01: the intake collector cannot emit pr/merge fields and returns an
+  # empty item list in production — consolidation identity must come from
+  # the journal read-landed-tuples projection for this exact queue id.
+  fixture_sane; build_sandbox
+  extract_block
+  run run_block --execute
+  [ "$status" -eq 0 ]
+  grep -q "finalize" "$EFFECTS"
+  python3 - "$CALL_LOG" <<'PYEOF'
+import sys
+calls = open(sys.argv[1], "rb").read().split(b"\0")
+tokens = [c.decode() for c in calls if c]
+jq = "skills/land-queue/scripts/queue-journal.py"
+assert jq in tokens, f"queue journal accessor never consulted: {tokens}"
+i = tokens.index(jq)
+argv = tokens[i:i + 8]
+assert "read-landed-tuples" in argv, argv
+assert "run-0304" in argv, f"journal not read for the exact queue id: {argv}"
+# the intake collector is never the consolidation identity source
+for j, t in enumerate(tokens):
+    if t == "skills/land-queue/scripts/collect-queue.py":
+        assert tokens[j + 1] != "collect", \
+            f"intake collector consulted for consolidation identity: {tokens}"
 PYEOF
 }
 
