@@ -62,12 +62,14 @@ STUB
 #!/usr/bin/env bash
 printf '%s\0' assert-merged.sh "$@" >> "${CALL_LOG:?}"
 printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
+printf 'assert-merged.sh %s\n' "$PWD" >> "${CWD_LOG:-/dev/null}"
 exit 0
 STUB
   cat > "$MOCK_BIN/run-finalizer.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\0' run-finalizer.sh "$@" >> "${CALL_LOG:?}"
 printf 'finalize %s\n' "$*" >> "${EVENTS:?}"
+printf 'run-finalizer.sh %s\n' "$PWD" >> "${CWD_LOG:-/dev/null}"
 exit 0
 STUB
   chmod +x "$MOCK_BIN"/*
@@ -78,6 +80,7 @@ write_gh() { # full happy gh authority for spec/item-a=101 spec/item-b=102
 #!/usr/bin/env bash
 printf '%s\0' gh "$@" >> "${CALL_LOG:?}"
 printf 'gh %s\n' "$*" >> "${EVENTS:?}"
+printf 'gh %s\n' "$PWD" >> "${CWD_LOG:-/dev/null}"
 br_of() { case "$1" in 101) echo spec/item-a ;; 102) echo spec/item-b ;; 103) echo spec/item-c ;; *) return 1 ;; esac; }
 case "${1:-} ${2:-}" in
   "pr view")
@@ -1380,6 +1383,93 @@ PYAGE
   grep -q "QUEUE-ABORTED:systemic:queue-wall" <<<"$output"
   ! grep -q "^finalize" "$EVENTS"
   ! grep -q "^assert-merged" "$EVENTS"
+}
+
+@test "[REPO-BIND] every GitHub authority runs in the target root with the derived slug from a foreign cwd" {
+  # CR-02 (round 3): gh resolution is cwd-based.  Invoking the queue from a
+  # DIFFERENT repository with colliding PR numbers must never let any gh,
+  # assert-merged.sh, or run-finalizer.sh call resolve repository B — the
+  # queue runs FROM the resolved physical target root and passes the
+  # origin-derived immutable owner/repo slug through every GitHub authority.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  # forge-shaped origin: fetch/push rewrite to the local bare fixture while
+  # `git remote get-url origin` still reports the URL the slug derives from
+  git -C "$WORK" remote set-url origin https://github.com/acme/widgets.git
+  git -C "$WORK" config url."$ORIGIN".insteadOf https://github.com/acme/widgets.git
+  export CWD_LOG="$BATS_TEST_TMPDIR/cwds"; : > "$CWD_LOG"
+  write_gh
+  write_children
+  # rewrap gh: require + strip the exact slug binding, then serve as usual
+  mv "$MOCK_BIN/gh" "$MOCK_BIN/gh-real"
+  cat > "$MOCK_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+args=() bound=0
+for a in "$@"; do
+  if [ "$a" = "--repo" ] && [ "$bound" = 0 ]; then bound=1; continue; fi
+  if [ "$bound" = 1 ]; then
+    [ "$a" = "acme/widgets" ] || { echo "UNSTUBBED-BOUNDARY:gh wrong slug $a" >&2; exit 64; }
+    bound=2; continue
+  fi
+  args+=("$a")
+done
+[ "$bound" = 2 ] || { echo "UNSTUBBED-BOUNDARY:gh missing --repo acme/widgets binding: $*" >&2; exit 64; }
+exec "${0%/gh}/gh-real" "${args[@]}"
+STUB
+  chmod +x "$MOCK_BIN/gh"
+  # a colliding same-numbered estate where cwd-based gh resolution would
+  # land if the queue kept the caller's working directory
+  REPO_B="$BATS_TEST_TMPDIR/repo-b"
+  git init -q -b main "$REPO_B"
+  ( cd "$REPO_B" && echo b > f.txt && git add f.txt && git commit -qm b )
+  RUN_ID=adhoc-bind1
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  cd "$REPO_B"
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  # every recorded authority cwd is the resolved physical target root —
+  # no call ever reached repository B
+  REPO_PHYS="$(cd "$WORK" && pwd -P)"
+  [ -s "$CWD_LOG" ]
+  BAD_CWD=0
+  while IFS=' ' read -r tool dir; do
+    [ "$dir" = "$REPO_PHYS" ] || { echo "authority $tool ran in $dir (expected $REPO_PHYS)" >&2; BAD_CWD=1; }
+  done < "$CWD_LOG"
+  [ "$BAD_CWD" -eq 0 ]
+  # the slug rode the merged-state and finalizer authorities too
+  grep -qx "assert-merged 101 acme/widgets" "$EVENTS"
+  grep -qx "finalize --run-id $RUN_ID 101 acme/widgets" "$EVENTS"
+}
+
+@test "[REPO-BIND] resume refuses a journal bound to a different repository before any authority" {
+  # CR-02 (round 3): the resumed physical target root must equal the
+  # journal-recorded repository binding — verified BEFORE reconciliation.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  RUN_ID=adhoc-bind2
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID" \
+    --repo "$WORK" --base main
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step finalize --item spec/item-a --pr 301 --head "$OID_A"
+  write_gh
+  write_children
+  REPO_B="$BATS_TEST_TMPDIR/repo-bind-b"
+  git init -q -b main "$REPO_B"
+  ( cd "$REPO_B" && echo b > f.txt && git add f.txt && git commit -qm b )
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$REPO_B" --base main \
+    --run-id "$RUN_ID" --resume "$RUN_ID"
+  [ "$status" -eq 2 ]
+  grep -q "QUEUE-REFUSED:repo-mismatch" <<<"$output"
+  ! grep -q "^gh " "$EVENTS"
+  ! grep -q "^assert-merged" "$EVENTS"
+  ! grep -q "^finalize" "$EVENTS"
 }
 
 @test "[POSTURE] production touch is auditable through review policy" {

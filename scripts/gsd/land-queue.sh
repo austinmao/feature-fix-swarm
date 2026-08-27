@@ -66,6 +66,50 @@ done
 # caller-supplied non-ledger --run-id ever trips the unrecordable block.
 [ -n "$RUN_ID" ] || RUN_ID="adhoc-land-queue-$(date +%s)-$$"
 
+# ── CR-02 (round 3): one physical target repository ───────────────────────
+# Resolve the physical target root ONCE immediately after argument parsing
+# and run the whole queue FROM it: gh resolves repositories from the cwd,
+# so every gh / assert-merged.sh / run-finalizer.sh authority below is
+# bound to the --repo target, never the caller's working directory.  When
+# the target's origin is forge-shaped, an immutable owner/repo slug derived
+# from that remote additionally rides every GitHub authority as --repo (gh)
+# and as the positional owner/repo both assert-merged.sh and
+# run-finalizer.sh already accept.  A --drain request touches no repository
+# and keeps the caller's cwd (its marker lands in the caller-resolved
+# store, exactly as before).
+REPO_ROOT="" REPO_SLUG=""
+GH_BIND=()
+if [ "$DRAIN" -eq 0 ]; then
+  if ! REPO_ROOT="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "QUEUE-REFUSED:repo-invalid --repo is not a git repository: $REPO"
+    exit 2
+  fi
+  REPO_ROOT="$(cd -- "$REPO_ROOT" && pwd -P)"
+  REPO="$REPO_ROOT"
+  # hermetic estate seam: canonicalize a relative path before leaving the
+  # caller's cwd, or the collector would resolve it against the target root.
+  if [ -n "${LAND_QUEUE_ESTATE_JSON:-}" ] \
+      && [ "${LAND_QUEUE_ESTATE_JSON#/}" = "$LAND_QUEUE_ESTATE_JSON" ]; then
+    LAND_QUEUE_ESTATE_JSON="$PWD/$LAND_QUEUE_ESTATE_JSON"
+  fi
+  cd -- "$REPO_ROOT"
+  # the CONFIGURED url, never `remote get-url` — get-url applies insteadOf
+  # rewrites, and the slug must derive from the immutable configured remote
+  _origin_url="$(git -C "$REPO_ROOT" config --get remote.origin.url 2>/dev/null || true)"
+  case "$_origin_url" in
+    *://*) _slug="${_origin_url%.git}"; _slug="${_slug#*://}"; _slug="${_slug#*@}"; _slug="${_slug#*/}" ;;
+    *@*:*) _slug="${_origin_url%.git}"; _slug="${_slug##*:}" ;;
+    *) _slug="" ;;
+  esac
+  case "$_slug" in
+    # exactly owner/repo — deeper forge paths or malformed shapes derive
+    # nothing and the cwd pin alone carries the binding
+    */*) case "$_slug" in */*/*|/*|*/) ;; *) REPO_SLUG="$_slug" ;; esac ;;
+  esac
+  unset _origin_url _slug
+  [ -z "$REPO_SLUG" ] || GH_BIND=(--repo "$REPO_SLUG")
+fi
+
 STORE_DIR="$(python3 "$GATES" store-dir)"
 LQ="$STORE_DIR/land-queue"
 mkdir -p "$LQ"
@@ -237,11 +281,11 @@ resume_reconcile() {
       # assert-merged.sh is the merged-state authority for the resume path:
       # rc 0 = MERGED, rc 1/2 = provably not landed, anything else = unknown.
       am_rc=0
-      "$am" "$pr" || am_rc=$?
+      "$am" "$pr" ${REPO_SLUG:+"$REPO_SLUG"} || am_rc=$?
       case "$am_rc" in
         0)
           errf="$WORKTMP/err-resume"
-          merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid 2>"$errf")" || merge_sha=""
+          merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid ${GH_BIND[@]+"${GH_BIND[@]}"} 2>"$errf")" || merge_sha=""
           ;;
         1|2) merge_sha="" ;;
         *)
@@ -264,7 +308,7 @@ resume_reconcile() {
         # finalizer MUTATION as well — a fence pass at classification time
         # is never authority to mutate later.
         require_go "resume-finalize $item" || return 1
-        if "$rf" --run-id "$RUN_ID" "$pr"; then
+        if "$rf" --run-id "$RUN_ID" "$pr" ${REPO_SLUG:+"$REPO_SLUG"}; then
           journal --kind result --step finalize --item "$item" --status reconciled
           journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
         else
@@ -312,9 +356,20 @@ if [ -n "$RESUME" ]; then
     echo "QUEUE-ERROR:store journal carries no readable created_at"; exit 70 ;;
   esac
   # deadline == created_at + queue wall by construction (journal cmd_init);
-  # the guard reproduces the same absolute deadline from created_at.  The
-  # repo/base binding is consumed by the CR-02 physical-root check.
-  : "$J_DEADLINE" "$J_REPO_ROOT" "$J_BASE"
+  # the guard reproduces the same absolute deadline from created_at.
+  : "$J_DEADLINE"
+  # CR-02 (round 3): the physical target root must equal the journal-bound
+  # repository before any reconciliation authority runs (a pre-binding
+  # journal has no repo_root and stays governed by the grant-mint
+  # fail-closed check).
+  if [ -n "$J_REPO_ROOT" ] && [ "$J_REPO_ROOT" != "$REPO_ROOT" ]; then
+    echo "QUEUE-REFUSED:repo-mismatch journal is bound to $J_REPO_ROOT but --repo resolves to $REPO_ROOT"
+    exit 2
+  fi
+  if [ -n "$J_BASE" ] && [ "$J_BASE" != "$BASE" ]; then
+    echo "QUEUE-REFUSED:base-mismatch journal is bound to base $J_BASE but --base is $BASE"
+    exit 2
+  fi
   QUEUE_STARTED="$J_CREATED_AT"
   ITEM_STARTED="$(date +%s)"
   GUARD_ITEMS=0
@@ -665,7 +720,7 @@ land_one_item() {
   drop_worktree "$wt"
 
   errf="$WORKTMP/err-prview-$IDX"
-  pr="$(gh pr view "$branch" --json number -q .number 2>"$errf")"
+  pr="$(gh pr view "$branch" --json number -q .number ${GH_BIND[@]+"${GH_BIND[@]}"} 2>"$errf")"
   eff_rc=$?
   if [ "$eff_rc" -ne 0 ]; then
     fail_item gh "$eff_rc" "$errf" pr-view "BLOCKED:pr-missing" \
@@ -673,7 +728,7 @@ land_one_item() {
     return $?
   fi
   errf="$WORKTMP/err-prhead-$IDX"
-  remote_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid 2>"$errf")"
+  remote_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid ${GH_BIND[@]+"${GH_BIND[@]}"} 2>"$errf")"
   eff_rc=$?
   if [ "$eff_rc" -ne 0 ]; then
     fail_item gh "$eff_rc" "$errf" pr-head "BLOCKED:pr-head" \
@@ -761,7 +816,7 @@ land_one_item() {
   require_go "ci $branch" || return 2
   journal --kind intent --step ci --item "$branch"
   errf="$WORKTMP/err-ci-$IDX"
-  run_bounded 1200 gh pr checks "$pr" --watch --interval 10 </dev/null 2>"$errf"
+  run_bounded 1200 gh pr checks "$pr" --watch --interval 10 ${GH_BIND[@]+"${GH_BIND[@]}"} </dev/null 2>"$errf"
   ci_rc=$?
   if [ "$ci_rc" -ne 0 ]; then
     if [ "$ci_rc" -eq 124 ]; then
@@ -779,7 +834,7 @@ land_one_item() {
   # and the PR must not be CONFLICTING before merge may be considered.
   errf="$WORKTMP/err-cistate-$IDX"
   ci_state="$(gh pr view "$pr" --json statusCheckRollup,mergeable \
-    -q '(.statusCheckRollup | length | tostring) + " " + .mergeable' 2>"$errf")"
+    -q '(.statusCheckRollup | length | tostring) + " " + .mergeable' ${GH_BIND[@]+"${GH_BIND[@]}"} 2>"$errf")"
   eff_rc=$?
   if [ "$eff_rc" -ne 0 ]; then
     journal --kind result --step ci --item "$branch" --status error
@@ -836,7 +891,7 @@ land_one_item() {
   # 8. head stability re-read: any drift is a typed abort — never a re-pin
   #    under the existing grant (f1bc7cad).
   errf="$WORKTMP/err-prhead2-$IDX"
-  now_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid 2>"$errf")"
+  now_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid ${GH_BIND[@]+"${GH_BIND[@]}"} 2>"$errf")"
   eff_rc=$?
   if [ "$eff_rc" -ne 0 ]; then
     fail_item gh "$eff_rc" "$errf" pr-head "BLOCKED:pr-head" \
@@ -863,7 +918,7 @@ land_one_item() {
 
   journal --kind intent --step merge --item "$branch" --pr "$pr" --head "$reviewed"
   errf="$WORKTMP/err-merge-$IDX"
-  gh pr merge "$pr" --squash --match-head-commit "$reviewed" 2>"$errf"
+  gh pr merge "$pr" --squash --match-head-commit "$reviewed" ${GH_BIND[@]+"${GH_BIND[@]}"} 2>"$errf"
   eff_rc=$?
   if [ "$eff_rc" -ne 0 ]; then
     journal --kind result --step merge --item "$branch" --status failed
@@ -874,12 +929,12 @@ land_one_item() {
   journal --kind result --step merge --item "$branch" --status ok
 
   am="$(command -v assert-merged.sh || printf '%s\n' "$SCRIPT_DIR/assert-merged.sh")"
-  if ! "$am" "$pr"; then
+  if ! "$am" "$pr" ${REPO_SLUG:+"$REPO_SLUG"}; then
     block_item "BLOCKED:not-merged" "assert-merged.sh does not confirm PR $pr as MERGED" \
       "bash scripts/gsd/assert-merged.sh $pr"
     return 1
   fi
-  if ! merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid)"; then
+  if ! merge_sha="$(gh pr view "$pr" --json mergeCommit -q .mergeCommit.oid ${GH_BIND[@]+"${GH_BIND[@]}"})"; then
     block_item "BLOCKED:merge-sha" "gh pr view $pr --json mergeCommit failed" \
       "gh pr view $pr --json mergeCommit -q .mergeCommit.oid"
     return 1
@@ -895,7 +950,7 @@ land_one_item() {
   # recovery can complete it and only then append LANDED.
   journal --kind intent --step finalize --item "$branch" --pr "$pr" --head "$reviewed"
   rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
-  if ! "$rf" --run-id "$RUN_ID" "$pr"; then
+  if ! "$rf" --run-id "$RUN_ID" "$pr" ${REPO_SLUG:+"$REPO_SLUG"}; then
     journal --kind result --step finalize --item "$branch" --status failed
     block_item "BLOCKED:finalizer" "run-finalizer failed for PR $pr" \
       "bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $pr"
