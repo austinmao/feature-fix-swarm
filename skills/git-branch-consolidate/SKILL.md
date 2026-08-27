@@ -101,11 +101,14 @@ all-items-terminal boundary, via `queue-journal.py read-landed-tuples` and
 manifest, refreshes `collect-estate.py`, requires `landed==true`, checks the
 exact scope-aware grant, and runs `assert-merged.sh` once per target PR —
 then prints the evidence and the PLANNED `run-finalizer.sh` delegation and
-deletes nothing.  The operational `--execute` code path is gated by the
-Phase 3 activation checkpoint and is NOT yet active: until it lands,
-`--execute` refuses with `CONSOLIDATE-REFUSED:execute-not-activated`.  When
-activated it may only delegate to `bash scripts/gsd/run-finalizer.sh`
-(the sole deletion owner) after immediate grant and OID rechecks.
+deletes nothing.  Explicit `--execute` (activated after the Phase 3
+checkpoint review) reruns the exact scope-aware grant check, rereads the
+local ref OID (when run inside a git worktree) and the PR head OID
+immediately before EVERY effect, and delegates each deletion exactly once to
+`bash scripts/gsd/run-finalizer.sh` — the sole deletion owner, whose
+merged-head proof holds the only sanctioned `git branch -D`.  The finalizer
+is fail-soft: the block prints its exit code and the observed ref
+postcondition rather than treating rc 0 alone as deletion proof.
 
 Environment contract: `CONSOLIDATE_RUN_ID` (queue run id owning the grant),
 `CONSOLIDATE_EVIDENCE_DIR` (must contain `grant`, `fresh-estate`,
@@ -208,6 +211,12 @@ fi
 read -r DIGEST < "$WORK/plan"
 SCOPE="consolidate:estate:$DIGEST"
 
+# ── exact target-set equality: rebuilt digest vs the granted manifest ────
+if [ -n "${CONSOLIDATE_SCOPE:-}" ] && [ "$SCOPE" != "$CONSOLIDATE_SCOPE" ]; then
+  echo "CONSOLIDATE-REFUSED:target-set mismatch rebuilt scope $SCOPE != granted scope $CONSOLIDATE_SCOPE"
+  exit 1
+fi
+
 # ── exact scope-aware grant check (queue-derived scope, never substituted)
 if ! lib/gates.py check-grant "$RUN_ID" --action "$SCOPE"; then
   echo "CONSOLIDATE-REFUSED:grant no exact unexpired queue-derived grant for scope $SCOPE"
@@ -222,20 +231,77 @@ while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
   fi
 done < <(tail -n +2 "$WORK/plan")
 
-# ── evidence report + planned (never self-executed) finalizer delegation ─
+# ── post-proof tip confirmation: observed PR head must equal expected OID ─
+while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
+  OBSERVED="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
+    echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable"
+    exit 1
+  }
+  if [ "$OBSERVED" != "$T_OID" ]; then
+    echo "CONSOLIDATE-REFUSED:oid-drift branch $T_BRANCH tip moved from $T_OID to $OBSERVED after proof"
+    exit 1
+  fi
+done < <(tail -n +2 "$WORK/plan")
+
+# ── evidence report + finalizer delegation plan ──────────────────────────
 echo "CONSOLIDATE REPORT mode=$MODE run=$RUN_ID"
 echo "EVIDENCE grant=ok scope=$SCOPE"
 echo "EVIDENCE fresh-estate=ok landed=true for every target"
 echo "EVIDENCE target-set=ok digest=$DIGEST"
 while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
   echo "EVIDENCE assert-merged=ok pr=$T_PR"
+  echo "EVIDENCE tip-oid=confirmed pr=$T_PR oid=$T_OID"
   echo "TARGET branch=$T_BRANCH oid=$T_OID pr=$T_PR merge=$T_MERGE"
   echo "PLANNED-FINALIZER: bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $T_PR"
 done < <(tail -n +2 "$WORK/plan")
 
 if [ "$MODE" = "execute" ]; then
-  echo "CONSOLIDATE-REFUSED:execute-not-activated the --execute code path is gated by the Phase 3 activation checkpoint; report-only evidence above"
-  exit 1
+  # ── execute: immediate pre-effect rechecks, then finalizer-only delegation
+  # Races between proof and effect fail closed: the exact scope-aware grant
+  # and the target tip OID are rechecked immediately before EVERY effect.
+  DELEGATION_FAILED=0
+  while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
+    if ! lib/gates.py check-grant "$RUN_ID" --action "$SCOPE" < /dev/null; then
+      echo "CONSOLIDATE-REFUSED:grant expired, revoked, or scope-substituted at the effect boundary (scope $SCOPE)"
+      exit 1
+    fi
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      LOCAL_OID="$(git rev-parse -q --verify "refs/heads/$T_BRANCH" 2>/dev/null || true)"
+      if [ -n "$LOCAL_OID" ] && [ "$LOCAL_OID" != "$T_OID" ]; then
+        echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is $LOCAL_OID, expected $T_OID"
+        exit 1
+      fi
+    fi
+    REREAD="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
+      echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable at the effect boundary"
+      exit 1
+    }
+    if [ "$REREAD" != "$T_OID" ]; then
+      echo "CONSOLIDATE-REFUSED:oid-drift branch $T_BRANCH tip moved from $T_OID to $REREAD between check and effect"
+      exit 1
+    fi
+    # sole deletion owner: delegate exactly as the landed Phase 2 caller does;
+    # the finalizer is fail-soft, so rc alone is never treated as deletion proof
+    FIN_RC=0
+    bash scripts/gsd/run-finalizer.sh --run-id "$RUN_ID" "$T_PR" < /dev/null || FIN_RC=$?
+    echo "DELEGATED run-finalizer.sh rc=$FIN_RC pr=$T_PR branch=$T_BRANCH"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if git rev-parse -q --verify "refs/heads/$T_BRANCH" >/dev/null 2>&1; then
+        echo "POSTCONDITION branch=$T_BRANCH still-present (finalizer kept or refused it)"
+      else
+        echo "POSTCONDITION branch=$T_BRANCH ref-gone"
+      fi
+    else
+      echo "POSTCONDITION branch=$T_BRANCH not-observable (no git worktree at cwd)"
+    fi
+    [ "$FIN_RC" -eq 0 ] || DELEGATION_FAILED=1
+  done < <(tail -n +2 "$WORK/plan")
+  if [ "$DELEGATION_FAILED" -ne 0 ]; then
+    echo "CONSOLIDATE-DELEGATION-INCOMPLETE: a finalizer delegation returned nonzero; inspect postconditions above"
+    exit 1
+  fi
+  echo "execute complete: every deletion was delegated to run-finalizer.sh"
+  exit 0
 fi
 
 echo "report-only: no deletion performed; run-finalizer.sh not invoked"
