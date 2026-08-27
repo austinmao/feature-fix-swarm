@@ -94,7 +94,8 @@ case "${1:-} ${2:-}" in
       "--json headRefOid -q .headRefOid")
         b="$(br_of "$target")" || { echo "UNSTUBBED-BOUNDARY:head $target" >&2; exit 64; }
         reads="${GH_STATE:?}/headreads-$target"; echo x >> "$reads"
-        if [ "${GH_HEAD_DRIFT:-}" = "1" ] && [ "$(wc -l < "$reads")" -ge 2 ]; then
+        # T2 (ship round 5): GH_HEAD_DRIFT_AT=1 drifts from the FIRST read
+        if [ "${GH_HEAD_DRIFT:-}" = "1" ] && [ "$(wc -l < "$reads")" -ge "${GH_HEAD_DRIFT_AT:-2}" ]; then
           o1="11111111111111111111"; echo "$o1$o1"
         else
           git --git-dir "${GH_ORIGIN:?}" rev-parse "refs/heads/$b"
@@ -123,7 +124,12 @@ case "${1:-} ${2:-}" in
     tree="$(git --git-dir "$GH_ORIGIN" merge-tree --write-tree refs/heads/main "$oid")" || exit 1
     msha="$(git --git-dir "$GH_ORIGIN" commit-tree "$tree" -p "$mainsha" -m "squash pr-$pr")"
     git --git-dir "$GH_ORIGIN" update-ref refs/heads/main "$msha"
-    printf '%s\n' "$msha" > "${GH_STATE:?}/merge-$pr"
+    if [ "${GH_EMPTY_MERGESHA:-}" = "1" ]; then
+      # T1 (ship round 5): merged at the authority but mergeCommit empty
+      : > "${GH_STATE:?}/merge-$pr"
+    else
+      printf '%s\n' "$msha" > "${GH_STATE:?}/merge-$pr"
+    fi
     exit 0 ;;
   *) echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
 esac
@@ -2695,4 +2701,130 @@ PYEOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"POSTURE-WEAKEN-IGNORED"* ]]
   [[ "$output" == *"floor config"* ]]
+}
+
+
+@test "[T1] post-merge assert-merged denial is BLOCKED:not-merged" {
+  # T1 (ship round 5): the failure tail AFTER `gh pr merge` succeeds —
+  # assert-merged.sh refusing to confirm MERGED is a typed item terminal,
+  # never a LANDED append or a crash.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  cat > "$MOCK_BIN/assert-merged.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' assert-merged.sh "$@" >> "${CALL_LOG:?}"
+printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
+exit 2
+STUB
+  chmod +x "$MOCK_BIN"/*
+  RUN_ID=run-410
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "gh pr merge 101" "$EVENTS"
+  grep -q "ITEM spec/item-a BLOCKED:not-merged" <<<"$output"
+  grep -q "HUMAN-INBOX: spec/item-a BLOCKED:not-merged" <<<"$output"
+  posture_no_hit -q "ITEM spec/item-a LANDED" <<<"$output"
+  posture_no_hit -q "finalize" "$EVENTS"
+}
+
+@test "[T1] empty mergeCommit after a confirmed merge is BLOCKED:merge-sha" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RUN_ID=run-411
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  GH_EMPTY_MERGESHA=1 PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" \
+    --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "gh pr merge 101" "$EVENTS"
+  grep -q "ITEM spec/item-a BLOCKED:merge-sha" <<<"$output"
+  posture_no_hit -q "ITEM spec/item-a LANDED" <<<"$output"
+  posture_no_hit -q "finalize" "$EVENTS"
+}
+
+@test "[T1] failing finalizer after a confirmed merge is BLOCKED:finalizer, normal and resume" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  cat > "$MOCK_BIN/run-finalizer.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' run-finalizer.sh "$@" >> "${CALL_LOG:?}"
+printf 'finalize %s\n' "$*" >> "${EVENTS:?}"
+exit 1
+STUB
+  chmod +x "$MOCK_BIN"/*
+
+  # normal path: merge confirmed, finalizer fails -> typed terminal
+  RUN_ID=run-412
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "gh pr merge 101" "$EVENTS"
+  grep -q "finalize --run-id $RUN_ID 101" "$EVENTS"
+  grep -q "ITEM spec/item-a BLOCKED:finalizer" <<<"$output"
+  posture_no_hit -q "ITEM spec/item-a LANDED" <<<"$output"
+
+  # resume path: dangling finalize intent + merged authority, finalizer
+  # still failing -> same typed terminal through recovery
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  MERGE_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  OWNER=run-413
+  python3 "$JR" init --store "$LQ" --queue-id q-t1d --run-id "$OWNER"
+  python3 "$JR" record-manifest --store "$LQ" --queue-id q-t1d --item spec/item-a
+  python3 "$JR" append --store "$LQ" --queue-id q-t1d \
+    --kind intent --step finalize --item spec/item-a --pr 101 --head "$OID_A"
+  printf '%s\n' "$MERGE_A" > "$GH_STATE/merge-101"
+  cat > "$MOCK_BIN/assert-merged.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' assert-merged.sh "$@" >> "${CALL_LOG:?}"
+printf 'assert-merged %s\n' "$*" >> "${EVENTS:?}"
+[ -s "${GH_STATE:?}/merge-$1" ] && exit 0
+exit 2
+STUB
+  chmod +x "$MOCK_BIN"/*
+  : > "$EVENTS"
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --resume q-t1d
+  [ "$status" -eq 0 ]
+  grep -q "finalize --run-id $OWNER 101" "$EVENTS"
+  grep -q "ITEM spec/item-a BLOCKED:finalizer" <<<"$output"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+  python3 - "$LQ/q-t1d.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+rows = [f'{e["kind"]}:{e["step"]}:{e.get("status","")}'
+        for e in doc["events"] if e.get("item") == "spec/item-a"]
+assert "result:finalize:failed" in rows, rows
+assert rows[-1].startswith("terminal:terminal:BLOCKED:finalizer"), rows
+PYEOF
+}
+
+@test "[T2] head drift on the FIRST gh read after push blocks before any review" {
+  # T2 (ship round 5): the push->headRefOid equality check is the FIRST
+  # gh read after the push — a drifted head must block the item BEFORE the
+  # reviewer is ever dispatched (no review of an unpinned head).
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RUN_ID=run-414
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  GH_HEAD_DRIFT=1 GH_HEAD_DRIFT_AT=1 PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:head-drift" <<<"$output"
+  posture_no_hit -q "codex review" "$EVENTS"
+  posture_no_hit -q "gh pr checks" "$EVENTS"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
 }
