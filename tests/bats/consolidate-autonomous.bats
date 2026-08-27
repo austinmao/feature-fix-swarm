@@ -85,11 +85,9 @@ build_sandbox() {
 
   # exact slash-qualified repository paths the Step 4-A block may call —
   # every one logs, obeys a narrow allow table, and denies everything else.
-  write_stub "skills/land-queue/scripts/collect-queue.py" '
-case "$1" in
-  collect|precheck) cat "${QUEUE_DOC:?}" ;;
-  *) echo "UNSTUBBED-BOUNDARY:collect-queue $*" >&2; exit 64 ;;
-esac'
+  write_stub "skills/land-queue/scripts/queue-journal.py" '
+if [ -n "${QJ_OVERRIDE:-}" ]; then cat "$QJ_OVERRIDE"; exit "${QJ_RC:-0}"; fi
+exec python3 "${REAL_ROOT:?}/skills/land-queue/scripts/queue-journal.py" "$@"'
   write_stub "skills/git-branch-consolidate/scripts/collect-estate.py" '
 cat "${ESTATE_DOC:?}"'
   write_stub "lib/gates.py" '
@@ -150,13 +148,10 @@ case "${1:-}" in
     echo "UNSTUBBED-BOUNDARY:git $*" >&2; exit 64 ;;
 esac'
 
-  # queue-derived canonical target manifest from the REAL fixture estate
-  export QUEUE_DOC="$BATS_TEST_TMPDIR/queue-doc.json"
-  cat > "$QUEUE_DOC" <<JSON
-{"schema": 1, "items": [{"branch": "spec/merged", "head": "$MERGED_OID", "pr": 201, "merge_sha": "$(git -C "$WORK" rev-parse refs/heads/main)"}], "count": 1}
-JSON
+  # fresh-estate document with a REAL matching record for the default
+  # target (WR-01) — never an empty branch list posing as evidence.
   export ESTATE_DOC="$BATS_TEST_TMPDIR/estate-doc.json"
-  printf '{"branches": []}\n' > "$ESTATE_DOC"
+  printf '{"branches": [{"branch": "spec/merged", "landed": true}]}\n' > "$ESTATE_DOC"
 
   # REAL durable queue journal (CR-01/WR-01): the default happy manifest is
   # built through the production accessor, never a synthetic document.
@@ -304,10 +299,12 @@ fixture_sane() { # failure here would be infrastructure, so prove it first
 @test "[TARGET] equal-count wrong target set is refused" {
   fixture_sane; build_sandbox
   extract_block
-  # same count (1), different branch tuple than the granted manifest
-  cat > "$QUEUE_DOC" <<JSON
-{"schema": 1, "items": [{"branch": "spec/unmerged", "head": "$UNMERGED_OID", "pr": 202, "merge_sha": "deadbeef"}], "count": 1}
-JSON
+  # same count (1), different branch tuple than the granted manifest —
+  # built through the real journal so the projection itself is honest
+  make_real_journal q-wrong run-0304 \
+    spec/unmerged "$UNMERGED_OID" 202 "$(python3 -c "print('c'*40)")"
+  export CONSOLIDATE_QUEUE_ID=q-wrong
+  printf '{"branches": [{"branch": "spec/unmerged", "landed": true}]}\n' > "$ESTATE_DOC"
   run run_block --execute
   [ "$status" -eq 1 ]
   [ ! -s "$EFFECTS" ]
@@ -316,11 +313,16 @@ JSON
 @test "[TARGET] duplicate target tuple is refused" {
   fixture_sane; build_sandbox
   extract_block
-  cat > "$QUEUE_DOC" <<JSON
-{"schema": 1, "items": [{"branch": "spec/merged", "head": "$MERGED_OID", "pr": 201, "merge_sha": "x"}, {"branch": "spec/merged", "head": "$MERGED_OID", "pr": 201, "merge_sha": "x"}], "count": 2}
-JSON
+  # the real journal cannot emit duplicates, so this exercises the block's
+  # own defense-in-depth validation of the projection output
+  export QJ_OVERRIDE="$BATS_TEST_TMPDIR/qj-dup"
+  M="$(python3 -c "print('e'*40)")"
+  printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
+    spec/merged "$MERGED_OID" 201 "$M" \
+    spec/merged "$MERGED_OID" 201 "$M" > "$QJ_OVERRIDE"
   run run_block --execute
   [ "$status" -eq 1 ]
+  grep -qi "duplicate-target" <<<"$output"
   [ ! -s "$EFFECTS" ]
 }
 
@@ -358,11 +360,12 @@ JSON
 @test "[REFUSE] unmerged branch deletion is refused with branches unchanged" {
   fixture_sane; build_sandbox
   extract_block
-  cat > "$QUEUE_DOC" <<JSON
-{"schema": 1, "items": [{"branch": "spec/unmerged", "head": "$UNMERGED_OID", "pr": 202, "merge_sha": null}], "count": 1}
-JSON
+  # a projection quad without an observed merge commit is never a target
+  export QJ_OVERRIDE="$BATS_TEST_TMPDIR/qj-unmerged"
+  printf '%s\0%s\0%s\0%s\0' spec/unmerged "$UNMERGED_OID" 202 "" > "$QJ_OVERRIDE"
   run run_block --execute
   [ "$status" -eq 1 ]
+  grep -qi "no observed merge commit" <<<"$output"
   [ ! -s "$EFFECTS" ]
   git -C "$WORK" rev-parse -q --verify refs/heads/spec/unmerged >/dev/null
 }
@@ -370,7 +373,17 @@ JSON
 @test "[REFUSE] dirty worktree removal is refused with the worktree intact" {
   fixture_sane; build_sandbox
   extract_block
+  # target the ACTUAL dirty-worktree branch with an otherwise valid-shaped
+  # tuple; the fresh estate truthfully reports it not landed -> refusal
+  make_real_journal q-dirty run-0304 \
+    spec/dirty "$(git -C "$WORK" rev-parse refs/heads/spec/dirty)" 204 \
+    "$(python3 -c "print('c'*40)")"
+  export CONSOLIDATE_QUEUE_ID=q-dirty
+  printf '{"branches": [{"branch": "spec/dirty", "landed": false, "worktree_dirty": 1}]}\n' > "$ESTATE_DOC"
   run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "fresh-estate" <<<"$output"
+  [ ! -s "$EFFECTS" ]
   test -f "$DIRTY/uncommitted.txt"
   no_hit -a "worktree.remove" "$CALL_LOG"
 }
@@ -378,11 +391,16 @@ JSON
 @test "[REFUSE] checked-out branch deletion is refused" {
   fixture_sane; build_sandbox
   extract_block
-  cat > "$QUEUE_DOC" <<JSON
-{"schema": 1, "items": [{"branch": "spec/unmerged", "head": "$UNMERGED_OID", "pr": 202, "merge_sha": "x"}], "count": 1}
-JSON
+  # the branch checked out in the linked worktree, valid-shaped evidence,
+  # honest not-landed estate -> refused before any effect
+  make_real_journal q-co run-0304 \
+    spec/unmerged "$UNMERGED_OID" 202 "$(python3 -c "print('c'*40)")"
+  export CONSOLIDATE_QUEUE_ID=q-co
+  printf '{"branches": [{"branch": "spec/unmerged", "landed": false}]}\n' > "$ESTATE_DOC"
   run run_block --execute
   [ "$status" -eq 1 ]
+  grep -qi "fresh-estate" <<<"$output"
+  [ ! -s "$EFFECTS" ]
   test -f "$LINKED/.git"
   git -C "$WORK" rev-parse -q --verify refs/heads/spec/unmerged >/dev/null
 }
@@ -398,11 +416,13 @@ JSON
 @test "[REFUSE] the base branch is never a deletion target" {
   fixture_sane; build_sandbox
   extract_block
-  cat > "$QUEUE_DOC" <<JSON
-{"schema": 1, "items": [{"branch": "main", "head": "$(git -C "$WORK" rev-parse refs/heads/main)", "pr": 203, "merge_sha": "x"}], "count": 1}
-JSON
+  make_real_journal q-base run-0304 \
+    main "$(git -C "$WORK" rev-parse refs/heads/main)" 203 \
+    "$(python3 -c "print('c'*40)")"
+  export CONSOLIDATE_QUEUE_ID=q-base
   run run_block --execute
   [ "$status" -eq 1 ]
+  grep -qi "base branch is never a deletion target" <<<"$output"
   git -C "$ORIGIN" rev-parse -q --verify refs/heads/main >/dev/null
   [ ! -s "$EFFECTS" ]
 }
@@ -466,18 +486,23 @@ PYEOF
   no_hit -F '../' "$RUNNER"
   run run_block --execute
   no_hit -q "UNSTUBBED-BOUNDARY" <<<"$output"
-  # runtime: every logged argv0 is a bare shim or a sandbox-relative stub
-  python3 - "$CALL_LOG" <<'PYEOF'
+  # runtime: every logged argv0 is a bare shim or a sandbox-relative stub;
+  # fixture paths under BATS_TEST_TMPDIR are stub ARGUMENTS handed through
+  # the env contract (journal store, repo), not invocations
+  python3 - "$CALL_LOG" "$BATS_TEST_TMPDIR" <<'PYEOF'
 import sys
 known = {"gh", "codex", "claude", "git",
-         "skills/land-queue/scripts/collect-queue.py",
+         "skills/land-queue/scripts/queue-journal.py",
          "skills/git-branch-consolidate/scripts/collect-estate.py",
          "lib/gates.py", "scripts/gsd/assert-merged.sh",
          "scripts/gsd/run-finalizer.sh"}
+tmpdir = sys.argv[2]
 calls = open(sys.argv[1], "rb").read().split(b"\0")
 tokens = [c.decode() for c in calls if c]
 argv0s = {t for t in tokens if t in known or "/" in t}
-bad = {t for t in argv0s if t not in known}
+bad = {t for t in argv0s
+       if t not in known and not t.startswith(tmpdir)
+       and not t.startswith("spec/")}
 assert not bad, f"escaped the stub sandbox: {sorted(bad)}"
 PYEOF
 }

@@ -97,8 +97,10 @@ all-items-terminal boundary, via `queue-journal.py read-landed-tuples` and
 `gates.py grant-consolidate`), never prose, scouts, or shell arguments.
 
 **Report-only is the default.** Every run rebuilds the canonical target set
-`(branch ref, expected tip OID, PR#, observed merge commit)` from the queue
-manifest, refreshes `collect-estate.py`, requires `landed==true`, checks the
+`(branch ref, expected tip OID, PR#, observed merge commit)` from the durable
+queue journal's `read-landed-tuples` projection for the exact queue id (the
+intake collector carries no PR/merge identity and is never consulted),
+refreshes `collect-estate.py`, requires `landed==true`, checks the
 exact scope-aware grant, and runs `assert-merged.sh` once per target PR —
 then prints the evidence and the PLANNED `run-finalizer.sh` delegation and
 deletes nothing.  Explicit `--execute` (activated after the Phase 3
@@ -112,8 +114,11 @@ postcondition rather than treating rc 0 alone as deletion proof.
 
 Environment contract: `CONSOLIDATE_RUN_ID` (queue run id owning the grant),
 `CONSOLIDATE_EVIDENCE_DIR` (must contain `grant`, `fresh-estate`,
-`target-set`, `assert-merged`), optional `CONSOLIDATE_REPO` (default `.`)
-and `CONSOLIDATE_BASE` (default `main`).  Run from the repository root.
+`target-set`, `assert-merged`), optional `CONSOLIDATE_QUEUE_ID` (journal
+queue id, default the run id), `CONSOLIDATE_QUEUE_STORE` (land-queue journal
+store, default `$(lib/gates.py store-dir)/land-queue`), `CONSOLIDATE_REPO`
+(default `.`) and `CONSOLIDATE_BASE` (default `main`).  Run from the
+repository root.
 
 <!-- PHASE3_CONSOLIDATE_BEGIN -->
 ```bash
@@ -145,46 +150,63 @@ done
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/consolidate-4a.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-# ── refreshed deterministic inputs: queue manifest + fresh estate ────────
-skills/land-queue/scripts/collect-queue.py collect   --repo "$REPO" --base "$BASE" > "$WORK/queue.json"
+# ── canonical manifest: the durable queue journal is the ONLY source ─────
+# (CR-01) The intake collector cannot carry PR/merge identity and returns an
+# empty item list in production; consolidation identity comes exclusively
+# from the journal read-landed-tuples projection for this exact queue id.
+QUEUE_ID="${CONSOLIDATE_QUEUE_ID:-$RUN_ID}"
+QUEUE_STORE="${CONSOLIDATE_QUEUE_STORE:-}"
+if [ -z "$QUEUE_STORE" ]; then
+  QUEUE_STORE="$(lib/gates.py store-dir)/land-queue"
+fi
+if ! skills/land-queue/scripts/queue-journal.py read-landed-tuples   --store "$QUEUE_STORE" --queue-id "$QUEUE_ID" > "$WORK/tuples"; then
+  echo "CONSOLIDATE-REFUSED:target-set queue journal read failed for queue $QUEUE_ID"
+  exit 1
+fi
 skills/git-branch-consolidate/scripts/collect-estate.py   --repo "$REPO" --base "$BASE" > "$WORK/estate.json"
 
 # ── canonical tuple validation + exact target-set digest (no shell JSON) ─
-if ! python3 - "$WORK/queue.json" "$WORK/estate.json" "$BASE" "$WORK/plan" <<'PYVALIDATE'
+if ! python3 - "$WORK/tuples" "$WORK/estate.json" "$BASE" "$WORK/plan" <<'PYVALIDATE'
 import hashlib, json, re, sys
-queue_path, estate_path, base, out_path = sys.argv[1:5]
+tuples_path, estate_path, base, out_path = sys.argv[1:5]
 OID = re.compile(r"^[0-9a-f]{40}$")
 PRN = re.compile(r"^[0-9]{1,9}$")
 def refuse(reason):
     print("CONSOLIDATE-REFUSED:" + reason)
     sys.exit(3)
 try:
-    doc = json.load(open(queue_path))
+    raw = open(tuples_path, "rb").read()
 except Exception:
-    refuse("target-set queue manifest unreadable")
-items = doc.get("items") if isinstance(doc, dict) else None
-if not isinstance(items, list) or not items:
+    refuse("target-set journal projection unreadable")
+parts = raw.split(b"\0")
+if parts and parts[-1] == b"":
+    parts.pop()
+if not parts:
     refuse("target-set empty target set")
+if len(parts) % 4:
+    refuse("target-set malformed journal projection")
+try:
+    fields = [part.decode("utf-8") for part in parts]
+except UnicodeDecodeError:
+    refuse("target-set malformed journal projection")
 seen, tuples = set(), []
-for it in items:
-    if not isinstance(it, dict):
-        refuse("target-set malformed target entry")
-    b, h, pr, m = it.get("branch"), it.get("head"), it.get("pr"), it.get("merge_sha")
-    if not isinstance(b, str) or not b or any(c.isspace() for c in b):
+for i in range(0, len(fields), 4):
+    b, h, pr, m = fields[i:i + 4]
+    if not b or any(c.isspace() for c in b):
         refuse("target-set malformed branch ref")
     if b == base:
         refuse("target-set base branch is never a deletion target: " + b)
-    if not isinstance(h, str) or not OID.match(h):
+    if not OID.match(h):
         refuse("target-set malformed expected tip OID for " + b)
-    if isinstance(pr, bool) or not PRN.match(str(pr)):
+    if not PRN.match(pr):
         refuse("target-set malformed PR number for " + b)
-    if not isinstance(m, str) or not OID.match(m):
+    if not OID.match(m):
         refuse("not-landed no observed merge commit for " + b)
     key = (b, h)
     if key in seen:
         refuse("duplicate-target " + b)
     seen.add(key)
-    tuples.append((b, h, str(int(str(pr))), m))
+    tuples.append((b, h, str(int(pr)), m))
 try:
     est = json.load(open(estate_path))
 except Exception:
