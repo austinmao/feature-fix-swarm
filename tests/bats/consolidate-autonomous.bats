@@ -513,6 +513,20 @@ for j, t in enumerate(tokens):
 PYEOF
 }
 
+@test "[FENCE] a missing local target ref refuses at the pre-effect fence" {
+  # CR-06: inside a git worktree the immediate pre-effect check requires
+  # refs/heads/<target> to EXIST and equal the expected OID.  A ref the
+  # queue's earlier finalizer already removed is exactly the race window —
+  # absence is never treated as success.
+  fixture_sane; build_sandbox
+  extract_block
+  git -C "$WORK" branch -d spec/merged
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "oid-drift\|missing" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+}
+
 @test "[REPO] proofs and effects bind to one physical repository" {
   # CR-07: a grant scoped to the fixture repository must refuse when the
   # run is pointed at a DIFFERENT physical repository — before any effect.
