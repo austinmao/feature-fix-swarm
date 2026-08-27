@@ -842,6 +842,25 @@ if [ -z "$QUEUE_TERMINAL" ] && [ "$POSTURE" = "zero" ] && [ "${#QUAR_IDX[@]}" -g
   done
 fi
 
+# ── spec-006 Phase 3 (REQ-301/302): deterministic consolidate grant ───────
+# Runs ONLY at the all-items-terminal point (the emit_report hook boundary):
+# the validated queue-journal read-landed-tuples projection is the sole
+# manifest source — never estate prose, scouts, resume strings, or shell
+# arguments.  The NUL transport goes straight from the journal accessor to
+# gates.py grant-consolidate, so no shell word-splitting ever touches target
+# identity; the TTL is bounded by the recorded queue wall and the 8h cap.
+# Grant derivation never rewrites the queue outcome: on any refusal the
+# landed report stands and the consolidation simply has no grant to run
+# under (fail closed, REQ-302).
+if [ -z "$QUEUE_TERMINAL" ]; then
+  LANDED_TUPLES="$WORKTMP/landed-tuples"
+  if python3 "$JOURNAL" read-landed-tuples --store "$LQ" --queue-id "$QUEUE_ID"       > "$LANDED_TUPLES" 2>/dev/null && [ -s "$LANDED_TUPLES" ]; then
+    if ! python3 "$GATES" grant-consolidate "$RUN_ID" --queue-id "$QUEUE_ID"         --queue-timeout-seconds "${QUEUE_WALL_SECONDS:-28800}"         --ttl-hours 8 < "$LANDED_TUPLES"; then
+      echo "CONSOLIDATE-GRANT-SKIPPED: queue-derived grant refused; landed report stands"
+    fi
+  fi
+fi
+
 # ── report ────────────────────────────────────────────────────────────────
 echo "LAND-QUEUE REPORT queue=$QUEUE_ID items=$COUNT"
 emit_report

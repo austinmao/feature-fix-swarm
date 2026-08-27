@@ -319,6 +319,47 @@ def cmd_read_terminals(ns) -> int:
     return 0
 
 
+def cmd_read_landed_tuples(ns) -> int:
+    """NUL-emit the closed canonical target tuple
+    (branch ref, expected tip OID, PR#, observed merge commit) for every
+    item whose LAST terminal is LANDED (spec-006 Phase 3, REQ-301).
+
+    This is the ONLY projection consolidate:estate may derive from: the
+    tip OID and PR come from the item's latest keyed intent, the observed
+    merge commit from the LANDED terminal's detail, and every field is
+    re-validated against the closed regexes on the way out.  A LANDED item
+    with missing or malformed evidence refuses the WHOLE read — a partial
+    manifest must never mint a grant.
+    """
+    doc = _load(_doc_path(ns.store, ns.queue_id))
+    last_terminal, keyed = {}, {}
+    for event in doc["events"]:
+        item = event.get("item")
+        if not item:
+            continue
+        if event.get("kind") == "terminal":
+            last_terminal[item] = event
+        elif event.get("kind") == "intent" and event.get("key"):
+            keyed[item] = event
+    for item in sorted(last_terminal):
+        term = last_terminal[item]
+        if term.get("status") != "LANDED":
+            continue
+        intent = keyed.get(item)
+        merge_sha = term.get("detail")
+        if (intent is None
+                or not PR_RE.match(str(intent.get("pr", "")))
+                or not OID_RE.match(str(intent.get("head", "")))
+                or not isinstance(merge_sha, str)
+                or not OID_RE.match(merge_sha)):
+            raise JournalError(
+                "QUEUE-ERROR:store LANDED item lacks a validated canonical "
+                "tuple (keyed intent + 40-hex merge detail): " + item)
+        for value in (item, intent["head"], str(intent["pr"]), merge_sha):
+            sys.stdout.write(str(value) + "\0")
+    return 0
+
+
 def cmd_read_report(ns) -> int:
     """NUL-emit item,status,detail,reason,unblock for report rendering.
 
@@ -383,7 +424,8 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     for name in ("init", "append", "events", "read-terminals", "read-dangling",
-                 "read-nonterminal", "count-terminals", "read-report"):
+                 "read-nonterminal", "count-terminals", "read-report",
+                 "read-landed-tuples"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
         p.add_argument("--queue-id", required=True)
@@ -416,6 +458,7 @@ def main(argv=None) -> int:
                 "read-nonterminal": cmd_read_nonterminal,
                 "count-terminals": cmd_count_terminals,
                 "read-report": cmd_read_report,
+                "read-landed-tuples": cmd_read_landed_tuples,
                 "lock-acquire": cmd_lock_acquire, "lock-release": cmd_lock_release}
     try:
         return handlers[ns.cmd](ns)

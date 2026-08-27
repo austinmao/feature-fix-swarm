@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Machine gates for human-out-of-loop runs (v4 hardening).
 
 Completion authority lives HERE, not in agent self-report:
@@ -1129,6 +1130,20 @@ ACTION_PAT = re.compile(r"^[a-z][a-z0-9_-]*:\S+$")
 GRANT_DEFAULT_TTL_HOURS = 72.0  # multi-day runs; 24h expired mid-run
 GRANT_MAX_TTL_HOURS = 168.0  # 7 days — non-finite/zero/negative/huger rejected
 
+# spec-006 Phase 3 (REQ-301/302, T-03-06/07): consolidate:estate grants are
+# queue-derived ONLY — the scope pins the exact target manifest as a sha256
+# over the canonical sorted (branch ref, expected tip OID) tuples, and the
+# TTL never exceeds the 8h queue wall.  A bare `consolidate:estate` (or any
+# other consolidate:* shape) is refused at mint time so it can never match
+# at the effect boundary.
+CONSOLIDATE_SCOPE_PAT = re.compile(r"^consolidate:estate:[0-9a-f]{64}$")
+CONSOLIDATE_MAX_TTL_HOURS = 8.0
+CONSOLIDATE_QUEUE_WALL_SECONDS = 28800.0  # queue-guard.sh QUEUE_WALL_SECONDS
+_CONSOLIDATE_OID_PAT = re.compile(r"^[0-9a-f]{40}$")
+_CONSOLIDATE_PR_PAT = re.compile(r"^[0-9]{1,9}$")
+_CONSOLIDATE_BRANCH_PAT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+_CONSOLIDATE_QUEUE_ID_PAT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 # Artifact identity (spec-295 EDGE-006): an immutable OCI digest reference
 # (name[:tag]@sha256:<64hex> — tag optional, digest mandatory and
 # authoritative) or a 40-hex commit sha. A mutable tag WITHOUT a digest
@@ -1162,6 +1177,14 @@ def grant_actions(store: Path, run_id: str, actions: list[str], *,
         return False
     if not math.isfinite(ttl_hours) or not 0 < ttl_hours <= GRANT_MAX_TTL_HOURS:
         return False  # inf/0/negative/absurd TTL = effectively non-expiring
+    for a in actions:
+        if a.startswith("consolidate:"):
+            # Queue-derived exact scope + 8h cap (REQ-301/302, T-03-07):
+            # only consolidate:estate:<sha256(target tuples)> may exist.
+            if not CONSOLIDATE_SCOPE_PAT.match(a):
+                return False
+            if ttl_hours > CONSOLIDATE_MAX_TTL_HOURS:
+                return False
     clean_reason = sanitize_reason(reason) if isinstance(reason, str) else ""
     granted_at = _now()
     with _StoreLock(store):
@@ -1193,6 +1216,73 @@ def check_grant(store: Path, run_id: str, action: str,
     if not entry:
         return False
     return (now if now is not None else _now()) < entry.get("expires_at", 0)
+
+
+def consolidate_scope(tuples) -> str:
+    """Exact queue-derived scope for a consolidation target manifest:
+    sha256 over the canonical JSON of the SORTED (branch ref, expected tip
+    OID) pairs — the same serialization the Step 4-A controller and the
+    Wave-0 contracts compute, so scope equality is byte-exact."""
+    canon = json.dumps(sorted([[t[0], t[1]] for t in tuples]),
+                       separators=(",", ":")).encode()
+    return "consolidate:estate:" + hashlib.sha256(canon).hexdigest()
+
+
+def grant_consolidate_estate(store: Path, run_id: str, tuples, *,
+                             queue_id: str,
+                             queue_timeout_seconds: float = CONSOLIDATE_QUEUE_WALL_SECONDS,
+                             ttl_hours: float = CONSOLIDATE_MAX_TTL_HOURS):
+    """Mint the queue-derived consolidate:estate grant (REQ-301/302).
+
+    Accepts ONLY validated canonical target tuples
+    (branch ref, expected tip OID, PR#, observed merge commit) — the closed
+    queue-journal read-landed-tuples projection — never estate prose, scout
+    output, resume strings, or arbitrary shell arguments.  Tuples are sorted
+    for the canonical digest; duplicate (branch, head) keys, empty input,
+    malformed fields, and any TTL above the recorded queue timeout or the
+    8h cap are rejected.  Returns the granted scope string, or None
+    (fail closed, no write) on any validation failure."""
+    import math
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    if not isinstance(queue_id, str) or not _CONSOLIDATE_QUEUE_ID_PAT.match(queue_id):
+        return None
+    if not isinstance(tuples, (list, tuple)) or not tuples:
+        return None
+    seen = set()
+    normalized = []
+    for t in tuples:
+        if not isinstance(t, (list, tuple)) or len(t) != 4:
+            return None
+        branch, head, pr, merge = t
+        if not isinstance(branch, str) or not _CONSOLIDATE_BRANCH_PAT.match(branch):
+            return None
+        if not isinstance(head, str) or not _CONSOLIDATE_OID_PAT.match(head):
+            return None
+        if isinstance(pr, bool) or not isinstance(pr, (int, str)) \
+                or not _CONSOLIDATE_PR_PAT.match(str(pr)):
+            return None
+        if not isinstance(merge, str) or not _CONSOLIDATE_OID_PAT.match(merge):
+            return None
+        key = (branch, head)
+        if key in seen:
+            return None  # duplicate targets are refused, never coalesced
+        seen.add(key)
+        normalized.append((branch, head, int(pr), merge))
+    if isinstance(queue_timeout_seconds, bool) \
+            or not isinstance(queue_timeout_seconds, (int, float)) \
+            or not math.isfinite(queue_timeout_seconds) or queue_timeout_seconds <= 0:
+        return None
+    if isinstance(ttl_hours, bool) or not isinstance(ttl_hours, (int, float)) \
+            or not math.isfinite(ttl_hours) \
+            or not 0 < ttl_hours <= CONSOLIDATE_MAX_TTL_HOURS:
+        return None
+    if ttl_hours * 3600 > queue_timeout_seconds:
+        return None  # TTL never outlives the recorded queue wall
+    scope = consolidate_scope(normalized)
+    ok = grant_actions(store, run_id, [scope], ttl_hours=float(ttl_hours),
+                       granted_by="queue", reason=f"queue:{queue_id}")
+    return scope if ok else None
 
 
 def _valid_artifact(artifact) -> bool:
@@ -4075,6 +4165,51 @@ def main(argv: list[str]) -> int:
         for m in art["missing"]:
             print(f"  MISSING-EVIDENCE: {m}")
         return 0 if art["verdict"] == "go" else 1
+    if cmd == "grant-consolidate":
+        # spec-006 Phase 3: queue-derived consolidate:estate minting.  Tuples
+        # arrive as NUL-delimited (branch, head, pr, merge) quads on stdin —
+        # the queue-journal read-landed-tuples transport — so no shell ever
+        # word-splits or re-parses target identity.
+        if not args:
+            print("usage: gates.py grant-consolidate RUN_ID --queue-id ID "
+                  "[--ttl-hours H] [--queue-timeout-seconds S]", file=sys.stderr)
+            return 2
+        run_id = args[0]
+        queue_id = _flag(args, "--queue-id")
+        try:
+            ttl = float(_flag(args, "--ttl-hours", str(CONSOLIDATE_MAX_TTL_HOURS)))
+            timeout_s = float(_flag(args, "--queue-timeout-seconds",
+                                    str(CONSOLIDATE_QUEUE_WALL_SECONDS)))
+        except ValueError:
+            print("CONSOLIDATE-GRANT-REJECTED: --ttl-hours and "
+                  "--queue-timeout-seconds must be numeric", file=sys.stderr)
+            return 1
+        raw = sys.stdin.buffer.read(1 << 20)
+        parts = raw.split(b"\0")
+        if parts and parts[-1] == b"":
+            parts.pop()
+        if not parts or len(parts) % 4:
+            print("CONSOLIDATE-GRANT-REJECTED: stdin must carry NUL-delimited "
+                  "(branch, head, pr, merge) quads", file=sys.stderr)
+            return 1
+        try:
+            fields = [part.decode("utf-8") for part in parts]
+        except UnicodeDecodeError:
+            print("CONSOLIDATE-GRANT-REJECTED: non-UTF-8 tuple field",
+                  file=sys.stderr)
+            return 1
+        quads = [tuple(fields[i:i + 4]) for i in range(0, len(fields), 4)]
+        scope = grant_consolidate_estate(store, run_id, quads,
+                                         queue_id=queue_id,
+                                         queue_timeout_seconds=timeout_s,
+                                         ttl_hours=ttl)
+        if scope is None:
+            print("CONSOLIDATE-GRANT-REJECTED: empty/malformed/duplicate "
+                  "target tuples, bad queue id, or TTL above the queue "
+                  "timeout/8h cap", file=sys.stderr)
+            return 1
+        print(f"GRANTED: {scope} (run {run_id}, queue {queue_id}, ttl {ttl}h)")
+        return 0
     if cmd == "grant":
         run_id = args[0]
         actions = [args[i + 1] for i, a in enumerate(args) if a == "--action"]
