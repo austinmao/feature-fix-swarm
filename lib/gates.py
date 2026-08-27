@@ -1662,14 +1662,37 @@ def _promote_miss_reason(store: Path, run_id: str, surface: str, artifact,
 
 
 def _check_hotfix_bypass(store: Path, run_id: str, action: str,
-                         *, now: float | None = None) -> bool:
+                         *, now: float | None = None,
+                         posture: str | None = None) -> bool:
     """The ONE sanctioned promote-precondition escape (REQ-07/EDGE-004): a
     hotfix:prod-* action authorizes ONLY on an operator grant carrying a
     non-empty reason — deliberately does NOT call check_promotion, since
     bypassing the promote requirement is the entire point of the escape.
     No autonomous code path may call grant_actions on a hotfix:prod- action
     (process control, V4 access control) — the only way a hotfix grant
-    exists is an explicit operator `grant ... --reason`."""
+    exists is an explicit operator `grant ... --reason`.
+
+    WR-03 / Rule 12a: the bypass is POSTURE-DEPENDENT, downstream of the
+    stricter-only posture resolver.  `posture` defaults to the resolver's
+    exported AUTONOMY_POSTURE (never the raw FFS_AUTONOMY_POSTURE input,
+    which only autonomy-posture.sh may read).  floor forbids the bypass
+    entirely; zero — the committed default, also used when no resolver ran
+    — keeps the grant+reason contract; any other non-empty value fails
+    closed.  The durable bypass record carries the effective posture."""
+    effective = (posture if posture is not None
+                 else os.environ.get("AUTONOMY_POSTURE", ""))
+    effective = (effective or "").strip() or "zero"
+    if effective != "zero":
+        if effective == "floor":
+            refusal = ("HOTFIX-POSTURE-REFUSED: floor posture forbids the "
+                       "hotfix:prod-* emergency bypass; land through the "
+                       "full promote path or have the operator resolve the "
+                       "posture to zero")
+        else:
+            refusal = ("HOTFIX-POSTURE-REFUSED: unvalidated effective "
+                       "posture never loosens the bypass; fail closed")
+        record_pending(store, run_id, action, refusal)
+        return False
     if not check_grant(store, run_id, action, now=now):
         record_pending(store, run_id, action,
                        "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
@@ -1683,11 +1706,12 @@ def _check_hotfix_bypass(store: Path, run_id: str, action: str,
                        "NO-HOTFIX-GRANT: hotfix:prod-* requires an operator "
                        "grant carrying a non-empty --reason")
         return False
-    record_hotfix_bypass(store, run_id, action, reason)
+    record_hotfix_bypass(store, run_id, action, reason, posture=effective)
     return True
 
 
-def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> bool:
+def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str,
+                         *, posture: str = "zero") -> bool:
     """Durable audit record for a hotfix:prod-* bypass (REQ-07/EDGE-004) —
     mirrors record_pending's lock/save shape. Append-only: each bypass
     (even a repeat during the same incident) gets its own entry, unlike
@@ -1699,6 +1723,7 @@ def record_hotfix_bypass(store: Path, run_id: str, action: str, reason: str) -> 
         auto.setdefault("hotfix_bypasses", []).append({
             "action": action,
             "reason": sanitize_reason(reason),
+            "posture": posture,
             "recorded_at": _now(),
         })
         _save_store(store, data)

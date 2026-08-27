@@ -24,7 +24,8 @@ raises privilege — each layer may only preserve or increase strictness
 
 - `floor` restores the no-cross-vendor-reviewer block: a missing
   opposite-vendor reviewer blocks the item
-  (`BLOCKED:no-cross-vendor-reviewer`).
+  (`BLOCKED:no-cross-vendor-reviewer`). `floor` also forbids the
+  `hotfix:prod-*` emergency bypass outright (Rule 12a).
 - `zero` keeps merge throughput: same-vendor review is allowed but recorded
   as a counted degradation; promotion privilege shrinks instead of the merge.
 

@@ -2338,6 +2338,7 @@ def test_hotfix_case_variant_with_reason_is_audited(tmp_path) -> None:
     assert bypass == [{
         "action": action,
         "reason": "db down",
+        "posture": "zero",
         "recorded_at": bypass[0]["recorded_at"],
     }]
 
