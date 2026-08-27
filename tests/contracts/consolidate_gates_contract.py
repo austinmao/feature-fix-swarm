@@ -129,6 +129,41 @@ def test_default_ttl_cannot_outlive_the_8h_cap(tmp_path):
              "valid past the 8h cap")
 
 
+def test_scope_differs_when_only_pr_differs():
+    """CR-04: the canonical scope must cover ALL FOUR tuple fields.  Two
+    manifests identical in (branch, head) but differing only in PR number
+    must produce different scopes -- otherwise a grant minted for one merged
+    PR authorizes finalizing a different PR with the same head."""
+    gates = gates_module()
+    a = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)])
+    b = gates.consolidate_scope([("spec/a", "a" * 40, 18, "b" * 40)])
+    assert a != b, ("scope collision: PR number is not part of the "
+                    "canonical consolidate scope")
+
+
+def test_scope_differs_when_only_merge_commit_differs():
+    """CR-04: same collision requirement for the observed merge commit."""
+    gates = gates_module()
+    a = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)])
+    b = gates.consolidate_scope([("spec/a", "a" * 40, 17, "c" * 40)])
+    assert a != b, ("scope collision: the observed merge commit is not part "
+                    "of the canonical consolidate scope")
+
+
+def test_minted_grant_never_matches_a_pr_substituted_scope(tmp_path):
+    """CR-04 refusal path: a grant minted for one canonical tuple must fail
+    check_grant for the scope of the SAME (branch, head) under a different
+    PR/merge pair."""
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    minted = gates.grant_consolidate_estate(
+        store, "run-1", [("spec/a", "a" * 40, 17, "b" * 40)], queue_id="q1")
+    assert minted, "queue-derived mint refused a valid canonical tuple"
+    substituted = gates.consolidate_scope([("spec/a", "a" * 40, 18, "c" * 40)])
+    assert substituted != minted
+    assert gates.check_grant(store, "run-1", substituted) is False
+
+
 def test_cli_refuses_over_cap_consolidate_grant(tmp_path):
     scope = queue_scope(TUPLES)
     env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
