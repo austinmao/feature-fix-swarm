@@ -28,6 +28,13 @@ import time
 from pathlib import Path
 
 SCHEMA = 1
+# CR-02 (spec-006 phase 3, round 2): the ABSOLUTE queue deadline is recorded
+# at init as created_at + QUEUE_WALL_SECONDS and is the ONLY source of grant
+# lifetime — matching queue-guard.sh QUEUE_WALL_SECONDS, never a caller
+# value.  Additive schema note: SCHEMA stays 1; `deadline` is a new optional
+# field, so journals written before this change remain readable (readers
+# treat a missing deadline as fail-closed at the grant-mint boundary).
+QUEUE_WALL_SECONDS = 28800
 MAX_FIELD = 4096
 MAX_JOURNAL_BYTES = 4 * 1024 * 1024
 KINDS = frozenset({"intent", "result", "terminal"})
@@ -119,6 +126,10 @@ def _load(path: Path) -> dict:
     if (not isinstance(doc, dict) or doc.get("schema") != SCHEMA
             or not isinstance(doc.get("events"), list)):
         raise JournalError("QUEUE-ERROR:store invalid journal shape")
+    deadline = doc.get("deadline")
+    if deadline is not None and (isinstance(deadline, bool)
+                                 or not isinstance(deadline, (int, float))):
+        raise JournalError("QUEUE-ERROR:store invalid journal deadline")
     return doc
 
 
@@ -179,9 +190,14 @@ def cmd_init(ns) -> int:
     path = _doc_path(ns.store, ns.queue_id)
     if path.exists():
         raise JournalError(f"QUEUE-ERROR:store journal already exists: {path.name}")
+    created = int(time.time())
     _save(path, {"schema": SCHEMA, "queue_id": ns.queue_id,
                  "run_id": _field(ns.run_id, "run_id"),
-                 "created_at": int(time.time()), "events": []})
+                 "created_at": created,
+                 # CR-02: the immutable absolute deadline — grant lifetime
+                 # derives ONLY from this field, never from a caller timeout.
+                 "deadline": created + QUEUE_WALL_SECONDS,
+                 "events": []})
     return 0
 
 

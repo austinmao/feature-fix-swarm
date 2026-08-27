@@ -4222,8 +4222,7 @@ def main(argv: list[str]) -> int:
         # re-run derivation can never silently extend authority).
         if not args:
             print("usage: gates.py grant-consolidate RUN_ID --queue-id ID "
-                  "--journal-store DIR [--ttl-hours H] "
-                  "[--queue-timeout-seconds S]", file=sys.stderr)
+                  "--journal-store DIR [--ttl-hours H]", file=sys.stderr)
             return 2
         run_id = args[0]
         queue_id = _flag(args, "--queue-id")
@@ -4238,13 +4237,17 @@ def main(argv: list[str]) -> int:
         if not journal_store:
             return _cg_reject("--journal-store is required: the queue "
                               "journal is the only tuple source")
+        if "--queue-timeout-seconds" in args:
+            # CR-02 (round 2): the queue deadline is journal-immutable - a
+            # caller-controlled timeout is deadline authority and is removed
+            # from the production mint path entirely.
+            return _cg_reject("--queue-timeout-seconds is not accepted: "
+                              "grant lifetime derives only from the "
+                              "journal-recorded immutable deadline field")
         try:
             ttl = float(_flag(args, "--ttl-hours", str(CONSOLIDATE_MAX_TTL_HOURS)))
-            timeout_s = float(_flag(args, "--queue-timeout-seconds",
-                                    str(CONSOLIDATE_QUEUE_WALL_SECONDS)))
         except ValueError:
-            return _cg_reject("--ttl-hours and --queue-timeout-seconds "
-                              "must be numeric")
+            return _cg_reject("--ttl-hours must be numeric")
         import importlib.util as _ilu
         qj_path = (Path(__file__).resolve().parents[1] / "skills"
                    / "land-queue" / "scripts" / "queue-journal.py")
@@ -4274,7 +4277,22 @@ def main(argv: list[str]) -> int:
         created_at = doc.get("created_at")
         if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
             return _cg_reject("journal carries no numeric created_at")
-        remaining_h = (created_at + timeout_s - _now()) / 3600.0
+        deadline = doc.get("deadline")
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            # CR-02: grant lifetime derives ONLY from the journal-recorded
+            # immutable absolute deadline; a journal without one (written
+            # before the deadline field existed) fails closed rather than
+            # trusting any caller-supplied window.
+            return _cg_reject("journal records no absolute deadline; a "
+                              "deadline-less journal never mints authority")
+        # defense in depth: even a tampered oversized deadline never exceeds
+        # the real queue wall measured from created_at.
+        effective_deadline = min(float(deadline),
+                                 created_at + CONSOLIDATE_QUEUE_WALL_SECONDS)
+        timeout_s = effective_deadline - created_at
+        if timeout_s <= 0:
+            return _cg_reject("journal deadline precedes its creation time")
+        remaining_h = (effective_deadline - _now()) / 3600.0
         if remaining_h <= 0:
             return _cg_reject("original queue deadline has passed; a late "
                               "derivation never re-opens authority")

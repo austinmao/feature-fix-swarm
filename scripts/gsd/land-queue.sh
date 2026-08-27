@@ -162,8 +162,9 @@ emit_report() { # typed ITEM/REVERT/HUMAN-INBOX rows from the journal
 # and derives the canonical tuples from the journal's read-landed-tuples
 # projection — never estate prose, scouts, resume strings, shell arguments,
 # or stdin.  The grant is bound to the journal's ORIGINAL run id and its
-# TTL is clipped to the original queue deadline, so a resumed queue can
-# never silently extend authority (WR-02).  Grant derivation never rewrites
+# TTL is clipped to the journal-recorded immutable deadline, so a resumed
+# queue or a caller environment value can never extend authority
+# (WR-02/CR-02: no caller timeout is ever forwarded to the mint).  Grant derivation never rewrites
 # the queue outcome: on any refusal the landed report stands and the
 # consolidation simply has no grant to run under (fail closed, REQ-302).
 derive_consolidate_grant() {
@@ -171,8 +172,7 @@ derive_consolidate_grant() {
   orig_run="$(python3 "$JOURNAL" read-run-id --store "$LQ" --queue-id "$QUEUE_ID" 2>/dev/null)" || return 0
   [ -n "$orig_run" ] || return 0
   if ! python3 "$GATES" grant-consolidate "$orig_run" --queue-id "$QUEUE_ID" \
-      --journal-store "$LQ" --repo "$REPO" --base "$BASE" \
-      --queue-timeout-seconds "${QUEUE_WALL_SECONDS:-28800}" --ttl-hours 8; then
+      --journal-store "$LQ" --repo "$REPO" --base "$BASE" --ttl-hours 8; then
     echo "CONSOLIDATE-GRANT-SKIPPED: queue-derived grant refused; landed report stands"
   fi
 }
