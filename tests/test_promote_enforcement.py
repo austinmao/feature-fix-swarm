@@ -83,18 +83,23 @@ def test_non_prod_action_leaves_promote_store_byte_identical(tmp_path) -> None:
     assert store.read_bytes() == before
 
 
-# ── WR-03 / Rule 12a: the hotfix bypass is posture-dependent ──────────────
+# ── WR-03 / CR-01 / Rule 12a: the hotfix bypass is posture-dependent ──────
 # The document promises the emergency bypass sits downstream of the
 # stricter-only posture resolver; these tests make that property real.
-# The check reads the resolver's exported AUTONOMY_POSTURE (never the raw
-# FFS_AUTONOMY_POSTURE input, which only autonomy-posture.sh may read).
+# Round 2 (CR-01) STRENGTHENED the evidence rule: the check honors ONLY the
+# durable per-run posture record written by note_posture — a caller
+# environment variable is never authorization evidence (it may only agree
+# with the durable record; unbacked or conflicting claims fail closed).
 
 import json
 
 
 def test_hotfix_bypass_permitted_under_zero_posture(tmp_path, monkeypatch) -> None:
+    # CR-01: zero authorizes only as DURABLE evidence; the matching env
+    # claim is tolerated but is not what authorizes.
     monkeypatch.setenv("AUTONOMY_POSTURE", "zero")
     store = tmp_path / "evidence.json"
+    gates.note_posture(store, "run-1", "zero", "default")
     gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="incident 42")
     assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
     data = json.loads(store.read_text())
@@ -104,8 +109,10 @@ def test_hotfix_bypass_permitted_under_zero_posture(tmp_path, monkeypatch) -> No
 
 
 def test_hotfix_bypass_refused_under_floor_posture(tmp_path, monkeypatch) -> None:
+    # CR-01: the durably recorded floor refuses — with OR without any env.
     monkeypatch.setenv("AUTONOMY_POSTURE", "floor")
     store = tmp_path / "evidence.json"
+    gates.note_posture(store, "run-1", "floor", "env")
     gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="incident 42")
     assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False, \
         "floor posture must forbid the hotfix:prod-* emergency bypass"
@@ -117,6 +124,7 @@ def test_hotfix_bypass_refused_under_floor_posture(tmp_path, monkeypatch) -> Non
 
 
 def test_hotfix_bypass_fails_closed_on_unvalidated_posture(tmp_path, monkeypatch) -> None:
+    # CR-01: an unvalidated caller claim has no durable backing — fail closed.
     monkeypatch.setenv("AUTONOMY_POSTURE", "bananas")
     store = tmp_path / "evidence.json"
     gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="incident 42")
