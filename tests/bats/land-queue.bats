@@ -11,6 +11,9 @@ setup() {
   # inertness is proven there by the fail-closed unset-seam denied-PATH case.
   export TAKEOVER_TEST_IDENTITY="bats-boot-1"
   export FFS_HOST=claude
+  # CR-01: reviews route through adversary-host.sh; the hermetic seam skips
+  # the model-availability probe so stubs see exactly one review invocation.
+  export FFS_ADVERSARY_MODEL_PROBE=off
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; QUEUE="$ROOT/scripts/gsd/land-queue.sh"
   ORIGIN="$BATS_TEST_TMPDIR/origin.git"; WORK="$BATS_TEST_TMPDIR/work"; LINKED="$BATS_TEST_TMPDIR/linked"
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
@@ -46,12 +49,7 @@ mk_branch() { # $1 branch, $2 file, $3 content — commit on a new branch off ma
 }
 
 write_children() { # happy logging stubs for every non-gh effect child
-  cat > "$MOCK_BIN/codex" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
-printf 'codex %s\n' "$*" >> "${EVENTS:?}"
-exit 0
-STUB
+  write_vendor_stub codex
   cat > "$MOCK_BIN/feature-implement" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\0' feature-implement "$@" >> "${CALL_LOG:?}"
@@ -140,13 +138,55 @@ no_reviewer_path() { # PATH with no codex/claude anywhere but sane core tools
   printf '%s' "$MOCK_BIN:/usr/bin:/bin:/usr/sbin"
 }
 
-write_vendor_stub() { # $1 vendor CLI name — happy logging reviewer stub
-  cat > "$MOCK_BIN/$1" <<STUB
+write_vendor_stub() { # $1 vendor CLI name — argv-contract reviewer stub
+  # CR-01 (round 3): stubs accept ONLY the real CLI's supported
+  # non-interactive seam and reject the legacy `<vendor> review <pr> <oid>`
+  # fiction exactly like the real binary — a stub can never validate an
+  # interface the production CLI refuses.
+  if [ "$1" = codex ]; then
+    cat > "$MOCK_BIN/codex" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\0' $1 "\$@" >> "\${CALL_LOG:?}"
-printf '$1 %s\n' "\$*" >> "\${EVENTS:?}"
+printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
+# real-CLI parser contract: `codex review` takes at most one positional
+if [ "${1:-}" = "review" ] && [ $# -ge 3 ]; then
+  echo "error: unexpected argument '$3' found" >&2
+  exit 2
+fi
+[ "${1:-}" = "exec" ] || { echo "UNSTUBBED-BOUNDARY:codex $*" >&2; exit 64; }
+sandbox=0 dash=0
+for a in "$@"; do
+  [ "$a" = "read-only" ] && sandbox=1
+  [ "$a" = "-" ] && dash=1
+done
+[ "$sandbox" = 1 ] && [ "$dash" = 1 ] \
+  || { echo "UNSTUBBED-BOUNDARY:codex exec argv missing read-only sandbox or stdin sentinel" >&2; exit 64; }
+prompt="$(cat)"
+pr="$(printf '%s\n' "$prompt" | sed -n 's/^Pull request: #//p' | head -1)"
+oid="$(printf '%s\n' "$prompt" | sed -n 's/^Reviewed head: //p' | head -1)"
+printf 'codex review pr=%s head=%s\n' "$pr" "$oid" >> "${EVENTS:?}"
+echo "VERDICT: APPROVE"
 exit 0
 STUB
+  else
+    cat > "$MOCK_BIN/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' claude "$@" >> "${CALL_LOG:?}"
+# real-CLI parser contract: claude has no `review` subcommand at all
+if [ "${1:-}" = "review" ]; then
+  echo "Error: unknown command 'review'" >&2
+  exit 1
+fi
+hasp=0
+for a in "$@"; do [ "$a" = "-p" ] && hasp=1; done
+[ "$hasp" = 1 ] || { echo "UNSTUBBED-BOUNDARY:claude $* (only -p print mode is supported)" >&2; exit 64; }
+prompt="$(cat)"
+pr="$(printf '%s\n' "$prompt" | sed -n 's/^Pull request: #//p' | head -1)"
+oid="$(printf '%s\n' "$prompt" | sed -n 's/^Reviewed head: //p' | head -1)"
+printf 'claude review pr=%s head=%s\n' "$pr" "$oid" >> "${EVENTS:?}"
+echo "VERDICT: APPROVE"
+exit 0
+STUB
+  fi
   chmod +x "$MOCK_BIN/$1"
 }
 
@@ -248,12 +288,7 @@ case "${1:-} ${2:-}" in
     echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64 ;;
 esac
 STUB
-  cat > "$MOCK_BIN/codex" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
-printf 'codex %s\n' "$*" >> "${EVENTS:?}"
-exit 0
-STUB
+  write_vendor_stub codex
   cat > "$MOCK_BIN/feature-implement" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\0' feature-implement "$@" >> "${CALL_LOG:?}"
@@ -296,13 +331,13 @@ STUB
   expected="$BATS_TEST_TMPDIR/expected-events"
   cat > "$expected" <<EOF2
 implement spec/item-a --autonomous
-codex review 101 $OID_A
+codex review pr=101 head=$OID_A
 gh pr checks 101 --watch --interval 10
 gh pr merge 101 --squash --match-head-commit $OID_A
 assert-merged 101
 finalize --run-id $RUN_ID 101
 implement spec/item-b --autonomous
-codex review 102 $OID_B
+codex review pr=102 head=$OID_B
 gh pr checks 102 --watch --interval 10
 gh pr merge 102 --squash --match-head-commit $OID_B
 assert-merged 102
@@ -1126,6 +1161,148 @@ PYEOF
     --run-id bogus.run2 spec/item-a
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a BLOCKED:review-unrecorded" <<<"$output"
+  posture_no_hit -q "gh pr checks" "$EVENTS"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+}
+
+@test "[REVIEW-ARGV] the legacy 'REVIEWER review PR OID' argv is rejected by both vendor parsers" {
+  # CR-01 (round 3): `codex review 101 <oid>` exits 2 (unexpected argument)
+  # on the real CLI and claude has no review subcommand — the stubs pin the
+  # REAL parser contract so no stub can validate unsupported syntax, and
+  # the production queue no longer contains the fictional argv at all.
+  stub_env
+  write_vendor_stub codex
+  write_vendor_stub claude
+  OID="$(python3 -c "print('a'*40)")"
+  run "$MOCK_BIN/codex" review 101 "$OID"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unexpected argument"* ]]
+  run "$MOCK_BIN/claude" review 101 "$OID"
+  [ "$status" -ne 0 ]
+  # the production seam is the adversary-host invocation API, never a raw
+  # `"$reviewer" review` argv
+  posture_no_hit -E '"\$reviewer" review ' "$ROOT/scripts/gsd/land-queue.sh"
+  grep -q 'adversary_invoke_typed_request' "$ROOT/scripts/gsd/land-queue.sh"
+}
+
+@test "[REVIEW-ARGV] codex vendor branch reviews through the sandboxed exec seam with the pinned data-only prompt" {
+  # CR-01 argv contract, codex branch: the review must arrive as
+  # `codex exec ... --sandbox read-only ... -` with the prompt on stdin,
+  # carrying the canonical repository, PR, reviewed head, baseline, and the
+  # delimited untrusted diff — and a validated verdict artifact must exist.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RUN_ID=run-968
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  grep -qx "codex review pr=101 head=$OID_A" "$EVENTS"
+  # the recorded argv used the real seam (exec + read-only + stdin dash)
+  python3 - "$CALL_LOG" <<'PYEOF'
+import sys
+calls = open(sys.argv[1], "rb").read().split(b"\0")
+tokens = [c.decode() for c in calls if c]
+idxs = [i for i, t in enumerate(tokens) if t == "codex"]
+assert idxs, tokens
+argv = tokens[idxs[0] + 1:idxs[0] + 80]
+assert argv[0] == "exec", argv
+assert "read-only" in argv and "-" in argv, argv
+assert "review" not in argv[:1], argv
+PYEOF
+  # a validated, nonempty verdict artifact exists for the reviewed PR
+  ls "$LQ"/reviews/*101* >/dev/null
+  grep -Eq '^VERDICT: APPROVE[[:space:]]*$' "$LQ"/reviews/*101*
+}
+
+@test "[REVIEW-ARGV] claude vendor branch reviews through the supported -p seam" {
+  # CR-01 argv contract, claude branch: a codex-producing host reviews with
+  # the OPPOSITE vendor (claude) through `claude ... -p` — never a
+  # fictional subcommand.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  rm -f "$MOCK_BIN/codex"
+  write_vendor_stub claude
+  ln -sf "$(command -v python3)" "$MOCK_BIN/python3"
+  ln -sf "$(command -v bash)" "$MOCK_BIN/bash"
+  RUN_ID=run-969
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  FFS_HOST=codex PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" \
+    --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  grep -qx "claude review pr=101 head=$OID_A" "$EVENTS"
+  python3 - "$CALL_LOG" <<'PYEOF'
+import sys
+calls = open(sys.argv[1], "rb").read().split(b"\0")
+tokens = [c.decode() for c in calls if c]
+idxs = [i for i, t in enumerate(tokens) if t == "claude"]
+assert idxs, tokens
+argv = tokens[idxs[0] + 1:idxs[0] + 20]
+assert "-p" in argv, argv
+assert argv[0] != "review", argv
+PYEOF
+}
+
+@test "[REVIEW-ARGV] a reviewer without a validated verdict artifact fails closed before CI" {
+  # CR-01: rc 0 alone is never a satisfied review — an empty or
+  # verdict-free artifact blocks the item with a typed terminal.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  cat > "$MOCK_BIN/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
+[ "${1:-}" = "exec" ] || { echo "UNSTUBBED-BOUNDARY:codex $*" >&2; exit 64; }
+cat >/dev/null
+printf 'codex review-silent\n' >> "${EVENTS:?}"
+exit 0
+STUB
+  chmod +x "$MOCK_BIN/codex"
+  RUN_ID=adhoc-argv2
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:review-verdict" <<<"$output"
+  posture_no_hit -q "gh pr checks" "$EVENTS"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+}
+
+@test "[REVIEW-ARGV] a REVISE verdict blocks the item before CI" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  cat > "$MOCK_BIN/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' codex "$@" >> "${CALL_LOG:?}"
+[ "${1:-}" = "exec" ] || { echo "UNSTUBBED-BOUNDARY:codex $*" >&2; exit 64; }
+cat >/dev/null
+printf 'codex review-revise\n' >> "${EVENTS:?}"
+echo "HIGH: the change breaks the frobnicator"
+echo "VERDICT: REVISE"
+exit 0
+STUB
+  chmod +x "$MOCK_BIN/codex"
+  RUN_ID=adhoc-argv3
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:review" <<<"$output"
   posture_no_hit -q "gh pr checks" "$EVENTS"
   posture_no_hit -q "gh pr merge" "$EVENTS"
 }
