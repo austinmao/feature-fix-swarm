@@ -1297,6 +1297,91 @@ assert any(n.startswith("result:finalize:") for n in names), names
 assert names[-1].startswith("terminal:terminal:LANDED"), names
 PYEOF
 }
+@test "[RESUME-GUARD] a pre-existing STOP marker blocks resume recovery before any authority or finalizer" {
+  # CR-05 (round 3): resume recovery must run the same require_go fence
+  # (STOP + journal deadline) immediately before every recovery authority
+  # and effect.  A STOP present at resume start appends a typed queue
+  # terminal and executes ZERO assert-merged/gh/finalizer calls.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  RUN_ID=adhoc-rg1
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID" \
+    --repo "$WORK" --base main
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step merge --item spec/item-a --pr 301 --head "$OID_A"
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind result --step merge --item spec/item-a --status ok
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step finalize --item spec/item-a --pr 301 --head "$OID_A"
+  MERGE_SHA="$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)"
+  printf '%s\n' "$MERGE_SHA" > "$GH_STATE/merge-301"
+  touch "$LQ/STOP"
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" --resume "$RUN_ID"
+  rm -f "$LQ/STOP"
+  [ "$status" -eq 1 ]
+  grep -q "QUEUE-ABORTED:operator-stop" <<<"$output"
+  # zero recovery calls of any kind: not the finalizer, not the read
+  # authorities either
+  ! grep -q "^finalize" "$EVENTS"
+  ! grep -q "^assert-merged" "$EVENTS"
+  ! grep -q "^gh " "$EVENTS"
+  # the typed terminal is durably journaled
+  python3 - "$LQ/$RUN_ID.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+terms = [e for e in doc["events"] if e["kind"] == "terminal" and not e.get("item")]
+assert any(t.get("status") == "QUEUE-ABORTED:operator-stop" for t in terms), terms
+PYEOF
+}
+
+@test "[RESUME-GUARD] resume after the journal deadline never runs a dangling finalizer" {
+  # CR-05 (round 3): the guard clock is initialized from the journal's
+  # immutable created_at/deadline evidence, so an expired queue resumed
+  # later appends a typed terminal and executes zero finalizer calls —
+  # a caller environment can never extend recovery authority.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  RUN_ID=adhoc-rg2
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID" \
+    --repo "$WORK" --base main
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step merge --item spec/item-a --pr 301 --head "$OID_A"
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind result --step merge --item spec/item-a --status ok
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step finalize --item spec/item-a --pr 301 --head "$OID_A"
+  MERGE_SHA="$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)"
+  printf '%s\n' "$MERGE_SHA" > "$GH_STATE/merge-301"
+  # age the journal past its own absolute deadline
+  python3 - "$LQ/$RUN_ID.json" <<'PYAGE'
+import json, sys, time
+path = sys.argv[1]
+doc = json.load(open(path))
+doc["created_at"] = int(time.time()) - (28800 + 7200)
+doc["deadline"] = doc["created_at"] + 28800
+open(path, "w").write(json.dumps(doc, sort_keys=True))
+PYAGE
+  QUEUE_WALL_SECONDS=999999 PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" --resume "$RUN_ID"
+  [ "$status" -eq 1 ]
+  grep -q "QUEUE-ABORTED:systemic:queue-wall" <<<"$output"
+  ! grep -q "^finalize" "$EVENTS"
+  ! grep -q "^assert-merged" "$EVENTS"
+}
+
 @test "[POSTURE] production touch is auditable through review policy" {
   # 7c59d7a0: end-to-end through the REAL landing controller — it records a
   # bound degradation event and the production authority refuses promotion.

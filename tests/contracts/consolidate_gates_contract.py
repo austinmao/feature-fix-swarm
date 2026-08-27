@@ -789,3 +789,27 @@ def test_landed_tuples_excludes_an_item_reopened_after_landing(tmp_path):
         "a reopened item stayed in the deletion-target projection"
     assert mod.nonterminal_items(doc) == ["spec/x"], \
         "a reopened item was not counted nonterminal"
+
+
+def test_read_meta_emits_immutable_clock_and_binding(tmp_path):
+    """CR-05 (round 3): resume loads created_at/deadline and the repo
+    binding through read-meta BEFORE any reconciliation effect.  Optional
+    fields absent from pre-binding journals emit empty (SCHEMA stays 1)."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo)
+    proc = _qj(journal, "q-cr04", "read-meta")
+    assert proc.returncode == 0, proc.stderr
+    created, deadline, repo_root, base = _split0(proc.stdout)
+    assert created.isdigit() and deadline.isdigit(), (created, deadline)
+    assert int(deadline) == int(created) + 28800, \
+        "deadline is not the recorded created_at + queue wall"
+    assert repo_root == os.path.realpath(repo) and base == "main"
+    # pre-binding journal: empty binding fields, clock still present
+    store = tmp_path / "lq-unbound"
+    store.mkdir()
+    store.chmod(0o700)
+    proc = _qj(store, "q-old", "init", "--run-id", "run-q")
+    assert proc.returncode == 0, proc.stderr
+    created, deadline, repo_root, base = _split0(
+        _qj(store, "q-old", "read-meta").stdout)
+    assert created.isdigit() and repo_root == "" and base == ""

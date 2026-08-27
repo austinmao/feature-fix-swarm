@@ -189,6 +189,30 @@ derive_consolidate_grant() {
   fi
 }
 
+# e846ec0c: consulted immediately before STARTING every external effect —
+# defined here (before the resume path) because CR-05 resume recovery runs
+# the same fence before every recovery authority and effect.
+require_go() { # $1 step label; nonzero return records a queue terminal
+  local verdict
+  verdict="$(bash "$GUARD" allow --store "$LQ" --items "$GUARD_ITEMS" \
+    --queue-started "$QUEUE_STARTED" --item-started "$ITEM_STARTED" \
+    --round "${ITEM_ROUND:-1}")" || true
+  case "$verdict" in
+    ALLOW) return 0 ;;
+    STOP:operator-stop)
+      journal --kind terminal --step terminal --status "QUEUE-ABORTED:operator-stop" --detail "$1"
+      QUEUE_TERMINAL="QUEUE-ABORTED:operator-stop"
+      return 1 ;;
+    *)
+      # ponytail: wall/cap verdicts map to a queue-level systemic abort in
+      # 02-01; the 02-02 failure machine refines per-item wall handling.
+      journal --kind terminal --step terminal \
+        --status "QUEUE-ABORTED:systemic:${verdict#STOP:}" --detail "$1"
+      QUEUE_TERMINAL="QUEUE-ABORTED:systemic:${verdict#STOP:}"
+      return 1 ;;
+  esac
+}
+
 RESUME_RETRY=()
 resume_reconcile() {
   # REQ-208 / 8c88ebfa (01-08 two-phase intent): before any new effect,
@@ -204,6 +228,10 @@ resume_reconcile() {
   am="$(command -v assert-merged.sh || printf '%s\n' "$SCRIPT_DIR/assert-merged.sh")"
   while IFS= read -r -d '' item && IFS= read -r -d '' step \
       && IFS= read -r -d '' pr && IFS= read -r -d '' head; do
+    # CR-05 (round 3): the SAME require_go fence (STOP marker + journal-
+    # anchored wall clock) runs immediately before every recovery authority
+    # — read authorities included, never only after them.
+    require_go "resume-reconcile $item" || return 1
     merge_sha=""
     if [ -n "$pr" ]; then
       # assert-merged.sh is the merged-state authority for the resume path:
@@ -232,6 +260,10 @@ resume_reconcile() {
         # already authority-confirmed.  Recovery re-runs the finalizer
         # idempotently and only then appends LANDED — never a second merge.
         rf="$(command -v run-finalizer.sh || printf '%s\n' "$SCRIPT_DIR/run-finalizer.sh")"
+        # CR-05: STOP/deadline consulted immediately before the recovery
+        # finalizer MUTATION as well — a fence pass at classification time
+        # is never authority to mutate later.
+        require_go "resume-finalize $item" || return 1
         if "$rf" --run-id "$RUN_ID" "$pr"; then
           journal --kind result --step finalize --item "$item" --status reconciled
           journal --kind terminal --step terminal --item "$item" --status LANDED --detail "$merge_sha"
@@ -261,10 +293,42 @@ resume_reconcile() {
 }
 
 RESUMING=0
+QUEUE_TERMINAL=""
 if [ -n "$RESUME" ]; then
   RESUMING=1
   QUEUE_ID="$RESUME"
-  resume_reconcile
+  # CR-05 (round 3): load the journal's IMMUTABLE created_at/deadline and
+  # repository binding BEFORE any reconciliation effect, and anchor the
+  # guard clock to that evidence — never the resumer's own start time, so
+  # neither a caller environment nor a late resume can extend recovery
+  # authority past the recorded queue wall.
+  RESUME_META="$WORKTMP/resume-meta"
+  python3 "$JOURNAL" read-meta --store "$LQ" --queue-id "$QUEUE_ID" > "$RESUME_META" \
+    || { echo "QUEUE-ERROR:store"; exit 70; }
+  { IFS= read -r -d '' J_CREATED_AT && IFS= read -r -d '' J_DEADLINE \
+      && IFS= read -r -d '' J_REPO_ROOT && IFS= read -r -d '' J_BASE; } < "$RESUME_META" \
+    || { echo "QUEUE-ERROR:store"; exit 70; }
+  case "$J_CREATED_AT" in ''|*[!0-9]*)
+    echo "QUEUE-ERROR:store journal carries no readable created_at"; exit 70 ;;
+  esac
+  # deadline == created_at + queue wall by construction (journal cmd_init);
+  # the guard reproduces the same absolute deadline from created_at.  The
+  # repo/base binding is consumed by the CR-02 physical-root check.
+  : "$J_DEADLINE" "$J_REPO_ROOT" "$J_BASE"
+  QUEUE_STARTED="$J_CREATED_AT"
+  ITEM_STARTED="$(date +%s)"
+  GUARD_ITEMS=0
+  ITEM_ROUND=1
+  resume_reconcile || true
+  if [ -n "$QUEUE_TERMINAL" ]; then
+    # CR-05: STOP or expired deadline at resume — the typed queue terminal
+    # is already journaled by require_go; report and stop with ZERO further
+    # recovery effects.
+    echo "LAND-QUEUE REPORT queue=$QUEUE_ID resumed"
+    emit_report
+    echo "$QUEUE_TERMINAL"
+    exit 1
+  fi
   if [ "${#RESUME_RETRY[@]}" -eq 0 ]; then
     # WR-02: every item already terminal — re-run the idempotent grant
     # derivation so a crash between LANDED and minting is recoverable.
@@ -284,8 +348,6 @@ else
       --repo "$REPO" --base "$BASE" \
     || { echo "QUEUE-ERROR:store"; exit 70; }
 fi
-
-QUEUE_TERMINAL=""
 
 # 71c46cda: a stale DRAIN marker at startup is honored once, then consumed
 # under the held lock.
@@ -328,9 +390,12 @@ load_changed_files() { # $1 doc-file, $2 item-index
   rm -f "$tmp"
 }
 
-# ── bounded intake: the queue clock starts here ───────────────────────────
-QUEUE_STARTED="$(date +%s)"
-ITEM_STARTED="$QUEUE_STARTED"
+# ── bounded intake: the queue clock starts here — a resumed queue keeps
+# the journal-anchored clock loaded above (CR-05) ─────────────────────────
+if [ -z "${QUEUE_STARTED:-}" ]; then
+  QUEUE_STARTED="$(date +%s)"
+fi
+ITEM_STARTED="$(date +%s)"
 journal --kind intent --step collect --detail "bounded three-source intake"
 DOC="$WORKTMP/queue-doc.json"
 COLLECT_ARGS=(collect --repo "$REPO" --base "$BASE")
@@ -386,28 +451,6 @@ if [ "$RESUMING" -eq 0 ]; then
   python3 "$JOURNAL" "${MANIFEST_ARGS[@]}" \
     || { echo "QUEUE-ERROR:store"; exit 70; }
 fi
-
-# e846ec0c: consulted immediately before STARTING every external effect.
-require_go() { # $1 step label; nonzero return records a queue terminal
-  local verdict
-  verdict="$(bash "$GUARD" allow --store "$LQ" --items "$GUARD_ITEMS" \
-    --queue-started "$QUEUE_STARTED" --item-started "$ITEM_STARTED" \
-    --round "${ITEM_ROUND:-1}")" || true
-  case "$verdict" in
-    ALLOW) return 0 ;;
-    STOP:operator-stop)
-      journal --kind terminal --step terminal --status "QUEUE-ABORTED:operator-stop" --detail "$1"
-      QUEUE_TERMINAL="QUEUE-ABORTED:operator-stop"
-      return 1 ;;
-    *)
-      # ponytail: wall/cap verdicts map to a queue-level systemic abort in
-      # 02-01; the 02-02 failure machine refines per-item wall handling.
-      journal --kind terminal --step terminal \
-        --status "QUEUE-ABORTED:systemic:${verdict#STOP:}" --detail "$1"
-      QUEUE_TERMINAL="QUEUE-ABORTED:systemic:${verdict#STOP:}"
-      return 1 ;;
-  esac
-}
 
 # ── failure classification, no-progress, and breaker accounting ───────────
 # REQ-205/REQ-206: every observed effect failure is classified through the

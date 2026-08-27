@@ -520,6 +520,21 @@ def cmd_read_landed_tuples(ns) -> int:
     return 0
 
 
+def cmd_read_meta(ns) -> int:
+    """NUL-emit created_at, deadline, repo_root, base (CR-05/CR-02).
+
+    The journal's immutable clock and repository binding, loaded by resume
+    BEFORE any reconciliation effect so the guard clock and the repo check
+    are anchored to journal evidence, never the resumer's environment.
+    Optional fields absent from pre-binding journals emit empty (additive:
+    SCHEMA stays 1)."""
+    doc = _load(_doc_path(ns.store, ns.queue_id))
+    for key in ("created_at", "deadline", "repo_root", "base"):
+        value = doc.get(key)
+        sys.stdout.write(("" if value is None else str(value)) + "\0")
+    return 0
+
+
 def cmd_read_run_id(ns) -> int:
     """Print the journal's recorded owning run id (WR-02): resumed queues
     bind the consolidate grant to the ORIGINAL run, never the resumer."""
@@ -596,7 +611,8 @@ def main(argv=None) -> int:
 
     for name in ("init", "append", "events", "read-terminals", "read-dangling",
                  "read-nonterminal", "count-terminals", "read-report",
-                 "read-landed-tuples", "read-run-id", "record-manifest"):
+                 "read-landed-tuples", "read-run-id", "read-meta",
+                 "record-manifest"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
         p.add_argument("--queue-id", required=True)
@@ -635,6 +651,7 @@ def main(argv=None) -> int:
                 "read-report": cmd_read_report,
                 "read-landed-tuples": cmd_read_landed_tuples,
                 "read-run-id": cmd_read_run_id,
+                "read-meta": cmd_read_meta,
                 "record-manifest": cmd_record_manifest,
                 "lock-acquire": cmd_lock_acquire, "lock-release": cmd_lock_release}
     try:
