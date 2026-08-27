@@ -450,6 +450,40 @@ assert grant < am < gh < fin, (grant, am, gh, fin, tokens)
 PYEOF
 }
 
+@test "[ESTATE] a target with NO estate record refuses and never reaches the finalizer" {
+  # CR-02: rec is None is NOT positive fresh evidence — an empty branch
+  # list (the old success fixture) must fail closed with the sentinel
+  # untouched.
+  fixture_sane; build_sandbox
+  extract_block
+  printf '{"branches": []}\n' > "$ESTATE_DOC"
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "fresh-estate target missing" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+}
+
+@test "[ESTATE] landed must be the literal boolean true" {
+  fixture_sane; build_sandbox
+  extract_block
+  # a truthy non-boolean (the string "yes") is not positive evidence
+  printf '{"branches": [{"branch": "spec/merged", "landed": "yes"}]}\n' > "$ESTATE_DOC"
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "fresh-estate landed!=true" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+}
+
+@test "[ESTATE] duplicate estate rows for one target are refused" {
+  fixture_sane; build_sandbox
+  extract_block
+  printf '{"branches": [{"branch": "spec/merged", "landed": true}, {"branch": "spec/merged", "landed": true}]}\n' > "$ESTATE_DOC"
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "fresh-estate duplicate" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+}
+
 @test "[JOURNAL] target manifest comes from the durable queue journal for the exact queue id" {
   # CR-01: the intake collector cannot emit pr/merge fields and returns an
   # empty item list in production — consolidation identity must come from
