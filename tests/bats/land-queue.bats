@@ -844,6 +844,8 @@ PYEOF
   MERGE_A="$(python3 -c "print('f'*40)")"
   python3 "$JRNL" init --store "$LQ" --queue-id resume-q1 --run-id run-961 \
     --repo "$WORK" --base main
+  python3 "$JRNL" record-manifest --store "$LQ" --queue-id resume-q1 \
+    --item spec/item-a
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
     --kind intent --step merge --item spec/item-a --pr 101 --head "$HEAD_A"
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
@@ -930,6 +932,8 @@ PYEOF2
   MERGE_A="$(python3 -c "print('f'*40)")"
   python3 "$JRNL" init --store "$LQ" --queue-id resume-q2 --run-id run-963 \
     --repo "$WORK" --base main
+  python3 "$JRNL" record-manifest --store "$LQ" --queue-id resume-q2 \
+    --item spec/item-a
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q2 \
     --kind intent --step merge --item spec/item-a --pr 101 --head "$HEAD_A"
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q2 \

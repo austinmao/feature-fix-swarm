@@ -71,6 +71,8 @@ def make_journal(tmp_path, queue_id="q-cr03", run_id="run-q",
     # repo (make_repo) before building the journal.
     qj("init", "--run-id", run_id, "--repo", str(tmp_path / "repo"),
        "--base", "main")
+    manifest = [t[0] for t in items] + ([nonterminal_item] if nonterminal_item else [])
+    qj("record-manifest", *[a for b in manifest for a in ("--item", b)])
     for branch, head, pr, merge in items:
         qj("append", "--kind", "intent", "--step", "merge",
            "--item", branch, "--pr", pr, "--head", head)
@@ -432,7 +434,8 @@ def make_commit_repo(tmp_path, name="repo"):
 
 
 def make_bound_journal(tmp_path, repo, queue_id="q-cr04", run_id="run-q",
-                       items=(("spec/merged", "a" * 40, "201", "b" * 40),)):
+                       items=(("spec/merged", "a" * 40, "201", "b" * 40),),
+                       record_manifest=True):
     """Journal initialized WITH the CR-04 repository binding."""
     store = tmp_path / "lq-bound"
     store.mkdir(exist_ok=True)
@@ -444,6 +447,8 @@ def make_bound_journal(tmp_path, repo, queue_id="q-cr04", run_id="run-q",
                               capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
     qj("init", "--run-id", run_id, "--repo", str(repo), "--base", "main")
+    if items and record_manifest:
+        qj("record-manifest", *[a for b in items for a in ("--item", b[0])])
     for branch, head, pr, merge in items:
         qj("append", "--kind", "intent", "--step", "merge",
            "--item", branch, "--pr", pr, "--head", head)
@@ -533,7 +538,8 @@ def _qj(store, queue_id, *args):
 
 def test_journal_records_an_immutable_intake_manifest(tmp_path):
     repo = make_commit_repo(tmp_path)
-    journal = make_bound_journal(tmp_path, repo, items=())
+    journal = make_bound_journal(tmp_path, repo, items=(),
+                                 record_manifest=False)
     proc = _qj(journal, "q-cr04", "record-manifest",
                "--item", "spec/merged", "--item", "spec/ghost")
     assert proc.returncode == 0, proc.stderr
@@ -553,7 +559,8 @@ def test_mint_refuses_a_manifest_item_that_never_started(tmp_path):
     """CR-03: item B crashed before its first event — the grant derivation
     must see it as nonterminal and refuse, never mint a partial grant."""
     repo = make_commit_repo(tmp_path)
-    journal = make_bound_journal(tmp_path, repo)  # spec/merged fully landed
+    journal = make_bound_journal(tmp_path, repo,
+                                 record_manifest=False)  # spec/merged landed
     proc = _qj(journal, "q-cr04", "record-manifest",
                "--item", "spec/merged", "--item", "spec/ghost")
     assert proc.returncode == 0, proc.stderr
@@ -569,7 +576,7 @@ def test_mint_refuses_a_journal_without_a_manifest(tmp_path):
     """CR-03: a journal that never recorded its intake manifest cannot prove
     completeness — fail closed."""
     repo = make_commit_repo(tmp_path)
-    journal = make_bound_journal(tmp_path, repo)
+    journal = make_bound_journal(tmp_path, repo, record_manifest=False)
     mint = _mint(tmp_path, journal)
     assert mint.returncode != 0, \
         "a manifest-less journal minted consolidation authority"
@@ -580,7 +587,7 @@ def test_read_nonterminal_enumerates_unstarted_manifest_items(tmp_path):
     """CR-03: resume must re-enter an item that has NO events at all — the
     manifest, not the event stream, is the item universe."""
     repo = make_commit_repo(tmp_path)
-    journal = make_bound_journal(tmp_path, repo)
+    journal = make_bound_journal(tmp_path, repo, record_manifest=False)
     proc = _qj(journal, "q-cr04", "record-manifest",
                "--item", "spec/merged", "--item", "spec/ghost")
     assert proc.returncode == 0, proc.stderr

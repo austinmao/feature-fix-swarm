@@ -4269,6 +4269,12 @@ def main(argv: list[str]) -> int:
         if doc.get("run_id") != run_id:
             return _cg_reject(f"run/queue binding: journal {queue_id} is "
                               "owned by a different run id")
+        # CR-03: the durable intake manifest is the item universe — a
+        # journal that never recorded one cannot prove completeness and a
+        # declared item without a terminal (even with ZERO events) refuses.
+        if not isinstance(doc.get("manifest"), list):
+            return _cg_reject("journal records no intake manifest; a "
+                              "manifest-less journal never mints authority")
         live = qj.nonterminal_items(doc)
         if live:
             return _cg_reject("queue is not all-items-terminal: "

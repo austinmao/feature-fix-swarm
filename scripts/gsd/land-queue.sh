@@ -358,6 +358,23 @@ if [ "$TRUNCATED" = "true" ]; then
   GUARD_ITEMS=$((COUNT + 1))
 fi
 
+# CR-03 (round 2): persist the COMPLETE validated intake manifest atomically
+# after collection and before the first item effect.  Resume and grant
+# derivation enumerate these declared items and require a terminal for
+# every one, so a crash between items can never silently drop an unstarted
+# item or mint a partial consolidate grant.  A resumed queue keeps the
+# original journal's immutable manifest.
+if [ "$RESUMING" -eq 0 ]; then
+  MANIFEST_ARGS=(record-manifest --store "$LQ" --queue-id "$QUEUE_ID")
+  j=0
+  while [ "$j" -lt "$COUNT" ]; do
+    MANIFEST_ARGS+=(--item "$(read_scalar "$DOC" "$j" branch)")
+    j=$((j + 1))
+  done
+  python3 "$JOURNAL" "${MANIFEST_ARGS[@]}" \
+    || { echo "QUEUE-ERROR:store"; exit 70; }
+fi
+
 # e846ec0c: consulted immediately before STARTING every external effect.
 require_go() { # $1 step label; nonzero return records a queue terminal
   local verdict

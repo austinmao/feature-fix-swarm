@@ -135,6 +135,12 @@ def _load(path: Path) -> dict:
         value = doc.get(key)
         if value is not None and (not isinstance(value, str) or not value):
             raise JournalError(f"QUEUE-ERROR:store invalid journal {key}")
+    manifest = doc.get("manifest")
+    if manifest is not None:
+        if (not isinstance(manifest, list)
+                or any(not isinstance(m, str) or not m for m in manifest)
+                or len(set(manifest)) != len(manifest)):
+            raise JournalError("QUEUE-ERROR:store invalid journal manifest")
     return doc
 
 
@@ -233,6 +239,36 @@ def cmd_init(ns) -> int:
     return 0
 
 
+def cmd_record_manifest(ns) -> int:
+    """Persist the complete validated intake manifest (CR-03) — atomic,
+    immutable, recorded after collection and BEFORE the first item effect.
+    Identical replays are idempotent; a differing list refuses: the intake
+    truth is written once.  Additive schema note: SCHEMA stays 1 and
+    `manifest` is optional at read, so pre-manifest journals stay readable
+    (they fail closed at the grant-mint boundary instead)."""
+    items = list(ns.item or [])
+    seen = set()
+    for item in items:
+        value = _field(item, "manifest item")
+        if not value or any(ch.isspace() for ch in value):
+            raise JournalError("QUEUE-ERROR:store invalid manifest item")
+        if value in seen:
+            raise JournalError("QUEUE-ERROR:store duplicate manifest item")
+        seen.add(value)
+    path = _doc_path(ns.store, ns.queue_id)
+    doc = _load(path)
+    existing = doc.get("manifest")
+    if existing is not None:
+        if existing == items:
+            return 0  # idempotent replay
+        raise JournalError(
+            "QUEUE-ERROR:store manifest already recorded and differs; the "
+            "intake truth is immutable")
+    doc["manifest"] = items
+    _save(path, doc)
+    return 0
+
+
 def cmd_append(ns) -> int:
     if ns.kind not in KINDS:
         raise JournalError("QUEUE-ERROR:store invalid event kind")
@@ -324,6 +360,12 @@ def cmd_read_nonterminal(ns) -> int:
     terminal_items = {e.get("item")
                       for e in events if e.get("kind") == "terminal"}
     order, dangling, keyed = [], {}, {}
+    # CR-03: the declared manifest — not the event stream — is the item
+    # universe: an item that crashed before its FIRST event still resumes.
+    for item in doc.get("manifest") or []:
+        if item not in terminal_items:
+            order.append(item)
+            dangling[item] = None
     for event in events:
         item = event.get("item")
         if not item or item in terminal_items:
@@ -412,6 +454,11 @@ def nonterminal_items(doc: dict) -> list:
     """Items carrying events but no terminal — a nonterminal queue must
     never mint a consolidate grant (CR-03)."""
     seen, terminal = [], set()
+    # CR-03: enumerate the declared manifest so an item with zero events is
+    # still nonterminal — a partial manifest must never mint a grant.
+    for item in doc.get("manifest") or []:
+        if item not in seen:
+            seen.append(item)
     for event in doc["events"]:
         item = event.get("item")
         if not item:
@@ -504,7 +551,7 @@ def main(argv=None) -> int:
 
     for name in ("init", "append", "events", "read-terminals", "read-dangling",
                  "read-nonterminal", "count-terminals", "read-report",
-                 "read-landed-tuples", "read-run-id"):
+                 "read-landed-tuples", "read-run-id", "record-manifest"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
         p.add_argument("--queue-id", required=True)
@@ -525,6 +572,8 @@ def main(argv=None) -> int:
         if name == "count-terminals":
             p.add_argument("--item", required=True)
             p.add_argument("--status", required=True)
+        if name == "record-manifest":
+            p.add_argument("--item", action="append")
     for name in ("lock-acquire", "lock-release"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
@@ -541,6 +590,7 @@ def main(argv=None) -> int:
                 "read-report": cmd_read_report,
                 "read-landed-tuples": cmd_read_landed_tuples,
                 "read-run-id": cmd_read_run_id,
+                "record-manifest": cmd_record_manifest,
                 "lock-acquire": cmd_lock_acquire, "lock-release": cmd_lock_release}
     try:
         return handlers[ns.cmd](ns)
