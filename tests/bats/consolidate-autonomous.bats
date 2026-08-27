@@ -540,18 +540,52 @@ for j, t in enumerate(tokens):
 PYEOF
 }
 
-@test "[FENCE] a missing local target ref refuses at the pre-effect fence" {
-  # CR-06: inside a git worktree the immediate pre-effect check requires
-  # refs/heads/<target> to EXIST and equal the expected OID.  A ref the
-  # queue's earlier finalizer already removed is exactly the race window —
-  # absence is never treated as success.
+@test "[FENCE] a missing local ref with a drifted PR head refuses at the pre-effect fence" {
+  # CR-06/WR-01: blind absence is never success.  When the local ref is
+  # gone, the exact PR head must still equal the journal-pinned OID - a
+  # drifted head refuses before any effect, exactly like the local-drift
+  # fence.
   fixture_sane; build_sandbox
   extract_block
   git -C "$WORK" branch -d spec/merged
+  python3 -c "print('9'*40)" > "$GH_STATE/head-201"   # drifted PR head
   run run_block --execute
   [ "$status" -eq 1 ]
   grep -qi "oid-drift\|missing" <<<"$output"
   [ ! -s "$EFFECTS" ]
+}
+
+@test "[FINALIZED] the queue finalizer's own outcome is idempotent: both refs gone reports completion" {
+  # WR-01 (round 2): land-queue runs run-finalizer.sh BEFORE appending
+  # LANDED, and the real finalizer deletes the local (and on success the
+  # remote) branch ref.  Step 4-A executed after that normal cleanup must
+  # recognize the DEFINED already-finalized state - exact PR head verified
+  # AND both refs gone - and report completion instead of refusing, with
+  # nothing delegated.
+  fixture_sane; build_sandbox
+  extract_block
+  # reproduce the real finalizer postcondition on the fixture estate
+  git -C "$WORK" branch -d spec/merged
+  git -C "$ORIGIN" update-ref -d refs/heads/spec/merged
+  run run_block --execute
+  [ "$status" -eq 0 ]
+  grep -qi "already-finalized" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+}
+
+@test "[FINALIZED] remaining remote cleanup routes through the finalizer with the journal-pinned identity" {
+  # WR-01 (round 2): local ref gone but the remote survived (the first
+  # fail-soft finalizer removed the local ref then failed) - after the PR
+  # head verifies, the remaining remote cleanup is delegated exactly once
+  # to run-finalizer.sh under the journal-pinned run id + PR, whose
+  # merged-head proof still owns the only sanctioned deletion.
+  fixture_sane; build_sandbox
+  extract_block
+  git -C "$WORK" branch -d spec/merged
+  git -C "$ORIGIN" rev-parse -q --verify refs/heads/spec/merged >/dev/null
+  run run_block --execute
+  [ "$status" -eq 0 ]
+  grep -q "finalize --run-id run-0304 201" "$EFFECTS"
 }
 
 @test "[REPO] proofs and effects bind to one physical repository" {
