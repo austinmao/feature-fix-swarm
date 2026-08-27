@@ -9,6 +9,15 @@
 # gates-test-command.sh's completion backstop instead.
 #
 # Usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE>
+#        plan-wall.sh --run [phases-root]   (default .planning/phases)
+#   --run walls EVERY phase dir under the root that has plan files, in one
+#   invocation, under ONE global `wall:run` round counter (per-phase round
+#   counters are not consumed). Per-plan records stay keyed by each plan's
+#   real parent phase slug, and residuals land per phase dir — the
+#   gates-test-command.sh per-phase completion backstop and the
+#   review-gate residual glob are satisfied unchanged. Plan-less subdirs
+#   are skipped (a later-planned phase is still walled by the per-phase
+#   seam); zero plans under the root -> exit 2. --run --await is refused.
 #   --await rc: 0 done · 20 decided-blocked · 75 pending · 76 attempts-exhausted
 #   (PLAN_WALL_AWAIT_MAX pending returns per phase, default 6; counter resets
 #   on any decided outcome)
@@ -87,9 +96,19 @@ case "${1:-}" in
     ;;
 esac
 
+PW_RUN_MODE=0
+if [ "${1:-}" = "--run" ]; then
+  PW_RUN_MODE=1
+  shift
+  if [ "$PW_AWAIT" -eq 1 ] || [ "${1:-}" = "--await" ]; then
+    echo "usage: plan-wall.sh --run [phases-root] (--await is per-phase only)" >&2
+    exit 2
+  fi
+fi
+
 TARGET="${1:-}"
-if [ -z "$TARGET" ]; then
-  echo "usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE>" >&2
+if [ -z "$TARGET" ] && [ "$PW_RUN_MODE" -eq 0 ]; then
+  echo "usage: plan-wall.sh [--await <seconds>] <PHASE_DIR|PLAN_FILE> | --run [phases-root]" >&2
   exit 2
 fi
 
@@ -122,6 +141,71 @@ if [ -z "$RUN_ID" ]; then
   [ -n "$BRANCH_NNN" ] && RUN_ID="spec-${BRANCH_NNN}"
 fi
 [ -n "$RUN_ID" ] || RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+
+# ── run mode: wall every planned phase under one global round counter ─────
+# Each phase dir is delegated to a fresh self-invocation (full per-phase
+# machinery: plan glob, records keyed by the real phase slug, per-phase
+# WALL-RESIDUALS.md, sha-unchanged idempotence). PLAN_WALL_RUN_CHILD=1
+# tells the child to skip its own per-phase round counter — the run-level
+# `wall:run` counter here is the only round authority for a --run pass.
+if [ "$PW_RUN_MODE" -eq 1 ]; then
+  RUN_ROOT="${TARGET:-$PLANNING_DIR/phases}"
+  if [ ! -d "$RUN_ROOT" ]; then
+    echo "plan-wall: --run: phases root not found: $RUN_ROOT" >&2
+    exit 2
+  fi
+  PW_RUN_DIRS=()
+  shopt -s nullglob
+  for _pw_d in "$RUN_ROOT"/*/; do
+    _pw_d="${_pw_d%/}"
+    _pw_has_plan=0
+    for _pw_f in "$_pw_d"/*-PLAN.md; do _pw_has_plan=1; break; done
+    [ "$_pw_has_plan" -eq 0 ] && [ -f "$_pw_d/PLAN.md" ] && _pw_has_plan=1
+    [ "$_pw_has_plan" -eq 1 ] && PW_RUN_DIRS+=("$_pw_d")
+  done
+  shopt -u nullglob
+  if [ "${#PW_RUN_DIRS[@]}" -eq 0 ]; then
+    echo "plan-wall: --run: zero plan files under $RUN_ROOT — nothing to wall" >&2
+    exit 2
+  fi
+  PW_MAX_ROUNDS="${PLAN_WALL_MAX_ROUNDS:-2}"
+  case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=2 ;; esac
+  [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
+  PW_ROUND=""
+  if [ "${PLAN_WALL:-on}" != off ]; then
+    _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" \
+        --max "$PW_MAX_ROUNDS" 2>&1)"
+    _pw_lr_rc=$?
+    printf '%s\n' "$_pw_lr_out" >&2
+    if [ "$_pw_lr_rc" -ne 0 ] && printf '%s' "$_pw_lr_out" | grep -q '^LOOP-CAP:'; then
+      echo "plan-wall: WALL-ROUND-CAP --run — $PW_MAX_ROUNDS run-level wall rounds exhausted" >&2
+      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:run --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      exit 3
+    elif [ "$_pw_lr_rc" -ne 0 ]; then
+      echo "plan-wall: WARN: round counter unavailable (loop-round rc=$_pw_lr_rc) — proceeding without cap this invocation" >&2
+    fi
+    PW_ROUND="$(printf '%s' "$_pw_lr_out" | sed -n 's|^LOOP-ROUND: .* round \([0-9][0-9]*\)/.*|\1|p' | head -1)"
+  fi
+  RUN_RC=0
+  for _pw_d in "${PW_RUN_DIRS[@]}"; do
+    PLAN_WALL_RUN_CHILD=1 bash "${BASH_SOURCE[0]}" "$_pw_d"
+    [ $? -eq 0 ] || RUN_RC=1
+  done
+  if [ "$RUN_RC" -ne 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
+    if [ -n "$PW_ROUND" ] && [ "$PW_ROUND" -ge "$PW_MAX_ROUNDS" ]; then
+      echo "plan-wall: WALL-ROUND-CAP --run — block on the final allowed run round ($PW_ROUND/$PW_MAX_ROUNDS): quarantine and move on" >&2
+      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:run --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      RUN_RC=3
+    else
+      echo "plan-wall: BLOCKED --run — one repair round remains (round ${PW_ROUND:-?}/$PW_MAX_ROUNDS)" >&2
+    fi
+  fi
+  if [ "$RUN_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
+    python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" --reset >/dev/null 2>&1 \
+      || echo "plan-wall: WARN: passing run-round counter reset failed (non-fatal)" >&2
+  fi
+  exit "$RUN_RC"
+fi
 
 # ── phase + plan discovery ────────────────────────────────────────────────
 
@@ -1077,7 +1161,7 @@ PW_MAX_ROUNDS="${PLAN_WALL_MAX_ROUNDS:-2}"
 case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=2 ;; esac
 [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
 PW_ROUND=""
-if [ "${PLAN_WALL:-on}" != off ]; then
+if [ "${PLAN_WALL:-on}" != off ] && [ "${PLAN_WALL_RUN_CHILD:-0}" != 1 ]; then
   _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
       --max "$PW_MAX_ROUNDS" 2>&1)"
   _pw_lr_rc=$?
