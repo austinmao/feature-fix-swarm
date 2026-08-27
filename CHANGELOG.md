@@ -13,7 +13,8 @@ all skills.
 - **One-round wall** (plan-wall.sh; feature-implement 2.15.0; plan-decompose
   1.8.0): the diminishing-returns "strictly fewer NEW than last round" pass
   predicate is DELETED — NEW findings are reviewer-imagination-bound, not
-  defect-bound (specs 388/006/371/381 all failed to converge). Round 1 is
+  defect-bound (specs 388, 006, 381 and 385 all failed to converge, plus the
+  006/007/008 cap trio the 2026-08-08 policy itself cited). Round 1 is
   terminal: HIGH-only passes immediately as `PASS-RESIDUAL` (residuals ride
   to the executed-diff review, unchanged policy (c)); a CRITICAL blocks and
   buys exactly one repair round; a CRITICAL surviving repair exits 3

@@ -430,7 +430,8 @@ pair.
   residuals into `tasks.md` (Step 5) and are closed at the executed-diff
   review. There is NO round-count comparison: the superseded
   strictly-fewer-NEW rule was reviewer-imagination-bound and never
-  converged (spec-388: 19→9→10→8→7→12; four independent runs confirmed).
+  converged (spec-388: 19→9→10→8→7→12; independently confirmed on specs
+  006, 381 and 385).
   A CRITICAL, a REJECT with no keyable findings, or an unkeyable H/C falls
   through to the repair path — one repair round (`PLAN_GATE_MAX_REPAIRS`,
   default 1). A finding that RECURS after its repair round (REPEAT of a

@@ -33,7 +33,8 @@
 # Wall policy (b)+(c) — operator decision 2026-08-27 (supersedes the
 # 2026-08-08 diminishing-returns rule, which proved structurally
 # unsatisfiable: NEW findings per round are reviewer-imagination-bound, not
-# defect-bound — four independent runs never converged).
+# defect-bound: specs 388, 006, 381 and 385 each failed to converge, on top
+# of the 006/007/008 wall caps the 2026-08-08 policy already cited).
 #   (b) one round, terminal: round 1 is the review. Zero unresolved
 #       CRITICAL -> the phase PASSES immediately; unresolved HIGHs pass as
 #       PASS-RESIDUAL (stay UNRESOLVED in findings-queue, listed in
