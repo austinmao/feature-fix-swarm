@@ -601,3 +601,64 @@ def test_read_nonterminal_enumerates_unstarted_manifest_items(tmp_path):
         f"the never-started manifest item is invisible to resume: {quads}"
     assert not any(q[0] == "spec/merged" for q in quads), \
         "a terminal item leaked into the nonterminal projection"
+
+
+# ── WR-03 (round 2): externally-landed items never poison the projection ──
+# An item whose landing was only OBSERVED (precheck/authority) carries a
+# LANDED terminal but no keyed merge/finalize intent — this queue performed
+# no effect on it.  The projection omits such proven no-effect targets and
+# still refuses malformed EFFECT targets, so one externally-landed item can
+# never block the grant for every other valid landed target.
+
+
+def test_externally_landed_item_is_omitted_not_poisoning(tmp_path):
+    gates = gates_module()
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo, record_manifest=False)
+    proc = _qj(journal, "q-cr04", "record-manifest",
+               "--item", "spec/merged", "--item", "spec/external")
+    assert proc.returncode == 0, proc.stderr
+    # externally observed landing: terminal only, no keyed intent ever
+    proc = _qj(journal, "q-cr04", "append", "--kind", "terminal",
+               "--step", "terminal", "--item", "spec/external",
+               "--status", "LANDED", "--detail", "d" * 40)
+    assert proc.returncode == 0, proc.stderr
+    mint = _mint(tmp_path, journal)
+    assert mint.returncode == 0, (
+        "one externally-landed item poisoned the whole projection: "
+        + mint.stdout + mint.stderr)
+    expected = gates.consolidate_scope(
+        [("spec/merged", "a" * 40, 201, "b" * 40)],
+        repo_root=os.path.realpath(repo), base="main")
+    assert expected in mint.stdout, \
+        "the grant scope is not exactly the queue-effected targets"
+    # the no-effect item must NOT be a deletion target
+    unexpected = gates.consolidate_scope(
+        [("spec/merged", "a" * 40, 201, "b" * 40),
+         ("spec/external", "d" * 40, 999, "d" * 40)],
+        repo_root=os.path.realpath(repo), base="main")
+    assert unexpected not in mint.stdout
+
+
+def test_malformed_effect_target_still_refuses_projection(tmp_path):
+    """WR-03 guard: an item WITH a keyed intent (a real queue effect) whose
+    LANDED detail is malformed still refuses the whole read — omission is
+    only for proven no-effect targets."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo, record_manifest=False)
+    proc = _qj(journal, "q-cr04", "record-manifest",
+               "--item", "spec/merged", "--item", "spec/broken")
+    assert proc.returncode == 0, proc.stderr
+    proc = _qj(journal, "q-cr04", "append", "--kind", "intent",
+               "--step", "merge", "--item", "spec/broken",
+               "--pr", "777", "--head", "e" * 40)
+    assert proc.returncode == 0, proc.stderr
+    proc = _qj(journal, "q-cr04", "append", "--kind", "terminal",
+               "--step", "terminal", "--item", "spec/broken",
+               "--status", "LANDED", "--detail", "not-a-sha")
+    assert proc.returncode == 0, proc.stderr
+    mint = _mint(tmp_path, journal)
+    assert mint.returncode != 0, \
+        "a malformed effect target minted consolidation authority"
+    assert _no_consolidate_grant(tmp_path), \
+        "a grant was written despite a malformed effect target"
