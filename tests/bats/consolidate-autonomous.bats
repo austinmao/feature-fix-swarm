@@ -680,3 +680,48 @@ bad = {t for t in argv0s
 assert not bad, f"escaped the stub sandbox: {sorted(bad)}"
 PYEOF
 }
+
+
+@test "[T3] end-to-end: real journal + real grant-consolidate mint + --execute against UNSTUBBED gates.py" {
+  # T3 (ship round 5): every other scenario runs the Step 4-A block against
+  # a grep-stub gates.py, so the block's tuple serialization and the scope
+  # the REAL grant-consolidate mints could drift apart while both suites
+  # stay green (the block<->gates serialization fake-pass).  This case
+  # drives the whole chain unstubbed: production journal accessor ->
+  # production mint -> production check-grant at the block's boundaries.
+  fixture_sane; build_sandbox
+  extract_block
+  # the mint path requires the durable intake manifest (CR-03)
+  python3 "$REAL_ROOT/skills/land-queue/scripts/queue-journal.py" \
+    record-manifest --store "$QJ_STORE" --queue-id run-0304 --item spec/merged
+  # bind a REAL evidence store and replace the grep-stub gates.py with a
+  # delegator to the real one
+  export GATES_STORE="$BATS_TEST_TMPDIR/gates-real/evidence.json"
+  mkdir -p "$BATS_TEST_TMPDIR/gates-real"
+  write_stub "lib/gates.py" '
+exec /usr/bin/env GATES_STORE="${GATES_STORE:?}" python3 "${REAL_ROOT:?}/lib/gates.py" "$@"'
+  # negative control: before any mint the REAL check-grant must refuse the
+  # block (proves the real gates path is load-bearing, not a stub echo)
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  [ ! -s "$EFFECTS" ]
+  # mint through the REAL production derivation from the REAL journal
+  run python3 "$REAL_ROOT/lib/gates.py" grant-consolidate run-0304 \
+    --queue-id run-0304 --journal-store "$QJ_STORE" \
+    --repo "$WORK" --base main --ttl-hours 8
+  [ "$status" -eq 0 ]
+  # the minted scope is byte-identical to the tuple hash the block will
+  # compute — the serialization identity this test exists to pin
+  python3 - "$GATES_STORE" "$CONSOLIDATE_SCOPE" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+grants = data.get("_autonomy", {}).get("run-0304", {}).get("grants", {})
+scopes = [a for a in grants if a.startswith("consolidate:estate:")]
+assert scopes == [sys.argv[2]], (scopes, sys.argv[2])
+PYEOF
+  run run_block --execute
+  [ "$status" -eq 0 ]
+  grep -q "finalize" "$EFFECTS"
+  no_hit -a "git.branch.*-D" "$CALL_LOG"
+  no_hit -a "UNSTUBBED-BOUNDARY" <<<"$output"
+}
