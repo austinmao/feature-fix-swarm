@@ -1,6 +1,6 @@
 # Promotion Protocol
 
-Twelve rules for moving a change from development through staging into production
+Thirteen rules for moving a change from development through staging into production
 without rebuilding it, guessing at drift, or shipping unproven artifacts. Each rule
 below is one sentence, followed by the mechanism that enforces it today. Rules 3,
 4, and 5 are enforced by the environment registry — its schema, `/ffs-init`, and
@@ -18,7 +18,8 @@ the `env-registry.sh` verbs are documented in
 9. Fleet-wide promotion goes canary first, then the rest of the fleet, with a recorded revert lever (Enforcement: the fleet promotion lever's canary-required guard and revert command).
 10. Environment mutation happens only through a re-runnable CLI lever, never a manual console clickpath (Enforcement: lever scripts and their accompanying test suites).
 11. Environment drift is machine-detected on a recurring basis, not tracked from memory (Enforcement: the parity manifest and its read-only audit lever).
-12. An emergency bypass exists, is restricted to an operator, and is loudly and durably recorded (Enforcement: the evidence ledger's operator-only emergency escape, grant- and reason-gated).
+12a. An emergency bypass exists, is restricted to an operator, is posture-dependent — never looser than the effective autonomy posture allows (see docs/autonomy-posture.md) — and is loudly and durably recorded (Enforcement: the evidence ledger's operator-only emergency escape, grant- and reason-gated, downstream of the posture resolver's stricter-only resolution).
+12b. Grant-registry maintenance keeps every automatic grant typed, exact, and bounded — including the queue-derived consolidate:estate grant, whose scope is a sha256 of the exact landed target tuples and whose TTL never exceeds the queue wall (Enforcement: the machine gate registry's grant-consolidate mint and its exact scope-and-expiry check, rerun immediately before every effect).
 
 ## Plan-wall pass policy: diminishing returns + wall-the-diff (operator decision, 2026-08-08)
 

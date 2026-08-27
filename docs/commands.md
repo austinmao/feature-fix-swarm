@@ -108,12 +108,13 @@ Quick reference for all available commands in the feature-fix-swarm harness acro
 
 | Command | What it does |
 |---------|-------------|
-| `/git-branch-consolidate` | Read-only audit of every branch and worktree — is the content already landed, what does it still owe, does it have tests, is its spec/plan/tasks trail complete. Emits an ordered merge set, cleanup set, and testing gaps to `.planning/ESTATE-<UTC>.md`; never checks out, merges, or deletes |
+| `/git-branch-consolidate` | Read-only audit of every branch and worktree — is the content already landed, what does it still owe, does it have tests, is its spec/plan/tasks trail complete. Emits an ordered merge set, cleanup set, and testing gaps to `.planning/ESTATE-<UTC>.md`; never checks out, merges, or deletes. `--autonomous` (Step 4-A) stays report-only by default: it prints the deletion plan only when all four proofs hold — a queue-derived exact-scope `consolidate:estate` grant, fresh estate evidence with `landed==true` for every target, exact target-set tuple proof, and a green `assert-merged` result per target PR — and deletes nothing. Explicit `--execute` requires the same four proofs, rechecks grant scope/expiry and target OIDs immediately before each effect, and delegates every deletion solely to `scripts/gsd/run-finalizer.sh` under its merged-head proof — there is no other deletion path |
 | `/git-branch-cleanup` | Triage branches against the base branch, merge only CI-green non-gated PRs, prune merged refs + worktrees. Squash-merge and operator-gate aware; owns the deletion approval flow |
 
 **Pair order:** `/git-branch-consolidate` audits and decides, then hands its
 `delete-safe` set to `/git-branch-cleanup` to execute. Land before cleanup, or
-you delete the only copy.
+you delete the only copy. In `--autonomous` mode this handoff does not apply:
+deletion is delegated solely to `run-finalizer.sh` — no second deletion owner.
 
 ## Environment Variables
 

@@ -22,10 +22,16 @@ RULE_LINE = re.compile(r"^\d+\.\s")
 ANNOTATION = re.compile(r"\(Enforcement:.*?\)", re.IGNORECASE)
 
 
-def test_doc_has_exactly_12_numbered_rules() -> None:
+def test_doc_has_exactly_thirteen_recognized_rules() -> None:
+    # Phase 3 (spec-006) split Rule 12 into 12a/12b: eleven plain-numbered
+    # rules plus the two lettered split lines total thirteen recognized
+    # rules, matching the doc's "Thirteen rules" count line.
     lines = DOC.read_text().splitlines()
-    rule_lines = [l for l in lines if RULE_LINE.match(l)]
-    assert len(rule_lines) == 12, f"expected 12 rules, found {len(rule_lines)}"
+    numbered = [l for l in lines if RULE_LINE.match(l)]
+    lettered = [l for l in lines if RULE_12A.match(l) or RULE_12B.match(l)]
+    assert len(numbered) == 11, f"expected 11 numbered rules, found {len(numbered)}"
+    total = len(numbered) + len(lettered)
+    assert total == 13, f"expected 13 recognized rules, found {total}"
 
 
 def test_doc_has_zero_vendor_names() -> None:
