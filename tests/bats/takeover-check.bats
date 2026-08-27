@@ -435,8 +435,10 @@ PY
   run env GATES_STORE="$STORE" GSD_RUN_ID=spec-006 bash "$COLLECTOR" 006
   [ "$status" -eq 0 ]
   local store_dir="$(dirname "$STORE")/takeover"
-  [ "$(stat -f '%Lp' "$store_dir/spec-006.json")" = 600 ]
-  [ "$(stat -f '%Lp' "$store_dir/spec-006.md")" = 600 ]
+  # GNU form first: on Linux `stat -f` is FILESYSTEM stat (retro.bats idiom)
+  file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+  [ "$(file_mode "$store_dir/spec-006.json")" = 600 ]
+  [ "$(file_mode "$store_dir/spec-006.md")" = 600 ]
   [ -z "$(find "$store_dir" -name '.spec-006.*.tmp' -print -quit)" ]
 }
 

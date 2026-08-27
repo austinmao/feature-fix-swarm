@@ -182,7 +182,7 @@ def self_test() -> int:
     import tempfile as _tempfile
     fd, noexec = _tempfile.mkstemp(prefix="behavioral-red-noexec-")
     _os.close(fd)
-    _os.chmod(noexec, 0o644)  # exists but is not executable: PermissionError
+    _os.chmod(noexec, 0o600)  # exists but is not executable: PermissionError
     e2e += [
         ("e2e-invalid-utf8-output",
          [sys.executable, "-c",

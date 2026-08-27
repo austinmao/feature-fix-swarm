@@ -373,7 +373,7 @@ class OwnerLock:
         os.fsync(self.directory_fd)
         return True
 
-    def _reclaim(self, judged: os.stat_result) -> None:
+    def _reclaim(self, judged: os.stat_result, judged_raw: bytes) -> None:
         """Move one judged-stale inode aside under the serialized election."""
         with ReclaimElection(self.directory_fd):
             if self._pre_move_hook is not None:
@@ -387,7 +387,21 @@ class OwnerLock:
             tomb = f".takeover-check.tombstone.{os.getpid()}.{time.time_ns()}"
             os.rename(self.name, tomb, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
             tomb_st = os.stat(tomb, dir_fd=self.directory_fd, follow_symlinks=False)
-            if not same_identity(tomb_st, judged):
+            # (dev, ino) alone is NOT proof on inode-recycling filesystems
+            # (linux tmpfs reuses a freed inode number immediately, so a
+            # replacement published after the stale lock's unlink can carry
+            # the judged identity). The judged PAYLOAD BYTES are the
+            # authority: a tomb whose content differs from what was judged
+            # stale is a replacement, whatever its inode says.
+            try:
+                tomb_fd = open_regular(self.directory_fd, tomb)
+                try:
+                    tomb_raw = read_regular(tomb_fd)
+                finally:
+                    os.close(tomb_fd)
+            except (UnsafeTakeoverPath, OSError):
+                tomb_raw = None
+            if not same_identity(tomb_st, judged) or tomb_raw != judged_raw:
                 # A replacement published inside the move window was moved by
                 # mistake: restore it by link and never delete its inode.
                 try:
@@ -424,7 +438,7 @@ class OwnerLock:
                     stale = time.time() - judged.st_mtime > 1
                 if not stale:
                     raise LockBusy("runner-live")
-                self._reclaim(judged)
+                self._reclaim(judged, raw)
             except LockBusy:
                 raise
             except (UnsafeTakeoverPath, OSError):
@@ -436,7 +450,23 @@ class OwnerLock:
             return
         try:
             current = os.stat(self.name, dir_fd=self.directory_fd, follow_symlinks=False)
-            if (current.st_dev, current.st_ino) == self.identity:
+            if (current.st_dev, current.st_ino) != self.identity:
+                return
+            # Inode identity alone is spoofable by recycling (linux tmpfs
+            # hands a freed inode number to the next creation) — only a lock
+            # whose PAYLOAD is provably ours is ours to remove. Anything
+            # unreadable or foreign is spared.
+            try:
+                fd = open_regular(self.directory_fd, self.name)
+                try:
+                    payload = json.loads(read_regular(fd).decode("utf-8"))
+                finally:
+                    os.close(fd)
+            except (UnsafeTakeoverPath, OSError, UnicodeDecodeError, json.JSONDecodeError):
+                return
+            if (isinstance(payload, dict)
+                    and payload.get("pid") == os.getpid()
+                    and payload.get("run_id") == self.run_id):
                 os.unlink(self.name, dir_fd=self.directory_fd)
         except FileNotFoundError:
             pass
