@@ -2410,6 +2410,89 @@ def test_cli_check_grant_hotfix_without_grant_refuses(tmp_path) -> None:
     assert r.returncode == 1
 
 
+# ── spec-006 Phase 3 round-2 CR-01: durable posture evidence ────────────────
+# The resolved posture + provenance are persisted under the run id in the
+# evidence ledger BEFORE queue effects begin.  _check_hotfix_bypass requires
+# that durable value for autonomous runs and rejects missing or conflicting
+# posture claims — a caller environment variable is NEVER authorization
+# evidence.
+
+
+def test_note_posture_records_durable_evidence(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    assert gates.note_posture(store, "run-1", "floor", "env") is True
+    rec = json.loads(store.read_text())["_autonomy"]["run-1"]["posture"]
+    assert rec["posture"] == "floor"
+    assert rec["source"] == "env"
+    assert isinstance(rec.get("recorded_at"), (int, float))
+    # identical replay is idempotent; a conflicting re-record refuses
+    assert gates.note_posture(store, "run-1", "floor", "env") is True
+    assert gates.note_posture(store, "run-1", "zero", "default") is False
+    rec = json.loads(store.read_text())["_autonomy"]["run-1"]["posture"]
+    assert rec["posture"] == "floor", "a conflicting re-record weakened the posture"
+
+
+def test_note_posture_rejects_invalid_values(tmp_path) -> None:
+    import pytest
+
+    store = tmp_path / "evidence.json"
+    for bad in ("FLOOR", "bananas", "", None):
+        with pytest.raises(ValueError):
+            gates.note_posture(store, "run-1", bad, "env")
+    with pytest.raises(ValueError):
+        gates.note_posture(store, "run-1", "floor", "caller")
+    assert not store.exists() or "posture" not in store.read_text()
+
+
+def test_hotfix_refuses_durable_floor_without_any_env(tmp_path, monkeypatch) -> None:
+    """CR-01: a promotion check in a LATER process (no env at all) must see
+    the floor the queue durably resolved and refuse the bypass."""
+    monkeypatch.delenv("AUTONOMY_POSTURE", raising=False)
+    store = tmp_path / "evidence.json"
+    gates.note_posture(store, "run-1", "floor", "env")
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="sev1")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("HOTFIX-POSTURE-REFUSED" in p["reason"] for p in pend)
+    data = json.loads(store.read_text())
+    assert not data["_autonomy"]["run-1"].get("hotfix_bypasses")
+
+
+def test_hotfix_refuses_env_zero_spoof_against_durable_floor(tmp_path, monkeypatch) -> None:
+    """CR-01: starting the checking process with AUTONOMY_POSTURE=zero never
+    weakens a durably-recorded floor — conflicting evidence fails closed."""
+    store = tmp_path / "evidence.json"
+    gates.note_posture(store, "run-1", "floor", "env")
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="sev1")
+    monkeypatch.setenv("AUTONOMY_POSTURE", "zero")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
+    data = json.loads(store.read_text())
+    assert not data["_autonomy"]["run-1"].get("hotfix_bypasses")
+
+
+def test_hotfix_refuses_env_claim_without_durable_evidence(tmp_path, monkeypatch) -> None:
+    """CR-01: a caller environment variable is never authorization evidence —
+    an env posture claim with NO durable record for the run fails closed."""
+    store = tmp_path / "evidence.json"
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="sev1")
+    monkeypatch.setenv("AUTONOMY_POSTURE", "zero")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is False
+    pend = gates.list_pending(store, "run-1")
+    assert any("HOTFIX-POSTURE-REFUSED" in p["reason"] for p in pend)
+
+
+def test_hotfix_durable_zero_keeps_grant_reason_contract(tmp_path, monkeypatch) -> None:
+    """CR-01: a durably-recorded zero (matching claim or no claim) keeps the
+    ordinary grant+reason bypass contract."""
+    monkeypatch.delenv("AUTONOMY_POSTURE", raising=False)
+    store = tmp_path / "evidence.json"
+    gates.note_posture(store, "run-1", "zero", "default")
+    gates.grant_actions(store, "run-1", ["hotfix:prod-cp"], reason="db down")
+    assert gates.check_grant_prod(store, "run-1", "hotfix:prod-cp", None) is True
+    bypasses = json.loads(store.read_text())["_autonomy"]["run-1"]["hotfix_bypasses"]
+    assert bypasses and bypasses[0]["posture"] == "zero"
+
+
 # ── spec-295 Phase 2: preflight staging-proof kind (RED → GREEN) ────────────
 
 def test_preflight_staging_proof_empty_ledger_fails(tmp_path) -> None:

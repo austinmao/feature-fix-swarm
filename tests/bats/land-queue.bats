@@ -1724,6 +1724,49 @@ PYEOF
   [ "$(grep -c "^POSTURE-RESOLVED:" <<<"$output")" -eq 1 ]
 }
 
+@test "[POSTURE-DURABLE] a floor queue's resolved posture survives into a separate promotion process" {
+  # CR-01 (round 2): the queue durably records its resolved posture +
+  # provenance under the run id BEFORE any effect.  A check-grant-prod
+  # launched LATER in a fresh process — with no AUTONOMY_POSTURE in its
+  # environment, or with a spoofed zero — must still see floor and refuse
+  # the hotfix bypass.  A caller env var is never authorization evidence.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+  RUN_ID=run-967
+  FFS_AUTONOMY_POSTURE=floor PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output"
+  # the durable posture record exists under the run id
+  python3 - "$GATES_STORE" <<'PYEOF2'
+import json, sys
+data = json.load(open(sys.argv[1]))
+rec = data.get("_autonomy", {}).get("run-967", {}).get("posture")
+assert isinstance(rec, dict) and rec.get("posture") == "floor", rec
+PYEOF2
+  # separate process: an operator-granted reasoned hotfix must STILL refuse
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action hotfix:prod-cp \
+    --reason "sev1 incident" >/dev/null
+  run python3 "$ROOT/lib/gates.py" check-grant "$RUN_ID" --action hotfix:prod-cp
+  [ "$status" -eq 1 ]
+  # spoof: a caller env zero in the checking process never loosens floor
+  AUTONOMY_POSTURE=zero run python3 "$ROOT/lib/gates.py" check-grant "$RUN_ID" \
+    --action hotfix:prod-cp
+  [ "$status" -eq 1 ]
+  python3 - "$GATES_STORE" <<'PYEOF2'
+import json, sys
+data = json.load(open(sys.argv[1]))
+auto = data.get("_autonomy", {}).get("run-967", {})
+assert not auto.get("hotfix_bypasses"), auto.get("hotfix_bypasses")
+pend = [p.get("reason", "") for p in auto.get("pending", [])]
+assert any("HOTFIX-POSTURE-REFUSED" in r for r in pend), pend
+PYEOF2
+}
+
 @test "[POSTURE-SEAM] only the resolver reads FFS_AUTONOMY_POSTURE and consumers use the resolved value" {
   # single production read of the env override (expansion, not prose)
   readers="$(grep -rlF '${FFS_AUTONOMY_POSTURE' "$ROOT/scripts" "$ROOT/lib" \
