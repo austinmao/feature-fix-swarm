@@ -2676,3 +2676,23 @@ assert rows[-1].startswith("terminal:terminal:LANDED"), rows
 assert fin < len(rows) - 1, rows
 PYEOF
 }
+
+
+@test "[L4] env zero agreeing with the zero default records source=env" {
+  # L4 (ship round 5): an exact env zero that AGREES with the effective
+  # zero is still an env-layer decision — provenance names src=env instead
+  # of silently keeping default/config.  The weaken path (env zero vs
+  # committed floor) keeps its advisory + floor provenance unchanged.
+  run bash -c '. "'"$ROOT"'/scripts/gsd/autonomy-posture.sh"; FFS_AUTONOMY_POSTURE=zero resolve_autonomy_posture "" ""; printf "%s %s\n" "$AUTONOMY_POSTURE" "$AUTONOMY_POSTURE_SOURCE"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "zero env" ]
+  # config zero + env zero: the env layer is the last agreeing authority
+  run bash -c '. "'"$ROOT"'/scripts/gsd/autonomy-posture.sh"; FFS_AUTONOMY_POSTURE=zero resolve_autonomy_posture "" zero; printf "%s %s\n" "$AUTONOMY_POSTURE" "$AUTONOMY_POSTURE_SOURCE"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "zero env" ]
+  # weaken attempt unchanged: committed floor survives with its provenance
+  run bash -c '. "'"$ROOT"'/scripts/gsd/autonomy-posture.sh"; FFS_AUTONOMY_POSTURE=zero resolve_autonomy_posture "" floor; printf "%s %s\n" "$AUTONOMY_POSTURE" "$AUTONOMY_POSTURE_SOURCE"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"POSTURE-WEAKEN-IGNORED"* ]]
+  [[ "$output" == *"floor config"* ]]
+}

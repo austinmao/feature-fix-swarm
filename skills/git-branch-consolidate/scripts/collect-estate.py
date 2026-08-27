@@ -313,10 +313,14 @@ def main():
         tests = [f for f in files if TEST_PAT.search(f)]
         srcs = [f for f in files if SRC_PAT.search(f) and not TEST_PAT.search(f)]
         sid = spec_id_of(bname, files)
+        # L2 (ship round 5): sh() returns "ERROR:..." text on failure —
+        # int() over that crashed the whole audit.  Mirror the
+        # committed_epoch guard: digits-or-sentinel, never a raw int().
+        ahead_out, ahead_rc = sh(["git", "rev-list", "--count", f"{base}..{ref}"], repo)
         rec = {
             "branch": bname, "remote_only": True, "last_commit": None,
             "upstream": ref, "merged_into_base": False,
-            "ahead": int(sh(["git", "rev-list", "--count", f"{base}..{ref}"], repo)[0] or -1),
+            "ahead": int(ahead_out) if ahead_rc == 0 and ahead_out.isdigit() else -1,
             "behind": None, "files_changed": len(files),
             "residual_files": len(residual), "residual_code": len(residual_code),
             "residual_code_sample": sorted(residual_code)[:12],

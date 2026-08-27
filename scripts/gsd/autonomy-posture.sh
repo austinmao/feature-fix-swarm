@@ -79,6 +79,10 @@ PY
     zero)  # never weaken: a committed floor survives an env zero request
       if [ "$eff" = "floor" ]; then
         echo "POSTURE-WEAKEN-IGNORED: env requested zero; committed floor preserved" >&2
+      else
+        # L4 (ship round 5): env zero AGREEING with the effective zero is
+        # still an env-layer decision — provenance records src=env.
+        src="env"
       fi ;;
     *) echo "POSTURE-INVALID: $(_posture_sanitize "$envv")" >&2 ;;
   esac

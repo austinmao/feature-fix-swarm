@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# spec-status deterministic collector — READ-ONLY. Emits labeled fact sections
-# for the spec-status skill's subagents to interpret. Never mutates anything.
+# spec-status deterministic collector — read-only fact emission plus ONE
+# deliberate write at the end: it invokes scripts/gsd/takeover-record.py to
+# publish the versioned takeover record (ledger expectation + record
+# siblings under the effective gates store).  Everything before that final
+# step only reads (L3, ship round 5).
 # Usage: collect-status-facts.sh <spec-id-or-slug-prefix>   (run from repo/worktree root)
 set -u
 SPEC="${1:-}"
