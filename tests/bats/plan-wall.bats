@@ -92,8 +92,10 @@ queue_list() {
 
 # ── PATH-001: HIGH finding blocks; refute + reason unblocks re-run ──────────
 
-@test "PATH-001: HIGH finding blocks, resolve --disposition refute unblocks re-run with zero dispatch" {
-  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"missing null check","line":3}]'
+@test "PATH-001: CRITICAL finding blocks, resolve --disposition refute unblocks re-run with zero dispatch" {
+  # policy (b) 2026-08-27: HIGH-only passes as PASS-RESIDUAL, so the
+  # block+adjudicate path is exercised with the still-blocking severity
+  stub_claude_json '[{"severity":"CRITICAL","file":"a.py","claim":"missing null check","line":3}]'
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
   [[ "$output" == *"BLOCKED"* ]]
@@ -151,7 +153,7 @@ EOF
 # model output hit it.
 
 @test "spec-005 regression: finding with vendor/confidence/repro keys is schema-valid, not rc=97" {
-  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"missing null check","line":3,"repro":"call f(null)","vendor":"anthropic","confidence":0.8}]'
+  stub_claude_json '[{"severity":"CRITICAL","file":"a.py","claim":"missing null check","line":3,"repro":"call f(null)","vendor":"anthropic","confidence":0.8}]'
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
   [[ "$output" == *"BLOCKED"* ]]
@@ -621,7 +623,7 @@ EOF
 # ── PATH-013: reopen on a changed plan re-reporting the same finding ────────
 
 @test "PATH-013: resolved signature re-reported after the plan CHANGES -> reopens and blocks" {
-  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"leaky query","line":9}]'
+  stub_claude_json '[{"severity":"CRITICAL","file":"a.py","claim":"leaky query","line":9}]'
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
   sig="$(queue_list --unresolved --source wall --plan .planning/phases/1-foo/PLAN.md | jq -r '.[0].sig')"

@@ -85,6 +85,10 @@ Write `.planning/STATUS-<UTC yyyymmdd-HHMM>.md`:
   one-command unblock.
 - **Hygiene/risk** — secret-shaped strings, TTL expiries, disk, drift.
 - **Next 3 actions** — from the risk assessor, reconciled.
+- **Design-doc coverage** — when `specs/<NNN>/spec.md` has a `## Scope
+  ledger` with a source doc: `DESIGN-DOC COVERAGE: N of M slices consumed;
+  unconsumed: [list]; next: /feature-spec "slice N: …"` (D7 — partial
+  coverage must never be silent in a handoff).
 
 Print the headline + Next 3 inline; the file carries the rest.
 

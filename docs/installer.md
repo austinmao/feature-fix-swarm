@@ -41,6 +41,21 @@ User installs are hash-managed copies in both `~/.agents/skills` and
 `~/.claude/skills`. Their manifest is
 `~/.cache/feature-fix-swarm/install-manifest.json`.
 
+User installs also stage the managed lib runtime at
+`~/.claude/lib/feature-fix-swarm/` — `gates.py`, `runtime_proof.py`, and
+`scripts/gsd/socratic-slice.sh` — the paths the shipped scripts resolve when
+no repo-local copy shadows them. These are manifest-tracked like skills, so
+`--doctor` flags a drifted/stale copy and `--uninstall` removes them.
+`--reconcile-consumer` likewise ships `lib/gates.py` and
+`lib/runtime_proof.py` so vendored consumers stop running stale gate logic.
+
+A pre-existing hand-copied file at the managed path (the old workaround for
+this gap) is an unmanaged collision: the install blocks and preserves it
+unless you pass `--adopt-collisions`, which backs it up and stages the fresh
+bytes. Project-scope installs do not stage the home-path runtime — a machine
+using only project scope should also run `--scope user` (or
+`--reconcile-consumer`) once so the ladder's `~/.claude` rung resolves.
+
 For one transition release, `bash setup.sh` still means `--scope user` and
 prints a deprecation warning. Scripts and documentation should use the
 explicit form now.

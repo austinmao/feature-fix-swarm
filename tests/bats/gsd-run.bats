@@ -2674,3 +2674,63 @@ guard_wall_calls() {
   grep -Fq repo-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
+
+# ── rc-3 wall auto-continue: END-TO-END through the real gsd-run.sh path ────
+# (P3-H1, deferred from PR #129 — the unit suite exercises the extracted
+# _gsd_run_wall_gate function; these prove the real /gsd-execute-phase entry
+# routes wall rc 3 through the gate: quarantine without a grant, one bounded
+# reset + re-run with one.)
+
+wall_e2e_stub() { # rc-per-call queue, same shape as wall-auto-continue.bats
+  cat > "$HARNESS_ROOT/scripts/gsd/plan-wall.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "$BATS_TEST_TMPDIR/wall.calls"
+rc="\$(head -n1 "$BATS_TEST_TMPDIR/wall.rcs")"
+sed -i.bak '1d' "$BATS_TEST_TMPDIR/wall.rcs" 2>/dev/null || true
+exit "\${rc:-0}"
+STUB
+  chmod +x "$HARNESS_ROOT/scripts/gsd/plan-wall.sh"
+}
+
+@test "e2e: rc-3 wall without a grant quarantines /gsd-execute-phase (exit 3, no drive)" {
+  wall_e2e_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/wall-e2e-nogrant"
+  guard_repo "$REPO"
+  mkdir -p "$REPO/lib"
+  cp "$HARNESS_ROOT/lib/gates.py" "$REPO/lib/gates.py"
+  printf '3\n' > "$BATS_TEST_TMPDIR/wall.rcs"
+  RID=wall-e2e-nogrant-1
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GATES_STORE="$BATS_TEST_TMPDIR/wall-e2e-nogrant.json" \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"WALL-AUTO-CONTINUE skipped (no wall-reset:03-guard grant"* ]]
+  [ "$(guard_wall_calls)" -eq 1 ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "e2e: rc-3 wall with grant + clean queue auto-continues into the drive" {
+  wall_e2e_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/wall-e2e-grant"
+  guard_repo "$REPO"
+  mkdir -p "$REPO/lib"
+  cp "$HARNESS_ROOT/lib/gates.py" "$REPO/lib/gates.py"
+  printf '3\n0\n' > "$BATS_TEST_TMPDIR/wall.rcs"
+  RID=wall-e2e-grant-1
+  GATES_STORE="$BATS_TEST_TMPDIR/wall-e2e-grant.json" \
+    python3 "$HARNESS_ROOT/lib/gates.py" grant "$RID" \
+    --action wall-reset:03-guard --rollback "n/a"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GATES_STORE="$BATS_TEST_TMPDIR/wall-e2e-grant.json" \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WALL-AUTO-CONTINUE phase=03-guard"* ]]
+  [ "$(guard_wall_calls)" -eq 2 ]
+  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+}

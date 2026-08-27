@@ -39,9 +39,7 @@ run_wall() {
   run bash "$LEVER" .planning/phases/1-foo
 }
 
-@test "round cap: default 3 — fourth invocation exits 3 with WALL-ROUND-CAP" {
-  run_wall; [ "$status" -ne 3 ]
-  run_wall; [ "$status" -ne 3 ]
+@test "round cap: default 2 — hard block on the second invocation exits 3 with WALL-ROUND-CAP" {
   run_wall; [ "$status" -ne 3 ]
   run_wall
   [ "$status" -eq 3 ]
@@ -51,20 +49,19 @@ run_wall() {
   [[ "$output" == *"--reset"* ]]
 }
 
-@test "round cap: PLAN_WALL_MAX_ROUNDS=1 — second invocation capped" {
-  PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/1-foo
-  [ "$status" -ne 3 ]
+@test "round cap: PLAN_WALL_MAX_ROUNDS=1 — hard block on the FIRST invocation quarantines (no repair round)" {
   PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 3 ]
   [[ "$output" == *"WALL-ROUND-CAP"* ]]
 }
 
 @test "round cap: counter is durable across invocations but reset-all clears it" {
-  PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/1-foo
-  PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/1-foo
+  run_wall
+  run_wall
   [ "$status" -eq 3 ]
   python3 "$GATES_PY" loop-round "$GSD_RUN_ID" --reset-all
-  PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/1-foo
+  # post-reset the phase is back on round 1 of 2 — blocked, not capped
+  run_wall
   [ "$status" -ne 3 ]
 }
 
@@ -78,11 +75,7 @@ run_wall() {
   [ "$status" -ne 3 ]
 }
 
-@test "round cap: garbage PLAN_WALL_MAX_ROUNDS falls back to default 3" {
-  PLAN_WALL_MAX_ROUNDS=banana run bash "$LEVER" .planning/phases/1-foo
-  [ "$status" -ne 3 ]
-  PLAN_WALL_MAX_ROUNDS=banana run bash "$LEVER" .planning/phases/1-foo
-  [ "$status" -ne 3 ]
+@test "round cap: garbage PLAN_WALL_MAX_ROUNDS falls back to default 2" {
   PLAN_WALL_MAX_ROUNDS=banana run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -ne 3 ]
   PLAN_WALL_MAX_ROUNDS=banana run bash "$LEVER" .planning/phases/1-foo
@@ -109,10 +102,10 @@ run_wall() {
 @test "round cap: distinct phases count independently" {
   mkdir -p .planning/phases/2-bar
   echo "Phase 2: another plain widget" > .planning/phases/2-bar/PLAN.md
-  PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/1-foo
-  PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/1-foo
+  run_wall
+  run_wall
   [ "$status" -eq 3 ]
   # phase 2 is untouched by phase 1's exhausted counter
-  PLAN_WALL_MAX_ROUNDS=1 run bash "$LEVER" .planning/phases/2-bar
+  run bash "$LEVER" .planning/phases/2-bar
   [ "$status" -ne 3 ]
 }

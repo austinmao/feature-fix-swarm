@@ -8,9 +8,63 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-08-27 — FFS cycle-time cut, operator decision)
+
+- **One-round wall** (plan-wall.sh; feature-implement 2.15.0; plan-decompose
+  1.8.0): the diminishing-returns "strictly fewer NEW than last round" pass
+  predicate is DELETED — NEW findings are reviewer-imagination-bound, not
+  defect-bound (specs 388, 006, 381 and 385 all failed to converge, plus the
+  006/007/008 cap trio the 2026-08-08 policy itself cited). Round 1 is
+  terminal: HIGH-only passes immediately as `PASS-RESIDUAL` (residuals ride
+  to the executed-diff review, unchanged policy (c)); a CRITICAL blocks and
+  buys exactly one repair round; a CRITICAL surviving repair exits 3
+  `WALL-ROUND-CAP`. `PLAN_WALL_MAX_ROUNDS` default 3→2;
+  `WALL-NO-CONVERGENCE` no longer exists. gsd-run's rc-3 auto-continue
+  precondition narrows to CRITICAL-only (residual HIGHs are open by design).
+- **Durable plan-gate budget** (plan-decompose 1.8.0): the review budget is
+  charged on `gates.py loop-round "spec-<NNN>" plangate:plan` — re-invoking
+  after `PLAN-DECOMPOSE-BLOCKED` re-emits the block with zero dispatch
+  instead of silently minting a fresh budget (spec-388 rounds 4–6). Open
+  findings persist in `specs/<NNN>/plan-review-findings.json`.
+  `PLAN_GATE_MAX_REPAIRS` default 2→1.
+- **Size-aware ceremony** (new `scripts/gsd/seed-ceremony-tier.sh`;
+  spec-decompose 2.8.0): specs classify at seed time (full / light / adhoc;
+  `FFS_CEREMONY_TIER` override). `light` caps the ROADMAP at 2 phases and
+  pays ONE run-level wall (`plan-wall.sh --run`, new mode: global `wall:run`
+  round counter, per-phase records/residuals unchanged) instead of per-phase
+  walls; `adhoc` recommends `/feature-implement --adhoc` (interactive STOP /
+  autonomous continue as light).
+- **Plan-length gate is advisory** (`plan-length-gate.sh`): WARN, non-blocking (rc 0);
+  `FFS_PLAN_LENGTH_ENFORCE=1` restores blocking. The forced condense/replan
+  round is deleted from spec-decompose.
+- **Verifier single-run** (feature-implement 2.15.0): a verifier FAIL is
+  adjudicated (fix/refute/waive) — never re-run for a second opinion on
+  unchanged state; max 1 re-verify per phase.
+- **Design-doc coverage ledger** (feature-spec 2.8.0; feature-implement;
+  spec-status): specs seeded from a multi-slice design doc carry a required
+  `## Scope ledger` (doc path + sha256, every slice CONSUMED/DEFERRED), and
+  every completion report/handoff prints `DESIGN-DOC COVERAGE: N of M
+  slices consumed …` — partial coverage is never silent again.
+- **Typed dispatch-budget grant** (feature-implement): an exhausted
+  dispatch budget refreshes only via a `dispatch-budget:<spec>:<phase>`
+  grant, never plan-amendment-as-budget-reset.
+- **Residual-channel guard** (review-gate-command.sh): every globbed
+  `WALL-RESIDUALS.md` must splice into the reviewer prompt; unreadable
+  manifests fail closed. review-gate 1.12.0 adds stale-reopen auto-refute
+  (a REOPEN with no new evidence cites the prior disposition).
+- **`run-finalizer.sh --archive-planning`**: sweeps the landed run's
+  `.planning/phases/` dirs to `.planning/archive/<run-id>/` so later merges
+  never abort on stale untracked files.
+
 ### Added
 
 - spec-006 Phase 3 closes the autonomous landing loop: `/git-branch-consolidate --autonomous` (Step 4-A) consumes the landed queue's own evidence and stays report-only by default — deletion requires explicit `--execute` plus all four proofs (queue-derived exact-scope `consolidate:estate` grant, fresh `landed==true` estate evidence, exact target-set tuple proof, green `assert-merged` per target PR) and is delegated solely to `scripts/gsd/run-finalizer.sh` under its merged-head proof. A new monotonic autonomy posture (`zero` committed default; `FFS_AUTONOMY_POSTURE=floor` stricter-only) governs promotion privilege — see `docs/autonomy-posture.md` and promotion-protocol Rules 12a/12b.
+- Installer now delivers the managed lib runtime: `setup.sh --scope user` stages
+  `gates.py`, `runtime_proof.py`, and `scripts/gsd/socratic-slice.sh` under
+  `~/.claude/lib/feature-fix-swarm/` (manifest-tracked — doctor flags drift,
+  uninstall removes them), and `--reconcile-consumer` ships `lib/gates.py` +
+  `lib/runtime_proof.py`. Previously no install path delivered `gates.py` at
+  all; the managed copy went silently stale while doctor reported PASS.
 
 - `/feature-implement --autonomous` gets a bounded, grant-gated rc-3 auto-continue: on `WALL-ROUND-CAP`/`WALL-NO-CONVERGENCE`, a phase with zero unresolved HIGH/CRITICAL wall findings, an operator `wall-reset:<phase-slug>` grant, and an unspent `PLAN_WALL_AUTO_RESET_MAX` budget (default 1) gets exactly one wall reset + re-run before quarantine goes terminal; enforced in `scripts/gsd/gsd-run.sh` (`_gsd_run_wall_gate` — the actual `--autonomous` runner seam), documented in `skills/feature-implement/SKILL.md`. `/feature-spec` Step 6 MAX-AUTH enumeration now mints one `wall-reset:<phase-slug>` grant per phase directory (autonomy-grant 1.4.0 adds the gate type). Interactive sessions never mint the grant, so their exit-3 stop is unchanged.
 - Fix-round mutation contract (feature-implement 2.14.0, plan-decompose 1.7.0): a wall/plan-gate fix round must rewrite or delete the defective plan text — never append a correction block leaving the original standing, which next-round reviewers re-notice and the findings queue counts as REOPEN=NEW, tripping the diminishing-returns rule (root cause of the spec-385 no-convergence quarantines).

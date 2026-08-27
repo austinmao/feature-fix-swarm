@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
 description: "Create and decompose a lightweight plan with opposite-first review, one bounded read-only active-host fallback, and bounded self-repair; returns success or an evidence-backed terminal block."
-version: "1.7.0"
+version: "1.8.0"
 permissions:
   filesystem: write
   network: false
@@ -62,8 +62,12 @@ This skill is the single owner of lightweight planning quality. Callers such as
 `/task-swarm` sequence its result; they do not reimplement review, scoring, or
 repair loops.
 
-- `PLAN_GATE_MAX_REPAIRS=${PLAN_GATE_MAX_REPAIRS:-2}`: maximum host-native plan
-  rewrites after the initial opposite-host review.
+- `PLAN_GATE_MAX_REPAIRS=${PLAN_GATE_MAX_REPAIRS:-1}`: maximum host-native plan
+  rewrites after the initial opposite-host review (default 1 — the round-1
+  review is terminal under the 2026-08-27 one-round policy; a repair round
+  exists only for CRITICAL/REJECT/unkeyable findings). The round budget is
+  DURABLE (gates.py loop-round, below) — re-invoking this skill after a
+  terminal block does NOT mint a fresh budget.
 - `TASK_GATE_MAX_REPAIRS=${TASK_GATE_MAX_REPAIRS:-2}`: maximum
   `spec-decompose` repair passes after the initial task score.
 - Each repair consumes the prior findings as inert data, edits only the owned
@@ -72,7 +76,12 @@ repair loops.
   active-host fallback. Both hosts unavailable is a terminal evidence-backed
   block; a parseable quality rejection is repaired.
 - Exhaustion writes `$SPEC_DIR/plan-decompose-blocked.md` and returns the
-  terminal marker `PLAN-DECOMPOSE-BLOCKED spec=<NNN> stage=<plan|tasks>
+  terminal marker; the durable counter makes a bare re-invocation re-emit
+  this block idempotently with ZERO reviewer dispatch. The only fresh-budget
+  lever is explicit and operator-visible:
+  `python3 lib/gates.py loop-round "spec-$SPEC_ID" plangate:plan --reset --max 1`
+  (include this line verbatim in the blocked artifact). Terminal marker:
+  `PLAN-DECOMPOSE-BLOCKED spec=<NNN> stage=<plan|tasks>
   findings=<path> resume="/plan-decompose <NNN>"` with exit 1.
 
 Operator grants never bypass this quality contract; likewise, quality rejection
@@ -158,6 +167,38 @@ Write the plan output to `$SPEC_DIR/plan.md`.
 
 Skip entirely when `--no-review` (or deprecated `--no-codex`) is passed.
 
+**Durable round budget (D2, 2026-08-27).** Before EVERY reviewer dispatch in
+this step (round 1 and each repair round), charge the durable counter with
+the stable spec-derived run id — never a session-derived id, which would
+mint a fresh budget on every resume:
+
+```bash
+LR_OUT="$(python3 lib/gates.py loop-round "spec-$SPEC_ID" "plangate:plan" \
+  --max "$((1 + ${PLAN_GATE_MAX_REPAIRS:-1}))" 2>&1)"; LR_RC=$?
+```
+
+- `LR_RC=1` (LOOP-CAP): the budget is already spent — re-emit the terminal
+  `PLAN-DECOMPOSE-BLOCKED` block (with the reset recipe) WITHOUT dispatching
+  a reviewer. This is the resume-idempotence path: a re-invocation after a
+  terminal block costs zero dispatches.
+- Any other nonzero `LR_RC` (store unusable): WARN and proceed uncapped this
+  invocation — fail open, mirroring plan-wall.sh; a broken store must not
+  impersonate the cap.
+- On a final PASS verdict (any pass, residuals included):
+  `python3 lib/gates.py loop-round "spec-$SPEC_ID" plangate:plan --reset` —
+  a pass IS convergence; without the reset, a later legitimate
+  re-decomposition of the same spec would start pre-capped.
+
+**Durable open-findings set.** The running finding set lives at
+`$SPEC_DIR/plan-review-findings.json` — an array of
+`{sig12, severity, file, title, status, first_round, last_round}` with
+`status` ∈ `open|fixed-pending|resolved`, atomically rewritten
+(temp-file + move) after every round. It deliberately SURVIVES budget
+resets: stable ids feed the PRIOR_FINDINGS block, so a post-reset round 1
+still refuses to re-litigate adjudicated findings. On entry, if the file
+exists, load it as the open set and log
+`[plan-decompose] resuming: N open finding(s) from prior invocation`.
+
 Use the shared host adapter; do not hard-code a vendor. The reviewer is always
 the opposite family from the orchestrator and resolves a typed judgment-tier
 request for that host. The adapter owns stdin closure and portable timeout
@@ -240,8 +281,12 @@ is empty.
 reviewer, so without this the round-2 reviewer re-derives everything from
 rewritten prose and mints new findings for defects round 1 already
 adjudicated — the non-convergence plan-wall.sh fixed with its PRIOR_FINDINGS
-block. Mirror it here. No new store is needed: the whole repair loop is one
-continuous run of this skill, so the running set lives in-session.
+block. Mirror it here. The running set is durable —
+`$SPEC_DIR/plan-review-findings.json` (contract in the budget block above) —
+because the repair loop is NOT one continuous run: terminal blocks get
+re-invoked across sessions, and an in-session set gave every re-invocation
+amnesia (spec-388 rounds 4–6 re-derived and re-adjudicated the same
+defects three times).
 
 An id can only be stable if the fields it hashes are. plan-wall.sh gets that
 from a JSON schema (`schemas/review-finding.schema.json`) its reviewer output
@@ -296,8 +341,9 @@ Track only **HIGH and CRITICAL** findings in the running set, the same
 severities plan-wall counts — MEDIUM/LOW never enter the convergence
 arithmetic, so they can neither satisfy the pass test below nor go missing
 from a residual list they were never in. Carry `{sig12, severity, file,
-title}` forward and classify each newly-parsed keyable finding as **NEW** (id
-unseen) or **REPEAT** (id seen in an earlier round).
+title, status, first_round, last_round}` forward in
+`$SPEC_DIR/plan-review-findings.json` and classify each newly-parsed keyable
+finding as **NEW** (id unseen) or **REPEAT** (id seen in an earlier round).
 
 Closing a finding takes both halves, in this order, and nothing else closes
 one:
@@ -315,7 +361,8 @@ inflate exactly the number the pass test reads. Log `[plan-decompose] round
 {n} findings: NEW:{new} REPEAT:{repeat} RESOLVED:{resolved}
 NOT-REPORTED:{not_reported} UNKEYABLE:{unkeyable}`.
 
-On round 2+, build the block from the open set, one line each as
+On round 2+ (or a resumed round 1 with a non-empty findings file), build
+the block from the durable open set, one line each as
 `<sig12> <SEVERITY> OPEN <file> -- <title>` using the canonicalized
 single-line `file`/`title`, and substitute it for the `<PRIOR_FINDINGS
 block...>` placeholder. This path has no shell-level `fence_neutralize`, so
@@ -372,25 +419,23 @@ pair.
   as data, write the revised `plan.md`, and re-run the opposite-host review.
   Repeat up to `PLAN_GATE_MAX_REPAIRS`; do not return to `/task-swarm` between
   attempts.
-- **Pass-with-residuals (mirrors plan-wall.sh wall policy (b)).** Evaluate
-  this rule BEFORE the REJECT/CRITICAL bullet above — the two overlap on a
-  round-2 REJECT and this exception wins; without an explicit precedence the
-  same review result orders both "repair again" and "stop repairing". It
-  fires only when ALL of: a previous round's NEW count exists (round 2+),
-  zero unresolved CRITICAL this round, zero UNKEYABLE HIGH/CRITICAL findings
-  this round (an unkeyable one is untracked and would vanish from the
-  residual list — a false pass), and this round's NEW count STRICTLY FEWER
-  than the previous round's. Then → **PASS**, do not repair further.
-  Round 1, missing history, and an unchanged-or-larger NEW count are strict:
-  fall through to the repair path. An unresolved CRITICAL always blocks and
-  is never eligible for this exception, at any count.
-
-  A REJECT verdict with fewer new HIGHs than last round still passing is the
-  intended reading, not an oversight: it is plan-wall.sh's wall policy (b)
-  verbatim (operator decision 2026-08-08, `scripts/gsd/plan-wall.sh:24-32`),
-  which trades plan-stage re-litigation for diff-stage review under policy
-  (c). Requiring NEW=0 here would restore the unbounded wall→fix→wall loop
-  that policy replaced. The residual list below is what keeps it honest.
+- **Pass-with-residuals (mirrors plan-wall.sh wall policy (b), 2026-08-27
+  one-round rule).** Evaluate this rule BEFORE the REJECT/CRITICAL bullet
+  above — the two overlap and this exception wins; without an explicit
+  precedence the same review result orders both "repair again" and "stop
+  repairing". It fires when BOTH: zero unresolved CRITICAL this round, and
+  zero UNKEYABLE HIGH/CRITICAL findings this round (an unkeyable one is
+  untracked and would vanish from the residual list — a false pass).
+  Then → **PASS** immediately, round 1 included — open HIGHs ride as
+  residuals into `tasks.md` (Step 5) and are closed at the executed-diff
+  review. There is NO round-count comparison: the superseded
+  strictly-fewer-NEW rule was reviewer-imagination-bound and never
+  converged (spec-388: 19→9→10→8→7→12; independently confirmed on specs
+  006, 381 and 385).
+  A CRITICAL, a REJECT with no keyable findings, or an unkeyable H/C falls
+  through to the repair path — one repair round (`PLAN_GATE_MAX_REPAIRS`,
+  default 1). A finding that RECURS after its repair round (REPEAT of a
+  fixed-pending id) is a terminal block, not another repair.
 - Verdict APPROVE-WITH-FIXES with HIGH findings: apply HIGH fixes to `plan.md`, continue.
 - Verdict APPROVE: continue.
 
@@ -406,7 +451,11 @@ plan-wall.sh's own diminishing-returns policy (b).
 
 If the final allowed review still returns REJECT or CRITICAL, write the terminal
 blocked artifact defined in the ownership contract and exit 1. Never emit a
-generic “mandatory plan gate” message without the surviving findings.
+generic “mandatory plan gate” message without the surviving findings. The
+blocked artifact MUST carry the explicit fresh-budget recipe
+(`python3 lib/gates.py loop-round "spec-$SPEC_ID" plangate:plan --reset --max 1`)
+— the durable counter means a bare re-invocation re-emits this block with
+zero dispatch instead of silently minting rounds 4–6.
 
 Log finding counts: `[plan-decompose] opposite-host plan review: C:{critical} H:{high} M:{medium} verdict:{verdict} NEW:{new} REPEAT:{repeat} RESOLVED:{resolved}`
 
@@ -452,7 +501,10 @@ Invoke `Skill: spec-decompose` with `$SPEC_ID`.
 This writes `$SPEC_DIR/tasks.md` with annotated task list.
 
 When Step 3 ended in a pass-with-residuals, append a `## Plan Gate Residuals`
-section to that `tasks.md` listing every finding still in the open set —
+section to that `tasks.md` listing every finding still open in
+`$SPEC_DIR/plan-review-findings.json` (the durable set — never a from-memory
+reconstruction; this is what closed the spec-379 phantom residual-home
+failure) —
 including the NOT-REPORTED ones, which were never proven fixed — as
 `- {sig12} [{severity}] {file}: {title}`, using the canonicalized single-line
 fields. These are pinned executor assumptions, closed at the executed-diff

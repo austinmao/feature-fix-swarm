@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.14.0"
+version: "2.15.0"
 allowed-tools:
   - Read
   - Edit
@@ -243,6 +243,20 @@ drive across vendors.
 
 **Spec mode:** read `.planning/ROADMAP.md` for the first unchecked phase N.
 
+Once, immediately before entering the phase loop (NOT at run-start
+bootstrap): if `.planning/ceremony-tier` exists and starts with `light`,
+run the run-level wall over every already-planned phase in one invocation:
+
+```bash
+[ -f .planning/ceremony-tier ] && grep -q '^light' .planning/ceremony-tier && bash scripts/gsd/plan-wall.sh --run
+```
+
+STOP on nonzero. This pays ONE global `wall:run` round for the whole run;
+per-phase re-entry at the runner's own wall seam then takes the
+sha-unchanged zero-dispatch idempotence path (an edited plan still
+re-dispatches). Tiers `full`/absent change nothing — the per-phase wall
+below is the unchanged default.
+
 Before a dry run or any interactive/headless execution, run:
 
 ```bash
@@ -272,21 +286,20 @@ headless runner (`gsd-run.sh`) invokes the SAME lever again at its own
 pre-execution seam (beside `requirement-ownership-gate.sh`), so a direct
 runner call cannot bypass this wall either.
 
-Exit 3 = `WALL-ROUND-CAP` (durable per-phase round cap, default
-`PLAN_WALL_MAX_ROUNDS=3`): this is TERMINAL for the phase, not a retryable
-BLOCKED — do NOT start another fix round. Quarantine the phase (record the
-open findings + the printed unblock commands in the run report / pendings)
-and move to other runnable work; the cap exists because uncounted
-wall→fix→wall loops have burned 19 rounds/2 days and 38+ turns/a week of
-vendor quota. Only an operator-reviewed findings resolution (or a deliberate
-`PLAN_WALL_MAX_ROUNDS` raise) reopens it.
+The wall is ONE round (policy (b) 2026-08-27): round 1 is the review.
+HIGH-only findings pass immediately as `PASS-RESIDUAL` (they ride into
+execution as pinned assumptions, closed at the executed-diff review); an
+unresolved CRITICAL blocks (rc 1) and buys exactly one repair round.
 
-Exit 3 is shared by two distinct terminal conditions — `WALL-ROUND-CAP`
-above and `WALL-NO-CONVERGENCE` (the wall quarantines early when a
-diminishing-returns round finds new HIGH/CRITICAL findings that are not
-strictly fewer than the previous round, before the round cap is even hit).
-Distinguish them from the printed line, not the exit code; the operator
-action is identical either way — quarantine and move on.
+Exit 3 = `WALL-ROUND-CAP` (durable per-phase round cap, default
+`PLAN_WALL_MAX_ROUNDS=2` — review + one CRITICAL-repair round): this is
+TERMINAL for the phase, not a retryable BLOCKED — do NOT start another fix
+round. Quarantine the phase (record the open findings + the printed unblock
+commands in the run report / pendings) and move to other runnable work; the
+cap exists because uncounted wall→fix→wall loops have burned 19 rounds/2
+days and 38+ turns/a week of vendor quota. Only an operator-reviewed
+findings resolution (or a deliberate `PLAN_WALL_MAX_ROUNDS` raise) reopens
+it.
 
 ### Fix-round mutation contract
 
@@ -296,11 +309,10 @@ text the finding points at. Never leave the original text standing and
 append a correction block after it: the wall's reviewer dispatch re-reads
 the WHOLE plan file each round, so appended-but-not-removed defective prose
 gets re-noticed and re-reported. A re-report of a previously RESOLVED
-finding is a REOPEN, and the findings queue counts a REOPEN as NEW — which
-inflates this round's new-HIGH/CRITICAL count and can by itself trip the
-wall's diminishing-returns rule (new ≥ prior → `WALL-NO-CONVERGENCE`). The
-fix IS the edit to the plan; `findings-queue resolve` records the
-adjudication, it does not substitute for one.
+finding is a REOPEN — a reopened CRITICAL blocks again and there is only
+one repair round before `WALL-ROUND-CAP`. The fix IS the edit to the plan;
+`findings-queue resolve` records the adjudication, it does not substitute
+for one.
 
 ### Autonomous rc-3 bounded auto-continue
 
@@ -310,10 +322,11 @@ quarantine becomes terminal — `gsd-run.sh` enforces this in code
 invocation, and no agent turn exists between its two wall calls for an
 interactive prose recipe to govern). On exit 3, before quarantine:
 
-1. Every plan under the phase must have zero unresolved HIGH/CRITICAL wall
+1. Every plan under the phase must have zero unresolved CRITICAL wall
    findings (`findings-queue list --unresolved --source wall --severity
-   HIGH,CRITICAL --plan <plan>`). Any unresolved finding anywhere in the
-   phase → quarantine (unchanged).
+   CRITICAL --plan <plan>`). Residual HIGHs do NOT count — under the
+   one-round wall they are open on every pass-residual phase by design.
+   Any unresolved CRITICAL anywhere in the phase → quarantine (unchanged).
 2. Zero unresolved AND `gates.py check-grant "$RUN_ID" --action
    wall-reset:<phase-slug>` passes AND the durable per-phase budget
    (`gates.py loop-round "$RUN_ID" wall-autoreset:<phase-slug> --max
@@ -322,10 +335,9 @@ interactive prose recipe to govern). On exit 3, before quarantine:
 3. `gates.py loop-round "$RUN_ID" wall:<phase-slug> --reset --max 1`, then
    re-run the wall on the phase exactly once.
 4. ANY nonzero exit from that re-run — a second rc 3 OR a plain rc 1
-   BLOCKED — is quarantine terminal. The reset also cleared the round's
-   prior-count history, so the re-run's diminishing-returns comparison has
-   no baseline and is strict: only a hard zero-unresolved pass clears it.
-   The `wall-autoreset:<phase-slug>` budget is spent regardless of which
+   BLOCKED — is quarantine terminal. Post-reset the wall restarts at round
+   1 of its one-round policy: a pass (including `PASS-RESIDUAL`) clears; a
+   fresh CRITICAL is terminal. The `wall-autoreset:<phase-slug>` budget is spent regardless of which
    exit code comes back — at the default `PLAN_WALL_AUTO_RESET_MAX=1` this
    recipe never runs twice for the same phase in the same run; raising the
    knob is a deliberate, visible escape mirroring `PLAN_WALL_MAX_ROUNDS`,
@@ -393,11 +405,30 @@ serialize:
 Claude Fable's instruction-following is strong enough that these two short guards
 replace enumerated behavior lists — do not grow them into checklists.
 
+**Dispatch-budget refresh is a typed grant, never plan surgery (D10,
+2026-08-27).** Wherever a per-round dispatch/executor budget applies (a
+consumer repo's run policy, a gsd segment cap), an EXHAUSTED budget is
+refreshed only by a typed grant in the run's autonomy ledger:
+`gates.py grant "$RUN_ID" --action "dispatch-budget:<spec>:<phase>"
+--rollback "<how to unwind>"`, checked beside the budget with
+`gates.py check-grant "$RUN_ID" --action "dispatch-budget:<spec>:<phase>"`,
+mirroring `wall-reset:<slug>`. The grant's justification names the NEW root
+cause that earned more dispatches. NEVER amend a plan to reset a budget:
+spec-381 burned two full rounds on plan surgery whose only purpose was
+minting fresh budget, and the amendment triggered implicit re-review on top.
+Budgets are defect-scoped, not round-scoped.
+
 (Orchestrator-level mitigation: per-turn work inside gsd-core sub-agents is
 gsd-core's to guard — deeper coverage needs a gsd-core change, out of scope.)
 
-On verifier gaps: `/gsd-plan-phase N --gaps` then `/gsd-execute-phase N --gaps-only`
-(same runner), max 2 gap rounds, then STOP and report.
+On a verifier FAIL, ADJUDICATE the reported gap set first — for each gap:
+fix it, refute it (with evidence), or waive it (recorded residual). Never
+dispatch a fresh verifier for a second opinion on the same state: verifier
+runs against unchanged code return disjoint blocker sets (spec-006: 4 runs,
+4 different sets), so a re-run is noise, not signal. Re-verify only AFTER
+fixes land, max 1 re-verify per phase; then `/gsd-plan-phase N --gaps` +
+`/gsd-execute-phase N --gaps-only` (same runner), max 2 gap rounds, then
+STOP and report.
 
 ### Package-legitimacy pre-install gate (v2.10.0)
 
@@ -525,11 +556,15 @@ exit 0
    skill is available, run it (read-only queue snapshot). Both skill references
    are fail-soft — sessions without them use the bare-`gh` path silently.
    **Run-end finalizer (after assert-merged exits 0):**
-   `bash scripts/gsd/run-finalizer.sh <pr-number>` — removes the run's clean
+   `bash scripts/gsd/run-finalizer.sh --archive-planning <pr-number>` — removes the run's clean
    worktree (dirty → routed to `/adopt-wip`, never deleted), deletes the landed
    feature branch local+remote (squash-safe: only under merged-`headRefOid`
    proof, never a blind force-delete), prunes `gsd/phase-*` branches that are
-   ancestors of the merged head, clears `.planning/run-state/`. Fail-soft,
+   ancestors of the merged head, clears `.planning/run-state/`, and
+   (`--archive-planning`, D8) sweeps the landed run's phase dirs to
+   `.planning/archive/<run-id>/` so a later run's merge never aborts on the
+   stale untracked files (spec-388: 11-file untracked-overwrite abort).
+   Fail-soft,
    ALWAYS exits 0 — cleanup failure never un-merges or blocks the report.
    Kill-switch `FFS_RUN_FINALIZER=off`.
    CI re-proves the levers this step names actually exist (verify block,
@@ -563,7 +598,12 @@ path): release the Step 1.5 claim FIRST, so a stop mid-report never strands it:
 ```
 
 Phases executed, verifier verdicts, gap rounds, gate evidence ids, consumed grants,
-pendings (for one-command morning resume), files changed. Include the delegation
+pendings (for one-command morning resume), files changed. When
+`specs/NNN/spec.md` carries a `## Scope ledger` with a source doc, ALWAYS
+end the report with the coverage line (D7):
+`DESIGN-DOC COVERAGE: N of M slices consumed; unconsumed: [list]; next:
+/feature-spec "slice N: …"` — a run that completed slices 0–1 of a 7-slice
+design doc must say so louder than "complete". Include the delegation
 histogram `tiers={frontier:N,judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`
 (spawns by typed request and resolved model; `inline-mechanical` = host
 trip-wire drains, target 0) — verify
