@@ -395,6 +395,19 @@ serialize:
 Claude Fable's instruction-following is strong enough that these two short guards
 replace enumerated behavior lists — do not grow them into checklists.
 
+**Dispatch-budget refresh is a typed grant, never plan surgery (D10,
+2026-08-27).** Wherever a per-round dispatch/executor budget applies (a
+consumer repo's run policy, a gsd segment cap), an EXHAUSTED budget is
+refreshed only by a typed grant in the run's autonomy ledger:
+`gates.py grant "$RUN_ID" --action "dispatch-budget:<spec>:<phase>"
+--rollback "<how to unwind>"`, checked beside the budget with
+`gates.py check-grant "$RUN_ID" --action "dispatch-budget:<spec>:<phase>"`,
+mirroring `wall-reset:<slug>`. The grant's justification names the NEW root
+cause that earned more dispatches. NEVER amend a plan to reset a budget:
+spec-381 burned two full rounds on plan surgery whose only purpose was
+minting fresh budget, and the amendment triggered implicit re-review on top.
+Budgets are defect-scoped, not round-scoped.
+
 (Orchestrator-level mitigation: per-turn work inside gsd-core sub-agents is
 gsd-core's to guard — deeper coverage needs a gsd-core change, out of scope.)
 
