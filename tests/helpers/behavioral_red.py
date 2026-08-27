@@ -154,10 +154,28 @@ def self_test() -> int:
         ("e2e-infrastructure-traceback",
          [sys.executable, "-c", f"print({marker!r}); raise RuntimeError('x')"], 0),
     ]
-    for label, argv, expected in e2e:
-        code = run(marker, argv)
-        if code != expected:
-            failures.append(f"{label}: got exit {code}, expected {expected}")
+    # WR-02 (round 2): decoding and spawn infrastructure failures are never
+    # RED proof — the classifier must exit 0 with an infrastructure verdict
+    # instead of crashing into a nonzero exit that run-red records as RED.
+    import os as _os
+    import tempfile as _tempfile
+    fd, noexec = _tempfile.mkstemp(prefix="behavioral-red-noexec-")
+    _os.close(fd)
+    _os.chmod(noexec, 0o644)  # exists but is not executable: PermissionError
+    e2e += [
+        ("e2e-invalid-utf8-output",
+         [sys.executable, "-c",
+          "import sys; sys.stdout.buffer.write(b'\\xff\\xfe garbage\\n'); "
+          f"print({marker!r}); raise SystemExit(1)"], 0),
+        ("e2e-spawn-permission-denied", [noexec], 0),
+    ]
+    try:
+        for label, argv, expected in e2e:
+            code = run(marker, argv)
+            if code != expected:
+                failures.append(f"{label}: got exit {code}, expected {expected}")
+    finally:
+        _os.unlink(noexec)
     if failures:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
