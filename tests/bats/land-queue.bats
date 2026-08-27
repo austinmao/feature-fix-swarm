@@ -1979,6 +1979,44 @@ STUB
   [ ! -e "$WORK/.feature-fix-swarm/land-queue/DRAIN" ]
   [ ! -e "$REPO_B/.feature-fix-swarm/land-queue/DRAIN" ]
 }
+
+@test "[DEADLINE] resume stops on the journal's RECORDED deadline, not a reproduced one" {
+  # LOW-2 (round 4): the resume path read the journal's immutable deadline
+  # and then discarded it — the guard reproduced created_at + wall instead.
+  # The recorded absolute deadline is the authority and rides every
+  # require_go fence on resume.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  RUN_ID=adhoc-ddl1
+  OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID" \
+    --repo "$WORK" --base main
+  python3 "$JR" append --store "$LQ" --queue-id "$RUN_ID" \
+    --kind intent --step finalize --item spec/item-a --pr 301 --head "$OID_A"
+  # the recorded deadline is EXPIRED while created_at is fresh — only the
+  # journal's recorded value can catch this
+  python3 - "$LQ/$RUN_ID.json" <<'PYEOF'
+import json, sys, time
+path = sys.argv[1]
+with open(path) as fh:
+    doc = json.load(fh)
+doc["deadline"] = int(time.time()) - 5
+with open(path, "w") as fh:
+    json.dump(doc, fh)
+PYEOF
+  write_gh
+  write_children
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" --resume "$RUN_ID"
+  grep -q "QUEUE-ABORTED:systemic:queue-wall" <<<"$output"
+  # zero recovery effects ran past the expired recorded deadline
+  ! grep -q "^assert-merged" "$EVENTS"
+  ! grep -q "^gh " "$EVENTS"
+  ! grep -q "^finalize" "$EVENTS"
+}
 @test "[HUMAN-INBOX] blocked item has reason and one-command unblock" {
   test -f "$LINKED/.git"
   stub_env

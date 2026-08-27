@@ -417,3 +417,25 @@ STUB
   ! grep -q "QUEUE-ABORTED:systemic" <<<"$output"
   [ ! -s "$CALL_LOG" ]
 }
+
+@test "[GUARD] allow honors the recorded absolute --deadline over the reproduced wall" {
+  # LOW-2 (round 4): the resume path loads the journal's IMMUTABLE recorded
+  # deadline but the guard only ever REPRODUCED it from --queue-started.
+  # The recorded value is the authority: pass it through and stop on it.
+  STORE="$BATS_TEST_TMPDIR/qstore"; mkdir -p "$STORE"
+  now=1000000
+
+  # fresh queue clock but an EXPIRED recorded deadline — the RECORDED wins
+  run bash "$GUARD" allow --store "$STORE" --items 2 \
+    --queue-started $((now - 10)) --item-started $((now - 5)) \
+    --round 1 --now "$now" --deadline $((now - 1))
+  [ "$status" -eq 3 ]
+  [ "$output" = "STOP:queue-wall" ]
+
+  # an unexpired recorded deadline still allows
+  run bash "$GUARD" allow --store "$STORE" --items 2 \
+    --queue-started $((now - 10)) --item-started $((now - 5)) \
+    --round 1 --now "$now" --deadline $((now + 100))
+  [ "$status" -eq 0 ]
+  [ "$output" = "ALLOW" ]
+}

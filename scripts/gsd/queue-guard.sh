@@ -33,7 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATES="$SCRIPT_DIR/../../lib/gates.py"
 
 usage() {
-  echo "usage: queue-guard.sh allow --store DIR --items N --queue-started EPOCH [--item-started EPOCH] [--round N] [--now EPOCH]" >&2
+  echo "usage: queue-guard.sh allow --store DIR --items N --queue-started EPOCH [--item-started EPOCH] [--round N] [--now EPOCH] [--deadline EPOCH]" >&2
   echo "       queue-guard.sh drain-consume --store DIR" >&2
   echo "       queue-guard.sh classify-subprocess --boundary NAME --rc N --stderr-file FILE" >&2
   echo "       queue-guard.sh record --store DIR --queue-id ID --class CLASS" >&2
@@ -48,7 +48,7 @@ if [ "$1" = "--contract-probe" ]; then
 fi
 
 cmd="$1"; shift
-store="" items=0 queue_started="" item_started="" round=1 now=""
+store="" items=0 queue_started="" item_started="" round=1 now="" deadline=""
 boundary="" rc="" errfile="" queue_id="" class="" item="" gate=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -58,6 +58,7 @@ while [ $# -gt 0 ]; do
     --item-started) item_started="${2:?--item-started requires a value}"; shift 2 ;;
     --round) round="${2:?--round requires a value}"; shift 2 ;;
     --now) now="${2:?--now requires a value}"; shift 2 ;;
+    --deadline) deadline="${2:?--deadline requires a value}"; shift 2 ;;
     --boundary) boundary="${2:?--boundary requires a value}"; shift 2 ;;
     --rc) rc="${2:?--rc requires a value}"; shift 2 ;;
     --stderr-file) errfile="${2:?--stderr-file requires a value}"; shift 2 ;;
@@ -93,6 +94,15 @@ case "$cmd" in
     if [ -n "$queue_started" ]; then
       case "$queue_started" in *[!0-9]*) usage ;; esac
       if [ $((now - queue_started)) -ge "$QUEUE_WALL_SECONDS" ]; then
+        echo "STOP:queue-wall"; exit 3
+      fi
+    fi
+    # LOW-2 (round 4): the journal's RECORDED absolute deadline is the
+    # authority when supplied — stricter-only alongside the reproduced
+    # queue-started wall above.
+    if [ -n "$deadline" ]; then
+      case "$deadline" in *[!0-9]*) usage ;; esac
+      if [ "$now" -ge "$deadline" ]; then
         echo "STOP:queue-wall"; exit 3
       fi
     fi

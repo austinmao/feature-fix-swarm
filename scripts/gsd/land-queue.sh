@@ -251,7 +251,8 @@ require_go() { # $1 step label; nonzero return records a queue terminal
   local verdict
   verdict="$(bash "$GUARD" allow --store "$LQ" --items "$GUARD_ITEMS" \
     --queue-started "$QUEUE_STARTED" --item-started "$ITEM_STARTED" \
-    --round "${ITEM_ROUND:-1}")" || true
+    --round "${ITEM_ROUND:-1}" \
+    ${QUEUE_DEADLINE:+--deadline "$QUEUE_DEADLINE"})" || true
   case "$verdict" in
     ALLOW) return 0 ;;
     STOP:operator-stop)
@@ -349,6 +350,7 @@ resume_reconcile() {
 
 RESUMING=0
 QUEUE_TERMINAL=""
+QUEUE_DEADLINE=""
 if [ -n "$RESUME" ]; then
   RESUMING=1
   QUEUE_ID="$RESUME"
@@ -366,9 +368,15 @@ if [ -n "$RESUME" ]; then
   case "$J_CREATED_AT" in ''|*[!0-9]*)
     echo "QUEUE-ERROR:store journal carries no readable created_at"; exit 70 ;;
   esac
-  # deadline == created_at + queue wall by construction (journal cmd_init);
-  # the guard reproduces the same absolute deadline from created_at.
-  : "$J_DEADLINE"
+  # LOW-2 (round 4): the journal's RECORDED absolute deadline is the
+  # authority — it rides every require_go fence instead of being
+  # reproduced from created_at.  A missing deadline (pre-CR-02 journal)
+  # keeps the reproduced wall; a corrupt one is a store error.
+  case "$J_DEADLINE" in
+    '') ;;
+    *[!0-9]*) echo "QUEUE-ERROR:store journal carries an unreadable deadline"; exit 70 ;;
+    *) QUEUE_DEADLINE="$J_DEADLINE" ;;
+  esac
   # CR-02 (round 3): the physical target root must equal the journal-bound
   # repository before any reconciliation authority runs (a pre-binding
   # journal has no repo_root and stays governed by the grant-mint
