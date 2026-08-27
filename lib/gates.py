@@ -398,16 +398,24 @@ def note_degraded(store: Path, kind: str, **payload) -> bool:
             if not isinstance(seam, str) or not seam.strip() or not isinstance(degraded, bool) or not isinstance(invocation_id, str) or not invocation_id:
                 raise ValueError("INVALID-INVOCATION")
             binding = _review_binding(payload)
+            candidate = {"run_id": run_id, "seam": seam, "degraded": degraded,
+                         "invocation_id": invocation_id}
+            if binding:
+                candidate.update(binding)
             for existing in ns["invocations"]:
                 if existing.get("run_id") == run_id and existing.get("invocation_id") == invocation_id:
-                    if existing.get("seam") == seam and existing.get("degraded") is degraded:
+                    # H1 (ship round 5): an idempotent replay must be the FULL
+                    # canonical event — binding fields included.  A differing
+                    # binding under the same idempotency key fails closed
+                    # instead of silently deduping a later reviewed head onto
+                    # the first head's recorded evidence.
+                    prior = {k: v for k, v in existing.items()
+                             if k != "recorded_at"}
+                    if (json.dumps(prior, sort_keys=True)
+                            == json.dumps(candidate, sort_keys=True)):
                         return False
                     raise ValueError("IDEMPOTENCY-CONFLICT")
-            event = {"run_id": run_id, "seam": seam, "degraded": degraded,
-                     "invocation_id": invocation_id, "recorded_at": _now()}
-            if binding:
-                event.update(binding)
-            ns["invocations"].append(event)
+            ns["invocations"].append(dict(candidate, recorded_at=_now()))
         else:
             raise ValueError("INVALID-DEGRADATION-KIND")
         _save_store(store, data)
@@ -3939,6 +3947,7 @@ def main(argv: list[str]) -> int:
             if ns.reset_rung:
                 print("RUNG-RESET" if reset_rung(store, ns.reset_rung) else "RUNG-ABSENT")
                 return 0
+            wrote = True
             if ns.kind == "rung-attempt":
                 note_degraded(store, ns.kind, rung_id=ns.rung_id, outcome=ns.outcome)
             elif ns.kind == "invocation":
@@ -3949,15 +3958,17 @@ def main(argv: list[str]) -> int:
                                  baseline=ns.baseline, repo=ns.repo,
                                  changed_files=ns.changed_file or [],
                                  production_files=ns.production_file or [])
-                note_degraded(store, ns.kind, run_id=ns.run_id, seam=ns.seam,
-                              degraded=ns.degraded == "true",
-                              invocation_id=ns.invocation_id, **extra)
+                wrote = note_degraded(store, ns.kind, run_id=ns.run_id, seam=ns.seam,
+                                      degraded=ns.degraded == "true",
+                                      invocation_id=ns.invocation_id, **extra)
             else:
                 raise ValueError("INVALID-DEGRADATION-KIND")
         except (ValueError, SystemExit) as exc:
             print(f"NOTE-DEGRADED-REJECTED: {exc}", file=sys.stderr)
             return 2
-        print("DEGRADATION-RECORDED")
+        # H1 (ship round 5): a no-write idempotent replay is surfaced
+        # distinctly — never the same token as a real write.
+        print("DEGRADATION-RECORDED" if wrote else "DEGRADATION-REPLAY")
         return 0
     if cmd == "canary-evidence":
         parser = argparse.ArgumentParser(prog="gates.py canary-evidence", add_help=False)

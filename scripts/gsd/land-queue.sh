@@ -612,7 +612,11 @@ base_sha() { git -C "$REPO" ls-remote origin "refs/heads/$BASE" 2>/dev/null | cu
 # and widen-only.
 note_review_invocation() { # $1 degraded true|false, $2 branch, $3 head, $4 baseline
   local inv args f
-  inv="review-$QUEUE_ID-$IDX-r${ITEM_ROUND:-1}"
+  # H1 (ship round 5): the idempotency key is CONTENT-bound — branch plus the
+  # exact reviewed head — never the positional intake index.  A resumed queue
+  # renumbers indices, so an index-derived id can collide with a DIFFERENT
+  # review event and silently dedupe distinct evidence.
+  inv="review-$QUEUE_ID-$2-$3-r${ITEM_ROUND:-1}"
   args=(note-degraded invocation --run-id "$RUN_ID" --seam land-queue-review
     --degraded "$1" --invocation-id "$inv")
   if [ -n "$4" ]; then

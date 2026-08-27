@@ -4403,3 +4403,90 @@ def test_stale_docstring_claim_absent() -> None:
     # has not returned (absence only, no particular replacement wording).
     text = (DISPATCH_DIR / "gates.py").read_text()
     assert "wiring lands Phase 4" not in text
+
+
+# ── spec-006 ship round 5 (H1): binding-aware invocation idempotency ────────
+
+def _h1_repo(tmp_path):
+    """Tiny real repo: baseline plus two successive heads for binding tests."""
+    import os as _os
+    import subprocess as _sp
+    repo = tmp_path / "h1-repo"
+    env = {**_os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+    def _git(*args):
+        _sp.run(["git", "-C", str(repo), *args], check=True, env=env,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+
+    def _head():
+        return _sp.run(["git", "-C", str(repo), "rev-parse", "HEAD"], env=env,
+                       capture_output=True, text=True, check=True).stdout.strip()
+
+    repo.mkdir()
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "t@example.invalid")
+    _git("config", "user.name", "t")
+    (repo / "a.txt").write_text("base\n")
+    _git("add", "a.txt"); _git("commit", "-qm", "base")
+    baseline = _head()
+    (repo / "b.txt").write_text("one\n")
+    _git("add", "b.txt"); _git("commit", "-qm", "one")
+    head1 = _head()
+    (repo / "c.txt").write_text("two\n")
+    _git("add", "c.txt"); _git("commit", "-qm", "two")
+    head2 = _head()
+    return repo, baseline, head1, head2
+
+
+def test_invocation_idempotency_is_binding_aware(tmp_path) -> None:
+    """H1: same (run_id, invocation_id, seam, degraded) with a DIFFERENT
+    review binding is an IDEMPOTENCY-CONFLICT — never a silent no-write
+    dedupe that lets a later reviewed head reuse the first head's event."""
+    import pytest
+    repo, baseline, head1, head2 = _h1_repo(tmp_path)
+    store = tmp_path / "evidence.json"
+    common = dict(run_id="spec-006", seam="land-queue-review", degraded=True,
+                  invocation_id="review-q-1-r1")
+    assert gates.note_degraded(store, "invocation", **common, branch="spec/x",
+                               head=head1, baseline=baseline,
+                               repo=str(repo)) is True
+    # byte-identical canonical replay stays idempotent (no write, no error)
+    assert gates.note_degraded(store, "invocation", **common, branch="spec/x",
+                               head=head1, baseline=baseline,
+                               repo=str(repo)) is False
+    # same idempotency key, different reviewed head: fail closed
+    with pytest.raises(ValueError, match="IDEMPOTENCY-CONFLICT"):
+        gates.note_degraded(store, "invocation", **common, branch="spec/x",
+                            head=head2, baseline=baseline, repo=str(repo))
+    # same key, binding dropped entirely: also a conflict, never a dedupe
+    with pytest.raises(ValueError, match="IDEMPOTENCY-CONFLICT"):
+        gates.note_degraded(store, "invocation", **common)
+    # exactly one event recorded throughout
+    data = json.loads(store.read_text())
+    events = [e for e in data["_degradation"]["invocations"]
+              if e.get("invocation_id") == "review-q-1-r1"]
+    assert len(events) == 1 and events[0]["head"] == head1
+
+
+def test_note_degraded_cli_surfaces_replay_distinctly(tmp_path) -> None:
+    """H1: the CLI never prints DEGRADATION-RECORDED for a no-write replay —
+    the idempotent-replay case is surfaced as DEGRADATION-REPLAY (rc 0) and
+    a conflicting replay stays a nonzero typed rejection."""
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    g = str(DISPATCH_DIR / "gates.py")
+    argv = ["python3", g, "note-degraded", "invocation", "--run-id", "spec-006",
+            "--seam", "land-queue-review", "--degraded", "true",
+            "--invocation-id", "review-q-1-r1"]
+    first = _sp.run(argv, capture_output=True, text=True, env=env)
+    assert first.returncode == 0 and "DEGRADATION-RECORDED" in first.stdout
+    replay = _sp.run(argv, capture_output=True, text=True, env=env)
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert "DEGRADATION-REPLAY" in replay.stdout
+    assert "DEGRADATION-RECORDED" not in replay.stdout
+    conflict = _sp.run(argv[:-3] + ["false", "--invocation-id", "review-q-1-r1"],
+                       capture_output=True, text=True, env=env)
+    assert conflict.returncode == 2
+    assert "IDEMPOTENCY-CONFLICT" in conflict.stderr
