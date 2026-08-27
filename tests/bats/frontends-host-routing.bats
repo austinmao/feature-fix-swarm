@@ -33,7 +33,7 @@ setup() {
 }
 
 @test "/plan-decompose owns bounded plan and task repair budgets" {
-  grep -F 'PLAN_GATE_MAX_REPAIRS=${PLAN_GATE_MAX_REPAIRS:-2}' skills/plan-decompose/SKILL.md
+  grep -F 'PLAN_GATE_MAX_REPAIRS=${PLAN_GATE_MAX_REPAIRS:-1}' skills/plan-decompose/SKILL.md
   grep -F 'TASK_GATE_MAX_REPAIRS=${TASK_GATE_MAX_REPAIRS:-2}' skills/plan-decompose/SKILL.md
   grep -F '$SPEC_DIR/plan-decompose-blocked.md' skills/plan-decompose/SKILL.md
   grep -F 'generic “mandatory plan gate” message' skills/plan-decompose/SKILL.md
