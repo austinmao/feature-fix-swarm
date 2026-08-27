@@ -129,7 +129,10 @@ esac'
   write_shim codex 'echo "UNSTUBBED-BOUNDARY:codex $*" >&2; exit 64'
   write_shim claude 'echo "UNSTUBBED-BOUNDARY:claude $*" >&2; exit 64'
   write_shim git '
-real="$(command -v -p git)"
+# command -v -p returns the shim itself here (bash 3.2 AND 5.3 ignore -p
+# with -v), which would exec this shim forever; resolve real git from the
+# sandbox PATH minus the shim dir instead.
+real="$(PATH=/usr/bin:/bin command -v git)"
 case "${1:-}" in
   rev-parse|status|log|diff|show|merge-base|for-each-ref|cat-file|ls-tree)
     exec "$real" "$@" ;;
