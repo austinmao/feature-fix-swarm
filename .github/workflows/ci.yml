@@ -29,7 +29,10 @@ jobs:
         run: |
           python -m pip install --quiet --requirement requirements-dev.txt
           python -m pytest lib/ tests/ -q
-          python -m pytest tests/contracts/land_queue_gates_contract.py -q
+          python -m pytest tests/contracts/land_queue_gates_contract.py tests/contracts/consolidate_gates_contract.py -q
+          # tests/contracts/phase2_contract_contract.py is run-environment-only:
+          # it validates the gitignored .planning 03-PHASE2-CONTRACT.json artifact
+          # that exists only inside a spec-006 run worktree, never in CI checkouts.
       - name: Scan production Python
         run: bandit -r lib scripts -x lib/tests,lib/run_state/tests -lll -q
       - name: SKILL.md verify blocks (anti-rot)
