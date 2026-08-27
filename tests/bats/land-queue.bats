@@ -1380,3 +1380,139 @@ PYEOF
   [ "$rc" -eq 0 ] \
     || posture_red "the conflict item was requeued under env floor: quarantine auto-requeue is a zero-posture-only consumer"
 }
+
+# ── Phase 3 Task 2 (03-02): invalid-input, once-only, and no-op-knob guards ──
+# The resolver accepts exact lowercase zero/floor after trimming ONLY ordinary
+# surrounding whitespace; every other env/config value falls through to the
+# committed policy with one bounded, sanitized advisory and zero shell side
+# effects.  A structural inventory pins the single-seam property: only
+# autonomy-posture.sh reads FFS_AUTONOMY_POSTURE, and every enumerated floor
+# consumer uses the resolved AUTONOMY_POSTURE.
+
+@test "[POSTURE] surrounding whitespace trims to a valid floor but mixed case never counts" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+
+  # ' floor ' trims to the exact literal: the run strengthens to floor
+  FFS_AUTONOMY_POSTURE=' floor ' PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id run-311 spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output"
+  grep -q "POSTURE-RESOLVED: floor source=env" <<<"$output"
+
+  # 'FLOOR' is not the exact lowercase literal: advisory, fall through to zero
+  FFS_AUTONOMY_POSTURE='FLOOR' PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id run-312 spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "POSTURE-INVALID: FLOOR" <<<"$output"
+  grep -q "POSTURE-RESOLVED: zero source=default" <<<"$output"
+  grep -q "ITEM spec/item-a BLOCKED:grant-missing" <<<"$output"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+}
+
+@test "[POSTURE] newline and shell-metacharacter env values advise sanitized and never execute" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+
+  # interior newline survives surrounding-whitespace trimming: invalid
+  FFS_AUTONOMY_POSTURE=$'flo\nor' PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id run-313 spec/item-a
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "^POSTURE-INVALID:" <<<"$output")" -eq 1 ]
+  grep -q "POSTURE-RESOLVED: zero source=default" <<<"$output"
+
+  # command substitution text is data, never evaluated, never echoed raw
+  FFS_AUTONOMY_POSTURE='$(touch "'"$WORK"'/pwned")' PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id run-314 spec/item-a
+  [ "$status" -eq 0 ]
+  [ ! -e "$WORK/pwned" ]
+  [ "$(grep -c "^POSTURE-INVALID:" <<<"$output")" -eq 1 ]
+  posture_no_hit -qF '$(' <<<"$output"
+  grep -q "ITEM spec/item-a BLOCKED:grant-missing" <<<"$output"
+}
+
+@test "[POSTURE] invalid config type advises once and falls through to the zero default" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RESTRICTED="$(no_reviewer_path)"
+  mkdir -p "$WORK/.planning"
+  printf '{"autonomy": {"posture": 5}}\n' > "$WORK/.planning/config.json"
+  PATH="$RESTRICTED" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id run-315 spec/item-a
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "^POSTURE-INVALID: config" <<<"$output")" -eq 1 ]
+  grep -q "POSTURE-RESOLVED: zero source=default" <<<"$output"
+  grep -q "ITEM spec/item-a BLOCKED:grant-missing" <<<"$output"
+}
+
+@test "[POSTURE] a multi-item run resolves and prints posture exactly once" {
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  mk_branch spec/item-b b.txt beta
+  write_gh
+  write_children
+  RUN_ID=run-316
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-102 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a spec/item-b
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  grep -q "ITEM spec/item-b LANDED" <<<"$output"
+  [ "$(grep -c "^POSTURE-RESOLVED:" <<<"$output")" -eq 1 ]
+}
+
+@test "[POSTURE-SEAM] only the resolver reads FFS_AUTONOMY_POSTURE and consumers use the resolved value" {
+  # single production read of the env override (expansion, not prose)
+  readers="$(grep -rlF '${FFS_AUTONOMY_POSTURE' "$ROOT/scripts" "$ROOT/lib" \
+    "$ROOT"/skills/*/scripts 2>/dev/null)"
+  [ "$readers" = "$ROOT/scripts/gsd/autonomy-posture.sh" ]
+  # the queue resolves once and prints provenance once
+  [ "$(grep -c 'resolve_autonomy_posture "' "$ROOT/scripts/gsd/land-queue.sh")" -eq 1 ]
+  [ "$(grep -c '^echo "POSTURE-RESOLVED:' "$ROOT/scripts/gsd/land-queue.sh")" -eq 1 ]
+  # no consumer kept an independent pre-resolver posture read
+  posture_no_hit -F '"$POSTURE"' "$ROOT/scripts/gsd/land-queue.sh"
+  # every enumerated land-queue floor consumer sits behind the resolved
+  # variable; identifiers mirror 03-PHASE2-CONTRACT.json posture_consumers
+  # (used directly when the gitignored contract is present)
+  python3 - "$ROOT" <<'PYEOF'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+lq = (root / "scripts/gsd/land-queue.sh").read_text()
+contract = (root / ".planning/phases/03-consolidate-4-a-posture-docs"
+            / "03-PHASE2-CONTRACT.json")
+idents = []
+if contract.is_file():
+    doc = json.load(open(contract))
+    for group in doc["posture_consumers"].values():
+        for entry in group:
+            src = entry["source"]
+            if src["path"] == "scripts/gsd/land-queue.sh":
+                idents.append(src["identifier"])
+else:  # pinned mirror for checkouts without the gitignored contract
+    idents = [
+        'reviewer="$(command -v codex || command -v claude || true)"',
+        'block_item "BLOCKED:no-cross-vendor-reviewer"',
+        "note_review_invocation() {",
+        'QUAR_IDX+=("$IDX")',
+    ]
+assert idents, "no land-queue posture consumers enumerated"
+for ident in idents:
+    assert ident in lq, f"contract consumer identifier missing live: {ident!r}"
+# the two posture-diverging consumer classes read AUTONOMY_POSTURE only
+assert lq.count('[ "$AUTONOMY_POSTURE" = "floor" ]') == 1, "floor block guard"
+assert lq.count('[ "$AUTONOMY_POSTURE" = "zero" ]') == 2, "quarantine guards"
+PYEOF
+}
