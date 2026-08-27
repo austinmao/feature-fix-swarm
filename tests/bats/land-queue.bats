@@ -1934,6 +1934,51 @@ STUB
   ! grep -q "implement spec/item-b" "$EVENTS"
   [ ! -e "$LQ/DRAIN" ]
 }
+
+@test "[DRAIN] --drain honors --repo — a foreign-cwd drain reaches the running queue's store" {
+  # F4 (round 4): the queue run cd's to REPO_ROOT before store resolution,
+  # but --drain skipped that entire block — a drain issued from a foreign
+  # cwd dropped its marker in the CALLER-cwd store and the running queue
+  # never saw it.  --drain now honors --repo with the same rev-parse + cd
+  # before store resolution.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  mk_branch spec/item-b b.txt beta
+  write_gh
+  write_children
+  # the addressing bug is only observable through the RESOLVED store —
+  # GATES_STORE would pin every process to one store and mask it
+  unset GATES_STORE
+  REPO_B="$BATS_TEST_TMPDIR/repo-drain-b"
+  git init -q -b main "$REPO_B"
+  ( cd "$REPO_B" && echo b > f.txt && git add f.txt && git commit -qm b )
+  export QUEUE_BIN="$QUEUE" TARGET_REPO="$WORK" FOREIGN_CWD="$REPO_B"
+  # item-a's implement child plays the second process: it requests a drain
+  # from the SAME foreign cwd the queue was started from, with --repo
+  cat > "$MOCK_BIN/feature-implement" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' feature-implement "$@" >> "${CALL_LOG:?}"
+printf 'implement %s\n' "$*" >> "${EVENTS:?}"
+if [ "$1" = "spec/item-a" ]; then
+  ( cd "${FOREIGN_CWD:?}" && bash "${QUEUE_BIN:?}" --repo "${TARGET_REPO:?}" --drain >/dev/null )
+fi
+exit 0
+STUB
+  chmod +x "$MOCK_BIN"/*
+  RUN_ID=adhoc-dr2
+  ( cd "$WORK" && python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null )
+  cd "$REPO_B"
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a spec/item-b
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  grep -q "QUEUE-DRAINED:operator-drain" <<<"$output"
+  ! grep -q "implement spec/item-b" "$EVENTS"
+  # marker consumed from the TARGET store; the caller-cwd store never saw one
+  [ ! -e "$WORK/.feature-fix-swarm/land-queue/DRAIN" ]
+  [ ! -e "$REPO_B/.feature-fix-swarm/land-queue/DRAIN" ]
+}
 @test "[HUMAN-INBOX] blocked item has reason and one-command unblock" {
   test -f "$LINKED/.git"
   stub_env

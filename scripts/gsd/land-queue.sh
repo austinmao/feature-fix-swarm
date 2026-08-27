@@ -74,25 +74,26 @@ done
 # the target's origin is forge-shaped, an immutable owner/repo slug derived
 # from that remote additionally rides every GitHub authority as --repo (gh)
 # and as the positional owner/repo both assert-merged.sh and
-# run-finalizer.sh already accept.  A --drain request touches no repository
-# and keeps the caller's cwd (its marker lands in the caller-resolved
-# store, exactly as before).
+# run-finalizer.sh already accept.  F4 (round 4): --drain runs the SAME
+# rev-parse + cd before store resolution — a drain issued from a foreign
+# cwd previously dropped its marker in the caller-cwd store, where the
+# running queue (pinned to the --repo target's store) never saw it.
 REPO_ROOT="" REPO_SLUG=""
 GH_BIND=()
+if ! REPO_ROOT="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)"; then
+  echo "QUEUE-REFUSED:repo-invalid --repo is not a git repository: $REPO"
+  exit 2
+fi
+REPO_ROOT="$(cd -- "$REPO_ROOT" && pwd -P)"
+REPO="$REPO_ROOT"
+# hermetic estate seam: canonicalize a relative path before leaving the
+# caller's cwd, or the collector would resolve it against the target root.
+if [ -n "${LAND_QUEUE_ESTATE_JSON:-}" ] \
+    && [ "${LAND_QUEUE_ESTATE_JSON#/}" = "$LAND_QUEUE_ESTATE_JSON" ]; then
+  LAND_QUEUE_ESTATE_JSON="$PWD/$LAND_QUEUE_ESTATE_JSON"
+fi
+cd -- "$REPO_ROOT"
 if [ "$DRAIN" -eq 0 ]; then
-  if ! REPO_ROOT="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)"; then
-    echo "QUEUE-REFUSED:repo-invalid --repo is not a git repository: $REPO"
-    exit 2
-  fi
-  REPO_ROOT="$(cd -- "$REPO_ROOT" && pwd -P)"
-  REPO="$REPO_ROOT"
-  # hermetic estate seam: canonicalize a relative path before leaving the
-  # caller's cwd, or the collector would resolve it against the target root.
-  if [ -n "${LAND_QUEUE_ESTATE_JSON:-}" ] \
-      && [ "${LAND_QUEUE_ESTATE_JSON#/}" = "$LAND_QUEUE_ESTATE_JSON" ]; then
-    LAND_QUEUE_ESTATE_JSON="$PWD/$LAND_QUEUE_ESTATE_JSON"
-  fi
-  cd -- "$REPO_ROOT"
   # the CONFIGURED url, never `remote get-url` — get-url applies insteadOf
   # rewrites, and the slug must derive from the immutable configured remote
   _origin_url="$(git -C "$REPO_ROOT" config --get remote.origin.url 2>/dev/null || true)"
