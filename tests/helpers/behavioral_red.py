@@ -85,8 +85,12 @@ def classify(returncode: int, output: str, marker: str) -> tuple[str, int]:
 
 
 def run(marker: str, argv: list[str]) -> int:
+    # WR-02 (round 2): capture BYTES and decode with an explicit fail-closed
+    # policy — any decode failure or spawn/read OSError is an infrastructure
+    # verdict (exit 0, run-red FAILS), never a crash whose nonzero exit
+    # would satisfy the RED gate without a behavioral-red verdict.
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=1500)
+        proc = subprocess.run(argv, capture_output=True, timeout=1500)
     except FileNotFoundError:
         print(f"BEHAVIORAL-RED-CLASSIFIER: verdict=infrastructure:spawn-failed "
               f"argv0={argv[0]!r}", file=sys.stderr)
@@ -95,9 +99,18 @@ def run(marker: str, argv: list[str]) -> int:
         print("BEHAVIORAL-RED-CLASSIFIER: verdict=infrastructure:timeout",
               file=sys.stderr)
         return 0
-    output = proc.stdout + "\n" + proc.stderr
-    sys.stdout.write(proc.stdout)
-    sys.stderr.write(proc.stderr)
+    except OSError as exc:
+        print(f"BEHAVIORAL-RED-CLASSIFIER: verdict=infrastructure:spawn-failed "
+              f"argv0={argv[0]!r} ({exc.__class__.__name__})", file=sys.stderr)
+        return 0
+    sys.stdout.buffer.write(proc.stdout)
+    sys.stderr.buffer.write(proc.stderr)
+    try:
+        output = (proc.stdout + b"\n" + proc.stderr).decode("utf-8")
+    except UnicodeError:
+        print("BEHAVIORAL-RED-CLASSIFIER: "
+              "verdict=infrastructure:undecodable-output", file=sys.stderr)
+        return 0
     verdict, code = classify(proc.returncode, output, marker)
     print(f"BEHAVIORAL-RED-CLASSIFIER: verdict={verdict} "
           f"child-rc={proc.returncode} marker={marker}", file=sys.stderr)
