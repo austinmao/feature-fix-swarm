@@ -1525,3 +1525,46 @@ EOF
   echo "$output" | grep -q '^waiver run_id=spec-008'
   echo "$output" | grep -q 'finalize complete'
 }
+
+
+@test "H3: local ref advanced between landed-tip proof and delete SURVIVES (atomic compare-and-delete)" {
+  # H3 (ship round 5): the landed-tip proof read and the branch delete must
+  # be one atomic compare-and-delete.  A name-only `git branch -D` deletes
+  # whatever the ref points at NOW — interleaved work pushed between the
+  # rev-parse and the delete would be destroyed.  The shim advances feat/x
+  # the moment the finalizer reads its tip, returning the stale OID.
+  mock_gh_merged
+  REALGIT="$(command -v git)"
+  RACE_DONE="$BATS_TEST_TMPDIR/race-done"
+  cat > "$MOCK_BIN/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1 \$2" = "rev-parse refs/heads/feat/x" ]; then
+  old="\$("$REALGIT" rev-parse refs/heads/feat/x)"
+  if [ ! -f "$RACE_DONE" ]; then
+    tree="\$("$REALGIT" rev-parse "refs/heads/feat/x^{tree}")"
+    new="\$("$REALGIT" commit-tree "\$tree" -p "\$old" -m "interleaved work")"
+    "$REALGIT" update-ref refs/heads/feat/x "\$new"
+    touch "$RACE_DONE"
+  fi
+  echo "\$old"
+  exit 0
+fi
+exec "$REALGIT" "\$@"
+EOF
+  chmod +x "$MOCK_BIN/git"
+  run bash "$LEVER" 1
+  rm -f "$MOCK_BIN/git"
+  [ "$status" -eq 0 ]
+  # the race fired and the advanced branch SURVIVES with a typed refusal
+  [ -f "$RACE_DONE" ]
+  git show-ref --verify -q refs/heads/feat/x
+  [[ "$output" == *"NOT deleting"* ]]
+}
+
+@test "H3: unraced squash delete still lands through the compare-and-delete path" {
+  mock_gh_merged
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  ! git show-ref --verify -q refs/heads/feat/x
+  [[ "$output" == *"landed"* ]]
+}

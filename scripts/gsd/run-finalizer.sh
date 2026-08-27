@@ -871,10 +871,17 @@ delete_landed_branch() { # delete $1 only under landed-tip proof
   tip="$(git rev-parse "refs/heads/$br" 2>/dev/null)" || return 1
   if [ "$tip" = "$HEAD_OID" ] \
      || git merge-base --is-ancestor "$tip" "$HEAD_OID" 2>/dev/null; then
-    if git branch -D "$br" >/dev/null 2>&1; then
+    # H3 (ship round 5): keep the checked-out-branch guard `git branch -D`
+    # used to provide, then delete via ATOMIC compare-and-delete —
+    # `update-ref -d <ref> <oldvalue>` refuses unless the ref still points
+    # at the proven tip, so work pushed between the rev-parse above and
+    # the delete survives instead of being name-deleted.
+    if git worktree list --porcelain | grep -qx "branch refs/heads/$br"; then
+      warn "could not delete '$br' (checked out somewhere?)"
+    elif git update-ref -d "refs/heads/$br" "$tip" >/dev/null 2>&1; then
       note "deleted local branch '$br' (tip $tip landed as merged PR head — squash-safe proof)"
     else
-      warn "could not delete '$br' (checked out somewhere?)"
+      warn "branch '$br' moved between landed-tip proof and delete — NOT deleting (interleaved work?)"
     fi
   else
     warn "branch '$br' tip $tip is not the merged PR head ($HEAD_OID) — NOT deleting (unmerged work?)"
