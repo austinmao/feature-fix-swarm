@@ -516,3 +516,81 @@ def test_grant_consolidate_reads_binding_from_the_journal(tmp_path):
         repo_root=os.path.realpath(repo), base="main")
     assert expected in proc.stdout, \
         "granted scope is not derived from the journal-recorded binding"
+
+
+# ── CR-03 (round 2): the validated intake manifest is durable ─────────────
+# The complete item list is persisted atomically after collection and before
+# the first item effect; resume and grant derivation enumerate the declared
+# manifest and require a terminal for EVERY item, so a crash between items
+# can never silently drop an unstarted item or mint a partial grant.
+
+
+def _qj(store, queue_id, *args):
+    return subprocess.run([sys.executable, str(QJ_PATH), *args,
+                           "--store", str(store), "--queue-id", queue_id],
+                          capture_output=True, text=True)
+
+
+def test_journal_records_an_immutable_intake_manifest(tmp_path):
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo, items=())
+    proc = _qj(journal, "q-cr04", "record-manifest",
+               "--item", "spec/merged", "--item", "spec/ghost")
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads((journal / "q-cr04.json").read_text())
+    assert doc.get("manifest") == ["spec/merged", "spec/ghost"], \
+        "record-manifest did not persist the validated item list"
+    # identical replay is idempotent; a DIFFERENT list is refused
+    again = _qj(journal, "q-cr04", "record-manifest",
+                "--item", "spec/merged", "--item", "spec/ghost")
+    assert again.returncode == 0, again.stderr
+    conflict = _qj(journal, "q-cr04", "record-manifest", "--item", "spec/other")
+    assert conflict.returncode != 0, \
+        "a conflicting manifest re-record silently replaced the intake truth"
+
+
+def test_mint_refuses_a_manifest_item_that_never_started(tmp_path):
+    """CR-03: item B crashed before its first event — the grant derivation
+    must see it as nonterminal and refuse, never mint a partial grant."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo)  # spec/merged fully landed
+    proc = _qj(journal, "q-cr04", "record-manifest",
+               "--item", "spec/merged", "--item", "spec/ghost")
+    assert proc.returncode == 0, proc.stderr
+    mint = _mint(tmp_path, journal)
+    assert mint.returncode != 0, \
+        "a partial grant was minted while manifest item spec/ghost never started"
+    assert "spec/ghost" in (mint.stdout + mint.stderr), \
+        "the refusal does not name the dropped manifest item"
+    assert _no_consolidate_grant(tmp_path), "a partial grant was written"
+
+
+def test_mint_refuses_a_journal_without_a_manifest(tmp_path):
+    """CR-03: a journal that never recorded its intake manifest cannot prove
+    completeness — fail closed."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo)
+    mint = _mint(tmp_path, journal)
+    assert mint.returncode != 0, \
+        "a manifest-less journal minted consolidation authority"
+    assert _no_consolidate_grant(tmp_path), "a grant was written without a manifest"
+
+
+def test_read_nonterminal_enumerates_unstarted_manifest_items(tmp_path):
+    """CR-03: resume must re-enter an item that has NO events at all — the
+    manifest, not the event stream, is the item universe."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo)
+    proc = _qj(journal, "q-cr04", "record-manifest",
+               "--item", "spec/merged", "--item", "spec/ghost")
+    assert proc.returncode == 0, proc.stderr
+    rows = _qj(journal, "q-cr04", "read-nonterminal")
+    assert rows.returncode == 0, rows.stderr
+    fields = rows.stdout.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    quads = [fields[i:i + 4] for i in range(0, len(fields), 4)]
+    assert ["spec/ghost", "", "", ""] in quads, \
+        f"the never-started manifest item is invisible to resume: {quads}"
+    assert not any(q[0] == "spec/merged" for q in quads), \
+        "a terminal item leaked into the nonterminal projection"

@@ -871,6 +871,48 @@ assert not [a for a in resumer if a.startswith("consolidate:")], \
 PYEOF
 }
 
+@test "[MANIFEST] a crash between items resumes the unstarted item and never mints a partial grant" {
+  # CR-03 (round 2): the validated intake manifest is durable.  A queue that
+  # landed item-a and crashed before item-b's FIRST event must resume item-b
+  # through the full lifecycle; the consolidate grant appears only once every
+  # declared manifest item is terminal — never as a partial a-only grant.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  mk_branch spec/item-b b.txt beta
+  write_gh
+  write_children
+  mkdir -p "$LQ"; chmod 700 "$LQ"
+  JRNL="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  HEAD_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  MERGE_A="$(python3 -c "print('f'*40)")"
+  python3 "$JRNL" init --store "$LQ" --queue-id crash-q1 --run-id run-965 \
+    --repo "$WORK" --base main
+  python3 "$JRNL" record-manifest --store "$LQ" --queue-id crash-q1 \
+    --item spec/item-a --item spec/item-b
+  python3 "$JRNL" append --store "$LQ" --queue-id crash-q1 \
+    --kind intent --step merge --item spec/item-a --pr 101 --head "$HEAD_A"
+  python3 "$JRNL" append --store "$LQ" --queue-id crash-q1 \
+    --kind result --step merge --item spec/item-a --status ok
+  python3 "$JRNL" append --store "$LQ" --queue-id crash-q1 \
+    --kind terminal --step terminal --item spec/item-a --status LANDED \
+    --detail "$MERGE_A"
+  # crash window: item-b never produced a single event
+  python3 "$ROOT/lib/gates.py" grant run-966 --action merge:pr-102 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id run-966 --resume crash-q1
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-b LANDED" <<<"$output"
+  grep -q "gh pr merge 102" "$EVENTS"
+  python3 - "$GATES_STORE" <<'PYEOF2'
+import json, sys
+data = json.load(open(sys.argv[1]))
+grants = data.get("_autonomy", {}).get("run-965", {}).get("grants", {})
+scopes = [a for a in grants if a.startswith("consolidate:estate:")]
+assert scopes, f"no consolidate grant after BOTH manifest items landed: {list(grants)}"
+PYEOF2
+}
+
 @test "[DEADLINE] a late resume with an oversized caller timeout never re-mints authority" {
   # CR-02 (round 2): the queue deadline is journal-immutable.  A resume
   # after the original absolute deadline — even with an oversized
