@@ -828,8 +828,13 @@ land_one_item() {
         return $?
       fi
       # a zero-byte diff while the item records changed files is a
-      # contradictory state, never reviewable evidence
-      if ! [ -s "$review_diff" ] && [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
+      # contradictory state, never reviewable evidence — but ONLY when the
+      # reviewed head IS the intake head the changed-file list was recorded
+      # for.  After a rebase that skipped already-landed cherry-picks the
+      # reviewed head legitimately diffs empty against base (PATH-004
+      # scenario B) while the intake list still names the landed files.
+      if ! [ -s "$review_diff" ] && [ "$reviewed" = "$head" ] \
+          && [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
         journal --kind result --step review --item "$branch" --status failed
         block_item "BLOCKED:review-diff" \
           "merge-base diff of $reviewed is empty but the item records ${#CHANGED_FILES[@]} changed files" \
