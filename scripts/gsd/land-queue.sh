@@ -550,18 +550,42 @@ if [ "$TRUNCATED" = "true" ]; then
   GUARD_ITEMS=$((COUNT + 1))
 fi
 
+# ── H6 (ship round 5): collector conflicts are queue outcomes ─────────────
+# Every conflict record the collector discovered materializes as its typed
+# item terminal in the journal BEFORE any effect, counts toward the intake
+# caps, joins the durable manifest, and renders in the report/inbox — a
+# conflicts-only queue must never exit with an empty rc-0 report.
+CONFLICT_ROWS="$WORKTMP/conflicts"
+CONFLICT_BRANCHES=()
+python3 "$COLLECTOR" emit-conflicts0 --doc "$DOC" > "$CONFLICT_ROWS" \
+  || { echo "QUEUE-ERROR:store"; exit 70; }
+while IFS= read -r -d '' c_branch && IFS= read -r -d '' c_status \
+    && IFS= read -r -d '' c_reason && IFS= read -r -d '' c_unblock; do
+  CONFLICT_BRANCHES+=("$c_branch")
+  journal --kind terminal --step terminal --item "$c_branch" \
+    --status "$c_status" \
+    --reason "${c_reason:-$c_status}" \
+    --unblock "${c_unblock:-inspect the disagreeing intake records for $c_branch, then re-run intake}"
+done < "$CONFLICT_ROWS"
+GUARD_ITEMS=$((GUARD_ITEMS + ${#CONFLICT_BRANCHES[@]}))
+
 # CR-03 (round 2): persist the COMPLETE validated intake manifest atomically
 # after collection and before the first item effect.  Resume and grant
 # derivation enumerate these declared items and require a terminal for
 # every one, so a crash between items can never silently drop an unstarted
 # item or mint a partial consolidate grant.  A resumed queue keeps the
-# original journal's immutable manifest.
+# original journal's immutable manifest.  H6: conflict branches are
+# declared alongside landable items so the manifest is the COMPLETE
+# discovered-branch truth.
 if [ "$RESUMING" -eq 0 ]; then
   MANIFEST_ARGS=(record-manifest --store "$LQ" --queue-id "$QUEUE_ID")
   j=0
   while [ "$j" -lt "$COUNT" ]; do
     MANIFEST_ARGS+=(--item "$(read_scalar "$DOC" "$j" branch)")
     j=$((j + 1))
+  done
+  for c_branch in ${CONFLICT_BRANCHES[@]+"${CONFLICT_BRANCHES[@]}"}; do
+    MANIFEST_ARGS+=(--item "$c_branch")
   done
   python3 "$JOURNAL" "${MANIFEST_ARGS[@]}" \
     || { echo "QUEUE-ERROR:store"; exit 70; }

@@ -399,6 +399,28 @@ def get_scalar(doc, item_index, field):
     return value
 
 
+def emit_conflicts0(doc):
+    """H6 (ship round 5): closed NUL accessor for the conflicts array —
+    branch, status, reason, unblock per conflict, control-byte validated,
+    so the queue can materialize every conflict as its typed terminal."""
+    conflicts = doc.get("conflicts") if isinstance(doc, dict) else None
+    if not isinstance(conflicts, list):
+        raise CollectError("missing conflicts array")
+    rows = []
+    for conflict in conflicts:
+        if not isinstance(conflict, dict):
+            raise CollectError("non-dict conflict row")
+        values = []
+        for field in ("branch", "status", "reason", "unblock"):
+            value = conflict.get(field, "")
+            if (not isinstance(value, str)
+                    or any(ch in value for ch in "\0\r\n")):
+                raise CollectError(f"invalid conflict field: {field}")
+            values.append(value)
+        rows.append(values)
+    return rows
+
+
 def emit_array0(doc, item_index, field):
     if field not in ARRAY_FIELDS:
         raise CollectError(f"array field not allowlisted: {field!r}")
@@ -442,6 +464,9 @@ def main(argv=None):
         p.add_argument("--item")
         p.add_argument("--field", required=True)
 
+    p = sub.add_parser("emit-conflicts0")
+    p.add_argument("--doc", required=True)
+
     ns = parser.parse_args(argv)
     try:
         if ns.cmd == "collect":
@@ -461,6 +486,11 @@ def main(argv=None):
             print(json.dumps(result, sort_keys=True))
             return 0
         doc = json.loads(Path(ns.doc).read_text())
+        if ns.cmd == "emit-conflicts0":
+            for row in emit_conflicts0(doc):
+                for value in row:
+                    sys.stdout.write(value + "\0")
+            return 0
         index = int(ns.item) if ns.item is not None else None
         if ns.cmd == "get-scalar":
             sys.stdout.write(get_scalar(doc, index, ns.field) + "\n")

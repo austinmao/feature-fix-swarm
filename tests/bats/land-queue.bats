@@ -2591,3 +2591,41 @@ STUB
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a LANDED" <<<"$output"
 }
+
+
+@test "[H6] a conflicts-only intake materializes typed terminals in journal, manifest, and report" {
+  # H6 (ship round 5): collector conflicts were dropped on the floor — a
+  # queue whose ONLY discovered work was conflicted exited 0 with an empty
+  # report and no durable record.  Every conflict must land as its typed
+  # item terminal in the journal BEFORE any effect, count toward intake
+  # caps, join the durable manifest, and render in the report/inbox.
+  test -f "$LINKED/.git"
+  stub_env
+  # two canonical takeover records disagreeing on head for a branch that
+  # exists nowhere else -> BLOCKED:identity-conflict from the collector
+  TSTORE="$(python3 "$ROOT/lib/gates.py" store-dir)"
+  mkdir -p "$TSTORE/takeover"
+  H1="$(python3 -c "print('1'*40)")"
+  H2="$(python3 -c "print('2'*40)")"
+  printf '{"schema_version":1,"ids":{"spec_id":"006","run_id":"spec-006"},"git_state":{"branch":"spec/conflicted","head":"%s","upstream":"","dirty":[]}}\n' \
+    "$H1" > "$TSTORE/takeover/spec-006.json"
+  printf '{"schema_version":1,"ids":{"spec_id":"006","run_id":"spec-006"},"git_state":{"branch":"spec/conflicted","head":"%s","upstream":"","dirty":[]}}\n' \
+    "$H2" > "$TSTORE/takeover/spec-007.json"
+  write_gh
+  write_children
+  RUN_ID=spec-006
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --run-id "$RUN_ID"
+  # explicit blocked summary, never an empty rc-0 report
+  grep -q "ITEM spec/conflicted BLOCKED:identity-conflict" <<<"$output"
+  grep -q "HUMAN-INBOX: spec/conflicted BLOCKED:identity-conflict" <<<"$output"
+  posture_no_hit -q "HUMAN-INBOX: empty" <<<"$output"
+  # durable journal: manifest names the branch, typed terminal recorded
+  python3 - "$LQ/$RUN_ID.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert "spec/conflicted" in (doc.get("manifest") or []), doc.get("manifest")
+terms = [e for e in doc["events"] if e.get("kind") == "terminal"
+         and e.get("item") == "spec/conflicted"]
+assert terms and terms[-1]["status"] == "BLOCKED:identity-conflict", terms
+PYEOF
+}
