@@ -3895,6 +3895,20 @@ def main(argv: list[str]) -> int:
             return 2
         print("WAIVER-RECORDED")
         return 0
+    if cmd == "read-posture":
+        # H2 (ship round 5): expose the durable per-run posture record so a
+        # resumed queue adopts the owner run's posture instead of
+        # re-resolving to a default-zero substitution.
+        if len(args) != 1:
+            print("usage: gates.py read-posture <run-id>", file=sys.stderr)
+            return 2
+        rec = (_load_store(store).get("_autonomy", {})
+               .get(args[0], {}).get("posture"))
+        if isinstance(rec, dict) and rec.get("posture") in ("zero", "floor"):
+            print(f"{rec['posture']} {rec.get('source', 'config')}")
+            return 0
+        print("POSTURE-ABSENT", file=sys.stderr)
+        return 1
     if cmd == "note-posture":
         # CR-01: durable posture + provenance under the run id — written by
         # the queue BEFORE any effect; the only posture evidence the hotfix

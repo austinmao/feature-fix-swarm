@@ -64,6 +64,10 @@ done
 # CR-05 (round 2): the generated default is LEDGER-SHAPED (adhoc-*) so the
 # fail-closed review-invocation recording works out of the box; only a
 # caller-supplied non-ledger --run-id ever trips the unrecordable block.
+# H2 (ship round 5): remember whether the caller supplied --run-id — a
+# resumed queue adopts the journal's owner run id when absent and refuses
+# a mismatching explicit one.
+RUN_ID_CLI="$RUN_ID"
 [ -n "$RUN_ID" ] || RUN_ID="adhoc-land-queue-$(date +%s)-$$"
 
 # ── CR-02 (round 3): one physical target repository ───────────────────────
@@ -131,6 +135,26 @@ if [ "$DRAIN" -eq 1 ]; then
   exit 0
 fi
 
+# ── H2 (ship round 5): resume run-id binding ──────────────────────────────
+# The journal records its owning run id at init.  A resume reads that
+# binding BEFORE the lock, posture resolution, or any effect: absent
+# --run-id adopts the owner id (never a fresh adhoc-* substitute); a
+# mismatching explicit --run-id is a typed refusal.  Every gate/review/
+# finalizer authority below then uses the bound id.
+if [ -n "$RESUME" ]; then
+  if ! J_RUN_ID="$(python3 "$JOURNAL" read-run-id --store "$LQ" --queue-id "$RESUME")"; then
+    echo "QUEUE-ERROR:store"
+    exit 70
+  fi
+  if [ -n "$J_RUN_ID" ]; then
+    if [ -n "$RUN_ID_CLI" ] && [ "$RUN_ID_CLI" != "$J_RUN_ID" ]; then
+      echo "QUEUE-REFUSED:run-mismatch journal $RESUME is owned by run $J_RUN_ID but --run-id is $RUN_ID_CLI"
+      exit 2
+    fi
+    RUN_ID="$J_RUN_ID"
+  fi
+fi
+
 # 71193d25: exactly one queue per store — a queue-wide OwnerLock bound to
 # this runner's pid, held for the whole run.
 if ! python3 "$JOURNAL" lock-acquire --store "$LQ" --run-id "$RUN_ID" --pid $$; then
@@ -163,14 +187,31 @@ QUEUE_ID="$RUN_ID"
 # .planning/config.json autonomy.posture) < FFS_AUTONOMY_POSTURE, stricter-
 # only.  Resolved exactly once per run; every posture consumer below reads
 # AUTONOMY_POSTURE, never the env/config inputs.
-resolve_autonomy_posture "$REPO/.planning/config.json" "$POSTURE_CLI"
+# H2 (ship round 5): a resumed queue keeps its owner run's DURABLE posture
+# record — a resumer-environment re-resolution would substitute the default
+# zero for a recorded floor.  Absent a durable record (legacy journal), the
+# ordinary resolution + durable write applies under the bound run id.
+DURABLE_POSTURE=""
+if [ -n "$RESUME" ]; then
+  DURABLE_POSTURE="$(python3 "$GATES" read-posture "$RUN_ID" 2>/dev/null)" || DURABLE_POSTURE=""
+fi
+if [ -n "$DURABLE_POSTURE" ]; then
+  AUTONOMY_POSTURE="${DURABLE_POSTURE%% *}"
+  AUTONOMY_POSTURE_SOURCE="${DURABLE_POSTURE#* }"
+  export AUTONOMY_POSTURE AUTONOMY_POSTURE_SOURCE
+else
+  resolve_autonomy_posture "$REPO/.planning/config.json" "$POSTURE_CLI"
+fi
 echo "POSTURE-RESOLVED: $AUTONOMY_POSTURE source=$AUTONOMY_POSTURE_SOURCE"
 # CR-01 (round 2): persist the resolved posture + provenance under the run
 # id in the gates evidence ledger BEFORE any queue effect.  Later processes
 # (promotion checks, hotfix bypass) read this durable record — never a
 # caller environment variable.  An unwritable record fails the queue closed.
-if ! python3 "$GATES" note-posture "$RUN_ID" --posture "$AUTONOMY_POSTURE" \
-    --source "$AUTONOMY_POSTURE_SOURCE" >/dev/null; then
+# A resumed queue with a durable record skips the re-record: the posture is
+# immutable per run and already persisted by its owner.
+if [ -z "$DURABLE_POSTURE" ] \
+    && ! python3 "$GATES" note-posture "$RUN_ID" --posture "$AUTONOMY_POSTURE" \
+      --source "$AUTONOMY_POSTURE_SOURCE" >/dev/null; then
   echo "QUEUE-ERROR:store posture evidence write refused"
   exit 70
 fi

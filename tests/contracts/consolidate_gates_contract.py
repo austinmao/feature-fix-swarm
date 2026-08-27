@@ -799,17 +799,21 @@ def test_read_meta_emits_immutable_clock_and_binding(tmp_path):
     journal = make_bound_journal(tmp_path, repo)
     proc = _qj(journal, "q-cr04", "read-meta")
     assert proc.returncode == 0, proc.stderr
-    created, deadline, repo_root, base = _split0(proc.stdout)
+    created, deadline, repo_root, base, run_id = _split0(proc.stdout)
     assert created.isdigit() and deadline.isdigit(), (created, deadline)
     assert int(deadline) == int(created) + 28800, \
         "deadline is not the recorded created_at + queue wall"
     assert repo_root == os.path.realpath(repo) and base == "main"
+    # H2 (ship round 5): the owning run id rides as an additive 5th field so
+    # the resume path can adopt it before any effect.
+    assert run_id == "run-q", run_id
     # pre-binding journal: empty binding fields, clock still present
     store = tmp_path / "lq-unbound"
     store.mkdir()
     store.chmod(0o700)
     proc = _qj(store, "q-old", "init", "--run-id", "run-q")
     assert proc.returncode == 0, proc.stderr
-    created, deadline, repo_root, base = _split0(
+    created, deadline, repo_root, base, run_id = _split0(
         _qj(store, "q-old", "read-meta").stdout)
     assert created.isdigit() and repo_root == "" and base == ""
+    assert run_id == "run-q", run_id

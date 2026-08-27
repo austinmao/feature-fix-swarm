@@ -891,8 +891,13 @@ PYEOF
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
     --kind terminal --step terminal --item spec/item-a --status LANDED \
     --detail "$MERGE_A"
+  # H2 (ship round 5): a resume without --run-id adopts the journal's owner
+  # run id; a foreign explicit --run-id is now the typed run-mismatch
+  # refusal (covered by [H2]).  The grant-binding assertions below are
+  # unchanged: authority still binds to the ORIGINAL run, never a resumer
+  # substitute (run-962 stays empty).
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id run-962 --resume resume-q1
+    --resume resume-q1
   [ "$status" -eq 0 ]
   grep -q "resumed" <<<"$output"
   python3 - "$GATES_STORE" <<'PYEOF'
@@ -937,10 +942,12 @@ PYEOF
   python3 "$JRNL" append --store "$LQ" --queue-id crash-q1 \
     --kind terminal --step terminal --item spec/item-a --status LANDED \
     --detail "$MERGE_A"
-  # crash window: item-b never produced a single event
-  python3 "$ROOT/lib/gates.py" grant run-966 --action merge:pr-102 --reason t >/dev/null
+  # crash window: item-b never produced a single event.  H2 (ship round 5):
+  # the resume adopts the journal's owner run id (run-965), so the merge
+  # grant — like every gate call — is checked under the OWNER run.
+  python3 "$ROOT/lib/gates.py" grant run-965 --action merge:pr-102 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id run-966 --resume crash-q1
+    --resume crash-q1
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-b LANDED" <<<"$output"
   grep -q "gh pr merge 102" "$EVENTS"
@@ -989,8 +996,11 @@ if "deadline" in doc:
     doc["deadline"] = doc["created_at"] + 28800
 open(path, "w").write(json.dumps(doc, sort_keys=True))
 PYAGE
+  # H2 (ship round 5): resume adopts the journal owner run id (run-963); a
+  # foreign --run-id would refuse typed before any effect (see [H2]).  The
+  # run-964 leak assertion below stays: no substitute run ever gains grants.
   QUEUE_WALL_SECONDS=999999 PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" \
-    --repo "$WORK" --base main --run-id run-964 --resume resume-q2
+    --repo "$WORK" --base main --resume resume-q2
   [ "$status" -eq 0 ]
   grep -q "CONSOLIDATE-GRANT-SKIPPED" <<<"$output"
   python3 - "$GATES_STORE" <<'PYEOF2'
@@ -2456,5 +2466,49 @@ for ident in idents:
 # the two posture-diverging consumer classes read AUTONOMY_POSTURE only
 assert lq.count('[ "$AUTONOMY_POSTURE" = "floor" ]') == 1, "floor block guard"
 assert lq.count('[ "$AUTONOMY_POSTURE" = "zero" ]') == 2, "quarantine guards"
+PYEOF
+}
+
+
+@test "[H2] resume without --run-id adopts the journal owner run id and its durable floor posture" {
+  # H2 (ship round 5): a resumed queue is OWNED by the run recorded at
+  # journal init.  Resuming without --run-id must adopt that id (never a
+  # fresh adhoc-* substitute) and keep the owner run's durable floor
+  # posture — a resumer-environment re-resolution would substitute the
+  # default zero and let a same-vendor fallback review a floor queue.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  mkdir -p "$LQ"
+  JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  OWNER=run-501
+  python3 "$JR" init --store "$LQ" --queue-id q-501 --run-id "$OWNER"
+  python3 "$JR" record-manifest --store "$LQ" --queue-id q-501 --item spec/item-a
+  # the owner run durably recorded FLOOR before crashing mid-queue
+  GATES_STORE="$GATES_STORE" python3 "$ROOT/lib/gates.py" note-posture "$OWNER" \
+    --posture floor --source config >/dev/null
+
+  # a mismatched caller --run-id is refused with the typed token, pre-effect
+  run bash "$QUEUE" --repo "$WORK" --base main --run-id run-999 --resume q-501
+  [ "$status" -eq 2 ]
+  grep -q "QUEUE-REFUSED:run-mismatch" <<<"$output"
+
+  # resume with NO --run-id on a floor-incapable PATH: floor must survive
+  RESTRICTED="$(no_reviewer_path)"
+  PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main --resume q-501
+  [ "$status" -eq 0 ]
+  grep -q "POSTURE-RESOLVED: floor" <<<"$output"
+  grep -q "ITEM spec/item-a BLOCKED:no-cross-vendor-reviewer" <<<"$output"
+  posture_no_hit -q "POSTURE-RESOLVED: zero" <<<"$output"
+  # the degradation evidence is bound to the OWNER run id, not adhoc-*
+  python3 - "$GATES_STORE" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+ev = data.get("_degradation", {}).get("invocations", [])
+owner = [e for e in ev if e.get("run_id") == "run-501"]
+adhoc = [e for e in ev if str(e.get("run_id", "")).startswith("adhoc-")]
+assert len(owner) == 1 and not adhoc, ev
 PYEOF
 }

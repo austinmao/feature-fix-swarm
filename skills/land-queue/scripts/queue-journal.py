@@ -554,15 +554,17 @@ def cmd_read_landed_tuples(ns) -> int:
 
 
 def cmd_read_meta(ns) -> int:
-    """NUL-emit created_at, deadline, repo_root, base (CR-05/CR-02).
+    """NUL-emit created_at, deadline, repo_root, base, run_id (CR-05/CR-02).
 
     The journal's immutable clock and repository binding, loaded by resume
     BEFORE any reconciliation effect so the guard clock and the repo check
     are anchored to journal evidence, never the resumer's environment.
     Optional fields absent from pre-binding journals emit empty (additive:
-    SCHEMA stays 1)."""
+    SCHEMA stays 1).  H2 (ship round 5): the owning run_id rides as an
+    additive trailing field so resume can adopt it; four-field readers
+    simply stop before it."""
     doc = _load(_doc_path(ns.store, ns.queue_id))
-    for key in ("created_at", "deadline", "repo_root", "base"):
+    for key in ("created_at", "deadline", "repo_root", "base", "run_id"):
         value = doc.get(key)
         sys.stdout.write(("" if value is None else str(value)) + "\0")
     return 0
