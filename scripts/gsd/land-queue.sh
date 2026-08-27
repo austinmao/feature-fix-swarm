@@ -61,7 +61,10 @@ while [ $# -gt 0 ]; do
     *) EXPLICIT+=("$1"); shift ;;
   esac
 done
-[ -n "$RUN_ID" ] || RUN_ID="land-queue-$(date +%s)-$$"
+# CR-05 (round 2): the generated default is LEDGER-SHAPED (adhoc-*) so the
+# fail-closed review-invocation recording works out of the box; only a
+# caller-supplied non-ledger --run-id ever trips the unrecordable block.
+[ -n "$RUN_ID" ] || RUN_ID="adhoc-land-queue-$(date +%s)-$$"
 
 STORE_DIR="$(python3 "$GATES" store-dir)"
 LQ="$STORE_DIR/land-queue"
@@ -498,7 +501,10 @@ note_review_invocation() { # $1 degraded true|false, $2 branch, $3 head, $4 base
   if [ -n "$4" ]; then
     args+=(--repo "$REPO" --branch "$2" --head "$3" --baseline "$4")
     for f in ${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}; do
-      args+=(--changed-file "$f")
+      # CR-05: --opt=value form so a leading-dash filename (e.g.
+      # -dash.txt) is never eaten by argparse as an option — with the
+      # old two-token form the recording failed silently under || true.
+      args+=("--changed-file=$f")
     done
   fi
   python3 "$GATES" "${args[@]}" >/dev/null

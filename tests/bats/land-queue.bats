@@ -271,7 +271,7 @@ exit 0
 STUB
   chmod +x "$MOCK_BIN"/*
 
-  RUN_ID=queue-wave0
+  RUN_ID=adhoc-queue-wave0
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason wave0 >/dev/null
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-102 --reason wave0 >/dev/null
 
@@ -363,7 +363,7 @@ STUB
 
   # Scenario A — REQ-207: a twice-failing local gate is BLOCKED:no-progress
   # while items one and three still land (local weather never stops the queue).
-  RUN_ID=p4a
+  RUN_ID=adhoc-p4a
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-103 --reason t >/dev/null
   # First observation of the same normalized signature (round 1 history).
@@ -415,7 +415,7 @@ esac
 STUB
   chmod +x "$MOCK_BIN"/*
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id p4b spec/item-a spec/item-b spec/item-c
+    --run-id adhoc-p4b spec/item-a spec/item-b spec/item-c
   [ "$status" -eq 1 ]
   grep -q "QUEUE-ABORTED:systemic:gh-auth" <<<"$output"
   grep -q "ITEM spec/item-a BLOCKED:reviewer-unreachable" <<<"$output"
@@ -427,12 +427,12 @@ STUB
   : > "$EVENTS"
   mkdir -p "$LQ"
   JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
-  python3 "$JR" init --store "$LQ" --queue-id p4c --run-id p4c
+  python3 "$JR" init --store "$LQ" --queue-id adhoc-p4c --run-id adhoc-p4c
   landed_sha="$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)"
-  python3 "$JR" append --store "$LQ" --queue-id p4c \
+  python3 "$JR" append --store "$LQ" --queue-id adhoc-p4c \
     --kind terminal --step terminal --item spec/item-a --status LANDED --detail "$landed_sha"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id p4c --resume p4c
+    --run-id adhoc-p4c --resume adhoc-p4c
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a LANDED $landed_sha" <<<"$output"
   ! grep -q "^gh " "$EVENTS"
@@ -451,7 +451,7 @@ STUB
 
   LQ="$BATS_TEST_TMPDIR/gates/land-queue"; mkdir -p "$LQ"
   JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
-  RUN_ID=resume1
+  RUN_ID=adhoc-resume1
   python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID"
   # Crash simulation (REQ-208 / 8c88ebfa): two merge intents journaled with
   # their idempotency keys, results never observed.  item-a's merge actually
@@ -525,7 +525,7 @@ PYEOF
   write_children
   mkdir -p "$LQ"
   JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
-  RUN_ID=resume2
+  RUN_ID=adhoc-resume2
   python3 "$JR" init --store "$LQ" --queue-id "$RUN_ID" --run-id "$RUN_ID"
   # Crash BETWEEN steps: rebase intent AND result journaled, no dangling
   # intent, no terminal — a dangling-intent reader alone never surfaces this
@@ -582,7 +582,7 @@ fi
 exit 0
 STUB
   chmod +x "$MOCK_BIN"/*
-  RUN_ID=e5a
+  RUN_ID=adhoc-e5a
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a spec/item-b spec/item-c
@@ -623,7 +623,7 @@ STUB
   mk_branch spec/item-b b.txt beta
   write_gh
   write_children
-  RUN_ID=e10a
+  RUN_ID=adhoc-e10a
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-102 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a spec/item-b
@@ -646,7 +646,7 @@ assert len(terms) == 2 and all(t["status"] == "BLOCKED:conflict" for t in terms)
 PYEOF
 
   # Without base advancement there is NO requeue at all.
-  RUN_ID=e10b
+  RUN_ID=adhoc-e10b
   : > "$EVENTS"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a
@@ -687,7 +687,7 @@ echo "UNSTUBBED-BOUNDARY:$*" >&2; exit 64
 STUB
   chmod +x "$MOCK_BIN"/*
 
-  RUN_ID=reditem
+  RUN_ID=adhoc-reditem
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main --run-id "$RUN_ID" spec/item-a
   [ "$status" -eq 0 ]
 
@@ -756,7 +756,7 @@ STUB
   chmod +x "$MOCK_BIN"/*
 
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id sysa spec/item-a spec/item-b spec/item-c
+    --run-id adhoc-sysa spec/item-a spec/item-b spec/item-c
   [ "$status" -eq 1 ]
 
   # 6e4616bc stricter reading: two CONSECUTIVE enumerated systemic failures
@@ -797,7 +797,7 @@ STUB
   chmod +x "$MOCK_BIN"/*
   export GATES_STORE="$BATS_TEST_TMPDIR/gates2/evidence.json"; mkdir -p "$BATS_TEST_TMPDIR/gates2"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id sysb spec/item-a spec/item-b
+    --run-id adhoc-sysb spec/item-a spec/item-b
   [ "$status" -eq 0 ]
   ! grep -q "QUEUE-ABORTED" <<<"$output"
   grep -q "ITEM spec/item-a BLOCKED:review" <<<"$output"
@@ -1148,7 +1148,7 @@ exec "$@"
 STUB
   chmod +x "$MOCK_BIN/timeout"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id ci1 spec/item-a
+    --run-id adhoc-ci1 spec/item-a
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a BLOCKED:ci-timeout" <<<"$output"
   grep -qx "timeout 1200 gh pr checks" "$EVENTS"
@@ -1157,21 +1157,21 @@ STUB
   # 2. Empty check rollup after a green watch is a named block.
   export GH_ROLLUP="0 MERGEABLE"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id ci2 spec/item-a
+    --run-id adhoc-ci2 spec/item-a
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a BLOCKED:ci-empty" <<<"$output"
 
   # 3. Merge conflict mergeability is a named block.
   export GH_ROLLUP="1 CONFLICTING"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id ci3 spec/item-a
+    --run-id adhoc-ci3 spec/item-a
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a BLOCKED:merge-conflict" <<<"$output"
 
   # 4. gh auth failure is a named block.
   export GH_ROLLUP="AUTHFAIL"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id ci4 spec/item-a
+    --run-id adhoc-ci4 spec/item-a
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a BLOCKED:gh-auth" <<<"$output"
   unset GH_ROLLUP
@@ -1187,7 +1187,7 @@ STUB
   write_children
   export GH_HEAD_DRIFT=1
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id hd1 spec/item-a
+    --run-id adhoc-hd1 spec/item-a
   unset GH_HEAD_DRIFT
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a BLOCKED:head-moved" <<<"$output"
@@ -1202,7 +1202,7 @@ STUB
   write_children
   # Grant deliberately withheld: the last precondition fails.
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id mg1 spec/item-a
+    --run-id adhoc-mg1 spec/item-a
   [ "$status" -eq 0 ]
   grep -q "ITEM spec/item-a BLOCKED:grant-missing" <<<"$output"
   ! grep -q "gh pr merge" "$EVENTS"
@@ -1215,7 +1215,7 @@ STUB
   mk_branch spec/item-a a.txt alpha
   write_gh
   write_children
-  RUN_ID=gr1
+  RUN_ID=adhoc-gr1
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a
@@ -1238,7 +1238,7 @@ PYEOF
   write_children
   # (a) success ordering: merge result -> finalizer intent -> finalizer
   # result -> LANDED terminal, never LANDED before finalization (865d06d4).
-  RUN_ID=fz0
+  RUN_ID=adhoc-fz0
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a
@@ -1255,7 +1255,7 @@ PYEOF
   # (b) crash between finalizer intent and terminal: recovery re-runs the
   # finalizer idempotently, then appends LANDED — no second merge call.
   : > "$EVENTS"
-  RUN_ID=fz1
+  RUN_ID=adhoc-fz1
   mkdir -p "$LQ"
   JR="$ROOT/skills/land-queue/scripts/queue-journal.py"
   OID_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
@@ -1351,7 +1351,7 @@ PYEOF
   # (a) STOP present before the first item: nothing is dispatched.
   mkdir -p "$LQ"; touch "$LQ/STOP"
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id st1 spec/item-a
+    --run-id adhoc-st1 spec/item-a
   [ "$status" -eq 1 ]
   grep -q "QUEUE-ABORTED:operator-stop" <<<"$output"
   ! grep -q "^implement " "$EVENTS"
@@ -1363,7 +1363,7 @@ PYEOF
   : > "$EVENTS"
   export STOP_AT_CI=1
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id st2 spec/item-a
+    --run-id adhoc-st2 spec/item-a
   unset STOP_AT_CI
   [ "$status" -eq 1 ]
   grep -q "QUEUE-ABORTED:operator-stop" <<<"$output"
@@ -1391,7 +1391,7 @@ fi
 exit 0
 STUB
   chmod +x "$MOCK_BIN"/*
-  RUN_ID=dr1
+  RUN_ID=adhoc-dr1
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a spec/item-b
@@ -1417,7 +1417,7 @@ echo "compile explosion in module core" >&2
 exit 1
 STUB
   chmod +x "$MOCK_BIN"/*
-  RUN_ID=hi1
+  RUN_ID=adhoc-hi1
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a
   [ "$status" -eq 0 ]
@@ -1439,7 +1439,7 @@ PYEOF
   mk_branch spec/item-a a.txt alpha
   write_gh
   write_children
-  RUN_ID=rv1
+  RUN_ID=adhoc-rv1
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a
@@ -1503,7 +1503,7 @@ PYEOF
   write_gh
   write_children
   PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
-    --run-id trunc1 "${branches[@]}"
+    --run-id adhoc-trunc1 "${branches[@]}"
   # An 11-item intake must trip the named max-items outcome, never proceed
   # silently with a sliced 10-item list.
   [ "$status" -eq 1 ]
