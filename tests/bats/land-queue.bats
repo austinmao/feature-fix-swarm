@@ -803,6 +803,30 @@ STUB
   grep -q "ITEM spec/item-a BLOCKED:review" <<<"$output"
   grep -q "ITEM spec/item-b BLOCKED:review" <<<"$output"
 }
+@test "[GRANT-HOOK] normal completion derives a queue-bound consolidate grant" {
+  # WR-02 companion pin: the same idempotent derivation runs at the normal
+  # all-items-terminal boundary, minting under the queue's own run id.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  RUN_ID=run-960
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  python3 - "$GATES_STORE" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+grants = data.get("_autonomy", {}).get("run-960", {}).get("grants", {})
+scopes = [a for a in grants if a.startswith("consolidate:estate:")]
+assert scopes, f"no consolidate grant at normal completion; grants={list(grants)}"
+assert grants[scopes[0]].get("granted_by") == "queue", grants[scopes[0]]
+PYEOF
+}
+
 @test "[RESUME] a completed queue resumed with no retries still derives the consolidate grant" {
   # WR-02: crash after the final LANDED append but before grant derivation
   # must be recoverable — the no-retry resume path re-runs the idempotent

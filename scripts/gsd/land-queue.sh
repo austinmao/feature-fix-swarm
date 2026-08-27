@@ -155,6 +155,28 @@ emit_report() { # typed ITEM/REVERT/HUMAN-INBOX rows from the journal
   fi
 }
 
+# ── spec-006 Phase 3 (REQ-301/302, CR-03/WR-02): consolidate grant ────────
+# Idempotent post-terminal derivation, invoked at every all-items-terminal
+# boundary.  gates.py grant-consolidate loads the named queue journal
+# ITSELF, verifies the run/queue binding and that every item is terminal,
+# and derives the canonical tuples from the journal's read-landed-tuples
+# projection — never estate prose, scouts, resume strings, shell arguments,
+# or stdin.  The grant is bound to the journal's ORIGINAL run id and its
+# TTL is clipped to the original queue deadline, so a resumed queue can
+# never silently extend authority (WR-02).  Grant derivation never rewrites
+# the queue outcome: on any refusal the landed report stands and the
+# consolidation simply has no grant to run under (fail closed, REQ-302).
+derive_consolidate_grant() {
+  local orig_run
+  orig_run="$(python3 "$JOURNAL" read-run-id --store "$LQ" --queue-id "$QUEUE_ID" 2>/dev/null)" || return 0
+  [ -n "$orig_run" ] || return 0
+  if ! python3 "$GATES" grant-consolidate "$orig_run" --queue-id "$QUEUE_ID" \
+      --journal-store "$LQ" --repo "$REPO" --base "$BASE" \
+      --queue-timeout-seconds "${QUEUE_WALL_SECONDS:-28800}" --ttl-hours 8; then
+    echo "CONSOLIDATE-GRANT-SKIPPED: queue-derived grant refused; landed report stands"
+  fi
+}
+
 RESUME_RETRY=()
 resume_reconcile() {
   # REQ-208 / 8c88ebfa (01-08 two-phase intent): before any new effect,
@@ -232,6 +254,9 @@ if [ -n "$RESUME" ]; then
   QUEUE_ID="$RESUME"
   resume_reconcile
   if [ "${#RESUME_RETRY[@]}" -eq 0 ]; then
+    # WR-02: every item already terminal — re-run the idempotent grant
+    # derivation so a crash between LANDED and minting is recoverable.
+    derive_consolidate_grant
     echo "LAND-QUEUE REPORT queue=$QUEUE_ID resumed"
     emit_report
     exit 0
@@ -868,28 +893,6 @@ if [ -z "$QUEUE_TERMINAL" ] && [ "$AUTONOMY_POSTURE" = "zero" ] && [ "${#QUAR_ID
     fi
   done
 fi
-
-# ── spec-006 Phase 3 (REQ-301/302, CR-03/WR-02): consolidate grant ────────
-# Idempotent post-terminal derivation, invoked at every all-items-terminal
-# boundary.  gates.py grant-consolidate loads the named queue journal
-# ITSELF, verifies the run/queue binding and that every item is terminal,
-# and derives the canonical tuples from the journal's read-landed-tuples
-# projection — never estate prose, scouts, resume strings, shell arguments,
-# or stdin.  The grant is bound to the journal's ORIGINAL run id and its
-# TTL is clipped to the original queue deadline, so a resumed queue can
-# never silently extend authority (WR-02).  Grant derivation never rewrites
-# the queue outcome: on any refusal the landed report stands and the
-# consolidation simply has no grant to run under (fail closed, REQ-302).
-derive_consolidate_grant() {
-  local orig_run
-  orig_run="$(python3 "$JOURNAL" read-run-id --store "$LQ" --queue-id "$QUEUE_ID" 2>/dev/null)" || return 0
-  [ -n "$orig_run" ] || return 0
-  if ! python3 "$GATES" grant-consolidate "$orig_run" --queue-id "$QUEUE_ID" \
-      --journal-store "$LQ" --repo "$REPO" --base "$BASE" \
-      --queue-timeout-seconds "${QUEUE_WALL_SECONDS:-28800}" --ttl-hours 8; then
-    echo "CONSOLIDATE-GRANT-SKIPPED: queue-derived grant refused; landed report stands"
-  fi
-}
 
 if [ -z "$QUEUE_TERMINAL" ]; then
   derive_consolidate_grant
