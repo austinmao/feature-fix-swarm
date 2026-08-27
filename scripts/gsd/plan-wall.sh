@@ -987,8 +987,10 @@ _pw_dispatch_path() {
   # ── re-run idempotence (AC-005): unchanged plan + a PRIOR record that was
   # itself actually reviewed by a real reviewer (reviewed-pass|
   # adjudicated-pass|blocked — "blocked" means a rung DID run and reported
-  # findings that are now resolved; AC-005 explicitly requires this to
-  # deterministically unblock via zero dispatch), no queue error, + zero
+  # findings; if those are now resolved AC-005 requires a deterministic
+  # unblock via zero dispatch, and if they are still open the recorded
+  # verdict is simply re-emitted — either way byte-identical content is
+  # never re-reviewed), no queue error, + zero
   # unresolved HIGH/CRITICAL -> adjudicated-pass, ZERO reviewer dispatch. A
   # prior WALL-UNREVIEWED/NO-PLAN/WAIVED record must NOT take this path —
   # those mean no reviewer ever actually ran, so an empty findings queue
@@ -1040,7 +1042,35 @@ _pw_dispatch_path() {
           return 0
         fi
       fi
-      # sha unchanged but unresolved HIGH/CRITICAL remain -> fresh dispatch below
+      if [ "$prior_verdict" = blocked ]; then
+        # Unchanged plan, prior verdict blocked, findings still open: the
+        # reviewer already reviewed these exact bytes and its findings are
+        # recorded — re-dispatching on byte-identical content buys nothing
+        # (ported from the openclaw #1784 fork's F3 guarantee, re-derived
+        # for the one-round policy). Severity decides which zero-dispatch
+        # verdict this collapses to:
+        #   CRITICAL still open -> re-emit the hard block (rc 1); the driver
+        #     turns that into BLOCKED or WALL-ROUND-CAP by round, so looping
+        #     without editing the plan reaches quarantine with zero extra
+        #     dispatches.
+        #   only HIGHs left (the CRITICAL was adjudicated away) -> soft
+        #     block (rc 2); the driver applies policy (b) and passes the
+        #     phase as PASS-RESIDUAL unless another plan hard-blocks.
+        # The prior record is left untouched in both arms: its verdict is
+        # still true and it keeps the real reviewer provenance (the driver
+        # rewrites soft-blocked records to pass-residual itself).
+        critical_count="$(printf '%s' "$unresolved" | jq \
+          '[.[] | select(.severity == "CRITICAL")] | length' 2>/dev/null || echo 1)"
+        if [ "$critical_count" != "0" ]; then
+          echo "plan-wall: BLOCKED $plan_file (unchanged plan, zero dispatch — $critical_count unresolved CRITICAL still open)" >&2
+          return 1
+        fi
+        PW_VERDICT="blocked"
+        echo "plan-wall: RESIDUAL-HIGH $plan_file (unchanged plan, zero dispatch — $unresolved_count unresolved HIGH riding unless the phase hard-blocks)" >&2
+        return 2
+      fi
+      # sha unchanged, a PASS-verdict record, but new unresolved findings
+      # appeared in the queue since -> fresh dispatch below
     fi
   fi
 

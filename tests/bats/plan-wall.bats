@@ -841,3 +841,89 @@ EOF
   trail="$(jq -r '.rung_trail | join(";")' "$record")"
   [[ "$trail" != *"tier-descent:"* ]]
 }
+
+# ── blocked-verdict idempotence: byte-identical content is never re-reviewed ─
+# Upstream port of the openclaw #1784 fork's F3 guarantee (its PW_ANY_DISPATCH
+# guard), re-derived for the one-round policy: the repair round exists to
+# review a REPAIRED plan; on unchanged bytes the recorded verdict is simply
+# re-emitted with zero reviewer dispatch, so looping without editing reaches
+# WALL-ROUND-CAP without burning a single extra dispatch.
+
+@test "BLK-IDEM-1: unresolved CRITICAL on an unchanged plan re-blocks with ZERO dispatch and caps at round 2" {
+  # one pinned run id across both invocations: the round counter is keyed by
+  # run id, and the default is $$-derived (fresh per invocation)
+  stub_claude_json '[{"severity":"CRITICAL","file":"a.py","claim":"drops tenant_id with no backfill guard","line":3}]'
+  GSD_RUN_ID=blk-idem-1 FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCKED"* ]]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.verdict' "$record")" = "blocked" ]
+
+  # do NOT resolve, do NOT edit the plan — re-invoke with a tripwire stub
+  MARKER="$BATS_TEST_TMPDIR/should-not-run"
+  cat > bin/stub-claude <<STUB
+#!/usr/bin/env bash
+touch "$MARKER"
+cat >/dev/null
+printf '{"findings":[]}\n'
+STUB
+  chmod +x bin/stub-claude
+  GSD_RUN_ID=blk-idem-1 FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  # round 2 is the final allowed round: an unresolved CRITICAL quarantines
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"zero dispatch"* ]]
+  [[ "$output" == *"WALL-ROUND-CAP"* ]]
+  [ ! -f "$MARKER" ]
+  # the prior record is untouched: verdict still blocked, real reviewer
+  # provenance preserved (not blanked by an idempotent rewrite)
+  [ "$(jq -r '.verdict' "$record")" = "blocked" ]
+  [ -n "$(jq -r '.reviewer_model // empty' "$record")" ]
+}
+
+@test "BLK-IDEM-2: CRITICAL adjudicated away, HIGHs remain, unchanged plan -> PASS-RESIDUAL with ZERO dispatch" {
+  stub_claude_json '[{"severity":"CRITICAL","file":"a.py","claim":"drops tenant_id with no backfill guard","line":3},{"severity":"HIGH","file":"b.py","claim":"missing null check","line":9}]'
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  record="$(record_for 1-foo plan)"
+  [ "$(jq -r '.verdict' "$record")" = "blocked" ]
+
+  crit_sig="$(queue_list --unresolved --source wall --severity CRITICAL \
+    --plan .planning/phases/1-foo/PLAN.md | jq -r '.[0].sig')"
+  [ -n "$crit_sig" ] && [ "$crit_sig" != "null" ]
+  python3 "$GATES_PY" findings-queue resolve "$crit_sig" --disposition refute --reason "guard exists at migrate.ts:12"
+
+  MARKER="$BATS_TEST_TMPDIR/should-not-run"
+  cat > bin/stub-claude <<STUB
+#!/usr/bin/env bash
+touch "$MARKER"
+cat >/dev/null
+printf '{"findings":[]}\n'
+STUB
+  chmod +x bin/stub-claude
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"zero dispatch"* ]]
+  [[ "$output" == *"PLAN-WALL-PASS-RESIDUAL"* ]]
+  [ ! -f "$MARKER" ]
+  [ "$(jq -r '.verdict' "$record")" = "pass-residual" ]
+  [ -f .planning/phases/1-foo/WALL-RESIDUALS.md ]
+}
+
+@test "BLK-IDEM-3: a blocked plan EDITED before re-invocation IS re-dispatched" {
+  stub_claude_json '[{"severity":"CRITICAL","file":"a.py","claim":"drops tenant_id with no backfill guard","line":3}]'
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+
+  echo "Phase 1 REVISED: add the backfill guard before the drop" > .planning/phases/1-foo/PLAN.md
+  MARKER="$BATS_TEST_TMPDIR/did-run"
+  cat > bin/stub-claude <<STUB
+#!/usr/bin/env bash
+touch "$MARKER"
+cat >/dev/null
+printf '{"findings":[]}\n'
+STUB
+  chmod +x bin/stub-claude
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  # changed bytes must reach a real reviewer — the idempotence path may not fire
+  [ -f "$MARKER" ]
+}
