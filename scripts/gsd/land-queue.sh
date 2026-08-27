@@ -940,18 +940,25 @@ Report blocking findings, one per line. End your response with exactly one line:
         "address reviewer findings for PR $pr, then re-run the queue"
       return $?
     fi
-    # 37bc43d9 / CR-01: a satisfied review is rc 0 PLUS a validated,
-    # NONEMPTY verdict artifact — an artifact without a line-anchored
-    # verdict fails closed, and a REVISE verdict blocks the item.
-    if ! [ -s "$findings" ] \
-        || ! grep -Eq '^VERDICT: (APPROVE|REVISE)[[:space:]]*$' "$findings"; then
+    # 37bc43d9 / CR-01 / H4 (ship round 5): a satisfied review is rc 0 PLUS
+    # a validated, NONEMPTY verdict artifact.  The verdict counts ONLY as
+    # the exact final non-empty line, exactly one VERDICT line may exist in
+    # the whole artifact (an anywhere-grep let attacker-influenced output
+    # smuggle an APPROVE mid-file with trailing text), and the value set is
+    # the closed APPROVE|REVISE pair.
+    local verdict_count verdict_line
+    verdict_count="$(grep -c '^VERDICT:' "$findings" || true)"
+    verdict_line="$(awk 'NF {last = $0} END {print last}' "$findings")"
+    if ! [ -s "$findings" ] || [ "$verdict_count" != "1" ] \
+        || ! printf '%s\n' "$verdict_line" \
+          | grep -Eq '^VERDICT: (APPROVE|REVISE)[[:space:]]*$'; then
       journal --kind result --step review --item "$branch" --status invalid
       block_item "BLOCKED:review-verdict" \
         "reviewer returned no validated verdict artifact for PR $pr" \
         "inspect $findings, then re-run the queue"
       return 1
     fi
-    if grep -Eq '^VERDICT: REVISE[[:space:]]*$' "$findings"; then
+    if printf '%s\n' "$verdict_line" | grep -Eq '^VERDICT: REVISE[[:space:]]*$'; then
       journal --kind result --step review --item "$branch" --status findings --detail "$findings"
       block_item "BLOCKED:review" \
         "reviewer verdict REVISE for PR $pr" \
