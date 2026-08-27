@@ -52,6 +52,7 @@ setup() {
 
   export CALL_LOG="$BATS_TEST_TMPDIR/calls"; : > "$CALL_LOG"
   export EFFECTS="$BATS_TEST_TMPDIR/effects"; : > "$EFFECTS"
+  export GATES_CHECKS="$BATS_TEST_TMPDIR/gates-checks"; : > "$GATES_CHECKS"
   export GH_STATE="$BATS_TEST_TMPDIR/gh-state"; mkdir -p "$GH_STATE"
   printf '%s\n' "$MERGED_OID" > "$GH_STATE/head-201"
 }
@@ -95,6 +96,10 @@ case "$1" in
   check-grant)
     run="$2"; action=""
     while [ $# -gt 0 ]; do [ "$1" = "--action" ] && action="$2"; shift; done
+    if [ -n "${GRANT_EXPIRE_AFTER:-}" ]; then
+      echo x >> "${GATES_CHECKS:?}"
+      [ "$(wc -l < "$GATES_CHECKS")" -le "$GRANT_EXPIRE_AFTER" ] || exit 1
+    fi
     grep -qxF "$run $action" "${GRANT_FILE:?}" || exit 1
     exit 0 ;;
   *) echo "UNSTUBBED-BOUNDARY:gates $*" >&2; exit 64 ;;
@@ -349,6 +354,18 @@ fixture_sane() { # failure here would be infrastructure, so prove it first
   [ ! -s "$EFFECTS" ]
 }
 
+@test "[GRANT] grant expiring AFTER the first successful check refuses at the effect boundary" {
+  # WR-01: the stateful stub passes the initial check, then expires — this
+  # exercises expiry BETWEEN check and effect, not a never-granted run.
+  fixture_sane; build_sandbox
+  extract_block
+  export GRANT_EXPIRE_AFTER=1
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "effect boundary" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+}
+
 @test "[GRANT] expired or absent grant is refused at the effect boundary" {
   fixture_sane; build_sandbox
   extract_block
@@ -429,26 +446,35 @@ fixture_sane() { # failure here would be infrastructure, so prove it first
   [ ! -s "$EFFECTS" ]
 }
 
-@test "[ORDER] grant check, merge assertion, OID reread, finalizer — exact order" {
+@test "[ORDER] full per-target sequence: grant, assert-merged, OID read, grant recheck, OID reread, finalizer" {
   fixture_sane; build_sandbox
   extract_block
   export EFFECTS_META="$BATS_TEST_TMPDIR/effects-meta"; : > "$EFFECTS_META"
   run run_block --execute
   [ "$status" -eq 0 ]
-  python3 - "$CALL_LOG" <<'PYEOF'
+  python3 - "$CALL_LOG" "$CONSOLIDATE_SCOPE" <<'PYEOF'
 import sys
 calls = open(sys.argv[1], "rb").read().split(b"\0")
+scope = sys.argv[2]
 tokens = [c.decode() for c in calls if c]
-def first(name):
-    for i, t in enumerate(tokens):
-        if t == name:
-            return i
-    raise AssertionError(f"{name} never called: {tokens}")
-grant = first("lib/gates.py")
-am = first("scripts/gsd/assert-merged.sh")
-gh = first("gh")
-fin = first("scripts/gsd/run-finalizer.sh")
-assert grant < am < gh < fin, (grant, am, gh, fin, tokens)
+boundary = {"lib/gates.py", "scripts/gsd/assert-merged.sh", "gh",
+            "scripts/gsd/run-finalizer.sh"}
+seq = []
+for i, t in enumerate(tokens):
+    if t in boundary:
+        seq.append((i, t))
+names = [t for _i, t in seq]
+# WR-01: the COMPLETE per-target sequence for the single target, including
+# the second grant check and the OID reread immediately before delegation.
+assert names == ["lib/gates.py", "scripts/gsd/assert-merged.sh", "gh",
+                 "lib/gates.py", "gh", "scripts/gsd/run-finalizer.sh"], names
+gates_calls = [i for i, t in seq if t == "lib/gates.py"]
+for i in gates_calls:
+    argv = tokens[i:i + 5]
+    assert "check-grant" in argv and scope in argv, argv
+fin = [i for i, t in seq if t == "scripts/gsd/run-finalizer.sh"][0]
+assert tokens[fin + 1:fin + 4] == ["--run-id", "run-0304", "201"], \
+    tokens[fin:fin + 4]
 PYEOF
 }
 
