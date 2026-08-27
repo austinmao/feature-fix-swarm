@@ -870,6 +870,56 @@ assert not [a for a in resumer if a.startswith("consolidate:")], \
 PYEOF
 }
 
+@test "[DEADLINE] a late resume with an oversized caller timeout never re-mints authority" {
+  # CR-02 (round 2): the queue deadline is journal-immutable.  A resume
+  # after the original absolute deadline — even with an oversized
+  # QUEUE_WALL_SECONDS in the caller environment — must never derive a
+  # fresh consolidate grant; the landed report stands with the typed
+  # skipped-grant advisory.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  mkdir -p "$LQ"; chmod 700 "$LQ"
+  JRNL="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  HEAD_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  MERGE_A="$(python3 -c "print('f'*40)")"
+  python3 "$JRNL" init --store "$LQ" --queue-id resume-q2 --run-id run-963
+  python3 "$JRNL" append --store "$LQ" --queue-id resume-q2 \
+    --kind intent --step merge --item spec/item-a --pr 101 --head "$HEAD_A"
+  python3 "$JRNL" append --store "$LQ" --queue-id resume-q2 \
+    --kind result --step merge --item spec/item-a --status ok
+  python3 "$JRNL" append --store "$LQ" --queue-id resume-q2 \
+    --kind terminal --step terminal --item spec/item-a --status LANDED \
+    --detail "$MERGE_A"
+  # age the journal past its own absolute deadline
+  python3 - "$LQ/resume-q2.json" <<'PYAGE'
+import json, sys, time
+path = sys.argv[1]
+doc = json.load(open(path))
+doc["created_at"] = int(time.time()) - (28800 + 7200)
+if "deadline" in doc:
+    doc["deadline"] = doc["created_at"] + 28800
+open(path, "w").write(json.dumps(doc, sort_keys=True))
+PYAGE
+  QUEUE_WALL_SECONDS=999999 PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" \
+    --repo "$WORK" --base main --run-id run-964 --resume resume-q2
+  [ "$status" -eq 0 ]
+  grep -q "CONSOLIDATE-GRANT-SKIPPED" <<<"$output"
+  python3 - "$GATES_STORE" <<'PYEOF2'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except FileNotFoundError:
+    data = {}
+for run in ("run-963", "run-964"):
+    grants = data.get("_autonomy", {}).get(run, {}).get("grants", {})
+    leaked = [a for a in grants if a.startswith("consolidate:estate:")]
+    assert not leaked, f"expired-deadline resume minted authority for {run}: {leaked}"
+PYEOF2
+}
+
 @test "[REVIEW] floor on a codex host refuses when only codex is installed" {
   # CR-05 / 37bc43d9: floor's defining guarantee is an OPPOSITE-vendor
   # reviewer — the producing host's own CLI never satisfies it.

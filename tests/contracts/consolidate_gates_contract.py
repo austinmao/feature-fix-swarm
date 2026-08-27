@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -332,3 +333,75 @@ def test_cli_refuses_over_cap_consolidate_grant(tmp_path):
     _red(proc.returncode != 0,
          "the gates.py CLI accepted a consolidate:estate grant with a 24h "
          "TTL; consolidate grants are capped at 8h")
+
+
+# ── CR-02 (round 2): the queue deadline is journal-immutable ──────────────
+# The caller must never be able to extend an expired queue deadline: `init`
+# records the absolute deadline, mint derives lifetime ONLY from it, and the
+# caller-controlled --queue-timeout-seconds flag is refused outright.
+
+QUEUE_WALL_SECONDS = 28800
+
+
+def test_journal_init_records_absolute_queue_deadline(tmp_path):
+    """CR-02: `init` persists created_at + the fixed queue wall as the
+    absolute deadline; grant lifetime may derive ONLY from this field."""
+    make_repo(tmp_path)
+    journal = make_journal(tmp_path)
+    doc = json.loads((journal / "q-cr03.json").read_text())
+    deadline = doc.get("deadline")
+    assert isinstance(deadline, int) and not isinstance(deadline, bool), \
+        "journal init records no absolute queue deadline"
+    assert deadline == doc["created_at"] + QUEUE_WALL_SECONDS, \
+        "deadline is not created_at + the fixed queue wall"
+
+
+def test_mint_refuses_caller_supplied_queue_timeout_flag(tmp_path):
+    """CR-02: --queue-timeout-seconds is caller-controlled deadline authority
+    and is removed from the production mint path — its presence refuses
+    outright with no grant write."""
+    make_repo(tmp_path)
+    journal = make_journal(tmp_path)
+    env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    proc = subprocess.run(
+        [sys.executable, str(GATES_PATH), "grant-consolidate", "run-q",
+         "--queue-id", "q-cr03", "--journal-store", str(journal),
+         "--repo", str(tmp_path / "repo"), "--base", "main",
+         "--queue-timeout-seconds", "999999"],
+        capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert proc.returncode != 0, \
+        "grant-consolidate accepted a caller-supplied queue timeout"
+    store = tmp_path / "evidence.json"
+    assert not store.exists() or "consolidate:estate:" not in store.read_text(), \
+        "a grant was written despite the caller-timeout refusal"
+
+
+def test_late_mint_refuses_after_journal_deadline_despite_oversized_env(tmp_path):
+    """CR-02: once the journal's recorded absolute deadline has passed, no
+    derivation re-opens authority — an oversized caller timeout after the
+    original deadline must refuse with no grant write."""
+    make_repo(tmp_path)
+    journal = make_journal(tmp_path)
+    path = journal / "q-cr03.json"
+    doc = json.loads(path.read_text())
+    doc["created_at"] = int(time.time()) - (QUEUE_WALL_SECONDS + 7200)
+    if "deadline" in doc:
+        doc["deadline"] = doc["created_at"] + QUEUE_WALL_SECONDS
+    path.write_text(json.dumps(doc, sort_keys=True))
+    env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    # the pre-fix hole: an oversized caller timeout re-opened the window
+    proc = subprocess.run(
+        [sys.executable, str(GATES_PATH), "grant-consolidate", "run-q",
+         "--queue-id", "q-cr03", "--journal-store", str(journal),
+         "--repo", str(tmp_path / "repo"), "--base", "main",
+         "--queue-timeout-seconds", "999999"],
+        capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert proc.returncode != 0, \
+        "an oversized caller timeout re-opened an expired queue deadline"
+    # and the flagless direct path must refuse on the journal deadline alone
+    proc2 = _grant_consolidate(tmp_path, "run-q", "q-cr03", journal)
+    assert proc2.returncode != 0, \
+        "a late derivation minted after the journal deadline passed"
+    store = tmp_path / "evidence.json"
+    assert not store.exists() or "consolidate:estate:" not in store.read_text(), \
+        "a grant was written after the original queue deadline"
