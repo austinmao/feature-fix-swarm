@@ -4524,3 +4524,82 @@ def test_m1_pinned_fd_check_grant_refuses_typed_not_granted(tmp_path) -> None:
     assert "GATES-STORE-ERROR" not in r.stderr, r.stderr
     # the pinned snapshot is untouched — no pending record was written
     assert store.read_text() == "{}"
+
+
+# ── spec-006 ship round 5 (T4): fd-flags guard coverage ─────────────────────
+
+def test_t4_fd_flags_rejected_on_mutation_commands(tmp_path) -> None:
+    """T4 (ship round 5): descriptor flags are a deliberately narrow
+    READ-ONLY interface for the takeover wall — any mutation command
+    carrying --store-dir-fd/--store-fd is rc 2 with the exact
+    TAKEOVER-FD-FLAGS-REJECTED token, so an inherited fd can never become
+    authority for a write."""
+    import os as _os
+    import subprocess as _sp
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    (store_dir / "evidence.json").write_text("{}")
+    g = str(DISPATCH_DIR / "gates.py")
+    dir_fd = _os.open(store_dir, _os.O_RDONLY)
+    ev_fd = _os.open(store_dir / "evidence.json", _os.O_RDONLY)
+    try:
+        for argv in (
+            ["grant", "run-9", "--action", "merge:pr-1", "--reason", "t"],
+            ["note-degraded", "invocation", "--run-id", "spec-006",
+             "--seam", "s", "--degraded", "true", "--invocation-id", "i-1"],
+            ["note-posture", "run-9", "--posture", "zero",
+             "--source", "default"],
+        ):
+            r = _sp.run(["python3", g, *argv,
+                         "--store-dir-fd", str(dir_fd),
+                         "--store-fd", str(ev_fd)],
+                        capture_output=True, text=True,
+                        pass_fds=(dir_fd, ev_fd), cwd=tmp_path)
+            assert r.returncode == 2, (argv, r.returncode, r.stderr)
+            assert "TAKEOVER-FD-FLAGS-REJECTED" in r.stderr, (argv, r.stderr)
+    finally:
+        _os.close(dir_fd)
+        _os.close(ev_fd)
+    # nothing was written through the refused seam
+    assert (store_dir / "evidence.json").read_text() == "{}"
+
+
+def test_t4_pinned_fd_shape_rejections(tmp_path) -> None:
+    """T4 (ship round 5): a non-regular or oversized pinned evidence fd is
+    the typed TAKEOVER-STATE-REJECTED refusal (rc 1) — never a read."""
+    import os as _os
+    import subprocess as _sp
+    g = str(DISPATCH_DIR / "gates.py")
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+
+    # non-regular: the store-fd is a DIRECTORY descriptor
+    (store_dir / "evidence.json").write_text("{}")
+    dir_fd = _os.open(store_dir, _os.O_RDONLY)
+    bogus_fd = _os.open(store_dir, _os.O_RDONLY)
+    try:
+        r = _sp.run(["python3", g, "takeover-state", "spec-006",
+                     "--store-dir-fd", str(dir_fd), "--store-fd", str(bogus_fd)],
+                    capture_output=True, text=True,
+                    pass_fds=(dir_fd, bogus_fd), cwd=tmp_path)
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "TAKEOVER-STATE-REJECTED" in r.stderr, r.stderr
+    finally:
+        _os.close(dir_fd)
+        _os.close(bogus_fd)
+
+    # oversized: pinned evidence beyond the 1 MiB consumer cap
+    big = store_dir / "evidence.json"
+    big.write_text("{" + " " * (1024 * 1024 + 10) + "}")
+    dir_fd = _os.open(store_dir, _os.O_RDONLY)
+    ev_fd = _os.open(big, _os.O_RDONLY)
+    try:
+        r = _sp.run(["python3", g, "takeover-state", "spec-006",
+                     "--store-dir-fd", str(dir_fd), "--store-fd", str(ev_fd)],
+                    capture_output=True, text=True,
+                    pass_fds=(dir_fd, ev_fd), cwd=tmp_path)
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "TAKEOVER-STATE-REJECTED" in r.stderr, r.stderr
+    finally:
+        _os.close(dir_fd)
+        _os.close(ev_fd)
