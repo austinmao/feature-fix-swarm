@@ -453,10 +453,11 @@ fixture_sane() { # failure here would be infrastructure, so prove it first
   export EFFECTS_META="$BATS_TEST_TMPDIR/effects-meta"; : > "$EFFECTS_META"
   run run_block --execute
   [ "$status" -eq 0 ]
-  python3 - "$CALL_LOG" "$CONSOLIDATE_SCOPE" <<'PYEOF'
+  python3 - "$CALL_LOG" "$CONSOLIDATE_SCOPE" "$MERGED_OID" <<'PYEOF'
 import sys
 calls = open(sys.argv[1], "rb").read().split(b"\0")
 scope = sys.argv[2]
+pinned_oid = sys.argv[3]
 tokens = [c.decode() for c in calls if c]
 boundary = {"lib/gates.py", "scripts/gsd/assert-merged.sh", "gh",
             "scripts/gsd/run-finalizer.sh"}
@@ -474,9 +475,53 @@ for i in gates_calls:
     argv = tokens[i:i + 5]
     assert "check-grant" in argv and scope in argv, argv
 fin = [i for i, t in seq if t == "scripts/gsd/run-finalizer.sh"][0]
-assert tokens[fin + 1:fin + 4] == ["--run-id", "run-0304", "201"], \
-    tokens[fin:fin + 4]
+# CR-04: the sole deletion owner receives the journal-pinned expected head
+# so its remote cleanup is compare-and-delete, never name-only.
+assert tokens[fin + 1:fin + 6] == ["--run-id", "run-0304",
+                                   "--expected-head", pinned_oid, "201"], \
+    tokens[fin:fin + 6]
 PYEOF
+}
+
+@test "[FENCE] a moved LIVE remote ref refuses at the pre-effect fence (local present)" {
+  # CR-04 (round 3): the historical PR headRefOid and the local ref can both
+  # equal the pinned OID while the REMOTE branch name was recreated or
+  # advanced with new, unmerged work — a name-only delete would destroy it.
+  fixture_sane; build_sandbox
+  extract_block
+  git -C "$WORK" checkout -q spec/merged
+  echo drift > "$WORK/drift.txt"
+  git -C "$WORK" add drift.txt
+  git -C "$WORK" commit -qm "post-merge remote work"
+  git -C "$WORK" push -q origin spec/merged
+  git -C "$WORK" checkout -q main
+  git -C "$WORK" update-ref refs/heads/spec/merged "$MERGED_OID"
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "oid-drift" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+  # the moved remote survives, still ahead of the pinned OID
+  [ "$(git -C "$WORK" ls-remote origin refs/heads/spec/merged | cut -f1)" != "$MERGED_OID" ]
+}
+
+@test "[FENCE] missing local ref with a moved remote refuses before any effect" {
+  # CR-04 (round 3): the missing-local path used to accept ANY nonempty
+  # ls-remote row and delegate remote cleanup — the row's OID must equal
+  # the journal-pinned OID or the target refuses.
+  fixture_sane; build_sandbox
+  extract_block
+  git -C "$WORK" checkout -q spec/merged
+  echo drift > "$WORK/drift.txt"
+  git -C "$WORK" add drift.txt
+  git -C "$WORK" commit -qm "post-merge remote work"
+  git -C "$WORK" push -q origin spec/merged
+  git -C "$WORK" checkout -q main
+  git -C "$WORK" update-ref -d refs/heads/spec/merged
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "oid-drift" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+  [ "$(git -C "$WORK" ls-remote origin refs/heads/spec/merged | cut -f1)" != "$MERGED_OID" ]
 }
 
 @test "[ESTATE] a target with NO estate record refuses and never reaches the finalizer" {
@@ -585,7 +630,9 @@ PYEOF
   git -C "$ORIGIN" rev-parse -q --verify refs/heads/spec/merged >/dev/null
   run run_block --execute
   [ "$status" -eq 0 ]
-  grep -q "finalize --run-id run-0304 201" "$EFFECTS"
+  # CR-04: the delegated remote cleanup carries the journal-pinned expected
+  # head for the finalizer's compare-and-delete fence.
+  grep -q "finalize --run-id run-0304 --expected-head $MERGED_OID 201" "$EFFECTS"
 }
 
 @test "[REPO] proofs and effects bind to one physical repository" {

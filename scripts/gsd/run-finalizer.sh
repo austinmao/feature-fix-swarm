@@ -69,12 +69,16 @@ DRY=0
 PR=""
 REPO=""
 FINALIZER_RUN_ID=""
+EXPECTED_HEAD=""
 expect_run_id=0
+expect_expected_head=0
 for arg in "$@"; do
   if [ "$expect_run_id" -eq 1 ]; then FINALIZER_RUN_ID="$arg"; expect_run_id=0; continue; fi
+  if [ "$expect_expected_head" -eq 1 ]; then EXPECTED_HEAD="$arg"; expect_expected_head=0; continue; fi
   case "$arg" in
     --dry-run) DRY=1 ;;
     --run-id) expect_run_id=1 ;;
+    --expected-head) expect_expected_head=1 ;;
     -*) warn "unknown argument '$arg' — skipping"; exit 0 ;;
     *) if [ -z "$PR" ]; then PR="$arg"
        elif [ -z "$REPO" ]; then REPO="$arg"
@@ -82,6 +86,12 @@ for arg in "$@"; do
   esac
 done
 [ "$expect_run_id" -eq 0 ] || { warn "--run-id requires a value"; exit 78; }
+# CR-04: the expected remote head is the compare-and-delete fence input for
+# remote cleanup — a malformed value refuses before any mutation.
+[ "$expect_expected_head" -eq 0 ] || { warn "--expected-head requires a value"; exit 78; }
+if [ -n "$EXPECTED_HEAD" ] && ! printf '%s' "$EXPECTED_HEAD" | grep -Eq '^[0-9a-f]{40}$'; then
+  warn "--expected-head must be a 40-hex object id"; exit 78
+fi
 REPO_ARGS=()
 [ -n "$REPO" ] && REPO_ARGS=(--repo "$REPO")
 
@@ -875,12 +885,29 @@ delete_landed_branch() { # delete $1 only under landed-tip proof
 remove_worktree_for_branch "$BRANCH" || true
 # 2. local + remote feature branch
 delete_landed_branch "$BRANCH"
-# `gh pr merge --delete-branch` usually got here first — only push a delete if
-# the remote ref still exists, else every finish tail ends on a bogus WARN.
-if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-  run git push origin --delete "$BRANCH"
-else
+# CR-04 (round 3): compare-and-delete remote fence.  The remote ref is
+# deleted ONLY when its LIVE tip equals the expected head — the caller's
+# --expected-head when supplied (the queue/Step 4-A journal-pinned OID),
+# else the gh-recorded merged PR head.  A merged PR retains its reviewed
+# head while the branch NAME can be recreated or advanced with new,
+# unmerged work, so the old name-only `git push origin --delete` was a
+# data-loss boundary and no longer exists.  The push itself uses
+# `--force-with-lease=<ref>:<oid>` (the repo's sanctioned pattern, see
+# skills/git-branch-cleanup): the server rejects the delete as stale if
+# the ref moved between the read and the push, so the fence is atomic —
+# a moved remote always survives.
+REMOTE_FENCE_OID="${EXPECTED_HEAD:-$HEAD_OID}"
+if ! REMOTE_ROW="$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null)"; then
+  warn "could not read remote refs/heads/$BRANCH — NOT deleting"
+elif [ -z "$REMOTE_ROW" ]; then
   note "remote branch '$BRANCH' already gone — nothing to delete"
+else
+  REMOTE_OID="$(printf '%s\n' "$REMOTE_ROW" | head -1 | cut -f1)"
+  if [ "$REMOTE_OID" != "$REMOTE_FENCE_OID" ]; then
+    warn "remote '$BRANCH' tip $REMOTE_OID is not the expected head $REMOTE_FENCE_OID — NOT deleting (moved remote work?)"
+  else
+    run git push --force-with-lease="refs/heads/$BRANCH:$REMOTE_FENCE_OID" origin ":refs/heads/$BRANCH"
+  fi
 fi
 # 3. gsd/phase-* intermediates: prune only ancestors of the merged head
 while IFS= read -r pb; do

@@ -303,7 +303,7 @@ while IFS="$(printf '\t')" read -r T_BRANCH T_OID T_PR T_MERGE; do
   echo "EVIDENCE assert-merged=ok pr=$T_PR"
   echo "EVIDENCE tip-oid=confirmed pr=$T_PR oid=$T_OID"
   echo "TARGET branch=$T_BRANCH oid=$T_OID pr=$T_PR merge=$T_MERGE"
-  echo "PLANNED-FINALIZER: bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID $T_PR"
+  echo "PLANNED-FINALIZER: bash scripts/gsd/run-finalizer.sh --run-id $RUN_ID --expected-head $T_OID $T_PR"
 done < <(tail -n +2 "$WORK/plan")
 
 if [ "$MODE" = "execute" ]; then
@@ -334,6 +334,21 @@ if [ "$MODE" = "execute" ]; then
           echo "CONSOLIDATE-REFUSED:oid-drift local refs/heads/$T_BRANCH is $LOCAL_OID, expected $T_OID"
           exit 1
         fi
+        # CR-04 (round 3): the LIVE remote ref must ALSO equal the pinned
+        # OID.  The historical PR headRefOid and the local ref can both
+        # match while the remote branch NAME was recreated or advanced with
+        # new, unmerged work — a name-only remote delete would destroy it.
+        REMOTE_ROW="$(git ls-remote origin "refs/heads/$T_BRANCH" < /dev/null)" || {
+          echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH unreadable at the pre-effect fence"
+          exit 1
+        }
+        if [ -n "$REMOTE_ROW" ]; then
+          REMOTE_OID="$(printf '%s\n' "$REMOTE_ROW" | head -1 | cut -f1)"
+          if [ "$REMOTE_OID" != "$T_OID" ]; then
+            echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH is $REMOTE_OID, expected $T_OID"
+            exit 1
+          fi
+        fi
       else
         HEAD_ABSENT="$(gh pr view "$T_PR" --json headRefOid -q .headRefOid < /dev/null)" || {
           echo "CONSOLIDATE-REFUSED:oid-drift head OID for PR $T_PR unreadable while local refs/heads/$T_BRANCH is missing"
@@ -351,6 +366,14 @@ if [ "$MODE" = "execute" ]; then
           echo "POSTCONDITION branch=$T_BRANCH already-finalized (local and remote refs gone; PR $T_PR head $T_OID verified)"
           ALREADY_FINALIZED=1
         else
+          # CR-04 (round 3): a surviving remote row is delegable ONLY when
+          # its live OID equals the journal-pinned OID — any drift refuses
+          # before the finalizer is reached.
+          REMOTE_OID="$(printf '%s\n' "$REMOTE_ROW" | head -1 | cut -f1)"
+          if [ "$REMOTE_OID" != "$T_OID" ]; then
+            echo "CONSOLIDATE-REFUSED:oid-drift remote refs/heads/$T_BRANCH is $REMOTE_OID, expected $T_OID (local ref missing)"
+            exit 1
+          fi
           echo "REMOTE-CLEANUP-REMAINING branch=$T_BRANCH local ref gone, remote survives; delegating to run-finalizer.sh under the journal-pinned identity"
         fi
       fi
@@ -367,9 +390,11 @@ if [ "$MODE" = "execute" ]; then
       exit 1
     fi
     # sole deletion owner: delegate exactly as the landed Phase 2 caller does;
-    # the finalizer is fail-soft, so rc alone is never treated as deletion proof
+    # the finalizer is fail-soft, so rc alone is never treated as deletion
+    # proof.  CR-04: the journal-pinned OID rides along as --expected-head so
+    # the finalizer's remote cleanup is compare-and-delete, never name-only.
     FIN_RC=0
-    bash "$TOOLS/scripts/gsd/run-finalizer.sh" --run-id "$RUN_ID" "$T_PR" < /dev/null || FIN_RC=$?
+    bash "$TOOLS/scripts/gsd/run-finalizer.sh" --run-id "$RUN_ID" --expected-head "$T_OID" "$T_PR" < /dev/null || FIN_RC=$?
     echo "DELEGATED run-finalizer.sh rc=$FIN_RC pr=$T_PR branch=$T_BRANCH"
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       if git rev-parse -q --verify "refs/heads/$T_BRANCH" >/dev/null 2>&1; then

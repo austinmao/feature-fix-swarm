@@ -185,6 +185,73 @@ EOF
   ! git ls-remote --exit-code origin refs/heads/feat/x
 }
 
+@test "CR-04: --expected-head compare-and-delete removes an unmoved remote" {
+  mock_gh_merged
+  run bash "$LEVER" --expected-head "$FEAT_OID" 1
+  [ "$status" -eq 0 ]
+  ! git ls-remote --exit-code origin refs/heads/feat/x
+}
+
+@test "CR-04: a remote tip moved past the expected head SURVIVES the fence" {
+  mock_gh_merged
+  # new, unmerged work lands on the remote branch name after the merged PR
+  git checkout -q feat/x
+  echo z > z.txt; git add z.txt; git commit -qm "new remote work"
+  MOVED_OID="$(git rev-parse feat/x)"
+  git push -q origin feat/x
+  git checkout -q main
+  run bash "$LEVER" --expected-head "$FEAT_OID" 1
+  [ "$status" -eq 0 ]
+  [ "$(git ls-remote origin refs/heads/feat/x | cut -f1)" = "$MOVED_OID" ]
+  [[ "$output" == *"NOT deleting"* ]]
+}
+
+@test "CR-04: without --expected-head the merged PR head is the fence — moved remote survives" {
+  mock_gh_merged
+  git checkout -q feat/x
+  echo z > z.txt; git add z.txt; git commit -qm "new remote work"
+  MOVED_OID="$(git rev-parse feat/x)"
+  git push -q origin feat/x
+  git checkout -q main
+  run bash "$LEVER" 1
+  [ "$status" -eq 0 ]
+  [ "$(git ls-remote origin refs/heads/feat/x | cut -f1)" = "$MOVED_OID" ]
+}
+
+@test "CR-04: check/delete race — the lease rejects a remote moved after the read" {
+  mock_gh_merged
+  # the remote really moves; a git shim serves the STALE expected OID to the
+  # pre-push read only, so the push's --force-with-lease compare-and-delete
+  # is the only thing standing between the race and data loss.
+  git checkout -q feat/x
+  echo z > z.txt; git add z.txt; git commit -qm "race work"
+  MOVED_OID="$(git rev-parse feat/x)"
+  git push -q origin feat/x
+  git checkout -q main
+  REAL_GIT="$(PATH=/usr/bin:/bin command -v git)"
+  cat > "$MOCK_BIN/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "ls-remote" ]; then
+  case "\$*" in *"refs/heads/feat/x"*)
+    printf '%s\trefs/heads/feat/x\n' "$FEAT_OID"; exit 0 ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+  chmod +x "$MOCK_BIN/git"
+  run bash "$LEVER" --expected-head "$FEAT_OID" 1
+  rm -f "$MOCK_BIN/git"
+  [ "$status" -eq 0 ]
+  [ "$("$REAL_GIT" -C "$WORK" ls-remote origin refs/heads/feat/x | cut -f1)" = "$MOVED_OID" ]
+}
+
+@test "CR-04: malformed --expected-head refuses before any mutation" {
+  mock_gh_merged
+  run bash "$LEVER" --expected-head not-a-sha 1
+  [ "$status" -eq 78 ]
+  git ls-remote --exit-code origin refs/heads/feat/x >/dev/null
+}
+
 @test "clean worktree on feature branch removed before branch delete" {
   mock_gh_merged
   WT="$BATS_TEST_TMPDIR/wt-feat"
