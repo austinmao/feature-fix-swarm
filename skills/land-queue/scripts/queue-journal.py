@@ -23,6 +23,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -130,6 +131,10 @@ def _load(path: Path) -> dict:
     if deadline is not None and (isinstance(deadline, bool)
                                  or not isinstance(deadline, (int, float))):
         raise JournalError("QUEUE-ERROR:store invalid journal deadline")
+    for key in ("repo_root", "base"):
+        value = doc.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise JournalError(f"QUEUE-ERROR:store invalid journal {key}")
     return doc
 
 
@@ -186,18 +191,45 @@ def _queue_lock(io, directory_fd: int, run_id: str, pid: int):
     return QueueLock(directory_fd, run_id)
 
 
+def canonical_repo_root(repo: str) -> str:
+    """Physical git toplevel of `repo`, realpath-canonicalized (CR-04)."""
+    proc = subprocess.run(["git", "-C", repo, "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise JournalError(f"QUEUE-ERROR:store --repo is not a git repository: {repo}")
+    return os.path.realpath(proc.stdout.strip())
+
+
+def _valid_base(base: str) -> str:
+    base = _field(base, "base")
+    if not base or any(ch.isspace() for ch in base):
+        raise JournalError("QUEUE-ERROR:store invalid base branch name")
+    return base
+
+
 def cmd_init(ns) -> int:
     path = _doc_path(ns.store, ns.queue_id)
     if path.exists():
         raise JournalError(f"QUEUE-ERROR:store journal already exists: {path.name}")
     created = int(time.time())
-    _save(path, {"schema": SCHEMA, "queue_id": ns.queue_id,
-                 "run_id": _field(ns.run_id, "run_id"),
-                 "created_at": created,
-                 # CR-02: the immutable absolute deadline — grant lifetime
-                 # derives ONLY from this field, never from a caller timeout.
-                 "deadline": created + QUEUE_WALL_SECONDS,
-                 "events": []})
+    doc = {"schema": SCHEMA, "queue_id": ns.queue_id,
+           "run_id": _field(ns.run_id, "run_id"),
+           "created_at": created,
+           # CR-02: the immutable absolute deadline — grant lifetime
+           # derives ONLY from this field, never from a caller timeout.
+           "deadline": created + QUEUE_WALL_SECONDS,
+           "events": []}
+    # CR-04: canonicalize and persist the creating repository root + base.
+    # Both-or-neither: a bound journal is the only journal grant-consolidate
+    # will mint from (unbound journals stay readable but fail closed at the
+    # mint boundary).
+    if (ns.repo is None) != (ns.base is None):
+        raise JournalError(
+            "QUEUE-ERROR:store init requires --repo and --base together")
+    if ns.repo is not None:
+        doc["repo_root"] = canonical_repo_root(ns.repo)
+        doc["base"] = _valid_base(ns.base)
+    _save(path, doc)
     return 0
 
 
@@ -478,6 +510,8 @@ def main(argv=None) -> int:
         p.add_argument("--queue-id", required=True)
         if name == "init":
             p.add_argument("--run-id", required=True)
+            p.add_argument("--repo")
+            p.add_argument("--base")
         if name == "append":
             p.add_argument("--kind", required=True)
             p.add_argument("--step", required=True)

@@ -186,7 +186,8 @@ esac'
 make_real_journal() { # $1 queue-id, $2 run-id, then (branch head pr merge)*
   local qid="$1" rid="$2" jrnl="$REAL_ROOT/skills/land-queue/scripts/queue-journal.py"
   shift 2
-  python3 "$jrnl" init --store "$QJ_STORE" --queue-id "$qid" --run-id "$rid"
+  python3 "$jrnl" init --store "$QJ_STORE" --queue-id "$qid" --run-id "$rid" \
+    --repo "$WORK" --base main
   while [ $# -gt 0 ]; do
     python3 "$jrnl" append --store "$QJ_STORE" --queue-id "$qid" \
       --kind intent --step merge --item "$1" --pr "$3" --head "$2"

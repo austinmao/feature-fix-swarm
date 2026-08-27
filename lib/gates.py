@@ -4227,8 +4227,11 @@ def main(argv: list[str]) -> int:
         run_id = args[0]
         queue_id = _flag(args, "--queue-id")
         journal_store = _flag(args, "--journal-store")
-        repo_arg = _flag(args, "--repo", ".")
-        base_arg = _flag(args, "--base", "main")
+        # CR-04 (round 2): --repo/--base are VERIFICATION-ONLY — the
+        # journal-recorded binding is the sole authority; caller values
+        # that differ byte-for-byte refuse before any grant write.
+        repo_arg = _flag(args, "--repo", "")
+        base_arg = _flag(args, "--base", "")
 
         def _cg_reject(reason: str) -> int:
             print(f"CONSOLIDATE-GRANT-REJECTED: {sanitize_reason(reason)}",
@@ -4296,19 +4299,36 @@ def main(argv: list[str]) -> int:
         if remaining_h <= 0:
             return _cg_reject("original queue deadline has passed; a late "
                               "derivation never re-opens authority")
-        # CR-07: one physical repository root, resolved here and baked into
-        # the scope, so proofs and effects can never split across checkouts.
-        toplevel = subprocess.run(
-            ["git", "-C", repo_arg, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True)
-        if toplevel.returncode != 0 or not toplevel.stdout.strip():
-            return _cg_reject(f"--repo is not a git repository: {repo_arg}")
-        repo_root = os.path.realpath(toplevel.stdout.strip())
-        if not base_arg.strip():
-            return _cg_reject("--base must be non-empty")
+        # CR-07/CR-04: one physical repository root, recorded by the queue
+        # journal at init — the repository that CREATED the queue, never the
+        # repository a caller points at.  Proofs and effects can never split
+        # across checkouts, and a terminal journal can never be replayed to
+        # mint deletion authority for a different repository or base.
+        repo_root = doc.get("repo_root")
+        base = doc.get("base")
+        if (not isinstance(repo_root, str) or not repo_root
+                or not isinstance(base, str) or not base):
+            return _cg_reject("journal records no repository binding "
+                              "(repo_root/base); an unbound journal never "
+                              "mints authority")
+        if repo_arg:
+            caller_top = subprocess.run(
+                ["git", "-C", repo_arg, "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True)
+            if caller_top.returncode != 0 or not caller_top.stdout.strip():
+                return _cg_reject(f"--repo is not a git repository: {repo_arg}")
+            caller_root = os.path.realpath(caller_top.stdout.strip())
+            if caller_root != repo_root:
+                return _cg_reject("caller --repo differs from the "
+                                  "journal-recorded repository root; a "
+                                  "queue journal only mints for the "
+                                  "repository that created it")
+        if base_arg and base_arg != base:
+            return _cg_reject("caller --base differs byte-for-byte from the "
+                              "journal-recorded base branch")
         scope = grant_consolidate_estate(store, run_id, quads,
                                          queue_id=queue_id,
-                                         repo_root=repo_root, base=base_arg,
+                                         repo_root=repo_root, base=base,
                                          queue_timeout_seconds=timeout_s,
                                          ttl_hours=min(ttl, remaining_h))
         if scope is None:

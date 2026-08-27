@@ -67,7 +67,10 @@ def make_journal(tmp_path, queue_id="q-cr03", run_id="run-q",
                                "--store", str(store), "--queue-id", queue_id],
                               capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
-    qj("init", "--run-id", run_id)
+    # CR-04: journals are repository-bound at init; callers create the
+    # repo (make_repo) before building the journal.
+    qj("init", "--run-id", run_id, "--repo", str(tmp_path / "repo"),
+       "--base", "main")
     for branch, head, pr, merge in items:
         qj("append", "--kind", "intent", "--step", "merge",
            "--item", branch, "--pr", pr, "--head", head)

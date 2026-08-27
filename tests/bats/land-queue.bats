@@ -842,7 +842,8 @@ PYEOF
   JRNL="$ROOT/skills/land-queue/scripts/queue-journal.py"
   HEAD_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
   MERGE_A="$(python3 -c "print('f'*40)")"
-  python3 "$JRNL" init --store "$LQ" --queue-id resume-q1 --run-id run-961
+  python3 "$JRNL" init --store "$LQ" --queue-id resume-q1 --run-id run-961 \
+    --repo "$WORK" --base main
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
     --kind intent --step merge --item spec/item-a --pr 101 --head "$HEAD_A"
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
@@ -885,7 +886,8 @@ PYEOF
   JRNL="$ROOT/skills/land-queue/scripts/queue-journal.py"
   HEAD_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
   MERGE_A="$(python3 -c "print('f'*40)")"
-  python3 "$JRNL" init --store "$LQ" --queue-id resume-q2 --run-id run-963
+  python3 "$JRNL" init --store "$LQ" --queue-id resume-q2 --run-id run-963 \
+    --repo "$WORK" --base main
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q2 \
     --kind intent --step merge --item spec/item-a --pr 101 --head "$HEAD_A"
   python3 "$JRNL" append --store "$LQ" --queue-id resume-q2 \

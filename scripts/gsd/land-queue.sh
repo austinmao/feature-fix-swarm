@@ -266,7 +266,10 @@ if [ -n "$RESUME" ]; then
   # intake sources stay closed so no new item can join a resumed queue.
   EXPLICIT=(${RESUME_RETRY[@]+"${RESUME_RETRY[@]}"})
 else
+  # CR-04: the journal binds the creating repository root + base at init;
+  # grant-consolidate reads that binding as its sole repo/base authority.
   python3 "$JOURNAL" init --store "$LQ" --queue-id "$QUEUE_ID" --run-id "$RUN_ID" \
+      --repo "$REPO" --base "$BASE" \
     || { echo "QUEUE-ERROR:store"; exit 70; }
 fi
 
