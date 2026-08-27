@@ -25,7 +25,7 @@ all skills.
 - **seed-ceremony-tier.sh warns on a directory argument**: passing a
   directory where a spec.md/plan.md file path is expected silently
   classified `light default`; it now prints a loud stderr WARN (still
-  advisory, still exit 0).
+  advisory — the exit code stays zero).
 
 ### Changed (2026-08-27 — FFS cycle-time cut, operator decision)
 
