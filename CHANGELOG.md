@@ -8,6 +8,25 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-08-27 — blocked-verdict wall idempotence)
+
+- **plan-wall.sh never re-reviews byte-identical content, blocked plans
+  included**: re-run idempotence (AC-005) previously covered pass verdicts
+  only — an unchanged plan with a still-open blocking finding re-dispatched
+  the reviewer every invocation. Now a sha-unchanged plan whose prior record
+  is `blocked` re-emits with ZERO dispatch: CRITICAL still open → hard block
+  (the driver reaches `WALL-ROUND-CAP` with no extra dispatches); CRITICAL
+  adjudicated away with HIGHs remaining → policy (b) `PASS-RESIDUAL`. Edited
+  plans still re-dispatch. Ports the openclaw `#1784` fork's F3 guarantee
+  (`PW_ANY_DISPATCH`) upstream, closing the regression accepted in the
+  openclaw re-sync (openclaw PR #1841's fork-allowlist note). Measured on a
+  4-phase/15-plan fixture with an unresolved CRITICAL: 30→15 reviewer
+  dispatches, repair-round re-invocation now free.
+- **seed-ceremony-tier.sh warns on a directory argument**: passing a
+  directory where a spec.md/plan.md file path is expected silently
+  classified `light default`; it now prints a loud stderr WARN (still
+  advisory — the exit code stays zero).
+
 ### Changed (2026-08-27 — FFS cycle-time cut, operator decision)
 
 - **One-round wall** (plan-wall.sh; feature-implement 2.15.0; plan-decompose

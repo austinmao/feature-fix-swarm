@@ -90,3 +90,17 @@ setup() {
   [ -n "$tier_line" ] && [ -n "$ownership_line" ]
   [ "$tier_line" -lt "$ownership_line" ]
 }
+
+@test "directory passed as spec path -> loud WARN on stderr, still advisory light default" {
+  mkdir -p somespec
+  run bash "$LEVER" somespec plan.md
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN: 'somespec' is a directory"* ]]
+  [[ "$output" == *"light default"* ]]
+}
+
+@test "file paths produce no directory WARN" {
+  run bash "$LEVER" spec.md plan.md 3 100
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"WARN"* ]]
+}

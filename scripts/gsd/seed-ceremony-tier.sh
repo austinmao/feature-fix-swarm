@@ -26,6 +26,13 @@ SPEC="${1:-}"
 PLAN="${2:-}"
 EST_FILES="${3:-}"
 EST_LOC="${4:-}"
+# A directory arg is a caller bug that would otherwise classify as
+# "light default" with no signal (the security grep skips non-files).
+# Warn loudly but stay advisory — the single exit point below still rules.
+for _a in "$SPEC" "$PLAN"; do
+  [ -n "$_a" ] && [ -d "$_a" ] && \
+    echo "seed-ceremony-tier: WARN: '$_a' is a directory — expected a spec.md/plan.md FILE path; classifying without it" >&2
+done
 case "$EST_FILES" in *[!0-9]*|'') EST_FILES="" ;; esac
 case "$EST_LOC" in *[!0-9]*|'') EST_LOC="" ;; esac
 
