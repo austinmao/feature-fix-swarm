@@ -688,7 +688,24 @@ land_one_item() {
     fi
     # 37bc43d9: a satisfied review is rc 0 PLUS its findings artifact.
     journal --kind result --step review --item "$branch" --status ok --detail "$findings"
-    note_review_invocation "$review_degraded" "$branch" "$reviewed" "$baseline" || true
+    # CR-05 (round 2): an unrecordable review invocation fails CLOSED for
+    # BOTH the degraded same-vendor path and the clean review — production
+    # promotion evaluates the degraded-review ratio over the invocation
+    # ledger, so an incomplete denominator must never reach CI or merge.
+    # This matches the no-reviewer degraded path's unrecordable handling.
+    if ! note_review_invocation "$review_degraded" "$branch" "$reviewed" "$baseline"; then
+      journal --kind result --step review --item "$branch" --status unrecorded
+      if [ "$review_degraded" = "true" ]; then
+        block_item "BLOCKED:degradation-unrecorded" \
+          "same-vendor degraded review succeeded but gates.py refused to record the degradation event" \
+          "re-run with a ledger-shaped --run-id (spec-NNN, run-N, or adhoc-*)"
+      else
+        block_item "BLOCKED:review-unrecorded" \
+          "review succeeded but gates.py refused to record the invocation evidence" \
+          "re-run with a ledger-shaped --run-id (spec-NNN, run-N, or adhoc-*)"
+      fi
+      return 1
+    fi
   fi
 
   # 6. bounded CI watch — the exact REQ-210 contract.
