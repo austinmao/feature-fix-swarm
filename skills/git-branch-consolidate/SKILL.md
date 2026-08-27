@@ -211,13 +211,21 @@ try:
     est = json.load(open(estate_path))
 except Exception:
     refuse("fresh-estate estate output unreadable")
-by_branch = {}
+# CR-02: fail closed — exactly ONE estate row per target, with the literal
+# boolean true.  A missing record is not positive fresh evidence.
+by_branch, dup = {}, set()
 for rec in (est.get("branches") or []) if isinstance(est, dict) else []:
     if isinstance(rec, dict) and isinstance(rec.get("branch"), str):
+        if rec["branch"] in by_branch:
+            dup.add(rec["branch"])
         by_branch[rec["branch"]] = rec
 for b, h, pr, m in tuples:
+    if b in dup:
+        refuse("fresh-estate duplicate estate rows for " + b)
     rec = by_branch.get(b)
-    if rec is not None and not rec.get("landed"):
+    if rec is None:
+        refuse("fresh-estate target missing for " + b)
+    if rec.get("landed") is not True:
         refuse("fresh-estate landed!=true for " + b)
 digest = hashlib.sha256(json.dumps(sorted([[b, h, p, m] for b, h, p, m in tuples]),
                                    separators=(",", ":")).encode()).hexdigest()
