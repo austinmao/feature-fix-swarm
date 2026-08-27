@@ -179,13 +179,25 @@ def load_takeover_records(pattern):
                 row = json.load(handle)
         except (OSError, ValueError):
             continue  # malformed/hostile takeover records never become items
-        if not isinstance(row, dict) or not row.get("branch"):
+        if not isinstance(row, dict):
             continue
+        # H5 (ship round 5): the CANONICAL versioned writer schema
+        # (scripts/gsd/takeover-record.py) nests branch/head under
+        # git_state and both ids under ids — that shape is authoritative.
+        # The legacy flat top-level fields survive only as a trivially
+        # cheap fallback for pre-schema records.
         ids = row.get("ids") if isinstance(row.get("ids"), dict) else {}
-        records.append({"source": "takeover", "branch": str(row["branch"]),
-                        "head": row.get("head") or row.get("head_sha"),
-                        "run_id": row.get("run_id") or ids.get("run_id"),
-                        "spec_id": row.get("spec_id") or row.get("spec")})
+        git_state = (row.get("git_state")
+                     if isinstance(row.get("git_state"), dict) else {})
+        branch = git_state.get("branch") or row.get("branch")
+        if not branch:
+            continue
+        records.append({"source": "takeover", "branch": str(branch),
+                        "head": git_state.get("head") or row.get("head")
+                        or row.get("head_sha"),
+                        "run_id": ids.get("run_id") or row.get("run_id"),
+                        "spec_id": ids.get("spec_id") or row.get("spec_id")
+                        or row.get("spec")})
     return records
 
 

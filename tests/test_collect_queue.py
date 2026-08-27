@@ -56,6 +56,28 @@ def real_git_estate(tmp_path: Path) -> dict[str, Path | str]:
     return {"origin": origin, "work": work, "linked": linked, "head": head}
 
 
+def _writer_record(branch: str, head: str, run_id: str, spec_id: str) -> dict:
+    """Byte-copy of scripts/gsd/takeover-record.py's writer output shape
+    (schema_version 1): branch/head under git_state, both ids under ids —
+    NO flat top-level identity fields (H5, ship round 5).  The old
+    hand-shaped fixtures encoded a schema production never writes."""
+    return {
+        "schema_version": 1,
+        "created_at": 0,
+        "ids": {"spec_id": spec_id, "run_id": run_id},
+        "gates_store": "/dev/null/evidence.json",
+        "gates_store_anchor": "0" * 64,
+        "git_state": {"branch": branch, "head": head, "upstream": "",
+                      "dirty": []},
+        "preflight": {}, "grants": [], "pendings": [], "promotions": [],
+        "runner": {"status": "unknown", "pid": None, "live": False,
+                   "process_state": "", "pid_start_time": "",
+                   "boot_session_id": ""},
+        "unresolved_findings": [], "phases": [], "evidence": [], "forbid": [],
+        "resume": {"command": f"/spec-status {spec_id}", "preconditions": []},
+    }
+
+
 def load_collector():
     if not COLLECTOR.is_file():
         pytest.fail("RED-EXPECTED: REQ-201 collect-queue.py is not shipped")
@@ -105,9 +127,8 @@ def test_req201_fetch_first_and_three_source_union(real_git_estate, tmp_path):
 
     takeover_dir = tmp_path / "takeover"
     takeover_dir.mkdir()
-    (takeover_dir / "spec-201.json").write_text(json.dumps({
-        "branch": "spec/201-docs", "head": head,
-        "ids": {"run_id": "spec-201"}, "spec_id": "201"}))
+    (takeover_dir / "spec-201.json").write_text(json.dumps(
+        _writer_record("spec/201-docs", head, "spec-201", "201")))
     estate = [{"branch": "spec/201-docs", "disposition": "docs-only",
                "landed": False, "residual_files": 1, "spec_id": "201"}]
 
@@ -161,8 +182,8 @@ def test_req201_identity_conflicts_block(real_git_estate, tmp_path):
     takeover_dir = tmp_path / "takeover"
     takeover_dir.mkdir()
     wrong_head = "0" * 40
-    (takeover_dir / "a.json").write_text(json.dumps({
-        "branch": "spec/201-docs", "head": wrong_head, "ids": {"run_id": "spec-201"}}))
+    (takeover_dir / "a.json").write_text(json.dumps(
+        _writer_record("spec/201-docs", wrong_head, "spec-201", "201")))
     doc = module.collect(repo=str(work), base="main",
                          explicit=["spec/201-docs"],
                          takeover_glob=str(takeover_dir / "*.json"), fetch=False)
@@ -179,10 +200,10 @@ def test_req201_identity_conflicts_block(real_git_estate, tmp_path):
 
     # run-id disagreement between two takeover records also blocks.
     head = real_git_estate["head"]
-    (takeover_dir / "a.json").write_text(json.dumps({
-        "branch": "spec/201-docs", "head": head, "ids": {"run_id": "spec-201"}}))
-    (takeover_dir / "b.json").write_text(json.dumps({
-        "branch": "spec/201-docs", "head": head, "ids": {"run_id": "spec-999"}}))
+    (takeover_dir / "a.json").write_text(json.dumps(
+        _writer_record("spec/201-docs", head, "spec-201", "201")))
+    (takeover_dir / "b.json").write_text(json.dumps(
+        _writer_record("spec/201-docs", head, "spec-999", "201")))
     doc = module.collect(repo=str(work), base="main",
                          takeover_glob=str(takeover_dir / "*.json"), fetch=False)
     assert doc["items"] == []
@@ -399,3 +420,56 @@ def test_coverage_contract_targets_only_stable_dynamic_module_name(real_git_esta
                       "--field", "__class__"])
     captured = capsys.readouterr()
     assert rc != 0 and captured.out == ""
+
+
+# ── spec-006 ship round 5 (H5): canonical takeover-record intake ──────────
+
+
+def test_h5_real_writer_record_is_loaded_by_intake(real_git_estate, tmp_path):
+    """H5 (ship round 5): the intake loader parses the CANONICAL versioned
+    schema the real takeover-record.py writer produces (ids.* + git_state.*).
+    RED probe: with the flat-field loader a real writer record intakes as
+    nothing at all."""
+    work = _sanity(real_git_estate)
+    linked = real_git_estate["linked"]  # checked out on spec/201-docs
+    head = real_git_estate["head"]
+    module = load_collector()
+    gates_dir = tmp_path / "gates"
+    gates_dir.mkdir()
+    env = {**os.environ, "GATES_STORE": str(gates_dir / "evidence.json"),
+           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+           "TAKEOVER_TEST_IDENTITY": "pytest-boot-1"}
+    writer = ROOT / "scripts" / "gsd" / "takeover-record.py"
+    proc = subprocess.run(
+        [sys.executable, str(writer), "--gates",
+         str(ROOT / "lib" / "gates.py"), "--spec-id", "201",
+         "--run-id", "spec-201"],
+        cwd=linked, env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    records = module.load_takeover_records(
+        str(gates_dir / "takeover" / "*.json"))
+    assert records == [{"source": "takeover", "branch": "spec/201-docs",
+                        "head": head, "run_id": "spec-201",
+                        "spec_id": "201"}]
+    doc = module.collect(repo=str(work), base="main",
+                         takeover_glob=str(gates_dir / "takeover" / "*.json"),
+                         fetch=False)
+    assert [i["branch"] for i in doc["items"]] == ["spec/201-docs"]
+    assert doc["items"][0]["run_id"] == "spec-201"
+    assert doc["items"][0]["spec_id"] == "201"
+
+
+def test_h5_legacy_flat_record_still_loads(real_git_estate, tmp_path):
+    """Legacy flat top-level fields stay accepted as a trivially cheap
+    fallback; the canonical nested shape is authoritative when both exist."""
+    _sanity(real_git_estate)
+    head = real_git_estate["head"]
+    module = load_collector()
+    tdir = tmp_path / "takeover"
+    tdir.mkdir()
+    (tdir / "legacy.json").write_text(json.dumps({
+        "branch": "spec/201-docs", "head": head,
+        "run_id": "spec-201", "spec_id": "201"}))
+    [rec] = module.load_takeover_records(str(tdir / "*.json"))
+    assert rec == {"source": "takeover", "branch": "spec/201-docs",
+                   "head": head, "run_id": "spec-201", "spec_id": "201"}

@@ -2099,7 +2099,9 @@ PYEOF
   git branch -qD spec/item-a
   TSTORE="$(python3 "$ROOT/lib/gates.py" store-dir)"
   mkdir -p "$TSTORE/takeover"
-  printf '{"branch":"spec/item-a","head":"%s","run_id":"spec-006","spec_id":"006"}\n' \
+  # H5 (ship round 5): the fixture carries the CANONICAL versioned writer
+  # shape (ids.* + git_state.*), matching real takeover-record.py output.
+  printf '{"schema_version":1,"ids":{"spec_id":"006","run_id":"spec-006"},"git_state":{"branch":"spec/item-a","head":"%s","upstream":"","dirty":[]}}\n' \
     "$OID_A" > "$TSTORE/takeover/spec-006.json"
   # Estate source: the REAL collect-estate discovery over the fixture repo
   # (local git only) finds spec/item-b and spec/queue as review-then-land.
