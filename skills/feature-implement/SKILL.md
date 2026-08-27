@@ -233,6 +233,20 @@ drive across vendors.
 
 **Spec mode:** read `.planning/ROADMAP.md` for the first unchecked phase N.
 
+Once, immediately before entering the phase loop (NOT at run-start
+bootstrap): if `.planning/ceremony-tier` exists and starts with `light`,
+run the run-level wall over every already-planned phase in one invocation:
+
+```bash
+[ -f .planning/ceremony-tier ] && grep -q '^light' .planning/ceremony-tier && bash scripts/gsd/plan-wall.sh --run
+```
+
+STOP on nonzero. This pays ONE global `wall:run` round for the whole run;
+per-phase re-entry at the runner's own wall seam then takes the
+sha-unchanged zero-dispatch idempotence path (an edited plan still
+re-dispatches). Tiers `full`/absent change nothing — the per-phase wall
+below is the unchanged default.
+
 Before a dry run or any interactive/headless execution, run:
 
 ```bash
