@@ -63,14 +63,17 @@ run_gate() {
   [[ "$output" != *"WALL-AUTO-CONTINUE"* ]]
 }
 
-@test "rc 3 with unresolved HIGH finding: quarantine stands, no reset" {
+@test "open residual HIGHs do NOT block auto-continue (one-round wall: HIGHs ride as residuals)" {
+  # D1 regression guard: with HIGH left in the severity filter the recipe
+  # would be permanently unreachable — every pass-residual phase has open
+  # HIGHs by design.
   python3 "$GATES" findings-queue add "f.py" "bad" --severity HIGH \
     --run-id "$GSD_RUN_ID" --source wall --plan ".planning/phases/04-foo/01-PLAN.md"
-  printf '3\n' > "$WALL_RC_QUEUE"
-  run -3 run_gate
-  [[ "$output" == *"WALL-AUTO-CONTINUE skipped"* ]]
-  [[ "$output" == *"unresolved HIGH/CRITICAL"* ]]
-  [ "$(grep -c called "$WALL_CALL_LOG")" -eq 1 ]
+  python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
+  printf '3\n0\n' > "$WALL_RC_QUEUE"
+  run -0 run_gate
+  [[ "$output" == *"WALL-AUTO-CONTINUE phase=04-foo"* ]]
+  [ "$(grep -c called "$WALL_CALL_LOG")" -eq 2 ]
 }
 
 @test "rc 3, zero unresolved, no grant: quarantine stands" {
@@ -117,7 +120,7 @@ run_gate() {
 }
 
 @test "resolved finding no longer blocks: adjudication clears the precondition" {
-  out="$(python3 "$GATES" findings-queue add "f.py" "bad" --severity HIGH \
+  out="$(python3 "$GATES" findings-queue add "f.py" "bad" --severity CRITICAL \
     --run-id "$GSD_RUN_ID" --source wall --plan ".planning/phases/04-foo/01-PLAN.md")"
   sig="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
   python3 "$GATES" findings-queue resolve "$sig" --disposition fix --reason "fixed in commit"
@@ -128,25 +131,25 @@ run_gate() {
   [ "$(grep -c called "$WALL_CALL_LOG")" -eq 2 ]
 }
 
-@test "unresolved CRITICAL blocks (severity CSV second element)" {
+@test "unresolved CRITICAL blocks: quarantine stands, no reset" {
   python3 "$GATES" findings-queue add "f.py" "worse" --severity CRITICAL \
     --run-id "$GSD_RUN_ID" --source wall --plan ".planning/phases/04-foo/01-PLAN.md"
   python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
   printf '3\n' > "$WALL_RC_QUEUE"
   run -3 run_gate
-  [[ "$output" == *"unresolved HIGH/CRITICAL"* ]]
+  [[ "$output" == *"unresolved CRITICAL"* ]]
   [ "$(grep -c called "$WALL_CALL_LOG")" -eq 1 ]
 }
 
 @test "PLAN.md fallback name is checked too" {
   rm "$PHASE_DIR/01-PLAN.md"
   printf '%s\n' plan > "$PHASE_DIR/PLAN.md"
-  python3 "$GATES" findings-queue add "f.py" "bad" --severity HIGH \
+  python3 "$GATES" findings-queue add "f.py" "bad" --severity CRITICAL \
     --run-id "$GSD_RUN_ID" --source wall --plan ".planning/phases/04-foo/PLAN.md"
   python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
   printf '3\n' > "$WALL_RC_QUEUE"
   run -3 run_gate
-  [[ "$output" == *"unresolved HIGH/CRITICAL"* ]]
+  [[ "$output" == *"unresolved CRITICAL"* ]]
 }
 
 @test "phase with no plan files fails closed even with a grant" {
@@ -170,6 +173,6 @@ PYSTUB
   python3 "$GATES" grant "$GSD_RUN_ID" --action wall-reset:04-foo --rollback "n/a"
   printf '3\n' > "$WALL_RC_QUEUE"
   run -3 run_gate
-  [[ "$output" == *"unresolved HIGH/CRITICAL"* ]]
+  [[ "$output" == *"unresolved CRITICAL"* ]]
   [ "$(grep -c called "$WALL_CALL_LOG")" -eq 1 ]
 }
