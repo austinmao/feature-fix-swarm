@@ -812,7 +812,7 @@ STUB
   write_gh
   write_children
   RESTRICTED="$(same_vendor_only_path codex)"
-  RUN_ID=run-cr05a
+  RUN_ID=run-951
   FFS_HOST=codex PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main \
     --posture floor --run-id "$RUN_ID" spec/item-a
   [ "$status" -eq 0 ]
@@ -823,7 +823,7 @@ STUB
 import json, sys
 data = json.load(open(sys.argv[1]))
 ev = [e for e in data["_degradation"]["invocations"]
-      if e.get("run_id") == "run-cr05a"]
+      if e.get("run_id") == "run-951"]
 assert len(ev) == 1 and ev[0]["degraded"] is True, ev
 PYEOF
 }
@@ -835,7 +835,7 @@ PYEOF
   write_gh
   write_children
   RESTRICTED="$(same_vendor_only_path claude)"
-  RUN_ID=run-cr05b
+  RUN_ID=run-952
   FFS_HOST=claude PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main \
     --posture floor --run-id "$RUN_ID" spec/item-a
   [ "$status" -eq 0 ]
@@ -853,7 +853,7 @@ PYEOF
   write_gh
   write_children
   RESTRICTED="$(same_vendor_only_path codex)"
-  RUN_ID=run-cr05c
+  RUN_ID=run-953
   python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
   FFS_HOST=codex PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main \
     --run-id "$RUN_ID" spec/item-a
@@ -864,7 +864,7 @@ PYEOF
 import json, sys
 data = json.load(open(sys.argv[1]))
 ev = [e for e in data["_degradation"]["invocations"]
-      if e.get("run_id") == "run-cr05c"]
+      if e.get("run_id") == "run-953"]
 assert len(ev) == 1 and ev[0]["degraded"] is True, ev
 PYEOF
 }

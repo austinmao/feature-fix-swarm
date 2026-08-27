@@ -28,6 +28,8 @@ GATES="$ROOT/lib/gates.py"
 . "$SCRIPT_DIR/run-bounded.sh"
 # shellcheck source=scripts/gsd/autonomy-posture.sh
 . "$SCRIPT_DIR/autonomy-posture.sh"
+# shellcheck source=scripts/gsd/adversary-host.sh
+. "$SCRIPT_DIR/adversary-host.sh"
 
 usage() {
   echo "usage: land-queue.sh [--repo DIR] [--base NAME] [--run-id ID] [--posture zero|floor] [--drain] [--resume QUEUE-ID] [BRANCH...]" >&2
@@ -105,6 +107,13 @@ QUEUE_ID="$RUN_ID"
 # AUTONOMY_POSTURE, never the env/config inputs.
 resolve_autonomy_posture "$REPO/.planning/config.json" "$POSTURE_CLI"
 echo "POSTURE-RESOLVED: $AUTONOMY_POSTURE source=$AUTONOMY_POSTURE_SOURCE"
+# ── CR-05: producing host + opposite vendor, resolved once per run ────────
+# Floor's defining guarantee (37bc43d9) is a review by the OPPOSITE vendor;
+# the host that produced the change can never review itself into a floor
+# pass.  Detection follows scripts/gsd/adversary-host.sh conventions.
+PRODUCING_HOST="$(detect_orchestrator_host)"
+OPPOSITE_VENDOR="$(adversary_kind_for_host "$PRODUCING_HOST")"
+echo "REVIEW-VENDOR: host=$PRODUCING_HOST opposite=$OPPOSITE_VENDOR"
 # EDGE-006: any journal validation/write failure is immediate infrastructure
 # QUEUE-ERROR:store — it bypasses classification and stops the queue before
 # another effect runs.
@@ -575,10 +584,17 @@ land_one_item() {
   fi
   reviewed="$prepared"
 
-  # 5. cross-vendor review of the pinned head (REQ-209 / 37bc43d9).
+  # 5. cross-vendor review of the pinned head (REQ-209 / 37bc43d9 / CR-05).
   require_go "review $branch" || return 2
   journal --kind intent --step review --item "$branch" --detail "$reviewed"
-  reviewer="$(command -v codex || command -v claude || true)"
+  # CR-05: only the OPPOSITE vendor's CLI satisfies floor; under zero a
+  # same-vendor CLI may still review but is recorded as DEGRADED.
+  local review_degraded=false
+  reviewer="$(command -v "$OPPOSITE_VENDOR" || true)"
+  if [ -z "$reviewer" ] && [ "$AUTONOMY_POSTURE" != "floor" ]; then
+    reviewer="$(command -v codex || command -v claude || true)"
+    [ -z "$reviewer" ] || review_degraded=true
+  fi
   baseline="$(git -C "$REPO" rev-parse "refs/remotes/origin/$BASE" 2>/dev/null)" || baseline=""
   if [ -z "$reviewer" ]; then
     journal --kind result --step review --item "$branch" --status missing
@@ -586,11 +602,12 @@ land_one_item() {
     require_go "degrade $branch" || return 2
     if [ "$AUTONOMY_POSTURE" = "floor" ]; then
       # Floor: no same-host substitute, ever — the degraded posture is
-      # recorded AND the item blocks (37bc43d9).
+      # recorded AND the item blocks (37bc43d9/CR-05), whether the host's
+      # own CLI is installed or not.
       note_review_invocation true "$branch" "$reviewed" "$baseline" || true
       block_item "BLOCKED:no-cross-vendor-reviewer" \
-        "floor posture requires an opposite-vendor reviewer and none is on PATH" \
-        "install an opposite-vendor reviewer CLI (codex or claude), then re-run the queue"
+        "floor posture requires an opposite-vendor ($OPPOSITE_VENDOR) reviewer and none is on PATH; the producing host's own CLI never counts" \
+        "install the opposite-vendor reviewer CLI ($OPPOSITE_VENDOR), then re-run the queue"
       return 1
     fi
     # Zero: merge stays permitted ONLY with a durably recorded degradation
@@ -617,7 +634,7 @@ land_one_item() {
     fi
     # 37bc43d9: a satisfied review is rc 0 PLUS its findings artifact.
     journal --kind result --step review --item "$branch" --status ok --detail "$findings"
-    note_review_invocation false "$branch" "$reviewed" "$baseline" || true
+    note_review_invocation "$review_degraded" "$branch" "$reviewed" "$baseline" || true
   fi
 
   # 6. bounded CI watch — the exact REQ-210 contract.
