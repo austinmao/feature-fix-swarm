@@ -197,7 +197,7 @@ for b, h, pr, m in tuples:
     rec = by_branch.get(b)
     if rec is not None and not rec.get("landed"):
         refuse("fresh-estate landed!=true for " + b)
-digest = hashlib.sha256(json.dumps(sorted([[b, h] for b, h, _p, _m in tuples]),
+digest = hashlib.sha256(json.dumps(sorted([[b, h, p, m] for b, h, p, m in tuples]),
                                    separators=(",", ":")).encode()).hexdigest()
 with open(out_path, "w") as fh:
     fh.write(digest + "\n")

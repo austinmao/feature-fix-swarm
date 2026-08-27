@@ -164,7 +164,8 @@ JSON
     printf 'ok\n' > "$CONSOLIDATE_EVIDENCE_DIR/$e"
   done
   export GRANT_FILE="$BATS_TEST_TMPDIR/grants"
-  TARGET_HASH="$(python3 -c "import hashlib,json,sys;print(hashlib.sha256(json.dumps([['spec/merged','$MERGED_OID']],separators=(',',':')).encode()).hexdigest())")"
+  MAIN_OID="$(git -C "$WORK" rev-parse refs/heads/main)"
+  TARGET_HASH="$(python3 -c "import hashlib,json,sys;print(hashlib.sha256(json.dumps([['spec/merged','$MERGED_OID','201','$MAIN_OID']],separators=(',',':')).encode()).hexdigest())")"
   export CONSOLIDATE_RUN_ID="run-0304"
   printf '%s consolidate:estate:%s\n' "$CONSOLIDATE_RUN_ID" "$TARGET_HASH" > "$GRANT_FILE"
   export CONSOLIDATE_SCOPE="consolidate:estate:$TARGET_HASH"

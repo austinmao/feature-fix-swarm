@@ -1220,10 +1220,14 @@ def check_grant(store: Path, run_id: str, action: str,
 
 def consolidate_scope(tuples) -> str:
     """Exact queue-derived scope for a consolidation target manifest:
-    sha256 over the canonical JSON of the SORTED (branch ref, expected tip
-    OID) pairs — the same serialization the Step 4-A controller and the
-    Wave-0 contracts compute, so scope equality is byte-exact."""
-    canon = json.dumps(sorted([[t[0], t[1]] for t in tuples]),
+    sha256 over the canonical JSON of the SORTED FULL tuples
+    (branch ref, expected tip OID, normalized PR number, observed merge
+    commit) — all four fields, so a grant minted for one merged PR can
+    never authorize a different PR or merge commit sharing the same head
+    (CR-04).  The Step 4-A controller and the Wave-0 contracts compute the
+    same serialization, so scope equality is byte-exact."""
+    canon = json.dumps(sorted([[t[0], t[1], str(int(str(t[2]))), t[3]]
+                               for t in tuples]),
                        separators=(",", ":")).encode()
     return "consolidate:estate:" + hashlib.sha256(canon).hexdigest()
 
