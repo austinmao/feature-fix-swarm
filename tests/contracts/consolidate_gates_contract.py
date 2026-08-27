@@ -49,6 +49,35 @@ def queue_scope(tuples: list[tuple[str, str]]) -> str:
     return "consolidate:estate:" + hashlib.sha256(canon).hexdigest()
 
 
+QJ_PATH = ROOT / "skills" / "land-queue" / "scripts" / "queue-journal.py"
+
+
+def make_journal(tmp_path, queue_id="q-cr03", run_id="run-q",
+                 items=(("spec/merged", "a" * 40, "201", "b" * 40),),
+                 nonterminal_item=None):
+    """Real durable queue journal built through the production accessor —
+    the ONLY manifest source grant-consolidate may trust (CR-03)."""
+    store = tmp_path / "lq"
+    store.mkdir()
+    store.chmod(0o700)
+
+    def qj(*args):
+        proc = subprocess.run([sys.executable, str(QJ_PATH), *args,
+                               "--store", str(store), "--queue-id", queue_id],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+    qj("init", "--run-id", run_id)
+    for branch, head, pr, merge in items:
+        qj("append", "--kind", "intent", "--step", "merge",
+           "--item", branch, "--pr", pr, "--head", head)
+        qj("append", "--kind", "terminal", "--step", "terminal",
+           "--item", branch, "--status", "LANDED", "--detail", merge)
+    if nonterminal_item:
+        qj("append", "--kind", "intent", "--step", "merge",
+           "--item", nonterminal_item, "--pr", "999", "--head", "f" * 40)
+    return store
+
+
 TUPLES = [("spec/merged", "a" * 40)]
 OTHER_TUPLES = [("spec/other", "b" * 40)]
 
@@ -127,6 +156,97 @@ def test_default_ttl_cannot_outlive_the_8h_cap(tmp_path):
         _red(live_past_cap is False,
              "a consolidate:estate grant under the default TTL is still "
              "valid past the 8h cap")
+
+
+def test_generic_grant_actions_refuses_consolidate_scopes(tmp_path):
+    """CR-03: the public grant machinery must never mint a consolidate:*
+    action — only the queue-derived grant_consolidate_estate path may."""
+    gates = gates_module()
+    store = tmp_path / "evidence.json"
+    scope = gates.consolidate_scope([("spec/a", "a" * 40, 17, "b" * 40)])
+    assert gates.grant_actions(store, "run-1", [scope], ttl_hours=1.0) is False
+    assert gates.check_grant(store, "run-1", scope) is False
+
+
+def test_generic_grant_cli_refuses_consolidate_with_typed_reason(tmp_path):
+    """CR-03 probe fix: `gates.py grant ... --action consolidate:estate:<sha>`
+    returned rc 0 GRANTED.  It must refuse with a typed reason and mint
+    nothing."""
+    scope = "consolidate:estate:" + "0" * 64
+    env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    proc = subprocess.run(
+        [sys.executable, str(GATES_PATH), "grant", "probe-run",
+         "--action", scope, "--ttl-hours", "1", "--reason", "probe"],
+        capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert proc.returncode != 0, "generic grant minted a consolidate:* action"
+    combined = proc.stdout + proc.stderr
+    assert "GRANT-REJECTED" in combined and "grant-consolidate" in combined, \
+        f"refusal is not typed toward the queue-derived path: {combined!r}"
+    check = subprocess.run(
+        [sys.executable, str(GATES_PATH), "check-grant", "probe-run",
+         "--action", scope], capture_output=True, text=True, env=env,
+        cwd=tmp_path)
+    assert check.returncode != 0, "a refused grant is still checkable"
+
+
+def _grant_consolidate(tmp_path, run_id, queue_id, journal_store, stdin=b""):
+    env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    return subprocess.run(
+        [sys.executable, str(GATES_PATH), "grant-consolidate", run_id,
+         "--queue-id", queue_id, "--journal-store", str(journal_store)],
+        input=stdin, capture_output=True, env=env, cwd=tmp_path)
+
+
+def test_grant_consolidate_derives_tuples_from_the_named_journal(tmp_path):
+    """CR-03: grant-consolidate loads the named queue journal itself and
+    derives the canonical tuples from it — hostile stdin is ignored."""
+    gates = gates_module()
+    journal = make_journal(tmp_path)
+    proc = _grant_consolidate(tmp_path, "run-q", "q-cr03", journal,
+                              stdin=b"evil\x00" + b"9" * 40 + b"\x001\x00"
+                              + b"8" * 40 + b"\x00")
+    assert proc.returncode == 0, proc.stderr
+    expected = gates.consolidate_scope(
+        [("spec/merged", "a" * 40, 201, "b" * 40)])
+    assert expected in proc.stdout.decode(), \
+        "granted scope is not derived from the journal projection"
+    env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    check = subprocess.run(
+        [sys.executable, str(GATES_PATH), "check-grant", "run-q",
+         "--action", expected], capture_output=True, env=env, cwd=tmp_path)
+    assert check.returncode == 0
+
+
+def test_grant_consolidate_refuses_run_binding_mismatch(tmp_path):
+    """CR-03: the caller-supplied run id must equal the journal's recorded
+    run id — a substituted run id never grafts queue authority."""
+    gates = gates_module()
+    journal = make_journal(tmp_path)
+    valid_stdin = b"spec/merged\x00" + b"a" * 40 + b"\x00201\x00" \
+        + b"b" * 40 + b"\x00"
+    proc = _grant_consolidate(tmp_path, "run-SUBSTITUTED", "q-cr03", journal,
+                              stdin=valid_stdin)
+    assert proc.returncode != 0, \
+        "grant-consolidate minted under a run id the journal never recorded"
+    scope = gates.consolidate_scope([("spec/merged", "a" * 40, 201, "b" * 40)])
+    for run in ("run-SUBSTITUTED", "run-q"):
+        env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+        check = subprocess.run(
+            [sys.executable, str(GATES_PATH), "check-grant", run,
+             "--action", scope], capture_output=True, env=env, cwd=tmp_path)
+        assert check.returncode != 0, f"grant leaked for {run}"
+
+
+def test_grant_consolidate_refuses_a_nonterminal_queue(tmp_path):
+    """CR-03: minting requires the whole queue to be items-terminal — a
+    dangling item means the queue is still live."""
+    journal = make_journal(tmp_path, nonterminal_item="spec/live")
+    valid_stdin = b"spec/merged\x00" + b"a" * 40 + b"\x00201\x00" \
+        + b"b" * 40 + b"\x00"
+    proc = _grant_consolidate(tmp_path, "run-q", "q-cr03", journal,
+                              stdin=valid_stdin)
+    assert proc.returncode != 0, \
+        "grant-consolidate minted while an item is still nonterminal"
 
 
 def test_scope_differs_when_only_pr_differs():
