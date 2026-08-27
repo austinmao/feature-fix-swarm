@@ -197,6 +197,33 @@ def _queue_lock(io, directory_fd: int, run_id: str, pid: int):
     return QueueLock(directory_fd, run_id)
 
 
+def effective_terminal_items(events) -> set:
+    """CR-03 (round 3): sequence-ordered lifecycle projection.
+
+    An item is terminal only when its LATEST lifecycle-relevant event is a
+    terminal — a later intent starts a new attempt and REOPENS the item, so
+    a historical quarantine terminal (zero posture writes BLOCKED:conflict,
+    then retries after the base advances) can never hide a crashed retry
+    from resume, grant derivation, or reporting.  Result events resolve
+    intents and never open attempts, so they are ignored here.
+
+    Additive schema note: SCHEMA stays 1 and no field changes — this is a
+    purely behavioral projection rule, so journals written before this
+    change remain readable and simply project through the same rule.
+    """
+    last = {}
+    for event in events:
+        item = event.get("item")
+        if not item:
+            continue
+        kind = event.get("kind")
+        if kind == "terminal":
+            last[item] = True
+        elif kind == "intent":
+            last.pop(item, None)
+    return set(last)
+
+
 def canonical_repo_root(repo: str) -> str:
     """Physical git toplevel of `repo`, realpath-canonicalized (CR-04)."""
     proc = subprocess.run(["git", "-C", repo, "rev-parse", "--show-toplevel"],
@@ -328,8 +355,8 @@ def cmd_read_dangling(ns) -> int:
     events = doc["events"]
     resolved = {(e.get("item"), e.get("step"))
                 for e in events if e.get("kind") == "result"}
-    terminal_items = {e.get("item")
-                      for e in events if e.get("kind") == "terminal"}
+    # CR-03 (round 3): sequence-ordered — a later intent reopens the item.
+    terminal_items = effective_terminal_items(events)
     for event in events:
         if event.get("kind") != "intent" or not event.get("item"):
             continue
@@ -357,8 +384,9 @@ def cmd_read_nonterminal(ns) -> int:
     events = doc["events"]
     resolved = {(e.get("item"), e.get("step"))
                 for e in events if e.get("kind") == "result"}
-    terminal_items = {e.get("item")
-                      for e in events if e.get("kind") == "terminal"}
+    # CR-03 (round 3): sequence-ordered — a later intent reopens the item,
+    # so a crashed second-round attempt after a quarantine terminal resumes.
+    terminal_items = effective_terminal_items(events)
     order, dangling, keyed = [], {}, {}
     # CR-03: the declared manifest — not the event stream — is the item
     # universe: an item that crashed before its FIRST event still resumes.
@@ -431,8 +459,13 @@ def landed_tuples(doc: dict) -> list:
             continue
         if event.get("kind") == "terminal":
             last_terminal[item] = event
-        elif event.get("kind") == "intent" and event.get("key"):
-            keyed[item] = event
+        elif event.get("kind") == "intent":
+            # CR-03 (round 3): a later intent starts a new attempt — the
+            # stale terminal is no longer the item's lifecycle truth, so a
+            # reopened item can never stay a proven-final deletion target.
+            last_terminal.pop(item, None)
+            if event.get("key"):
+                keyed[item] = event
     tuples = []
     for item in sorted(last_terminal):
         term = last_terminal[item]
@@ -462,7 +495,7 @@ def landed_tuples(doc: dict) -> list:
 def nonterminal_items(doc: dict) -> list:
     """Items carrying events but no terminal — a nonterminal queue must
     never mint a consolidate grant (CR-03)."""
-    seen, terminal = [], set()
+    seen = []
     # CR-03: enumerate the declared manifest so an item with zero events is
     # still nonterminal — a partial manifest must never mint a grant.
     for item in doc.get("manifest") or []:
@@ -474,8 +507,8 @@ def nonterminal_items(doc: dict) -> list:
             continue
         if item not in seen:
             seen.append(item)
-        if event.get("kind") == "terminal":
-            terminal.add(item)
+    # CR-03 (round 3): sequence-ordered — a later intent reopens the item.
+    terminal = effective_terminal_items(doc["events"])
     return [item for item in seen if item not in terminal]
 
 
@@ -504,6 +537,9 @@ def cmd_read_report(ns) -> int:
     """
     doc = _load(_doc_path(ns.store, ns.queue_id))
     terminals = [e for e in doc["events"] if e.get("kind") == "terminal"]
+    # CR-03 (round 3): a stale terminal superseded by a later intent is not
+    # a FINAL outcome — reporting it as final hides a crashed retry.
+    effective = effective_terminal_items(doc["events"])
     last = {}
     for idx, event in enumerate(terminals):
         item = event.get("item", "")
@@ -511,7 +547,7 @@ def cmd_read_report(ns) -> int:
             last[item] = idx
     for idx, event in enumerate(terminals):
         item = event.get("item", "")
-        if item and last[item] != idx:
+        if item and (last[item] != idx or item not in effective):
             continue
         for field in ("item", "status", "detail", "reason", "unblock"):
             sys.stdout.write(str(event.get(field, "")) + "\0")

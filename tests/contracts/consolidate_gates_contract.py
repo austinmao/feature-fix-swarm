@@ -662,3 +662,130 @@ def test_malformed_effect_target_still_refuses_projection(tmp_path):
         "a malformed effect target minted consolidation authority"
     assert _no_consolidate_grant(tmp_path), \
         "a grant was written despite a malformed effect target"
+
+
+# ── CR-03 (round 3): sequence-ordered terminal projection ─────────────────
+# An item is terminal only when its LATEST lifecycle-relevant event is a
+# terminal with no later intent starting a new attempt.  A historical
+# BLOCKED:conflict terminal followed by a second-round intent must reopen
+# the item for read-dangling, read-nonterminal, nonterminal_items,
+# landed_tuples, and reporting — never hide a crashed retry.
+
+
+def _split0(raw: str) -> list:
+    parts = raw.split("\0")
+    if parts and parts[-1] == "":
+        parts.pop()
+    return parts
+
+
+def _reopened_journal(tmp_path, *, second_terminal=None):
+    """Journal reproducing the reviewer probe: BLOCKED:conflict terminal,
+    then a second-round keyed merge intent (crash before its terminal)."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo, items=())
+    _qj(journal, "q-cr04", "record-manifest", "--item", "spec/retry")
+    for args in (
+        ("append", "--kind", "intent", "--step", "rebase",
+         "--item", "spec/retry"),
+        ("append", "--kind", "result", "--step", "rebase",
+         "--item", "spec/retry", "--status", "conflict"),
+        ("append", "--kind", "terminal", "--step", "terminal",
+         "--item", "spec/retry", "--status", "BLOCKED:conflict",
+         "--reason", "rebase conflicts", "--unblock", "rebase and re-run"),
+        ("append", "--kind", "intent", "--step", "merge",
+         "--item", "spec/retry", "--pr", "301", "--head", "c" * 40),
+    ):
+        proc = _qj(journal, "q-cr04", *args)
+        assert proc.returncode == 0, proc.stderr
+    if second_terminal:
+        proc = _qj(journal, "q-cr04", "append", "--kind", "terminal",
+                   "--step", "terminal", "--item", "spec/retry",
+                   "--status", second_terminal[0],
+                   "--detail", second_terminal[1])
+        assert proc.returncode == 0, proc.stderr
+    return journal
+
+
+def test_reopened_conflict_terminal_is_nonterminal_for_resume(tmp_path):
+    """The reviewer's real-accessor probe: terminal:BLOCKED:conflict then
+    intent:merge produced ZERO read-nonterminal bytes, so resume skipped
+    reconciliation of a merge that may already have happened."""
+    journal = _reopened_journal(tmp_path)
+    proc = _qj(journal, "q-cr04", "read-nonterminal")
+    fields = _split0(proc.stdout)
+    assert proc.returncode == 0, proc.stderr
+    assert fields == ["spec/retry", "merge", "301", "c" * 40], (
+        "a later intent must reopen the stale conflict terminal for resume: "
+        f"{fields!r}")
+    dang = _split0(_qj(journal, "q-cr04", "read-dangling").stdout)
+    assert dang == ["spec/retry", "merge", "301", "c" * 40], (
+        f"read-dangling hid the crashed second-round merge intent: {dang!r}")
+
+
+def test_second_round_terminal_closes_the_reopened_item(tmp_path):
+    """After the retry records its OWN terminal the item is terminal again
+    (EDGE-010 parked quarantine keeps exactly one report row)."""
+    journal = _reopened_journal(
+        tmp_path, second_terminal=("BLOCKED:conflict", ""))
+    assert _split0(_qj(journal, "q-cr04", "read-nonterminal").stdout) == []
+    rows = _split0(_qj(journal, "q-cr04", "read-report").stdout)
+    assert rows[0::5].count("spec/retry") == 1, rows
+
+
+def test_read_report_omits_a_reopened_stale_terminal(tmp_path):
+    """A stale terminal superseded by a new attempt is not a FINAL outcome —
+    reporting it as final is exactly the CR-03 failure mode."""
+    journal = _reopened_journal(tmp_path)
+    rows = _split0(_qj(journal, "q-cr04", "read-report").stdout)
+    assert "spec/retry" not in rows[0::5], (
+        f"the stale BLOCKED:conflict terminal was reported as final: {rows!r}")
+
+
+def test_grant_mint_refuses_when_a_terminal_is_reopened_by_a_later_intent(
+        tmp_path):
+    """Crash after a second-round merge intent that followed an earlier
+    quarantine terminal: the queue is NOT all-terminal — minting would grant
+    deletion authority while a retry is unreconciled."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo, record_manifest=False)
+    proc = _qj(journal, "q-cr04", "record-manifest",
+               "--item", "spec/merged", "--item", "spec/retry")
+    assert proc.returncode == 0, proc.stderr
+    for args in (
+        ("append", "--kind", "terminal", "--step", "terminal",
+         "--item", "spec/retry", "--status", "BLOCKED:conflict",
+         "--reason", "rebase conflicts", "--unblock", "rebase and re-run"),
+        ("append", "--kind", "intent", "--step", "merge",
+         "--item", "spec/retry", "--pr", "301", "--head", "c" * 40),
+    ):
+        proc = _qj(journal, "q-cr04", *args)
+        assert proc.returncode == 0, proc.stderr
+    mint = _mint(tmp_path, journal)
+    assert mint.returncode != 0, \
+        "authority was minted while spec/retry's crashed retry is unreconciled"
+    assert _no_consolidate_grant(tmp_path), \
+        "a grant was written over a reopened, unreconciled item"
+
+
+def test_landed_tuples_excludes_an_item_reopened_after_landing(tmp_path):
+    """A LANDED terminal followed by a later keyed intent (a new attempt) is
+    no longer a proven-final deletion target."""
+    qj = gates_module()  # reuse the loader pattern for path-loading modules
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("qj_cr03", QJ_PATH)
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    events = [
+        {"kind": "intent", "step": "merge", "item": "spec/x",
+         "pr": 301, "head": "c" * 40, "key": "pr-301@" + "c" * 40},
+        {"kind": "terminal", "step": "terminal", "item": "spec/x",
+         "status": "LANDED", "detail": "d" * 40},
+        {"kind": "intent", "step": "merge", "item": "spec/x",
+         "pr": 301, "head": "e" * 40, "key": "pr-301@" + "e" * 40},
+    ]
+    doc = {"schema": 1, "events": events}
+    assert mod.landed_tuples(doc) == [], \
+        "a reopened item stayed in the deletion-target projection"
+    assert mod.nonterminal_items(doc) == ["spec/x"], \
+        "a reopened item was not counted nonterminal"
