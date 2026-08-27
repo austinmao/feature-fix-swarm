@@ -405,3 +405,111 @@ def test_late_mint_refuses_after_journal_deadline_despite_oversized_env(tmp_path
     store = tmp_path / "evidence.json"
     assert not store.exists() or "consolidate:estate:" not in store.read_text(), \
         "a grant was written after the original queue deadline"
+
+
+# ── CR-04 (round 2): the journal binds the repository that created it ─────
+# `init` canonicalizes and persists repo_root + base; grant-consolidate
+# reads them from the journal ONLY and rejects caller values that differ
+# byte-for-byte, so a terminal journal from repository A can never mint
+# deletion authority for repository B (even with identical commits).
+
+
+def make_commit_repo(tmp_path, name="repo"):
+    repo = tmp_path / name
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "f.txt").write_text("x\n")
+    env = dict(os.environ,
+               GIT_AUTHOR_NAME="c", GIT_AUTHOR_EMAIL="c@example.invalid",
+               GIT_COMMITTER_NAME="c", GIT_COMMITTER_EMAIL="c@example.invalid",
+               GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+    subprocess.run(["git", "-C", str(repo), "add", "f.txt"], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"],
+                   check=True, env=env)
+    return repo
+
+
+def make_bound_journal(tmp_path, repo, queue_id="q-cr04", run_id="run-q",
+                       items=(("spec/merged", "a" * 40, "201", "b" * 40),)):
+    """Journal initialized WITH the CR-04 repository binding."""
+    store = tmp_path / "lq-bound"
+    store.mkdir(exist_ok=True)
+    store.chmod(0o700)
+
+    def qj(*args):
+        proc = subprocess.run([sys.executable, str(QJ_PATH), *args,
+                               "--store", str(store), "--queue-id", queue_id],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+    qj("init", "--run-id", run_id, "--repo", str(repo), "--base", "main")
+    for branch, head, pr, merge in items:
+        qj("append", "--kind", "intent", "--step", "merge",
+           "--item", branch, "--pr", pr, "--head", head)
+        qj("append", "--kind", "terminal", "--step", "terminal",
+           "--item", branch, "--status", "LANDED", "--detail", merge)
+    return store
+
+
+def _mint(tmp_path, journal, *extra, run_id="run-q", queue_id="q-cr04"):
+    env = dict(os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    return subprocess.run(
+        [sys.executable, str(GATES_PATH), "grant-consolidate", run_id,
+         "--queue-id", queue_id, "--journal-store", str(journal), *extra],
+        capture_output=True, text=True, env=env, cwd=tmp_path)
+
+
+def _no_consolidate_grant(tmp_path):
+    store = tmp_path / "evidence.json"
+    return not store.exists() or "consolidate:estate:" not in store.read_text()
+
+
+def test_journal_init_persists_canonical_repo_binding(tmp_path):
+    """CR-04: init canonicalizes --repo to the physical git toplevel and
+    persists repo_root + base in the journal."""
+    repo = make_commit_repo(tmp_path)
+    sub = repo / "sub"
+    sub.mkdir()
+    journal = make_bound_journal(tmp_path, sub)  # a SUBDIR canonicalizes up
+    doc = json.loads((journal / "q-cr04.json").read_text())
+    assert doc.get("repo_root") == os.path.realpath(repo), \
+        "journal init did not persist the canonical repository root"
+    assert doc.get("base") == "main", \
+        "journal init did not persist the base branch"
+
+
+def test_grant_consolidate_refuses_cross_repository_mint(tmp_path):
+    """CR-04: a journal created by repository A refuses to mint against
+    repository B — even a clone with identical commits — before any grant
+    write."""
+    repo_a = make_commit_repo(tmp_path, "repo-a")
+    repo_b = tmp_path / "repo-b"
+    subprocess.run(["git", "clone", "-q", str(repo_a), str(repo_b)], check=True)
+    journal = make_bound_journal(tmp_path, repo_a)
+    proc = _mint(tmp_path, journal, "--repo", str(repo_b), "--base", "main")
+    assert proc.returncode != 0, \
+        "a journal from repository A minted deletion authority for repository B"
+    assert _no_consolidate_grant(tmp_path), "a cross-repository grant was written"
+
+
+def test_grant_consolidate_refuses_cross_base_mint(tmp_path):
+    """CR-04: a differing caller --base is rejected byte-for-byte."""
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo)
+    proc = _mint(tmp_path, journal, "--repo", str(repo), "--base", "develop")
+    assert proc.returncode != 0, \
+        "a journal bound to base main minted against base develop"
+    assert _no_consolidate_grant(tmp_path), "a cross-base grant was written"
+
+
+def test_grant_consolidate_reads_binding_from_the_journal(tmp_path):
+    """CR-04: with no caller --repo/--base at all, the mint succeeds using
+    the journal-recorded binding — the journal is the ONLY authority."""
+    gates = gates_module()
+    repo = make_commit_repo(tmp_path)
+    journal = make_bound_journal(tmp_path, repo)
+    proc = _mint(tmp_path, journal)
+    assert proc.returncode == 0, proc.stderr
+    expected = gates.consolidate_scope(
+        [("spec/merged", "a" * 40, 201, "b" * 40)],
+        repo_root=os.path.realpath(repo), base="main")
+    assert expected in proc.stdout, \
+        "granted scope is not derived from the journal-recorded binding"
