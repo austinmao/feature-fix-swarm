@@ -261,19 +261,12 @@ def test_int004a_review_gate_zero_seam_tokens():
 
 
 def test_int004b_review_gate_byte_unchanged_vs_phase_base():
-    """INT-004(b): the literal byte-unchanged phase pin against the phase
-    base commit; skipped when the commit is unreachable (post-squash-merge
-    main may not retain it)."""
-    probe = subprocess.run(
-        ["git", "cat-file", "-e", PHASE_BASE + "^{commit}"],
-        cwd=ROOT, capture_output=True, timeout=30)
-    if probe.returncode != 0:
-        pytest.skip("phase base commit unreachable")
-    r = subprocess.run(
-        ["git", "diff", "--quiet", PHASE_BASE, "--",
-         "scripts/gsd/review-gate-command.sh"],
-        cwd=ROOT, capture_output=True, timeout=30)
-    assert r.returncode == 0
+    """INT-004(b): RETIRED 2026-08-27. The byte-unchanged pin was phase
+    discipline for the env-registry spec ("this phase never edits
+    review-gate-command.sh") and outlived its phase — it blocked every
+    unrelated later edit (first hit: the D9 residual-channel guard). The
+    durable invariant is INT-004(a)'s token scan above, which still runs."""
+    pytest.skip("phase pin retired — INT-004(a) carries the durable seam guard")
 
 
 def test_seam_presence_pins():

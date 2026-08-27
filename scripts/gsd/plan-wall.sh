@@ -188,8 +188,7 @@ if [ "$PW_RUN_MODE" -eq 1 ]; then
   fi
   RUN_RC=0
   for _pw_d in "${PW_RUN_DIRS[@]}"; do
-    PLAN_WALL_RUN_CHILD=1 bash "${BASH_SOURCE[0]}" "$_pw_d"
-    [ $? -eq 0 ] || RUN_RC=1
+    PLAN_WALL_RUN_CHILD=1 bash "${BASH_SOURCE[0]}" "$_pw_d" || RUN_RC=1
   done
   if [ "$RUN_RC" -ne 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
     if [ -n "$PW_ROUND" ] && [ "$PW_ROUND" -ge "$PW_MAX_ROUNDS" ]; then

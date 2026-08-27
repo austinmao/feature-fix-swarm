@@ -233,3 +233,18 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -F 'RESIDUALS START' "$BATS_TEST_TMPDIR/codex.stdin"
 }
+
+@test "D9 channel guard: unreadable WALL-RESIDUALS.md fails closed, never a residual-less review" {
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- abc HIGH lib/foo.py — riding residual" > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  chmod 000 "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  chmod 644 "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'unreadable'* ]]
+  [[ "$output" == *'"verdict":"REVISE"'* ]]
+  # reviewer was never dispatched
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}

@@ -546,11 +546,15 @@ exit 0
    skill is available, run it (read-only queue snapshot). Both skill references
    are fail-soft — sessions without them use the bare-`gh` path silently.
    **Run-end finalizer (after assert-merged exits 0):**
-   `bash scripts/gsd/run-finalizer.sh <pr-number>` — removes the run's clean
+   `bash scripts/gsd/run-finalizer.sh --archive-planning <pr-number>` — removes the run's clean
    worktree (dirty → routed to `/adopt-wip`, never deleted), deletes the landed
    feature branch local+remote (squash-safe: only under merged-`headRefOid`
    proof, never a blind force-delete), prunes `gsd/phase-*` branches that are
-   ancestors of the merged head, clears `.planning/run-state/`. Fail-soft,
+   ancestors of the merged head, clears `.planning/run-state/`, and
+   (`--archive-planning`, D8) sweeps the landed run's phase dirs to
+   `.planning/archive/<run-id>/` so a later run's merge never aborts on the
+   stale untracked files (spec-388: 11-file untracked-overwrite abort).
+   Fail-soft,
    ALWAYS exits 0 — cleanup failure never un-merges or blocks the report.
    Kill-switch `FFS_RUN_FINALIZER=off`.
    CI re-proves the levers this step names actually exist (verify block,
@@ -584,7 +588,12 @@ path): release the Step 1.5 claim FIRST, so a stop mid-report never strands it:
 ```
 
 Phases executed, verifier verdicts, gap rounds, gate evidence ids, consumed grants,
-pendings (for one-command morning resume), files changed. Include the delegation
+pendings (for one-command morning resume), files changed. When
+`specs/NNN/spec.md` carries a `## Scope ledger` with a source doc, ALWAYS
+end the report with the coverage line (D7):
+`DESIGN-DOC COVERAGE: N of M slices consumed; unconsumed: [list]; next:
+/feature-spec "slice N: …"` — a run that completed slices 0–1 of a 7-slice
+design doc must say so louder than "complete". Include the delegation
 histogram `tiers={frontier:N,judgment:N,execution:N,volume:N,exact:N,inline-mechanical:N}`
 (spawns by typed request and resolved model; `inline-mechanical` = host
 trip-wire drains, target 0) — verify
