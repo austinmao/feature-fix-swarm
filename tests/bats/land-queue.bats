@@ -803,6 +803,49 @@ STUB
   grep -q "ITEM spec/item-a BLOCKED:review" <<<"$output"
   grep -q "ITEM spec/item-b BLOCKED:review" <<<"$output"
 }
+@test "[RESUME] a completed queue resumed with no retries still derives the consolidate grant" {
+  # WR-02: crash after the final LANDED append but before grant derivation
+  # must be recoverable — the no-retry resume path re-runs the idempotent
+  # post-terminal derivation, bound to the ORIGINAL journal run id.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  # journal for a fully-terminal queue, built through the real accessor,
+  # with NO consolidate grant ever minted (the simulated crash window)
+  mkdir -p "$LQ"; chmod 700 "$LQ"
+  JRNL="$ROOT/skills/land-queue/scripts/queue-journal.py"
+  HEAD_A="$(git --git-dir "$ORIGIN" rev-parse refs/heads/spec/item-a)"
+  MERGE_A="$(python3 -c "print('f'*40)")"
+  python3 "$JRNL" init --store "$LQ" --queue-id resume-q1 --run-id run-961
+  python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
+    --kind intent --step merge --item spec/item-a --pr 101 --head "$HEAD_A"
+  python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
+    --kind result --step merge --item spec/item-a --status ok
+  python3 "$JRNL" append --store "$LQ" --queue-id resume-q1 \
+    --kind terminal --step terminal --item spec/item-a --status LANDED \
+    --detail "$MERGE_A"
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id run-962 --resume resume-q1
+  [ "$status" -eq 0 ]
+  grep -q "resumed" <<<"$output"
+  python3 - "$GATES_STORE" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+grants = data.get("_autonomy", {}).get("run-961", {}).get("grants", {})
+scopes = [a for a in grants if a.startswith("consolidate:estate:")]
+assert scopes, ("no consolidate grant derived on the no-retry resume path; "
+                f"grants={list(grants)}")
+entry = grants[scopes[0]]
+assert entry.get("granted_by") == "queue", entry
+assert entry.get("expires_at", 0) - entry.get("granted_at", 0) <= 8 * 3600 + 1, entry
+resumer = data.get("_autonomy", {}).get("run-962", {}).get("grants", {})
+assert not [a for a in resumer if a.startswith("consolidate:")], \
+    "the grant leaked onto the resumer's run id instead of the original"
+PYEOF
+}
+
 @test "[REVIEW] floor on a codex host refuses when only codex is installed" {
   # CR-05 / 37bc43d9: floor's defining guarantee is an OPPOSITE-vendor
   # reviewer — the producing host's own CLI never satisfies it.
