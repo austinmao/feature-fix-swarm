@@ -167,11 +167,16 @@ without repeating the requirement ID. This intentionally overrides gsd-core's
 stale template prose that says PLAN requirements cannot be empty—its executor
 otherwise marks repeated IDs complete after the first plan.
 
-### Step 3.5: Plan-length gate
+### Step 3.5: Plan-length gate (advisory)
 
 After plans are written for each phase and before the coherence gate, run
-`bash scripts/gsd/plan-length-gate.sh <PHASE_DIR>`. Route every nonzero result
-to a replan; never hand-truncate a plan to satisfy the limit.
+`bash scripts/gsd/plan-length-gate.sh <PHASE_DIR>`. It WARNs and exits 0 on
+oversize plans (D6 2026-08-27 — the condense/replan round it used to force
+removed zero content on spec-387 and cost a full round); log the WARN lines
+in the report and continue. `FFS_PLAN_LENGTH_ENFORCE=1` restores blocking;
+under it, route a nonzero to a replan — never hand-truncate a plan to
+satisfy the limit. Usage/infra errors (`no-plans`, `unreadable`) are hard
+failures either way — fix the invocation, not the plan.
 
 ### Step 4: Coherence gate
 
