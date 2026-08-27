@@ -149,3 +149,21 @@ EOF
     [[ "$output" != *"WALL-ROUND-CAP"* ]]
   done
 }
+
+@test "reviewer prompt pins the CRITICAL severity discipline (sole blocking severity)" {
+  # Under the one-round policy CRITICAL is the ONLY severity that blocks, so
+  # a loose definition would re-inflate exactly the churn this policy cuts.
+  # Ported from openclaw's independent plan-wall fork (#1784 cluster).
+  cat > bin/stub-claude <<EOF
+#!/usr/bin/env bash
+cat > "$BATS_TEST_TMPDIR/captured-prompt.txt"
+printf '{"findings":[]}\n'
+EOF
+  chmod +x bin/stub-claude
+  run_wall
+  [ "$status" -eq 0 ]
+  grep -q "CRITICAL is reserved for a defect" "$BATS_TEST_TMPDIR/captured-prompt.txt"
+  grep -q "irreversible loss" "$BATS_TEST_TMPDIR/captured-prompt.txt"
+  grep -q "cite the exact plan step" "$BATS_TEST_TMPDIR/captured-prompt.txt"
+  grep -q "every other defect is at most HIGH" "$BATS_TEST_TMPDIR/captured-prompt.txt"
+}
