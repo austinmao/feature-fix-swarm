@@ -1672,16 +1672,42 @@ def _check_hotfix_bypass(store: Path, run_id: str, action: str,
     (process control, V4 access control) — the only way a hotfix grant
     exists is an explicit operator `grant ... --reason`.
 
-    WR-03 / Rule 12a: the bypass is POSTURE-DEPENDENT, downstream of the
-    stricter-only posture resolver.  `posture` defaults to the resolver's
-    exported AUTONOMY_POSTURE (never the raw FFS_AUTONOMY_POSTURE input,
-    which only autonomy-posture.sh may read).  floor forbids the bypass
-    entirely; zero — the committed default, also used when no resolver ran
-    — keeps the grant+reason contract; any other non-empty value fails
-    closed.  The durable bypass record carries the effective posture."""
-    effective = (posture if posture is not None
-                 else os.environ.get("AUTONOMY_POSTURE", ""))
-    effective = (effective or "").strip() or "zero"
+    CR-01 / Rule 12a: the bypass is POSTURE-DEPENDENT, and the run's
+    DURABLE posture record (written by note_posture before any queue
+    effect) is the only posture evidence honored.  A caller value —
+    the `posture` kwarg or the AUTONOMY_POSTURE environment variable —
+    is NEVER authorization evidence: with a durable record it may only
+    agree (a conflict fails closed); without one it is an unbacked
+    autonomy claim and fails closed outright.  Only when neither a durable
+    record nor any caller claim exists (a manual operator flow, no
+    resolver ran) does the committed zero default apply.  floor forbids
+    the bypass entirely; zero keeps the grant+reason contract; any other
+    recorded value fails closed.  The durable bypass record carries the
+    effective posture."""
+    claimed = (posture if posture is not None
+               else os.environ.get("AUTONOMY_POSTURE", ""))
+    claimed = (claimed or "").strip()
+    rec = (_load_store(store).get("_autonomy", {})
+           .get(run_id, {}).get("posture"))
+    durable = rec.get("posture") if isinstance(rec, dict) else None
+    if isinstance(durable, str) and durable:
+        if claimed and claimed != durable:
+            record_pending(store, run_id, action,
+                           "HOTFIX-POSTURE-REFUSED: caller posture claim "
+                           "conflicts with the run's durable posture "
+                           "evidence; a caller value is never "
+                           "authorization evidence — fail closed")
+            return False
+        effective = durable
+    elif claimed:
+        record_pending(store, run_id, action,
+                       "HOTFIX-POSTURE-REFUSED: caller-supplied posture has "
+                       "no durable evidence for this run; only the ledger "
+                       "record written by the queue's resolver authorizes "
+                       "— fail closed")
+        return False
+    else:
+        effective = "zero"
     if effective != "zero":
         if effective == "floor":
             refusal = ("HOTFIX-POSTURE-REFUSED: floor posture forbids the "
@@ -1707,6 +1733,37 @@ def _check_hotfix_bypass(store: Path, run_id: str, action: str,
                        "grant carrying a non-empty --reason")
         return False
     record_hotfix_bypass(store, run_id, action, reason, posture=effective)
+    return True
+
+
+def note_posture(store: Path, run_id: str, posture: str, source: str) -> bool:
+    """Persist the run's resolved autonomy posture + provenance (CR-01).
+
+    Written by the queue BEFORE any effect; the ONLY posture evidence
+    _check_hotfix_bypass will honor.  Identical replays are idempotent;
+    a conflicting re-record returns False (no write) — the durable posture
+    is immutable per run, so a weaker later claim can never overwrite a
+    stricter recorded one (or vice versa).  Invalid inputs raise."""
+    if posture not in ("zero", "floor"):
+        raise ValueError("INVALID-POSTURE: posture must be zero|floor")
+    if source not in ("default", "config", "env"):
+        raise ValueError("INVALID-POSTURE: source must be default|config|env")
+    if not isinstance(run_id, str) or not run_id.strip() \
+            or len(run_id) > 256 or "\x00" in run_id:
+        raise ValueError("INVALID-POSTURE: malformed run id")
+    with _StoreLock(store):
+        data = _load_store(store)
+        auto = data.setdefault("_autonomy", {}).setdefault(run_id, {})
+        existing = auto.get("posture")
+        if existing is not None:
+            if (isinstance(existing, dict)
+                    and existing.get("posture") == posture
+                    and existing.get("source") == source):
+                return True  # idempotent replay
+            return False  # conflicting re-record: fail closed, no write
+        auto["posture"] = {"posture": posture, "source": source,
+                           "recorded_at": _now()}
+        _save_store(store, data)
     return True
 
 
@@ -3826,6 +3883,28 @@ def main(argv: list[str]) -> int:
             print(f"WAIVER-REJECTED: {exc}", file=sys.stderr)
             return 2
         print("WAIVER-RECORDED")
+        return 0
+    if cmd == "note-posture":
+        # CR-01: durable posture + provenance under the run id — written by
+        # the queue BEFORE any effect; the only posture evidence the hotfix
+        # bypass will honor.
+        parser = argparse.ArgumentParser(prog="gates.py note-posture",
+                                         add_help=False)
+        parser.add_argument("run_id")
+        parser.add_argument("--posture", required=True)
+        parser.add_argument("--source", required=True)
+        try:
+            ns = parser.parse_args(args)
+            ok = note_posture(store, ns.run_id, ns.posture, ns.source)
+        except (ValueError, SystemExit) as exc:
+            print(f"POSTURE-REJECTED: {exc}", file=sys.stderr)
+            return 2
+        if not ok:
+            print("POSTURE-REJECTED: conflicting durable posture already "
+                  "recorded for this run (immutable per run)",
+                  file=sys.stderr)
+            return 1
+        print("POSTURE-RECORDED")
         return 0
     if cmd == "note-degraded":
         parser = argparse.ArgumentParser(prog="gates.py note-degraded", add_help=False)

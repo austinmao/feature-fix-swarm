@@ -46,8 +46,9 @@ branch advances (`zero` posture only); a second failure is terminal.
 
 - `scripts/gsd/land-queue.sh` — the cross-vendor block, degradation
   recording (`note_review_invocation`), and zero-only quarantine capture.
-- `lib/gates.py` — `note_degraded` (degradation ledger) and
-  `check_grant_prod` (production grant authority enforcing the limits above).
+- `lib/gates.py` — `note_posture` (durable per-run posture evidence, the
+  only posture the hotfix bypass honors), `note_degraded` (degradation
+  ledger) and `check_grant_prod` (production grant authority).
 - `skills/land-queue/scripts/queue-journal.py` — `cmd_count_terminals`
   (once-only requeue counter authority).
 

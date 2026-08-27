@@ -107,6 +107,15 @@ QUEUE_ID="$RUN_ID"
 # AUTONOMY_POSTURE, never the env/config inputs.
 resolve_autonomy_posture "$REPO/.planning/config.json" "$POSTURE_CLI"
 echo "POSTURE-RESOLVED: $AUTONOMY_POSTURE source=$AUTONOMY_POSTURE_SOURCE"
+# CR-01 (round 2): persist the resolved posture + provenance under the run
+# id in the gates evidence ledger BEFORE any queue effect.  Later processes
+# (promotion checks, hotfix bypass) read this durable record — never a
+# caller environment variable.  An unwritable record fails the queue closed.
+if ! python3 "$GATES" note-posture "$RUN_ID" --posture "$AUTONOMY_POSTURE" \
+    --source "$AUTONOMY_POSTURE_SOURCE" >/dev/null; then
+  echo "QUEUE-ERROR:store posture evidence write refused"
+  exit 70
+fi
 # ── CR-05: producing host + opposite vendor, resolved once per run ────────
 # Floor's defining guarantee (37bc43d9) is a review by the OPPOSITE vendor;
 # the host that produced the change can never review itself into a floor
