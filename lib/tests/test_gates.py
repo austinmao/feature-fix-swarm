@@ -519,6 +519,66 @@ def test_run_red_uses_real_exit_code(tmp_path) -> None:
     assert gates.check_red(store, "T052") is True
 
 
+def test_run_red_survives_invalid_utf8_child_output(tmp_path) -> None:
+    """WR-01 (round 3): arbitrary child bytes must never crash the RED gate.
+
+    run_red used to launch with text=True, so a child emitting invalid UTF-8
+    raised UnicodeDecodeError in the parent and no RED record was written.
+    The gate must capture bytes and decode fail-closed (replacement), keeping
+    its exit-code contract: nonzero child exit == RED proven.
+    """
+    store = tmp_path / "evidence.json"
+    ok = gates.run_red(store, "T053", [
+        "python3", "-c",
+        "import sys; sys.stdout.buffer.write(b'\\xff\\xfe garbage\\n');"
+        " sys.exit(1)"])
+    assert ok is True
+    tail = json.loads(store.read_text())["T053"]["red_proof"]["log_tail"]
+    assert isinstance(tail, str) and "garbage" in tail
+
+
+def test_run_red_through_behavioral_red_consumer_invalid_utf8(tmp_path) -> None:
+    """WR-01 (round 3): end-to-end through the REAL `gates.py run-red` CLI
+    with the behavioral_red classifier and an invalid-UTF-8 child.
+
+    The classifier must classify the undecodable output as infrastructure
+    (exit 0) WITHOUT replaying the raw bytes, and the enclosing run-red must
+    produce the controlled NOT-RED outcome — no UnicodeDecodeError traceback
+    anywhere, no RED record stored.
+    """
+    import os
+    import subprocess
+    import sys
+
+    store = tmp_path / "evidence.json"
+    helper = (Path(gates.__file__).resolve().parents[1]
+              / "tests" / "helpers" / "behavioral_red.py")
+    marker = "EXPECTED-RED:CONSOLIDATE:missing-production-seam"
+    child = ("import sys; sys.stdout.buffer.write(b'\\xff\\xfe garbage\\n');"
+             f" print({marker!r}); sys.exit(1)")
+    # the classifier itself must emit the infrastructure verdict and exit 0
+    # without replaying the raw undecodable bytes
+    direct = subprocess.run(
+        [sys.executable, str(helper), "--expect-marker", marker, "--",
+         sys.executable, "-c", child], capture_output=True)
+    assert direct.returncode == 0, direct.stderr
+    assert b"infrastructure:undecodable-output" in direct.stderr, direct.stderr
+    assert b"\xff\xfe" not in direct.stdout + direct.stderr, \
+        "raw undecodable bytes were replayed"
+    # ... and the REAL run-red consumer must report a controlled NOT-RED
+    proc = subprocess.run(
+        [sys.executable, gates.__file__, "run-red", "T054", "--",
+         sys.executable, str(helper), "--expect-marker", marker, "--",
+         sys.executable, "-c", child],
+        capture_output=True, env={**os.environ, "GATES_STORE": str(store)})
+    combined = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+    assert "Traceback" not in combined, combined
+    assert proc.returncode == 1, (proc.returncode, combined)
+    assert "NOT-RED" in combined, combined
+    if store.exists():
+        assert "red_proof" not in json.loads(store.read_text()).get("T054", {})
+
+
 def test_red_markers_accept_bare_fail() -> None:
     """P1: go test prints bare FAIL — must count as a failure marker."""
     assert gates.FAILURE_MARKERS.search("FAIL\nexit status 1") is not None

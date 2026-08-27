@@ -564,10 +564,13 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800, *,
 def run_red(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> bool:
     """Execute the RED test command; store a proof only if it REALLY failed
     (nonzero exit from the runner itself). Returns True iff RED proven."""
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # WR-01 (round 3): capture BYTES and decode with an explicit fail-closed
+    # policy (errors="replace") — text=True crashed the gate with
+    # UnicodeDecodeError on arbitrary child output, writing no record at all.
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if proc.returncode == 0:
         return False
-    tail = (proc.stdout + proc.stderr)[-2000:]
+    tail = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")[-2000:]
     with _StoreLock(store):
         data = _load_store(store)
         entry = data.setdefault(task_id, {})

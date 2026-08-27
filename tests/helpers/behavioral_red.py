@@ -103,14 +103,22 @@ def run(marker: str, argv: list[str]) -> int:
         print(f"BEHAVIORAL-RED-CLASSIFIER: verdict=infrastructure:spawn-failed "
               f"argv0={argv[0]!r} ({exc.__class__.__name__})", file=sys.stderr)
         return 0
-    sys.stdout.buffer.write(proc.stdout)
-    sys.stderr.buffer.write(proc.stderr)
+    # WR-01 (round 3): classify BEFORE replaying anything.  The enclosing
+    # `gates.py run-red` consumer reads this process's streams as text, so
+    # replaying undecodable raw child bytes crashed the parent with
+    # UnicodeDecodeError and no RED record.  Valid UTF-8 replays untouched;
+    # undecodable output is NEVER replayed raw — a replacement-decoded
+    # diagnostic is emitted after the infrastructure classification instead.
     try:
         output = (proc.stdout + b"\n" + proc.stderr).decode("utf-8")
     except UnicodeError:
+        sys.stdout.write(proc.stdout.decode("utf-8", errors="replace"))
+        sys.stderr.write(proc.stderr.decode("utf-8", errors="replace"))
         print("BEHAVIORAL-RED-CLASSIFIER: "
               "verdict=infrastructure:undecodable-output", file=sys.stderr)
         return 0
+    sys.stdout.buffer.write(proc.stdout)
+    sys.stderr.buffer.write(proc.stderr)
     verdict, code = classify(proc.returncode, output, marker)
     print(f"BEHAVIORAL-RED-CLASSIFIER: verdict={verdict} "
           f"child-rc={proc.returncode} marker={marker}", file=sys.stderr)
