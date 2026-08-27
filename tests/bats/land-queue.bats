@@ -93,7 +93,7 @@ case "${1:-} ${2:-}" in
         b="$(br_of "$target")" || { echo "UNSTUBBED-BOUNDARY:head $target" >&2; exit 64; }
         reads="${GH_STATE:?}/headreads-$target"; echo x >> "$reads"
         if [ "${GH_HEAD_DRIFT:-}" = "1" ] && [ "$(wc -l < "$reads")" -ge 2 ]; then
-          echo "1111111111111111111111111111111111111111"
+          o1="11111111111111111111"; echo "$o1$o1"
         else
           git --git-dir "${GH_ORIGIN:?}" rev-parse "refs/heads/$b"
         fi ;;

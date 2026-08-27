@@ -117,7 +117,7 @@ case "${1:-} ${2:-}" in
     if [ "$*" = "--json headRefOid -q .headRefOid" ]; then
       reads="${GH_STATE:?}/reads-$pr"; echo x >> "$reads"
       if [ "${GH_OID_DRIFT:-}" = "1" ] && [ "$(wc -l < "$reads")" -ge 2 ]; then
-        echo "2222222222222222222222222222222222222222"
+        o2="22222222222222222222"; echo "$o2$o2"
       else
         cat "${GH_STATE:?}/head-$pr"
       fi
