@@ -26,13 +26,15 @@ GUARD="$SCRIPT_DIR/queue-guard.sh"
 GATES="$ROOT/lib/gates.py"
 # shellcheck source=scripts/gsd/run-bounded.sh
 . "$SCRIPT_DIR/run-bounded.sh"
+# shellcheck source=scripts/gsd/autonomy-posture.sh
+. "$SCRIPT_DIR/autonomy-posture.sh"
 
 usage() {
   echo "usage: land-queue.sh [--repo DIR] [--base NAME] [--run-id ID] [--posture zero|floor] [--drain] [--resume QUEUE-ID] [BRANCH...]" >&2
   exit 2
 }
 
-REPO="$PWD" BASE="main" RUN_ID="" DRAIN=0 RESUME="" POSTURE="zero"
+REPO="$PWD" BASE="main" RUN_ID="" DRAIN=0 RESUME="" POSTURE_CLI=""
 EXPLICIT=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,7 +48,7 @@ while [ $# -gt 0 ]; do
       # Research-resolved narrow input seam: zero default, floor stricter.
       # Phase 3 owns the committed configuration; nothing is read from disk.
       case "${2:-}" in
-        zero|floor) POSTURE="$2"; shift 2 ;;
+        zero|floor) POSTURE_CLI="$2"; shift 2 ;;
         *) usage ;;
       esac ;;
     --parallel|--parallel=*)
@@ -95,6 +97,14 @@ trap 'on_signal 2' INT
 trap 'on_signal 15' TERM
 
 QUEUE_ID="$RUN_ID"
+
+# ── REQ-306: single monotonic posture resolution (spec-006 phase 3) ───────
+# default zero < config (validated --posture flag, else the committed
+# .planning/config.json autonomy.posture) < FFS_AUTONOMY_POSTURE, stricter-
+# only.  Resolved exactly once per run; every posture consumer below reads
+# AUTONOMY_POSTURE, never the env/config inputs.
+resolve_autonomy_posture "$REPO/.planning/config.json" "$POSTURE_CLI"
+echo "POSTURE-RESOLVED: $AUTONOMY_POSTURE source=$AUTONOMY_POSTURE_SOURCE"
 # EDGE-006: any journal validation/write failure is immediate infrastructure
 # QUEUE-ERROR:store — it bypasses classification and stops the queue before
 # another effect runs.
@@ -574,7 +584,7 @@ land_one_item() {
     journal --kind result --step review --item "$branch" --status missing
     # e846ec0c: STOP is consulted before the degradation-recording effect.
     require_go "degrade $branch" || return 2
-    if [ "$POSTURE" = "floor" ]; then
+    if [ "$AUTONOMY_POSTURE" = "floor" ]; then
       # Floor: no same-host substitute, ever — the degraded posture is
       # recorded AND the item blocks (37bc43d9).
       note_review_invocation true "$branch" "$reviewed" "$baseline" || true
@@ -804,7 +814,7 @@ while [ "$i" -lt "$COUNT" ]; do
     fi
     # EDGE-010: a conflict quarantine is eligible for exactly one
     # zero-posture requeue after the base advances.
-    if [ "$POSTURE" = "zero" ] && [ "$LAST_TERMINAL_STATUS" = "BLOCKED:conflict" ]; then
+    if [ "$AUTONOMY_POSTURE" = "zero" ] && [ "$LAST_TERMINAL_STATUS" = "BLOCKED:conflict" ]; then
       QUAR_IDX+=("$IDX")
       QUAR_BASE+=("$(base_sha)")
     fi
@@ -815,7 +825,7 @@ done
 # Requeue once, only when the base advanced since the quarantine, and only
 # while the durable journal counter shows fewer than two conflict terminals
 # — the second quarantine parks permanently.
-if [ -z "$QUEUE_TERMINAL" ] && [ "$POSTURE" = "zero" ] && [ "${#QUAR_IDX[@]}" -gt 0 ]; then
+if [ -z "$QUEUE_TERMINAL" ] && [ "$AUTONOMY_POSTURE" = "zero" ] && [ "${#QUAR_IDX[@]}" -gt 0 ]; then
   k=0
   while [ "$k" -lt "${#QUAR_IDX[@]}" ]; do
     IDX="${QUAR_IDX[$k]}"

@@ -46,7 +46,22 @@ bash scripts/gsd/land-queue.sh --resume QUEUE-ID
   closed so no new item joins a resumed queue. Only an unreachable merge
   authority parks an item `BLOCKED:resume-incomplete` with a one-command
   remedy.
-- **`--posture zero|floor`** (default `zero`): review posture for this run.
+- **Autonomy posture (`zero|floor`, committed default `zero`):** the review
+  posture for a run is resolved exactly once, monotonically, by
+  `scripts/gsd/autonomy-posture.sh` (`resolve_autonomy_posture`): default
+  `zero` < config (the validated `--posture` flag, else `.autonomy.posture`
+  in the target repo's `.planning/config.json`, seeded from
+  `templates/gsd-config.base.json`) < the `FFS_AUTONOMY_POSTURE` environment
+  override — where each later layer may only preserve or increase strictness
+  (`zero` < `floor`). The environment may strengthen `zero` to `floor` but
+  can NEVER weaken a committed `floor` back to `zero`; only exact lowercase
+  `zero`/`floor` are accepted, and any other value emits one sanitized
+  stderr advisory (`POSTURE-INVALID: <value>`) and falls through. Every run
+  prints its resolved policy and provenance exactly once as
+  `POSTURE-RESOLVED: <zero|floor> source=<default|config|env>`, and every
+  posture consumer (reviewer floor block, degradation recording, conflict
+  quarantine requeue) uses that single result — nothing re-reads the flag,
+  file, or environment.
   `floor` blocks without an opposite-vendor reviewer
   (`BLOCKED:no-cross-vendor-reviewer`) — executable presence never counts; a
   satisfied review is rc 0 plus a recorded findings artifact under
@@ -159,4 +174,8 @@ for artifact in \
 done
 bash "$REPO_ROOT/scripts/gsd/queue-guard.sh" --contract-probe
 bash "$REPO_ROOT/scripts/gsd/land-queue.sh" --contract-probe
+# REQ-306: the posture resolver exists and the committed default is zero
+test -f "$REPO_ROOT"/scripts/gsd/autonomy-posture.sh
+grep -q '"posture": "zero"' "$REPO_ROOT/templates/gsd-config.base.json"
+grep -c 'resolve_autonomy_posture "' "$REPO_ROOT/scripts/gsd/land-queue.sh" | grep -qx 1
 ```

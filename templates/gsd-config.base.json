@@ -3,6 +3,9 @@
   "model_profile": "balanced",
   "granularity": "coarse",
   "parallelization": true,
+  "autonomy": {
+    "posture": "zero"
+  },
   "resolve_model_ids": false,
   "model_overrides": {
     "gsd-planner": "fable",
