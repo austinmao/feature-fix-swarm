@@ -33,7 +33,7 @@ all skills.
   round counter, per-phase records/residuals unchanged) instead of per-phase
   walls; `adhoc` recommends `/feature-implement --adhoc` (interactive STOP /
   autonomous continue as light).
-- **Plan-length gate is advisory** (`plan-length-gate.sh`): WARN + exit 0;
+- **Plan-length gate is advisory** (`plan-length-gate.sh`): WARN, non-blocking (rc 0);
   `FFS_PLAN_LENGTH_ENFORCE=1` restores blocking. The forced condense/replan
   round is deleted from spec-decompose.
 - **Verifier single-run** (feature-implement 2.15.0): a verifier FAIL is

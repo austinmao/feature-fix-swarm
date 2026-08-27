@@ -246,7 +246,11 @@ import re  # noqa: E402
 REVIEW_GATE = ROOT / "scripts" / "gsd" / "review-gate-command.sh"
 FI_SKILL = ROOT / "skills" / "feature-implement" / "SKILL.md"
 PF_SKILL = ROOT / "skills" / "preflight" / "SKILL.md"
-PHASE_BASE = "2e77ed7"
+# Content pin for INT-004(b) — see that test for the re-pin protocol.
+# The "sha256:" prefix is the credential scanner's own sanctioned form for a
+# legitimate digest literal (env-registry.sh _WHITELIST) — keep it.
+REVIEW_GATE_SHA256 = (
+    "sha256:b470c7c449f74531fe86a7c5d17206b0476c309f6f4710002be54b84ca7aa045")
 
 
 def test_int004a_review_gate_zero_seam_tokens():
@@ -260,13 +264,22 @@ def test_int004a_review_gate_zero_seam_tokens():
         assert token not in text, token
 
 
-def test_int004b_review_gate_byte_unchanged_vs_phase_base():
-    """INT-004(b): RETIRED 2026-08-27. The byte-unchanged pin was phase
-    discipline for the env-registry spec ("this phase never edits
-    review-gate-command.sh") and outlived its phase — it blocked every
-    unrelated later edit (first hit: the D9 residual-channel guard). The
-    durable invariant is INT-004(a)'s token scan above, which still runs."""
-    pytest.skip("phase pin retired — INT-004(a) carries the durable seam guard")
+def test_int004b_review_gate_content_pin():
+    """INT-004(b): review-gate-command.sh is tripwired — it may only change
+    deliberately, never as collateral of an unrelated edit.
+
+    Re-based 2026-08-27 (was a `git diff` against phase base 2e77ed7): the
+    commit-diff form skipped itself whenever the base commit became
+    unreachable (post-squash-merge main), so the tripwire silently stopped
+    guarding. A content hash always runs and survives squash merges.
+
+    Editing this file deliberately? Update REVIEW_GATE_SHA256 to the new
+    `shasum -a 256 scripts/gsd/review-gate-command.sh` in the SAME commit —
+    that re-pin is the conscious acknowledgement this gate exists to force."""
+    actual = "sha256:" + hashlib.sha256(REVIEW_GATE.read_bytes()).hexdigest()
+    assert actual == REVIEW_GATE_SHA256, (
+        f"review-gate-command.sh changed ({actual}); if intended, "
+        f"re-pin REVIEW_GATE_SHA256 in this test in the same commit")
 
 
 def test_seam_presence_pins():

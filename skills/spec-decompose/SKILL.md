@@ -52,7 +52,7 @@ Otherwise translate the FFS spec into gsd's planning inputs:
 - `.planning/REQUIREMENTS.md` — one `REQ-NN` per user story / acceptance criterion
   from `spec.md` (verbatim ACs; testable phrasing)
 - `.planning/ROADMAP.md` — phases from `plan.md`'s phase breakdown; each phase lists
-  its REQ ids + literal success criteria (commands that must exit 0). On
+  its REQ ids + literal success criteria (commands that must succeed, rc 0). On
   ceremony tier `light` (below), cap the ROADMAP at 2 phases — MERGE
   plan.md's breakdown into at most two coherent phases rather than dropping
   content; ceremony cost is phases × plans × rounds, and phase count is the
