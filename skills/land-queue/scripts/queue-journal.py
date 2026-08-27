@@ -419,8 +419,10 @@ def landed_tuples(doc: dict) -> list:
     tip OID and PR come from the item's latest keyed intent, the observed
     merge commit from the LANDED terminal's detail, and every field is
     re-validated against the closed regexes on the way out.  A LANDED item
-    with missing or malformed evidence refuses the WHOLE read — a partial
-    manifest must never mint a grant.
+    with NO keyed intent at all performed no queue effect (WR-03: an
+    externally-observed landing) and is omitted; a LANDED item WITH a keyed
+    intent but missing/malformed evidence refuses the WHOLE read — a
+    corrupted effect target must never mint a grant.
     """
     last_terminal, keyed = {}, {}
     for event in doc["events"]:
@@ -438,8 +440,15 @@ def landed_tuples(doc: dict) -> list:
             continue
         intent = keyed.get(item)
         merge_sha = term.get("detail")
-        if (intent is None
-                or not PR_RE.match(str(intent.get("pr", "")))
+        if intent is None:
+            # WR-03 (round 2): no keyed merge/finalize intent was ever
+            # journaled for this item — the queue performed no effect on it
+            # (a merge can only run AFTER its keyed intent is durable), so
+            # its landing was observed externally.  A proven no-effect
+            # target is OMITTED from the deletion projection instead of
+            # poisoning every valid target in the queue.
+            continue
+        if (not PR_RE.match(str(intent.get("pr", "")))
                 or not OID_RE.match(str(intent.get("head", "")))
                 or not isinstance(merge_sha, str)
                 or not OID_RE.match(merge_sha)):
