@@ -1092,6 +1092,41 @@ assert e["degraded"] is False and e.get("branch") == "spec/item-b", e
 assert len(e.get("head", "")) == 40, e
 PYEOF
 }
+@test "[REVIEW] an unrecordable review invocation fails closed before CI or merge" {
+  # CR-05 (round 2): when the reviewer SUCCEEDS but gates.py refuses to
+  # record the invocation (here: a non-ledger-shaped run id), the item must
+  # terminate — degraded same-vendor as BLOCKED:degradation-unrecorded,
+  # clean review as BLOCKED:review-unrecorded — and neither CI nor merge may
+  # run.  Production promotion's degraded-ratio denominator depends on
+  # complete invocation evidence, so an unrecordable review is never
+  # silently promoted past.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+
+  # degraded same-vendor path: codex host, only codex installed, zero posture
+  RESTRICTED="$(same_vendor_only_path codex)"
+  FFS_HOST=codex PATH="$RESTRICTED" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id bogus.run spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "^codex review" "$EVENTS"
+  grep -q "ITEM spec/item-a BLOCKED:degradation-unrecorded" <<<"$output"
+  posture_no_hit -q "gh pr checks" "$EVENTS"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+
+  # clean-review path fails closed too (complete-denominator rule)
+  : > "$EVENTS"
+  write_children  # restore the codex stub: the claude host's opposite vendor
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id bogus.run2 spec/item-a
+  [ "$status" -eq 0 ]
+  grep -q "ITEM spec/item-a BLOCKED:review-unrecorded" <<<"$output"
+  posture_no_hit -q "gh pr checks" "$EVENTS"
+  posture_no_hit -q "gh pr merge" "$EVENTS"
+}
+
 @test "[CI] timeout shim requires literal 1200 and gh watch interval 10" {
   test -f "$LINKED/.git"
   stub_env
