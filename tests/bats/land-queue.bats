@@ -1686,6 +1686,47 @@ STUB
   grep -qx "finalize --run-id $RUN_ID 101" "$EVENTS"
 }
 
+@test "[REVIEW-DIFF] a failed merge-base diff blocks the item — never an empty reviewed block" {
+  # F2 (round 4): `git diff baseline...head || : > diff` converted ANY diff
+  # failure into an EMPTY untrusted block, so the reviewer approved a change
+  # it never saw and the item merged with zero review evidence (37bc43d9).
+  # A diff failure is an item failure: BLOCKED:review-diff, no reviewer
+  # invocation, no CI, no merge.
+  test -f "$LINKED/.git"
+  stub_env
+  mk_branch spec/item-a a.txt alpha
+  write_gh
+  write_children
+  # git wrapper: fail ONLY a range diff (the review's merge-base diff);
+  # every other git invocation passes through to the real binary.
+  REAL_GIT="$(command -v git)"
+  cat > "$MOCK_BIN/git" <<STUB
+#!/usr/bin/env bash
+is_diff=0 has_range=0
+for a in "\$@"; do
+  [ "\$a" = diff ] && is_diff=1
+  case "\$a" in *...*) has_range=1 ;; esac
+done
+if [ "\$is_diff" = 1 ] && [ "\$has_range" = 1 ]; then
+  echo "fatal: unable to read tree object" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+STUB
+  chmod +x "$MOCK_BIN/git"
+  RUN_ID=adhoc-rdiff1
+  python3 "$ROOT/lib/gates.py" grant "$RUN_ID" --action merge:pr-101 --reason t >/dev/null
+  PATH="$MOCK_BIN:$PATH" run bash "$QUEUE" --repo "$WORK" --base main \
+    --run-id "$RUN_ID" spec/item-a
+  grep -q "BLOCKED:review-diff" <<<"$output"
+  ! grep -q "ITEM spec/item-a LANDED" <<<"$output"
+  # the reviewer never saw an empty block, and no CI/merge effect ran
+  ! grep -q "review pr=" "$EVENTS"
+  ! grep -q "^gh pr checks" "$EVENTS"
+  ! grep -q "^gh pr merge" "$EVENTS"
+  ! grep -q "^assert-merged" "$EVENTS"
+}
+
 @test "[POSTURE] production touch is auditable through review policy" {
   # 7c59d7a0: end-to-end through the REAL landing controller — it records a
   # bound degradation event and the production authority refuses promotion.

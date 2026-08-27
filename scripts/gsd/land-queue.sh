@@ -813,8 +813,28 @@ land_one_item() {
     local review_diff review_prompt review_rc
     review_diff="$WORKTMP/review-diff-$IDX"
     if [ -n "$baseline" ]; then
+      # F2 (round 4): a diff failure previously degraded to an EMPTY
+      # untrusted block — the reviewer approved a change it never saw and
+      # the item merged with zero review evidence.  Review evidence is
+      # load-bearing (37bc43d9): no diff, no review, no merge.
+      eff_rc=0
       git -C "$REPO" diff "$baseline...$reviewed" -- > "$review_diff" 2>"$errf" \
-        || : > "$review_diff"
+        || eff_rc=$?
+      if [ "$eff_rc" -ne 0 ]; then
+        journal --kind result --step review --item "$branch" --status failed
+        fail_item review-diff "$eff_rc" "$errf" review "BLOCKED:review-diff" \
+          "fix 'git -C $REPO diff $baseline...$reviewed' and re-run the queue"
+        return $?
+      fi
+      # a zero-byte diff while the item records changed files is a
+      # contradictory state, never reviewable evidence
+      if ! [ -s "$review_diff" ] && [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
+        journal --kind result --step review --item "$branch" --status failed
+        block_item "BLOCKED:review-diff" \
+          "merge-base diff of $reviewed is empty but the item records ${#CHANGED_FILES[@]} changed files" \
+          "verify origin/$BASE and the PR head, then re-run the queue"
+        return 1
+      fi
     else
       printf '%s\n' ${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"} > "$review_diff"
     fi
