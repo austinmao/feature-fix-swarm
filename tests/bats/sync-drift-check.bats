@@ -94,6 +94,10 @@ run_check() {
 }
 
 @test "symlinked and re-spelled aliases of the source dir are refused" {
+  # Inode identity (bash `-ef`, wall residual e62537db6216), not string
+  # equality, is the predicate: a symlink resolves to the same `pwd -P`
+  # string as its target, but on a bind-mounted alias the strings can
+  # differ while `-ef` still reports the same underlying directory.
   ln -sfn "$CONSUMER" "$BATS_TEST_TMPDIR/consumer-link"
   run env GSD_SYNC_SRC="$CONSUMER" bash "$SCRIPTS/$LEVER" "$BATS_TEST_TMPDIR/consumer-link"
   [ "$status" -eq 2 ]
