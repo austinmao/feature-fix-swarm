@@ -241,7 +241,8 @@ EOF
 }
 
 @test "spec-status documents the 1.2 takeover writer contract" {
-  grep -q 'version: "1.2.0"' "$ROOT/skills/spec-status/SKILL.md"
+  # 1.2.x: the takeover writer contract is the minor line, not the patch
+  grep -Eq 'version: "1\.2\.[0-9]+"' "$ROOT/skills/spec-status/SKILL.md"
   grep -q 'deterministic forbid' "$ROOT/skills/spec-status/SKILL.md"
 }
 

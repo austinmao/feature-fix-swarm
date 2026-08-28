@@ -1,7 +1,7 @@
 ---
 name: spec-status
 description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan out volume, execution, and judgment roles over git, .planning, gates, runner state, evidence, and hygiene; write a status report and host-native handoff."
-version: "1.2.0"
+version: "1.2.1"
 ---
 
 # /spec-status [NNN] [--continue-compact] [--no-handoff]
@@ -115,8 +115,8 @@ fi
 ```
 
 A finding stops the commit for that artifact with nothing added to the
-index or object database; a missing scanner warns once per artifact and
-continues. `HANDOFF_PATH` stays unset under `--no-handoff`, so the second
+index or object database; a missing scanner or guard BLOCKS the commit for
+that artifact (fail-closed — nothing is published unscanned). `HANDOFF_PATH` stays unset under `--no-handoff`, so the second
 call never runs — preserving that flag's behavior.
 
 ## Constraints
