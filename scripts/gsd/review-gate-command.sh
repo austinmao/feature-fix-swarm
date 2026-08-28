@@ -71,7 +71,10 @@ fi
 # findings against plan prose are not. Each phase's WALL-RESIDUALS.md (written
 # by plan-wall.sh on a diminishing-returns pass) is fed to the reviewer as
 # focus, delimited as untrusted data. The findings-queue stays authoritative;
-# the manifest is a convenience surface.
+# the manifest is a convenience surface. An APPROVED verdict now also CLOSES
+# the riding residuals mechanically in the queue (see
+# _rg_close_riding_residuals below) — the manifest is read for the reviewer
+# prompt AND for which sigs to resolve once the diff is approved.
 # D9 (2026-08-27): the one-round wall shifts more weight onto this channel,
 # so it gets a mechanical guard — every residual manifest the glob found MUST
 # be spliced into the reviewer prompt; an unreadable manifest fails closed
@@ -154,6 +157,36 @@ fi
 if printf '%s\n' "$FINAL_VERDICT" | grep -Eq '^VERDICT: BLOCK[[:space:]]*$'; then
   printf '{"verdict":"REVISE","findings":%s}\n' "$(printf '%s' "$CLEAN_OUTPUT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
   exit 1
+fi
+
+# wall policy (c): an APPROVED verdict closes riding residuals in the
+# findings-queue mechanically — fail-soft, never changes the verdict/exit.
+# The manifest only carries a 12-char sig prefix (sig[0:12]); `findings-queue
+# resolve` matches the full sig exactly, so each prefix is expanded against
+# the live queue first — an unmatched or ambiguous prefix is a fail-soft skip.
+if [ -n "$GATES_PY" ] && [ -n "$RESIDUAL_FOCUS" ]; then
+  _rg_sigs="$(printf '%s' "$RESIDUAL_FOCUS" | grep -oE '^- [0-9a-f]{12} ' | awk '{print $2}' | sort -u)"
+  while IFS= read -r _rg_sig; do
+    [ -n "$_rg_sig" ] || continue
+    _rg_full="$(python3 "$GATES_PY" findings-queue list 2>/dev/null | python3 -c '
+import json, sys
+pfx = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+matches = sorted({f["sig"] for f in data if f.get("sig", "").startswith(pfx)})
+print(matches[0]) if len(matches) == 1 else None
+' "$_rg_sig" 2>/dev/null)"
+    if [ -n "$_rg_full" ] && python3 "$GATES_PY" findings-queue resolve "$_rg_full" \
+        --disposition fix \
+        --reason "closed at executed-diff review (review-gate APPROVED)" \
+        >/dev/null 2>&1; then
+      echo "[review-gate] residual $_rg_sig auto-resolved (disposition fix) — wall policy (c)" >&2
+    else
+      echo "[review-gate] residual $_rg_sig resolve skipped (already resolved|not in queue)" >&2
+    fi
+  done <<<"$_rg_sigs"
 fi
 
 if [ "$DEGRADED" -eq 1 ]; then

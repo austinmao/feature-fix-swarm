@@ -8,6 +8,36 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-08-28 — review-gate APPROVED auto-resolves riding wall residuals)
+
+- `scripts/gsd/review-gate-command.sh`: an APPROVED verdict now mechanically
+  closes the plan-wall residuals it read as review focus (wall policy (c)) —
+  each `WALL-RESIDUALS.md` sig prefix is expanded against the live
+  findings-queue and resolved with `--disposition fix`, fail-soft (an
+  already-resolved or unknown sig never changes the verdict or exit code).
+  Previously the residuals rode into the queue forever unless an operator
+  resolved them by hand; the empty-diff early-APPROVED path deliberately
+  does NOT trigger this (nothing was reviewed). Found in the spec-012
+  one-round wall live run.
+
+### Fixed (2026-08-28 — feature-implement verify-done key prose)
+
+- `skills/feature-implement/SKILL.md` Step 5 corrected the completion-authority
+  example: `GATES_STRICT=1 python3 "$GATES_PY" verify-done gsd-phase` was
+  wrong — the literal key `gsd-phase` never matches a real evidence record
+  and always returns NOT-DONE. The evidence key is the `.planning/phases/`
+  directory basename (e.g. `01-self-compare-guard`), the same key
+  `gates-test-command.sh` records evidence under. Prose-only fix (2.15.0 →
+  2.15.1). Found in the spec-012 one-round wall live run.
+
+### Fixed (2026-08-28 — feature-spec ship:gsd grant auto-enumeration)
+
+- `skills/feature-spec/SKILL.md` Step 6's grant-enumeration walk now always
+  includes `ship:gsd` in the enumerated grant list. `review-gate-command.sh`
+  requires a `ship:gsd` grant on every run, but it never appears in plan.md
+  or tasks.md, so walking artifacts alone missed it — spec-012 needed a
+  manual mid-run grant to unblock ship. (2.8.0 → 2.8.1)
+
 ### Fixed (2026-08-28 — sync-drift-check refuses a self-compare)
 
 - `scripts/gsd/sync-drift-check.sh` no longer reports a clean `OK` when
