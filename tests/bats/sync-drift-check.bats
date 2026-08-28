@@ -73,3 +73,53 @@ run_check() {
   run env GSD_SYNC_SRC="$SRC" bash "$SCRIPTS/$LEVER" "$BATS_TEST_TMPDIR/nope"
   [ "$status" -ne 0 ]
 }
+
+@test "implicit self-compare (GSD_SYNC_SRC unset) is refused" {
+  cp "$SCRIPTS/$LEVER" "$CONSUMER/$LEVER"
+  run env -u GSD_SYNC_SRC bash "$CONSUMER/$LEVER" "$CONSUMER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"SELF-COMPARE"* ]]
+  [[ "$output" != *"IN-SYNC:"* ]]
+
+  run env GSD_SYNC_SRC="$SRC" bash "$CONSUMER/$LEVER" "$CONSUMER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"IN-SYNC:"* ]]
+}
+
+@test "explicit self-compare (GSD_SYNC_SRC == consumer) is refused" {
+  run env GSD_SYNC_SRC="$CONSUMER" bash "$SCRIPTS/$LEVER" "$CONSUMER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"SELF-COMPARE"* ]]
+  [[ "$output" != *"IN-SYNC:"* ]]
+}
+
+@test "symlinked and re-spelled aliases of the source dir are refused" {
+  ln -sfn "$CONSUMER" "$BATS_TEST_TMPDIR/consumer-link"
+  run env GSD_SYNC_SRC="$CONSUMER" bash "$SCRIPTS/$LEVER" "$BATS_TEST_TMPDIR/consumer-link"
+  [ "$status" -eq 2 ]
+
+  run env GSD_SYNC_SRC="$CONSUMER" bash "$SCRIPTS/$LEVER" "$CONSUMER/"
+  [ "$status" -eq 2 ]
+
+  run env GSD_SYNC_SRC="$CONSUMER/." bash "$SCRIPTS/$LEVER" "$CONSUMER"
+  [ "$status" -eq 2 ]
+}
+
+@test "self-compare refusal prints the GSD_SYNC_SRC recipe" {
+  run env GSD_SYNC_SRC="$CONSUMER" bash "$SCRIPTS/$LEVER" "$CONSUMER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GSD_SYNC_SRC="* ]]
+  [[ "$output" == *"<consumer-scripts-dir>"* ]]
+}
+
+@test "missing consumer dir error precedes the self-compare guard" {
+  run env GSD_SYNC_SRC="$SRC" bash "$SCRIPTS/$LEVER" "$BATS_TEST_TMPDIR/nope"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not found"* ]]
+  [[ "$output" != *"SELF-COMPARE"* ]]
+
+  run env GSD_SYNC_SRC="$BATS_TEST_TMPDIR/no-such-src" bash "$SCRIPTS/$LEVER" "$CONSUMER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[sync-drift-check] OK"* ]]
+  [[ "$output" != *"SELF-COMPARE"* ]]
+}
