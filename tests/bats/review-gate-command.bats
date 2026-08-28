@@ -248,3 +248,81 @@ EOF
   # reviewer was never dispatched
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
 }
+
+@test "wall policy (c): APPROVED verdict auto-resolves an unresolved riding residual sig" {
+  export HOME="$BATS_TEST_TMPDIR"
+  mkdir -p "$HOME/.claude/lib/feature-fix-swarm"
+  cp "$ROOT/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  export GATES_STORE="$BATS_TEST_TMPDIR/store.json"
+  python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
+    --action ship:gsd --reason test >/dev/null
+  ADD_OUT="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue add \
+    lib/foo.py "idempotency key missing" --severity HIGH --source wall \
+    --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  SIG12="${SIG:0:12}"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<EOF
+# Wall residuals — 01-degradation
+- $SIG12 HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)
+EOF
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  RESOLVED="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue list \
+    --unresolved --source wall 2>/dev/null)"
+  [[ "$RESOLVED" != *"$SIG"* ]]
+  ALL="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue list --source wall)"
+  [[ "$ALL" == *"$SIG"* ]]
+  [[ "$ALL" == *'"disposition": "fix"'* || "$ALL" == *'"disposition":"fix"'* ]]
+}
+
+@test "wall policy (c): empty diff early-exit does NOT auto-resolve riding residuals" {
+  export HOME="$BATS_TEST_TMPDIR"
+  mkdir -p "$HOME/.claude/lib/feature-fix-swarm"
+  cp "$ROOT/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  export GATES_STORE="$BATS_TEST_TMPDIR/store-empty.json"
+  python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
+    --action ship:gsd --reason test >/dev/null
+  ADD_OUT="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue add \
+    lib/foo.py "idempotency key missing" --severity HIGH --source wall \
+    --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  SIG12="${SIG:0:12}"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<EOF
+# Wall residuals — 01-degradation
+- $SIG12 HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)
+EOF
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf '' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'empty diff'* ]]
+  RESOLVED="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue list \
+    --unresolved --source wall 2>/dev/null)"
+  [[ "$RESOLVED" == *"$SIG"* ]]
+}
+
+@test "wall policy (c): residual sig not in the findings-queue is a fail-soft skip" {
+  export HOME="$BATS_TEST_TMPDIR"
+  mkdir -p "$HOME/.claude/lib/feature-fix-swarm"
+  cp "$ROOT/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  export GATES_STORE="$BATS_TEST_TMPDIR/store-missing.json"
+  python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
+    --action ship:gsd --reason test >/dev/null
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<'EOF'
+# Wall residuals — 01-degradation
+- deadbeefcafe HIGH lib/foo.py — no such finding in the queue (plan: 01-01-PLAN.md)
+EOF
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'resolve skipped'* ]]
+}
