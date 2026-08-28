@@ -8,6 +8,20 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-08-28 — sync-drift-check refuses a self-compare)
+
+- `scripts/gsd/sync-drift-check.sh` no longer reports a clean `OK` when
+  `GSD_SYNC_SRC` and the consumer dir resolve to the same directory — the
+  natural invocation from inside a consumer with `GSD_SYNC_SRC` unset. It
+  now exits 2 with a `[sync-drift-check] ERROR: SELF-COMPARE` line naming
+  both paths and the working `GSD_SYNC_SRC=` recipe. Directory identity is
+  realpath (`pwd -P`) equality plus a device+inode (`-ef`) check, so
+  symlinked aliases, `./`/trailing-slash spellings, and same-inode bind
+  mounts are all caught, not just exact string matches. The prior false
+  green landed on the exact question the tool exists to answer, and its
+  `STALE-ALLOWLIST` noise invited pruning real fork allowlist entries — the
+  next blind sync then destroyed the fork (hit twice in the field; spec 012).
+
 ### Fixed (2026-08-28 — handoff scan chain fails CLOSED)
 
 - `scripts/gsd/publish-scanned-handoff.sh` and `scripts/gsd/scan-handoff-credentials.sh`
