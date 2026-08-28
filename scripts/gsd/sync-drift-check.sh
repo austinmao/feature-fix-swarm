@@ -32,6 +32,22 @@ if [ -z "$CONSUMER" ] || [ ! -d "$CONSUMER" ]; then
   exit 2
 fi
 
+# Self-compare guard (spec-012): comparing a dir to itself prints IN-SYNC for
+# every file and STALE-ALLOWLIST for every real fork — a false green on the
+# exact question this tool answers. Realpath both sides so symlink aliases
+# and ./ or trailing-slash spellings collapse (AC-003). A SRC that does not
+# exist falls through to today's behaviour (EDGE-001). The `-ef` device+inode
+# check (wall residual e62537db6216) additionally catches the same directory
+# exposed through two distinct Linux bind-mount paths, where the two `pwd -P`
+# strings differ even though both name the same inode.
+_src_real="$(cd "$SRC" 2>/dev/null && pwd -P || printf '%s' "$SRC")"
+_dst_real="$(cd "$CONSUMER" && pwd -P)"
+if [ "$_src_real" = "$_dst_real" ] || [ "$_src_real" -ef "$_dst_real" ]; then
+  echo "[sync-drift-check] ERROR: SELF-COMPARE — source and consumer are the same directory ($_dst_real); every file would report IN-SYNC" >&2
+  echo "usage: GSD_SYNC_SRC=<packaged scripts/gsd dir> sync-drift-check.sh <consumer-scripts-dir> [--allowlist FILE]" >&2
+  exit 2
+fi
+
 allow_reason() {
   # Prints the reason when $1 is allowlisted, else nothing.
   [ -n "$ALLOWLIST" ] && [ -f "$ALLOWLIST" ] || return 0
