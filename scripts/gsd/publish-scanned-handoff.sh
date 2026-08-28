@@ -48,6 +48,13 @@ if [ ! -f "$ARTIFACT" ]; then
   echo "publish-scanned-handoff: artifact not found: $ARTIFACT" >&2
   exit 1
 fi
+if [ -L "$ARTIFACT" ]; then
+  # Never dereference a symlinked artifact: the scanned bytes must be the
+  # regular file's own, not whatever an external link target resolves to at
+  # copy time (ported from the openclaw consumer fork, 2026-08-28).
+  echo "publish-scanned-handoff: REFUSED — artifact is a symlink: $ARTIFACT" >&2
+  exit 4
+fi
 
 TMP_COPY=""
 cleanup() {
@@ -74,7 +81,11 @@ if [ -x "$SCANNER" ]; then
     exit "$scan_rc"
   fi
 else
-  echo "publish-scanned-handoff: WARN: credential scanner absent; continuing" >&2
+  # FAIL-CLOSED: a missing scanner must never let unscanned bytes reach the
+  # object database or the destination — that is this script's whole
+  # contract (ported from the openclaw consumer fork, 2026-08-28).
+  echo "publish-scanned-handoff: BLOCKED — credential scanner absent; refusing to publish unscanned bytes" >&2
+  exit 3
 fi
 
 if [ "$MODE" = "--publish-to" ]; then

@@ -1,6 +1,6 @@
 ---
 name: continue-compact
-version: 1.0.0
+version: 1.0.1
 description: Prepare a durable handoff and a host-native resume command before the built-in compact operation. Use when context is low or the user asks to continue after compaction.
 ---
 
@@ -42,7 +42,8 @@ operator can paste at a logical task boundary.
    ```
 
    A finding stops the commit with nothing added to the index or object
-   database; a missing scanner warns once and continues.
+   database; a missing scanner or guard BLOCKS the commit (fail-closed —
+   nothing is published unscanned).
 5. Build an instruction under 250 characters. It starts with the active task
    and ends exactly: `After compact, execute the Resume Prompt in the handoff doc.`
 

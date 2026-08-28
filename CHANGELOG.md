@@ -8,6 +8,22 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-08-28 — handoff scan chain fails CLOSED)
+
+- `scripts/gsd/publish-scanned-handoff.sh` and `scripts/gsd/scan-handoff-credentials.sh`
+  no longer warn-and-continue when the credential scanner or guard is absent.
+  A missing scanner used to let unscanned bytes reach the object database or
+  the publish destination — the exact outcome the copy-then-scan-then-publish
+  harness exists to prevent. Now: scanner absent → `BLOCKED`, exit 3; guard
+  absent → the scanner itself exits 3 instead of reporting a clean scan it never
+  ran. A symlinked artifact is refused outright (exit 4) before anything is
+  copied — a dereferencing copy would scan the link target's bytes, a
+  non-dereferencing one would publish the link, and both are wrong. Ported from
+  the openclaw consumer fork, which had carried the publish-side half since
+  spec-369; the scanner-side hole was open in both repos. continue-compact
+  1.0.1, spec-status 1.2.1 prose updated; CG-020/021/022 absent-guard pins
+  flipped to fail-closed; CG-026/027 added.
+
 ### Changed (2026-08-27 — blocked-verdict wall idempotence)
 
 - **plan-wall.sh never re-reviews byte-identical content, blocked plans

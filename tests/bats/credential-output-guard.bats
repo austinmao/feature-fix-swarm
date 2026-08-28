@@ -185,16 +185,18 @@ build_handoff_fixture() {
   [ -z "$(git -C "$fixture" diff --cached --name-only)" ]
   [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$before" ]
 
-  # absent-guard-warns
+  # absent-guard-BLOCKS (fail-closed): nothing scanned -> nothing committed
   fixture="$BATS_TEST_TMPDIR/cg020-absent"
   build_handoff_fixture "$fixture"
   rm -f "$fixture/scripts/hooks/credential-output-guard.sh"
   echo "clean handoff body" > "$fixture/handoff.md"
   before="$(git -C "$fixture" rev-list --count HEAD)"
   run env REPO_ROOT="$fixture" HANDOFF_PATH="$fixture/handoff.md" bash -c "$block"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *WARN* ]]
-  [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$((before + 1))" ]
+  [ "$status" -eq 3 ]
+  [[ "$output" == *BLOCKED* ]]
+  [[ "$output" != *WARN* ]]
+  [ -z "$(git -C "$fixture" diff --cached --name-only)" ]
+  [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$before" ]
 }
 
 @test "CG-021: goal-wrap.sh handoff-scan block extracts and executes — clean, finding, absent-guard" {
@@ -219,15 +221,15 @@ build_handoff_fixture() {
   [ "$status" -ne 0 ]
   [ ! -e "$fixture/dest.md" ]
 
-  # absent-guard-warns
+  # absent-guard-BLOCKS (fail-closed): destination never written
   fixture="$BATS_TEST_TMPDIR/cg021-absent"
   build_handoff_fixture "$fixture"
   rm -f "$fixture/scripts/hooks/credential-output-guard.sh"
   echo "clean handoff body" > "$fixture/handoff.md"
   run env REPO_ROOT="$fixture" HANDOFF_PATH="$fixture/handoff.md" HANDOFF_DEST="$fixture/dest.md" bash -c "$block"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *WARN* ]]
-  [ "$(cat "$fixture/dest.md")" = "clean handoff body" ]
+  [ "$status" -eq 3 ]
+  [[ "$output" == *BLOCKED* ]]
+  [ ! -e "$fixture/dest.md" ]
 }
 
 @test "CG-022: spec-status.sh handoff-scan block extracts and executes — clean, finding, absent-guard, --no-handoff" {
@@ -265,16 +267,52 @@ build_handoff_fixture() {
   [ -z "$(git -C "$fixture" diff --cached --name-only)" ]
   [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$before" ]
 
-  # absent-guard-warns
+  # absent-guard-BLOCKS (fail-closed)
   fixture="$BATS_TEST_TMPDIR/cg022-absent"
   build_handoff_fixture "$fixture"
   rm -f "$fixture/scripts/hooks/credential-output-guard.sh"
   echo "status body" > "$fixture/status.md"
   before="$(git -C "$fixture" rev-list --count HEAD)"
   run env -u HANDOFF_PATH REPO_ROOT="$fixture" STATUS_PATH="$fixture/status.md" bash -c "$block"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *WARN* ]]
-  [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$((before + 1))" ]
+  [ "$status" -eq 3 ]
+  [[ "$output" == *BLOCKED* ]]
+  [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$before" ]
+}
+
+@test "CG-026: publish-scanned-handoff.sh fails CLOSED when the scanner itself is absent — both modes" {
+  local fixture before
+  fixture="$BATS_TEST_TMPDIR/cg026"
+  build_handoff_fixture "$fixture"
+  rm -f "$fixture/scripts/gsd/scan-handoff-credentials.sh"
+  echo "clean handoff body" > "$fixture/handoff.md"
+  before="$(git -C "$fixture" rev-list --count HEAD)"
+  run bash "$fixture/scripts/gsd/publish-scanned-handoff.sh" "$fixture/handoff.md" --commit "m"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"scanner absent"* ]]
+  [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$before" ]
+  [ -z "$(git -C "$fixture" diff --cached --name-only)" ]
+  run bash "$fixture/scripts/gsd/publish-scanned-handoff.sh" "$fixture/handoff.md" --publish-to "$fixture/dest.md"
+  [ "$status" -eq 3 ]
+  [ ! -e "$fixture/dest.md" ]
+}
+
+@test "CG-027: publish-scanned-handoff.sh refuses a symlinked artifact before copying or scanning" {
+  local fixture before
+  fixture="$BATS_TEST_TMPDIR/cg027"
+  build_handoff_fixture "$fixture"
+  # link target is OUTSIDE the repo and carries a credential: a dereferencing
+  # copy would scan (and block on) the target's bytes; a non-dereferencing one
+  # would publish the link. Both are wrong — the only right answer is refusal.
+  echo "API_TOKEN=sk_123456789012345678" > "$BATS_TEST_TMPDIR/cg027-outside.md"
+  ln -s "$BATS_TEST_TMPDIR/cg027-outside.md" "$fixture/handoff.md"
+  before="$(git -C "$fixture" rev-list --count HEAD)"
+  run bash "$fixture/scripts/gsd/publish-scanned-handoff.sh" "$fixture/handoff.md" --commit "m"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"symlink"* ]]
+  [ "$(git -C "$fixture" rev-list --count HEAD)" -eq "$before" ]
+  run bash "$fixture/scripts/gsd/publish-scanned-handoff.sh" "$fixture/handoff.md" --publish-to "$fixture/dest.md"
+  [ "$status" -eq 4 ]
+  [ ! -e "$fixture/dest.md" ]
 }
 
 @test "CG-023: publish-scanned-handoff.sh source never reads a git index blob as its scan target" {
