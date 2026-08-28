@@ -1,0 +1,6 @@
+[
+  {"kind": "probe", "name": "bats-present", "argv": ["bats", "--version"]},
+  {"kind": "probe", "name": "shellcheck-present", "argv": ["shellcheck", "--version"]},
+  {"kind": "probe", "name": "gh-auth", "argv": ["gh", "auth", "status"]},
+  {"kind": "probe", "name": "baseline-suite-green", "argv": ["bats", "tests/bats/sync-drift-check.bats"]}
+]
