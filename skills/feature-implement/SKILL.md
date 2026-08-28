@@ -478,7 +478,7 @@ See `docs/promotion-protocol.md` for the full 12-rule dev→staging→production
 promotion protocol; the completion authority below enforces rules 7, 8, and 12 of it.
 
 gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
-- `GATES_STRICT=1 python3 "$GATES_PY" verify-done "<phase-dir basename>"` must exit 0
+- `GATES_STRICT=1 python3 "$GATES_PY" verify-done "<phase-dir basename>"` must succeed (rc 0)
   — the key is the `.planning/phases/` directory basename (e.g.
   `01-self-compare-guard`), the same key `gates-test-command.sh` records
   evidence under and plan-wall.sh writes records under. The literal key
