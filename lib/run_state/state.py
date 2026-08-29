@@ -21,6 +21,19 @@ VALID_STATES = (
 VALID_SKILLS = ("feature", "fix")
 
 
+class UnknownRunError(LookupError):
+    """Raised when a mutator targets a run_id that matches no row.
+
+    Subclasses LookupError (the stdlib base for "lookup miss") rather than
+    KeyError (message-repr mangling) or ValueError (already used by
+    create_run/update_state for invalid enum values).
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__(f"no run found with id {run_id!r}")
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
@@ -165,10 +178,12 @@ class RunStore:
         completed_at = now if new_state == "complete" else None
         conn = sqlite3.connect(self.db_path)
         try:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE runs SET state = ?, updated_at = ?, completed_at = COALESCE(?, completed_at) WHERE id = ?",
                 (new_state, now, completed_at, run_id),
             )
+            if cursor.rowcount == 0:
+                raise UnknownRunError(run_id)
             conn.execute(
                 "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'state_change', ?, ?)",
                 (run_id, json.dumps({"new_state": new_state}), now),
@@ -181,10 +196,12 @@ class RunStore:
         now = _now()
         conn = sqlite3.connect(self.db_path)
         try:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE runs SET current_phase = ?, updated_at = ? WHERE id = ?",
                 (phase, now, run_id),
             )
+            if cursor.rowcount == 0:
+                raise UnknownRunError(run_id)
             conn.execute(
                 "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'phase', ?, ?)",
                 (run_id, json.dumps({"phase": phase}), now),
@@ -200,6 +217,8 @@ class RunStore:
         conn = sqlite3.connect(self.db_path)
         try:
             before_row = conn.execute("SELECT tokens_used, tokens_budget FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if before_row is None:
+                raise UnknownRunError(run_id)
             conn.execute(
                 "UPDATE runs SET tokens_used = tokens_used + ?, updated_at = ? WHERE id = ?",
                 (delta, now, run_id),

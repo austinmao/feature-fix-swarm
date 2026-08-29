@@ -335,6 +335,3 @@ def test_audit_strand_restored_on_sigterm(tmp_path: Path, monkeypatch: pytest.Mo
         signal.signal(signal.SIGTERM, prev_handler)
 
     assert store.get_run(run_id).state == "active"
-    assert record["verdict"] == "pass"
-    assert record["kind"] == "fix"
-    assert "ts" in record  # ISO-8601 timestamp

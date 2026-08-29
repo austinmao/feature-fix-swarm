@@ -5,10 +5,11 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 from pathlib import Path
 
-from run_state.state import RunStore, DEFAULT_DB, VALID_STATES
+from run_state.state import RunStore, DEFAULT_DB, VALID_STATES, UnknownRunError
 
 
 def _parse_tokens(value):
@@ -148,7 +149,12 @@ def main(argv=None) -> int:
     s.set_defaults(func=cmd_audit)
 
     args = p.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except UnknownRunError:
+        # Same shape cmd_status already emits for a missing run.
+        print(json.dumps({"error": "not_found", "run_id": args.run_id}), file=sys.stderr)
+        return 1
 
 def cmd_audit(args: argparse.Namespace) -> int:
     """Run adversarial audit. Updates run state based on verdict."""
@@ -172,66 +178,91 @@ def cmd_audit(args: argparse.Namespace) -> int:
     store = _store()
     store.update_state(args.run_id, "pending_audit")
 
-    result = run_audit(prompt=prompt, cwd=cwd)
+    # GH-3: an exception, SIGTERM, or SIGINT during the audit subprocess must
+    # not strand the run in pending_audit forever. Convert both signals to a
+    # catchable KeyboardInterrupt (keeping the previous handlers so they can
+    # be restored), and restore state=active in `finally` unless a verdict
+    # already landed.
+    def _raise_keyboard_interrupt(signum, frame):
+        raise KeyboardInterrupt(f"interrupted by signal {signum}")
 
-    conn = sqlite3.connect(store.db_path)
+    prev_sigterm = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    prev_sigint = signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+    settled = False
     try:
-        conn.execute(
-            "UPDATE runs SET audit_attempts = audit_attempts + 1, last_audit_verdict = ? WHERE id = ?",
-            (result.verdict, args.run_id),
-        )
-        conn.execute(
-            "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'audit', ?, datetime('now'))",
-            (args.run_id, json.dumps({"verdict": result.verdict, "reasoning": result.reasoning, "missing": result.missing})),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        result = run_audit(prompt=prompt, cwd=cwd)
 
-    # v3.0 codex-gate Pass 1 P2 fix: also append to ~/.claude/state/audits.jsonl
-    # so native `/goal` condition checker can grep audit history without
-    # needing to open SQLite. One line per audit; append-only; never rewritten.
-    audits_log = Path.home() / ".claude" / "state" / "audits.jsonl"
-    try:
-        audits_log.parent.mkdir(parents=True, exist_ok=True)
-        from datetime import datetime, timezone
-        record = {
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        conn = sqlite3.connect(store.db_path)
+        try:
+            conn.execute(
+                "UPDATE runs SET audit_attempts = audit_attempts + 1, last_audit_verdict = ? WHERE id = ?",
+                (result.verdict, args.run_id),
+            )
+            conn.execute(
+                "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'audit', ?, datetime('now'))",
+                (args.run_id, json.dumps({"verdict": result.verdict, "reasoning": result.reasoning, "missing": result.missing})),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # v3.0 codex-gate Pass 1 P2 fix: also append to ~/.claude/state/audits.jsonl
+        # so native `/goal` condition checker can grep audit history without
+        # needing to open SQLite. One line per audit; append-only; never rewritten.
+        audits_log = Path.home() / ".claude" / "state" / "audits.jsonl"
+        try:
+            audits_log.parent.mkdir(parents=True, exist_ok=True)
+            from datetime import datetime, timezone
+            record = {
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "run_id": args.run_id,
+                "kind": args.kind,
+                "verdict": result.verdict,
+                "reasoning": result.reasoning[:500],
+                "missing": result.missing,
+            }
+            with audits_log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError:
+            # Best-effort log; SQLite remains source of truth.
+            pass
+
+        if result.verdict == "pass":
+            # v3.0: native /goal handles continuation; no marker to manage.
+            # kind=fix → terminal complete. kind=phase / kind=feature stay
+            # active so the caller (the skill) advances to the next wedge or
+            # final canary stage.
+            if args.kind == "fix":
+                store.update_state(args.run_id, "complete")
+            elif args.kind == "phase":
+                # Per-phase audit pass: phase done, but feature pipeline still
+                # running. Stay active; caller advances to next wedge.
+                store.update_state(args.run_id, "active")
+            else:  # feature — keep run alive for canary
+                store.update_state(args.run_id, "active")
+        else:
+            store.update_state(args.run_id, "active")
+        settled = True
+
+        print(json.dumps({
             "run_id": args.run_id,
-            "kind": args.kind,
             "verdict": result.verdict,
-            "reasoning": result.reasoning[:500],
+            "reasoning": result.reasoning,
             "missing": result.missing,
-        }
-        with audits_log.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-    except OSError:
-        # Best-effort log; SQLite remains source of truth.
-        pass
-
-    if result.verdict == "pass":
-        # v3.0: native /goal handles continuation; no marker to manage.
-        # kind=fix → terminal complete. kind=phase / kind=feature stay
-        # active so the caller (the skill) advances to the next wedge or
-        # final canary stage.
-        if args.kind == "fix":
-            store.update_state(args.run_id, "complete")
-        elif args.kind == "phase":
-            # Per-phase audit pass: phase done, but feature pipeline still
-            # running. Stay active; caller advances to next wedge.
-            store.update_state(args.run_id, "active")
-        else:  # feature — keep run alive for canary
-            store.update_state(args.run_id, "active")
-    else:
-        store.update_state(args.run_id, "active")
-
-    print(json.dumps({
-        "run_id": args.run_id,
-        "verdict": result.verdict,
-        "reasoning": result.reasoning,
-        "missing": result.missing,
-    }))
-    return 0 if result.verdict == "pass" else 1
+        }))
+        return 0 if result.verdict == "pass" else 1
+    except KeyboardInterrupt:
+        print(json.dumps({"error": "interrupted", "run_id": args.run_id}), file=sys.stderr)
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, prev_sigterm)
+        signal.signal(signal.SIGINT, prev_sigint)
+        if not settled:
+            try:
+                store.update_state(args.run_id, "active")
+            except UnknownRunError:
+                # Row deleted mid-audit — don't mask the original failure.
+                pass
 
 
 if __name__ == "__main__":
