@@ -227,21 +227,22 @@ def cmd_audit(args: argparse.Namespace) -> int:
             # Best-effort log; SQLite remains source of truth.
             pass
 
-        if result.verdict == "pass":
-            # v3.0: native /goal handles continuation; no marker to manage.
-            # kind=fix → terminal complete. kind=phase / kind=feature stay
-            # active so the caller (the skill) advances to the next wedge or
-            # final canary stage.
-            if args.kind == "fix":
-                store.update_state(args.run_id, "complete")
-            elif args.kind == "phase":
-                # Per-phase audit pass: phase done, but feature pipeline still
-                # running. Stay active; caller advances to next wedge.
-                store.update_state(args.run_id, "active")
-            else:  # feature — keep run alive for canary
-                store.update_state(args.run_id, "active")
+        # v3.0: native /goal handles continuation; no marker to manage.
+        # kind=fix pass → terminal complete. kind=phase/kind=feature pass,
+        # and any fail, stay active so the caller (the skill) advances to
+        # the next wedge, retries, or reaches the final canary stage.
+        if result.verdict == "pass" and args.kind == "fix":
+            target_state = "complete"
         else:
-            store.update_state(args.run_id, "active")
+            target_state = "active"
+
+        # review-gate round 2 HIGH: CAS, not an unconditional write. A
+        # concurrent abort/complete landing while run_audit was in flight
+        # must not be clobbered by the verdict this call just computed —
+        # False means someone else moved the state first; leave it alone
+        # and say so honestly in the output instead of pretending the
+        # verdict took effect.
+        transitioned = store.recover_state(args.run_id, "pending_audit", target_state)
         settled = True
 
         print(json.dumps({
@@ -249,6 +250,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
             "verdict": result.verdict,
             "reasoning": result.reasoning,
             "missing": result.missing,
+            "state_transition": "applied" if transitioned else "superseded",
         }))
         return 0 if result.verdict == "pass" else 1
     except KeyboardInterrupt:
