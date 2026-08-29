@@ -357,3 +357,95 @@ def test_audit_cleanup_does_not_overwrite_a_concurrent_abort(tmp_path: Path, mon
         run_state.cli.main(["audit", run_id, "--kind", "fix"])
 
     assert store.get_run(run_id).state == "aborted"
+
+
+# --- review-gate round 2 HIGH: the verdict path itself must CAS too --------
+# (round 1 only fixed the exceptional-cleanup path; a normal verdict landing
+# after a concurrent abort/complete still clobbered it with a plain
+# update_state.)
+
+
+def test_audit_pass_state_transition_superseded_by_concurrent_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _concurrent_abort_then_pass(*, prompt, cwd):
+        RunStore(db_path).update_state(run_id, "aborted")
+        return run_state.audit.AuditResult(verdict="pass", reasoning="ok", missing=[])
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _concurrent_abort_then_pass)
+
+    rc = run_state.cli.main(["audit", run_id, "--kind", "fix"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0  # exit code stays verdict-driven, not state-driven
+    assert payload["state_transition"] == "superseded"
+    assert store.get_run(run_id).state == "aborted"
+
+
+def test_audit_fail_state_transition_superseded_by_concurrent_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _concurrent_abort_then_fail(*, prompt, cwd):
+        RunStore(db_path).update_state(run_id, "aborted")
+        return run_state.audit.AuditResult(verdict="fail", reasoning="nope", missing=["X"])
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _concurrent_abort_then_fail)
+
+    rc = run_state.cli.main(["audit", run_id, "--kind", "fix"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["state_transition"] == "superseded"
+    assert store.get_run(run_id).state == "aborted"
+
+
+def test_audit_pass_state_transition_applied_when_uncontended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _pass(*, prompt, cwd):
+        return run_state.audit.AuditResult(verdict="pass", reasoning="ok", missing=[])
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _pass)
+
+    rc = run_state.cli.main(["audit", run_id, "--kind", "fix"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["state_transition"] == "applied"
+    assert store.get_run(run_id).state == "complete"
+
+
+def test_audit_fail_state_transition_applied_when_uncontended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _fail(*, prompt, cwd):
+        return run_state.audit.AuditResult(verdict="fail", reasoning="nope", missing=["X"])
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _fail)
+
+    rc = run_state.cli.main(["audit", run_id, "--kind", "fix"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["state_transition"] == "applied"
+    assert store.get_run(run_id).state == "active"
