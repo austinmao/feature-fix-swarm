@@ -5,6 +5,11 @@ import pytest
 
 from run_state.state import init_db, RunStore
 
+# NOTE: UnknownRunError does not exist until Task 2 (GREEN). Importing it at
+# module scope would break collection of every test in this file, including
+# the pre-existing ones the RED gate must keep green — so each new test below
+# imports it locally, letting only those tests fail during RED.
+
 
 def test_init_db_creates_runs_table(tmp_path: Path) -> None:
     db_path = tmp_path / "runs.db"
@@ -203,3 +208,46 @@ def test_legacy_v2_run_can_be_aborted(tmp_path: Path) -> None:
     # `aborted` is in v3.0 VALID_STATES, so the transition itself is allowed.
     store.update_state("legacy-1", "aborted")
     assert store.get_run("legacy-1").state == "aborted"
+
+
+# --- GH-3: unknown run_id must raise, never fabricate history ---------------
+
+
+def test_update_state_unknown_run_id_raises(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    store = RunStore(tmp_path / "runs.db")
+    with pytest.raises(UnknownRunError):
+        store.update_state("nope-000000", "complete")
+
+
+def test_update_phase_unknown_run_id_raises(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    store = RunStore(tmp_path / "runs.db")
+    with pytest.raises(UnknownRunError):
+        store.update_phase("nope-000000", "wedge-1")
+
+
+def test_inc_tokens_unknown_run_id_raises(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    store = RunStore(tmp_path / "runs.db")
+    with pytest.raises(UnknownRunError):
+        store.inc_tokens("nope-000000", 100)
+
+
+def test_unknown_run_id_writes_no_event_row(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    for call in (
+        lambda: store.update_state("nope-000000", "complete"),
+        lambda: store.update_phase("nope-000000", "wedge-1"),
+        lambda: store.inc_tokens("nope-000000", 100),
+    ):
+        with pytest.raises(UnknownRunError):
+            call()
+    conn = sqlite3.connect(db_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0

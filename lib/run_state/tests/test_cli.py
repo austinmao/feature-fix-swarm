@@ -1,8 +1,16 @@
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+import pytest
+
+import run_state.audit
+import run_state.cli
+from run_state.state import RunStore
 
 LIB_ROOT = Path(__file__).resolve().parents[2]
 
@@ -244,6 +252,89 @@ def test_audit_appends_jsonl_for_goal_grep(tmp_path: Path) -> None:
     assert len(lines) == 1
     record = lines[0]
     assert record["run_id"] == run_id
+
+
+# --- GH-3: unknown run_id at the CLI must exit not_found, never fabricate ---
+
+
+def test_cli_update_unknown_run_id_exits_not_found(tmp_path: Path) -> None:
+    db = tmp_path / "runs.db"
+    env = {"RUN_STATE_DB": str(db)}
+    bogus = "nope-000000"
+    for args in (
+        ["update", bogus, "--state", "complete"],
+        ["update", bogus, "--phase", "wedge-1"],
+        ["update", bogus, "--tokens", "10"],
+    ):
+        r = _run(args, env_extra=env)
+        assert r.returncode == 1
+        assert json.loads(r.stderr) == {"error": "not_found", "run_id": bogus}
+
+
+def test_cli_complete_unknown_run_id_exits_not_found(tmp_path: Path) -> None:
+    db = tmp_path / "runs.db"
+    env = {"RUN_STATE_DB": str(db)}
+    bogus = "nope-000000"
+    r = _run(["complete", bogus], env_extra=env)
+    assert r.returncode == 1
+    assert json.loads(r.stderr) == {"error": "not_found", "run_id": bogus}
+
+
+def test_cli_abort_unknown_run_id_exits_not_found(tmp_path: Path) -> None:
+    db = tmp_path / "runs.db"
+    env = {"RUN_STATE_DB": str(db)}
+    bogus = "nope-000000"
+    r = _run(["abort", bogus], env_extra=env)
+    assert r.returncode == 1
+    assert json.loads(r.stderr) == {"error": "not_found", "run_id": bogus}
+
+
+def test_audit_strand_restored_on_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _raise(*, prompt, cwd):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _raise)
+
+    with pytest.raises(RuntimeError):
+        run_state.cli.main(["audit", run_id, "--kind", "fix"])
+
+    run = store.get_run(run_id)
+    assert run.state == "active"
+    assert run.audit_attempts == 0
+    assert run.last_audit_verdict is None
+
+
+def test_audit_strand_restored_on_sigterm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _send_sigterm(*, prompt, cwd):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.5)
+        raise AssertionError("SIGTERM did not interrupt run_audit")
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _send_sigterm)
+
+    def _guard_handler(signum, frame):
+        raise AssertionError("CLI installed no SIGTERM handler for the audit subprocess")
+
+    prev_handler = signal.signal(signal.SIGTERM, _guard_handler)
+    try:
+        try:
+            run_state.cli.main(["audit", run_id, "--kind", "fix"])
+        except BaseException:
+            pass
+    finally:
+        signal.signal(signal.SIGTERM, prev_handler)
+
+    assert store.get_run(run_id).state == "active"
     assert record["verdict"] == "pass"
     assert record["kind"] == "fix"
     assert "ts" in record  # ISO-8601 timestamp
