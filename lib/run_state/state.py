@@ -192,6 +192,37 @@ class RunStore:
         finally:
             conn.close()
 
+    def recover_state(self, run_id: str, from_state: str, to_state: str) -> bool:
+        """CAS: transition run_id from from_state to to_state in one UPDATE.
+
+        Returns True iff the transition happened. Returns False — silently,
+        no exception, no event row — when run_id is unknown OR its current
+        state isn't from_state (already moved on: a concurrent abort/
+        complete, or a verdict that landed before this call). For crash/
+        interrupt cleanup paths that must never raise over the original
+        error and must never clobber a state someone else already set.
+        # ponytail: no VALID_STATES check — the only caller passes a
+        # hardcoded literal, so an invalid to_state is a programmer error,
+        # not a runtime input to validate.
+        """
+        now = _now()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "UPDATE runs SET state = ?, updated_at = ? WHERE id = ? AND state = ?",
+                (to_state, now, run_id, from_state),
+            )
+            if cursor.rowcount == 0:
+                return False
+            conn.execute(
+                "INSERT INTO events (run_id, event_type, payload_json, created_at) VALUES (?, 'state_change', ?, ?)",
+                (run_id, json.dumps({"new_state": to_state, "recovered_from": from_state}), now),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
     def update_phase(self, run_id: str, phase: str) -> None:
         now = _now()
         conn = sqlite3.connect(self.db_path)

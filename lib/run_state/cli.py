@@ -258,11 +258,12 @@ def cmd_audit(args: argparse.Namespace) -> int:
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
         if not settled:
-            try:
-                store.update_state(args.run_id, "active")
-            except UnknownRunError:
-                # Row deleted mid-audit — don't mask the original failure.
-                pass
+            # CAS, not an unconditional write: only resurrect pending_audit
+            # -> active. A concurrent abort/complete, or a verdict that
+            # already landed in this same call before the interrupt hit,
+            # must not be overwritten. False means someone else moved the
+            # state first — leave it alone.
+            store.recover_state(args.run_id, "pending_audit", "active")
 
 
 if __name__ == "__main__":
