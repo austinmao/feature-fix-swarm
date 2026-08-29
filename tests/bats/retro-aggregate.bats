@@ -137,6 +137,8 @@ pending_digests() { # pending_digests -- count of un-consumed dated digest files
   [ "$(count_calls 'issue create')" -eq 1 ]
   [ "$(count_calls 'issue comment')" -eq 0 ]
   [ ! -f "$DATED" ]
+  [ ! -f "$DATED.processing" ]
+  [ -f "$DATED.consumed" ]
   [ "$(pending_digests)" -eq 0 ]
 
   : > "$GH_CALL_LOG"
@@ -246,4 +248,37 @@ PY
   second_count="$output"
   [ "$second_count" -eq 45 ]
   [ "$second_count" -gt "$first_count" ]
+}
+
+# ── Test E: snapshot-first claim — filing failure leaves .processing, never
+#    the bare name and never .consumed; a re-run does not re-file it ───────
+
+@test "snapshot-first: a filing failure leaves the claimed digest at .processing, not consumed, and it is never re-filed" {
+  fresh_env aggE
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_SEARCH_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_WRITE_FAIL_CODE=500  # an unrecognized status -> fatal write-failure
+  export GH_LIST_FIXTURE GH_SEARCH_FIXTURE GH_WRITE_FAIL_CODE
+
+  DATED="$REPO/.feature-fix-swarm/digest-20260812.jsonl"
+  cp "$FIXTURES/single-p1-digest.jsonl" "$DATED"
+
+  analyze_h
+  [ "$status" -ne 0 ]
+  [ ! -f "$DATED" ]
+  [ ! -f "$DATED.consumed" ]
+  [ ! -f "$DATED.rejected" ]
+  [ -f "$DATED.processing" ]
+  [[ "$stderr" == *"RETRO:filing-failed-digest-left-processing"* ]]
+  [[ "$stderr" == *"$DATED.processing"* ]]
+
+  unset GH_WRITE_FAIL_CODE
+  : > "$GH_CALL_LOG"
+  analyze_h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RETRO:no-events"* ]]
+  [ "$(count_calls 'issue create')" -eq 0 ]
+  [ "$(count_calls 'issue comment')" -eq 0 ]
+  [ -f "$DATED.processing" ]
+  [ "$(pending_digests)" -eq 0 ]
 }

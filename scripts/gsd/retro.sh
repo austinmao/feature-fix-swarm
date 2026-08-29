@@ -75,6 +75,21 @@ if [ "$mode" = "collect" ]; then
   exec python3 "$RETRO_PY" collect --digest "$digest" --findings "$findings" --changelog "$changelog"
 fi
 
+# Snapshot-first claim: rename an auto-discovered digest to .processing
+# BEFORE any read, not after analysis. A producer append that lands after
+# this mv starts a fresh digest-*.jsonl -- no event is ever silently folded
+# into a consumed file. Every later outcome (parse failure, filing failure,
+# a crash anywhere in between) leaves the file out of the *.jsonl glob, so
+# it is never re-read and never double-filed; bytes are always preserved.
+if [ "$auto_discovered" -eq 1 ]; then
+  claimed="$digest.processing"
+  if ! mv "$digest" "$claimed"; then
+    echo "RETRO:snapshot-failed" >&2
+    exit 1
+  fi
+  digest="$claimed"
+fi
+
 [ -f "$STATE_PY" ] || { echo "RETRO:missing-state" >&2; exit 1; }
 
 # The legacy Phase 1 explicit state-root seam is intentionally scrub-only.
@@ -97,10 +112,11 @@ chmod 600 "$handoff"
 trap 'rm -f "$handoff"' EXIT
 if ! RETRO_FILING=1 python3 "$RETRO_PY" analyze --digest "$digest" --findings "$findings" --changelog "$changelog" --state-root "$state_root" --scanner "$SCANNER" > "$handoff"; then
   # An unparseable digest would otherwise sit at the head of the oldest-first
-  # queue forever and block every newer file behind it. Move it aside intact
-  # (never delete) so the next run can drain past it.
+  # queue forever and block every newer file behind it. It is already
+  # claimed (.processing, out of the *.jsonl glob); move it to .rejected
+  # intact (never delete) so the next run can drain past it.
   if [ "$auto_discovered" -eq 1 ]; then
-    mv -f "$digest" "$digest.rejected" 2>/dev/null || true
+    mv -f "$digest" "${digest%.processing}.rejected" 2>/dev/null || true
   fi
   exit 1
 fi
@@ -113,15 +129,21 @@ if [ "${RETRO_TEST_SEAM:-}" != "1" ] || [ "$state_root" = "$fixed_root" ]; then
   fi
   python3 "$STATE_PY" file "$handoff"
   file_rc=$?
-  # Consume only on a successful filing pass through the production branch:
-  # the redirected-state-root seam branch never reaches here, so a digest
-  # read through that seam is never marked consumed while its rows stay
-  # unfiled. digest.sh flushes the current day's file (run-finalizer.sh
-  # calls it immediately before retro), so renaming today's file here is
-  # safe -- the producer's next append starts a fresh file, never one we
-  # just consumed.
-  if [ "$file_rc" -eq 0 ] && [ "$auto_discovered" -eq 1 ]; then
-    mv -f "$digest" "$digest.consumed" 2>/dev/null || true
+  if [ "$auto_discovered" -eq 1 ]; then
+    if [ "$file_rc" -eq 0 ]; then
+      # digest.sh flushes the current day's file (run-finalizer.sh calls it
+      # immediately before retro), so consuming today's file here is safe --
+      # the producer's next append starts a fresh file, never this one.
+      if ! mv -f "$digest" "${digest%.processing}.consumed" 2>/dev/null; then
+        echo "RETRO:consume-rename-failed $digest" >&2
+      fi
+    else
+      # Filing failed (or a crash lands here): leave the claimed file at
+      # .processing rather than renaming it. It stays out of the *.jsonl
+      # glob (never auto-reprocessed, no duplicate writes) with its bytes
+      # intact (no loss); an operator can rename it back to re-queue.
+      echo "RETRO:filing-failed-digest-left-processing $digest" >&2
+    fi
   fi
   cat "$handoff"
   exit "$file_rc"
