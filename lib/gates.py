@@ -1441,12 +1441,14 @@ def _valid_canary_record(rec) -> bool:
     """Re-validate a persisted canary row on every read (the
     _valid_promotion_record precedent): a tampered or legacy row degrades to
     refusal, never a crash. Typed = exactly the recorder's schema semantics —
-    40-hex sha, boolean pass, control-free run_id, bounded timestamps."""
+    the same immutable artifact identity `_valid_artifact` accepts (digest
+    reference or 40-hex commit sha), boolean pass, control-free run_id,
+    bounded timestamps."""
     import math
     if not isinstance(rec, dict):
         return False
     sha = rec.get("sha")
-    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+    if not _valid_artifact(sha):
         return False
     if rec.get("pass") is not True and rec.get("pass") is not False:
         return False
@@ -1985,8 +1987,10 @@ def record_canary_evidence(store: Path, run_id, sha, passed, created_at,
     """
     if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
         raise ValueError("INVALID-CANARY-RUN-ID")
-    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
-        # 40-hex commit sha ONLY (F5) — digest refs are not canary identity.
+    if not _valid_artifact(sha):
+        # Same immutable identity `_valid_artifact` accepts (digest reference
+        # or 40-hex commit sha) — binding stays exact whole-string equality,
+        # so a commit sha never satisfies a digest artifact nor the converse.
         raise ValueError("INVALID-CANARY-SHA")
     if not isinstance(passed, bool):
         raise ValueError("INVALID-CANARY-PASS")

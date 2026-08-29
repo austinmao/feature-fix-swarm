@@ -309,6 +309,91 @@ EOF
   [ "$(jq -r '.canary[0].run_id' "$STORE")" = "unattributed" ]
 }
 
+# ── REQ-301: canary rows accept the same immutable artifact shapes the
+# promotion ledger already accepts (OCI digest reference or 40-hex commit
+# sha) — binding stays exact whole-string equality, so a digest row never
+# satisfies a commit-sha artifact nor the converse. Motivating case: a
+# consumer with digest-artifact image promotions.
+
+canary_promo_check() { # $1=canary sha to record ("none"=skip) $2=artifact
+  local canary_sha="$1" artifact="$2"
+  local store="$BATS_TEST_TMPDIR/${BATS_TEST_NAME}-evidence.json"
+  python3 - "$REPO/lib/gates.py" "$canary_sha" "$artifact" "$store" <<'PYEOF'
+import importlib.util
+import sys
+from pathlib import Path
+
+gates_path, canary_sha, artifact, store = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("gates", gates_path)
+gates = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gates)
+
+store = Path(store)
+try:
+    rc = gates.run_gate(
+        store, "stg", ["python3", "-c", "raise SystemExit(0)"],
+        artifact=artifact,
+    )
+    assert rc == 0, f"run_gate returned {rc}"
+    gates.grant_actions(store, "run-1", ["deploy:prod-web"])
+    gates.record_promotion(
+        store, "run-1", from_env="staging", to_env="prod",
+        surface="web", artifact=artifact, evidence_ids=["stg"],
+    )
+    if canary_sha != "none":
+        gates.record_canary_evidence(
+            store, "run-1", canary_sha, True,
+            "2026-06-13T08:43:44.814Z", "2026-06-13T08:48:02.991Z",
+        )
+    bound = gates.check_promotion(store, "run-1", "prod", "web", artifact)
+    print("BOUND" if bound else "REFUSED")
+except Exception as exc:  # surface as a real test failure, never silent REFUSED
+    print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+}
+
+@test "REQ-301 digest canary: (a) digest canary row + same digest artifact BOUND" {
+  DIGEST_A="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  run canary_promo_check "$DIGEST_A" "$DIGEST_A"
+  [ "$status" -eq 0 ]
+  [ "$output" = "BOUND" ]
+}
+
+@test "REQ-301 digest canary: (b) digest canary row + different digest artifact REFUSED" {
+  DIGEST_A="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  DIGEST_B="app@sha256:$(printf 'b%.0s' $(seq 1 64))"
+  run canary_promo_check "$DIGEST_A" "$DIGEST_B"
+  [ "$status" -eq 0 ]
+  [ "$output" = "REFUSED" ]
+}
+
+@test "REQ-301 digest canary: (c) commit-sha canary row + digest artifact REFUSED" {
+  COMMIT_SHA="$(git rev-parse HEAD)"
+  DIGEST_A="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  run canary_promo_check "$COMMIT_SHA" "$DIGEST_A"
+  [ "$status" -eq 0 ]
+  [ "$output" = "REFUSED" ]
+}
+
+@test "REQ-301 digest canary: (d) armed store with no matching canary row REFUSED" {
+  # Pre-existing (pre-REQ-301) behavior guard: both sides are already-valid
+  # 40-hex commit shas — no digest shape involved — so this must already
+  # pass on current main, unchanged by the digest-canary fix.
+  COMMIT_SHA="$(git rev-parse HEAD)"
+  UNRELATED_SHA="$(printf '0%.0s' $(seq 1 40))"
+  run canary_promo_check "$UNRELATED_SHA" "$COMMIT_SHA"
+  [ "$status" -eq 0 ]
+  [ "$output" = "REFUSED" ]
+}
+
+@test "REQ-301 digest canary: (e) absent canary namespace + digest artifact BOUND (pass-through)" {
+  DIGEST_A="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  run canary_promo_check "none" "$DIGEST_A"
+  [ "$status" -eq 0 ]
+  [ "$output" = "BOUND" ]
+}
+
 @test "AC-004: mid-run HEAD drift refuses with no record" {
   add_web_commit
   RESULTS="$BATS_TEST_TMPDIR/results.json"

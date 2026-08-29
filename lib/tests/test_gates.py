@@ -2664,15 +2664,29 @@ def test_canary_recorder_appends_verbatim_schema_row(tmp_path) -> None:
     assert isinstance(rec["ts"], float)
 
 
-def test_canary_recorder_rejects_non_40_hex_sha(tmp_path) -> None:
+def test_canary_recorder_rejects_non_immutable_shapes(tmp_path) -> None:
+    # REQ-301: canary sha accepts the same immutable artifact shapes
+    # `_valid_artifact` does (digest reference or 40-hex commit sha) — a
+    # mutable tag without a digest, or any other malformed shape, is still
+    # rejected.
     import pytest
     store = tmp_path / "evidence.json"
-    for bad in ("abc", "Z" * 40, "ab" * 32, "", None,
-                "myapp@sha256:" + "f" * 64):  # digest refs are NOT canary identity
+    for bad in ("abc", "Z" * 40, "ab" * 32, "", None, "myapp:latest"):
         with pytest.raises(ValueError, match="INVALID-CANARY-SHA"):
             gates.record_canary_evidence(store, "run-1", bad, True,
                                          _ISO_CREATED, _ISO_ENDED)
     assert not store.exists()
+
+
+def test_canary_recorder_accepts_digest_ref_sha(tmp_path) -> None:
+    # REQ-301: a digest-shaped artifact ref is a valid canary identity too,
+    # not just a bare 40-hex commit sha.
+    store = tmp_path / "evidence.json"
+    digest = "myapp@sha256:" + "f" * 64
+    gates.record_canary_evidence(store, "run-1", digest, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    rows = json.loads(store.read_text())["canary"]
+    assert rows[0]["sha"] == digest
 
 
 def test_canary_recorder_rejects_empty_or_missing_timestamps(tmp_path) -> None:
