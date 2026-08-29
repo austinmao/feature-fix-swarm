@@ -282,3 +282,45 @@ PY
   [ -f "$DATED.processing" ]
   [ "$(pending_digests)" -eq 0 ]
 }
+
+# ── Test F: collision-safe claim — a stranded .processing never gets
+#    silently overwritten when a same-named digest is claimed again ────────
+
+@test "collision-safe claim: a stranded .processing for the same digest name is never overwritten by a fresh claim" {
+  fresh_env aggF
+  GH_LIST_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_SEARCH_FIXTURE="$FIXTURES/gh-list-empty.json"
+  GH_WRITE_FAIL_CODE=500  # an unrecognized status -> fatal write-failure, so
+  export GH_LIST_FIXTURE GH_SEARCH_FIXTURE GH_WRITE_FAIL_CODE
+  # the fresh claim also stays parked afterward, not consumed -- both
+  # files (stranded + freshly-claimed) are directly inspectable at the end.
+
+  DATED="$REPO/.feature-fix-swarm/digest-20260830.jsonl"
+  STRANDED="$DATED.processing"
+  # Simulate a prior run's filing failure that left a claimed digest parked.
+  cp "$FIXTURES/single-p1-digest.jsonl" "$STRANDED"
+  # Same-day producer recreates the plain digest under the SAME base name.
+  cp "$FIXTURES/repeat-p1-digest.jsonl" "$DATED"
+
+  analyze_h
+  [ "$status" -ne 0 ]
+
+  # The stranded file must survive untouched -- byte-identical, never
+  # silently overwritten by the fresh claim's mv.
+  [ -f "$STRANDED" ]
+  cmp -s "$STRANDED" "$FIXTURES/single-p1-digest.jsonl"
+
+  # The fresh digest was claimed under a UNIQUIFIED name (never plain
+  # .processing, since that name was already taken) and its bytes survive
+  # too -- nothing lost, nothing clobbered.
+  [ ! -f "$DATED" ]
+  shopt -s nullglob
+  claimed=("$DATED".processing.*)
+  shopt -u nullglob
+  [ "${#claimed[@]}" -eq 1 ]
+  cmp -s "${claimed[0]}" "$FIXTURES/repeat-p1-digest.jsonl"
+
+  [ "$(pending_digests)" -eq 0 ]
+  [[ "$stderr" == *"RETRO:filing-failed-digest-left-processing"* ]]
+  [[ "$stderr" == *"${claimed[0]}"* ]]
+}

@@ -75,14 +75,24 @@ if [ "$mode" = "collect" ]; then
   exec python3 "$RETRO_PY" collect --digest "$digest" --findings "$findings" --changelog "$changelog"
 fi
 
+# Never clobber an earlier marker file left by a prior run (e.g. a stranded
+# .processing from a filing failure, same-day producer recreates the plain
+# digest, next run's claim would otherwise overwrite it): uniquify on
+# collision instead of a bare mv.
+safe_dest() { local d="$1"; [ -e "$d" ] && d="$d.$(date +%s).$$"; printf '%s\n' "$d"; }
+
 # Snapshot-first claim: rename an auto-discovered digest to .processing
 # BEFORE any read, not after analysis. A producer append that lands after
 # this mv starts a fresh digest-*.jsonl -- no event is ever silently folded
 # into a consumed file. Every later outcome (parse failure, filing failure,
 # a crash anywhere in between) leaves the file out of the *.jsonl glob, so
 # it is never re-read and never double-filed; bytes are always preserved.
+# original_digest is kept so .rejected/.consumed destinations are always
+# derived from the pre-claim name, never by stripping a suffix off a
+# (possibly already-uniquified) claimed path.
+original_digest="$digest"
 if [ "$auto_discovered" -eq 1 ]; then
-  claimed="$digest.processing"
+  claimed="$(safe_dest "$digest.processing")"
   if ! mv "$digest" "$claimed"; then
     echo "RETRO:snapshot-failed" >&2
     exit 1
@@ -116,7 +126,7 @@ if ! RETRO_FILING=1 python3 "$RETRO_PY" analyze --digest "$digest" --findings "$
   # claimed (.processing, out of the *.jsonl glob); move it to .rejected
   # intact (never delete) so the next run can drain past it.
   if [ "$auto_discovered" -eq 1 ]; then
-    mv -f "$digest" "${digest%.processing}.rejected" 2>/dev/null || true
+    mv -f "$digest" "$(safe_dest "$original_digest.rejected")" 2>/dev/null || true
   fi
   exit 1
 fi
@@ -134,7 +144,7 @@ if [ "${RETRO_TEST_SEAM:-}" != "1" ] || [ "$state_root" = "$fixed_root" ]; then
       # digest.sh flushes the current day's file (run-finalizer.sh calls it
       # immediately before retro), so consuming today's file here is safe --
       # the producer's next append starts a fresh file, never this one.
-      if ! mv -f "$digest" "${digest%.processing}.consumed" 2>/dev/null; then
+      if ! mv -f "$digest" "$(safe_dest "$original_digest.consumed")" 2>/dev/null; then
         echo "RETRO:consume-rename-failed $digest" >&2
       fi
     else
