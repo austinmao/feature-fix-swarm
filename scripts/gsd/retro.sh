@@ -57,8 +57,14 @@ fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$repo_root" ] || { echo "RETRO:no-repository" >&2; exit 1; }
+# auto_discovered marks a digest this script found itself (oldest-first, so
+# an older unconsumed backlog file is never shadowed by a newer one). An
+# explicit --digest is a test seam pointing at a checked-in fixture and is
+# never renamed.
+auto_discovered=0
 if [ -z "$digest" ]; then
-  digest="$(find "$repo_root/.feature-fix-swarm" -maxdepth 1 -type f -name 'digest-*.jsonl' -print 2>/dev/null | sort | tail -n 1)"
+  digest="$(find "$repo_root/.feature-fix-swarm" -maxdepth 1 -type f -name 'digest-*.jsonl' -print 2>/dev/null | sort | head -n 1)"
+  [ -n "$digest" ] && auto_discovered=1
 fi
 [ -n "$digest" ] || { echo "RETRO:no-events"; exit 0; }
 [ -n "$findings" ] || findings="$repo_root/.feature-fix-swarm/findings.json"
@@ -90,6 +96,12 @@ handoff="$(mktemp "${TMPDIR:-/tmp}/ffs-retro-handoff.XXXXXX")" || { echo "RETRO:
 chmod 600 "$handoff"
 trap 'rm -f "$handoff"' EXIT
 if ! RETRO_FILING=1 python3 "$RETRO_PY" analyze --digest "$digest" --findings "$findings" --changelog "$changelog" --state-root "$state_root" --scanner "$SCANNER" > "$handoff"; then
+  # An unparseable digest would otherwise sit at the head of the oldest-first
+  # queue forever and block every newer file behind it. Move it aside intact
+  # (never delete) so the next run can drain past it.
+  if [ "$auto_discovered" -eq 1 ]; then
+    mv -f "$digest" "$digest.rejected" 2>/dev/null || true
+  fi
   exit 1
 fi
 
@@ -101,6 +113,16 @@ if [ "${RETRO_TEST_SEAM:-}" != "1" ] || [ "$state_root" = "$fixed_root" ]; then
   fi
   python3 "$STATE_PY" file "$handoff"
   file_rc=$?
+  # Consume only on a successful filing pass through the production branch:
+  # the redirected-state-root seam branch never reaches here, so a digest
+  # read through that seam is never marked consumed while its rows stay
+  # unfiled. digest.sh flushes the current day's file (run-finalizer.sh
+  # calls it immediately before retro), so renaming today's file here is
+  # safe -- the producer's next append starts a fresh file, never one we
+  # just consumed.
+  if [ "$file_rc" -eq 0 ] && [ "$auto_discovered" -eq 1 ]; then
+    mv -f "$digest" "$digest.consumed" 2>/dev/null || true
+  fi
   cat "$handoff"
   exit "$file_rc"
 fi
