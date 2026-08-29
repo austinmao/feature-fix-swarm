@@ -251,3 +251,61 @@ def test_unknown_run_id_writes_no_event_row(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert count == 0
+
+
+# --- review-gate HIGH: recover_state must be an atomic CAS, never clobber a
+# terminal/concurrently-moved state -------------------------------------------
+
+
+def test_recover_state_transitions_matching_state(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    assert store.recover_state(run_id, "pending_audit", "active") is True
+    assert store.get_run(run_id).state == "active"
+
+
+def test_recover_state_noop_when_current_state_does_not_match(tmp_path: Path) -> None:
+    # Simulates a concurrent abort/complete landing during the audit
+    # subprocess: recover_state must not overwrite it back to "active".
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "aborted")
+    assert store.recover_state(run_id, "pending_audit", "active") is False
+    assert store.get_run(run_id).state == "aborted"
+
+
+def test_recover_state_noop_when_already_settled_to_complete(tmp_path: Path) -> None:
+    # Simulates a signal landing after the verdict path already wrote
+    # "complete" but before the caller's settled flag flips.
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    store.update_state(run_id, "complete")
+    assert store.recover_state(run_id, "pending_audit", "active") is False
+    assert store.get_run(run_id).state == "complete"
+
+
+def test_recover_state_noop_on_unknown_run_id(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    assert store.recover_state("nope-000000", "pending_audit", "active") is False
+
+
+def test_recover_state_writes_no_event_row_on_noop(tmp_path: Path) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")  # state=active
+    conn = sqlite3.connect(db_path)
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert store.recover_state(run_id, "pending_audit", "active") is False
+
+    conn = sqlite3.connect(db_path)
+    try:
+        after = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        conn.close()
+    assert after == before

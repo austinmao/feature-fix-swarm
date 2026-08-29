@@ -335,3 +335,25 @@ def test_audit_strand_restored_on_sigterm(tmp_path: Path, monkeypatch: pytest.Mo
         signal.signal(signal.SIGTERM, prev_handler)
 
     assert store.get_run(run_id).state == "active"
+
+
+def test_audit_cleanup_does_not_overwrite_a_concurrent_abort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # review-gate HIGH: an unconditional "restore to active" in cmd_audit's
+    # cleanup would clobber a state a concurrent `abort`/`complete` call set
+    # while the audit subprocess was still running. The cleanup must be a
+    # CAS (pending_audit -> active only) so it leaves a moved-on state alone.
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _concurrent_abort_then_raise(*, prompt, cwd):
+        RunStore(db_path).update_state(run_id, "aborted")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _concurrent_abort_then_raise)
+
+    with pytest.raises(RuntimeError):
+        run_state.cli.main(["audit", run_id, "--kind", "fix"])
+
+    assert store.get_run(run_id).state == "aborted"
