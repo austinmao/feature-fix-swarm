@@ -252,6 +252,9 @@ def test_audit_appends_jsonl_for_goal_grep(tmp_path: Path) -> None:
     assert len(lines) == 1
     record = lines[0]
     assert record["run_id"] == run_id
+    assert record["verdict"] == "pass"
+    assert record["kind"] == "fix"
+    assert "ts" in record  # ISO-8601 timestamp
 
 
 # --- GH-3: unknown run_id at the CLI must exit not_found, never fabricate ---
