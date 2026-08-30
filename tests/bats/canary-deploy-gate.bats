@@ -165,6 +165,65 @@ flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
   [ "$(row_count)" = "0" ]
 }
 
+# ── FFS_DEPLOY_PROBE_DIGEST_FILE (optional): probe-side attestation ────────
+# Double-observation (before/after the probe) still admits an A->B->A flip
+# entirely within the probe window: both observations see A while the probe
+# actually tested B. When this OPTIONAL seam is set, the probe itself must
+# write the digest it tested; the wrapper truncates the file before running
+# the probe (so stale content can never satisfy it) and requires the
+# post-probe content to byte-match the observed digest.
+
+@test "opted-in: probe-attested digest matches observed -> recorded, PASS" {
+  DIGEST="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-match"
+  GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
+    FFS_DEPLOY_PROBE_CMD="printf '%s' '$DIGEST' > '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"canary-deploy-gate: PASS"* ]]
+  [ "$(row_count)" = "1" ]
+  [ "$(jq -r '.canary[0].sha' "$STORE")" = "$DIGEST" ]
+}
+
+@test "opted-in: probe attests a DIFFERENT digest (tested B while observed A) -> DIGEST-CHANGED, zero rows even with a passing probe" {
+  DIGEST_A="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  DIGEST_B="app@sha256:$(printf 'b%.0s' $(seq 1 64))"
+  PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-mismatch"
+  GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST_A'" \
+    FFS_DEPLOY_PROBE_CMD="printf '%s' '$DIGEST_B' > '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-DIGEST-CHANGED"* ]]
+  [ "$(row_count)" = "0" ]
+}
+
+@test "opted-in: probe writes nothing to the digest file -> PROBE-DIGEST-INVALID, zero rows" {
+  DIGEST="app@sha256:$(printf 'c%.0s' $(seq 1 64))"
+  PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-empty"
+  GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
+    FFS_DEPLOY_PROBE_CMD="true" \
+    FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-PROBE-DIGEST-INVALID"* ]]
+  [ "$(row_count)" = "0" ]
+}
+
+@test "opted-in: stale pre-existing digest-file content is truncated before the probe, not reused" {
+  DIGEST="app@sha256:$(printf 'd%.0s' $(seq 1 64))"
+  WRONG="app@sha256:$(printf 'e%.0s' $(seq 1 64))"
+  PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-stale"
+  printf '%s\n' "$WRONG" > "$PROBE_FILE"
+  # probe writes nothing itself — if the wrapper failed to truncate, the
+  # stale WRONG digest would still be there and (since it differs from
+  # DIGEST) would surface as DIGEST-CHANGED, not PROBE-DIGEST-INVALID.
+  GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
+    FFS_DEPLOY_PROBE_CMD="true" \
+    FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-PROBE-DIGEST-INVALID"* ]]
+  [ "$(row_count)" = "0" ]
+}
+
 # ── digest-query invalid output (ordering + shape) ─────────────────────────
 
 @test "digest-query emits nothing -> DIGEST-INVALID, zero rows" {
