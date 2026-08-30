@@ -183,11 +183,23 @@ so one phase's findings never block another phase's wall.
 | `CANARY_DIFF_BASE` | `origin/main` | `scripts/gsd/canary-gate.sh:32` | Base ref for the web-touch diff |
 | `CANARY_WEB_PATTERN` | fixed ERE | `scripts/gsd/canary-gate.sh:61` | What counts as a web-touching file |
 | `CANARY_GATE_ALLOW_STALE` | `0` | `scripts/gsd/canary-gate.sh:112` | Bypasses only the results-newer-than-HEAD check |
+| `FFS_DEPLOY_DIGEST_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:66` | Shell command whose stdout is the digest actually deployed |
+| `FFS_DEPLOY_PROBE_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:67` | Post-deploy health/smoke command; its exit code is the recorded pass/fail |
+| `FFS_DEPLOY_DIGEST_TIMEOUT` | `60` | `scripts/gsd/canary-deploy-gate.sh:73` | Wall-clock bound on the digest query |
+| `FFS_DEPLOY_PROBE_TIMEOUT` | `300` | `scripts/gsd/canary-deploy-gate.sh:74` | Wall-clock bound on the probe |
 | `QA_BASE_URL` | unset (probes common ports) | `scripts/browser-proof.sh:72` | Pins the app URL. An unreachable pin is a hard `NO-SERVER`, no fallback probing |
 | `BROWSER_PROOF_PROBE_PORTS` | `3000 3001 5173 4321 8080 8000` | `scripts/browser-proof.sh:77` | Ports probed when `QA_BASE_URL` is unset |
 | `QA_FORCE_BROWSER` | `0` | `scripts/browser-proof.sh:47` | Forces `WEB-TOUCH:yes` regardless of diff |
 | `QA_ALLOW_NO_SERVER` | `0` | `scripts/browser-proof.sh:84` | Explicit waiver of the no-server requirement |
 | `QA_SCENARIOS` | unset | `scripts/qa-swarm.sh:212` | scenarios.md enforcing coverage completeness |
+
+`scripts/gsd/canary-deploy-gate.sh` (GH-153) is the sanctioned producer of
+canary evidence for image-digest deploy surfaces — the digest equivalent of
+`canary-gate.sh`'s commit-sha binding. Both `FFS_DEPLOY_DIGEST_CMD` and
+`FFS_DEPLOY_PROBE_CMD` are consumer-supplied; FFS ships no platform-specific
+defaults for either seam. The wrapper *observes* the digest from the query
+command's stdout rather than accepting one as input — there is no `--digest`
+flag or equivalent env override.
 
 ### Run lifecycle
 
