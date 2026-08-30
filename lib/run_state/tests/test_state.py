@@ -309,3 +309,37 @@ def test_recover_state_writes_no_event_row_on_noop(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert after == before
+
+
+# --- review-gate round 3 HIGH: recover_state must mirror update_state's
+# completed_at semantics (COALESCE so a non-complete transition never clears
+# a completed_at set earlier, and a transition to "complete" always sets it).
+
+
+def test_recover_state_to_complete_sets_completed_at(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    assert store.recover_state(run_id, "pending_audit", "complete") is True
+    assert store.get_run(run_id).completed_at is not None
+
+
+def test_recover_state_to_non_complete_leaves_completed_at_untouched(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    store.update_state(run_id, "complete")
+    completed_at_before = store.get_run(run_id).completed_at
+    assert completed_at_before is not None
+
+    assert store.recover_state(run_id, "complete", "aborted") is True
+    run = store.get_run(run_id)
+    assert run.state == "aborted"
+    assert run.completed_at == completed_at_before
+
+
+def test_recover_state_superseded_leaves_completed_at_untouched(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")  # state=active, completed_at=None
+    assert store.recover_state(run_id, "pending_audit", "complete") is False
+    assert store.get_run(run_id).completed_at is None

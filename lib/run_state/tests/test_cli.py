@@ -430,6 +430,30 @@ def test_audit_pass_state_transition_applied_when_uncontended(
     assert store.get_run(run_id).state == "complete"
 
 
+def test_audit_pass_uncontended_fix_sets_completed_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # review-gate round 3 HIGH: recover_state's completed_at semantics must
+    # match update_state's — a passing fix-audit landing state=complete via
+    # the CAS must not leave completed_at NULL.
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")
+    monkeypatch.setenv("RUN_STATE_DB", str(db_path))
+
+    def _pass(*, prompt, cwd):
+        return run_state.audit.AuditResult(verdict="pass", reasoning="ok", missing=[])
+
+    monkeypatch.setattr(run_state.audit, "run_audit", _pass)
+
+    rc = run_state.cli.main(["audit", run_id, "--kind", "fix"])
+
+    assert rc == 0
+    run = store.get_run(run_id)
+    assert run.state == "complete"
+    assert run.completed_at is not None
+
+
 def test_audit_fail_state_transition_applied_when_uncontended(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
