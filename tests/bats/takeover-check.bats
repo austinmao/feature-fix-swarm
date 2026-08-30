@@ -67,6 +67,24 @@ assert_single_refusal() {
   [ "$(printf '%s\n' "$output" | grep -c '^Unblock (operator): ')" -eq 1 ]
 }
 
+# GH-152: add a large inert top-level padding key to a JSON file without
+# touching any field a reader classifies on (see lib/gates.py:3052
+# "unrelated top-level fields survive").  Used to inflate the shared
+# evidence store or the takeover record past the legacy 1 MiB literal
+# while keeping every field the wall actually reads unchanged.
+pad_json_file() {
+  local file="$1" bytes="$2"
+  python3 - "$file" "$bytes" <<'PY'
+import json, sys
+path, n = sys.argv[1], int(sys.argv[2])
+with open(path) as f:
+    d = json.load(f)
+d["_pad"] = "x" * n
+with open(path, "w") as f:
+    json.dump(d, f)
+PY
+}
+
 seed_live_authority() {
   local now="$(date +%s)"
   python3 - "$STORE" "$now" <<'PY'
@@ -100,6 +118,38 @@ PY
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
   [ "$output" = "TAKEOVER-OK" ]
+}
+
+@test "GH-152 wall accepts a store larger than the legacy ceiling at the default cap" {
+  write_live_takeover_fixture "$(date +%s)"
+  pad_json_file "$STORE" 1200000
+  [ "$(wc -c < "$STORE")" -gt 1048576 ]
+  run env -u FFS_TAKEOVER_SNAPSHOT_MAX_BYTES GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  [ "$output" = "TAKEOVER-OK" ]
+  [[ "$output" != *record-mismatch* ]]
+  [[ "$output" != *TAKEOVER-SNAPSHOT-TOO-LARGE* ]]
+  [[ "$output" != *"unsafe regular file"* ]]
+}
+
+@test "GH-152 wall still refuses a store past a lowered cap with unchanged tokens" {
+  write_live_takeover_fixture "$(date +%s)"
+  pad_json_file "$STORE" 1200000
+  [ "$(wc -c < "$STORE")" -gt 1048576 ]
+  run env GATES_STORE="$STORE" FFS_TAKEOVER_SNAPSHOT_MAX_BYTES=1048576 bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
+
+@test "GH-152 record larger than the legacy ceiling survives the record path" {
+  write_live_takeover_fixture "$(date +%s)"
+  local record="$(dirname "$STORE")/takeover/spec-006.json"
+  pad_json_file "$record" 1200000
+  [ "$(wc -c < "$record")" -gt 1048576 ]
+  run env -u FFS_TAKEOVER_SNAPSHOT_MAX_BYTES GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  [ "$output" = "TAKEOVER-OK" ]
+  [[ "$output" != *decoy-store* ]]
+  [[ "$output" != *record-mismatch* ]]
 }
 
 @test "absence split is explicit and expectation makes missing record refuse" {
