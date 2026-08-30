@@ -200,14 +200,17 @@ PY
 }
 
 write_padded_record() {
-  # Direct production writer invocation with the cap-boundary pad seam.
+  # Direct production writer invocation with the cap-boundary pad seam. The
+  # ceiling is pinned via the knob (GH-152) rather than relying on the
+  # writer's raised default, so this still tests the same byte boundary.
   local store="$1" pad="$2"
   mkdir -p "$(dirname "$store")"
   run env GATES_STORE="$store" TAKEOVER_TEST_RECORD_PAD="$pad" \
+    FFS_TAKEOVER_SNAPSHOT_MAX_BYTES=1048576 \
     python3 "$ROOT/scripts/gsd/takeover-record.py" --gates "$GATES" --spec-id 006 --run-id spec-006
 }
 
-@test "writer publishes a record of exactly the consumer cap" {
+@test "writer publishes a record of exactly the configured cap" {
   # Measure the base serialized size and the per-pad-byte overhead, then pad
   # to exactly MAX_BYTES.  Store directory names share one length so the
   # embedded store path never skews the measurement.
@@ -221,7 +224,7 @@ write_padded_record() {
   write_padded_record "$BATS_TEST_TMPDIR/mA/evidence.json" $((1048576 - base - overhead))
   [ "$status" -eq 0 ]
   [ "$(wc -c < "$BATS_TEST_TMPDIR/mA/takeover/spec-006.json")" -eq 1048576 ]
-  # The wall's consumer accepts a record of exactly the cap.
+  # The wall's consumer accepts a record of exactly the configured cap.
   run python3 - "$BATS_TEST_TMPDIR/mA/takeover/spec-006.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))["ids"]["run_id"]=="spec-006"
@@ -229,7 +232,7 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "writer refuses a record one byte over the consumer cap before any publication" {
+@test "writer refuses a record one byte over the configured cap before any publication" {
   write_padded_record "$BATS_TEST_TMPDIR/m1/evidence.json" 0
   [ "$status" -eq 0 ]
   local base; base="$(wc -c < "$BATS_TEST_TMPDIR/m1/takeover/spec-006.json")"

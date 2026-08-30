@@ -4602,16 +4602,19 @@ def test_t4_pinned_fd_shape_rejections(tmp_path) -> None:
         _os.close(dir_fd)
         _os.close(bogus_fd)
 
-    # oversized: pinned evidence beyond the 1 MiB consumer cap
+    # oversized: pinned evidence beyond the configured cap (GH-152: the
+    # default ceiling is now 32 MiB, so the boundary is pinned explicitly
+    # via the knob rather than relying on a hardcoded 1 MiB fixture).
     big = store_dir / "evidence.json"
     big.write_text("{" + " " * (1024 * 1024 + 10) + "}")
     dir_fd = _os.open(store_dir, _os.O_RDONLY)
     ev_fd = _os.open(big, _os.O_RDONLY)
+    env = dict(_os.environ, FFS_TAKEOVER_SNAPSHOT_MAX_BYTES="1048576")
     try:
         r = _sp.run(["python3", g, "takeover-state", "spec-006",
                      "--store-dir-fd", str(dir_fd), "--store-fd", str(ev_fd)],
                     capture_output=True, text=True,
-                    pass_fds=(dir_fd, ev_fd), cwd=tmp_path)
+                    pass_fds=(dir_fd, ev_fd), cwd=tmp_path, env=env)
         assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
         assert "TAKEOVER-STATE-REJECTED" in r.stderr, r.stderr
     finally:
