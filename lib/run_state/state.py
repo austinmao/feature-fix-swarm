@@ -206,11 +206,15 @@ class RunStore:
         # not a runtime input to validate.
         """
         now = _now()
+        # review-gate round 3 HIGH: mirror update_state's completed_at
+        # semantics — COALESCE so a non-complete transition never clears a
+        # completed_at set earlier, and landing on "complete" always sets it.
+        completed_at = now if to_state == "complete" else None
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.execute(
-                "UPDATE runs SET state = ?, updated_at = ? WHERE id = ? AND state = ?",
-                (to_state, now, run_id, from_state),
+                "UPDATE runs SET state = ?, updated_at = ?, completed_at = COALESCE(?, completed_at) WHERE id = ? AND state = ?",
+                (to_state, now, completed_at, run_id, from_state),
             )
             if cursor.rowcount == 0:
                 return False
