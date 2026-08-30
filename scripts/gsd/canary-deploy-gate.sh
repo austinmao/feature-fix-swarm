@@ -16,6 +16,17 @@
 # equivalent of canary-gate.sh's `git rev-parse HEAD` discipline: a
 # --digest flag would reproduce the caller-fabrication hole one layer out.
 #
+# DOUBLE-OBSERVATION (TOCTOU): the digest is observed TWICE through the same
+# FFS_DEPLOY_DIGEST_CMD seam — once before the probe, once again immediately
+# after it completes — with identical single-line/shape validation both
+# times. A deployment that flips from digest A to digest B mid-probe would
+# otherwise let B's healthy response mint a PASS row for A, making an
+# unprobed artifact promotable. On any mismatch between the two observations
+# the wrapper refuses with CANARY-DEPLOY-DIGEST-CHANGED (exit 2, zero rows)
+# regardless of the probe's own outcome — a moved deployment is neither a
+# pass nor a fail for either digest. Each observation's own validation
+# failures keep their existing UNOBSERVED/INVALID refusal semantics.
+#
 # D-02: one row per observed digest, not per deploy surface. Rows key by
 # the observed digest, matching _canary_bound_ok's exact-string semantics.
 # One digest serving N surfaces needs one passing row; an operator wanting
@@ -76,38 +87,54 @@ PROBE_TIMEOUT="${FFS_DEPLOY_PROBE_TIMEOUT:-300}"
 # shellcheck disable=SC1091 source=./run-bounded.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/run-bounded.sh"
 
-# Step 3: observe the digest — bounded, stdout captured, set -e suspended so
-# a nonzero rc (including 124 timeout) is handled explicitly, never a hard
-# script exit.
-set +e
-OBSERVED_DIGEST="$(run_bounded "$DIGEST_TIMEOUT" bash -c "$DEPLOY_DIGEST_CMD")"
-DIGEST_RC=$?
-set -e
-if [ "$DIGEST_RC" -ne 0 ]; then
-  echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-UNOBSERVED — digest-query command failed or timed out (rc $DIGEST_RC)" >&2
-  exit 2
-fi
-
-# Step 4: validate captured stdout, IN THIS ORDER. The newline check MUST
-# precede the pattern check — grep -E matches per line, so a two-line
-# output whose second line happens to be well-formed digest-shaped would
-# otherwise slip through.
 DEPLOY_DIGEST_ERE='^[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9._-]*)?@sha256:[0-9a-f]{64}$'
 # Mirror of lib/gates.py:1195 ARTIFACT_DIGEST_PAT — POSIX-ERE transcription
 # with (?:...) non-capturing groups rewritten as plain groups (identical
 # matching). A bats vector table pins the two together.
-if [ -z "$OBSERVED_DIGEST" ]; then
-  echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query produced empty output" >&2
-  exit 2
-fi
-case "$OBSERVED_DIGEST" in
-  *$'\n'*)
-    echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query produced multi-line output" >&2
-    exit 2
-    ;;
-esac
-if ! echo "$OBSERVED_DIGEST" | grep -Eq "$DEPLOY_DIGEST_ERE"; then
-  echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query output '$OBSERVED_DIGEST' is not digest-shaped (a bare commit sha is canary-gate.sh's surface, not this wrapper's)" >&2
+
+# Observe the digest once — bounded, stdout captured, set -e suspended so a
+# nonzero rc (including 124 timeout) is handled explicitly, never a hard
+# script exit. Prints the digest on stdout and returns 0 on success; on
+# failure prints the typed refusal to stderr itself and returns 2 (a
+# command-substitution call site can't read variables this function sets —
+# it runs in a subshell — so the message is emitted here, not signaled
+# back). Called twice (pre- and post-probe, see DOUBLE-OBSERVATION above)
+# so the validation logic lives in exactly one place; $3 is an optional
+# message suffix distinguishing the post-probe confirmation call.
+_observe_digest() {
+  local _timeout="$1" _cmd="$2" _suffix="${3:-}" _digest _rc
+  set +e
+  _digest="$(run_bounded "$_timeout" bash -c "$_cmd")"
+  _rc=$?
+  set -e
+  if [ "$_rc" -ne 0 ]; then
+    echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-UNOBSERVED — digest-query command failed or timed out (rc $_rc)${_suffix}" >&2
+    return 2
+  fi
+  # Validate, IN THIS ORDER. The newline check MUST precede the pattern
+  # check — grep -E matches per line, so a two-line output whose second
+  # line happens to be well-formed digest-shaped would otherwise slip
+  # through.
+  if [ -z "$_digest" ]; then
+    echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query produced empty output${_suffix}" >&2
+    return 2
+  fi
+  case "$_digest" in
+    *$'\n'*)
+      echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query produced multi-line output${_suffix}" >&2
+      return 2
+      ;;
+  esac
+  if ! echo "$_digest" | grep -Eq "$DEPLOY_DIGEST_ERE"; then
+    echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query output '$_digest' is not digest-shaped (a bare commit sha is canary-gate.sh's surface, not this wrapper's)${_suffix}" >&2
+    return 2
+  fi
+  printf '%s' "$_digest"
+  return 0
+}
+
+# Step 3-4: pre-probe observation.
+if ! OBSERVED_DIGEST="$(_observe_digest "$DIGEST_TIMEOUT" "$DEPLOY_DIGEST_CMD")"; then
   exit 2
 fi
 
@@ -124,6 +151,18 @@ if [ "$PROBE_RC" -eq 0 ]; then
   PASS_VAL="true"
 else
   PASS_VAL="false"
+fi
+
+# Step 5b (TOCTOU): re-observe immediately after the probe completes, same
+# seam, same validation. Mismatch refuses regardless of the probe's own
+# outcome (see DOUBLE-OBSERVATION above) — checked BEFORE recording, so a
+# flipped deployment records nothing for either digest.
+if ! CONFIRM_DIGEST="$(_observe_digest "$DIGEST_TIMEOUT" "$DEPLOY_DIGEST_CMD" " (post-probe confirmation)")"; then
+  exit 2
+fi
+if [ "$CONFIRM_DIGEST" != "$OBSERVED_DIGEST" ]; then
+  echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-CHANGED — digest moved from ${OBSERVED_DIGEST} to ${CONFIRM_DIGEST} during the probe window; refusing (neither a pass nor a fail for either digest)" >&2
+  exit 2
 fi
 
 # Step 6: resolve this script's OWN repo root and lib/gates.py — mirrors
