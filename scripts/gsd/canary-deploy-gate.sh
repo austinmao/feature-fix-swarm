@@ -190,6 +190,12 @@ _observe_digest() {
 # regular file; an existing path not owned by this process's uid. A path
 # that does not exist yet is safe (the truncate is about to create it).
 # Prints the path and the violation class ONLY — never file content.
+# Residual (accepted): the check-then-use pair is itself raceable by a
+# writer in the seam directory — but that writer sits in the SAME env trust
+# boundary that supplies FFS_DEPLOY_PROBE_CMD, so it could forge the digest
+# more directly; point the seam at a private, trusted directory. Integrity
+# beyond that is the store's tamper scan + permissions, never this recorder
+# (same boundary record_canary_evidence documents).
 _probe_digest_file_safe() {
   local _p="$1"
   if [ -L "$_p" ]; then
