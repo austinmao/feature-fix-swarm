@@ -38,6 +38,14 @@
 # missing/malformed content refuses and records nothing, same as above.
 # When unset, current double-observation behavior stands unchanged.
 #
+# PROBE-DIGEST-FILE PATH SAFETY: that path can live in a writable shared
+# directory, so it is checked — BEFORE truncating and AGAIN before reading
+# — for a symlink (dangling or not), a non-regular file, or an existing
+# file not owned by this process; any of those refuses with
+# CANARY-DEPLOY-PROBE-DIGEST-UNSAFE and records nothing. The read is capped
+# (head -c 4096) and its raw content is NEVER echoed in any error/output —
+# only the path and the violation class are.
+#
 # D-02: one row per observed digest, not per deploy surface. Rows key by
 # the observed digest, matching _canary_bound_ok's exact-string semantics.
 # One digest serving N surfaces needs one passing row; an operator wanting
@@ -170,6 +178,37 @@ _observe_digest() {
   return 0
 }
 
+# The optional probe-digest-file path could live in a writable shared
+# directory — same operator-configuration trust class as the command seams,
+# but a symlink there would redirect our truncate/read to an arbitrary file
+# this process can touch, and a swapped-in regular file's raw bytes could
+# otherwise leak through an error message (mirrors publish-scanned-handoff.sh's
+# `[ -L ]` symlink refusal on artifact paths). Checked BEFORE truncating and
+# AGAIN before reading — the untrusted probe runs between those two calls and
+# could swap the path out from under the first check. Refuses on: the path
+# is a symlink (dangling or not); an existing path that is not a plain
+# regular file; an existing path not owned by this process's uid. A path
+# that does not exist yet is safe (the truncate is about to create it).
+# Prints the path and the violation class ONLY — never file content.
+_probe_digest_file_safe() {
+  local _p="$1"
+  if [ -L "$_p" ]; then
+    echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-UNSAFE — FFS_DEPLOY_PROBE_DIGEST_FILE is a symlink: $_p" >&2
+    return 1
+  fi
+  if [ -e "$_p" ]; then
+    if [ ! -f "$_p" ]; then
+      echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-UNSAFE — FFS_DEPLOY_PROBE_DIGEST_FILE is not a regular file: $_p" >&2
+      return 1
+    fi
+    if [ ! -O "$_p" ]; then
+      echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-UNSAFE — FFS_DEPLOY_PROBE_DIGEST_FILE is not owned by this process: $_p" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
 # Step 3-4: pre-probe observation.
 if ! OBSERVED_DIGEST="$(_observe_digest "$DIGEST_TIMEOUT" "$DEPLOY_DIGEST_CMD")"; then
   exit 2
@@ -180,6 +219,9 @@ fi
 # able to satisfy the post-probe check.
 PROBE_DIGEST_FILE="${FFS_DEPLOY_PROBE_DIGEST_FILE:-}"
 if [ -n "$PROBE_DIGEST_FILE" ]; then
+  if ! _probe_digest_file_safe "$PROBE_DIGEST_FILE"; then
+    exit 2
+  fi
   : > "$PROBE_DIGEST_FILE"
 fi
 
@@ -216,7 +258,13 @@ fi
 # the probe itself tested, closing the in-window flip double-observation
 # alone cannot see.
 if [ -n "$PROBE_DIGEST_FILE" ]; then
-  PROBE_DIGEST="$(cat "$PROBE_DIGEST_FILE" 2>/dev/null || true)"
+  if ! _probe_digest_file_safe "$PROBE_DIGEST_FILE"; then
+    exit 2
+  fi
+  # head -c caps the read — a swapped-in large file can't be slurped into
+  # this process even though the safety check above already rejects
+  # anything the truncate itself didn't create as a plain regular file.
+  PROBE_DIGEST="$(head -c 4096 "$PROBE_DIGEST_FILE" 2>/dev/null || true)"
   PROBE_SHAPE="$(_digest_shape_check "$PROBE_DIGEST")"
   case "$PROBE_SHAPE" in
     empty)
@@ -228,7 +276,10 @@ if [ -n "$PROBE_DIGEST_FILE" ]; then
       exit 2
       ;;
     badshape)
-      echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-INVALID — FFS_DEPLOY_PROBE_DIGEST_FILE content '$PROBE_DIGEST' is not digest-shaped" >&2
+      # Never echo the file's content here — it can be arbitrary bytes from
+      # whatever was actually at this path (see _probe_digest_file_safe
+      # above for why that's a real, not hypothetical, risk).
+      echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-INVALID — FFS_DEPLOY_PROBE_DIGEST_FILE content is not digest-shaped" >&2
       exit 2
       ;;
   esac

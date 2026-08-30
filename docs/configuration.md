@@ -183,11 +183,11 @@ so one phase's findings never block another phase's wall.
 | `CANARY_DIFF_BASE` | `origin/main` | `scripts/gsd/canary-gate.sh:32` | Base ref for the web-touch diff |
 | `CANARY_WEB_PATTERN` | fixed ERE | `scripts/gsd/canary-gate.sh:61` | What counts as a web-touching file |
 | `CANARY_GATE_ALLOW_STALE` | `0` | `scripts/gsd/canary-gate.sh:112` | Bypasses only the results-newer-than-HEAD check |
-| `FFS_DEPLOY_DIGEST_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:91` | Shell command whose stdout is the digest actually deployed. Run TWICE — once before the probe, once again immediately after — and the two observations must be byte-identical or the run is refused |
-| `FFS_DEPLOY_PROBE_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:92` | Post-deploy health/smoke command; its exit code is the recorded pass/fail |
-| `FFS_DEPLOY_PROBE_DIGEST_FILE` | unset (optional) | `scripts/gsd/canary-deploy-gate.sh:181` | Path the probe writes the digest it actually tested (single line, same shape rule as the query seam). Truncated before the probe runs so stale content can never satisfy it; missing/empty/malformed content after the probe, or a mismatch against the observed digest, refuses and records nothing — even with a passing probe. Closes an A→B→A flip entirely inside the probe window, which double-observation alone cannot see |
-| `FFS_DEPLOY_DIGEST_TIMEOUT` | `60` | `scripts/gsd/canary-deploy-gate.sh:98` | Wall-clock bound on each digest-query call (applies to both observations) |
-| `FFS_DEPLOY_PROBE_TIMEOUT` | `300` | `scripts/gsd/canary-deploy-gate.sh:99` | Wall-clock bound on the probe |
+| `FFS_DEPLOY_DIGEST_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:99` | Shell command whose stdout is the digest actually deployed. Run TWICE — once before the probe, once again immediately after — and the two observations must be byte-identical or the run is refused |
+| `FFS_DEPLOY_PROBE_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:100` | Post-deploy health/smoke command; its exit code is the recorded pass/fail |
+| `FFS_DEPLOY_PROBE_DIGEST_FILE` | unset (optional) | `scripts/gsd/canary-deploy-gate.sh:220` | Path the probe writes the digest it actually tested (single line, same shape rule as the query seam). Truncated before the probe runs so stale content can never satisfy it; missing/empty/malformed content after the probe, or a mismatch against the observed digest, refuses and records nothing — even with a passing probe. Closes an A→B→A flip entirely inside the probe window, which double-observation alone cannot see. The path is refused if it is a symlink, a non-regular file, or not owned by this process (checked before truncating AND before reading — `CANARY-DEPLOY-PROBE-DIGEST-UNSAFE`); the read is capped at 4096 bytes and its content is never echoed in any error |
+| `FFS_DEPLOY_DIGEST_TIMEOUT` | `60` | `scripts/gsd/canary-deploy-gate.sh:106` | Wall-clock bound on each digest-query call (applies to both observations) |
+| `FFS_DEPLOY_PROBE_TIMEOUT` | `300` | `scripts/gsd/canary-deploy-gate.sh:107` | Wall-clock bound on the probe |
 | `QA_BASE_URL` | unset (probes common ports) | `scripts/browser-proof.sh:72` | Pins the app URL. An unreachable pin is a hard `NO-SERVER`, no fallback probing |
 | `BROWSER_PROOF_PROBE_PORTS` | `3000 3001 5173 4321 8080 8000` | `scripts/browser-proof.sh:77` | Ports probed when `QA_BASE_URL` is unset |
 | `QA_FORCE_BROWSER` | `0` | `scripts/browser-proof.sh:47` | Forces `WEB-TOUCH:yes` regardless of diff |
@@ -208,6 +208,9 @@ probe's own outcome. Double-observation still admits an A→B→A flip entirely
 *inside* the probe window (both observations see A while the probe tested
 B); consumers whose probe can attest the digest it actually tested should
 set the optional `FFS_DEPLOY_PROBE_DIGEST_FILE` to close that residual gap.
+Because that path can live in a writable shared directory, the wrapper never
+truncates or reads through a symlink there and never echoes the file's raw
+content in an error — see the table row above.
 
 ### Run lifecycle
 

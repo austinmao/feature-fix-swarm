@@ -229,7 +229,7 @@ flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
 # (redirecting our truncate/read to a file the gate's privileges can touch)
 # or get swapped between the truncate and the read. Neither the truncate nor
 # the read may ever dereference a symlink there, and no error path may ever
-# echo the file's raw content (it could be a secret file's bytes).
+# echo the file's raw content (it could be a sensitive file's bytes).
 
 @test "probe-digest-file path is a symlink before truncation -> refusal, target left intact" {
   DIGEST="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
