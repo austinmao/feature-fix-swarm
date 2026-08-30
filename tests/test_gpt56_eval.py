@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -116,3 +117,87 @@ def test_run_one_produces_a_clean_row_end_to_end(tmp_path: Path) -> None:
     assert row["corpus_sha256"] == "c" * 64
     assert row["codex_cli_version"] == "0.150.0"
     assert row["retries"] == 0
+
+
+def test_run_one_flags_missing_required_concept(tmp_path: Path) -> None:
+    answer_text = "This response never states the required phrase."
+    events = [
+        _agent_message_event(json.dumps({"answer": answer_text})),
+        _turn_completed_event({}),
+    ]
+    stub = _write_cli_stub(tmp_path, events)
+
+    row = _run_with_stub(stub, tmp_path, must_include=["edge case"])
+
+    assert {"severity": "HIGH", "message": "missing required concept: edge case"} in row["findings"]
+    assert row["mandatory_gates_passed"] is False
+    assert row["requirement_coverage_regression"] is True
+
+
+def test_run_one_flags_non_json_event_line(tmp_path: Path) -> None:
+    stub = _write_cli_stub(tmp_path, ["this stdout line is not JSON at all"])
+
+    row = _run_with_stub(stub, tmp_path, must_include=["edge case"])
+
+    assert {"severity": "HIGH", "message": "missing required concept: edge case"} in row["findings"]
+    assert {"severity": "HIGH", "message": "non-JSON CLI event"} in row["findings"]
+    assert (
+        {"severity": "HIGH", "message": "final answer did not match the JSON schema"}
+        in row["findings"]
+    )
+    assert row["mandatory_gates_passed"] is False
+    assert row["requirement_coverage_regression"] is True
+
+
+def test_run_one_flags_answer_that_is_not_schema_shaped(tmp_path: Path) -> None:
+    # Valid JSON, but the top-level value is an array — not an object with
+    # an "answer" field, so the schema lookup itself fails.
+    events = [
+        _agent_message_event(json.dumps(["not", "an", "object"])),
+        _turn_completed_event({}),
+    ]
+    stub = _write_cli_stub(tmp_path, events)
+
+    row = _run_with_stub(stub, tmp_path, must_include=["edge case"])
+
+    assert (
+        {"severity": "HIGH", "message": "final answer did not match the JSON schema"}
+        in row["findings"]
+    )
+    assert row["mandatory_gates_passed"] is False
+
+
+def test_run_one_stays_dirty_on_nonzero_exit_despite_clean_answer(tmp_path: Path) -> None:
+    answer_text = "This clean answer covers the edge case fully."
+    events = [
+        _agent_message_event(json.dumps({"answer": answer_text})),
+        _turn_completed_event({}),
+    ]
+    stub = _write_cli_stub(tmp_path, events, exit_code=3)
+
+    row = _run_with_stub(stub, tmp_path, must_include=["edge case"])
+
+    assert {"severity": "HIGH", "message": "Codex CLI exited 3"} in row["findings"]
+    assert row["mandatory_gates_passed"] is False
+    assert row["requirement_coverage_regression"] is False
+
+
+def test_run_one_stays_dirty_on_timeout_despite_clean_partial_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer_text = "This clean partial answer covers the edge case fully."
+    partial_stdout = (
+        _agent_message_event(json.dumps({"answer": answer_text})) + "\n"
+    )
+
+    def _raise_timeout(command, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=300, output=partial_stdout)
+
+    monkeypatch.setattr(RUNNER.subprocess, "run", _raise_timeout)
+
+    row = _run_with_stub(
+        str(tmp_path / "unused-cli-stub"), tmp_path, must_include=["edge case"]
+    )
+
+    assert {"severity": "HIGH", "message": "Codex CLI exited 124"} in row["findings"]
+    assert row["mandatory_gates_passed"] is False
