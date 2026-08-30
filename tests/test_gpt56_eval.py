@@ -149,6 +149,31 @@ def test_run_one_flags_non_json_event_line(tmp_path: Path) -> None:
     assert row["requirement_coverage_regression"] is True
 
 
+def test_run_one_treats_a_non_object_json_event_line_as_malformed(tmp_path: Path) -> None:
+    # Valid JSON, but not a JSON object at all (bare scalar / array). These
+    # must degrade the row the same way an undecodable line does, not crash
+    # run_one with AttributeError from event.get(...) on a non-dict.
+    answer_text = "This clean answer covers the edge case fully."
+    usage = {"input_tokens": 12, "output_tokens": 3}
+    events = [
+        "42",
+        "[1, 2]",
+        _agent_message_event(json.dumps({"answer": answer_text})),
+        _turn_completed_event(usage),
+    ]
+    stub = _write_cli_stub(tmp_path, events)
+
+    row = _run_with_stub(stub, tmp_path, must_include=["edge case"])
+
+    malformed_finding = {"severity": "HIGH", "message": "non-JSON CLI event"}
+    assert row["findings"].count(malformed_finding) == 2
+    assert row["answer_sha256"] == hashlib.sha256(answer_text.encode()).hexdigest()
+    assert row["usage"] == usage
+    assert {"severity": "HIGH", "message": "missing required concept: edge case"} not in row["findings"]
+    assert row["mandatory_gates_passed"] is False
+    assert row["requirement_coverage_regression"] is False
+
+
 def test_run_one_flags_answer_that_is_not_schema_shaped(tmp_path: Path) -> None:
     # Valid JSON, but the top-level value is an array — not an object with
     # an "answer" field, so the schema lookup itself fails.
