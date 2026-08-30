@@ -132,6 +132,39 @@ PYEOF
   [[ "$ENDED" > "$CREATED" ]]
 }
 
+# ── TOCTOU: digest must be re-confirmed after the probe ─────────────────────
+# A digest observed only BEFORE the probe lets a deployment flip from A to B
+# mid-probe: B's healthy response would otherwise record a PASS row for A,
+# making an unprobed artifact promotable. The wrapper must observe TWICE
+# (pre- and post-probe, same seam, same validation) and refuse on mismatch.
+
+flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
+  printf "if [ -f '%s' ]; then printf '%%s\\n' '%s'; else touch '%s'; printf '%%s\\n' '%s'; fi" \
+    "$1" "$3" "$1" "$2"
+}
+
+@test "digest flips mid-probe with a PASSING probe -> DIGEST-CHANGED, zero rows" {
+  DIGEST_A="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  DIGEST_B="app@sha256:$(printf 'b%.0s' $(seq 1 64))"
+  CNT="$BATS_TEST_TMPDIR/flip-count-pass"
+  DIGEST_CMD="$(flip_digest_cmd "$CNT" "$DIGEST_A" "$DIGEST_B")"
+  run_wrapper "$DIGEST_CMD" "true"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-DIGEST-CHANGED"* ]]
+  [ "$(row_count)" = "0" ]
+}
+
+@test "digest flips mid-probe with a FAILING probe -> still DIGEST-CHANGED, zero rows (mismatch outranks probe outcome)" {
+  DIGEST_A="app@sha256:$(printf 'c%.0s' $(seq 1 64))"
+  DIGEST_B="app@sha256:$(printf 'd%.0s' $(seq 1 64))"
+  CNT="$BATS_TEST_TMPDIR/flip-count-fail"
+  DIGEST_CMD="$(flip_digest_cmd "$CNT" "$DIGEST_A" "$DIGEST_B")"
+  run_wrapper "$DIGEST_CMD" "exit 7"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-DIGEST-CHANGED"* ]]
+  [ "$(row_count)" = "0" ]
+}
+
 # ── digest-query invalid output (ordering + shape) ─────────────────────────
 
 @test "digest-query emits nothing -> DIGEST-INVALID, zero rows" {
