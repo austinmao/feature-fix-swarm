@@ -43,6 +43,10 @@ run-state abort <run_id>
 
 `--tokens` accepts K/M/B/T suffix: `250K`, `1.5M`, `1B`, `2T`.
 
+`update`, `complete`, `abort`, and `audit` exit nonzero with a single JSON
+error line on stderr (`{"error": "not_found", "run_id": "<id>"}`) when
+`run_id` names a run that does not exist.
+
 ## Files
 
 | Path | Purpose |
