@@ -67,6 +67,24 @@ assert_single_refusal() {
   [ "$(printf '%s\n' "$output" | grep -c '^Unblock (operator): ')" -eq 1 ]
 }
 
+# GH-152: add a large inert top-level padding key to a JSON file without
+# touching any field a reader classifies on (see lib/gates.py:3052
+# "unrelated top-level fields survive").  Used to inflate the shared
+# evidence store or the takeover record past the legacy 1 MiB literal
+# while keeping every field the wall actually reads unchanged.
+pad_json_file() {
+  local file="$1" bytes="$2"
+  python3 - "$file" "$bytes" <<'PY'
+import json, sys
+path, n = sys.argv[1], int(sys.argv[2])
+with open(path) as f:
+    d = json.load(f)
+d["_pad"] = "x" * n
+with open(path, "w") as f:
+    json.dump(d, f)
+PY
+}
+
 seed_live_authority() {
   local now="$(date +%s)"
   python3 - "$STORE" "$now" <<'PY'
@@ -100,6 +118,38 @@ PY
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 0 ]
   [ "$output" = "TAKEOVER-OK" ]
+}
+
+@test "GH-152 wall accepts a store larger than the legacy ceiling at the default cap" {
+  write_live_takeover_fixture "$(date +%s)"
+  pad_json_file "$STORE" 1200000
+  [ "$(wc -c < "$STORE")" -gt 1048576 ]
+  run env -u FFS_TAKEOVER_SNAPSHOT_MAX_BYTES GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  [ "$output" = "TAKEOVER-OK" ]
+  [[ "$output" != *record-mismatch* ]]
+  [[ "$output" != *TAKEOVER-SNAPSHOT-TOO-LARGE* ]]
+  [[ "$output" != *"unsafe regular file"* ]]
+}
+
+@test "GH-152 wall still refuses a store past a lowered cap with unchanged tokens" {
+  write_live_takeover_fixture "$(date +%s)"
+  pad_json_file "$STORE" 1200000
+  [ "$(wc -c < "$STORE")" -gt 1048576 ]
+  run env GATES_STORE="$STORE" FFS_TAKEOVER_SNAPSHOT_MAX_BYTES=1048576 bash "$WALL" --run-id spec-006
+  assert_single_refusal record-mismatch
+}
+
+@test "GH-152 record larger than the legacy ceiling survives the record path" {
+  write_live_takeover_fixture "$(date +%s)"
+  local record="$(dirname "$STORE")/takeover/spec-006.json"
+  pad_json_file "$record" 1200000
+  [ "$(wc -c < "$record")" -gt 1048576 ]
+  run env -u FFS_TAKEOVER_SNAPSHOT_MAX_BYTES GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  [ "$output" = "TAKEOVER-OK" ]
+  [[ "$output" != *decoy-store* ]]
+  [[ "$output" != *record-mismatch* ]]
 }
 
 @test "absence split is explicit and expectation makes missing record refuse" {
@@ -150,14 +200,17 @@ PY
 }
 
 write_padded_record() {
-  # Direct production writer invocation with the cap-boundary pad seam.
+  # Direct production writer invocation with the cap-boundary pad seam. The
+  # ceiling is pinned via the knob (GH-152) rather than relying on the
+  # writer's raised default, so this still tests the same byte boundary.
   local store="$1" pad="$2"
   mkdir -p "$(dirname "$store")"
   run env GATES_STORE="$store" TAKEOVER_TEST_RECORD_PAD="$pad" \
+    FFS_TAKEOVER_SNAPSHOT_MAX_BYTES=1048576 \
     python3 "$ROOT/scripts/gsd/takeover-record.py" --gates "$GATES" --spec-id 006 --run-id spec-006
 }
 
-@test "writer publishes a record of exactly the consumer cap" {
+@test "writer publishes a record of exactly the configured cap" {
   # Measure the base serialized size and the per-pad-byte overhead, then pad
   # to exactly MAX_BYTES.  Store directory names share one length so the
   # embedded store path never skews the measurement.
@@ -171,7 +224,7 @@ write_padded_record() {
   write_padded_record "$BATS_TEST_TMPDIR/mA/evidence.json" $((1048576 - base - overhead))
   [ "$status" -eq 0 ]
   [ "$(wc -c < "$BATS_TEST_TMPDIR/mA/takeover/spec-006.json")" -eq 1048576 ]
-  # The wall's consumer accepts a record of exactly the cap.
+  # The wall's consumer accepts a record of exactly the configured cap.
   run python3 - "$BATS_TEST_TMPDIR/mA/takeover/spec-006.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))["ids"]["run_id"]=="spec-006"
@@ -179,7 +232,7 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "writer refuses a record one byte over the consumer cap before any publication" {
+@test "writer refuses a record one byte over the configured cap before any publication" {
   write_padded_record "$BATS_TEST_TMPDIR/m1/evidence.json" 0
   [ "$status" -eq 0 ]
   local base; base="$(wc -c < "$BATS_TEST_TMPDIR/m1/takeover/spec-006.json")"
