@@ -80,10 +80,15 @@ spec.loader.exec_module(gates)
 
 store = Path(store)
 try:
+    rc = gates.run_gate(
+        store, "stg", ["python3", "-c", "raise SystemExit(0)"],
+        artifact=artifact,
+    )
+    assert rc == 0, f"run_gate returned {rc}"
     gates.grant_actions(store, "run-1", ["deploy:prod-web"])
     gates.record_promotion(
         store, "run-1", from_env="staging", to_env="prod",
-        surface="web", artifact=artifact, evidence_ids=[],
+        surface="web", artifact=artifact, evidence_ids=["stg"],
     )
     bound = gates.check_promotion(store, "run-1", "prod", "web", artifact)
     print("BOUND" if bound else "REFUSED")
