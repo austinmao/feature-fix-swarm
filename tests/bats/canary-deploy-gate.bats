@@ -224,6 +224,56 @@ flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
   [ "$(row_count)" = "0" ]
 }
 
+# ── FFS_DEPLOY_PROBE_DIGEST_FILE: symlink/ownership hardening ──────────────
+# A writable shared directory means the configured path could be a symlink
+# (redirecting our truncate/read to a file the gate's privileges can touch)
+# or get swapped between the truncate and the read. Neither the truncate nor
+# the read may ever dereference a symlink there, and no error path may ever
+# echo the file's raw content (it could be a secret file's bytes).
+
+@test "probe-digest-file path is a symlink before truncation -> refusal, target left intact" {
+  DIGEST="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+  TARGET="$BATS_TEST_TMPDIR/symlink-target"
+  printf 'target-content-marker\n' > "$TARGET"
+  LINK="$BATS_TEST_TMPDIR/symlink-probe-file"
+  ln -s "$TARGET" "$LINK"
+  GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
+    FFS_DEPLOY_PROBE_CMD="true" \
+    FFS_DEPLOY_PROBE_DIGEST_FILE="$LINK" run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-PROBE-DIGEST-UNSAFE"* ]]
+  [ "$(row_count)" = "0" ]
+  [ "$(cat "$TARGET")" = "target-content-marker" ]
+}
+
+@test "probe-digest-file path swapped to a symlink after truncate, before read -> refusal, zero rows" {
+  DIGEST="app@sha256:$(printf 'b%.0s' $(seq 1 64))"
+  TARGET="$BATS_TEST_TMPDIR/swap-target"
+  printf 'swap-target-content\n' > "$TARGET"
+  PROBE_FILE="$BATS_TEST_TMPDIR/swap-probe-file"
+  # deterministic swap: the probe command itself replaces the (wrapper-
+  # truncated) regular file with a symlink before the wrapper reads it back.
+  GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
+    FFS_DEPLOY_PROBE_CMD="rm -f '$PROBE_FILE'; ln -s '$TARGET' '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-PROBE-DIGEST-UNSAFE"* ]]
+  [ "$(row_count)" = "0" ]
+}
+
+@test "probe-digest-file with malformed multi-KB content -> refusal, content never echoed" {
+  DIGEST="app@sha256:$(printf 'c%.0s' $(seq 1 64))"
+  PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-huge"
+  SENTINEL="UNIQUE-SENTINEL-BYTES-MUST-NEVER-APPEAR-IN-OUTPUT"
+  GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
+    FFS_DEPLOY_PROBE_CMD="{ printf '%s' '$SENTINEL'; head -c 5000 /dev/zero | tr '\\0' 'x'; } > '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"CANARY-DEPLOY-PROBE-DIGEST-INVALID"* ]]
+  [ "$(row_count)" = "0" ]
+  [[ "$output" != *"$SENTINEL"* ]]
+}
+
 # ── digest-query invalid output (ordering + shape) ─────────────────────────
 
 @test "digest-query emits nothing -> DIGEST-INVALID, zero rows" {
