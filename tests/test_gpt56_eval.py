@@ -201,3 +201,101 @@ def test_run_one_stays_dirty_on_timeout_despite_clean_partial_output(
 
     assert {"severity": "HIGH", "message": "Codex CLI exited 124"} in row["findings"]
     assert row["mandatory_gates_passed"] is False
+
+
+def _corpus_matrix_rows() -> list[dict[str, object]]:
+    """Build the row shape production's main() actually emits: for each
+    real corpus fixture, each effort in its tier's matrix entry, times
+    repetitions 1 and 2 — no hand-picked synthetic tier/fixture counts."""
+    corpus = json.loads((ROOT / "evals/gpt56/corpus.json").read_text())
+    rows: list[dict[str, object]] = []
+    for fixture in corpus:
+        model, efforts = RUNNER.MATRIX[fixture["tier"]]
+        for effort in efforts:
+            for repetition in (1, 2):
+                rows.append(
+                    {
+                        "fixture_id": fixture["id"],
+                        "repetition": repetition,
+                        "tier": fixture["tier"],
+                        "model_id": model,
+                        "effort": effort,
+                        "mandatory_gates_passed": True,
+                        "findings": [],
+                        "requirement_coverage_regression": False,
+                    }
+                )
+    return rows
+
+
+def test_corpus_matrix_builder_yields_72_rows_12_per_effort() -> None:
+    rows = _corpus_matrix_rows()
+
+    assert len(rows) == 72
+    for tier, (_model, efforts) in RUNNER.MATRIX.items():
+        if len(efforts) < 2:
+            continue
+        for effort in efforts:
+            count = sum(1 for row in rows if row["tier"] == tier and row["effort"] == effort)
+            assert count == 12
+
+
+def test_selections_choose_lower_effort_for_real_corpus_matrix() -> None:
+    rows = _corpus_matrix_rows()
+
+    decision = RUNNER.selections(rows)
+
+    assert decision == {
+        tier: efforts[1]
+        for tier, (_model, efforts) in RUNNER.MATRIX.items()
+        if len(efforts) >= 2
+    }
+    assert "frontier" not in decision
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"findings": [{"severity": "HIGH", "message": "regression"}]},
+        {"requirement_coverage_regression": True},
+    ],
+)
+def test_selections_fall_back_to_higher_effort_on_dirty_lower_row_real_corpus(
+    mutation: dict[str, object],
+) -> None:
+    rows = _corpus_matrix_rows()
+    target = next(
+        row
+        for row in rows
+        if row["tier"] == "execution" and row["effort"] == RUNNER.MATRIX["execution"][1][1]
+    )
+    target.update(mutation)
+
+    decision = RUNNER.selections(rows)
+
+    assert decision["execution"] == RUNNER.MATRIX["execution"][1][0]
+    for tier, (_model, efforts) in RUNNER.MATRIX.items():
+        if tier == "execution" or len(efforts) < 2:
+            continue
+        assert decision[tier] == efforts[1]
+
+
+def test_selections_fail_closed_on_incomplete_real_corpus_matrix() -> None:
+    rows = _corpus_matrix_rows()
+    rows.pop()
+
+    with pytest.raises(SystemExit, match="incomplete volume evaluation matrix"):
+        RUNNER.selections(rows)
+
+
+def test_selections_fail_closed_on_dirty_higher_effort_baseline_real_corpus() -> None:
+    rows = _corpus_matrix_rows()
+    target = next(
+        row
+        for row in rows
+        if row["tier"] == "execution" and row["effort"] == RUNNER.MATRIX["execution"][1][0]
+    )
+    target["findings"] = [{"severity": "HIGH", "message": "regression"}]
+
+    with pytest.raises(SystemExit, match="higher-effort execution baseline failed"):
+        RUNNER.selections(rows)
