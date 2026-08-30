@@ -27,6 +27,17 @@
 # pass nor a fail for either digest. Each observation's own validation
 # failures keep their existing UNOBSERVED/INVALID refusal semantics.
 #
+# RESIDUAL (by design): an A->B->A double flip entirely INSIDE the probe
+# window defeats double-observation — both observations see A while the
+# probe itself tested B. A deployment lease would close this but is out of
+# reach for a vendor-neutral wrapper. Consumers whose probe can attest the
+# digest it tested SHOULD set FFS_DEPLOY_PROBE_DIGEST_FILE (optional) to
+# close it: the wrapper truncates that path before running the probe (so
+# stale content can never satisfy it), then after the probe requires its
+# content to byte-match both surrounding observations — mismatch or
+# missing/malformed content refuses and records nothing, same as above.
+# When unset, current double-observation behavior stands unchanged.
+#
 # D-02: one row per observed digest, not per deploy surface. Rows key by
 # the observed digest, matching _canary_bound_ok's exact-string semantics.
 # One digest serving N surfaces needs one passing row; an operator wanting
@@ -58,6 +69,9 @@
 # Env:
 #   FFS_DEPLOY_DIGEST_CMD       (required) stdout is the deployed digest
 #   FFS_DEPLOY_PROBE_CMD        (required) post-deploy health/smoke command
+#   FFS_DEPLOY_PROBE_DIGEST_FILE (optional) path the probe writes the digest
+#                                it actually tested; closes the in-probe-window
+#                                flip double-observation alone cannot see
 #   FFS_DEPLOY_DIGEST_TIMEOUT   default 60  — wall-clock bound, digest query
 #   FFS_DEPLOY_PROBE_TIMEOUT    default 300 — wall-clock bound, probe
 #   GSD_RUN_ID                  default unattributed — run_id on the row
@@ -92,6 +106,32 @@ DEPLOY_DIGEST_ERE='^[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9._-]*)?@s
 # with (?:...) non-capturing groups rewritten as plain groups (identical
 # matching). A bats vector table pins the two together.
 
+# Classify a candidate digest string against DEPLOY_DIGEST_ERE, IN THIS
+# ORDER: empty check, then newline check, then pattern. The newline check
+# MUST precede the pattern check — grep -E matches per line, so a two-line
+# value whose second line happens to be well-formed digest-shaped would
+# otherwise slip through. Prints one of ok|empty|multiline|badshape to
+# stdout. Shared by both the digest-query seam and the optional
+# FFS_DEPLOY_PROBE_DIGEST_FILE seam so the shape rule lives in one place.
+_digest_shape_check() {
+  local _d="$1"
+  if [ -z "$_d" ]; then
+    printf 'empty'
+    return
+  fi
+  case "$_d" in
+    *$'\n'*)
+      printf 'multiline'
+      return
+      ;;
+  esac
+  if echo "$_d" | grep -Eq "$DEPLOY_DIGEST_ERE"; then
+    printf 'ok'
+  else
+    printf 'badshape'
+  fi
+}
+
 # Observe the digest once — bounded, stdout captured, set -e suspended so a
 # nonzero rc (including 124 timeout) is handled explicitly, never a hard
 # script exit. Prints the digest on stdout and returns 0 on success; on
@@ -102,7 +142,7 @@ DEPLOY_DIGEST_ERE='^[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9._-]*)?@s
 # so the validation logic lives in exactly one place; $3 is an optional
 # message suffix distinguishing the post-probe confirmation call.
 _observe_digest() {
-  local _timeout="$1" _cmd="$2" _suffix="${3:-}" _digest _rc
+  local _timeout="$1" _cmd="$2" _suffix="${3:-}" _digest _rc _shape
   set +e
   _digest="$(run_bounded "$_timeout" bash -c "$_cmd")"
   _rc=$?
@@ -111,24 +151,21 @@ _observe_digest() {
     echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-UNOBSERVED — digest-query command failed or timed out (rc $_rc)${_suffix}" >&2
     return 2
   fi
-  # Validate, IN THIS ORDER. The newline check MUST precede the pattern
-  # check — grep -E matches per line, so a two-line output whose second
-  # line happens to be well-formed digest-shaped would otherwise slip
-  # through.
-  if [ -z "$_digest" ]; then
-    echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query produced empty output${_suffix}" >&2
-    return 2
-  fi
-  case "$_digest" in
-    *$'\n'*)
+  _shape="$(_digest_shape_check "$_digest")"
+  case "$_shape" in
+    empty)
+      echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query produced empty output${_suffix}" >&2
+      return 2
+      ;;
+    multiline)
       echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query produced multi-line output${_suffix}" >&2
       return 2
       ;;
+    badshape)
+      echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query output '$_digest' is not digest-shaped (a bare commit sha is canary-gate.sh's surface, not this wrapper's)${_suffix}" >&2
+      return 2
+      ;;
   esac
-  if ! echo "$_digest" | grep -Eq "$DEPLOY_DIGEST_ERE"; then
-    echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-INVALID — digest-query output '$_digest' is not digest-shaped (a bare commit sha is canary-gate.sh's surface, not this wrapper's)${_suffix}" >&2
-    return 2
-  fi
   printf '%s' "$_digest"
   return 0
 }
@@ -136,6 +173,14 @@ _observe_digest() {
 # Step 3-4: pre-probe observation.
 if ! OBSERVED_DIGEST="$(_observe_digest "$DIGEST_TIMEOUT" "$DEPLOY_DIGEST_CMD")"; then
   exit 2
+fi
+
+# Optional probe-side attestation seam (see RESIDUAL above). Truncate BEFORE
+# the probe runs — a stale value left from a prior invocation must never be
+# able to satisfy the post-probe check.
+PROBE_DIGEST_FILE="${FFS_DEPLOY_PROBE_DIGEST_FILE:-}"
+if [ -n "$PROBE_DIGEST_FILE" ]; then
+  : > "$PROBE_DIGEST_FILE"
 fi
 
 # Step 5: bounded probe run; its rc IS the recorded pass/fail (D-03/D-04).
@@ -163,6 +208,34 @@ fi
 if [ "$CONFIRM_DIGEST" != "$OBSERVED_DIGEST" ]; then
   echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-CHANGED — digest moved from ${OBSERVED_DIGEST} to ${CONFIRM_DIGEST} during the probe window; refusing (neither a pass nor a fail for either digest)" >&2
   exit 2
+fi
+
+# Step 5c (optional, see RESIDUAL above): probe-attested digest must be
+# present, shape-valid, and byte-match the (already agreeing) observations.
+# This is full probe-to-artifact binding — the recorded digest is the one
+# the probe itself tested, closing the in-window flip double-observation
+# alone cannot see.
+if [ -n "$PROBE_DIGEST_FILE" ]; then
+  PROBE_DIGEST="$(cat "$PROBE_DIGEST_FILE" 2>/dev/null || true)"
+  PROBE_SHAPE="$(_digest_shape_check "$PROBE_DIGEST")"
+  case "$PROBE_SHAPE" in
+    empty)
+      echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-INVALID — FFS_DEPLOY_PROBE_DIGEST_FILE was empty after the probe; a consumer that opts in must have the probe write the digest it tested" >&2
+      exit 2
+      ;;
+    multiline)
+      echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-INVALID — FFS_DEPLOY_PROBE_DIGEST_FILE contained multi-line output" >&2
+      exit 2
+      ;;
+    badshape)
+      echo "canary-deploy-gate: CANARY-DEPLOY-PROBE-DIGEST-INVALID — FFS_DEPLOY_PROBE_DIGEST_FILE content '$PROBE_DIGEST' is not digest-shaped" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$PROBE_DIGEST" != "$OBSERVED_DIGEST" ]; then
+    echo "canary-deploy-gate: CANARY-DEPLOY-DIGEST-CHANGED — probe-attested digest ${PROBE_DIGEST} does not match the observed digest ${OBSERVED_DIGEST}; refusing (neither a pass nor a fail for either digest)" >&2
+    exit 2
+  fi
 fi
 
 # Step 6: resolve this script's OWN repo root and lib/gates.py — mirrors
