@@ -73,7 +73,7 @@ fi
 DIGEST_TIMEOUT="${FFS_DEPLOY_DIGEST_TIMEOUT:-60}"
 PROBE_TIMEOUT="${FFS_DEPLOY_PROBE_TIMEOUT:-300}"
 
-# shellcheck source=./run-bounded.sh
+# shellcheck disable=SC1091 source=./run-bounded.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/run-bounded.sh"
 
 # Step 3: observe the digest — bounded, stdout captured, set -e suspended so
