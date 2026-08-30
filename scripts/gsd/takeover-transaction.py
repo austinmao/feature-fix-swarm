@@ -28,6 +28,25 @@ sys.modules[_GATES_SPEC.name] = _GATES
 _GATES_SPEC.loader.exec_module(_GATES)
 
 
+def _bounded_max_bytes() -> int:
+    """Bound the shared takeover evidence/record ceiling.
+
+    GH-152: the ceiling exists to bound memory on a hostile or oversized
+    artifact; a consumer shared store past the old 1 MiB literal is a
+    legitimate size, not a takeover conflict. Override with
+    FFS_TAKEOVER_SNAPSHOT_MAX_BYTES; garbage, empty, or an absent variable
+    falls back to the default. There is no sentinel that disables the
+    ceiling — the weakest reachable setting is the floor, identical to the
+    behavior this replaces.
+    """
+    raw = os.environ.get("FFS_TAKEOVER_SNAPSHOT_MAX_BYTES", "")
+    try:
+        value = int(raw.strip())
+    except (ValueError, TypeError):
+        return 33554432
+    return max(1048576, min(value, 268435456))
+
+
 def inheritable(fd: int) -> str:
     os.set_inheritable(fd, True)
     return str(fd)
@@ -54,7 +73,7 @@ def recover_takeover_transaction(store: str, store_dir_fd: int, takeover_dir_fd:
 def _record_binds(record_fd: int, store: str, run_id: str) -> bool:
     """Validate hostile record claims before any evidence bytes are read."""
     st = os.fstat(record_fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_size > 1024 * 1024:
+    if not stat.S_ISREG(st.st_mode) or st.st_size > _bounded_max_bytes():
         return False
     os.lseek(record_fd, 0, os.SEEK_SET)
     # Full-read loop to the exact fstat size: a short kernel read must never
@@ -113,10 +132,23 @@ def _capture_snapshot(evidence_fd: int) -> tuple[int, str]:
     """Capture immutable evidence bytes, rejecting every torn read."""
     for _ in range(3):
         before = os.fstat(evidence_fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _bounded_max_bytes():
             raise ValueError("invalid evidence")
         os.lseek(evidence_fd, 0, os.SEEK_SET)
-        raw = os.read(evidence_fd, before.st_size)
+        # Full-read loop to the exact fstat size: a short kernel read must
+        # never be misjudged as a torn evidence file — same discipline as
+        # takeover-io.py:read_regular and _record_binds above. The loop
+        # removes a *false* torn signal; the before/after fstat comparison
+        # below still catches a *real* one.
+        chunks: list[bytes] = []
+        total = 0
+        while total < before.st_size:
+            chunk = os.read(evidence_fd, min(65536, before.st_size - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        raw = b"".join(chunks)
         after = os.fstat(evidence_fd)
         if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
                 == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
