@@ -10,7 +10,7 @@ way out.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) **or** [Codex
   CLI](https://github.com/openai/codex). Both is better — that's what enables
   cross-vendor review
-- Node 22+, npm 10+, Python 3.9+, `git`
+- Node 24+, npm 10+, Python 3.11+, `git`
 
 ## Step 1: install
 

@@ -26,15 +26,18 @@ make_stub_path() {
   local repo="$BATS_TEST_TMPDIR/repo" home="$BATS_TEST_TMPDIR/home" tool
   mkdir -p "$repo/node_modules/@opengsd/gsd-core" "$home"
   git -C "$repo" init -q
-  printf '{"version": "1.11.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
+  printf '{"version": "1.13.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
   for skill in prompt-master socratic; do
     mkdir -p "$home/.agents/skills/$skill"
     touch "$home/.agents/skills/$skill/SKILL.md"
   done
-  for tool in node npm claude gh jq shasum ps; do
+  for tool in claude gh jq shasum ps; do
     printf '#!/bin/sh\nexit 0\n' > "$STUBS/$tool"
     chmod +x "$STUBS/$tool"
   done
+  printf '#!/bin/sh\nprintf "v24.0.0\\n"\n' > "$STUBS/node"
+  printf '#!/bin/sh\nprintf "10.0.0\\n"\n' > "$STUBS/npm"
+  chmod +x "$STUBS/node" "$STUBS/npm"
   # python3 and git must be real (the script itself uses them); carry the
   # real filelock location past the fake HOME (pip --user installs are
   # HOME-relative)
@@ -43,6 +46,60 @@ make_stub_path() {
   run bash -c "cd '$repo' && PATH='$STUBS:$PATH' HOME='$home' PYTHONPATH='$pypath' bash '$SCRIPT' check"
   [ "$status" -eq 0 ]
   [[ "$output" != *"(required)"* ]]
+}
+
+@test "check rejects Node below 24 and reports the Node 24 remedy" {
+  printf '#!/bin/sh\nprintf "v23.9.0\\n"\n' > "$STUBS/node"
+  chmod +x "$STUBS/node"
+
+  run env PATH="$STUBS:$PATH" bash "$SCRIPT" check
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"MISSING  node (required)"* ]]
+  [[ "$output" == *"install or activate Node.js 24+"* ]]
+}
+
+@test "check rejects npm below 10 and reports the npm 10 remedy" {
+  printf '#!/bin/sh\nprintf "9.9.0\\n"\n' > "$STUBS/npm"
+  chmod +x "$STUBS/npm"
+
+  run env PATH="$STUBS:$PATH" bash "$SCRIPT" check
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"MISSING  npm (required)"* ]]
+  [[ "$output" == *"install or activate npm 10+"* ]]
+}
+
+@test "check accepts minimum versions after wrapper notice lines" {
+  printf '#!/bin/sh\nprintf "node wrapper notice x.y\\nv24.0.0\\n"\n' > "$STUBS/node"
+  printf '#!/bin/sh\nprintf "npm notice x.y\\n10.0.0\\n"\n' > "$STUBS/npm"
+  chmod +x "$STUBS/node" "$STUBS/npm"
+
+  run env PATH="$STUBS:$PATH" bash "$SCRIPT" check
+
+  [[ "$output" == *"ok       node"* ]]
+  [[ "$output" == *"ok       npm"* ]]
+}
+
+@test "install refuses Node below 24 before changing repo dependencies" {
+  printf '#!/bin/sh\nprintf "v23.9.0\\n"\n' > "$STUBS/node"
+  chmod +x "$STUBS/node"
+
+  run env PATH="$STUBS:$PATH" bash "$SCRIPT" install --yes
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DEPS: Node.js 24+ is required"* ]]
+}
+
+@test "install refuses npm below 10 before changing repo dependencies" {
+  printf '#!/bin/sh\nprintf "v24.0.0\\n"\n' > "$STUBS/node"
+  printf '#!/bin/sh\nprintf "9.9.0\\n"\n' > "$STUBS/npm"
+  chmod +x "$STUBS/node" "$STUBS/npm"
+
+  run env PATH="$STUBS:$PATH" bash "$SCRIPT" install --yes
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DEPS: npm 10+ is required"* ]]
 }
 
 @test "check exits 1 and names a remedy when a required binary is hidden" {

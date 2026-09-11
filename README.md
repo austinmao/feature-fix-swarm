@@ -68,7 +68,7 @@ Claude Code.
 
 ## Quick start
 
-You need macOS or Linux, Git, Bash or zsh, Node.js 22+ with npm 10+, Python
+You need macOS or Linux, Git, Bash or zsh, Node.js 24+ with npm 10+, Python
 3.11+, and at least one supported host: [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 or [Codex CLI](https://github.com/openai/codex).
 
@@ -120,7 +120,7 @@ and execution engine. It owns the `gsd-*` skills, agents, hooks, manifests,
 plan/execute/verify loop, and `.planning` state format.
 
 FFS does not fork or rewrite that engine. It exact-pins
-`@opengsd/gsd-core@1.10.0`, invokes GSD's own installer for complete Claude and
+`@opengsd/gsd-core@1.13.0`, invokes GSD's own installer for complete Claude and
 Codex profiles, and layers controls around it:
 
 | GSD provides | FFS adds |
@@ -140,8 +140,8 @@ on integration, safety, and proof.
 | Dependency | Required? | Installed by FFS? | Why it exists |
 | --- | ---: | ---: | --- |
 | Claude Code or Codex CLI | One required | No | The interactive agent host |
-| Open GSD Core `1.10.0` | Yes, exact pin | Yes, through its upstream installer | Planning, execution, verification, and runtime manifests |
-| Python 3.11+, Node 22+/npm 10+, Git, Bash/zsh | Yes | No | Installer, gates, tests, and worktrees |
+| Open GSD Core `1.13.0` | Yes, exact pin | Yes, through its upstream installer | Planning, execution, verification, and runtime manifests |
+| Python 3.11+, Node 24+/npm 10+, Git, Bash/zsh | Yes | No | Installer, gates, tests, and worktrees |
 | `prompt-master` at commit `d15eab…` | Yes | Yes, pinned and compatibility-patched | Host-aware prompt refinement without copying an unreviewed moving branch |
 | [`socratic`](https://github.com/m4vic/socratic) at commit `8c7e1f…` | Yes | Yes, pinned by default; skippable with `FFS_SKIP_SOCRATIC=1` | Pinned question bank the spec, plan-wall, plan-decompose, and review-gate seams slice from ([how it is used](docs/socratic.md)) |
 | The opposite host CLI | Recommended | No | Stronger cross-vendor adversarial review; otherwise review is marked degraded |
