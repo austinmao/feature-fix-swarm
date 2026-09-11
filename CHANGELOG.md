@@ -8,6 +8,13 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-09-11 — GSD Core 1.13.0 and Node 24 baseline)
+
+- Updated the exact `@opengsd/gsd-core` pin from 1.11.0 to 1.13.0 across
+  package metadata, installer/runtime constants, fixtures, and documentation.
+  The supported and CI-tested Node.js baseline is now 24+, matching the GSD
+  package's declared engine requirement.
+
 ### Fixed (2026-08-28 — review-gate APPROVED auto-resolves riding wall residuals)
 
 - `scripts/gsd/review-gate-command.sh`: an APPROVED verdict now mechanically

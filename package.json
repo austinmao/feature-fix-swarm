@@ -2,7 +2,7 @@
   "name": "feature-fix-swarm",
   "private": true,
   "engines": {
-    "node": ">=22",
+    "node": ">=24",
     "npm": ">=10"
   },
   "devDependencies": {

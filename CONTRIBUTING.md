@@ -18,7 +18,7 @@ By participating, you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development setup
 
-Requirements: macOS or Ubuntu, Git, Bash and zsh, Node.js 22+/npm 10+, and
+Requirements: macOS or Ubuntu, Git, Bash and zsh, Node.js 24+/npm 10+, and
 Python 3.11+.
 
 ```bash

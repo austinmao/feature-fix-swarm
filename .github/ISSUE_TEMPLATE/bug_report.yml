@@ -34,7 +34,7 @@ body:
     attributes:
       label: Environment
       description: Operating system, shell, Python, Node/npm, and Codex/Claude versions.
-      placeholder: macOS 15, zsh, Python 3.11, Node 22, Codex 0.146.x
+      placeholder: macOS 15, zsh, Python 3.11, Node 24, Codex 0.146.x
     validations:
       required: true
   - type: dropdown
