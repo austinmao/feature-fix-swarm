@@ -12,7 +12,7 @@ import shutil
 import sys
 
 
-GSD_VERSION = "1.11.0"
+GSD_VERSION = "1.13.0"
 SKILL_NAME = re.compile(r"^gsd-[a-z0-9][a-z0-9-]*$")
 
 

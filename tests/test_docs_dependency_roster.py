@@ -5,6 +5,7 @@ and a phantom-scanner claim in the past)."""
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -56,3 +57,20 @@ def test_readme_points_at_the_executable_roster() -> None:
     readme = (ROOT / "README.md").read_text()
     assert "scripts/gsd/deps.sh check" in readme
     assert "docs/initialization.md" in readme
+
+
+def test_dependency_versions_match_the_package_contract() -> None:
+    package = json.loads((ROOT / "package.json").read_text())
+    gsd_version = package["devDependencies"]["@opengsd/gsd-core"]
+    node_floor = package["engines"]["node"].removeprefix(">=")
+    node_major = node_floor.split(".", 1)[0]
+    surfaces = {
+        "README.md": (f"@opengsd/gsd-core@{gsd_version}", f"Node {node_major}+"),
+        "CONTRIBUTING.md": (f"Node.js {node_major}+", "npm 10+", "Python 3.11+"),
+        "docs/getting-started.md": (f"Node {node_major}+", "npm 10+", "Python 3.11+"),
+        "docs/dependencies.md": (f"@opengsd/gsd-core@{gsd_version}", f"Node {node_major}+"),
+    }
+    for relative, needles in surfaces.items():
+        text = (ROOT / relative).read_text()
+        missing = [needle for needle in needles if needle not in text]
+        assert not missing, f"{relative} is missing package-version contract text: {missing}"

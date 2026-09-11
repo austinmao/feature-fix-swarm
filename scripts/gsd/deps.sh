@@ -40,13 +40,13 @@ except OSError:
     print("")
 PYEOF
 )"
-GSD_VERSION="${GSD_VERSION:-1.11.0}"
+GSD_VERSION="${GSD_VERSION:-1.13.0}"
 
 # roster rows: name|kind|required|remedy
 # kinds: binary (command -v; comma = any-of), npm, pip, pin
 ROSTER='python3|binary|required|install Python 3.11+ (brew install python@3.12 / apt install python3)
-node|binary|required|install Node.js 22+ (brew install node / apt install nodejs)
-npm|binary|required|install npm 10+ (ships with Node.js 22+)
+node|binary|required|install or activate Node.js 24+ (an older node on PATH also fails; brew install node / apt install nodejs)
+npm|binary|required|install or activate npm 10+ (an older npm on PATH also fails; ships with Node.js 24+)
 git|binary|required|install git (brew install git / apt install git)
 claude,codex|binary|required|install Claude Code (https://docs.anthropic.com/en/docs/claude-code) or Codex CLI (https://github.com/openai/codex)
 gh|binary|required|brew install gh / apt install gh — required by the ship/finalize tail
@@ -81,6 +81,24 @@ probe_binary() { # any-of comma list
   return 1
 }
 
+probe_major_version() { # command minimum-major
+  local command_name="$1" minimum_major="$2" output line candidate major=""
+  command -v "$command_name" >/dev/null 2>&1 || return 1
+  output="$("$command_name" --version 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    line="${line#v}"
+    candidate="${line%%.*}"
+    case "$candidate" in
+      ''|*[!0-9]*) continue ;;
+      *) major="$candidate"; break ;;
+    esac
+  done <<< "$output"
+  case "$major" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$major" -ge "$minimum_major" ]
+}
+
 probe_npm() {
   [ "$(python3 - "$REPO_ROOT" <<'PY' 2>/dev/null
 import json, pathlib, sys
@@ -109,6 +127,10 @@ probe_pin() {
 }
 
 probe() { # $1=name $2=kind
+  case "$1" in
+    node) probe_major_version node 24; return ;;
+    npm)  probe_major_version npm 10; return ;;
+  esac
   case "$2" in
     binary) probe_binary "$1" ;;
     npm)    probe_npm ;;
@@ -158,7 +180,8 @@ cmd_install() {
     esac
   done
 
-  probe_binary npm || fail "npm is not installed — install Node.js 22+ first (deps.sh cannot install system tools)"
+  probe_major_version node 24 || fail "Node.js 24+ is required — install or activate Node.js 24+ first (deps.sh cannot install system tools)"
+  probe_major_version npm 10 || fail "npm 10+ is required — install or activate npm 10+ first (deps.sh cannot install system tools)"
   probe_binary python3 || fail "python3 is not installed — install Python 3.11+ first (deps.sh cannot install system tools)"
 
   if probe_npm; then
