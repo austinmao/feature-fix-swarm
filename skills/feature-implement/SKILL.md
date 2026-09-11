@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.15.0"
+version: "2.15.1"
 allowed-tools:
   - Read
   - Edit
@@ -478,7 +478,11 @@ See `docs/promotion-protocol.md` for the full 12-rule dev→staging→production
 promotion protocol; the completion authority below enforces rules 7, 8, and 12 of it.
 
 gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
-- `GATES_STRICT=1 python3 "$GATES_PY" verify-done gsd-phase` must exit 0
+- `GATES_STRICT=1 python3 "$GATES_PY" verify-done "<phase-dir basename>"` must succeed (rc 0)
+  — the key is the `.planning/phases/` directory basename (e.g.
+  `01-self-compare-guard`), the same key `gates-test-command.sh` records
+  evidence under and plan-wall.sh writes records under. The literal key
+  `gsd-phase` is not a real record key and always returns NOT-DONE.
 - the `gsd-phase-evidence-gate.sh` PreToolUse hook blocks ROADMAP/STATE
   phase-complete flips without that evidence (`GATES_BYPASS=1` = operator only)
 

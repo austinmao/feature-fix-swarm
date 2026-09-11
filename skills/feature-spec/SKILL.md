@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.8.0
+version: 2.8.1
 ---
 
 # /feature-spec [NNN | "description"]
@@ -760,7 +760,10 @@ stalling. Build the ledger NOW — by default with zero stops:
    clear the bounded rc-3 auto-continue (see feature-implement "Autonomous
    rc-3 bounded auto-continue") without stopping. A phase added or renamed
    after grant time has no grant and correctly quarantines — same floor as
-   every other gate type.
+   every other gate type. ALWAYS include `ship:gsd` in the enumerated grant
+   list — `scripts/gsd/review-gate-command.sh` requires it on every run and
+   it never appears in plan.md or tasks.md, so walking artifacts alone misses
+   it (spec-012 needed a manual mid-run grant to unblock ship).
 2. **Default (MAX-AUTH):** record ALL enumerated actions immediately — no stop.
    Launching without `--gated` IS the approval (the launch notice announced it
    at minute 1, while the operator was present); the enumerated list with a

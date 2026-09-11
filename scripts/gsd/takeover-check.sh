@@ -169,10 +169,26 @@ fi
 # bounded; O_NOFOLLOW and fstat close both symlink and type confusion paths.
 META="$(python3 - "$TAKEOVER_RECORD_FD" "$CANON_STORE" "$RUN_ID" <<'PY'
 import hashlib,json,os,stat,sys
+# GH-152-CEILING-HELPER-START
+import os
+def _takeover_snapshot_max_bytes():
+    # GH-152: bound the shared takeover evidence/record ceiling. A consumer
+    # shared record past the old 1 MiB literal is a legitimate size, not a
+    # takeover conflict. Override with FFS_TAKEOVER_SNAPSHOT_MAX_BYTES;
+    # garbage, empty, or an absent variable falls back to the default.
+    # There is no sentinel that disables the ceiling.
+    raw = os.environ.get('FFS_TAKEOVER_SNAPSHOT_MAX_BYTES', '')
+    try:
+        value = int(raw.strip())
+    except (ValueError, TypeError):
+        return 33554432
+    return max(1048576, min(value, 268435456))
+# GH-152-CEILING-HELPER-END
+_MAX_BYTES = _takeover_snapshot_max_bytes()
 fd,store,rid=sys.argv[1:]
 try:
  fd=int(fd); st=os.fstat(fd)
- if not stat.S_ISREG(st.st_mode) or st.st_size>1024*1024 or st.st_uid!=os.getuid(): raise ValueError()
+ if not stat.S_ISREG(st.st_mode) or st.st_size>_MAX_BYTES or st.st_uid!=os.getuid(): raise ValueError()
  os.lseek(fd,0,os.SEEK_SET)
  # Full-read loop to the exact fstat size: short data or growth past the
  # opened size is never accepted as the record bytes (01-VERIFICATION gap).

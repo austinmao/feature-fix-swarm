@@ -2664,15 +2664,29 @@ def test_canary_recorder_appends_verbatim_schema_row(tmp_path) -> None:
     assert isinstance(rec["ts"], float)
 
 
-def test_canary_recorder_rejects_non_40_hex_sha(tmp_path) -> None:
+def test_canary_recorder_rejects_non_immutable_shapes(tmp_path) -> None:
+    # REQ-301: canary sha accepts the same immutable artifact shapes
+    # `_valid_artifact` does (digest reference or 40-hex commit sha) — a
+    # mutable tag without a digest, or any other malformed shape, is still
+    # rejected.
     import pytest
     store = tmp_path / "evidence.json"
-    for bad in ("abc", "Z" * 40, "ab" * 32, "", None,
-                "myapp@sha256:" + "f" * 64):  # digest refs are NOT canary identity
+    for bad in ("abc", "Z" * 40, "ab" * 32, "", None, "myapp:latest"):
         with pytest.raises(ValueError, match="INVALID-CANARY-SHA"):
             gates.record_canary_evidence(store, "run-1", bad, True,
                                          _ISO_CREATED, _ISO_ENDED)
     assert not store.exists()
+
+
+def test_canary_recorder_accepts_digest_ref_sha(tmp_path) -> None:
+    # REQ-301: a digest-shaped artifact ref is a valid canary identity too,
+    # not just a bare 40-hex commit sha.
+    store = tmp_path / "evidence.json"
+    digest = "myapp@sha256:" + "f" * 64
+    gates.record_canary_evidence(store, "run-1", digest, True,
+                                 _ISO_CREATED, _ISO_ENDED)
+    rows = json.loads(store.read_text())["canary"]
+    assert rows[0]["sha"] == digest
 
 
 def test_canary_recorder_rejects_empty_or_missing_timestamps(tmp_path) -> None:
@@ -4588,16 +4602,19 @@ def test_t4_pinned_fd_shape_rejections(tmp_path) -> None:
         _os.close(dir_fd)
         _os.close(bogus_fd)
 
-    # oversized: pinned evidence beyond the 1 MiB consumer cap
+    # oversized: pinned evidence beyond the configured cap (GH-152: the
+    # default ceiling is now 32 MiB, so the boundary is pinned explicitly
+    # via the knob rather than relying on a hardcoded 1 MiB fixture).
     big = store_dir / "evidence.json"
     big.write_text("{" + " " * (1024 * 1024 + 10) + "}")
     dir_fd = _os.open(store_dir, _os.O_RDONLY)
     ev_fd = _os.open(big, _os.O_RDONLY)
+    env = dict(_os.environ, FFS_TAKEOVER_SNAPSHOT_MAX_BYTES="1048576")
     try:
         r = _sp.run(["python3", g, "takeover-state", "spec-006",
                      "--store-dir-fd", str(dir_fd), "--store-fd", str(ev_fd)],
                     capture_output=True, text=True,
-                    pass_fds=(dir_fd, ev_fd), cwd=tmp_path)
+                    pass_fds=(dir_fd, ev_fd), cwd=tmp_path, env=env)
         assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
         assert "TAKEOVER-STATE-REJECTED" in r.stderr, r.stderr
     finally:

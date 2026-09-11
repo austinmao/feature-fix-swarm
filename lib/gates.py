@@ -108,6 +108,25 @@ EXIT0_PAT = re.compile(r"\bexit 0\b|sys\.exit\(0\)|process\.exit\(0\)")
 _PINNED_STORE_DATA: dict | None = None
 
 
+def _takeover_snapshot_max_bytes() -> int:
+    """Bound the shared takeover evidence/record/snapshot ceiling.
+
+    GH-152: the ceiling exists to bound memory on a hostile or oversized
+    artifact; a consumer shared store past the old 1 MiB literal is a
+    legitimate size, not a takeover conflict. Override with
+    FFS_TAKEOVER_SNAPSHOT_MAX_BYTES; garbage, empty, or an absent variable
+    falls back to the default. There is no sentinel that disables the
+    ceiling — the weakest reachable setting is the floor, identical to the
+    behavior this replaces.
+    """
+    raw = os.environ.get("FFS_TAKEOVER_SNAPSHOT_MAX_BYTES", "")
+    try:
+        value = int(raw.strip())
+    except (ValueError, TypeError):
+        return 33554432
+    return max(1048576, min(value, 268435456))
+
+
 def _load_store(store: Path) -> dict:
     """Load the normal store, or the per-process descriptor-pinned snapshot."""
     if _PINNED_STORE_DATA is not None:
@@ -131,19 +150,31 @@ def _load_pinned_store(store_dir_fd: int, store_fd: int) -> dict:
         entry = os.stat("evidence.json", dir_fd=store_dir_fd, follow_symlinks=False)
     except OSError as exc:
         raise ValueError("TAKEOVER-FD-MISMATCH") from exc
+    max_bytes = _takeover_snapshot_max_bytes()
     if (not stat.S_ISDIR(directory.st_mode) or not stat.S_ISREG(evidence.st_mode)
             or directory.st_uid != os.getuid() or evidence.st_uid != os.getuid()
-            or evidence.st_size > 1024 * 1024 or entry.st_dev != evidence.st_dev
+            or evidence.st_size > max_bytes or entry.st_dev != evidence.st_dev
             or entry.st_ino != evidence.st_ino):
         raise ValueError("TAKEOVER-FD-MISMATCH")
     duplicate = os.dup(store_fd)
     try:
         os.lseek(duplicate, 0, os.SEEK_SET)
-        raw = os.read(duplicate, 1024 * 1024 + 1)
+        # Full-read loop to the ceiling: a short kernel read on a large-but-
+        # valid store must never be misjudged as an oversized one
+        # (01-VERIFICATION discipline, same shape as _read_evidence_at).
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(duplicate, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("TAKEOVER-FD-MISMATCH")
+        raw = b"".join(chunks)
     finally:
         os.close(duplicate)
-    if len(raw) > 1024 * 1024:
-        raise ValueError("TAKEOVER-FD-MISMATCH")
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1441,12 +1472,14 @@ def _valid_canary_record(rec) -> bool:
     """Re-validate a persisted canary row on every read (the
     _valid_promotion_record precedent): a tampered or legacy row degrades to
     refusal, never a crash. Typed = exactly the recorder's schema semantics —
-    40-hex sha, boolean pass, control-free run_id, bounded timestamps."""
+    the same immutable artifact identity `_valid_artifact` accepts (digest
+    reference or 40-hex commit sha), boolean pass, control-free run_id,
+    bounded timestamps."""
     import math
     if not isinstance(rec, dict):
         return False
     sha = rec.get("sha")
-    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
+    if not _valid_artifact(sha):
         return False
     if rec.get("pass") is not True and rec.get("pass") is not False:
         return False
@@ -1985,8 +2018,10 @@ def record_canary_evidence(store: Path, run_id, sha, passed, created_at,
     """
     if not isinstance(run_id, str) or not EVIDENCE_RUN_ID_RE.fullmatch(run_id):
         raise ValueError("INVALID-CANARY-RUN-ID")
-    if not isinstance(sha, str) or not ARTIFACT_SHA_PAT.fullmatch(sha):
-        # 40-hex commit sha ONLY (F5) — digest refs are not canary identity.
+    if not _valid_artifact(sha):
+        # Same immutable identity `_valid_artifact` accepts (digest reference
+        # or 40-hex commit sha) — binding stays exact whole-string equality,
+        # so a commit sha never satisfies a digest artifact nor the converse.
         raise ValueError("INVALID-CANARY-SHA")
     if not isinstance(passed, bool):
         raise ValueError("INVALID-CANARY-PASS")
@@ -2513,7 +2548,7 @@ def _snapshot_data(fd: int) -> dict:
             if not chunk:
                 break
             chunks.append(chunk)
-            if sum(map(len, chunks)) > 1024 * 1024:
+            if sum(map(len, chunks)) > _takeover_snapshot_max_bytes():
                 raise ValueError("TAKEOVER-SNAPSHOT-TOO-LARGE")
     finally:
         os.close(duplicate)
@@ -2645,7 +2680,7 @@ def _read_evidence_at(store_dir_fd: int) -> tuple[bytes, os.stat_result]:
                  dir_fd=store_dir_fd)
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 1024 * 1024:
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > _takeover_snapshot_max_bytes():
             raise _TakeoverRefusal("record-mismatch")
         chunks: list[bytes] = []
         while True:
@@ -2653,7 +2688,7 @@ def _read_evidence_at(store_dir_fd: int) -> tuple[bytes, os.stat_result]:
             if not chunk:
                 break
             chunks.append(chunk)
-            if sum(map(len, chunks)) > 1024 * 1024:
+            if sum(map(len, chunks)) > _takeover_snapshot_max_bytes():
                 raise _TakeoverRefusal("record-mismatch")
         return b"".join(chunks), st
     finally:
@@ -3030,7 +3065,7 @@ def takeover_consume(run_id: str, consumed_at: int, store_dir_fd: int, store_fd,
             if not _entry_is_fd(takeover_dir_fd, record_name, record_fd):
                 raise _TakeoverRefusal("record-mismatch")
             record_st = os.fstat(record_fd)
-            if not stat.S_ISREG(record_st.st_mode) or record_st.st_size > 1024 * 1024:
+            if not stat.S_ISREG(record_st.st_mode) or record_st.st_size > _takeover_snapshot_max_bytes():
                 raise _TakeoverRefusal("record-mismatch")
             record_raw = _read_exact(record_fd, record_st.st_size)
             if record_raw is None:

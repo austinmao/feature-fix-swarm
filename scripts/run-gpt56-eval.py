@@ -207,6 +207,8 @@ def run_one(
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            event = None
+        if not isinstance(event, dict):
             parse_errors.append("non-JSON CLI event")
             continue
         if event.get("type") == "item.completed":

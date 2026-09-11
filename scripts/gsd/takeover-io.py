@@ -26,7 +26,26 @@ class UnsafeTakeoverPath(RuntimeError):
     pass
 
 
-MAX_BYTES = 1024 * 1024
+def _bounded_max_bytes() -> int:
+    """Bound the shared takeover evidence/record ceiling.
+
+    GH-152: the ceiling exists to bound memory on a hostile or oversized
+    artifact; a consumer shared store past the old 1 MiB literal is a
+    legitimate size, not a takeover conflict. Override with
+    FFS_TAKEOVER_SNAPSHOT_MAX_BYTES; garbage, empty, or an absent variable
+    falls back to the default. There is no sentinel that disables the
+    ceiling — the weakest reachable setting is the floor, identical to the
+    behavior this replaces.
+    """
+    raw = os.environ.get("FFS_TAKEOVER_SNAPSHOT_MAX_BYTES", "")
+    try:
+        value = int(raw.strip())
+    except (ValueError, TypeError):
+        return 33554432
+    return max(1048576, min(value, 268435456))
+
+
+MAX_BYTES = _bounded_max_bytes()
 
 
 @dataclass(frozen=True)
