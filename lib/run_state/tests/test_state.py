@@ -5,6 +5,11 @@ import pytest
 
 from run_state.state import init_db, RunStore
 
+# NOTE: UnknownRunError does not exist until Task 2 (GREEN). Importing it at
+# module scope would break collection of every test in this file, including
+# the pre-existing ones the RED gate must keep green — so each new test below
+# imports it locally, letting only those tests fail during RED.
+
 
 def test_init_db_creates_runs_table(tmp_path: Path) -> None:
     db_path = tmp_path / "runs.db"
@@ -203,3 +208,138 @@ def test_legacy_v2_run_can_be_aborted(tmp_path: Path) -> None:
     # `aborted` is in v3.0 VALID_STATES, so the transition itself is allowed.
     store.update_state("legacy-1", "aborted")
     assert store.get_run("legacy-1").state == "aborted"
+
+
+# --- GH-3: unknown run_id must raise, never fabricate history ---------------
+
+
+def test_update_state_unknown_run_id_raises(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    store = RunStore(tmp_path / "runs.db")
+    with pytest.raises(UnknownRunError):
+        store.update_state("nope-000000", "complete")
+
+
+def test_update_phase_unknown_run_id_raises(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    store = RunStore(tmp_path / "runs.db")
+    with pytest.raises(UnknownRunError):
+        store.update_phase("nope-000000", "wedge-1")
+
+
+def test_inc_tokens_unknown_run_id_raises(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    store = RunStore(tmp_path / "runs.db")
+    with pytest.raises(UnknownRunError):
+        store.inc_tokens("nope-000000", 100)
+
+
+def test_unknown_run_id_writes_no_event_row(tmp_path: Path) -> None:
+    from run_state.state import UnknownRunError
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    for call in (
+        lambda: store.update_state("nope-000000", "complete"),
+        lambda: store.update_phase("nope-000000", "wedge-1"),
+        lambda: store.inc_tokens("nope-000000", 100),
+    ):
+        with pytest.raises(UnknownRunError):
+            call()
+    conn = sqlite3.connect(db_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0
+
+
+# --- review-gate HIGH: recover_state must be an atomic CAS, never clobber a
+# terminal/concurrently-moved state -------------------------------------------
+
+
+def test_recover_state_transitions_matching_state(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    assert store.recover_state(run_id, "pending_audit", "active") is True
+    assert store.get_run(run_id).state == "active"
+
+
+def test_recover_state_noop_when_current_state_does_not_match(tmp_path: Path) -> None:
+    # Simulates a concurrent abort/complete landing during the audit
+    # subprocess: recover_state must not overwrite it back to "active".
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "aborted")
+    assert store.recover_state(run_id, "pending_audit", "active") is False
+    assert store.get_run(run_id).state == "aborted"
+
+
+def test_recover_state_noop_when_already_settled_to_complete(tmp_path: Path) -> None:
+    # Simulates a signal landing after the verdict path already wrote
+    # "complete" but before the caller's settled flag flips.
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    store.update_state(run_id, "complete")
+    assert store.recover_state(run_id, "pending_audit", "active") is False
+    assert store.get_run(run_id).state == "complete"
+
+
+def test_recover_state_noop_on_unknown_run_id(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    assert store.recover_state("nope-000000", "pending_audit", "active") is False
+
+
+def test_recover_state_writes_no_event_row_on_noop(tmp_path: Path) -> None:
+    db_path = tmp_path / "runs.db"
+    store = RunStore(db_path)
+    run_id = store.create_run(skill="fix", objective="x")  # state=active
+    conn = sqlite3.connect(db_path)
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert store.recover_state(run_id, "pending_audit", "active") is False
+
+    conn = sqlite3.connect(db_path)
+    try:
+        after = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        conn.close()
+    assert after == before
+
+
+# --- review-gate round 3 HIGH: recover_state must mirror update_state's
+# completed_at semantics (COALESCE so a non-complete transition never clears
+# a completed_at set earlier, and a transition to "complete" always sets it).
+
+
+def test_recover_state_to_complete_sets_completed_at(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    assert store.recover_state(run_id, "pending_audit", "complete") is True
+    assert store.get_run(run_id).completed_at is not None
+
+
+def test_recover_state_to_non_complete_leaves_completed_at_untouched(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")
+    store.update_state(run_id, "pending_audit")
+    store.update_state(run_id, "complete")
+    completed_at_before = store.get_run(run_id).completed_at
+    assert completed_at_before is not None
+
+    assert store.recover_state(run_id, "complete", "aborted") is True
+    run = store.get_run(run_id)
+    assert run.state == "aborted"
+    assert run.completed_at == completed_at_before
+
+
+def test_recover_state_superseded_leaves_completed_at_untouched(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    run_id = store.create_run(skill="fix", objective="x")  # state=active, completed_at=None
+    assert store.recover_state(run_id, "pending_audit", "complete") is False
+    assert store.get_run(run_id).completed_at is None

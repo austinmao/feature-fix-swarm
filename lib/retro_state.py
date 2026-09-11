@@ -24,6 +24,10 @@ import time
 REPOSITORY = "austinmao/feature-fix-swarm"
 CONSENT_MAJOR = "1"
 META_RE = re.compile(r"<!-- ffs-retro fingerprint:([0-9a-f]{16}) priority:(P[0-3]) occurrences:([0-9]+) -->")
+# Mirrors retro_scrub.TOKEN_RE: the create body's script/gate facts must stay
+# a closed vocabulary even when `file` is pointed at a hand-written payload.
+_FACT_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_FACT_PLACEHOLDER = "unknown"
 
 
 class RetroStateError(Exception):
@@ -226,11 +230,30 @@ def _query(fingerprint: str, title: str, search: bool = False) -> list[dict]:
     except (ValueError, json.JSONDecodeError): return []
 
 
+def _fact_token(value: object) -> str:
+    return value if isinstance(value, str) and _FACT_TOKEN_RE.fullmatch(value) else _FACT_PLACEHOLDER
+
+
+def _fact_exit_code(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255:
+        return _FACT_PLACEHOLDER
+    return str(value)
+
+
 def _body(finding: dict, occurrences: int, comment: bool = False) -> tuple[str, str]:
     fp, priority = finding["fingerprint"], finding["priority"]
     title = f"FFS retro {priority}: {finding['script']} {finding['event_class']}"
     marker = f"<!-- ffs-retro fingerprint:{fp} priority:{priority} occurrences:{occurrences} -->"
-    text = ("Additional occurrence recorded by ffs-retro.\n\n" if comment else "Automatically filed by ffs-retro.\n\n") + marker + "\n"
+    if comment:
+        text = "Additional occurrence recorded by ffs-retro.\n\n" + marker + "\n"
+    else:
+        facts = (
+            f"script: {_fact_token(finding.get('script'))}\n"
+            f"gate: {_fact_token(finding.get('gate'))}\n"
+            f"exit_code: {_fact_exit_code(finding.get('exit_code'))}\n"
+            f"occurrences: {occurrences}\n"
+        )
+        text = "Automatically filed by ffs-retro.\n\n" + facts + marker + "\n"
     return title, text
 
 
@@ -260,21 +283,32 @@ def _row(action: str, finding: dict | None = None, **extra: object) -> dict:
     return row
 
 
-def _file_one(rows: list[dict], finding: dict) -> FilingOutcome:
+def _row_count(row: dict) -> int:
+    # A row's own aggregate contribution.  Missing, or not a positive int
+    # (a pre-fix ledger wrote neither), reads as 1 -- one row, one occurrence
+    # -- so an old and a new ledger agree on the running total.
+    value = row.get("count")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 1
+
+
+def _file_one(rows: list[dict], finding: dict, count: int = 1) -> FilingOutcome:
     fp = finding["fingerprint"]
-    occurrences = 1 + sum(1 for row in rows if row.get("fingerprint") == fp and row.get("action") in {"accrue", "create", "comment", "intent"})
+    prior = sum(_row_count(row) for row in rows if row.get("fingerprint") == fp and row.get("action") in {"accrue", "create", "comment", "intent"})
+    occurrences = prior + count
     creates = [row for row in rows if row.get("action") == "create" and row.get("fingerprint") == fp and isinstance(row.get("issue_number"), int)]
     title, create_body = _body(finding, occurrences)
     if creates:
         issue = min(row["issue_number"] for row in creates)
-        return _comment(rows, finding, issue, occurrences)
+        return _comment(rows, finding, issue, occurrences, count)
     if any(row.get("action") == "intent" and row.get("fingerprint") == fp for row in rows):
-        rows.append(_row("defer", finding, outcome="pending-intent", occurrences=occurrences)); return FilingOutcome("pending-intent")
+        rows.append(_row("defer", finding, outcome="pending-intent", occurrences=occurrences, count=count)); return FilingOutcome("pending-intent")
     try: floor = int(os.environ.get("RETRO_P3_OCCURRENCE_FLOOR", "3")); cap = int(os.environ.get("RETRO_MAX_NEW_ISSUES", "3"))
     except ValueError: floor, cap = 3, 3
     floor, cap = max(0, floor), max(0, cap)
     if finding["priority"] == "P3" and occurrences < floor:
-        rows.append(_row("accrue", finding, occurrences=occurrences)); return FilingOutcome("accrued")
+        rows.append(_row("accrue", finding, occurrences=occurrences, count=count)); return FilingOutcome("accrued")
     try: threshold = float(os.environ.get("RETRO_TITLE_SIM", "0.8"))
     except ValueError: threshold = 0.8
     listed = _query(fp, title)
@@ -282,13 +316,13 @@ def _file_one(rows: list[dict], finding: dict) -> FilingOutcome:
     if not match:
         searched = _query(fp, title, True)
         match = select_issue_match(searched, fingerprint=fp, title=title, threshold=threshold)
-    if match: return _comment(rows, finding, match.number, occurrences)
+    if match: return _comment(rows, finding, match.number, occurrences, count)
     if sum(1 for row in rows if row.get("action") == "create" and row.get("run_id") == os.environ.get("GSD_RUN_ID", "local")) >= cap:
-        rows.append(_row("accrue", finding, outcome="cap", occurrences=occurrences)); return FilingOutcome("cap")
+        rows.append(_row("accrue", finding, outcome="cap", occurrences=occurrences, count=count)); return FilingOutcome("cap")
     # A second exact query closes the check/create race while still locked.
     late = select_issue_match(_query(fp, title, True), fingerprint=fp, title=title, threshold=2.0)
-    if late: return _comment(rows, finding, late.number, occurrences)
-    rows.append(_row("intent", finding, outcome="pre-create", occurrences=occurrences))
+    if late: return _comment(rows, finding, late.number, occurrences, count)
+    rows.append(_row("intent", finding, outcome="pre-create", occurrences=occurrences, count=count))
     # This is intentionally published before the external create.  A process
     # death after this point must bias toward no duplicate, never another
     # create based on an eventually-consistent search result.
@@ -301,23 +335,40 @@ def _file_one(rows: list[dict], finding: dict) -> FilingOutcome:
         # The create supersedes its published intent; keeping both would
         # inflate the fingerprint's occurrence count by one forever.
         rows[:] = [row for row in rows if not (row.get("action") == "intent" and row.get("fingerprint") == fp)]
-        rows.append(_row("create", finding, issue_number=number, occurrences=occurrences, paced_at=time.time())); return FilingOutcome("created")
+        rows.append(_row("create", finding, issue_number=number, occurrences=occurrences, count=count, paced_at=time.time())); return FilingOutcome("created")
     status = next((str(code) for code in (403, 404, 422) if str(code) in response.stderr), None)
     # The failed child made no public create, so retain its typed outcome
     # rather than leaving a misleading permanent intent record.
     rows[:] = [row for row in rows if not (row.get("action") == "intent" and row.get("fingerprint") == fp)]
-    rows.append(_row("create", finding, outcome=f"gh-{status}" if status else "gh-failure", status="failed", occurrences=occurrences, paced_at=time.time()))
+    rows.append(_row("create", finding, outcome=f"gh-{status}" if status else "gh-failure", status="failed", occurrences=occurrences, count=count, paced_at=time.time()))
     return FilingOutcome("known-failure" if status else "write-failure", not bool(status))
 
 
-def _comment(rows: list[dict], finding: dict, issue: int, occurrences: int) -> FilingOutcome:
+def _comment(rows: list[dict], finding: dict, issue: int, occurrences: int, count: int) -> FilingOutcome:
     _title, body = _body(finding, occurrences, True); _pace(rows)
     response = _write(["issue", "comment", str(issue)], body)
     if response.returncode == 0:
-        rows.append(_row("comment", finding, issue_number=issue, occurrences=occurrences, paced_at=time.time())); return FilingOutcome("commented")
+        rows.append(_row("comment", finding, issue_number=issue, occurrences=occurrences, count=count, paced_at=time.time())); return FilingOutcome("commented")
     status = next((str(code) for code in (403, 404, 422) if str(code) in response.stderr), None)
-    rows.append(_row("comment", finding, outcome=f"gh-{status}" if status else "gh-failure", status="failed", issue_number=issue, occurrences=occurrences, paced_at=time.time()))
+    rows.append(_row("comment", finding, outcome=f"gh-{status}" if status else "gh-failure", status="failed", issue_number=issue, occurrences=occurrences, count=count, paced_at=time.time()))
     return FilingOutcome("known-failure" if status else "write-failure", not bool(status))
+
+
+def _aggregate(findings: list) -> dict[str, tuple[dict, int]]:
+    # Insertion-ordered fingerprint -> (first finding seen, row count).  A
+    # row admits only when it is a filable dict with a string fingerprint --
+    # anything else can be neither deduped nor filed, and letting it through
+    # would raise inside _file_one's bare `finding["fingerprint"]` lookup.
+    groups: dict[str, tuple[dict, int]] = {}
+    for finding in findings:
+        if not isinstance(finding, dict) or finding.get("priority") not in {"P0", "P1", "P2", "P3"}:
+            continue
+        fp = finding.get("fingerprint")
+        if not isinstance(fp, str):
+            continue
+        first, seen = groups.get(fp, (finding, 0))
+        groups[fp] = (first, seen + 1)
+    return groups
 
 
 def file_payload(path: Path) -> FilingOutcome:
@@ -331,10 +382,9 @@ def file_payload(path: Path) -> FilingOutcome:
             if not isinstance(findings, list): raise ValueError
         except (OSError, ValueError, TypeError, json.JSONDecodeError): return FilingOutcome("invalid-payload", True)
         fatal = False
-        for finding in findings:
-            if isinstance(finding, dict) and finding.get("priority") in {"P0", "P1", "P2", "P3"}:
-                outcome = _file_one(rows, finding); fatal |= outcome.fatal
-                _save_ledger(ledger, rows)  # intent is durable before the next candidate/write
+        for finding, count in _aggregate(findings).values():
+            outcome = _file_one(rows, finding, count); fatal |= outcome.fatal
+            _save_ledger(ledger, rows)  # intent is durable before the next candidate/write
         return FilingOutcome("filed", fatal)
 
 
