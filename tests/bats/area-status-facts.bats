@@ -752,16 +752,39 @@ EOF
 # PACKAGE_ROOT, at the enclosing repository root — this package ships
 # upstream and has no repo-local skills tree of its own, so every case that
 # targets one of them is guarded by the SAME marker: presence of a
-# repo-root `.claude/skills/` tree. That is the one marker a bare package
-# checkout genuinely lacks. Deliverable existence is then a hard assertion
-# INSIDE the guard, never the guard itself — deleting a deliverable must
-# fail the suite, not quiet it.
+# repo-root `.claude/skills/` tree above PACKAGE_ROOT. A package checkout may
+# legitimately contain its own `.claude/skills/` tree, so directory presence
+# at PACKAGE_ROOT is not enough to activate these parent-repository contracts.
+# Deliverable existence is then a hard assertion INSIDE the guard, never the
+# guard itself — deleting a deliverable must fail the suite, not quiet it.
+
+repo_skills_tree_is_external() {
+  local package_root="$1"
+  local repo_root="$2"
+  [ -n "$repo_root" ] &&
+    [ "$repo_root" != "$package_root" ] &&
+    [ -d "$repo_root/.claude/skills" ]
+}
 
 require_repo_skills_tree() {
   REPO_ROOT="$(git -C "$PACKAGE_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
-  if [ -z "$REPO_ROOT" ] || [ ! -d "$REPO_ROOT/.claude/skills" ]; then
+  if ! repo_skills_tree_is_external "$PACKAGE_ROOT" "$REPO_ROOT"; then
     skip "no repo-root .claude/skills tree in this checkout"
   fi
+}
+
+@test "repo skill contract guard requires a parent repository" {
+  same_root="$BATS_TEST_TMPDIR/same-root"
+  parent_root="$BATS_TEST_TMPDIR/parent-root"
+  nested_package="$parent_root/packages/feature-fix-swarm"
+  mkdir -p "$same_root/.claude/skills/feature-fix-swarm"
+  mkdir -p "$parent_root/.claude/skills" "$nested_package"
+
+  run repo_skills_tree_is_external "$same_root" "$same_root"
+  [ "$status" -ne 0 ]
+
+  run repo_skills_tree_is_external "$nested_package" "$parent_root"
+  [ "$status" -eq 0 ]
 }
 
 # === REQ-07: verify-review staleness amendment (plan 02-02 turns these green) ===
