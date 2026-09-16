@@ -90,6 +90,124 @@ queue_list() {
   python3 "$GATES_PY" findings-queue list "$@"
 }
 
+write_native_import() {
+  # Exact complete-set provenance; caller supplies a canonical findings array.
+  local findings="$1" run_id="${2:-native-import}" sha soc
+  git checkout -q 001-native 2>/dev/null || git checkout -qb 001-native
+  mkdir -p specs/001-native
+  printf 'socratic evidence\n' > specs/001-native/socratic.md
+  sha="$(shasum -a 256 .planning/phases/1-foo/PLAN.md | awk '{print $1}')"
+  soc="$(shasum -a 256 specs/001-native/socratic.md | awk '{print $1}')"
+  jq -n --arg run "$run_id" --arg phase .planning/phases/1-foo \
+    --arg sha "$sha" --arg soc "$soc" --argjson findings "$findings" \
+    '{schema:"ffs.native-plan-wall-import/v1",run_id:$run,phase:$phase,
+      reviewer:{model:"gpt-5.6-sol",transport:"native-test"},
+      plans:[{path:".planning/phases/1-foo/PLAN.md",sha256:$sha,producer_model:"claude-fable-5",findings:$findings}],
+      socratic:{path:"specs/001-native/socratic.md",sha256:$soc}}' \
+    > native-review.json
+}
+
+@test "native import: clean/HIGH/CRITICAL reports use normal queue and wall records without CLI dispatch" {
+  write_native_import '[{"severity":"HIGH","file":"x","claim":"high","line":1,"repro":null,"vendor":null,"confidence":0.9}]'
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude \
+    ADVERSARY_BIN_CLAUDE=nonexistent-should-not-run run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.verdict' "$(record_for 1-foo plan)")" = pass-residual ]
+  [ "$(queue_list --unresolved --source wall --plan .planning/phases/1-foo/PLAN.md | jq length)" = 1 ]
+
+  # A changed report finding is still adjudicated by the existing queue/wall,
+  # not trusted as a report verdict.
+  # Preserve the prior PASS-residual record: the new CRITICAL must supersede
+  # it through ordinary queue/wall handling, never via state deletion.
+  write_native_import '[{"severity":"CRITICAL","file":"x","claim":"critical","line":1,"repro":"step","vendor":null,"confidence":0.9}]'
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude \
+    ADVERSARY_BIN_CLAUDE=nonexistent-should-not-run run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.verdict' "$(record_for 1-foo plan)")" = blocked ]
+}
+
+@test "native import: stale provenance and malformed findings fail closed without CLI fallback" {
+  write_native_import '[{"severity":"HIGH","file":"x","claim":"high","line":1,"repro":null,"vendor":null,"confidence":"HIGH"}]'
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude \
+    ADVERSARY_BIN_CLAUDE=nonexistent-should-not-run run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"native import rejected"* ]]
+  [ "$(jq -r '.verdict' "$(record_for 1-foo plan)")" = WALL-UNREVIEWED ]
+  GSD_TEST_CMD=true run bash scripts/gsd/gates-test-command.sh 1-foo
+  [ "$status" -ne 0 ]
+}
+
+@test "native import: cached record cannot bypass a stale replacement report" {
+  write_native_import '[]'
+  MARKER="$BATS_TEST_TMPDIR/clean-native-cli"
+  printf '#!/usr/bin/env bash\ntouch "%s"\nexit 99\n' "$MARKER" > bin/stub-claude; chmod +x bin/stub-claude
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  [ ! -e "$MARKER" ]
+  [ "$(jq -r '.verdict' "$(record_for 1-foo plan)")" = reviewed-pass ]
+  [ "$(queue_list --source wall --plan .planning/phases/1-foo/PLAN.md | jq length)" = 0 ]
+  digest="$(shasum -a 256 native-review.json | awk '{print $1}')"
+  jq -e --arg digest "native-import:$digest" '.rung_trail | index($digest) != null' "$(record_for 1-foo plan)" >/dev/null
+  printf 'changed plan\n' >> .planning/phases/1-foo/PLAN.md
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude \
+    ADVERSARY_BIN_CLAUDE=nonexistent-should-not-run run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"native import rejected"* ]]
+}
+
+@test "native import: duplicate plan and stale Socratic provenance fail closed" {
+  write_native_import '[]'
+  jq '.plans += [.plans[0]]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]; [[ "$output" == *"incomplete or has extras"* ]]
+  rm -rf .planning/run-state
+  write_native_import '[]' native-import-soc
+  printf 'changed evidence\n' >> specs/001-native/socratic.md
+  GSD_RUN_ID=native-import-soc PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]; [[ "$output" == *"Socratic provenance is missing or stale"* ]]
+}
+
+@test "native import: missing Socratic after PASS replaces record and blocks completion without CLI" {
+  write_native_import '[]'
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]
+  rm specs/001-native/socratic.md
+  MARKER="$BATS_TEST_TMPDIR/no-cli"
+  printf '#!/usr/bin/env bash\ntouch "%s"\nexit 99\n' "$MARKER" > bin/stub-claude; chmod +x bin/stub-claude
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]; [ ! -e "$MARKER" ]
+  [ "$(jq -r '.verdict' "$(record_for 1-foo plan)")" = WALL-UNREVIEWED ]
+  GSD_TEST_CMD=true run bash scripts/gsd/gates-test-command.sh 1-foo; [ "$status" -ne 0 ]
+}
+
+@test "native import: missing and extra plan provenance fail closed" {
+  write_native_import '[]'
+  jq '.plans=[]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+  rm -rf .planning/run-state; write_native_import '[]' native-import-extra
+  jq '.plans += [{"path":"extra.md","sha256":"x","producer_model":"claude-fable-5","findings":[]}]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
+  GSD_RUN_ID=native-import-extra PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 1 ]
+}
+
+@test "native import: multi-plan findings stay plan-owned with reversed JSON key order and no CLI" {
+  printf 'second plan\n' > .planning/phases/1-foo/02-PLAN.md
+  write_native_import '[]'
+  second_sha="$(shasum -a 256 .planning/phases/1-foo/02-PLAN.md | awk '{print $1}')"
+  jq --arg sha "$second_sha" '
+    .plans[0].findings = [{"severity":"HIGH","file":"one.py","claim":"one","line":1,"repro":null,"vendor":null,"confidence":0.9}]
+    | .plans += [{"findings":[{"severity":"MEDIUM","file":"two.py","claim":"two","line":1,"repro":null,"vendor":null,"confidence":0.9}],"producer_model":"claude-fable-5","sha256":$sha,"path":".planning/phases/1-foo/02-PLAN.md"}]
+    | .plans[0] = {"findings":.plans[0].findings,"producer_model":.plans[0].producer_model,"sha256":.plans[0].sha256,"path":.plans[0].path}
+  ' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
+  MARKER="$BATS_TEST_TMPDIR/native-cli-ran"
+  printf '#!/usr/bin/env bash\ntouch "%s"\nexit 99\n' "$MARKER" > bin/stub-claude; chmod +x bin/stub-claude
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  [ "$status" -eq 0 ]; [ ! -e "$MARKER" ]
+  [ "$(queue_list --source wall --plan .planning/phases/1-foo/PLAN.md | jq -r '.[0].file')" = one.py ]
+  [ "$(queue_list --source wall --plan .planning/phases/1-foo/02-PLAN.md | jq -r '.[0].file')" = two.py ]
+}
+
 # ── PATH-001: HIGH finding blocks; refute + reason unblocks re-run ──────────
 
 @test "PATH-001: CRITICAL finding blocks, resolve --disposition refute unblocks re-run with zero dispatch" {

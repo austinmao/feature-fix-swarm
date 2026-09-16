@@ -944,6 +944,20 @@ _pw_dispatch_path() {
   local sev fpath claim line issue add_out add_rc _pw_is_new critical_count
   local prior_findings_block prior_findings_cache _pw_prior_sig12 _pw_prior_match
 
+  _pw_import_reject_phase() {
+    local reason="$1" ip islug irp isource isha payload
+    for ip in "${PLAN_FILES[@]}"; do
+      islug="$(_pw_slug "$ip")"
+      irp="$(_pw_record_path "$PHASE_SLUG" "$islug" "$ip")"
+      isource="$(_pw_relpath "$ip")"
+      isha=""
+      [ -f "$ip" ] && isha="$(_pw_sha256 "$ip")"
+      payload="$(jq -n --arg plan "$isource" --arg sha "$isha" --arg run "$RUN_ID" --arg reason "$reason" '{planner_model:null,reviewer_model:null,relation:null,rung_trail:[("native-import-rejected:"+$reason)],verdict:"WALL-UNREVIEWED",plan_sha256:(if $sha == "" then null else $sha end),run_id:$run,security_match:false,fence_marker:false,fence_enabled:true,cross_vendor_fallback:"on",escalation_enabled:false,source_plan:$plan,queue_error:true,tier_descent:false,waiver:null,import_error:$reason}')"
+      _pw_write_record "$irp" "$payload" || { echo "plan-wall: FATAL: could not durably block rejected native import" >&2; return 1; }
+    done
+    return 0
+  }
+
   _pw_resolve_socratic_slice
 
   if [ ! -f "$plan_file" ] || [ ! -r "$plan_file" ]; then
@@ -996,7 +1010,10 @@ _pw_dispatch_path() {
   # those mean no reviewer ever actually ran, so an empty findings queue
   # reflects nothing was ever checked, not that it passed (spec-004 fix
   # round finding 2: WALL-UNREVIEWED laundering).
-  if [ -f "$record_path" ]; then
+  # Native import is an explicit, current evidence submission. Never let a
+  # cached record skip its validation: a stale/malformed replacement must
+  # fail closed rather than receive the normal zero-dispatch cache outcome.
+  if [ -f "$record_path" ] && [ -z "${PLAN_WALL_IMPORT_REPORT:-}" ]; then
     prior_sha="$(jq -r '.plan_sha256 // empty' "$record_path" 2>/dev/null)"
     prior_verdict="$(jq -r '.verdict // empty' "$record_path" 2>/dev/null)"
     prior_queue_error="$(jq -r '.queue_error // false' "$record_path" 2>/dev/null)"
@@ -1074,6 +1091,47 @@ _pw_dispatch_path() {
     fi
   fi
 
+  # ── imported native review or fresh dispatch ──
+  # Import mode is intentionally fail-closed and never falls back to a CLI:
+  # an operator selected this transport because the CLI is unavailable.
+  if [ -n "${PLAN_WALL_IMPORT_REPORT:-}" ]; then
+    local import_out import_phase import_socratic import_plans=() import_plan producer_model
+    import_phase="$(_pw_relpath "$PHASE_DIR")"
+    import_socratic="specs/${BRANCH_NNN}-"*/socratic.md
+    shopt -s nullglob
+    local import_socratics=("$REPO_ROOT"/$import_socratic)
+    shopt -u nullglob
+    if [ "${#import_socratics[@]}" -ne 1 ]; then
+      _pw_import_reject_phase "socratic-discovery-failed" || return 1
+      echo "plan-wall: native import requires exactly one repository Socratic document for branch ${BRANCH_NNN:-unknown}" >&2
+      return 1
+    fi
+    for import_plan in "${PLAN_FILES[@]}"; do import_plans+=("$(_pw_relpath "$import_plan")"); done
+    host="$(detect_orchestrator_host)"
+    if [ "$host" = codex ]; then
+      PW_PLANNER_ID="$(codex_equiv_model "$(_pw_planner_alias)")"
+    else
+      PW_PLANNER_ID="$(_pw_resolve_claude_id "$(_pw_planner_alias)")"
+    fi
+    import_out="$(python3 "$SCRIPT_DIR/import-native-plan-wall.py" --repo "$REPO_ROOT" --report "$PLAN_WALL_IMPORT_REPORT" --run-id "$RUN_ID" --phase "$import_phase" --plans "${import_plans[@]}" --plan "$source_plan" --socratic "$(_pw_relpath "${import_socratics[0]}")" --configured-planner "$PW_PLANNER_ID")" || {
+      _pw_import_reject_phase "validation-failed" || return 1
+      echo "plan-wall: native import rejected; refusing CLI fallback" >&2; return 1; }
+    PW_FINDINGS_JSON="$(printf '%s' "$import_out" | jq -c '. | {findings}')" || return 1
+    PW_REVIEWER_MODEL="$(printf '%s' "$import_out" | jq -r '.reviewer_model')"
+    producer_model="$(printf '%s' "$import_out" | jq -r --arg p "$source_plan" '.producer_models[$p] // empty')"
+    [ -n "$producer_model" ] || { echo "plan-wall: imported producer absent for $source_plan" >&2; return 1; }
+    [ "$producer_model" = "$PW_PLANNER_ID" ] || { echo "plan-wall: imported producer differs from configured planner" >&2; return 1; }
+    PW_RELATION="$(_pw_relation "$PW_PLANNER_ID" "$PW_REVIEWER_MODEL")"
+    local import_digest
+    import_digest="$(_pw_sha256 "$PLAN_WALL_IMPORT_REPORT")" || {
+      _pw_import_reject_phase "report-digest-failed" || return 1
+      echo "plan-wall: native import digest failed; refusing pass" >&2; return 1; }
+    [[ "$import_digest" =~ ^[0-9a-f]{64}$ ]] || {
+      _pw_import_reject_phase "report-digest-invalid" || return 1
+      echo "plan-wall: native import digest invalid; refusing pass" >&2; return 1; }
+    PW_RUNG_TRAIL=("native-import:$import_digest" "transport:$(printf '%s' "$import_out" | jq -r '.reviewer_transport')")
+    PW_TIER_DESCENT=false
+  else
   # ── fresh dispatch ──
   prior_findings_block="$(_pw_prior_findings_block "$source_plan")"
   prompt="$(_pw_build_prompt "$plan_content" "$PW_SOCRATIC_SLICE" "$prior_findings_block")"
@@ -1093,6 +1151,7 @@ _pw_dispatch_path() {
       echo "plan-wall: FATAL: record write failed at $record_path" >&2; return 1; }
     echo "plan-wall: WALL-UNREVIEWED $plan_file — every reviewer rung exhausted" >&2
     return 1
+  fi
   fi
 
   queue_error=false
