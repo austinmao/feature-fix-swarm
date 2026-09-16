@@ -161,6 +161,10 @@ jobs:
           cache: npm
       - name: Install exact GSD package
         run: npm ci
+      - name: Apply and verify exact GSD overlay
+        run: |
+          python scripts/gsd/apply-gsd-core-overlay.py apply --repo .
+          python scripts/gsd/apply-gsd-core-overlay.py verify --repo .
       - name: Install python coord-layer dependencies (filelock)
         run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Run bats suites

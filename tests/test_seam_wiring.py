@@ -741,10 +741,9 @@ def test_seam5_ci_pytest_job_runs_env_registry_check():
     assert "--probe-gh" not in pytest_job
 
 
-def test_ci_bats_job_installs_exact_gsd_package_before_running_bats():
-    """The Bats job includes overlay/deps suites that verify the pinned
-    @opengsd/gsd-core package. A fresh CI checkout must install node_modules
-    before test discovery reaches those suites."""
+def test_ci_bats_job_reapplies_and_verifies_exact_gsd_overlay_before_bats():
+    """npm ci restores the pristine exact pin; Bats requires its reviewed
+    overlay to be reapplied and verified before suite discovery."""
     lines = [ln for ln in CI_YML.read_text().splitlines()
              if not ln.lstrip().startswith("#")]
     text = "\n".join(lines)
@@ -753,5 +752,9 @@ def test_ci_bats_job_installs_exact_gsd_package_before_running_bats():
     following_job = bats_i + 1 + following.start() if following else -1
     bats_job = text[bats_i:following_job if following_job != -1 else len(text)]
     npm_i = bats_job.index("npm ci")
+    apply_i = bats_job.index(
+        "apply-gsd-core-overlay.py apply --repo .")
+    verify_i = bats_job.index(
+        "apply-gsd-core-overlay.py verify --repo .")
     run_i = bats_job.index("bats --print-output-on-failure")
-    assert npm_i < run_i
+    assert npm_i < apply_i < verify_i < run_i
