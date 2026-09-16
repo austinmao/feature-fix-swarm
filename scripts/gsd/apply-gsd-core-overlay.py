@@ -152,7 +152,7 @@ def render(source: bytes) -> bytes:
     const pytest = (() => {
         if (!/^=+ test session starts =+$/m.test(output))
             return null;
-        const collection = [...output.matchAll(/^collected (\d+) items?(?:\s*\/\s*(\d+) errors?)?\s*$/gm)];
+        const collection = [...output.matchAll(/^(?:collecting\b[^\r\n]*?\s+)?collected (\d+) items?(?:\s*\/\s*(\d+) errors?)?\s*$/gm)];
         if (collection.length !== 1)
             return null;
         const tests = Number(collection[0][1]);

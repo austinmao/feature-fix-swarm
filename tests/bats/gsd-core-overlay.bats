@@ -56,6 +56,14 @@ NODE
   [[ "$output" == *'"verdict": "RED_EVIDENCE_OK"'* ]]
 }
 
+@test "exact-pin overlay accepts pytest collection progress followed by the verified item count" {
+  REC="$BATS_TEST_TMPDIR/pytest-collection-progress.json"
+  pytest_record "$REC" "test_imports_missing_media_module" "test_media_plan_store.py" $'============================= test session starts ==============================\ncollecting ... collected 1 item\n\ntests/test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n\n=================================== FAILURES ===================================\nE       ModuleNotFoundError: No module named \'media_plan_store\'\n=========================== short test summary info ============================\nFAILED tests/test_media_plan_store.py::test_imports_missing_media_module - ModuleNotFoundError: No module named \'media_plan_store\'\n============================== 1 failed in 0.04s ===============================\n'
+  run node "$TOOLS" check tdd-red-evidence "$REC" --raw
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict": "RED_EVIDENCE_OK"'* ]]
+}
+
 @test "pytest adapter rejects collection/config errors, zero collection, wrong-file same-name, unrelated, and malformed summaries" {
   for CASE in collection config zero wrong_file unrelated malformed; do
     REC="$BATS_TEST_TMPDIR/pytest-$CASE.json"
