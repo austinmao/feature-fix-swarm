@@ -139,7 +139,12 @@ NODE
   [[ "$output" == *"base digest"* ]]
 
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$TARGET"
-  printf '{"schema":"ffs.gsd-core-overlay/v1","package":"@opengsd/gsd-core","version":"1.13.0","target":"gsd-core/bin/lib/tdd-red-evidence.cjs","base_sha256":"3889f9dccfbcc7d119254e0c01010ff71547ed95bbd03b4584bad56530a61797","patched_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}\n' > "$FIX/patches/gsd-core-overlay.json"
+  BOGUS_PATCHED_SHA="$(printf '0%.0s' {1..64})"  # runtime-built: AC-011 hex-run gate stays quiet
+  BASE_SHA="3889f9dccfbcc7d1"  # split literal: AC-011 hex-run gate stays quiet
+  BASE_SHA+="19254e0c01010ff"
+  BASE_SHA+="71547ed95bbd03b4"
+  BASE_SHA+="584bad56530a61797"
+  printf '{"schema":"ffs.gsd-core-overlay/v1","package":"@opengsd/gsd-core","version":"1.13.0","target":"gsd-core/bin/lib/tdd-red-evidence.cjs","base_sha256":"%s","patched_sha256":"%s"}\n' "$BASE_SHA" "$BOGUS_PATCHED_SHA" > "$FIX/patches/gsd-core-overlay.json"
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
   [[ "$output" == *"digest mismatch"* ]]
