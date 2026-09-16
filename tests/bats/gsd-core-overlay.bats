@@ -56,13 +56,14 @@ NODE
   [[ "$output" == *'"verdict": "RED_EVIDENCE_OK"'* ]]
 }
 
-@test "pytest adapter rejects collection/config errors, zero collection, unrelated, and malformed summaries" {
-  for CASE in collection config zero unrelated malformed; do
+@test "pytest adapter rejects collection/config errors, zero collection, wrong-file same-name, unrelated, and malformed summaries" {
+  for CASE in collection config zero wrong_file unrelated malformed; do
     REC="$BATS_TEST_TMPDIR/pytest-$CASE.json"
     case "$CASE" in
       collection) DATA=$'============================= test session starts ==============================\ncollected 0 items / 1 error\n\n==================================== ERRORS ====================================\n___________ ERROR collecting tests/test_media_plan_store.py ___________\nImportError while importing test module\n=========================== short test summary info ============================\nERROR tests/test_media_plan_store.py\n!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n=============================== 1 error in 0.04s ===============================\n' ;;
       config) DATA=$'ERROR: usage: pytest [options] [file_or_dir] [file_or_dir] [...]\npytest: error: unrecognized arguments: --bad-flag\n  inifile: None\n  rootdir: /tmp\n' ;;
       zero) DATA=$'============================= test session starts ==============================\ncollected 0 items\n\n============================ no tests ran in 0.01s =============================\n' ;;
+      wrong_file) DATA=$'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_other_store.py::test_imports_missing_media_module FAILED [100%]\n\n=================================== FAILURES ===================================\n______________________ test_imports_missing_media_module ______________________\n\nE       AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_other_store.py::test_imports_missing_media_module - AssertionError\n============================== 1 failed in 0.04s ===============================\n' ;;
       unrelated) DATA=$'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_media_plan_store.py::test_other_case FAILED [100%]\n\n=================================== FAILURES ===================================\n_______________________________ test_other_case _______________________________\n\nE       AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_media_plan_store.py::test_other_case - AssertionError\n============================== 1 failed in 0.04s ===============================\n' ;;
       malformed) DATA=$'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n=========================== short test summary info ============================\nFAILED tests/test_media_plan_store.py::test_imports_missing_media_module - ModuleNotFoundError\n' ;;
     esac

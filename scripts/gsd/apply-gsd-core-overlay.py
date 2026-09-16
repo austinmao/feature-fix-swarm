@@ -171,25 +171,27 @@ def render(source: bytes) -> bytes:
             return null;
         const results = [];
         for (const line of output.split(/\r?\n/)) {
-            const match = line.match(/^\S+::(.+?)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS)\b/);
+            const match = line.match(/^(\S+)::(.+?)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS)\b/);
             if (!match)
                 continue;
-            const name = match[1].trim();
-            if (!name)
+            const file = match[1];
+            const name = match[2].trim();
+            if (!file || !name)
                 return null;
-            results.push({ name, failed: match[2] === 'FAILED' });
+            results.push({ file, name, failed: match[3] === 'FAILED' });
         }
-        if (results.length !== tests || new Set(results.map((item) => item.name)).size !== tests)
+        if (results.length !== tests || new Set(results.map((item) => `${item.file}::${item.name}`)).size !== tests)
             return null;
-        const failing = results.filter((item) => item.failed).map((item) => item.name);
+        const failing = results.filter((item) => item.failed);
         if (failing.length !== expectedFailures)
             return null;
         const targetName = targetTest.includes('::') ? targetTest.split('::').at(-1) : targetTest;
-        const matchesTarget = (name) => name === targetName
-            || name.replace(/\[[^\]]*\]$/, '') === targetName;
+        const targetBase = baseOf(input?.targetFile ?? '');
+        const matchesTarget = (item) => targetBase !== '' && baseOf(item.file) === targetBase
+            && (item.name === targetName || item.name.replace(/\[[^\]]*\]$/, '') === targetName);
         if (!failing.some(matchesTarget))
             return null;
-        return { tests, fail: failing.length, failing: failing.map((name) => matchesTarget(name) ? targetTest : name) };
+        return { tests, fail: failing.length, failing: failing.map((item) => matchesTarget(item) ? targetTest : item.name) };
     })();
     const failing = [...new Set([...topLevelFailing, ...(nestedTap?.failing ?? []), ...(pytest?.failing ?? [])])];
     const hasNodeSummary = /^# tests \d+\s*$/m.test(output);
