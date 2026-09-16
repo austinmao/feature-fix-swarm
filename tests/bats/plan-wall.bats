@@ -167,6 +167,22 @@ write_native_import() {
   [ "$status" -eq 1 ]; [[ "$output" == *"Socratic provenance is missing or stale"* ]]
 }
 
+@test "native import: duplicate Socratic discovery fails closed before CLI fallback" {
+  write_native_import '[]'
+  mkdir -p "specs/001-native duplicate"
+  printf 'second socratic evidence\n' > "specs/001-native duplicate/socratic.md"
+  MARKER="$BATS_TEST_TMPDIR/duplicate-socratic-cli"
+  printf '#!/usr/bin/env bash\ntouch "%s"\nexit 99\n' "$MARKER" > bin/stub-claude; chmod +x bin/stub-claude
+
+  GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude \
+    ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"native import requires exactly one repository Socratic document"* ]]
+  [ ! -e "$MARKER" ]
+  [ "$(jq -r '.verdict' "$(record_for 1-foo plan)")" = WALL-UNREVIEWED ]
+}
+
 @test "native import: missing Socratic after PASS replaces record and blocks completion without CLI" {
   write_native_import '[]'
   GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo

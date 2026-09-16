@@ -673,10 +673,10 @@ _pw_extract_payload() {
 # Sets PW_ANSWERED_MODEL (empty if the ladder never got that far) and
 # PW_TIER_DESCENT.
 _pw_note_answered_rung() {
-  local rung_file="$1" want_model="$2" want_effort="$3" kind model effort
+  local rung_file="$1" want_model="$2" want_effort="$3" _kind model effort
   PW_ANSWERED_MODEL=""
   [ -s "$rung_file" ] || return 0
-  IFS='|' read -r kind model effort < "$rung_file"
+  IFS='|' read -r _kind model effort < "$rung_file"
   PW_ANSWERED_MODEL="$model"
   [ -n "$model" ] && [ "$model" != "$want_model" ] || return 0
   PW_TIER_DESCENT=true
@@ -1095,12 +1095,12 @@ _pw_dispatch_path() {
   # Import mode is intentionally fail-closed and never falls back to a CLI:
   # an operator selected this transport because the CLI is unavailable.
   if [ -n "${PLAN_WALL_IMPORT_REPORT:-}" ]; then
-    local import_out import_phase import_socratic import_plans=() import_plan producer_model
+    local import_out import_phase import_plans=() import_plan producer_model
+    local import_socratics=() socratic_candidate
     import_phase="$(_pw_relpath "$PHASE_DIR")"
-    import_socratic="specs/${BRANCH_NNN}-"*/socratic.md
-    shopt -s nullglob
-    local import_socratics=("$REPO_ROOT"/$import_socratic)
-    shopt -u nullglob
+    while IFS= read -r -d '' socratic_candidate; do
+      import_socratics+=("$socratic_candidate")
+    done < <(find "$REPO_ROOT/specs" -mindepth 2 -maxdepth 2 -type f -path "$REPO_ROOT/specs/${BRANCH_NNN}-*/socratic.md" -print0 2>/dev/null)
     if [ "${#import_socratics[@]}" -ne 1 ]; then
       _pw_import_reject_phase "socratic-discovery-failed" || return 1
       echo "plan-wall: native import requires exactly one repository Socratic document for branch ${BRANCH_NNN:-unknown}" >&2
