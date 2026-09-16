@@ -159,6 +159,8 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+      - name: Install exact GSD package
+        run: npm ci
       - name: Install python coord-layer dependencies (filelock)
         run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Run bats suites

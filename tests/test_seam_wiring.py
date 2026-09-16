@@ -739,3 +739,19 @@ def test_seam5_ci_pytest_job_runs_env_registry_check():
     pytest_job = text[pytest_i:tamper_i]
     assert "env-registry.sh check" in pytest_job
     assert "--probe-gh" not in pytest_job
+
+
+def test_ci_bats_job_installs_exact_gsd_package_before_running_bats():
+    """The Bats job includes overlay/deps suites that verify the pinned
+    @opengsd/gsd-core package. A fresh CI checkout must install node_modules
+    before test discovery reaches those suites."""
+    lines = [ln for ln in CI_YML.read_text().splitlines()
+             if not ln.lstrip().startswith("#")]
+    text = "\n".join(lines)
+    bats_i = text.index("\n  bats:")
+    following = re.search(r"\n  [A-Za-z0-9_-]+:", text[bats_i + 1:])
+    following_job = bats_i + 1 + following.start() if following else -1
+    bats_job = text[bats_i:following_job if following_job != -1 else len(text)]
+    npm_i = bats_job.index("npm ci")
+    run_i = bats_job.index("bats --print-output-on-failure")
+    assert npm_i < run_i
