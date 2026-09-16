@@ -4,12 +4,26 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 
 runtime = "claude" if "--claude" in sys.argv else "codex" if "--codex" in sys.argv else None
 if runtime is None:
     raise SystemExit(2)
+if os.environ.get("FFS_GSD_STUB_REQUIRE_OVERLAY") == "1":
+    source = Path.cwd()
+    overlay = source / "scripts" / "gsd" / "apply-gsd-core-overlay.py"
+    verified = subprocess.run(
+        [sys.executable, str(overlay), "verify", "--repo", str(source)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if verified.returncode != 0:
+        print(verified.stderr.strip() or "overlay was not applied before profile installation", file=sys.stderr)
+        raise SystemExit(23)
 root = Path.home() / ".claude" if runtime == "claude" else Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 if os.environ.get("FFS_GSD_STUB_FAIL_RUNTIME") == runtime:
     if os.environ.get("FFS_GSD_STUB_CORRUPT_ON_FAILURE") == "1":

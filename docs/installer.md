@@ -1,10 +1,11 @@
 # Installer, migration, and rollback
 
 FFS has two explicit installation scopes. The installer owns FFS skills and
-the pinned `prompt-master` compatibility copy. Setup invokes the exact pinned
-GSD upstream installer for complete Claude and Codex profiles; that upstream
-installer remains the only writer and owner of `gsd-*` skills, agents, hooks,
-and configuration.
+the pinned `prompt-master` compatibility copy. Setup first applies and
+verifies its byte-pinned GSD RED-evidence compatibility overlay, then invokes
+the exact pinned GSD upstream installer for complete Claude and Codex profiles.
+That upstream installer remains the only writer and owner of `gsd-*` skills,
+agents, hooks, and configuration.
 
 ## Project scope
 
@@ -83,8 +84,9 @@ JSON output has schema `ffs.doctor/v1`. Exit codes are stable:
 
 Doctor also requires upstream `gsd-file-manifest.json` ownership at GSD 1.13.0
 with full profiles in both the Claude and Codex config roots. If Codex CLI is
-installed, its supported range is `>=0.137.0,<0.148.0`; `0.146.x` and `0.147.x`
-are the tested lines.
+installed, its supported range is `>=0.137.0,<0.148.0` or exact `0.154.0`;
+`0.146.x`, `0.147.x`, and `0.154.0` are the tested lines. Intervening and later
+releases remain refused until individually qualified.
 
 ## Safe migration
 
@@ -146,5 +148,9 @@ gsd-core --claude --global --profile=full
 gsd-core --codex --global --profile=full
 ```
 
-FFS orchestrates these calls but never copies or rewrites GSD source
-artifacts. Upstream manifests remain the source of ownership truth.
+FFS orchestrates these calls and never copies GSD runtime artifacts into its
+own catalog. The sole exception is the audited, deterministic RED-evidence
+overlay described in [Dependencies](dependencies.md#why-gsd-is-a-dependency-instead-of-vendored-code):
+setup applies and verifies it against both the pristine and rendered digests
+before dispatch. Upstream manifests remain the source of ownership truth for
+global profiles.

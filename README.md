@@ -155,8 +155,9 @@ on integration, safety, and proof.
 | Optional QA lane: `npx`/vitest, `playwright`, `canary`; optional tooling: `bats`, `shellcheck`, `slopcheck`, `gbrain` | Optional | No | Browser-proof QA, contributor tests/lint, package-legitimacy verdicts, workspace memory |
 
 `bash scripts/gsd/deps.sh check` is the executable form of this table — it
-probes every row and prints the exact install command for anything missing;
-`/ffs-init` runs it first and auto-installs the repo-scoped rows. See
+probes every row (including the byte-pinned GSD RED-evidence overlay) and
+prints the exact install command for anything missing; `/ffs-init` runs it
+first and auto-installs the repo-scoped rows. See
 [Initialization](docs/initialization.md).
 
 The complete ownership, pinning, update, and degradation rules are documented
@@ -209,7 +210,7 @@ the legacy alias bridge.
 
 - macOS with Bash or zsh
 - Ubuntu with Bash
-- Codex CLI `>=0.137.0,<0.148.0` (`0.146.x` and `0.147.x` are the tested lines)
+- Codex CLI `>=0.137.0,<0.148.0` or exact `0.154.0` (`0.146.x`, `0.147.x`, and `0.154.0` are tested; intervening and later releases are refused)
 - Claude Code using the corresponding host-native skills
 - Windows is not currently supported
 

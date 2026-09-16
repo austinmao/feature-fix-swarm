@@ -22,11 +22,17 @@ make_stub_path() {
 @test "check exits 0 in a fully-provisioned environment (hermetic)" {
   # Build a provisioned world from scratch so this passes on any runner:
   # stubs for every required binary, a scratch repo with the pinned gsd-core
-  # in node_modules, and a fake HOME carrying the staged external skills.
+  # plus its exact-pin overlay in node_modules, and a fake HOME carrying the
+  # staged external skills. Nothing here relies on the caller's checkout or
+  # globally installed GSD bytes.
   local repo="$BATS_TEST_TMPDIR/repo" home="$BATS_TEST_TMPDIR/home" tool
-  mkdir -p "$repo/node_modules/@opengsd/gsd-core" "$home"
+  local target="$repo/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs"
+  mkdir -p "$(dirname "$target")" "$repo/scripts/gsd" "$repo/patches" "$home"
   git -C "$repo" init -q
-  printf '{"version": "1.13.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
+  cp "$ROOT/scripts/gsd/apply-gsd-core-overlay.py" "$repo/scripts/gsd/"
+  cp "$ROOT/patches/gsd-core-overlay.json" "$repo/patches/"
+  cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$target"
+  printf '{"name":"@opengsd/gsd-core","version":"1.13.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
   for skill in prompt-master socratic; do
     mkdir -p "$home/.agents/skills/$skill"
     touch "$home/.agents/skills/$skill/SKILL.md"

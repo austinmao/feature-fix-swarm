@@ -7,7 +7,7 @@ what FFS owns from what it installs, invokes, or merely integrates with.
 
 | Component | Version policy | Ownership | Purpose |
 | --- | --- | --- | --- |
-| Claude Code or Codex CLI | At least one current supported host; Codex `>=0.137.0,<0.148.0` | User-installed | Runs the skills and agents |
+| Claude Code or Codex CLI | At least one current supported host; Codex `>=0.137.0,<0.148.0` or exact `0.154.0` | User-installed | Runs the skills and agents |
 | Open GSD Core | Exact `@opengsd/gsd-core@1.13.0` | Upstream-owned; installed through GSD's installer | Plan/execute/verify orchestration, manifests, hooks, and GSD skills |
 | Node.js and npm | Node 24+, npm 10+ | User-installed | Reproducible GSD package installation |
 | Python | 3.11+ | User-installed | Installer, gates, state, and verification tools |
@@ -78,7 +78,15 @@ Copying its skills or hooks into FFS source would create two implementations,
 make security fixes hard to trace, and blur who is responsible for migrations.
 
 FFS therefore calls GSD's full-profile installer and verifies its upstream
-manifest. FFS owns only the surrounding integration: cross-host discovery,
+manifest. It also carries one audited compatibility overlay for
+`gsd-core/bin/lib/tdd-red-evidence.cjs`: the applier accepts only
+`@opengsd/gsd-core@1.13.0`, the committed pristine-file SHA-256, and the
+committed rendered SHA-256. `deps.sh install` and managed setup apply and
+verify that overlay before either global profile is installed. This is not a
+fork or a hand edit: any upstream byte, version, or rendered-digest drift
+fails closed and requires a reviewed overlay update.
+
+FFS otherwise owns only the surrounding integration: cross-host discovery,
 safe migration and rollback, run locking, phase evidence, typed model routing,
 adversarial review, sandbox/auth handling, and operator grants.
 
