@@ -341,8 +341,48 @@ case "$REQUESTED_SANDBOX_MODE" in
     ;;
   *) echo "gsd-run: sandbox mode must be workspace-write or danger-full-access" >&2; exit 2 ;;
 esac
-RESUME_REQUESTED="${GSD_RESUME:-0}"
+GSD_RESUME_EXPLICIT=0
+[ "${GSD_RESUME+x}" != x ] || GSD_RESUME_EXPLICIT=1
+case "${GSD_RESUME:-}" in
+  ""|0|1) ;;
+  *) echo "gsd-run: GSD_RESUME must be 0 or 1 when set" >&2; exit 2 ;;
+esac
+# Fresh-start recovery values authorize only prelaunch tuple replacement.
+# Consume their exported inputs before a host probe or stateful drive can
+# inherit them; the private copies below are intentionally non-exported.
+unset FRESH_START_REASON FRESH_START_EXPECTED_ROLE_CONFIG_HASH \
+  FRESH_START_EXPECTED_BUNDLE_HASH FRESH_START_NEW_BUNDLE_HASH
+FRESH_START_REASON="${GSD_FRESH_START_REASON:-}"
+FRESH_START_EXPECTED_ROLE_CONFIG_HASH="${GSD_FRESH_START_EXPECTED_ROLE_CONFIG_HASH:-}"
+FRESH_START_EXPECTED_BUNDLE_HASH="${GSD_FRESH_START_EXPECTED_BUNDLE_HASH:-}"
+FRESH_START_NEW_BUNDLE_HASH="${GSD_FRESH_START_NEW_BUNDLE_HASH:-}"
+unset GSD_FRESH_START_REASON GSD_FRESH_START_EXPECTED_ROLE_CONFIG_HASH \
+  GSD_FRESH_START_EXPECTED_BUNDLE_HASH GSD_FRESH_START_NEW_BUNDLE_HASH
+RESUME_REQUESTED=0
+FRESH_ROLE_PIN_RECOVERY_REQUESTED=0
+FRESH_BUNDLE_RECOVERY_REQUESTED=0
 if [ "$GSD_SKILL_NAME" = gsd-resume-work ]; then
+  if [ "$GSD_RESUME_EXPLICIT" -eq 1 ] && [ "$GSD_RESUME" = 0 ]; then
+    echo "gsd-run: gsd-resume-work cannot be used with explicit GSD_RESUME=0" >&2
+    exit 2
+  fi
+  RESUME_REQUESTED=1
+elif [ "$GSD_RESUME_EXPLICIT" -eq 1 ] && [ "$GSD_RESUME" = 0 ]; then
+  # This is deliberately not a general resume-drift escape hatch. The
+  # prelaunch tuple helper admits exactly one named recovery kind for an
+  # explicitly named, failed, same-host run. Bundle repair requires both an
+  # old and a new hash; role-pin repair retains its existing single-old-hash
+  # contract. Mixing them is an operator-error, never a broader waiver.
+  if [ -n "$FRESH_START_EXPECTED_ROLE_CONFIG_HASH" ] \
+    && { [ -n "$FRESH_START_EXPECTED_BUNDLE_HASH" ] || [ -n "$FRESH_START_NEW_BUNDLE_HASH" ]; }; then
+    echo "gsd-run: explicit fresh-start recovery kinds role_config_hash and bundle_hash are mutually exclusive" >&2
+    exit 2
+  elif [ -n "$FRESH_START_EXPECTED_BUNDLE_HASH" ] || [ -n "$FRESH_START_NEW_BUNDLE_HASH" ]; then
+    FRESH_BUNDLE_RECOVERY_REQUESTED=1
+  else
+    FRESH_ROLE_PIN_RECOVERY_REQUESTED=1
+  fi
+elif [ "${GSD_RESUME:-0}" = 1 ]; then
   RESUME_REQUESTED=1
 elif [ -f "$RUN_TUPLE_FILE" ] && [ -f "$RUN_STATUS_FILE" ] \
   && grep -q '^state=failed$' "$RUN_STATUS_FILE" \
@@ -354,6 +394,10 @@ elif [ -f "$RUN_TUPLE_FILE" ] && [ -f "$RUN_STATUS_FILE" ] \
   # arms resume against the previous drive's tuple and wedges every fresh
   # launch on tuple drift.
   RESUME_REQUESTED=1
+fi
+if { [ "$FRESH_ROLE_PIN_RECOVERY_REQUESTED" -eq 1 ] || [ "$FRESH_BUNDLE_RECOVERY_REQUESTED" -eq 1 ]; } && [ -z "${GSD_RUN_ID:-}" ]; then
+  echo "gsd-run: explicit fresh-start recovery requires an explicit GSD_RUN_ID" >&2
+  exit 2
 fi
 RUN_ID="${GSD_RUN_ID:-}"
 if [ -z "$RUN_ID" ] && [ "$RESUME_REQUESTED" = 1 ] && [ -f "$RUN_TUPLE_FILE" ]; then
@@ -626,6 +670,72 @@ coord_renew_run() {
   esac
 }
 
+FRESH_START_RECOVERY_ARCHIVE_DIR=""
+capture_explicit_fresh_start_recovery_state() {
+  { [ "$FRESH_ROLE_PIN_RECOVERY_REQUESTED" -eq 1 ] || [ "$FRESH_BUNDLE_RECOVERY_REQUESTED" -eq 1 ]; } || return 0
+  FRESH_START_RECOVERY_ARCHIVE_DIR="$(/usr/bin/python3 - "$RUN_STATE_DIR" "$RUN_TUPLE_FILE" "$RUN_STATUS_FILE" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+
+state_dir, tuple_path, status_path = sys.argv[1:]
+
+def fail(message):
+    print(f"gsd-run: explicit fresh-start recovery refused: {message}", file=sys.stderr)
+    raise SystemExit(78)
+
+def read_regular(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        fail("state artifacts must be readable regular non-symlink files")
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fail("state artifacts must be regular non-symlink files")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
+
+old_tuple_raw = read_regular(tuple_path)
+old_status_raw = read_regular(status_path)
+try:
+    archive = tempfile.mkdtemp(prefix="gsd-run.archive.", dir=state_dir)
+    os.chmod(archive, 0o700)
+    for name, raw in (("tuple", old_tuple_raw), ("status", old_status_raw)):
+        fd = os.open(os.path.join(archive, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            write_all(fd, raw)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    dirfd = os.open(archive, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+except OSError:
+    fail("unable to snapshot failed state safely")
+print(archive)
+PY
+)" || return 78
+  [ -n "$FRESH_START_RECOVERY_ARCHIVE_DIR" ] || return 78
+}
+
 acquire_run_state() {
   [ ! -L "$RUN_STATE_DIR" ] || {
     echo "gsd-run: refusing symlinked run-state directory: $RUN_STATE_DIR" >&2
@@ -639,6 +749,7 @@ acquire_run_state() {
 
   local heartbeat_secs
   # Lock claim/reclaim/lease checks live exclusively in lib-lock.sh.
+  capture_explicit_fresh_start_recovery_state || return $?
   write_heartbeat || return 1
   write_run_status probing
   heartbeat_secs="${GSD_HEARTBEAT_SECS:-15}"
@@ -1224,8 +1335,9 @@ version_in_supported_codex_range() {
   IFS=. read -r major minor patch <<EOF
 $version
 EOF
-  case "$major:$minor:$patch" in *[!0-9:]*|::*|*::) return 1 ;; esac
-  [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 148 ]
+  case "$major:$minor:$patch" in *[!0-9:]*|::*|*::|*:) return 1 ;; esac
+  { [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 148 ]; } \
+    || { [ "$major" -eq 0 ] && [ "$minor" -eq 154 ] && [ "$patch" -eq 0 ]; }
 }
 
 require_supported_codex_cli() {
@@ -1235,10 +1347,10 @@ require_supported_codex_cli() {
     echo "gsd-run: could not determine Codex CLI version" >&2
     return 78
   }
-  version="$(printf '%s\n' "$raw" | sed -nE 's/.*[^0-9]([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)"
+  version="$(printf '%s\n' "$raw" | sed -nE 's/^[[:space:]]*[^[:space:]]+[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' | head -1)"
   if [ -z "$version" ] || ! version_in_supported_codex_range "$version"; then
     CODEX_PREFLIGHT_FATAL=1
-    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.148.0" >&2
+    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.148.0 or 0.154.0" >&2
     return 78
   fi
   CODEX_CLI_VERSION="$version"
@@ -1297,8 +1409,46 @@ command_surface_available() {
   fi
 }
 
+ensure_git_ref_parent() {
+  local anchor="$1" ref_tail="$2" current component current_real saved_ifs
+  [ -d "$anchor" ] && [ ! -L "$anchor" ] || {
+    echo "gsd-run: refusing symlinked linked-worktree branch-ref parent" >&2
+    return 78
+  }
+  current="$(cd "$anchor" && pwd -P)" || return 78
+  [ "$current" = "$anchor" ] || {
+    echo "gsd-run: linked-worktree branch-ref parent escapes Git common directory" >&2
+    return 78
+  }
+  saved_ifs="$IFS"
+  IFS=/
+  set -- $ref_tail
+  IFS="$saved_ifs"
+  # The final component is the ref file; each preceding component is a
+  # directory Git may need to create before it can atomically write .lock.
+  while [ "$#" -gt 1 ]; do
+    component="$1"
+    shift
+    current="$current/$component"
+    if [ -e "$current" ]; then
+      [ -d "$current" ] && [ ! -L "$current" ] || {
+        echo "gsd-run: refusing symlinked linked-worktree branch-ref parent" >&2
+        return 78
+      }
+    else
+      mkdir "$current" || return 1
+    fi
+    current_real="$(cd "$current" && pwd -P)" || return 78
+    [ "$current_real" = "$current" ] || {
+      echo "gsd-run: linked-worktree branch-ref parent escapes Git common directory" >&2
+      return 78
+    }
+  done
+}
+
 prepare_codex_runtime() {
   local source_root skill_root auth_source network_bool writable_json trusted_package node_bin auth_meta auth_uid auth_mode
+  local admin_dir admin_parent branch_ref branch_ref_rc branch_tail branch_ref_file branch_ref_lock branch_log_file branch_log_lock
   source_root="$(codex_source_root)"
   skill_root="$(codex_skill_root)"
   command_surface_available codex || return $?
@@ -1326,25 +1476,53 @@ prepare_codex_runtime() {
   # (no tracked source becomes writable) and this also unblocks the sibling
   # evidence.json write (lib/gates.py:1372) that was broken for the same
   # reason.
-  # Spec-008 live fix: a commit inside the LINKED worktree writes git
-  # metadata OUTSIDE the worktree root — its per-worktree git dir
-  # (<common>/worktrees/<run-id>: index.lock, HEAD, logs) and the SHARED
-  # object store (<common>/objects). Without these two roots every
-  # sandboxed `git add`/`git commit` dies with "Unable to create
-  # index.lock: Operation not permitted" and the drive cannot make its
-  # RED/GREEN/SUMMARY commits. Deliberately NARROW: never the whole .git —
-  # hooks/ (arbitrary code executed by the next unsandboxed git call) and
-  # refs/ (other branches) stay non-writable.
-  # The executor also creates/advances phase branches under the gsd/*
-  # namespace (refs/heads/gsd/phase-* + their reflogs). Grant EXACTLY that
-  # namespace — pre-created here because the sandbox cannot mkdir inside
-  # the ungranted refs/heads parent — so main and every other branch ref
-  # stay non-writable.
-  mkdir -p "$GIT_COMMON_DIR/refs/heads/gsd" "$GIT_COMMON_DIR/logs/refs/heads/gsd" || return 1
+  # Git worktree move preserves the admin directory basename, so it is NOT
+  # derivable from RUN_ID. Ask trusted Git for the exact admin directory and
+  # require its physical parent to be <common>/worktrees before granting it.
+  admin_dir="$($GIT_BIN_FIXED -C "$RUN_WORKTREE_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || return 78
+  [ -d "$admin_dir" ] && [ ! -L "$admin_dir" ] || {
+    echo "gsd-run: refusing invalid linked-worktree admin directory" >&2; return 78; }
+  admin_dir="$(cd "$admin_dir" && pwd -P)" || return 78
+  admin_parent="$(dirname "$admin_dir")"
+  if [ "$admin_parent" != "$GIT_COMMON_DIR/worktrees" ]; then
+    echo "gsd-run: linked-worktree admin directory escapes the Git common worktrees namespace" >&2
+    return 78
+  fi
+  # A normal commit atomically writes its exact branch ref and reflog through
+  # sibling .lock files. Grant those four paths only — never refs/heads,
+  # another branch namespace, or the whole Git common directory.
+  branch_ref="$($GIT_BIN_FIXED -C "$RUN_WORKTREE_ROOT" symbolic-ref -q HEAD 2>/dev/null)"
+  branch_ref_rc=$?
+  case "$branch_ref_rc" in
+    0|1) ;;
+    *) echo "gsd-run: unable to resolve linked-worktree symbolic ref" >&2; return 78 ;;
+  esac
+  case "$branch_ref" in
+    "") ;;
+    refs/heads/*)
+      $GIT_BIN_FIXED check-ref-format "$branch_ref" >/dev/null 2>&1 || {
+        echo "gsd-run: refusing invalid linked-worktree branch ref" >&2; return 78; }
+      branch_ref_file="$GIT_COMMON_DIR/$branch_ref"
+      branch_ref_lock="$branch_ref_file.lock"
+      branch_log_file="$GIT_COMMON_DIR/logs/$branch_ref"
+      branch_log_lock="$branch_log_file.lock"
+      # Validate both fixed anchors before creating a nested branch parent:
+      # mkdir -p follows symlinked parents, so checking only the final ref
+      # file would otherwise permit a linked worktree to escape .git.
+      branch_tail="$(printf '%s' "$branch_ref" | sed 's#^refs/heads/##')"
+      ensure_git_ref_parent "$GIT_COMMON_DIR/refs/heads" "$branch_tail" || return $?
+      ensure_git_ref_parent "$GIT_COMMON_DIR/logs/refs/heads" "$branch_tail" || return $?
+      for _git_ref_path in "$branch_ref_file" "$branch_ref_lock" "$branch_log_file" "$branch_log_lock"; do
+        [ ! -L "$_git_ref_path" ] || {
+          echo "gsd-run: refusing symlinked linked-worktree branch artifact" >&2; return 78; }
+      done
+      ;;
+    *) echo "gsd-run: refusing non-head linked-worktree symbolic ref" >&2; return 78 ;;
+  esac
   writable_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
     "$RUN_WORKTREE_ROOT" "$PROJECT_PRIMARY_ROOT/.feature-fix-swarm" \
-    "$GIT_COMMON_DIR/objects" "$GIT_COMMON_DIR/worktrees/$RUN_ID" \
-    "$GIT_COMMON_DIR/refs/heads/gsd" "$GIT_COMMON_DIR/logs/refs/heads/gsd")" || return 1
+    "$GIT_COMMON_DIR/objects" "$admin_dir" \
+    ${branch_ref_file:+"$branch_ref_file" "$branch_ref_lock" "$branch_log_file" "$branch_log_lock"})" || return 1
   {
     printf 'approval_policy = "never"\n'
     printf 'sandbox_mode = "%s"\n' "$REQUESTED_SANDBOX_MODE"
@@ -1403,6 +1581,143 @@ consume_danger_grant() {
   SANDBOX_GRANT_CONSUMPTION="$output"
 }
 
+archive_explicit_fresh_start_recovery() {
+  local new_tuple="$1"
+  local kind
+  if [ "$FRESH_BUNDLE_RECOVERY_REQUESTED" -eq 1 ]; then kind=bundle_hash; else kind=role_config_hash; fi
+  [ -n "$FRESH_START_RECOVERY_ARCHIVE_DIR" ] || {
+    echo "gsd-run: explicit fresh-start recovery refused: failed-state snapshot is missing" >&2
+    return 78
+  }
+  /usr/bin/python3 - "$FRESH_START_RECOVERY_ARCHIVE_DIR" "$new_tuple" "$RUN_ID" "$GSD_SKILL_NAME" "$SELECTED_HOST" \
+    "$kind" "$FRESH_START_EXPECTED_ROLE_CONFIG_HASH" "$FRESH_START_EXPECTED_BUNDLE_HASH" \
+    "$FRESH_START_NEW_BUNDLE_HASH" "$FRESH_START_REASON" <<'PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+
+archive, new_path, run_id, skill, host, kind, expected_role, expected_bundle, new_bundle, reason = sys.argv[1:]
+
+def fail(message):
+    print(f"gsd-run: explicit fresh-start recovery refused: {message}", file=sys.stderr)
+    raise SystemExit(78)
+
+def read_regular(name, dirfd=None):
+    try:
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dirfd)
+    except OSError:
+        fail("recovery artifact is unreadable")
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fail("recovery artifact is not regular")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+def parse(raw):
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("tuple data is malformed")
+    out = {}
+    for line in text.splitlines():
+        if not line or "=" not in line:
+            fail("tuple data is malformed")
+        key, value = line.split("=", 1)
+        if not re.fullmatch(r"[a-z_]+", key) or key in out:
+            fail("tuple data is malformed")
+        out[key] = value
+    return out
+
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
+
+try:
+    dirfd = os.open(archive, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+except OSError:
+    fail("failed-state archive is unavailable")
+try:
+    old_tuple_raw = read_regular("tuple", dirfd)
+    old_status_raw = read_regular("status", dirfd)
+    new_raw = read_regular(new_path)
+    old_tuple, old_status, new_tuple = map(parse, (old_tuple_raw, old_status_raw, new_raw))
+    if old_tuple.get("run_id") != run_id or old_tuple.get("skill") != skill:
+        fail("prior tuple is not this explicit run and skill")
+    if old_status.get("state") != "failed" or old_status.get("skill") != skill:
+        fail("prior status is not a failed drive for this skill")
+    if old_status.get("host") != host or old_tuple.get("runtime") != host:
+        fail("prior drive host differs from selected host")
+    old_cmp, new_cmp = dict(old_tuple), dict(new_tuple)
+    old_cmp.pop("auth_initial_hash", None)
+    new_cmp.pop("auth_initial_hash", None)
+    drift = {k for k in set(old_cmp) | set(new_cmp) if old_cmp.get(k) != new_cmp.get(k)}
+    if kind == "role_config_hash":
+        old_role, new_role = old_tuple.get("role_config_hash", ""), new_tuple.get("role_config_hash", "")
+        if old_role != expected_role or not re.fullmatch(r"[0-9a-f]{64}", old_role):
+            fail("expected old role hash does not match the prior tuple")
+        if not re.fullmatch(r"[0-9a-f]{64}", new_role) or old_role == new_role:
+            fail("role hash must be the sole actual change")
+        if drift != {"role_config_hash"}:
+            fail("only role_config_hash may change")
+        recovery_metadata = (
+            "schema=ffs.gsd-run-role-pin-recovery/v1\noutcome=accepted\n"
+            "recovery_kind=role_config_hash\n"
+            f"old_role_config_hash={old_role}\nnew_role_config_hash={new_role}\n"
+        )
+    elif kind == "bundle_hash":
+        old_bundle, actual_new_bundle = old_tuple.get("bundle_hash", ""), new_tuple.get("bundle_hash", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_bundle) or not re.fullmatch(r"[0-9a-f]{64}", new_bundle):
+            fail("bundle recovery requires exact expected old and new bundle hashes")
+        if old_bundle != expected_bundle:
+            fail("expected old bundle hash does not match the prior tuple")
+        if actual_new_bundle != new_bundle:
+            fail("expected new bundle hash does not match the candidate tuple")
+        if old_bundle == actual_new_bundle:
+            fail("bundle hash must change during bundle recovery")
+        if drift != {"bundle_hash"}:
+            fail("only bundle_hash may change")
+        recovery_metadata = (
+            "schema=ffs.gsd-run-bundle-recovery/v1\noutcome=accepted\n"
+            "recovery_kind=bundle_hash\n"
+            f"old_bundle_hash={old_bundle}\nnew_bundle_hash={actual_new_bundle}\n"
+        )
+    else:
+        fail("unknown fresh-start recovery kind")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,160}", reason):
+        fail("reason must be a single-line audit label")
+    metadata = (
+        recovery_metadata
+        + f"reason={reason}\nrun_id={run_id}\nskill={skill}\nhost={host}\n"
+        f"old_tuple_sha256={hashlib.sha256(old_tuple_raw).hexdigest()}\n"
+        f"old_status_sha256={hashlib.sha256(old_status_raw).hexdigest()}\n"
+        f"new_tuple_sha256={hashlib.sha256(new_raw).hexdigest()}\n"
+        "archived_at=" + __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n"
+    ).encode()
+    fd = os.open("metadata.next", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dirfd)
+    try:
+        write_all(fd, metadata)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace("metadata.next", "metadata", src_dir_fd=dirfd, dst_dir_fd=dirfd)
+    os.fsync(dirfd)
+finally:
+    os.close(dirfd)
+PY
+}
+
 persist_prelaunch_tuple() {
   local model="$1" effort="$2" tmp
   tmp="$(mktemp "$RUN_STATE_DIR/.gsd-run.tuple.XXXXXX")" || return 1
@@ -1447,6 +1762,15 @@ persist_prelaunch_tuple() {
       return 78
     fi
     rm -f "$tmp"
+  elif [ "$FRESH_ROLE_PIN_RECOVERY_REQUESTED" -eq 1 ] || [ "$FRESH_BUNDLE_RECOVERY_REQUESTED" -eq 1 ]; then
+    # Explicit GSD_RESUME=0 can replace a failed tuple only through the
+    # narrow role-pin or exact bundle archival path above. It rejects missing
+    # or incomplete state; ordinary first launches leave GSD_RESUME unset.
+    archive_explicit_fresh_start_recovery "$tmp" || {
+      rm -f "$tmp"
+      return 78
+    }
+    atomic_replace "$tmp" "$RUN_TUPLE_FILE"
   else
     atomic_replace "$tmp" "$RUN_TUPLE_FILE"
   fi
@@ -1578,6 +1902,9 @@ if [ "$SELECTED_HOST" = "codex" ]; then
     *) echo "gsd-run: unsupported Codex GSD command: $first" >&2; exit 2 ;;
   esac
   [ "$#" -eq 0 ] || CODEX_COMMAND="$CODEX_COMMAND $*"
+  CODEX_COMMAND="$CODEX_COMMAND
+
+FFS CODEX STAGED-WORKFLOW CONTRACT: Before doing any work, fully read the exact verified staged workflow at \"$CODEX_RUNTIME_HOME/skills/$GSD_SKILL_NAME/SKILL.md\" under CODEX_HOME. Follow every linked workflow it directs you to. Do not use any legacy/local feature-implement skill or infer the workflow from the slash-command name."
   # Codex exposes two lifetimes: the orchestration cell and the long-lived
   # child PTY. Make the distinction explicit to the autonomous executor so a
   # yielded cell cannot be mistaken for a failed stateful command and retried.
