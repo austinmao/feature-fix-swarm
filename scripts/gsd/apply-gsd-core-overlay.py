@@ -169,6 +169,23 @@ def render(source: bytes) -> bytes:
         const expectedFailures = Number(failed[1]);
         if (!Number.isSafeInteger(expectedFailures) || expectedFailures < 1)
             return null;
+        const normalizePath = (value) => {
+            if (typeof value !== 'string' || value.length === 0)
+                return '';
+            const parts = [];
+            for (const part of value.replace(/\\/g, '/').split('/')) {
+                if (part === '' || part === '.')
+                    continue;
+                if (part === '..') {
+                    if (parts.length === 0)
+                        return '';
+                    parts.pop();
+                    continue;
+                }
+                parts.push(part);
+            }
+            return parts.join('/');
+        };
         const results = [];
         for (const line of output.split(/\r?\n/)) {
             const match = line.match(/^(\S+)::(.+?)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS)\b/);
@@ -186,9 +203,17 @@ def render(source: bytes) -> bytes:
         if (failing.length !== expectedFailures)
             return null;
         const targetName = targetTest.includes('::') ? targetTest.split('::').at(-1) : targetTest;
-        const targetBase = baseOf(input?.targetFile ?? '');
-        const matchesTarget = (item) => targetBase !== '' && baseOf(item.file) === targetBase
+        const suppliedTargetFile = typeof input?.targetFile === 'string' ? input.targetFile : '';
+        const targetPath = normalizePath(suppliedTargetFile);
+        const targetHasDirectory = /[\\/]/.test(suppliedTargetFile);
+        const matchesTarget = (item) => {
+            const filePath = normalizePath(item.file);
+            const matchesFile = targetHasDirectory
+                ? filePath === targetPath || (targetPath.includes('/') && filePath.endsWith(`/${targetPath}`))
+                : targetPath !== '' && baseOf(filePath) === targetPath;
+            return matchesFile
             && (item.name === targetName || item.name.replace(/\[[^\]]*\]$/, '') === targetName);
+        };
         if (!failing.some(matchesTarget))
             return null;
         return { tests, fail: failing.length, failing: failing.map((item) => matchesTarget(item) ? targetTest : item.name) };

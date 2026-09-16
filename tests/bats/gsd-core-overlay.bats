@@ -20,12 +20,12 @@ NODE
 }
 
 pytest_record() {
-  node - "$1" "$2" "$3" <<'NODE'
+  node - "$1" "$2" "$3" "$4" <<'NODE'
 const fs = require("fs");
 fs.writeFileSync(process.argv[2], JSON.stringify({
   command: "python3 -m pytest -q", exitCode: 1,
-  targetTest: process.argv[3], targetFile: "test_media_plan_store.py",
-  output: process.argv[4],
+  targetTest: process.argv[3], targetFile: process.argv[4],
+  output: process.argv[5],
 }));
 NODE
 }
@@ -50,7 +50,7 @@ NODE
 
 @test "exact-pin overlay accepts a collected named pytest failure, including an asserted missing module" {
   REC="$BATS_TEST_TMPDIR/pytest-red.json"
-  pytest_record "$REC" "test_imports_missing_media_module" $'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n\n=================================== FAILURES ===================================\n______________________ test_imports_missing_media_module ______________________\n\n    def test_imports_missing_media_module():\n>       import media_plan_store\nE       ModuleNotFoundError: No module named \'media_plan_store\'\n\ntests/test_media_plan_store.py:4: ModuleNotFoundError\n=========================== short test summary info ============================\nFAILED tests/test_media_plan_store.py::test_imports_missing_media_module - ModuleNotFoundError: No module named \'media_plan_store\'\n============================== 1 failed in 0.04s ===============================\n'
+  pytest_record "$REC" "test_imports_missing_media_module" "test_media_plan_store.py" $'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n\n=================================== FAILURES ===================================\n______________________ test_imports_missing_media_module ______________________\n\n    def test_imports_missing_media_module():\n>       import media_plan_store\nE       ModuleNotFoundError: No module named \'media_plan_store\'\n\ntests/test_media_plan_store.py:4: ModuleNotFoundError\n=========================== short test summary info ============================\nFAILED tests/test_media_plan_store.py::test_imports_missing_media_module - ModuleNotFoundError: No module named \'media_plan_store\'\n============================== 1 failed in 0.04s ===============================\n'
   run node "$TOOLS" check tdd-red-evidence "$REC" --raw
   [ "$status" -eq 0 ]
   [[ "$output" == *'"verdict": "RED_EVIDENCE_OK"'* ]]
@@ -67,11 +67,32 @@ NODE
       unrelated) DATA=$'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_media_plan_store.py::test_other_case FAILED [100%]\n\n=================================== FAILURES ===================================\n_______________________________ test_other_case _______________________________\n\nE       AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_media_plan_store.py::test_other_case - AssertionError\n============================== 1 failed in 0.04s ===============================\n' ;;
       malformed) DATA=$'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n=========================== short test summary info ============================\nFAILED tests/test_media_plan_store.py::test_imports_missing_media_module - ModuleNotFoundError\n' ;;
     esac
-    pytest_record "$REC" "test_imports_missing_media_module" "$DATA"
+    pytest_record "$REC" "test_imports_missing_media_module" "test_media_plan_store.py" "$DATA"
     run node "$TOOLS" check tdd-red-evidence "$REC" --raw
     [ "$status" -eq 0 ]
     [[ "$output" == *'"verdict": "INVALID_RED"'* ]]
   done
+}
+
+@test "pytest adapter binds directory-qualified targets by normalized path, not basename" {
+  TARGET="src/tests/test_media_plan_store.py"
+  BAD="$BATS_TEST_TMPDIR/pytest-same-basename-wrong-directory.json"
+  pytest_record "$BAD" "test_imports_missing_media_module" "$TARGET" $'============================= test session starts ==============================\ncollected 1 item\n\nother/tests/test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n\n=================================== FAILURES ===================================\nE       AssertionError\n=========================== short test summary info ============================\nFAILED other/tests/test_media_plan_store.py::test_imports_missing_media_module - AssertionError\n============================== 1 failed in 0.04s ===============================\n'
+  run node "$TOOLS" check tdd-red-evidence "$BAD" --raw
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict": "INVALID_RED"'* ]]
+
+  GOOD="$BATS_TEST_TMPDIR/pytest-normalized-target.json"
+  pytest_record "$GOOD" "test_imports_missing_media_module" "$TARGET" $'============================= test session starts ==============================\ncollected 1 item\n\nsrc/./tests/../tests/test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n\n=================================== FAILURES ===================================\nE       AssertionError\n=========================== short test summary info ============================\nFAILED src/./tests/../tests/test_media_plan_store.py::test_imports_missing_media_module - AssertionError\n============================== 1 failed in 0.04s ===============================\n'
+  run node "$TOOLS" check tdd-red-evidence "$GOOD" --raw
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict": "RED_EVIDENCE_OK"'* ]]
+
+  WINDOWS="$BATS_TEST_TMPDIR/pytest-windows-normalized-target.json"
+  pytest_record "$WINDOWS" "test_imports_missing_media_module" $'src\\tests\\test_media_plan_store.py' $'============================= test session starts ==============================\ncollected 1 item\n\nsrc/tests/./test_media_plan_store.py::test_imports_missing_media_module FAILED [100%]\n\n=================================== FAILURES ===================================\nE       AssertionError\n=========================== short test summary info ============================\nFAILED src/tests/./test_media_plan_store.py::test_imports_missing_media_module - AssertionError\n============================== 1 failed in 0.04s ===============================\n'
+  run node "$TOOLS" check tdd-red-evidence "$WINDOWS" --raw
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict": "RED_EVIDENCE_OK"'* ]]
 }
 
 @test "nested TAP adapter rejects zero, malformed, every-level plan mismatch, directives, loader, and unrelated evidence" {

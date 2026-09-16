@@ -4,5 +4,5 @@
   "version": "1.13.0",
   "target": "gsd-core/bin/lib/tdd-red-evidence.cjs",
   "base_sha256": "3889f9dccfbcc7d119254e0c01010ff71547ed95bbd03b4584bad56530a61797",
-  "patched_sha256": "56b4bafb80334327fefdc9e5a547de6542e03bdf476dba6252076aa748cdb90c"
+  "patched_sha256": "c1e8a1366c0675c3acaff11315907188a37f111737d36b874fd4e53bedee7356"
 }
