@@ -866,6 +866,40 @@ def test_doctor_rejects_unsupported_codex_cli(tmp_path: Path) -> None:
     assert any(check["id"] == "codex-cli-version" and check["status"] == "fail" for check in report["checks"])
 
 
+def test_codex_version_policy_preserves_legacy_range_and_exact_0_154_0_only() -> None:
+    accepted = ((0, 137, 0), (0, 147, 99), (0, 154, 0))
+    rejected = ((0, 136, 9), (0, 148, 0), (0, 153, 99), (0, 154, 1), (0, 155, 0), (1, 154, 0))
+
+    assert all(ffs_installer.codex_version_is_supported(version) for version in accepted)
+    assert not any(ffs_installer.codex_version_is_supported(version) for version in rejected)
+
+
+@pytest.mark.parametrize("output", ("codex-cli 0.154", "codex-cli 0.154.0.1", "codex-cli 0.154.0-dev"))
+def test_parse_cli_version_rejects_malformed_or_suffixed_exact_compatibility_versions(output: str) -> None:
+    assert ffs_installer.parse_cli_version(output) is None
+
+
+def test_doctor_accepts_exact_codex_0_154_0(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "codex"
+    fake.write_text("#!/usr/bin/env bash\necho 'codex-cli 0.154.0'\n")
+    fake.chmod(0o755)
+
+    result = run_setup(
+        tmp_path,
+        "--doctor",
+        "--scope",
+        "user",
+        "--json",
+        extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+    report = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert any(check["id"] == "codex-cli-version" and check["status"] == "pass" for check in report["checks"])
+
+
 def test_doctor_reports_ac009_model_routing_advisory_checks(tmp_path: Path) -> None:
     """spec-004 AC-009: stale-bake surface + per-surface catalog/resolver
     warnings are advisory (never fail doctor) and the catalog check fires
@@ -1551,6 +1585,33 @@ def test_truncated_failure_manifest_cannot_bypass_upstream_restore(tmp_path: Pat
 
     assert result.returncode == 1
     assert json.loads(old_manifest.read_text())["version"] == "1.8.0"
+
+
+def test_install_gsd_profiles_applies_verified_overlay_before_each_global_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup transaction must not dispatch the upstream installer until
+    the exact-pin adapter has passed both its apply and verify steps."""
+    source = tmp_path / "source"
+    installer = tmp_path / "gsd-core"
+    source.mkdir()
+    installer.write_text("stub\n")
+    installer.chmod(0o755)
+    events: list[str] = []
+
+    monkeypatch.setattr(ffs_installer, "verify_gsd_package", lambda _: events.append("package"))
+    monkeypatch.setattr(ffs_installer, "apply_gsd_core_overlay", lambda _: events.append("overlay"))
+    monkeypatch.setenv("FFS_GSD_INSTALLER", str(installer))
+
+    def upstream(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        assert events[:2] == ["package", "overlay"]
+        events.append(command[1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(ffs_installer.subprocess, "run", upstream)
+    ffs_installer.install_gsd_profiles(source)
+
+    assert events == ["package", "overlay", "--claude", "--codex"]
 
 
 def test_project_legacy_migration_refuses_symlinked_codex_ancestor(tmp_path: Path) -> None:

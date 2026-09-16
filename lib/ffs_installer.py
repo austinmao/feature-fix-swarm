@@ -34,6 +34,8 @@ BACKUP_SCHEMA = "ffs.backup/v1"
 GSD_VERSION = "1.13.0"
 CODEX_MIN_VERSION = (0, 137, 0)
 CODEX_MAX_VERSION = (0, 148, 0)
+CODEX_EXACT_COMPATIBILITY_VERSIONS = {(0, 154, 0)}
+CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or 0.154.0"
 
 # Runtime files the shipped scripts resolve at ~/.claude/lib/feature-fix-swarm/
 # (see plan-wall.sh / gsd-run.sh / qa-swarm.sh resolution ladders). Before
@@ -1595,9 +1597,39 @@ def verify_gsd_package(source: Path) -> None:
         )
 
 
+def apply_gsd_core_overlay(source: Path) -> None:
+    """Apply and immediately re-verify FFS's exact, audited GSD adapter.
+
+    The overlay is intentionally narrower than a source fork: one byte-pinned
+    upstream file and one rendered digest.  It must succeed before the
+    upstream global-profile installer can observe the package, otherwise a
+    mixed host installation could claim a runtime that the local executor
+    cannot actually validate.
+    """
+    overlay = source / "scripts" / "gsd" / "apply-gsd-core-overlay.py"
+    if not overlay.is_file():
+        raise ActionableError(f"GSD exact-pin overlay applier is missing: {overlay}")
+    for mode in ("apply", "verify"):
+        process = subprocess.run(
+            [sys.executable, str(overlay), mode, "--repo", str(source)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if process.returncode != 0:
+            detail = process.stderr.strip() or process.stdout.strip() or "unknown failure"
+            raise ActionableError(f"GSD exact-pin overlay {mode} failed: {detail}")
+
+
 def install_gsd_profiles(source: Path) -> None:
     """Delegate complete host surfaces to the pinned upstream installer."""
     verify_gsd_package(source)
+    # Keep this immediately before dispatch: a failed/mismatched overlay
+    # leaves the pre-existing global profiles untouched. The enclosing
+    # install_gsd_with_rollback transaction restores those profiles if either
+    # host installer subsequently fails.
+    apply_gsd_core_overlay(source)
     override = os.environ.get("FFS_GSD_INSTALLER")
     installer = Path(override) if override else source / "node_modules" / ".bin" / "gsd-core"
     if not installer.is_file():
@@ -2095,6 +2127,16 @@ def add_gsd_doctor_checks(checks: list[dict[str, str]], source: Path) -> None:
         check_entry(checks, "gsd-package", "fail", str(exc), "install the exact pinned package from the lockfile")
     else:
         check_entry(checks, "gsd-package", "pass", f"@opengsd/gsd-core is exactly {GSD_VERSION}")
+    overlay = source / "scripts" / "gsd" / "apply-gsd-core-overlay.py"
+    result = subprocess.run(
+        [sys.executable, str(overlay), "verify", "--repo", str(source)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    ) if overlay.is_file() else None
+    if result is None or result.returncode:
+        detail = (result.stderr.strip() if result else f"missing overlay applier: {overlay}")
+        check_entry(checks, "gsd-core-overlay", "fail", detail, "run scripts/gsd/deps.sh install --yes")
+    else:
+        check_entry(checks, "gsd-core-overlay", "pass", "exact-pin GSD overlay digest matches its manifest")
 
     errors: list[str] = []
     for runtime, root in gsd_config_roots().items():
@@ -2344,8 +2386,12 @@ def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) 
 
 
 def parse_cli_version(output: str) -> tuple[int, int, int] | None:
-    match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", output)
+    match = re.search(r"(?<!\S)(\d+)\.(\d+)\.(\d+)(?!\S)", output)
     return tuple(map(int, match.groups())) if match else None
+
+
+def codex_version_is_supported(version: tuple[int, int, int]) -> bool:
+    return CODEX_MIN_VERSION <= version < CODEX_MAX_VERSION or version in CODEX_EXACT_COMPATIBILITY_VERSIONS
 
 
 def add_codex_version_check(checks: list[dict[str, str]]) -> None:
@@ -2367,16 +2413,16 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             "codex-cli-version",
             "fail",
             f"could not parse Codex CLI version from {executable}",
-            "install Codex CLI >=0.137.0,<0.148.0",
+            f"install Codex CLI {CODEX_VERSION_POLICY}",
         )
-    elif not (CODEX_MIN_VERSION <= parsed < CODEX_MAX_VERSION):
+    elif not codex_version_is_supported(parsed):
         rendered = ".".join(map(str, parsed))
         check_entry(
             checks,
             "codex-cli-version",
             "fail",
-            f"Codex CLI {rendered} is outside supported range >=0.137.0,<0.148.0",
-            "install a supported Codex CLI release; 0.146.x is the tested line",
+            f"Codex CLI {rendered} is outside supported range {CODEX_VERSION_POLICY}",
+            "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 are tested",
         )
     else:
         check_entry(checks, "codex-cli-version", "pass", f"Codex CLI {'.'.join(map(str, parsed))} is supported")

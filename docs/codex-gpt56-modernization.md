@@ -9,7 +9,7 @@ copy or rewrite GSD source artifacts.
 | Component | Supported | Notes |
 |---|---|---|
 | GSD Core | `@opengsd/gsd-core@1.13.0` | Exact pin; both Claude and Codex profiles are installed |
-| Codex CLI | `>=0.137.0,<0.148.0` | Tested on `0.146.x` and `0.147.x`; doctor and `gsd-run` fail outside the range |
+| Codex CLI | `>=0.137.0,<0.148.0` or exact `0.154.0` | Tested on `0.146.x`, `0.147.x`, and `0.154.0`; doctor and `gsd-run` refuse intervening and later releases |
 | Node.js / npm | Node 24+ / npm 10+ | Required by the pinned GSD installer |
 | Shell | macOS zsh, Ubuntu bash | Windows is not supported by this release |
 | Claude Code | Current OAuth-backed CLI | Used for Claude-native runs and cross-vendor review |
@@ -136,6 +136,17 @@ efforts, skill hashes, sandbox/network mode, and adversary provenance. Resume
 refuses any drift in that tuple. Optional adversary fallback sets
 `run_state.adversary.degraded=true`; degraded provenance cannot satisfy a gate
 that requested an exact reviewer such as Fable.
+
+The only fresh-start exception is a failed-run recovery with `GSD_RESUME=0`.
+It is not a general tuple-drift override: the caller must supply an explicit
+run ID, a single-line reason, and exactly one recovery kind. Role-pin recovery
+attests the prior `role_config_hash`; bundle recovery requires both
+`GSD_FRESH_START_EXPECTED_BUNDLE_HASH` and
+`GSD_FRESH_START_NEW_BUNDLE_HASH`. In either case the archived failed tuple,
+status, and metadata must prove the same skill and host and that the named
+field was the sole protected-field drift. Mixed role+bundle inputs, a changed
+second field, non-failed state, wrong host, ordinary resume, and replay all
+refuse before a drive begins.
 
 ## Model request schema
 

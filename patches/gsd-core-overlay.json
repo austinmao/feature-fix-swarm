@@ -1,0 +1,8 @@
+{
+  "schema": "ffs.gsd-core-overlay/v1",
+  "package": "@opengsd/gsd-core",
+  "version": "1.13.0",
+  "target": "gsd-core/bin/lib/tdd-red-evidence.cjs",
+  "base_sha256": "3889f9dccfbcc7d119254e0c01010ff71547ed95bbd03b4584bad56530a61797",
+  "patched_sha256": "719e35a5ed6e4365cbe3edf212ee58985565ff332be79e86427bdb108045d784"
+}

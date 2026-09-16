@@ -26,12 +26,43 @@ if [ ! -d "$AGENTS_DIR" ]; then
 fi
 
 updated=0
+native_codex_pin() {
+  case "$1" in
+    gpt-5.6-sol) printf '%s\t%s\n' gpt-5.6-sol high ;;
+    gpt-5.6-terra) printf '%s\t%s\n' gpt-5.6-terra medium ;;
+    gpt-5.6-luna) printf '%s\t%s\n' gpt-5.6-luna low ;;
+    *) return 1 ;;
+  esac
+}
+
+native_codex_effort_is_valid() {
+  case "$1:$2" in
+    gpt-5.6-sol:high|gpt-5.6-sol:xhigh|gpt-5.6-terra:medium|gpt-5.6-terra:high|gpt-5.6-luna:low|gpt-5.6-luna:medium) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 rewrite_agent() {
-  local file="$1" source_model="$2" mapped effort tmp
-  if ! mapped="$(codex_equiv_model "$source_model")"; then
+  local file="$1" source_model="$2" native_mode="${3:-preserve-native-effort}" mapped effort pin existing_effort tmp
+  if mapped="$(codex_equiv_model "$source_model")"; then
+    effort="$(codex_equiv_effort "$source_model")" || return 0
+  elif pin="$(native_codex_pin "$source_model")"; then
+    IFS=$'\t' read -r mapped effort <<EOF
+$pin
+EOF
+    # A generated agent may already carry an allowed native effort (notably
+    # the fable alias's intentional Sol/xhigh distinction). Preserve that
+    # pin on the ordinary existing-TOML pass. An explicit config override is
+    # the authoritative request and resets to its canonical native effort.
+    if [ "$native_mode" = preserve-native-effort ]; then
+      existing_effort="$(sed -n 's/^model_reasoning_effort = "\([^"]*\)"$/\1/p' "$file" | head -1)"
+      if native_codex_effort_is_valid "$source_model" "$existing_effort"; then
+        effort="$existing_effort"
+      fi
+    fi
+  else
     return 0
   fi
-  effort="$(codex_equiv_effort "$source_model")" || return 0
 
   tmp="$(mktemp "${file}.tmp.XXXXXX")" || exit 1
   if ! awk -v model="$mapped" -v effort="$effort" '
@@ -67,14 +98,25 @@ rewrite_agent() {
   updated=$((updated + 1))
 }
 
-# A clean global GSD Codex install intentionally omits model lines. Seed the
-# explicit FFS agent roles from the project config (or package template) first.
+# Translate models already emitted by a project-local GSD install before
+# applying explicit role overrides. This lets known native Codex IDs acquire a
+# canonical effort, while a configured fable alias retains its deliberate
+# Sol/xhigh distinction instead of being rewritten to the native Sol/high pin.
+while IFS= read -r -d '' file; do
+  current="$(sed -n 's/^model = "\([^"]*\)"$/\1/p' "$file" | head -1)"
+  [ -n "$current" ] || continue
+  rewrite_agent "$file" "$current"
+done < <(find "$AGENTS_DIR" -type f -name 'gsd-*.toml' -print0)
+
+# A clean global GSD Codex install intentionally omits model lines. Apply the
+# explicit FFS agent roles from the project config (or package template) last:
+# source aliases (notably fable -> Sol/xhigh) remain the authoritative pin.
 if [ -n "$MODEL_CONFIG" ] && [ -f "$MODEL_CONFIG" ]; then
   while IFS=$'\t' read -r agent source_model; do
     [ -n "$agent" ] && [ -n "$source_model" ] || continue
     file="$AGENTS_DIR/$agent.toml"
     [ -f "$file" ] || continue
-    rewrite_agent "$file" "$source_model"
+    rewrite_agent "$file" "$source_model" force-native-effort
   done < <(python3 - "$MODEL_CONFIG" <<'PY'
 import json
 import re
@@ -91,12 +133,5 @@ for agent, model in (config.get("model_overrides") or {}).items():
 PY
   )
 fi
-
-# Also translate aliases already emitted by a project-local GSD install.
-while IFS= read -r -d '' file; do
-  current="$(sed -n 's/^model = "\([^"]*\)"$/\1/p' "$file" | head -1)"
-  [ -n "$current" ] || continue
-  rewrite_agent "$file" "$current"
-done < <(find "$AGENTS_DIR" -type f -name 'gsd-*.toml' -print0)
 
 echo "codex-model-sync: materialized $updated agent model pin(s) under $AGENTS_DIR"

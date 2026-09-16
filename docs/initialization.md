@@ -17,8 +17,9 @@ The roster is declared once, in `deps.sh` itself, as rows of
 
 - **binary** — probed with `command -v`; comma-separated names mean any-of
   (`shasum,sha256sum`, `claude,codex`, `timeout,gtimeout`).
-- **npm** — `@opengsd/gsd-core` at the exact pinned version, resolved from
-  `node_modules/` (the same comparison `setup.sh` makes before installing).
+- **npm** — `@opengsd/gsd-core` at the exact pinned version plus FFS's
+  byte-pinned RED-evidence overlay, resolved and verified from `node_modules/`
+  (the same comparison `setup.sh` makes before installing profiles).
 - **pip** — `filelock`, verified by the same symbol-presence floor probe
   `scripts/coord/coord.py` uses (`SoftFileLease`), never a version-string
   parse.
@@ -42,8 +43,10 @@ package manager; use sudo; install anything global. Missing system tools
 (`gh`, `jq`, `bats`, `shellcheck`, `tmux`, `canary`, `playwright`, …) are
 reported with the exact install command and left to the operator. `npm ci`
 only runs when `@opengsd/gsd-core` is absent or off-version — a working
-`node_modules/` is never wiped; the pip install uses the sanctioned
-`python3 -m pip install --requirement requirements-dev.txt` form (see
+`node_modules/` is never wiped; after `npm ci`, the GSD overlay is applied and
+its rendered digest is verified before the command reports success. The pip
+install uses the sanctioned `python3 -m pip install --requirement
+requirements-dev.txt` form (see
 [Dependencies and integrations](dependencies.md)).
 
 The roster is mechanically tested against the docs:
