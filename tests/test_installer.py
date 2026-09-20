@@ -866,9 +866,9 @@ def test_doctor_rejects_unsupported_codex_cli(tmp_path: Path) -> None:
     assert any(check["id"] == "codex-cli-version" and check["status"] == "fail" for check in report["checks"])
 
 
-def test_codex_version_policy_preserves_legacy_range_and_exact_0_154_0_only() -> None:
-    accepted = ((0, 137, 0), (0, 147, 99), (0, 154, 0))
-    rejected = ((0, 136, 9), (0, 148, 0), (0, 153, 99), (0, 154, 1), (0, 155, 0), (1, 154, 0))
+def test_codex_version_policy_preserves_legacy_range_and_exact_compatibility_pins_only() -> None:
+    accepted = ((0, 137, 0), (0, 147, 99), (0, 154, 0), (0, 155, 1))
+    rejected = ((0, 136, 9), (0, 148, 0), (0, 153, 99), (0, 154, 1), (0, 155, 0), (0, 155, 2), (1, 154, 0))
 
     assert all(ffs_installer.codex_version_is_supported(version) for version in accepted)
     assert not any(ffs_installer.codex_version_is_supported(version) for version in rejected)
@@ -879,12 +879,13 @@ def test_parse_cli_version_rejects_malformed_or_suffixed_exact_compatibility_ver
     assert ffs_installer.parse_cli_version(output) is None
 
 
-def test_doctor_accepts_exact_codex_0_154_0(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", ("0.154.0", "0.155.1"))
+def test_doctor_accepts_exact_codex_compatibility_pins(tmp_path: Path, version: str) -> None:
     assert run_setup(tmp_path, "--scope", "user").returncode == 0
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake = fake_bin / "codex"
-    fake.write_text("#!/usr/bin/env bash\necho 'codex-cli 0.154.0'\n")
+    fake.write_text(f"#!/usr/bin/env bash\necho 'codex-cli {version}'\n")
     fake.chmod(0o755)
 
     result = run_setup(
