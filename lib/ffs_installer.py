@@ -34,8 +34,10 @@ BACKUP_SCHEMA = "ffs.backup/v1"
 GSD_VERSION = "1.13.0"
 CODEX_MIN_VERSION = (0, 137, 0)
 CODEX_MAX_VERSION = (0, 148, 0)
-CODEX_EXACT_COMPATIBILITY_VERSIONS = {(0, 154, 0)}
-CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or 0.154.0"
+# Compatibility pins are admitted one release at a time after a live probe of
+# the runner's subscription-authenticated, read-only exec and hooks surface.
+CODEX_EXACT_COMPATIBILITY_VERSIONS = {(0, 154, 0), (0, 155, 1)}
+CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1"
 
 # Runtime files the shipped scripts resolve at ~/.claude/lib/feature-fix-swarm/
 # (see plan-wall.sh / gsd-run.sh / qa-swarm.sh resolution ladders). Before
@@ -2422,7 +2424,7 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             "codex-cli-version",
             "fail",
             f"Codex CLI {rendered} is outside supported range {CODEX_VERSION_POLICY}",
-            "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 are tested",
+            "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 / 0.155.1 are tested",
         )
     else:
         check_entry(checks, "codex-cli-version", "pass", f"Codex CLI {'.'.join(map(str, parsed))} is supported")
