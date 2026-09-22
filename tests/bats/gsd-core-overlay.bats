@@ -196,9 +196,9 @@ scope = {"__name__": "matcher"}
 exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
 os.chdir(os.path.dirname(sys.argv[2]))
 declared = scope["parse_declared_paths"](sys.argv[2])
-raise SystemExit(0 if any(scope["path_matches"](path, declared) for path in scope["changed_paths_for_commit"](sys.argv[3])) else 1)
+raise SystemExit(0 if any(scope["path_matches"](path, declared) for path in scope["changed_paths_for_commit"](sys.argv[3])) else 3)
 PY
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 3 ]
 
   for COMMIT in "$CURRENT" "$DELETED"; do
     run python3 - "$OVERLAY" "$REPO/03-04-PLAN.md" "$COMMIT" <<'PY'
@@ -210,7 +210,7 @@ scope = {"__name__": "matcher"}
 exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
 os.chdir(os.path.dirname(sys.argv[2]))
 declared = scope["parse_declared_paths"](sys.argv[2])
-raise SystemExit(0 if any(scope["path_matches"](path, declared) for path in scope["changed_paths_for_commit"](sys.argv[3])) else 1)
+raise SystemExit(0 if any(scope["path_matches"](path, declared) for path in scope["changed_paths_for_commit"](sys.argv[3])) else 3)
 PY
     [ "$status" -eq 0 ]
   done
@@ -231,6 +231,21 @@ assert scope["normalize_path"]("src\\one\\two.py") == "src/one/two.py"
 assert scope["normalize_path"]("\\\\server\\share\\x") is None
 assert scope["path_matches"]("src/a.py", [("src/**/*.py", False)])
 assert not scope["path_matches"]("src/pkg/a.py", [("src/*.py", False)])
+assert scope["normalize_path"]("C:\\repo\\x.py") is None
+import subprocess
+scope["subprocess"].check_output = lambda *a, **k: b"C100\x00src/pkg/a.py\x00src/copy.py\x00M\x00other.txt\x00"
+assert scope["changed_paths_for_commit"]("deadbeef") == ["src/pkg/a.py", "src/copy.py", "other.txt"]
+import tempfile, os
+for bad in ('files_modified: [a.py, "b.py]', "files_modified:\n  - a.py\n  b.py", "files_modified: [../escape.py]"):
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+        fh.write("---\n" + bad + "\n---\n")
+    try:
+        scope["parse_declared_paths"](fh.name)
+        raise AssertionError("accepted malformed declaration: " + bad)
+    except ValueError:
+        pass
+    finally:
+        os.unlink(fh.name)
 PY
   [ "$status" -eq 0 ]
 }
@@ -291,14 +306,18 @@ PY
   run python3 "$MATCHER" 03-04-PLAN.md "$RENAMED"
   [ "$status" -eq 0 ]
   run python3 "$MATCHER" 03-04-PLAN.md "$UNRELATED"
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 3 ]
+  # a traversal declaration is refused (2), never silently unrelated
+  printf -- '---\nfiles_modified: [../escape.py]\n---\n' > 03-04-TRAV-PLAN.md
+  run python3 "$MATCHER" 03-04-TRAV-PLAN.md "$SEED"
+  [ "$status" -eq 2 ]
   run python3 "$MATCHER" 03-04-BAD-PLAN.md "$SEED"
   [ "$status" -eq 2 ]
   # * never crosses a directory: top-level *.txt matches other.txt, not src/pkg/a.py
   run python3 "$MATCHER" 03-04-TOP-PLAN.md "$UNRELATED"
   [ "$status" -eq 0 ]
   run python3 "$MATCHER" 03-04-TOP-PLAN.md "$RENAMED"
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 3 ]
 }
 
 @test "safe-resume matcher exits 2 (fail closed) on an unparseable plan or unknown commit" {

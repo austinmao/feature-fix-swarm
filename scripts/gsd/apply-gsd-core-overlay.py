@@ -307,7 +307,7 @@ def normalize_path(raw):
     if not isinstance(raw, str):
         return None
     value = raw.strip().strip("\"'").replace("\\", "/")
-    if not value or value.startswith("/"):
+    if not value or value.startswith("/") or re.match(r"^[A-Za-z]:", value):
         return None
     parts = []
     for part in value.split("/"):
@@ -346,10 +346,15 @@ def parse_declared_paths(plan_path):
         if value.startswith("[") or value.endswith("]"):
             if not (value.startswith("[") and value.endswith("]")):
                 raise ValueError("PLAN declared-path list is malformed")
+            if value.count('"') % 2 or value.count("'") % 2:
+                raise ValueError("PLAN declared-path list is malformed")
             try:
-                declared.extend(next(csv.reader([value[1:-1]], skipinitialspace=True), []))
+                items = next(csv.reader([value[1:-1]], skipinitialspace=True), [])
             except csv.Error as exc:
                 raise ValueError("PLAN declared-path list is malformed") from exc
+            if any('"' in item or "'" in item for item in items):
+                raise ValueError("PLAN declared-path list is malformed")
+            declared.extend(items)
             index += 1
             continue
         if value:
@@ -360,6 +365,8 @@ def parse_declared_paths(plan_path):
         while index < len(frontmatter):
             item = re.match(r"^\s+-\s+(.*?)\s*$", frontmatter[index])
             if not item:
+                if re.match(r"^\s+\S", frontmatter[index]):
+                    raise ValueError("PLAN declared-path list is malformed")
                 break
             declared.append(item.group(1))
             index += 1
@@ -421,7 +428,7 @@ def path_matches(changed, declared):
 
 def changed_paths_for_commit(commit):
     output = subprocess.check_output(
-        ["git", "diff-tree", "--root", "--no-commit-id", "--name-status", "-z", "-r", "-M", commit]
+        ["git", "diff-tree", "--root", "--no-commit-id", "--name-status", "-z", "-r", "-M", "-C", commit]
     )
     fields = output.decode("utf-8", "surrogateescape").split("\0")
     paths = []
@@ -444,9 +451,10 @@ def changed_paths_for_commit(commit):
 
 
 def main():
-    # Exit 0 = intersects the plan, 1 = unrelated, 2 = cannot decide. The
-    # rendered gate treats only >1 as fail-closed, and an uncaught exception
-    # would exit 1 and read as "unrelated", so every failure maps to 2 here.
+    # Exit 0 = intersects the plan, 3 = unrelated, 2 = cannot decide. The
+    # rendered gate ignores ONLY exit 3; Python's own uncaught-exception
+    # status is 1, so an interpreter or runtime failure can never read as
+    # "unrelated". Known failures still map to 2 with a message.
     if len(sys.argv) != 3:
         print("usage: safe-resume-path-matcher PLAN_PATH COMMIT", file=sys.stderr)
         raise SystemExit(2)
@@ -456,7 +464,7 @@ def main():
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"safe-resume-path-matcher: {exc}", file=sys.stderr)
         raise SystemExit(2)
-    raise SystemExit(0 if any(path_matches(path, declared) for path in changed) else 1)
+    raise SystemExit(0 if any(path_matches(path, declared) for path in changed) else 3)
 
 
 if __name__ == "__main__":
@@ -490,6 +498,10 @@ PLAN_N=$((10#{{plan_padded}}))
 PLAN_SCOPE_RE="^[a-z]+\\((0*${{PHASE_N}})-(0*${{PLAN_N}})\\):"
 MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 PLAN_COMMITS=""
+if ! PLAN_COMMIT_LIST=$(git log --format=%H -E ${{MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"}} --grep="${{PLAN_SCOPE_RE}}" -30); then
+  echo "SAFE RESUME GATE: git log failed while enumerating scoped commits; refusing dispatch." >&2
+  exit 1
+fi
 while IFS= read -r PLAN_COMMIT_SHA; do
   [ -n "$PLAN_COMMIT_SHA" ] || continue
   if python3 - "$PLAN_PATH" "$PLAN_COMMIT_SHA" <<'PY'
@@ -499,15 +511,17 @@ PY
     PLAN_COMMITS="${{PLAN_COMMITS}}${{PLAN_COMMITS:+$'\\n'}}$(git show -s --format='%h %s' "$PLAN_COMMIT_SHA")"
   else
     MATCH_STATUS=$?
-    if [ "$MATCH_STATUS" -gt 1 ]; then
-      echo "SAFE RESUME GATE: cannot safely parse declared paths for $PLAN_PATH; refusing dispatch." >&2
+    # Only the matcher's explicit "unrelated" code (3) is ignorable; 2 is a
+    # declared parse/git failure and 1 is an interpreter crash — both refuse.
+    if [ "$MATCH_STATUS" -ne 3 ]; then
+      echo "SAFE RESUME GATE: matcher exit $MATCH_STATUS for $PLAN_PATH; refusing dispatch." >&2
       exit 1
     fi
     # Same numeric scope but no declared-file intersection is unrelated history.
     # It is advisory only and must not block this plan's first execution.
     echo "SAFE RESUME: ignoring unrelated scoped commit $PLAN_COMMIT_SHA" >&2
   fi
-done < <(git log --format=%H -E ${{MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"}} --grep="${{PLAN_SCOPE_RE}}" -30)
+done < <(printf '%s\n' "$PLAN_COMMIT_LIST")
 '''.encode("utf-8")
     if source.count(old) != 1:
         raise ValueError("upstream execute-phase safe-resume anchor is missing or ambiguous")
