@@ -350,7 +350,7 @@ def parse_declared_paths(plan_path):
     saw_field = False
     index = 0
     while index < len(frontmatter):
-        match = re.match(r"^(files_(?:modified|deleted)):\s*(.*?)\s*$", frontmatter[index])
+        match = re.match(r"^(files_(?:modified|deleted))\s*:\s*(.*?)\s*$", frontmatter[index])
         if not match:
             index += 1
             continue
@@ -442,9 +442,14 @@ def path_matches(changed, declared):
 
 
 def changed_paths_for_commit(commit):
-    output = subprocess.check_output(
-        ["git", "diff-tree", "--root", "--no-commit-id", "--name-status", "-z", "-r", "-M", "-C", commit]
-    )
+    # A merge commit yields nothing from diff-tree without a parent, so diff
+    # explicitly against the first parent; a root commit diffs against empty.
+    parents = subprocess.check_output(["git", "rev-list", "--parents", "-n", "1", commit]).decode().split()
+    if len(parents) > 1:
+        diff_cmd = ["git", "diff-tree", "--no-commit-id", "--name-status", "-z", "-r", "-M", "-C", parents[1], parents[0]]
+    else:
+        diff_cmd = ["git", "diff-tree", "--root", "--no-commit-id", "--name-status", "-z", "-r", "-M", "-C", commit]
+    output = subprocess.check_output(diff_cmd)
     fields = output.decode("utf-8", "surrogateescape").split("\0")
     paths = []
     index = 0
@@ -510,6 +515,8 @@ SUMMARY_PATH="{{phase_dir}}/{{plan_padded}}-SUMMARY.md"
 # its changed (including deleted, renamed, or copied) repository paths intersects
 # the current PLAN's files_modified/files_deleted declaration. No declared-path
 # parse failure may silently authorize dispatch; fail closed and inspect the plan.
+# Every scoped commit since the milestone base is considered (no -30 cap): the
+# one intersecting commit must not be hidden behind newer unrelated ones.
 PHASE_N=$((10#{{phase_number}}))
 PLAN_N=$((10#{{plan_padded}}))
 PLAN_SCOPE_RE="^[a-z]+\\((0*${{PHASE_N}})-(0*${{PLAN_N}})\\):"
@@ -526,7 +533,7 @@ if ! python3 "$SAFE_RESUME_MATCHER" "$PLAN_PATH" --validate; then
   echo "SAFE RESUME GATE: cannot parse declared paths for $PLAN_PATH; refusing dispatch." >&2
   exit 1
 fi
-if ! PLAN_COMMIT_LIST=$(git log --format=%H -E ${{MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"}} --grep="${{PLAN_SCOPE_RE}}" -30); then
+if ! PLAN_COMMIT_LIST=$(git log --format=%H -E ${{MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"}} --grep="${{PLAN_SCOPE_RE}}"); then
   echo "SAFE RESUME GATE: git log failed while enumerating scoped commits; refusing dispatch." >&2
   exit 1
 fi

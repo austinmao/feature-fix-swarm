@@ -237,7 +237,7 @@ scope["subprocess"].check_output = lambda *a, **k: b"C100\x00src/pkg/a.py\x00src
 assert scope["changed_paths_for_commit"]("deadbeef") == ["src/pkg/a.py", "src/copy.py", "other.txt"]
 import tempfile, os
 with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
-    fh.write("---\nfiles_modified:\n  - a.py\n\n  # later entries survive blank and comment lines\n  - later/b.py\n---\n")
+    fh.write("---\nfiles_modified :\n  - a.py\n\n  # later entries survive blank and comment lines\n  - later/b.py\n---\n")
 try:
     assert scope["parse_declared_paths"](fh.name) == [("a.py", False), ("later/b.py", False)]
 finally:
@@ -277,6 +277,13 @@ PY
   git -C "$REPO" add other.txt
   git -C "$REPO" commit -qm 'feat(03-04): unrelated'
   UNRELATED=$(git -C "$REPO" rev-parse HEAD)
+  git -C "$REPO" checkout -q -b side
+  printf 'side\n' > "$REPO/src/pkg/side.py"
+  git -C "$REPO" add src/pkg/side.py
+  git -C "$REPO" commit -qm 'chore: side work'
+  git -C "$REPO" checkout -q -
+  git -C "$REPO" merge -q --no-ff -m 'feat(03-04): merge side' side
+  MERGED=$(git -C "$REPO" rev-parse HEAD)
   cat > "$REPO/03-04-PLAN.md" <<'PLAN'
 ---
 files_modified:
@@ -310,6 +317,9 @@ PY
   run python3 "$MATCHER" 03-04-PLAN.md "$SEED"
   [ "$status" -eq 0 ]
   run python3 "$MATCHER" 03-04-PLAN.md "$RENAMED"
+  [ "$status" -eq 0 ]
+  # a scoped MERGE commit that brings in a declared path intersects (first-parent diff)
+  run python3 "$MATCHER" 03-04-PLAN.md "$MERGED"
   [ "$status" -eq 0 ]
   run python3 "$MATCHER" 03-04-PLAN.md "$UNRELATED"
   [ "$status" -eq 3 ]
