@@ -402,7 +402,7 @@ STUB
   printf 'no frontmatter here\n' > "$REPO/03-04-PLAN.md"
   printf -- '---\nfiles_modified: [seed.txt]\n---\n' > "$REPO/03-04-GOOD-PLAN.md"
 
-  for CASE in "$REPO/03-04-PLAN.md $SHA" "$REPO/03-04-GOOD-PLAN.md 0000000000000000000000000000000000000000" "$REPO/missing-PLAN.md $SHA"; do
+  for CASE in "$REPO/03-04-PLAN.md $SHA" "$REPO/03-04-GOOD-PLAN.md no-such-commit" "$REPO/missing-PLAN.md $SHA"; do
     set -- $CASE
     run python3 - "$OVERLAY" "$1" "$2" <<'PY'
 import importlib.util, os, sys
