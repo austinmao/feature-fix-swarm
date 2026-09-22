@@ -47,7 +47,7 @@ seed_learnings() {
   cat > "$STUB_DIR/gbrain" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
-  doctor) exit 0 ;;
+  doctor) echo "[OK] connection"; exit 0 ;;
   put) echo "PUT \$2 \$3" >> "$MARKER"; exit 0 ;;
   sync) exit 0 ;;
   *) exit 1 ;;
@@ -135,6 +135,81 @@ EOF
   [[ "$output" == *"1 harvested"* ]]
   [ -n "$stderr" ]
   [ ! -s "$TARGET" ]
+}
+
+@test "doctor rc=1 but prints [OK] connection: put path used, not archive (reachability != health)" {
+  seed_learnings "phase-01" '{"note":"a"}'
+  cat > "$STUB_DIR/gbrain" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  doctor) echo "[OK] connection"; echo "[FAIL] sync_freshness"; exit 1 ;;
+  put) echo "PUT \$2" >> "$MARKER"; exit 0 ;;
+  sync) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/gbrain"
+  ARCHIVE="$TMP/.feature-fix-swarm/learnings-archive.jsonl"
+  mkdir -p "$TMP/.feature-fix-swarm"
+  : > "$ARCHIVE"
+  cd "$TMP"
+  PATH="$STUB_DIR:$MINPATH" run bash "$REPO_ROOT/$SCRIPT" "$TMP/planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 harvested"* ]]
+  [ -f "$MARKER" ]
+  [ "$(wc -l < "$ARCHIVE" | tr -d ' ')" -eq 0 ]
+}
+
+@test "doctor rc=0 but no [OK] connection line: treated unhealthy, archive fallback" {
+  seed_learnings "phase-01" '{"note":"a"}'
+  cat > "$STUB_DIR/gbrain" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  doctor) echo "[OK] sync_freshness"; exit 0 ;;
+  *) echo "UNEXPECTED \$*" >> "$MARKER"; exit 1 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/gbrain"
+  ARCHIVE="$TMP/.feature-fix-swarm/learnings-archive.jsonl"
+  mkdir -p "$TMP/.feature-fix-swarm"
+  : > "$ARCHIVE"
+  cd "$TMP"
+  PATH="$STUB_DIR:$MINPATH" run bash "$REPO_ROOT/$SCRIPT" "$TMP/planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 harvested"* ]]
+  [ "$(wc -l < "$ARCHIVE" | tr -d ' ')" -eq 1 ]
+  [ ! -f "$MARKER" ]
+}
+
+@test "put content arrives via stdin, not positional arg (3 entries -> 3 puts, each one entry)" {
+  seed_learnings "phase-01" '{"note":"a"}' '{"note":"b"}' '{"note":"c"}'
+  cat > "$STUB_DIR/gbrain" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  doctor) echo "[OK] connection"; exit 0 ;;
+  put)
+    if [ -n "\${3:-}" ]; then
+      echo "POSITIONAL-CONTENT-LEAK" >> "$MARKER"
+      exit 0
+    fi
+    body="\$(cat)"
+    echo "STDIN-PUT \$2 :: \$body" >> "$MARKER"
+    exit 0
+    ;;
+  sync) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/gbrain"
+  PATH="$STUB_DIR:$MINPATH" run bash "$SCRIPT" "$TMP/planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"3 harvested"* ]]
+  [ -f "$MARKER" ]
+  [ "$(grep -c '^STDIN-PUT ' "$MARKER")" -eq 3 ]
+  [ "$(grep -c 'POSITIONAL-CONTENT-LEAK' "$MARKER")" -eq 0 ]
+  # each stored body holds exactly one JSON note — never the whole file's
+  # worth of entries concatenated onto the first put's stdin.
+  [ "$(grep -o '"note"' "$MARKER" | wc -l | tr -d ' ')" -eq 3 ]
 }
 
 @test "zero entries / missing .planning: exit 0, 0 harvested" {

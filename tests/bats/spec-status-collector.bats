@@ -210,3 +210,46 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"ledger run id mismatch: requested 340, got GSD_RUN_ID=spec-342"* ]]
 }
+
+# Simulates the managed user-level install: the skill script lives OUTSIDE
+# any repo (e.g. ~/.claude/skills/spec-status/scripts/), so its own
+# "../../../scripts/gsd/takeover-record.py" skill-relative path resolves to
+# a nonexistent location. The repo-relative candidates (rooted at
+# `git rev-parse --show-toplevel`, same chain gates.py already uses) must be
+# tried instead.
+setup_user_level_install() {
+  USER_SKILL_ROOT="$BATS_TEST_TMPDIR/user-install"
+  mkdir -p "$USER_SKILL_ROOT/skills/spec-status/scripts"
+  cp "$COLLECTOR" "$USER_SKILL_ROOT/skills/spec-status/scripts/collect-status-facts.sh"
+  USER_COLLECTOR="$USER_SKILL_ROOT/skills/spec-status/scripts/collect-status-facts.sh"
+}
+
+@test "user-level install resolves takeover-record.py via the repo-relative candidate chain" {
+  setup_user_level_install
+  mkdir -p packages/feature-fix-swarm/lib packages/feature-fix-swarm/scripts/gsd
+  : > packages/feature-fix-swarm/lib/gates.py
+  cat > packages/feature-fix-swarm/scripts/gsd/takeover-record.py <<'PY'
+import sys
+with open("takeover-record-invoked.marker", "w") as f:
+    f.write(" ".join(sys.argv[1:]))
+PY
+
+  run env -u GSD_RUN_ID -u GATES_STORE bash "$USER_COLLECTOR" 340
+
+  [ "$status" -eq 0 ]
+  [ -f "takeover-record-invoked.marker" ]
+  grep -q -- '--spec-id 340' takeover-record-invoked.marker
+}
+
+@test "user-level install with no takeover-record.py candidate fails closed" {
+  setup_user_level_install
+  mkdir -p packages/feature-fix-swarm/lib
+  : > packages/feature-fix-swarm/lib/gates.py
+  # deliberately no takeover-record.py anywhere in the candidate chain
+
+  run env -u GSD_RUN_ID -u GATES_STORE bash "$USER_COLLECTOR" 340
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"takeover record refused"* ]]
+  [ ! -f "takeover-record-invoked.marker" ]
+}
