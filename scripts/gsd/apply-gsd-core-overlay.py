@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Apply or verify the exact-pin FFS overlay for @opengsd/gsd-core.
+"""Apply or verify exact-pin FFS overlays for @opengsd/gsd-core.
 
 The package lives in ignored node_modules and npm ci replaces it.  This
-small, deterministic overlay is therefore the durable patch seam: it admits
-one package version and one upstream file digest, atomically writes one
-reviewed transform, then verifies the resulting digest on every check.
+small, deterministic overlay set is therefore the durable patch seam: it
+admits one package version and byte-pinned upstream targets, atomically writes
+reviewed transforms, then verifies every resulting digest on each check.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import tempfile
 
 PACKAGE = "@opengsd/gsd-core"
 VERSION = "1.13.0"
-TARGET = Path("gsd-core/bin/lib/tdd-red-evidence.cjs")
 MANIFEST = Path("patches/gsd-core-overlay.json")
 
 
@@ -32,7 +31,7 @@ def fail(message: str) -> int:
     return 78
 
 
-def render(source: bytes) -> bytes:
+def render_tdd_red_evidence(source: bytes) -> bytes:
     old = br"""    const summary = (0, prohibition_enforcement_cjs_1.parseNodeTestSummary)(output);
     const failing = (0, prohibition_enforcement_cjs_1.tapFailedTestNames)(output);
     const evidence = {
@@ -261,6 +260,108 @@ def render(source: bytes) -> bytes:
     return rendered.replace(old_checks, new_checks)
 
 
+def render_executor_sequential_guard(source: bytes) -> bytes:
+    old = """if [ -f .git ]; then  # worktree
+  # Positive allow-list: HEAD must be on a per-agent branch (`agent-<id>` or
+  # legacy `worktree-agent-<id>`). This catches feature/* and any other
+  # arbitrary branch that the deny-list would silently allow (#2924, #1995).
+  if ! echo "$ACTUAL_BRANCH" | grep -Eq '^((worktree-)?agent-|worktree-wf_)[A-Za-z0-9._/-]+$'; then
+    echo "FATAL: refusing to commit — worktree HEAD '$ACTUAL_BRANCH' is not in the agent-* / worktree-agent-* / worktree-wf_* namespace." >&2
+    echo "Agent commits must live on per-agent branches; surface as blocker (#2924)." >&2
+    exit 1
+  fi
+fi
+""".encode("utf-8")
+    new = """# This positive namespace check applies only to an executor dispatched with
+# isolation="worktree". A sequential executor can run from the user's existing
+# linked worktree, where .git is also a file but the legitimate branch is the
+# feature branch. In sequential mode, preserve the protected-branch check above
+# and skip this isolated-agent namespace check.
+if [ -f .git ] && [ "$(gsd_run query config-get workflow.use_worktrees --raw 2>/dev/null || echo true)" != "false" ]; then
+  # Positive allow-list: HEAD must be on a per-agent branch (`agent-<id>` or
+  # legacy `worktree-agent-<id>`). This catches feature/* and any other
+  # arbitrary branch that the deny-list would silently allow (#2924, #1995).
+  if ! echo "$ACTUAL_BRANCH" | grep -Eq '^((worktree-)?agent-|worktree-wf_)[A-Za-z0-9._/-]+$'; then
+    echo "FATAL: refusing to commit — worktree HEAD '$ACTUAL_BRANCH' is not in the agent-* / worktree-agent-* / worktree-wf_* namespace." >&2
+    echo "Agent commits must live on per-agent branches; surface as blocker (#2924)." >&2
+    exit 1
+  fi
+fi
+""".encode("utf-8")
+    if source.count(old) != 1:
+        raise ValueError("upstream executor namespace-guard anchor is missing or ambiguous")
+    return source.replace(old, new)
+
+
+RENDERERS = {
+    "gsd-core/bin/lib/tdd-red-evidence.cjs": render_tdd_red_evidence,
+    "agents/gsd-executor.md": render_executor_sequential_guard,
+}
+
+
+def validate_manifest(manifest: object) -> list[dict[str, str]] | None:
+    if not isinstance(manifest, dict) or set(manifest) != {"schema", "package", "version", "targets"}:
+        return None
+    if manifest.get("schema") != "ffs.gsd-core-overlay/v2" or manifest.get("package") != PACKAGE or manifest.get("version") != VERSION:
+        return None
+    targets = manifest.get("targets")
+    if not isinstance(targets, list) or len(targets) != len(RENDERERS):
+        return None
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in targets:
+        if not isinstance(item, dict) or set(item) != {"target", "base_sha256", "patched_sha256"}:
+            return None
+        target = item.get("target")
+        base = item.get("base_sha256")
+        patched = item.get("patched_sha256")
+        if target not in RENDERERS or target in seen:
+            return None
+        if not all(isinstance(value, str) and len(value) == 64 for value in (base, patched)):
+            return None
+        seen.add(target)
+        normalized.append({"target": target, "base_sha256": base, "patched_sha256": patched})
+    return normalized if seen == set(RENDERERS) else None
+
+
+def atomically_replace(target: Path, content: bytes, mode: int) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".ffs-gsd-overlay.", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def replace_pending(
+    pending: list[tuple[Path, bytes, bytes, int, str]], fail_target: str | None
+) -> str | None:
+    """Replace all rendered targets, restoring earlier targets after a failure."""
+    replaced: list[tuple[Path, bytes, int]] = []
+    try:
+        for target, original, patched, mode, relative_target in pending:
+            if relative_target == fail_target:
+                raise OSError(f"injected replacement failure for {relative_target}")
+            atomically_replace(target, patched, mode)
+            replaced.append((target, original, mode))
+    except OSError as exc:
+        rollback_errors: list[str] = []
+        for target, original, mode in reversed(replaced):
+            try:
+                atomically_replace(target, original, mode)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target}: {rollback_exc}")
+        if rollback_errors:
+            return f"overlay replacement failed: {exc}; rollback failed: {'; '.join(rollback_errors)}"
+        return f"overlay replacement failed: {exc}; prior targets restored"
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("apply", "verify"))
@@ -271,14 +372,8 @@ def main() -> int:
         manifest = json.loads((repo / MANIFEST).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return fail(f"overlay manifest is unreadable: {exc}")
-    if manifest != {
-        "schema": "ffs.gsd-core-overlay/v1",
-        "package": PACKAGE,
-        "version": VERSION,
-        "target": TARGET.as_posix(),
-        "base_sha256": manifest.get("base_sha256"),
-        "patched_sha256": manifest.get("patched_sha256"),
-    } or not all(isinstance(manifest.get(key), str) and len(manifest[key]) == 64 for key in ("base_sha256", "patched_sha256")):
+    targets = validate_manifest(manifest)
+    if targets is None:
         return fail("overlay manifest is invalid")
     package = repo / "node_modules" / "@opengsd" / "gsd-core"
     try:
@@ -287,35 +382,37 @@ def main() -> int:
         return fail(f"pinned package metadata is unreadable: {exc}")
     if package_meta.get("name") != PACKAGE or package_meta.get("version") != VERSION:
         return fail(f"overlay requires exact {PACKAGE}@{VERSION}")
-    target = package / TARGET
-    try:
-        source = target.read_bytes()
-    except OSError as exc:
-        return fail(f"overlay target is unreadable: {exc}")
-    current = digest(source)
-    if args.mode == "verify":
-        return 0 if current == manifest["patched_sha256"] else fail("overlay digest mismatch; run scripts/gsd/deps.sh install --yes")
-    if current == manifest["patched_sha256"]:
-        return 0
-    if current != manifest["base_sha256"]:
-        return fail("overlay target does not match the exact upstream base digest")
-    try:
-        patched = render(source)
-    except ValueError as exc:
-        return fail(str(exc))
-    if digest(patched) != manifest["patched_sha256"]:
-        return fail("rendered overlay digest does not match the manifest")
-    fd, temporary = tempfile.mkstemp(prefix=".ffs-gsd-overlay.", dir=target.parent)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(patched)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, target.stat().st_mode & 0o777)
-        os.replace(temporary, target)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    pending: list[tuple[Path, bytes, bytes, int, str]] = []
+    for spec in targets:
+        target = package / spec["target"]
+        try:
+            source = target.read_bytes()
+            mode = target.stat().st_mode & 0o777
+        except OSError as exc:
+            return fail(f"overlay target {spec['target']} is unreadable: {exc}")
+        current = digest(source)
+        if args.mode == "verify":
+            if current != spec["patched_sha256"]:
+                return fail(f"overlay digest mismatch for {spec['target']}; run scripts/gsd/deps.sh install --yes")
+            continue
+        if current == spec["patched_sha256"]:
+            continue
+        if current != spec["base_sha256"]:
+            return fail(f"overlay target {spec['target']} does not match the exact upstream base digest")
+        try:
+            patched = RENDERERS[spec["target"]](source)
+        except ValueError as exc:
+            return fail(str(exc))
+        if digest(patched) != spec["patched_sha256"]:
+            return fail(f"rendered overlay digest does not match the manifest for {spec['target']}")
+        pending.append((target, source, patched, mode, spec["target"]))
+
+    fail_target = os.environ.get("FFS_GSD_OVERLAY_TEST_FAIL_TARGET")
+    if fail_target is not None and fail_target not in RENDERERS:
+        return fail("invalid FFS_GSD_OVERLAY_TEST_FAIL_TARGET")
+    replacement_error = replace_pending(pending, fail_target)
+    if replacement_error:
+        return fail(replacement_error)
     return 0
 
 
