@@ -160,21 +160,35 @@ def test_dhcp_hostname_change_does_not_change_machine_identity_or_liveness(
     assert probe_identity(captured) == "LIVE"
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux PID namespace seam")
-def test_linux_pid_namespace_change_is_unknown(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("observed_inode, expected", [(41, "LIVE"), (42, "UNKNOWN")])
+def test_linux_pid_namespace_identity_fixture(
+    monkeypatch: pytest.MonkeyPatch, observed_inode: int, expected: str,
 ) -> None:
+    """Exercise Linux namespace matching with fixture OS observations on any host."""
     import process_identity
 
-    captured = process_identity.ProcessIdentity.current()
-    namespace_path = f"/proc/{captured.pid}/ns/pid"
-    native_stat = process_identity.os.stat
-    observed = native_stat(namespace_path)
+    namespace_path = f"/proc/{os.getpid()}/ns/pid"
+    native_stat = os.stat
+    native_read_text = Path.read_text
+    namespace_inode = 41
 
-    def changed_namespace(path, *args, **kwargs):
+    def fixture_read_text(path, *args, **kwargs):
+        if os.fspath(path) == "/etc/machine-id":
+            return "fixture-machine\n"
+        return native_read_text(path, *args, **kwargs)
+
+    def fixture_stat(path, *args, **kwargs):
         if os.fspath(path) == namespace_path:
-            return SimpleNamespace(st_dev=observed.st_dev, st_ino=observed.st_ino + 1)
+            return SimpleNamespace(st_dev=7, st_ino=namespace_inode)
         return native_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(process_identity.os, "stat", changed_namespace)
-    assert process_identity.probe_identity(captured) == "UNKNOWN"
+    monkeypatch.setattr(process_identity, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(Path, "read_text", fixture_read_text)
+    monkeypatch.setattr(process_identity.os, "stat", fixture_stat)
+    monkeypatch.setattr(process_identity, "_boot_identity", lambda: "fixture-boot")
+    monkeypatch.setattr(process_identity, "process_start_token", lambda pid: "fixture-start")
+    monkeypatch.setattr(process_identity, "process_alive", lambda pid: True)
+    captured = process_identity.ProcessIdentity.current()
+    assert captured.host_id == "linux:fixture-machine:pidns:7:41"
+    namespace_inode = observed_inode
+    assert process_identity.probe_identity(captured) == expected
