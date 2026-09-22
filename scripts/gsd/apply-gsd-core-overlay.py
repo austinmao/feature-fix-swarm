@@ -297,7 +297,6 @@ fi
 # Keeping it as one constant gives the Bats suite a direct way to exercise the
 # exact parser/matcher which the pinned workflow instructs an executor to run.
 SAFE_RESUME_PATH_MATCHER = r'''import csv
-import fnmatch
 import re
 import subprocess
 import sys
@@ -307,7 +306,7 @@ def normalize_path(raw):
     """Return a normalized repository-relative path, or None when unsafe."""
     if not isinstance(raw, str):
         return None
-    value = raw.strip().strip("\\\"'").replace("\\\\", "/")
+    value = raw.strip().strip("\"'").replace("\\", "/")
     if not value or value.startswith("/"):
         return None
     parts = []
@@ -344,7 +343,9 @@ def parse_declared_paths(plan_path):
             continue
         saw_field = True
         value = match.group(2)
-        if value.startswith("[") and value.endswith("]"):
+        if value.startswith("[") or value.endswith("]"):
+            if not (value.startswith("[") and value.endswith("]")):
+                raise ValueError("PLAN declared-path list is malformed")
             try:
                 declared.extend(next(csv.reader([value[1:-1]], skipinitialspace=True), []))
             except csv.Error as exc:
@@ -367,12 +368,40 @@ def parse_declared_paths(plan_path):
     normalized = []
     for item in declared:
         raw = item.strip()
-        is_directory = raw.rstrip().replace("\\", "/").endswith("/")
+        if not raw:
+            raise ValueError("PLAN declared-path list is malformed")
+        is_directory = raw.rstrip().strip("\"'").replace("\\", "/").endswith("/")
         path = normalize_path(raw)
         if path is None:
             raise ValueError("PLAN contains an unsafe declared path")
         normalized.append((path, is_directory))
+    if not normalized:
+        raise ValueError("PLAN declares no paths")
     return normalized
+
+
+def glob_regex(pattern):
+    """Git-style path glob: * and ? never cross a slash; ** spans directories,
+    including zero of them (src/**/a.py matches src/a.py)."""
+    parts = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            parts.append("(?:.*/)?")
+            index += 3
+        elif pattern.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        else:
+            parts.append(re.escape(pattern[index]))
+            index += 1
+    return re.compile("^" + "".join(parts) + "$")
 
 
 def path_matches(changed, declared):
@@ -382,10 +411,8 @@ def path_matches(changed, declared):
     for pattern, is_directory in declared:
         if is_directory and changed_path.startswith(pattern + "/"):
             return True
-        if pattern.endswith("/**") and changed_path.startswith(pattern[:-3].rstrip("/") + "/"):
-            return True
-        if any(token in pattern for token in "*?["):
-            if fnmatch.fnmatchcase(changed_path, pattern):
+        if "*" in pattern or "?" in pattern:
+            if glob_regex(pattern).match(changed_path):
                 return True
         elif changed_path == pattern:
             return True
@@ -447,7 +474,10 @@ PLAN_SCOPE_RE="^[a-z]+\\((0*${PHASE_N})-(0*${PLAN_N})\\):"
 MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 PLAN_COMMITS=$(git log --oneline -E ${MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"} --grep="${PLAN_SCOPE_RE}" -30)
 '''
-    matcher = SAFE_RESUME_PATH_MATCHER.rstrip().replace("'", "'\\\"'\\\"'")
+    # Inserted verbatim: the heredoc is quoted (<<'PY'), so nothing inside it is
+    # subject to shell expansion or quoting; mangling quotes here would corrupt
+    # the Python and turn a SyntaxError (exit 1) into a false "unrelated".
+    matcher = SAFE_RESUME_PATH_MATCHER.rstrip()
     new = f'''PLAN_PATH="{{phase_dir}}/{{plan_padded}}-PLAN.md"
 SUMMARY_PATH="{{phase_dir}}/{{plan_padded}}-SUMMARY.md"
 # A commit message scope is necessary but not sufficient: phase/plan numbers recur

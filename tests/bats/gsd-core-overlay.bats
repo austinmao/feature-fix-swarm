@@ -224,10 +224,81 @@ scope = {"__name__": "matcher"}
 exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
 declared = scope["parse_declared_paths"](sys.argv[2])
 assert scope["path_matches"]("docs/guide/nested/page.md", declared)
+assert scope["path_matches"]("docs/guide/page.md", declared)
 assert scope["path_matches"]("assets/images/hero.jpg", declared)
 assert not scope["path_matches"]("assets/images-old/hero.jpg", declared)
+assert scope["normalize_path"]("src\\one\\two.py") == "src/one/two.py"
+assert scope["normalize_path"]("\\\\server\\share\\x") is None
+assert scope["path_matches"]("src/a.py", [("src/**/*.py", False)])
+assert not scope["path_matches"]("src/pkg/a.py", [("src/*.py", False)])
 PY
   [ "$status" -eq 0 ]
+}
+
+@test "safe-resume gate runs the RENDERED heredoc verbatim: 0 intersect, 1 unrelated, 2 malformed plan" {
+  # R-1/R-5 (PR #171 review): execute the exact Python the rendered workflow
+  # embeds, not the source constant, so quoting drift in the renderer is caught.
+  REPO="$BATS_TEST_TMPDIR/rendered-repo"
+  mkdir -p "$REPO/src/pkg"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email "ffs-test@example.invalid"
+  git -C "$REPO" config user.name "FFS test"
+  printf 'a\n' > "$REPO/src/pkg/a.py"
+  printf 'b\n' > "$REPO/src/b.py"
+  printf 'c\n' > "$REPO/other.txt"
+  git -C "$REPO" add src other.txt
+  git -C "$REPO" commit -qm 'feat(03-04): seed'
+  SEED=$(git -C "$REPO" rev-parse HEAD)
+  git -C "$REPO" mv src/b.py src/renamed.py
+  git -C "$REPO" commit -qm 'feat(03-04): rename'
+  RENAMED=$(git -C "$REPO" rev-parse HEAD)
+  printf 'more\n' >> "$REPO/other.txt"
+  git -C "$REPO" add other.txt
+  git -C "$REPO" commit -qm 'feat(03-04): unrelated'
+  UNRELATED=$(git -C "$REPO" rev-parse HEAD)
+  cat > "$REPO/03-04-PLAN.md" <<'PLAN'
+---
+files_modified:
+  - src/**/*.py
+  - "src\renamed.py"
+---
+PLAN
+  printf -- '---\nfiles_modified: [src/a.py, src/b.py\n---\n' > "$REPO/03-04-BAD-PLAN.md"
+  printf -- '---\nfiles_modified: [*.txt]\n---\n' > "$REPO/03-04-TOP-PLAN.md"
+
+  python3 - "$OVERLAY" "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md" "$BATS_TEST_TMPDIR/rendered-matcher.py" <<'PY'
+import importlib.util, re, sys
+spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
+overlay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(overlay)
+installed = open(sys.argv[2], "rb").read()
+try:
+    rendered = overlay.render_execute_phase_safe_resume(installed).decode("utf-8")
+except ValueError:
+    # node_modules already carries the applied overlay (local dev after
+    # `apply`); the rendered gate IS the installed file then.
+    rendered = installed.decode("utf-8")
+match = re.search(r"<<'PY'\n(.*?)\nPY\n", rendered, re.S)
+assert match, "rendered gate has no quoted PY heredoc"
+assert match.group(1) == overlay.SAFE_RESUME_PATH_MATCHER.rstrip(), "heredoc is not the verbatim matcher"
+compile(match.group(1), "rendered", "exec")
+open(sys.argv[3], "w").write(match.group(1))
+PY
+  MATCHER="$BATS_TEST_TMPDIR/rendered-matcher.py"
+  cd "$REPO"
+  run python3 "$MATCHER" 03-04-PLAN.md "$SEED"
+  [ "$status" -eq 0 ]
+  run python3 "$MATCHER" 03-04-PLAN.md "$RENAMED"
+  [ "$status" -eq 0 ]
+  run python3 "$MATCHER" 03-04-PLAN.md "$UNRELATED"
+  [ "$status" -eq 1 ]
+  run python3 "$MATCHER" 03-04-BAD-PLAN.md "$SEED"
+  [ "$status" -eq 2 ]
+  # * never crosses a directory: top-level *.txt matches other.txt, not src/pkg/a.py
+  run python3 "$MATCHER" 03-04-TOP-PLAN.md "$UNRELATED"
+  [ "$status" -eq 0 ]
+  run python3 "$MATCHER" 03-04-TOP-PLAN.md "$RENAMED"
+  [ "$status" -eq 1 ]
 }
 
 @test "safe-resume matcher exits 2 (fail closed) on an unparseable plan or unknown commit" {
