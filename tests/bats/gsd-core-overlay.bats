@@ -242,7 +242,7 @@ try:
     assert scope["parse_declared_paths"](fh.name) == [("a.py", False), ("later/b.py", False)]
 finally:
     os.unlink(fh.name)
-for bad in ('files_modified: [a.py, "b.py]', 'files_modified: ["a.py"junk]', "files_modified:\n  - a.py\n  b.py", "files_modified: [../escape.py]"):
+for bad in ('files_modified: [a.py, "b.py]', 'files_modified: ["a.py"junk]', "files_modified:\n  - a.py\n  b.py", "files_modified: [../escape.py]", "files_modified: src/a.py # c", "files_modified:\n  - \"src/a.py\"junk"):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write("---\n" + bad + "\n---\n")
     try:
@@ -317,6 +317,14 @@ PY
   printf -- '---\nfiles_modified: [../escape.py]\n---\n' > 03-04-TRAV-PLAN.md
   run python3 "$MATCHER" 03-04-TRAV-PLAN.md "$SEED"
   [ "$status" -eq 2 ]
+  run python3 "$MATCHER" 03-04-TRAV-PLAN.md --validate
+  [ "$status" -eq 2 ]
+  run python3 "$MATCHER" 03-04-PLAN.md --validate
+  [ "$status" -eq 0 ]
+  # trailing junk on a block entry is malformed, not a path that never matches
+  printf -- '---\nfiles_modified:\n  - src/pkg/a.py # touched\n---\n' > 03-04-JUNK-PLAN.md
+  run python3 "$MATCHER" 03-04-JUNK-PLAN.md "$SEED"
+  [ "$status" -eq 2 ]
   run python3 "$MATCHER" 03-04-BAD-PLAN.md "$SEED"
   [ "$status" -eq 2 ]
   # * never crosses a directory: top-level *.txt matches other.txt, not src/pkg/a.py
@@ -345,6 +353,7 @@ PY
   REAL_GIT="$(command -v git)"
   cat > "$BATS_TEST_TMPDIR/stub/python3" <<'STUB'
 #!/usr/bin/env bash
+case " $* " in *" --validate "*) exit "${STUB_VALIDATE_STATUS:-0}" ;; esac
 exit "${STUB_MATCHER_STATUS:-3}"
 STUB
   cat > "$BATS_TEST_TMPDIR/stub/git" <<STUB
@@ -368,6 +377,16 @@ STUB
   run env PATH="$BATS_TEST_TMPDIR/stub:$PATH" STUB_GIT_LOG_FAILS=1 bash "$BATS_TEST_TMPDIR/gate.sh"
   [ "$status" -eq 1 ]
   [[ "$output" == *"git log failed"* ]]
+  # a malformed declaration refuses BEFORE any candidate is considered
+  run env PATH="$BATS_TEST_TMPDIR/stub:$PATH" STUB_VALIDATE_STATUS=2 bash "$BATS_TEST_TMPDIR/gate.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot parse declared paths"* ]]
+  # ...and with the REAL matcher, a malformed plan and zero scoped commits still refuse
+  printf -- '---\nfiles_modified: [seed.txt\n---\n' > "$REPO/.planning/phases/03-x/04-PLAN.md"
+  git -C "$REPO" commit -qam 'chore: unscoped'
+  run bash "$BATS_TEST_TMPDIR/gate.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot parse declared paths"* ]]
 }
 
 @test "safe-resume matcher exits 2 (fail closed) on an unparseable plan or unknown commit" {

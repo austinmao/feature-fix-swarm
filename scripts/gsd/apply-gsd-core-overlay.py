@@ -322,6 +322,19 @@ def normalize_path(raw):
     return "/".join(parts) or None
 
 
+def declared_token(raw):
+    """One declared entry as exactly one path token: a fully quoted string or an
+    unquoted token with no whitespace, comment marker or stray quote."""
+    raw = raw.strip()
+    if raw[:1] in ("\"", "'"):
+        if len(raw) < 2 or raw[-1] != raw[0] or raw[0] in raw[1:-1]:
+            raise ValueError("PLAN declared-path entry is malformed")
+        return raw[1:-1]
+    if not raw or any(ch in raw for ch in " \t#\"'"):
+        raise ValueError("PLAN declared-path entry is malformed")
+    return raw
+
+
 def parse_declared_paths(plan_path):
     """Read files_modified/files_deleted from constrained PLAN frontmatter."""
     text = open(plan_path, encoding="utf-8").read()
@@ -352,13 +365,11 @@ def parse_declared_paths(plan_path):
                 items = next(csv.reader([value[1:-1]], skipinitialspace=True, strict=True), [])
             except csv.Error as exc:
                 raise ValueError("PLAN declared-path list is malformed") from exc
-            if any('"' in item or "'" in item for item in items):
-                raise ValueError("PLAN declared-path list is malformed")
-            declared.extend(items)
+            declared.extend(declared_token(item) for item in items)
             index += 1
             continue
         if value:
-            declared.append(value)
+            declared.append(declared_token(value))
             index += 1
             continue
         index += 1
@@ -372,7 +383,7 @@ def parse_declared_paths(plan_path):
                 if re.match(r"^\s+\S", line):
                     raise ValueError("PLAN declared-path list is malformed")
                 break
-            declared.append(item.group(1))
+            declared.append(declared_token(item.group(1)))
             index += 1
     if not saw_field:
         raise ValueError("PLAN declares neither files_modified nor files_deleted")
@@ -381,7 +392,7 @@ def parse_declared_paths(plan_path):
         raw = item.strip()
         if not raw:
             raise ValueError("PLAN declared-path list is malformed")
-        is_directory = raw.rstrip().strip("\"'").replace("\\", "/").endswith("/")
+        is_directory = raw.replace("\\", "/").endswith("/")
         path = normalize_path(raw)
         if path is None:
             raise ValueError("PLAN contains an unsafe declared path")
@@ -460,10 +471,12 @@ def main():
     # status is 1, so an interpreter or runtime failure can never read as
     # "unrelated". Known failures still map to 2 with a message.
     if len(sys.argv) != 3:
-        print("usage: safe-resume-path-matcher PLAN_PATH COMMIT", file=sys.stderr)
+        print("usage: safe-resume-path-matcher PLAN_PATH (COMMIT | --validate)", file=sys.stderr)
         raise SystemExit(2)
     try:
         declared = parse_declared_paths(sys.argv[1])
+        if sys.argv[2] == "--validate":
+            raise SystemExit(0)
         changed = changed_paths_for_commit(sys.argv[2])
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"safe-resume-path-matcher: {exc}", file=sys.stderr)
@@ -502,17 +515,29 @@ PLAN_N=$((10#{{plan_padded}}))
 PLAN_SCOPE_RE="^[a-z]+\\((0*${{PHASE_N}})-(0*${{PLAN_N}})\\):"
 MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 PLAN_COMMITS=""
+SAFE_RESUME_MATCHER=$(mktemp) || exit 1
+trap 'rm -f "$SAFE_RESUME_MATCHER"' EXIT
+cat > "$SAFE_RESUME_MATCHER" <<'PY'
+{matcher}
+PY
+# Validate the declaration ONCE, before any commit is considered: a missing or
+# malformed PLAN must refuse even when zero scoped commits exist.
+if ! python3 "$SAFE_RESUME_MATCHER" "$PLAN_PATH" --validate; then
+  echo "SAFE RESUME GATE: cannot parse declared paths for $PLAN_PATH; refusing dispatch." >&2
+  exit 1
+fi
 if ! PLAN_COMMIT_LIST=$(git log --format=%H -E ${{MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"}} --grep="${{PLAN_SCOPE_RE}}" -30); then
   echo "SAFE RESUME GATE: git log failed while enumerating scoped commits; refusing dispatch." >&2
   exit 1
 fi
 while IFS= read -r PLAN_COMMIT_SHA; do
   [ -n "$PLAN_COMMIT_SHA" ] || continue
-  if python3 - "$PLAN_PATH" "$PLAN_COMMIT_SHA" <<'PY'
-{matcher}
-PY
-  then
-    PLAN_COMMITS="${{PLAN_COMMITS}}${{PLAN_COMMITS:+$'\\n'}}$(git show -s --format='%h %s' "$PLAN_COMMIT_SHA")"
+  if python3 "$SAFE_RESUME_MATCHER" "$PLAN_PATH" "$PLAN_COMMIT_SHA"; then
+    if ! PLAN_COMMIT_LINE=$(git show -s --format='%h %s' "$PLAN_COMMIT_SHA"); then
+      echo "SAFE RESUME GATE: git show failed for $PLAN_COMMIT_SHA; refusing dispatch." >&2
+      exit 1
+    fi
+    PLAN_COMMITS="${{PLAN_COMMITS}}${{PLAN_COMMITS:+$'\\n'}}${{PLAN_COMMIT_LINE}}"
   else
     MATCH_STATUS=$?
     # Only the matcher's explicit "unrelated" code (3) is ignorable; 2 is a
