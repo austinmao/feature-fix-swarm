@@ -352,6 +352,10 @@ def parse_declared_paths(plan_path):
     while index < len(frontmatter):
         match = re.match(r"^(files_(?:modified|deleted))\s*:\s*(.*?)\s*$", frontmatter[index])
         if not match:
+            # A declared-path key that is present but not in the exact grammar
+            # (indented, misspelt suffix, etc.) must not be skipped silently.
+            if re.search(r"files_(?:modified|deleted)\s*:", frontmatter[index]):
+                raise ValueError("PLAN declared-path key is malformed")
             index += 1
             continue
         saw_field = True

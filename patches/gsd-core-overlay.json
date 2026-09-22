@@ -16,7 +16,7 @@
     {
       "target": "gsd-core/workflows/execute-phase.md",
       "base_sha256": "cddc9308933fa5925384673d34c528017ac5f19f2fbc0eb0d8f48892eb0ae8b1",
-      "patched_sha256": "976f2578b9a09e08e3120bfd78847b542622a2cbb21c7112e03e053a46ad8174"
+      "patched_sha256": "8c4b58639f3c5899b4e8b73c0ed11bf98388fd7b7d8e96e561fd17129b6a4d72"
     }
   ]
 }
