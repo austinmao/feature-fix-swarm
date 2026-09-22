@@ -129,12 +129,66 @@ NODE
   done
 }
 
+@test "executor overlay permits a sequential linked-worktree branch but retains the isolated-worktree gate" {
+  EXECUTOR="$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md"
+  grep -F 'workflow.use_worktrees --raw' "$EXECUTOR"
+  grep -F 'skip this isolated-agent namespace check' "$EXECUTOR"
+
+  mkdir -p "$BATS_TEST_TMPDIR/linked-worktree"
+  touch "$BATS_TEST_TMPDIR/linked-worktree/.git"
+  run bash -c '
+    cd "$1"
+    gsd_run() { printf "false\\n"; }
+    if [ -f .git ] && [ "$(gsd_run query config-get workflow.use_worktrees --raw 2>/dev/null || echo true)" != "false" ]; then
+      exit 99
+    fi
+  ' -- "$BATS_TEST_TMPDIR/linked-worktree"
+  [ "$status" -eq 0 ]
+
+  run bash -c '
+    cd "$1"
+    gsd_run() { printf "true\\n"; }
+    if [ -f .git ] && [ "$(gsd_run query config-get workflow.use_worktrees --raw 2>/dev/null || echo true)" != "false" ]; then
+      exit 99
+    fi
+  ' -- "$BATS_TEST_TMPDIR/linked-worktree"
+  [ "$status" -eq 99 ]
+}
+
+@test "overlay rolls back earlier replacements if a later target replacement fails" {
+  run python3 - "$OVERLAY" "$BATS_TEST_TMPDIR" <<'PY'
+import importlib.util, os, stat, sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
+overlay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(overlay)
+root = Path(sys.argv[2]) / "rollback"
+root.mkdir()
+first, second = root / "first", root / "second"
+first.write_bytes(b"first-before")
+second.write_bytes(b"second-before")
+first.chmod(0o640)
+second.chmod(0o600)
+before = [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second)]
+error = overlay.replace_pending([
+    (first, before[0][0], b"first-after", before[0][1], "first"),
+    (second, before[1][0], b"second-after", before[1][1], "second"),
+], "second")
+assert error and "prior targets restored" in error
+assert [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second)] == before
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "overlay verifier rejects package-version, base, and patched-digest mismatch" {
   FIX="$BATS_TEST_TMPDIR/fixture"
   TARGET="$FIX/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs"
-  mkdir -p "$(dirname "$TARGET")" "$FIX/patches"
+  EXECUTOR="$FIX/node_modules/@opengsd/gsd-core/agents/gsd-executor.md"
+  mkdir -p "$(dirname "$TARGET")" "$(dirname "$EXECUTOR")" "$FIX/patches"
   cp "$ROOT/patches/gsd-core-overlay.json" "$FIX/patches/"
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$TARGET"
+  cp "$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md" "$EXECUTOR"
   printf '{"name":"@opengsd/gsd-core","version":"1.13.1"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
@@ -148,12 +202,20 @@ NODE
 
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$TARGET"
   BOGUS_PATCHED_SHA="$(printf '0%.0s' {1..64})"  # runtime-built: AC-011 hex-run gate stays quiet
-  BASE_SHA="3889f9dccfbcc7d1"  # split literal: AC-011 hex-run gate stays quiet
-  BASE_SHA+="19254e0c01010ff"
-  BASE_SHA+="71547ed95bbd03b4"
-  BASE_SHA+="584bad56530a61797"
-  printf '{"schema":"ffs.gsd-core-overlay/v1","package":"@opengsd/gsd-core","version":"1.13.0","target":"gsd-core/bin/lib/tdd-red-evidence.cjs","base_sha256":"%s","patched_sha256":"%s"}\n' "$BASE_SHA" "$BOGUS_PATCHED_SHA" > "$FIX/patches/gsd-core-overlay.json"
+  python3 - "$FIX/patches/gsd-core-overlay.json" "$BOGUS_PATCHED_SHA" <<'PY'
+import json, sys
+path, bogus = sys.argv[1:]
+manifest = json.load(open(path))
+manifest["targets"][0]["patched_sha256"] = bogus
+open(path, "w").write(json.dumps(manifest))
+PY
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
   [[ "$output" == *"digest mismatch"* ]]
+
+  cp "$ROOT/patches/gsd-core-overlay.json" "$FIX/patches/"
+  printf 'untrusted executor drift\n' > "$EXECUTOR"
+  run python3 "$OVERLAY" verify --repo "$FIX"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"agents/gsd-executor.md"* ]]
 }
