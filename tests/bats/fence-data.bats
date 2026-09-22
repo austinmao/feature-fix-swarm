@@ -289,7 +289,7 @@ sys.stdout.buffer.write(data[len(start):-len(end)])
   [[ "$output" == *"== GIT =="* ]]
   # shellcheck disable=SC2154 # stderr populated by run --separate-stderr
   [ "$(printf '%s\n' "$stderr" | grep -c 'fence-data.sh')" -eq 1 ]
-  [[ "$stderr" == *"takeover record refused: gates.py or takeover-record.py unavailable"* ]]
+  [[ "$stderr" == *"takeover record refused"* ]]
 }
 
 # ── Task 3: REQ-402 structural presence (grep-level, comment-filtered) ──────

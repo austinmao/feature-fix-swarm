@@ -54,7 +54,8 @@ case "\$1" in
 esac
 EOF
   chmod +x "$STUB_DIR/gbrain"
-  PATH="$STUB_DIR:$MINPATH" run bash "$SCRIPT" "$TMP/planning"
+  cd "$TMP"
+  PATH="$STUB_DIR:$MINPATH" run bash "$REPO_ROOT/$SCRIPT" "$TMP/planning"
   [ "$status" -eq 0 ]
   [[ "$output" == *"2 harvested"* ]]
   [ -f "$MARKER" ]
@@ -201,7 +202,8 @@ case "\$1" in
 esac
 EOF
   chmod +x "$STUB_DIR/gbrain"
-  PATH="$STUB_DIR:$MINPATH" run bash "$SCRIPT" "$TMP/planning"
+  cd "$TMP"
+  PATH="$STUB_DIR:$MINPATH" run bash "$REPO_ROOT/$SCRIPT" "$TMP/planning"
   [ "$status" -eq 0 ]
   [[ "$output" == *"3 harvested"* ]]
   [ -f "$MARKER" ]
@@ -210,6 +212,29 @@ EOF
   # each stored body holds exactly one JSON note — never the whole file's
   # worth of entries concatenated onto the first put's stdin.
   [ "$(grep -o '"note"' "$MARKER" | wc -l | tr -d ' ')" -eq 3 ]
+}
+
+@test "doctor output larger than the pipe buffer still resolves healthy (no SIGPIPE/rc141)" {
+  seed_learnings "phase-01" '{"note":"a"}'
+  cat > "$STUB_DIR/gbrain" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  doctor)
+    echo "[OK] connection"
+    python3 -c "print('x' * 70000)"
+    exit 1
+    ;;
+  put) echo "PUT \$2" >> "$MARKER"; exit 0 ;;
+  sync) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/gbrain"
+  cd "$TMP"
+  PATH="$STUB_DIR:$MINPATH" run bash "$REPO_ROOT/$SCRIPT" "$TMP/planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 harvested"* ]]
+  [ -f "$MARKER" ]
 }
 
 @test "zero entries / missing .planning: exit 0, 0 harvested" {

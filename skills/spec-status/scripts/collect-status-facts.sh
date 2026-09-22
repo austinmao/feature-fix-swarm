@@ -228,6 +228,6 @@ if [ -n "$TAKEOVER_GP" ] && [ -n "$TAKEOVER_PY" ]; then
   python3 "$TAKEOVER_PY" \
     --gates "$TAKEOVER_GP" --spec-id "$SPEC_ID" --run-id "$EXPECTED_RUN_ID" || exit $?
 else
-  echo "takeover record refused: gates.py or takeover-record.py unavailable" >&2
+  echo "takeover record refused: gates.py=${TAKEOVER_GP:-MISSING} takeover-record.py=${TAKEOVER_PY:-MISSING}" >&2
   exit 1
 fi
