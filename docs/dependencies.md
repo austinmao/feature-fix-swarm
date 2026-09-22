@@ -78,13 +78,17 @@ Copying its skills or hooks into FFS source would create two implementations,
 make security fixes hard to trace, and blur who is responsible for migrations.
 
 FFS therefore calls GSD's full-profile installer and verifies its upstream
-manifest. It also carries one audited compatibility overlay for
-`gsd-core/bin/lib/tdd-red-evidence.cjs`: the applier accepts only
-`@opengsd/gsd-core@1.13.0`, the committed pristine-file SHA-256, and the
-committed rendered SHA-256. `deps.sh install` and managed setup apply and
-verify that overlay before either global profile is installed. This is not a
-fork or a hand edit: any upstream byte, version, or rendered-digest drift
-fails closed and requires a reviewed overlay update.
+manifest. It also carries a small audited compatibility overlay set for
+`gsd-core/bin/lib/tdd-red-evidence.cjs`, `agents/gsd-executor.md`, and
+`gsd-core/workflows/execute-phase.md`: the applier accepts only
+`@opengsd/gsd-core@1.13.0`, every committed pristine-file SHA-256, and every
+committed rendered SHA-256. The safe-resume target treats a matching commit
+scope as only a candidate; it blocks redispatch only when that commit changes
+a path declared by the active plan, and refuses dispatch outright (exit 2
+from the matcher) when the plan's declared paths cannot be parsed. `deps.sh install` and managed setup apply
+and verify all targets atomically before either global profile is installed.
+This is not a fork or a hand edit: any upstream byte, version, or
+rendered-digest drift fails closed and requires a reviewed overlay update.
 
 FFS otherwise owns only the surrounding integration: cross-host discovery,
 safe migration and rollback, run locking, phase evidence, typed model routing,

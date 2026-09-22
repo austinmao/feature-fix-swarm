@@ -1,5 +1,5 @@
 {
-  "schema": "ffs.gsd-core-overlay/v2",
+  "schema": "ffs.gsd-core-overlay/v3",
   "package": "@opengsd/gsd-core",
   "version": "1.13.0",
   "targets": [
@@ -12,6 +12,11 @@
       "target": "agents/gsd-executor.md",
       "base_sha256": "40431b7e765a9bf6b656788196bf947a94f8697323285f0f5e552353148deafb",
       "patched_sha256": "c26c85437e1b5082d16ae69e2c53f474601431e48b9e270fa22a7bac680a1f9f"
+    },
+    {
+      "target": "gsd-core/workflows/execute-phase.md",
+      "base_sha256": "cddc9308933fa5925384673d34c528017ac5f19f2fbc0eb0d8f48892eb0ae8b1",
+      "patched_sha256": "35ce861d496ae262316ed37536e323d8b131add43a7dee8d9135b2f4aa820676"
     }
   ]
 }

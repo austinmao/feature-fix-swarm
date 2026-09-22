@@ -293,16 +293,208 @@ fi
     return source.replace(old, new)
 
 
+# This program is rendered verbatim into the execute-phase safe-resume gate.
+# Keeping it as one constant gives the Bats suite a direct way to exercise the
+# exact parser/matcher which the pinned workflow instructs an executor to run.
+SAFE_RESUME_PATH_MATCHER = r'''import csv
+import fnmatch
+import re
+import subprocess
+import sys
+
+
+def normalize_path(raw):
+    """Return a normalized repository-relative path, or None when unsafe."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().strip("\\\"'").replace("\\\\", "/")
+    if not value or value.startswith("/"):
+        return None
+    parts = []
+    for part in value.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts) or None
+
+
+def parse_declared_paths(plan_path):
+    """Read files_modified/files_deleted from constrained PLAN frontmatter."""
+    text = open(plan_path, encoding="utf-8").read()
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("PLAN frontmatter is missing")
+    try:
+        end = next(index for index, line in enumerate(lines[1:], 1) if line.strip() == "---")
+    except StopIteration as exc:
+        raise ValueError("PLAN frontmatter is unterminated") from exc
+    frontmatter = lines[1:end]
+    declared = []
+    saw_field = False
+    index = 0
+    while index < len(frontmatter):
+        match = re.match(r"^(files_(?:modified|deleted)):\s*(.*?)\s*$", frontmatter[index])
+        if not match:
+            index += 1
+            continue
+        saw_field = True
+        value = match.group(2)
+        if value.startswith("[") and value.endswith("]"):
+            try:
+                declared.extend(next(csv.reader([value[1:-1]], skipinitialspace=True), []))
+            except csv.Error as exc:
+                raise ValueError("PLAN declared-path list is malformed") from exc
+            index += 1
+            continue
+        if value:
+            declared.append(value)
+            index += 1
+            continue
+        index += 1
+        while index < len(frontmatter):
+            item = re.match(r"^\s+-\s+(.*?)\s*$", frontmatter[index])
+            if not item:
+                break
+            declared.append(item.group(1))
+            index += 1
+    if not saw_field:
+        raise ValueError("PLAN declares neither files_modified nor files_deleted")
+    normalized = []
+    for item in declared:
+        raw = item.strip()
+        is_directory = raw.rstrip().replace("\\", "/").endswith("/")
+        path = normalize_path(raw)
+        if path is None:
+            raise ValueError("PLAN contains an unsafe declared path")
+        normalized.append((path, is_directory))
+    return normalized
+
+
+def path_matches(changed, declared):
+    changed_path = normalize_path(changed)
+    if changed_path is None:
+        return False
+    for pattern, is_directory in declared:
+        if is_directory and changed_path.startswith(pattern + "/"):
+            return True
+        if pattern.endswith("/**") and changed_path.startswith(pattern[:-3].rstrip("/") + "/"):
+            return True
+        if any(token in pattern for token in "*?["):
+            if fnmatch.fnmatchcase(changed_path, pattern):
+                return True
+        elif changed_path == pattern:
+            return True
+    return False
+
+
+def changed_paths_for_commit(commit):
+    output = subprocess.check_output(
+        ["git", "diff-tree", "--root", "--no-commit-id", "--name-status", "-z", "-r", "-M", commit]
+    )
+    fields = output.decode("utf-8", "surrogateescape").split("\0")
+    paths = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        if index >= len(fields):
+            raise ValueError("git diff-tree name-status output is malformed")
+        paths.append(fields[index])
+        index += 1
+        if status.startswith(("R", "C")):
+            if index >= len(fields):
+                raise ValueError("git rename/copy output is malformed")
+            paths.append(fields[index])
+            index += 1
+    return paths
+
+
+def main():
+    # Exit 0 = intersects the plan, 1 = unrelated, 2 = cannot decide. The
+    # rendered gate treats only >1 as fail-closed, and an uncaught exception
+    # would exit 1 and read as "unrelated", so every failure maps to 2 here.
+    if len(sys.argv) != 3:
+        print("usage: safe-resume-path-matcher PLAN_PATH COMMIT", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        declared = parse_declared_paths(sys.argv[1])
+        changed = changed_paths_for_commit(sys.argv[2])
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"safe-resume-path-matcher: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    raise SystemExit(0 if any(path_matches(path, declared) for path in changed) else 1)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def render_execute_phase_safe_resume(source: bytes) -> bytes:
+    old = b'''SUMMARY_PATH="{phase_dir}/{plan_padded}-SUMMARY.md"
+# #4003: no padding rule in the commit protocol, so zero-strip both components and
+# match ANCHORED at the commit scope; bound to the latest reachable tag (milestone marker).
+PHASE_N=$((10#{phase_number}))
+PLAN_N=$((10#{plan_padded}))
+PLAN_SCOPE_RE="^[a-z]+\\((0*${PHASE_N})-(0*${PLAN_N})\\):"
+MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+PLAN_COMMITS=$(git log --oneline -E ${MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"} --grep="${PLAN_SCOPE_RE}" -30)
+'''
+    matcher = SAFE_RESUME_PATH_MATCHER.rstrip().replace("'", "'\\\"'\\\"'")
+    new = f'''PLAN_PATH="{{phase_dir}}/{{plan_padded}}-PLAN.md"
+SUMMARY_PATH="{{phase_dir}}/{{plan_padded}}-SUMMARY.md"
+# A commit message scope is necessary but not sufficient: phase/plan numbers recur
+# across milestones. A candidate is production work for this plan only when one of
+# its changed (including deleted, renamed, or copied) repository paths intersects
+# the current PLAN's files_modified/files_deleted declaration. No declared-path
+# parse failure may silently authorize dispatch; fail closed and inspect the plan.
+PHASE_N=$((10#{{phase_number}}))
+PLAN_N=$((10#{{plan_padded}}))
+PLAN_SCOPE_RE="^[a-z]+\\((0*${{PHASE_N}})-(0*${{PLAN_N}})\\):"
+MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+PLAN_COMMITS=""
+while IFS= read -r PLAN_COMMIT_SHA; do
+  [ -n "$PLAN_COMMIT_SHA" ] || continue
+  if python3 - "$PLAN_PATH" "$PLAN_COMMIT_SHA" <<'PY'
+{matcher}
+PY
+  then
+    PLAN_COMMITS="${{PLAN_COMMITS}}${{PLAN_COMMITS:+$'\\n'}}$(git show -s --format='%h %s' "$PLAN_COMMIT_SHA")"
+  else
+    MATCH_STATUS=$?
+    if [ "$MATCH_STATUS" -gt 1 ]; then
+      echo "SAFE RESUME GATE: cannot safely parse declared paths for $PLAN_PATH; refusing dispatch." >&2
+      exit 1
+    fi
+    # Same numeric scope but no declared-file intersection is unrelated history.
+    # It is advisory only and must not block this plan's first execution.
+    echo "SAFE RESUME: ignoring unrelated scoped commit $PLAN_COMMIT_SHA" >&2
+  fi
+done < <(git log --format=%H -E ${{MILESTONE_BASE:+"$MILESTONE_BASE..HEAD"}} --grep="${{PLAN_SCOPE_RE}}" -30)
+'''.encode("utf-8")
+    if source.count(old) != 1:
+        raise ValueError("upstream execute-phase safe-resume anchor is missing or ambiguous")
+    return source.replace(old, new)
+
+
 RENDERERS = {
     "gsd-core/bin/lib/tdd-red-evidence.cjs": render_tdd_red_evidence,
     "agents/gsd-executor.md": render_executor_sequential_guard,
+    "gsd-core/workflows/execute-phase.md": render_execute_phase_safe_resume,
 }
 
 
 def validate_manifest(manifest: object) -> list[dict[str, str]] | None:
     if not isinstance(manifest, dict) or set(manifest) != {"schema", "package", "version", "targets"}:
         return None
-    if manifest.get("schema") != "ffs.gsd-core-overlay/v2" or manifest.get("package") != PACKAGE or manifest.get("version") != VERSION:
+    if manifest.get("schema") != "ffs.gsd-core-overlay/v3" or manifest.get("package") != PACKAGE or manifest.get("version") != VERSION:
         return None
     targets = manifest.get("targets")
     if not isinstance(targets, list) or len(targets) != len(RENDERERS):

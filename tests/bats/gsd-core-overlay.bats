@@ -155,6 +155,124 @@ NODE
   [ "$status" -eq 99 ]
 }
 
+@test "safe-resume overlay ignores same-scope history unless its paths intersect the active plan" {
+  REPO="$BATS_TEST_TMPDIR/resume-repo"
+  mkdir -p "$REPO/src" "$REPO/legacy" "$REPO/docs/guide" "$REPO/assets/images"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email "ffs-test@example.invalid"
+  git -C "$REPO" config user.name "FFS test"
+  cat > "$REPO/03-04-PLAN.md" <<'PLAN'
+---
+files_modified: [./src/current.py, docs/guide/**, "assets\\images\\"]
+files_deleted:
+  - legacy/obsolete.py
+---
+PLAN
+  printf 'unrelated\n' > "$REPO/src/unrelated.py"
+  printf 'obsolete\n' > "$REPO/legacy/obsolete.py"
+  git -C "$REPO" add src/unrelated.py legacy/obsolete.py
+  git -C "$REPO" commit -qm 'chore: seed paths'
+
+  printf 'still unrelated\n' >> "$REPO/src/unrelated.py"
+  git -C "$REPO" add src/unrelated.py
+  git -C "$REPO" commit -qm 'feat(03-04): unrelated prior milestone work'
+  UNRELATED=$(git -C "$REPO" rev-parse HEAD)
+
+  printf 'current\n' > "$REPO/src/current.py"
+  git -C "$REPO" add src/current.py
+  git -C "$REPO" commit -qm 'feat(03-04): current plan partial implementation'
+  CURRENT=$(git -C "$REPO" rev-parse HEAD)
+
+  git -C "$REPO" rm -q legacy/obsolete.py
+  git -C "$REPO" commit -qm 'feat(03-04): remove obsolete current-plan file'
+  DELETED=$(git -C "$REPO" rev-parse HEAD)
+
+  run python3 - "$OVERLAY" "$REPO/03-04-PLAN.md" "$UNRELATED" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
+overlay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(overlay)
+scope = {"__name__": "matcher"}
+exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
+os.chdir(os.path.dirname(sys.argv[2]))
+declared = scope["parse_declared_paths"](sys.argv[2])
+raise SystemExit(0 if any(scope["path_matches"](path, declared) for path in scope["changed_paths_for_commit"](sys.argv[3])) else 1)
+PY
+  [ "$status" -eq 1 ]
+
+  for COMMIT in "$CURRENT" "$DELETED"; do
+    run python3 - "$OVERLAY" "$REPO/03-04-PLAN.md" "$COMMIT" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
+overlay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(overlay)
+scope = {"__name__": "matcher"}
+exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
+os.chdir(os.path.dirname(sys.argv[2]))
+declared = scope["parse_declared_paths"](sys.argv[2])
+raise SystemExit(0 if any(scope["path_matches"](path, declared) for path in scope["changed_paths_for_commit"](sys.argv[3])) else 1)
+PY
+    [ "$status" -eq 0 ]
+  done
+
+  run python3 - "$OVERLAY" "$REPO/03-04-PLAN.md" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
+overlay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(overlay)
+scope = {"__name__": "matcher"}
+exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
+declared = scope["parse_declared_paths"](sys.argv[2])
+assert scope["path_matches"]("docs/guide/nested/page.md", declared)
+assert scope["path_matches"]("assets/images/hero.jpg", declared)
+assert not scope["path_matches"]("assets/images-old/hero.jpg", declared)
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "safe-resume matcher exits 2 (fail closed) on an unparseable plan or unknown commit" {
+  REPO="$BATS_TEST_TMPDIR/resume-bad-repo"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email "ffs-test@example.invalid"
+  git -C "$REPO" config user.name "FFS test"
+  printf 'seed\n' > "$REPO/seed.txt"
+  git -C "$REPO" add seed.txt
+  git -C "$REPO" commit -qm 'feat(03-04): seed'
+  SHA=$(git -C "$REPO" rev-parse HEAD)
+  printf 'no frontmatter here\n' > "$REPO/03-04-PLAN.md"
+  printf -- '---\nfiles_modified: [seed.txt]\n---\n' > "$REPO/03-04-GOOD-PLAN.md"
+
+  for CASE in "$REPO/03-04-PLAN.md $SHA" "$REPO/03-04-GOOD-PLAN.md 0000000000000000000000000000000000000000" "$REPO/missing-PLAN.md $SHA"; do
+    set -- $CASE
+    run python3 - "$OVERLAY" "$1" "$2" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
+overlay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(overlay)
+scope = {"__name__": "matcher"}
+exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
+os.chdir(os.path.dirname(sys.argv[2]))
+sys.argv = ["safe-resume-path-matcher", sys.argv[2], sys.argv[3]]
+scope["main"]()
+PY
+    [ "$status" -eq 2 ]
+  done
+
+  run python3 - "$OVERLAY" "$REPO/03-04-GOOD-PLAN.md" "$SHA" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
+overlay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(overlay)
+scope = {"__name__": "matcher"}
+exec(overlay.SAFE_RESUME_PATH_MATCHER, scope)
+os.chdir(os.path.dirname(sys.argv[2]))
+sys.argv = ["safe-resume-path-matcher", sys.argv[2], sys.argv[3]]
+scope["main"]()
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "overlay rolls back earlier replacements if a later target replacement fails" {
   run python3 - "$OVERLAY" "$BATS_TEST_TMPDIR" <<'PY'
 import importlib.util, os, stat, sys
@@ -170,13 +288,17 @@ first.write_bytes(b"first-before")
 second.write_bytes(b"second-before")
 first.chmod(0o640)
 second.chmod(0o600)
-before = [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second)]
+third = root / "third"
+third.write_bytes(b"third-before")
+third.chmod(0o644)
+before = [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second, third)]
 error = overlay.replace_pending([
     (first, before[0][0], b"first-after", before[0][1], "first"),
     (second, before[1][0], b"second-after", before[1][1], "second"),
-], "second")
+    (third, before[2][0], b"third-after", before[2][1], "third"),
+], "third")
 assert error and "prior targets restored" in error
-assert [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second)] == before
+assert [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second, third)] == before
 PY
   [ "$status" -eq 0 ]
 }
@@ -185,10 +307,12 @@ PY
   FIX="$BATS_TEST_TMPDIR/fixture"
   TARGET="$FIX/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs"
   EXECUTOR="$FIX/node_modules/@opengsd/gsd-core/agents/gsd-executor.md"
-  mkdir -p "$(dirname "$TARGET")" "$(dirname "$EXECUTOR")" "$FIX/patches"
+  RESUME="$FIX/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md"
+  mkdir -p "$(dirname "$TARGET")" "$(dirname "$EXECUTOR")" "$(dirname "$RESUME")" "$FIX/patches"
   cp "$ROOT/patches/gsd-core-overlay.json" "$FIX/patches/"
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$TARGET"
   cp "$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md" "$EXECUTOR"
+  cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md" "$RESUME"
   printf '{"name":"@opengsd/gsd-core","version":"1.13.1"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
@@ -218,4 +342,11 @@ PY
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
   [[ "$output" == *"agents/gsd-executor.md"* ]]
+
+  cp "$ROOT/patches/gsd-core-overlay.json" "$FIX/patches/"
+  cp "$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md" "$EXECUTOR"
+  printf 'untrusted safe resume drift\n' > "$RESUME"
+  run python3 "$OVERLAY" verify --repo "$FIX"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-core/workflows/execute-phase.md"* ]]
 }
