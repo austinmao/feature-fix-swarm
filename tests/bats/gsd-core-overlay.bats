@@ -242,7 +242,13 @@ try:
     assert scope["parse_declared_paths"](fh.name) == [("a.py", False), ("later/b.py", False)]
 finally:
     os.unlink(fh.name)
-for bad in ('files_modified: [a.py, "b.py]', 'files_modified: ["a.py"junk]', "files_modified:\n  - a.py\n  b.py", "files_modified: [../escape.py]", "files_modified: src/a.py # c", "files_modified:\n  - \"src/a.py\"junk", " files_modified: [a.py]\nfiles_deleted: [b.py]"):
+with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+    fh.write('---\n"files_modified": [a.py]\nfiles_deleted: [b.py]\n---\n')
+try:
+    assert scope["parse_declared_paths"](fh.name) == [("a.py", False), ("b.py", False)]
+finally:
+    os.unlink(fh.name)
+for bad in ('files_modified: [a.py, "b.py]', 'files_modified: ["a.py"junk]', "files_modified:\n  - a.py\n  b.py", "files_modified: [../escape.py]", "files_modified: src/a.py # c", "files_modified:\n  - \"src/a.py\"junk", " files_modified: [a.py]\nfiles_deleted: [b.py]", "'files_modified\": [a.py]\nfiles_deleted: [b.py]", "files_modified_extra: [a.py]"):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write("---\n" + bad + "\n---\n")
     try:
