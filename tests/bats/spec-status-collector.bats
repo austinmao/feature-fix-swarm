@@ -250,6 +250,6 @@ PY
   run env -u GSD_RUN_ID -u GATES_STORE bash "$USER_COLLECTOR" 340
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"takeover record refused"* ]]
+  [[ "$output" == *"takeover record refused: gates.py="*"/packages/feature-fix-swarm/lib/gates.py takeover-record.py=MISSING"* ]]
   [ ! -f "takeover-record-invoked.marker" ]
 }
