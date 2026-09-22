@@ -86,7 +86,19 @@ PY
 }
 
 gbrain_healthy() {
-  command -v gbrain >/dev/null 2>&1 && gb doctor >/dev/null 2>&1
+  # `gb doctor` exits nonzero whenever ANY health check FAILs (e.g.
+  # sync_freshness, type_proliferation) even while connectivity is fine — its
+  # rc alone is not a reachability signal. Probe connectivity only: an
+  # "[OK] connection" line in the output means reachable, regardless of rc.
+  command -v gbrain >/dev/null 2>&1 || return 1
+  # Capture first, then match on a herestring (not a pipe): with `pipefail`,
+  # `printf '%s' "$out" | grep -q ...` can itself fail with rc 141 — grep -q
+  # exits as soon as it sees a match, printf gets SIGPIPE once $out is large
+  # enough to overflow the pipe buffer. A herestring has no pipe, so grep's
+  # own exit status is the only one that matters.
+  local out
+  out="$(gb doctor 2>/dev/null)" || true
+  grep -q '\[OK\] connection' <<<"$out"
 }
 
 hash_of() {
@@ -122,12 +134,17 @@ write_gbrain() {
   # archive, i.e. duplicated. This is acceptable for advisory memory: learnings
   # are idempotent hints, dedup is a recall-time concern, and per-entry failure
   # bookkeeping isn't worth the complexity for a fail-soft harvester.
+  # gbrain 0.50 ignores a positional content arg and reads stdin/--content
+  # instead — pipe the entry on stdin. `gb put`'s stdin is the printf pipe,
+  # not fd 0, so it can't actually steal from the loop's input file; the
+  # read loop still consumes fd 3 (not fd 0) defensively, and `3<&-` on the
+  # put keeps that fd from leaking into gbrain's child process either way.
   local entry hash ok=0
-  while IFS= read -r entry || [ -n "$entry" ]; do
+  while IFS= read -r entry <&3 || [ -n "$entry" ]; do
     [ -z "$entry" ] && continue
     hash="$(hash_of "$entry")"
-    gb put "learnings/$hash" "$entry" >/dev/null 2>&1 || ok=1
-  done < "$1"
+    printf '%s' "$entry" | gb put "learnings/$hash" 3<&- >/dev/null 2>&1 || ok=1
+  done 3< "$1"
   gb sync --no-pull --no-embed >/dev/null 2>&1 || true
   return "$ok"
 }
