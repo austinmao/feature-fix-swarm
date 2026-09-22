@@ -291,14 +291,16 @@ second.chmod(0o600)
 third = root / "third"
 third.write_bytes(b"third-before")
 third.chmod(0o644)
-before = [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second, third)]
+before = [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second)]
+third_before = (third.read_bytes(), stat.S_IMODE(third.stat().st_mode))
 error = overlay.replace_pending([
     (first, before[0][0], b"first-after", before[0][1], "first"),
     (second, before[1][0], b"second-after", before[1][1], "second"),
-    (third, before[2][0], b"third-after", before[2][1], "third"),
+    (third, third_before[0], b"third-after", third_before[1], "third"),
 ], "third")
 assert error and "prior targets restored" in error
-assert [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second, third)] == before
+assert [(path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in (first, second)] == before
+assert (third.read_bytes(), stat.S_IMODE(third.stat().st_mode)) == third_before
 PY
   [ "$status" -eq 0 ]
 }
