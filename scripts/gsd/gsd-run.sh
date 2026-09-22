@@ -989,10 +989,11 @@ validate_extra_writable_worktrees() {
     EXTRA_WRITABLE_WORKTREES+=("$candidate_real")
   done
 
-  # The literal canonical list is audit-friendly and part of the strict
-  # resume tuple.  Reordering is deliberate drift rather than a silent
-  # capability substitution.
-  EXTRA_WRITABLE_WORKTREES_TUPLE="$(IFS='|'; printf '%s' "${EXTRA_WRITABLE_WORKTREES[*]}")"
+  # Compact JSON is an injective representation of the exact canonical list:
+  # unlike a separator join, a valid filesystem name cannot make one root
+  # serialize as two. Reordering remains deliberate drift rather than a
+  # silent capability substitution.
+  EXTRA_WRITABLE_WORKTREES_TUPLE="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:], separators=(",", ":")))' "${EXTRA_WRITABLE_WORKTREES[@]}")" || return 1
 }
 
 CODEX_SESSION_CONTRACT="${GSD_CODEX_SESSION_CONTRACT:-FFS CODEX EXEC-SESSION CONTRACT: A tool result saying 'Script running with cell ID' is not completion or failure. Wait on that yielded cell. If the wait result contains a session_id and no exit_code, the nested process is still alive: poll that exact session with write_stdin until it exits. If the tool session is lost, check runner liveness with kill -0 \$(head -1 \"$RUN_PID_FILE\"); never launch a replacement while that pid is alive. Any worktree created for this run must live under \"$RUN_WORKTREE_ROOT\".}"
@@ -1847,13 +1848,19 @@ normalize_prelaunch_tuple_for_compare() {
     /^auth_initial_hash=/ { next }
     /^extra_writable_worktrees=/ {
       seen += 1
-      if (seen == 1) extra = $0
+      if (seen == 1) {
+        # The first implementation used the safe literal `none`; normalize
+        # it to the JSON empty-list form without accepting any ambiguous
+        # prior non-empty separator encoding.
+        if ($0 == "extra_writable_worktrees=none") extra = "extra_writable_worktrees=[]"
+        else extra = $0
+      }
       else print
       next
     }
     { print }
     END {
-      if (seen == 0) print "extra_writable_worktrees=none"
+      if (seen == 0) print "extra_writable_worktrees=[]"
       else print extra
     }
   ' "$tuple"

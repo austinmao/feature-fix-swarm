@@ -1175,7 +1175,13 @@ for custody in custodies:
     assert roots.count(custody) == 1, roots
 PY
   [ "$status" -eq 0 ]
-  grep -Fxq "extra_writable_worktrees=$CUSTODY_ONE_REAL|$CUSTODY_TWO_REAL" "$RUN_STATE/gsd-run.tuple"
+  run python3 - "$RUN_STATE/gsd-run.tuple" "$CUSTODY_ONE_REAL" "$CUSTODY_TWO_REAL" <<'PY'
+import json, sys
+tuple, *expected = sys.argv[1:]
+line = next(line for line in open(tuple) if line.startswith("extra_writable_worktrees="))
+assert json.loads(line.split("=", 1)[1]) == expected
+PY
+  [ "$status" -eq 0 ]
 }
 
 @test "extra writable worktree setting refuses symlink, nonexistent, non-worktree, foreign, and escaped paths" {
@@ -1236,6 +1242,36 @@ PY
 
   FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RESUME=1 GSD_RUN_STATE_DIR="$RUN_STATE" \
     GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$CUSTODY_TWO" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"resume tuple drift"* ]]
+  [[ "$output" == *"extra_writable_worktrees"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "resume refuses an extra worktree set that collides under a separator join" {
+  RUN_ID=spec-408
+  RUN_STATE="$BATS_TEST_TMPDIR/extra-writable-injective-resume-state"
+  PARENT="$BATS_TEST_TMPDIR/.claude/worktrees"
+  ONE="$PARENT/foo|$PARENT/bar"
+  TWO_A="$PARENT/foo"
+  TWO_B="$PARENT/bar"
+  mkdir -p "$(dirname "$ONE")"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b collision-one "$ONE"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b collision-two-a "$TWO_A"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b collision-two-b "$TWO_B"
+
+  FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RUN_STATE_DIR="$RUN_STATE" \
+    GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$ONE" FAKE_CODEX_DRIVE_RC=42 \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 42 ]
+  rm -f "$BATS_TEST_TMPDIR/codex.args"
+
+  FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RESUME=1 GSD_RUN_STATE_DIR="$RUN_STATE" \
+    GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$TWO_A:$TWO_B" \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
