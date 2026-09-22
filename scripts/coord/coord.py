@@ -1346,7 +1346,17 @@ def cmd_status(store: StoreFds, args) -> int:
     with registry_transaction(store) as registry:
         claims = dict(registry.get("claims", {}))
         leases = dict(_lease_entries(registry))
-    now = time.time()
+
+    # Status is diagnostic only.  Probe the authoritative anchor after the
+    # registry lock is released; the acquisition CLI is only provenance.
+    def anchor_liveness(entry):
+        verdict = _anchor_is_stale(
+            entry.get("holder_anchor_pid"),
+            entry.get("holder_host"),
+            entry.get("holder_anchor_start_token"),
+        )
+        return {"live": "LIVE", "stale": "DEAD", "unprobeable": "UNKNOWN"}[verdict]
+
     for key, entry in sorted(claims.items()):
         flags = []
         worktree = entry.get("holder_worktree")
@@ -1355,17 +1365,17 @@ def cmd_status(store: StoreFds, args) -> int:
         holder_host = entry.get("holder_host")
         if holder_host and holder_host != _host_name():
             flags.append("FOREIGN-HOST")
-        if (
-            entry.get("holder_anchor_pid") is None
-            or entry.get("last_renewed_at") is None
-            or entry.get("ttl_secs") is None
-        ):
+        # Older claim records predate durable anchor metadata.  They remain
+        # readable diagnostics (with UNKNOWN liveness); timing fields are the
+        # longstanding completeness requirement for claims.
+        if entry.get("last_renewed_at") is None or entry.get("ttl_secs") is None:
             flags.append("INCOMPLETE-ENTRY")
         line = (
             f"{key} holder={_redact_uuid(entry.get('holder_uuid'))} "
             f"generation={entry.get('generation')} "
             f"anchor_pid={entry.get('holder_anchor_pid')} "
-            f"cli_pid={entry.get('cli_pid')} "
+            f"anchor_liveness={anchor_liveness(entry)} "
+            f"acquisition_cli_pid={entry.get('cli_pid')} "
             f"worktree={worktree} "
             f"last_renewed_at={entry.get('last_renewed_at')} "
             f"ttl_secs={entry.get('ttl_secs')} "
@@ -1394,7 +1404,8 @@ def cmd_status(store: StoreFds, args) -> int:
                 f"{key} mode={mode} holder={_redact_uuid(holder_uuid)} "
                 f"generation={entry.get('generation')} "
                 f"anchor_pid={entry.get('holder_anchor_pid')} "
-                f"cli_pid={entry.get('cli_pid')} "
+                f"anchor_liveness={anchor_liveness(entry)} "
+                f"acquisition_cli_pid={entry.get('cli_pid')} "
                 f"worktree={worktree} "
                 f"last_renewed_at={entry.get('last_renewed_at')} "
                 f"ttl_secs={entry.get('ttl_secs')} "
