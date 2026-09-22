@@ -236,7 +236,13 @@ import subprocess
 scope["subprocess"].check_output = lambda *a, **k: b"C100\x00src/pkg/a.py\x00src/copy.py\x00M\x00other.txt\x00"
 assert scope["changed_paths_for_commit"]("deadbeef") == ["src/pkg/a.py", "src/copy.py", "other.txt"]
 import tempfile, os
-for bad in ('files_modified: [a.py, "b.py]', "files_modified:\n  - a.py\n  b.py", "files_modified: [../escape.py]"):
+with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+    fh.write("---\nfiles_modified:\n  - a.py\n\n  # later entries survive blank and comment lines\n  - later/b.py\n---\n")
+try:
+    assert scope["parse_declared_paths"](fh.name) == [("a.py", False), ("later/b.py", False)]
+finally:
+    os.unlink(fh.name)
+for bad in ('files_modified: [a.py, "b.py]', 'files_modified: ["a.py"junk]', "files_modified:\n  - a.py\n  b.py", "files_modified: [../escape.py]"):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write("---\n" + bad + "\n---\n")
     try:
@@ -318,6 +324,50 @@ PY
   [ "$status" -eq 0 ]
   run python3 "$MATCHER" 03-04-TOP-PLAN.md "$RENAMED"
   [ "$status" -eq 3 ]
+}
+
+@test "rendered safe-resume gate bash: ignores only matcher exit 3, refuses 1/2 and a failing git log" {
+  REPO="$BATS_TEST_TMPDIR/gate-repo"
+  mkdir -p "$REPO/.planning/phases/03-x" "$BATS_TEST_TMPDIR/stub"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email "ffs-test@example.invalid"
+  git -C "$REPO" config user.name "FFS test"
+  printf -- '---\nfiles_modified: [seed.txt]\n---\n' > "$REPO/.planning/phases/03-x/04-PLAN.md"
+  printf 'seed\n' > "$REPO/seed.txt"
+  git -C "$REPO" add seed.txt .planning
+  git -C "$REPO" commit -qm 'feat(03-04): seed'
+  # the rendered bash block, with gsd's template placeholders filled
+  awk '/<step name="safe_resume_gate">/{f=1} f&&/^```bash/{g=1;next} f&&g&&/^```/{exit} f&&g' \
+    "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md" \
+    | sed 's|{phase_dir}|.planning/phases/03-x|g; s|{plan_padded}|04|g; s|{phase_number}|03|g' \
+    > "$BATS_TEST_TMPDIR/gate.sh"
+  grep -q 'PLAN_COMMIT_LIST=' "$BATS_TEST_TMPDIR/gate.sh"
+  REAL_GIT="$(command -v git)"
+  cat > "$BATS_TEST_TMPDIR/stub/python3" <<'STUB'
+#!/usr/bin/env bash
+exit "${STUB_MATCHER_STATUS:-3}"
+STUB
+  cat > "$BATS_TEST_TMPDIR/stub/git" <<STUB
+#!/usr/bin/env bash
+if [ "\${STUB_GIT_LOG_FAILS:-0}" = 1 ] && [ "\$1" = log ]; then exit 128; fi
+exec "$REAL_GIT" "\$@"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/stub/python3" "$BATS_TEST_TMPDIR/stub/git"
+  cd "$REPO"
+  run env PATH="$BATS_TEST_TMPDIR/stub:$PATH" STUB_MATCHER_STATUS=3 bash "$BATS_TEST_TMPDIR/gate.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring unrelated scoped commit"* ]]
+  run env PATH="$BATS_TEST_TMPDIR/stub:$PATH" STUB_MATCHER_STATUS=0 bash -c ". $BATS_TEST_TMPDIR/gate.sh; printf '%s' \"\$PLAN_COMMITS\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"feat(03-04): seed"* ]]
+  for BAD in 1 2; do
+    run env PATH="$BATS_TEST_TMPDIR/stub:$PATH" STUB_MATCHER_STATUS="$BAD" bash "$BATS_TEST_TMPDIR/gate.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"refusing dispatch"* ]]
+  done
+  run env PATH="$BATS_TEST_TMPDIR/stub:$PATH" STUB_GIT_LOG_FAILS=1 bash "$BATS_TEST_TMPDIR/gate.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"git log failed"* ]]
 }
 
 @test "safe-resume matcher exits 2 (fail closed) on an unparseable plan or unknown commit" {

@@ -349,7 +349,7 @@ def parse_declared_paths(plan_path):
             if value.count('"') % 2 or value.count("'") % 2:
                 raise ValueError("PLAN declared-path list is malformed")
             try:
-                items = next(csv.reader([value[1:-1]], skipinitialspace=True), [])
+                items = next(csv.reader([value[1:-1]], skipinitialspace=True, strict=True), [])
             except csv.Error as exc:
                 raise ValueError("PLAN declared-path list is malformed") from exc
             if any('"' in item or "'" in item for item in items):
@@ -363,9 +363,13 @@ def parse_declared_paths(plan_path):
             continue
         index += 1
         while index < len(frontmatter):
-            item = re.match(r"^\s+-\s+(.*?)\s*$", frontmatter[index])
+            line = frontmatter[index]
+            if not line.strip() or line.lstrip().startswith("#"):
+                index += 1
+                continue
+            item = re.match(r"^\s+-\s+(.*?)\s*$", line)
             if not item:
-                if re.match(r"^\s+\S", frontmatter[index]):
+                if re.match(r"^\s+\S", line):
                     raise ValueError("PLAN declared-path list is malformed")
                 break
             declared.append(item.group(1))
@@ -521,7 +525,7 @@ PY
     # It is advisory only and must not block this plan's first execution.
     echo "SAFE RESUME: ignoring unrelated scoped commit $PLAN_COMMIT_SHA" >&2
   fi
-done < <(printf '%s\n' "$PLAN_COMMIT_LIST")
+done < <(printf '%s\\n' "$PLAN_COMMIT_LIST")
 '''.encode("utf-8")
     if source.count(old) != 1:
         raise ValueError("upstream execute-phase safe-resume anchor is missing or ambiguous")
