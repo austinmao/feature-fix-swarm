@@ -87,11 +87,12 @@ def test_every_shipped_skill_passes_host_dispatch_lint() -> None:
     assert failures == []
 
 
-def test_feature_implement_declares_autonomous_rc3_auto_continue() -> None:
+def test_feature_implement_declares_sealed_review_allowance() -> None:
     text = (ROOT / "skills" / "feature-implement" / "SKILL.md").read_text()
-    assert "### Autonomous rc-3 bounded auto-continue" in text
-    assert "wall-autoreset:" in text
-    assert "PLAN_WALL_AUTO_RESET_MAX" in text
+    assert "review:wall:<number>" in text
+    assert "maximum 2 admitted review rounds per numbered phase" in text
+    assert "Do not mint an automatic reset grant" in text
+    assert "### Autonomous rc-3 bounded auto-continue" not in text
 
 
 def test_autonomy_grant_declares_wall_reset_type() -> None:
@@ -99,9 +100,10 @@ def test_autonomy_grant_declares_wall_reset_type() -> None:
     assert "`wall-reset`" in text
 
 
-def test_feature_spec_max_auth_enumerates_wall_reset_per_phase() -> None:
+def test_feature_spec_max_auth_does_not_enumerate_wall_reset_extensions() -> None:
     text = (ROOT / "skills" / "feature-spec" / "SKILL.md").read_text()
-    assert "wall-reset:<phase-slug>" in text
+    assert "review:wall:<number>" in text
+    assert "Do not enumerate `wall-reset`" in text
 
 
 def test_fix_round_mutation_contract_present_in_wall_skills() -> None:

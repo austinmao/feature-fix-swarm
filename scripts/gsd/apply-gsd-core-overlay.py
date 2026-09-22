@@ -5,6 +5,9 @@ The package lives in ignored node_modules and npm ci replaces it.  This
 small, deterministic overlay set is therefore the durable patch seam: it
 admits one package version and byte-pinned upstream targets, atomically writes
 reviewed transforms, then verifies every resulting digest on each check.
+Under 1.14 the repository's node_modules stays pristine; the installer applies
+this overlay to its staged package copy (--package-root) before the
+supervised-dispatch patch.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import tempfile
 
 
 PACKAGE = "@opengsd/gsd-core"
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 MANIFEST = Path("patches/gsd-core-overlay.json")
 
 
@@ -502,7 +505,12 @@ def render_execute_phase_safe_resume(source: bytes) -> bytes:
     old = b'''SUMMARY_PATH="{phase_dir}/{plan_padded}-SUMMARY.md"
 # #4003: no padding rule in the commit protocol, so zero-strip both components and
 # match ANCHORED at the commit scope; bound to the latest reachable tag (milestone marker).
-PHASE_N=$((10#{phase_number}))
+PHASE_NUMBER="{phase_number}"
+# #4619: {phase_number} may be decimal (01.1) or N-segment (23.1.2) \xe2\x80\x94 $((10#...))
+# is a hard shell syntax error on a non-integer, so zero-strip only the LEADING
+# integer segment and keep the rest as an escaped-dot string for the ERE below.
+PHASE_INT=${PHASE_NUMBER%%.*}; PHASE_FRAC=${PHASE_NUMBER#"$PHASE_INT"}
+PHASE_N="$((10#$PHASE_INT))${PHASE_FRAC//./\\\\.}"
 PLAN_N=$((10#{plan_padded}))
 PLAN_SCOPE_RE="^[a-z]+\\((0*${PHASE_N})-(0*${PLAN_N})\\):"
 MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -521,7 +529,12 @@ SUMMARY_PATH="{{phase_dir}}/{{plan_padded}}-SUMMARY.md"
 # parse failure may silently authorize dispatch; fail closed and inspect the plan.
 # Every scoped commit since the milestone base is considered (no -30 cap): the
 # one intersecting commit must not be hidden behind newer unrelated ones.
-PHASE_N=$((10#{{phase_number}}))
+PHASE_NUMBER="{{phase_number}}"
+# #4619: {{phase_number}} may be decimal (01.1) or N-segment (23.1.2) — $((10#...))
+# is a hard shell syntax error on a non-integer, so zero-strip only the LEADING
+# integer segment and keep the rest as an escaped-dot string for the ERE below.
+PHASE_INT=${{PHASE_NUMBER%%.*}}; PHASE_FRAC=${{PHASE_NUMBER#"$PHASE_INT"}}
+PHASE_N="$((10#$PHASE_INT))${{PHASE_FRAC//./\\\\.}}"
 PLAN_N=$((10#{{plan_padded}}))
 PLAN_SCOPE_RE="^[a-z]+\\((0*${{PHASE_N}})-(0*${{PLAN_N}})\\):"
 MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -642,6 +655,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("apply", "verify"))
     parser.add_argument("--repo", type=Path, default=Path.cwd())
+    parser.add_argument("--package-root", type=Path, default=None)
     args = parser.parse_args()
     repo = args.repo.resolve()
     try:
@@ -651,7 +665,8 @@ def main() -> int:
     targets = validate_manifest(manifest)
     if targets is None:
         return fail("overlay manifest is invalid")
-    package = repo / "node_modules" / "@opengsd" / "gsd-core"
+    package = (args.package_root.resolve() if args.package_root is not None
+               else repo / "node_modules" / "@opengsd" / "gsd-core")
     try:
         package_meta = json.loads((package / "package.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

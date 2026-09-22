@@ -15,7 +15,7 @@ import sys
 from typing import NoReturn
 
 
-GSD_VERSION = "1.13.0"
+GSD_VERSION = "1.14.0"
 CANONICAL_HOOKS = {
     "SessionStart": "gsd-check-update.js",
     "SubagentStart": "gsd-context-monitor.js",
@@ -173,7 +173,24 @@ def canonical_registration(
     if len(matches) != 1:
         fail(f"{event} must contain exactly one canonical {expected_name} registration")
     _, staged_target = matches[0]
-    return [{"hooks": [{"type": "command", "command": f"{shlex.quote(str(safe_node))} {shlex.quote(str(staged_target))}"}]}]
+    # Codex itself, rather than a direct Node smoke, must prove registration.
+    # This tiny wrapper is generated only after its target passed the pinned
+    # package hash check.  It records a nonce-bound event only when a probe
+    # explicitly supplies the private observation path; ordinary drives have
+    # no observer environment and execute the verified hook unchanged.
+    observer = staged_hooks / f"ffs-observe-{expected_name}"
+    observer.write_text(
+        "const fs=require('fs'),cp=require('child_process');\n"
+        "const chunks=[];process.stdin.on('data',c=>chunks.push(c));process.stdin.on('end',()=>{\n"
+        "const input=Buffer.concat(chunks);\n"
+        "try { const d=JSON.parse(input.toString()||'{}'); const p=process.env.FFS_HOOK_OBSERVATION; const n=process.env.FFS_HOOK_NONCE; if(p&&n&&typeof d.hook_event_name==='string') fs.appendFileSync(p, n+' '+d.hook_event_name+'\\n',{mode:0o600}); } catch (_) {}\n"
+        f"const r=cp.spawnSync({json.dumps(str(safe_node))},[{json.dumps(str(staged_target))}],{{input,encoding:'utf8',env:process.env}});\n"
+        "if(r.stdout)process.stdout.write(r.stdout);if(r.stderr)process.stderr.write(r.stderr);process.exit(r.status===null?1:r.status);\n"
+        "});\n",
+        encoding="utf-8",
+    )
+    os.chmod(observer, 0o700)
+    return [{"hooks": [{"type": "command", "command": f"{shlex.quote(str(safe_node))} {shlex.quote(str(observer))}"}]}]
 
 
 def stage_hooks(

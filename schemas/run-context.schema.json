@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://feature-fix-swarm.local/schemas/run-context.schema.json",
+  "title": "Fixture run context or refusal",
+  "type": "object",
+  "required": ["schema_version", "ok", "code", "candidates"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "code": {"type": "string", "minLength": 1},
+    "repository_id": {"type": "string", "format": "uuid"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "activity_id": {"type": "string", "format": "uuid"},
+    "attempt_id": {"type": ["string", "null"]},
+    "workspace": {"type": "string"},
+    "evidence_root": {"type": "string"},
+    "generation": {"type": "integer", "minimum": 1},
+    "runtime_tuple_hash": {"type": ["string", "null"]},
+    "workspace_state": {"enum": ["reserved", "preparing", "ready", "blocked", "missing", "aborted"]},
+    "ready": {"type": "boolean"},
+    "selected_input_count": {"type": "integer", "minimum": 0},
+    "selected_input_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "selection_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reused_result": {"type": "boolean"},
+    "candidates": {"type": "array", "items": {"type": "object"}},
+    "recovery_action": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {"action": {"type": "string", "minLength": 1}}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"ok": {"const": true}}},
+      "then": {
+        "required": [
+          "repository_id", "run_id", "activity_id", "workspace", "evidence_root",
+          "generation", "workspace_state", "ready", "selected_input_count",
+          "selected_input_manifest_hash", "selection_manifest_hash", "input_digest",
+          "attempt_id", "runtime_tuple_hash"
+        ]
+      },
+      "else": {"required": ["problem", "cause", "fix", "docs", "recovery_action"]}
+    }
+  ],
+  "additionalProperties": true
+}

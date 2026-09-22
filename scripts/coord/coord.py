@@ -66,6 +66,29 @@ class CoordExit(Exception):
         self.message = message
 
 
+def project_control_context(context, read_store) -> dict:
+    """Return an inert new-authority projection for legacy coordination readers."""
+    from run_context import RunContext
+    from run_state.state import ControlStore, _ControlStoreView
+    if not isinstance(context, RunContext):
+        raise TypeError("RunContext required")
+    if isinstance(read_store, ControlStore):
+        raise ValueError("READ_ONLY_STORE_REQUIRED")
+    if not isinstance(read_store, _ControlStoreView):
+        raise TypeError("ControlStore.open_read_only view required")
+    read_store.validate_run_context(context)
+    return {
+        "repository_id": context.repository_id,
+        "run_id": context.run_id,
+        "activity_id": context.activity_id,
+        "attempt_id": context.attempt_id,
+        "generation": f"control:{context.generation}",
+        "workspace": context.workspace,
+        "evidence_root": context.evidence_root,
+        "authority": "read_only",
+    }
+
+
 # ── filelock gate (REQ-12) — every subcommand routes through this ──────────
 def _require_filelock():
     """Import filelock and enforce the >=3.30 floor via symbol presence.

@@ -852,8 +852,41 @@ archive_run_ledger() { # $1=worktree path, $2=branch name being removed
 
 remove_worktree_for_branch() { # remove the worktree checked out on $1 iff clean
   local br="$1" wt
-  wt="$(git worktree list --porcelain \
-        | awk -v b="refs/heads/$br" '$1=="worktree"{w=$2} $1=="branch"&&$2==b{print w}')"
+  # Git's NUL-delimited porcelain preserves whitespace and quoted path bytes.
+  # read -d retains a trailing newline in the selected path, unlike $(...).
+  # The child emits a complete NUL-terminated result only after a successful,
+  # unambiguous inventory; no output on failure can authorize a removal.
+  if ! IFS= read -r -d '' wt < <(python3 - "$br" <<'PY_WORKTREE'
+import os
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain", "-z"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+    )
+    if not result.stdout.endswith(b"\0"):
+        raise ValueError("incomplete worktree inventory")
+    branch = b"branch refs/heads/" + os.fsencode(sys.argv[1])
+    paths = []
+    for block in result.stdout.split(b"\0\0"):
+        records = block.split(b"\0")
+        if branch in records:
+            matches = [record[9:] for record in records if record.startswith(b"worktree ")]
+            if len(matches) != 1 or not matches[0]:
+                raise ValueError("malformed worktree inventory")
+            paths.extend(matches)
+    if len(paths) > 1:
+        raise ValueError("ambiguous worktree inventory")
+    sys.stdout.buffer.write((paths[0] if paths else b"") + b"\0")
+except (OSError, subprocess.SubprocessError, ValueError):
+    sys.exit(1)
+PY_WORKTREE
+  ); then
+    warn "could not identify worktree for '$br' — keeping worktree"
+    return 1
+  fi
   [ -n "$wt" ] || return 0
   if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
     warn "worktree $wt on '$br' is DIRTY — keeping it; route to /adopt-wip"

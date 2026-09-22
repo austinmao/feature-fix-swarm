@@ -10,7 +10,7 @@
 # Map (docs/fable-pilotfish-alignment.md ~L90-98, plan-adversary.sh defaults;
 # effort split per spec-004 AC-004 — frontier (fable) regains the one bit of
 # distinction the model-collapse lost):
-#   fable  -> gpt-5.6-sol   / xhigh
+#   fable  -> gpt-6-astra   / xhigh
 #   opus   -> gpt-5.6-sol   / high
 #   sonnet -> gpt-5.6-terra / medium
 #   haiku  -> gpt-5.6-luna  / low
@@ -25,19 +25,20 @@
 
 codex_equiv_model() {
   case "$1" in
-    *fable*|*opus*) echo "gpt-5.6-sol" ;;
-    *sonnet*) echo "gpt-5.6-terra" ;;
-    *haiku*) echo "gpt-5.6-luna" ;;
+    gpt-6-astra|*fable*) echo "gpt-6-astra" ;;
+    gpt-5.6-sol|*opus*) echo "gpt-5.6-sol" ;;
+    gpt-5.6-terra|*sonnet*) echo "gpt-5.6-terra" ;;
+    gpt-5.6-luna|*haiku*) echo "gpt-5.6-luna" ;;
     *) echo "$1"; return 1 ;;
   esac
 }
 
 codex_equiv_effort() {
   case "$1" in
-    *fable*) echo "xhigh" ;;
-    *opus*) echo "high" ;;
-    *sonnet*) echo "medium" ;;
-    *haiku*) echo "low" ;;
+    gpt-6-astra|*fable*) echo "xhigh" ;;
+    gpt-5.6-sol|*opus*) echo "high" ;;
+    gpt-5.6-terra|*sonnet*) echo "medium" ;;
+    gpt-5.6-luna|*haiku*) echo "low" ;;
     *) echo "$1"; return 1 ;;
   esac
 }

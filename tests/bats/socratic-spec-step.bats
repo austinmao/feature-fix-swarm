@@ -48,7 +48,7 @@ EOF
 @test "validate passes a well-formed socratic.md" {
   make_valid_fixture "$SPEC"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>/dev/null"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -56,7 +56,7 @@ EOF
 
 @test "validate reuses the shared anchored status pattern" {
   make_valid_fixture "$SPEC"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1 >/dev/null"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1 >/dev/null"
   [ "$status" -eq 0 ]
   count="$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')"
   [ "$count" -eq 1 ]
@@ -68,7 +68,7 @@ packs: []" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1 >/dev/null"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1 >/dev/null"
   [ "$status" -eq 3 ]
   count="$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')"
   [ "$count" -eq 1 ]
@@ -80,7 +80,7 @@ packs: []" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1 >/dev/null"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1 >/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"packs=none"* ]]
 
@@ -90,7 +90,7 @@ packs: [operations, threat-modeling, software-design]" "## Self-answered highlig
 ## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1 >/dev/null"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1 >/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"packs=operations,threat-modeling,software-design"* ]]
 }
@@ -103,7 +103,7 @@ packs: []" "## Self-answered highlights
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"typo-domain"* ]]
 }
@@ -115,7 +115,7 @@ packs: [typo-pack]" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"typo-pack"* ]]
 
@@ -125,13 +125,13 @@ packs: []" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"bogus"* ]]
 
   # Contrast: the SAME depth=bogus fixture over the non-validate path warns
   # and falls back to core, and arms on the sibling valid domain.
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"socratic: armed"* ]]
   [[ "$output" == *"domains=requirements"* ]]
@@ -145,7 +145,7 @@ packs: operations" "## Self-answered highlights
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"packs"* ]]
   [[ "$output" == *"VALIDATE-FAIL"* ]]
@@ -159,14 +159,14 @@ packs: [operations, threat-modeling, software-design, typo-pack]" "## Self-answe
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"typo-pack"* ]]
 }
 
 @test "validate ignores the SOCRATIC=off kill switch" {
   make_valid_fixture "$SPEC"
-  run bash -c "SOCRATIC=off bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "SOCRATIC=off bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" != *"SOCRATIC=off"* ]]
 
@@ -176,14 +176,14 @@ packs: []" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "SOCRATIC=off bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "SOCRATIC=off bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" != *"SOCRATIC=off"* ]]
 }
 
 @test "validate needs no vendor tree" {
   make_valid_fixture "$SPEC"
-  run bash -c "FFS_SOCRATIC_DIR='$BATS_TEST_TMPDIR/does-not-exist' bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$BATS_TEST_TMPDIR/does-not-exist") bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 0 ]
 
   make_spec_dir "$SPEC" "domains: [typo-domain]
@@ -192,7 +192,7 @@ packs: []" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "FFS_SOCRATIC_DIR='$BATS_TEST_TMPDIR/does-not-exist' bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$BATS_TEST_TMPDIR/does-not-exist") bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
 }
 
@@ -204,7 +204,7 @@ packs: []" "## Self-answered highlights
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
 }
 
@@ -216,7 +216,7 @@ packs: []" "## Self-answered highlights
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"typo-domain"* ]]
   [[ "$output" == *"bogus"* ]]
@@ -230,28 +230,28 @@ packs: []"
   make_spec_dir "$SPEC" "$base" "## Assumed (flag if wrong)
 ## Open questions → grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"Self-answered highlights"* ]]
 
   make_spec_dir "$SPEC" "$base" "## Self-answered highlights
 ## Open questions → grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"Assumed"* ]]
 
   make_spec_dir "$SPEC" "$base" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"Open questions"* ]]
 
   make_spec_dir "$SPEC" "$base" "## Self-answered highlights
 ## Assumed (flag if wrong)
 ## Open questions → grants"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"Top risks"* ]]
 
@@ -260,12 +260,12 @@ packs: []"
 ## Assumed (flag if wrong)
 ## Open questions -> grants
 ## Top risks"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
 }
 
 @test "validate rejects a missing socratic.md and malformed frontmatter" {
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
 
   mkdir -p "$SPEC"
@@ -273,7 +273,7 @@ packs: []"
 domains: [requirements]
 ---
 EOF
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
 }
 
@@ -285,10 +285,10 @@ packs: []" "## Self-answered highlights
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 3 ]
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"socratic: armed"* ]]
   [[ "$output" == *"domains=requirements"* ]]
@@ -302,7 +302,7 @@ packs: [operations, threat-modeling, software-design]" "## Self-answered highlig
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" != *"WARN"* ]]
   [[ "$output" != *"software-design"* ]] || [[ "$output" == *"packs=operations,threat-modeling,software-design"* ]]
@@ -310,14 +310,14 @@ packs: [operations, threat-modeling, software-design]" "## Self-answered highlig
 
 @test "validate never reads stdin and writes nothing to stdout" {
   make_valid_fixture "$SPEC"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' </dev/null 2>/dev/null"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") </dev/null 2>/dev/null"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
 @test "--validate combined with --mode is a usage error" {
   make_valid_fixture "$SPEC"
-  run bash -c "bash '$SCRIPT' --validate '$SPEC/socratic.md' --mode plan 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") --validate $(printf '%q' "$SPEC/socratic.md") --mode plan 2>&1"
   [ "$status" -eq 2 ]
 }
 
@@ -708,7 +708,7 @@ exit 1
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin/python3"
   export GATES_STORE="$BATS_TEST_TMPDIR/evidence.json"
-  run bash -c "PATH='$BATS_TEST_TMPDIR/bin:$PATH' bash '$SCRIPT' --record-pendings '$SPEC/socratic.md' spec-fatal"
+  run bash -c "PATH=$(printf '%q' "$BATS_TEST_TMPDIR/bin:$PATH") bash $(printf '%q' "$SCRIPT") --record-pendings $(printf '%q' "$SPEC/socratic.md") spec-fatal"
   [ "$status" -eq 1 ]
   [[ "$output" == *"socratic: record-pendings FATAL: pending write failed"* ]]
 }

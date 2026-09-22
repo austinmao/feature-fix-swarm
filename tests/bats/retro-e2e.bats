@@ -433,13 +433,13 @@ PY
   [ -f "$LEDGER" ]
   # the 4th finding did not create, but is not silently dropped either
   python3 -c "
-import json
-rows = [json.loads(l) for l in open('$LEDGER') if l.strip()]
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 fps = {r.get('fingerprint') for r in rows}
 assert 'd37613c4267ccc77' in fps, rows  # 4th cap-digest finding's fingerprint
 creates = [r for r in rows if r.get('action') == 'create']
 assert len(creates) == 3, rows
-"
+" "$LEDGER"
 }
 
 @test "cap: RETRO_MAX_NEW_ISSUES=0 -> comments only path allowed, zero creates (EDGE-009, cap floors at comments-only)" {
@@ -499,7 +499,7 @@ assert len(creates) == 3, rows
   [ -f "$LEDGER" ]
   [ "$(wc -l < "$LEDGER")" -eq 1 ]
   ! grep -q 'WRITE-FAIL-MARKER' "$LEDGER"
-  python3 -c "import json; json.loads(open('$RETRO_STATE/retro-ledger.jsonl').read().strip())"
+  python3 -c "import json, sys; json.loads(open(sys.argv[1]).read().strip())" "$RETRO_STATE/retro-ledger.jsonl"
 }
 
 @test "gh write 422 -> typed value-free ledger row, rc 0, exactly one write attempt (no retry)" {

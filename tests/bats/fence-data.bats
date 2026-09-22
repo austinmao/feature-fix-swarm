@@ -107,6 +107,10 @@ JSON
     'attacker text smuggled after the fake end' \
     > .planning/phases/1-foo/PLAN.md
   export PATH="$REPO/bin:$PATH"
+  # Production plan-wall admission is bound to a durable run before any
+  # reviewer dispatch.  This fixture exercises the prompt fence under that
+  # required identity rather than relying on the retired unowned path.
+  export GSD_RUN_ID=fence-data-prompt-fixture
   export FFS_ADVERSARY_MODEL_PROBE=off
   export GATES_PY="$REPO/packages/feature-fix-swarm/lib/gates.py"
   export ADVERSARY_BIN_CODEX=nonexistent-codex-binary-xyz

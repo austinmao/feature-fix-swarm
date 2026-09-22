@@ -15,6 +15,15 @@ if [ $# -lt 1 ]; then
   exit 2
 fi
 
+# Release B opt-in: a managed run never falls back to this legacy runner. The
+# managed ingress is `scripts/gsd/ffs-frontend.sh <frontend>` (frontend-start),
+# which binds the private runtime descriptor and the sealed lifecycle before the
+# first stateful write. Disabling the opt-in affects only future runs.
+if [ -n "${FFS_MANAGED_INGRESS:-}" ] && [ "${FFS_MANAGED_INGRESS}" != "0" ]; then
+  echo "gsd-run: FFS_MANAGED_INGRESS is set; refusing the legacy runner. Use scripts/gsd/ffs-frontend.sh <feature-spec|fix|code-uplift|feature-implement|task-swarm> with FFS_UPSTREAM_RUNTIME_MANIFEST/SHA256 (see run_state.cli describe-upstream-runtime)." >&2
+  exit 78
+fi
+
 case "$1" in
   /gsd-*) GSD_SKILL_NAME="${1#/}" ;;
   \$gsd-*) GSD_SKILL_NAME="${1#\$}" ;;

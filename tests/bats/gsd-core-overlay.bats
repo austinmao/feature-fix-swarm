@@ -2,10 +2,21 @@
 
 bats_require_minimum_version 1.5.0
 
+# node_modules stays pristine under 1.14 (the installer overlays a staged
+# copy), so every behavioural test runs against one overlaid staged copy.
+setup_file() {
+  local root
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  cp -R "$root/node_modules/@opengsd/gsd-core" "$BATS_FILE_TMPDIR/gsd-core"
+  python3 "$root/scripts/gsd/apply-gsd-core-overlay.py" apply --repo "$root" \
+    --package-root "$BATS_FILE_TMPDIR/gsd-core"
+}
+
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   OVERLAY="$ROOT/scripts/gsd/apply-gsd-core-overlay.py"
-  TOOLS="$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/gsd-tools.cjs"
+  PKG="$BATS_FILE_TMPDIR/gsd-core"
+  TOOLS="$PKG/gsd-core/bin/gsd-tools.cjs"
 }
 
 record() {
@@ -31,7 +42,7 @@ NODE
 }
 
 @test "exact-pin overlay accepts truthful Vitest nested TAP RED without a Node summary" {
-  run python3 "$OVERLAY" verify --repo "$ROOT"
+  run python3 "$OVERLAY" verify --repo "$ROOT" --package-root "$PKG"
   [ "$status" -eq 0 ]
   REC="$BATS_TEST_TMPDIR/nested.json"
   record "$REC" $'TAP version 13\n1..1\nnot ok 1 - budget.test.ts {\n    1..5\n    not ok 1 - charges buyer the configured USD micro-cap\n    not ok 2 - reserve failure\n    not ok 3 - settle failure\n    not ok 4 - release failure\n    not ok 5 - cap failure\n}\n'
@@ -130,7 +141,7 @@ NODE
 }
 
 @test "executor overlay permits a sequential linked-worktree branch but retains the isolated-worktree gate" {
-  EXECUTOR="$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md"
+  EXECUTOR="$PKG/agents/gsd-executor.md"
   grep -F 'workflow.use_worktrees --raw' "$EXECUTOR"
   grep -F 'skip this isolated-agent namespace check' "$EXECUTOR"
 
@@ -300,7 +311,7 @@ PLAN
   printf -- '---\nfiles_modified: [src/a.py, src/b.py\n---\n' > "$REPO/03-04-BAD-PLAN.md"
   printf -- '---\nfiles_modified: [*.txt]\n---\n' > "$REPO/03-04-TOP-PLAN.md"
 
-  python3 - "$OVERLAY" "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md" "$BATS_TEST_TMPDIR/rendered-matcher.py" <<'PY'
+  python3 - "$OVERLAY" "$PKG/gsd-core/workflows/execute-phase.md" "$BATS_TEST_TMPDIR/rendered-matcher.py" <<'PY'
 import importlib.util, re, sys
 spec = importlib.util.spec_from_file_location("overlay", sys.argv[1])
 overlay = importlib.util.module_from_spec(spec)
@@ -362,7 +373,7 @@ PY
   git -C "$REPO" commit -qm 'feat(03-04): seed'
   # the rendered bash block, with gsd's template placeholders filled
   awk '/<step name="safe_resume_gate">/{f=1} f&&/^```bash/{g=1;next} f&&g&&/^```/{exit} f&&g' \
-    "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md" \
+    "$PKG/gsd-core/workflows/execute-phase.md" \
     | sed 's|{phase_dir}|.planning/phases/03-x|g; s|{plan_padded}|04|g; s|{phase_number}|03|g' \
     > "$BATS_TEST_TMPDIR/gate.sh"
   grep -q 'PLAN_COMMIT_LIST=' "$BATS_TEST_TMPDIR/gate.sh"
@@ -490,18 +501,18 @@ PY
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$TARGET"
   cp "$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md" "$EXECUTOR"
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md" "$RESUME"
-  printf '{"name":"@opengsd/gsd-core","version":"1.13.1"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
+  printf '{"name":"@opengsd/gsd-core","version":"1.14.1"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
-  [[ "$output" == *"exact @opengsd/gsd-core@1.13.0"* ]]
+  [[ "$output" == *"exact @opengsd/gsd-core@1.14.0"* ]]
 
-  printf '{"name":"@opengsd/gsd-core","version":"1.13.0"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
+  printf '{"name":"@opengsd/gsd-core","version":"1.14.0"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   printf 'untrusted drift\n' > "$TARGET"
   run python3 "$OVERLAY" apply --repo "$FIX"
   [ "$status" -eq 78 ]
   [[ "$output" == *"base digest"* ]]
 
-  cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$TARGET"
+  cp "$PKG/gsd-core/bin/lib/tdd-red-evidence.cjs" "$TARGET"
   BOGUS_PATCHED_SHA="$(printf '0%.0s' {1..64})"  # runtime-built: AC-011 hex-run gate stays quiet
   python3 - "$FIX/patches/gsd-core-overlay.json" "$BOGUS_PATCHED_SHA" <<'PY'
 import json, sys
@@ -521,7 +532,7 @@ PY
   [[ "$output" == *"agents/gsd-executor.md"* ]]
 
   cp "$ROOT/patches/gsd-core-overlay.json" "$FIX/patches/"
-  cp "$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md" "$EXECUTOR"
+  cp "$PKG/agents/gsd-executor.md" "$EXECUTOR"
   printf 'untrusted safe resume drift\n' > "$RESUME"
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]

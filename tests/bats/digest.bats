@@ -98,7 +98,8 @@ assert_store_unchanged() { cmp -s "$STORE" "$BATS_TEST_TMPDIR/store.before"; }
 cat >> "$NOTIFY_OUT"
 EOF
   chmod +x "$BATS_TEST_TMPDIR/notify.sh"
-  export DIGEST_NOTIFY_CMD="$BATS_TEST_TMPDIR/notify.sh"
+  export DIGEST_FIXTURE_NOTIFY="$BATS_TEST_TMPDIR/notify.sh"
+  export DIGEST_NOTIFY_CMD='"$DIGEST_FIXTURE_NOTIFY"'
   run bash "$SCRIPT" --immediate
   [ "$status" -eq 0 ]
   grep -q '^waiver ' "$NOTIFY_OUT"
@@ -112,7 +113,8 @@ EOF
   seed_waiver
   printf '#!/usr/bin/env bash\nexit 1\n' > "$BATS_TEST_TMPDIR/notify.sh"
   chmod +x "$BATS_TEST_TMPDIR/notify.sh"
-  export DIGEST_NOTIFY_CMD="$BATS_TEST_TMPDIR/notify.sh"
+  export DIGEST_FIXTURE_NOTIFY="$BATS_TEST_TMPDIR/notify.sh"
+  export DIGEST_NOTIFY_CMD='"$DIGEST_FIXTURE_NOTIFY"'
   run bash "$SCRIPT" --immediate
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '^waiver '
@@ -320,7 +322,8 @@ if printf '%s\n' "\$input" | grep -q '^loop-cap '; then exit 1; fi
 printf '%s\n' "\$input" >> "$NOTIFY_OUT"
 EOF
   chmod +x "$BATS_TEST_TMPDIR/notify.sh"
-  export DIGEST_NOTIFY_CMD="$BATS_TEST_TMPDIR/notify.sh"
+  export DIGEST_FIXTURE_NOTIFY="$BATS_TEST_TMPDIR/notify.sh"
+  export DIGEST_NOTIFY_CMD='"$DIGEST_FIXTURE_NOTIFY"'
   run bash "$SCRIPT" --immediate
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '^waiver '

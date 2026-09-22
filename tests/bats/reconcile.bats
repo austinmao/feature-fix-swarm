@@ -19,12 +19,26 @@ teardown() {
   true
 }
 
+wait_for_marker() {
+  local expected="$1"
+  local attempt
+  # reconcile intentionally returns after it has recorded a background child.
+  # Observe the child's durable side effect, rather than assuming the child
+  # has been scheduled inside a fixed interval after that return.
+  for attempt in $(seq 1 250); do
+    [ -f "$RECONCILE_MARK" ] && [ "$(cat "$RECONCILE_MARK")" = "$expected" ] && return 0
+    sleep 0.02
+  done
+  return 1
+}
+
 @test "tracer: satisfied time condition relaunches once" {
   now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint tracer waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","verbatim"]' '{"respawns":2}'
   jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-tracer.json > record && mv record .planning/run-state/lifecycle-tracer.json
   run bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [[ "$output" == *RECONCILE:relaunched* ]]
-  sleep 0.1; [ "$(cat "$RECONCILE_MARK")" = verbatim ]; [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-tracer.json)" = 1 ]
+  wait_for_marker verbatim
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-tracer.json)" = 1 ]
 }
 
 @test "unsatisfied record stays byte identical" {
@@ -57,8 +71,7 @@ teardown() {
   jq '.child_pid=99999999 | .launched_at=1' .planning/run-state/lifecycle-stale.json > record && mv record .planning/run-state/lifecycle-stale.json
   run env FFS_RECONCILE_STALE_SECS=1 bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=stale'* ]]
-  sleep 0.1
-  [ "$(cat "$RECONCILE_MARK")" = stale ]
+  wait_for_marker stale
   [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-stale.json)" = 2 ]
 }
 
@@ -91,11 +104,26 @@ teardown() {
   jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-idem.json > record && mv record .planning/run-state/lifecycle-idem.json
   run bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=idem'* ]]
-  sleep 0.2
+  wait_for_marker idem
   run bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [[ "$output" == *still-waiting* ]]
   [ "$(wc -l < "$RECONCILE_MARK" | tr -d ' ')" = 1 ]
   [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-idem.json)" = 1 ]
+}
+
+@test "concurrent reconcilers relaunch and charge a due record once" {
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint concurrent waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","concurrent"]' '{"respawns":2}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-concurrent.json > record && mv record .planning/run-state/lifecycle-concurrent.json
+
+  bash scripts/gsd/reconcile.sh > "$BATS_TEST_TMPDIR/reconcile-one.log" 2>&1 & first=$!
+  bash scripts/gsd/reconcile.sh > "$BATS_TEST_TMPDIR/reconcile-two.log" 2>&1 & second=$!
+  wait "$first"; [ "$?" -eq 0 ]
+  wait "$second"; [ "$?" -eq 0 ]
+
+  wait_for_marker concurrent
+  [ "$(wc -l < "$RECONCILE_MARK" | tr -d ' ')" = 1 ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-concurrent.json)" = 1 ]
+  [ "$(jq -r .state .planning/run-state/lifecycle-concurrent.json)" = running ]
 }
 
 @test "FFS_LIFECYCLE=off still recovers an existing record" {
@@ -103,7 +131,7 @@ teardown() {
   jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-offed.json > record && mv record .planning/run-state/lifecycle-offed.json
   run env FFS_LIFECYCLE=off bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=offed'* ]]
-  sleep 0.1; [ "$(cat "$RECONCILE_MARK")" = offed ]
+  wait_for_marker offed
   [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-offed.json)" = 1 ]
 }
 
@@ -115,9 +143,8 @@ teardown() {
   sleep 4
   run bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=roundtrip'* ]]
-  sleep 0.1
   expected="$(jq -r '.resume_argv[1:] | join(" ")' .planning/run-state/lifecycle-roundtrip.json)"
-  [ "$(cat "$RECONCILE_MARK")" = "$expected" ]
+  wait_for_marker "$expected"
 }
 
 @test "ci round trip: infra failure reruns then success relaunches" {
@@ -144,6 +171,7 @@ EOF
   chmod +x "$BIN/gh"
   run bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=ci'* ]]
+  wait_for_marker ci
 }
 
 @test "a live running launcher is left alone" {
@@ -181,8 +209,7 @@ EOF
   run bash scripts/gsd/reconcile.sh
   [ "$status" -eq 0 ]
   [[ "$output" == *"RECONCILE:relaunched run=wt-run"* ]]
-  sleep 0.1
-  [ "$(cat "$RECONCILE_MARK")" = from-worktree ]
+  wait_for_marker from-worktree
   [ "$(jq -r .budgets.respawns "$rec")" = 0 ]
 }
 

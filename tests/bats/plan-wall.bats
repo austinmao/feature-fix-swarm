@@ -45,6 +45,7 @@ setup() {
   export PATH="$REPO/bin:$PATH"
   export FFS_ADVERSARY_MODEL_PROBE=off
   export GATES_PY="$REPO/packages/feature-fix-swarm/lib/gates.py"
+  export GSD_RUN_ID="fixture-plan-wall"
   # Default the OTHER vendor's binary to a name that resolves nowhere, so a
   # claude-only test's rule-1 opposite-vendor ladder fails FAST (rc=127)
   # instead of shelling out to a REAL codex/claude CLI that may be installed
@@ -549,14 +550,11 @@ EOF
   chmod 444 "$GATES_STORE"
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   chmod 644 "$GATES_STORE"
-  [ "$status" -eq 1 ]
-  record="$(record_for 1-foo plan)"
-  verdict="$(jq -r '.verdict' "$record")"
-  [ "$verdict" = "WALL-UNREVIEWED" ] || [ "$verdict" = "blocked" ]
-  [[ "$verdict" != *pass* ]]
-  # the store failure is auditable: either the queue_error stamp (blocked
-  # path) or the per-rung degradation-note rejection (unreviewed path)
-  jq -e '(.queue_error == true) or ((.rung_trail | join(" ")) | contains("NOTE-DEGRADED-REJECTED"))' "$record"
+  # loop-round now owns admission accounting and refuses the unusable ledger
+  # before reviewer dispatch or a wall record can be written.  The command's
+  # explicit refusal is therefore the only available audit evidence.
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"WALL-ACCOUNTING-UNAVAILABLE"* ]]
 }
 
 # ── fresh-context contract: payload = brief + plan content ONLY ────────────
@@ -765,8 +763,8 @@ EOF
 
   echo "Phase 1: a DIFFERENT plan body, forces a fresh dispatch" > .planning/phases/1-foo/PLAN.md
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"BLOCKED"* ]]
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"WALL-ROUND-CAP"* ]]
   entry="$(queue_list | jq --arg sig "$sig" '.[] | select(.sig == $sig)')"
   [ "$(printf '%s' "$entry" | jq -r '.resolved')" = "false" ]
   [ "$(printf '%s' "$entry" | jq '.history | length')" -ge 1 ]

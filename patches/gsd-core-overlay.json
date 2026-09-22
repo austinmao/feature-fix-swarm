@@ -1,7 +1,7 @@
 {
   "schema": "ffs.gsd-core-overlay/v3",
   "package": "@opengsd/gsd-core",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "targets": [
     {
       "target": "gsd-core/bin/lib/tdd-red-evidence.cjs",
@@ -15,8 +15,8 @@
     },
     {
       "target": "gsd-core/workflows/execute-phase.md",
-      "base_sha256": "cddc9308933fa5925384673d34c528017ac5f19f2fbc0eb0d8f48892eb0ae8b1",
-      "patched_sha256": "cd0cae287a09d41866894554da38d15f43e6bb9ca92ba85247e801519f6a3628"
+      "base_sha256": "ba69804f311a5efb7ebd87b824917a82fbacbb3389cf56de06346d64d31beb4a",
+      "patched_sha256": "be54fdcfec4cec8fda55a2ee312a0ad63b2573d27c714adfeb325ef73c11b354"
     }
   ]
 }

@@ -161,10 +161,12 @@ jobs:
           cache: npm
       - name: Install exact GSD package
         run: npm ci
-      - name: Apply and verify exact GSD overlay
+      - name: Apply and verify exact GSD overlay on a staged copy
+        # node_modules stays pristine (the installer stages 1.14 the same way).
         run: |
-          python scripts/gsd/apply-gsd-core-overlay.py apply --repo .
-          python scripts/gsd/apply-gsd-core-overlay.py verify --repo .
+          cp -R node_modules/@opengsd/gsd-core "$RUNNER_TEMP/gsd-core"
+          python scripts/gsd/apply-gsd-core-overlay.py apply --repo . --package-root "$RUNNER_TEMP/gsd-core"
+          python scripts/gsd/apply-gsd-core-overlay.py verify --repo . --package-root "$RUNNER_TEMP/gsd-core"
       - name: Install python coord-layer dependencies (filelock)
         run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Run bats suites

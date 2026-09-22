@@ -22,7 +22,7 @@ setup() {
   [[ "$output" == *"CLAIM-OK generation=1"* ]]
   registry="$REPO/.feature-fix-swarm/coord/registry.json"
   [ -f "$registry" ]
-  run python3 -c "import json; d=json.load(open('$registry')); e=d['claims']['claim:spec-009']; print(e['generation'])"
+  run python3 -c "import json,sys; d=json.load(open(sys.argv[1])); e=d['claims']['claim:spec-009']; print(e['generation'])" "$registry"
   [ "$status" -eq 0 ]
   [ "$output" = "1" ]
 }
@@ -147,11 +147,11 @@ setup() {
     [ "$sess_a" = "$sess_b" ]
     registry="$REPO/.feature-fix-swarm/coord/registry.json"
     run python3 -c "
-import json
-d = json.load(open('$registry'))
+import json, sys
+d = json.load(open(sys.argv[1]))
 assert len(d['claims']) == 1, d['claims']
 assert d['generations']['claim:spec-009']['gen'] == 1, d['generations']
-"
+" "$registry"
     [ "$status" -eq 0 ]
   done
 }

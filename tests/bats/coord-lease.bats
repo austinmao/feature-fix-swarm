@@ -23,12 +23,12 @@ setup() {
   registry="$REPO/.feature-fix-swarm/coord/registry.json"
   [ -f "$registry" ]
   run python3 -c "
-import json
-d = json.load(open('$registry'))
+import json, sys
+d = json.load(open(sys.argv[1]))
 e = d['leases']['path:docs/a.md']
 assert e['mode'] == 'exclusive', e
 assert len(e['holders']) == 1, e
-"
+" "$registry"
   [ "$status" -eq 0 ]
 }
 
@@ -103,10 +103,10 @@ assert len(e['holders']) == 1, e
   [ "$status" -eq 0 ]
   registry="$REPO/.feature-fix-swarm/coord/registry.json"
   run python3 -c "
-import json
-d = json.load(open('$registry'))
+import json, sys
+d = json.load(open(sys.argv[1]))
 assert len(d['leases']['path:docs/a.md']['holders']) == 2
-"
+" "$registry"
   [ "$status" -eq 0 ]
 }
 
@@ -161,10 +161,10 @@ assert len(d['leases']['path:docs/a.md']['holders']) == 2
   [ "$(cat "$b_log.rc")" -eq 0 ]
   registry="$REPO/.feature-fix-swarm/coord/registry.json"
   run python3 -c "
-import json
-d = json.load(open('$registry'))
+import json, sys
+d = json.load(open(sys.argv[1]))
 assert len(d['leases']['path:docs/shared.md']['holders']) == 2
-"
+" "$registry"
   [ "$status" -eq 0 ]
 }
 

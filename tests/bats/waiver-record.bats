@@ -300,7 +300,7 @@ normalize_wr130() {
 }
 
 @test "WR-130: plan-wall's successful PLAN_WALL=off waiver path is byte-identical to the pre-migration baseline" {
-  local pw_first old_extract old_work new_work
+  local pw_first old_extract old_work new_work legacy_record current_record
   # The byte-compat comparison needs real history back to the pinned
   # pre-migration anchor; a shallow CI clone (fetch-depth 1) cannot resolve
   # it — skip rather than fail on an environment that lacks the baseline
@@ -336,8 +336,26 @@ normalize_wr130() {
   [[ "$(cat "$new_work/STDOUT")" == *WAIVED* ]]
 
   diff <(normalize_wr130 "$old_work/STDOUT") <(normalize_wr130 "$new_work/STDOUT")
+  current_record="$new_work/.planning/run-state/plan-wall-1-foo-plan.json"
+  ! grep -q '"tier_descent"' "$old_work/.planning/run-state/plan-wall-1-foo-plan.json"
+  # #118 / 0912f31924b7 added this boolean to
+  # every wall record after WR-130's historical baseline.  Keep the current
+  # schema assertion explicit, then make a separate legacy comparison fixture
+  # that removes only this adjudicated extension.
+  jq -e 'has("tier_descent") and (.tier_descent | type == "boolean") and .tier_descent == false' \
+    "$current_record" >/dev/null
+  legacy_record="$new_work/.planning/run-state/plan-wall-1-foo-plan.legacy-wr130.json"
+  python3 - "$current_record" "$legacy_record" <<'PY'
+from pathlib import Path
+import sys
+current = Path(sys.argv[1]).read_bytes()
+field = b'  "tier_descent": false,\n'
+if current.count(field) != 1:
+    raise SystemExit("WR-130 expected exactly one tier_descent field line")
+Path(sys.argv[2]).write_bytes(current.replace(field, b"", 1))
+PY
   diff <(normalize_wr130 "$old_work/.planning/run-state/plan-wall-1-foo-plan.json") \
-       <(normalize_wr130 "$new_work/.planning/run-state/plan-wall-1-foo-plan.json")
+       <(normalize_wr130 "$legacy_record")
 }
 
 # ── WR-140: isolation gate ───────────────────────────────────────────────────

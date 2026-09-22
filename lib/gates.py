@@ -82,6 +82,25 @@ import tempfile
 import time
 from pathlib import Path
 
+
+def project_control_context(context, read_store, input_hashes) -> dict:
+    """Project scoped control gates without lending mutation authority."""
+    from run_context import RunContext
+    from run_state.state import ControlStore, _ControlStoreView
+    if not isinstance(context, RunContext) or not isinstance(input_hashes, dict):
+        raise TypeError("RunContext and input hash mapping required")
+    if isinstance(read_store, ControlStore):
+        raise ValueError("READ_ONLY_STORE_REQUIRED")
+    if not isinstance(read_store, _ControlStoreView):
+        raise TypeError("ControlStore.open_read_only view required")
+    from scripts.coord.coord import project_control_context as project_coord_context
+    projection = project_coord_context(context, read_store)
+    projection["input_hashes"] = dict(input_hashes)
+    projection["gates"] = read_store.project_gates(
+        input_hashes, run_id=context.run_id, repository_id=context.repository_id,
+    )
+    return projection
+
 # Cheap deterministic gates run before expensive behavioral/LLM gates
 # (fast/slow loop). A rung failure skips all later rungs and retries the task.
 GATE_LADDER = ["compile", "typecheck", "lint", "unit", "integration", "e2e", "review"]
@@ -184,7 +203,7 @@ def _load_pinned_store(store_dir_fd: int, store_fd: int) -> dict:
     return data
 
 
-def _save_store(store: Path, data: dict) -> None:
+def _save_store(store: Path, data: dict, *, durable: bool = False) -> None:
     # atomic: write a temp file in the same dir, then rename over the store —
     # a crash or parallel reader never sees a torn file.
     store = Path(store)
@@ -193,7 +212,16 @@ def _save_store(store: Path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, store)
+        if durable:
+            parent_fd = os.open(store.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -836,6 +864,35 @@ def _loops_ns(data: dict, run_id: str) -> dict:
     return run_entry
 
 
+def loop_round_durable(store: Path, run_id: str, loop_name: str, maximum: int) -> tuple[int, int]:
+    """Reserve a fixed protected allowance without spending past its cap."""
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError("durable loop maximum must be a positive integer")
+    with _StoreLock(store):
+        data = _load_store(store)
+        entry = _loops_ns(data, run_id)
+        key = loop_name + "#cap"
+        if key not in entry:
+            # A legacy counter for this protected name cannot be silently reinterpreted.
+            if loop_name in entry:
+                raise ValueError("durable loop metadata missing beside existing protected counter")
+            meta = {"max": maximum, "used": 0}
+            entry[key] = meta
+        else:
+            meta = entry[key]
+        if (not isinstance(meta, dict) or set(meta) != {"max", "used"}
+                or any(isinstance(meta[k], bool) or not isinstance(meta[k], int) for k in ("max", "used"))
+                or meta["max"] < 1 or meta["used"] < 0):
+            raise ValueError("durable loop metadata malformed")
+        if meta["max"] != maximum:
+            raise ValueError("durable loop maximum is sealed on first reservation")
+        if meta["used"] >= meta["max"]:
+            return meta["used"] + 1, meta["max"]
+        meta["used"] += 1
+        _save_store(store, data, durable=True)
+        return meta["used"], meta["max"]
+
+
 def loop_round(store: Path, run_id: str, loop_name: str) -> int:
     """Increment the named loop's round counter for this run and return the
     new round number (1-based). The CAP decision belongs to the caller (the
@@ -845,7 +902,11 @@ def loop_round(store: Path, run_id: str, loop_name: str) -> int:
         data = _load_store(store)
         run_entry = _loops_ns(data, run_id)
         current = run_entry.get(loop_name)
-        n = (current if isinstance(current, int) and current >= 0 else 0) + 1
+        if loop_name not in run_entry:
+            current = 0
+        elif isinstance(current, bool) or not isinstance(current, int) or current < 0:
+            raise ValueError("loop-round counter malformed")
+        n = current + 1
         run_entry[loop_name] = n
         _save_store(store, data)
     return n
@@ -889,6 +950,8 @@ def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
     stable across runs, so a landed run must drop its counters or the next
     run of the same spec starts pre-capped)."""
     store = Path(store)
+    if loop_name is not None and loop_name.startswith("review:"):
+        raise ValueError("protected review loop counters cannot be reset")
     if not store.exists():
         # Nothing recorded — and _StoreLock would mkdir the store's parent and
         # leave a .lock file behind, resurrecting a worktree directory the
@@ -901,6 +964,12 @@ def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
     # Corrupt-store errors propagate to the CLI's rc-3 path un-locked too.
     probe = json.loads(store.read_text())
     loops = probe.get("_loops")
+    if loop_name is None and isinstance(loops, dict) and isinstance(loops.get(run_id), dict) and any(str(k).startswith("review:") or str(k).endswith("#cap") for k in loops[run_id]):
+        raise ValueError("protected review loop counters cannot be reset-all")
+    if (loop_name is not None and isinstance(loops, dict)
+            and isinstance(loops.get(run_id), dict)
+            and loop_name + "#cap" in loops[run_id]):
+        raise ValueError("durable loop counters cannot be reset")
     if loop_name is None:
         if not (isinstance(loops, dict) and run_id in loops):
             return
@@ -913,7 +982,13 @@ def reset_loop_round(store: Path, run_id: str, loop_name: str | None) -> None:
     with _StoreLock(store):
         data = _load_store(store)
         loops = data.get("_loops")
+        if (loop_name is not None and isinstance(loops, dict)
+                and isinstance(loops.get(run_id), dict)
+                and loop_name + "#cap" in loops[run_id]):
+            raise ValueError("durable loop counters cannot be reset")
         if isinstance(loops, dict):
+            if loop_name is None and isinstance(loops.get(run_id), dict) and any(str(k).startswith("review:") or str(k).endswith("#cap") for k in loops[run_id]):
+                raise ValueError("protected review loop counters cannot be reset-all")
             if loop_name is None:
                 loops.pop(run_id, None)
             elif isinstance(loops.get(run_id), dict):
@@ -4224,6 +4299,7 @@ def main(argv: list[str]) -> int:
         parser.add_argument("run_id")
         parser.add_argument("loop_name", nargs="?")
         parser.add_argument("--max", type=int)
+        parser.add_argument("--durable", action="store_true")
         parser.add_argument("--reset", action="store_true")
         parser.add_argument("--reset-all", action="store_true")
         parser.add_argument("--note-count", type=int)
@@ -4232,7 +4308,11 @@ def main(argv: list[str]) -> int:
         except SystemExit:
             return 2
         if ns.reset_all:
-            reset_loop_round(store, ns.run_id, None)
+            try:
+                reset_loop_round(store, ns.run_id, None)
+            except ValueError as exc:
+                print(f"LOOP-RESET-REJECTED: {exc}", file=sys.stderr)
+                return 1
             print(f"LOOP-RESET-ALL: (run {ns.run_id})")
             return 0
         if ns.loop_name is None:
@@ -4240,7 +4320,11 @@ def main(argv: list[str]) -> int:
                   file=sys.stderr)
             return 2
         if ns.reset:
-            reset_loop_round(store, ns.run_id, ns.loop_name)
+            try:
+                reset_loop_round(store, ns.run_id, ns.loop_name)
+            except ValueError as exc:
+                print(f"LOOP-RESET-REJECTED: {exc}", file=sys.stderr)
+                return 1
             print(f"LOOP-RESET: {ns.loop_name} (run {ns.run_id})")
             return 0
         if ns.note_count is not None:
@@ -4272,7 +4356,17 @@ def main(argv: list[str]) -> int:
             print("LOOP-ROUND-REJECTED: --max must be >= 1", file=sys.stderr)
             return 2
         try:
+            if ns.durable:
+                n, sealed_max = loop_round_durable(store, ns.run_id, ns.loop_name, ns.max)
+                if n > sealed_max:
+                    print(f"LOOP-CAP: {ns.loop_name} round {n} exceeds sealed max {sealed_max} (run {ns.run_id})")
+                    return 1
+                print(f"LOOP-ROUND: {ns.loop_name} round {n}/{sealed_max} (run {ns.run_id})")
+                return 0
             n = loop_round(store, ns.run_id, ns.loop_name)
+        except ValueError as exc:
+            print(f"LOOP-ROUND-ERROR: accounting refused ({exc})", file=sys.stderr)
+            return 3
         except (OSError, json.JSONDecodeError) as exc:
             # Counter INFRASTRUCTURE failure (unreadable/corrupt/unwritable
             # store) is rc=3, distinct from cap-hit (1) and usage (2): the

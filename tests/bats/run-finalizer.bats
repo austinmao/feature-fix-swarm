@@ -86,7 +86,8 @@ EOF
   STORE="$BATS_TEST_TMPDIR/evidence.json"
   run env GATES_STORE="$STORE" python3 "$EVENT" finisher-skipped --run-id spec-008 --pr 12
   [ "$status" -eq 0 ]
-  run python3 -c "import json; d=json.load(open('$STORE')); e=d['events']; assert len(e)==1; assert set(e[0]) == {'kind','run_id','pr','ts'}; assert e[0]['pr'] == 12 and isinstance(e[0]['ts'], (int,float))"
+  run python3 -c "import sys;
+import json; d=json.load(open(sys.argv[1])); e=d['events']; assert len(e)==1; assert set(e[0]) == {'kind','run_id','pr','ts'}; assert e[0]['pr'] == 12 and isinstance(e[0]['ts'], (int,float))" "$STORE"
   [ "$status" -eq 0 ]
   before="$(cksum "$STORE")"
   run env GATES_STORE="$STORE" python3 "$EVENT" finisher-skipped --run-id $'bad\nrun' --pr +12
@@ -254,7 +255,7 @@ EOF
 
 @test "clean worktree on feature branch removed before branch delete" {
   mock_gh_merged
-  WT="$BATS_TEST_TMPDIR/wt-feat"
+  WT="$BATS_TEST_TMPDIR/"$'wt space\'tab\tline\nend\n'
   git worktree add -q "$WT" feat/x
   run bash "$LEVER" 1
   [ "$status" -eq 0 ]
@@ -1399,12 +1400,13 @@ teardown_rf_holder() { [ -n "${HOLDER_PID:-}" ] && kill "$HOLDER_PID" 2>/dev/nul
   [ -f .planning/run-state/gsd-run.pid ]                  # no run-state cleanup
   [ -d "$BATS_TEST_TMPDIR/work/.feature-fix-swarm" ]      # no archive mutation
   [[ "$output" == *"finisher-skipped run_id=spec-rf210 pr=7"* ]]
-  run python3 -c "
+  run python3 -c "import sys;
+
 import json
-d = json.load(open('$STORE'))
+d = json.load(open(sys.argv[1]))
 rows = [e for e in d['events'] if e['kind'] == 'finisher-skipped']
 assert len(rows) == 1, rows
-assert rows[0]['run_id'] == 'spec-rf210' and rows[0]['pr'] == 7, rows"
+assert rows[0]['run_id'] == 'spec-rf210' and rows[0]['pr'] == 7, rows" "$STORE"
   [ "$status" -eq 0 ]
 }
 
@@ -1496,15 +1498,15 @@ assert rows[0]['run_id'] == 'spec-rf210' and rows[0]['pr'] == 7, rows"
   teardown_rf_holder
   [ "$status" -eq 0 ]
   run python3 -c "
-import json
-a = json.load(open('$SA'))['events'][0]
-b = json.load(open('$SB'))['events'][0]
-c = json.load(open('$SC'))['events'][0]
+import json, sys
+a = json.load(open(sys.argv[1]))['events'][0]
+b = json.load(open(sys.argv[2]))['events'][0]
+c = json.load(open(sys.argv[3]))['events'][0]
 assert a['run_id'] == 'spec-rfa', a
 assert b['run_id'] == 'spec-rfb', b
 assert c['run_id'] == 'unattributed', c
-assert c['lock_path'] == '$LOCK', c
-assert c['holder_pid'] == $HOLDER_PID, c"
+assert c['lock_path'] == sys.argv[4], c
+assert c['holder_pid'] == int(sys.argv[5]), c" "$SA" "$SB" "$SC" "$LOCK" "$HOLDER_PID"
   [ "$status" -eq 0 ]
 }
 

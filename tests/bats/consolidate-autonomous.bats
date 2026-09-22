@@ -177,7 +177,16 @@ esac'
   export CONSOLIDATE_REPO="$WORK"
   REPO_PHYS="$(cd "$WORK" && pwd -P)"
   MAIN_OID="$(git -C "$WORK" rev-parse refs/heads/main)"
-  TARGET_HASH="$(python3 -c "import hashlib,json,sys;print(hashlib.sha256(json.dumps(['$REPO_PHYS','main',[['spec/merged','$MERGED_OID','201','$MAIN_OID']]],separators=(',',':')).encode()).hexdigest())")"
+  TARGET_HASH="$(python3 - "$REPO_PHYS" "$MERGED_OID" "$MAIN_OID" <<'PYHASH'
+import hashlib
+import json
+import sys
+
+repo, merged_oid, main_oid = sys.argv[1:]
+material = [repo, "main", [["spec/merged", merged_oid, "201", main_oid]]]
+print(hashlib.sha256(json.dumps(material, separators=(",", ":")).encode()).hexdigest())
+PYHASH
+)"
   export CONSOLIDATE_RUN_ID="run-0304"
   printf '%s consolidate:estate:%s\n' "$CONSOLIDATE_RUN_ID" "$TARGET_HASH" > "$GRANT_FILE"
   export CONSOLIDATE_SCOPE="consolidate:estate:$TARGET_HASH"

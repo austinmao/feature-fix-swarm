@@ -116,8 +116,8 @@ fi
 GATES_PY=""
 for candidate in \
   "$REPO_ROOT/packages/feature-fix-swarm/lib/gates.py" \
-  "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
-  "$REPO_ROOT/lib/gates.py"; do
+  "$REPO_ROOT/lib/gates.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/gates.py"; do
   [ -f "$candidate" ] && GATES_PY="$candidate" && break
 done
 if [ -z "$GATES_PY" ]; then
@@ -141,14 +141,17 @@ RUN_ID="${GSD_RUN_ID:-}"
 if [ -z "$RUN_ID" ]; then
   [ -n "$BRANCH_NNN" ] && RUN_ID="spec-${BRANCH_NNN}"
 fi
-[ -n "$RUN_ID" ] || RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+if [ -z "$RUN_ID" ]; then
+  echo "plan-wall: RUN-ID-REQUIRED — resolve a durable run before review; resume cannot mint another allowance" >&2
+  exit 78
+fi
 
 # ── run mode: wall every planned phase under one global round counter ─────
 # Each phase dir is delegated to a fresh self-invocation (full per-phase
 # machinery: plan glob, records keyed by the real phase slug, per-phase
 # WALL-RESIDUALS.md, sha-unchanged idempotence). PLAN_WALL_RUN_CHILD=1
-# tells the child to skip its own per-phase round counter — the run-level
-# `wall:run` counter here is the only round authority for a --run pass.
+# tells the child to skip its compatibility convergence counter. Each child
+# still reserves its protected phase review allowance before fresh dispatch.
 if [ "$PW_RUN_MODE" -eq 1 ]; then
   # Default root honors GSD_PROJECT planning isolation (consumers namespace
   # planning as .planning/<project>/phases). An explicit root arg always wins;
@@ -189,21 +192,34 @@ if [ "$PW_RUN_MODE" -eq 1 ]; then
     printf '%s\n' "$_pw_lr_out" >&2
     if [ "$_pw_lr_rc" -ne 0 ] && printf '%s' "$_pw_lr_out" | grep -q '^LOOP-CAP:'; then
       echo "plan-wall: WALL-ROUND-CAP --run — $PW_MAX_ROUNDS run-level wall rounds exhausted" >&2
-      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:run --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      echo "plan-wall: inspect open findings (python3 $GATES_PY findings-queue list --unresolved) and preserve the objective for diagnosis; legacy resets and PLAN_WALL_MAX_ROUNDS cannot renew the protected review allowance" >&2
       exit 3
     elif [ "$_pw_lr_rc" -ne 0 ]; then
-      echo "plan-wall: WARN: round counter unavailable (loop-round rc=$_pw_lr_rc) — proceeding without cap this invocation" >&2
+      echo "plan-wall: WALL-ACCOUNTING-UNAVAILABLE (loop-round rc=$_pw_lr_rc) — admission refused" >&2
+      exit 78
     fi
     PW_ROUND="$(printf '%s' "$_pw_lr_out" | sed -n 's|^LOOP-ROUND: .* round \([0-9][0-9]*\)/.*|\1|p' | head -1)"
+    if ! [[ "$PW_ROUND" =~ ^[1-9][0-9]*$ ]]; then
+      echo "plan-wall: WALL-ACCOUNTING-INVALID — admission refused" >&2
+      exit 78
+    fi
   fi
   RUN_RC=0
   for _pw_d in "${PW_RUN_DIRS[@]}"; do
-    PLAN_WALL_RUN_CHILD=1 bash "${BASH_SOURCE[0]}" "$_pw_d" || RUN_RC=1
+    PLAN_WALL_RUN_CHILD=1 bash "${BASH_SOURCE[0]}" "$_pw_d"
+    _pw_child_rc=$?
+    if [ "$_pw_child_rc" -eq 78 ]; then
+      RUN_RC=78
+    elif [ "$_pw_child_rc" -eq 3 ] && [ "$RUN_RC" -ne 78 ]; then
+      RUN_RC=3
+    elif [ "$_pw_child_rc" -ne 0 ] && [ "$RUN_RC" -eq 0 ]; then
+      RUN_RC=1
+    fi
   done
-  if [ "$RUN_RC" -ne 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
+  if [ "$RUN_RC" -eq 1 ] && [ "${PLAN_WALL:-on}" != off ]; then
     if [ -n "$PW_ROUND" ] && [ "$PW_ROUND" -ge "$PW_MAX_ROUNDS" ]; then
       echo "plan-wall: WALL-ROUND-CAP --run — block on the final allowed run round ($PW_ROUND/$PW_MAX_ROUNDS): quarantine and move on" >&2
-      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:run --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      echo "plan-wall: inspect open findings (python3 $GATES_PY findings-queue list --unresolved) and preserve the objective for diagnosis; legacy resets and PLAN_WALL_MAX_ROUNDS cannot renew the protected review allowance" >&2
       RUN_RC=3
     else
       echo "plan-wall: BLOCKED --run — one repair round remains (round ${PW_ROUND:-?}/$PW_MAX_ROUNDS)" >&2
@@ -597,6 +613,9 @@ _pw_prior_findings_block() {
 # delimiter, so a whole-prompt filter would escape the real fence and leave
 # no valid one (wall residual 0a909156).
 _pw_build_prompt() {
+  if [ "${4:-false}" = true ]; then
+    printf '%s\n' 'REPAIR CONFIRMATION: Use the original accepted requirements. Confirm the adjudicated findings and concrete regressions caused by the edits. Do not add requirements or evidence obligations based on reviewer preference. A newly evidenced correctness/security defect must cite the violated original behavior and its reproduction; it remains a finding for adjudication, never permission to restart or expand the repair allowance.'
+  fi
   if [ -z "${2:-}" ]; then
     printf '%s\n' "$PW_REVIEW_BRIEF"
     printf '%s' "$1" | fence_neutralize PLAN | fence_neutralize SOCRATIC | fence_neutralize PRIOR_FINDINGS
@@ -873,7 +892,7 @@ _pw_waiver_path() {
     return 1
   fi
   if [ "$PW_VERDICT" = WAIVED ]; then
-    echo "plan-wall: WAIVED $plan_file (reason: $reason)"
+    echo "plan-wall: WAIVED $PW_SOURCE_PLAN (reason: $reason)"
     return 0
   fi
   echo "plan-wall: BLOCKED $plan_file (waiver queue_error)" >&2
@@ -935,6 +954,44 @@ _pw_resolve_socratic_slice() {
   fi
 }
 
+# The legacy convergence counter below is a compatibility counter. Actual
+# fresh review rounds have a separate sealed allowance in the same ledger;
+# PASS, cache hits, reset-all, and run-mode flags cannot replenish it.
+# Descriptive phase renames retain the numbered GSD phase identity. Unnumbered
+# paths share one scope rather than minting an allowance for each new name.
+PW_REVIEW_ROUND=""
+PW_REVIEW_ADMISSION_RC=0
+_pw_admit_review_round() {
+  local phase key out rc
+  [ -z "$PW_REVIEW_ROUND" ] || return 0
+  phase="${PHASE_SLUG%%-*}"
+  if [[ "$phase" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    phase="$(printf '%s' "$phase" | sed -E 's/(^|\.)0+([0-9])/\1\2/g')"
+  else
+    phase=unscoped
+  fi
+  key="review:wall:$phase"
+  out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "$key" --durable --max 2 2>&1)"
+  rc=$?
+  printf '%s\n' "$out" >&2
+  if [ "$rc" -ne 0 ]; then
+    if printf '%s' "$out" | grep -q '^LOOP-CAP:'; then
+      PW_REVIEW_ADMISSION_RC=3
+      echo "plan-wall: WALL-ROUND-CAP — original review allowance exhausted; preserve findings and objective for diagnosis, not another repair round" >&2
+    else
+      PW_REVIEW_ADMISSION_RC=78
+      echo "plan-wall: WALL-ACCOUNTING-UNAVAILABLE — fresh review admission refused" >&2
+    fi
+    return "$PW_REVIEW_ADMISSION_RC"
+  fi
+  PW_REVIEW_ROUND="$(printf '%s' "$out" | sed -n 's|^LOOP-ROUND: .* round \([0-9][0-9]*\)/.*|\1|p' | head -1)"
+  if ! [[ "$PW_REVIEW_ROUND" =~ ^[1-9][0-9]*$ ]]; then
+    PW_REVIEW_ADMISSION_RC=78
+    echo "plan-wall: WALL-ACCOUNTING-INVALID — fresh review admission refused" >&2
+    return 78
+  fi
+}
+
 # ── normal dispatch path ────────────────────────────────────────────────────
 
 _pw_dispatch_path() {
@@ -943,6 +1000,7 @@ _pw_dispatch_path() {
   local prior_sha prior_verdict prior_queue_error unresolved unresolved_count host prompt queue_error finding
   local sev fpath claim line issue add_out add_rc _pw_is_new critical_count
   local prior_findings_block prior_findings_cache _pw_prior_sig12 _pw_prior_match
+  local repair_confirmation=false
 
   _pw_import_reject_phase() {
     local reason="$1" ip islug irp isource isha payload
@@ -1133,8 +1191,14 @@ _pw_dispatch_path() {
     PW_TIER_DESCENT=false
   else
   # ── fresh dispatch ──
+  _pw_admit_review_round || return "$PW_REVIEW_ADMISSION_RC"
   prior_findings_block="$(_pw_prior_findings_block "$source_plan")"
-  prompt="$(_pw_build_prompt "$plan_content" "$PW_SOCRATIC_SLICE" "$prior_findings_block")"
+  case "${prior_verdict:-}" in
+    reviewed-pass|adjudicated-pass|blocked|pass-residual) repair_confirmation=true ;;
+  esac
+  # Durable phase identity survives descriptive renames and missing path records.
+  [ "$PW_REVIEW_ROUND" -gt 1 ] && repair_confirmation=true
+  prompt="$(_pw_build_prompt "$plan_content" "$PW_SOCRATIC_SLICE" "$prior_findings_block" "$repair_confirmation")"
   host="$(detect_orchestrator_host)"
   if [ "$host" = codex ]; then
     PW_PLANNER_ID="$(codex_equiv_model "$(_pw_planner_alias)")"
@@ -1266,20 +1330,19 @@ if [ "${PLAN_WALL:-on}" != off ] && [ "${PLAN_WALL_RUN_CHILD:-0}" != 1 ]; then
       --max "$PW_MAX_ROUNDS" 2>&1)"
   _pw_lr_rc=$?
   printf '%s\n' "$_pw_lr_out" >&2
-  # Current round number, parsed from the durable counter's own output (fail
-  # open: unparseable -> empty -> the final-round fast-quarantine below is
-  # skipped and the LOOP-CAP pre-check above stays the only cap authority).
+  # An unavailable or malformed counter cannot grant another review launch.
   PW_ROUND="$(printf '%s' "$_pw_lr_out" | sed -n 's|^LOOP-ROUND: .* round \([0-9][0-9]*\)/.*|\1|p' | head -1)"
   if [ "$_pw_lr_rc" -ne 0 ] && printf '%s' "$_pw_lr_out" | grep -q '^LOOP-CAP:'; then
     echo "plan-wall: WALL-ROUND-CAP $TARGET — $PW_MAX_ROUNDS wall rounds exhausted for this phase without convergence" >&2
-    echo "plan-wall: quarantine this phase and move on. Unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:$PHASE_SLUG --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      echo "plan-wall: inspect open findings (python3 $GATES_PY findings-queue list --unresolved) and preserve the objective for diagnosis; legacy resets and PLAN_WALL_MAX_ROUNDS cannot renew the protected review allowance" >&2
     exit 3
   elif [ "$_pw_lr_rc" -ne 0 ]; then
-    # Counter plumbing failed (corrupt/unwritable store, missing python…).
-    # Fail OPEN: the cap is a guard, and a guard's infrastructure failure
-    # must not impersonate the guard firing — the wall's own queue_error
-    # path downstream is the authority on a broken store.
-    echo "plan-wall: WARN: round counter unavailable (loop-round rc=$_pw_lr_rc) — proceeding without cap this invocation" >&2
+    echo "plan-wall: WALL-ACCOUNTING-UNAVAILABLE (loop-round rc=$_pw_lr_rc) — admission refused" >&2
+    exit 78
+  fi
+  if ! [[ "$PW_ROUND" =~ ^[1-9][0-9]*$ ]]; then
+    echo "plan-wall: WALL-ACCOUNTING-INVALID — admission refused" >&2
+    exit 78
   fi
 fi
 
@@ -1340,6 +1403,9 @@ for plan_file in "${PLAN_FILES[@]}"; do
   else
     _pw_dispatch_path "$plan_file" "$record_path"
     _pw_rc=$?
+    if [ "$PW_REVIEW_ADMISSION_RC" -ne 0 ]; then
+      break
+    fi
     if [ "$_pw_rc" -eq 2 ]; then
       # HIGH-only unresolved — soft block, phase-level decision below.
       PW_SOFT_RECORDS+=("$record_path")
@@ -1364,7 +1430,7 @@ if [ "${PLAN_WALL:-on}" != off ]; then
   elif [ "$PW_HARD_BLOCK" = true ]; then
     if [ -n "$PW_ROUND" ] && [ "$PW_ROUND" -ge "$PW_MAX_ROUNDS" ]; then
       echo "plan-wall: WALL-ROUND-CAP $TARGET — hard block on the final allowed round ($PW_ROUND/$PW_MAX_ROUNDS): quarantine this phase and move on" >&2
-      echo "plan-wall: unblock (operator): resolve the open findings (python3 $GATES_PY findings-queue list --unresolved), then reset: python3 $GATES_PY loop-round $RUN_ID wall:$PHASE_SLUG --reset --max 1; or raise PLAN_WALL_MAX_ROUNDS for one deliberate extra round" >&2
+      echo "plan-wall: inspect open findings (python3 $GATES_PY findings-queue list --unresolved) and preserve the objective for diagnosis; legacy resets and PLAN_WALL_MAX_ROUNDS cannot renew the protected review allowance" >&2
       OVERALL_RC=3
     else
       echo "plan-wall: BLOCKED $TARGET — one repair round remains (round ${PW_ROUND:-?}/$PW_MAX_ROUNDS); a CRITICAL surviving it quarantines the phase (exit 3)" >&2
@@ -1372,14 +1438,16 @@ if [ "${PLAN_WALL:-on}" != off ]; then
   fi
 fi
 
-# A PASSING wall clears its own round counter (+count history): the counter
-# bounds CONVERGENCE attempts, and a pass IS convergence. Without this, every
-# post-pass re-invocation (runner pre-execution seam, orchestrator retries,
-# nested single-flight refusals) burns a round toward WALL-ROUND-CAP even
-# though each one passes idempotently — observed live on spec-008: two
-# passing re-runs + two nested runner retries capped a phase that had
-# already PASSED. A plan edited after a pass correctly restarts at a strict
-# round 1. Reset failure is a WARN, never a verdict change.
+# Protected review admission failures are terminal even when the compatibility
+# convergence counter was reset after a prior PASS or skipped by run mode.
+if [ "$PW_REVIEW_ADMISSION_RC" -ne 0 ]; then
+  exit "$PW_REVIEW_ADMISSION_RC"
+fi
+
+# A PASSING wall clears only its compatibility convergence counter (+history).
+# Cached passes may repeat without a fresh review. Edited plans still consume
+# the sealed review:wall allowance, which is never reset here.
+# Reset failure is a WARN, never a verdict change.
 if [ "$OVERALL_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
   python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" --reset >/dev/null 2>&1 \
     || echo "plan-wall: WARN: passing-round counter reset failed (non-fatal)" >&2

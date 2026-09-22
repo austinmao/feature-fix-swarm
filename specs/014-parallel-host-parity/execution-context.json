@@ -1,0 +1,20 @@
+{
+  "run_id": "spec-014",
+  "workspace": "/Users/luminamao/Documents/Github/feature-fix-swarm-runs/upgrade-parallel-20260912",
+  "evidence_root": "/Users/luminamao/.local/state/feature-fix-swarm-bootstrap/spec-014",
+  "gates_store": "/Users/luminamao/.local/state/feature-fix-swarm-bootstrap/spec-014/evidence.json",
+  "transport": "native-typed-gsd-bootstrap",
+  "gsd_project": "",
+  "gsd_workstream": "",
+  "gsd_session_key": "spec-014",
+  "gsd_runtime": "codex",
+  "excluded_authorizations": [
+    "commit",
+    "push",
+    "ship",
+    "merge",
+    "release",
+    "tenant-deployment"
+  ],
+  "readiness": "UNMET"
+}

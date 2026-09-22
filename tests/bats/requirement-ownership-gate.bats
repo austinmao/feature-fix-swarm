@@ -61,7 +61,7 @@ must_haves:
 EOF
   write_plan 03 '[FR-003]'
 
-  run bash -c "cd '$REPO' && bash '$SCRIPT' 2"
+  run bash -c "cd $(printf '%q' "$REPO") && bash $(printf '%q' "$SCRIPT") 2"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"PASS phase=02 roadmap=3 plans=3"* ]]
@@ -72,7 +72,7 @@ EOF
   write_plan 01 '[FR-001, FR-002]'
   write_plan 02 '[FR-001, FR-003]'
 
-  run bash -c "cd '$REPO' && bash '$SCRIPT' 02"
+  run bash -c "cd $(printf '%q' "$REPO") && bash $(printf '%q' "$SCRIPT") 02"
 
   [ "$status" -eq 2 ]
   [[ "$output" == *"FR-001 is owned by multiple plans"* ]]
@@ -86,7 +86,7 @@ EOF
   write_plan 02 '[FR-001, FR-999]'
   write_plan 03 '[FR-003]'
 
-  run bash -c "cd '$REPO' && bash '$SCRIPT' 2"
+  run bash -c "cd $(printf '%q' "$REPO") && bash $(printf '%q' "$SCRIPT") 2"
 
   [ "$status" -eq 2 ]
   [[ "$output" == *"missing from plans: FR-002"* ]]
@@ -106,7 +106,7 @@ must_haves:
 EOF
   write_plan 02 '[FR-001, FR-002, FR-003]'
 
-  run bash -c "cd '$REPO' && bash '$SCRIPT' 2"
+  run bash -c "cd $(printf '%q' "$REPO") && bash $(printf '%q' "$SCRIPT") 2"
 
   [ "$status" -eq 2 ]
   [[ "$output" == *"02-01-PLAN.md has no explicit requirements field"* ]]
@@ -123,7 +123,7 @@ EOF
 EOF
   write_plan 01 '[FR-001, FR-002]'
 
-  run bash -c "cd '$REPO' && bash '$SCRIPT' 2"
+  run bash -c "cd $(printf '%q' "$REPO") && bash $(printf '%q' "$SCRIPT") 2"
 
   [ "$status" -eq 0 ]
 }
@@ -137,7 +137,7 @@ EOF
 EOF
   write_plan 01 '[]'
 
-  run bash -c "cd '$REPO' && bash '$SCRIPT' 2"
+  run bash -c "cd $(printf '%q' "$REPO") && bash $(printf '%q' "$SCRIPT") 2"
 
   [ "$status" -eq 2 ]
   [[ "$output" == *"ROADMAP Phase 2 has no Requirements declaration"* ]]

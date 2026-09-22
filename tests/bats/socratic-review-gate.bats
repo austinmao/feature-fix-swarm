@@ -36,7 +36,7 @@ setup() {
 depth: core" "- ASSUME-001: default A
 - ASSUME-002: default B"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERIFICATION_REQUIREMENTS_SENTINEL"* ]]
@@ -65,7 +65,7 @@ depth: core" "- ASSUME-001: default A
   make_spec_dir "$SPEC" "domains: [requirements]"
   local out="$BATS_TEST_TMPDIR/verify-absent.out"
 
-  run bash -c "FFS_SOCRATIC_DIR='$BATS_TEST_TMPDIR/does-not-exist' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null > '$out'"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$BATS_TEST_TMPDIR/does-not-exist") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>/dev/null > $(printf '%q' "$out")"
 
   [ "$status" -eq 0 ]
   [ -f "$out" ]
@@ -77,7 +77,7 @@ depth: core" "- ASSUME-001: default A
   local out="$BATS_TEST_TMPDIR/usage.out"
   local err="$BATS_TEST_TMPDIR/usage.err"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode > '$out' 2> '$err'"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode > $(printf '%q' "$out") 2> $(printf '%q' "$err")"
 
   [ "$status" -eq 2 ]
   [ -f "$out" ]
@@ -138,7 +138,7 @@ depth: core" "- ASSUME-001: default A
 - ASSUME-001: first
 - ASSUME-002: second"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"ASSUME-003: third"* ]]
@@ -155,7 +155,7 @@ depth: core" "- ASSUME-001: default A
 @test "a spec with Verification content and an empty ledger still arms" {
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [ -n "$output" ]
@@ -234,7 +234,7 @@ build_hv_harness() {
   # --- armed: vendor tree + socratic.md carrying an ASSUME entry -----------
   make_spec_dir "$SPEC" "domains: [requirements]" "- ASSUME-001: default A"
   build_hv_harness "$harness" "$SPEC/spec.md" "$block_script"
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$harness'"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$harness")"
   [ "$status" -eq 0 ]
 
   start_count="$(printf '%s\n' "$output" | grep -c '^SOCRATIC_DATA_START$')"
@@ -260,7 +260,7 @@ build_hv_harness() {
   # stdout must stay byte-identical unarmed; the helper's status line now
   # passes through on stderr (AC-012 observability) instead of being dropped
   unarmed_err="$BATS_TEST_TMPDIR/unarmed.err"
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$harness' 2>'$unarmed_err'"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$harness") 2>$(printf '%q' "$unarmed_err")"
   [ "$status" -eq 0 ]
 
   no_block_expected="$(printf '%s\n' 'SPEC_DATA_END' 'DIFF_DATA_START')"

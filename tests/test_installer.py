@@ -51,7 +51,12 @@ def run_setup(
     env.update(
         {
             "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
             "CODEX_HOME": str(home / ".codex"),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_CACHE_HOME": str(home / ".cache"),
+            "XDG_DATA_HOME": str(home / ".local/share"),
+            "XDG_STATE_HOME": str(home / ".local/state"),
             "FFS_SKIP_PROMPT_MASTER": "1",
             "FFS_SKIP_SOCRATIC": "1",
             "FFS_GSD_INSTALLER": str(ROOT / "tests/fixtures/gsd-installer-stub.py"),
@@ -574,6 +579,19 @@ def test_user_install_copies_socratic_to_both_hosts(tmp_path: Path) -> None:
     assert manifest["paths"][str(claude.absolute())]["fingerprint"]
 
 
+def test_run_setup_binds_claude_config_to_fixture_home_despite_ambient_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = tmp_path / "ambient-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient))
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "home/.claude/gsd-file-manifest.json").is_file()
+    assert not ambient.exists()
+
+
 def test_same_release_project_reinstall_with_socratic_preserves_manifest_bytes(
     tmp_path: Path,
 ) -> None:
@@ -660,6 +678,7 @@ def test_socratic_stage_directory_removed_after_install(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
     monkeypatch.delenv("FFS_SKIP_SOCRATIC", raising=False)
@@ -801,8 +820,37 @@ def test_install_invokes_upstream_full_claude_and_codex_profiles(tmp_path: Path)
     calls = (tmp_path / "gsd-installer.log").read_text().splitlines()
     assert calls == ["--claude --global --profile=full", "--codex --global --profile=full"]
     manifest = json.loads((tmp_path / "home/.cache/feature-fix-swarm/install-manifest.json").read_text())
-    assert manifest["gsd"]["version"] == "1.13.0"
+    assert manifest["gsd"]["version"] == "1.14.0"
+    assert manifest["gsd"]["commit"] == bytes.fromhex("f8542fef 67c1f978 ffa70912 cb6f2aaa b76464c6").hex()
     assert manifest["gsd"]["profiles"] == {"claude": "full", "codex": "full"}
+
+
+def test_gsd_package_verification_binds_qualified_lock_integrity(tmp_path: Path) -> None:
+    package_root = tmp_path / "source"
+    installed = package_root / "node_modules/@opengsd/gsd-core"
+    installed.mkdir(parents=True)
+    (package_root / "package.json").write_text(
+        json.dumps({"devDependencies": {"@opengsd/gsd-core": "1.14.0"}})
+    )
+    (package_root / "package-lock.json").write_text(
+        json.dumps({
+            "packages": {
+                "node_modules/@opengsd/gsd-core": {
+                    "version": "1.14.0",
+                    "integrity": ffs_installer.GSD_INTEGRITY,
+                }
+            }
+        })
+    )
+    (installed / "package.json").write_text(json.dumps({"version": "1.14.0"}))
+
+    ffs_installer.verify_gsd_package(package_root)
+
+    lock = json.loads((package_root / "package-lock.json").read_text())
+    lock["packages"]["node_modules/@opengsd/gsd-core"]["integrity"] = "sha512-wrong"
+    (package_root / "package-lock.json").write_text(json.dumps(lock))
+    with pytest.raises(ffs_installer.ActionableError, match="qualified release integrity"):
+        ffs_installer.verify_gsd_package(package_root)
 
 
 def test_no_argument_install_is_deprecated_user_scope(tmp_path: Path) -> None:
@@ -885,7 +933,14 @@ def test_doctor_accepts_exact_codex_compatibility_pins(tmp_path: Path, version: 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake = fake_bin / "codex"
-    fake.write_text(f"#!/usr/bin/env bash\necho 'codex-cli {version}'\n")
+    fake.write_text(
+        f"#!/usr/bin/env bash\n"
+        f"if [ \"$1\" = \"--version\" ]; then\n"
+        f"  echo 'codex-cli {version}'\n"
+        f"elif [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then\n"
+        f"  echo '--strict-config --ignore-user-config --ignore-rules --sandbox --add-dir --disable --dangerously-bypass-hook-trust'\n"
+        f"fi\n"
+    )
     fake.chmod(0o755)
 
     result = run_setup(
@@ -929,7 +984,13 @@ def test_doctor_warns_on_unreachable_canonical_tier_model(tmp_path: Path) -> Non
     fake_claude.write_text("#!/usr/bin/env bash\nexit 0\n")
     fake_claude.chmod(0o755)
     fake_codex = fake_bin / "codex"
-    fake_codex.write_text("#!/usr/bin/env bash\n[ \"${1:-}\" = --version ] && echo 'codex-cli 0.146.0'\nexit 0\n")
+    fake_codex.write_text(
+        "#!/usr/bin/env bash\n"
+        "[ \"${1:-}\" = --version ] && echo 'codex-cli 0.146.0' && exit 0\n"
+        "[ \"${1:-}\" = exec ] && [ \"${2:-}\" = --help ] && "
+        "echo '--strict-config --ignore-user-config --ignore-rules --sandbox --add-dir --disable multi_agent --disable multi_agent_v2 --dangerously-bypass-hook-trust' && exit 0\n"
+        "exit 0\n"
+    )
     fake_codex.chmod(0o755)
     fail_probe = tmp_path / "fail-on-opus.sh"
     fail_probe.write_text('#!/usr/bin/env bash\n[ "$1" = claude-opus-5 ] && exit 1\nexit 0\n')
@@ -985,10 +1046,15 @@ def _fake_host_cli_path(tmp_path: Path) -> str:
         # Answer --version with an in-range pin: a codex on PATH also wakes
         # the pre-existing codex-cli-version doctor check, which fails hard
         # on an unparseable version.
+        extra = (
+            'if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then '
+            'echo "--strict-config --ignore-user-config --ignore-rules --sandbox --add-dir --disable multi_agent --disable multi_agent_v2 --dangerously-bypass-hook-trust"; fi\n'
+            if host == "codex" else ""
+        )
         exe.write_text(
             '#!/bin/sh\n'
             'if [ "$1" = "--version" ]; then echo "0.146.0"; fi\n'
-            'exit 0\n'
+            + extra + 'exit 0\n'
         )
         exe.chmod(0o755)
     return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
@@ -1183,7 +1249,7 @@ def test_upgrade_rollback_restores_prior_gsd_version_manifests(tmp_path: Path) -
     installed = run_setup(tmp_path, "--scope", "user")
     assert installed.returncode == 0, installed.stderr
     backup_id = next(line.split("=", 1)[1] for line in installed.stdout.splitlines() if line.startswith("backup_id="))
-    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.13.0"
+    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.14.0"
 
     rolled_back = run_setup(tmp_path, "--rollback", backup_id)
 
@@ -1314,6 +1380,7 @@ def test_project_install_refuses_ancestor_swap_after_preflight(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
     monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
@@ -1588,7 +1655,7 @@ def test_truncated_failure_manifest_cannot_bypass_upstream_restore(tmp_path: Pat
     assert json.loads(old_manifest.read_text())["version"] == "1.8.0"
 
 
-def test_install_gsd_profiles_applies_verified_overlay_before_each_global_profile(
+def test_install_gsd_profiles_does_not_apply_legacy_overlay_for_1_14_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The setup transaction must not dispatch the upstream installer until
@@ -1601,18 +1668,22 @@ def test_install_gsd_profiles_applies_verified_overlay_before_each_global_profil
     events: list[str] = []
 
     monkeypatch.setattr(ffs_installer, "verify_gsd_package", lambda _: events.append("package"))
-    monkeypatch.setattr(ffs_installer, "apply_gsd_core_overlay", lambda _: events.append("overlay"))
+    monkeypatch.setattr(
+        ffs_installer,
+        "apply_gsd_core_overlay",
+        lambda *_: (_ for _ in ()).throw(AssertionError("the overlay runs only on the staged copy")),
+    )
     monkeypatch.setenv("FFS_GSD_INSTALLER", str(installer))
 
     def upstream(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        assert events[:2] == ["package", "overlay"]
+        assert events in (["package"], ["package", "--claude"])
         events.append(command[1])
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(ffs_installer.subprocess, "run", upstream)
     ffs_installer.install_gsd_profiles(source)
 
-    assert events == ["package", "overlay", "--claude", "--codex"]
+    assert events == ["package", "--claude", "--codex"]
 
 
 def test_project_legacy_migration_refuses_symlinked_codex_ancestor(tmp_path: Path) -> None:
@@ -1948,6 +2019,7 @@ def test_failure_after_first_ffs_write_restores_gsd_and_project(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
     monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
@@ -1987,6 +2059,7 @@ def test_failure_rollback_preserves_concurrent_project_change(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("FFS_SKIP_PROMPT_MASTER", "1")
     monkeypatch.setenv("FFS_SKIP_SOCRATIC", "1")
@@ -2057,8 +2130,35 @@ def test_project_install_no_hint_when_registry_present(tmp_path: Path) -> None:
 MANAGED_LIB_EXPECTED = {
     "lib/gates.py": ".claude/lib/feature-fix-swarm/gates.py",
     "lib/runtime_proof.py": ".claude/lib/feature-fix-swarm/runtime_proof.py",
+    "lib/model_requests.py": ".claude/lib/feature-fix-swarm/model_requests.py",
+    "lib/host_capabilities.py": ".claude/lib/feature-fix-swarm/host_capabilities.py",
+    "lib/process_identity.py": ".claude/lib/feature-fix-swarm/process_identity.py",
+    "lib/run_context.py": ".claude/lib/feature-fix-swarm/run_context.py",
+    **{
+        f"lib/run_state/{name}": f".claude/lib/feature-fix-swarm/run_state/{name}"
+        for name in (
+            "__init__.py", "audit.py", "cli.py", "codex_host.py", "commands.py",
+            "frontend_selection.py", "host_request.py", "managed.py", "ownership.py",
+            "selection.py", "state.py", "supervisor.py", "upstream.py",
+            "worker_channel.py", "worker_policy.py", "workspace.py",
+        )
+    },
+    "scripts/gsd/codex-runtime-observer.py": ".claude/lib/feature-fix-swarm/scripts/gsd/codex-runtime-observer.py",
+    "patches/gsd-1.14-ffs-supervised-dispatch.patch": ".claude/lib/feature-fix-swarm/patches/gsd-1.14-ffs-supervised-dispatch.patch",
     "scripts/gsd/socratic-slice.sh": ".claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh",
 }
+
+
+def test_gsd_compatibility_package_is_patched_from_exact_pinned_bytes(tmp_path: Path) -> None:
+    staged = ffs_installer.stage_gsd_compatibility_package(ROOT, tmp_path)
+    receipt = json.loads((staged / "ffs-compatibility.json").read_text())
+    assert receipt["commit"] == ffs_installer.GSD_COMMIT
+    assert receipt["patch_sha256"] == ffs_installer.GSD_COMPATIBILITY_PATCH_SHA256
+    for relative, expected in ffs_installer.GSD_COMPATIBILITY_OUTPUT.items():
+        assert hashlib.sha256((staged / relative).read_bytes()).hexdigest() == expected
+    assert hashlib.sha256(
+        (ROOT / "node_modules/@opengsd/gsd-core/gsd-core/bin/gsd-tools.cjs").read_bytes()
+    ).hexdigest() == ffs_installer.GSD_COMPATIBILITY_BASELINE["gsd-core/bin/gsd-tools.cjs"]
 
 
 def test_user_install_stages_managed_lib_runtime(tmp_path: Path) -> None:
@@ -2075,6 +2175,23 @@ def test_user_install_stages_managed_lib_runtime(tmp_path: Path) -> None:
     # the skill ladders exec socratic-slice.sh directly (no interpreter prefix);
     # gates.py is always python3-prefixed, so only the script needs the x bit
     assert (home / ".claude/lib/feature-fix-swarm/scripts/gsd/socratic-slice.sh").stat().st_mode & 0o100
+
+
+def test_user_install_managed_entrypoint_import_closure_is_self_contained(tmp_path: Path) -> None:
+    result = run_setup(tmp_path, "--scope", "user")
+    assert result.returncode == 0, result.stderr
+    root = tmp_path / "home/.claude/lib/feature-fix-swarm"
+    environment = {**os.environ, "HOME": str(tmp_path / "home"), "PYTHONPATH": str(root)}
+    cli = subprocess.run(
+        [sys.executable, "-m", "run_state.cli", "--help"], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=20,
+    )
+    assert cli.returncode == 0, (cli.stdout, cli.stderr)
+    observer = subprocess.run(
+        [sys.executable, str(root / "scripts/gsd/codex-runtime-observer.py"), "--help"],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=20,
+    )
+    assert observer.returncode == 0, (observer.stdout, observer.stderr)
 
 
 def test_doctor_flags_stale_managed_gates(tmp_path: Path) -> None:
@@ -2159,3 +2276,64 @@ def test_staged_socratic_slice_executes_outside_the_repo(tmp_path: Path) -> None
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
     )
     assert "fence-data.sh missing" not in result.stderr
+
+
+def test_managed_lib_files_ship_every_module_their_imports_reach() -> None:
+    """A staged runtime must import on its own: every lib module reachable from
+    a shipped lib module (including function-local imports) is shipped too."""
+    import ast
+    import re
+
+    lib = ROOT / "lib"
+    shipped = {source[len("lib/"):] for source, _dest in ffs_installer.MANAGED_LIB_FILES
+               if source.startswith("lib/") and source.endswith(".py")}
+
+    def targets(relative: str) -> set[str]:
+        package = Path(relative).parent
+        found = set()
+        for node in ast.walk(ast.parse((lib / relative).read_text())):
+            if isinstance(node, ast.Import):
+                candidates = [alias.name.replace(".", "/") for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = package if node.level == 1 else Path()
+                module = base / (node.module or "").replace(".", "/")
+                candidates = [str(module)] + [str(module / alias.name) for alias in node.names]
+            else:
+                continue
+            found.update(c + ".py" for c in candidates if (lib / (c + ".py")).is_file())
+        return found
+
+    reached, pending = set(), list(shipped)
+    while pending:
+        current = pending.pop()
+        if current in reached:
+            continue
+        reached.add(current)
+        pending.extend(targets(current) - reached)
+    assert sorted(reached - shipped) == []
+
+    # Non-Python siblings a shipped module loads by Path(__file__).with_name(...)
+    # (e.g. a Node bridge) must ship too; names that are not repository files are outputs.
+    shipped_assets = {source[len("lib/"):] for source, _dest in ffs_installer.MANAGED_LIB_FILES
+                      if source.startswith("lib/")}
+    siblings = {str(Path(module).parent / name)
+                for module in reached
+                for name in re.findall(r"with_name\(\s*['\"]([^'\"]+)['\"]", (lib / module).read_text())}
+    assert sorted(s for s in siblings if (lib / s).is_file() and s not in shipped_assets) == []
+
+
+@pytest.mark.parametrize("stock", ["node_modules/@opengsd/gsd-core/bin/install.js", "node_modules/.bin/gsd-core"])
+def test_installer_override_refuses_the_stock_unpatched_gsd_installer(tmp_path, monkeypatch, stock) -> None:
+    source = tmp_path / "source"
+    package = source / "node_modules" / "@opengsd" / "gsd-core"
+    (package / "bin").mkdir(parents=True)
+    (package / "bin" / "install.js").write_text("// stock\n")
+    (source / "node_modules" / ".bin").mkdir()
+    (source / "node_modules" / ".bin" / "gsd-core").symlink_to(package / "bin" / "install.js")
+    monkeypatch.setattr(ffs_installer, "verify_gsd_package", lambda _: None)
+    monkeypatch.setenv("FFS_GSD_INSTALLER", str(source / stock))
+    ran = []
+    monkeypatch.setattr(ffs_installer.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(ffs_installer.ActionableError, match="stock gsd-core installer"):
+        ffs_installer.install_gsd_profiles(source, tmp_path / "staging")
+    assert ran == []
