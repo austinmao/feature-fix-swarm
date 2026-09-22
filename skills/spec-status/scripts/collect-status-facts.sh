@@ -216,10 +216,18 @@ TAKEOVER_GP=""
 for c in "$ROOT/packages/feature-fix-swarm/lib/gates.py" "$ROOT/lib/gates.py" "$COLLECT_STATUS_SCRIPT_DIR/../../../lib/gates.py"; do
   [ -f "$c" ] && TAKEOVER_GP="$c" && break
 done
-if [ -n "$TAKEOVER_GP" ]; then
-  python3 "$COLLECT_STATUS_SCRIPT_DIR/../../../scripts/gsd/takeover-record.py" \
+# The writer resolves through the same chain as gates.py: a managed install
+# copies this skill into ~/.claude/skills, where a skill-relative path lands
+# outside any repo (every managed run aborted with "can't open file" until
+# 2026-09-12).
+TAKEOVER_PY=""
+for c in "$ROOT/packages/feature-fix-swarm/scripts/gsd/takeover-record.py" "$ROOT/scripts/gsd/takeover-record.py" "$COLLECT_STATUS_SCRIPT_DIR/../../../scripts/gsd/takeover-record.py"; do
+  [ -f "$c" ] && TAKEOVER_PY="$c" && break
+done
+if [ -n "$TAKEOVER_GP" ] && [ -n "$TAKEOVER_PY" ]; then
+  python3 "$TAKEOVER_PY" \
     --gates "$TAKEOVER_GP" --spec-id "$SPEC_ID" --run-id "$EXPECTED_RUN_ID" || exit $?
 else
-  echo "takeover record refused: gates.py unavailable" >&2
+  echo "takeover record refused: gates.py or takeover-record.py unavailable" >&2
   exit 1
 fi

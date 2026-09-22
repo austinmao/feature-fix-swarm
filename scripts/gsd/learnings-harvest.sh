@@ -86,7 +86,17 @@ PY
 }
 
 gbrain_healthy() {
-  command -v gbrain >/dev/null 2>&1 && gb doctor >/dev/null 2>&1
+  # `gb doctor` exits nonzero whenever ANY health check FAILs (e.g.
+  # sync_freshness, type_proliferation) even while connectivity is fine — its
+  # rc alone is not a reachability signal. Probe connectivity only: an
+  # "[OK] connection" line in the output means reachable, regardless of rc.
+  command -v gbrain >/dev/null 2>&1 || return 1
+  # Capture first, then grep: with `pipefail` a piped `gb doctor | grep -q`
+  # would still fail the whole call on doctor's own nonzero rc even when
+  # grep matches — the exact bug this fix removes.
+  local out
+  out="$(gb doctor 2>/dev/null)" || true
+  printf '%s' "$out" | grep -q '\[OK\] connection'
 }
 
 hash_of() {
@@ -122,12 +132,16 @@ write_gbrain() {
   # archive, i.e. duplicated. This is acceptable for advisory memory: learnings
   # are idempotent hints, dedup is a recall-time concern, and per-entry failure
   # bookkeeping isn't worth the complexity for a fail-soft harvester.
+  # gbrain 0.50 ignores a positional content arg and reads stdin/--content
+  # instead — pipe the entry on stdin. The read loop consumes its input on fd
+  # 3 (not fd 0) so `gb put`'s own stdin read below doesn't steal the next
+  # line out of the loop's input file.
   local entry hash ok=0
-  while IFS= read -r entry || [ -n "$entry" ]; do
+  while IFS= read -r entry <&3 || [ -n "$entry" ]; do
     [ -z "$entry" ] && continue
     hash="$(hash_of "$entry")"
-    gb put "learnings/$hash" "$entry" >/dev/null 2>&1 || ok=1
-  done < "$1"
+    printf '%s' "$entry" | gb put "learnings/$hash" >/dev/null 2>&1 || ok=1
+  done 3< "$1"
   gb sync --no-pull --no-embed >/dev/null 2>&1 || true
   return "$ok"
 }
