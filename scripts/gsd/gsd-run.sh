@@ -439,6 +439,13 @@ if [ -n "$RUN_COORD_ID" ]; then
 fi
 
 RUN_WORKTREE_ROOT="$PROJECT_PRIMARY_ROOT/.claude/worktrees/$RUN_ID"
+# GSD_EXTRA_WRITABLE_WORKTREE is deliberately narrower than a generic
+# writable-roots escape hatch: it names one or more colon-delimited, existing
+# sibling worktrees.  The validated physical paths are the only values that
+# reach the Codex workspace-write configuration, and their stable list is
+# resume-critical below.
+declare -a EXTRA_WRITABLE_WORKTREES=()
+EXTRA_WRITABLE_WORKTREES_TUPLE="none"
 CODEX_RUNTIME_HOME=""
 CODEX_CLI_VERSION=""
 CODEX_PREFLIGHT_FATAL=0
@@ -876,6 +883,116 @@ ensure_run_worktree() {
      && [ ! -e "$RUN_WORKTREE_ROOT/.planning" ]; then
     cp -R "$REPO_ROOT/.planning" "$RUN_WORKTREE_ROOT/.planning" || return 1
   fi
+}
+
+validate_extra_writable_worktrees() {
+  local requested expected_parent expected_parent_real candidate candidate_real
+  local actual_top actual_common registered registered_path registered_real
+  local prior
+
+  EXTRA_WRITABLE_WORKTREES=()
+  EXTRA_WRITABLE_WORKTREES_TUPLE="none"
+  requested="${GSD_EXTRA_WRITABLE_WORKTREE:-}"
+  [ -n "$requested" ] || return 0
+
+  # A colon-delimited absolute-path list keeps the capability explicit in an
+  # environment variable while rejecting ambiguous empty elements.  This is
+  # intentionally not a general path-list mechanism.
+  case "$requested" in
+    :*|*:|*::*|*$'\n'*|*$'\r'*)
+      echo "gsd-run: GSD_EXTRA_WRITABLE_WORKTREE must be a colon-delimited list of non-empty absolute paths" >&2
+      return 78
+      ;;
+  esac
+
+  expected_parent="$PROJECT_PRIMARY_ROOT/.claude/worktrees"
+  [ -d "$expected_parent" ] && [ ! -L "$expected_parent" ] || {
+    echo "gsd-run: refusing invalid extra writable worktree parent" >&2
+    return 78
+  }
+  expected_parent_real="$(cd "$expected_parent" && pwd -P)" || return 78
+  [ "$expected_parent_real" = "$expected_parent" ] || {
+    echo "gsd-run: extra writable worktree parent escapes the project worktrees namespace" >&2
+    return 78
+  }
+
+  local IFS=:
+  local -a candidates=()
+  read -r -a candidates <<< "$requested"
+  for candidate in "${candidates[@]}"; do
+    case "$candidate" in
+      /*) ;;
+      *)
+        echo "gsd-run: extra writable worktree must be an absolute path" >&2
+        return 78
+        ;;
+    esac
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || {
+      echo "gsd-run: refusing nonexistent or symlinked extra writable worktree: $candidate" >&2
+      return 78
+    }
+    candidate_real="$(cd "$candidate" && pwd -P)" || return 78
+    case "$candidate_real" in
+      "$expected_parent_real"/*) ;;
+      *)
+        echo "gsd-run: extra writable worktree escapes the project worktrees namespace" >&2
+        return 78
+        ;;
+    esac
+    [ "$candidate_real" != "$RUN_WORKTREE_ROOT" ] || {
+      echo "gsd-run: extra writable worktree must be distinct from the active run worktree" >&2
+      return 78
+    }
+    actual_top="$($GIT_BIN_FIXED -C "$candidate_real" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "$actual_top" ] || {
+      echo "gsd-run: extra writable path is not a registered Git worktree: $candidate" >&2
+      return 78
+    }
+    actual_top="$(cd "$actual_top" && pwd -P)" || return 78
+    [ "$actual_top" = "$candidate_real" ] || {
+      echo "gsd-run: extra writable path must name a Git worktree root: $candidate" >&2
+      return 78
+    }
+    actual_common="$($GIT_BIN_FIXED -C "$candidate_real" rev-parse --git-common-dir 2>/dev/null || true)"
+    [ -n "$actual_common" ] || {
+      echo "gsd-run: extra writable path is not a registered Git worktree: $candidate" >&2
+      return 78
+    }
+    case "$actual_common" in
+      /*) actual_common="$(cd "$actual_common" && pwd -P)" ;;
+      *) actual_common="$(cd "$candidate_real/$actual_common" && pwd -P)" ;;
+    esac
+    [ "$actual_common" = "$GIT_COMMON_DIR" ] || {
+      echo "gsd-run: extra writable worktree belongs to a different Git common directory" >&2
+      return 78
+    }
+    registered=0
+    while IFS= read -r registered_path; do
+      case "$registered_path" in
+        worktree\ *)
+          registered_path="${registered_path#worktree }"
+          registered_real="$(cd "$registered_path" 2>/dev/null && pwd -P)" || continue
+          [ "$registered_real" != "$candidate_real" ] || { registered=1; break; }
+          ;;
+      esac
+    done < <("$GIT_BIN_FIXED" -C "$REPO_ROOT" worktree list --porcelain)
+    [ "$registered" -eq 1 ] || {
+      echo "gsd-run: extra writable path is not a registered Git worktree: $candidate" >&2
+      return 78
+    }
+    for prior in "${EXTRA_WRITABLE_WORKTREES[@]}"; do
+      [ "$prior" != "$candidate_real" ] || {
+        echo "gsd-run: duplicate extra writable worktree: $candidate" >&2
+        return 78
+      }
+    done
+    EXTRA_WRITABLE_WORKTREES+=("$candidate_real")
+  done
+
+  # The literal canonical list is audit-friendly and part of the strict
+  # resume tuple.  Reordering is deliberate drift rather than a silent
+  # capability substitution.
+  EXTRA_WRITABLE_WORKTREES_TUPLE="$(IFS='|'; printf '%s' "${EXTRA_WRITABLE_WORKTREES[*]}")"
 }
 
 CODEX_SESSION_CONTRACT="${GSD_CODEX_SESSION_CONTRACT:-FFS CODEX EXEC-SESSION CONTRACT: A tool result saying 'Script running with cell ID' is not completion or failure. Wait on that yielded cell. If the wait result contains a session_id and no exit_code, the nested process is still alive: poll that exact session with write_stdin until it exits. If the tool session is lost, check runner liveness with kill -0 \$(head -1 \"$RUN_PID_FILE\"); never launch a replacement while that pid is alive. Any worktree created for this run must live under \"$RUN_WORKTREE_ROOT\".}"
@@ -1522,7 +1639,7 @@ prepare_codex_runtime() {
   esac
   writable_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
     "$RUN_WORKTREE_ROOT" "$PROJECT_PRIMARY_ROOT/.feature-fix-swarm" \
-    "$GIT_COMMON_DIR/objects" "$admin_dir" \
+    "$GIT_COMMON_DIR/objects" "$admin_dir" "${EXTRA_WRITABLE_WORKTREES[@]}" \
     ${branch_ref_file:+"$branch_ref_file" "$branch_ref_lock" "$branch_log_file" "$branch_log_lock"})" || return 1
   {
     printf 'approval_policy = "never"\n'
@@ -1719,6 +1836,29 @@ finally:
 PY
 }
 
+normalize_prelaunch_tuple_for_compare() {
+  local tuple="$1"
+  # Older persisted tuples predate the extra-worktree capability.  Treat an
+  # absent field as the safe default while retaining strict comparison for
+  # every present capability and every other resume-critical field.  Moving
+  # this field to a stable final position makes the one-field compatibility
+  # normalization independent of tuple line ordering.
+  awk '
+    /^auth_initial_hash=/ { next }
+    /^extra_writable_worktrees=/ {
+      seen += 1
+      if (seen == 1) extra = $0
+      else print
+      next
+    }
+    { print }
+    END {
+      if (seen == 0) print "extra_writable_worktrees=none"
+      else print extra
+    }
+  ' "$tuple"
+}
+
 persist_prelaunch_tuple() {
   local model="$1" effort="$2" tmp
   tmp="$(mktemp "$RUN_STATE_DIR/.gsd-run.tuple.XXXXXX")" || return 1
@@ -1742,6 +1882,7 @@ persist_prelaunch_tuple() {
     printf 'network_mode=%s\n' "$NETWORK_MODE"
     printf 'network_purpose=%s\n' "${NETWORK_PURPOSE:-none}"
     printf 'worktree_root=%s\n' "$RUN_WORKTREE_ROOT"
+    printf 'extra_writable_worktrees=%s\n' "$EXTRA_WRITABLE_WORKTREES_TUPLE"
     printf 'adversary_degraded=%s\n' "$ADVERSARY_DEGRADED"
     printf 'sandbox_grant_consumption=%s\n' "$SANDBOX_GRANT_CONSUMPTION"
   } > "$tmp"
@@ -1755,8 +1896,8 @@ persist_prelaunch_tuple() {
     # change the next launch's initial hash; it is audit metadata, not runtime
     # drift. Every other tuple field remains resume-critical.
     if ! diff -q \
-      <(grep -v '^auth_initial_hash=' "$RUN_TUPLE_FILE") \
-      <(grep -v '^auth_initial_hash=' "$tmp") >/dev/null; then
+      <(normalize_prelaunch_tuple_for_compare "$RUN_TUPLE_FILE") \
+      <(normalize_prelaunch_tuple_for_compare "$tmp") >/dev/null; then
       echo "gsd-run: resume tuple drift; refusing to launch with changed runtime/model/CLI/skill/sandbox" >&2
       diff -u "$RUN_TUPLE_FILE" "$tmp" >&2 || true
       rm -f "$tmp"
@@ -1798,14 +1939,14 @@ probe_host() {
 
   while IFS='|' read -r model effort; do
     if [ "$kind" = "codex" ]; then
-      output="$(run_bounded "$PROBE_TIMEOUT_SECS" env -u OPENAI_API_KEY "$bin" exec \
+      output="$(run_bounded "$PROBE_TIMEOUT_SECS" env -u OPENAI_API_KEY -u GSD_EXTRA_WRITABLE_WORKTREE "$bin" exec \
         -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" \
         --sandbox read-only --ephemeral --ignore-user-config --ignore-rules \
         --color never "$PROBE_PROMPT" </dev/null 2>&1)"
       rc=$?
     else
       output="$(run_bounded "$PROBE_TIMEOUT_SECS" env \
-        -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+        -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u GSD_EXTRA_WRITABLE_WORKTREE \
         "$bin" --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
         --permission-mode plan --tools '' --no-session-persistence \
         --model "$model" -p "$PROBE_PROMPT" </dev/null 2>&1)"
@@ -1869,6 +2010,10 @@ if [ "$_native_rc" -ne 0 ]; then
 fi
 
 ensure_run_worktree || exit $?
+validate_extra_writable_worktrees || exit $?
+# The runner has consumed and pinned this input.  Never propagate a mutable
+# sandbox capability request into the stateful agent environment.
+unset GSD_EXTRA_WRITABLE_WORKTREE
 check_planning_divergence "$@" || exit $?
 # The plan wall above (pre-execution seam) reviewed the REPO phase directory.
 # A worktree-direction sync just replaced that reviewed content with content

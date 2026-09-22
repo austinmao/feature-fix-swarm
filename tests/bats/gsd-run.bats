@@ -14,6 +14,7 @@ setup() {
   unset GSD_ACTIVE_DRIVE GSD_RUN_ID GSD_RUN_STATE_DIR GSD_MACHINE_ID \
         GSD_RESUME GSD_TOKEN_BUDGET GSD_HEARTBEAT_SECS GSD_FOREIGN_LEASE_SECS \
         GSD_RECLAIM_LEASE_SECS GSD_SANDBOX_MODE GSD_NETWORK_MODE \
+        GSD_EXTRA_WRITABLE_WORKTREE \
         GSD_FRESH_START_REASON GSD_FRESH_START_EXPECTED_ROLE_CONFIG_HASH \
         GSD_FRESH_START_EXPECTED_BUNDLE_HASH GSD_FRESH_START_NEW_BUNDLE_HASH \
         GATES_STORE GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE || true
@@ -142,6 +143,7 @@ if [ "\${1:-}" = "--version" ]; then
 fi
 if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
   touch "$BATS_TEST_TMPDIR/codex.probed"
+  printf '%s\n' "\${GSD_EXTRA_WRITABLE_WORKTREE-unset}" > "$BATS_TEST_TMPDIR/codex.probe-extra-writable"
   printf '%s\n' "\${OPENAI_API_KEY-unset}" > "$BATS_TEST_TMPDIR/codex.probe-api-key"
   case "\${FAKE_CODEX_PROBE_MODE:-ok}" in
     bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
@@ -1144,6 +1146,130 @@ assert common + '/logs/refs/heads/gsd' not in roots, roots
 assert common not in roots, roots
 PY
   [ "$status" -eq 0 ]
+}
+
+@test "Codex sandbox admits validated sibling worktrees and records their exact set in the resume tuple" {
+  RUN_ID=spec-408
+  CUSTODY_ONE="$BATS_TEST_TMPDIR/.claude/worktrees/spec-406-custody"
+  CUSTODY_TWO="$BATS_TEST_TMPDIR/.claude/worktrees/spec-406-custody-assets"
+  RUN_STATE="$BATS_TEST_TMPDIR/extra-writable-state"
+  mkdir -p "$BATS_TEST_TMPDIR/.claude/worktrees"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b 406-custody "$CUSTODY_ONE"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b 406-custody-assets "$CUSTODY_TWO"
+
+  FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RUN_STATE_DIR="$RUN_STATE" \
+    GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$CUSTODY_ONE:$CUSTODY_TWO" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/codex.probe-extra-writable")" = unset ]
+  CUSTODY_ONE_REAL="$(cd "$CUSTODY_ONE" && pwd -P)"
+  CUSTODY_TWO_REAL="$(cd "$CUSTODY_TWO" && pwd -P)"
+  run python3 - "$BATS_TEST_TMPDIR/codex.config" "$CUSTODY_ONE_REAL" "$CUSTODY_TWO_REAL" <<'PY'
+import ast, re, sys
+config, *custodies = sys.argv[1:]
+roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', open(config).read(), re.M).group(1))
+for custody in custodies:
+    assert custody in roots, roots
+    assert roots.count(custody) == 1, roots
+PY
+  [ "$status" -eq 0 ]
+  grep -Fxq "extra_writable_worktrees=$CUSTODY_ONE_REAL|$CUSTODY_TWO_REAL" "$RUN_STATE/gsd-run.tuple"
+}
+
+@test "extra writable worktree setting refuses symlink, nonexistent, non-worktree, foreign, and escaped paths" {
+  PARENT="$BATS_TEST_TMPDIR/.claude/worktrees"
+  mkdir -p "$PARENT"
+  LEGAL="$PARENT/legal-custody"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b legal-custody "$LEGAL"
+  ln -s "$LEGAL" "$PARENT/symlink-custody"
+  mkdir -p "$PARENT/not-a-worktree"
+  OUTSIDE="$BATS_TEST_TMPDIR/outside-custody"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b outside-custody "$OUTSIDE"
+
+  FOREIGN_SOURCE="$BATS_TEST_TMPDIR/foreign-source"
+  git init -q "$FOREIGN_SOURCE"
+  git -C "$FOREIGN_SOURCE" config user.email test@example.com
+  git -C "$FOREIGN_SOURCE" config user.name Test
+  printf '%s\n' foreign > "$FOREIGN_SOURCE/seed"
+  git -C "$FOREIGN_SOURCE" add seed
+  git -C "$FOREIGN_SOURCE" commit -qm foreign
+  FOREIGN="$PARENT/foreign-custody"
+  git -C "$FOREIGN_SOURCE" worktree add -q "$FOREIGN"
+
+  assert_extra_refusal() {
+    local candidate="$1" expected="$2"
+    rm -f "$BATS_TEST_TMPDIR/codex.args" "$BATS_TEST_TMPDIR/codex.probed"
+    run env FFS_HOST=codex GSD_RUN_ID=spec-408 GSD_NETWORK_MODE=none \
+      GSD_RUN_STATE_DIR="$BATS_TEST_TMPDIR/extra-refusal-${RANDOM}" \
+      GSD_EXTRA_WRITABLE_WORKTREE="$candidate" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+      bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+    [ "$status" -eq 78 ]
+    [[ "$output" == *"$expected"* ]]
+    [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  }
+
+  assert_extra_refusal "$PARENT/symlink-custody" "refusing nonexistent or symlinked extra writable worktree"
+  assert_extra_refusal "$PARENT/missing-custody" "refusing nonexistent or symlinked extra writable worktree"
+  assert_extra_refusal "$PARENT/not-a-worktree" "extra writable path must name a Git worktree root"
+  assert_extra_refusal "$FOREIGN" "different Git common directory"
+  assert_extra_refusal "$OUTSIDE" "escapes the project worktrees namespace"
+}
+
+@test "resume refuses extra writable worktree capability drift" {
+  RUN_ID=spec-408
+  RUN_STATE="$BATS_TEST_TMPDIR/extra-writable-resume-state"
+  PARENT="$BATS_TEST_TMPDIR/.claude/worktrees"
+  CUSTODY_ONE="$PARENT/spec-406-custody-one"
+  CUSTODY_TWO="$PARENT/spec-406-custody-two"
+  mkdir -p "$PARENT"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b 406-custody-one "$CUSTODY_ONE"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b 406-custody-two "$CUSTODY_TWO"
+
+  FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RUN_STATE_DIR="$RUN_STATE" \
+    GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$CUSTODY_ONE" FAKE_CODEX_DRIVE_RC=42 \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 42 ]
+  rm -f "$BATS_TEST_TMPDIR/codex.args"
+
+  FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RESUME=1 GSD_RUN_STATE_DIR="$RUN_STATE" \
+    GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$CUSTODY_TWO" \
+    CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"resume tuple drift"* ]]
+  [[ "$output" == *"extra_writable_worktrees"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+}
+
+@test "resume accepts a legacy tuple with no extra writable worktree field as the safe default" {
+  RUN_ID=spec-408
+  RUN_STATE="$BATS_TEST_TMPDIR/legacy-extra-writable-resume-state"
+
+  FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RUN_STATE_DIR="$RUN_STATE" \
+    GSD_NETWORK_MODE=none FAKE_CODEX_DRIVE_RC=42 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 42 ]
+  python3 - "$RUN_STATE/gsd-run.tuple" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text("\n".join(
+    line for line in path.read_text().splitlines()
+    if not line.startswith("extra_writable_worktrees=")
+) + "\n")
+PY
+  rm -f "$BATS_TEST_TMPDIR/codex.args"
+
+  FFS_HOST=codex GSD_RUN_ID="$RUN_ID" GSD_RESUME=1 GSD_RUN_STATE_DIR="$RUN_STATE" \
+    GSD_NETWORK_MODE=none CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.args" ]
 }
 
 @test "sandbox refuses a symlinked parent of an attached worktree branch ref" {
