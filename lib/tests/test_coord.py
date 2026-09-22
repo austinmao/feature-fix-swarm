@@ -2466,3 +2466,116 @@ def test_status_redacts_holder_uuids(repo, monkeypatch, capsys):
     combined = cap.out + cap.err
     assert claim_uuid[:8] in combined
     assert claim_uuid not in combined
+
+
+# ── Phase 06 FFS-repair: status is a diagnostic, never a second owner ─────
+def test_status_reports_anchor_liveness_and_historical_acquisition_cli_pid(repo, monkeypatch, capsys):
+    """A: status probes only the anchor; the acquisition CLI is historical.
+
+    The original status surface displayed a dead one-shot CLI PID as if it
+    were ownership state.  A status reader needs all three liveness outcomes
+    without changing the registry or emitting the ambiguous ``cli_pid=``
+    label.
+    """
+    anchor = _spawn_anchor()
+    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(anchor.pid))
+    monkeypatch.setenv("FFS_RUN_ID", "status-live")
+    store = coord._open_store()
+    try:
+        assert coord.cmd_claim(store, argparse_namespace(spec_id="status-live", ttl=None, heartbeat=None)) == 0
+        with coord.registry_transaction(store) as registry:
+            entry = registry["claims"][coord._claim_key("status-live")]
+            entry["cli_pid"] = 424242  # a completed acquisition process
+            coord._save_registry(store, registry)
+        before = (store.store_root / "registry.json").read_bytes()
+        assert coord.cmd_status(store, argparse_namespace()) == 0
+        live = capsys.readouterr().out
+        assert "anchor_liveness=LIVE" in live
+        assert "acquisition_cli_pid=424242" in live
+        assert " cli_pid=" not in live
+        assert (store.store_root / "registry.json").read_bytes() == before
+
+        anchor.kill()
+        anchor.wait(timeout=5)
+        assert coord.cmd_status(store, argparse_namespace()) == 0
+        assert "anchor_liveness=DEAD" in capsys.readouterr().out
+
+        with coord.registry_transaction(store) as registry:
+            entry = registry["claims"][coord._claim_key("status-live")]
+            entry["holder_anchor_pid"] = os.getpid()
+            entry["holder_anchor_start_token"] = "wrong-token"
+            coord._save_registry(store, registry)
+        assert coord.cmd_status(store, argparse_namespace()) == 0
+        assert "anchor_liveness=DEAD" in capsys.readouterr().out
+
+        with coord.registry_transaction(store) as registry:
+            entry = registry["claims"][coord._claim_key("status-live")]
+            entry["holder_host"] = "foreign-host"
+            coord._save_registry(store, registry)
+        assert coord.cmd_status(store, argparse_namespace()) == 0
+        unknown = capsys.readouterr().out
+        assert "anchor_liveness=UNKNOWN" in unknown
+        assert "FOREIGN-HOST" in unknown
+    finally:
+        if anchor.poll() is None:
+            anchor.kill()
+            anchor.wait(timeout=5)
+        coord._close_store(store)
+
+
+def test_renewals_preserve_acquisition_cli_pid_and_foreign_renewal_is_byte_identical(repo, monkeypatch):
+    """B: a renewal refreshes authority timing, not its acquisition history."""
+    monkeypatch.setenv("FFS_COORD_ANCHOR_PID", str(os.getpid()))
+    monkeypatch.setenv("FFS_RUN_ID", "renew-owner")
+    store = coord._open_store()
+    try:
+        assert coord.cmd_claim(store, argparse_namespace(spec_id="renew-owner", ttl=None, heartbeat=None)) == 0
+        assert coord.cmd_lease_acquire(store, _lease_args(resource="path:docs/renew.md", mode="exclusive")) == 0
+        with coord.registry_transaction(store) as registry:
+            claim = registry["claims"][coord._claim_key("renew-owner")]
+            lease = next(iter(registry["leases"]["path:docs/renew.md"]["holders"].values()))
+            claim_generation, lease_generation = claim["generation"], lease["generation"]
+            claim["cli_pid"] = 111111
+            lease["cli_pid"] = 222222
+            old_claim_clock, old_lease_clock = claim["last_renewed_at"], lease["last_renewed_at"]
+            coord._save_registry(store, registry)
+        time.sleep(0.002)
+        assert coord.cmd_claim_renew(store, argparse_namespace(spec_id="renew-owner", generation=claim_generation, ttl=None)) == 0
+        assert coord.cmd_lease_renew(store, _renew_args(resource="path:docs/renew.md", generation=lease_generation)) == 0
+        with coord.registry_transaction(store) as registry:
+            claim = registry["claims"][coord._claim_key("renew-owner")]
+            lease = next(iter(registry["leases"]["path:docs/renew.md"]["holders"].values()))
+            assert claim["cli_pid"] == 111111 and claim["last_renewed_at"] > old_claim_clock
+            assert lease["cli_pid"] == 222222 and lease["last_renewed_at"] > old_lease_clock
+
+        monkeypatch.setenv("FFS_RUN_ID", "renew-foreign")
+        before = (store.store_root / "registry.json").read_bytes()
+        assert coord.cmd_claim_renew(store, argparse_namespace(spec_id="renew-owner", generation=claim_generation, ttl=None)) == coord.EXIT_REFUSED
+        assert coord.cmd_lease_renew(store, _renew_args(resource="path:docs/renew.md", generation=lease_generation)) == coord.EXIT_SUPERSEDED
+        assert (store.store_root / "registry.json").read_bytes() == before
+    finally:
+        coord._close_store(store)
+
+
+@pytest.mark.parametrize("cli_pid", [None, 31337])
+def test_status_reads_legacy_cli_pid_without_migration_or_rule_changes(repo, cli_pid, capsys):
+    """C: absent legacy metadata is diagnostic-only and status is read-only."""
+    store = coord._open_store()
+    try:
+        entry = _hand_stamp_claim(store, "legacy-cli")
+        with coord.registry_transaction(store) as registry:
+            claim = registry["claims"][coord._claim_key("legacy-cli")]
+            if cli_pid is None:
+                del claim["cli_pid"]
+            else:
+                claim["cli_pid"] = cli_pid
+            coord._save_registry(store, registry)
+        before = (store.store_root / "registry.json").read_bytes()
+        assert coord.cmd_status(store, argparse_namespace()) == 0
+        out = capsys.readouterr().out
+        assert f"acquisition_cli_pid={cli_pid}" in out
+        assert "INCOMPLETE-ENTRY" not in out  # cli_pid was never mandatory
+        assert (store.store_root / "registry.json").read_bytes() == before
+        assert entry["generation"] == 1
+    finally:
+        coord._close_store(store)

@@ -55,7 +55,7 @@ COORD-CONTENTION (lock timeout, retryable), `78` store/config refusal
 | `lease-acquire` | `--resource <key> --mode shared\|exclusive [--ttl N] [--heartbeat N]` | `session=<uuid>` then `LEASE-OK generation=<n>` | lease-held listing | 0 / 3 |
 | `lease-renew` | `--resource <key> --generation N [--ttl N]` | `LEASE-OK generation=<n>` | `LEASE-SUPERSEDED caller_generation=N current_generation=M` | 0 / 4 |
 | `lease-release` | `--resource <key> --generation N` | `RELEASE-OK` | `RELEASE-REFUSED: stale generation` / `: not a recorded holder` | 0 / 3 |
-| `status` | (none) | one line per live claim and lease holder (holder, generation, anchor_pid, worktree, `last_renewed_at`, `ttl_secs`, `expires_at`, and any `flags=`) | — | 0 |
+| `status` | (none) | one line per live claim and lease holder (holder, generation, anchor_pid, `anchor_liveness`, historical `acquisition_cli_pid`, worktree, `last_renewed_at`, `ttl_secs`, `expires_at`, and any `flags=`) | — | 0 |
 | `doctor` | (none) | see [Troubleshooting](#troubleshooting) | — | 0 / 69 |
 
 ## Identity and environment variables
@@ -199,6 +199,16 @@ silently:
    gitignored subtree; no tracked source becomes writable. This is an
    accepted, bounded widening over the existing cooperative single-UID
    model (item 3 above), not a new trust boundary.
+
+## Status field semantics
+
+`status` derives `anchor_liveness=LIVE`, `DEAD`, or `UNKNOWN` from the holder
+anchor PID, start token, and host tuple. It never probes the acquisition CLI.
+`acquisition_cli_pid` is optional legacy provenance: it identifies the
+short-lived command that originally recorded the holder and may be dead after
+a successful claim. Renewals refresh timing and the authoritative anchor tuple
+while preserving that historical value byte-for-byte. A missing legacy
+`cli_pid` remains readable and does not make a record incomplete.
 
 ## Troubleshooting
 
