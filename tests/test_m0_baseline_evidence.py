@@ -140,6 +140,9 @@ def test_fixture_reversed_suite_chronology_is_rejected(tmp_path: Path) -> None:
 
 def env_report(name: str) -> tuple[Path, dict]:
     raw = os.environ.get(name)
+    # The evidence gate opts in; ordinary CI has no operator reports and skips.
+    if not raw and os.environ.get("FFS_REQUIRE_ACTUAL_EVIDENCE") == "1":
+        pytest.fail(f"{name} is required when FFS_REQUIRE_ACTUAL_EVIDENCE=1")
     if not raw:
         pytest.skip(f"actual evidence not selected: set {name}")
     path = Path(raw)

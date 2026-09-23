@@ -1,17 +1,19 @@
 """Production ingress queues before per-run effects and releases on failure."""
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 
 import pytest
 
 from run_state.managed import prepare_managed_run
-from run_state.managed_admission import ManagedAdmissionRefused
 from run_state.state import ControlStore
-from run_state.tests.admission_fixture import queue as fixture_queue
+from run_state.tests.admission_fixture import queue as fixture_queue, release as fixture_release
 from test_managed_production_ingress import _setup, ROOT, _tree
 from test_run_context_acceptance import INHERITED_CONTEXT_KEYS
 
@@ -20,7 +22,7 @@ from test_run_context_acceptance import INHERITED_CONTEXT_KEYS
 # stays opt-in refusal only (operator ruling 2). Strict, so wiring it fails CI.
 deferred_ingress_admission = pytest.mark.xfail(
     reason="DEFERRED: global admission at managed production ingress (spec-014 Release B ledger)",
-    raises=(AssertionError, IndexError, ManagedAdmissionRefused), strict=True,
+    raises=(AssertionError, IndexError), strict=True,
 )
 
 
@@ -37,6 +39,7 @@ def test_waiting_production_run_has_no_state_or_workspace_effects(tmp_path, monk
     child = subprocess.Popen(
         ["bash", str(ROOT / "scripts/gsd/gsd-run.sh"), "/gsd-plan-phase", "1"],
         cwd=primary, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 20
@@ -47,7 +50,7 @@ def test_waiting_production_run_has_no_state_or_workspace_effects(tmp_path, monk
         assert _tree(authority) == before
         assert _tree(primary) == checkout_before
         assert not (primary.parent / ".ffs-workspaces").exists()
-        queue.release(tickets.pop(0))
+        fixture_release(queue, tickets.pop(0))
         stdout, stderr = child.communicate(timeout=60)
         assert child.returncode == 78, (stdout, stderr)
         assert json.loads(stdout)["code"] == "HOST_CAPABILITY_UNQUALIFIED"
@@ -57,11 +60,12 @@ def test_waiting_production_run_has_no_state_or_workspace_effects(tmp_path, monk
             assert connection.execute("SELECT worker_capacity FROM authority_run_limits").fetchone()[0] == 3
             assert not connection.execute("SELECT 1 FROM sqlite_master WHERE name='managed_admissions'").fetchone()
     finally:
-        if child.poll() is None:
-            child.kill()
+        # Kill the whole session: grandchildren hold the pipes open past a bash-only kill.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGKILL)
         child.communicate(timeout=10)
         for ticket in tickets:
-            queue.release(ticket)
+            fixture_release(queue, ticket)
 
 
 @deferred_ingress_admission

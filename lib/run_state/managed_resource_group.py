@@ -8,7 +8,7 @@ import time
 
 from process_identity import ProcessIdentity, probe_identity
 from .ownership import assert_owner
-from .resource_groups import GroupMember, GroupPlan, LaunchBinding, ResourceParentGroupRegistry
+from .resource_groups import GroupMember, GroupPlan, LaunchBinding, ResourceGroupRefused, ResourceParentGroupRegistry
 from .shared_resources import SharedResourceCoordinator, record_admission_request, ControlStoreLeaseEvidenceReader
 from .state import ControlStoreRefused
 
@@ -266,8 +266,11 @@ class ManagedParentResourceCoordinator(SharedResourceCoordinator):
                 self.store._assert_activity_binding(tx, self.token, intent["activity_id"])
         if intent is None:
             return super().restore_bound_intent(intent_id)
-        if (intent["generation"] != self.token.generation or intent["child_pid"] is None
-                or intent["state"] in _SETTLED_INTENTS):
+        if intent["generation"] != self.token.generation or intent["child_pid"] is None:
+            return None
+        # A settled intent still holds its slot when completion was recorded but
+        # the release crashed; hand the ticket back so a replay can release it.
+        if intent["state"] in _SETTLED_INTENTS and self._slot_released(match, is_parent):
             return None
         demand = self.demand if is_parent else self.child_demand
         binding = {"request_key": match, "parent_group": self.plan.group_id, "is_parent": is_parent,
@@ -309,15 +312,51 @@ class ManagedParentResourceCoordinator(SharedResourceCoordinator):
     def release(self, reservation):
         _ticket, data = reservation
         binding = self.bindings[data['request_key']]
+        # Idempotent: a replay (or a second resumed supervisor) finds the slot already released.
+        if self._slot_released(data['request_key'], data['is_parent']):
+            return
         if data['is_parent']:
             with self.store.read_transaction() as tx:
                 intent = tx.execute('SELECT * FROM authority_launch_intents WHERE id=?', (binding.launch_intent_id,)).fetchone()
             if intent is None or intent['state'] not in {'completed_succeeded', 'completed_failed', 'reconcile_required'}:
                 raise ControlStoreRefused('RESOURCE_GROUP_PARENT_PROOF_INVALID')
-            self.registry.mark_parent_ended(self.plan, binding, _hash(dict(intent)))
-            self.registry.close_after_parent_end(self.plan)
+            proof = _hash(dict(intent))
+            for retry in (False, True):
+                try:
+                    # A replay after a crash between the two steps finds the group already parent_ended.
+                    if self._group_state() != 'parent_ended':
+                        self.registry.mark_parent_ended(self.plan, binding, proof)
+                    self.registry.close_after_parent_end(self.plan)
+                    return
+                except ResourceGroupRefused:
+                    # Lost a CAS race with a concurrent replay: accept only a group it closed,
+                    # finish its close once from parent_ended, and otherwise keep the refusal.
+                    state = self._group_state()
+                    if state == 'closed':
+                        return
+                    if retry or state != 'parent_ended':
+                        raise
         else:
-            self.registry.finish_child(self.plan, self.claims[binding.launch_intent_id])
+            try:
+                self.registry.finish_child(self.plan, self.claims[binding.launch_intent_id])
+            except ResourceGroupRefused:
+                if not self._slot_released(data['request_key'], False):
+                    raise
+
+    def _group_state(self):
+        with self.queue._connection() as connection:
+            row = connection.execute('SELECT state FROM resource_parent_groups WHERE group_id=?',
+                                     (self.plan.group_id,)).fetchone()
+        return None if row is None else row['state']
+
+    def _slot_released(self, request_key, is_parent):
+        # Only a proven terminal record counts; anything else goes through the registry's own CAS checks.
+        if is_parent:
+            return self._group_state() in {'closed', 'expired'}
+        with self.queue._connection() as connection:
+            row = connection.execute('SELECT state FROM resource_parent_group_claims WHERE group_id=? AND request_key=?',
+                                     (self.plan.group_id, request_key)).fetchone()
+        return row is not None and row['state'] == 'finished'
 
     def record_feedback(self, reservation, *, outcome):
         # Parent feedback is backed by its released native lease. Child grants

@@ -18,8 +18,9 @@ from run_state.workspace import inspect_workspace, begin_child_workspace_prepara
 from test_supervised_process import setup_owner
 
 
-@pytest.mark.parametrize('unsafe', [False, True])
-def test_actual_parent_and_sequential_children_share_one_prepaid_envelope(tmp_path, unsafe):
+@pytest.mark.parametrize('mode', ['safe', 'unsafe', 'release-crash'])
+def test_actual_parent_and_sequential_children_share_one_prepaid_envelope(tmp_path, monkeypatch, mode):
+    unsafe = mode == 'unsafe'
     supervisor, store, parent = setup_owner(tmp_path)
     token = supervisor.token
     store.transition_activity(token, parent.activity_id, expected='pending', new='active', reason='fixture parent')
@@ -78,14 +79,40 @@ def test_actual_parent_and_sequential_children_share_one_prepaid_envelope(tmp_pa
                 assert tx.execute('SELECT COUNT(*) FROM authority_launch_intents WHERE child_pid IS NOT NULL').fetchone()[0] == 1
             return
         child_handle = supervisor.launch(request)
-        assert supervisor.finish(child_handle, timeout=10, token_usage=0)['returncode'] == 0
+        if mode == 'release-crash' and index == 1:
+            _finish_with_release_crash(supervisor, coordinator, child_handle, monkeypatch, 'release')
+        else:
+            assert supervisor.finish(child_handle, timeout=10, token_usage=0)['returncode'] == 0
         assert len(queue.snapshot()) == 2
         assert all(row['status'] == 'active' for row in queue.snapshot())
     (ready.path / 'release').touch()
-    assert supervisor.finish(handle, timeout=10, token_usage=0)['returncode'] == 0
+    if mode == 'release-crash':
+        # Crash between mark_parent_ended and close: the replay must finish the close.
+        _finish_with_release_crash(supervisor, coordinator.registry, handle, monkeypatch, 'close_after_parent_end')
+    else:
+        assert supervisor.finish(handle, timeout=10, token_usage=0)['returncode'] == 0
     assert all(row['status'] == 'released' for row in queue.snapshot())
     with store.read_transaction() as tx:
         assert tx.execute('SELECT dispatch_used FROM authority_run_limits').fetchone()[0] == 3
+
+
+def _finish_with_release_crash(supervisor, target, handle, monkeypatch, method):
+    """Completion recorded, release crashed: a same-owner replay recovers and releases the slot."""
+    coordinator = supervisor.shared_resource_coordinator
+    with monkeypatch.context() as crash:
+        def interrupted(*args, **kwargs):
+            raise RuntimeError('fixture crash')
+        crash.setattr(target, method, interrupted)
+        with pytest.raises(RuntimeError, match='fixture crash'):
+            supervisor.finish(handle, timeout=10, token_usage=0)
+    reservation = coordinator.restore_bound_intent(handle.intent_id)
+    assert reservation is not None
+    coordinator.release(reservation)
+    coordinator.release(reservation)  # a second replay is a no-op, never a refusal
+    with monkeypatch.context() as stale:  # a concurrent replay settled the slot after this one read it
+        stale.setattr(coordinator, '_slot_released', lambda *args: False)
+        coordinator.release(reservation)
+    assert coordinator.restore_bound_intent(handle.intent_id) is None
 
 
 @pytest.mark.parametrize('replay', [False, True])

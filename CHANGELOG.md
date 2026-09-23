@@ -8,6 +8,22 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-23 — spec-014 Release B cross-vendor review follow-ups)
+
+- Prepaid resource groups: a replay after `complete_launch` succeeded but the
+  release crashed now recovers the ticket and releases the slot, instead of
+  holding it until a successor generation. Release is idempotent and accepts
+  a concurrent replay's settlement only when the group or claim is proven
+  closed or finished.
+- Supervisor keeps a cached reservation until release and provider feedback
+  both succeed, so a same-supervisor replay retries a crashed feedback write.
+- The deferred ingress-admission tests release fixture tickets through a
+  proven-dead consumer and no longer accept `ManagedAdmissionRefused`, so
+  wiring ingress flips them to XPASS. Their `gsd-run.sh` child runs in its own
+  session and cleanup kills the process group.
+- Evidence tests fail on a missing operator report when
+  `FFS_REQUIRE_ACTUAL_EVIDENCE=1`; otherwise they skip with a stated reason.
+
 ### Added (2026-09-23 — spec-014 Release B: opt-in managed run-state core)
 
 - Managed frontend admission (`scripts/gsd/ffs-frontend.sh`, `run_state`

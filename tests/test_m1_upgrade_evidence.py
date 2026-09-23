@@ -391,6 +391,9 @@ def test_fixture_contract_publishes_closed_comparison_binding_schema() -> None:
 
 def _actual_json(name: str) -> object:
     selected = os.environ.get(name)
+    # The evidence gate opts in; ordinary CI has no operator reports and skips.
+    if not selected and os.environ.get("FFS_REQUIRE_ACTUAL_EVIDENCE") == "1":
+        pytest.fail(f"{name} is required when FFS_REQUIRE_ACTUAL_EVIDENCE=1")
     if not selected:
         pytest.skip(f"actual evidence not selected: set {name}")
     path = Path(selected)

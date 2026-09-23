@@ -188,6 +188,9 @@ def test_fixture_symlink_recovery_artifact_is_refused(tmp_path: Path) -> None:
 
 def report_from_env(name: str) -> tuple[Path, dict]:
     raw = os.environ.get(name)
+    # The evidence gate opts in; ordinary CI has no operator reports and skips.
+    if not raw and os.environ.get("FFS_REQUIRE_ACTUAL_EVIDENCE") == "1":
+        pytest.fail(f"{name} is required when FFS_REQUIRE_ACTUAL_EVIDENCE=1")
     if not raw:
         pytest.skip(f"actual evidence not selected: set {name}")
     path = Path(raw)
