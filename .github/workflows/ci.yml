@@ -27,6 +27,17 @@ jobs:
         run: npm ci
       - name: Exercise live GSD install, doctor, and staging seams
         run: bash tests/live-gsd-package.sh
+      - name: Register the exact GSD runtime descriptor for the test suites
+        # Spec-014 tests bind to a controller-registered upstream runtime
+        # (FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR + _SHA256). Describe the
+        # pristine npm-ci install so CI exercises the same runtime identity.
+        run: |
+          out="$RUNNER_TEMP/upstream-runtime.json"
+          PYTHONPATH=lib python -m run_state.cli describe-upstream-runtime \
+            --module-root node_modules/@opengsd/gsd-core/gsd-core/bin/lib \
+            --node "$(command -v node)" --output "$out"
+          echo "FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR=$out" >> "$GITHUB_ENV"
+          echo "FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR_SHA256=$(sha256sum "$out" | cut -d' ' -f1)" >> "$GITHUB_ENV"
       - name: Run python test suites
         run: |
           python -m pip install --quiet --requirement requirements-dev.txt
