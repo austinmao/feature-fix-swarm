@@ -8,10 +8,10 @@ setup() {
   source "$LIB"
 }
 
-@test "codex_equiv_model: fable alias -> gpt-5.6-sol" {
+@test "codex_equiv_model: fable alias -> gpt-6-astra" {
   run codex_equiv_model fable
   [ "$status" -eq 0 ]
-  [ "$output" = "gpt-5.6-sol" ]
+  [ "$output" = "gpt-6-astra" ]
 }
 
 @test "codex_equiv_model: opus alias -> gpt-5.6-sol" {
@@ -45,7 +45,7 @@ setup() {
 
 @test "codex_equiv_model: accepts full Claude model IDs" {
   run codex_equiv_model claude-fable-5
-  [ "$output" = "gpt-5.6-sol" ]
+  [ "$output" = "gpt-6-astra" ]
   run codex_equiv_model claude-opus-5
   [ "$output" = "gpt-5.6-sol" ]
   run codex_equiv_model claude-sonnet-5

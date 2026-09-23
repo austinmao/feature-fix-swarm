@@ -69,6 +69,11 @@ review stop.
 
 ## Procedure
 
+**Managed-ingress gate (check first).** If `FFS_MANAGED_INGRESS=1`, do not run
+Steps 0–5 or delegate anything: go straight to
+[Managed ingress](#managed-ingress-release-b-opt-in-spec-014) and invoke
+`scripts/gsd/ffs-frontend.sh task-swarm`. Any refusal it prints is the result.
+
 Cross-session coordination (spec-009) is inherited, not re-implemented: the
 execution step routes through `/feature-implement`, whose Step 1.5
 claim-or-stop claims the run id (interactive) or defers to `gsd-run.sh`'s own
@@ -158,6 +163,32 @@ through `scripts/gsd/gsd-run.sh`: a fixed pre-launch probe prefers the invoking
 host and may select the other host before work begins. A started drive is never
 replayed across vendors. Review gates try the opposite family first and may use
 one explicitly degraded, read-only active-host fallback.
+
+### Managed ingress (Release B opt-in, spec-014)
+
+With `FFS_MANAGED_INGRESS=1` the legacy `gsd-run.sh` refuses (exit 78) and the
+drive enters the managed frontend instead:
+
+```bash
+python3 -m run_state.cli describe-upstream-runtime \
+  --module-root node_modules/@opengsd/gsd-core/gsd-core/bin/lib --node "$(command -v node)" \
+  --output .planning/run-state/upstream-runtime.json          # prints sha256
+FFS_UPSTREAM_RUNTIME_MANIFEST=.planning/run-state/upstream-runtime.json \
+FFS_UPSTREAM_RUNTIME_SHA256=<sha256> FFS_PHASE_SCOPE=<N> \
+FFS_ACCEPTANCE_DRAFT=<draft.json> FFS_REVIEW_MODEL_CATALOG=<models.json> \
+FFS_HOST_KIND=codex FFS_CODEX_RUNTIME_HOME=... CODEX_BIN=... GSD_MODEL_REQUEST='{"kind":"tier","name":"execution"}' \
+FFS_HOST_TOKEN_RESERVATION=<tokens, e.g. 100K> \
+bash scripts/gsd/ffs-frontend.sh task-swarm --select-file <path> ...
+```
+
+The descriptor SHA-256 is bound at start and revalidated on every resume
+(`UPSTREAM_RUNTIME_DRIFT`); the sealed draft's criterion ids must be the run's
+accepted requirement ids (`objective:<sha256(objective)>`). The lifecycle runs
+execute -> mapped checks -> one native final review -> DONE; a failed check with
+no repair producer hands back and refuses `RECOVERY_PRODUCER_UNAVAILABLE`.
+`FFS_ACCEPTANCE_DRAFT` is required (`ACCEPTANCE_DRAFT_REQUIRED` otherwise), and
+task-swarm must deliver its work through a supervised GSD wave
+(`WAVE_EXECUTION_UNPROVEN` otherwise).
 
 ## Rules
 

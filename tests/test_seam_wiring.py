@@ -25,8 +25,6 @@ import subprocess
 import time
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 EMIT = ROOT / "scripts" / "gsd" / "promote-emit.sh"
 GATES = ROOT / "lib" / "gates.py"
@@ -250,7 +248,7 @@ PF_SKILL = ROOT / "skills" / "preflight" / "SKILL.md"
 # The "sha256:" prefix is the credential scanner's own sanctioned form for a
 # legitimate digest literal (env-registry.sh _WHITELIST) — keep it.
 REVIEW_GATE_SHA256 = (
-    "sha256:4b5835e28ab47860d790b158e5282ae8a30f04fc91c863a671962ac62be77cf4")
+    "sha256:3046e5fe87b8ba0fff09973fd4bc6c471c33ca74fc769507010a0e3d64e221aa")
 
 
 def test_int004a_review_gate_zero_seam_tokens():
@@ -742,8 +740,8 @@ def test_seam5_ci_pytest_job_runs_env_registry_check():
 
 
 def test_ci_bats_job_reapplies_and_verifies_exact_gsd_overlay_before_bats():
-    """npm ci restores the pristine exact pin; Bats requires its reviewed
-    overlay to be reapplied and verified before suite discovery."""
+    """npm ci restores the pristine exact pin; the reviewed overlay must
+    apply and verify on a staged copy before suite discovery."""
     lines = [ln for ln in CI_YML.read_text().splitlines()
              if not ln.lstrip().startswith("#")]
     text = "\n".join(lines)

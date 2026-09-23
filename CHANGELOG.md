@@ -8,6 +8,42 @@ all skills.
 
 ## Unreleased
 
+### Added (2026-09-23 — spec-014 Release B: opt-in managed run-state core)
+
+- Managed frontend admission (`scripts/gsd/ffs-frontend.sh`, `run_state`
+  CLI `frontend-start`): feature-spec, fix, code-uplift, feature-implement,
+  and task-swarm can enter a controller-owned run with a registered upstream
+  runtime descriptor (`describe-upstream-runtime`), dispatch and token
+  budgets, and bounded worker capacity. Opt-in only: nothing is activated by
+  default, and `gsd-run.sh` refuses the legacy runner only when
+  `FFS_MANAGED_INGRESS` is set.
+- Supervised native review dispatch for Codex and Claude hosts, sealed review
+  contracts, restart monitoring, a terminal descendant fence, accounting
+  settlement, and a recovery controller that fails closed
+  (`RECOVERY_PRODUCER_UNAVAILABLE`) and retains handback.
+- Deferred, still fail-closed: zero-plan frontends
+  (`PRELAUNCH_PHASE_SCOPE_REQUIRED`), recovery/repair/spec-review producers,
+  production review-model catalog wiring, `gsd-run.sh` ingress wiring, and
+  global admission at managed production ingress. Their tests are strict
+  expected failures, so wiring any of them fails CI until the marker goes.
+  Everything here is fixture-proven; no native host qualification is claimed.
+- Linux portability: PID-namespace proof no longer reads the ptrace-guarded
+  `/proc/1/ns/pid` and accepts only the initial namespace; unlimited
+  `RLIMIT_NPROC` falls back to the kernel thread/PID cap; the recovery docs
+  cache accepts a root-owned sticky ancestor such as `/tmp`; deeply nested
+  review JSON is a typed refusal on Python 3.11; prepaid resource-group
+  replay restores its parent ticket. Darwin-only `sandbox-exec` and
+  bubblewrap confinement tests skip where the product itself fails closed.
+- Restored the executable bit on `scripts/gsd/codex-model-sync.sh`.
+
+### Changed (2026-09-23 — GSD Core 1.14.0, staged overlay)
+
+- Updated the exact `@opengsd/gsd-core` pin from 1.13.0 to 1.14.0. The
+  installer and CI now apply the compatibility overlay to a staged copy via
+  `--package-root`, so `node_modules` stays pristine.
+- CI registers the pristine install's runtime descriptor before the Python
+  suites, so descriptor-bound tests run against the same runtime identity.
+
 ### Changed (2026-09-11 — GSD Core 1.13.0 and Node 24 baseline)
 
 - Updated the exact `@opengsd/gsd-core` pin from 1.11.0 to 1.13.0 across

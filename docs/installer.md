@@ -82,7 +82,7 @@ JSON output has schema `ffs.doctor/v1`. Exit codes are stable:
   collision, or different project/user versions.
 - `2`: invalid invocation or an internal installer failure.
 
-Doctor also requires upstream `gsd-file-manifest.json` ownership at GSD 1.13.0
+Doctor also requires upstream `gsd-file-manifest.json` ownership at GSD 1.14.0
 with full profiles in both the Claude and Codex config roots. If Codex CLI is
 installed, its supported range is `>=0.137.0,<0.148.0` or exact `0.154.0` / `0.155.1`;
 `0.146.x`, `0.147.x`, `0.154.0`, and `0.155.1` are the tested lines. Intervening and other later
@@ -141,7 +141,7 @@ rolled back with the emitted ID.
 
 ## GSD ownership
 
-`setup.sh` verifies the exact `@opengsd/gsd-core@1.13.0` package and runs:
+`setup.sh` verifies the exact `@opengsd/gsd-core@1.14.0` package and runs:
 
 ```text
 gsd-core --claude --global --profile=full

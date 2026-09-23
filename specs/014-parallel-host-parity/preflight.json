@@ -1,0 +1,138 @@
+[
+  {
+    "kind": "probe",
+    "name": "git-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "git",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "python-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "python3",
+      "-c",
+      "import pytest,coverage,filelock; print(\"Python test dependencies available\")"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "node-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "node",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "npm-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "npm",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "bats-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "bats",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "shellcheck-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "shellcheck",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "bandit-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "bandit",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "claude-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "claude",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "codex-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "codex",
+      "--version"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "tmux-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "tmux",
+      "-V"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "github-available",
+    "argv": [
+      "rtk",
+      "proxy",
+      "gh",
+      "api",
+      "rate_limit",
+      "--jq",
+      ".resources.core.limit"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "managed-gsd-both-hosts",
+    "argv": [
+      "rtk",
+      "proxy",
+      "python3",
+      "-c",
+      "from pathlib import Path; h=Path.home(); assert all((h/p/\"gsd-core/bin/gsd-tools.cjs\").is_file() for p in (\".claude\",\".codex\")); print(\"Managed entrypoints present; exact bundle verification is a separate gate\")"
+    ]
+  },
+  {
+    "kind": "probe",
+    "name": "registered-isolated-workspace",
+    "argv": [
+      "rtk",
+      "proxy",
+      "python3",
+      "-c",
+      "import subprocess; from pathlib import Path; p=Path.cwd(); common=Path(subprocess.check_output([\"git\",\"rev-parse\",\"--git-common-dir\"],text=True).strip()).resolve(); assert p.name==\"recovery-gsd114-host-integration-20260916\" and common.parent != p; print(\"Registered isolated checkout\")"
+    ]
+  }
+]

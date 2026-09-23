@@ -31,7 +31,30 @@ from typing import Any, Iterator
 INSTALL_SCHEMA = "ffs.install/v1"
 DOCTOR_SCHEMA = "ffs.doctor/v1"
 BACKUP_SCHEMA = "ffs.backup/v1"
-GSD_VERSION = "1.13.0"
+GSD_VERSION = "1.14.0"
+GSD_COMMIT = "f8542fef67c1f978ffa70912cb6f2aaab76464c6"
+GSD_INTEGRITY = "sha512-e05sV2c8KlcQ2hoJ4U3U1OBjqswQOon4C29Cs75fEAr+tq7qJ/XyFYrN/nwblREWUkPUUoxmVzLVj4Im2KjQxQ=="
+GSD_COMPATIBILITY_PATCH = "gsd-1.14-ffs-supervised-dispatch.patch"
+GSD_COMPATIBILITY_PATCH_SHA256 = "5f28ac10d80002d0f60ff453194ee7537ee1ca709600bfff595ad21fe67a0f5e"
+GSD_COMPATIBILITY_BASELINE = {
+    "agents/gsd-executor.md": "40431b7e765a9bf6b656788196bf947a94f8697323285f0f5e552353148deafb",
+    "bin/install.js": "0acbd01933783537f934b33b6cc9132ff8e11ae37f0fa88ff63bc402aa0ae861",
+    "gsd-core/bin/lib/tdd-red-evidence.cjs": "3889f9dccfbcc7d119254e0c01010ff71547ed95bbd03b4584bad56530a61797",
+    "gsd-core/bin/gsd-tools.cjs": "ec066117822d0270bafa6ed3f863b4aebee8bfda243efcd828bf8a1d85732a92",
+    "gsd-core/workflows/execute-phase.md": "ba69804f311a5efb7ebd87b824917a82fbacbb3389cf56de06346d64d31beb4a",
+    "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "7c791b8311ed047abcb747c2e8e7a2362c199b66daa3d9fb89bf0feb1d58ab32",
+}
+# Outputs after the exact-pin overlay (patches/gsd-core-overlay.json) and then
+# the supervised-dispatch patch are applied to the staged copy, in that order.
+GSD_COMPATIBILITY_OUTPUT = {
+    "agents/gsd-executor.md": "c26c85437e1b5082d16ae69e2c53f474601431e48b9e270fa22a7bac680a1f9f",
+    "bin/install.js": "3669a79b6f80f2f373a78a2e0cecf58c5f8cac736f17eb08d49ee368672b197c",
+    "gsd-core/bin/gsd-tools.cjs": "f0b3dde4d9bca6c81b53459c51547ea5ea5daeec965431481815cd3b94ba3328",
+    "gsd-core/bin/lib/tdd-red-evidence.cjs": "719e35a5ed6e4365cbe3edf212ee58985565ff332be79e86427bdb108045d784",
+    "gsd-core/workflows/execute-phase.md": "b233aec60d03d678fa8f93e1a7b35fb045fe615ecb5488b73735e3cfefd3907b",
+    "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "435ea7ecdddc48796d56f4252b59d099423feb9f83aaa4b697743b3f7ad25bea",
+    "gsd-core/bin/ffs-supervised-dispatch.cjs": "f3356ecdc8f9f24a7f036f4c0143177db53cd8be87feca80111e6479e11fa619",
+}
 CODEX_MIN_VERSION = (0, 137, 0)
 CODEX_MAX_VERSION = (0, 148, 0)
 # Compatibility pins are admitted one release at a time after a live probe of
@@ -46,6 +69,69 @@ CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1"
 MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     ("lib/gates.py", "gates.py"),
     ("lib/runtime_proof.py", "runtime_proof.py"),
+    ("lib/model_requests.py", "model_requests.py"),
+    ("lib/host_capabilities.py", "host_capabilities.py"),
+    ("lib/process_identity.py", "process_identity.py"),
+    ("lib/run_context.py", "run_context.py"),
+    ("lib/run_state/__init__.py", "run_state/__init__.py"),
+    ("lib/run_state/audit.py", "run_state/audit.py"),
+    ("lib/run_state/cli.py", "run_state/cli.py"),
+    ("lib/run_state/claude_host.py", "run_state/claude_host.py"),
+    ("lib/run_state/claude_qualification.py", "run_state/claude_qualification.py"),
+    ("lib/run_state/claude_runtime_staging.py", "run_state/claude_runtime_staging.py"),
+    ("lib/run_state/codex_host.py", "run_state/codex_host.py"),
+    ("lib/run_state/commands.py", "run_state/commands.py"),
+    ("lib/run_state/frontend_selection.py", "run_state/frontend_selection.py"),
+    ("lib/run_state/gsd_wave_bridge.py", "run_state/gsd_wave_bridge.py"),
+    ("lib/run_state/host_request.py", "run_state/host_request.py"),
+    ("lib/run_state/managed.py", "run_state/managed.py"),
+    ("lib/run_state/managed_admission.py", "run_state/managed_admission.py"),
+    ("lib/run_state/managed_claude_qualification.py", "run_state/managed_claude_qualification.py"),
+    ("lib/run_state/managed_qualification.py", "run_state/managed_qualification.py"),
+    ("lib/run_state/ownership.py", "run_state/ownership.py"),
+    ("lib/run_state/runtime_staging.py", "run_state/runtime_staging.py"),
+    ("lib/run_state/selection.py", "run_state/selection.py"),
+    ("lib/run_state/state.py", "run_state/state.py"),
+    ("lib/run_state/supervisor.py", "run_state/supervisor.py"),
+    ("lib/run_state/upstream.py", "run_state/upstream.py"),
+    ("lib/run_state/wave_consumer.py", "run_state/wave_consumer.py"),
+    ("lib/run_state/wave_execution.py", "run_state/wave_execution.py"),
+    ("lib/run_state/worker_channel.py", "run_state/worker_channel.py"),
+    ("lib/run_state/worker_policy.py", "run_state/worker_policy.py"),
+    ("lib/run_state/workspace.py", "run_state/workspace.py"),
+    # Managed frontend lifecycle closure (test_managed_lib_files_ship_every_module_their_imports_reach).
+    ("lib/run_state/candidate_chain.py", "run_state/candidate_chain.py"),
+    ("lib/run_state/containment.py", "run_state/containment.py"),
+    ("lib/run_state/final_review_context.py", "run_state/final_review_context.py"),
+    ("lib/run_state/frontend_completion.py", "run_state/frontend_completion.py"),
+    ("lib/run_state/frontend_lifecycle.py", "run_state/frontend_lifecycle.py"),
+    ("lib/run_state/frontend_policy.py", "run_state/frontend_policy.py"),
+    ("lib/run_state/frontend_producers.py", "run_state/frontend_producers.py"),
+    ("lib/run_state/integration_journal.py", "run_state/integration_journal.py"),
+    ("lib/run_state/local_check_runtime.py", "run_state/local_check_runtime.py"),
+    ("lib/run_state/managed_resource_group.py", "run_state/managed_resource_group.py"),
+    ("lib/run_state/migration.py", "run_state/migration.py"),
+    ("lib/run_state/native_review_runtime.py", "run_state/native_review_runtime.py"),
+    ("lib/run_state/native_review_supervision.py", "run_state/native_review_supervision.py"),
+    ("lib/run_state/native_review_transport.py", "run_state/native_review_transport.py"),
+    ("lib/run_state/prelaunch_inventory.py", "run_state/prelaunch_inventory.py"),
+    # prelaunch_inventory.py runs this sibling bridge via Path(__file__).with_name().
+    ("lib/run_state/prelaunch_plans.cjs", "run_state/prelaunch_plans.cjs"),
+    ("lib/run_state/provider_feedback.py", "run_state/provider_feedback.py"),
+    ("lib/run_state/recovery_controller.py", "run_state/recovery_controller.py"),
+    ("lib/run_state/recovery_docs.py", "run_state/recovery_docs.py"),
+    ("lib/run_state/recovery_integration.py", "run_state/recovery_integration.py"),
+    ("lib/run_state/recovery_trial_checks.py", "run_state/recovery_trial_checks.py"),
+    ("lib/run_state/resource_groups.py", "run_state/resource_groups.py"),
+    ("lib/run_state/resource_observation.py", "run_state/resource_observation.py"),
+    ("lib/run_state/resource_scheduler.py", "run_state/resource_scheduler.py"),
+    ("lib/run_state/resource_watchdog.py", "run_state/resource_watchdog.py"),
+    ("lib/run_state/run_policy.py", "run_state/run_policy.py"),
+    ("lib/run_state/sealed_review.py", "run_state/sealed_review.py"),
+    ("lib/run_state/shared_resources.py", "run_state/shared_resources.py"),
+    ("lib/run_state/wave_candidate.py", "run_state/wave_candidate.py"),
+    ("scripts/gsd/codex-runtime-observer.py", "scripts/gsd/codex-runtime-observer.py"),
+    ("patches/gsd-1.14-ffs-supervised-dispatch.patch", "patches/gsd-1.14-ffs-supervised-dispatch.patch"),
     ("scripts/gsd/socratic-slice.sh", "scripts/gsd/socratic-slice.sh"),
     # socratic-slice.sh hard-sources this sibling at startup; without it the
     # staged copy is dead on arrival
@@ -1584,10 +1670,13 @@ def stage_socratic(source: Path, backup: Backup) -> Path | None:
 
 def verify_gsd_package(source: Path) -> None:
     package_path = source / "package.json"
+    lock_path = source / "package-lock.json"
     installed_path = source / "node_modules" / "@opengsd" / "gsd-core" / "package.json"
     package = read_json(package_path)
+    lock = read_json(lock_path)
     installed = read_json(installed_path)
     declared = (package or {}).get("devDependencies", {}).get("@opengsd/gsd-core")
+    locked = (lock or {}).get("packages", {}).get("node_modules/@opengsd/gsd-core", {})
     actual = (installed or {}).get("version")
     if declared != GSD_VERSION:
         raise ActionableError(
@@ -1597,23 +1686,21 @@ def verify_gsd_package(source: Path) -> None:
         raise ActionableError(
             f"installed @opengsd/gsd-core must be {GSD_VERSION}; found {actual!r}; run npm install"
         )
+    if locked.get("version") != GSD_VERSION or locked.get("integrity") != GSD_INTEGRITY:
+        raise ActionableError(
+            "package lock must bind @opengsd/gsd-core "
+            f"{GSD_VERSION} to the qualified release integrity"
+        )
 
 
-def apply_gsd_core_overlay(source: Path) -> None:
-    """Apply and immediately re-verify FFS's exact, audited GSD adapter.
-
-    The overlay is intentionally narrower than a source fork: one byte-pinned
-    upstream file and one rendered digest.  It must succeed before the
-    upstream global-profile installer can observe the package, otherwise a
-    mixed host installation could claim a runtime that the local executor
-    cannot actually validate.
-    """
+def apply_gsd_core_overlay(source: Path, package: Path) -> None:
+    """Apply and verify the exact-pin overlay on a staged package copy only."""
     overlay = source / "scripts" / "gsd" / "apply-gsd-core-overlay.py"
     if not overlay.is_file():
         raise ActionableError(f"GSD exact-pin overlay applier is missing: {overlay}")
     for mode in ("apply", "verify"):
         process = subprocess.run(
-            [sys.executable, str(overlay), mode, "--repo", str(source)],
+            [sys.executable, str(overlay), mode, "--repo", str(source), "--package-root", str(package)],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1624,21 +1711,82 @@ def apply_gsd_core_overlay(source: Path) -> None:
             raise ActionableError(f"GSD exact-pin overlay {mode} failed: {detail}")
 
 
-def install_gsd_profiles(source: Path) -> None:
+def stage_gsd_compatibility_package(source: Path, staging: Path) -> Path:
+    """Patch an isolated exact package copy; never mutate node_modules in place."""
+    package = source / "node_modules" / "@opengsd" / "gsd-core"
+    patch = source / "patches" / GSD_COMPATIBILITY_PATCH
+    if patch.is_symlink() or not patch.is_file() or sha256_file(patch) != GSD_COMPATIBILITY_PATCH_SHA256:
+        raise ActionableError("GSD compatibility patch is missing or has drifted")
+    target = staging / "gsd-core-candidate"
+    if target.exists() or target.is_symlink():
+        raise ActionableError(f"GSD compatibility staging already exists: {target}")
+    shutil.copytree(package, target, symlinks=True)
+    for relative, expected in GSD_COMPATIBILITY_BASELINE.items():
+        candidate = target / relative
+        if candidate.is_symlink() or not candidate.is_file() or sha256_file(candidate) != expected:
+            raise ActionableError(f"GSD compatibility baseline mismatch: {relative}")
+    apply_gsd_core_overlay(source, target)
+    added = target / "gsd-core/bin/ffs-supervised-dispatch.cjs"
+    if lexists(added):
+        raise ActionableError("GSD compatibility output already exists")
+    git = Path("/usr/bin/git")
+    if not git.is_file() or git.is_symlink():
+        raise ActionableError("trusted Git executable is unavailable")
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(staging), "LANG": "C", "LC_ALL": "C"}
+    for arguments in (("apply", "--check", str(patch)), ("apply", str(patch))):
+        process = subprocess.run(
+            [str(git), *arguments], cwd=target, env=environment,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
+        )
+        if process.returncode != 0:
+            detail = process.stderr.strip() or process.stdout.strip() or "unknown failure"
+            raise ActionableError(f"GSD compatibility patch failed: {detail[:512]}")
+    for relative, expected in GSD_COMPATIBILITY_OUTPUT.items():
+        candidate = target / relative
+        if candidate.is_symlink() or not candidate.is_file() or sha256_file(candidate) != expected:
+            raise ActionableError(f"GSD compatibility output mismatch: {relative}")
+    receipt = {
+        "schema": "ffs.gsd-compatibility/v1", "version": GSD_VERSION,
+        "commit": GSD_COMMIT, "patch": GSD_COMPATIBILITY_PATCH,
+        "patch_sha256": GSD_COMPATIBILITY_PATCH_SHA256,
+        "outputs": GSD_COMPATIBILITY_OUTPUT,
+    }
+    (target / "ffs-compatibility.json").write_text(
+        json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8",
+    )
+    return target
+
+
+def install_gsd_profiles(source: Path, staging: Path | None = None) -> None:
     """Delegate complete host surfaces to the pinned upstream installer."""
     verify_gsd_package(source)
-    # Keep this immediately before dispatch: a failed/mismatched overlay
-    # leaves the pre-existing global profiles untouched. The enclosing
-    # install_gsd_with_rollback transaction restores those profiles if either
-    # host installer subsequently fails.
-    apply_gsd_core_overlay(source)
     override = os.environ.get("FFS_GSD_INSTALLER")
-    installer = Path(override) if override else source / "node_modules" / ".bin" / "gsd-core"
-    if not installer.is_file():
+    if override:
+        # Test seam only: an override never receives the staged overlay, so the
+        # package's own stock installer is refused rather than run unpatched.
+        package_root = source / "node_modules" / "@opengsd" / "gsd-core"
+        stock = (package_root / "bin" / "install.js", source / "node_modules" / ".bin" / "gsd-core")
+        if any(path.exists() and Path(override).resolve() == path.resolve() for path in stock):
+            raise ActionableError(
+                "FFS_GSD_INSTALLER names the stock gsd-core installer, which would install "
+                "profiles without the staged FFS overlay; unset it to use the staged installer"
+            )
+        print("ffs-installer: FFS_GSD_INSTALLER test seam in use; the staged FFS overlay is not applied",
+              file=sys.stderr)
+        command = [override]
+        installer = Path(override)
+    else:
+        if staging is None:
+            raise ActionableError("GSD compatibility staging root is required")
+        package = stage_gsd_compatibility_package(source, staging)
+        node = shutil.which("node")
+        installer = package / "bin" / "install.js"
+        command = [node, str(installer)] if node else []
+    if not command or not installer.is_file():
         raise ActionableError(f"GSD upstream installer is missing: {installer}")
     for runtime in ("claude", "codex"):
         process = subprocess.run(
-            [str(installer), f"--{runtime}", "--global", "--profile=full"],
+            [*command, f"--{runtime}", "--global", "--profile=full"],
             cwd=source,
             text=True,
             stdout=subprocess.PIPE,
@@ -1711,7 +1859,7 @@ def install_gsd_with_rollback(source: Path, backup: Backup) -> None:
         for path in sorted(before, key=str):
             backup.before(path)
         try:
-            install_gsd_profiles(source)
+            install_gsd_profiles(source, backup.directory)
         except Exception:
             # A failed upstream installer can leave a truncated manifest. Do
             # not let discovery of that damaged output bypass restoration of
@@ -1926,6 +2074,8 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
             "gsd": {
                 "owner": "upstream-installer",
                 "version": GSD_VERSION,
+                "commit": GSD_COMMIT,
+                "integrity": GSD_INTEGRITY,
                 "profiles": {"claude": "full", "codex": "full"},
             },
         }
@@ -2129,16 +2279,6 @@ def add_gsd_doctor_checks(checks: list[dict[str, str]], source: Path) -> None:
         check_entry(checks, "gsd-package", "fail", str(exc), "install the exact pinned package from the lockfile")
     else:
         check_entry(checks, "gsd-package", "pass", f"@opengsd/gsd-core is exactly {GSD_VERSION}")
-    overlay = source / "scripts" / "gsd" / "apply-gsd-core-overlay.py"
-    result = subprocess.run(
-        [sys.executable, str(overlay), "verify", "--repo", str(source)],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    ) if overlay.is_file() else None
-    if result is None or result.returncode:
-        detail = (result.stderr.strip() if result else f"missing overlay applier: {overlay}")
-        check_entry(checks, "gsd-core-overlay", "fail", detail, "run scripts/gsd/deps.sh install --yes")
-    else:
-        check_entry(checks, "gsd-core-overlay", "pass", "exact-pin GSD overlay digest matches its manifest")
 
     errors: list[str] = []
     for runtime, root in gsd_config_roots().items():
@@ -2401,13 +2541,15 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
     if not executable:
         check_entry(checks, "codex-cli-version", "pass", "Codex CLI is not installed; version gate not applicable")
         return
-    process = subprocess.run(
-        [executable, "--version"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        process = subprocess.run(
+            [executable, "--version"], text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=3,
+        )
+    except subprocess.TimeoutExpired:
+        check_entry(checks, "codex-cli-version", "fail", "Codex CLI version inspection timed out",
+                    "install a responsive Codex CLI before using isolated runtime checks")
+        return
     parsed = parse_cli_version(process.stdout + "\n" + process.stderr) if process.returncode == 0 else None
     if parsed is None:
         check_entry(
@@ -2417,7 +2559,8 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             f"could not parse Codex CLI version from {executable}",
             f"install Codex CLI {CODEX_VERSION_POLICY}",
         )
-    elif not codex_version_is_supported(parsed):
+        return
+    if not codex_version_is_supported(parsed):
         rendered = ".".join(map(str, parsed))
         check_entry(
             checks,
@@ -2426,8 +2569,25 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             f"Codex CLI {rendered} is outside supported range {CODEX_VERSION_POLICY}",
             "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 / 0.155.1 are tested",
         )
+        return
+    # The doctor must not admit a binary solely from its release number.  Keep
+    # this invocation separate so fake/missing feature surfaces fail closed.
+    contract = Path(__file__).resolve().with_name("host_capabilities.py")
+    admitted = subprocess.run(
+        [sys.executable, str(contract), "cli", executable],
+        text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False,
+    )
+    if admitted.returncode:
+        check_entry(
+            checks,
+            "codex-cli-version",
+            "fail",
+            f"Codex CLI {'.'.join(map(str, parsed))} lacks required isolated-runtime capabilities",
+            "install a Codex CLI with strict config, isolated discovery, sandbox and hook-trust support",
+        )
     else:
-        check_entry(checks, "codex-cli-version", "pass", f"Codex CLI {'.'.join(map(str, parsed))} is supported")
+        check_entry(checks, "codex-cli-version", "pass",
+                    f"Codex CLI {'.'.join(map(str, parsed))} passes the static CLI-surface check; runtime readiness is UNMET until its isolated canary passes")
 
 
 def doctor(scope: str, project: Path | None, as_json: bool) -> int:
@@ -2560,6 +2720,8 @@ def reconcile_consumer(source: Path, target: Path) -> int:
         "scripts/hooks/cli-hang-guard.sh",
         "scripts/hooks/credential-output-guard.sh",
         "lib/model_requests.py",
+        "lib/host_capabilities.py",
+        "lib/process_identity.py",
         "lib/gates.py",
         "lib/runtime_proof.py",
     ]

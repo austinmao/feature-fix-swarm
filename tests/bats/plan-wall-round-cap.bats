@@ -44,9 +44,9 @@ run_wall() {
   run_wall
   [ "$status" -eq 3 ]
   [[ "$output" == *"WALL-ROUND-CAP"* ]]
-  # the unblock is printed, naming both levers
+  # Protected review capacity cannot be renewed by reset or a larger max.
   [[ "$output" == *"findings-queue list --unresolved"* ]]
-  [[ "$output" == *"--reset"* ]]
+  [[ "$output" == *"cannot renew the protected review allowance"* ]]
 }
 
 @test "round cap: PLAN_WALL_MAX_ROUNDS=1 — hard block on the FIRST invocation quarantines (no repair round)" {
@@ -55,14 +55,16 @@ run_wall() {
   [[ "$output" == *"WALL-ROUND-CAP"* ]]
 }
 
-@test "round cap: counter is durable across invocations but reset-all clears it" {
+@test "round cap: reset-all preserves protected review allowance after fresh reviews" {
   run_wall
   run_wall
   [ "$status" -eq 3 ]
-  python3 "$GATES_PY" loop-round "$GSD_RUN_ID" --reset-all
-  # post-reset the phase is back on round 1 of 2 — blocked, not capped
+  run python3 "$GATES_PY" loop-round "$GSD_RUN_ID" --reset-all
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected review"* ]]
+  # The cap diagnosis is honest: reset-all cannot refill protected review usage.
   run_wall
-  [ "$status" -ne 3 ]
+  [ "$status" -eq 3 ]
 }
 
 @test "round cap: PLAN_WALL=off waiver never consumes a round" {
@@ -82,20 +84,17 @@ run_wall() {
   [ "$status" -eq 3 ]
 }
 
-@test "round cap: counter infrastructure failure fails OPEN, never impersonates the cap" {
+@test "round cap: counter infrastructure failure refuses admission" {
   # An empty read-only store makes loop-round's _load_store raise
-  # (JSONDecodeError) — rc=3 LOOP-ROUND-ERROR. The wall must WARN and
-  # proceed unbounded (the queue_error path downstream owns broken-store
-  # reporting), never exit 3. Regression for PR #91 round 1: any nonzero
-  # from loop-round was read as cap-hit, breaking plan-wall.bats' own
-  # queue-I/O fault-injection case.
+  # (JSONDecodeError). An accounting failure must refuse review dispatch;
+  # exit 78 distinguishes unavailable authority from an exhausted cap.
   mkdir -p "$(dirname "$GATES_STORE")"
   : > "$GATES_STORE"
   chmod 444 "$GATES_STORE"
   run bash "$LEVER" .planning/phases/1-foo
   chmod 644 "$GATES_STORE"
-  [ "$status" -ne 3 ]
-  [[ "$output" == *"round counter unavailable"* ]]
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"WALL-ACCOUNTING-UNAVAILABLE"* ]]
   [[ "$output" != *"WALL-ROUND-CAP"* ]]
 }
 

@@ -36,7 +36,7 @@ make_stub_path() {
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/lib/tdd-red-evidence.cjs" "$target"
   cp "$ROOT/node_modules/@opengsd/gsd-core/agents/gsd-executor.md" "$executor"
   cp "$ROOT/node_modules/@opengsd/gsd-core/gsd-core/workflows/execute-phase.md" "$resume"
-  printf '{"name":"@opengsd/gsd-core","version":"1.13.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
+  printf '{"name":"@opengsd/gsd-core","version":"1.14.0"}\n' > "$repo/node_modules/@opengsd/gsd-core/package.json"
   for skill in prompt-master socratic; do
     mkdir -p "$home/.agents/skills/$skill"
     touch "$home/.agents/skills/$skill/SKILL.md"

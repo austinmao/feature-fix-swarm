@@ -46,8 +46,8 @@ fi
 GATES_PY=""
 for candidate in \
   "$REPO_ROOT/packages/feature-fix-swarm/lib/gates.py" \
-  "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
-  "$REPO_ROOT/lib/gates.py"; do
+  "$REPO_ROOT/lib/gates.py" \
+  "$HOME/.claude/lib/feature-fix-swarm/gates.py"; do
   [ -f "$candidate" ] && GATES_PY="$candidate" && break
 done
 if [ -n "$GATES_PY" ]; then
@@ -63,6 +63,20 @@ fi
 if [ -z "$DIFF" ]; then
   echo '{"verdict":"APPROVED","note":"empty diff"}'
   exit 0
+fi
+
+# A non-empty executed diff spends one sealed review allowance before any host invocation.
+# Prefer the repository gate; the user-scope installation is a compatibility fallback.
+if [ -z "$GATES_PY" ]; then
+  echo '{"verdict":"REVISE","note":"BLOCKED: bundled gates.py unavailable; refusing unmetered review"}'
+  exit 1
+fi
+if ! _loop_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" 'review:diff' --max 2 --durable 2>&1)"; then
+  python3 - "$_loop_out" <<'PYJSON'
+import json, sys
+print(json.dumps({"verdict": "REVISE", "note": "BLOCKED: durable review allowance unavailable or exhausted: " + sys.argv[1].replace("\n", " ")}))
+PYJSON
+  exit 1
 fi
 
 # Wall policy (c) (2026-08-08 operator decision): plan-wall residuals ride

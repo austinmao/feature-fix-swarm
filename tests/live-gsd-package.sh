@@ -11,9 +11,17 @@ live_home="$live_root/home"
 live_bin="$live_root/bin"
 mkdir -p "$live_home" "$live_bin"
 
-# Doctor requires a supported Codex version. CI is validating the installed
-# package/runtime surface here, not launching a provider process.
-printf '%s\n' '#!/usr/bin/env bash' "printf 'codex-cli 0.147.0\\n'" > "$live_bin/codex"
+# Doctor requires a supported Codex version and the static isolated-runtime
+# `exec --help` surface. CI is validating the installed package/runtime
+# surface here, not launching a provider process (runtime stays UNMET).
+cat > "$live_bin/codex" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  exec) printf '%s\n' --strict-config --ignore-user-config --ignore-rules \
+          --sandbox --add-dir --disable --dangerously-bypass-hook-trust ;;
+  *) printf 'codex-cli 0.147.0\n' ;;
+esac
+STUB
 chmod +x "$live_bin/codex"
 
 export HOME="$live_home"

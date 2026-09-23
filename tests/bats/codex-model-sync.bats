@@ -33,7 +33,7 @@ EOF
 
   run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
-  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
   # spec-004 AC-004 effort split: fable materializes at xhigh, opus stays high
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
@@ -87,7 +87,7 @@ JSON
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-execution.toml"
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-judgment.toml"
   grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-judgment.toml"
-  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-frontier.toml"
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-frontier.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-frontier.toml"
 }
 
@@ -108,13 +108,13 @@ JSON
   [ "$(cat "$CODEX_ROOT/agents/gsd-executor.toml")" = "$first" ]
 }
 
-@test "a standalone fable alias keeps its emitted Sol xhigh pin on repeat sync" {
+@test "a standalone fable alias keeps its emitted Astra xhigh pin on repeat sync" {
   write_agent gsd-planner fable
   CONFIG="$BATS_TEST_TMPDIR/no-planner-override.json"
   printf '%s\n' '{"model_overrides":{}}' > "$CONFIG"
   GSD_MODEL_CONFIG="$CONFIG" bash "$SCRIPT" "$CODEX_ROOT"
   first="$(cat "$CODEX_ROOT/agents/gsd-planner.toml")"
-  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
 
   GSD_MODEL_CONFIG="$CONFIG" bash "$SCRIPT" "$CODEX_ROOT"
@@ -131,9 +131,33 @@ JSON
 
   GSD_MODEL_CONFIG="$CONFIG" run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
-  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  [[ "$output" == *"materialized 2 agent model pin(s)"* ]]
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
   # spec-004 AC-004: fable override materializes at xhigh
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
   grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor.toml"
+}
+
+@test "resolved Codex tier IDs get explicit model and effort pins" {
+  write_agent_without_model gsd-planner
+  write_agent_without_model gsd-plan-checker
+  write_agent_without_model gsd-executor
+  write_agent_without_model gsd-research-synthesizer
+  CONFIG="$BATS_TEST_TMPDIR/config.json"
+  cat > "$CONFIG" <<'JSON'
+{"model_overrides":{"gsd-planner":"gpt-6-astra","gsd-plan-checker":"gpt-5.6-sol","gsd-executor":"gpt-5.6-terra","gsd-research-synthesizer":"gpt-5.6-luna"}}
+JSON
+
+  GSD_MODEL_CONFIG="$CONFIG" run bash "$SCRIPT" "$CODEX_ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"materialized 4 agent model pin(s)"* ]]
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-plan-checker.toml"
+  grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-plan-checker.toml"
+  grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor.toml"
+  grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor.toml"
+  grep -F 'model = "gpt-5.6-luna"' "$CODEX_ROOT/agents/gsd-research-synthesizer.toml"
+  grep -F 'model_reasoning_effort = "low"' "$CODEX_ROOT/agents/gsd-research-synthesizer.toml"
 }

@@ -26,10 +26,10 @@ setup() {
   [[ "$output" == *"-u OPENAI_API_KEY"* ]]
 }
 
-@test "gsd-run codex drive strips OPENAI_API_KEY" {
-  run grep -nF -- 'CODEX_BIN" exec' "$REPO_ROOT/scripts/gsd/gsd-run.sh"
+@test "managed Codex drive uses a closed environment without OPENAI_API_KEY" {
+  run env PYTHONPATH="$REPO_ROOT/lib" python3 -m pytest -q \
+    "$REPO_ROOT/lib/run_state/tests/test_codex_host.py::test_adapter_builds_the_exact_closed_invocation"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"-u OPENAI_API_KEY"* ]]
 }
 
 @test "run_state audit does not inherit OPENAI_API_KEY into codex exec" {

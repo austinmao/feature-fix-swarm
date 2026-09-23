@@ -93,6 +93,10 @@ EOF
     rm -f "$tmp"
     exit 1
   fi
+  if cmp -s "$file" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
   chmod --reference="$file" "$tmp" 2>/dev/null || chmod "$(stat -f '%Lp' "$file" 2>/dev/null || echo 600)" "$tmp" 2>/dev/null || true
   mv "$tmp" "$file"
   updated=$((updated + 1))

@@ -19,7 +19,9 @@ class ModelRequestError(ValueError):
 
 
 CODEX_TIERS = {
-    "frontier": ("gpt-5.6-sol", "xhigh"),
+    # Frontier is an explicitly requested planning capability.  It is never
+    # part of the automatic ladder (which ends at judgment/Sol).
+    "frontier": ("gpt-6-astra", "xhigh"),
     "judgment": ("gpt-5.6-sol", "high"),
     "execution": ("gpt-5.6-terra", "medium"),
     "volume": ("gpt-5.6-luna", "low"),

@@ -10,6 +10,8 @@ setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   LIB="$ROOT/scripts/gsd/model-probe-lib.sh"
   TMP="$BATS_TEST_TMPDIR"
+  # The override is a command word, so resolve fixture executables through PATH.
+  export PATH="$TMP:$PATH"
   export GSD_FALLBACK_CACHE="$TMP/cache"
   cat > "$TMP/probe-ok.sh" <<'SH'
 #!/usr/bin/env bash
@@ -26,33 +28,33 @@ SH
   # spec-004 fix round finding 15: the header's "no side effects beyond
   # defining functions" claim used to be false — mkdir ran unconditionally
   # at source time. mkdir now happens lazily inside each probe function.
-  run bash -c ". '$LIB'; type probe_claude_model >/dev/null && type probe_codex_model >/dev/null && echo DEFINED"
+  run bash -c ". $(printf '%q' "$LIB"); type probe_claude_model >/dev/null && type probe_codex_model >/dev/null && echo DEFINED"
   [ "$status" -eq 0 ]
   [ "$output" = "DEFINED" ]
   [ ! -d "$GSD_FALLBACK_CACHE" ]
 }
 
 @test "calling a probe function creates the cache dir lazily" {
-  run env GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
+  run env GSD_MODEL_PROBE_CMD="probe-ok.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
   [ "$status" -eq 0 ]
   [ -d "$GSD_FALLBACK_CACHE" ]
 }
 
 @test "probe_claude_model: ok probe caches ok, matches model-fallback.sh cache filename" {
-  run env GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
+  run env GSD_MODEL_PROBE_CMD="probe-ok.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
   [ "$status" -eq 0 ]
   [ -f "$GSD_FALLBACK_CACHE/claude-fable-5.status" ]
   [ "$(cat "$GSD_FALLBACK_CACHE/claude-fable-5.status")" = "ok" ]
 }
 
 @test "probe_claude_model: fail probe caches fail, function returns nonzero" {
-  run env GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
+  run env GSD_MODEL_PROBE_CMD="probe-fail.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
   [ "$status" -eq 1 ]
   [ "$(cat "$GSD_FALLBACK_CACHE/claude-fable-5.status")" = "fail" ]
 }
 
 @test "probe_codex_model: separate cache key from probe_claude_model" {
-  run env GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" bash -c ". '$LIB'; probe_codex_model gpt-5.6-sol"
+  run env GSD_MODEL_PROBE_CMD_CODEX="probe-ok.sh" bash -c ". $(printf '%q' "$LIB"); probe_codex_model gpt-5.6-sol"
   [ "$status" -eq 0 ]
   [ -f "$GSD_FALLBACK_CACHE/gpt-5.6-sol.status" ]
 }
@@ -65,8 +67,8 @@ echo probed >> "$PROBE_LOG"
 exit 0
 SH
   chmod +x "$TMP/probe-log.sh"
-  GSD_MODEL_PROBE_CMD="$TMP/probe-log.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
-  GSD_MODEL_PROBE_CMD="$TMP/probe-log.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5" || true
+  GSD_MODEL_PROBE_CMD="probe-log.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
+  GSD_MODEL_PROBE_CMD="probe-log.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5" || true
   [ "$(wc -l < "$PROBE_LOG" | tr -d ' ')" -eq 1 ]
 }
 
@@ -78,9 +80,9 @@ echo probed >> "$PROBE_LOG"
 exit 0
 SH
   chmod +x "$TMP/probe-log.sh"
-  GSD_MODEL_PROBE_CMD="$TMP/probe-log.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
-  GSD_MODEL_PROBE_CMD="$TMP/probe-log.sh" GSD_MODEL_PROBE_FORCE=1 \
-    bash -c ". '$LIB'; probe_claude_model claude-fable-5"
+  GSD_MODEL_PROBE_CMD="probe-log.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
+  GSD_MODEL_PROBE_CMD="probe-log.sh" GSD_MODEL_PROBE_FORCE=1 \
+    bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
   [ "$(wc -l < "$PROBE_LOG" | tr -d ' ')" -eq 2 ]
 }
 
@@ -92,10 +94,10 @@ echo probed >> "$PROBE_LOG"
 exit 0
 SH
   chmod +x "$TMP/probe-log.sh"
-  GSD_MODEL_PROBE_CMD="$TMP/probe-log.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
+  GSD_MODEL_PROBE_CMD="probe-log.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
   # simulate the 24h cache expiring
   touch -t 202001010000 "$GSD_FALLBACK_CACHE/claude-fable-5.status"
-  GSD_MODEL_PROBE_CMD="$TMP/probe-log.sh" bash -c ". '$LIB'; probe_claude_model claude-fable-5"
+  GSD_MODEL_PROBE_CMD="probe-log.sh" bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-fable-5"
   [ "$(wc -l < "$PROBE_LOG" | tr -d ' ')" -eq 2 ]
 }
 
@@ -103,15 +105,15 @@ SH
   ISOLATED="$TMP/isolated"
   mkdir -p "$ISOLATED"
   cp "$LIB" "$ISOLATED/model-probe-lib.sh"   # deliberately WITHOUT run-bounded.sh
-  run bash -c ". '$ISOLATED/model-probe-lib.sh'"
+  run bash -c ". $(printf '%q' "$ISOLATED/model-probe-lib.sh")"
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot locate run-bounded.sh"* ]]
 }
 
 @test "GSD_FALLBACK_CACHE override is honored" {
   ALT="$TMP/alt-cache"
-  run env GSD_FALLBACK_CACHE="$ALT" GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" \
-    bash -c ". '$LIB'; probe_claude_model claude-opus-5"
+  run env GSD_FALLBACK_CACHE="$ALT" GSD_MODEL_PROBE_CMD="probe-ok.sh" \
+    bash -c ". $(printf '%q' "$LIB"); probe_claude_model claude-opus-5"
   [ "$status" -eq 0 ]
   [ -f "$ALT/claude-opus-5.status" ]
 }

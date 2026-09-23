@@ -40,8 +40,7 @@ except OSError:
     print("")
 PYEOF
 )"
-GSD_VERSION="${GSD_VERSION:-1.13.0}"
-GSD_OVERLAY="${GSD_OVERLAY:-$REPO_ROOT/scripts/gsd/apply-gsd-core-overlay.py}"
+GSD_VERSION="${GSD_VERSION:-1.14.0}"
 
 # roster rows: name|kind|required|remedy
 # kinds: binary (command -v; comma = any-of), npm, pip, pin
@@ -109,12 +108,9 @@ try:
 except OSError:
     print("")
 PY
-  )" = "$GSD_VERSION" ] && python3 "$GSD_OVERLAY" verify --repo "$REPO_ROOT" >/dev/null 2>&1
-}
-
-apply_gsd_overlay() {
-  [ -f "$GSD_OVERLAY" ] || fail "GSD overlay applier is missing: $GSD_OVERLAY" 2
-  python3 "$GSD_OVERLAY" apply --repo "$REPO_ROOT" || fail "GSD exact-pin overlay failed" 2
+  )" = "$GSD_VERSION" ]
+  # node_modules stays pristine: the installer applies and verifies the
+  # exact-pin overlay on its staged package copy (lib/ffs_installer.py).
 }
 
 probe_pip() {
@@ -200,8 +196,7 @@ cmd_install() {
       case "$answer" in y|Y|yes|YES) ;; *) fail "npm ci declined — re-run with --yes to skip this prompt" ;; esac
     fi
     (cd "$REPO_ROOT" && npm ci) || fail "npm ci failed" 2
-    apply_gsd_overlay
-    probe_npm || fail "npm ci completed but @opengsd/gsd-core $GSD_VERSION with its exact-pin overlay is not resolvable" 2
+    probe_npm || fail "npm ci completed but @opengsd/gsd-core $GSD_VERSION is not resolvable" 2
     printf 'installed @opengsd/gsd-core %s via npm ci\n' "$GSD_VERSION"
   fi
 

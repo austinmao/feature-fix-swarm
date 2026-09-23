@@ -126,7 +126,7 @@ deletion is delegated solely to `run-finalizer.sh` — no second deletion owner.
 
 ## gsd-core (Orchestration)
 
-The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.13.0`.
+The gsd loop replaced ruflo as FFS's orchestrator (spec 002). Pin: `@opengsd/gsd-core@1.14.0`.
 Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG package.
 
 | Scenario | Use |

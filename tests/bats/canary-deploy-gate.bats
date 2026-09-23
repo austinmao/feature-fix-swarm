@@ -139,7 +139,7 @@ PYEOF
 # (pre- and post-probe, same seam, same validation) and refuse on mismatch.
 
 flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
-  printf "if [ -f '%s' ]; then printf '%%s\\n' '%s'; else touch '%s'; printf '%%s\\n' '%s'; fi" \
+  printf "if [ -f %q ]; then printf '%%s\\n' %q; else touch %q; printf '%%s\\n' %q; fi" \
     "$1" "$3" "$1" "$2"
 }
 
@@ -177,7 +177,7 @@ flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
   DIGEST="app@sha256:$(printf 'a%.0s' $(seq 1 64))"
   PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-match"
   GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
-    FFS_DEPLOY_PROBE_CMD="printf '%s' '$DIGEST' > '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_CMD="printf '%s' '$DIGEST' > $(printf '%q' "$PROBE_FILE")" \
     FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"canary-deploy-gate: PASS"* ]]
@@ -190,7 +190,7 @@ flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
   DIGEST_B="app@sha256:$(printf 'b%.0s' $(seq 1 64))"
   PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-mismatch"
   GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST_A'" \
-    FFS_DEPLOY_PROBE_CMD="printf '%s' '$DIGEST_B' > '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_CMD="printf '%s' '$DIGEST_B' > $(printf '%q' "$PROBE_FILE")" \
     FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
   [ "$status" -eq 2 ]
   [[ "$output" == *"CANARY-DEPLOY-DIGEST-CHANGED"* ]]
@@ -254,7 +254,7 @@ flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
   # deterministic swap: the probe command itself replaces the (wrapper-
   # truncated) regular file with a symlink before the wrapper reads it back.
   GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
-    FFS_DEPLOY_PROBE_CMD="rm -f '$PROBE_FILE'; ln -s '$TARGET' '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_CMD="rm -f $(printf '%q' "$PROBE_FILE"); ln -s $(printf '%q' "$TARGET") $(printf '%q' "$PROBE_FILE")" \
     FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
   [ "$status" -eq 2 ]
   [[ "$output" == *"CANARY-DEPLOY-PROBE-DIGEST-UNSAFE"* ]]
@@ -266,7 +266,7 @@ flip_digest_cmd() { # $1=counter-file $2=digest-A $3=digest-B
   PROBE_FILE="$BATS_TEST_TMPDIR/probe-digest-huge"
   SENTINEL="UNIQUE-SENTINEL-BYTES-MUST-NEVER-APPEAR-IN-OUTPUT"
   GATES_STORE="$STORE" FFS_DEPLOY_DIGEST_CMD="printf '%s\n' '$DIGEST'" \
-    FFS_DEPLOY_PROBE_CMD="{ printf '%s' '$SENTINEL'; head -c 5000 /dev/zero | tr '\\0' 'x'; } > '$PROBE_FILE'" \
+    FFS_DEPLOY_PROBE_CMD="{ printf '%s' '$SENTINEL'; head -c 5000 /dev/zero | tr '\\0' 'x'; } > $(printf '%q' "$PROBE_FILE")" \
     FFS_DEPLOY_PROBE_DIGEST_FILE="$PROBE_FILE" run bash "$SCRIPT"
   [ "$status" -eq 2 ]
   [[ "$output" == *"CANARY-DEPLOY-PROBE-DIGEST-INVALID"* ]]

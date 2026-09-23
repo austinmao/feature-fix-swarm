@@ -11,7 +11,9 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # spec-014 Release B adds ~250 git- and subprocess-heavy test files
+    # (~20 min measured on a 2-vCPU Linux container).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,6 +29,17 @@ jobs:
         run: npm ci
       - name: Exercise live GSD install, doctor, and staging seams
         run: bash tests/live-gsd-package.sh
+      - name: Register the exact GSD runtime descriptor for the test suites
+        # Spec-014 tests bind to a controller-registered upstream runtime
+        # (FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR + _SHA256). Describe the
+        # pristine npm-ci install so CI exercises the same runtime identity.
+        run: |
+          out="$RUNNER_TEMP/upstream-runtime.json"
+          PYTHONPATH=lib python -m run_state.cli describe-upstream-runtime \
+            --module-root node_modules/@opengsd/gsd-core/gsd-core/bin/lib \
+            --node "$(command -v node)" --output "$out"
+          echo "FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR=$out" >> "$GITHUB_ENV"
+          echo "FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR_SHA256=$(sha256sum "$out" | cut -d' ' -f1)" >> "$GITHUB_ENV"
       - name: Run python test suites
         run: |
           python -m pip install --quiet --requirement requirements-dev.txt
@@ -161,10 +174,12 @@ jobs:
           cache: npm
       - name: Install exact GSD package
         run: npm ci
-      - name: Apply and verify exact GSD overlay
+      - name: Apply and verify exact GSD overlay on a staged copy
+        # node_modules stays pristine (the installer stages 1.14 the same way).
         run: |
-          python scripts/gsd/apply-gsd-core-overlay.py apply --repo .
-          python scripts/gsd/apply-gsd-core-overlay.py verify --repo .
+          cp -R node_modules/@opengsd/gsd-core "$RUNNER_TEMP/gsd-core"
+          python scripts/gsd/apply-gsd-core-overlay.py apply --repo . --package-root "$RUNNER_TEMP/gsd-core"
+          python scripts/gsd/apply-gsd-core-overlay.py verify --repo . --package-root "$RUNNER_TEMP/gsd-core"
       - name: Install python coord-layer dependencies (filelock)
         run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Run bats suites

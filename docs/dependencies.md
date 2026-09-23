@@ -8,7 +8,7 @@ what FFS owns from what it installs, invokes, or merely integrates with.
 | Component | Version policy | Ownership | Purpose |
 | --- | --- | --- | --- |
 | Claude Code or Codex CLI | At least one current supported host; Codex `>=0.137.0,<0.148.0` or exact `0.154.0` / `0.155.1` | User-installed | Runs the skills and agents |
-| Open GSD Core | Exact `@opengsd/gsd-core@1.13.0` | Upstream-owned; installed through GSD's installer | Plan/execute/verify orchestration, manifests, hooks, and GSD skills |
+| Open GSD Core | Exact `@opengsd/gsd-core@1.14.0` | Upstream-owned; installed through GSD's installer | Plan/execute/verify orchestration, manifests, hooks, and GSD skills |
 | Node.js and npm | Node 24+, npm 10+ | User-installed | Reproducible GSD package installation |
 | Python | 3.11+ | User-installed | Installer, gates, state, and verification tools |
 | Git | Current supported release | User-installed | Source control, common-directory locks, and worktrees |
@@ -81,12 +81,14 @@ FFS therefore calls GSD's full-profile installer and verifies its upstream
 manifest. It also carries a small audited compatibility overlay set for
 `gsd-core/bin/lib/tdd-red-evidence.cjs`, `agents/gsd-executor.md`, and
 `gsd-core/workflows/execute-phase.md`: the applier accepts only
-`@opengsd/gsd-core@1.13.0`, every committed pristine-file SHA-256, and every
-committed rendered SHA-256. The safe-resume target treats a matching commit
+`@opengsd/gsd-core@1.14.0`, every committed pristine-file SHA-256, and every
+committed rendered SHA-256. The repository's `node_modules` stays pristine;
+the installer applies the overlay to its staged package copy, then the
+supervised-dispatch patch, and pins every resulting digest. The safe-resume target treats a matching commit
 scope as only a candidate; it blocks redispatch only when that commit changes
 a path declared by the active plan, and refuses dispatch outright (exit 2
-from the matcher) when the plan's declared paths cannot be parsed. `deps.sh install` and managed setup apply
-and verify all targets atomically before either global profile is installed.
+from the matcher) when the plan's declared paths cannot be parsed. Managed setup applies
+and verifies all targets atomically before either global profile is installed.
 This is not a fork or a hand edit: any upstream byte, version, or
 rendered-digest drift fails closed and requires a reviewed overlay update.
 

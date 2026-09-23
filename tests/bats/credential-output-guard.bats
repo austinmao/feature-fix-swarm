@@ -75,7 +75,7 @@ envelope() {
   chmod +x "$fixture/scripts/hooks/credential-output-guard.sh" "$fixture/scripts/gsd/waiver-record.sh"
   git -C "$fixture" init -q
   fixture_hook="$fixture/scripts/hooks/credential-output-guard.sh"
-  run bash -c "$(declare -f envelope); envelope 'railway variables' | CREDENTIAL_OUTPUT_GUARD=off bash '$fixture_hook'"
+  run bash -c "$(declare -f envelope); envelope 'railway variables' | CREDENTIAL_OUTPUT_GUARD=off bash \"\$1\"" _ "$fixture_hook"
   [ "$status" -eq 0 ]
   run bash -c "printf 'not-json' | bash '$HOOK'"
   [ "$status" -eq 0 ]

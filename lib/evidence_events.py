@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 
 from gates import _StoreLock, _load_store, _now, _save_store, _store_path
 
 MAX_RUN_ID = 128
+MAX_LOCK_PATH_BYTES = 4096
 RUN_ID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
+CONTROL_FREE_RE = re.compile(r"^[^\x00-\x1f\x7f]+$")
 POS_INT_RE = re.compile(r"^[1-9][0-9]*$")
 
 
@@ -28,6 +31,20 @@ def _positive(value: str, name: str) -> int:
     return int(value)
 
 
+def _lock_path(value: str) -> str:
+    if not os.path.isabs(value):
+        raise ValueError("lock path must be absolute")
+    if not CONTROL_FREE_RE.fullmatch(value):
+        raise ValueError("lock path must be control-free")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("lock path must be valid UTF-8") from exc
+    if len(encoded) > MAX_LOCK_PATH_BYTES:
+        raise ValueError("lock path exceeds 4096 bytes")
+    return value
+
+
 def finisher_skipped(args: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="evidence_events.py finisher-skipped")
     parser.add_argument("--run-id", required=True)
@@ -42,8 +59,7 @@ def finisher_skipped(args: list[str]) -> int:
         if run_id == "unattributed":
             if not all(trace):
                 raise ValueError("unattributed events require --lock-path and --holder-pid")
-            if not ns.lock_path.startswith("/") or not RUN_ID_RE.fullmatch(ns.lock_path):
-                raise ValueError("lock path must be an absolute control-free path")
+            lock_path = _lock_path(ns.lock_path)
             holder_pid = _positive(ns.holder_pid, "holder pid")
         elif any(trace):
             raise ValueError("trace flags are permitted only for unattributed events")
@@ -62,7 +78,7 @@ def finisher_skipped(args: list[str]) -> int:
                 raise ValueError("evidence events namespace is not a list")
             event = {"kind": "finisher-skipped", "run_id": run_id, "pr": pr, "ts": _now()}
             if run_id == "unattributed":
-                event.update({"lock_path": ns.lock_path, "holder_pid": holder_pid})
+                event.update({"lock_path": lock_path, "holder_pid": holder_pid})
             events.append(event)
             _save_store(store, data)
     except (OSError, ValueError, TypeError) as exc:

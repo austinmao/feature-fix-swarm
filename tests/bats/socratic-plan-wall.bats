@@ -38,6 +38,7 @@ JSON
   export PATH="$REPO/bin:$PATH"
   export FFS_ADVERSARY_MODEL_PROBE=off
   export GATES_PY="$REPO/packages/feature-fix-swarm/lib/gates.py"
+  export GSD_RUN_ID="fixture-socratic-plan-wall"
   # Other vendor's binary resolves nowhere, so rule-1 opposite-vendor fails
   # fast (rc=127) instead of shelling out to a real CLI on the machine.
   export ADVERSARY_BIN_CODEX=nonexistent-codex-binary-xyz
@@ -138,7 +139,9 @@ run_wall_capture() {
   git checkout -q --detach HEAD
   run_wall_capture
   [ "$status" -eq 0 ]
-  cmp "$PROMPT_CAPTURE" "$BASELINE"
+  repair_prefix='REPAIR CONFIRMATION: Use the original accepted requirements. Confirm the adjudicated findings and concrete regressions caused by the edits. Do not add requirements or evidence obligations based on reviewer preference. A newly evidenced correctness/security defect must cite the violated original behavior and its reproduction; it remains a finding for adjudication, never permission to restart or expand the repair allowance.'
+  [ "$(head -n 1 "$PROMPT_CAPTURE")" = "$repair_prefix" ]
+  tail -n +2 "$PROMPT_CAPTURE" | cmp - "$BASELINE"
 }
 
 @test "SOCRATIC=off leaves the prompt byte-identical" {

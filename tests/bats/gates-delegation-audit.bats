@@ -63,7 +63,7 @@ EOF
 }
 
 @test "reads stdin when no path given" {
-  run bash -c "python3 '$GATES' delegation-audit < '$CLEAN'"
+  run bash -c 'python3 "$1" delegation-audit < "$2"' _ "$GATES" "$CLEAN"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DELEGATION-OK"* ]]
 }

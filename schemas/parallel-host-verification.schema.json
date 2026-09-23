@@ -1,0 +1,1986 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ffs.parallel-host-verification/v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/baseline_manifest"
+    },
+    {
+      "$ref": "#/$defs/installation_manifest"
+    },
+    {
+      "$ref": "#/$defs/upgrade_manifest"
+    },
+    {
+      "$ref": "#/$defs/review_manifest"
+    },
+    {
+      "$ref": "#/$defs/matrix_manifest"
+    },
+    {
+      "$ref": "#/$defs/hosts_manifest"
+    },
+    {
+      "$ref": "#/$defs/audit_manifest"
+    },
+    {
+      "$ref": "#/$defs/coverage_manifest"
+    },
+    {
+      "$ref": "#/$defs/migration_manifest"
+    },
+    {
+      "$ref": "#/$defs/rollout_manifest"
+    },
+    {
+      "$ref": "#/$defs/review_result"
+    },
+    {
+      "$ref": "#/$defs/repair_authority"
+    },
+    {
+      "$ref": "#/$defs/full_inventory_evidence"
+    },
+    {
+      "$ref": "#/$defs/upgrade_ledger"
+    },
+    {
+      "$ref": "#/$defs/result_envelope"
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_object_id": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonempty"
+      },
+      "uniqueItems": true
+    },
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/nonempty"
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "activity": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "attempt": {
+          "$ref": "#/$defs/nonempty"
+        }
+      },
+      "required": [
+        "run",
+        "activity",
+        "attempt"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "model": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "session": {
+          "$ref": "#/$defs/nonempty"
+        }
+      },
+      "required": [
+        "host",
+        "model",
+        "session"
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "locator": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "locator",
+        "sha256"
+      ]
+    },
+    "status_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {"const": "PASS"},
+        "artifact": {"$ref": "#/$defs/artifact"}
+      },
+      "required": ["status", "artifact"]
+    },
+    "verification_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "manifest": {"$ref": "#/$defs/artifact"},
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"baseline": {"$ref": "#/$defs/artifact"}}
+        }
+      },
+      "required": ["manifest", "inputs"]
+    },
+    "candidate": {
+      "$ref": "#/$defs/artifact"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "binary_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "bundle_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "config_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "source_sha256",
+        "binary_sha256",
+        "bundle_sha256",
+        "config_sha256"
+      ]
+    },
+    "suite_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "locator": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "exit_status": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "started_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_utc": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "locator",
+        "sha256",
+        "argv",
+        "exit_status",
+        "started_utc",
+        "completed_utc"
+      ]
+    },
+    "suite_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "suite_artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/suite_descriptor"
+          }
+        }
+      },
+      "required": [
+        "suite_artifacts"
+      ]
+    },
+    "suite_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "exit_status": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "started_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tests": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "enum": [
+              "PASS",
+              "FAIL"
+            ]
+          }
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "environment": {},
+        "dependencies": {},
+        "config_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "const": "unavailable"
+            }
+          ]
+        }
+      },
+      "required": [
+        "argv",
+        "exit_status",
+        "started_utc",
+        "completed_utc",
+        "tests"
+      ]
+    },
+    "inventory_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "PASS"
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "artifacts"
+      ]
+    },
+    "full_inventory_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "enum": [
+            "ffs.full-inventory-evidence/v1",
+            "ffs.full-inventory-evidence/v2"
+          ]
+        },
+        "category": {
+          "enum": [
+            "ci",
+            "python",
+            "bats",
+            "backups_recovery",
+            "source_runtime",
+            "tools_customizations",
+            "coverage",
+            "environment"
+          ]
+        },
+        "status": {
+          "const": "PASS"
+        },
+        "complete": {
+          "const": true
+        },
+        "started_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "observations": {
+          "type": "object",
+          "minProperties": 1
+        }
+      },
+      "required": [
+        "schema",
+        "category",
+        "status",
+        "complete",
+        "started_utc",
+        "completed_utc",
+        "provenance",
+        "observations"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "schema": {"const": "ffs.full-inventory-evidence/v2"},
+              "category": {"const": "source_runtime"}
+            },
+            "required": ["schema", "category"]
+          },
+          "then": {
+            "properties": {
+              "observations": {"$ref": "#/$defs/m0_source_runtime_observations"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "schema": {"const": "ffs.full-inventory-evidence/v2"},
+              "category": {"const": "backups_recovery"}
+            },
+            "required": ["schema", "category"]
+          },
+          "then": {
+            "properties": {
+              "observations": {"$ref": "#/$defs/m0_backup_observations"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"schema": {"const": "ffs.full-inventory-evidence/v2"}},
+            "required": ["schema"]
+          },
+          "then": {
+            "properties": {
+              "category": {"enum": ["source_runtime", "backups_recovery"]}
+            }
+          }
+        }
+      ]
+    },
+    "m0_git_repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root": {"type": "string", "pattern": "^/"},
+        "common_dir": {"type": "string", "pattern": "^/"},
+"head": {"$ref": "#/$defs/git_object_id"},
+"generation": {"$ref": "#/$defs/git_object_id"}
+      },
+      "required": ["root", "common_dir", "head", "generation"]
+    },
+    "m0_directory_entry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "relative_path": {"$ref": "#/$defs/nonempty"},
+            "type": {"const": "directory"}
+          },
+          "required": ["relative_path", "type"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "relative_path": {"$ref": "#/$defs/nonempty"},
+            "type": {"const": "file"},
+            "source_artifact": {"$ref": "#/$defs/artifact"},
+            "staged_artifact": {"$ref": "#/$defs/artifact"}
+          },
+          "required": ["relative_path", "type", "source_artifact", "staged_artifact"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "relative_path": {"$ref": "#/$defs/nonempty"},
+            "type": {"const": "symlink"},
+            "source_link_target": {"type": "string"},
+            "staged_link_target": {"type": "string"}
+          },
+          "required": ["relative_path", "type", "source_link_target", "staged_link_target"]
+        }
+      ]
+    },
+    "m0_mapping": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "managed_path": {"$ref": "#/$defs/nonempty"},
+            "type": {"const": "file"},
+            "source_artifact": {"$ref": "#/$defs/artifact"},
+            "staged_artifact": {"$ref": "#/$defs/artifact"}
+          },
+          "required": ["managed_path", "type", "source_artifact", "staged_artifact"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "managed_path": {"$ref": "#/$defs/nonempty"},
+            "type": {"const": "directory"},
+            "source_root": {"type": "string", "pattern": "^/"},
+            "staged_root": {"type": "string", "pattern": "^/"},
+            "fingerprint": {"type": "string", "pattern": "^dir:[0-9a-f]{64}$"},
+            "entries": {
+              "type": "array", "minItems": 1, "maxItems": 128,
+              "items": {"$ref": "#/$defs/m0_directory_entry"}
+            }
+          },
+          "required": ["managed_path", "type", "source_root", "staged_root", "fingerprint", "entries"]
+        }
+      ]
+    },
+    "m0_canonical_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {"enum": ["project", "user"]},
+        "install_manifest": {"$ref": "#/$defs/artifact"},
+        "project_root": {"type": ["string", "null"]},
+        "profile_root": {"type": "string", "pattern": "^/"},
+        "resolved_source_root": {"type": "string", "pattern": "^/"},
+        "repository": {"$ref": "#/$defs/m0_git_repository"},
+        "doctor_artifact": {"$ref": "#/$defs/artifact"},
+        "mappings": {
+          "type": "array", "minItems": 1, "maxItems": 128,
+          "items": {"$ref": "#/$defs/m0_mapping"}
+        }
+      },
+      "required": ["scope", "install_manifest", "project_root", "resolved_source_root", "repository", "doctor_artifact", "mappings"]
+    },
+    "m0_source_runtime_observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "type": "array", "minItems": 4, "maxItems": 4,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "role": {"enum": ["source", "binary", "bundle", "config"]},
+              "artifact": {"$ref": "#/$defs/artifact"}
+            },
+            "required": ["role", "artifact"]
+          }
+        },
+        "canonical_source": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifests": {
+              "type": "array", "minItems": 1, "maxItems": 128,
+              "items": {"$ref": "#/$defs/m0_canonical_manifest"}
+            },
+            "upstream_mappings": {"type": "array", "maxItems": 0},
+            "current_dirty_inventory": {"type": "array", "maxItems": 0}
+          },
+          "required": ["manifests", "upstream_mappings", "current_dirty_inventory"]
+        }
+      },
+      "required": ["entries", "canonical_source"]
+    },
+    "m0_recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_sha256": {"$ref": "#/$defs/digest"},
+        "backup_artifact": {"$ref": "#/$defs/artifact"},
+        "restored_artifact": {"$ref": "#/$defs/artifact"},
+        "verification_artifact": {"$ref": "#/$defs/artifact"}
+      },
+      "required": ["expected_sha256", "backup_artifact", "restored_artifact", "verification_artifact"]
+    },
+    "m0_backup_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/nonempty"},
+        "expected_sha256": {"$ref": "#/$defs/digest"},
+        "backup_artifact": {"$ref": "#/$defs/artifact"},
+        "restored_artifact": {"$ref": "#/$defs/artifact"},
+        "verification_artifact": {"$ref": "#/$defs/artifact"}
+      },
+      "required": ["name", "expected_sha256", "backup_artifact", "restored_artifact", "verification_artifact"]
+    },
+    "m0_backup_observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required_surface_ids": {
+          "type": "array", "minItems": 10, "maxItems": 10,
+          "uniqueItems": true, "items": {"$ref": "#/$defs/nonempty"}
+        },
+        "entries": {
+          "type": "array", "minItems": 1,
+          "items": {"$ref": "#/$defs/m0_backup_entry"}
+        },
+        "surfaces": {
+          "type": "array", "minItems": 1, "maxItems": 10,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "name": {"$ref": "#/$defs/nonempty"},
+              "recoveries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/m0_recovery"}}
+            },
+            "required": ["name", "recoveries"]
+          }
+        }
+      },
+      "required": ["required_surface_ids"],
+      "oneOf": [{"required": ["entries"]}, {"required": ["surfaces"]}]
+    },
+    "ledger_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "old_version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "new_version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "source": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "manager": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "command": {
+          "$ref": "#/$defs/argv"
+        },
+        "rollback": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "backup": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "runtime": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "recovery": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "incompatible": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      },
+      "required": [
+        "target",
+        "old_version",
+        "new_version",
+        "source",
+        "manager",
+        "command",
+        "rollback",
+        "backup",
+        "runtime",
+        "recovery",
+        "incompatible",
+        "evidence"
+      ]
+    },
+    "upgrade_ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "ffs.upgrade-ledger/v1"
+        },
+        "complete": {
+          "const": true
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ledger_entry"
+          }
+        },
+        "profile_progression": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "baseline_exceptions": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "complete",
+        "entries"
+      ]
+    },
+    "review_finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "severity": {
+          "type": "string",
+          "pattern": "^(?:[lL][oO][wW]|[mM][eE][dD][iI][uU][mM]|[hH][iI][gG][hH]|[cC][rR][iI][tT][iI][cC][aA][lL])$"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved",
+            "refuted"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "affected_paths": {
+          "$ref": "#/$defs/ids"
+        },
+        "evidence": {
+          "$ref": "#/$defs/ids"
+        },
+        "adjudication": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "evidence": {
+              "$ref": "#/$defs/ids"
+            }
+          },
+          "required": [
+            "owner",
+            "evidence"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "severity",
+        "status"
+      ]
+    },
+    "review_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/review_finding"
+          }
+        },
+        "reviewed_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "host": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "model": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "session": {
+          "$ref": "#/$defs/nonempty"
+        }
+      },
+      "required": [
+        "verdict",
+        "findings",
+        "reviewed_sha256"
+      ]
+    },
+    "repair_assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "finding_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "action": {
+          "const": "assign-repair"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "path_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "owning_phase": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "regression_contract": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "authority_id": {
+          "$ref": "#/$defs/nonempty"
+        }
+      },
+      "required": [
+        "finding_id",
+        "action",
+        "owner",
+        "path_ids",
+        "owning_phase",
+        "regression_contract",
+        "authority_id"
+      ]
+    },
+    "finding_disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "finding_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "action": {
+          "enum": [
+            "accept-risk",
+            "track",
+            "resolve",
+            "refute"
+          ]
+        },
+        "owner": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "evidence": {
+          "$ref": "#/$defs/ids"
+        },
+        "authority_id": {
+          "$ref": "#/$defs/nonempty"
+        }
+      },
+      "required": [
+        "finding_id",
+        "action",
+        "owner",
+        "rationale",
+        "evidence"
+      ]
+    },
+    "adapter_pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "label": {
+          "enum": [
+            "hermetic",
+            "authenticated",
+            "degraded",
+            "local"
+          ]
+        },
+        "host": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "model": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "executable": {
+          "$ref": "#/$defs/artifact"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      },
+      "required": [
+        "argv",
+        "label",
+        "host",
+        "model",
+        "executable",
+        "artifacts"
+      ]
+    },
+    "installation_fixture_paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root": {"type": "string", "pattern": "^/"},
+        "home": {"type": "string", "pattern": "^/"},
+        "codex_home": {"type": "string", "pattern": "^/"},
+        "cache": {"type": "string", "pattern": "^/"},
+        "state": {"type": "string", "pattern": "^/"},
+        "project": {"type": "string", "pattern": "^/"}
+      },
+      "required": ["root", "home", "codex_home", "cache", "state", "project"]
+    },
+    "installation_initial_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"$ref": "#/$defs/nonempty"},
+        "type": {"enum": ["file", "directory"]},
+        "sha256": {"$ref": "#/$defs/digest"}
+      },
+      "required": ["path", "type"],
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "file"}}, "required": ["type"]},
+          "then": {"required": ["sha256"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "directory"}}, "required": ["type"]},
+          "then": {"not": {"required": ["sha256"]}}
+        }
+      ]
+    },
+    "installation_authority_grant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fixture_root": {"type": "string", "pattern": "^/"},
+        "fixture": {"$ref": "#/$defs/installation_fixture_paths"},
+        "device": {"type": "integer", "minimum": 0},
+        "inode": {"type": "integer", "minimum": 0},
+        "setup_argv": {
+          "type": "array",
+          "minItems": 2,
+          "prefixItems": [
+            {"const": "/bin/bash"},
+            {"$ref": "#/$defs/nonempty"}
+          ],
+          "items": {"$ref": "#/$defs/nonempty"}
+        },
+        "stub_artifact": {"$ref": "#/$defs/artifact"},
+        "nested_stub_artifact": {"$ref": "#/$defs/artifact"},
+        "initial_entries": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/installation_initial_entry"}
+        }
+      },
+      "required": ["fixture_root", "fixture", "device", "inode", "setup_argv", "stub_artifact", "initial_entries"]
+    },
+    "repair_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "ffs.verification-repair-authority/v1"
+        },
+        "run": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "candidate_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "producer": {
+          "$ref": "#/$defs/identity"
+        },
+        "assignments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/repair_assignment"
+          }
+        },
+        "adapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/adapter_pin"
+          }
+        },
+        "installations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/installation_authority_grant"}
+        }
+      },
+      "required": [
+        "schema",
+        "run",
+        "candidate_sha256",
+        "assignments"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "problem": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "cause": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "fix": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "docs": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "recovery_action": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "unmet_code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "problem",
+        "cause",
+        "fix",
+        "docs",
+        "recovery_action",
+        "unmet_code"
+      ]
+    },
+    "gate_vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review_complete": {
+          "type": "boolean"
+        },
+        "repair_authorized": {
+          "type": "boolean"
+        },
+        "path_admitted": {
+          "type": "boolean"
+        },
+        "rollout_ready": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "review_complete",
+        "repair_authorized",
+        "path_admitted",
+        "rollout_ready"
+      ]
+    },
+    "installation_invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": {"$ref": "#/$defs/argv"},
+        "exit_status": {"type": "integer"},
+        "started_utc": {"type": "string", "format": "date-time"},
+        "completed_utc": {"type": "string", "format": "date-time"},
+        "stdout_sha256": {"$ref": "#/$defs/digest"},
+        "stderr_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "required": ["argv", "exit_status", "started_utc", "completed_utc", "stdout_sha256", "stderr_sha256"]
+    },
+    "installation_inventory_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"$ref": "#/$defs/nonempty"},
+        "type": {"enum": ["directory", "file", "runtime-link"]},
+        "sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        }
+      },
+      "required": ["path", "type", "sha256"]
+    },
+    "installation_fixture_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root": {"type": "string", "pattern": "^/"},
+        "inventory": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/installation_inventory_entry"}
+        }
+      },
+      "required": ["root", "inventory"]
+    },
+    "result_envelope": {
+      "type": "object",
+      "required": [
+        "schema",
+        "gate",
+        "purpose",
+        "binding",
+        "status",
+        "exit_status",
+        "gate_vector",
+        "errors"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ffs.parallel-host-verification/v1"
+        },
+        "gate": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "purpose": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNMET"
+          ]
+        },
+        "exit_status": {
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        "gate_vector": {
+          "$ref": "#/$defs/gate_vector"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        "ac_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "path_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "int_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "platform": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "host": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "model": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "label": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "authenticated": {
+          "type": "boolean"
+        },
+        "command": {
+          "$ref": "#/$defs/argv"
+        },
+        "started_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "provenance": {
+          "oneOf": [
+            {"$ref": "#/$defs/provenance"},
+            {"type": "object", "maxProperties": 0}
+          ]
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifact"}
+        },
+        "unmet_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "review_complete": {
+          "type": "boolean"
+        },
+        "repair_authorized": {
+          "type": "boolean"
+        },
+        "path_admitted": {
+          "type": "boolean"
+        },
+        "rollout_ready": {
+          "type": "boolean"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/identity"
+        },
+        "producer": {
+          "$ref": "#/$defs/identity"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/review_finding"
+          }
+        },
+        "evidence_origin": {
+          "enum": [
+            "executed",
+            "imported"
+          ]
+        },
+        "identity_assurance": {
+          "enum": [
+            "observed",
+            "asserted"
+          ]
+        },
+        "blocked_paths": {
+          "$ref": "#/$defs/ids"
+        },
+        "review_execution": {
+          "type": "object"
+        },
+        "review_adapter": {
+          "type": "object"
+        },
+        "invocation": {
+          "$ref": "#/$defs/installation_invocation"
+        },
+        "fixture": {
+          "$ref": "#/$defs/installation_fixture_result"
+        },
+        "tests": {
+          "type": "object"
+        },
+        "suite_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "suite_observations": {
+          "type": "array"
+        },
+        "suite_passed": {
+          "type": "boolean"
+        },
+        "repository": {
+          "type": "object"
+        },
+        "full_baseline_complete": {
+          "type": "boolean"
+        },
+        "baseline_profile": {
+          "type": ["string", "null"]
+        },
+        "canonical_source_verified": {
+          "type": "boolean"
+        },
+        "full_baseline_unmet": {
+          "type": "array"
+        },
+        "full_inventory_evidence": {
+          "type": "object"
+        },
+        "coverage_scope": {
+          "enum": [
+            "diagnostic",
+            "full-suite"
+          ]
+        },
+        "comparison_passed": {
+          "type": "boolean"
+        },
+        "baseline_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "ledger_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "ledger_entries": {
+          "type": "array"
+        },
+        "new_failures": {
+          "type": "array"
+        },
+        "missing_tests": {
+          "type": "array"
+        },
+        "remaining_failures": {
+          "type": "array"
+        },
+        "missing_suites": {
+          "type": "array"
+        },
+        "new_suites": {
+          "type": "array"
+        },
+        "provenance_drift": {
+          "type": "boolean"
+        },
+        "before_provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "after_provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "comparison_binding_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        },
+        "repetitions": {"type": "integer", "minimum": 1},
+        "platforms": {"$ref": "#/$defs/ids"},
+        "case_count": {"type": "integer", "minimum": 0},
+        "row_count": {"type": "integer", "minimum": 0},
+        "pairings": {"$ref": "#/$defs/ids"},
+        "review_directions": {"$ref": "#/$defs/ids"},
+        "soak_seconds": {"type": "integer", "minimum": 0},
+        "domains": {"$ref": "#/$defs/ids"},
+        "finding_count": {"type": "integer", "minimum": 0},
+        "line_min": {"type": "number", "minimum": 0, "maximum": 100},
+        "coverage": {"type": "object"},
+        "source_count": {"type": "integer", "minimum": 0},
+        "record_counts": {"type": "object"},
+        "run_count": {"type": "integer", "minimum": 0},
+        "consumer": {"type": "string"},
+        "surface_count": {"type": "integer", "minimum": 0},
+        "fork_count": {"type": "integer", "minimum": 0},
+        "canary_count": {"type": "integer", "minimum": 0},
+        "result_count": {"type": "integer", "minimum": 0},
+        "gates": {"$ref": "#/$defs/ids"},
+        "candidate_sha256": {"$ref": "#/$defs/digest"},
+        "m7_complete": {"type": "boolean"},
+        "verification_proof": {"$ref": "#/$defs/verification_proof"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"gate": {"enum": ["audit", "coverage", "hosts", "installation-lifecycle", "matrix", "migration", "rollout", "upgrade-comparison"]}, "status": {"const": "PASS"}}, "required": ["gate", "status"]},
+          "then": {"required": ["verification_proof"]}
+        },
+        {
+          "if": {"properties": {"gate": {"const": "upgrade-comparison"}, "status": {"const": "PASS"}}, "required": ["gate", "status"]},
+          "then": {"properties": {"verification_proof": {"properties": {"inputs": {"required": ["baseline"]}}}}}
+        },
+        {
+          "if": {"properties": {"gate": {"enum": ["audit", "coverage", "hosts", "installation-lifecycle", "matrix", "migration", "rollout"]}, "status": {"const": "PASS"}}, "required": ["gate", "status"]},
+          "then": {"properties": {"verification_proof": {"properties": {"inputs": {"maxProperties": 0}}}}}
+        },
+        {"if": {"properties": {"gate": {"const": "audit"}}}, "then": {"required": ["domains", "finding_count", "reviewer"]}},
+        {"if": {"properties": {"gate": {"const": "coverage"}}}, "then": {"required": ["line_min", "coverage"]}},
+        {"if": {"properties": {"gate": {"const": "hosts"}}}, "then": {"required": ["pairings", "review_directions", "soak_seconds", "row_count"]}},
+        {"if": {"properties": {"gate": {"const": "installation-lifecycle"}}}, "then": {"required": ["row_count", "platforms"]}},
+        {"if": {"properties": {"gate": {"const": "matrix"}}}, "then": {"required": ["repetitions", "platforms", "case_count", "row_count"]}},
+        {"if": {"properties": {"gate": {"const": "migration"}}}, "then": {"required": ["source_count", "record_counts", "run_count"]}},
+        {"if": {"properties": {"gate": {"const": "rollout"}}}, "then": {"required": ["consumer", "surface_count", "fork_count", "canary_count"]}},
+        {"if": {"properties": {"gate": {"const": "upgrade-comparison"}}}, "then": {"required": ["new_failures", "missing_tests", "remaining_failures", "suite_passed", "comparison_passed", "baseline_sha256", "ledger_sha256", "ledger_entries", "suite_ids", "missing_suites", "new_suites", "suite_observations", "provenance_drift", "before_provenance", "after_provenance", "comparison_binding_sha256"]}}
+      ],
+      "additionalProperties": false
+    },
+    "common_properties": {
+      "schema": {
+        "const": "ffs.parallel-host-verification/v1"
+      },
+      "binding": {
+        "$ref": "#/$defs/binding"
+      },
+      "label": {
+        "enum": [
+          "hermetic",
+          "authenticated",
+          "degraded",
+          "local"
+        ]
+      },
+      "candidate": {
+        "$ref": "#/$defs/candidate"
+      },
+      "provenance": {
+        "$ref": "#/$defs/provenance"
+      },
+      "ac_ids": {
+        "$ref": "#/$defs/ids"
+      },
+      "path_ids": {
+        "$ref": "#/$defs/ids"
+      },
+      "int_ids": {
+        "$ref": "#/$defs/ids"
+      }
+    },
+    "completion_common_manifest": {
+      "type": "object",
+      "properties": {
+        "schema": {"const": "ffs.parallel-host-verification/v1"},
+        "binding": {"$ref": "#/$defs/binding"},
+        "label": {"enum": ["hermetic", "authenticated", "degraded", "local"]},
+        "candidate": {"$ref": "#/$defs/candidate"},
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "ac_ids": {"$ref": "#/$defs/ids"},
+        "path_ids": {"$ref": "#/$defs/ids"},
+        "int_ids": {"$ref": "#/$defs/ids"}
+      },
+      "required": ["schema", "binding", "label", "candidate", "provenance", "ac_ids", "path_ids", "int_ids"]
+    },
+    "matrix_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"matrix": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "required_case_ids": {"$ref": "#/$defs/ids"},
+            "rows": {"type": "array", "minItems": 1, "items": {
+              "type": "object", "additionalProperties": false,
+              "properties": {"case_id": {"$ref": "#/$defs/nonempty"}, "platform": {"enum": ["darwin", "linux"]},
+                "repetitions": {"const": 25}, "status": {"const": "PASS"}, "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["case_id", "platform", "repetitions", "status", "artifact"]
+            }}
+          }, "required": ["required_case_ids", "rows"]
+        }}, "required": ["matrix"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "hosts_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"hosts": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "review_directions": {"$ref": "#/$defs/ids"},
+            "rows": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+              "properties": {"pairing": {"enum": ["claude-claude", "claude-codex", "codex-codex"]},
+                "platform": {"enum": ["darwin", "linux"]}, "overlap_seconds": {"type": "number", "minimum": 600},
+                "productive": {"const": true}, "authenticated": {"const": true}, "status": {"const": "PASS"},
+                "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["pairing", "platform", "overlap_seconds", "productive", "authenticated", "status", "artifact"]}},
+            "tier_rows": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+              "properties": {"host": {"enum": ["claude", "codex"]}, "tier": {"enum": ["astra", "sol", "terra", "luna", "fable", "opus", "sonnet", "haiku"]},
+                "requested_model": {"$ref": "#/$defs/nonempty"}, "actual_model": {"$ref": "#/$defs/nonempty"},
+                "status": {"const": "PASS"}, "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["host", "tier", "requested_model", "actual_model", "status", "artifact"]}}
+          }, "required": ["review_directions", "rows", "tier_rows"]
+        }}, "required": ["hosts"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "audit_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"audit": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"required_domains": {"$ref": "#/$defs/ids"},
+            "domains": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+              "properties": {"id": {"$ref": "#/$defs/nonempty"}, "status": {"const": "PASS"}, "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["id", "status", "artifact"]}},
+            "findings": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+              "properties": {"id": {"$ref": "#/$defs/nonempty"}, "severity": {"enum": ["critical", "high", "medium", "low"]},
+                "disposition": {"$ref": "#/$defs/nonempty"}, "owner": {"$ref": "#/$defs/nonempty"}, "evidence": {"$ref": "#/$defs/artifact"}},
+              "required": ["id", "severity", "disposition", "owner", "evidence"]}},
+            "producer": {"$ref": "#/$defs/identity"}, "reviewer": {"$ref": "#/$defs/identity"}, "review_pin": {"$ref": "#/$defs/artifact"}},
+          "required": ["required_domains", "domains", "findings", "producer", "reviewer", "review_pin"]
+        }}, "required": ["audit"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "coverage_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"coverage": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"xml": {"$ref": "#/$defs/artifact"}, "execution": {"$ref": "#/$defs/artifact"}},
+          "required": ["xml", "execution"]
+        }}, "required": ["coverage"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "migration_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"migration": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}},
+            "journal": {"$ref": "#/$defs/artifact"},
+            "record_counts": {"type": "object", "additionalProperties": false,
+              "properties": {"source": {"type": "integer", "minimum": 0}, "imported": {"type": "integer", "minimum": 0}, "quarantined": {"type": "integer", "minimum": 0}},
+              "required": ["source", "imported", "quarantined"]},
+            "id_bindings": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
+              "properties": {"source_id": {"$ref": "#/$defs/nonempty"}, "source_run_id": {"$ref": "#/$defs/nonempty"},
+                "canonical_run_id": {"$ref": "#/$defs/nonempty"}, "evidence": {"$ref": "#/$defs/artifact"}},
+              "required": ["source_id", "source_run_id", "canonical_run_id", "evidence"]}},
+            "epochs": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
+              "properties": {"run_id": {"$ref": "#/$defs/nonempty"}, "epoch": {"type": "integer", "minimum": 1},
+                "writer": {"enum": ["legacy", "new", "none"]}, "proof": {"$ref": "#/$defs/artifact"}},
+              "required": ["run_id", "epoch", "writer", "proof"]}},
+            "owner_fence": {"$ref": "#/$defs/artifact"}, "interlock": {"$ref": "#/$defs/artifact"},
+            "restart": {"$ref": "#/$defs/status_artifact"}, "rollback": {"$ref": "#/$defs/status_artifact"},
+            "legacy_unchanged": {"const": true}},
+          "required": ["sources", "journal", "record_counts", "id_bindings", "epochs", "owner_fence", "interlock", "restart", "rollback", "legacy_unchanged"]
+        }}, "required": ["migration"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "rollout_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"rollout": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"consumer": {"$ref": "#/$defs/nonempty"},
+            "surfaces": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
+              "properties": {"path": {"$ref": "#/$defs/nonempty"}, "owner": {"const": "ffs"},
+                "source": {"$ref": "#/$defs/artifact"}, "staged": {"$ref": "#/$defs/artifact"}, "status": {"const": "PASS"}},
+              "required": ["path", "owner", "source", "staged", "status"]}},
+            "forks": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+              "properties": {"id": {"$ref": "#/$defs/nonempty"}, "disposition": {"enum": ["ported", "retained-consumer", "not-present"]}, "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["id", "disposition", "artifact"]}},
+            "canaries": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "object", "additionalProperties": false,
+              "properties": {"platform": {"enum": ["darwin", "linux"]}, "round": {"enum": [1, 2]}, "status": {"const": "PASS"},
+                "productive_overlap_seconds": {"type": "number", "minimum": 600}, "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["platform", "round", "status", "productive_overlap_seconds", "artifact"]}},
+            "protected_unchanged": {"const": true}, "rollback": {"$ref": "#/$defs/artifact"}},
+          "required": ["consumer", "surfaces", "forks", "canaries", "protected_unchanged", "rollback"]
+        }}, "required": ["rollout"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "baseline_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "ffs.parallel-host-verification/v1"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "label": {
+          "enum": [
+            "hermetic",
+            "authenticated",
+            "degraded",
+            "local"
+          ]
+        },
+        "candidate": {
+          "$ref": "#/$defs/candidate"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "ac_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "path_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "int_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "baseline_profile": {
+          "const": "m0/v1"
+        },
+        "baseline": {
+          "$ref": "#/$defs/suite_selection"
+        },
+        "full_inventory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ci": {
+              "$ref": "#/$defs/inventory_record"
+            },
+            "python": {
+              "$ref": "#/$defs/inventory_record"
+            },
+            "bats": {
+              "$ref": "#/$defs/inventory_record"
+            },
+            "backups_recovery": {
+              "$ref": "#/$defs/inventory_record"
+            },
+            "source_runtime": {
+              "$ref": "#/$defs/inventory_record"
+            },
+            "tools_customizations": {
+              "$ref": "#/$defs/inventory_record"
+            },
+            "coverage": {
+              "$ref": "#/$defs/inventory_record"
+            },
+            "environment": {
+              "$ref": "#/$defs/inventory_record"
+            }
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "binding",
+        "label",
+        "candidate",
+        "provenance",
+        "ac_ids",
+        "path_ids",
+        "int_ids",
+        "baseline"
+      ]
+    },
+    "installation_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "ffs.parallel-host-verification/v1"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "label": {
+          "enum": [
+            "hermetic",
+            "authenticated",
+            "degraded",
+            "local"
+          ]
+        },
+        "candidate": {
+          "$ref": "#/$defs/candidate"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "ac_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "path_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "int_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "installation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "setup_argv": {
+              "$ref": "#/$defs/argv"
+            },
+            "fixture": {
+              "$ref": "#/$defs/installation_fixture_paths"
+            },
+            "env": {
+              "type": "object"
+            },
+            "stub_artifact": {
+              "$ref": "#/$defs/artifact"
+            },
+            "nested_stub_artifact": {
+              "$ref": "#/$defs/artifact"
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60
+            },
+            "lifecycle_rows": {
+              "type": "array",
+              "minItems": 24,
+              "maxItems": 24,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "operation": {"enum": ["fresh-install", "upgrade", "collision", "interruption", "rollback", "uninstall"]},
+                  "scope": {"enum": ["project", "user"]},
+                  "platform": {"enum": ["darwin", "linux"]},
+                  "status": {"const": "PASS"},
+                  "artifact": {"$ref": "#/$defs/artifact"}
+                },
+                "required": ["operation", "scope", "platform", "status", "artifact"]
+              }
+            },
+            "protected_unchanged": {
+              "type": "boolean"
+            }
+          },
+          "oneOf": [
+            {"required": ["setup_argv", "fixture", "env", "stub_artifact", "timeout_seconds"]},
+            {"required": ["lifecycle_rows", "protected_unchanged"]}
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "binding",
+        "label",
+        "candidate",
+        "provenance",
+        "ac_ids",
+        "path_ids",
+        "int_ids",
+        "installation"
+      ]
+    },
+    "upgrade_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "ffs.parallel-host-verification/v1"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "label": {
+          "enum": [
+            "hermetic",
+            "authenticated",
+            "degraded",
+            "local"
+          ]
+        },
+        "candidate": {
+          "$ref": "#/$defs/candidate"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "ac_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "path_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "int_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "current": {
+          "$ref": "#/$defs/suite_selection"
+        },
+        "ledger_artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "comparison_binding": {
+          "$ref": "#/$defs/upgrade_comparison_binding"
+        }
+      },
+      "required": [
+        "schema",
+        "binding",
+        "label",
+        "candidate",
+        "provenance",
+        "ac_ids",
+        "path_ids",
+        "int_ids",
+        "current",
+        "ledger_artifact"
+      ]
+    },
+    "upgrade_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ffs.upgrade-environment/v1"},
+        "run": {"$ref": "#/$defs/nonempty"},
+        "repository": {"$ref": "#/$defs/nonempty"},
+        "binding": {"$ref": "#/$defs/binding"},
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {"$ref": "#/$defs/artifact"}, "binary": {"$ref": "#/$defs/artifact"},
+            "bundle": {"$ref": "#/$defs/artifact"}, "config": {"$ref": "#/$defs/artifact"},
+            "dependencies": {"$ref": "#/$defs/artifact"}, "environment": {"$ref": "#/$defs/artifact"}
+          },
+          "required": ["source", "binary", "bundle", "config", "dependencies", "environment"]
+        }
+      },
+      "required": ["schema", "run", "repository", "binding", "provenance", "artifacts"]
+    },
+    "upgrade_transition_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "component": {"enum": ["source", "binary", "bundle", "config", "dependencies", "environment"]},
+        "before_sha256": {"$ref": "#/$defs/digest"},
+        "after_sha256": {"$ref": "#/$defs/digest"},
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}
+      },
+      "required": ["component", "before_sha256", "after_sha256", "evidence"]
+    },
+    "upgrade_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ffs.upgrade-transition/v1"}, "run": {"$ref": "#/$defs/nonempty"},
+        "repository": {"$ref": "#/$defs/nonempty"}, "before_baseline_sha256": {"$ref": "#/$defs/digest"},
+        "before_identity_sha256": {"$ref": "#/$defs/digest"}, "after_identity_sha256": {"$ref": "#/$defs/digest"},
+        "ledger_sha256": {"$ref": "#/$defs/digest"},
+        "changes": {"type": "array", "items": {"$ref": "#/$defs/upgrade_transition_change"}}
+      },
+      "required": ["schema", "run", "repository", "before_baseline_sha256", "before_identity_sha256", "after_identity_sha256", "ledger_sha256", "changes"]
+    },
+    "upgrade_comparison_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"}, "run": {"$ref": "#/$defs/nonempty"},
+        "repository": {"$ref": "#/$defs/nonempty"},
+        "before": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"binding": {"$ref": "#/$defs/binding"}, "provenance": {"$ref": "#/$defs/provenance"}, "identity_artifact": {"$ref": "#/$defs/artifact"}},
+          "required": ["binding", "provenance", "identity_artifact"]
+        },
+        "after": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"binding": {"$ref": "#/$defs/binding"}, "provenance": {"$ref": "#/$defs/provenance"}, "identity_artifact": {"$ref": "#/$defs/artifact"}},
+          "required": ["binding", "provenance", "identity_artifact"]
+        },
+        "transition_artifact": {"$ref": "#/$defs/artifact"}
+      },
+      "required": ["id", "run", "repository", "before", "after", "transition_artifact"]
+    },
+    "upgrade_result": {
+      "properties": {
+        "before_provenance": {"$ref": "#/$defs/provenance"},
+        "after_provenance": {"$ref": "#/$defs/provenance"},
+        "comparison_binding_sha256": {
+          "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        }
+      },
+      "allOf": [
+        {"$ref": "#/$defs/result_envelope"},
+        {"type": "object", "required": ["before_provenance", "after_provenance", "comparison_binding_sha256"]}
+      ]
+    },
+    "review_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "ffs.parallel-host-verification/v1"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "label": {
+          "enum": [
+            "hermetic",
+            "authenticated",
+            "degraded",
+            "local"
+          ]
+        },
+        "candidate": {
+          "$ref": "#/$defs/candidate"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "ac_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "path_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "int_ids": {
+          "$ref": "#/$defs/ids"
+        },
+        "platform": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "command": {
+          "$ref": "#/$defs/argv"
+        },
+        "started_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exit_status": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reviewer": {
+          "$ref": "#/$defs/identity"
+        },
+        "producer": {
+          "$ref": "#/$defs/identity"
+        },
+        "artifact_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "locator": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          },
+          "required": [
+            "locator"
+          ]
+        },
+        "severe_path_disposition": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/repair_assignment"
+              },
+              {
+                "$ref": "#/$defs/finding_disposition"
+              }
+            ]
+          }
+        },
+        "review_adapter": {
+          "$ref": "#/$defs/argv"
+        },
+        "review_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      },
+      "required": [
+        "schema",
+        "binding",
+        "label",
+        "candidate",
+        "provenance",
+        "ac_ids",
+        "path_ids",
+        "int_ids",
+        "producer"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "review_adapter"
+          ],
+          "not": {
+            "required": [
+              "result"
+            ]
+          }
+        },
+        {
+          "required": [
+            "platform",
+            "command",
+            "started_utc",
+            "completed_utc",
+            "exit_status",
+            "reviewer",
+            "artifact_sha256",
+            "artifacts",
+            "result",
+            "severe_path_disposition"
+          ],
+          "not": {
+            "required": [
+              "review_adapter"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

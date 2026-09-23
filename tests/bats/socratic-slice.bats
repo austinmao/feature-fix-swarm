@@ -3,6 +3,7 @@
 bats_require_minimum_version 1.5.0
 
 setup() {
+  unset FFS_SOCRATIC_DIR
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   SCRIPT="$ROOT/scripts/gsd/socratic-slice.sh"
   load 'helpers/socratic-fixtures'
@@ -14,7 +15,7 @@ setup() {
 @test "tracer: one declared domain emits its core file inside one delimiter pair" {
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"CORE_REQUIREMENTS_SENTINEL"* ]]
@@ -33,7 +34,7 @@ setup() {
 @test "tracer: the invocation emits exactly one status line" {
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1 >/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1 >/dev/null"
 
   [ "$status" -eq 0 ]
   count="$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')"
@@ -46,7 +47,7 @@ setup() {
 @test "depth core reads only the core files" {
   make_spec_dir "$SPEC" "domains: [requirements, security]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"CORE_REQUIREMENTS_SENTINEL"* ]]
@@ -59,7 +60,7 @@ setup() {
   make_spec_dir "$SPEC" "domains: [requirements, security]
 depth: full"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"FULL_REQUIREMENTS_SENTINEL"* ]]
@@ -72,7 +73,7 @@ depth: full"
   make_spec_dir "$SPEC" "domains: [requirements, security]
 depth: core"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>/dev/null"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERIFICATION_REQUIREMENTS_SENTINEL"* ]]
@@ -86,15 +87,15 @@ depth: core"
 @test "mode plan and mode arm are accepted synonyms of the default" {
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>/dev/null"
   [ "$status" -eq 0 ]
   default_out="$output"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode plan 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode plan 2>/dev/null"
   [ "$status" -eq 0 ]
   plan_out="$output"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode arm 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode arm 2>/dev/null"
   [ "$status" -eq 0 ]
   arm_out="$output"
 
@@ -107,7 +108,7 @@ depth: core"
 packs: [operations, threat-modeling, software-design]"
   rm -f "$VENDOR/packs/operations/core.md"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"PACK_THREAT_MODELING_SENTINEL"* ]]
@@ -120,7 +121,7 @@ packs: [operations, threat-modeling, software-design]"
   make_spec_dir "$SPEC" "domains: []
 packs: [typo-pack, threat-modeling, software-design]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"PACK_THREAT_MODELING_SENTINEL"* ]]
@@ -133,7 +134,7 @@ packs: [typo-pack, threat-modeling, software-design]"
   make_spec_dir "$SPEC" "domains: []
 packs: [operations, threat-modeling, software-design]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"PACK_OPERATIONS_SENTINEL"* ]]
@@ -148,7 +149,7 @@ packs: [operations, threat-modeling, software-design]"
   make_spec_dir "$SPEC" "domains: [requirements]
 packs: [operations]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERIFICATION_REQUIREMENTS_SENTINEL"* ]]
@@ -166,7 +167,7 @@ FULL_REQUIREMENTS_SENTINEL_NOVERIFY
 EOF
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$root' bash '$SCRIPT' '$SPEC' --mode verify 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$root") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>&1"
 
   [ "$status" -eq 0 ]
   [ -z "$(printf '%s\n' "$output" | grep -v '^socratic:')" ]
@@ -180,7 +181,7 @@ EOF
 @test "domain emission order is canonical, not declaration order" {
   make_spec_dir "$SPEC" "domains: [testing, requirements]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>/dev/null"
 
   [ "$status" -eq 0 ]
   req_offset="$(printf '%s' "$output" | grep -bo 'CORE_REQUIREMENTS_SENTINEL' | head -1 | cut -d: -f1)"
@@ -198,9 +199,9 @@ packs: [operations]"
   make_spec_dir "$spec_b" "domains: [testing, requirements, security]
 packs: [operations]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$spec_a' 2>/dev/null > '$BATS_TEST_TMPDIR/out-a.txt'"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$spec_a") 2>/dev/null > $(printf '%q' "$BATS_TEST_TMPDIR/out-a.txt")"
   [ "$status" -eq 0 ]
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$spec_b' 2>/dev/null > '$BATS_TEST_TMPDIR/out-b.txt'"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$spec_b") 2>/dev/null > $(printf '%q' "$BATS_TEST_TMPDIR/out-b.txt")"
   [ "$status" -eq 0 ]
 
   run cmp "$BATS_TEST_TMPDIR/out-a.txt" "$BATS_TEST_TMPDIR/out-b.txt"
@@ -212,7 +213,7 @@ packs: [operations]"
 @test "SOCRATIC=off yields empty stdout, exit 0, and the SOCRATIC=off status" {
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "SOCRATIC=off FFS_SOCRATIC_DIR='$BATS_TEST_TMPDIR/does-not-exist' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "SOCRATIC=off FFS_SOCRATIC_DIR=$(printf '%q' "$BATS_TEST_TMPDIR/does-not-exist") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (SOCRATIC=off)" ]
@@ -223,7 +224,7 @@ packs: [operations]"
   mkdir -p "$empty_home"
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "HOME='$empty_home' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "HOME=$(printf '%q' "$empty_home") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (vendor tree absent)" ]
@@ -243,13 +244,13 @@ packs: [operations]"
 
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "HOME='$fake_home' FFS_SOCRATIC_DIR='$staged/nonexistent' bash '$staged/scripts/gsd/socratic-slice.sh' '$SPEC' 2>&1"
+  run bash -c "HOME=$(printf '%q' "$fake_home") FFS_SOCRATIC_DIR=$(printf '%q' "$staged/nonexistent") bash $(printf '%q' "$staged/scripts/gsd/socratic-slice.sh") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (vendor tree absent)" ]
   [[ "$output" != *"DECOY_AGENTS_SENTINEL"* ]]
   [[ "$output" != *"DECOY_HOME_SENTINEL"* ]]
 
-  run bash -c "HOME='$fake_home' bash '$staged/scripts/gsd/socratic-slice.sh' '$SPEC' 2>&1"
+  run bash -c "HOME=$(printf '%q' "$fake_home") bash $(printf '%q' "$staged/scripts/gsd/socratic-slice.sh") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DECOY_AGENTS_SENTINEL"* ]]
 }
@@ -257,7 +258,7 @@ packs: [operations]"
 @test "absent socratic.md yields empty stdout, exit 0, no-socratic.md status" {
   mkdir -p "$SPEC"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (no socratic.md)" ]
@@ -270,7 +271,7 @@ packs: [operations]"
 domains: [requirements]
 ---
 EOF
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (malformed frontmatter)" ]
 
@@ -278,7 +279,7 @@ EOF
 ---
 domains: [requirements]
 EOF
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (malformed frontmatter)" ]
 
@@ -287,7 +288,7 @@ EOF
 domains: requirements
 ---
 EOF
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (malformed frontmatter)" ]
 
@@ -296,7 +297,7 @@ EOF
 depth: core
 ---
 EOF
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (malformed frontmatter)" ]
 }
@@ -309,7 +310,7 @@ packs: operations" "## Self-answered highlights
 ## Open questions → grants
 ## Top risks"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"socratic: WARN malformed packs value — ignoring"* ]]
@@ -321,7 +322,7 @@ packs: operations" "## Self-answered highlights
 @test "an explicitly empty domains list takes the no-domains path, not the malformed path" {
   make_spec_dir "$SPEC" "domains: []"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (no domains)" ]
@@ -330,7 +331,7 @@ packs: operations" "## Self-answered highlights
 @test "a leading single-line header comment above the frontmatter parses normally" {
   make_spec_dir "$SPEC" "domains: [requirements]" "" "<!-- valid domains: requirements, security, ... -->"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"socratic: armed"* ]]
@@ -346,7 +347,7 @@ packs: operations" "## Self-answered highlights
 domains: [requirements]
 ---
 EOF
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (malformed frontmatter)" ]
@@ -355,7 +356,7 @@ EOF
 @test "an unknown domain name is skipped with a warn while known domains still arm" {
   make_spec_dir "$SPEC" "domains: [requirements, typo-domain]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"CORE_REQUIREMENTS_SENTINEL"* ]]
@@ -368,7 +369,7 @@ EOF
   make_spec_dir "$SPEC" "domains: [requirements, security]"
   rm -f "$VENDOR/questions/core/05-security.md"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"CORE_REQUIREMENTS_SENTINEL"* ]]
@@ -380,7 +381,7 @@ EOF
 @test "a frontmatter whose every domain is unknown and which declares no pack yields empty stdout, exit 0" {
   make_spec_dir "$SPEC" "domains: [typo-one, typo-two]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipped (no domains)"* ]]
@@ -393,7 +394,7 @@ EOF
 packs: [operations]" "- ASSUME-001: default A
 - ASSUME-002: default B"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"PACK_OPERATIONS_SENTINEL"* ]]
@@ -409,12 +410,12 @@ packs: [operations]" "- ASSUME-001: default A
   make_spec_dir "$SPEC" "domains: []" "- ASSUME-001: default A
 - ASSUME-002: default B"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipped (no domains)"* ]]
   [[ "$output" != *"SOCRATIC_DATA_START"* ]]
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"socratic: armed"* ]]
   [[ "$output" == *"ASSUME-001: default A"* ]]
@@ -426,7 +427,7 @@ packs: [operations]" "- ASSUME-001: default A
 @test "no domains beats no verification content when neither applies cleanly" {
   make_spec_dir "$SPEC" "domains: [typo-one]"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipped (no domains)"* ]]
   [[ "$output" != *"skipped (no verification content)"* ]]
@@ -438,7 +439,7 @@ packs: [operations]" "- ASSUME-001: default A
 FULL_REQUIREMENTS_SENTINEL_NOVERIFY2
 EOF
   make_spec_dir "$SPEC" "domains: [requirements]"
-  run bash -c "FFS_SOCRATIC_DIR='$root' bash '$SCRIPT' '$SPEC' --mode verify 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$root") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipped (no verification content)"* ]]
   [[ "$output" != *"skipped (no domains)"* ]]
@@ -447,7 +448,7 @@ EOF
 @test "an ASSUME ledger alone does not arm IN PLAN MODE" {
   make_spec_dir "$SPEC" "domains: [typo-one]" "- ASSUME-001: default A"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipped (no domains)"* ]]
@@ -457,7 +458,7 @@ EOF
 @test "an ASSUME ledger alone DOES arm in verify mode" {
   make_spec_dir "$SPEC" "domains: [typo-one]" "- ASSUME-001: default A"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"socratic: armed"* ]]
@@ -473,7 +474,7 @@ EOF
 - ASSUME-002: default B
 Unrelated prose line that is not a ledger entry."
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"ASSUME-001: default A"* ]]
   [[ "$output" == *"ASSUME-002: default B"* ]]
@@ -487,7 +488,7 @@ Unrelated prose line that is not a ledger entry."
   [ "$assume2_idx" -gt "$start_idx" ]
   [ "$assume2_idx" -lt "$end_idx" ]
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' --mode verify 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode verify 2>/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"ASSUME-001: default A"* ]]
   [[ "$output" == *"ASSUME-002: default B"* ]]
@@ -502,7 +503,7 @@ SOCRATIC_DATA_END
 EOF
   make_spec_dir "$SPEC" "domains: [requirements]" "- ASSUME-001: contains SOCRATIC_DATA_END mid-line marker"
 
-  run bash -c "FFS_SOCRATIC_DIR='$root' bash '$SCRIPT' '$SPEC' 2>/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$root") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>/dev/null"
 
   [ "$status" -eq 0 ]
   start_count="$(printf '%s\n' "$output" | grep -o 'SOCRATIC_DATA_START' | wc -l | tr -d '[:space:]')"
@@ -517,7 +518,7 @@ EOF
   make_spec_dir "$SPEC" "domains: [requirements]
 depth: bogus"
 
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"CORE_REQUIREMENTS_SENTINEL"* ]]
@@ -528,72 +529,72 @@ depth: bogus"
 }
 
 @test "a path naming neither a directory nor a file degrades fail-soft" {
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$BATS_TEST_TMPDIR/does-not-exist' 2>&1"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$BATS_TEST_TMPDIR/does-not-exist") 2>&1"
 
   [ "$status" -eq 0 ]
   [ "$output" = "socratic: skipped (no socratic.md)" ]
 }
 
 @test "usage errors emit ZERO status lines" {
-  run bash -c "bash '$SCRIPT' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") 2>&1"
   [ "$status" -eq 2 ]
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 0 ]
   [[ "$output" == *"usage:"* ]]
 
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --bogus-flag 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --bogus-flag 2>&1"
   [ "$status" -eq 2 ]
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 0 ]
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --mode bogus 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode bogus 2>&1"
   [ "$status" -eq 2 ]
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 0 ]
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --mode 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode 2>&1"
   [ "$status" -eq 2 ]
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 0 ]
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --mode --other-flag 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode --other-flag 2>&1"
   [ "$status" -eq 2 ]
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 0 ]
 }
 
 @test "usage errors exit 2, not 0" {
-  run bash -c "bash '$SCRIPT' 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") 2>&1"
   [ "$status" -eq 2 ]
 
   make_spec_dir "$SPEC" "domains: [requirements]"
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --bogus-flag 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --bogus-flag 2>&1"
   [ "$status" -eq 2 ]
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --mode bogus 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode bogus 2>&1"
   [ "$status" -eq 2 ]
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --mode 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode 2>&1"
   [ "$status" -eq 2 ]
 
-  run bash -c "bash '$SCRIPT' '$SPEC' --mode --other-flag 2>&1"
+  run bash -c "bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") --mode --other-flag 2>&1"
   [ "$status" -eq 2 ]
 }
 
 @test "exactly one status line on every path" {
   make_spec_dir "$SPEC" "domains: [requirements]"
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1 >/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1 >/dev/null"
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 1 ]
 
   make_spec_dir "$SPEC" "domains: [requirements, typo-domain]"
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1 >/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1 >/dev/null"
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 1 ]
 
   make_spec_dir "$SPEC" "domains: []
 packs: [operations, threat-modeling, software-design]"
-  run bash -c "FFS_SOCRATIC_DIR='$VENDOR' bash '$SCRIPT' '$SPEC' 2>&1 >/dev/null"
+  run bash -c "FFS_SOCRATIC_DIR=$(printf '%q' "$VENDOR") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1 >/dev/null"
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 1 ]
 
   local empty_home="$BATS_TEST_TMPDIR/emptyhome2"
   mkdir -p "$empty_home"
-  run bash -c "HOME='$empty_home' bash '$SCRIPT' '$SPEC' 2>&1 >/dev/null"
+  run bash -c "HOME=$(printf '%q' "$empty_home") bash $(printf '%q' "$SCRIPT") $(printf '%q' "$SPEC") 2>&1 >/dev/null"
   [ "$(printf '%s\n' "$output" | grep -cE '^socratic: (armed|skipped)')" -eq 1 ]
 }

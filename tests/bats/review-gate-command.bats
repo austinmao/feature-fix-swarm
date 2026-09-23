@@ -7,6 +7,14 @@ setup() {
   CWD="$BATS_TEST_TMPDIR/cwd"
   mkdir -p "$STUB_DIR" "$CWD"
   export FFS_ADVERSARY_MODEL_PROBE=off
+  # Each case receives actual private grant and accounting authority.
+  export HOME="$BATS_TEST_TMPDIR"
+  export GATES_STORE="$BATS_TEST_TMPDIR/review-gate-store.json"
+  mkdir -p "$HOME/.claude/lib/feature-fix-swarm"
+  cp "$ROOT/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  cp "$ROOT/lib/model_requests.py" "$HOME/.claude/lib/feature-fix-swarm/model_requests.py"
+  python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
+    --action ship:gsd --reason "disposable review-gate fixture" >/dev/null
 
   cat > "$STUB_DIR/fake-codex" <<EOF
 #!/usr/bin/env bash

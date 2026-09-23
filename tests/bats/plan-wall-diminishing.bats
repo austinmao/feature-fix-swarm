@@ -91,7 +91,7 @@ queue_unresolved_count() {
   [ "$status" -eq 3 ]
   [[ "$output" == *"WALL-ROUND-CAP"* ]]
   [[ "$output" == *"findings-queue list --unresolved"* ]]
-  [[ "$output" == *"--reset"* ]]
+  [[ "$output" == *"cannot renew the protected review allowance"* ]]
 }
 
 @test "repair round with CRITICAL resolved and HIGHs open passes as PASS-RESIDUAL" {

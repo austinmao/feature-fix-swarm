@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 
@@ -343,3 +344,123 @@ def test_recover_state_superseded_leaves_completed_at_untouched(tmp_path: Path) 
     run_id = store.create_run(skill="fix", objective="x")  # state=active, completed_at=None
     assert store.recover_state(run_id, "pending_audit", "complete") is False
     assert store.get_run(run_id).completed_at is None
+
+
+# --- M3 prospective read-compatibility contracts ---------------------------
+
+
+def test_legacy_sqlite_projection_is_read_only_and_preserves_full_ids(tmp_path: Path) -> None:
+    from run_state.state import ControlStore
+
+    legacy = tmp_path / "legacy-runs.db"
+    old = RunStore(legacy)
+    run_id = old.create_run(skill="fix", objective="legacy projection")
+    before = (legacy.read_bytes(), legacy.stat().st_mtime_ns)
+    projected = list(ControlStore.read_legacy_run_store(legacy))
+    after = (legacy.read_bytes(), legacy.stat().st_mtime_ns)
+    assert after == before
+    match = next(row for row in projected if row.source_run_id == run_id)
+    assert match.canonical_run_id == run_id
+    assert match.source_sha256
+    assert match.disposition == "mapped"
+
+
+def test_legacy_alias_conflict_is_quarantined_without_rewrite(tmp_path: Path) -> None:
+    from run_state.state import ControlStore
+
+    source = tmp_path / "legacy-context.json"
+    source.write_text(json.dumps({
+        "GSD_RUN_ID": "spec-014",
+        "FFS_RUN_ID": "different-014",
+        "workspace": "/fixture/missing",
+    }, sort_keys=True) + "\n")
+    before = (source.read_bytes(), source.stat().st_mtime_ns)
+    projection = ControlStore.read_legacy_context(source)
+    after = (source.read_bytes(), source.stat().st_mtime_ns)
+    assert after == before
+    assert projection.disposition == "quarantined"
+    assert projection.code == "ALIAS_CONFLICT"
+    assert projection.canonical_run_id is None
+
+
+def test_legacy_read_of_missing_source_does_not_create_it(tmp_path: Path) -> None:
+    from run_state.state import ControlStore
+
+    source = tmp_path / "missing" / "runs.db"
+    with pytest.raises(FileNotFoundError):
+        list(ControlStore.read_legacy_run_store(source))
+    assert not source.parent.exists()
+
+
+@pytest.mark.parametrize("source_kind", ["missing-runs-table", "not-sqlite"])
+def test_legacy_sqlite_errors_are_typed_and_preserve_source_bytes(
+    tmp_path: Path, source_kind: str,
+) -> None:
+    from run_state.state import ControlStore, ControlStoreRefused
+
+    source = tmp_path / f"{source_kind}.db"
+    if source_kind == "missing-runs-table":
+        connection = sqlite3.connect(source)
+        connection.execute("CREATE TABLE unrelated (value TEXT)")
+        connection.commit()
+        connection.close()
+        expected_code = "STORE_IO"
+    else:
+        source.write_bytes(b"not a sqlite database\n")
+        expected_code = "CORRUPT_STORE"
+    before = (source.read_bytes(), source.stat().st_mtime_ns)
+    with pytest.raises(ControlStoreRefused) as refused:
+        list(ControlStore.read_legacy_run_store(source))
+    assert refused.value.code == expected_code
+    assert (source.read_bytes(), source.stat().st_mtime_ns) == before
+
+
+def test_pre_expiry_decision_schema_refuses_all_public_reads_without_writes(
+    tmp_path: Path,
+) -> None:
+    from process_identity import ProcessIdentity
+    from run_state.ownership import StartRequest, reserve_resources
+    from run_state.state import ControlStore, ControlStoreRefused
+
+    db = tmp_path / "authority" / "control.sqlite3"
+    store = ControlStore(db)
+    owner = reserve_resources(store, StartRequest(
+        "legacy-decision-run", str(tmp_path / "workspace"), "legacy-decision-objective",
+        ProcessIdentity.current(), repository_id="legacy-decision-repository",
+        planning_scope="legacy-decision-scope",
+    ))
+    hashes = {
+        "candidate": "a" * 64,
+        "runtime": "b" * 64,
+        "config": "c" * 64,
+        "policy": "d" * 64,
+        "dependencies": "e" * 64,
+    }
+    store.record_decision(
+        owner.token, gate="review_complete", status=True,
+        input_hashes=hashes,
+        evidence={"locator": "fixture://legacy-decision", "sha256": "f" * 64},
+        provenance={"author": "historical-fixture"},
+        expires_at="2099-01-01T00:00:00Z",
+    )
+    del store
+
+    connection = sqlite3.connect(db)
+    connection.execute("ALTER TABLE authority_decisions DROP COLUMN expires_at")
+    connection.commit()
+    connection.close()
+    before = (db.read_bytes(), db.stat().st_mtime_ns)
+
+    view = ControlStore.open_read_only(db)
+    public_reads = (
+        lambda: list(view.enumerate_decisions()),
+        lambda: view.project_gates(
+            hashes, run_id="legacy-decision-run",
+            repository_id="legacy-decision-repository",
+        ),
+    )
+    for read in public_reads:
+        with pytest.raises(ControlStoreRefused) as refused:
+            read()
+        assert refused.value.code == "UNSUPPORTED_SCHEMA"
+        assert (db.read_bytes(), db.stat().st_mtime_ns) == before

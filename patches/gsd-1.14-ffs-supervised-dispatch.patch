@@ -1,0 +1,588 @@
+diff --git a/bin/install.js b/bin/install.js
+index c3f5473d1..187a9ba5d 100755
+--- a/bin/install.js
++++ b/bin/install.js
+@@ -10024,9 +10024,10 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
+   // Track scripts/changeset/ and scripts/lib/ so saveLocalPatches() can detect drift
+   const changesetInstallDir = path.join(configDir, 'scripts', 'changeset');
+   if (fs.existsSync(changesetInstallDir)) {
+-    for (const file of fs.readdirSync(changesetInstallDir)) {
+-      if (file.endsWith('.cjs')) {
+-        manifest.files['scripts/changeset/' + file] = fileHash(path.join(changesetInstallDir, file));
++    for (const file of GSD_CHANGESET_FILES) {
++      const changesetFile = path.join(changesetInstallDir, file);
++      if (fs.existsSync(changesetFile)) {
++        manifest.files['scripts/changeset/' + file] = fileHash(changesetFile);
+       }
+     }
+   }
+diff --git a/gsd-core/bin/gsd-tools.cjs b/gsd-core/bin/gsd-tools.cjs
+index 852d40e11..a02510e14 100755
+--- a/gsd-core/bin/gsd-tools.cjs
++++ b/gsd-core/bin/gsd-tools.cjs
+@@ -2056,6 +2056,56 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
+     }
+   }
+ 
++  /**
++   * FFS compatibility seam.  This is intentionally independent from the
++   * host capability registry: an FFS supervisor is an admission-bound process
++   * transport, not a new isolation primitive.  The execute-phase workflow
++   * calls this only when it has selected the explicit
++   * `ffs-supervised-process` mode.  Missing or malformed admission is a hard
++   * refusal, never a silent fallback to inline or unisolated execution.
++   */
++  function routeFfsSupervisedDispatch({ args, raw, error }) {
++    const admissionFile = process.env.FFS_SUPERVISED_ADMISSION_FILE;
++    const commandJson = process.env.FFS_SUPERVISED_DISPATCH_COMMAND_JSON;
++    if (!admissionFile || !commandJson) {
++      error(
++        'ffs-supervised-process admission is unavailable: set FFS_SUPERVISED_ADMISSION_FILE and FFS_SUPERVISED_DISPATCH_COMMAND_JSON',
++        ERROR_REASON.SDK_FAIL_FAST,
++      );
++    }
++    let admission;
++    let command;
++    try {
++      admission = JSON.parse(fs.readFileSync(admissionFile, 'utf8'));
++      command = JSON.parse(commandJson);
++    } catch (cause) {
++      error(`ffs-supervised-process admission is unreadable: ${cause.message}`, ERROR_REASON.SDK_FAIL_FAST);
++    }
++    if (
++      !admission || admission.schema !== 'ffs.supervisor-admission/v1' || admission.available !== true ||
++      !Number.isSafeInteger(admission.generation) || admission.generation < 1 ||
++      ['activity_id', 'repository_id', 'run_id', 'runtime_identity', 'workspace'].some(
++        (key) => typeof admission[key] !== 'string' || !admission[key]
++      ) || !path.isAbsolute(admission.workspace) ||
++      !Array.isArray(command) || command.length === 0 ||
++      command.some((part) => typeof part !== 'string' || !part || part.includes('\0'))
++    ) {
++      error(
++        'ffs-supervised-process admission is unavailable or malformed; refusing to dispatch',
++        ERROR_REASON.SDK_FAIL_FAST,
++      );
++    }
++    const result = {
++      mode: 'ffs-supervised-process',
++      admission,
++      command,
++      commitMode: process.env.FFS_SUPERVISED_COMMIT_MODE || 'patches',
++      applyBetweenWaves: true,
++    };
++    if (args.indexOf('--json') !== -1) output(result, raw);
++    else process.stdout.write(result.mode);
++  }
++
+   /**
+    * #3673 (ADR-1239 Phase 1) — typed, PURE-READ query exposing the negotiated
+    * `dispatch.maxConcurrency` numeric sub-field. Sibling of `dispatch-isolation`
+@@ -4432,6 +4482,7 @@ const HOST_COMMAND_ROUTERS = {
+     'normalize-test-command': routeNormalizeTestCommand,
+     'dispatch-should-flatten': routeDispatchShouldFlatten,
+     'dispatch-isolation': routeDispatchIsolation,
++    'dispatch-ffs-supervised': routeFfsSupervisedDispatch,
+     'dispatch-capacity': routeDispatchCapacity,
+     'inspect-dispatch-isolation': routeInspectDispatchIsolation,
+     'record-dispatch-isolation': routeRecordDispatchIsolation,
+@@ -4693,7 +4744,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
+   'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
+   'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, planning, profile-questionnaire, ' +
+   'profile-sample, progress, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
+-  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
++  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-ffs-supervised, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
+   'resolve-execution, review-lane, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
+   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
+   'Global flags:\n' +
+@@ -5280,4 +5331,3 @@ module.exports = {
+   MODEL_ID_SANITIZE_STRIP_RE,
+   MODEL_ID_MAX_LENGTH,
+ };
+-
+diff --git a/gsd-core/workflows/execute-phase.md b/gsd-core/workflows/execute-phase.md
+index eb9464bd8..e962e9236 100644
+--- a/gsd-core/workflows/execute-phase.md
++++ b/gsd-core/workflows/execute-phase.md
+@@ -13,6 +13,18 @@ Execute all plans in a phase using wave-based parallel execution. Orchestrator s
+ Orchestrator coordinates, not executes. Each subagent loads the full execute-plan context. Orchestrator: discover plans → analyze deps → group waves → spawn agents → handle checkpoints → collect results.
+ </core_principle>
+ 
++<ffs_supervised_process priority="first">
++When `GSD_DISPATCH_MODE=ffs-supervised-process`, this is a mandatory transport
++contract. Before touching any path declared by a plan, read the
++FFS-supervised-process compatibility section of
++`gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md`. Build
++one complete manifest for the current dependency wave and invoke
++`ffs-supervised-dispatch.cjs`. The outer orchestrator must not edit declared
++plan targets, call per-plan native agents, or use an inline/sequential fallback.
++If the adapter cannot run or rejects the wave, stop with the capability failure
++and leave plan targets unchanged. Continue only from its validated result.
++</ffs_supervised_process>
++
+ <!-- #2508 runtime-aware-dispatch -->
+ 
+ > **Runtime-aware dispatch (#2508 Phase 4).** GSD workflows dispatch specialized subagents by role. Before dispatching on a built-in-only runtime (kimi-code — three built-ins only), resolve the role to a built-in via `gsd_run query resolve-dispatch-type --requested <role> --raw`. On named-dispatch runtimes (Claude/OpenCode/…) the role is returned unchanged; on kimi-code it maps to `coder`/`explore`/`plan` by role-suffix. The persona rides `${AGENT_SKILLS_<ROLE>}` (Phase 3) regardless. See @gsd-core/references/runtime-aware-dispatch.md.
+@@ -727,6 +739,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
+ 
+    **Orchestrator-managed worktree dispatch** (`ISOLATION=orchestrator-worktree`): read and execute `execute-phase/steps/executor-isolation-dispatch.md`. GSD creates each worktree (`worktree create`) and spawns the executor into it; the orchestrator performs every git operation. Merge-back and cleanup are the existing manifest-scoped gauntlet, unchanged.
+ 
++   **FFS-supervised-process dispatch** (`GSD_DISPATCH_MODE=ffs-supervised-process`): before any per-plan `Agent()` call, read and execute the FFS-supervised-process compatibility section in `execute-phase/steps/executor-isolation-dispatch.md`. It allocates the complete wave, captures the initial HEAD, embeds each fresh prompt, and invokes the FFS process adapter once for that wave. Do not fall through to the per-plan Agent loop, launch a partial wave, or alter `ISOLATION`; after the adapter returns, continue with the existing serialized integration, post-merge validation, and manifest-only cleanup before the next dependency wave.
++
+    **Sequential mode** (`USE_WORKTREES_FOR_PLAN` is `false` — either project-level `USE_WORKTREES=false`, or per-plan submodule intersection forced it false in step 2.5):
+ 
+    Omit `isolation="worktree"` from the Agent call. Before composing the prompt, read and execute
+diff --git a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
+index 2c7eaa8c5..3ef17ea1c 100644
+--- a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
++++ b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
+@@ -338,3 +338,143 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
+ 
+ > **Declared-scope conformance (#2596):** ADR-1239 specifies that *both* isolation adapters route their merge through a check that each plan branch's committed diff stayed inside its declared `files_modified` scope. That check now exists, advisory-first, and is wired into **both** paths: this one passes `--files "$PLAN_FILES"` to `worktree create` above, the harness path passes it to `worktree record-agent`, and `cleanup-wave` runs the one comparison for both. A path outside the declared scope is reported in the result's `warnings` array; it does not block the merge. Promotion to a hard gate is a separate, disclosed change.
+ 
++## FFS-supervised-process compatibility mode
++
++FFS can provide an explicit process supervisor for recovery and for fixture
++repositories. This mode is selected only when the host sets
++`GSD_DISPATCH_MODE=ffs-supervised-process`; it is a process transport layered
++over the existing isolation decision, not a new `ISOLATION` value and never a
++reason to bypass the isolation guard. A host that has not demonstrated FFS
++admission must refuse the wave.
++
++Resolve the admission descriptor immediately before the first executor in the
++wave:
++
++```bash
++if [ "${GSD_DISPATCH_MODE:-}" = "ffs-supervised-process" ]; then
++  FFS_DISPATCH_JSON=$(gsd_run query dispatch-ffs-supervised --json --raw 2>/dev/null) || {
++    echo "FATAL: ffs-supervised-process was requested but FFS admission is unavailable; refusing to dispatch." >&2
++    exit 78
++  }
++  FFS_MODE=$(printf '%s' "$FFS_DISPATCH_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let j=JSON.parse(s);process.stdout.write(j&&j.mode||"")}catch{}})')
++  [ "$FFS_MODE" = "ffs-supervised-process" ] || {
++    echo "FATAL: FFS admission did not return mode ffs-supervised-process; refusing to dispatch." >&2
++    exit 78
++  }
++fi
++```
++
++When this mode is selected, preserve the normal dependency-wave loop and the
++existing serialized integration/cleanup gauntlet with these additional
++requirements:
++
++1. Capture `EXPECTED_BASE=$(git rev-parse HEAD)` once at wave start, before
++   requesting any executor. Prepare every plan's complete, fresh prompt before
++   launching the first process. The FFS supervisor exclusively allocates and
++   registers each child worktree beneath the current run; GSD must not create
++   or name executor worktrees in this mode. Each manifest
++   plan carries `initial_head: "$EXPECTED_BASE"`, `prompt_fresh: true`, a
++   unique `prompt_nonce`, the SHA-256 of that exact prompt, `files_modified`,
++   `files_deleted`, and its original `depends_on` plan ids. Dependencies on
++   completed prior waves remain in the manifest for supervisor verification;
++   no plan may depend on another plan allocated in the same runnable wave.
++   A plan whose measured HEAD or prompt hash does not match is a fatal wave
++   error.
++2. Bind all wave transport files to the admitted orchestrator workspace before
++   writing the manifest. `FFS_DISPATCH_JSON.admission.workspace` is the sole
++   workspace authority. Resolve the current repository root with
++   `git rev-parse --show-toplevel`; it must be byte-for-byte equal to that
++   admission workspace. Extract and validate the admission `activity_id` as a
++   portable path segment (`[A-Za-z0-9][A-Za-z0-9._-]*`). A mismatch, malformed
++   value, symlink, or non-private directory is a capability refusal. Do not
++   use `TMPDIR`, `/tmp`, `mktemp`, or an inherited manifest path in this mode.
++
++   Use this deterministic private layout. The activity-specific directory has
++   one immutable manifest/result/receipt set per dependency-wave number:
++
++   ```bash
++   FFS_ADMISSION_BINDING=$(printf '%s' "$FFS_DISPATCH_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s),a=j&&j.admission;if(!a||typeof a.workspace!=="string"||typeof a.activity_id!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(a.activity_id))throw Error();process.stdout.write(a.workspace+"\t"+a.activity_id)}catch{process.exit(1)}})') || exit 78
++   IFS=$'\t' read -r FFS_ADMISSION_WORKSPACE FFS_ADMISSION_ACTIVITY <<< "$FFS_ADMISSION_BINDING"
++   FFS_ORCHESTRATOR_WORKSPACE=$(git rev-parse --show-toplevel) || exit 78
++   [ "$FFS_ORCHESTRATOR_WORKSPACE" = "$FFS_ADMISSION_WORKSPACE" ] || { echo "FATAL: admitted workspace mismatch; refusing wave." >&2; exit 78; }
++   FFS_WAVE_DIRECTORY="$FFS_ADMISSION_WORKSPACE/.planning/.ffs-supervised/waves/$FFS_ADMISSION_ACTIVITY"
++   umask 077
++   for FFS_PRIVATE_DIRECTORY in "$FFS_ADMISSION_WORKSPACE/.planning/.ffs-supervised" "${FFS_ADMISSION_WORKSPACE}/.planning/.ffs-supervised/waves" "$FFS_WAVE_DIRECTORY"; do
++     [ ! -L "$FFS_PRIVATE_DIRECTORY" ] && { [ -d "$FFS_PRIVATE_DIRECTORY" ] || mkdir -m 700 "$FFS_PRIVATE_DIRECTORY"; } || exit 78
++     chmod 700 "$FFS_PRIVATE_DIRECTORY" || exit 78
++   done
++   [[ "${FFS_WAVE_NUMBER:-}" =~ ^[1-9][0-9]*$ ]] || exit 78
++   FFS_WAVE_MANIFEST="$FFS_WAVE_DIRECTORY/wave-$FFS_WAVE_NUMBER.manifest.json"
++   FFS_WAVE_RESULT="$FFS_WAVE_DIRECTORY/wave-$FFS_WAVE_NUMBER.result.json"
++   FFS_WAVE_RECEIPT="$FFS_WAVE_RESULT.receipt.json"
++   FFS_WAVE_RETAINED=none
++   for FFS_WAVE_FILE in "$FFS_WAVE_MANIFEST" "$FFS_WAVE_RESULT" "$FFS_WAVE_RECEIPT"; do
++     [ ! -L "$FFS_WAVE_FILE" ] || { echo "FATAL: symlinked retained wave evidence; refusing." >&2; exit 78; }
++     [ -e "$FFS_WAVE_FILE" ] && FFS_WAVE_RETAINED=some
++   done
++   if [ "$FFS_WAVE_RETAINED" = some ] && [ -f "$FFS_WAVE_MANIFEST" ] && [ -f "$FFS_WAVE_RESULT" ] && [ -f "$FFS_WAVE_RECEIPT" ]; then
++     FFS_WAVE_RETAINED=complete
++   elif [ "$FFS_WAVE_RETAINED" = some ]; then
++     echo "FATAL: partial retained wave evidence; refusing without relaunch." >&2
++     exit 78
++   fi
++   ```
++
++   The pair is owned by this one admitted activity. Create each as a regular
++   `0600` file without following symlinks. Never overwrite, truncate, or
++   delete a pre-existing pair: it is recovery evidence for an uncertain
++   launch. Plans with the same relative file path remain valid when their
++   worktrees are distinct; the supervisor receives both allocations in one
++   complete manifest and must not serialize them merely because paths match.
++   Set FFS_WAVE_NUMBER from the current dependency-wave allocation. On resume,
++   reuse the exact retained manifest through the adapter; it validates the
++   bound completion receipt before returning without another invocation.
++3. If `FFS_WAVE_RETAINED=complete`, invoke the adapter immediately with the
++   retained manifest/result paths. It validates the retained manifest, result,
++   and receipt before returning and cannot relaunch. Do not regenerate prompts
++   or write a replacement manifest in this branch. Otherwise, write one new
++   manifest for the whole wave with
++   `schema: "ffs.gsd-supervised-dispatch/v1"`, include the complete admission
++   object returned by `dispatch-ffs-supervised`,
++   `mode: "ffs-supervised-process"`, `commit_mode: "patches"`, and
++   `apply_between_waves: true`. Do not launch a process while the manifest is
++   incomplete. Fresh manifests are created only through this exclusive writer
++   (where `FFS_WAVE_MANIFEST_JSON` is the canonical complete manifest):
++
++   ```bash
++   [ "$FFS_WAVE_RETAINED" = none ] || exit 78
++   node -e 'const fs=require("node:fs");const p=process.argv[1],b=Buffer.from(process.argv[2]);const fd=fs.openSync(p,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);try{fs.writeFileSync(fd,b);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}' "$FFS_WAVE_MANIFEST" "$FFS_WAVE_MANIFEST_JSON" || exit 78
++   ```
++
++   Invoke the installed adapter with that manifest and result path in either
++   branch:
++
++   ```bash
++   node "${GSD_TOOLS%/*}/ffs-supervised-dispatch.cjs" \
++     --manifest "$FFS_WAVE_MANIFEST" --output "$FFS_WAVE_RESULT" || {
++       echo "FATAL: FFS supervisor rejected the allocated wave; retaining manifest, result, and worktrees for recovery." >&2
++       exit 78
++     }
++   ```
++
++   The adapter launches `FFS_SUPERVISED_DISPATCH_COMMAND_JSON` as an argv array
++   with `shell: false`. Admission comes from
++   `FFS_SUPERVISED_ADMISSION_FILE` and is required by the query above; missing,
++   malformed, or unavailable admission is a refusal, never inline fallback.
++4. In recovery mode the supervisor must return one scoped `patch` and one
++   `summary` per plan, with no repository commit. The orchestrator applies and
++   reviews those patches only in the existing serialized integration step
++   between waves. In fixture mode only, set `commit_mode: "fixture-commits"`
++   and require one verified commit SHA per plan; the same wave barrier and
++   cleanup rules still apply. A patch-mode response containing a commit is a
++   protocol error.
++   Patch mode supersedes upstream per-task and metadata commit instructions.
++   Workers skip git staging/commit and committed-SUMMARY requirements. Plan
++   completion and resume use the supervisor result plus the adapter's
++   `wave-N.result.json.receipt.json`, bound to the complete manifest and
++   result hashes. Retain this receipt with the manifest and result; never
++   infer completion from a commit count or replay a changed prompt against it.
++5. Wait for the complete result, validate every plan id and declared scope,
++   then complete the normal serialized integration. Retain the private pair on
++   every refusal, validation failure, interrupted integration, or uncertain
++   result. Retain completed manifest/result/receipt sets for resume; the next
++   dependency wave uses its own wave number. Never remove the shared private
++   directory, another activity's files, or supervisor-owned evidence.
+diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
+new file mode 100644
+index 000000000..18cc26e4e
+--- /dev/null
++++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
+@@ -0,0 +1,299 @@
++#!/usr/bin/env node
++'use strict';
++
++/**
++ * FFS compatibility transport for @opengsd/gsd-core 1.14.
++ *
++ * The supervisor is deliberately an external process.  GSD owns wave order,
++ * prompt construction, initial HEAD capture, and integration/cleanup; FFS
++ * owns admission and the child process boundary.  One invocation represents
++ * one already allocated wave, so a supervisor cannot launch a partial wave.
++ */
++
++const crypto = require('node:crypto');
++const fs = require('node:fs');
++const path = require('node:path');
++const { spawn } = require('node:child_process');
++
++const SCHEMA = 'ffs.gsd-supervised-dispatch/v1';
++const MODE = 'ffs-supervised-process';
++const ADMISSION_EXIT = 78;
++const MAX_REPLY_BYTES = 16 * 1024 * 1024;
++
++function fail(message, code = 2) {
++  process.stderr.write(`ffs-supervised-dispatch: ${message}\n`);
++  process.exitCode = code;
++}
++
++function option(name) {
++  const index = process.argv.indexOf(name);
++  return index < 0 ? null : process.argv[index + 1] || null;
++}
++
++function isSha(value, length) {
++  return typeof value === 'string' && new RegExp(`^[0-9a-f]{${length}}$`).test(value);
++}
++
++function safeRelativeList(value, field) {
++  if (!Array.isArray(value) || value.length > 512 || value.some((item) => (
++    typeof item !== 'string' || !item || Buffer.byteLength(item, 'utf8') > 512 ||
++    path.isAbsolute(item) || item.includes('\\') || item.includes('\0') ||
++    item.split('/').some((part) => !part || part === '.' || part === '..')
++  ))) {
++    throw new Error(`${field} must contain safe relative paths`);
++  }
++  return value;
++}
++
++function patchPaths(value, field) {
++  const found = new Set();
++  for (const line of value.split(/\r?\n/)) {
++    if (!line.startsWith('diff --git ')) continue;
++    const match = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
++    if (!match) throw new Error(`${field} contains an unsupported or quoted path header`);
++    for (const item of match.slice(1)) {
++      const safe = safeRelativeList([item], field)[0];
++      found.add(safe);
++    }
++  }
++  if (found.size === 0) throw new Error(`${field} contains no Git diff paths`);
++  return [...found];
++}
++
++function readJson(file) {
++  try {
++    const raw = fs.readFileSync(file, 'utf8');
++    const value = JSON.parse(raw);
++    if (Buffer.byteLength(raw, 'utf8') > 16 * 1024 || raw !== canonicalJson(value)) {
++      throw new Error('manifest is not bounded canonical JSON');
++    }
++    return value;
++  } catch (error) {
++    throw new Error(`cannot read manifest ${file}: ${error.message}`);
++  }
++}
++
++function canonicalJson(value) {
++  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
++  if (value && typeof value === 'object') {
++    return `{${Object.keys(value).sort().map((key) => (
++      `${JSON.stringify(key)}:${canonicalJson(value[key])}`
++    )).join(',')}}`;
++  }
++  const encoded = JSON.stringify(value);
++  if (encoded === undefined) throw new Error('manifest contains an unsupported JSON value');
++  return encoded;
++}
++
++function validateManifest(manifest) {
++  const manifestKeys = ['admission', 'apply_between_waves', 'commit_mode', 'initial_head', 'mode',
++    'orchestrator_root', 'phase', 'plans', 'schema', 'wave'];
++  if (!manifest || Array.isArray(manifest) ||
++      JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(manifestKeys) ||
++      manifest.schema !== SCHEMA || manifest.mode !== MODE) {
++    throw new Error(`manifest must declare schema ${SCHEMA} and mode ${MODE}`);
++  }
++  if (typeof manifest.orchestrator_root !== 'string' || !path.isAbsolute(manifest.orchestrator_root) ||
++      manifest.orchestrator_root.includes('\0') || Buffer.byteLength(manifest.orchestrator_root, 'utf8') > 4096) {
++    throw new Error('orchestrator_root must be a bounded absolute path');
++  }
++  if (!isSha(manifest.initial_head, 40)) throw new Error('initial_head must be a 40-character commit');
++  if (!Number.isSafeInteger(manifest.wave) || manifest.wave < 1) throw new Error('wave must be a positive integer');
++  if (typeof manifest.phase !== 'string' || !manifest.phase || Buffer.byteLength(manifest.phase, 'utf8') > 128) throw new Error('phase is required');
++  const admissionKeys = ['activity_id', 'available', 'generation', 'repository_id', 'run_id', 'runtime_identity', 'schema', 'workspace'];
++  if (!manifest.admission || JSON.stringify(Object.keys(manifest.admission).sort()) !== JSON.stringify(admissionKeys)
++      || manifest.admission.schema !== 'ffs.supervisor-admission/v1' || manifest.admission.available !== true
++      || !Number.isSafeInteger(manifest.admission.generation) || manifest.admission.generation < 1
++      || ['activity_id', 'repository_id', 'run_id', 'runtime_identity', 'workspace'].some(
++        (key) => typeof manifest.admission[key] !== 'string' || !manifest.admission[key]
++      ) || !path.isAbsolute(manifest.admission.workspace)) {
++    throw new Error('FFS admission is unavailable');
++  }
++  if (!['patches', 'fixture-commits'].includes(manifest.commit_mode)) {
++    throw new Error('commit_mode must be patches or fixture-commits');
++  }
++  if (!Array.isArray(manifest.plans) || manifest.plans.length === 0 || manifest.plans.length > 64) {
++    throw new Error('plans must contain the complete runnable wave');
++  }
++  const ids = new Set();
++  const dependencyIds = new Set();
++  for (const plan of manifest.plans) {
++    const planKeys = Object.keys(plan || {}).sort();
++    const expectedPlanKeys = ['files_deleted', 'files_modified', 'id', 'initial_head', 'prompt',
++      'prompt_fresh', 'prompt_nonce', 'prompt_sha256'];
++    const expectedPlanKeysWithDependencies = ['depends_on', ...expectedPlanKeys].sort();
++    if (!plan || Array.isArray(plan) || (JSON.stringify(planKeys) !== JSON.stringify(expectedPlanKeys)
++        && JSON.stringify(planKeys) !== JSON.stringify(expectedPlanKeysWithDependencies))
++        || typeof plan.id !== 'string' || !plan.id || Buffer.byteLength(plan.id, 'utf8') > 128 || ids.has(plan.id)) {
++      throw new Error('plan ids must be non-empty and unique');
++    }
++    ids.add(plan.id);
++    if (plan.initial_head !== manifest.initial_head) {
++      throw new Error(`plan ${plan.id} initial_head differs from the measured wave HEAD`);
++    }
++    if (plan.prompt_fresh !== true || typeof plan.prompt !== 'string' || !plan.prompt || Buffer.byteLength(plan.prompt, 'utf8') > 8192) {
++      throw new Error(`plan ${plan.id} must carry a fresh prompt`);
++    }
++    const promptHash = crypto.createHash('sha256').update(plan.prompt, 'utf8').digest('hex');
++    if (plan.prompt_sha256 !== promptHash) throw new Error(`plan ${plan.id} prompt hash mismatch`);
++    if (typeof plan.prompt_nonce !== 'string' || !plan.prompt_nonce || Buffer.byteLength(plan.prompt_nonce, 'utf8') > 256) {
++      throw new Error(`plan ${plan.id} prompt nonce is required`);
++    }
++    safeRelativeList(plan.files_modified, `plan ${plan.id} files_modified`);
++    safeRelativeList(plan.files_deleted, `plan ${plan.id} files_deleted`);
++    const dependencies = plan.depends_on === undefined ? [] : plan.depends_on;
++    if (!Array.isArray(dependencies) || dependencies.length > 64) {
++      throw new Error(`plan ${plan.id} has invalid dependencies`);
++    }
++    for (const dependency of dependencies) {
++      if (typeof dependency !== 'string' || !dependency || dependency === plan.id) {
++          throw new Error(`plan ${plan.id} has an invalid dependency`);
++        }
++        dependencyIds.add(dependency);
++    }
++  }
++  if ([...dependencyIds].some((id) => ids.has(id))) {
++    throw new Error('allocated wave contains an unresolved internal dependency');
++  }
++  if (typeof manifest.apply_between_waves !== 'boolean' || manifest.apply_between_waves !== true) {
++    throw new Error('supervisor must return material for integration between waves');
++  }
++  return manifest;
++}
++
++function commandFromEnvironment() {
++  const encoded = process.env.FFS_SUPERVISED_DISPATCH_COMMAND_JSON;
++  if (!encoded) throw new Error('FFS_SUPERVISED_DISPATCH_COMMAND_JSON is unset');
++  let command;
++  try { command = JSON.parse(encoded); } catch (error) { throw new Error(`invalid supervisor command JSON: ${error.message}`); }
++  if (!Array.isArray(command) || command.length === 0 || command.some((part) => typeof part !== 'string' || !part || part.includes('\0'))) {
++    throw new Error('supervisor command must be a non-empty argv array');
++  }
++  return command;
++}
++
++function validateReply(reply, manifest) {
++  if (!reply || reply.schema !== SCHEMA || reply.mode !== MODE || reply.wave !== manifest.wave) {
++    throw new Error('supervisor reply has the wrong schema, mode, or wave');
++  }
++  if (reply.initial_head !== manifest.initial_head) throw new Error('supervisor changed initial_head');
++  if (reply.apply_between_waves !== true) throw new Error('supervisor did not opt into between-wave integration');
++  if (!Array.isArray(reply.results) || reply.results.length !== manifest.plans.length) {
++    throw new Error('supervisor must return one result for every allocated plan');
++  }
++  const expected = new Map(manifest.plans.map((plan) => [plan.id, plan]));
++  const seen = new Set();
++  for (const result of reply.results) {
++    const plan = expected.get(result && result.plan_id);
++    if (!plan || seen.has(result.plan_id)) throw new Error('supervisor returned an unknown or duplicate plan');
++    seen.add(result.plan_id);
++    if (!['complete', 'failed'].includes(result.status)) throw new Error(`plan ${plan.id} has an invalid status`);
++    if (typeof result.summary !== 'string' || !result.summary) throw new Error(`plan ${plan.id} has no summary`);
++    const changed = safeRelativeList(result.changed_files || [], `plan ${plan.id} changed_files`);
++    const declared = new Set([...plan.files_modified, ...plan.files_deleted]);
++    if (changed.some((file) => !declared.has(file))) throw new Error(`plan ${plan.id} returned an out-of-scope file`);
++    if (manifest.commit_mode === 'patches') {
++      if (typeof result.patch !== 'string') throw new Error(`plan ${plan.id} must return patch material`);
++      if (result.commit !== undefined) throw new Error(`plan ${plan.id} attempted a repository commit in patch mode`);
++      const actual = result.patch ? patchPaths(result.patch, `plan ${plan.id} patch`) : [];
++      if (result.status === 'failed' && (result.patch || changed.length)) {
++        throw new Error(`failed plan ${plan.id} cannot return integration material`);
++      }
++      if (result.status === 'complete' && changed.length > 0 && !result.patch) {
++        throw new Error(`plan ${plan.id} must return a scoped patch for changed files`);
++      }
++      if (actual.some((file) => !declared.has(file))) {
++        throw new Error(`plan ${plan.id} patch contains an out-of-scope file`);
++      }
++      if (actual.length !== changed.length || actual.some((file) => !changed.includes(file))) {
++        throw new Error(`plan ${plan.id} changed_files does not match its patch paths`);
++      }
++    } else if (typeof result.commit !== 'string' || !isSha(result.commit, 40)) {
++      throw new Error(`fixture plan ${plan.id} must return a commit SHA`);
++    }
++  }
++  if (seen.size !== expected.size) throw new Error('supervisor omitted an allocated plan');
++  return reply;
++}
++
++function launch(command, manifest) {
++  return new Promise((resolve, reject) => {
++    const child = spawn(command[0], command.slice(1), {
++      cwd: manifest.orchestrator_root,
++      env: { ...process.env, FFS_SUPERVISED_DISPATCH_MODE: MODE },
++      stdio: ['pipe', 'pipe', 'inherit'],
++      shell: false,
++    });
++    const chunks = [];
++    let bytes = 0;
++    child.stdout.on('data', (chunk) => {
++      bytes += chunk.length;
++      if (bytes > MAX_REPLY_BYTES) child.kill('SIGTERM');
++      else chunks.push(chunk);
++    });
++    child.on('error', (error) => reject(error));
++    child.on('close', (code, signal) => {
++      if (signal || code !== 0) return reject(new Error(`supervisor exited ${signal || code}`));
++      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
++      catch (error) { reject(new Error(`invalid supervisor reply: ${error.message}`)); }
++    });
++    // The Python authority deliberately accepts only canonical JSON bytes so
++    // the retained manifest hash is stable across the Node/Python boundary.
++    child.stdin.end(canonicalJson(manifest));
++  });
++}
++
++async function main() {
++  const manifestPath = option('--manifest');
++  const outputPath = option('--output');
++  if (!manifestPath || !outputPath) return fail('usage: --manifest <file> --output <file>');
++  try {
++    const manifest = validateManifest(readJson(manifestPath));
++    const command = commandFromEnvironment();
++    const digest = value => crypto.createHash('sha256').update(value).digest('hex');
++    const receiptPath = outputPath + '.receipt.json';
++    const manifestDigest = digest(canonicalJson(manifest));
++    const privateBytes = file => {
++      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
++      try {
++        const info = fs.fstatSync(fd);
++        if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600 || info.uid !== process.getuid()) {
++          throw new Error('unsafe retained completion receipt');
++        }
++        return fs.readFileSync(fd);
++      } finally { fs.closeSync(fd); }
++    };
++    // Completion binds the entire frozen request, not merely plan IDs or HEAD.
++    // A partial publication is uncertain and must never launch a second wave.
++    const exists = file => { try { fs.lstatSync(file); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } };
++    if (exists(outputPath) || exists(receiptPath)) {
++      const raw = privateBytes(outputPath);
++      const receipt = JSON.parse(privateBytes(receiptPath).toString('utf8'));
++      const expected = {schema:'ffs.gsd-no-commit-completion/v1', manifest_sha256:manifestDigest,
++        result_sha256:digest(raw), initial_head:manifest.initial_head, commit_mode:manifest.commit_mode};
++      if (canonicalJson(receipt) !== canonicalJson(expected)) throw new Error('completion receipt input mismatch');
++      validateReply(JSON.parse(raw.toString('utf8')), manifest);
++      return;
++    }
++    const reply = validateReply(await launch(command, manifest), manifest);
++    const raw = `${JSON.stringify(reply, null, 2)}\n`;
++    const publish = (file, bytes) => {
++      const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
++      try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
++      const directory = fs.openSync(require('node:path').dirname(file), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
++      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
++    };
++    publish(outputPath, raw);
++    publish(receiptPath, JSON.stringify({schema:'ffs.gsd-no-commit-completion/v1',
++      manifest_sha256:manifestDigest, result_sha256:digest(raw), initial_head:manifest.initial_head,
++      commit_mode:manifest.commit_mode}) + '\n');
++  } catch (error) {
++    return fail(
++      error.message,
++      error.message.includes('admission') || error.message.includes('FFS_SUPERVISED_')
++        ? ADMISSION_EXIT : 1,
++    );
++  }
++}
++
++main();

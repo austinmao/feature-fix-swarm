@@ -435,7 +435,7 @@ def test_h5_real_writer_record_is_loaded_by_intake(real_git_estate, tmp_path):
     head = real_git_estate["head"]
     module = load_collector()
     gates_dir = tmp_path / "gates"
-    gates_dir.mkdir()
+    gates_dir.mkdir(mode=0o700)
     env = {**os.environ, "GATES_STORE": str(gates_dir / "evidence.json"),
            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
            "TAKEOVER_TEST_IDENTITY": "pytest-boot-1"}

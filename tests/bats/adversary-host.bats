@@ -305,7 +305,7 @@ EOF
   ISOLATED="$BATS_TEST_TMPDIR/isolated"
   mkdir -p "$ISOLATED"
   cp "$LIB" "$ISOLATED/adversary-host.sh"   # deliberately WITHOUT run-bounded.sh
-  run bash -c ". '$ISOLATED/adversary-host.sh'"
+  run bash -c '. "$1"' _ "$ISOLATED/adversary-host.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot locate run-bounded.sh"* ]]
 }
@@ -432,7 +432,7 @@ EOF
   echo '{}' > "$SCHEMA"
 
   run env ADVERSARY_BIN_CODEX=capture-args-codex PATH="$STUB_DIR:$PATH" \
-    bash -c ". '$LIB'; adversary_invoke codex 10 sol xhigh review '$SCHEMA'"
+    bash -c '. "$1"; adversary_invoke codex 10 sol xhigh review "$2"' _ "$LIB" "$SCHEMA"
 
   [ "$status" -eq 0 ]
   grep -Fqx -- '--output-schema' "$BATS_TEST_TMPDIR/argv.log"

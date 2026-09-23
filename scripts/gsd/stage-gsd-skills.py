@@ -10,13 +10,14 @@ from pathlib import Path
 import re
 import shutil
 import sys
+from typing import NoReturn
 
 
-GSD_VERSION = "1.13.0"
+GSD_VERSION = "1.14.0"
 SKILL_NAME = re.compile(r"^gsd-[a-z0-9][a-z0-9-]*$")
 
 
-def fail(message: str) -> "NoReturn":
+def fail(message: str) -> NoReturn:
     raise SystemExit(f"gsd-run: {message}")
 
 

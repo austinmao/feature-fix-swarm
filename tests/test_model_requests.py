@@ -11,7 +11,7 @@ from lib.model_requests import ModelRequestError, resolve_request, validate_docu
 @pytest.mark.parametrize(
     ("name", "model", "effort"),
     [
-        ("frontier", "gpt-5.6-sol", "xhigh"),
+        ("frontier", "gpt-6-astra", "xhigh"),
         ("judgment", "gpt-5.6-sol", "high"),
         ("execution", "gpt-5.6-terra", "medium"),
         ("volume", "gpt-5.6-luna", "low"),
