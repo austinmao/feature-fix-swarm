@@ -2613,6 +2613,8 @@ class Supervisor:
             self.shared_resource_coordinator.record_feedback(
                 reservation, outcome="success" if status == "succeeded" else status,
             )
+            # Kept until both settle: release and feedback are idempotent, so a replay retries them.
+            self._shared_reservations.pop(handle.intent_id, None)
         handle.recorded = True
         return handle.result
 

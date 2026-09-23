@@ -316,7 +316,7 @@ def test_native_final_review_uses_real_supervisor_authority_chain(tmp_path, monk
     _run_case(tmp_path, monkeypatch, host, check)
 
 
-@pytest.mark.parametrize("boundary", ["monitor-result", "sidecar", "completion"])
+@pytest.mark.parametrize("boundary", ["monitor-result", "sidecar", "completion", "feedback"])
 def test_native_review_resume_releases_same_owner_resource_lease(tmp_path, monkeypatch, boundary):
     def check(supervisor, store, request, sealed, source, material):
         handle = supervisor.launch_native_review(request)
@@ -329,7 +329,8 @@ def test_native_review_resume_releases_same_owner_resource_lease(tmp_path, monke
                 def interrupted(*args, **kwargs):
                     raise RuntimeError("fixture crash")
                 crash.setattr(store if boundary == "sidecar" else coordinator,
-                              "complete_launch" if boundary == "sidecar" else "release", interrupted)
+                              {"sidecar": "complete_launch", "completion": "release",
+                               "feedback": "record_feedback"}[boundary], interrupted)
                 with pytest.raises(RuntimeError, match="fixture crash"):
                     supervisor.finish(handle, timeout=15)
         resumed = Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
@@ -342,6 +343,18 @@ def test_native_review_resume_releases_same_owner_resource_lease(tmp_path, monke
         replay = Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
             shared_resource_coordinator=coordinator, resource_demand_policy=cold_start_demand)
         assert replay.finish(replay.resume_monitored(handle.intent_id), timeout=15) == result
+        # Same-supervisor replays after the release settle idempotently, whatever each still caches;
+        # feedback that crashed after the release is retried rather than dropped.
+        retried, feedback = [], coordinator.record_feedback
+        with monkeypatch.context() as spy:
+            spy.setattr(coordinator, "record_feedback",
+                        lambda reservation, *, outcome: (retried.append(outcome), feedback(reservation, outcome=outcome)))
+            for owner in (resumed, supervisor):
+                assert owner.finish(owner.resume_monitored(handle.intent_id), timeout=15) == result
+                assert handle.intent_id not in owner._shared_reservations
+        if boundary == "feedback":
+            assert retried
+        assert coordinator.queue.status(reservation[0])["status"] == "released"
         with store.read_transaction() as tx:
             assert tx.execute("SELECT count(*) FROM authority_policy_action_attempts p JOIN authority_launch_intents i ON i.id=p.intent_id WHERE i.activity_id=?", (request.activity_id,)).fetchone()[0] == 1
             assert tx.execute("SELECT count(*) FROM authority_launch_intents WHERE activity_id=?", (request.activity_id,)).fetchone()[0] == 1
