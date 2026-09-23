@@ -25,8 +25,8 @@ better than self-review (F1 23.8% vs 24.6%) — statistically indistinguishable
 
 | Request | Claude resolution | Codex resolution | Default effort | Runs |
 |---|---|---|---|---|
-| **frontier** | `claude-fable-5` | `gpt-5.6-sol` | xhigh | Planning only — the single low-volume, highest-leverage seat |
-| **judgment** | `claude-opus-5` | `gpt-5.6-sol` | high | Checking, debugging, verification, code/security review |
+| **frontier** | `claude-fable-5` | `gpt-6-astra` | xhigh | Planning only — the single low-volume, highest-leverage seat |
+| **judgment** | `claude-opus-5` | `gpt-6-sol` | xhigh | Checking, debugging, verification, code/security review |
 | **execution** | `claude-sonnet-5` | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research, integration, Nyquist work |
 | **volume** | `claude-haiku-4-5-20251001` | `gpt-5.6-luna` | low | Mapping, synthesis, and status collection — bounded-context inputs only |
 
@@ -58,9 +58,11 @@ ladder: cross-vendor beats same-vendor-different-model beats
 same-model-different-effort. The record never implies diversity it didn't
 get: it stores the actual `relation` (`cross-vendor | same-vendor | self`)
 between the producer's resolved model/vendor and the reviewer's, computed
-from what each side actually resolved to — not from the tier names, which can
-collapse (Codex-host frontier-vs-judgment both resolve to `gpt-5.6-sol`, so
-that pairing is `self` even though the tiers differ).
+from what each side actually resolved to — not from the tier names. Historically
+frontier and judgment could collapse onto the same Codex model (both resolved
+to `gpt-5.6-sol`, distinguished only by effort); the gpt-6-astra/gpt-6-sol
+repin gives them distinct models again, but the `relation` field still exists
+for the day a future repin re-collapses two tiers onto one model.
 
 ## The plan wall
 
@@ -115,23 +117,23 @@ an untyped model request:
 
 | Claude | Codex | Effort |
 |---|---|---|
-| fable | `gpt-5.6-sol` | `xhigh` |
-| opus | `gpt-5.6-sol` | `high` |
+| fable | `gpt-6-astra` | `xhigh` |
+| opus | `gpt-6-sol` | `xhigh` |
 | sonnet | `gpt-5.6-terra` | `medium` |
 | haiku | `gpt-5.6-luna` | `low` |
 
-Both aliases resolve to the same Codex model — Sol has no separate frontier
-rung — so the effort split is the only bit of distinction the alias map can
-regain; `codex_equiv_effort` carries it (`*fable*` → `xhigh`, `*opus*` →
-`high`). The reverse map collapses `sol → opus`, never `sol → fable`: a
-Codex-host degrade must not silently select the most expensive Claude model.
-An explicit exact Fable request is not this compatibility mapping: it never
-falls back and its provenance gate cannot be satisfied by Sol or Opus.
+fable and opus resolve to distinct Codex models (Astra and Sol, respectively)
+via `codex_equiv_model`; `codex_equiv_effort` carries their effort (`*fable*` →
+`xhigh`, `*opus*` → `xhigh`). The reverse map collapses `sol → opus`, never
+`sol → fable`: a Codex-host degrade must not silently select the most
+expensive Claude model. An explicit exact Fable request is not this
+compatibility mapping: it never falls back and its provenance gate cannot be
+satisfied by Sol or Opus.
 
 **`GSD_LEAD_MODEL=fable` is unchanged and deliberate.** It keeps its exact
 `claude-fable-5` request semantics, including host-pinning and fail-closed
 guards — an operator naming fable wants Fable, and a tier conversion would
-silently substitute `gpt-5.6-sol@xhigh` on a Codex host. The tier system adds
+silently substitute `gpt-6-astra@xhigh` on a Codex host. The tier system adds
 `{"kind":"tier","name":"frontier"}` as the portable spelling alongside it,
 not a replacement for it.
 

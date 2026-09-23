@@ -22,7 +22,7 @@ CODEX_TIERS = {
     # Frontier is an explicitly requested planning capability.  It is never
     # part of the automatic ladder (which ends at judgment/Sol).
     "frontier": ("gpt-6-astra", "xhigh"),
-    "judgment": ("gpt-5.6-sol", "high"),
+    "judgment": ("gpt-6-sol", "xhigh"),
     "execution": ("gpt-5.6-terra", "medium"),
     "volume": ("gpt-5.6-luna", "low"),
 }

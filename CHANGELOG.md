@@ -8,6 +8,20 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-09-24 — judgment tier repinned to gpt-6-sol @ xhigh)
+
+- The Codex `judgment` tier (used by `/review-gate`, `plan-wall.sh`,
+  `plan-adversary.sh`, and `spec-panel.sh`) moves from `gpt-5.6-sol` @ `high`
+  to `gpt-6-sol` @ `xhigh` — `lib/model_requests.py` `CODEX_TIERS["judgment"]`
+  and `scripts/gsd/model-equivalents.sh`'s `opus` alias are the two sources of
+  truth; every consumer resolves through them (typed tier/alias requests) or
+  was updated to match (`adversary-host.sh`'s built-in ladder fallback rung,
+  `plan-wall.sh`'s same-vendor rungs and opposite-vendor pin, `spec-panel.sh`'s
+  single-vendor author, `model-fallback.sh`/`fallback-rehearsal.sh`'s
+  `CODEX_SOL`, `lib/dispatch.py`'s tier/cost/escalation tables).
+  `gpt-5.6-sol` @ `high` remains a recognized model and a lower admission rung
+  in the adversary ladder — it is no longer the default.
+
 ### Fixed (2026-09-23 — spec-014 Release B cross-vendor review follow-ups)
 
 - Prepaid resource groups: a replay after `complete_launch` succeeded but the
