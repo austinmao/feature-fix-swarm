@@ -199,7 +199,7 @@ while not Path('ipc-release').exists():
                 retained = tmp_path / "retained-delegated-worktree"
                 allocated.rename(retained)
                 subprocess.run(
-                    ["rtk", "proxy", "git", "clone", "--no-hardlinks", "-q", str(primary), str(allocated)],
+                    ["git", "clone", "--no-hardlinks", "-q", str(primary), str(allocated)],
                     check=True,
                 )
                 with pytest.raises(SupervisorRefused, match="REQUEST_BINDING_UNKNOWN"):

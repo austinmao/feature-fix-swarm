@@ -313,6 +313,14 @@ def test_receipt_paths_hardlinks_and_insecure_root_are_refused_before_use(tmp_pa
     with pytest.raises(DocumentationCacheCorruption):
         DocumentationCache(insecure_root, approved_sources=[SOURCE]).read(request())
 
+    # Only a root-owned sticky ancestor (/tmp) may be world-writable.
+    for index, mode in enumerate((0o777, 0o1777)):
+        shared_parent = tmp_path.resolve() / f"shared-{index}"
+        shared_parent.mkdir()
+        shared_parent.chmod(mode)
+        with pytest.raises(DocumentationCacheCorruption):
+            DocumentationCache(shared_parent / "cached-docs", approved_sources=[SOURCE]).read(request())
+
     linked_parent_target = tmp_path.resolve() / "private-target"
     linked_parent_target.mkdir()
     linked_parent = tmp_path.resolve() / "linked-parent"

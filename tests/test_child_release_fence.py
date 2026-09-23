@@ -71,6 +71,15 @@ def test_parent_invalidation_before_release_retains_debit_without_execution(
         with store.read_transaction() as tx:
             assert tx.execute("SELECT dispatch_used FROM authority_run_limits").fetchone()[0] == 1
             row = tx.execute("SELECT state,child_pid FROM authority_launch_intents").fetchone()
-            assert row["state"] in {"acknowledged", "released_to_execute"}
+            # "aborted" is a terminal activity state: _transition_activity_tx
+            # revokes every non-terminal descendant launch intent to
+            # "reconcile_required" in the same transaction (state.py's
+            # "terminality never refunds an attempt"). "paused" is not
+            # terminal, so the intent is left exactly where the fault landed.
+            expected_states = (
+                {"reconcile_required"} if state == "aborted"
+                else {"acknowledged", "released_to_execute"}
+            )
+            assert row["state"] in expected_states
             assert row["child_pid"] is not None
     _invoke(tmp_path, monkeypatch, execute)

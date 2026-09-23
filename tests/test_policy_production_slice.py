@@ -5,12 +5,18 @@ does not qualify authenticated hosts or the later frontend review workflow.
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import pytest
 from dataclasses import replace
 import time
 from datetime import datetime, timedelta, timezone
+
+requires_local_confinement = pytest.mark.skipif(
+    sys.platform != "darwin" or not os.path.isfile("/usr/bin/sandbox-exec"),
+    reason="needs Darwin sandbox-exec local-check confinement (non-Darwin fails closed; covered by test_local_check_transport)",
+)
 
 from run_state.frontend_completion import post_repair_review_tx
 from run_state.managed_admission import ManagedAdmissionQueue
@@ -37,6 +43,7 @@ from test_wave_consumer import record_wave, wave_fixture
 from test_wave_execution import git
 
 
+@requires_local_confinement
 def test_production_ingress_seals_before_wave_and_retains_cumulative_accounting(tmp_path, monkeypatch):
     primary, authority, _, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
@@ -247,14 +254,17 @@ print(json.dumps({'schema':'ffs.sealed-final-review/v1','acceptance_hash':sys.ar
     assert observed["final_receipt_hash"] != observed["receipt_hash"]
 
 
+@requires_local_confinement
 def test_failed_review_is_found_across_two_wave_bound_candidates(tmp_path, monkeypatch):
     _wave_descendant_proof(tmp_path, monkeypatch)
 
 
+@requires_local_confinement
 def test_repair_child_integrates_patch_and_replays_without_new_debit(tmp_path, monkeypatch):
     _wave_descendant_proof(tmp_path, monkeypatch, repair=True)
 
 
+@requires_local_confinement
 def test_lifecycle_resolves_repair_child_candidate_despite_stale_caller_context(tmp_path, monkeypatch):
     _wave_descendant_proof(tmp_path, monkeypatch, repair=True, resolve=True)
 

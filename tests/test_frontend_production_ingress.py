@@ -175,6 +175,15 @@ def test_frontend_shell_cannot_override_controller_identity(tmp_path, option):
     assert _tree(authority) == before
 
 
+# DEFERRED (spec-014 Release B ledger, operator ruling 2): frontend skills keep
+# main's text; the managed admission section lands with the deferred skill wiring.
+deferred_skill_wiring = pytest.mark.xfail(
+    reason="DEFERRED: frontend skill admission wiring (spec-014 Release B ledger)",
+    raises=ValueError, strict=True,
+)
+
+
+@deferred_skill_wiring
 @pytest.mark.parametrize("frontend", ["feature-spec", "feature-implement", "fix", "code-uplift"])
 def test_frontend_skill_routes_before_init_and_requires_ambient_stop(frontend):
     text = (ROOT / "skills" / frontend / "SKILL.md").read_text()

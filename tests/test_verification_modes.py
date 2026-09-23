@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -21,6 +22,26 @@ ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "scripts/verification/parallel_host_parity.py"
 SETUP = ROOT / "setup.sh"
 SCHEMA = "ffs.parallel-host-verification/v1"
+
+
+def _skip_without_real_confinement() -> None:
+    """Skip when neither of parallel_host_parity._sandbox_command's own OS
+    confinement mechanisms (Darwin sandbox-exec, Linux bubblewrap) is
+    available. Mirrors that function's exact predicate so this only skips
+    where the product itself would fail closed with CONFINEMENT_UNAVAILABLE
+    (see test_m1_installer_delta.py::test_sandbox_command_refused_without_bwrap
+    for the assertion that the fail-closed path is real, not just untested).
+    """
+    available = (
+        shutil.which("sandbox-exec") is not None
+        if sys.platform == "darwin"
+        else shutil.which("bwrap") is not None
+    )
+    if not available:
+        pytest.skip(
+            "needs real OS install confinement (Darwin sandbox-exec or "
+            "Linux bubblewrap) — unavailable on this host"
+        )
 
 
 def sha(path: Path) -> str:
@@ -357,6 +378,7 @@ def test_fresh_review_missing_reviewer_identity_is_unmet_and_cannot_admit(tmp_pa
 
 
 def test_installation_cli_runs_real_private_installer(tmp_path: Path) -> None:
+    _skip_without_real_confinement()
     fixture = tmp_path / "private-fixture"
     fixture.mkdir(mode=0o700)
     home, codex, cache, state, project = (fixture / name for name in
@@ -390,6 +412,7 @@ def test_installation_cli_runs_real_private_installer(tmp_path: Path) -> None:
 
 def test_private_installation_os_confines_untrusted_stub_before_candidate_code(tmp_path: Path) -> None:
     """The child must receive an OS boundary; fixture env alone is insufficient."""
+    _skip_without_real_confinement()
     fixture = tmp_path / "private-fixture"
     fixture.mkdir(mode=0o700)
     external_sentinel = tmp_path / "outside-active-profile"
@@ -464,6 +487,7 @@ def test_upgrade_cli_rejects_missing_and_new_failures(tmp_path: Path) -> None:
 
 
 def test_installation_cli_rejects_escaped_runtime(tmp_path: Path) -> None:
+    _skip_without_real_confinement()
     fixture = tmp_path / "private-fixture"
     outside = tmp_path / "outside-runtime.sh"
     outside.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -500,6 +524,7 @@ def test_installation_cli_rejects_escaped_runtime(tmp_path: Path) -> None:
 
 
 def test_private_installation_timeout_stops_descendant_writes(tmp_path: Path) -> None:
+    _skip_without_real_confinement()
     import time
     fixture = tmp_path / "private-fixture"
     fixture.mkdir(mode=0o700)
@@ -586,6 +611,7 @@ def test_private_installation_cannot_claim_an_unregistered_same_owner_temp_direc
 
 @pytest.mark.parametrize("detach", ["setsid", "spawn-group"])
 def test_private_installation_cannot_detach_children_from_timeout_cleanup(tmp_path: Path, detach: str) -> None:
+    _skip_without_real_confinement()
     import time
     fixture = tmp_path / "private-fixture"
     fixture.mkdir(mode=0o700)

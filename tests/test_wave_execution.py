@@ -22,7 +22,7 @@ from test_run_context_acceptance import INHERITED_CONTEXT_KEYS
 
 def git(path: Path, *args: str) -> str:
     return subprocess.run(
-        ["rtk", "proxy", "git", *args], cwd=path, check=True,
+        ["git", *args], cwd=path, check=True,
         capture_output=True, text=True,
     ).stdout.strip()
 
@@ -216,9 +216,9 @@ def test_harvest_includes_modified_new_deleted_and_binary_as_applicable_patch(tm
     assert "GIT binary patch" in result.patch
     assert stat.S_IMODE(result.evidence_path.stat().st_mode) == 0o600
     applied = tmp_path / "applied"
-    subprocess.run(["rtk", "proxy", "git", "clone", "-q", str(repository), str(applied)], check=True)
+    subprocess.run(["git", "clone", "-q", str(repository), str(applied)], check=True)
     subprocess.run(
-        ["rtk", "proxy", "git", "apply", "--binary", str(result.evidence_path)],
+        ["git", "apply", "--binary", str(result.evidence_path)],
         cwd=applied, check=True,
     )
     assert (applied / "tracked.txt").read_text() == "changed\n"
@@ -305,7 +305,7 @@ def test_harvest_is_relative_to_parent_snapshot_and_applies_to_parent_overlay(tm
                      "git_mode": "100644"} if target.exists() else None)
         assert prepared["expected_after"][relative] == expected
     subprocess.run(
-        ["rtk", "proxy", "git", "apply", "--binary", str(result.evidence_path)],
+        ["git", "apply", "--binary", str(result.evidence_path)],
         cwd=repository, check=True,
     )
     for relative in ("tracked.txt", "binary.bin", "deleted.txt", "plan-new.txt"):

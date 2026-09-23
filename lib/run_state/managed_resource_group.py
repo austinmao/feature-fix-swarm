@@ -235,6 +235,45 @@ class ManagedParentResourceCoordinator(SharedResourceCoordinator):
         self.bindings[data['request_key']] = binding
         return binding
 
+    def restore_bound_intent(self, intent_id):
+        """Recover a prepaid-group ticket from this coordinator's own group state.
+
+        Prepaid-group admissions (``acquire`` above) share one ticket across
+        the whole parent envelope and never record a per-request
+        ``resource-lease:`` event, so the inherited SQL-event reconstruction
+        in ``SharedResourceCoordinator.restore_bound_intent`` always raises
+        ``SHARED_RESOURCE_LEASE_RESTORE_REQUIRED`` for them (it only special-
+        cases the missing ``resource-request:`` binding, not the lease).
+        Recover instead from this coordinator's own in-memory group state,
+        which the caller -- the same process, reconnecting to a still-live
+        child -- already holds from the original ``bind_intent`` call.
+        """
+        # Without this coordinator's own record of the intent, defer to the base
+        # reconstruction and its admission-event checks.
+        if self.reservation is None or self.plan is None:
+            return super().restore_bound_intent(intent_id)
+        match = next((key for key, binding in self.bindings.items()
+                      if binding.launch_intent_id == intent_id), None)
+        if match is None:
+            return super().restore_bound_intent(intent_id)
+        is_parent = match == self.parent_request_key
+        if not is_parent and intent_id not in self.claims:
+            return super().restore_bound_intent(intent_id)
+        with self.store.read_transaction() as tx:
+            assert_owner(tx, self.token)
+            intent = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone()
+            if intent is not None:
+                self.store._assert_activity_binding(tx, self.token, intent["activity_id"])
+        if intent is None:
+            return super().restore_bound_intent(intent_id)
+        if (intent["generation"] != self.token.generation or intent["child_pid"] is None
+                or intent["state"] in _SETTLED_INTENTS):
+            return None
+        demand = self.demand if is_parent else self.child_demand
+        binding = {"request_key": match, "parent_group": self.plan.group_id, "is_parent": is_parent,
+                   "group_demand": demand.record()}
+        return self.reservation.tickets["parent"], binding
+
     def assert_spawn_safe(self, reservation):
         """Recheck physical headroom, preserving ordinary target reductions.
 

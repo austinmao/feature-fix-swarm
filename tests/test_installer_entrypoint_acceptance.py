@@ -5,6 +5,7 @@ import shutil
 import time
 
 from test_verification_modes import ROOT, common, invoke, sha, write_json
+from test_verification_modes import _skip_without_real_confinement
 from test_verification_modes import test_installation_cli_runs_real_private_installer as _run_real_install_fixture
 
 
@@ -23,6 +24,7 @@ def _selected_source(tmp_path: Path) -> Path:
 
 
 def test_private_installation_executes_selected_setup_bytes(tmp_path: Path) -> None:
+    _skip_without_real_confinement()
     source_root = _selected_source(tmp_path)
     fixture = tmp_path / "private-fixture"
     fixture.mkdir(mode=0o700)
@@ -66,6 +68,7 @@ def _stub_manifest(tmp_path: Path, program: str, source_root: Path = ROOT) -> tu
 
 
 def test_private_installation_bounds_entrypoint_output_before_timeout(tmp_path: Path) -> None:
+    _skip_without_real_confinement()
     source_root = _selected_source(tmp_path)
     setup = source_root / "setup.sh"
     shebang, body = setup.read_text().split("\n", 1)
@@ -78,6 +81,7 @@ def test_private_installation_bounds_entrypoint_output_before_timeout(tmp_path: 
 
 
 def test_private_installation_reaps_children_after_successful_parent_exit(tmp_path: Path) -> None:
+    _skip_without_real_confinement()
     fixture = tmp_path / "private-fixture"
     marker, late = fixture / "child-started", fixture / "orphan-late-write"
     child = f"import pathlib,time;time.sleep(5);pathlib.Path({str(late)!r}).write_text('survived')"

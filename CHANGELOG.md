@@ -23,8 +23,18 @@ all skills.
   (`RECOVERY_PRODUCER_UNAVAILABLE`) and retains handback.
 - Deferred, still fail-closed: zero-plan frontends
   (`PRELAUNCH_PHASE_SCOPE_REQUIRED`), recovery/repair/spec-review producers,
-  production review-model catalog wiring, and `gsd-run.sh` ingress wiring.
+  production review-model catalog wiring, `gsd-run.sh` ingress wiring, and
+  global admission at managed production ingress. Their tests are strict
+  expected failures, so wiring any of them fails CI until the marker goes.
   Everything here is fixture-proven; no native host qualification is claimed.
+- Linux portability: PID-namespace proof no longer reads the ptrace-guarded
+  `/proc/1/ns/pid` and accepts only the initial namespace; unlimited
+  `RLIMIT_NPROC` falls back to the kernel thread/PID cap; the recovery docs
+  cache accepts a root-owned sticky ancestor such as `/tmp`; deeply nested
+  review JSON is a typed refusal on Python 3.11; prepaid resource-group
+  replay restores its parent ticket. Darwin-only `sandbox-exec` and
+  bubblewrap confinement tests skip where the product itself fails closed.
+- Restored the executable bit on `scripts/gsd/codex-model-sync.sh`.
 
 ### Changed (2026-09-23 — GSD Core 1.14.0, staged overlay)
 

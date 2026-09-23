@@ -238,7 +238,7 @@ Path('result-{i}.txt').write_text('overlapped')
         assert git(f.parent, "rev-parse", "HEAD") == f.manifest["initial_head"]
         with f.store.read_transaction() as tx:
             intents = tx.execute(
-                "SELECT capacity_exempt FROM authority_launch_intents ORDER BY created_at,id",
+                "SELECT capacity_exempt FROM authority_launch_intents ORDER BY rowid",
             ).fetchall()
             count = len(intents)
         assert [row["capacity_exempt"] for row in intents] == [1, 0, 0]

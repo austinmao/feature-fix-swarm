@@ -18,7 +18,7 @@ LIB = Path(__file__).resolve().parents[2]
 
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["rtk", "proxy", "git", *args], cwd=cwd, check=True,
+    return subprocess.run(["git", *args], cwd=cwd, check=True,
                           capture_output=True, text=True)
 
 

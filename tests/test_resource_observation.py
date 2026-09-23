@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import errno
+import os
+from pathlib import Path
 import time
 from types import SimpleNamespace
 
@@ -106,8 +109,8 @@ def _write_proc_visibility_fixture(proc_root):
     _write_status(proc_root, 1, 0, (1,))
     (proc_root / "self" / "ns").mkdir()
     (proc_root / "1" / "ns").mkdir()
-    (proc_root / "self" / "ns" / "pid").symlink_to("pid:[42]")
-    (proc_root / "1" / "ns" / "pid").symlink_to("pid:[42]")
+    (proc_root / "self" / "ns" / "pid").symlink_to("pid:[4026531836]")
+    (proc_root / "1" / "ns" / "pid").symlink_to("pid:[4026531836]")
     (proc_root / "self" / "mountinfo").write_text(
         "1 0 0:1 / /proc rw - proc proc rw\n", encoding="ascii"
     )
@@ -175,6 +178,86 @@ def test_linux_process_collection_refuses_hidden_or_malformed_proc_data(
 
     monkeypatch.setattr(observation.os, "getuid", lambda: 0)
     assert observation._linux_rlimit_process_headroom(proc_root) == (True, None)
+
+
+def test_unprivileged_pid_namespace_proof_needs_no_ptrace_access_to_pid_1(
+    tmp_path, monkeypatch
+):
+    from run_state import resource_observation as observation
+
+    proc_root = tmp_path / "proc"
+    _write_status(proc_root, 101, 42, (101, 102))
+    (proc_root / "self").mkdir()
+    _write_proc_visibility_fixture(proc_root)
+    (proc_root / "self" / "status").write_text(
+        "CapEff:\t0000000000000000\nNSpid:\t101\n", encoding="ascii"
+    )
+    real_readlink = os.readlink
+
+    def ptrace_guarded_readlink(path, *args, **kwargs):
+        # The kernel answers EACCES for root-owned /proc/1/ns/* to non-root.
+        if Path(path) == proc_root / "1" / "ns" / "pid":
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(observation.os, "readlink", ptrace_guarded_readlink)
+    monkeypatch.setattr(observation.os, "getuid", lambda: 42)
+    monkeypatch.setattr(observation.resource, "getrlimit", lambda _kind: (5, 5))
+    assert observation._linux_proc_visibility_verified(proc_root) is True
+    assert observation._linux_rlimit_process_headroom(proc_root) == (True, 3)
+
+    # The caller's own namespace link must still be present and well formed.
+    (proc_root / "self" / "ns" / "pid").unlink()
+    (proc_root / "self" / "ns" / "pid").symlink_to("pid:[not-a-number]")
+    assert observation._linux_rlimit_process_headroom(proc_root) == (False, None)
+
+    # A nested namespace (a container) cannot see the UID's threads elsewhere,
+    # so its count would undercount RLIMIT_NPROC usage: unknown, not headroom.
+    (proc_root / "self" / "ns" / "pid").unlink()
+    (proc_root / "self" / "ns" / "pid").symlink_to("pid:[4026532001]")
+    assert observation._linux_rlimit_process_headroom(proc_root) == (False, None)
+
+
+def _write_unlimited_linux_fixture(proc_root, mount, monkeypatch):
+    from run_state import resource_observation as observation
+
+    _write_cgroup_fixture(proc_root, mount)
+    (mount / "parent" / "child").mkdir(parents=True)
+    (mount / "parent" / "child" / "pids.max").write_text("max\n", encoding="ascii")
+    (proc_root / "self" / "status").write_text(
+        "CapEff:\t0000000000000000\nNSpid:\t101\n", encoding="ascii"
+    )
+    monkeypatch.setattr(observation.os, "getuid", lambda: 42)
+    infinity = observation.resource.RLIM_INFINITY
+    monkeypatch.setattr(
+        observation.resource, "getrlimit", lambda _kind: (infinity, infinity)
+    )
+
+
+def test_linux_unlimited_uid_and_cgroup_use_measured_kernel_thread_cap(
+    tmp_path, monkeypatch
+):
+    from run_state import resource_observation as observation
+
+    proc_root = tmp_path / "proc"
+    _write_unlimited_linux_fixture(proc_root, tmp_path / "cgroup", monkeypatch)
+    # Neither per-UID nor cgroup limits exist and the kernel cap is unreadable:
+    # still unknown, never invented headroom.
+    assert observation._linux_process_available(proc_root) is None
+
+    (proc_root / "sys" / "kernel").mkdir(parents=True)
+    (proc_root / "sys" / "kernel" / "threads-max").write_text("1000\n", encoding="ascii")
+    (proc_root / "sys" / "kernel" / "pid_max").write_text("4194304\n", encoding="ascii")
+    (proc_root / "loadavg").write_text("0.50 0.40 0.30 3/234 9999\n", encoding="ascii")
+    assert observation._linux_process_available(proc_root) == 766
+    # pid_max loses the kernel's reserved low PIDs: min(1000, 800 - 300) - 234.
+    (proc_root / "sys" / "kernel" / "pid_max").write_text("800\n", encoding="ascii")
+    assert observation._linux_process_available(proc_root) == 266
+
+    (proc_root / "sys" / "kernel" / "pid_max").write_text("200\n", encoding="ascii")
+    assert observation._linux_process_available(proc_root) == 0
+    (proc_root / "loadavg").write_text("0.50 0.40 0.30 3/234 9999", encoding="ascii")
+    assert observation._linux_process_available(proc_root) is None
 
 
 def test_linux_cgroup_headroom_uses_the_tightest_ancestor_limit(tmp_path):

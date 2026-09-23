@@ -196,8 +196,19 @@ def _linux_status_real_uid(status: str) -> int | None:
     return int(fields[1])
 
 
+_INITIAL_PID_NAMESPACE = "pid:[4026531836]"
+# Low PIDs the kernel skips after wrap-around (RESERVED_PIDS).
+_LINUX_RESERVED_PIDS = 300
+
+
 def _linux_unambiguous_pid_namespace(status: str, proc_root: Path) -> bool:
-    """Require one visible PID namespace and agreement with visible PID 1."""
+    """Require this procfs to belong to the caller's own PID namespace.
+
+    ``NSpid`` lists one PID per namespace from the procfs mount's namespace
+    down to the caller's, so exactly one field proves they are the same
+    namespace (and so is visible PID 1).  ``/proc/1/ns/pid`` is not consulted:
+    it is ptrace-guarded and returns EACCES to every unprivileged caller.
+    """
     if not status.endswith("\n"):
         return False
     matches = [line for line in status.splitlines() if line.startswith("NSpid:")]
@@ -214,10 +225,12 @@ def _linux_unambiguous_pid_namespace(status: str, proc_root: Path) -> bool:
         return False
     try:
         own_namespace = os.readlink(proc_root / "self" / "ns" / "pid")
-        init_namespace = os.readlink(proc_root / "1" / "ns" / "pid")
     except OSError:
         return False
-    return own_namespace == init_namespace and own_namespace.startswith("pid:[") and own_namespace.endswith("]") and own_namespace[5:-1].isdecimal()
+    # RLIMIT_NPROC counts the real UID's threads in every PID namespace, so a
+    # count taken inside a nested namespace would undercount: only the initial
+    # namespace (PROC_PID_INIT_INO) can see them all.
+    return own_namespace == _INITIAL_PID_NAMESPACE
 
 
 def _linux_proc_visibility_verified(proc_root: Path) -> bool:
@@ -474,12 +487,40 @@ def _linux_rlimit_process_headroom(proc_root: Path = Path("/proc")) -> tuple[boo
         return False, None
 
 
-def _linux_process_available() -> int | None:
-    rlimit_known, rlimit = _linux_rlimit_process_headroom()
-    cgroup_known, cgroup = _linux_cgroup_process_headroom()
+def _linux_system_thread_headroom(proc_root: Path = Path("/proc")) -> int | None:
+    """Kernel-wide thread/PID cap minus every live kernel thread, or unknown."""
+    try:
+        limits = []
+        for name in ("threads-max", "pid_max"):
+            value = (proc_root / "sys" / "kernel" / name).read_text(encoding="ascii")
+            if not value.endswith("\n") or not value[:-1].isascii() or not value[:-1].isdecimal():
+                return None
+            limit = int(value[:-1])
+            limits.append(max(0, limit - _LINUX_RESERVED_PIDS) if name == "pid_max" else limit)
+        loadavg = (proc_root / "loadavg").read_text(encoding="ascii")
+        fields = loadavg.split()
+        if not loadavg.endswith("\n") or len(fields) != 5:
+            return None
+        _running, separator, total = fields[3].partition("/")
+        if separator != "/" or not total.isascii() or not total.isdecimal():
+            return None
+        return max(0, min(limits) - int(total))
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _linux_process_available(proc_root: Path = Path("/proc")) -> int | None:
+    rlimit_known, rlimit = _linux_rlimit_process_headroom(proc_root)
+    cgroup_known, cgroup = _linux_cgroup_process_headroom(proc_root)
     if not rlimit_known or not cgroup_known:
         return None
-    bounds = [value for value in (rlimit, cgroup) if value is not None]
+    # Like Darwin's kern.maxproc headroom, the kernel-wide cap is a measured
+    # bound: no RLIMIT_NPROC and pids.max=max still is not unbounded.
+    bounds = [
+        value
+        for value in (rlimit, cgroup, _linux_system_thread_headroom(proc_root))
+        if value is not None
+    ]
     return min(bounds) if bounds else None
 
 

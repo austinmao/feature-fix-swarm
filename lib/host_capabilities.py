@@ -518,7 +518,7 @@ def validate_artifact_review_material(value: object) -> ArtifactReviewMaterial:
             output_contract=None if value.output_contract_json is None else json.loads(value.output_contract_json),
             review_context=None if value.review_context_json is None else json.loads(value.review_context_json),
         )
-    except (CapabilityError, TypeError, ValueError) as exc:
+    except (CapabilityError, TypeError, ValueError, RecursionError) as exc:
         raise CapabilityError("artifact review material is malformed") from exc
     if rebuilt != value:
         raise CapabilityError("artifact review material is not canonical")

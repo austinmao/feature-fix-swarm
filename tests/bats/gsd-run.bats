@@ -48,7 +48,7 @@ setup() {
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md"
   printf '%s\n' 'name = "gsd-executor"' 'model = "sonnet"' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml"
   printf '%s\n' '# executor' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.md"
-  printf '%s\n' '1.13.0' > "$CODEX_SOURCE_ROOT/gsd-core/VERSION"
+  printf '%s\n' '1.14.0' > "$CODEX_SOURCE_ROOT/gsd-core/VERSION"
   cat > "$CODEX_SOURCE_ROOT/hooks/gsd-context-monitor.js" <<EOF
 process.stdin.resume();
 process.stdin.on('end', () => require('fs').writeFileSync('$BATS_TEST_TMPDIR/hook.smoked', 'yes\n'));
@@ -65,7 +65,7 @@ EOF
   cp "$CODEX_SOURCE_ROOT/hooks/gsd-check-update-worker.js" "$GSD_PACKAGE_ROOT/hooks/dist/gsd-check-update-worker.js"
   cp "$CODEX_SOURCE_ROOT/hooks/managed-hooks-registry.cjs" "$GSD_PACKAGE_ROOT/hooks/dist/managed-hooks-registry.cjs"
   printf '%s\n' 'module.exports = true;' > "$GSD_PACKAGE_ROOT/hooks/sibling/dependency.js"
-  printf '%s\n' '{"name":"@opengsd/gsd-core","version":"1.13.0"}' > "$GSD_PACKAGE_ROOT/package.json"
+  printf '%s\n' '{"name":"@opengsd/gsd-core","version":"1.14.0"}' > "$GSD_PACKAGE_ROOT/package.json"
   NODE_ON_PATH="$(command -v node)"
   [ -x "$NODE_ON_PATH" ]
   SAFE_NODE="$BATS_TEST_TMPDIR/trusted-node"
@@ -123,7 +123,7 @@ EOF
   version_hash="$(shasum -a 256 "$CODEX_SOURCE_ROOT/gsd-core/VERSION" | awk '{print $1}')"
   quick_skill_hash="$(shasum -a 256 "$USER_AGENTS_ROOT/skills/gsd-quick/SKILL.md" | awk '{print $1}')"
   cat > "$CODEX_SOURCE_ROOT/gsd-file-manifest.json" <<EOF
-{"version":"1.13.0","files":{"agents/gsd-executor.toml":"$agent_toml_hash","agents/gsd-executor.md":"$agent_md_hash","gsd-core/VERSION":"$version_hash","skills/gsd-quick/SKILL.md":"$quick_skill_hash"}}
+{"version":"1.14.0","files":{"agents/gsd-executor.toml":"$agent_toml_hash","agents/gsd-executor.md":"$agent_md_hash","gsd-core/VERSION":"$version_hash","skills/gsd-quick/SKILL.md":"$quick_skill_hash"}}
 EOF
   printf '%s\n' '---' 'name: gsd-quick' '---' > "$CLAUDE_SKILLS_ROOT/gsd-quick/SKILL.md"
   printf '%s\n' '---' 'name: gsd-plan-phase' '---' > "$CLAUDE_SKILLS_ROOT/gsd-plan-phase/SKILL.md"
@@ -1021,10 +1021,15 @@ EOF
   # reviewer CLIs are pointed at nonexistent binaries so every ladder rung
   # fails fast (rc=127) instead of shelling out to a real claude/codex CLI
   # that may be installed on the machine running this suite.
+  # A durable run id is required before plan-wall will admit a fresh review
+  # (spec-014 Release B: plan-wall.sh refuses RUN-ID-REQUIRED otherwise) —
+  # supply one so the wall's own safety property (block before any host
+  # probe) is what's actually under test here.
   FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     ADVERSARY_BIN_CODEX=nonexistent-codex-binary-xyz \
     ADVERSARY_BIN_CLAUDE=nonexistent-claude-binary-xyz \
     FFS_ADVERSARY_MODEL_PROBE=off \
+    GSD_RUN_ID=spec-004 \
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 2"
 
   [ "$status" -ne 0 ]
@@ -1698,7 +1703,7 @@ PY
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
-@test "frontier tier resolves gpt-5.6-sol at xhigh on the Codex host" {
+@test "frontier tier resolves gpt-6-astra at xhigh on the Codex host" {
   FFS_HOST=codex GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1706,7 +1711,7 @@ PY
   [ "$status" -eq 0 ]
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  grep -F 'model="gpt-5.6-sol"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6-astra"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
 }
 

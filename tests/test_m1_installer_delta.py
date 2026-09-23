@@ -28,7 +28,7 @@ from test_installer_opus_acceptance import (
     subject,
     write_json,
 )
-from test_verification_modes import ROOT, SETUP, invoke
+from test_verification_modes import ROOT, SETUP, _skip_without_real_confinement, invoke
 
 
 def _private_installation(tmp_path: Path, stub_text: str = "raise SystemExit(0)\n"):
@@ -100,7 +100,32 @@ def test_m01_linux_launch_uses_verifier_owned_absolute_bash(
     assert not marker.exists(), "fixture-controlled bin/bash became the interpreter"
 
 
+def test_sandbox_command_refused_without_bwrap_on_non_darwin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_sandbox_command's own predicate is Darwin sandbox-exec OR Linux
+    bubblewrap; proves the non-Darwin/no-bwrap combination fails closed with
+    CONFINEMENT_UNAVAILABLE rather than silently degrading. This is the case
+    real CI hits when bubblewrap isn't installed on the runner, and is why
+    tests that need a REAL confined child call _skip_without_real_confinement()
+    instead of asserting success unconditionally.
+    """
+    module = subject()
+    fixture = tmp_path / "private-fixture"
+    fixture.mkdir(mode=0o700)
+
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(module.E) as rejected:
+        module._sandbox_command(fixture, ["bash", "setup.sh"])
+
+    assert rejected.value.code == "CONFINEMENT_UNAVAILABLE"
+    assert rejected.value.status == "UNMET"
+
+
 def test_m02_undeclared_nested_popen_is_refused_before_child_effect(tmp_path: Path) -> None:
+    _skip_without_real_confinement()
     fixture = tmp_path / "private-fixture"
     fixture.mkdir(mode=0o700)
     marker = fixture / "undeclared-popen-observed.json"

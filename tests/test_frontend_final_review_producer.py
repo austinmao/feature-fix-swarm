@@ -10,12 +10,19 @@ native host qualification.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+requires_local_confinement = pytest.mark.skipif(
+    sys.platform != "darwin" or not os.path.isfile("/usr/bin/sandbox-exec"),
+    reason="needs Darwin sandbox-exec local-check confinement (non-Darwin fails closed; covered by test_local_check_transport)",
+)
+pytestmark = requires_local_confinement
 
 from run_state.claude_host import ClaudeLaunchMaterial
 from run_state.codex_host import CodexLaunchMaterial

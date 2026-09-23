@@ -9,19 +9,29 @@ import time
 import pytest
 
 from run_state.managed import prepare_managed_run
-from run_state.managed_admission import ManagedAdmissionQueue
+from run_state.managed_admission import ManagedAdmissionRefused
 from run_state.state import ControlStore
+from run_state.tests.admission_fixture import queue as fixture_queue
 from test_managed_production_ingress import _setup, ROOT, _tree
 from test_run_context_acceptance import INHERITED_CONTEXT_KEYS
 
+# DEFERRED (spec-014 Release B ledger): prepare_managed_run does not yet take a
+# global admission ticket at production ingress, and gsd-run.sh managed ingress
+# stays opt-in refusal only (operator ruling 2). Strict, so wiring it fails CI.
+deferred_ingress_admission = pytest.mark.xfail(
+    reason="DEFERRED: global admission at managed production ingress (spec-014 Release B ledger)",
+    raises=(AssertionError, IndexError, ManagedAdmissionRefused), strict=True,
+)
 
+
+@deferred_ingress_admission
 def test_waiting_production_run_has_no_state_or_workspace_effects(tmp_path, monkeypatch):
     primary, authority, _, env = _setup(tmp_path)
     global_root = tmp_path / "global"
     monkeypatch.setenv("FFS_MANAGED_ADMISSION_ROOT", str(global_root))
     env["FFS_MANAGED_ADMISSION_ROOT"] = str(global_root)
-    queue = ManagedAdmissionQueue()
-    tickets = [queue.acquire(state_root=tmp_path / str(index), run_id=str(index)) for index in range(2)]
+    queue = fixture_queue()
+    tickets = [queue.acquire(state_root=tmp_path / str(index), run_id=str(index), timeout=10) for index in range(2)]
     before = _tree(authority)
     checkout_before = _tree(primary)
     child = subprocess.Popen(
@@ -54,13 +64,14 @@ def test_waiting_production_run_has_no_state_or_workspace_effects(tmp_path, monk
             queue.release(ticket)
 
 
+@deferred_ingress_admission
 def test_callback_exception_releases_global_admission_after_ownership(tmp_path, monkeypatch):
     primary, authority, _, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
     for key in INHERITED_CONTEXT_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("FFS_MANAGED_ADMISSION_ROOT", str(tmp_path / "global"))
-    queue = ManagedAdmissionQueue()
+    queue = fixture_queue()
 
     def fail(store, token, context):
         assert queue.snapshot()[-1]["status"] == "active"

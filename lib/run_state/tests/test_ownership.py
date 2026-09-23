@@ -696,7 +696,7 @@ def test_bare_git_repository_cannot_contain_control_authority(tmp_path: Path) ->
     from run_state.ownership import ControlStore, ControlStoreRefused
 
     bare = tmp_path / "fixture.git"
-    subprocess.run(["rtk", "git", "init", "--bare", "-q", str(bare)], check=True,
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True,
                    capture_output=True, text=True)
     before = {entry.name for entry in bare.iterdir()}
     db = bare / "authority" / "control.sqlite3"

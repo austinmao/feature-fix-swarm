@@ -19,6 +19,11 @@ from types import SimpleNamespace
 
 import pytest
 
+requires_local_confinement = pytest.mark.skipif(
+    sys.platform != "darwin" or not os.path.isfile("/usr/bin/sandbox-exec"),
+    reason="needs Darwin sandbox-exec local-check confinement (non-Darwin fails closed; covered by test_local_check_transport)",
+)
+
 import host_capabilities
 from host_capabilities import QualifiedCodexRuntime, TELEMETRY_SCHEMA, _binary_chain
 from process_identity import ProcessIdentity
@@ -279,6 +284,7 @@ def _last_code(capsys) -> str:
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])["code"]
 
 
+@requires_local_confinement
 @pytest.mark.parametrize("entry", ["managed-start", "frontend-start"])
 def test_entrypoint_seals_draft_executes_reviews_natively_and_replays_to_done(tmp_path, monkeypatch, entry):
     primary, authority, repository_id, env = _setup(tmp_path)
@@ -363,6 +369,7 @@ def test_frontend_start_without_a_draft_refuses_before_any_outer_launch(tmp_path
     assert facts.outer == 0 and facts.native == 0 and facts.actions == {}
 
 
+@requires_local_confinement
 def test_failed_sealed_check_without_a_repair_producer_hands_back_and_refuses_truthfully(tmp_path, monkeypatch, capsys):
     primary, authority, repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)

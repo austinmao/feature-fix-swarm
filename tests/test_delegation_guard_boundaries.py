@@ -193,7 +193,7 @@ def test_authenticated_event_corruption_refuses_before_allocation(tmp_path, monk
 def _replace_tree(c, path, name):
     retained = c.tmp / name
     path.rename(retained)
-    subprocess.run(["rtk", "proxy", "git", "clone", "--no-hardlinks", "-q", str(c.primary), str(path)], check=True)
+    subprocess.run(["git", "clone", "--no-hardlinks", "-q", str(c.primary), str(path)], check=True)
     return retained
 
 

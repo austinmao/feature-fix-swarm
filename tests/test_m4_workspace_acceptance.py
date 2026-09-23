@@ -471,7 +471,7 @@ def test_input_selection_preserves_unrequested_session_key() -> None:
 
 def _git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["rtk", "proxy", "git", *args], cwd=cwd, check=check,
+        ["git", *args], cwd=cwd, check=check,
         capture_output=True, text=True,
     )
 

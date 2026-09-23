@@ -19,7 +19,7 @@ RUN = "spec-777"
 
 
 def _run(c, argv, *, text="", timeout=30):
-    return subprocess.run(["rtk", "proxy", *map(str, argv)], cwd=c.repo,
+    return subprocess.run([*map(str, argv)], cwd=c.repo,
                           env=c.env, input=text, text=True, capture_output=True,
                           timeout=timeout)
 

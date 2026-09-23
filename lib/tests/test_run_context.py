@@ -20,7 +20,7 @@ CONTEXT_KEYS = (
 
 
 def _git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["rtk", "proxy", "git", *args], cwd=cwd, check=check,
+    return subprocess.run(["git", *args], cwd=cwd, check=check,
                           capture_output=True, text=True)
 
 

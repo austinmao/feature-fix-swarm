@@ -21,6 +21,15 @@ from test_m4_upstream_context_acceptance import (
 )
 
 
+# DEFERRED (spec-014 Release B ledger, operator ruling 2): gsd-run.sh managed
+# ingress stays opt-in refusal only; routing the legacy shell through the managed
+# CLI is deferred past native qualification. Strict, so wiring it fails CI here.
+deferred_shell_ingress = pytest.mark.xfail(
+    reason="DEFERRED: gsd-run.sh managed ingress wiring (spec-014 Release B ledger)",
+    raises=(AssertionError, ValueError), strict=True,
+)
+
+
 def _setup(tmp_path):
     primary = _repository(tmp_path)
     authority = tmp_path / "authority"
@@ -91,6 +100,7 @@ def test_real_cli_persists_ceremony_estimate_and_refuses_tier_reset(tmp_path, en
     assert after.tier == tier and after.launch_charged == 0
 
 
+@deferred_shell_ingress
 def test_actual_shell_configures_limits_and_refuses_unqualified_host(tmp_path):
     primary, authority, repository_id, env = _setup(tmp_path)
     before = _tree(primary)
@@ -116,6 +126,7 @@ def test_actual_shell_configures_limits_and_refuses_unqualified_host(tmp_path):
     }
 
 
+@deferred_shell_ingress
 @pytest.mark.parametrize("change", ["flags", "skill", "limit"])
 def test_actual_shell_replay_rejects_changed_material_before_new_owner(tmp_path, change):
     primary, authority, _, env = _setup(tmp_path)
@@ -134,6 +145,7 @@ def test_actual_shell_replay_rejects_changed_material_before_new_owner(tmp_path,
     assert _tree(authority) == before
 
 
+@deferred_shell_ingress
 def test_candidate_cannot_adopt_legacy_run(tmp_path):
     primary, authority, _, env = _setup(tmp_path)
     selection = Path(env["FFS_SELECTION_MANIFEST"])
@@ -147,6 +159,7 @@ def test_candidate_cannot_adopt_legacy_run(tmp_path):
     assert _tree(authority) == before
 
 
+@deferred_shell_ingress
 def test_legacy_entry_cannot_write_managed_run(tmp_path):
     primary, authority, _, env = _setup(tmp_path)
     assert _run(primary, env, "/gsd-plan-phase", "1").returncode == 78
@@ -160,6 +173,7 @@ def test_legacy_entry_cannot_write_managed_run(tmp_path):
     assert _tree(authority) == before
 
 
+@deferred_shell_ingress
 def test_resume_request_key_retains_its_own_command_binding(tmp_path):
     primary, authority, _, env = _setup(tmp_path)
     assert _run(primary, env, "/gsd-plan-phase", "1").returncode == 78
@@ -172,6 +186,7 @@ def test_resume_request_key_retains_its_own_command_binding(tmp_path):
     assert _tree(authority) == before
 
 
+@deferred_shell_ingress
 def test_legacy_complete_cannot_finalize_managed_activity(tmp_path):
     primary, authority, _, env = _setup(tmp_path)
     assert _run(primary, env, "/gsd-plan-phase", "1").returncode == 78
@@ -187,6 +202,7 @@ def test_legacy_complete_cannot_finalize_managed_activity(tmp_path):
     assert _tree(authority) == before
 
 
+@deferred_shell_ingress
 @pytest.mark.parametrize("setting", ["FFS_DISPATCH_LIMIT", "GSD_TOKEN_BUDGET"])
 def test_oversized_limits_refuse_before_run_preparation(tmp_path, setting):
     primary, authority, _, env = _setup(tmp_path)

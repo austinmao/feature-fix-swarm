@@ -399,9 +399,13 @@ class DocumentationCache:
                     pass
                 next_fd = os.open(part, flags, dir_fd=current)
                 info = os.fstat(next_fd)
-                # Ancestors may belong to root, but must not be group/other
-                # writable.  The cache root itself is private to this user.
-                if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o022
+                # Ancestors belong to root or this user and are not group/other
+                # writable, except a root-owned sticky directory such as /tmp,
+                # where other users cannot rename or remove this user's
+                # entries.  The cache root itself is private to this user.
+                mode = stat.S_IMODE(info.st_mode)
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.getuid())
+                        or (mode & 0o022 and not (info.st_uid == 0 and mode & stat.S_ISVTX))
                         or (index == len(self.root.parts) - 1
                             and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077))):
                     os.close(next_fd)

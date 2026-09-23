@@ -87,7 +87,7 @@ JSON
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-execution.toml"
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-judgment.toml"
   grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-judgment.toml"
-  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-frontier.toml"
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-frontier.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-frontier.toml"
 }
 
@@ -108,13 +108,13 @@ JSON
   [ "$(cat "$CODEX_ROOT/agents/gsd-executor.toml")" = "$first" ]
 }
 
-@test "a standalone fable alias keeps its emitted Sol xhigh pin on repeat sync" {
+@test "a standalone fable alias keeps its emitted Astra xhigh pin on repeat sync" {
   write_agent gsd-planner fable
   CONFIG="$BATS_TEST_TMPDIR/no-planner-override.json"
   printf '%s\n' '{"model_overrides":{}}' > "$CONFIG"
   GSD_MODEL_CONFIG="$CONFIG" bash "$SCRIPT" "$CODEX_ROOT"
   first="$(cat "$CODEX_ROOT/agents/gsd-planner.toml")"
-  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
 
   GSD_MODEL_CONFIG="$CONFIG" bash "$SCRIPT" "$CODEX_ROOT"

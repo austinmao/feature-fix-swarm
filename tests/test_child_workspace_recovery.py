@@ -88,7 +88,7 @@ def test_foreign_clone_at_identical_head_refuses_before_debit(tmp_path, monkeypa
         )
         retained = tmp_path / "retained-original-child"
         ready.path.rename(retained)
-        subprocess.run(["rtk", "proxy", "git", "clone", "--no-hardlinks", "-q", str(primary), str(ready.path)], check=True)
+        subprocess.run(["git", "clone", "--no-hardlinks", "-q", str(primary), str(ready.path)], check=True)
         assert git(ready.path, "rev-parse", "HEAD") == base
         assert git(ready.path, "rev-parse", "--git-common-dir") == ".git"
         def accounting():

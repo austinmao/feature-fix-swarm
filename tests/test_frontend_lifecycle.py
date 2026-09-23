@@ -5,10 +5,17 @@ stage-resumable driver sequencing the existing authority components, not a
 native host execution, native diagnosis/trials or an opposite-vendor review.
 """
 from pathlib import Path
+import os
 import sys
 import time
 
 import pytest
+
+requires_local_confinement = pytest.mark.skipif(
+    sys.platform != "darwin" or not os.path.isfile("/usr/bin/sandbox-exec"),
+    reason="needs Darwin sandbox-exec local-check confinement (non-Darwin fails closed; covered by test_local_check_transport)",
+)
+pytestmark = requires_local_confinement
 
 from run_state.frontend_completion import post_repair_review_tx
 from run_state.frontend_lifecycle import LifecycleProducers, drive_frontend_lifecycle

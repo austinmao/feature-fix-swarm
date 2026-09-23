@@ -34,7 +34,7 @@ def _sha(data: bytes) -> str:
 
 def _git(*args: str, cwd: Path) -> str:
     completed = subprocess.run(
-        ["rtk", "proxy", "git", *args], cwd=cwd, check=True,
+        ["git", *args], cwd=cwd, check=True,
         capture_output=True, text=True,
     )
     return completed.stdout.strip()

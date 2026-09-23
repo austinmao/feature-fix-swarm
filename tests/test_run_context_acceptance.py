@@ -27,11 +27,11 @@ INHERITED_CONTEXT_KEYS = (
 
 
 def _git(*args: str, cwd: Path) -> None:
-    subprocess.run(["rtk", "proxy", "git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
 def _git_text(*args: str, cwd: Path) -> str:
-    return subprocess.run(["rtk", "proxy", "git", *args], cwd=cwd, check=True,
+    return subprocess.run(["git", *args], cwd=cwd, check=True,
                           capture_output=True, text=True).stdout.strip()
 
 

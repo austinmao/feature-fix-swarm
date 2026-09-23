@@ -8,12 +8,19 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import time
 import uuid
 
 import pytest
+
+requires_local_confinement = pytest.mark.skipif(
+    sys.platform != "darwin" or not os.path.isfile("/usr/bin/sandbox-exec"),
+    reason="needs Darwin sandbox-exec local-check confinement (non-Darwin fails closed; covered by test_local_check_transport)",
+)
+pytestmark = requires_local_confinement
 
 from host_capabilities import build_artifact_review_material
 from run_state.claude_host import ClaudeLaunchMaterial

@@ -11,7 +11,9 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # spec-014 Release B adds ~250 git- and subprocess-heavy test files
+    # (~20 min measured on a 2-vCPU Linux container).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
