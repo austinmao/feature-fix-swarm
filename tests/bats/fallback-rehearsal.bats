@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # fallback-rehearsal.sh — "a backup you never ran is a hope" (tested-fallback
-# discipline). The fallback chain fable -> gpt-5.6-sol -> opus is only real if
+# discipline). The fallback chain fable -> gpt-6-sol -> opus is only real if
 # its rungs have actually been RUN recently. This lever smoke-runs both rungs,
 # records tested_on + per-rung results, and model-fallback.sh WARNs at
 # fallback-ENGAGE time when the rehearsal record is missing or >30d stale.
@@ -22,7 +22,7 @@ setup() {
   [ -f "$REHEARSAL_FILE" ]
   grep -q '"tested_on"' "$REHEARSAL_FILE"
   grep -q '"claude-opus-5": *"ok"' "$REHEARSAL_FILE"
-  grep -q '"gpt-5.6-sol": *"ok"' "$REHEARSAL_FILE"
+  grep -q '"gpt-6-sol": *"ok"' "$REHEARSAL_FILE"
 }
 
 @test "a failed rung: exit 1, failure recorded not hidden" {
@@ -30,7 +30,7 @@ setup() {
     bash "$REHEARSAL"
   [ "$status" -eq 1 ]
   [ -f "$REHEARSAL_FILE" ]
-  grep -q '"gpt-5.6-sol": *"fail"' "$REHEARSAL_FILE"
+  grep -q '"gpt-6-sol": *"fail"' "$REHEARSAL_FILE"
   [[ "$output" == *"FAIL"* ]]
 }
 
@@ -40,7 +40,7 @@ setup() {
   [ "$status" -eq 0 ]
   [ ! -f "$REHEARSAL_FILE" ]
   [[ "$output" == *"claude-opus-5"* ]]
-  [[ "$output" == *"gpt-5.6-sol"* ]]
+  [[ "$output" == *"gpt-6-sol"* ]]
 }
 
 # ── model-fallback.sh engage-time staleness WARN ─────────────────────────────
@@ -62,7 +62,7 @@ engage_fallback() {
 }
 
 @test "engaging fallback with fresh rehearsal record: no rehearsal WARN" {
-  printf '{"tested_on":"2026-07-31","results":{"claude-opus-5":"ok","gpt-5.6-sol":"ok"}}\n' \
+  printf '{"tested_on":"2026-07-31","results":{"claude-opus-5":"ok","gpt-6-sol":"ok"}}\n' \
     > "$REHEARSAL_FILE"
   engage_fallback
   [ "$status" -eq 0 ]
@@ -70,7 +70,7 @@ engage_fallback() {
 }
 
 @test "engaging fallback with >30d-old rehearsal record warns: stale" {
-  printf '{"tested_on":"2026-01-01","results":{"claude-opus-5":"ok","gpt-5.6-sol":"ok"}}\n' \
+  printf '{"tested_on":"2026-01-01","results":{"claude-opus-5":"ok","gpt-6-sol":"ok"}}\n' \
     > "$REHEARSAL_FILE"
   touch -t 202601010000 "$REHEARSAL_FILE"
   engage_fallback

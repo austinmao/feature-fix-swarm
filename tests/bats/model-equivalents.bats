@@ -14,10 +14,10 @@ setup() {
   [ "$output" = "gpt-6-astra" ]
 }
 
-@test "codex_equiv_model: opus alias -> gpt-5.6-sol" {
+@test "codex_equiv_model: opus alias -> gpt-6-sol" {
   run codex_equiv_model opus
   [ "$status" -eq 0 ]
-  [ "$output" = "gpt-5.6-sol" ]
+  [ "$output" = "gpt-6-sol" ]
 }
 
 @test "codex_equiv_model: sonnet alias -> gpt-5.6-terra" {
@@ -32,11 +32,11 @@ setup() {
   [ "$output" = "gpt-5.6-luna" ]
 }
 
-@test "codex_equiv_effort: fable -> xhigh, opus -> high, sonnet -> medium, haiku -> low" {
+@test "codex_equiv_effort: fable -> xhigh, opus -> xhigh, sonnet -> medium, haiku -> low" {
   run codex_equiv_effort fable
   [ "$output" = "xhigh" ]
   run codex_equiv_effort opus
-  [ "$output" = "high" ]
+  [ "$output" = "xhigh" ]
   run codex_equiv_effort sonnet
   [ "$output" = "medium" ]
   run codex_equiv_effort haiku
@@ -47,7 +47,7 @@ setup() {
   run codex_equiv_model claude-fable-5
   [ "$output" = "gpt-6-astra" ]
   run codex_equiv_model claude-opus-5
-  [ "$output" = "gpt-5.6-sol" ]
+  [ "$output" = "gpt-6-sol" ]
   run codex_equiv_model claude-sonnet-5
   [ "$output" = "gpt-5.6-terra" ]
   run codex_equiv_model claude-haiku-4-5-20251001
@@ -59,6 +59,12 @@ setup() {
   [ "$status" -eq 0 ]
   [ "$output" = "opus" ]
   [ "$output" != "fable" ]
+}
+
+@test "claude_equiv_model: gpt-6-sol also collapses to opus" {
+  run claude_equiv_model gpt-6-sol
+  [ "$status" -eq 0 ]
+  [ "$output" = "opus" ]
 }
 
 @test "claude_equiv_model: terra -> sonnet, luna -> haiku" {

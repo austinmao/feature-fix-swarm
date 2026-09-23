@@ -349,6 +349,13 @@ EOF
   ! echo "$tried" | grep -q 'model="gpt-5.6-sol"'
 }
 
+@test "adversary_model_ladder: built-in sol fallback rung is gpt-6-sol xhigh for a non-sol preferred model" {
+  run bash -c ". '$LIB'; adversary_model_ladder codex gpt-5.6-terra medium"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"gpt-6-sol|xhigh"* ]]
+  [[ "$output" != *"gpt-5.6-sol|high"* ]]
+}
+
 @test "schema validation: rc=0 output failing the validator is a rung failure, ladder continues" {
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$STUB_DIR"
