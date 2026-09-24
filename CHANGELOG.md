@@ -8,6 +8,30 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-24 — spec-014 managed run-state live E2E findings)
+
+- A managed run no longer counts a succeeded qualification probe as the
+  finished outer execution. The outer activity's four capacity-exempt probe
+  intents made replay skip `session.execute`, so mapped checks ran on
+  unexecuted sealed input.
+- Qualification removes the probe `TMPDIR` (`.ffs-observer-tmp`) from the
+  worktree after the observation is published or replayed, so later mapped
+  checks no longer refuse `FRONTEND_CHECK_CANDIDATE_STALE`.
+- `FrontendPolicyRefused` and `RunPolicyRefused` raised inside a managed run
+  now reach `frontend-start`/`managed-start` as the typed JSON refusal
+  envelope (exit 78) instead of a raw traceback.
+- Private Codex staging now rewrites, and refuses to leave behind, the
+  `~/.codex` and `~/.agents/skills` spellings of a symlinked source profile.
+  Before this fix, the staged runtime ran the user's live, uninstrumented
+  GSD hook.
+- Resuming with the same request key after the outer runtime was qualified
+  now refuses `RETAINED_RUNTIME_NOT_REUSABLE` with recovery
+  `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
+  `qualify_host_adapter`. Every managed-run refusal envelope now carries a
+  short `detail` naming the underlying error, with no paths or values.
+- The test suites point `FFS_MANAGED_ADMISSION_ROOT` at a per-test temporary
+  directory and no longer write the per-user admission root.
+
 ### Changed (2026-09-24 — judgment tier repinned to gpt-6-sol @ xhigh)
 
 - The Codex `judgment` tier (used by `/review-gate`, `plan-wall.sh`,
