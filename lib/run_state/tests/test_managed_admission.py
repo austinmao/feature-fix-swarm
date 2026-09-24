@@ -293,6 +293,11 @@ def test_timeout_releases_waiter_and_ticket_requires_full_owner(tmp_path):
         _release(queue, ticket, str(index))
 
 
+def test_suite_never_uses_the_per_user_admission_root(tmp_path_factory):
+    root = managed_admission.global_admission_root()
+    assert root.is_relative_to(tmp_path_factory.getbasetemp().resolve())
+
+
 def test_authority_root_ignores_per_run_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("FFS_MANAGED_ADMISSION_ROOT", str(tmp_path / "global"))
     monkeypatch.setenv("FFS_STATE_ROOT", str(tmp_path / "run-a"))
