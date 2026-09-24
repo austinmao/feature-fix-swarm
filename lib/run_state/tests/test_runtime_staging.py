@@ -237,6 +237,23 @@ def test_stage_or_reuse_refuses_drift_without_repairing_the_stage(tmp_path: Path
     assert after == before
 
 
+def test_a_non_reusable_retained_stage_is_typed_apart_from_source_failures(tmp_path: Path) -> None:
+    from run_state.runtime_staging import RetainedRuntimeNotReusable
+    source, _skills, worktree = _profile(tmp_path)
+    target = tmp_path / "private-runtime"
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+    # Qualification leaves probe evidence in the runtime home by design.
+    (target / "observer-hooks.log").write_text("", encoding="utf-8")
+    (target / "observer-hooks.log").chmod(0o600)
+    with pytest.raises(RetainedRuntimeNotReusable, match="unowned or missing file"):
+        stage_or_reuse_private_codex_runtime(source, target, worktree)
+    # A changed source closure is not a retained-stage problem.
+    (source / "gsd-core" / "VERSION").write_text("changed\n", encoding="utf-8")
+    with pytest.raises(RuntimeStagingError) as refused:
+        stage_or_reuse_private_codex_runtime(source, target, worktree)
+    assert not isinstance(refused.value, RetainedRuntimeNotReusable)
+
+
 def test_stage_or_reuse_refuses_consumed_auth_and_a_different_workspace(tmp_path: Path) -> None:
     source, _skills, worktree = _profile(tmp_path)
     target = tmp_path / "private-runtime"

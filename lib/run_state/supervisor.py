@@ -3201,7 +3201,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         ManagedQualificationRefused, qualify_managed_runtime,
     )
     from run_state.runtime_staging import (
-        STAGE_MANIFEST_NAME, stage_or_reuse_private_codex_runtime,
+        STAGE_MANIFEST_NAME, RetainedRuntimeNotReusable, stage_or_reuse_private_codex_runtime,
     )
     from run_state.wave_consumer import WaveConsumer
     from run_state.worker_channel import WorkerChannelServer
@@ -3256,6 +3256,8 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             adapter = CodexHostAdapter(
                 bundle.qualified_runtime, host_request.binary, str(cli["version"]),
             )
+        except RetainedRuntimeNotReusable as error:
+            raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
         except (CapabilityError, ManagedQualificationRefused, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
         return QualifiedHostRuntime(bundle.activity, bundle.qualified_runtime, bundle.runtime_receipt,
@@ -3295,6 +3297,9 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             stage_or_reuse_private_codex_runtime(
                 Path(host_request.runtime_home), outer_home, ready.path,
             )
+    except RetainedRuntimeNotReusable as error:
+        # Qualification consumes the outer stage; this request key cannot resume it.
+        raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
     except (CapabilityError, OSError, ValueError) as error:
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
     contract_material = {

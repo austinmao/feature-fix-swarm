@@ -34,6 +34,10 @@ class RuntimeStagingError(ValueError):
     """The candidate profile cannot safely form an isolated runtime."""
 
 
+class RetainedRuntimeNotReusable(RuntimeStagingError):
+    """A retained private stage is not exact, e.g. its qualification consumed it."""
+
+
 def _fail(message: str) -> NoReturn:
     raise RuntimeStagingError(message)
 
@@ -636,4 +640,7 @@ def stage_or_reuse_private_codex_runtime(template_codex_home: Path, target_home:
     target = target_parent / requested_target.name
     if target != requested_target:
         _fail("target Codex home parent changed during validation")
-    return _validate_reusable_runtime(closure, target, workspace)
+    try:
+        return _validate_reusable_runtime(closure, target, workspace)
+    except RuntimeStagingError as exc:
+        raise RetainedRuntimeNotReusable(str(exc)) from exc

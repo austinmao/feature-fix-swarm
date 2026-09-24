@@ -224,3 +224,55 @@ def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path
     retained = Path(json.loads(intent["completion_evidence_json"])["locator"]).with_name("stdout.log").read_text()
     assert "FFS-supervised-process compatibility path is mandatory" in retained
     assert "outer orchestrator must never edit a plan's declared target files" in retained
+
+
+def test_non_reusable_retained_outer_stage_refuses_with_its_own_code(tmp_path, monkeypatch):
+    import pytest
+    from run_state.supervisor import SupervisorRefused
+
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    runtime = tmp_path / "private-runtime"
+    runtime.mkdir(mode=0o700)
+    fake = tmp_path / "qualified-codex"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o700)
+    staged = []
+
+    def stage(_template, home, _worktree):
+        # Resume with the same request key finds the outer stage its qualification consumed.
+        staged.append(Path(home))
+        raise runtime_staging.RetainedRuntimeNotReusable("retained stage contains an unowned or missing file")
+
+    monkeypatch.setattr(runtime_staging, "stage_or_reuse_private_codex_runtime", stage)
+    monkeypatch.setattr(host_capabilities, "admit_cli", lambda _binary: {"version": "0.154.0"})
+    monkeypatch.chdir(primary)
+    request = parse_codex_host_request(
+        runtime_home=str(runtime), binary=str(fake),
+        model_request_json='{"kind":"tier","name":"execution"}',
+        sandbox="workspace-write", network_enabled=False,
+        token_reservation=100, timeout_seconds=30,
+    )
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        return run_managed_command(
+            store, token, context, command=("/gsd-plan-phase", "1"),
+            request_key="retained-outer", dispatch_limit=3, token_limit=1000,
+            host_request=request, upstream_runtime=upstream_runtime,
+        )
+
+    with pytest.raises(SupervisorRefused, match="RETAINED_RUNTIME_NOT_REUSABLE"):
+        prepare_managed_run(
+            objective="retained outer", state_root=authority,
+            selection_manifest=env["FFS_SELECTION_MANIFEST"],
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+            request_key="retained-outer", command=("/gsd-plan-phase", "1"),
+            dispatch_limit=3, token_limit=1000, on_ready=execute,
+            run_id="retained-outer", activity="plan", scope="1", host_request=request,
+        )
+    assert len(staged) == 1

@@ -79,11 +79,32 @@ def _managed_run_refusals() -> tuple[type[Exception], ...]:
     return SupervisorRefused, FrontendPolicyRefused, RunPolicyRefused
 
 
+_REFUSAL_DETAIL = re.compile(r"[A-Za-z0-9 _.,:;()'-]{1,160}")
+
+
+def _refusal_detail(error: Exception) -> str | None:
+    """The underlying error's type and short message; never a path, file content, or value."""
+    cause = error.__cause__
+    if cause is None:
+        return None
+    message = getattr(cause, "code", None)
+    if not isinstance(message, str):
+        message = "" if isinstance(cause, OSError) else str(cause)
+    detail = type(cause).__name__ + (": " + message if message else "")
+    return detail if _REFUSAL_DETAIL.fullmatch(detail) else type(cause).__name__
+
+
 def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     """The managed-run JSON envelope (exit 78) for one of ``_managed_run_refusals``."""
     from run_state.supervisor import SupervisorRefused
     extra = {}
-    if isinstance(error, SupervisorRefused):
+    detail = _refusal_detail(error)
+    if detail is not None:
+        extra["detail"] = detail
+    if error.code == "RETAINED_RUNTIME_NOT_REUSABLE":
+        extra.update(cause="the outer runtime retained for this request key was consumed by its qualification",
+                     recovery_action={"action": "resume_with_new_request_key"})
+    elif isinstance(error, SupervisorRefused):
         extra.update(cause="the selected host backend has not demonstrated managed admission",
                      recovery_action={"action": "qualify_host_adapter"})
     else:

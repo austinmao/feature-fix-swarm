@@ -110,6 +110,30 @@ def test_frontend_policy_refusal_is_a_typed_envelope_not_a_traceback(tmp_path, m
     assert body["recovery_action"]["action"] != "qualify_host_adapter"
 
 
+@pytest.mark.parametrize(("code", "cause", "detail", "action"), [
+    ("HOST_CAPABILITY_UNQUALIFIED", ("RuntimeStagingError", "retained stage contains an unowned or missing file"),
+     "RuntimeStagingError: retained stage contains an unowned or missing file", "qualify_host_adapter"),
+    # A message naming a path (or any value) is reduced to the error type.
+    ("HOST_CAPABILITY_UNQUALIFIED", ("CapabilityError", "runtime tree contains unsafe member: /home/u/.codex/x"),
+     "CapabilityError", "qualify_host_adapter"),
+    ("RETAINED_RUNTIME_NOT_REUSABLE", ("RetainedRuntimeNotReusable", "staged auth has been revoked"),
+     "RetainedRuntimeNotReusable: staged auth has been revoked", "resume_with_new_request_key"),
+])
+def test_supervisor_refusal_envelope_carries_a_path_free_detail(tmp_path, monkeypatch, capsys,
+                                                                code, cause, detail, action):
+    import host_capabilities
+    from run_state import runtime_staging
+    from run_state.supervisor import SupervisorRefused
+
+    kind, message = cause
+    error = SupervisorRefused(code)
+    error.__cause__ = getattr(runtime_staging, kind, getattr(host_capabilities, kind, None))(message)
+    returncode, body = _frontend_refusal(tmp_path, monkeypatch, capsys, error)
+    assert returncode == 78 and body["code"] == code
+    assert body["detail"] == detail
+    assert body["recovery_action"] == {"action": action}
+
+
 @pytest.mark.parametrize(("frontend", "kind"), [
     ("feature-spec", "plan"), ("fix", "plan"), ("code-uplift", "review"),
     ("feature-implement", "execute"),
