@@ -387,6 +387,35 @@ def test_qualification_never_removes_a_scratch_path_it_did_not_create(tmp_path, 
     assert (scratch / "unrelated").read_text() == "keep"
 
 
+def test_remove_created_scratch_only_removes_what_the_owning_plan_created(tmp_path):
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    scratch = workspace / ".ffs-observer-tmp"; scratch.mkdir()
+    (scratch / "probe-temp").write_text("x")
+    info = scratch.lstat()
+    identity = (info.st_dev, info.st_ino)
+
+    # identity is None (this call's plan did not create it) -> left alone.
+    managed._remove_created_scratch(scratch, workspace, None)
+    assert scratch.exists()
+
+    # Matching identity but the wrong parent -> left alone.
+    managed._remove_created_scratch(scratch, tmp_path / "other-workspace", identity)
+    assert scratch.exists()
+
+    # Not a directory -> left alone even with a matching identity.
+    not_a_dir = workspace / "not-a-dir"; not_a_dir.write_text("x")
+    not_a_dir_info = not_a_dir.lstat()
+    managed._remove_created_scratch(not_a_dir, workspace, (not_a_dir_info.st_dev, not_a_dir_info.st_ino))
+    assert not_a_dir.exists()
+
+    # Missing path -> swallowed, never raises.
+    managed._remove_created_scratch(workspace / "missing", workspace, identity)
+
+    # Matching identity, parent, and is-a-dir -> removed.
+    managed._remove_created_scratch(scratch, workspace, identity)
+    assert not scratch.exists()
+
+
 def test_helper_stops_on_uncertain_probe_without_observation_or_promotion(tmp_path, monkeypatch):
     fixture = _fixture(tmp_path, uncertain_at=2)
     store, token, workspace, runtime, binary, gsd, request, evidence, supervisor, module, predicted = fixture

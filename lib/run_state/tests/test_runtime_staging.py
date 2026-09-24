@@ -279,6 +279,20 @@ def test_a_non_reusable_retained_stage_is_typed_apart_from_source_failures(tmp_p
     assert not isinstance(refused.value, RetainedRuntimeNotReusable)
 
 
+def test_stage_refuses_a_non_config_leftover_reference_to_the_source_profile(tmp_path: Path) -> None:
+    # hooks/ files are copied verbatim, never config-rewritten (only _CONFIG_SUFFIXES
+    # are).  A literal source path left in one is a genuine leftover the boundary
+    # regex must still catch, not just the JSON/TOML paths the other tests cover.
+    source, _skills, worktree = _profile(tmp_path)
+    hook = source / "hooks" / "gsd-other.js"
+    hook.write_text(f"// installed at {source}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    target = tmp_path / "private-runtime"
+
+    with pytest.raises(RuntimeStagingError, match="still references the source profile"):
+        stage_private_codex_runtime(source, target, worktree)
+
+
 def test_stage_or_reuse_refuses_consumed_auth_and_a_different_workspace(tmp_path: Path) -> None:
     source, _skills, worktree = _profile(tmp_path)
     target = tmp_path / "private-runtime"
