@@ -381,7 +381,8 @@ def test_failed_sealed_check_without_a_repair_producer_hands_back_and_refuses_tr
     assert facts.stage == "RECOVER" and facts.outer == 1 and facts.native == 0 and facts.reviews == 0
     assert facts.actions == {"execute": 1}
     replay = _managed_start(env, authority, "fl", runtime, fake, catalog, draft)
-    assert replay == 78 and _last_code(capsys) == "RECOVERY_PRODUCER_UNAVAILABLE"
+    # A run is never resumed after its real outer launch: the replay reports it settled.
+    assert replay == 78 and _last_code(capsys) == "REQUEST_ALREADY_COMPLETED"
     again = _facts(authority, repository_id, "fl")
     assert (again.stage, again.outer, again.native, again.actions) == ("RECOVER", 1, 0, {"execute": 1})
 

@@ -216,10 +216,7 @@ def test_dispatch_limit_cannot_be_reset_to_bypass_qualification_accounting(tmp_p
         ).fetchone()[0] == 3
 
 
-def test_four_completed_probes_promote_activity_binding_and_workspace_atomically(tmp_path):
-    store, token, workspace_path, contracts, hashes, envelope = _qualification_store(tmp_path)
-    evidence_root = tmp_path / "evidence"
-    evidence_root.mkdir()
+def _complete_probes(store, token, contracts, evidence_root):
     for index, name in enumerate(PROBES):
         intent = _reserve(store, token, contracts[name])
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -235,6 +232,37 @@ def test_four_completed_probes_promote_activity_binding_and_workspace_atomically
         store.complete_launch(
             intent.id, token, status="succeeded", evidence=receipt, token_usage=0,
         )
+
+
+def test_succeeded_qualification_probes_are_not_a_retained_outer_completion(tmp_path):
+    from run_state.frontend_producers import _retained_outer_completion
+    store, token, _workspace, contracts, _hashes, _envelope = _qualification_store(tmp_path)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    _complete_probes(store, token, contracts, evidence_root)
+    # Four succeeded capacity-exempt probes on the outer activity are not its execution.
+    assert _retained_outer_completion(store, "inventory-activity") is None
+    identity = ProcessIdentity.current()
+    outer = _publish(evidence_root, "outer.json", {"outer": True})
+    with store.transaction() as tx:
+        tx.execute(
+            "INSERT INTO authority_launch_intents "
+            "(id,activity_id,attempt_ordinal,state,generation,capacity_exempt,child_host_id,child_boot_id,"
+            "child_pid,child_start_token,created_at,updated_at,completion_status,completion_evidence_json) "
+            "VALUES('outer-launch','inventory-activity',5,'completed_succeeded',?,1,?,?,?,?,'now','now',"
+            "'succeeded',?)",
+            (token.generation, identity.host_id, identity.boot_id, identity.pid, identity.start_token,
+             json.dumps(outer)),
+        )
+    handle, evidence = _retained_outer_completion(store, "inventory-activity")
+    assert handle.intent_id == "outer-launch" and evidence == outer
+
+
+def test_four_completed_probes_promote_activity_binding_and_workspace_atomically(tmp_path):
+    store, token, workspace_path, contracts, hashes, envelope = _qualification_store(tmp_path)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    _complete_probes(store, token, contracts, evidence_root)
     observation = _publish(evidence_root, "qualification-observation.json", {"qualified": True})
     qualified = _qualified(workspace_path)
     runtime_identity = store.runtime_tuple_hash(qualified)

@@ -28,10 +28,19 @@ _CONFIG_SUFFIXES: Final = frozenset((".cfg", ".conf", ".ini", ".json", ".toml", 
 _BUNDLE_ROOTS: Final = ("agents", "gsd-core", "scripts", "hooks")
 _SESSION_START_HOOK: Final = "hooks/gsd-check-update.js"
 _SESSION_START_MARKER: Final = "// ffs-supervised-session-start-observer/v1"
+# A source-root spelling counts as a complete path root unless a character that
+# can continue a file name follows it (``~/.codex-backup``).  Anything else, such
+# as a separator, a quote, an escape or a shell character, ends the root, so the
+# leftover check fails closed on every spelling the rewrite could have missed.
+_ROOT_END: Final = r"(?![\w.~+@-])"
 
 
 class RuntimeStagingError(ValueError):
     """The candidate profile cannot safely form an isolated runtime."""
+
+
+class RetainedRuntimeNotReusable(RuntimeStagingError):
+    """A retained private stage is not exact, e.g. its qualification consumed it."""
 
 
 def _fail(message: str) -> NoReturn:
@@ -230,16 +239,27 @@ def _is_config_like(relative: Path) -> bool:
     return relative.suffix.lower() in _CONFIG_SUFFIXES
 
 
+def _source_spellings(source_home: Path, source_skills: Path) -> tuple[tuple[Path, Path], ...]:
+    """(spelling, canonical root) for each source root, plus $HOME aliases resolving to it.
+
+    With a symlinked ``~/.codex`` the installer writes hook commands under the
+    $HOME alias while staging only accepts the canonical source path.
+    """
+    spellings = [(source_skills, source_skills), (source_home, source_home)]
+    for alias, canonical in ((Path.home() / ".agents" / "skills", source_skills),
+                             (Path.home() / ".codex", source_home)):
+        if alias != canonical and alias.resolve() == canonical:
+            spellings.append((alias, canonical))
+    return tuple(spellings)
+
+
 def _rewritten_config_text(text: str, source_home: Path, source_skills: Path,
                            target_home: Path, target_skills: Path) -> str:
-    replacements = (
-        (str(source_skills), str(target_skills)),
-        (str(source_home), str(target_home)),
-        (str(source_skills).replace("/", r"\/"), str(target_skills).replace("/", r"\/")),
-        (str(source_home).replace("/", r"\/"), str(target_home).replace("/", r"\/")),
-    )
-    for old, new in replacements:
-        text = text.replace(old, new)
+    targets = {source_skills: str(target_skills), source_home: str(target_home)}
+    for spelling, canonical in _source_spellings(source_home, source_skills):
+        old, new = str(spelling), targets[canonical]
+        for before, after in ((old, new), (old.replace("/", r"\/"), new.replace("/", r"\/"))):
+            text = re.sub(re.escape(before) + _ROOT_END, lambda _match, value=after: value, text)
     return text
 
 
@@ -297,9 +317,9 @@ def _instrument_session_start_hook(target: Path) -> None:
 
 
 def _assert_no_source_reference(target: Path, source_home: Path, source_skills: Path) -> None:
-    needles = (str(source_home).encode(), str(source_skills).encode(),
-               str(source_home).replace("/", r"\/").encode(),
-               str(source_skills).replace("/", r"\/").encode())
+    needles = tuple(re.compile(re.escape(value.encode()) + _ROOT_END.encode())
+                    for spelling, _ in _source_spellings(source_home, source_skills)
+                    for value in (str(spelling), str(spelling).replace("/", r"\/")))
     for path in sorted(target.rglob("*")):
         if path.is_dir():
             continue
@@ -308,7 +328,7 @@ def _assert_no_source_reference(target: Path, source_home: Path, source_skills: 
             content = path.read_bytes()
         except OSError as exc:
             raise RuntimeStagingError("cannot validate staged runtime") from exc
-        if any(needle in content for needle in needles):
+        if any(needle.search(content) for needle in needles):
             _fail(f"staged runtime still references the source profile: {path.relative_to(target).as_posix()}")
 
 
@@ -627,4 +647,7 @@ def stage_or_reuse_private_codex_runtime(template_codex_home: Path, target_home:
     target = target_parent / requested_target.name
     if target != requested_target:
         _fail("target Codex home parent changed during validation")
-    return _validate_reusable_runtime(closure, target, workspace)
+    try:
+        return _validate_reusable_runtime(closure, target, workspace)
+    except RuntimeStagingError as exc:
+        raise RetainedRuntimeNotReusable(str(exc)) from exc

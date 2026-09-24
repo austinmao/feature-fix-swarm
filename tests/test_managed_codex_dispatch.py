@@ -9,6 +9,8 @@ import sys
 import time
 from types import SimpleNamespace
 
+import pytest
+
 import host_capabilities
 from host_capabilities import QualifiedCodexRuntime, TELEMETRY_SCHEMA, _binary_chain
 from process_identity import ProcessIdentity
@@ -224,3 +226,134 @@ def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path
     retained = Path(json.loads(intent["completion_evidence_json"])["locator"]).with_name("stdout.log").read_text()
     assert "FFS-supervised-process compatibility path is mandatory" in retained
     assert "outer orchestrator must never edit a plan's declared target files" in retained
+
+
+def _retain_outer(store, token, context, *, launch):
+    """Journal a retained outer activity for ``managed-host:retained-outer`` whose stage was consumed.
+
+    ``launch`` is None (qualification only) or the (state, completion_status) of
+    its real, non-qualification outer launch.
+    """
+    identity = ProcessIdentity.current()
+    evidence = Path(context.evidence_root) / "outer-result.json"
+    evidence.write_text("{}")
+    completion = json.dumps({"locator": str(evidence), "sha256": _digest(evidence)})
+    outer = "77777777-7777-4777-8777-777777777777"
+    home = Path(context.evidence_root) / "host" / "runtimes" / outer
+    home.mkdir(mode=0o700, parents=True)
+    (home / runtime_staging.STAGE_MANIFEST_NAME).write_text("{}\n")
+    with store.transaction() as tx:
+        tx.execute(
+            "INSERT INTO authority_activities (id,repository_id,run_id,kind,input_digest,revision,state,"
+            "retry_budget,remaining_retry_budget,runtime_tuple_hash,request_key,generation,created_at,updated_at) "
+            "VALUES(?,?,?,'execute',?,1000,?,5,0,?,'managed-host:retained-outer',?,'now','now')",
+            (outer, token.repository_id, token.run_id, "c" * 64,
+             "succeeded" if launch == ("completed_succeeded", "succeeded") else "active", "d" * 64,
+             token.generation))
+        tx.execute(
+            "INSERT INTO authority_child_bindings (activity_id,parent_activity_id,role,candidate_hash,"
+            "contract_hash,runtime_identity,workspace_binding,workspace_preparation_id,created_at) "
+            "VALUES(?,?,'worker',?,?,?,'/unused','unused','now')",
+            (outer, context.activity_id, "c" * 64, "e" * 64, "d" * 64))
+        for ordinal, (state, status) in enumerate(
+                [("completed_succeeded", "succeeded")] * 4 + ([] if launch is None else [launch]), start=1):
+            intent = f"outer-intent-{ordinal}"
+            tx.execute(
+                "INSERT INTO authority_launch_intents (id,activity_id,attempt_ordinal,state,generation,"
+                "capacity_exempt,child_host_id,child_boot_id,child_pid,child_start_token,created_at,updated_at,"
+                "completion_status,completion_evidence_json) VALUES(?,?,?,?,?,1,?,?,?,?,'now','now',?,?)",
+                (intent, outer, ordinal, state, token.generation, identity.host_id, identity.boot_id,
+                 identity.pid, identity.start_token, status, None if status is None else completion))
+            if ordinal <= 4:
+                tx.execute(
+                    "INSERT INTO authority_qualification_launches (intent_id,activity_id,request_key,probe_name,"
+                    "contract_sha256,contract_json,qualification_envelope_sha256,managed_input_sha256,"
+                    "qualification_cohort_id,qualification_request_id,created_at) "
+                    "VALUES(?,?,?,'probe',?,'{}',?,?,'cohort',?,'now')",
+                    (intent, outer, f"probe-{ordinal}", "1" * 64, "2" * 64, "c" * 64, f"probe-{ordinal}"))
+
+
+@pytest.mark.parametrize(("launch", "code", "action"), [
+    # Qualification alone consumed the stage: only then is a new request key the recovery.
+    (None, "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key"),
+    # A settled outer launch may have done its work: it is reported, never replayed as a
+    # success (its wave proof is not re-checked), re-staged or repeated under a new key.
+    (("completed_succeeded", "succeeded"), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    (("completed_failed", "failed"), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    # closed_dead can follow a released child whose work ran.
+    (("closed_dead", None), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    # An in-flight or uncertain outer launch needs owner-fence reconciliation.
+    (("released_to_execute", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
+    (("reconcile_required", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
+])
+def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monkeypatch, capsys,
+                                                                   launch, code, action):
+    from run_state.cli import _managed_run_refusal, _managed_run_refusals
+
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    runtime = tmp_path / "private-runtime"
+    runtime.mkdir(mode=0o700)
+    fake = tmp_path / "qualified-codex"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o700)
+    staged = []
+
+    def stage(_template, home, _worktree):
+        # The retained outer home holds consumed auth and probe or Codex state.
+        staged.append(Path(home))
+        raise runtime_staging.RetainedRuntimeNotReusable("retained stage contains an unowned or missing file")
+
+    monkeypatch.setattr(runtime_staging, "stage_or_reuse_private_codex_runtime", stage)
+    monkeypatch.setattr(host_capabilities, "admit_cli", lambda _binary: {"version": "0.154.0"})
+    monkeypatch.chdir(primary)
+    request = parse_codex_host_request(
+        runtime_home=str(runtime), binary=str(fake),
+        model_request_json='{"kind":"tier","name":"execution"}',
+        sandbox="workspace-write", network_enabled=False,
+        token_reservation=100, timeout_seconds=30,
+    )
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        _retain_outer(store, token, context, launch=launch)
+        try:
+            return run_managed_command(
+                store, token, context, command=("/gsd-plan-phase", "1"),
+                request_key="retained-outer", dispatch_limit=3, token_limit=1000,
+                host_request=request, upstream_runtime=upstream_runtime,
+            )
+        except _managed_run_refusals() as error:
+            return _managed_run_refusal(error, run_id=context.run_id)
+
+    returncode = prepare_managed_run(
+        objective="retained outer", state_root=authority,
+        selection_manifest=env["FFS_SELECTION_MANIFEST"],
+        upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        request_key="retained-outer", command=("/gsd-plan-phase", "1"),
+        dispatch_limit=3, token_limit=1000, on_ready=execute,
+        run_id="retained-outer", activity="plan", scope="1", host_request=request,
+    )
+    body = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert returncode == 78 and (body["code"], body["recovery_action"]["action"]) == (code, action)
+    assert len(staged) == (1 if launch is None else 0)
+
+
+@pytest.mark.parametrize(("launch", "outer", "code"), [
+    (None, True, "RETAINED_RUNTIME_NOT_REUSABLE"),
+    # A new request key starts a new outer run: never the recovery for a wave child or reviewer.
+    (None, False, "CHILD_RUNTIME_NOT_REUSABLE"),
+    # closed_dead can follow a released child whose work ran: settled, never a new key.
+    ({"state": "closed_dead"}, True, "REQUEST_ALREADY_COMPLETED"),
+    ({"state": "closed_dead"}, False, "REQUEST_ALREADY_COMPLETED"),
+    ({"state": "completed_succeeded"}, False, "REQUEST_ALREADY_COMPLETED"),
+    ({"state": "released_to_execute"}, True, "INTENT_RECONCILIATION_REQUIRED"),
+])
+def test_consumed_runtime_refusal_names_a_new_request_key_only_for_the_outer_child(launch, outer, code):
+    from run_state.supervisor import _retained_runtime_refusal
+
+    assert _retained_runtime_refusal(launch, outer=outer) == code

@@ -75,6 +75,74 @@ def test_frontend_retains_registered_runtime_for_parent_resource_admission(tmp_p
     assert len(reached) == 1
 
 
+def _frontend_refusal(tmp_path, monkeypatch, capsys, error):
+    """Drive frontend-start to a managed-run refusal and return (rc, envelope)."""
+    from run_state import cli, supervisor
+
+    primary, authority, _, env = _setup(tmp_path)
+    monkeypatch.chdir(primary)
+    for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
+        monkeypatch.delenv(key, raising=False)
+
+    def refuse(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(supervisor, "run_managed_command", refuse)
+    returncode = cli.main([
+        "frontend-start", "--frontend", "fix", "--objective", "typed refusal",
+        "--state-root", str(authority), "--request-key", "typed-refusal",
+        "--run-id", "frontend-typed-refusal", "--dispatch-limit", "3", "--token-limit", "1000",
+        "--upstream-runtime-manifest", env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        "--upstream-runtime-sha256", env["FFS_UPSTREAM_RUNTIME_SHA256"],
+    ])
+    return returncode, json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_frontend_policy_refusal_is_a_typed_envelope_not_a_traceback(tmp_path, monkeypatch, capsys):
+    from run_state.frontend_policy import FrontendPolicyRefused
+
+    returncode, body = _frontend_refusal(
+        tmp_path, monkeypatch, capsys, FrontendPolicyRefused("FRONTEND_CHECK_CANDIDATE_STALE"),
+    )
+    assert returncode == 78
+    assert body["ok"] is False and body["code"] == "FRONTEND_CHECK_CANDIDATE_STALE"
+    assert body["run_id"] == "frontend-typed-refusal"
+    assert body["recovery_action"]["action"] != "qualify_host_adapter"
+
+
+@pytest.mark.parametrize(("code", "cause", "detail", "action"), [
+    # A free-text message may carry an untrusted token or path: only the type is emitted.
+    ("HOST_CAPABILITY_UNQUALIFIED", ("RuntimeStagingError", "retained stage holds sk-untrusted-token"),
+     "RuntimeStagingError", "qualify_host_adapter"),
+    ("HOST_CAPABILITY_UNQUALIFIED", ("CapabilityError", "runtime tree contains unsafe member: /home/u/.codex/x"),
+     "CapabilityError", "qualify_host_adapter"),
+    # A typed code is emitted with the type.
+    ("HOST_CAPABILITY_UNQUALIFIED", ("ManagedQualificationRefused", "QUALIFICATION_UNCERTAIN"),
+     "ManagedQualificationRefused: QUALIFICATION_UNCERTAIN", "qualify_host_adapter"),
+    # ... but only a well-formed one.
+    ("HOST_CAPABILITY_UNQUALIFIED", ("ManagedQualificationRefused", "code with sk-untrusted-token"),
+     "ManagedQualificationRefused", "qualify_host_adapter"),
+    ("RETAINED_RUNTIME_NOT_REUSABLE", ("RetainedRuntimeNotReusable", "staged auth has been revoked"),
+     "RetainedRuntimeNotReusable", "resume_with_new_request_key"),
+    ("CHILD_RUNTIME_NOT_REUSABLE", ("RetainedRuntimeNotReusable", "staged auth has been revoked"),
+     "RetainedRuntimeNotReusable", "inspect_retained_child"),
+])
+def test_supervisor_refusal_envelope_carries_only_a_typed_detail(tmp_path, monkeypatch, capsys,
+                                                                 code, cause, detail, action):
+    import host_capabilities
+    from run_state import managed_qualification, runtime_staging
+    from run_state.supervisor import SupervisorRefused
+
+    kind, message = cause
+    error = SupervisorRefused(code)
+    error.__cause__ = next(getattr(module, kind) for module in (runtime_staging, host_capabilities,
+                                                                managed_qualification) if hasattr(module, kind))(message)
+    returncode, body = _frontend_refusal(tmp_path, monkeypatch, capsys, error)
+    assert returncode == 78 and body["code"] == code
+    assert body["detail"] == detail
+    assert body["recovery_action"] == {"action": action}
+
+
 @pytest.mark.parametrize(("frontend", "kind"), [
     ("feature-spec", "plan"), ("fix", "plan"), ("code-uplift", "review"),
     ("feature-implement", "execute"),

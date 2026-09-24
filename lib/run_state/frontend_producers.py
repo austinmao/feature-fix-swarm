@@ -338,13 +338,27 @@ def retained_outer_activity(store, token, *, parent_activity_id: str, child_key:
     return None if row is None else row["id"]
 
 
+def retained_launch(store, activity_id: str):
+    """The newest real (non-qualification) launch intent on a retained activity, if any."""
+    with store.read_transaction() as tx:
+        return tx.execute(
+            "SELECT state,completion_status FROM authority_launch_intents WHERE activity_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM authority_qualification_launches q "
+            "WHERE q.intent_id=authority_launch_intents.id) "
+            "ORDER BY attempt_ordinal DESC", (activity_id,)).fetchone()
+
+
 def _retained_outer_completion(store, activity_id: str):
     """A succeeded managed outer launch (capacity-exempt, not a qualification probe)."""
     from process_identity import ProcessIdentity
     with store.read_transaction() as tx:
+        # Qualification probes run on this same activity and are capacity-exempt too.
         row = tx.execute(
             "SELECT * FROM authority_launch_intents WHERE activity_id=? AND capacity_exempt=1 "
-            "AND completion_status='succeeded' ORDER BY attempt_ordinal DESC", (activity_id,)).fetchone()
+            "AND completion_status='succeeded' "
+            "AND NOT EXISTS (SELECT 1 FROM authority_qualification_launches q "
+            "WHERE q.intent_id=authority_launch_intents.id) "
+            "ORDER BY attempt_ordinal DESC", (activity_id,)).fetchone()
     if row is None:
         return None
     identity = ProcessIdentity(row["child_host_id"], row["child_boot_id"], row["child_pid"], row["child_start_token"])

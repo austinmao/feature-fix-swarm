@@ -331,6 +331,91 @@ def test_helper_launches_only_four_supervised_probes_then_promotes_and_receipts(
     assert json.loads(Path(gsd.admission_file).read_text()) == bundle.admission
 
 
+def _creating_scratch_plans(module, monkeypatch, scratch):
+    """Make the fixture plan create the probes' TMPDIR as the observer does: exclusively, with its identity."""
+    planned = module.prepare_qualification_plan
+
+    def plan(*args, **kwargs):
+        try:
+            scratch.mkdir()
+        except FileExistsError:
+            identity = None
+        else:
+            info = scratch.lstat()
+            identity = (info.st_dev, info.st_ino)
+            (scratch / "probe-temp").write_text("x")
+        return SimpleNamespace(**vars(planned(*args, **kwargs)), scratch_identity=identity)
+
+    monkeypatch.setattr(module, "prepare_qualification_plan", plan)
+
+
+def _scratch_kwargs(fixture, activity_id):
+    store, token, workspace, runtime, binary, gsd, request, evidence, supervisor, module, predicted = fixture
+    return dict(
+        activity_id=activity_id, activity_request_key="plan-key",
+        parent_activity_id="parent", workspace=workspace, runtime_home=runtime, binary=binary,
+        gsd_environment=gsd, host_request=request, role="worker", evidence_root=evidence,
+        final_contract_hash="9" * 64, supervisor=supervisor, observer_module=module,
+    )
+
+
+def test_qualification_leaves_no_probe_scratch_in_the_worktree(tmp_path, monkeypatch):
+    fixture = _fixture(tmp_path)
+    store, token, workspace, _runtime_home, _binary, _gsd, _request, _evidence, _sup, module, predicted = fixture
+    monkeypatch.setattr(managed, "verify_runtime", lambda *args, **kwargs: predicted)
+    scratch = workspace.path / ".ffs-observer-tmp"
+    _creating_scratch_plans(module, monkeypatch, scratch)
+    kwargs = _scratch_kwargs(fixture, "55555555-5555-4555-8555-555555555555")
+    managed.qualify_managed_runtime(store, token, **kwargs)
+    # A leftover untracked directory would change the later mapped-check input digest.
+    assert not scratch.exists()
+    managed.qualify_managed_runtime(
+        store, token, **{**kwargs, "workspace": replace(workspace, child_role="worker")},
+    )
+    assert not scratch.exists()
+
+
+def test_qualification_never_removes_a_scratch_path_it_did_not_create(tmp_path, monkeypatch):
+    fixture = _fixture(tmp_path)
+    store, token, workspace, _runtime_home, _binary, _gsd, _request, _evidence, _sup, module, predicted = fixture
+    monkeypatch.setattr(managed, "verify_runtime", lambda *args, **kwargs: predicted)
+    scratch = workspace.path / ".ffs-observer-tmp"
+    scratch.mkdir()
+    (scratch / "unrelated").write_text("keep")
+    _creating_scratch_plans(module, monkeypatch, scratch)
+    managed.qualify_managed_runtime(store, token, **_scratch_kwargs(fixture, "66666666-6666-4666-8666-666666666666"))
+    assert (scratch / "unrelated").read_text() == "keep"
+
+
+def test_remove_created_scratch_only_removes_what_the_owning_plan_created(tmp_path):
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    scratch = workspace / ".ffs-observer-tmp"; scratch.mkdir()
+    (scratch / "probe-temp").write_text("x")
+    info = scratch.lstat()
+    identity = (info.st_dev, info.st_ino)
+
+    # identity is None (this call's plan did not create it) -> left alone.
+    managed._remove_created_scratch(scratch, workspace, None)
+    assert scratch.exists()
+
+    # Matching identity but the wrong parent -> left alone.
+    managed._remove_created_scratch(scratch, tmp_path / "other-workspace", identity)
+    assert scratch.exists()
+
+    # Not a directory -> left alone even with a matching identity.
+    not_a_dir = workspace / "not-a-dir"; not_a_dir.write_text("x")
+    not_a_dir_info = not_a_dir.lstat()
+    managed._remove_created_scratch(not_a_dir, workspace, (not_a_dir_info.st_dev, not_a_dir_info.st_ino))
+    assert not_a_dir.exists()
+
+    # Missing path -> swallowed, never raises.
+    managed._remove_created_scratch(workspace / "missing", workspace, identity)
+
+    # Matching identity, parent, and is-a-dir -> removed.
+    managed._remove_created_scratch(scratch, workspace, identity)
+    assert not scratch.exists()
+
+
 def test_helper_stops_on_uncertain_probe_without_observation_or_promotion(tmp_path, monkeypatch):
     fixture = _fixture(tmp_path, uncertain_at=2)
     store, token, workspace, runtime, binary, gsd, request, evidence, supervisor, module, predicted = fixture

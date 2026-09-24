@@ -97,3 +97,8 @@ def test_callback_exception_releases_global_admission_after_ownership(tmp_path, 
     store = ControlStore(authority / "control.sqlite3")
     with store.read_transaction() as connection:
         assert connection.execute("SELECT COUNT(*) FROM control_reservations WHERE held=1").fetchone()[0] == 0
+
+
+def test_suite_never_uses_the_per_user_admission_root(tmp_path_factory):
+    from run_state.managed_admission import global_admission_root
+    assert global_admission_root().is_relative_to(tmp_path_factory.getbasetemp().resolve())

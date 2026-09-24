@@ -71,6 +71,66 @@ def _fixture_refusal(
     return _FIXTURE_CODES.get(code, 5) if exit_code is None else exit_code
 
 
+def _managed_run_refusals() -> tuple[type[Exception], ...]:
+    """Typed refusals which can escape a managed host run's callback."""
+    from run_state.frontend_policy import FrontendPolicyRefused
+    from run_state.run_policy import RunPolicyRefused
+    from run_state.supervisor import SupervisorRefused
+    return SupervisorRefused, FrontendPolicyRefused, RunPolicyRefused
+
+
+_REFUSAL_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+def _refusal_detail(error: Exception) -> str | None:
+    """The underlying error's type and typed code; never its free-text message."""
+    cause = error.__cause__
+    if cause is None:
+        return None
+    code = getattr(cause, "code", None)
+    if isinstance(code, str) and _REFUSAL_CODE.fullmatch(code):
+        return type(cause).__name__ + ": " + code
+    return type(cause).__name__
+
+
+# Supervisor codes whose cause is this request key's retained launch, not the host adapter.
+_REQUEST_KEY_REFUSALS = {
+    "RETAINED_RUNTIME_NOT_REUSABLE": (
+        "the outer runtime retained for this request key cannot be resumed, and no outer launch under it ran",
+        "resume_with_new_request_key"),
+    # A new request key would start a new outer run, repeating its completed work.
+    "CHILD_RUNTIME_NOT_REUSABLE": (
+        "a wave child or final reviewer runtime retained for this run cannot be resumed",
+        "inspect_retained_child"),
+    # The launch may have done its work, so a new request key could repeat it.
+    "REQUEST_ALREADY_COMPLETED": (
+        "a launch for this request key already settled and may have done its work; "
+        "it is never resumed, and a new request key could run it again",
+        "inspect_completed_launch"),
+    "INTENT_RECONCILIATION_REQUIRED": (
+        "a launch for this request key has not settled; only owner-fence reconciliation may settle it",
+        "reconcile_intent"),
+}
+
+
+def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
+    """The managed-run JSON envelope (exit 78) for one of ``_managed_run_refusals``."""
+    from run_state.supervisor import SupervisorRefused
+    extra = {}
+    detail = _refusal_detail(error)
+    if detail is not None:
+        extra["detail"] = detail
+    if error.code in _REQUEST_KEY_REFUSALS:
+        cause, action = _REQUEST_KEY_REFUSALS[error.code]
+        extra.update(cause=cause, recovery_action={"action": action})
+    elif isinstance(error, SupervisorRefused):
+        extra.update(cause="the selected host backend has not demonstrated managed admission",
+                     recovery_action={"action": "qualify_host_adapter"})
+    else:
+        extra["cause"] = "the managed run policy refused the transition"
+    return _fixture_refusal(error.code, run_id=run_id, exit_code=78, **extra)
+
+
 def _parse_tokens(value):
     """Parse '250K' / '1.5M' / '1B' / '2T' / '250000' to int.
 
@@ -204,7 +264,7 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
         return _fixture_refusal("MANAGED_COMMAND_CONTEXT_CONFLICT", exit_code=2)
 
     def execute(store, token, context):
-        from run_state.supervisor import SupervisorRefused, run_managed_command
+        from run_state.supervisor import run_managed_command
 
         try:
             upstream_runtime, _descriptor_digest = _load_upstream_runtime(args)
@@ -215,12 +275,8 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
                 model_request=_model_request_from_args(args), review_catalog=review_catalog,
                 acceptance_draft=acceptance_draft,
             )
-        except SupervisorRefused as error:
-            return _fixture_refusal(
-                error.code, run_id=context.run_id, exit_code=78,
-                cause="the selected host backend has not demonstrated managed admission",
-                recovery_action={"action": "qualify_host_adapter"},
-            )
+        except _managed_run_refusals() as error:
+            return _managed_run_refusal(error, run_id=context.run_id)
 
     return prepare_managed_run(
         objective=args.objective, state_root=args.state_root,

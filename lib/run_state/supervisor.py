@@ -3189,19 +3189,39 @@ def _managed_inventory_workspace(store, token, context, request_key, *, workspac
     return root, None if operation is None else (operation["payload"] if "payload" in operation.keys() else None), child_key, ready
 
 
+def _replayed_launch_refusal(launch) -> str:
+    """The refusal for a replay that reaches a real (non-qualification) launch intent.
+
+    A settled intent, including ``closed_dead``, may have run its work, so it is
+    reported and never repeated; an unsettled one needs owner-fence reconciliation.
+    """
+    return ("REQUEST_ALREADY_COMPLETED"
+            if launch["state"] in {"completed_succeeded", "completed_failed", "closed_dead"}
+            else "INTENT_RECONCILIATION_REQUIRED")
+
+
+def _retained_runtime_refusal(launch, *, outer: bool) -> str:
+    """The refusal for a retained private runtime that cannot be resumed."""
+    if launch is not None:
+        return _replayed_launch_refusal(launch)
+    # Only the outer child's runtime is named by the request key.  A new key starts a new
+    # outer run, so it never repairs a wave child or the final reviewer.
+    return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
+
+
 def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
                                   upstream_runtime=None, model_request=None, review_catalog=None):
     """Qualification seams, worker channel and outer contract for one Codex host run."""
     from host_capabilities import GsdSupervisorEnvironment, admit_cli
     from run_state.codex_host import CodexHostAdapter
     from run_state.frontend_producers import (
-        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_outer_activity,
+        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_launch, retained_outer_activity,
     )
     from run_state.managed_qualification import (
         ManagedQualificationRefused, qualify_managed_runtime,
     )
     from run_state.runtime_staging import (
-        STAGE_MANIFEST_NAME, stage_or_reuse_private_codex_runtime,
+        STAGE_MANIFEST_NAME, RetainedRuntimeNotReusable, stage_or_reuse_private_codex_runtime,
     )
     from run_state.wave_consumer import WaveConsumer
     from run_state.worker_channel import WorkerChannelServer
@@ -3256,6 +3276,9 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             adapter = CodexHostAdapter(
                 bundle.qualified_runtime, host_request.binary, str(cli["version"]),
             )
+        except RetainedRuntimeNotReusable as error:
+            raise SupervisorRefused(_retained_runtime_refusal(
+                retained_launch(store, activity_id), outer=activity_request_key == child_key)) from error
         except (CapabilityError, ManagedQualificationRefused, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
         return QualifiedHostRuntime(bundle.activity, bundle.qualified_runtime, bundle.runtime_receipt,
@@ -3290,11 +3313,20 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
                                                  child_key=child_key) or str(uuid.uuid4()))
     outer_home = runtime_root / outer_activity_id
+    launch = retained_launch(store, outer_activity_id)
+    if launch is not None:
+        # A real outer launch holds Codex state in its home and may have done work:
+        # never re-stage, re-qualify, relaunch or replay it as a success.  Resuming
+        # after a real launch would first need its wave proof checked again.
+        raise SupervisorRefused(_replayed_launch_refusal(launch))
     try:
         with productive_work(store, token, kind="preparation"):
             stage_or_reuse_private_codex_runtime(
                 Path(host_request.runtime_home), outer_home, ready.path,
             )
+    except RetainedRuntimeNotReusable as error:
+        # Only qualification consumed the outer stage; this request key cannot resume it.
+        raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
     except (CapabilityError, OSError, ValueError) as error:
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
     contract_material = {

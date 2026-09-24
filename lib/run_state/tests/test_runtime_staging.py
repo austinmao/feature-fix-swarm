@@ -99,6 +99,85 @@ def test_stage_isolated_runtime_rewrites_paths_and_never_mutates_source(tmp_path
     assert all(after[key] == value for key, value in before.items())
 
 
+def test_stage_rewrites_home_alias_spellings_of_a_symlinked_source_profile(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "canonical").mkdir()
+    source, skills, worktree = _profile(tmp_path / "canonical")
+    home = tmp_path / "home"
+    (home / ".agents").mkdir(parents=True)
+    (home / ".codex").symlink_to(source)
+    (home / ".agents" / "skills").symlink_to(skills)
+    monkeypatch.setenv("HOME", str(home))
+    alias_hook = str(home / ".codex" / "hooks" / "gsd-hook.js")
+    alias_skill = str(home / ".agents" / "skills" / "gsd-quick" / "SKILL.md")
+    # GSD writes hook commands under the $HOME spelling of a symlinked ~/.codex.
+    (source / "hooks.json").write_text(
+        '{"hook_path": "%s", "skill_path": "%s", "escaped": "%s"}'
+        % (alias_hook, alias_skill, alias_hook.replace("/", "\\/")), encoding="utf-8")
+    target = tmp_path / "private-runtime"
+
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+    hooks = (target / "hooks.json").read_text(encoding="utf-8")
+    assert str(home / ".codex") not in hooks and str(home / ".agents") not in hooks
+    assert str(home / ".codex").replace("/", "\\/") not in hooks
+    staged = json.loads(hooks)
+    assert staged["hook_path"] == str(target / "hooks" / "gsd-hook.js")
+    assert staged["skill_path"] == str(target / "skills" / "gsd-quick" / "SKILL.md")
+    assert staged["escaped"] == str(target / "hooks" / "gsd-hook.js")
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+
+def test_rewrite_matches_only_complete_source_path_roots(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "canonical").mkdir()
+    source, _skills, worktree = _profile(tmp_path / "canonical")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".codex").symlink_to(source)
+    monkeypatch.setenv("HOME", str(home))
+    alias = str(home / ".codex")
+    (source / "hooks.json").write_text(json.dumps({
+        "backup": str(home / ".codex-backup" / "x"), "other": f"{source}-other/x",
+        "hook": f"{alias}/hooks/x", "root": alias,
+    }), encoding="utf-8")
+    target = tmp_path / "private-runtime"
+
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+    staged = json.loads((target / "hooks.json").read_text(encoding="utf-8"))
+    assert staged == {
+        "backup": str(home / ".codex-backup" / "x"), "other": f"{source}-other/x",
+        "hook": f"{target}/hooks/x", "root": str(target),
+    }
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+
+def test_rewrite_matches_a_source_root_before_any_non_path_character(tmp_path: Path) -> None:
+    source, _skills, worktree = _profile(tmp_path)
+    # json.dumps escapes the quote as \" after the root: a shell-quoted hook command.
+    (source / "hooks.json").write_text(json.dumps({
+        "quoted": f'cd "{source}" && x', "chained": f"cd {source};ls", "piped": f"{source}|cat",
+    }), encoding="utf-8")
+    target = tmp_path / "private-runtime"
+
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+    assert json.loads((target / "hooks.json").read_text(encoding="utf-8")) == {
+        "quoted": f'cd "{target}" && x', "chained": f"cd {target};ls", "piped": f"{target}|cat",
+    }
+
+
+def test_stage_refuses_a_verbatim_leftover_root_before_a_shell_character(tmp_path: Path) -> None:
+    source, _skills, worktree = _profile(tmp_path)
+    hook = source / "hooks" / "gsd-other.js"
+    hook.write_text(f"// cd {source};ls\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    with pytest.raises(RuntimeStagingError, match="still references the source profile"):
+        stage_private_codex_runtime(source, tmp_path / "private-runtime", worktree)
+
+
 def test_stage_prebinds_codex_linked_worktree_canonical_trust_entry(tmp_path: Path) -> None:
     source, _skills, worktree = _profile(tmp_path)
     primary = tmp_path / "primary"
@@ -206,6 +285,37 @@ def test_stage_or_reuse_refuses_drift_without_repairing_the_stage(tmp_path: Path
 
     after = changed.read_bytes() if not changed.is_symlink() else os.readlink(changed).encode()
     assert after == before
+
+
+def test_a_non_reusable_retained_stage_is_typed_apart_from_source_failures(tmp_path: Path) -> None:
+    from run_state.runtime_staging import RetainedRuntimeNotReusable
+    source, _skills, worktree = _profile(tmp_path)
+    target = tmp_path / "private-runtime"
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+    # Qualification leaves probe evidence in the runtime home by design.
+    (target / "observer-hooks.log").write_text("", encoding="utf-8")
+    (target / "observer-hooks.log").chmod(0o600)
+    with pytest.raises(RetainedRuntimeNotReusable, match="unowned or missing file"):
+        stage_or_reuse_private_codex_runtime(source, target, worktree)
+    # A changed source closure is not a retained-stage problem.
+    (source / "gsd-core" / "VERSION").write_text("changed\n", encoding="utf-8")
+    with pytest.raises(RuntimeStagingError) as refused:
+        stage_or_reuse_private_codex_runtime(source, target, worktree)
+    assert not isinstance(refused.value, RetainedRuntimeNotReusable)
+
+
+def test_stage_refuses_a_non_config_leftover_reference_to_the_source_profile(tmp_path: Path) -> None:
+    # hooks/ files are copied verbatim, never config-rewritten (only _CONFIG_SUFFIXES
+    # are).  A literal source path left in one is a genuine leftover the boundary
+    # regex must still catch, not just the JSON/TOML paths the other tests cover.
+    source, _skills, worktree = _profile(tmp_path)
+    hook = source / "hooks" / "gsd-other.js"
+    hook.write_text(f"// installed at {source}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    target = tmp_path / "private-runtime"
+
+    with pytest.raises(RuntimeStagingError, match="still references the source profile"):
+        stage_private_codex_runtime(source, target, worktree)
 
 
 def test_stage_or_reuse_refuses_consumed_auth_and_a_different_workspace(tmp_path: Path) -> None:

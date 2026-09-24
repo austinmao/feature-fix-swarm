@@ -8,6 +8,53 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-24 — spec-014 managed run-state live E2E findings)
+
+- A managed run no longer counts a succeeded qualification probe as the
+  finished outer execution. The outer activity's four capacity-exempt probe
+  intents made replay skip `session.execute`, so mapped checks ran on
+  unexecuted sealed input.
+- Qualification removes the probe `TMPDIR` (`.ffs-observer-tmp`) from the
+  worktree after the observation is published or replayed. The observer now
+  creates that directory exclusively and records its identity. Qualification
+  removes only that exact directory and leaves any pre-existing directory
+  alone. A pre-existing file or symlink at that path refuses qualification.
+  This is hygiene only: the mapped-check inventory already ignores that
+  directory, so it does not explain the `FRONTEND_CHECK_CANDIDATE_STALE`
+  refusal seen in the operator E2E, whose cause is still open.
+- `FrontendPolicyRefused` and `RunPolicyRefused` raised inside a managed run
+  now reach `frontend-start`/`managed-start` as the typed JSON refusal
+  envelope (exit 78) instead of a raw traceback.
+- Private Codex staging now rewrites, and refuses to leave behind, the
+  `~/.codex` and `~/.agents/skills` spellings of a symlinked source profile.
+  Before this fix, the staged runtime ran the user's live, uninstrumented
+  GSD hook. A source-root spelling now matches only as a complete path root,
+  so paths such as `~/.codex-backup/x` and `<source>-other/x` are left alone.
+  A root followed by any character that cannot continue a file name, such as
+  a quote, an escape or a shell character, still matches, so the leftover
+  check refuses anything the rewrite missed.
+- Resuming with the same request key after only qualification consumed the
+  outer runtime now refuses `RETAINED_RUNTIME_NOT_REUSABLE` with recovery
+  `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
+  `qualify_host_adapter`. A replay of a run whose lifecycle already reached
+  `DONE` still returns its recorded success without relaunching anything.
+  Otherwise, when the outer activity really launched, a replay never
+  re-stages, re-qualifies or relaunches it, and never reports it as a
+  success, because its wave proof would not be checked again. A settled
+  launch (`completed_succeeded`, `completed_failed` or `closed_dead`) refuses
+  `REQUEST_ALREADY_COMPLETED` with recovery `inspect_completed_launch`, never
+  a new request key, because it may have done its work. An unsettled one
+  refuses `INTENT_RECONCILIATION_REQUIRED` with recovery `reconcile_intent`.
+  Resuming a run after its real outer launch is not supported yet. Neither
+  names `qualify_host_adapter` any more. A
+  wave-child or final-reviewer runtime that cannot be resumed refuses
+  `CHILD_RUNTIME_NOT_REUSABLE` with recovery `inspect_retained_child`,
+  because a new request key would start a new outer run. A managed-run
+  refusal caused by an underlying error now carries a `detail` holding only
+  the cause's type and typed `code`, never its message.
+- The test suites point `FFS_MANAGED_ADMISSION_ROOT` at a per-test temporary
+  directory and no longer write the per-user admission root.
+
 ### Changed (2026-09-24 — judgment tier repinned to gpt-6-sol @ xhigh)
 
 - The Codex `judgment` tier (used by `/review-gate`, `plan-wall.sh`,
