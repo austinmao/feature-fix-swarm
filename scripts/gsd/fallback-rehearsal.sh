@@ -2,7 +2,7 @@
 # fallback-rehearsal.sh — smoke-run the model-fallback rungs for real.
 #
 # "A backup you never ran is a hope": model-fallback.sh's chain
-# (fable -> gpt-5.6-sol -> opus) is structurally verified by bats, but a rung
+# (fable -> gpt-6-sol -> opus) is structurally verified by bats, but a rung
 # that has never carried a LIVE call can still fail at the exact moment the
 # primary is down. This lever runs one bounded trivial call through each
 # fallback rung's CLI, records tested_on + per-rung results, and exits nonzero
@@ -25,7 +25,7 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/run-bounded.sh"
 
 OPUS="claude-opus-5"
-CODEX_SOL="gpt-5.6-sol"
+CODEX_SOL="gpt-6-sol"
 CACHE_DIR="${GSD_FALLBACK_CACHE:-$HOME/.cache/gsd-model-probe}"
 REHEARSAL_FILE="$CACHE_DIR/rehearsal.json"
 PROBE_TIMEOUT="${GSD_MODEL_PROBE_TIMEOUT:-120}"

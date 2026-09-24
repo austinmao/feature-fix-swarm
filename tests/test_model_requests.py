@@ -12,7 +12,7 @@ from lib.model_requests import ModelRequestError, resolve_request, validate_docu
     ("name", "model", "effort"),
     [
         ("frontier", "gpt-6-astra", "xhigh"),
-        ("judgment", "gpt-5.6-sol", "high"),
+        ("judgment", "gpt-6-sol", "xhigh"),
         ("execution", "gpt-5.6-terra", "medium"),
         ("volume", "gpt-5.6-luna", "low"),
     ],

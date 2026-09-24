@@ -34,9 +34,11 @@ EOF
   run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
   grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
-  # spec-004 AC-004 effort split: fable materializes at xhigh, opus stays high
+  # spec-004 AC-004 effort split: fable and opus both materialize at xhigh
+  # (gpt-6-sol judgment repin — opus no longer distinguishes at high)
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
-  grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
+  grep -F 'model = "gpt-6-sol"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
   grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor-sonnet.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor-sonnet.toml"
   grep -F 'model = "gpt-5.6-luna"' "$CODEX_ROOT/agents/gsd-scout-haiku.toml"
@@ -58,6 +60,7 @@ EOF
   write_agent gsd-native-luna gpt-5.6-luna
   write_agent gsd-native-terra gpt-5.6-terra
   write_agent gsd-native-sol gpt-5.6-sol
+  write_agent gsd-native-sol6 gpt-6-sol
 
   run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
@@ -65,8 +68,11 @@ EOF
   grep -F 'model_reasoning_effort = "low"' "$CODEX_ROOT/agents/gsd-native-luna.toml"
   grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-native-terra.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-native-terra.toml"
+  # gpt-5.6-sol remains a recognized native pin (lower admission rung).
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-native-sol.toml"
   grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-native-sol.toml"
+  grep -F 'model = "gpt-6-sol"' "$CODEX_ROOT/agents/gsd-native-sol6.toml"
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-native-sol6.toml"
 }
 
 @test "full Codex role overrides pin generated agents without weakening alias pins" {

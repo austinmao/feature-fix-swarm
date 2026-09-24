@@ -149,7 +149,7 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
     bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
     fail) echo 'native quota exhausted API_TOKEN=super-secret-value-123456789 api_key=xYz bearer tiny' >&2; exit 69 ;;
     sol_unavailable)
-      if [[ "\$*" == *gpt-5.6-sol* ]]; then
+      if [[ "\$*" == *gpt-6-sol* ]]; then
         echo 'requested Codex model unavailable' >&2
         exit 69
       fi

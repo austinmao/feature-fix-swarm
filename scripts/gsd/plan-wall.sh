@@ -513,7 +513,7 @@ _pw_cross_vendor_fallback_state() {
 _pw_same_vendor_ordered_rungs() {
   local host="$1" planner="$2" model effort out=""
   if [ "$host" = codex ]; then
-    for pair in gpt-5.6-sol/high gpt-5.6-terra/medium gpt-5.6-luna/low; do
+    for pair in gpt-6-sol/xhigh gpt-5.6-terra/medium gpt-5.6-luna/low; do
       model="${pair%/*}"; effort="${pair#*/}"
       [ "$model" = "$planner" ] && continue
       out="${out}${model}|${effort}
@@ -715,7 +715,7 @@ _pw_select_and_review() {
   local opp_model opp_effort ordered first_model first_effort rung_file
 
   opposite="$(adversary_kind_for_host "$host")"
-  if [ "$opposite" = codex ]; then opp_model=gpt-5.6-sol; opp_effort=high
+  if [ "$opposite" = codex ]; then opp_model=gpt-6-sol; opp_effort=xhigh
   else opp_model=claude-opus-5; opp_effort=""; fi
 
   trail_file="$(mktemp "${TMPDIR:-/tmp}/pw-trail.XXXXXX")"

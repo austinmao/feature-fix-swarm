@@ -134,7 +134,7 @@ if [ "$CLAUDE_OK" -eq 1 ] && [ "$CODEX_OK" -eq 1 ]; then
   prompt="$(_sp_build_draft_prompt)"
   draft_anthropic="$(adversary_invoke claude "$SP_TIMEOUT" claude-opus-5 "" "$prompt")"
   rc_a=$?
-  draft_openai="$(adversary_invoke codex "$SP_TIMEOUT" gpt-5.6-sol high "$prompt")"
+  draft_openai="$(adversary_invoke codex "$SP_TIMEOUT" gpt-6-sol xhigh "$prompt")"
   rc_b=$?
   if [ "$rc_a" -ne 0 ] || [ "$rc_b" -ne 0 ]; then
     echo "spec-panel: blind draft dispatch failed (claude rc=$rc_a, codex rc=$rc_b)" >&2
@@ -153,8 +153,12 @@ if [ "$CLAUDE_OK" -eq 1 ]; then
   vendor=anthropic; kind=claude; author_model=claude-opus-5; author_effort=""
   refuter_model=claude-fable-5; refuter_effort=""
 elif [ "$CODEX_OK" -eq 1 ]; then
-  vendor=openai; kind=codex; author_model=gpt-5.6-sol; author_effort=high
-  refuter_model=gpt-5.6-sol; refuter_effort=xhigh
+  vendor=openai; kind=codex; author_model=gpt-6-sol; author_effort=xhigh
+  # refuter is the frontier tier (matches the Claude branch's opus+fable
+  # split below) — gpt-6-astra, not another judgment-tier sol pass, so the
+  # single-vendor degrade still gets a genuinely different model, not just a
+  # re-run of the author at the same effort ceiling.
+  refuter_model=gpt-6-astra; refuter_effort=xhigh
 else
   echo "spec-panel: no vendor CLI reachable — cannot draft" >&2
   exit 1

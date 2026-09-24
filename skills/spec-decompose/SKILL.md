@@ -149,7 +149,7 @@ gsd runs research → writes `NN-*-PLAN.md` files (wave/`depends_on` annotations
 parallelism contract `/gsd-execute-phase` executes) → plan-checker verifies. The seeded
 config also wires the plan-bounce seam (`workflow.plan_bounce_script =
 scripts/gsd/plan-adversary.sh`): high-blast plans (auth/RLS/payments/migrations/…)
-get a cross-model adversarial review (default `gpt-5.6-sol` @ `xhigh`, same adversary
+get a cross-model adversarial review (default `gpt-6-sol` @ `xhigh`, same adversary
 tier as review-gate) appended as findings, which the judgment plan-checker re-run
 adjudicates. Low-blast plans skip it (zero cost); kill-switch `PLAN_ADVERSARY=off`.
 Plans with

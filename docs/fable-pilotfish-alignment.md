@@ -110,6 +110,15 @@ was imprecise. Codex CLI 0.144's API-validated `model_reasoning_effort` enum is
 `none|minimal|low|medium|high|xhigh` — `ultra`/`max` are CLI-accepted aliases
 that do NOT appear in the enum itself; the canonical top tier is `xhigh`
 (matches plan-adversary.sh's `EFFORT=xhigh` default). No dated snapshots.
+
+Correction (2026-09-24 — gpt-6-sol judgment repin): the table above (and the
+"Sol is the Codex resolution for both frontier and judgment" line below it)
+describes the pre-astra state. The judgment tier now resolves to `gpt-6-sol`
+@ `xhigh` (was `gpt-5.6-sol` @ `high`); frontier is `gpt-6-astra` @ `xhigh`
+(spec 004, already distinct from judgment — see the addendum above). The two
+tiers are once again distinct models, not just an effort split of one model.
+`docs/model-tiers.md` is the canonical, kept-current tier reference;
+`scripts/gsd/model-equivalents.sh` is the canonical executable source.
 Caveat: OpenAI's real-time cyber classifiers can pause/block legitimate
 security-adjacent prompts mid-stream — same failure class as Fable's
 `security-model-fence.sh`, now present on both vendors; adversary scripts stay

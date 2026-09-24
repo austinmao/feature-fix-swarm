@@ -8,7 +8,7 @@
 # (cached 24h) and rewrites model_overrides + dynamic_routing.tier_models
 # BEFORE a run starts — then RESTORES them once fable comes back.
 #
-# Chain: fable -> [probe gpt-5.6-sol cross-vendor compensation, for
+# Chain: fable -> [probe gpt-6-sol cross-vendor compensation, for
 # marker-mode only] -> opus. Codex models can NEVER be Claude subagent pins,
 # so the actual config rewrite is always fable->opus; the codex-sol probe
 # only decides whether we record mode=codex-sol (cross-vendor xhigh
@@ -100,7 +100,7 @@ CONFIG="$PLANNING_DIR/config.json"
 MARKER="$PLANNING_DIR/fable-fallback.json"
 FABLE="claude-fable-5"
 OPUS="claude-opus-5"
-CODEX_SOL="gpt-5.6-sol"
+CODEX_SOL="gpt-6-sol"
 
 # Match BOTH value forms: gsd-core alias "fable" and full ID "claude-fable-5"
 # (the alias grep is exact-quoted, so it does NOT match inside the full ID).
