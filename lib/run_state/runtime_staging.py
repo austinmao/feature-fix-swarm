@@ -230,16 +230,26 @@ def _is_config_like(relative: Path) -> bool:
     return relative.suffix.lower() in _CONFIG_SUFFIXES
 
 
+def _source_spellings(source_home: Path, source_skills: Path) -> tuple[tuple[Path, Path], ...]:
+    """(spelling, canonical root) for each source root, plus $HOME aliases resolving to it.
+
+    With a symlinked ``~/.codex`` the installer writes hook commands under the
+    $HOME alias while staging only accepts the canonical source path.
+    """
+    spellings = [(source_skills, source_skills), (source_home, source_home)]
+    for alias, canonical in ((Path.home() / ".agents" / "skills", source_skills),
+                             (Path.home() / ".codex", source_home)):
+        if alias != canonical and alias.resolve() == canonical:
+            spellings.append((alias, canonical))
+    return tuple(spellings)
+
+
 def _rewritten_config_text(text: str, source_home: Path, source_skills: Path,
                            target_home: Path, target_skills: Path) -> str:
-    replacements = (
-        (str(source_skills), str(target_skills)),
-        (str(source_home), str(target_home)),
-        (str(source_skills).replace("/", r"\/"), str(target_skills).replace("/", r"\/")),
-        (str(source_home).replace("/", r"\/"), str(target_home).replace("/", r"\/")),
-    )
-    for old, new in replacements:
-        text = text.replace(old, new)
+    targets = {source_skills: str(target_skills), source_home: str(target_home)}
+    for spelling, canonical in _source_spellings(source_home, source_skills):
+        old, new = str(spelling), targets[canonical]
+        text = text.replace(old, new).replace(old.replace("/", r"\/"), new.replace("/", r"\/"))
     return text
 
 
@@ -297,9 +307,8 @@ def _instrument_session_start_hook(target: Path) -> None:
 
 
 def _assert_no_source_reference(target: Path, source_home: Path, source_skills: Path) -> None:
-    needles = (str(source_home).encode(), str(source_skills).encode(),
-               str(source_home).replace("/", r"\/").encode(),
-               str(source_skills).replace("/", r"\/").encode())
+    needles = tuple(value.encode() for spelling, _ in _source_spellings(source_home, source_skills)
+                    for value in (str(spelling), str(spelling).replace("/", r"\/")))
     for path in sorted(target.rglob("*")):
         if path.is_dir():
             continue

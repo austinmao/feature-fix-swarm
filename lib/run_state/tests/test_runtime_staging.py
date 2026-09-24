@@ -99,6 +99,35 @@ def test_stage_isolated_runtime_rewrites_paths_and_never_mutates_source(tmp_path
     assert all(after[key] == value for key, value in before.items())
 
 
+def test_stage_rewrites_home_alias_spellings_of_a_symlinked_source_profile(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "canonical").mkdir()
+    source, skills, worktree = _profile(tmp_path / "canonical")
+    home = tmp_path / "home"
+    (home / ".agents").mkdir(parents=True)
+    (home / ".codex").symlink_to(source)
+    (home / ".agents" / "skills").symlink_to(skills)
+    monkeypatch.setenv("HOME", str(home))
+    alias_hook = str(home / ".codex" / "hooks" / "gsd-hook.js")
+    alias_skill = str(home / ".agents" / "skills" / "gsd-quick" / "SKILL.md")
+    # GSD writes hook commands under the $HOME spelling of a symlinked ~/.codex.
+    (source / "hooks.json").write_text(
+        '{"hook_path": "%s", "skill_path": "%s", "escaped": "%s"}'
+        % (alias_hook, alias_skill, alias_hook.replace("/", "\\/")), encoding="utf-8")
+    target = tmp_path / "private-runtime"
+
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+    hooks = (target / "hooks.json").read_text(encoding="utf-8")
+    assert str(home / ".codex") not in hooks and str(home / ".agents") not in hooks
+    assert str(home / ".codex").replace("/", "\\/") not in hooks
+    staged = json.loads(hooks)
+    assert staged["hook_path"] == str(target / "hooks" / "gsd-hook.js")
+    assert staged["skill_path"] == str(target / "skills" / "gsd-quick" / "SKILL.md")
+    assert staged["escaped"] == str(target / "hooks" / "gsd-hook.js")
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+
 def test_stage_prebinds_codex_linked_worktree_canonical_trust_entry(tmp_path: Path) -> None:
     source, _skills, worktree = _profile(tmp_path)
     primary = tmp_path / "primary"
