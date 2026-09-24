@@ -36,8 +36,10 @@ all skills.
 - Resuming with the same request key after only qualification consumed the
   outer runtime now refuses `RETAINED_RUNTIME_NOT_REUSABLE` with recovery
   `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
-  `qualify_host_adapter`. When the outer activity really launched, a replay
-  never re-stages, re-qualifies or relaunches it, and never reports it as a
+  `qualify_host_adapter`. A replay of a run whose lifecycle already reached
+  `DONE` still returns its recorded success without relaunching anything.
+  Otherwise, when the outer activity really launched, a replay never
+  re-stages, re-qualifies or relaunches it, and never reports it as a
   success, because its wave proof would not be checked again. A settled
   launch (`completed_succeeded`, `completed_failed` or `closed_dead`) refuses
   `REQUEST_ALREADY_COMPLETED` with recovery `inspect_completed_launch`, never
