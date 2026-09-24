@@ -42,6 +42,25 @@ def test_plan_owns_only_a_probe_tmpdir_it_created_exclusively(tmp_path):
     assert again.scratch_identity is None
 
 
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_plan_refuses_a_probe_tmpdir_that_is_not_a_real_directory(tmp_path, kind):
+    runtime, binary = _runtime(tmp_path)
+    worktree = tmp_path / "work"
+    worktree.mkdir()
+    scratch = worktree / ".ffs-observer-tmp"
+    if kind == "file":
+        scratch.write_text("x")
+    else:
+        (tmp_path / "elsewhere").mkdir()
+        scratch.symlink_to(tmp_path / "elsewhere")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        observer.prepare_qualification_plan(
+            runtime, binary, worktree, runtime / "runtime-observation.json", 180,
+            model="gpt-6-astra", effort="high",
+        )
+
+
 def test_preparation_launches_nothing_and_exposes_only_four_fixed_probes(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("qualification preparation launched a process")

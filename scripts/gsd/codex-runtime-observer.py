@@ -554,6 +554,9 @@ def prepare_qualification_plan(runtime: Path, binary: Path, worktree: Path, outp
     try:
         tmpdir.mkdir()
     except FileExistsError:
+        # A retained scratch directory is reused and never removed; a file or link is refused.
+        if tmpdir.is_symlink() or not tmpdir.is_dir():
+            raise ValueError("qualification scratch path is not a directory") from None
         scratch_identity = None
     else:
         scratch_info = tmpdir.lstat()
