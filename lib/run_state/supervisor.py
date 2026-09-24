@@ -3189,13 +3189,19 @@ def _managed_inventory_workspace(store, token, context, request_key, *, workspac
     return root, None if operation is None else (operation["payload"] if "payload" in operation.keys() else None), child_key, ready
 
 
+def _replayed_launch_refusal(launch) -> str:
+    """The refusal ``Supervisor._launch`` raises when a replay reaches this retained intent."""
+    return ("REQUEST_ALREADY_COMPLETED" if launch["state"] in {"completed_succeeded", "completed_failed"}
+            else "INTENT_RECONCILIATION_REQUIRED")
+
+
 def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
                                   upstream_runtime=None, model_request=None, review_catalog=None):
     """Qualification seams, worker channel and outer contract for one Codex host run."""
     from host_capabilities import GsdSupervisorEnvironment, admit_cli
     from run_state.codex_host import CodexHostAdapter
     from run_state.frontend_producers import (
-        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_outer_activity,
+        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_launch, retained_outer_activity,
     )
     from run_state.managed_qualification import (
         ManagedQualificationRefused, qualify_managed_runtime,
@@ -3257,7 +3263,9 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                 bundle.qualified_runtime, host_request.binary, str(cli["version"]),
             )
         except RetainedRuntimeNotReusable as error:
-            raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
+            launch = retained_launch(store, activity_id)
+            raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE" if launch is None
+                                    else _replayed_launch_refusal(launch)) from error
         except (CapabilityError, ManagedQualificationRefused, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
         return QualifiedHostRuntime(bundle.activity, bundle.qualified_runtime, bundle.runtime_receipt,
@@ -3292,16 +3300,23 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
                                                  child_key=child_key) or str(uuid.uuid4()))
     outer_home = runtime_root / outer_activity_id
-    try:
-        with productive_work(store, token, kind="preparation"):
-            stage_or_reuse_private_codex_runtime(
-                Path(host_request.runtime_home), outer_home, ready.path,
-            )
-    except RetainedRuntimeNotReusable as error:
-        # Qualification consumes the outer stage; this request key cannot resume it.
-        raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
-    except (CapabilityError, OSError, ValueError) as error:
-        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
+    launch = retained_launch(store, outer_activity_id)
+    if launch is not None and launch["completion_status"] != "succeeded":
+        # A real outer launch holds Codex state in its home: never re-stage, re-qualify
+        # or relaunch it.  Refuse exactly as its launch replay would.
+        raise SupervisorRefused(_replayed_launch_refusal(launch))
+    if launch is None:
+        try:
+            with productive_work(store, token, kind="preparation"):
+                stage_or_reuse_private_codex_runtime(
+                    Path(host_request.runtime_home), outer_home, ready.path,
+                )
+        except RetainedRuntimeNotReusable as error:
+            # Only qualification consumed the outer stage; this request key cannot resume it.
+            raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
+        except (CapabilityError, OSError, ValueError) as error:
+            raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
+    # Otherwise a succeeded outer launch replays through its retained completion.
     contract_material = {
         "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),

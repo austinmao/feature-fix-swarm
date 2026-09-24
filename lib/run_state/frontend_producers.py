@@ -338,6 +338,15 @@ def retained_outer_activity(store, token, *, parent_activity_id: str, child_key:
     return None if row is None else row["id"]
 
 
+def retained_launch(store, activity_id: str):
+    """The newest real (non-qualification) launch intent on a retained activity, if any."""
+    with store.read_transaction() as tx:
+        return tx.execute(
+            "SELECT state,completion_status FROM authority_launch_intents WHERE activity_id=? "
+            "AND id NOT IN (SELECT intent_id FROM authority_qualification_launches) "
+            "ORDER BY attempt_ordinal DESC", (activity_id,)).fetchone()
+
+
 def _retained_outer_completion(store, activity_id: str):
     """A succeeded managed outer launch (capacity-exempt, not a qualification probe)."""
     from process_identity import ProcessIdentity
