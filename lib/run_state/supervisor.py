@@ -3196,9 +3196,10 @@ def _replayed_launch_refusal(launch) -> str:
 
 
 def _retained_runtime_refusal(launch, *, outer: bool) -> str:
-    """The refusal for a retained private runtime its qualification consumed."""
-    if launch is not None:
+    """The refusal for a retained private runtime that cannot be resumed."""
+    if launch is not None and launch["state"] != "closed_dead":
         return _replayed_launch_refusal(launch)
+    # No launch ran under it: none was recorded, or its child died before its permit.
     # Only the outer child's runtime is named by the request key.  A new key starts a new
     # outer run, so it never repairs a wave child or the final reviewer.
     return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
@@ -3309,10 +3310,12 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                                                  child_key=child_key) or str(uuid.uuid4()))
     outer_home = runtime_root / outer_activity_id
     launch = retained_launch(store, outer_activity_id)
-    if launch is not None and launch["completion_status"] != "succeeded":
+    if launch is not None and (launch["completion_status"] != "succeeded"
+                               or store.get_activity(outer_activity_id).state not in {"active", "succeeded"}):
         # A real outer launch holds Codex state in its home: never re-stage, re-qualify
-        # or relaunch it.  Refuse exactly as its launch replay would.
-        raise SupervisorRefused(_replayed_launch_refusal(launch))
+        # or relaunch it.  A succeeded launch whose activity then failed (for example on
+        # wave proof) is reported as completed, never replayed as a success.
+        raise SupervisorRefused(_retained_runtime_refusal(launch, outer=True))
     if launch is None:
         try:
             with productive_work(store, token, kind="preparation"):

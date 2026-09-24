@@ -96,11 +96,11 @@ def _refusal_detail(error: Exception) -> str | None:
 # Supervisor codes whose cause is this request key's retained launch, not the host adapter.
 _REQUEST_KEY_REFUSALS = {
     "RETAINED_RUNTIME_NOT_REUSABLE": (
-        "the outer runtime retained for this request key is not reusable: qualification consumed it or it changed",
+        "the outer runtime retained for this request key cannot be resumed, and no outer launch under it ran",
         "resume_with_new_request_key"),
     # A new request key would start a new outer run, repeating its completed work.
     "CHILD_RUNTIME_NOT_REUSABLE": (
-        "a wave child or final reviewer runtime retained for this run is not reusable",
+        "a wave child or final reviewer runtime retained for this run cannot be resumed",
         "inspect_retained_child"),
     # The launch may have succeeded, so a new request key could repeat its work.
     "REQUEST_ALREADY_COMPLETED": (
