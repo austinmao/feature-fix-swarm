@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import types
 import uuid
@@ -514,6 +515,11 @@ def qualify_managed_runtime(
                 raise ManagedQualificationRefused("QUALIFICATION_RESULT_INVALID") from exc
         else:
             observation = module.publish_qualification_results(plan, tuple(results))
+        # The probes' TMPDIR must sit in the worktree; left behind, it changes the
+        # later mapped-check snapshot's input digest (FRONTEND_CHECK_CANDIDATE_STALE).
+        scratch = Path(dict(plan.probes[0].environment)["TMPDIR"])
+        if scratch.parent == workspace.path and scratch.is_dir() and not scratch.is_symlink():
+            shutil.rmtree(scratch)
         qualified = verify_runtime(
             runtime, workspace.path, sandbox_mode=host_request.sandbox,
             network_enabled=host_request.network_enabled, roots=[str(workspace.path)],

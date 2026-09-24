@@ -331,6 +331,35 @@ def test_helper_launches_only_four_supervised_probes_then_promotes_and_receipts(
     assert json.loads(Path(gsd.admission_file).read_text()) == bundle.admission
 
 
+def test_qualification_leaves_no_probe_scratch_in_the_worktree(tmp_path, monkeypatch):
+    fixture = _fixture(tmp_path)
+    store, token, workspace, runtime, binary, gsd, request, evidence, supervisor, module, predicted = fixture
+    monkeypatch.setattr(managed, "verify_runtime", lambda *args, **kwargs: predicted)
+    scratch = workspace.path / ".ffs-observer-tmp"
+    planned = module.prepare_qualification_plan
+
+    def plan(*args, **kwargs):
+        # The real observer creates the probes' TMPDIR inside the worktree on every plan.
+        scratch.mkdir(exist_ok=True)
+        (scratch / "probe-temp").write_text("x")
+        return planned(*args, **kwargs)
+
+    monkeypatch.setattr(module, "prepare_qualification_plan", plan)
+    kwargs = dict(
+        activity_id="55555555-5555-4555-8555-555555555555", activity_request_key="plan-key",
+        parent_activity_id="parent", workspace=workspace, runtime_home=runtime, binary=binary,
+        gsd_environment=gsd, host_request=request, role="worker", evidence_root=evidence,
+        final_contract_hash="9" * 64, supervisor=supervisor, observer_module=module,
+    )
+    managed.qualify_managed_runtime(store, token, **kwargs)
+    # A leftover untracked directory would change the later mapped-check input digest.
+    assert not scratch.exists()
+    managed.qualify_managed_runtime(
+        store, token, **{**kwargs, "workspace": replace(workspace, child_role="worker")},
+    )
+    assert not scratch.exists()
+
+
 def test_helper_stops_on_uncertain_probe_without_observation_or_promotion(tmp_path, monkeypatch):
     fixture = _fixture(tmp_path, uncertain_at=2)
     store, token, workspace, runtime, binary, gsd, request, evidence, supervisor, module, predicted = fixture
