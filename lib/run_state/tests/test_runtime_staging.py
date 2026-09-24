@@ -153,6 +153,31 @@ def test_rewrite_matches_only_complete_source_path_roots(
     stage_or_reuse_private_codex_runtime(source, target, worktree)
 
 
+def test_rewrite_matches_a_source_root_before_any_non_path_character(tmp_path: Path) -> None:
+    source, _skills, worktree = _profile(tmp_path)
+    # json.dumps escapes the quote as \" after the root: a shell-quoted hook command.
+    (source / "hooks.json").write_text(json.dumps({
+        "quoted": f'cd "{source}" && x', "chained": f"cd {source};ls", "piped": f"{source}|cat",
+    }), encoding="utf-8")
+    target = tmp_path / "private-runtime"
+
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+    assert json.loads((target / "hooks.json").read_text(encoding="utf-8")) == {
+        "quoted": f'cd "{target}" && x', "chained": f"cd {target};ls", "piped": f"{target}|cat",
+    }
+
+
+def test_stage_refuses_a_verbatim_leftover_root_before_a_shell_character(tmp_path: Path) -> None:
+    source, _skills, worktree = _profile(tmp_path)
+    hook = source / "hooks" / "gsd-other.js"
+    hook.write_text(f"// cd {source};ls\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    with pytest.raises(RuntimeStagingError, match="still references the source profile"):
+        stage_private_codex_runtime(source, tmp_path / "private-runtime", worktree)
+
+
 def test_stage_prebinds_codex_linked_worktree_canonical_trust_entry(tmp_path: Path) -> None:
     source, _skills, worktree = _profile(tmp_path)
     primary = tmp_path / "primary"

@@ -28,9 +28,11 @@ _CONFIG_SUFFIXES: Final = frozenset((".cfg", ".conf", ".ini", ".json", ".toml", 
 _BUNDLE_ROOTS: Final = ("agents", "gsd-core", "scripts", "hooks")
 _SESSION_START_HOOK: Final = "hooks/gsd-check-update.js"
 _SESSION_START_MARKER: Final = "// ffs-supervised-session-start-observer/v1"
-# A source-root spelling counts only as a complete path root: followed by a
-# (JSON-escaped) separator, the end, or a character which cannot extend a path.
-_ROOT_END: Final = r"""(?=/|\\/|$|["'\s:,)\]}])"""
+# A source-root spelling counts as a complete path root unless a character that
+# can continue a file name follows it (``~/.codex-backup``).  Anything else, such
+# as a separator, a quote, an escape or a shell character, ends the root, so the
+# leftover check fails closed on every spelling the rewrite could have missed.
+_ROOT_END: Final = r"(?![\w.~+@-])"
 
 
 class RuntimeStagingError(ValueError):
