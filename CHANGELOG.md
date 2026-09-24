@@ -16,19 +16,26 @@ all skills.
   unexecuted sealed input.
 - Qualification removes the probe `TMPDIR` (`.ffs-observer-tmp`) from the
   worktree after the observation is published or replayed, so later mapped
-  checks no longer refuse `FRONTEND_CHECK_CANDIDATE_STALE`.
+  checks no longer refuse `FRONTEND_CHECK_CANDIDATE_STALE`. The observer now
+  creates that directory exclusively and records its identity. Qualification
+  removes only that exact directory and leaves any pre-existing path alone.
 - `FrontendPolicyRefused` and `RunPolicyRefused` raised inside a managed run
   now reach `frontend-start`/`managed-start` as the typed JSON refusal
   envelope (exit 78) instead of a raw traceback.
 - Private Codex staging now rewrites, and refuses to leave behind, the
   `~/.codex` and `~/.agents/skills` spellings of a symlinked source profile.
   Before this fix, the staged runtime ran the user's live, uninstrumented
-  GSD hook.
-- Resuming with the same request key after the outer runtime was qualified
-  now refuses `RETAINED_RUNTIME_NOT_REUSABLE` with recovery
+  GSD hook. A source-root spelling now matches only as a complete path root,
+  so paths such as `~/.codex-backup/x` and `<source>-other/x` are left alone.
+- Resuming with the same request key after only qualification consumed the
+  outer runtime now refuses `RETAINED_RUNTIME_NOT_REUSABLE` with recovery
   `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
-  `qualify_host_adapter`. Every managed-run refusal envelope now carries a
-  short `detail` naming the underlying error, with no paths or values.
+  `qualify_host_adapter`. When the outer activity really launched, its home
+  is never re-staged. A succeeded launch replays through its retained
+  completion. Any other launch refuses as its launch replay would
+  (`REQUEST_ALREADY_COMPLETED` or `INTENT_RECONCILIATION_REQUIRED`), never
+  with a new-key recovery. Every managed-run refusal envelope now carries a
+  `detail` holding only the cause's type and typed `code`, never its message.
 - The test suites point `FFS_MANAGED_ADMISSION_ROOT` at a per-test temporary
   directory and no longer write the per-user admission root.
 
