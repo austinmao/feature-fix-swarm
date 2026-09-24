@@ -30,6 +30,18 @@ def _results(plan):
                  for probe in plan.probes)
 
 
+def test_plan_owns_only_a_probe_tmpdir_it_created_exclusively(tmp_path):
+    plan = _plan(tmp_path)
+    scratch = plan.worktree / ".ffs-observer-tmp"
+    info = scratch.lstat()
+    assert plan.scratch_identity == (info.st_dev, info.st_ino)
+    # A second plan, or any pre-existing path, is not this plan's creation.
+    again = observer.prepare_qualification_plan(
+        plan.runtime, plan.binary, plan.worktree, plan.output, 180, model="gpt-6-astra", effort="high",
+    )
+    assert again.scratch_identity is None
+
+
 def test_preparation_launches_nothing_and_exposes_only_four_fixed_probes(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("qualification preparation launched a process")

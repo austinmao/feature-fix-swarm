@@ -451,6 +451,8 @@ class QualificationPlan(NamedTuple):
     binary_identity: str
     workspace_identity: str
     probes: tuple[QualificationProbe, ...]
+    # (st_dev, st_ino) of the probe TMPDIR when this plan created it; None if it pre-existed.
+    scratch_identity: tuple[int, int] | None = None
 
 
 class QualificationResult(NamedTuple):
@@ -548,7 +550,14 @@ def prepare_qualification_plan(runtime: Path, binary: Path, worktree: Path, outp
     token = seed.skill_token
     prepare_shell_probe(runtime)
     allowed = worktree / f"ffs-observer-allowed-{nonce}.txt"
-    tmpdir = worktree / ".ffs-observer-tmp"; tmpdir.mkdir(exist_ok=True)
+    tmpdir = worktree / ".ffs-observer-tmp"
+    try:
+        tmpdir.mkdir()
+    except FileExistsError:
+        scratch_identity = None
+    else:
+        scratch_info = tmpdir.lstat()
+        scratch_identity = (scratch_info.st_dev, scratch_info.st_ino)
     if preview and gsd_environment is not None:
         if not callable(getattr(gsd_environment, "as_dict", None)):
             raise ValueError("invalid GSD supervisor environment")
@@ -622,7 +631,7 @@ def prepare_qualification_plan(runtime: Path, binary: Path, worktree: Path, outp
         tuple(sorted(production_environment.items())), seed.observation_created_at_unix,
         json.dumps(runtime_hashes(runtime), sort_keys=True),
         json.dumps(executable_chain(binary), sort_keys=True),
-        json.dumps(workspace_identity(worktree), sort_keys=True), probes,
+        json.dumps(workspace_identity(worktree), sort_keys=True), probes, scratch_identity,
     )
 
 

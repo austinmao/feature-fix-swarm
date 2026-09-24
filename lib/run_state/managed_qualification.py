@@ -248,6 +248,18 @@ def _completed_probe(store, activity_id: str, request_key: str):
     return result
 
 
+def _remove_created_scratch(scratch: Path, workspace: Path, identity: tuple[int, int] | None) -> None:
+    """Remove the probe TMPDIR only if it is still the directory the plan created; never raise."""
+    try:
+        info = scratch.lstat()
+        if (identity is None or scratch.parent != workspace or not stat.S_ISDIR(info.st_mode)
+                or (info.st_dev, info.st_ino) != identity):
+            return
+        shutil.rmtree(scratch)
+    except OSError:
+        return
+
+
 def qualify_managed_runtime(
     store, token, *, activity_id: str, activity_request_key: str,
     parent_activity_id: str, workspace: WorkspacePreparation,
@@ -458,6 +470,8 @@ def qualify_managed_runtime(
         if preview_binding != exact_binding:
             raise ManagedQualificationRefused("QUALIFICATION_PREPARATION_CONFLICT")
         plan = exact_plan
+        owned_scratch = (getattr(preview_plan, "scratch_identity", None)
+                         or getattr(exact_plan, "scratch_identity", None))
         planned_policy = codex_environment_policy_hash(dict(plan.policy_environment))
         if (store.runtime_tuple_hash(_qualified(module.preview_qualified_runtime(plan))) != runtime_identity
                 or dict(predicted.observation).get("environment_sha256") != planned_policy):
@@ -517,9 +531,8 @@ def qualify_managed_runtime(
             observation = module.publish_qualification_results(plan, tuple(results))
         # The probes' TMPDIR must sit in the worktree; left behind, it changes the
         # later mapped-check snapshot's input digest (FRONTEND_CHECK_CANDIDATE_STALE).
-        scratch = Path(dict(plan.probes[0].environment)["TMPDIR"])
-        if scratch.parent == workspace.path and scratch.is_dir() and not scratch.is_symlink():
-            shutil.rmtree(scratch)
+        # Remove only the exact directory one of this call's plans created.
+        _remove_created_scratch(Path(dict(plan.probes[0].environment)["TMPDIR"]), workspace.path, owned_scratch)
         qualified = verify_runtime(
             runtime, workspace.path, sandbox_mode=host_request.sandbox,
             network_enabled=host_request.network_enabled, roots=[str(workspace.path)],
