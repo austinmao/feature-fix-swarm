@@ -32,9 +32,12 @@ all skills.
   `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
   `qualify_host_adapter`. When the outer activity really launched, its home
   is never re-staged. A succeeded launch replays through its retained
-  completion. Any other launch refuses as its launch replay would
-  (`REQUEST_ALREADY_COMPLETED` or `INTENT_RECONCILIATION_REQUIRED`), never
-  with a new-key recovery. Every managed-run refusal envelope now carries a
+  completion. Any other launch refuses as its launch replay would. A settled
+  launch refuses `REQUEST_ALREADY_COMPLETED` with recovery
+  `resume_with_new_request_key`. An unsettled one refuses
+  `INTENT_RECONCILIATION_REQUIRED` with recovery `inspect_owned_resources`,
+  because its admission stays reserved. Neither names `qualify_host_adapter`
+  any more. Every managed-run refusal envelope now carries a
   `detail` holding only the cause's type and typed `code`, never its message.
 - The test suites point `FFS_MANAGED_ADMISSION_ROOT` at a per-test temporary
   directory and no longer write the per-user admission root.

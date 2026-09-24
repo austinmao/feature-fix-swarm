@@ -93,6 +93,20 @@ def _refusal_detail(error: Exception) -> str | None:
     return type(cause).__name__
 
 
+# Supervisor codes whose cause is this request key's retained launch, not the host adapter.
+_REQUEST_KEY_REFUSALS = {
+    "RETAINED_RUNTIME_NOT_REUSABLE": (
+        "the outer runtime retained for this request key was consumed by its qualification",
+        "resume_with_new_request_key"),
+    "REQUEST_ALREADY_COMPLETED": (
+        "a launch for this request key already completed and cannot run again",
+        "resume_with_new_request_key"),
+    "INTENT_RECONCILIATION_REQUIRED": (
+        "a launch for this request key has not settled; its admission stays reserved",
+        "inspect_owned_resources"),
+}
+
+
 def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     """The managed-run JSON envelope (exit 78) for one of ``_managed_run_refusals``."""
     from run_state.supervisor import SupervisorRefused
@@ -100,9 +114,9 @@ def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     detail = _refusal_detail(error)
     if detail is not None:
         extra["detail"] = detail
-    if error.code == "RETAINED_RUNTIME_NOT_REUSABLE":
-        extra.update(cause="the outer runtime retained for this request key was consumed by its qualification",
-                     recovery_action={"action": "resume_with_new_request_key"})
+    if error.code in _REQUEST_KEY_REFUSALS:
+        cause, action = _REQUEST_KEY_REFUSALS[error.code]
+        extra.update(cause=cause, recovery_action={"action": action})
     elif isinstance(error, SupervisorRefused):
         extra.update(cause="the selected host backend has not demonstrated managed admission",
                      recovery_action={"action": "qualify_host_adapter"})
