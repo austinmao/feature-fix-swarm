@@ -3325,13 +3325,17 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         except (CapabilityError, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
     # Otherwise a succeeded outer launch replays through its retained completion.
+    try:
+        stage_manifest = (outer_home / STAGE_MANIFEST_NAME).read_bytes()
+    except OSError as error:
+        # A completed launch's home was pruned: report it, never re-stage or relaunch.
+        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED" if launch is None
+                                else "REQUEST_ALREADY_COMPLETED") from error
     contract_material = {
         "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "host_request": host_request.material(), "input_digest": ready.input_digest,
-        "runtime_stage_sha256": hashlib.sha256(
-            (outer_home / STAGE_MANIFEST_NAME).read_bytes(),
-        ).hexdigest(),
+        "runtime_stage_sha256": hashlib.sha256(stage_manifest).hexdigest(),
         "gsd_bridge_sha256": hashlib.sha256(bridge.read_bytes()).hexdigest(),
     }
     contract_hash = hashlib.sha256(_canonical(contract_material)).hexdigest()

@@ -18,7 +18,8 @@ all skills.
   worktree after the observation is published or replayed, so later mapped
   checks no longer refuse `FRONTEND_CHECK_CANDIDATE_STALE`. The observer now
   creates that directory exclusively and records its identity. Qualification
-  removes only that exact directory and leaves any pre-existing path alone.
+  removes only that exact directory and leaves any pre-existing directory
+  alone. A pre-existing file or symlink at that path refuses qualification.
 - `FrontendPolicyRefused` and `RunPolicyRefused` raised inside a managed run
   now reach `frontend-start`/`managed-start` as the typed JSON refusal
   envelope (exit 78) instead of a raw traceback.
@@ -27,12 +28,16 @@ all skills.
   Before this fix, the staged runtime ran the user's live, uninstrumented
   GSD hook. A source-root spelling now matches only as a complete path root,
   so paths such as `~/.codex-backup/x` and `<source>-other/x` are left alone.
+  A root followed by any character that cannot continue a file name, such as
+  a quote, an escape or a shell character, still matches, so the leftover
+  check refuses anything the rewrite missed.
 - Resuming with the same request key after only qualification consumed the
   outer runtime now refuses `RETAINED_RUNTIME_NOT_REUSABLE` with recovery
   `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
   `qualify_host_adapter`. When the outer activity really launched, its home
   is never re-staged. A succeeded launch replays through its retained
-  completion. Any other launch refuses as its launch replay would. A
+  completion; if its home was pruned it refuses `REQUEST_ALREADY_COMPLETED`
+  instead of raising a traceback. Any other launch refuses as its launch replay would. A
   completed launch refuses `REQUEST_ALREADY_COMPLETED` with recovery
   `inspect_completed_launch`, never a new request key, because the launch
   may have succeeded. An unsettled one refuses

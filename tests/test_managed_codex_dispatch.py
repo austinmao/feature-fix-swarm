@@ -271,20 +271,23 @@ def _retain_outer(store, token, context, *, launch):
                     "qualification_cohort_id,qualification_request_id,created_at) "
                     "VALUES(?,?,?,'probe',?,'{}',?,?,'cohort',?,'now')",
                     (intent, outer, f"probe-{ordinal}", "1" * 64, "2" * 64, "c" * 64, f"probe-{ordinal}"))
+    return home
 
 
-@pytest.mark.parametrize(("launch", "code", "action"), [
+@pytest.mark.parametrize(("launch", "pruned", "code", "action"), [
     # Qualification alone consumed the stage: only then is a new request key the recovery.
-    (None, "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key"),
+    (None, False, "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key"),
     # A completed outer launch replays through its retained completion; nothing is re-staged.
-    (("completed_succeeded", "succeeded"), None, None),
+    (("completed_succeeded", "succeeded"), False, None, None),
+    # ... and if its home was pruned it is reported, never re-staged or relaunched.
+    (("completed_succeeded", "succeeded"), True, "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
     # An in-flight, uncertain or failed outer launch reaches the supervisor's replay refusals.
-    (("released_to_execute", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
-    (("reconcile_required", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
-    (("completed_failed", "failed"), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    (("released_to_execute", None), False, "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
+    (("reconcile_required", None), False, "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
+    (("completed_failed", "failed"), False, "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
 ])
 def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monkeypatch, capsys,
-                                                                   launch, code, action):
+                                                                   launch, pruned, code, action):
     from run_state.cli import _managed_run_refusal, _managed_run_refusals
 
     primary, authority, _repository_id, env = _setup(tmp_path)
@@ -316,7 +319,9 @@ def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monk
             upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
             upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
         ))
-        _retain_outer(store, token, context, launch=launch)
+        home = _retain_outer(store, token, context, launch=launch)
+        if pruned:
+            (home / runtime_staging.STAGE_MANIFEST_NAME).unlink()
         try:
             return run_managed_command(
                 store, token, context, command=("/gsd-plan-phase", "1"),

@@ -343,7 +343,8 @@ def retained_launch(store, activity_id: str):
     with store.read_transaction() as tx:
         return tx.execute(
             "SELECT state,completion_status FROM authority_launch_intents WHERE activity_id=? "
-            "AND id NOT IN (SELECT intent_id FROM authority_qualification_launches) "
+            "AND NOT EXISTS (SELECT 1 FROM authority_qualification_launches q "
+            "WHERE q.intent_id=authority_launch_intents.id) "
             "ORDER BY attempt_ordinal DESC", (activity_id,)).fetchone()
 
 
@@ -355,7 +356,8 @@ def _retained_outer_completion(store, activity_id: str):
         row = tx.execute(
             "SELECT * FROM authority_launch_intents WHERE activity_id=? AND capacity_exempt=1 "
             "AND completion_status='succeeded' "
-            "AND id NOT IN (SELECT intent_id FROM authority_qualification_launches) "
+            "AND NOT EXISTS (SELECT 1 FROM authority_qualification_launches q "
+            "WHERE q.intent_id=authority_launch_intents.id) "
             "ORDER BY attempt_ordinal DESC", (activity_id,)).fetchone()
     if row is None:
         return None

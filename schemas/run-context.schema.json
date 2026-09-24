@@ -24,6 +24,7 @@
     "input_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "reused_result": {"type": "boolean"},
     "candidates": {"type": "array", "items": {"type": "object"}},
+    "detail": {"type": ["string", "null"]},
     "recovery_action": {
       "type": "object",
       "required": ["action"],
