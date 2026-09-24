@@ -279,9 +279,9 @@ def _retain_outer(store, token, context, *, launch):
     # A completed outer launch replays through its retained completion; nothing is re-staged.
     (("completed_succeeded", "succeeded"), None, None),
     # An in-flight, uncertain or failed outer launch reaches the supervisor's replay refusals.
-    (("released_to_execute", None), "INTENT_RECONCILIATION_REQUIRED", "inspect_owned_resources"),
-    (("reconcile_required", None), "INTENT_RECONCILIATION_REQUIRED", "inspect_owned_resources"),
-    (("completed_failed", "failed"), "REQUEST_ALREADY_COMPLETED", "resume_with_new_request_key"),
+    (("released_to_execute", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
+    (("reconcile_required", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
+    (("completed_failed", "failed"), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
 ])
 def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monkeypatch, capsys,
                                                                    launch, code, action):

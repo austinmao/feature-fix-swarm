@@ -98,12 +98,13 @@ _REQUEST_KEY_REFUSALS = {
     "RETAINED_RUNTIME_NOT_REUSABLE": (
         "the outer runtime retained for this request key was consumed by its qualification",
         "resume_with_new_request_key"),
+    # The launch may have succeeded, so a new request key could repeat its work.
     "REQUEST_ALREADY_COMPLETED": (
-        "a launch for this request key already completed and cannot run again",
-        "resume_with_new_request_key"),
+        "a launch for this request key already completed; a new request key would run it again",
+        "inspect_completed_launch"),
     "INTENT_RECONCILIATION_REQUIRED": (
-        "a launch for this request key has not settled; its admission stays reserved",
-        "inspect_owned_resources"),
+        "a launch for this request key has not settled; only owner-fence reconciliation may settle it",
+        "reconcile_intent"),
 }
 
 
