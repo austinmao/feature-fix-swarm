@@ -128,6 +128,31 @@ def test_stage_rewrites_home_alias_spellings_of_a_symlinked_source_profile(
     stage_or_reuse_private_codex_runtime(source, target, worktree)
 
 
+def test_rewrite_matches_only_complete_source_path_roots(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "canonical").mkdir()
+    source, _skills, worktree = _profile(tmp_path / "canonical")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".codex").symlink_to(source)
+    monkeypatch.setenv("HOME", str(home))
+    alias = str(home / ".codex")
+    (source / "hooks.json").write_text(json.dumps({
+        "backup": str(home / ".codex-backup" / "x"), "other": f"{source}-other/x",
+        "hook": f"{alias}/hooks/x", "root": alias,
+    }), encoding="utf-8")
+    target = tmp_path / "private-runtime"
+
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+    staged = json.loads((target / "hooks.json").read_text(encoding="utf-8"))
+    assert staged == {
+        "backup": str(home / ".codex-backup" / "x"), "other": f"{source}-other/x",
+        "hook": f"{target}/hooks/x", "root": str(target),
+    }
+    stage_or_reuse_private_codex_runtime(source, target, worktree)
+
+
 def test_stage_prebinds_codex_linked_worktree_canonical_trust_entry(tmp_path: Path) -> None:
     source, _skills, worktree = _profile(tmp_path)
     primary = tmp_path / "primary"

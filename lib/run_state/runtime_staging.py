@@ -28,6 +28,9 @@ _CONFIG_SUFFIXES: Final = frozenset((".cfg", ".conf", ".ini", ".json", ".toml", 
 _BUNDLE_ROOTS: Final = ("agents", "gsd-core", "scripts", "hooks")
 _SESSION_START_HOOK: Final = "hooks/gsd-check-update.js"
 _SESSION_START_MARKER: Final = "// ffs-supervised-session-start-observer/v1"
+# A source-root spelling counts only as a complete path root: followed by a
+# (JSON-escaped) separator, the end, or a character which cannot extend a path.
+_ROOT_END: Final = r"""(?=/|\\/|$|["'\s:,)\]}])"""
 
 
 class RuntimeStagingError(ValueError):
@@ -253,7 +256,8 @@ def _rewritten_config_text(text: str, source_home: Path, source_skills: Path,
     targets = {source_skills: str(target_skills), source_home: str(target_home)}
     for spelling, canonical in _source_spellings(source_home, source_skills):
         old, new = str(spelling), targets[canonical]
-        text = text.replace(old, new).replace(old.replace("/", r"\/"), new.replace("/", r"\/"))
+        for before, after in ((old, new), (old.replace("/", r"\/"), new.replace("/", r"\/"))):
+            text = re.sub(re.escape(before) + _ROOT_END, lambda _match, value=after: value, text)
     return text
 
 
@@ -311,7 +315,8 @@ def _instrument_session_start_hook(target: Path) -> None:
 
 
 def _assert_no_source_reference(target: Path, source_home: Path, source_skills: Path) -> None:
-    needles = tuple(value.encode() for spelling, _ in _source_spellings(source_home, source_skills)
+    needles = tuple(re.compile(re.escape(value.encode()) + _ROOT_END.encode())
+                    for spelling, _ in _source_spellings(source_home, source_skills)
                     for value in (str(spelling), str(spelling).replace("/", r"\/")))
     for path in sorted(target.rglob("*")):
         if path.is_dir():
@@ -321,7 +326,7 @@ def _assert_no_source_reference(target: Path, source_home: Path, source_skills: 
             content = path.read_bytes()
         except OSError as exc:
             raise RuntimeStagingError("cannot validate staged runtime") from exc
-        if any(needle in content for needle in needles):
+        if any(needle.search(content) for needle in needles):
             _fail(f"staged runtime still references the source profile: {path.relative_to(target).as_posix()}")
 
 
