@@ -102,9 +102,10 @@ _REQUEST_KEY_REFUSALS = {
     "CHILD_RUNTIME_NOT_REUSABLE": (
         "a wave child or final reviewer runtime retained for this run cannot be resumed",
         "inspect_retained_child"),
-    # The launch may have succeeded, so a new request key could repeat its work.
+    # The launch may have done its work, so a new request key could repeat it.
     "REQUEST_ALREADY_COMPLETED": (
-        "a launch for this request key already completed; a new request key would run it again",
+        "a launch for this request key already settled and may have done its work; "
+        "it is never resumed, and a new request key could run it again",
         "inspect_completed_launch"),
     "INTENT_RECONCILIATION_REQUIRED": (
         "a launch for this request key has not settled; only owner-fence reconciliation may settle it",

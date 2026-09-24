@@ -36,17 +36,15 @@ all skills.
 - Resuming with the same request key after only qualification consumed the
   outer runtime now refuses `RETAINED_RUNTIME_NOT_REUSABLE` with recovery
   `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
-  `qualify_host_adapter`. When the outer activity really launched, its home
-  is never re-staged. A succeeded launch replays through its retained
-  completion. If its home was pruned, or its activity then failed (for
-  example on wave proof), it refuses `REQUEST_ALREADY_COMPLETED` instead of
-  raising a traceback or replaying as a success. Any other launch refuses as
-  its launch replay would. A completed launch refuses
+  `qualify_host_adapter`. When the outer activity really launched, a replay
+  never re-stages, re-qualifies or relaunches it, and never reports it as a
+  success, because its wave proof would not be checked again. A settled
+  launch (`completed_succeeded`, `completed_failed` or `closed_dead`) refuses
   `REQUEST_ALREADY_COMPLETED` with recovery `inspect_completed_launch`, never
-  a new request key, because the launch may have succeeded. An unsettled one
+  a new request key, because it may have done its work. An unsettled one
   refuses `INTENT_RECONCILIATION_REQUIRED` with recovery `reconcile_intent`.
-  A launch whose child died before its permit (`closed_dead`) ran nothing and
-  is treated like no launch. Neither names `qualify_host_adapter` any more. A
+  Resuming a run after its real outer launch is not supported yet. Neither
+  names `qualify_host_adapter` any more. A
   wave-child or final-reviewer runtime that cannot be resumed refuses
   `CHILD_RUNTIME_NOT_REUSABLE` with recovery `inspect_retained_child`,
   because a new request key would start a new outer run. A managed-run

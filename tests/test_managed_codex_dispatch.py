@@ -271,27 +271,23 @@ def _retain_outer(store, token, context, *, launch):
                     "qualification_cohort_id,qualification_request_id,created_at) "
                     "VALUES(?,?,?,'probe',?,'{}',?,?,'cohort',?,'now')",
                     (intent, outer, f"probe-{ordinal}", "1" * 64, "2" * 64, "c" * 64, f"probe-{ordinal}"))
-    return home
 
 
-@pytest.mark.parametrize(("launch", "variant", "code", "action"), [
+@pytest.mark.parametrize(("launch", "code", "action"), [
     # Qualification alone consumed the stage: only then is a new request key the recovery.
-    (None, None, "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key"),
-    # ... as when the outer child died before its permit: no work ran under the key.
-    (("closed_dead", None), None, "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key"),
-    # A completed outer launch replays through its retained completion; nothing is re-staged.
-    (("completed_succeeded", "succeeded"), None, None, None),
-    # ... and if its home was pruned it is reported, never re-staged or relaunched.
-    (("completed_succeeded", "succeeded"), "pruned", "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
-    # ... and if its activity then failed (wave proof) it never replays as a success.
-    (("completed_succeeded", "succeeded"), "failed", "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
-    # An in-flight, uncertain or failed outer launch reaches the supervisor's replay refusals.
-    (("released_to_execute", None), None, "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
-    (("reconcile_required", None), None, "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
-    (("completed_failed", "failed"), None, "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    (None, "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key"),
+    # A settled outer launch may have done its work: it is reported, never replayed as a
+    # success (its wave proof is not re-checked), re-staged or repeated under a new key.
+    (("completed_succeeded", "succeeded"), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    (("completed_failed", "failed"), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    # closed_dead can follow a released child whose work ran.
+    (("closed_dead", None), "REQUEST_ALREADY_COMPLETED", "inspect_completed_launch"),
+    # An in-flight or uncertain outer launch needs owner-fence reconciliation.
+    (("released_to_execute", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
+    (("reconcile_required", None), "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent"),
 ])
 def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monkeypatch, capsys,
-                                                                   launch, variant, code, action):
+                                                                   launch, code, action):
     from run_state.cli import _managed_run_refusal, _managed_run_refusals
 
     primary, authority, _repository_id, env = _setup(tmp_path)
@@ -323,12 +319,7 @@ def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monk
             upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
             upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
         ))
-        home = _retain_outer(store, token, context, launch=launch)
-        if variant == "pruned":
-            (home / runtime_staging.STAGE_MANIFEST_NAME).unlink()
-        if variant == "failed":
-            with store.transaction() as tx:
-                tx.execute("UPDATE authority_activities SET state='failed' WHERE id=?", (home.name,))
+        _retain_outer(store, token, context, launch=launch)
         try:
             return run_managed_command(
                 store, token, context, command=("/gsd-plan-phase", "1"),
@@ -347,9 +338,6 @@ def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monk
         dispatch_limit=3, token_limit=1000, on_ready=execute,
         run_id="retained-outer", activity="plan", scope="1", host_request=request,
     )
-    if code is None:
-        assert returncode == 0 and staged == []
-        return
     body = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert returncode == 78 and (body["code"], body["recovery_action"]["action"]) == (code, action)
     assert len(staged) == (1 if launch is None else 0)
@@ -359,9 +347,9 @@ def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monk
     (None, True, "RETAINED_RUNTIME_NOT_REUSABLE"),
     # A new request key starts a new outer run: never the recovery for a wave child or reviewer.
     (None, False, "CHILD_RUNTIME_NOT_REUSABLE"),
-    # A child that died before its permit ran nothing: treated as no launch.
-    ({"state": "closed_dead"}, True, "RETAINED_RUNTIME_NOT_REUSABLE"),
-    ({"state": "closed_dead"}, False, "CHILD_RUNTIME_NOT_REUSABLE"),
+    # closed_dead can follow a released child whose work ran: settled, never a new key.
+    ({"state": "closed_dead"}, True, "REQUEST_ALREADY_COMPLETED"),
+    ({"state": "closed_dead"}, False, "REQUEST_ALREADY_COMPLETED"),
     ({"state": "completed_succeeded"}, False, "REQUEST_ALREADY_COMPLETED"),
     ({"state": "released_to_execute"}, True, "INTENT_RECONCILIATION_REQUIRED"),
 ])

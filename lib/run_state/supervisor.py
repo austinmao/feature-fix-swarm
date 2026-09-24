@@ -3190,16 +3190,20 @@ def _managed_inventory_workspace(store, token, context, request_key, *, workspac
 
 
 def _replayed_launch_refusal(launch) -> str:
-    """The refusal ``Supervisor._launch`` raises when a replay reaches this retained intent."""
-    return ("REQUEST_ALREADY_COMPLETED" if launch["state"] in {"completed_succeeded", "completed_failed"}
+    """The refusal for a replay that reaches a real (non-qualification) launch intent.
+
+    A settled intent, including ``closed_dead``, may have run its work, so it is
+    reported and never repeated; an unsettled one needs owner-fence reconciliation.
+    """
+    return ("REQUEST_ALREADY_COMPLETED"
+            if launch["state"] in {"completed_succeeded", "completed_failed", "closed_dead"}
             else "INTENT_RECONCILIATION_REQUIRED")
 
 
 def _retained_runtime_refusal(launch, *, outer: bool) -> str:
     """The refusal for a retained private runtime that cannot be resumed."""
-    if launch is not None and launch["state"] != "closed_dead":
+    if launch is not None:
         return _replayed_launch_refusal(launch)
-    # No launch ran under it: none was recorded, or its child died before its permit.
     # Only the outer child's runtime is named by the request key.  A new key starts a new
     # outer run, so it never repairs a wave child or the final reviewer.
     return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
@@ -3310,35 +3314,28 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                                                  child_key=child_key) or str(uuid.uuid4()))
     outer_home = runtime_root / outer_activity_id
     launch = retained_launch(store, outer_activity_id)
-    if launch is not None and (launch["completion_status"] != "succeeded"
-                               or store.get_activity(outer_activity_id).state not in {"active", "succeeded"}):
-        # A real outer launch holds Codex state in its home: never re-stage, re-qualify
-        # or relaunch it.  A succeeded launch whose activity then failed (for example on
-        # wave proof) is reported as completed, never replayed as a success.
-        raise SupervisorRefused(_retained_runtime_refusal(launch, outer=True))
-    if launch is None:
-        try:
-            with productive_work(store, token, kind="preparation"):
-                stage_or_reuse_private_codex_runtime(
-                    Path(host_request.runtime_home), outer_home, ready.path,
-                )
-        except RetainedRuntimeNotReusable as error:
-            # Only qualification consumed the outer stage; this request key cannot resume it.
-            raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
-        except (CapabilityError, OSError, ValueError) as error:
-            raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
-    # Otherwise a succeeded outer launch replays through its retained completion.
+    if launch is not None:
+        # A real outer launch holds Codex state in its home and may have done work:
+        # never re-stage, re-qualify, relaunch or replay it as a success.  Resuming
+        # after a real launch would first need its wave proof checked again.
+        raise SupervisorRefused(_replayed_launch_refusal(launch))
     try:
-        stage_manifest = (outer_home / STAGE_MANIFEST_NAME).read_bytes()
-    except OSError as error:
-        # A completed launch's home was pruned: report it, never re-stage or relaunch.
-        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED" if launch is None
-                                else "REQUEST_ALREADY_COMPLETED") from error
+        with productive_work(store, token, kind="preparation"):
+            stage_or_reuse_private_codex_runtime(
+                Path(host_request.runtime_home), outer_home, ready.path,
+            )
+    except RetainedRuntimeNotReusable as error:
+        # Only qualification consumed the outer stage; this request key cannot resume it.
+        raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
+    except (CapabilityError, OSError, ValueError) as error:
+        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
     contract_material = {
         "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "host_request": host_request.material(), "input_digest": ready.input_digest,
-        "runtime_stage_sha256": hashlib.sha256(stage_manifest).hexdigest(),
+        "runtime_stage_sha256": hashlib.sha256(
+            (outer_home / STAGE_MANIFEST_NAME).read_bytes(),
+        ).hexdigest(),
         "gsd_bridge_sha256": hashlib.sha256(bridge.read_bytes()).hexdigest(),
     }
     contract_hash = hashlib.sha256(_canonical(contract_material)).hexdigest()
