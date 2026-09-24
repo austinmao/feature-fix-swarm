@@ -341,3 +341,16 @@ def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monk
     body = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert returncode == 78 and (body["code"], body["recovery_action"]["action"]) == (code, action)
     assert len(staged) == (1 if launch is None else 0)
+
+
+@pytest.mark.parametrize(("launch", "outer", "code"), [
+    (None, True, "RETAINED_RUNTIME_NOT_REUSABLE"),
+    # A new request key starts a new outer run: never the recovery for a wave child or reviewer.
+    (None, False, "CHILD_RUNTIME_NOT_REUSABLE"),
+    ({"state": "completed_succeeded"}, False, "REQUEST_ALREADY_COMPLETED"),
+    ({"state": "released_to_execute"}, True, "INTENT_RECONCILIATION_REQUIRED"),
+])
+def test_consumed_runtime_refusal_names_a_new_request_key_only_for_the_outer_child(launch, outer, code):
+    from run_state.supervisor import _retained_runtime_refusal
+
+    assert _retained_runtime_refusal(launch, outer=outer) == code

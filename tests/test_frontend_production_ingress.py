@@ -124,6 +124,8 @@ def test_frontend_policy_refusal_is_a_typed_envelope_not_a_traceback(tmp_path, m
      "ManagedQualificationRefused", "qualify_host_adapter"),
     ("RETAINED_RUNTIME_NOT_REUSABLE", ("RetainedRuntimeNotReusable", "staged auth has been revoked"),
      "RetainedRuntimeNotReusable", "resume_with_new_request_key"),
+    ("CHILD_RUNTIME_NOT_REUSABLE", ("RetainedRuntimeNotReusable", "staged auth has been revoked"),
+     "RetainedRuntimeNotReusable", "inspect_retained_child"),
 ])
 def test_supervisor_refusal_envelope_carries_only_a_typed_detail(tmp_path, monkeypatch, capsys,
                                                                  code, cause, detail, action):

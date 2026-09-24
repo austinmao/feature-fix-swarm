@@ -3195,6 +3195,15 @@ def _replayed_launch_refusal(launch) -> str:
             else "INTENT_RECONCILIATION_REQUIRED")
 
 
+def _retained_runtime_refusal(launch, *, outer: bool) -> str:
+    """The refusal for a retained private runtime its qualification consumed."""
+    if launch is not None:
+        return _replayed_launch_refusal(launch)
+    # Only the outer child's runtime is named by the request key.  A new key starts a new
+    # outer run, so it never repairs a wave child or the final reviewer.
+    return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
+
+
 def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
                                   upstream_runtime=None, model_request=None, review_catalog=None):
     """Qualification seams, worker channel and outer contract for one Codex host run."""
@@ -3263,9 +3272,8 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                 bundle.qualified_runtime, host_request.binary, str(cli["version"]),
             )
         except RetainedRuntimeNotReusable as error:
-            launch = retained_launch(store, activity_id)
-            raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE" if launch is None
-                                    else _replayed_launch_refusal(launch)) from error
+            raise SupervisorRefused(_retained_runtime_refusal(
+                retained_launch(store, activity_id), outer=activity_request_key == child_key)) from error
         except (CapabilityError, ManagedQualificationRefused, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
         return QualifiedHostRuntime(bundle.activity, bundle.qualified_runtime, bundle.runtime_receipt,

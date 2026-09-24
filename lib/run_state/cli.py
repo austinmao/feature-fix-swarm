@@ -98,6 +98,10 @@ _REQUEST_KEY_REFUSALS = {
     "RETAINED_RUNTIME_NOT_REUSABLE": (
         "the outer runtime retained for this request key was consumed by its qualification",
         "resume_with_new_request_key"),
+    # A new request key would start a new outer run, repeating its completed work.
+    "CHILD_RUNTIME_NOT_REUSABLE": (
+        "a wave child or final reviewer runtime retained for this run was consumed by its qualification",
+        "inspect_retained_child"),
     # The launch may have succeeded, so a new request key could repeat its work.
     "REQUEST_ALREADY_COMPLETED": (
         "a launch for this request key already completed; a new request key would run it again",

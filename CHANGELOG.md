@@ -37,7 +37,10 @@ all skills.
   `inspect_completed_launch`, never a new request key, because the launch
   may have succeeded. An unsettled one refuses
   `INTENT_RECONCILIATION_REQUIRED` with recovery `reconcile_intent`. Neither
-  names `qualify_host_adapter` any more. Every managed-run refusal envelope now carries a
+  names `qualify_host_adapter` any more. A consumed wave-child or final-reviewer
+  runtime refuses `CHILD_RUNTIME_NOT_REUSABLE` with recovery
+  `inspect_retained_child`, because a new request key would start a new outer
+  run. Every managed-run refusal envelope now carries a
   `detail` holding only the cause's type and typed `code`, never its message.
 - The test suites point `FFS_MANAGED_ADMISSION_ROOT` at a per-test temporary
   directory and no longer write the per-user admission root.
