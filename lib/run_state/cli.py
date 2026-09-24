@@ -79,19 +79,18 @@ def _managed_run_refusals() -> tuple[type[Exception], ...]:
     return SupervisorRefused, FrontendPolicyRefused, RunPolicyRefused
 
 
-_REFUSAL_DETAIL = re.compile(r"[A-Za-z0-9 _.,:;()'-]{1,160}")
+_REFUSAL_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
 
 def _refusal_detail(error: Exception) -> str | None:
-    """The underlying error's type and short message; never a path, file content, or value."""
+    """The underlying error's type and typed code; never its free-text message."""
     cause = error.__cause__
     if cause is None:
         return None
-    message = getattr(cause, "code", None)
-    if not isinstance(message, str):
-        message = "" if isinstance(cause, OSError) else str(cause)
-    detail = type(cause).__name__ + (": " + message if message else "")
-    return detail if _REFUSAL_DETAIL.fullmatch(detail) else type(cause).__name__
+    code = getattr(cause, "code", None)
+    if isinstance(code, str) and _REFUSAL_CODE.fullmatch(code):
+        return type(cause).__name__ + ": " + code
+    return type(cause).__name__
 
 
 def _managed_run_refusal(error: Exception, *, run_id: str) -> int:

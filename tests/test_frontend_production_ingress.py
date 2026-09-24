@@ -111,23 +111,30 @@ def test_frontend_policy_refusal_is_a_typed_envelope_not_a_traceback(tmp_path, m
 
 
 @pytest.mark.parametrize(("code", "cause", "detail", "action"), [
-    ("HOST_CAPABILITY_UNQUALIFIED", ("RuntimeStagingError", "retained stage contains an unowned or missing file"),
-     "RuntimeStagingError: retained stage contains an unowned or missing file", "qualify_host_adapter"),
-    # A message naming a path (or any value) is reduced to the error type.
+    # A free-text message may carry an untrusted token or path: only the type is emitted.
+    ("HOST_CAPABILITY_UNQUALIFIED", ("RuntimeStagingError", "retained stage holds sk-untrusted-token"),
+     "RuntimeStagingError", "qualify_host_adapter"),
     ("HOST_CAPABILITY_UNQUALIFIED", ("CapabilityError", "runtime tree contains unsafe member: /home/u/.codex/x"),
      "CapabilityError", "qualify_host_adapter"),
+    # A typed code is emitted with the type.
+    ("HOST_CAPABILITY_UNQUALIFIED", ("ManagedQualificationRefused", "QUALIFICATION_UNCERTAIN"),
+     "ManagedQualificationRefused: QUALIFICATION_UNCERTAIN", "qualify_host_adapter"),
+    # ... but only a well-formed one.
+    ("HOST_CAPABILITY_UNQUALIFIED", ("ManagedQualificationRefused", "code with sk-untrusted-token"),
+     "ManagedQualificationRefused", "qualify_host_adapter"),
     ("RETAINED_RUNTIME_NOT_REUSABLE", ("RetainedRuntimeNotReusable", "staged auth has been revoked"),
-     "RetainedRuntimeNotReusable: staged auth has been revoked", "resume_with_new_request_key"),
+     "RetainedRuntimeNotReusable", "resume_with_new_request_key"),
 ])
-def test_supervisor_refusal_envelope_carries_a_path_free_detail(tmp_path, monkeypatch, capsys,
-                                                                code, cause, detail, action):
+def test_supervisor_refusal_envelope_carries_only_a_typed_detail(tmp_path, monkeypatch, capsys,
+                                                                 code, cause, detail, action):
     import host_capabilities
-    from run_state import runtime_staging
+    from run_state import managed_qualification, runtime_staging
     from run_state.supervisor import SupervisorRefused
 
     kind, message = cause
     error = SupervisorRefused(code)
-    error.__cause__ = getattr(runtime_staging, kind, getattr(host_capabilities, kind, None))(message)
+    error.__cause__ = next(getattr(module, kind) for module in (runtime_staging, host_capabilities,
+                                                                managed_qualification) if hasattr(module, kind))(message)
     returncode, body = _frontend_refusal(tmp_path, monkeypatch, capsys, error)
     assert returncode == 78 and body["code"] == code
     assert body["detail"] == detail
