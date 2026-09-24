@@ -71,6 +71,26 @@ def _fixture_refusal(
     return _FIXTURE_CODES.get(code, 5) if exit_code is None else exit_code
 
 
+def _managed_run_refusals() -> tuple[type[Exception], ...]:
+    """Typed refusals which can escape a managed host run's callback."""
+    from run_state.frontend_policy import FrontendPolicyRefused
+    from run_state.run_policy import RunPolicyRefused
+    from run_state.supervisor import SupervisorRefused
+    return SupervisorRefused, FrontendPolicyRefused, RunPolicyRefused
+
+
+def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
+    """The managed-run JSON envelope (exit 78) for one of ``_managed_run_refusals``."""
+    from run_state.supervisor import SupervisorRefused
+    extra = {}
+    if isinstance(error, SupervisorRefused):
+        extra.update(cause="the selected host backend has not demonstrated managed admission",
+                     recovery_action={"action": "qualify_host_adapter"})
+    else:
+        extra["cause"] = "the managed run policy refused the transition"
+    return _fixture_refusal(error.code, run_id=run_id, exit_code=78, **extra)
+
+
 def _parse_tokens(value):
     """Parse '250K' / '1.5M' / '1B' / '2T' / '250000' to int.
 
@@ -204,7 +224,7 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
         return _fixture_refusal("MANAGED_COMMAND_CONTEXT_CONFLICT", exit_code=2)
 
     def execute(store, token, context):
-        from run_state.supervisor import SupervisorRefused, run_managed_command
+        from run_state.supervisor import run_managed_command
 
         try:
             upstream_runtime, _descriptor_digest = _load_upstream_runtime(args)
@@ -215,12 +235,8 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
                 model_request=_model_request_from_args(args), review_catalog=review_catalog,
                 acceptance_draft=acceptance_draft,
             )
-        except SupervisorRefused as error:
-            return _fixture_refusal(
-                error.code, run_id=context.run_id, exit_code=78,
-                cause="the selected host backend has not demonstrated managed admission",
-                recovery_action={"action": "qualify_host_adapter"},
-            )
+        except _managed_run_refusals() as error:
+            return _managed_run_refusal(error, run_id=context.run_id)
 
     return prepare_managed_run(
         objective=args.objective, state_root=args.state_root,

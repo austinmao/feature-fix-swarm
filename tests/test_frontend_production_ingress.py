@@ -75,6 +75,41 @@ def test_frontend_retains_registered_runtime_for_parent_resource_admission(tmp_p
     assert len(reached) == 1
 
 
+def _frontend_refusal(tmp_path, monkeypatch, capsys, error):
+    """Drive frontend-start to a managed-run refusal and return (rc, envelope)."""
+    from run_state import cli, supervisor
+
+    primary, authority, _, env = _setup(tmp_path)
+    monkeypatch.chdir(primary)
+    for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
+        monkeypatch.delenv(key, raising=False)
+
+    def refuse(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(supervisor, "run_managed_command", refuse)
+    returncode = cli.main([
+        "frontend-start", "--frontend", "fix", "--objective", "typed refusal",
+        "--state-root", str(authority), "--request-key", "typed-refusal",
+        "--run-id", "frontend-typed-refusal", "--dispatch-limit", "3", "--token-limit", "1000",
+        "--upstream-runtime-manifest", env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        "--upstream-runtime-sha256", env["FFS_UPSTREAM_RUNTIME_SHA256"],
+    ])
+    return returncode, json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_frontend_policy_refusal_is_a_typed_envelope_not_a_traceback(tmp_path, monkeypatch, capsys):
+    from run_state.frontend_policy import FrontendPolicyRefused
+
+    returncode, body = _frontend_refusal(
+        tmp_path, monkeypatch, capsys, FrontendPolicyRefused("FRONTEND_CHECK_CANDIDATE_STALE"),
+    )
+    assert returncode == 78
+    assert body["ok"] is False and body["code"] == "FRONTEND_CHECK_CANDIDATE_STALE"
+    assert body["run_id"] == "frontend-typed-refusal"
+    assert body["recovery_action"]["action"] != "qualify_host_adapter"
+
+
 @pytest.mark.parametrize(("frontend", "kind"), [
     ("feature-spec", "plan"), ("fix", "plan"), ("code-uplift", "review"),
     ("feature-implement", "execute"),

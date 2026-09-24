@@ -358,9 +358,9 @@ def prepare_frontend_run(
         return _fixture_refusal("INVALID_REQUEST", exit_code=2)
 
     def execute(store, token, context):
-        from run_state.cli import _load_upstream_runtime
+        from run_state.cli import _load_upstream_runtime, _managed_run_refusal, _managed_run_refusals
         from run_state.ownership import OwnershipRefused
-        from run_state.supervisor import SupervisorRefused, run_managed_command
+        from run_state.supervisor import run_managed_command
         # Resource admission must use the same verified runtime descriptor as
         # workspace preparation, including on resume. Revalidate before this
         # callback's first mutation, as managed-start does at its launch seam.
@@ -396,12 +396,8 @@ def prepare_frontend_run(
                 model_request=model_request, review_catalog=review_catalog,
                 acceptance_draft=acceptance_draft,
             )
-        except SupervisorRefused as error:
-            return _fixture_refusal(
-                error.code, run_id=context.run_id, exit_code=78,
-                cause="the selected host backend has not demonstrated managed admission",
-                recovery_action={"action": "qualify_host_adapter"},
-            )
+        except _managed_run_refusals() as error:
+            return _managed_run_refusal(error, run_id=context.run_id)
 
     args = argparse.Namespace(
         objective=objective, state_root=str(state_root), selection_manifest=None,
