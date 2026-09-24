@@ -529,9 +529,8 @@ def qualify_managed_runtime(
                 raise ManagedQualificationRefused("QUALIFICATION_RESULT_INVALID") from exc
         else:
             observation = module.publish_qualification_results(plan, tuple(results))
-        # The probes' TMPDIR must sit in the worktree; left behind, it changes the
-        # later mapped-check snapshot's input digest (FRONTEND_CHECK_CANDIDATE_STALE).
-        # Remove only the exact directory one of this call's plans created.
+        # The probes' TMPDIR must sit in the worktree.  Do not leave probe residue
+        # there; remove only the exact directory one of this call's plans created.
         _remove_created_scratch(Path(dict(plan.probes[0].environment)["TMPDIR"]), workspace.path, owned_scratch)
         qualified = verify_runtime(
             runtime, workspace.path, sandbox_mode=host_request.sandbox,

@@ -15,11 +15,13 @@ all skills.
   intents made replay skip `session.execute`, so mapped checks ran on
   unexecuted sealed input.
 - Qualification removes the probe `TMPDIR` (`.ffs-observer-tmp`) from the
-  worktree after the observation is published or replayed, so later mapped
-  checks no longer refuse `FRONTEND_CHECK_CANDIDATE_STALE`. The observer now
+  worktree after the observation is published or replayed. The observer now
   creates that directory exclusively and records its identity. Qualification
   removes only that exact directory and leaves any pre-existing directory
   alone. A pre-existing file or symlink at that path refuses qualification.
+  This is hygiene only: the mapped-check inventory already ignores that
+  directory, so it does not explain the `FRONTEND_CHECK_CANDIDATE_STALE`
+  refusal seen in the operator E2E, whose cause is still open.
 - `FrontendPolicyRefused` and `RunPolicyRefused` raised inside a managed run
   now reach `frontend-start`/`managed-start` as the typed JSON refusal
   envelope (exit 78) instead of a raw traceback.
@@ -36,17 +38,20 @@ all skills.
   `resume_with_new_request_key`, instead of `HOST_CAPABILITY_UNQUALIFIED` /
   `qualify_host_adapter`. When the outer activity really launched, its home
   is never re-staged. A succeeded launch replays through its retained
-  completion; if its home was pruned it refuses `REQUEST_ALREADY_COMPLETED`
-  instead of raising a traceback. Any other launch refuses as its launch replay would. A
-  completed launch refuses `REQUEST_ALREADY_COMPLETED` with recovery
-  `inspect_completed_launch`, never a new request key, because the launch
-  may have succeeded. An unsettled one refuses
-  `INTENT_RECONCILIATION_REQUIRED` with recovery `reconcile_intent`. Neither
-  names `qualify_host_adapter` any more. A consumed wave-child or final-reviewer
-  runtime refuses `CHILD_RUNTIME_NOT_REUSABLE` with recovery
-  `inspect_retained_child`, because a new request key would start a new outer
-  run. Every managed-run refusal envelope now carries a
-  `detail` holding only the cause's type and typed `code`, never its message.
+  completion. If its home was pruned, or its activity then failed (for
+  example on wave proof), it refuses `REQUEST_ALREADY_COMPLETED` instead of
+  raising a traceback or replaying as a success. Any other launch refuses as
+  its launch replay would. A completed launch refuses
+  `REQUEST_ALREADY_COMPLETED` with recovery `inspect_completed_launch`, never
+  a new request key, because the launch may have succeeded. An unsettled one
+  refuses `INTENT_RECONCILIATION_REQUIRED` with recovery `reconcile_intent`.
+  A launch whose child died before its permit (`closed_dead`) ran nothing and
+  is treated like no launch. Neither names `qualify_host_adapter` any more. A
+  wave-child or final-reviewer runtime that cannot be resumed refuses
+  `CHILD_RUNTIME_NOT_REUSABLE` with recovery `inspect_retained_child`,
+  because a new request key would start a new outer run. A managed-run
+  refusal caused by an underlying error now carries a `detail` holding only
+  the cause's type and typed `code`, never its message.
 - The test suites point `FFS_MANAGED_ADMISSION_ROOT` at a per-test temporary
   directory and no longer write the per-user admission root.
 
