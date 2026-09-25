@@ -1622,69 +1622,90 @@ def cmd_migration_rollback(args: argparse.Namespace) -> int:
 
 _ADMISSION_CODES = {
     "MANAGED_ADMISSION_STORE_MISSING": 2, "INVALID_REQUEST": 2,
-    "LEGACY_OPAQUE_REMAINS": 3,
     "RECONCILE_BACKUP_FAILED": 5,
 }
 
 
 def _admission_refusal(code: str, **extra) -> int:
-    return _fixture_refusal(code, exit_code=_ADMISSION_CODES.get(code, 6), **extra)
+    cause, action = (
+        ("the admission store could not be read or written safely", "inspect_managed_admission")
+        if code != "INVALID_REQUEST" else
+        ("the fixture authority could not prove the requested transition", "correct_request")
+    )
+    return _fixture_refusal(
+        code, exit_code=_ADMISSION_CODES.get(code, 6), cause=cause,
+        recovery_action={"action": action}, **extra,
+    )
 
 
 def _admission_row_report(item: dict) -> dict:
     """Never includes the raw ticket value."""
     return {key: item[key] for key in (
-        "sequence", "writer_version", "status", "boot", "owner", "decision", "proof", "reason",
+        "sequence", "writer_version", "status", "boot", "owner", "child", "decision", "proof", "reason",
     )}
 
 
-def _run_admission_command(root: str | None, *, apply: bool | None) -> int:
-    """``apply=None`` is the read-only ``inspect`` command; ``False``/``True``
-    are ``reconcile``'s dry-run default and ``--apply``."""
-    from run_state.managed_admission import (
-        LEGACY_OPAQUE_GATE_SQL, ManagedAdmissionQueue, ManagedAdmissionRefused, global_admission_root,
-    )
-    try:
-        resolved_root = Path(root).resolve() if root else global_admission_root()
-    except ManagedAdmissionRefused as error:
-        return _admission_refusal(error.code)
-    database = resolved_root / "admission.sqlite3"
-    if not database.exists():
-        # The queue constructor would create a store on first open; inspect
-        # and reconcile must never do that -- refuse before opening it.
-        return _admission_refusal("MANAGED_ADMISSION_STORE_MISSING", database=str(database))
-    try:
-        queue = ManagedAdmissionQueue(resolved_root)
-        with queue._connection() as c:
-            gate_before = c.execute(LEGACY_OPAQUE_GATE_SQL).fetchone() is not None
-        result = queue.reconcile(apply=bool(apply))
-        with queue._connection() as c:
-            gate_after = c.execute(LEGACY_OPAQUE_GATE_SQL).fetchone() is not None
-    except ManagedAdmissionRefused as error:
-        return _admission_refusal(error.code, database=str(database))
+def _admission_payload(mode, database, plan, gate_before, gate_after, *, backup, reclaimed=(), row_changed=()):
     counts: dict[str, int] = {}
-    for item in result["plan"]:
+    for item in plan:
         key = str(item["writer_version"]) + "/" + item["status"]
         counts[key] = counts.get(key, 0) + 1
     payload = {
-        "schema_version": 1, "ok": True,
-        "mode": "inspect" if apply is None else ("apply" if apply else "dry-run"),
-        "database": str(database), "gate_armed_before": gate_before, "gate_armed_after": gate_after,
-        "counts": counts, "rows": [_admission_row_report(item) for item in result["plan"]],
-        "backup": result["backup"],
+        "schema_version": 1, "ok": True, "mode": mode, "database": database,
+        "gate_armed_before": gate_before, "gate_armed_after": gate_after,
+        "counts": counts, "rows": [_admission_row_report(item) for item in plan],
+        "backup": backup, "reclaimed": list(reclaimed), "row_changed": list(row_changed),
     }
+    exit_code = 0
+    if row_changed:
+        exit_code = 4  # ROW_CHANGED: a decision's exact snapshot raced a concurrent writer.
+        payload.update(
+            code="ROW_CHANGED",
+            cause="a reconcile decision no longer matched its exact snapshot when applied",
+            recovery_action={"action": "inspect_managed_admission"},
+        )
+    elif mode == "apply" and gate_after:
+        exit_code = 3  # LEGACY_OPAQUE_REMAINS: apply ran, but some row is still unreclaimed.
+        payload.update(
+            code="LEGACY_OPAQUE_REMAINS",
+            cause="global managed-run admission could not be fully proved",
+            recovery_action={"action": "inspect_managed_admission"},
+        )
     print(json.dumps(payload, sort_keys=True))
-    if apply and gate_after:
-        return 3  # LEGACY_OPAQUE_REMAINS: apply ran, but some row is still unreclaimed.
-    return 0
+    return exit_code
+
+
+def _admission_read_only(root, *, mode) -> int:
+    from run_state.managed_admission import ManagedAdmissionRefused, read_only_report
+    try:
+        report = read_only_report(root)
+    except ManagedAdmissionRefused as error:
+        return _admission_refusal(error.code)
+    return _admission_payload(
+        mode, report["database"], report["plan"], report["gate_before"], report["gate_after"], backup=None,
+    )
+
+
+def _admission_apply(root) -> int:
+    from run_state.managed_admission import ManagedAdmissionRefused, apply_reconcile_at_root
+    try:
+        report = apply_reconcile_at_root(root)
+    except ManagedAdmissionRefused as error:
+        return _admission_refusal(error.code)
+    return _admission_payload(
+        "apply", report["database"], report["plan"], report["gate_before"], report["gate_after"],
+        backup=report["backup"], reclaimed=report["reclaimed"], row_changed=report["row_changed"],
+    )
 
 
 def cmd_admission_inspect(args: argparse.Namespace) -> int:
-    return _run_admission_command(args.root, apply=None)
+    return _admission_read_only(args.root, mode="inspect")
 
 
 def cmd_admission_reconcile(args: argparse.Namespace) -> int:
-    return _run_admission_command(args.root, apply=bool(args.apply))
+    if args.apply:
+        return _admission_apply(args.root)
+    return _admission_read_only(args.root, mode="dry-run")
 
 
 def cmd_update(args: argparse.Namespace) -> int:
