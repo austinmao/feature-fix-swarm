@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-26, spec-014 Release C: Codex CLI 0.157.0 compatibility pin)
+
+- Codex CLI `0.157.0` is admitted as a fourth exact compatibility pin,
+  alongside the existing `0.154.0`, `0.155.1`, and `0.156.1` pins, on top of
+  the unchanged `>=0.137.0,<0.148.0` range. The runner host auto-updated to
+  `0.157.0`; live probe evidence of a read-only, ephemeral Codex exec
+  session under subscription auth, including confirming the
+  `UserPromptSubmit` hook still fires from `CODEX_HOME/hooks.json`, is in
+  the pull request. `0.157.1`, and every other untested 0.157.x or later
+  release stay refused.
+
 ### Fixed (2026-09-25, spec-014 Release C: F34 managed project/workstream scope)
 
 - A managed run bound to a non-default GSD project or workstream now
