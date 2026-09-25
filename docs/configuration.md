@@ -350,11 +350,27 @@ Neither ever migrates a v1 store or installs a fence trigger — a store that
 started as `writer_version=1`/`admission_policy.version=1` stays exactly
 that after any number of `inspect` or dry-run `reconcile` calls; only
 `--apply` may migrate it. A schema this reader cannot make sense of
-(including an `admission_policy` table with zero rows) refuses
-`MANAGED_ADMISSION_SCHEMA_INVALID` instead of crashing.
+(including an `admission_policy` table with zero rows, or a file shorter
+than the 100-byte sqlite header) refuses `MANAGED_ADMISSION_SCHEMA_INVALID`
+instead of crashing. Before either read-only command ever opens a sqlite
+connection, `_refuse_unless_legacy_journal_format` reads the file's header
+bytes 18-19 directly (`O_RDONLY|O_NOFOLLOW`) and refuses
+`MANAGED_ADMISSION_STORE_UNSAFE` unless they are `\x01\x01` (legacy
+rollback-journal format): opening a WAL-mode database even `mode=ro`
+creates `-wal`/`-shm` sidecar files as a side effect (SQLite's WAL reader
+needs them to read consistently), which a strictly read-only path must
+never do. A store this package creates is always DELETE-journal, so this
+only fires against a tampered or foreign file. Any other sqlite-level
+failure opening or reading the store (a corrupt file, a locked file) maps
+to `MANAGED_ADMISSION_SCHEMA_INVALID` or `MANAGED_ADMISSION_STORE_UNAVAILABLE`
+rather than a raw traceback.
 
 Every row is probed outside SQLite (boot id and process liveness), never
-assumed. A row is only ever reclaimed on one of two proofs: the recorded
+assumed. `--apply` runs these same probes while holding the write lock
+(below); each probe is a few local syscalls, a few milliseconds per row,
+but it still counts against every *other* writer's 2-second busy timeout
+for the whole duration of the apply. A row is only ever reclaimed on one
+of two proofs: the recorded
 owner is dead **and** its boot no longer exists (`boot-changed` — the host
 rebooted, so nothing from that incarnation survives, v1 or v2, any status),
 or it is a childless v2 `waiting` row whose owner died on the *same* boot
@@ -415,15 +431,28 @@ alone and its sequence lands in `row_changed`, never overwritten); commit.
 Any failure after the backup file is created removes it — a failed backup,
 verify, migrate, or CAS leaves the live database byte-for-byte untouched and
 refuses; nothing is ever applied without a verified backup on disk first,
-and no `.bak` file survives a failed apply.
+and no `.bak` file survives a failed apply. This includes a close() failure
+on the backup file's own exclusive create (the file it just made is
+unlinked before the failure is reported) and any raw `sqlite3.Error` from
+the writer connection itself — a contended lock, a missing table, a failed
+connect — which is chained into `MANAGED_ADMISSION_STORE_UNAVAILABLE`
+rather than escaping as a traceback. Once the gate has disarmed (the last
+`writer_version=1` row is reclaimed), the same transaction also clears any
+`'legacy-opaque'` tag left on a waiting row, the same cleanup `try_admit`
+performs when it notices the gate is clear — an apply that clears the last
+legacy row leaves no stale tag behind for the next `try_admit` to find.
 
 Exit codes: `0` ok; `2` `MANAGED_ADMISSION_STORE_MISSING` / `INVALID_REQUEST`;
 `3` `LEGACY_OPAQUE_REMAINS` — `--apply` ran but at least one row is still
 kept, so the gate is still armed; `4` `ROW_CHANGED` — `--apply` ran but at
-least one `reclaim` decision's exact snapshot no longer matched (raced by
-something else inside the same lock window, e.g. a schema-migration default
-landing differently than probed); `5` `RECONCILE_BACKUP_FAILED` (rolled
-back, database untouched, no `.bak` left); `6`
+least one `reclaim` decision's exact snapshot no longer matched. In normal
+use this should not occur: the CLI builds the plan from the same rows it
+CASes, under the one continuous writer lock it holds from before the
+backup through the commit, so there is no external window for anything to
+change the snapshot in between. It exists as a defensive guard (a stale
+snapshot is reported, never silently overwritten) rather than a plan that
+is ever expected to go stale in practice; `5` `RECONCILE_BACKUP_FAILED`
+(rolled back, database untouched, no `.bak` left); `6`
 `MANAGED_ADMISSION_STORE_UNSAFE` / `_STORE_UNAVAILABLE` / `_SCHEMA_INVALID`
 / `_ROOT_UNSAFE` / `_IDENTITY_UNKNOWN` (the caller's own process identity
 could not be captured). Both exit 3 and exit 4 payloads carry `code`,
@@ -451,6 +480,24 @@ full read/write access to the live `admission.sqlite3` and to the calling
 process itself, so closing the window would not remove any privilege a
 same-UID actor doesn't already have — it would only harden against a
 different-UID attacker, who is already excluded by the root's `0700` check.
+
+**Trust boundary.** The store is always opened by pathname (`root /
+"admission.sqlite3"`), never by an already-held file descriptor passed in
+from outside. `_lstat_root_and_path` checks only the leaf root directory:
+owned by the calling UID, mode `0700`, and (per `_read_root_and_path`,
+checked on the raw path before it is ever resolved) not a symlink. Nothing
+above that leaf is re-checked — every ancestor directory is trusted exactly
+the way the rest of the calling user's home directory already is; this
+package adds no additional isolation above the leaf. Consequently, **a
+multi-user host must never point `FFS_MANAGED_ADMISSION_ROOT`
+(`GLOBAL_ROOT_ENV` in `managed_admission.py`) at a path under a shared,
+writable ancestor directory** (for example anything under a
+world-or-group-writable `/tmp`, or a shared project directory writable by
+more than the intended UID) — a leaf directory can be `0700` and
+owner-correct while an untrusted party still controls an ancestor and could
+replace the leaf itself between checks. The default,
+`~/.local/state/feature-fix-swarm/managed-admission`, is safe because
+`$HOME` itself is expected to be single-user.
 
 **`managed_resource_group.py`'s parent-ticket watchdog caller is still
 unwired** (F25 design section 4's `admission_verdict` plumbing): the

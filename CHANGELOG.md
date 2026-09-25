@@ -43,6 +43,21 @@ all skills.
   changed the row first, that is no longer silently swallowed into a
   success. It is now reported by sequence number in the JSON output and
   produces its own distinct nonzero exit code.
+- A raw sqlite error (a contended writer lock, a missing table, a failed
+  connect) could still escape both inspect and reconcile as an unhandled
+  traceback instead of the typed refusal the rest of the command already
+  promised. Every sqlite-level failure through the whole reconcile --apply
+  flow, and the reads read-only inspect performs after opening the store,
+  now map to a typed refusal instead.
+- A close() failure right after the backup file's own exclusive create
+  could leak that file. It is now removed before the failure is reported.
+- inspect and reconcile now refuse a WAL-mode or truncated store before
+  ever opening a sqlite connection to it, instead of risking side-effect
+  file creation (or a raw crash) on what is supposed to be a strictly
+  read-only path.
+- A stale legacy-opaque tag left on a waiting row now clears the moment
+  reconcile --apply's own transaction disarms the gate, instead of
+  persisting until the next unrelated admission attempt happens to notice.
 
 ### Fixed (2026-09-25, spec-014 Release C: F25 admission wedge and reconcile CLI)
 
