@@ -19,8 +19,9 @@ all skills.
   `MANAGED_PROJECT_SCOPE_UNSUPPORTED`; that refusal is retired.
 - Each scope value is still validated against the resolver's own segment
   rule before it reaches the prompt or the host environment: it must
-  start with a letter or digit, then contain only letters, digits, `.`,
-  `_`, or `-`; it may never contain `..`; and it is at most 160 bytes.
+  start with an ASCII letter or digit, then contain only ASCII letters,
+  digits, `.`, `_`, or `-`; it may never contain `..`; and it is at most
+  160 bytes.
   An unsafe value refuses `MANAGED_PROMPT_VALUE_UNSAFE` at the prompt
   boundary, or `CapabilityError` at the host environment boundary. A
   present `GSD_PROJECT`/`GSD_WORKSTREAM` key is always validated -- a
