@@ -47,6 +47,16 @@ all skills.
     reconcile --apply. Full reference, including the trust boundary:
     docs/configuration.md.
 
+### Changed (2026-09-25, Codex CLI 0.156.1 compatibility pin)
+
+- Codex CLI `0.156.1` is admitted as a third exact compatibility pin,
+  alongside the existing `0.154.0` and `0.155.1` pins, on top of the
+  unchanged `>=0.137.0,<0.148.0` range. `0.156.1` was admitted after a live
+  probe of a read-only, ephemeral Codex exec session under subscription
+  auth, including confirming the `UserPromptSubmit` hook still fires from
+  `CODEX_HOME/hooks.json`. `0.156.0`, `0.156.2`, and every other untested
+  0.156.x or later release stay refused.
+
 ### Fixed (2026-09-25, spec-014 Release C: F32 managed frontend prompt)
 
 - A managed `task-swarm` or `feature-implement` run now asks the host to run
