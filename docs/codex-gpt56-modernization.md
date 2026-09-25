@@ -9,7 +9,7 @@ copy or rewrite GSD source artifacts.
 | Component | Supported | Notes |
 |---|---|---|
 | GSD Core | `@opengsd/gsd-core@1.14.0` | Exact pin; both Claude and Codex profiles are installed |
-| Codex CLI | `>=0.137.0,<0.148.0` or exact `0.154.0` / `0.155.1` | Tested on `0.146.x`, `0.147.x`, `0.154.0`, and `0.155.1`; doctor and `gsd-run` refuse intervening and other later releases |
+| Codex CLI | `>=0.137.0,<0.148.0` or exact `0.154.0` / `0.155.1` / `0.156.1` | Tested on `0.146.x`, `0.147.x`, `0.154.0`, `0.155.1`, and `0.156.1`; doctor and `gsd-run` refuse intervening and other later releases |
 | Node.js / npm | Node 24+ / npm 10+ | Required by the pinned GSD installer |
 | Shell | macOS zsh, Ubuntu bash | Windows is not supported by this release |
 | Claude Code | Current OAuth-backed CLI | Used for Claude-native runs and cross-vendor review |
