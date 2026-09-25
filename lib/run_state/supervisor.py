@@ -3112,52 +3112,64 @@ def run_managed_command(store, token, context, command, request_key,
 
 
 # A bare frontend word (feature-spec, feature-implement, fix, code-uplift,
-# task-swarm) is never staged into the private Codex runtime -- only gsd-*
-# skills are (runtime_staging.py's manifest check). feature-implement and
-# task-swarm's managed lifecycle actually drives gsd-execute-phase for their
-# already-selected, already-planned scope; name that command instead (#F32).
-# feature-spec/fix/code-uplift's staged mapping is a deferred design item
-# (not yet decided) -- they refuse as unstaged rather than guess.
+# task-swarm) is never staged into a private host runtime -- only gsd-*
+# skills are (runtime_staging.py's / claude_runtime_staging.py's manifest
+# checks). feature-implement and task-swarm's managed lifecycle actually
+# drives gsd-execute-phase for their already-selected, already-planned scope;
+# name that command instead (#F32). feature-spec/fix/code-uplift's staged
+# mapping is a deferred design item (not yet decided) -- they refuse as
+# unstaged rather than guess.
 _MANAGED_FRONTEND_STAGED_COMMAND: dict[str, str] = {
     "feature-implement": "gsd-execute-phase",
     "task-swarm": "gsd-execute-phase",
 }
 
+# Relative to a staged runtime home -- Codex's stage_or_reuse_private_codex_runtime
+# and Claude's stage_private_claude_runtime both copy the vendored
+# @opengsd/gsd-core package wholesale, so both hosts' dispatch doc/script sit
+# at these same paths underneath it. Single source for both the prompt and
+# its real-layout test (test_managed_frontend_prompt.py).
+_DISPATCH_DOC_RELATIVE = Path("gsd-core") / "workflows" / "execute-phase" / "steps" / "executor-isolation-dispatch.md"
+_DISPATCH_SCRIPT_RELATIVE = Path("gsd-core") / "bin" / "ffs-supervised-dispatch.cjs"
 
-def _managed_prompt(root, operation, command, *, staged_codex_home, planning_root: str,
+
+def _managed_prompt(root, operation, command, *, staged_runtime_home, planning_root: str,
                     project: str | None, planning_scope: str) -> tuple[tuple[str, ...], str, str]:
     """Return ``(invocation, prompt, role)`` for a managed host command."""
+    from run_state.prelaunch_inventory import is_valid_phase_scope
+
     invocation = tuple(command)
     if len(invocation) == 1 and invocation[0] in {
         "feature-spec", "feature-implement", "fix", "code-uplift", "task-swarm",
     }:
-        invocation_text = ""
         if operation is not None:
             try:
                 invocation_text = json.loads(operation)["data"]["invocation_text"]
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 raise SupervisorRefused("MANAGED_COMMAND_CONTEXT_CONFLICT") from None
+            if not isinstance(invocation_text, str):
+                raise SupervisorRefused("MANAGED_COMMAND_CONTEXT_CONFLICT")
         staged_command = _MANAGED_FRONTEND_STAGED_COMMAND.get(invocation[0])
         if staged_command is None:
             raise SupervisorRefused("MANAGED_FRONTEND_COMMAND_UNSTAGED")
-        # The staged command's argument is the already-selected planning scope
-        # (frontend-start --scope), never the operator's free-text invocation --
-        # no skill named by this map is staged with an invocation-text argument.
-        if not planning_scope:
+        # The staged command's only argument is the already-selected planning
+        # scope (frontend-start --scope), validated as a plain phase token.
+        # gsd-execute-phase treats everything after its invocation as
+        # GSD_ARGS, so the operator's free-text invocation_text (parsed above
+        # only to catch a malformed/conflicting operation payload) never
+        # enters the prompt -- it could otherwise forge a flag or a labelled
+        # line below.
+        if not is_valid_phase_scope(planning_scope):
             raise SupervisorRefused("PRELAUNCH_PHASE_SCOPE_REQUIRED")
         prompt_command = "$" + staged_command + " " + planning_scope
-        if invocation_text:
-            # The operator's request is context for the executor, never a
-            # command argument: keep it on its own clearly labelled line.
-            prompt_command += "\n\nOperator request: " + invocation_text
     else:
         head = invocation[0]
         prompt_command = ("$" + head[1:] if head.startswith("/") else head) + (
             " " + " ".join(invocation[1:]) if len(invocation) > 1 else ""
         )
-    staged_codex_home = Path(staged_codex_home)
-    dispatch_doc = staged_codex_home / "gsd-core" / "workflows" / "execute-phase" / "steps" / "executor-isolation-dispatch.md"
-    dispatch_script = staged_codex_home / "gsd-core" / "bin" / "ffs-supervised-dispatch.cjs"
+    staged_runtime_home = Path(staged_runtime_home)
+    dispatch_doc = staged_runtime_home / _DISPATCH_DOC_RELATIVE
+    dispatch_script = staged_runtime_home / _DISPATCH_SCRIPT_RELATIVE
     prompt = _managed_gsd_prompt(
         prompt_command, dispatch_doc=dispatch_doc, dispatch_script=dispatch_script,
         planning_root=planning_root, project=project,
@@ -3254,6 +3266,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     from run_state.managed_qualification import (
         ManagedQualificationRefused, qualify_managed_runtime,
     )
+    from run_state.prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
     from run_state.runtime_staging import (
         STAGE_MANIFEST_NAME, RetainedRuntimeNotReusable, stage_or_reuse_private_codex_runtime,
     )
@@ -3262,10 +3275,30 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     import tempfile
 
     root, operation, child_key, ready = _managed_inventory_workspace(store, token, context, request_key)
-    socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
-    channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
     host_evidence = Path(context.evidence_root) / "host"
     runtime_root = host_evidence / "runtimes"
+    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
+                                                 child_key=child_key) or str(uuid.uuid4()))
+    outer_home = runtime_root / outer_activity_id
+    upstream = context.upstream or {}
+    try:
+        planning_root = str(rebase_planning_root(
+            upstream, root_workspace=context.workspace, preparation_path=ready.path,
+        ))
+    except PrelaunchInventoryRefused as error:
+        raise SupervisorRefused(str(error)) from error
+    # Naming the staged command is pure (no filesystem/socket/process
+    # allocation): a refusal here (unstaged frontend, missing scope, operation
+    # conflict) must never leak a /tmp worker-channel dir or a staged runtime
+    # copy (which includes an auth copy) -- so it runs before any of that.
+    invocation, prompt, role = _managed_prompt(
+        root, operation, command, staged_runtime_home=outer_home,
+        planning_root=planning_root, project=upstream.get("project"),
+        planning_scope=token.planning_scope,
+    )
+
+    socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
+    channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
     runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     runtime_root.chmod(0o700)
     supervisor = Supervisor(
@@ -3343,9 +3376,6 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                                     final_contract_hash, child_role)
         return bind_launch(qualified, child_prompt, preparation, final_contract_hash, launch_request_key)
 
-    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
-                                                 child_key=child_key) or str(uuid.uuid4()))
-    outer_home = runtime_root / outer_activity_id
     launch = retained_launch(store, outer_activity_id)
     if launch is not None:
         # A real outer launch holds Codex state in its home and may have done work:
@@ -3362,13 +3392,6 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
     except (CapabilityError, OSError, ValueError) as error:
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
-    upstream = context.upstream or {}
-    planning_root = upstream.get("planning_root") or str(ready.path / ".planning")
-    invocation, prompt, role = _managed_prompt(
-        root, operation, command, staged_codex_home=outer_home,
-        planning_root=planning_root, project=upstream.get("project"),
-        planning_scope=token.planning_scope,
-    )
     contract_material = {
         "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),

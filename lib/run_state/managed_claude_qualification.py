@@ -244,6 +244,7 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     """Qualification seams, worker channel and outer contract for one Claude host run."""
     import tempfile
     from .frontend_producers import HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_outer_activity
+    from .prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
     from .supervisor import _managed_inventory_workspace, _managed_prompt
 
     root, operation, child_key, ready = _managed_inventory_workspace(
@@ -258,10 +259,16 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
                                                  child_key=child_key) or str(uuid.uuid4()))
     upstream = context.upstream or {}
+    try:
+        planning_root = str(rebase_planning_root(
+            upstream, root_workspace=context.workspace, preparation_path=ready.path,
+        ))
+    except PrelaunchInventoryRefused as error:
+        raise SupervisorRefused(str(error)) from error
     invocation, prompt, role = _managed_prompt(
-        root, operation, command, staged_codex_home=host_evidence / "runtimes" / outer_activity_id,
-        planning_root=upstream.get("planning_root") or str(ready.path / ".planning"),
-        project=upstream.get("project"), planning_scope=token.planning_scope,
+        root, operation, command, staged_runtime_home=host_evidence / "runtimes" / outer_activity_id,
+        planning_root=planning_root, project=upstream.get("project"),
+        planning_scope=token.planning_scope,
     )
     bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
     if bridge.is_symlink() or not bridge.is_file():
