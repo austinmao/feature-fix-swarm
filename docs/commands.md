@@ -135,6 +135,7 @@ Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG 
 | Execute the current phase | `/feature-implement NNN` → `/gsd-execute-phase N` |
 | Unattended run | `/feature-implement NNN --autonomous` (preflight PASS + grant ledger required) |
 | Headless drive | `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-<cmd> ...` (trimmed-MCP, auth-scrubbed) |
+| Managed run-state (opt-in, experimental) | `FFS_MANAGED_INGRESS=1` + `bash scripts/gsd/ffs-frontend.sh <frontend> ...`; `gsd-run.sh` then refuses with exit 78. Env vars and refusal codes: [Configuration](configuration.md#managed-run-state-opt-in-spec-014-release-b) |
 | Quick single-task fix | `/fix` → `/gsd-quick` |
 | Resume after context reset | `/gsd-resume-work` (STATE.md is the resume point) |
 | Verifier found gaps | `/gsd-plan-phase N --gaps` → `/gsd-execute-phase N --gaps-only` |

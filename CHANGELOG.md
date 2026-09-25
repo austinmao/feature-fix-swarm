@@ -68,6 +68,10 @@ all skills.
   `CODEX_SOL`, `lib/dispatch.py`'s tier/cost/escalation tables).
   `gpt-5.6-sol` @ `high` remains a recognized model and a lower admission rung
   in the adversary ladder — it is no longer the default.
+- The Codex `frontier` tier had already moved from `gpt-5.6-sol` to
+  `gpt-6-astra` @ `xhigh` in Release B (#173). Frontier and judgment now
+  resolve to different Codex models again, so a Codex-host planner and its
+  judgment-tier reviewer no longer share one model.
 
 ### Fixed (2026-09-23 — spec-014 Release B cross-vendor review follow-ups)
 
@@ -104,6 +108,8 @@ all skills.
   global admission at managed production ingress. Their tests are strict
   expected failures, so wiring any of them fails CI until the marker goes.
   Everything here is fixture-proven; no native host qualification is claimed.
+  Env vars, the entry point, and the refusal codes are in
+  [Configuration](docs/configuration.md#managed-run-state-opt-in-spec-014-release-b).
 - Linux portability: PID-namespace proof no longer reads the ptrace-guarded
   `/proc/1/ns/pid` and accepts only the initial namespace; unlimited
   `RLIMIT_NPROC` falls back to the kernel thread/PID cap; the recovery docs
@@ -120,6 +126,29 @@ all skills.
   `--package-root`, so `node_modules` stays pristine.
 - CI registers the pristine install's runtime descriptor before the Python
   suites, so descriptor-bound tests run against the same runtime identity.
+
+### Fixed (2026-09-22: gbrain learnings harvest and spec-status on user installs)
+
+- `scripts/gsd/learnings-harvest.sh` now decides gbrain is reachable from the
+  `[OK] connection` line in `gbrain doctor` output, not its exit code, so a
+  connected brain with an unrelated failing health check is still used. It
+  writes each learning to `gbrain put` on stdin: gbrain 0.50 ignores a
+  positional content argument, so earlier harvests stored nothing and each
+  put read the next entries out of the loop. (#172)
+- The `/spec-status` collector now finds `scripts/gsd/takeover-record.py`
+  through the same repo-relative lookup as `gates.py`, so it works from a
+  user-level skill install, and fails closed when no copy is found. (#172)
+
+### Fixed (2026-09-22: execute-phase safe-resume scoped to the active plan)
+
+- The execute-phase safe-resume gate no longer refuses to redispatch because
+  an unrelated older commit's scope tag matches the phase and plan numbers
+  (for example `feat(03-04)`). A scope match is now only a candidate: the
+  gate blocks only when that commit changes, deletes, renames, or copies a
+  path the active plan declares in `files_modified` or `files_deleted`, and
+  it refuses dispatch when those declarations cannot be parsed. Ships as a
+  third GSD overlay target, `gsd-core/workflows/execute-phase.md`
+  (overlay manifest schema v3). (#171)
 
 ### Changed (2026-09-11 — GSD Core 1.13.0 and Node 24 baseline)
 

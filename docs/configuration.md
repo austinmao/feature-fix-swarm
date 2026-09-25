@@ -111,23 +111,23 @@ references to either.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:1129` | Path to the evidence store all `gates.py` subcommands use |
-| `GATES_STRICT` | unset | `lib/gates.py:1324,1413,1458` | Rejects caller-asserted evidence; only runner-executed proof counts |
+| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:2557` | Path to the evidence store all `gates.py` subcommands use |
+| `GATES_STRICT` | unset | `lib/gates.py:4168,4267,4420` | Rejects caller-asserted evidence; only runner-executed proof counts |
 | `GATES_BYPASS` | `0` | `scripts/hooks/gsd-phase-evidence-gate.sh:17` | Skips the checkbox-flip block. Manual operator corrections only |
-| `TRUTH_THRESHOLD` | `0.95` | `lib/gates.py:1415` | Minimum truth score `phase-score` requires |
-| `RUNTIME_PROOF_STRICT` | unset | `lib/runtime_proof.py:399` | Rejects `driver=agent` proofs |
+| `TRUTH_THRESHOLD` | `0.95` | `lib/gates.py:4269` | Minimum truth score `phase-score` requires |
+| `RUNTIME_PROOF_STRICT` | unset | `lib/runtime_proof.py:628` | Rejects `driver=agent` proofs |
 | `GSD_PHASE_ID` | `gsd-phase` | `scripts/gsd/gates-test-command.sh:7` | Phase id used to key evidence |
-| `GSD_TEST_CMD` | falls back to `.planning/gsd-test-command`, then `python3 -m pytest lib/tests -q` | `scripts/gsd/gates-test-command.sh:29-37` | The test command run and recorded as phase evidence |
+| `GSD_TEST_CMD` | falls back to `.planning/gsd-test-command`, then `python3 -m pytest lib/tests -q` | `scripts/gsd/gates-test-command.sh:83-88` | The test command run and recorded as phase evidence |
 
 ### Model routing
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GSD_LEAD_MODEL` | `sonnet` | `scripts/gsd/gsd-run.sh:64` | Lead-tier alias the stateful drive launches with |
-| `GSD_LEAD_EFFORT` | tier's mapped effort, else `high` | `scripts/gsd/gsd-run.sh:319` | Codex reasoning-effort override for the lead |
-| `GSD_FALLBACK_CACHE` | `~/.cache/gsd-model-probe` | `scripts/gsd/model-fallback.sh:42` | Where 24h model-availability probe results cache |
-| `GSD_MODEL_PROBE_TIMEOUT` | `120` | `scripts/gsd/model-fallback.sh:51` | Wall-clock bound on availability probes |
-| `GSD_MODEL_PROBE_CMD` / `_CODEX` | unset | `scripts/gsd/model-fallback.sh:64,84` | Test-only probe command overrides |
+| `GSD_LEAD_MODEL` | `sonnet` | `scripts/gsd/gsd-run.sh:281` | Lead-tier alias the stateful drive launches with |
+| `GSD_LEAD_EFFORT` | tier's mapped effort, else `high` | `scripts/gsd/gsd-run.sh:1360` | Codex reasoning-effort override for the lead |
+| `GSD_FALLBACK_CACHE` | `~/.cache/gsd-model-probe` | `scripts/gsd/model-probe-lib.sh:38` | Where 24h model-availability probe results cache |
+| `GSD_MODEL_PROBE_TIMEOUT` | `120` | `scripts/gsd/model-probe-lib.sh:40` | Wall-clock bound on availability probes |
+| `GSD_MODEL_PROBE_CMD` / `_CODEX` | unset | `scripts/gsd/model-probe-lib.sh:53,75` | Test-only probe command overrides |
 | `GSD_MODEL_CONFIG` | `$PWD/.planning/config.json`, then the template | `scripts/gsd/codex-model-sync.sh:14-20` | Model-override source when no project config exists |
 
 ### Review and adversary
@@ -136,20 +136,20 @@ references to either.
 |---|---|---|---|
 | `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:78` | Hard override of diff-risk tier (`light\|standard\|full`) |
 | `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:116` | Merge-base for `--all` diffs |
-| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:88` | Budget for ship-time review, both hosts combined |
+| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:151` | Budget for ship-time review, both hosts combined |
 | `GSD_REVIEW_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/review-gate-command.sh` | Typed ship-review request; exact requests disable all fallback |
 | `PLAN_ADVERSARY` | on | `scripts/gsd/plan-adversary.sh:48` | `off` skips the cross-model plan review |
-| `PLAN_ADVERSARY_KEYWORDS` | `auth\|rls\|payment\|stripe\|crypto\|jwt\|...` | `scripts/gsd/plan-adversary.sh:54` | High-blast trigger set; a plan matching none skips the costly review |
+| `PLAN_ADVERSARY_KEYWORDS` | `auth\|rls\|payment\|stripe\|crypto\|jwt\|...` | `scripts/gsd/plan-adversary.sh:58` | High-blast trigger set; a plan matching none skips the costly review |
 | `PLAN_ADVERSARY_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/plan-adversary.sh` | Typed plan-review request; legacy raw model variables fail closed |
 | `PLAN_ADVERSARY_TIMEOUT` | `480` | `scripts/gsd/plan-adversary.sh` | Wall-clock cap |
-| `QA_COVERAGE` | on | `scripts/gsd/qa-coverage-adversary.sh:38` | `off` skips the advisory QA-coverage critique |
+| `QA_COVERAGE` | on | `scripts/gsd/qa-coverage-adversary.sh:39` | `off` skips the advisory QA-coverage critique |
 | `QA_COVERAGE_MODEL_REQUEST` / `_TIMEOUT` | `{"kind":"tier","name":"execution"}` / `300` | `scripts/gsd/qa-coverage-adversary.sh` | Typed QA-coverage adversary request and budget |
 | `GSD_DRIFT_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/scope-drift-gate.sh` | Typed optional drift-judge request |
-| `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:23` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
-| `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:78` | `0`/`off` disables the one-shot cross-vendor fallback. Also read by the plan wall's diversity-invariant reviewer selection — its state is stamped into the wall record |
-| `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:172` | `off` skips the cheap pre-review availability probe |
-| `FFS_ADVERSARY_*_TIMEOUT` | 20 / 120 / 180 / 240 / 480 | `scripts/gsd/adversary-host.sh:170-278` | Per-leg probe and review caps (ceilings — always clamped to the call's overall deadline). The preferred rung is the independent opposite-vendor reviewer and gets the 480 review ceiling; the same-vendor fallback keeps 240. The invariant `preferred >= fallback` holds for the DEFAULTS, asserted on both host directions in `tests/bats/adversary-host.bats`. An explicit env override stays authoritative and CAN invert it — adversary-host prints a `WARN ... BELOW ...` line naming both rungs' caps when it does, rather than clamping |
-| `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:110,139` | Executable overrides |
+| `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:176` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
+| `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:231` | `0`/`off` disables the one-shot cross-vendor fallback. Also read by the plan wall's diversity-invariant reviewer selection — its state is stamped into the wall record |
+| `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:372` | `off` skips the cheap pre-review availability probe |
+| `FFS_ADVERSARY_*_TIMEOUT` | 60 / 120 / 180 / 240 / 480 | `scripts/gsd/adversary-host.sh:370-378,569-572` | Per-leg probe and review caps (ceilings — always clamped to the call's overall deadline). The preferred rung is the independent opposite-vendor reviewer and gets the 480 review ceiling; the same-vendor fallback keeps 240. The invariant `preferred >= fallback` holds for the DEFAULTS, asserted on both host directions in `tests/bats/adversary-host.bats`. An explicit env override stays authoritative and CAN invert it — adversary-host prints a `WARN ... BELOW ...` line naming both rungs' caps when it does, rather than clamping |
+| `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:270,321` | Executable overrides |
 | `ADVERSARY_LAST_TIER_DESCENT` | `0` | `scripts/gsd/adversary-host.sh` | Read-only signal, not an input. Set to `1` when the reviewer that answered sat on a LOWER rung than the one requested (e.g. a judgment-tier ask answered by `gpt-5.6-terra` medium). Such a review is recorded as **degraded** and prints `adversary-host: TIER-DESCENT kind=… requested=… answered=…` to stderr; in-process callers that source this lib can gate on the variable |
 | `PLAN_WALL` | on | `scripts/gsd/plan-wall.sh` | `off` skips the per-phase plan wall — only with a durable, recorded waiver; a skip that cannot record its waiver fails closed |
 | `PLAN_WALL_TIMEOUT` | `180` | `scripts/gsd/plan-wall.sh` | Per-plan reviewer dispatch budget (seconds) |
@@ -163,8 +163,8 @@ references to either.
 | `PLAN_WALL_AWAIT_COUNT` | on | `scripts/gsd/plan-wall.sh` | `off` makes an `--await` probe budget-neutral (for evaluators) — does not consume `PLAN_WALL_AWAIT_MAX` |
 | `PLAN_WALL_AUTO_RESET_MAX` | `1` | `scripts/gsd/gsd-run.sh` (`_gsd_run_wall_gate`) | Per-phase-per-run budget for the `--autonomous` rc-3 bounded auto-continue; consumed via the durable `wall-autoreset:<phase-slug>` loop-round counter, spent regardless of the re-run's outcome, never replenished mid-run. Requires an operator `wall-reset:<phase-slug>` grant |
 | `SPEC_PANEL` | off | spec-authoring panel (last spec-decompose phase) | `on` enables the dual-vendor blind-draft panel at spec authoring; default off pending an EVAL-D fixture pass |
-| `FFS_ENV_REGISTRY` | unset | `lib/gates.py:2372` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
-| `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:2326` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
+| `FFS_ENV_REGISTRY` | unset | `lib/gates.py:3724` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
+| `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:3679` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
 
 `findings-queue` (`lib/gates.py`) resolutions now require a disposition:
 `gates.py findings-queue resolve --disposition refute|fix|waive --reason "…"`.
@@ -179,19 +179,19 @@ so one phase's findings never block another phase's wall.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `CANARY_GATE` | on | `scripts/gsd/canary-gate.sh:56` | `off` skips the fail-closed browser-QA gate |
-| `CANARY_DIFF_BASE` | `origin/main` | `scripts/gsd/canary-gate.sh:32` | Base ref for the web-touch diff |
-| `CANARY_WEB_PATTERN` | fixed ERE | `scripts/gsd/canary-gate.sh:61` | What counts as a web-touching file |
-| `CANARY_GATE_ALLOW_STALE` | `0` | `scripts/gsd/canary-gate.sh:112` | Bypasses only the results-newer-than-HEAD check |
+| `CANARY_GATE` | on | `scripts/gsd/canary-gate.sh:67` | `off` skips the fail-closed browser-QA gate |
+| `CANARY_DIFF_BASE` | `origin/main` | `scripts/gsd/canary-gate.sh:43` | Base ref for the web-touch diff |
+| `CANARY_WEB_PATTERN` | fixed ERE | `scripts/gsd/canary-gate.sh:77` | What counts as a web-touching file |
+| `CANARY_GATE_ALLOW_STALE` | `0` | `scripts/gsd/canary-gate.sh:133` | Bypasses only the results-newer-than-HEAD check |
 | `FFS_DEPLOY_DIGEST_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:99` | Shell command whose stdout is the digest actually deployed. Run TWICE — once before the probe, once again immediately after — and the two observations must be byte-identical or the run is refused |
 | `FFS_DEPLOY_PROBE_CMD` | unset (required) | `scripts/gsd/canary-deploy-gate.sh:100` | Post-deploy health/smoke command; its exit code is the recorded pass/fail |
-| `FFS_DEPLOY_PROBE_DIGEST_FILE` | unset (optional) | `scripts/gsd/canary-deploy-gate.sh:220` | Path the probe writes the digest it actually tested (single line, same shape rule as the query seam). Truncated before the probe runs so stale content can never satisfy it; missing/empty/malformed content after the probe, or a mismatch against the observed digest, refuses and records nothing — even with a passing probe. Closes an A→B→A flip entirely inside the probe window, which double-observation alone cannot see. The path is refused if it is a symlink, a non-regular file, or not owned by this process (checked before truncating AND before reading — `CANARY-DEPLOY-PROBE-DIGEST-UNSAFE`); the read is capped at 4096 bytes and its content is never echoed in any error |
+| `FFS_DEPLOY_PROBE_DIGEST_FILE` | unset (optional) | `scripts/gsd/canary-deploy-gate.sh:226` | Path the probe writes the digest it actually tested (single line, same shape rule as the query seam). Truncated before the probe runs so stale content can never satisfy it; missing/empty/malformed content after the probe, or a mismatch against the observed digest, refuses and records nothing — even with a passing probe. Closes an A→B→A flip entirely inside the probe window, which double-observation alone cannot see. The path is refused if it is a symlink, a non-regular file, or not owned by this process (checked before truncating AND before reading — `CANARY-DEPLOY-PROBE-DIGEST-UNSAFE`); the read is capped at 4096 bytes and its content is never echoed in any error |
 | `FFS_DEPLOY_DIGEST_TIMEOUT` | `60` | `scripts/gsd/canary-deploy-gate.sh:106` | Wall-clock bound on each digest-query call (applies to both observations) |
 | `FFS_DEPLOY_PROBE_TIMEOUT` | `300` | `scripts/gsd/canary-deploy-gate.sh:107` | Wall-clock bound on the probe |
-| `QA_BASE_URL` | unset (probes common ports) | `scripts/browser-proof.sh:72` | Pins the app URL. An unreachable pin is a hard `NO-SERVER`, no fallback probing |
-| `BROWSER_PROOF_PROBE_PORTS` | `3000 3001 5173 4321 8080 8000` | `scripts/browser-proof.sh:77` | Ports probed when `QA_BASE_URL` is unset |
-| `QA_FORCE_BROWSER` | `0` | `scripts/browser-proof.sh:47` | Forces `WEB-TOUCH:yes` regardless of diff |
-| `QA_ALLOW_NO_SERVER` | `0` | `scripts/browser-proof.sh:84` | Explicit waiver of the no-server requirement |
+| `QA_BASE_URL` | unset (probes common ports) | `scripts/browser-proof.sh:76` | Pins the app URL. An unreachable pin is a hard `NO-SERVER`, no fallback probing |
+| `BROWSER_PROOF_PROBE_PORTS` | `3000 3001 5173 4321 8080 8000` | `scripts/browser-proof.sh:81` | Ports probed when `QA_BASE_URL` is unset |
+| `QA_FORCE_BROWSER` | `0` | `scripts/browser-proof.sh:51` | Forces `WEB-TOUCH:yes` regardless of diff |
+| `QA_ALLOW_NO_SERVER` | `0` | `scripts/browser-proof.sh:88` | Explicit waiver of the no-server requirement |
 | `QA_SCENARIOS` | unset | `scripts/qa-swarm.sh:212` | scenarios.md enforcing coverage completeness |
 
 `scripts/gsd/canary-deploy-gate.sh` (GH-153) is the sanctioned producer of
@@ -216,20 +216,94 @@ content in an error — see the table row above.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:24` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
-| `TIMEOUT` | `900` | `scripts/gsd/gsd-run.sh:45` | Wall-clock bound on the whole drive |
-| `GSD_HOST_PROBE_TIMEOUT` | `45` | `scripts/gsd/gsd-run.sh:46` | Bound on the pre-launch host probe |
-| `GSD_RUN_STATE_DIR` | `$REPO_ROOT/.planning/run-state` | `scripts/gsd/gsd-run.sh:53` | Pidfile, status, heartbeat, reclaim mutex |
-| `GSD_MACHINE_ID` | hostname | `scripts/gsd/gsd-run.sh:60` | Identity for cross-machine run-ownership contention |
-| `GSD_HEARTBEAT_SECS` | `15` | `scripts/gsd/gsd-run.sh:248` | Heartbeat refresh interval |
-| `GSD_FOREIGN_LEASE_SECS` | `120` | `scripts/gsd/gsd-run.sh:153` | How long a foreign machine's lease is honored before reclaim |
-| `GSD_RECLAIM_LEASE_SECS` | `30` | `scripts/gsd/gsd-run.sh:155` | TTL of the reclaim mutex during stale-owner takeover |
+| `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:37` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
+| `TIMEOUT` | `900` | `scripts/gsd/gsd-run.sh:254` | Wall-clock bound on the whole drive |
+| `GSD_HOST_PROBE_TIMEOUT` | `45` | `scripts/gsd/gsd-run.sh:255` | Bound on the pre-launch host probe |
+| `GSD_RUN_STATE_DIR` | `<git-common-dir>/ffs/gsd-run` (shared by linked worktrees); `$REPO_ROOT/.planning/run-state` outside git | `scripts/gsd/gsd-run.sh:67-73,262` | Pidfile, status, heartbeat, reclaim mutex |
+| `GSD_MACHINE_ID` | hostname | `scripts/gsd/gsd-run.sh:270` | Identity for cross-machine run-ownership contention |
+| `GSD_HEARTBEAT_SECS` | `15` | `scripts/gsd/gsd-run.sh:771` | Heartbeat refresh interval |
+| `GSD_FOREIGN_LEASE_SECS` | `120` | `scripts/gsd/gsd-run.sh:762` | How long a foreign machine's lease is honored before reclaim |
+| `GSD_RECLAIM_LEASE_SECS` | `30` | `scripts/gsd/gsd-run.sh:762` | TTL of the reclaim mutex during stale-owner takeover |
 | `LIVENESS_WINDOW_MIN` | `30` | `scripts/gsd/liveness-check.sh:42` | Freshness window for the mtime-liveness signal |
 | `RUN_BOUNDED_KILL_AFTER` | `2` | `scripts/gsd/run-bounded.sh:32` | SIGTERM→SIGKILL grace period |
-| `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:443,448` | CLI executable overrides |
+| `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:1943,1949` | CLI executable overrides |
 | `GSD_CODEX_CONFIG_ROOT` | `${CODEX_HOME:-$HOME/.codex}` | `scripts/gsd/codex-model-sync.sh:12` | Where generated Codex agent TOMLs land |
-| `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:393` | Where the Claude-side SKILL.md surface lives |
+| `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:1532` | Where the Claude-side SKILL.md surface lives |
 | `GSD_PLANNING_SYNC` | unset | `scripts/gsd/gsd-run.sh:check_planning_divergence` | Which side wins when `.planning/phases/<slug>` has diverged between the repo and the run worktree. `repo` copies repo→worktree, `worktree` copies worktree→repo (and re-runs the plan wall, since it retires the reviewed repo copy). Unset fails closed with exit 78; any other value fails closed |
+
+### Managed run-state (opt-in, spec-014 Release B)
+
+Release B adds a controller-owned run path next to the `gsd-run.sh` drive.
+It is **off by default**, and nothing in a normal install turns it on. It is
+proven on fixture hosts and one operator smoke test only. No native host
+qualification has run, so treat it as experimental. Known limits today:
+
+- `/feature-spec`, `/fix`, and `/code-uplift` have no plan yet when they
+  start, so they refuse `PRELAUNCH_PHASE_SCOPE_REQUIRED`.
+- A run cannot resume after its real outer launch. A replay refuses instead
+  (see the refusals below).
+- The private host runtime stages only `gsd-*` skills
+  (`lib/run_state/runtime_staging.py:25`), so a managed frontend prompt that
+  names a non-GSD skill such as `$task-swarm` cannot load it.
+- A failed mapped check has no repair producer yet. It hands back and refuses
+  `RECOVERY_PRODUCER_UNAVAILABLE`.
+
+| Var | Default | Consumer | Effect |
+|---|---|---|---|
+| `FFS_MANAGED_INGRESS` | unset | `scripts/gsd/gsd-run.sh:22` | Any value other than `0` makes the legacy runner refuse with exit 78 and point at `scripts/gsd/ffs-frontend.sh`. Affects only runs started after it is set |
+| `FFS_UPSTREAM_RUNTIME_MANIFEST` / `_SHA256` | unset (required) | `scripts/gsd/ffs-frontend.sh:17-18` | The GSD runtime descriptor written by `python3 -m run_state.cli describe-upstream-runtime`, and the SHA-256 it prints. Bound at start and rechecked on every resume (`UPSTREAM_RUNTIME_DRIFT`, exit 2) |
+| `FFS_STATE_ROOT` | unset (required) | `scripts/gsd/ffs-frontend.sh:16` | Control-store root for the run (`--state-root`). Empty refuses `INVALID_REQUEST`, exit 2 (`lib/run_state/cli.py:340-349`) |
+| `FFS_OBJECTIVE` | unset (required) | `scripts/gsd/ffs-frontend.sh:15` | Objective sealed into the run. Empty refuses `INVALID_REQUEST`, exit 2 |
+| `FFS_INVOCATION_TEXT` | empty | `scripts/gsd/ffs-frontend.sh:14` | Invocation text sealed into the run; at most 16 KiB and no NUL bytes |
+| `FFS_REQUEST_KEY` | unset (required) | `scripts/gsd/ffs-frontend.sh:19` | Idempotency key. Empty refuses `INVALID_REQUEST`, exit 2. A replay of the same key returns its recorded success or refuses; it never relaunches |
+| `FFS_DISPATCH_LIMIT` | `32` | `scripts/gsd/ffs-frontend.sh:20` | Dispatch budget for the run |
+| `GSD_TOKEN_BUDGET` | `250K` | `scripts/gsd/ffs-frontend.sh:21` | Token budget (`--token-limit`; accepts `K`/`M`/`B`/`T` suffixes) |
+| `FFS_PROCESS_CAPACITY` | unset | `scripts/gsd/ffs-frontend.sh:22-24` | Worker capacity for the run |
+| `FFS_PHASE_SCOPE` | unset | `scripts/gsd/ffs-frontend.sh:25` | Phase to run. Without it the run refuses `PRELAUNCH_PHASE_SCOPE_REQUIRED` |
+| `FFS_ACCEPTANCE_DRAFT` | unset | `scripts/gsd/ffs-frontend.sh:26` | Operator-supplied acceptance draft (JSON). Its criterion ids must be the run's accepted requirement ids. Missing: `ACCEPTANCE_DRAFT_REQUIRED` |
+| `FFS_REVIEW_MODEL_CATALOG` | unset | `scripts/gsd/ffs-frontend.sh:27` | Model catalog for the native final review. There is no built-in production catalog yet, so the caller supplies it |
+| `FFS_HOST_KIND` | unset | `scripts/gsd/ffs-frontend.sh:28-45` | `codex` or `claude`. Needed for any run that does work: with no host the managed run refuses `HOST_CAPABILITY_UNQUALIFIED`, exit 78 (`lib/run_state/supervisor.py:3089`). Requires `FFS_HOST_TOKEN_RESERVATION` (the wrapper exits 2 without it); any other missing host field refuses `HOST_REQUEST_INCOMPLETE`, exit 2 (`lib/run_state/cli.py:312`) |
+| `FFS_HOST_TOKEN_RESERVATION` | unset | `scripts/gsd/ffs-frontend.sh:31-41` | Tokens reserved per host launch, e.g. `100K` |
+| `FFS_HOST_RUNTIME_HOME` | `FFS_CODEX_RUNTIME_HOME` | `scripts/gsd/ffs-frontend.sh:36` | Host runtime home. Must be an absolute, already-canonical path (`HOST_REQUEST_INVALID` otherwise; `lib/run_state/host_request.py:55-60`) |
+| `FFS_HOST_BINARY` | `CODEX_BIN` | `scripts/gsd/ffs-frontend.sh:37` | Host CLI executable. Absolute, canonical path |
+| `FFS_HOST_TIMEOUT` | `600` | `scripts/gsd/ffs-frontend.sh:42` | Host launch timeout in seconds, `1`-`3600` |
+| `FFS_HOST_CREDENTIAL_SOURCE` | unset | `scripts/gsd/ffs-frontend.sh:44` | Required for a Claude host and refused for a Codex host; either mistake refuses `HOST_REQUEST_INCOMPLETE`, exit 2 (`lib/run_state/cli.py:313-322`) |
+| `GSD_MODEL_REQUEST` / `GSD_SANDBOX_MODE` / `GSD_NETWORK_MODE` | unset / `workspace-write` / `disabled` | `scripts/gsd/ffs-frontend.sh:38-40` | Typed model request (valid JSON, else `HOST_MODEL_REQUEST_INVALID`), sandbox (`read-only`, `workspace-write`, or `danger-full-access`), and network mode for the host launch |
+| `GSD_RUN_ID` / `FFS_RUN_ID` | unset | `scripts/gsd/ffs-frontend.sh:60`, `lib/run_context.py:102-112` | Run id to select. The two names are aliases; different values refuse `CONFLICTING_RUN_ID`, exit 2 |
+| `GSD_RESUME` | unset | `scripts/gsd/ffs-frontend.sh:62-66` | `1` resumes; unset or `0` starts fresh; any other value exits 2 |
+| `GSD_PROJECT` / `GSD_WORKSTREAM` / `GSD_SESSION_KEY` | unset | `lib/run_state/cli.py:1940-1942` | Defaults for `--project`, `--workstream`, and `--session-key` |
+| `FFS_MANAGED_ADMISSION_ROOT` | `~/.local/state/feature-fix-swarm/managed-admission` | `lib/run_state/managed_admission.py:25,116-122` | Host-wide admission store shared by every managed run for this user. Must be absolute and not a symlink (`MANAGED_ADMISSION_ROOT_UNSAFE`). Test suites point it at a temporary directory |
+
+Entry point: `bash scripts/gsd/ffs-frontend.sh <feature-spec|fix|code-uplift|feature-implement|task-swarm> [--select-file P] [--delete-file P] [--required-context P] [--project N] [--workstream N] [--session-key K]`.
+It runs `python3 -m run_state.cli frontend-start` with the package's own
+`lib/` first on `PYTHONPATH`. The lifecycle is execute, then mapped checks,
+then one native final review, then `DONE`. A worked invocation is in
+`skills/task-swarm/SKILL.md` under "Managed ingress".
+
+**Refusals.** The wrapper's own argument checks print a plain message on
+stderr and exit 2. Every refusal from `run_state.cli` prints one JSON object
+on stdout:
+`{"ok": false, "code": …, "cause": …, "recovery_action": {"action": …}, …}`.
+Request, admission, and selection refusals use their own exit codes (for
+example `INVALID_REQUEST` and `UPSTREAM_RUNTIME_DRIFT` exit 2,
+`lib/run_state/cli.py:24-35`). A refusal raised inside a managed run exits 78
+(`lib/run_state/cli.py:116-131`); when it has an underlying cause, it adds
+`detail` with that error's type and typed code, never its message. Inside a
+managed run, the recovery action depends on the code:
+
+| Code | Meaning | `recovery_action` |
+|---|---|---|
+| `REQUEST_ALREADY_COMPLETED` | A launch under this request key already settled and may have done its work. It is never resumed, and a new key could repeat it | `inspect_completed_launch` |
+| `INTENT_RECONCILIATION_REQUIRED` | A launch under this request key has not settled; only owner-fence reconciliation may settle it | `reconcile_intent` |
+| `RETAINED_RUNTIME_NOT_REUSABLE` | The retained outer runtime cannot be resumed, and no outer launch ran under it | `resume_with_new_request_key` |
+| `CHILD_RUNTIME_NOT_REUSABLE` | A wave child or final-reviewer runtime cannot be resumed. A new key would start a new outer run | `inspect_retained_child` |
+| any other supervisor code, e.g. `HOST_CAPABILITY_UNQUALIFIED`, `WAVE_EXECUTION_UNPROVEN` | The selected host backend has not demonstrated managed admission | `qualify_host_adapter` |
+| a policy code, e.g. `FRONTEND_CHECK_CANDIDATE_STALE` | The managed run policy refused the transition | `correct_request` |
+
+A replay of a run whose lifecycle already reached `DONE` returns its recorded
+success without relaunching. There is no dedicated inspect or reconcile
+command yet for `inspect_*` and `reconcile_intent`; they name the step an
+operator takes by hand. Contract: `specs/014-parallel-host-parity/contracts/run-context.md`.
 
 ### Kill-switches
 
@@ -240,9 +314,9 @@ All default to on. Set to `off` to disable.
 | `DELEGATION_ENFORCER` | `scripts/hooks/delegation-enforcer.sh:25` | Auto-pinning `model` on unpinned sub-agent spawns |
 | `SECURITY_MODEL_FENCE` | `scripts/gsd/security-model-fence.sh` | The `fable → opus` demotion of `gsd-planner`/`gsd-plan-checker` on security-touching specs |
 | `CLI_HANG_GUARD` | `scripts/hooks/cli-hang-guard.sh:22` | The block on unbounded `codex exec` / `claude -p` calls |
-| `CREDENTIAL_OUTPUT_GUARD` | `scripts/hooks/credential-output-guard.sh:11` | The block on commands that would print secret values |
+| `CREDENTIAL_OUTPUT_GUARD` | `scripts/hooks/credential-output-guard.sh:13` | The block on commands that would print secret values |
 | `TDD_GATE_BYPASS=1` | `hooks/tdd-gate.sh:12` | The block on source edits with no paired test |
-| `FFS_HOST_PROCESS_DETECT` | `scripts/gsd/adversary-host.sh:42` | The PPID-walk host-detection fallback |
+| `FFS_HOST_PROCESS_DETECT` | `scripts/gsd/adversary-host.sh:195` | The PPID-walk host-detection fallback |
 | `GSD_PLANNING_GUARD` | `scripts/gsd/gsd-run.sh:check_planning_divergence` | The split-brain `.planning/phases/<slug>` check on `/gsd-plan-phase` and `/gsd-execute-phase` — `off` runs the phase against whatever each side happens to hold |
 
 The `newer=` field on a `GSD-RUN:PLANNING-DIVERGENCE` line is an **advisory

@@ -25,7 +25,7 @@ Python 3.11+.
 git clone https://github.com/austinmao/feature-fix-swarm.git
 cd feature-fix-swarm
 npm ci
-python3 -m pip install pytest
+python3 -m pip install --requirement requirements-dev.txt
 ```
 
 The canonical FFS skill sources live in `skills/`. GSD owns the installed
@@ -50,11 +50,31 @@ rollback, and linked-worktree locking.
 
 ## Verification
 
-Run the complete local gate:
+The spec-014 run-state tests bind to a registered GSD runtime, the same way
+CI does. Describe the `npm ci` install once per shell. Without these two
+variables, `tests/test_m4_upstream_binding.py` fails and some broker tests
+skip:
+
+```bash
+out="$(mktemp -d)/upstream-runtime.json"
+PYTHONPATH=lib python3 -m run_state.cli describe-upstream-runtime \
+  --module-root node_modules/@opengsd/gsd-core/gsd-core/bin/lib \
+  --node "$(command -v node)" --output "$out"
+export FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR="$out"
+export FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR_SHA256="$(shasum -a 256 "$out" | cut -d' ' -f1)"
+```
+
+The output path must not exist yet; the command refuses to overwrite a
+descriptor (`UPSTREAM_RUNTIME_DESCRIPTOR_EXISTS`). The test suites use a
+per-test managed-admission root, so they never write your real
+`~/.local/state/feature-fix-swarm/managed-admission`.
+
+Then run the complete local gate:
 
 ```bash
 npm audit
 python3 -m pytest lib/ tests/ -q
+python3 -m pytest tests/contracts/land_queue_gates_contract.py tests/contracts/consolidate_gates_contract.py -q
 python3 scripts/verify-skill-blocks.py
 python3 scripts/lint_host_dispatch.py skills/*/SKILL.md
 python3 scripts/lint_model_routing.py
