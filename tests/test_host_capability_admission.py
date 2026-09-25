@@ -106,9 +106,16 @@ def test_artifact_review_material_is_closed_and_uses_the_typed_model_resolver(tm
 
 def test_default_additions_are_byte_identical(tmp_path):
     """F34 5.4: with no scope, as_dict() returns exactly the 4 keys and the
-    policy hash matches an independently-built policy dict. Rules out
-    emitting "" scope keys, which would drift every retained runtime to
-    ENVIRONMENT_POLICY_DRIFT."""
+    policy hash matches a LITERAL sha256 computed at origin/main 59bff1d
+    (pre-F34) with these same fixed inputs (review round 3 item 4) -- not a
+    value recomputed by the current code under test -- so this proves
+    byte-identity with the pre-F34 policy, not just internal
+    self-consistency. Rules out emitting "" scope keys, which would drift
+    every retained runtime to ENVIRONMENT_POLICY_DRIFT. Golden inputs and
+    computation:
+    /private/tmp/claude-502/-Users-luminamao-Documents-Github-openclaw/
+    c2e40b87-25d4-44ab-8c8d-e8bc1d6f8e92/scratchpad/compute_golden.py, run
+    against a detached worktree of 59bff1d."""
     spec = importlib.util.spec_from_file_location(
         "ffs_host_default_additions", ROOT / "lib/host_capabilities.py"
     )
@@ -117,8 +124,8 @@ def test_default_additions_are_byte_identical(tmp_path):
     sys.modules[spec.name] = admission
     spec.loader.exec_module(admission)
 
-    home = tmp_path.resolve() / "home"
-    home.mkdir(parents=True)
+    home = Path("/private/tmp/ffs-f34-golden-codex/home")
+    home.mkdir(parents=True, exist_ok=True)
     admission_file = home / "admission.json"
     admission_file.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
     admission_file.chmod(0o600)
@@ -141,16 +148,7 @@ def test_default_additions_are_byte_identical(tmp_path):
         "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
         **additions.as_dict(),
     }
-    golden_policy = {
-        "HOME": str(home), "CODEX_HOME": str(home), "TMPDIR": str(home),
-        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
-        "GSD_DISPATCH_MODE": "ffs-supervised-process", "FFS_SUPERVISED_COMMIT_MODE": "patches",
-        "FFS_SUPERVISED_ADMISSION_FILE": str(admission_file.resolve().parent / "<admission>"),
-        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
-    }
-    golden_hash = hashlib.sha256(
-        json.dumps(golden_policy, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    golden_hash = "17b5eb435c98b6e601bcf57e5e707fe662fb30f869e3ef84ed39317adf58c96c"
     assert admission.codex_environment_policy_hash(environment) == golden_hash
 
     scoped = admission.GsdSupervisorEnvironment(
@@ -268,6 +266,28 @@ def test_process_environment_carries_optional_scope_when_present(tmp_path, monke
     assert result.workstream is None
 
     monkeypatch.setenv("GSD_PROJECT", "../x")
+    with pytest.raises(admission.CapabilityError):
+        admission.gsd_supervisor_environment_from_process()
+
+
+def test_process_environment_partial_required_set_refuses_typed(tmp_path, monkeypatch):
+    """Review round 3 item 1: gsd_supervisor_environment_from_process must
+    raise CapabilityError, not KeyError, when the process env has only SOME
+    of the 4 required keys set (e.g. only GSD_DISPATCH_MODE). 899a5fa used
+    os.environ.get for the required keys (missing -> None, caught downstream
+    as CapabilityError); round 2 regressed this to direct os.environ[key]
+    indexing, which raises a raw KeyError for a partial set."""
+    spec = importlib.util.spec_from_file_location(
+        "ffs_host_partial_process_env", ROOT / "lib/host_capabilities.py"
+    )
+    assert spec and spec.loader
+    admission = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = admission
+    spec.loader.exec_module(admission)
+    for key in ("GSD_DISPATCH_MODE", "FFS_SUPERVISED_COMMIT_MODE", "FFS_SUPERVISED_ADMISSION_FILE",
+                "FFS_SUPERVISED_DISPATCH_COMMAND_JSON", "GSD_PROJECT", "GSD_WORKSTREAM"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GSD_DISPATCH_MODE", "ffs-supervised-process")
     with pytest.raises(admission.CapabilityError):
         admission.gsd_supervisor_environment_from_process()
 

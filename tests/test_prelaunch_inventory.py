@@ -204,3 +204,22 @@ def test_missing_phases_root_refuses_typed(tmp_path):
     phases_root = tmp_path.resolve() / "phases"  # never created
     with pytest.raises(PrelaunchInventoryRefused, match='SELECTION_FAILED'):
         select_active_phase(_runtime(), phases_root, "1")
+
+
+def test_non_missing_os_error_on_resolve_stays_path_unsafe(tmp_path, monkeypatch):
+    """Review round 3 item 2: only an actually-absent phases root
+    (FileNotFoundError) maps to PRELAUNCH_PHASE_SELECTION_FAILED; any other
+    OSError from resolve(strict=True) (permission, symlink loop, etc.) must
+    stay PRELAUNCH_PLAN_PATH_UNSAFE."""
+    phases_root = tmp_path.resolve() / "phases"
+    phases_root.mkdir()
+    original_resolve = Path.resolve
+
+    def _fake_resolve(self, *args, **kwargs):
+        if self == phases_root:
+            raise PermissionError("fixture: permission denied")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _fake_resolve)
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        select_active_phase(_runtime(), phases_root, "1")

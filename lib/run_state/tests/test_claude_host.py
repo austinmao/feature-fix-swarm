@@ -81,19 +81,37 @@ def test_claude_preview_policy_validates_scope_segments(tmp_path: Path) -> None:
 
 
 def test_claude_default_scope_policy_hash_is_golden(tmp_path: Path) -> None:
-    """Review round 1 item 15: pin the default-scope (4-key) Claude
-    environment policy hash to an independently-built golden dict, the same
-    pattern as the Codex 5.4 golden."""
-    additions = _gsd_environment(tmp_path)
-    environment = {**_claude_base(tmp_path), **additions}
-    golden_policy = dict(environment)
-    golden_policy["TMPDIR"] = str((tmp_path / "tmp").resolve() / "<invocation>")
-    golden_policy["FFS_SUPERVISED_ADMISSION_FILE"] = str(
-        Path(additions["FFS_SUPERVISED_ADMISSION_FILE"]).resolve().parent / "<admission>"
-    )
-    golden_hash = hashlib.sha256(
-        json.dumps(golden_policy, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    """Review round 1 item 15, pinned per review round 3 item 4: the
+    default-scope (4-key) Claude environment policy hash must equal a
+    LITERAL sha256 computed at origin/main 59bff1d (pre-F34) with these same
+    fixed inputs -- not a value recomputed by the current code under test --
+    so this proves byte-identity with the pre-F34 policy, not just internal
+    self-consistency. Golden inputs and computation:
+    /private/tmp/claude-502/-Users-luminamao-Documents-Github-openclaw/
+    c2e40b87-25d4-44ab-8c8d-e8bc1d6f8e92/scratchpad/compute_golden.py, run
+    against a detached worktree of 59bff1d."""
+    home = Path("/private/tmp/ffs-f34-golden-claude/home")
+    home.mkdir(parents=True, exist_ok=True)
+    config = home / "config"
+    config.mkdir(exist_ok=True)
+    tmp_leaf = home / "tmp" / "leaf"
+    tmp_leaf.mkdir(parents=True, exist_ok=True)
+    admission = home / "admission.json"
+    admission.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission.chmod(0o600)
+    bridge = home / "gsd_wave_bridge.py"
+    bridge.write_text("#!/usr/bin/env python3\n")
+    command_json = json.dumps([sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"))
+    environment = {
+        "HOME": str(home), "CLAUDE_CONFIG_DIR": str(config), "TMPDIR": str(tmp_leaf),
+        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1", "CI": "1",
+        "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+        "GSD_DISPATCH_MODE": "ffs-supervised-process", "FFS_SUPERVISED_COMMIT_MODE": "patches",
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission),
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
+    }
+    golden_hash = "ae545cf608aaed7bd8c2a62f4dd52e4c56d9eaae175646de6d5c9a927a701ce3"
     assert claude_environment_policy_hash(environment) == golden_hash
 
     scoped_additions = _gsd_environment(tmp_path, "admission-scoped.json")
