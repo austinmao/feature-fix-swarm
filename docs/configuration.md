@@ -350,17 +350,19 @@ Neither ever migrates a v1 store or installs a fence trigger — a store that
 started as `writer_version=1`/`admission_policy.version=1` stays exactly
 that after any number of `inspect` or dry-run `reconcile` calls; only
 `--apply` may migrate it. A schema this reader cannot make sense of
-(including an `admission_policy` table with zero rows, or a file shorter
-than the 100-byte sqlite header) refuses `MANAGED_ADMISSION_SCHEMA_INVALID`
-instead of crashing. Before either read-only command ever opens a sqlite
-connection, `_refuse_unless_legacy_journal_format` reads the file's header
-bytes 18-19 directly (`O_RDONLY|O_NOFOLLOW`) and refuses
-`MANAGED_ADMISSION_STORE_UNSAFE` unless they are `\x01\x01` (legacy
-rollback-journal format): opening a WAL-mode database even `mode=ro`
-creates `-wal`/`-shm` sidecar files as a side effect (SQLite's WAL reader
-needs them to read consistently), which a strictly read-only path must
-never do. A store this package creates is always DELETE-journal, so this
-only fires against a tampered or foreign file. Any other sqlite-level
+(including an `admission_policy` table with zero rows) refuses
+`MANAGED_ADMISSION_SCHEMA_INVALID` instead of crashing. Before either
+read-only command ever opens a sqlite connection,
+`_refuse_unless_legacy_journal_format` reads the file's header bytes 18-19
+directly (`O_RDONLY|O_NOFOLLOW`) and refuses `MANAGED_ADMISSION_STORE_UNSAFE`
+unless they are `\x01\x01` (legacy rollback-journal format) — this is also
+the code path for a file shorter than the 100-byte sqlite header (too
+short to even hold a format-version byte, so it is UNSAFE, not
+SCHEMA_INVALID): opening a WAL-mode database even `mode=ro` creates
+`-wal`/`-shm` sidecar files as a side effect (SQLite's WAL reader needs
+them to read consistently), which a strictly read-only path must never do.
+A store this package creates is always DELETE-journal, so this only fires
+against a tampered, truncated, or foreign file. Any other sqlite-level
 failure opening or reading the store (a corrupt file, a locked file) maps
 to `MANAGED_ADMISSION_SCHEMA_INVALID` or `MANAGED_ADMISSION_STORE_UNAVAILABLE`
 rather than a raw traceback.
