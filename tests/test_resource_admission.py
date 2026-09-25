@@ -447,3 +447,262 @@ def test_aged_provider_group_does_not_capture_unrelated_provider(tmp_path, monke
                    (time.monotonic_ns() - 10_000_000_000,))
     assert not queue.try_admit(group[0])
     assert queue.try_admit(unrelated)
+
+
+# --- Round 2 (review findings) -----------------------------------------
+
+
+def test_apply_reconcile_cas_misses_on_child_bound_between_plan_and_apply(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    plan = queue.reconcile_plan()
+    target = next(item for item in plan if item["sequence"] == 1)
+    assert target["decision"] == "reclaim" and target["child"] is None
+    # A child gets bound between plan and apply.
+    with sqlite3.connect(root / "admission.sqlite3") as connection:
+        connection.execute(
+            "UPDATE managed_admissions SET child_host_id=?,child_boot_id=?,child_pid=?,child_start_token=? "
+            "WHERE sequence=1",
+            ("child-host", "child-boot", 99, "child-start"),
+        )
+    result = queue.apply_reconcile(plan)
+    assert result["reclaimed"] == [] and result["row_changed"] == [1]
+    assert queue.snapshot()[0]["status"] == "waiting"
+
+
+def test_apply_reconcile_cas_misses_on_status_changed_between_plan_and_apply(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    plan = queue.reconcile_plan()
+    with sqlite3.connect(root / "admission.sqlite3") as connection:
+        connection.execute("UPDATE managed_admissions SET status='released' WHERE sequence=1")
+    result = queue.apply_reconcile(plan)
+    assert result["reclaimed"] == [] and result["row_changed"] == [1]
+    assert queue.snapshot()[0]["status"] == "released"
+
+
+def test_apply_reconcile_cas_misses_on_ticket_changed_between_plan_and_apply(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    plan = queue.reconcile_plan()
+    with sqlite3.connect(root / "admission.sqlite3") as connection:
+        connection.execute("UPDATE managed_admissions SET ticket='new-ticket' WHERE sequence=1")
+    result = queue.apply_reconcile(plan)
+    assert result["reclaimed"] == [] and result["row_changed"] == [1]
+
+
+def test_reconcile_keeps_prior_boot_v1_row_when_owner_probes_live(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda _: "LIVE")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    target = next(item for item in queue.reconcile_plan() if item["sequence"] == 1)
+    assert target["decision"] == "keep" and target["reason"] == "OWNER_LIVE"
+
+
+def test_reconcile_keeps_prior_boot_v1_row_when_owner_probe_unknown(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda _: "UNKNOWN")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    target = next(item for item in queue.reconcile_plan() if item["sequence"] == 1)
+    assert target["decision"] == "keep" and target["reason"] == "OWNER_UNKNOWN"
+
+
+def test_reconcile_keeps_prior_boot_dead_v2_released_row(tmp_path, monkeypatch):
+    live = {"value": True}
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda _: "LIVE" if live["value"] else "DEAD")
+    queue = ManagedAdmissionQueue(tmp_path / "admission", observation_provider=lambda: _observation())
+    ticket = queue.enqueue(state_root=tmp_path, run_id="run")
+    with queue._transaction() as tx:
+        tx.execute("UPDATE managed_admissions SET boot_id='prior-boot',status='released' WHERE sequence=?",
+                   (ticket.sequence,))
+    live["value"] = False
+    target = next(item for item in queue.reconcile_plan() if item["sequence"] == ticket.sequence)
+    assert target["decision"] == "keep" and target["reason"] == "RELEASED_RETAINED"
+
+
+def test_reconcile_reclaims_prior_boot_dead_v2_waiting_row(tmp_path, monkeypatch):
+    live = {"value": True}
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda _: "LIVE" if live["value"] else "DEAD")
+    queue = ManagedAdmissionQueue(tmp_path / "admission", observation_provider=lambda: _observation())
+    ticket = queue.enqueue(state_root=tmp_path, run_id="run")
+    with queue._transaction() as tx:
+        tx.execute("UPDATE managed_admissions SET boot_id='prior-boot' WHERE sequence=?", (ticket.sequence,))
+    live["value"] = False
+    target = next(item for item in queue.reconcile_plan() if item["sequence"] == ticket.sequence)
+    assert target["decision"] == "reclaim" and target["proof"] == "boot-changed"
+
+
+def test_apply_reconcile_row_count_mismatch_is_backup_failure(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    plan = queue.reconcile_plan()
+
+    def fake_backup(source, destination_path):
+        with sqlite3.connect(destination_path) as dest:
+            source.backup(dest)
+            dest.execute("DELETE FROM managed_admissions")
+            dest.commit()
+
+    monkeypatch.setattr(managed_admission, "_perform_backup", fake_backup)
+    before = (root / "admission.sqlite3").read_bytes()
+    with pytest.raises(ManagedAdmissionRefused, match="RECONCILE_BACKUP_FAILED"):
+        queue.apply_reconcile(plan)
+    assert (root / "admission.sqlite3").read_bytes() == before
+    assert not any(p.name.endswith(".bak") for p in root.iterdir())
+    assert queue.snapshot()[0]["status"] == "waiting"
+
+
+def test_apply_reconcile_corrupt_backup_page_is_backup_failure(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    plan = queue.reconcile_plan()
+
+    def fake_backup(source, destination_path):
+        with sqlite3.connect(destination_path) as dest:
+            source.backup(dest)
+        data = bytearray(destination_path.read_bytes())
+        mid = len(data) // 2
+        data[mid:mid + 32] = bytes(32)
+        destination_path.write_bytes(bytes(data))
+
+    monkeypatch.setattr(managed_admission, "_perform_backup", fake_backup)
+    before = (root / "admission.sqlite3").read_bytes()
+    with pytest.raises(ManagedAdmissionRefused, match="RECONCILE_BACKUP_FAILED"):
+        queue.apply_reconcile(plan)
+    assert (root / "admission.sqlite3").read_bytes() == before
+    assert not any(p.name.endswith(".bak") for p in root.iterdir())
+
+
+def test_apply_reconcile_lock_contention_during_backup_is_backup_failure(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    plan = queue.reconcile_plan()
+    monkeypatch.setattr(
+        managed_admission, "_perform_backup",
+        lambda source, destination_path: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+    )
+    before = (root / "admission.sqlite3").read_bytes()
+    with pytest.raises(ManagedAdmissionRefused, match="RECONCILE_BACKUP_FAILED"):
+        queue.apply_reconcile(plan)
+    assert (root / "admission.sqlite3").read_bytes() == before
+    assert not any(p.name.endswith(".bak") for p in root.iterdir())
+
+
+def test_reclaimed_row_rejects_delete_not_just_status_update(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id=OWNER.boot_id,
+        pid=OWNER.pid, start_token=OWNER.start_token, status="reclaimed",
+    )
+    queue = _queue(tmp_path, monkeypatch)
+    assert queue.snapshot()[0]["status"] == "reclaimed"
+    with sqlite3.connect(root / "admission.sqlite3") as connection:
+        with pytest.raises(sqlite3.DatabaseError, match="RECLAIMED_ADMISSION_IMMUTABLE"):
+            connection.execute("UPDATE managed_admissions SET status='waiting' WHERE ticket='old'")
+        with pytest.raises(sqlite3.DatabaseError, match="RECLAIMED_ADMISSION_IMMUTABLE"):
+            connection.execute("UPDATE managed_admissions SET status='active' WHERE ticket='old'")
+        with pytest.raises(sqlite3.DatabaseError, match="RECLAIMED_ADMISSION_IMMUTABLE"):
+            connection.execute("DELETE FROM managed_admissions WHERE ticket='old'")
+    assert queue.snapshot()[0]["status"] == "reclaimed"
+
+
+def test_reclaimed_terminal_against_raw_legacy_release_sql_uses_match(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id=OWNER.boot_id,
+        pid=OWNER.pid, start_token=OWNER.start_token, status="reclaimed",
+    )
+    queue = _queue(tmp_path, monkeypatch)
+    with sqlite3.connect(root / "admission.sqlite3") as connection:
+        with pytest.raises(sqlite3.DatabaseError, match="RECLAIMED_ADMISSION_IMMUTABLE"):
+            connection.execute("UPDATE managed_admissions SET status='released' WHERE ticket='old'")
+
+
+def test_apply_reconcile_twice_second_pass_is_a_no_op(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    first = queue.reconcile(apply=True)
+    assert first["reclaimed"] == [1]
+    second = queue.reconcile(apply=True)
+    assert second["reclaimed"] == [] and second["row_changed"] == []
+    assert queue.snapshot()[0]["status"] == "reclaimed"
+
+
+def test_reclaimed_terminal_trigger_is_reinstalled_on_reopen_after_being_dropped(tmp_path, monkeypatch):
+    queue = _queue(tmp_path, monkeypatch)
+    with queue._transaction() as tx:
+        tx.execute("DROP TRIGGER admission_fence_reclaimed_terminal")
+        tx.execute("DROP TRIGGER admission_fence_reclaimed_no_delete")
+    with sqlite3.connect(tmp_path / "admission" / "admission.sqlite3") as connection:
+        assert not connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name LIKE 'admission_fence_reclaimed%'"
+        ).fetchall()
+    reopened = ManagedAdmissionQueue(tmp_path / "admission", observation_provider=lambda: _observation())
+    with sqlite3.connect(tmp_path / "admission" / "admission.sqlite3") as connection:
+        names = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'admission_fence_reclaimed%'"
+        ).fetchall()}
+    assert names == {"admission_fence_reclaimed_terminal", "admission_fence_reclaimed_no_delete"}
+
+
+def test_try_admit_clears_stale_legacy_opaque_tag_once_gate_disarms(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    stuck = queue.enqueue(state_root=tmp_path / "stuck", run_id="stuck")
+    assert queue.try_admit(stuck) is False
+    assert queue.status(stuck)["limiting_resource"] == "legacy-opaque"
+
+    result = queue.reconcile(apply=True)
+    assert result["reclaimed"] == [1]
+
+    live_waiter = queue.enqueue(state_root=tmp_path / "poke", run_id="poke")
+    assert queue.try_admit(live_waiter)
+    assert queue.status(stuck)["limiting_resource"] is None
