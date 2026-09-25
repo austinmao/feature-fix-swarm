@@ -112,6 +112,32 @@ _REQUEST_KEY_REFUSALS = {
         "reconcile_intent"),
 }
 
+# Supervisor codes whose cause is the staged prompt itself never having been
+# nameable: the operator's remedy is to change the request, not to qualify
+# a host adapter.
+_MANAGED_PROMPT_REFUSALS = {
+    "MANAGED_FRONTEND_COMMAND_UNSTAGED": (
+        "feature-spec/fix/code-uplift have no staged gsd-* command mapping yet; "
+        "only feature-implement and task-swarm do",
+        "select_a_staged_frontend"),
+    "PRELAUNCH_PHASE_SCOPE_REQUIRED": (
+        "the frontend has no selected planning scope (frontend-start --scope) "
+        "to stage as the command argument",
+        "supply_a_phase_scope"),
+    "PRELAUNCH_PLAN_PATH_UNSAFE": (
+        "the persisted upstream planning root could not be rebased onto this run's "
+        "prepared workspace",
+        "reconcile_upstream_binding"),
+    "MANAGED_FRONTEND_MODE_UNSUPPORTED": (
+        "the invocation text names a mode (--dry-run or --adhoc) the staged "
+        "gsd-execute-phase command cannot honor",
+        "drop_the_unsupported_mode_flag"),
+    "MANAGED_PROJECT_SCOPE_UNSUPPORTED": (
+        "a non-default project or workstream never reaches the qualified host "
+        "process env, so it cannot be honored",
+        "use_the_default_project"),
+}
+
 
 def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     """The managed-run JSON envelope (exit 78) for one of ``_managed_run_refusals``."""
@@ -122,6 +148,9 @@ def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
         extra["detail"] = detail
     if error.code in _REQUEST_KEY_REFUSALS:
         cause, action = _REQUEST_KEY_REFUSALS[error.code]
+        extra.update(cause=cause, recovery_action={"action": action})
+    elif error.code in _MANAGED_PROMPT_REFUSALS:
+        cause, action = _MANAGED_PROMPT_REFUSALS[error.code]
         extra.update(cause=cause, recovery_action={"action": action})
     elif isinstance(error, SupervisorRefused):
         extra.update(cause="the selected host backend has not demonstrated managed admission",

@@ -49,6 +49,12 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def claude_runtime_home(evidence_root, activity_id: str) -> Path:
+    """The one staged-runtime path for a Claude activity: qualification stages
+    here, and the outer prompt's dispatch doc/script sit underneath it."""
+    return Path(evidence_root) / "runtimes" / activity_id
+
+
 def _replace_qualification_admission(path: Path, expected: dict[str, object],
                                      admitted: dict[str, object]) -> None:
     """Atomically replace the qualification placeholder with its fenced identity."""
@@ -109,7 +115,7 @@ def qualify_managed_claude_runtime(
         # outer launch cannot be re-qualified; resume refuses HOST_CAPABILITY_UNQUALIFIED.
         # Deferred until before native Claude qualification: persist the plan for
         # replay, as the Codex path's stage_or_reuse + retained observation does.
-        runtime = Path(evidence_root) / "runtimes" / activity_id
+        runtime = claude_runtime_home(evidence_root, activity_id)
         try:
             runtime.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             runtime.parent.chmod(0o700)
@@ -266,9 +272,9 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     except PrelaunchInventoryRefused as error:
         raise SupervisorRefused(str(error)) from error
     invocation, prompt, role = _managed_prompt(
-        root, operation, command, staged_runtime_home=host_evidence / "runtimes" / outer_activity_id,
+        root, operation, command, staged_runtime_home=claude_runtime_home(host_evidence, outer_activity_id),
         planning_root=planning_root, project=upstream.get("project"),
-        planning_scope=token.planning_scope,
+        workstream=upstream.get("workstream"), planning_scope=token.planning_scope,
     )
     bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
     if bridge.is_symlink() or not bridge.is_file():

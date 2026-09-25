@@ -3043,8 +3043,16 @@ def _managed_command_requires_wave_proof(invocation: tuple[str, ...]) -> bool | 
     return None
 
 
+def _assert_managed_prompt_value_safe(value: str | None) -> None:
+    """Refuse a raw prompt value carrying a control character (injection risk)."""
+    if value is not None and any(ord(character) < 0x20 or ord(character) == 0x7f for character in value):
+        raise SupervisorRefused("MANAGED_PROMPT_VALUE_UNSAFE")
+
+
 def _managed_gsd_prompt(prompt_command: str, *, dispatch_doc, dispatch_script,
                         planning_root: str, project: str | None) -> str:
+    _assert_managed_prompt_value_safe(planning_root)
+    _assert_managed_prompt_value_safe(project)
     return (
         prompt_command
         + "\n\nThis is an FFS managed recovery workspace. Preserve the no-commit rule: "
@@ -3132,12 +3140,31 @@ _MANAGED_FRONTEND_STAGED_COMMAND: dict[str, str] = {
 _DISPATCH_DOC_RELATIVE = Path("gsd-core") / "workflows" / "execute-phase" / "steps" / "executor-isolation-dispatch.md"
 _DISPATCH_SCRIPT_RELATIVE = Path("gsd-core") / "bin" / "ffs-supervised-dispatch.cjs"
 
+# feature-implement's usage block (skills/feature-implement/SKILL.md) and
+# task-swarm's (skills/task-swarm/SKILL.md) each list flags an operator can
+# put in their free-text invocation. Of those, only these two change what
+# actually runs: --dry-run prints a plan and executes nothing, and
+# --adhoc (feature-implement only) routes to /gsd-quick instead of a phase
+# scope at all. gsd-execute-phase <scope> below cannot honor either, so a
+# whole-token match refuses instead of silently running for real. The
+# remaining flags (--autonomous, --gated, --attended, --no-swarm) only shape
+# operator gating around the SAME staged command and stay unaffected.
+_MANAGED_FRONTEND_MODE_FLAGS = frozenset({"--dry-run", "--adhoc"})
+
 
 def _managed_prompt(root, operation, command, *, staged_runtime_home, planning_root: str,
-                    project: str | None, planning_scope: str) -> tuple[tuple[str, ...], str, str]:
+                    project: str | None, workstream: str | None,
+                    planning_scope: str) -> tuple[tuple[str, ...], str, str]:
     """Return ``(invocation, prompt, role)`` for a managed host command."""
     from run_state.prelaunch_inventory import is_valid_phase_scope
 
+    # The qualified host process env strips every FFS_*/GSD_* var (this
+    # module's three env-sanitization sites) and the required-key allowlist
+    # never carries GSD_PROJECT/GSD_WORKSTREAM, so a non-default project or
+    # workstream can never actually reach the host: it would only ever be
+    # prompt prose the executor has no way to honor. Fail closed instead.
+    if project is not None or workstream is not None:
+        raise SupervisorRefused("MANAGED_PROJECT_SCOPE_UNSUPPORTED")
     invocation = tuple(command)
     if len(invocation) == 1 and invocation[0] in {
         "feature-spec", "feature-implement", "fix", "code-uplift", "task-swarm",
@@ -3149,6 +3176,8 @@ def _managed_prompt(root, operation, command, *, staged_runtime_home, planning_r
                 raise SupervisorRefused("MANAGED_COMMAND_CONTEXT_CONFLICT") from None
             if not isinstance(invocation_text, str):
                 raise SupervisorRefused("MANAGED_COMMAND_CONTEXT_CONFLICT")
+            if _MANAGED_FRONTEND_MODE_FLAGS.intersection(invocation_text.split()):
+                raise SupervisorRefused("MANAGED_FRONTEND_MODE_UNSUPPORTED")
         staged_command = _MANAGED_FRONTEND_STAGED_COMMAND.get(invocation[0])
         if staged_command is None:
             raise SupervisorRefused("MANAGED_FRONTEND_COMMAND_UNSTAGED")
@@ -3294,7 +3323,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     invocation, prompt, role = _managed_prompt(
         root, operation, command, staged_runtime_home=outer_home,
         planning_root=planning_root, project=upstream.get("project"),
-        planning_scope=token.planning_scope,
+        workstream=upstream.get("workstream"), planning_scope=token.planning_scope,
     )
 
     socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()

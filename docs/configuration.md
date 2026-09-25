@@ -238,13 +238,22 @@ It is **off by default**, and nothing in a normal install turns it on. It is
 proven on fixture hosts and one operator smoke test only. No native host
 qualification has run, so treat it as experimental. Known limits today:
 
-- `/feature-spec`, `/fix`, and `/code-uplift` have no plan yet when they
-  start, so they refuse `PRELAUNCH_PHASE_SCOPE_REQUIRED`.
+- `/feature-spec`, `/fix`, and `/code-uplift` have no staged `gsd-*` command
+  mapping yet (the private host runtime stages only `gsd-*` skills,
+  `lib/run_state/runtime_staging.py:25`), so they refuse
+  `MANAGED_FRONTEND_COMMAND_UNSTAGED`.
+- `/feature-implement` and `/task-swarm` map to `$gsd-execute-phase <scope>`,
+  where `<scope>` is the frontend's already-selected planning scope
+  (`frontend-start --scope`). No scope refuses `PRELAUNCH_PHASE_SCOPE_REQUIRED`
+  before any staging. The operator's invocation text is parsed once, only to
+  catch a malformed operation payload and to refuse a mode flag
+  (`--dry-run` or `--adhoc`) the mapped command cannot honor
+  (`MANAGED_FRONTEND_MODE_UNSUPPORTED`); it is never forwarded to the
+  executor, as a command argument or otherwise. A non-default project or
+  workstream never reaches the qualified host process env, so it refuses
+  `MANAGED_PROJECT_SCOPE_UNSUPPORTED` instead of silently running unscoped.
 - A run cannot resume after its real outer launch. A replay refuses instead
   (see the refusals below).
-- The private host runtime stages only `gsd-*` skills
-  (`lib/run_state/runtime_staging.py:25`), so a managed frontend prompt that
-  names a non-GSD skill such as `$task-swarm` cannot load it.
 - A failed mapped check has no repair producer yet. It hands back and refuses
   `RECOVERY_PRODUCER_UNAVAILABLE`.
 
@@ -297,6 +306,11 @@ managed run, the recovery action depends on the code:
 | `INTENT_RECONCILIATION_REQUIRED` | A launch under this request key has not settled; only owner-fence reconciliation may settle it | `reconcile_intent` |
 | `RETAINED_RUNTIME_NOT_REUSABLE` | The retained outer runtime cannot be resumed, and no outer launch ran under it | `resume_with_new_request_key` |
 | `CHILD_RUNTIME_NOT_REUSABLE` | A wave child or final-reviewer runtime cannot be resumed. A new key would start a new outer run | `inspect_retained_child` |
+| `MANAGED_FRONTEND_COMMAND_UNSTAGED` | `feature-spec`/`fix`/`code-uplift` have no staged `gsd-*` command mapping yet; only `feature-implement` and `task-swarm` do | `select_a_staged_frontend` |
+| `PRELAUNCH_PHASE_SCOPE_REQUIRED` | The frontend has no selected planning scope (`frontend-start --scope`) to stage as the command argument | `supply_a_phase_scope` |
+| `PRELAUNCH_PLAN_PATH_UNSAFE` | The persisted upstream planning root could not be rebased onto this run's prepared workspace | `reconcile_upstream_binding` |
+| `MANAGED_FRONTEND_MODE_UNSUPPORTED` | The invocation text names a mode (`--dry-run` or `--adhoc`) the staged `gsd-execute-phase` command cannot honor | `drop_the_unsupported_mode_flag` |
+| `MANAGED_PROJECT_SCOPE_UNSUPPORTED` | A non-default project or workstream never reaches the qualified host process env, so it cannot be honored | `use_the_default_project` |
 | any other supervisor code, e.g. `HOST_CAPABILITY_UNQUALIFIED`, `WAVE_EXECUTION_UNPROVEN` | The selected host backend has not demonstrated managed admission | `qualify_host_adapter` |
 | a policy code, e.g. `FRONTEND_CHECK_CANDIDATE_STALE` | The managed run policy refused the transition | `correct_request` |
 

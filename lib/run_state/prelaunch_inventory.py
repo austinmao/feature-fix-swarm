@@ -171,7 +171,7 @@ def freeze_prelaunch_plan_inventory(store, token, preparation, *, activity_id, r
     return material, digest
 
 
-_PHASE_SCOPE = re.compile(r'\d+(?:\.\d+)*')
+_PHASE_SCOPE = re.compile(r'[0-9]+(?:\.[0-9]+)*')
 
 
 def is_valid_phase_scope(value: object) -> bool:
