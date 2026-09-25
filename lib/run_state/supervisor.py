@@ -3043,7 +3043,8 @@ def _managed_command_requires_wave_proof(invocation: tuple[str, ...]) -> bool | 
     return None
 
 
-def _managed_gsd_prompt(prompt_command: str) -> str:
+def _managed_gsd_prompt(prompt_command: str, *, dispatch_doc, dispatch_script,
+                        planning_root: str, project: str | None) -> str:
     return (
         prompt_command
         + "\n\nThis is an FFS managed recovery workspace. Preserve the no-commit rule: "
@@ -3051,8 +3052,8 @@ def _managed_gsd_prompt(prompt_command: str) -> str:
           "Return scoped patch and evidence outputs through the FFS supervisor. "
           "Do not start unmanaged agents or grandchildren. "
           "For every GSD executor wave, the FFS-supervised-process compatibility path is mandatory: "
-          "read its section in executor-isolation-dispatch.md, build one complete wave manifest, "
-          "and invoke ffs-supervised-dispatch.cjs. The outer orchestrator must never edit a plan's "
+          f"read its section in {dispatch_doc}, build one complete wave manifest, "
+          f"and invoke {dispatch_script}. The outer orchestrator must never edit a plan's "
           "declared target files itself or use GSD's inline/sequential fallback. If the adapter cannot "
           "run, report the capability failure without performing plan work. If the adapter command "
           "returns an in-progress session, poll that same session with empty write_stdin calls until "
@@ -3060,7 +3061,9 @@ def _managed_gsd_prompt(prompt_command: str) -> str:
           "adapter session is still running. The supervisor applies accepted patches before replying; "
           "do not apply them again. Treat .ffs-observer-tmp, .planning/.ffs-worker-channel, and "
           ".planning/.ffs-wave-requests as supervisor-owned: do not list, read, write, or summarize "
-          "their contents."
+          "their contents.\n\n"
+          f"Planning root: {planning_root}\n"
+          f"GSD project: {project if project is not None else '(default)'}"
     )
 
 
@@ -3108,7 +3111,22 @@ def run_managed_command(store, token, context, command, request_key,
     return drive_managed_session(store, token, context, session, acceptance_draft=acceptance_draft)
 
 
-def _managed_prompt(root, operation, command) -> tuple[tuple[str, ...], str, str]:
+# A bare frontend word (feature-spec, feature-implement, fix, code-uplift,
+# task-swarm) is never staged into the private Codex runtime -- only gsd-*
+# skills are (runtime_staging.py's manifest check). Each frontend's managed
+# lifecycle actually drives one of these staged commands for its already-
+# selected, already-planned scope; name that command instead (#F32).
+_MANAGED_FRONTEND_STAGED_COMMAND: dict[str, str] = {
+    "feature-implement": "gsd-execute-phase",
+    "task-swarm": "gsd-execute-phase",
+    "feature-spec": "gsd-plan-phase",
+    "fix": "gsd-plan-phase",
+    "code-uplift": "gsd-code-review",
+}
+
+
+def _managed_prompt(root, operation, command, *, staged_codex_home, planning_root: str,
+                    project: str | None) -> tuple[tuple[str, ...], str, str]:
     """Return ``(invocation, prompt, role)`` for a managed host command."""
     invocation = tuple(command)
     if len(invocation) == 1 and invocation[0] in {
@@ -3120,7 +3138,10 @@ def _managed_prompt(root, operation, command) -> tuple[tuple[str, ...], str, str
                 invocation_text = json.loads(operation)["data"]["invocation_text"]
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 raise SupervisorRefused("MANAGED_COMMAND_CONTEXT_CONFLICT") from None
-        prompt_command = "$" + invocation[0]
+        staged_command = _MANAGED_FRONTEND_STAGED_COMMAND.get(invocation[0])
+        if staged_command is None:
+            raise SupervisorRefused("MANAGED_FRONTEND_COMMAND_UNSTAGED")
+        prompt_command = "$" + staged_command
         if invocation_text:
             prompt_command += " " + invocation_text
     else:
@@ -3128,7 +3149,14 @@ def _managed_prompt(root, operation, command) -> tuple[tuple[str, ...], str, str
         prompt_command = ("$" + head[1:] if head.startswith("/") else head) + (
             " " + " ".join(invocation[1:]) if len(invocation) > 1 else ""
         )
-    return invocation, _managed_gsd_prompt(prompt_command), "reviewer" if root["kind"] == "review" else "worker"
+    staged_codex_home = Path(staged_codex_home)
+    dispatch_doc = staged_codex_home / "gsd-core" / "workflows" / "execute-phase" / "steps" / "executor-isolation-dispatch.md"
+    dispatch_script = staged_codex_home / "gsd-core" / "bin" / "ffs-supervised-dispatch.cjs"
+    prompt = _managed_gsd_prompt(
+        prompt_command, dispatch_doc=dispatch_doc, dispatch_script=dispatch_script,
+        planning_root=planning_root, project=project,
+    )
+    return invocation, prompt, "reviewer" if root["kind"] == "review" else "worker"
 
 
 def _managed_inventory_workspace(store, token, context, request_key, *, workspace_api=None):
@@ -3228,7 +3256,6 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     import tempfile
 
     root, operation, child_key, ready = _managed_inventory_workspace(store, token, context, request_key)
-    invocation, prompt, role = _managed_prompt(root, operation, command)
     socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
     channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
     host_evidence = Path(context.evidence_root) / "host"
@@ -3329,6 +3356,12 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
     except (CapabilityError, OSError, ValueError) as error:
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
+    upstream = getattr(context, "upstream", None) or {}
+    planning_root = upstream.get("planning_root") or str(ready.path / ".planning")
+    invocation, prompt, role = _managed_prompt(
+        root, operation, command, staged_codex_home=outer_home,
+        planning_root=planning_root, project=upstream.get("project"),
+    )
     contract_material = {
         "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),

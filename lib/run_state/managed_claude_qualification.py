@@ -253,9 +253,16 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
             "begin_child_workspace_preparation": begin_child_workspace_preparation,
             "prepare_workspace": prepare_workspace, "inspect_workspace": inspect_workspace,
         })
-    invocation, prompt, role = _managed_prompt(root, operation, command)
     host_evidence = Path(context.evidence_root) / "host"
     host_evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
+                                                 child_key=child_key) or str(uuid.uuid4()))
+    upstream = getattr(context, "upstream", None) or {}
+    invocation, prompt, role = _managed_prompt(
+        root, operation, command, staged_codex_home=host_evidence / "runtimes" / outer_activity_id,
+        planning_root=upstream.get("planning_root") or str(ready.path / ".planning"),
+        project=upstream.get("project"),
+    )
     bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
     if bridge.is_symlink() or not bridge.is_file():
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
@@ -324,8 +331,6 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
         finish_timeout=host_request.timeout_seconds,
     )
     channel.attach_wave_consumer(wave_consumer)
-    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
-                                                 child_key=child_key) or str(uuid.uuid4()))
     stage_identity = hashlib.sha256((str(ready.path) + host_request.model).encode()).hexdigest()
     contract = _digest({"schema": "ffs.managed-claude-contract/v1", "command": list(invocation),
                         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
