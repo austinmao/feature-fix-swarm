@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -152,8 +153,11 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
         "claude-opus-5", None, "workspace-write", False, 23, 60,
     )
     token = SimpleNamespace(repository_id="repo", run_id="run", generation=1, planning_scope="1")
-    context = SimpleNamespace(activity_id="parent", evidence_root=tmp_path / "evidence",
-                              upstream={"project": None, "workstream": None, "session_key": None})
+    context = SimpleNamespace(
+        activity_id="parent", evidence_root=tmp_path / "evidence", workspace=str(tmp_path / "root-workspace"),
+        upstream={"project": None, "workstream": None, "session_key": None,
+                  "planning_root": str(tmp_path / "root-workspace" / ".planning")},
+    )
     assert managed.run_managed_claude_command(
         Store(), token, context, ("/gsd-execute-phase", "1"), "request", request,
     ) == 0
@@ -178,8 +182,11 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
 # (ACCEPTANCE_DRAFT_REQUIRED); the direct execute-phase command still proves the wave rule.
 @pytest.mark.parametrize(("command", "operation_payload", "expected_command", "expected_code"), [
     (("/gsd-execute-phase", "1"), None, "$gsd-execute-phase 1", "WAVE_EXECUTION_UNPROVEN"),
-    (("feature-implement",), json.dumps({"data": {"invocation_text": "014 --autonomous"}}),
-     "$feature-implement 014 --autonomous", "ACCEPTANCE_DRAFT_REQUIRED"),
+    # The staged command's argument is the real planning scope
+    # (token.planning_scope, set to "1" below); invocation_text never enters
+    # the prompt (#F32 review defect 5), so it no longer shapes expected_command.
+    (("feature-implement",), json.dumps({"data": {"invocation_text": "add --version flag"}}),
+     "$gsd-execute-phase 1", "ACCEPTANCE_DRAFT_REQUIRED"),
 ])
 def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requested(
     tmp_path, monkeypatch, command, operation_payload, expected_command, expected_code,
@@ -312,8 +319,11 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
         "claude-opus-5", None, "workspace-write", False, 23, 60,
     )
     token = SimpleNamespace(repository_id="repo", run_id="run", generation=1, planning_scope="1")
-    context = SimpleNamespace(activity_id="parent", evidence_root=tmp_path / "evidence",
-                              upstream={"project": None, "workstream": None, "session_key": None})
+    context = SimpleNamespace(
+        activity_id="parent", evidence_root=tmp_path / "evidence", workspace=str(tmp_path / "root-workspace"),
+        upstream={"project": None, "workstream": None, "session_key": None,
+                  "planning_root": str(tmp_path / "root-workspace" / ".planning")},
+    )
     store = Store()
     with pytest.raises(managed.SupervisorRefused, match=expected_code):
         managed.run_managed_claude_command(
@@ -325,3 +335,118 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
     assert store.transitions[-1][1]["new"] == "failed"
     assert store.transitions[-1][1]["reason"] == "GSD execution returned without supervised wave evidence"
     assert prompts[0].startswith(expected_command + "\n\n")
+
+
+def test_managed_claude_outer_prompt_for_task_swarm_names_staged_command_under_the_real_staged_home(
+    tmp_path, monkeypatch,
+):
+    """#F32 review defect 4: the Claude-host outer prompt for a bare frontend
+    word (task-swarm/feature-implement) was untested. Capture it directly via
+    prepare_outer() -- no wave/execute machinery needed -- and prove the
+    dispatch doc/script paths sit under the SAME directory
+    qualify_managed_claude_runtime actually stages the runtime into."""
+    from run_state.supervisor import _DISPATCH_DOC_RELATIVE, _DISPATCH_SCRIPT_RELATIVE
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ready = SimpleNamespace(
+        id="outer-workspace", parent_activity_id="parent", child_request_key="managed-host:request",
+        ready=True, path=workspace, input_digest="a" * 64, base_commit="b" * 40,
+    )
+
+    class Transaction:
+        def execute(self, sql, *_args):
+            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt",
+                                                  "runtime_identity FROM authority_child_bindings",
+                                                  "idempotency_key='frontend-operation'")):
+                return SimpleNamespace(fetchone=lambda: None)
+            return SimpleNamespace(fetchone=lambda: {"state": "ready", "kind": "execute"})
+
+    class Store:
+        def get_run_policy_budget(self, **_kwargs):
+            return None
+
+        @contextmanager
+        def read_transaction(self):
+            yield Transaction()
+
+        def runtime_tuple_hash(self, runtime):
+            return "runtime:" + getattr(runtime, "marker", runtime)
+
+    class Channel:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            return None
+
+        def attach_wave_consumer(self, _consumer):
+            return None
+
+    class Supervisor:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class WaveConsumer:
+        def __init__(self, _supervisor, _prepare_child, *, finish_timeout):
+            pass
+
+    staged_homes = []
+
+    def qualify(_store, _token, *, activity_id, activity_request_key, parent_activity_id,
+                workspace, host_request, role, evidence_root, final_contract_hash,
+                supervisor, bridge_command):
+        del host_request, supervisor, bridge_command
+        staged_homes.append(Path(evidence_root) / "runtimes" / activity_id)
+        qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
+        return (
+            SimpleNamespace(id=activity_id, state="active"), qualified,
+            SimpleNamespace(receipt_sha256="receipt:" + activity_id), tmp_path / activity_id,
+            SimpleNamespace(),
+        )
+
+    class Adapter:
+        def __init__(self, _qualified, _binary, _version):
+            pass
+
+        def build_launch_material(self, prompt, *, attempt, session_id, gsd_environment):
+            assert attempt == 1 and session_id and gsd_environment is not None
+            return SimpleNamespace(argv=("claude", prompt))
+
+    monkeypatch.setattr(managed, "_from_row", lambda _row: SimpleNamespace(
+        base_commit="b" * 40, repository_path=workspace,
+    ))
+    monkeypatch.setattr(managed, "load_input_snapshot", lambda *_args: SimpleNamespace(manifest={}))
+    monkeypatch.setattr(managed, "_verify_snapshot_complete", lambda *_args: None)
+    monkeypatch.setattr(managed, "begin_child_workspace_preparation", lambda *_args, **_kwargs: ready)
+    monkeypatch.setattr(managed, "prepare_workspace", lambda *_args, **_kwargs: ready)
+    monkeypatch.setattr(managed, "WorkerChannelServer", Channel)
+    monkeypatch.setattr(managed, "Supervisor", Supervisor)
+    monkeypatch.setattr(managed, "WaveConsumer", WaveConsumer)
+    monkeypatch.setattr(managed, "qualify_managed_claude_runtime", qualify)
+    monkeypatch.setattr(managed, "ClaudeHostAdapter", Adapter)
+
+    request = ClaudeHostRequest(
+        str(tmp_path / "candidate"), str(tmp_path / "credential"), str(tmp_path / "claude"),
+        "claude-opus-5", None, "workspace-write", False, 23, 60,
+    )
+    root_workspace = tmp_path / "root-workspace"
+    token = SimpleNamespace(repository_id="repo", run_id="run", generation=1, planning_scope="03")
+    context = SimpleNamespace(
+        activity_id="parent", evidence_root=tmp_path / "evidence", workspace=str(root_workspace),
+        upstream={"project": None, "workstream": None, "session_key": None,
+                  "planning_root": str(root_workspace / ".planning")},
+    )
+
+    session = managed.prepare_managed_claude_session(
+        Store(), token, context, ("task-swarm",), "request", request,
+    )
+    dispatch_request, _adapter = session.prepare_outer()
+    prompt = dispatch_request.claude_material.argv[-1]
+
+    assert prompt.split("\n", 1)[0] == "$gsd-execute-phase 03"
+    assert f"Planning root: {workspace}/.planning" in prompt
+    assert len(staged_homes) == 1
+    staged_home = staged_homes[0]
+    assert str(staged_home / _DISPATCH_DOC_RELATIVE) in prompt
+    assert str(staged_home / _DISPATCH_SCRIPT_RELATIVE) in prompt

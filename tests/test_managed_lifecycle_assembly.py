@@ -387,19 +387,53 @@ def test_failed_sealed_check_without_a_repair_producer_hands_back_and_refuses_tr
     assert (again.stage, again.outer, again.native, again.actions) == ("RECOVER", 1, 0, {"execute": 1})
 
 
+def _spy_ffs_worker_mkdtemp(monkeypatch) -> list:
+    """Track ffs-worker-* mkdtemp calls without diffing the shared, session-wide
+    /tmp directory (other tests' own worker dirs make that comparison flaky)."""
+    import tempfile as tempfile_module
+
+    calls = []
+    real_mkdtemp = tempfile_module.mkdtemp
+
+    def spy(*args, **kwargs):
+        if kwargs.get("prefix") == "ffs-worker-":
+            calls.append(kwargs)
+        return real_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile_module, "mkdtemp", spy)
+    return calls
+
+
+def _assert_no_outer_staging_leak(authority, repository_id, run_id, mkdtemp_calls):
+    """Naming the staged command is pure: a refusal from it must never leak a
+    /tmp worker-channel dir or a staged runtime copy (which includes an auth
+    copy). This is the discriminating check (#F32 review defect 2/3) -- a
+    refusal that instead comes from staging AFTER those allocations, or from
+    the later select_active_phase check, would fail one of these."""
+    from run_context import resolve_evidence
+
+    evidence_root = resolve_evidence(authority, run_id, repository_id)
+    assert not (evidence_root / "host" / "runtimes").exists()
+    assert mkdtemp_calls == []
+
+
 def test_execute_frontend_without_a_phase_scope_refuses_before_any_outer_launch(tmp_path, monkeypatch, capsys):
     # feature-spec/fix/code-uplift are permanently unstaged (#F32 defect 3) and
     # refuse as MANAGED_FRONTEND_COMMAND_UNSTAGED regardless of scope; only a
     # still-staged execute-family frontend (task-swarm/feature-implement)
-    # exercises the scope-required refusal.
+    # exercises the scope-required refusal. Assert it refuses BEFORE staging
+    # (not from the later select_active_phase check) so a disabled guard
+    # would fail this test, not silently pass it.
     primary, authority, repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
     runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
     draft = _draft(tmp_path)
+    mkdtemp_calls = _spy_ffs_worker_mkdtemp(monkeypatch)
     result = _frontend_start(env, authority, "fx", runtime, fake, catalog, draft, "task-swarm")
     assert result == 78 and _last_code(capsys) == "PRELAUNCH_PHASE_SCOPE_REQUIRED"
     facts = _facts(authority, repository_id, "fx")
     assert facts.outer == 0 and facts.native == 0 and facts.actions == {}
+    _assert_no_outer_staging_leak(authority, repository_id, "fx", mkdtemp_calls)
 
 
 def test_deferred_frontend_refuses_as_unstaged_before_any_outer_launch(tmp_path, monkeypatch, capsys):
@@ -407,17 +441,24 @@ def test_deferred_frontend_refuses_as_unstaged_before_any_outer_launch(tmp_path,
     monkeypatch.chdir(primary)
     runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
     draft = _draft(tmp_path)
+    mkdtemp_calls = _spy_ffs_worker_mkdtemp(monkeypatch)
     result = _frontend_start(env, authority, "df", runtime, fake, catalog, draft, "fix")
     assert result == 78 and _last_code(capsys) == "MANAGED_FRONTEND_COMMAND_UNSTAGED"
     facts = _facts(authority, repository_id, "df")
     assert facts.outer == 0 and facts.native == 0 and facts.actions == {}
+    _assert_no_outer_staging_leak(authority, repository_id, "df", mkdtemp_calls)
 
 
-def test_frontend_prompt_names_staged_command_with_real_scope_and_project(tmp_path, monkeypatch):
-    """Call-site proof (#F32 defects 1-2): the real token.planning_scope and
-    context.upstream['project'] -- not the operator's invocation text or a
-    getattr fallback -- reach the prompt through the real
-    prepare_managed_codex_session wiring."""
+def test_frontend_prompt_names_staged_command_with_real_scope_project_and_rebased_planning_root(
+    tmp_path, monkeypatch,
+):
+    """Call-site proof (#F32 review defects 1, 2, 5): the real
+    token.planning_scope and context.upstream['project'] reach the prompt
+    through the real prepare_managed_codex_session wiring; the planning root
+    is rebased onto the workspace the outer process actually runs in
+    (request.workspace, an isolated .ffs-children/<id>-style directory --
+    never the root run workspace's absolute upstream['planning_root'] as-is,
+    and never the operator's free-text invocation_text)."""
     import run_state.frontend_producers as frontend_producers
 
     primary, authority, _repository_id, env = _setup(tmp_path)
@@ -430,6 +471,7 @@ def test_frontend_prompt_names_staged_command_with_real_scope_and_project(tmp_pa
     def capture_drive(store, token, context, session, *, acceptance_draft=None):
         request, _adapter = session.prepare_outer()
         captured["prompt"] = request.codex_material.argv[-1]
+        captured["workspace"] = request.workspace
         session.close(None, None, None)
         return 0
 
@@ -443,9 +485,15 @@ def test_frontend_prompt_names_staged_command_with_real_scope_and_project(tmp_pa
     prompt = captured["prompt"]
     command_line = prompt.split("\n", 1)[0]
     assert command_line == "$gsd-execute-phase 03"
-    assert "add --version flag" not in command_line
-    assert "Operator request: add --version flag" in prompt
+    # The operator's invocation text never enters the prompt anywhere (#F32
+    # review defect 5) -- not as a command argument, not on any other line.
+    assert "add --version flag" not in prompt
     assert "GSD project: demo-project" in prompt
+    # The prompt's workspace is the isolated child the outer process actually
+    # runs in (never the primary/root checkout), and the planning root line
+    # is that same workspace rebased with project (#F32 review defect 1).
+    assert captured["workspace"] != str(primary)
+    assert f"Planning root: {captured['workspace']}/.planning/demo-project" in prompt
 
 
 def test_legacy_managed_start_without_a_seal_executes_once_as_before(tmp_path, monkeypatch):
