@@ -8,6 +8,31 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-25, spec-014 Release C: F34 managed project/workstream scope)
+
+- A managed run bound to a non-default GSD project or workstream now
+  propagates that scope to the qualified host process as `GSD_PROJECT` /
+  `GSD_WORKSTREAM`, through the same closed GSD environment addition set
+  used for `GSD_DISPATCH_MODE` and the other supervised-dispatch
+  variables. Before, the scope only appeared as prompt prose the host had
+  no way to honor, and every non-default run refused
+  `MANAGED_PROJECT_SCOPE_UNSUPPORTED`; that refusal is retired.
+- Each scope value is still validated against the resolver's own segment
+  rule (plain ASCII, no path separators, no `..`, at most 160 bytes)
+  before it reaches the prompt or the host environment, refusing
+  `MANAGED_PROMPT_VALUE_UNSAFE` for an unsafe one.
+- `rebase_planning_root` now refuses `PRELAUNCH_PLAN_PATH_UNSAFE` when the
+  persisted planning root's relative path is inconsistent with the
+  upstream project/workstream fields, instead of silently rebasing a
+  scope the env and the frozen plan inventory would otherwise disagree
+  about.
+- Selecting the active phase under an unknown scoped project now refuses
+  `PRELAUNCH_PLAN_PATH_UNSAFE` instead of letting a raw
+  `FileNotFoundError` escape.
+- The default (unscoped) run stays byte-identical: the closed GSD addition
+  set's keys, its qualification preparation digest, and its policy hash
+  are unchanged when no project or workstream is set.
+
 ### Fixed (2026-09-25, spec-014 Release C: F25 admission wedge and reconcile CLI)
 
 - A legacy (writer_version=1) managed admission row kept try_admit's
