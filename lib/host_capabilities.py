@@ -66,6 +66,33 @@ _GSD_ENVIRONMENT = {
 }
 _GSD_DISPATCH_MODE = "ffs-supervised-process"
 _GSD_COMMIT_MODE = "patches"
+# F34: the sealed upstream project/workstream, propagated to the host through
+# this same closed addition set. Optional -- present only when non-default.
+_GSD_SCOPE_ENVIRONMENT = {"GSD_PROJECT", "GSD_WORKSTREAM"}
+# The resolver's segment rule (lib/run_state/upstream.py's _UPSTREAM_SEGMENT),
+# copied here because this module cannot import run_state (layering, see the
+# model_requests/process_identity imports above). A parity test
+# (tests/test_m4_upstream_segment_compatibility.py) pins the two copies
+# together. The resolver's rule alone permits ".." (it is only a charset
+# regex); the bridge (upstream_bridge.cjs's isSegment) and GSD itself
+# (planning-workspace.cjs) separately ban it, so this copies both.
+_GSD_SCOPE_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _closed_gsd_keys(keys) -> bool:
+    """True when ``keys`` is exactly the 4 required GSD addition keys, plus
+    zero or more of the 2 optional GSD_PROJECT/GSD_WORKSTREAM scope keys."""
+    keys = frozenset(keys)
+    return _GSD_ENVIRONMENT <= keys <= _GSD_ENVIRONMENT | _GSD_SCOPE_ENVIRONMENT
+
+
+def _validate_gsd_scope_segment(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    if (not isinstance(value, str) or not value or len(value.encode("utf-8")) > 160
+            or ".." in value or _GSD_SCOPE_SEGMENT.fullmatch(value) is None):
+        raise CapabilityError(f"GSD supervisor {label} is unsafe")
+    return value
 
 
 class CapabilityError(ValueError):
@@ -110,14 +137,24 @@ class GsdSupervisorEnvironment:
     commit_mode: str
     admission_file: str
     dispatch_command_json: str
+    # F34: the sealed upstream project/workstream. None means default scope;
+    # as_dict() emits GSD_PROJECT/GSD_WORKSTREAM only when non-None, so the
+    # default-scope addition set (and its policy hash) stays byte-identical.
+    project: str | None = None
+    workstream: str | None = None
 
     def as_dict(self) -> dict[str, str]:
-        return {
+        additions = {
             "GSD_DISPATCH_MODE": self.dispatch_mode,
             "FFS_SUPERVISED_COMMIT_MODE": self.commit_mode,
             "FFS_SUPERVISED_ADMISSION_FILE": self.admission_file,
             "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": self.dispatch_command_json,
         }
+        if self.project is not None:
+            additions["GSD_PROJECT"] = self.project
+        if self.workstream is not None:
+            additions["GSD_WORKSTREAM"] = self.workstream
+        return additions
 
 
 def _validate_gsd_command_json(value: object) -> str:
@@ -148,14 +185,15 @@ def _validate_gsd_command_json(value: object) -> str:
 
 
 def validate_gsd_supervisor_environment(value: object) -> GsdSupervisorEnvironment:
-    """Validate the exact four-variable GSD supervisor addition set."""
+    """Validate the closed GSD supervisor addition set: 4 required keys plus
+    an optional GSD_PROJECT and/or GSD_WORKSTREAM scope key."""
     if isinstance(value, GsdSupervisorEnvironment):
         values = value.as_dict()
     elif isinstance(value, dict):
         values = value
     else:
         raise CapabilityError("GSD supervisor environment additions are malformed")
-    if set(values) != _GSD_ENVIRONMENT or any(not isinstance(key, str) for key in values):
+    if not _closed_gsd_keys(values) or any(not isinstance(key, str) for key in values):
         raise CapabilityError("GSD supervisor environment additions are not closed")
     if values["GSD_DISPATCH_MODE"] != _GSD_DISPATCH_MODE:
         raise CapabilityError("GSD supervisor dispatch mode is unsupported")
@@ -167,7 +205,11 @@ def validate_gsd_supervisor_environment(value: object) -> GsdSupervisorEnvironme
         raise CapabilityError("GSD supervisor admission file must be absolute")
     _private_regular(Path(admission), "GSD supervisor admission file")
     command_json = _validate_gsd_command_json(values["FFS_SUPERVISED_DISPATCH_COMMAND_JSON"])
-    return GsdSupervisorEnvironment(_GSD_DISPATCH_MODE, _GSD_COMMIT_MODE, admission, command_json)
+    project = _validate_gsd_scope_segment(values.get("GSD_PROJECT"), "project")
+    workstream = _validate_gsd_scope_segment(values.get("GSD_WORKSTREAM"), "workstream")
+    return GsdSupervisorEnvironment(
+        _GSD_DISPATCH_MODE, _GSD_COMMIT_MODE, admission, command_json, project, workstream,
+    )
 
 
 def gsd_supervisor_environment_from_process() -> GsdSupervisorEnvironment | None:
@@ -211,8 +253,11 @@ def codex_closed_environment(home: Path, tmpdir: Path, binary: Path,
 
 def codex_environment_policy(environment: dict[str, str]) -> dict[str, str]:
     """Return the replay-stable policy envelope for a closed Codex environment."""
-    if (not isinstance(environment, dict)
-            or set(environment) not in (_CODEX_ENVIRONMENT, _CODEX_ENVIRONMENT | _GSD_ENVIRONMENT)
+    if not isinstance(environment, dict):
+        raise CapabilityError("Codex closed environment is malformed")
+    gsd_keys = set(environment) - _CODEX_ENVIRONMENT
+    if (not _CODEX_ENVIRONMENT <= set(environment)
+            or (gsd_keys and not _closed_gsd_keys(gsd_keys))
             or any(not isinstance(key, str) or not isinstance(value, str)
                    for key, value in environment.items())):
         raise CapabilityError("Codex closed environment is malformed")
@@ -226,7 +271,7 @@ def codex_environment_policy(environment: dict[str, str]) -> dict[str, str]:
     policy = dict(environment)
     policy["TMPDIR"] = str(Path(environment["TMPDIR"]).resolve().parent)
     if _GSD_ENVIRONMENT.issubset(policy):
-        additions = validate_gsd_supervisor_environment({key: policy[key] for key in _GSD_ENVIRONMENT})
+        additions = validate_gsd_supervisor_environment({key: policy[key] for key in gsd_keys})
         policy["FFS_SUPERVISED_ADMISSION_FILE"] = str(
             Path(additions.admission_file).resolve().parent / "<admission>"
         )
@@ -245,11 +290,14 @@ def preview_gsd_codex_environment_policy_hash(environment: dict[str, str]) -> st
     other closed value are validated now; callers must compare this preview to
     ``codex_environment_policy_hash`` immediately after immutable publication.
     """
-    if not isinstance(environment, dict) or set(environment) != _CODEX_ENVIRONMENT | _GSD_ENVIRONMENT:
+    if not isinstance(environment, dict):
+        raise CapabilityError("Codex closed environment is malformed")
+    gsd_keys = set(environment) - _CODEX_ENVIRONMENT
+    if not _CODEX_ENVIRONMENT <= set(environment) or not _closed_gsd_keys(gsd_keys):
         raise CapabilityError("Codex closed environment is malformed")
     base = {key: environment[key] for key in _CODEX_ENVIRONMENT}
     policy = codex_environment_policy(base)
-    additions = {key: environment[key] for key in _GSD_ENVIRONMENT}
+    additions = {key: environment[key] for key in gsd_keys}
     if additions.get("GSD_DISPATCH_MODE") != _GSD_DISPATCH_MODE:
         raise CapabilityError("GSD supervisor dispatch mode is unsupported")
     if additions.get("FFS_SUPERVISED_COMMIT_MODE") != _GSD_COMMIT_MODE:
@@ -260,6 +308,8 @@ def preview_gsd_codex_environment_policy_hash(environment: dict[str, str]) -> st
     additions["FFS_SUPERVISED_DISPATCH_COMMAND_JSON"] = _validate_gsd_command_json(
         additions.get("FFS_SUPERVISED_DISPATCH_COMMAND_JSON")
     )
+    _validate_gsd_scope_segment(additions.get("GSD_PROJECT"), "project")
+    _validate_gsd_scope_segment(additions.get("GSD_WORKSTREAM"), "workstream")
     policy.update(additions)
     policy["FFS_SUPERVISED_ADMISSION_FILE"] = str(Path(admission).resolve().parent / "<admission>")
     return closed_environment_hash(policy)

@@ -14,7 +14,7 @@ from typing import Final
 import uuid
 
 from host_capabilities import (
-    CapabilityError, GsdSupervisorEnvironment, _binary_chain,
+    CapabilityError, GsdSupervisorEnvironment, _binary_chain, _closed_gsd_keys,
     gsd_supervisor_environment_from_process, validate_gsd_supervisor_environment,
 )
 from model_requests import ModelRequestError, resolve_request
@@ -206,7 +206,8 @@ def claude_closed_environment(home: Path, tmpdir: Path, binary: Path,
 
 
 def claude_environment_policy(environment: dict[str, str], *, preview: bool = False) -> dict[str, str]:
-    allowed = _BASE_ENVIRONMENT | (_GSD_ENVIRONMENT if _GSD_ENVIRONMENT.issubset(environment) else frozenset())
+    gsd_keys = set(environment) - _BASE_ENVIRONMENT
+    allowed = _BASE_ENVIRONMENT | (gsd_keys if _closed_gsd_keys(gsd_keys) else frozenset())
     if set(environment) != allowed or any(not isinstance(value, str) for value in environment.values()):
         raise ClaudeHostRefused("CLAUDE_ENVIRONMENT_INVALID")
     for key in ("HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"):
@@ -215,7 +216,7 @@ def claude_environment_policy(environment: dict[str, str], *, preview: bool = Fa
     policy = dict(environment)
     policy["TMPDIR"] = str(Path(environment["TMPDIR"]).resolve().parent / "<invocation>")
     if _GSD_ENVIRONMENT.issubset(policy):
-        additions = {key: policy[key] for key in _GSD_ENVIRONMENT}
+        additions = {key: policy[key] for key in gsd_keys}
         if preview:
             admission = Path(additions["FFS_SUPERVISED_ADMISSION_FILE"])
             if not admission.is_absolute():

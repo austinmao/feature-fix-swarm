@@ -205,6 +205,17 @@ def rebase_planning_root(upstream: object, *, root_workspace: str, preparation_p
         raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE') from error
     if not relative.parts or '..' in relative.parts:
         raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE')
+    # F34: the env naming one scope while the inventory freezes another is
+    # refused here -- the relative planning path must be exactly what GSD
+    # derives from upstream['project']/['workstream'].
+    expected = Path('.planning')
+    project, workstream = upstream.get('project'), upstream.get('workstream')
+    if project is not None:
+        expected = expected / project
+    if workstream is not None:
+        expected = expected / 'workstreams' / workstream
+    if relative != expected:
+        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE')
     return Path(preparation_path) / relative
 
 
@@ -213,7 +224,14 @@ def select_active_phase(runtime: UpstreamRuntime, phases_root: Path, phase_scope
     if not isinstance(runtime, UpstreamRuntime) or not is_valid_phase_scope(phase_scope):
         raise PrelaunchInventoryRefused('PRELAUNCH_PHASE_SCOPE_REQUIRED')
     runtime.verify()
-    if not phases_root.is_absolute() or phases_root.resolve(strict=True) != phases_root:
+    try:
+        unsafe = not phases_root.is_absolute() or phases_root.resolve(strict=True) != phases_root
+    except OSError as error:
+        # An unknown scoped project (upstream.py's resolver allows a missing
+        # leaf) resolves to a phases root that was never created. Map that
+        # to a typed refusal instead of letting FileNotFoundError escape.
+        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE') from error
+    if unsafe:
         raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE')
     descriptor = os.open(phases_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

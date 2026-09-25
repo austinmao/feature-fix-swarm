@@ -98,7 +98,7 @@ def qualify_managed_claude_runtime(
     store, token, *, activity_id: str, activity_request_key: str,
     parent_activity_id: str, workspace, host_request: ClaudeHostRequest,
     role: str, evidence_root: Path, final_contract_hash: str, supervisor,
-    bridge_command: str,
+    bridge_command: str, project: str | None = None, workstream: str | None = None,
 ):
     """Stage, fence four Claude probes, promote, then commit one exact receipt."""
     if (
@@ -124,6 +124,7 @@ def qualify_managed_claude_runtime(
             )
             additions = GsdSupervisorEnvironment(
                 "ffs-supervised-process", "patches", str(runtime / "supervisor-admission.json"), bridge_command,
+                project=project, workstream=workstream,
             )
             admission = Path(additions.admission_file)
             placeholder = {"schema": "ffs.supervisor-admission/v1", "available": True,
@@ -294,6 +295,7 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
                 host_request=host_request, role=child_role, evidence_root=host_evidence,
                 final_contract_hash=final_contract_hash, supervisor=supervisor,
                 bridge_command=bridge_command,
+                project=upstream.get("project"), workstream=upstream.get("workstream"),
             )
             observed_version = dict(qualified.observation).get("version")
             if observed_version != SUPPORTED_CLAUDE_VERSION:

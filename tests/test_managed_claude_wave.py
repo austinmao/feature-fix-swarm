@@ -108,8 +108,8 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
 
     def qualify(_store, _token, *, activity_id, activity_request_key, parent_activity_id,
                 workspace, host_request, role, evidence_root, final_contract_hash,
-                supervisor, bridge_command):
-        del host_request, evidence_root, supervisor, bridge_command
+                supervisor, bridge_command, project=None, workstream=None):
+        del host_request, evidence_root, supervisor, bridge_command, project, workstream
         qualification_calls.append({
             "activity_id": activity_id, "request_key": activity_request_key,
             "parent": parent_activity_id, "workspace": workspace, "role": role,
@@ -395,8 +395,8 @@ def test_managed_claude_outer_prompt_for_task_swarm_names_staged_command_under_t
 
     def qualify(_store, _token, *, activity_id, activity_request_key, parent_activity_id,
                 workspace, host_request, role, evidence_root, final_contract_hash,
-                supervisor, bridge_command):
-        del host_request, supervisor, bridge_command
+                supervisor, bridge_command, project=None, workstream=None):
+        del host_request, supervisor, bridge_command, project, workstream
         staged_homes.append(managed.claude_runtime_home(evidence_root, activity_id))
         qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
         return (

@@ -1230,11 +1230,11 @@ class Supervisor:
             raise SupervisorRefused("QUALIFICATION_MATERIAL_INVALID")
         required = {
             "HOME", "CODEX_HOME", "TMPDIR", "PATH", "LANG", "LC_ALL", "NO_COLOR",
-            "GSD_DISPATCH_MODE", "FFS_SUPERVISED_COMMIT_MODE",
-            "FFS_SUPERVISED_ADMISSION_FILE", "FFS_SUPERVISED_DISPATCH_COMMAND_JSON",
             "FFS_HOOK_OBSERVATION", "FFS_HOOK_NONCE",
         }
-        if (set(environment) != required
+        from host_capabilities import validate_gsd_supervisor_environment, CapabilityError, _closed_gsd_keys
+        gsd_keys = set(environment) - required
+        if (not required <= set(environment) or not _closed_gsd_keys(gsd_keys)
                 or any(not isinstance(key, str) or not isinstance(value, str) or "\0" in value
                        for key, value in environment.items())
                 or environment["HOME"] != material.runtime_home
@@ -1246,12 +1246,8 @@ class Supervisor:
                 or not tmpdir.is_absolute() or tmpdir.resolve().parent != cwd
                 or Path(environment["FFS_HOOK_OBSERVATION"]).parent != home):
             raise SupervisorRefused("QUALIFICATION_MATERIAL_INVALID")
-        from host_capabilities import validate_gsd_supervisor_environment, CapabilityError
         try:
-            validate_gsd_supervisor_environment({key: environment[key] for key in (
-                "GSD_DISPATCH_MODE", "FFS_SUPERVISED_COMMIT_MODE",
-                "FFS_SUPERVISED_ADMISSION_FILE", "FFS_SUPERVISED_DISPATCH_COMMAND_JSON",
-            )})
+            validate_gsd_supervisor_environment({key: environment[key] for key in gsd_keys})
         except CapabilityError as error:
             raise SupervisorRefused("QUALIFICATION_MATERIAL_INVALID") from error
         contract = {
@@ -3164,14 +3160,23 @@ def _managed_prompt(root, operation, command, *, staged_runtime_home, planning_r
                     planning_scope: str) -> tuple[tuple[str, ...], str, str]:
     """Return ``(invocation, prompt, role)`` for a managed host command."""
     from run_state.prelaunch_inventory import is_valid_phase_scope
+    from run_state.upstream import UpstreamRefused, _validate_segment
 
-    # The qualified host process env strips every FFS_*/GSD_* var (this
-    # module's three env-sanitization sites) and the required-key allowlist
-    # never carries GSD_PROJECT/GSD_WORKSTREAM, so a non-default project or
-    # workstream can never actually reach the host: it would only ever be
-    # prompt prose the executor has no way to honor. Fail closed instead.
-    if project is not None or workstream is not None:
-        raise SupervisorRefused("MANAGED_PROJECT_SCOPE_UNSUPPORTED")
+    # F34: the closed GSD env addition set (host_capabilities.
+    # GsdSupervisorEnvironment) now carries GSD_PROJECT/GSD_WORKSTREAM, so a
+    # non-default scope does reach the host process env. Validate each value
+    # against the resolver's own segment rule -- defense in depth against a
+    # scope value reaching this prompt from anywhere other than a
+    # freshly-validated binding (e.g. a sealed upstream row).
+    for value in (project, workstream):
+        if value is None:
+            continue
+        try:
+            _validate_segment(value, allow_none=False)
+        except UpstreamRefused:
+            raise SupervisorRefused("MANAGED_PROMPT_VALUE_UNSAFE") from None
+        if ".." in value:
+            raise SupervisorRefused("MANAGED_PROMPT_VALUE_UNSAFE")
     invocation = tuple(command)
     if len(invocation) == 1 and invocation[0] in {
         "feature-spec", "feature-implement", "fix", "code-uplift", "task-swarm",
@@ -3373,6 +3378,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             additions = GsdSupervisorEnvironment(
                 "ffs-supervised-process", "patches",
                 str(private_home / "supervisor-admission.json"), bridge_command,
+                project=upstream.get("project"), workstream=upstream.get("workstream"),
             )
             bundle = qualify_managed_runtime(
                 store, token, activity_id=activity_id,
