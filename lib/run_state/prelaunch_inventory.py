@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -170,11 +171,46 @@ def freeze_prelaunch_plan_inventory(store, token, preparation, *, activity_id, r
     return material, digest
 
 
+_PHASE_SCOPE = re.compile(r'[0-9]+(?:\.[0-9]+)*')
+
+
+def is_valid_phase_scope(value: object) -> bool:
+    """A plain GSD phase token: digits, optionally dot-segmented (e.g. "3" or "3.2.1").
+
+    Never whitespace, a flag (leading '-'), or free text -- the one shared
+    gate for every caller that stages this value as a command argument or a
+    phase-directory lookup key.
+    """
+    return isinstance(value, str) and _PHASE_SCOPE.fullmatch(value) is not None
+
+
+def rebase_planning_root(upstream: object, *, root_workspace: str, preparation_path: Path) -> Path:
+    """Rebase the durable, root-workspace-relative planning root onto a prepared workspace.
+
+    ``upstream['planning_root']`` (upstream.resolve_upstream_binding) is
+    always absolute under the ROOT run workspace. Every managed child
+    (inventory workspace, outer runtime, wave child) is a separate, isolated
+    directory holding the same selected files at the same relative paths --
+    so the planning root a live process actually needs is this same relative
+    path rebased onto that child's own prepared path, never the root
+    workspace's absolute string as-is, and never a fallback guess when it is
+    missing.
+    """
+    if not isinstance(upstream, dict) or not upstream.get('planning_root'):
+        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE')
+    planning = Path(upstream['planning_root'])
+    try:
+        relative = planning.relative_to(Path(root_workspace))
+    except ValueError as error:
+        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE') from error
+    if not relative.parts or '..' in relative.parts:
+        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE')
+    return Path(preparation_path) / relative
+
+
 def select_active_phase(runtime: UpstreamRuntime, phases_root: Path, phase_scope: str) -> Path:
     """Use the pinned GSD phase matcher over an anchored active-phase listing."""
-    import re
-    if (not isinstance(runtime, UpstreamRuntime) or not isinstance(phase_scope, str)
-            or re.fullmatch(r'\d+(?:\.\d+)*', phase_scope) is None):
+    if not isinstance(runtime, UpstreamRuntime) or not is_valid_phase_scope(phase_scope):
         raise PrelaunchInventoryRefused('PRELAUNCH_PHASE_SCOPE_REQUIRED')
     runtime.verify()
     if not phases_root.is_absolute() or phases_root.resolve(strict=True) != phases_root:
@@ -227,19 +263,15 @@ def freeze_managed_plan_inventory(store, token, context, preparation, *, activit
     upstream = context.upstream
     if (not isinstance(upstream, dict) or runtime.runtime_digest != upstream.get('runtime_digest')):
         raise PrelaunchInventoryRefused('UPSTREAM_RUNTIME_DRIFT')
-    planning = Path(upstream['planning_root'])
-    try:
-        relative = planning.relative_to(Path(context.workspace))
-    except ValueError as error:
-        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE') from error
-    if not relative.parts or '..' in relative.parts:
-        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE')
+    planning_root = rebase_planning_root(
+        upstream, root_workspace=context.workspace, preparation_path=preparation.path,
+    )
     with store.read_transaction() as tx:
         row = tx.execute('SELECT planning_scope FROM context_runs WHERE repository_id=? AND run_id=? AND activity_id=?',
             (token.repository_id, token.run_id, context.activity_id)).fetchone()
     if row is None:
         raise PrelaunchInventoryRefused('PRELAUNCH_PHASE_SCOPE_REQUIRED')
-    selected = select_active_phase(runtime, preparation.path / relative / 'phases', row['planning_scope'])
+    selected = select_active_phase(runtime, planning_root / 'phases', row['planning_scope'])
     return freeze_prelaunch_plan_inventory(store, token, preparation, activity_id=activity_id,
         runtime_identity=runtime_identity, runtime=runtime, phase_directory=selected,
         evidence_root=evidence_root, request_key=request_key)

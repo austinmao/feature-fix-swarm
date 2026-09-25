@@ -238,13 +238,22 @@ It is **off by default**, and nothing in a normal install turns it on. It is
 proven on fixture hosts and one operator smoke test only. No native host
 qualification has run, so treat it as experimental. Known limits today:
 
-- `/feature-spec`, `/fix`, and `/code-uplift` have no plan yet when they
-  start, so they refuse `PRELAUNCH_PHASE_SCOPE_REQUIRED`.
+- `/feature-spec`, `/fix`, and `/code-uplift` have no staged `gsd-*` command
+  mapping yet (the private host runtime stages only `gsd-*` skills,
+  `lib/run_state/runtime_staging.py:25`), so they refuse
+  `MANAGED_FRONTEND_COMMAND_UNSTAGED`.
+- `/feature-implement` and `/task-swarm` map to `$gsd-execute-phase <scope>`,
+  where `<scope>` is the frontend's already-selected planning scope
+  (`frontend-start --scope`). No scope refuses `PRELAUNCH_PHASE_SCOPE_REQUIRED`
+  before any staging. The operator's invocation text is parsed once, only to
+  catch a malformed operation payload and to refuse a mode flag
+  (`--dry-run` or `--adhoc`) the mapped command cannot honor
+  (`MANAGED_FRONTEND_MODE_UNSUPPORTED`); it is never forwarded to the
+  executor, as a command argument or otherwise. A non-default project or
+  workstream never reaches the qualified host process env, so it refuses
+  `MANAGED_PROJECT_SCOPE_UNSUPPORTED` instead of silently running unscoped.
 - A run cannot resume after its real outer launch. A replay refuses instead
   (see the refusals below).
-- The private host runtime stages only `gsd-*` skills
-  (`lib/run_state/runtime_staging.py:25`), so a managed frontend prompt that
-  names a non-GSD skill such as `$task-swarm` cannot load it.
 - A failed mapped check has no repair producer yet. It hands back and refuses
   `RECOVERY_PRODUCER_UNAVAILABLE`.
 
@@ -252,7 +261,7 @@ qualification has run, so treat it as experimental. Known limits today:
 |---|---|---|---|
 | `FFS_MANAGED_INGRESS` | unset | `scripts/gsd/gsd-run.sh:22` | Any value other than `0` makes the legacy runner refuse with exit 78 and point at `scripts/gsd/ffs-frontend.sh`. Affects only runs started after it is set |
 | `FFS_UPSTREAM_RUNTIME_MANIFEST` / `_SHA256` | unset (required) | `scripts/gsd/ffs-frontend.sh:17-18` | The GSD runtime descriptor written by `python3 -m run_state.cli describe-upstream-runtime`, and the SHA-256 it prints. Bound at start and rechecked on every resume (`UPSTREAM_RUNTIME_DRIFT`, exit 2) |
-| `FFS_STATE_ROOT` | unset (required) | `scripts/gsd/ffs-frontend.sh:16` | Control-store root for the run (`--state-root`). Empty refuses `INVALID_REQUEST`, exit 2 (`lib/run_state/cli.py:340-349`) |
+| `FFS_STATE_ROOT` | unset (required) | `scripts/gsd/ffs-frontend.sh:16` | Control-store root for the run (`--state-root`). Empty refuses `INVALID_REQUEST`, exit 2 (`lib/run_state/cli.py:373-382`) |
 | `FFS_OBJECTIVE` | unset (required) | `scripts/gsd/ffs-frontend.sh:15` | Objective sealed into the run. Empty refuses `INVALID_REQUEST`, exit 2 |
 | `FFS_INVOCATION_TEXT` | empty | `scripts/gsd/ffs-frontend.sh:14` | Invocation text sealed into the run; at most 16 KiB and no NUL bytes |
 | `FFS_REQUEST_KEY` | unset (required) | `scripts/gsd/ffs-frontend.sh:19` | Idempotency key. Empty refuses `INVALID_REQUEST`, exit 2. A replay of the same key returns its recorded success or refuses; it never relaunches |
@@ -262,16 +271,16 @@ qualification has run, so treat it as experimental. Known limits today:
 | `FFS_PHASE_SCOPE` | unset | `scripts/gsd/ffs-frontend.sh:25` | Phase to run. Without it the run refuses `PRELAUNCH_PHASE_SCOPE_REQUIRED` |
 | `FFS_ACCEPTANCE_DRAFT` | unset | `scripts/gsd/ffs-frontend.sh:26` | Operator-supplied acceptance draft (JSON). Its criterion ids must be the run's accepted requirement ids. Missing: `ACCEPTANCE_DRAFT_REQUIRED` |
 | `FFS_REVIEW_MODEL_CATALOG` | unset | `scripts/gsd/ffs-frontend.sh:27` | Model catalog for the native final review. There is no built-in production catalog yet, so the caller supplies it |
-| `FFS_HOST_KIND` | unset | `scripts/gsd/ffs-frontend.sh:28-45` | `codex` or `claude`. Needed for any run that does work: with no host the managed run refuses `HOST_CAPABILITY_UNQUALIFIED`, exit 78 (`lib/run_state/supervisor.py:3089`). Requires `FFS_HOST_TOKEN_RESERVATION` (the wrapper exits 2 without it); any other missing host field refuses `HOST_REQUEST_INCOMPLETE`, exit 2 (`lib/run_state/cli.py:312`) |
+| `FFS_HOST_KIND` | unset | `scripts/gsd/ffs-frontend.sh:28-45` | `codex` or `claude`. Needed for any run that does work: with no host the managed run refuses `HOST_CAPABILITY_UNQUALIFIED`, exit 78 (`lib/run_state/supervisor.py:3108`). Requires `FFS_HOST_TOKEN_RESERVATION` (the wrapper exits 2 without it); any other missing host field refuses `HOST_REQUEST_INCOMPLETE`, exit 2 (`lib/run_state/cli.py:345`) |
 | `FFS_HOST_TOKEN_RESERVATION` | unset | `scripts/gsd/ffs-frontend.sh:31-41` | Tokens reserved per host launch, e.g. `100K` |
 | `FFS_HOST_RUNTIME_HOME` | `FFS_CODEX_RUNTIME_HOME` | `scripts/gsd/ffs-frontend.sh:36` | Host runtime home. Must be an absolute, already-canonical path (`HOST_REQUEST_INVALID` otherwise; `lib/run_state/host_request.py:55-60`) |
 | `FFS_HOST_BINARY` | `CODEX_BIN` | `scripts/gsd/ffs-frontend.sh:37` | Host CLI executable. Absolute, canonical path |
 | `FFS_HOST_TIMEOUT` | `600` | `scripts/gsd/ffs-frontend.sh:42` | Host launch timeout in seconds, `1`-`3600` |
-| `FFS_HOST_CREDENTIAL_SOURCE` | unset | `scripts/gsd/ffs-frontend.sh:44` | Required for a Claude host and refused for a Codex host; either mistake refuses `HOST_REQUEST_INCOMPLETE`, exit 2 (`lib/run_state/cli.py:313-322`) |
+| `FFS_HOST_CREDENTIAL_SOURCE` | unset | `scripts/gsd/ffs-frontend.sh:44` | Required for a Claude host and refused for a Codex host; either mistake refuses `HOST_REQUEST_INCOMPLETE`, exit 2 (`lib/run_state/cli.py:346-355`) |
 | `GSD_MODEL_REQUEST` / `GSD_SANDBOX_MODE` / `GSD_NETWORK_MODE` | unset / `workspace-write` / `disabled` | `scripts/gsd/ffs-frontend.sh:38-40` | Typed model request (valid JSON, else `HOST_MODEL_REQUEST_INVALID`), sandbox (`read-only`, `workspace-write`, or `danger-full-access`), and network mode for the host launch |
 | `GSD_RUN_ID` / `FFS_RUN_ID` | unset | `scripts/gsd/ffs-frontend.sh:60`, `lib/run_context.py:102-112` | Run id to select. The two names are aliases; different values refuse `CONFLICTING_RUN_ID`, exit 2 |
 | `GSD_RESUME` | unset | `scripts/gsd/ffs-frontend.sh:62-66` | `1` resumes; unset or `0` starts fresh; any other value exits 2 |
-| `GSD_PROJECT` / `GSD_WORKSTREAM` / `GSD_SESSION_KEY` | unset | `lib/run_state/cli.py:1940-1942` | Defaults for `--project`, `--workstream`, and `--session-key` |
+| `GSD_PROJECT` / `GSD_WORKSTREAM` / `GSD_SESSION_KEY` | unset | `lib/run_state/cli.py:1973-1975` | Defaults for `--project`, `--workstream`, and `--session-key` |
 | `FFS_MANAGED_ADMISSION_ROOT` | `~/.local/state/feature-fix-swarm/managed-admission` | `lib/run_state/managed_admission.py:25,116-122` | Host-wide admission store shared by every managed run for this user. Must be absolute and not a symlink (`MANAGED_ADMISSION_ROOT_UNSAFE`). Test suites point it at a temporary directory |
 
 Entry point: `bash scripts/gsd/ffs-frontend.sh <feature-spec|fix|code-uplift|feature-implement|task-swarm> [--select-file P] [--delete-file P] [--required-context P] [--project N] [--workstream N] [--session-key K]`.
@@ -287,7 +296,7 @@ on stdout:
 Request, admission, and selection refusals use their own exit codes (for
 example `INVALID_REQUEST` and `UPSTREAM_RUNTIME_DRIFT` exit 2,
 `lib/run_state/cli.py:24-35`). A refusal raised inside a managed run exits 78
-(`lib/run_state/cli.py:116-131`); when it has an underlying cause, it adds
+(`lib/run_state/cli.py:146-164`); when it has an underlying cause, it adds
 `detail` with that error's type and typed code, never its message. Inside a
 managed run, the recovery action depends on the code:
 
@@ -297,6 +306,12 @@ managed run, the recovery action depends on the code:
 | `INTENT_RECONCILIATION_REQUIRED` | A launch under this request key has not settled; only owner-fence reconciliation may settle it | `reconcile_intent` |
 | `RETAINED_RUNTIME_NOT_REUSABLE` | The retained outer runtime cannot be resumed, and no outer launch ran under it | `resume_with_new_request_key` |
 | `CHILD_RUNTIME_NOT_REUSABLE` | A wave child or final-reviewer runtime cannot be resumed. A new key would start a new outer run | `inspect_retained_child` |
+| `MANAGED_FRONTEND_COMMAND_UNSTAGED` | `feature-spec`/`fix`/`code-uplift` have no staged `gsd-*` command mapping yet; only `feature-implement` and `task-swarm` do | `select_a_staged_frontend` |
+| `PRELAUNCH_PHASE_SCOPE_REQUIRED` | The frontend has no selected planning scope (`frontend-start --scope`) to stage as the command argument | `supply_a_phase_scope` |
+| `PRELAUNCH_PLAN_PATH_UNSAFE` | The persisted upstream planning root could not be rebased onto this run's prepared workspace | `reconcile_upstream_binding` |
+| `MANAGED_FRONTEND_MODE_UNSUPPORTED` | The invocation text names a mode (`--dry-run` or `--adhoc`) the staged `gsd-execute-phase` command cannot honor | `drop_the_unsupported_mode_flag` |
+| `MANAGED_PROJECT_SCOPE_UNSUPPORTED` | A non-default project or workstream never reaches the qualified host process env, so it cannot be honored | `use_the_default_project` |
+| `MANAGED_PROMPT_VALUE_UNSAFE` | The planning root or project carries a control character and cannot be placed in the host prompt | `rename_the_planning_path` |
 | any other supervisor code, e.g. `HOST_CAPABILITY_UNQUALIFIED`, `WAVE_EXECUTION_UNPROVEN` | The selected host backend has not demonstrated managed admission | `qualify_host_adapter` |
 | a policy code, e.g. `FRONTEND_CHECK_CANDIDATE_STALE` | The managed run policy refused the transition | `correct_request` |
 

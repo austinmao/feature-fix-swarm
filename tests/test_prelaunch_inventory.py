@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from run_state.prelaunch_inventory import (
-    PrelaunchInventoryRefused, _phase_bytes, scan_frozen_plan_bytes, select_active_phase,
+    PrelaunchInventoryRefused, _phase_bytes, is_valid_phase_scope, rebase_planning_root,
+    scan_frozen_plan_bytes, select_active_phase,
 )
 from run_state.upstream import UpstreamRuntime
 
@@ -67,3 +68,61 @@ def test_pinned_phase_matcher_selects_exact_scope_and_refuses_ambiguous_director
         select_active_phase(_runtime(), phases, '1')
     with pytest.raises(PrelaunchInventoryRefused, match='SCOPE_REQUIRED'):
         select_active_phase(_runtime(), phases, 'execute phase one')
+
+
+@pytest.mark.parametrize("scope", ["1", "03", "3.2.1", "10.20.30"])
+def test_is_valid_phase_scope_accepts_plain_ascii_digit_tokens(scope):
+    assert is_valid_phase_scope(scope) is True
+
+
+@pytest.mark.parametrize("scope", [
+    "", " ", "-1", "1 2", "1.a", "1.", "execute phase one",
+    "٣",  # U+0663 ARABIC-INDIC DIGIT THREE
+    "３",  # U+FF13 FULLWIDTH DIGIT THREE
+    None, 3,
+])
+def test_is_valid_phase_scope_rejects_non_ascii_and_non_token_values(scope):
+    # re.fullmatch(r'[0-9]+...') is ASCII-only by construction, unlike \d
+    # (which matches Unicode digit categories under Python's default str
+    # patterns) -- a scope staged as a command argument must be plain ASCII.
+    assert is_valid_phase_scope(scope) is False
+
+
+def test_rebase_planning_root_rebases_the_relative_planning_path(tmp_path):
+    root_workspace = tmp_path / "root"
+    preparation_path = tmp_path / "child"
+    upstream = {"planning_root": str(root_workspace / ".planning" / "demo-project")}
+    result = rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=preparation_path)
+    assert result == preparation_path / ".planning" / "demo-project"
+
+
+@pytest.mark.parametrize("upstream", [
+    None,
+    "not-a-dict",
+    {},
+    {"planning_root": None},
+    {"planning_root": ""},
+])
+def test_rebase_planning_root_refuses_missing_or_invalid_upstream(tmp_path, upstream):
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(tmp_path / "root"), preparation_path=tmp_path / "child")
+
+
+def test_rebase_planning_root_refuses_a_planning_root_outside_the_workspace(tmp_path):
+    upstream = {"planning_root": str(tmp_path / "elsewhere" / ".planning")}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(tmp_path / "root"), preparation_path=tmp_path / "child")
+
+
+def test_rebase_planning_root_refuses_a_planning_root_equal_to_the_workspace(tmp_path):
+    # relative_to yields an empty relative path -- rebased would be the
+    # preparation path itself, not a planning subdirectory.
+    upstream = {"planning_root": str(tmp_path / "root")}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(tmp_path / "root"), preparation_path=tmp_path / "child")
+
+
+def test_rebase_planning_root_refuses_a_dot_dot_part(tmp_path):
+    upstream = {"planning_root": str(tmp_path / "root" / ".." / "escape" / ".planning")}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(tmp_path / "root"), preparation_path=tmp_path / "child")

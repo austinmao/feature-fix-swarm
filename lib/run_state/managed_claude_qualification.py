@@ -49,6 +49,12 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def claude_runtime_home(evidence_root, activity_id: str) -> Path:
+    """The one staged-runtime path for a Claude activity: qualification stages
+    here, and the outer prompt's dispatch doc/script sit underneath it."""
+    return Path(evidence_root) / "runtimes" / activity_id
+
+
 def _replace_qualification_admission(path: Path, expected: dict[str, object],
                                      admitted: dict[str, object]) -> None:
     """Atomically replace the qualification placeholder with its fenced identity."""
@@ -109,7 +115,7 @@ def qualify_managed_claude_runtime(
         # outer launch cannot be re-qualified; resume refuses HOST_CAPABILITY_UNQUALIFIED.
         # Deferred until before native Claude qualification: persist the plan for
         # replay, as the Codex path's stage_or_reuse + retained observation does.
-        runtime = Path(evidence_root) / "runtimes" / activity_id
+        runtime = claude_runtime_home(evidence_root, activity_id)
         try:
             runtime.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             runtime.parent.chmod(0o700)
@@ -244,6 +250,7 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     """Qualification seams, worker channel and outer contract for one Claude host run."""
     import tempfile
     from .frontend_producers import HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_outer_activity
+    from .prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
     from .supervisor import _managed_inventory_workspace, _managed_prompt
 
     root, operation, child_key, ready = _managed_inventory_workspace(
@@ -253,9 +260,22 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
             "begin_child_workspace_preparation": begin_child_workspace_preparation,
             "prepare_workspace": prepare_workspace, "inspect_workspace": inspect_workspace,
         })
-    invocation, prompt, role = _managed_prompt(root, operation, command)
     host_evidence = Path(context.evidence_root) / "host"
     host_evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
+                                                 child_key=child_key) or str(uuid.uuid4()))
+    upstream = context.upstream or {}
+    try:
+        planning_root = str(rebase_planning_root(
+            upstream, root_workspace=context.workspace, preparation_path=ready.path,
+        ))
+    except PrelaunchInventoryRefused as error:
+        raise SupervisorRefused(str(error)) from error
+    invocation, prompt, role = _managed_prompt(
+        root, operation, command, staged_runtime_home=claude_runtime_home(host_evidence, outer_activity_id),
+        planning_root=planning_root, project=upstream.get("project"),
+        workstream=upstream.get("workstream"), planning_scope=token.planning_scope,
+    )
     bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
     if bridge.is_symlink() or not bridge.is_file():
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
@@ -324,8 +344,6 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
         finish_timeout=host_request.timeout_seconds,
     )
     channel.attach_wave_consumer(wave_consumer)
-    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
-                                                 child_key=child_key) or str(uuid.uuid4()))
     stage_identity = hashlib.sha256((str(ready.path) + host_request.model).encode()).hexdigest()
     contract = _digest({"schema": "ffs.managed-claude-contract/v1", "command": list(invocation),
                         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
