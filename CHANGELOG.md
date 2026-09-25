@@ -8,6 +8,42 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-25, spec-014 Release C: F25 review round 1)
+
+- inspect and reconcile (no --apply) used to construct a migrating queue
+  object, so a read-only inspection of a legacy store silently upgraded its
+  schema and installed a fence trigger before anything was ever backed up.
+  Both commands now open the store strictly read-only and never migrate or
+  create anything.
+- reconcile --apply took its backup outside the writer's own lock and after
+  the store was already migrated, so the backup was not a true preimage and
+  a v1 store's backup showed the post-migration schema. --apply now takes
+  the writer lock first, backs up from a separate read-only connection
+  while holding that lock (a concurrent writer's own attempt to write is
+  blocked or refused for the whole window), and only migrates afterward,
+  still inside the same lock, so a v1 store's backup faithfully shows
+  version 1.
+- The exact-snapshot compare-and-swap that applies a reclaim decision did
+  not check a row's bound child process identity, so a child bound between
+  planning and applying a reconcile could be silently overwritten. The
+  check now covers child identity too, null-safe.
+- A backup verification failure, a corrupt or short backup, and lock
+  contention while taking the backup now all refuse cleanly with the same
+  typed code instead of one silently passing or crashing with a raw
+  traceback. A failed backup never leaves a partial file behind, and it
+  never deletes a file reconcile did not create itself.
+- The terminal-reclaimed protection only blocked changing a reclaimed row's
+  status; it now also blocks deleting a reclaimed row outright.
+- A symlinked --root used to be resolved before its symlink was checked, so
+  it was silently followed instead of refused. The raw path is now checked
+  first.
+- An admission_policy table with zero rows used to crash with a raw
+  TypeError; it now refuses with a typed schema-invalid code.
+- When reconcile --apply's compare-and-swap misses because something else
+  changed the row first, that is no longer silently swallowed into a
+  success. It is now reported by sequence number in the JSON output and
+  produces its own distinct nonzero exit code.
+
 ### Fixed (2026-09-25, spec-014 Release C: F25 admission wedge and reconcile CLI)
 
 - A legacy (writer_version=1) managed admission row kept try_admit's
