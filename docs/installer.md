@@ -2,8 +2,9 @@
 
 FFS has two explicit installation scopes. The installer owns FFS skills and
 the pinned `prompt-master` compatibility copy. Setup first applies and
-verifies its byte-pinned GSD RED-evidence compatibility overlay, then invokes
-the exact pinned GSD upstream installer for complete Claude and Codex profiles.
+verifies its byte-pinned GSD compatibility overlay on a staged copy of the
+package (the repository's `node_modules` stays pristine), then invokes the
+exact pinned GSD upstream installer for complete Claude and Codex profiles.
 That upstream installer remains the only writer and owner of `gsd-*` skills,
 agents, hooks, and configuration.
 

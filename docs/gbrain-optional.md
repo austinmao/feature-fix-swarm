@@ -9,13 +9,21 @@ authority) stays 100% gbrain-free.
 ## Detection contract (all skills use exactly this)
 
 ```bash
-if command -v gbrain >/dev/null 2>&1 \
-   && env -u DATABASE_URL gbrain doctor 2>/dev/null | grep -q "\[OK\] connection"; then
-  GBRAIN=1
-else
-  GBRAIN=0   # skip silently — fallback below, NEVER a failure
+GBRAIN=0   # skip silently when unhealthy: fallback below, NEVER a failure
+if command -v gbrain >/dev/null 2>&1; then
+  out="$(env -u DATABASE_URL gbrain doctor 2>/dev/null)" || true
+  grep -q '\[OK\] connection' <<<"$out" && GBRAIN=1
 fi
 ```
+
+Match on doctor's output, not its exit code: `gbrain doctor` exits nonzero
+when any unrelated health check fails, even with a working connection. Match
+with a herestring, not a pipe: under `pipefail`, `… | grep -q` can fail with
+rc 141 once the output fills the pipe buffer. `scripts/gsd/learnings-harvest.sh`
+(`gbrain_healthy`) is the reference implementation.
+
+`gbrain put` reads page content from stdin (gbrain 0.50 ignores a positional
+content argument): `printf '%s' "$content" | env -u DATABASE_URL gbrain put <slug>`.
 
 Always invoke as `env -u DATABASE_URL gbrain …` — a shell-exported
 `DATABASE_URL` (common in web repos) hijacks gbrain's own connection config and

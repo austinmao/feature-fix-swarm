@@ -73,7 +73,9 @@ light tiers). Shipped:
   `gsd-integration-checker`/`gsd-nyquist-auditor` opus→sonnet,
   `gsd-research-synthesizer`/`gsd-codebase-mapper` sonnet→haiku.
 - `scripts/gsd/plan-adversary.sh` at gsd's `workflow.plan_bounce_script` seam:
-  high-blast plans get a `gpt-5.6-sol` @ `xhigh` cross-model review appended;
+  high-blast plans get a judgment-tier cross-model review appended (today
+  `gpt-6-sol` @ `xhigh`; `gpt-5.6-sol` when this was written, see the
+  2026-09-24 correction below);
   the opus plan-checker re-run adjudicates. This supersedes the earlier
   "interval mid-run verifier — deferred" disposition at the PLAN stage only:
   the plan is where Fable's planning strength makes an undetected error most

@@ -193,8 +193,8 @@ FFS requests workload intent rather than scattering vendor IDs through skills:
 
 | Tier | Claude default | Codex default | Effort | Typical work |
 | --- | --- | --- | ---: | --- |
-| `frontier` | Claude Fable | GPT-5.6 Sol | xhigh | Planning — the low-volume, highest-leverage seat |
-| `judgment` | Claude Opus | GPT-5.6 Sol | high | Checking, debugging, verification, code/security review |
+| `frontier` | Claude Fable | GPT-6 Astra | xhigh | Planning — the low-volume, highest-leverage seat |
+| `judgment` | Claude Opus | GPT-6 Sol | xhigh | Checking, debugging, verification, code/security review |
 | `execution` | Claude Sonnet | GPT-5.6 Terra | medium | Implementation, research, integration, orchestration |
 | `volume` | Claude Haiku | GPT-5.6 Luna | low | Mapping, synthesis, status collection (bounded-context inputs only) |
 
@@ -228,7 +228,7 @@ skill hash, or Codex CLI version drift is an actionable failure.
 | [Dependencies and integrations](docs/dependencies.md) | What is installed, who owns it, and why? |
 | [Pipeline](docs/pipeline.md) | How do the stages connect? |
 | [Commands](docs/commands.md) | What commands and gates are available? |
-| [Configuration](docs/configuration.md) | What can I tune? |
+| [Configuration](docs/configuration.md) | What can I tune, including the opt-in managed run-state path? |
 | [Installer, migration, and rollback](docs/installer.md) | How is FFS installed, migrated, and undone? |
 | [Environment registry](docs/environment-registry.md) | What environments exist, and how does `/ffs-init` declare them? |
 | [CI templates and test tiers](docs/ci-templates-and-tiers.md) | Which workflows does FFS propose, and where do CI test commands come from? |
@@ -237,6 +237,7 @@ skill hash, or Codex CLI version drift is an actionable failure.
 | [Healing](docs/healing.md) | How do waiting runs wake, recover, and remain bounded? |
 | [Retro loop](docs/retro.md) | What may the consent-gated diagnostic loop file, and how is it triaged? |
 | [Model tiers](docs/model-tiers.md) | Which model runs what, and how is provenance enforced? |
+| [Codex compatibility](docs/codex-gpt56-modernization.md) | Which Codex CLI and GSD versions are supported, and how does a Codex run stay isolated? |
 | [Socratic](docs/socratic.md) | What is the pinned question bank, and where does it reach a reviewer? |
 | [Browser proof](docs/browser-proof.md) | What counts as browser-QA evidence? |
 | [Digest](docs/digest.md) | How do I see what happened without watching a run? |
