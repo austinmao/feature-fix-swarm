@@ -80,6 +80,10 @@ def test_reconcile_backup_failure_exit5_db_untouched(tmp_path, monkeypatch, caps
     )
     monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
     monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    # Force the v1->v2 migration once (the migrate-fast-path re-run on an
+    # already-v2 store is a genuine SQL no-op) so the "untouched" snapshot
+    # below is taken after schema migration, not before it.
+    ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
     monkeypatch.setattr(
         managed_admission.ManagedAdmissionQueue, "_perform_backup",
         lambda self, source, destination_path: (_ for _ in ()).throw(OSError("simulated disk failure")),

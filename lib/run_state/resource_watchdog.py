@@ -72,6 +72,10 @@ class WatchdogTarget:
     scope: str
     demand: ResourceDemand
     last_progress_ns: int | None = None
+    # The admission registry's own limiting_resource for a waiting ticket, if
+    # any. Lets a caller surface the real block reason (e.g. an opaque legacy
+    # row) instead of a misleading provider/resource guess.
+    admission_verdict: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, str) or not self.scope:
@@ -81,6 +85,8 @@ class WatchdogTarget:
         if self.last_progress_ns is not None and (
             type(self.last_progress_ns) is not int or self.last_progress_ns < 0
         ):
+            raise ValueError("RESOURCE_WATCHDOG_TARGET_INVALID")
+        if self.admission_verdict is not None and not isinstance(self.admission_verdict, str):
             raise ValueError("RESOURCE_WATCHDOG_TARGET_INVALID")
 
 
@@ -583,6 +589,16 @@ class ResourceWatchdog:
         for index, target in enumerate(targets):
             if index in resolved:
                 limiting, age, provider_available = resolved[index]
+                if target.admission_verdict == "legacy-opaque":
+                    # The real block reason is an unreclaimed legacy row, not
+                    # local resource or provider availability -- report that,
+                    # not a misleading provider-exploration guess.
+                    statuses.append(WatchdogStatus(
+                        target.scope, RESOURCE_WAIT, ("legacy-opaque",), check_ns,
+                        target.last_progress_ns, check_ns + self._policy.sample_interval_ns,
+                        age, self._policy.version, ("LEGACY_ADMISSION_OPAQUE",),
+                    ))
+                    continue
                 provider = target.demand.provider
                 provider_unknown = (
                     provider is not None and target.demand.provider_units > 0

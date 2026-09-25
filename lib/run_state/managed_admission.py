@@ -3,6 +3,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,10 @@ from .resource_scheduler import ResourceScheduler, demand_from_record
 DEFAULT_MANAGED_RUN_CAPACITY = 2  # compatibility symbol, never an authority bound
 GLOBAL_ROOT_ENV = "FFS_MANAGED_ADMISSION_ROOT"
 _V2 = 2
+# Shared by try_admit's gate and the reconcile CLI's gate_armed_before/after.
+LEGACY_OPAQUE_GATE_SQL = (
+    "SELECT 1 FROM managed_admissions WHERE writer_version=1 AND status!='reclaimed' LIMIT 1"
+)
 
 
 class ManagedAdmissionRefused(RuntimeError):
@@ -231,6 +236,11 @@ class ManagedAdmissionQueue:
         )
         c.execute(
             "CREATE TRIGGER IF NOT EXISTS admission_fence_activate BEFORE UPDATE OF status ON managed_admissions WHEN OLD.status='waiting' AND NEW.status='active' AND OLD.writer_version!=2 BEGIN SELECT RAISE(ABORT,'LEGACY_ADMISSION_WRITE_REFUSED'); END"
+        )
+        # A reconciled row is a terminal, proof-carrying fact. No writer -- old
+        # or new -- may move it to any other status, including raw legacy SQL.
+        c.execute(
+            "CREATE TRIGGER IF NOT EXISTS admission_fence_reclaimed_terminal BEFORE UPDATE OF status ON managed_admissions WHEN OLD.status='reclaimed' AND NEW.status!='reclaimed' BEGIN SELECT RAISE(ABORT,'RECLAIMED_ADMISSION_IMMUTABLE'); END"
         )
 
     def _initialize(self):
@@ -550,12 +560,15 @@ class ManagedAdmissionQueue:
                         ),
                     )
 
-    def _candidates(self, c):
+    def _candidates(self, c, live_waiters):
         first = {}
         for row in c.execute(
             "SELECT * FROM managed_admissions WHERE status='waiting' ORDER BY sequence"
         ):
-            first.setdefault((row["repository_id"], row["run_id"]), row)
+            # A dead earliest waiter must never shadow a live later waiter of
+            # the same (repo, run): filter live owners before setdefault.
+            if _identity(row) in live_waiters:
+                first.setdefault((row["repository_id"], row["run_id"]), row)
         keys = sorted(first)
         cursor = c.execute(
             "SELECT scheduler_cursor FROM admission_policy WHERE singleton=1"
@@ -603,7 +616,7 @@ class ManagedAdmissionQueue:
                 )
             if own["status"] == "active":
                 return True
-            choices = [row for row in self._candidates(c) if _identity(row) in live_waiters]
+            choices = self._candidates(c, live_waiters)
             from .provider_feedback import effective_observation
             providers = [demand_from_record(row["demand_json"]).provider for row in choices]
             observation = effective_observation(
@@ -612,9 +625,7 @@ class ManagedAdmissionQueue:
             )
             # Legacy demand remains opaque even after legacy release.  It
             # cannot be silently converted to zero CPU/memory/provider cost.
-            opaque = c.execute(
-                "SELECT 1 FROM managed_admissions WHERE writer_version=1 AND status!='reclaimed' LIMIT 1"
-            ).fetchone()
+            opaque = c.execute(LEGACY_OPAQUE_GATE_SQL).fetchone()
             requested_demand = demand_from_record(own["demand_json"])
             if opaque is not None and any(
                 (
@@ -883,6 +894,152 @@ class ManagedAdmissionQueue:
                 )
             if c.execute(sql, values).rowcount != 1:
                 raise ManagedAdmissionRefused("MANAGED_ADMISSION_TICKET_INVALID")
+
+    def reconcile_plan(self):
+        """Read-only: probe every row outside SQLite; never mutates the database.
+
+        Boot proof (any writer version, any status): the recorded owner is
+        dead AND its boot no longer exists -- the host rebooted, so nothing
+        from that incarnation survives. Dead-waiter proof (v2, same boot): a
+        childless waiting row can never be granted by any other path once its
+        owner is dead (try_admit requires the live owner). v2 released rows
+        and v1 same-boot rows are always kept: a release may still be
+        resurrected (resource_groups.retry_expired_staging), and a same-boot
+        v1 DEAD reading alone is not distinguishable from a live descendant.
+        """
+        try:
+            current_boot = ProcessIdentity.current().boot_id
+        except (OSError, ValueError) as error:
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_IDENTITY_UNKNOWN") from error
+        with self._connection() as c:
+            rows = c.execute(
+                "SELECT * FROM managed_admissions ORDER BY sequence"
+            ).fetchall()
+        plan = []
+        for row in rows:
+            if row["status"] == "reclaimed":
+                continue
+            owner = _identity(row)
+            child = _identity(row, "child_")
+            decision, proof, reason = "keep", None, None
+            if owner is None:
+                reason = "OWNER_UNKNOWN"
+            elif row["writer_version"] == 1:
+                if row["boot_id"] == current_boot:
+                    reason = "LEGACY_SAME_BOOT_UNPROVABLE"
+                elif self._dead(owner):
+                    decision, proof = "reclaim", "boot-changed"
+                elif probe_identity(owner) == LIVE:
+                    reason = "OWNER_LIVE"
+                else:
+                    reason = "OWNER_UNKNOWN"
+            elif row["status"] == "released":
+                reason = "RELEASED_RETAINED"
+            elif row["boot_id"] != current_boot and self._dead(owner):
+                decision, proof = "reclaim", "boot-changed"
+            elif row["status"] == "waiting" and child is None and self._dead(owner):
+                decision, proof = "reclaim", "dead-waiter"
+            elif row["status"] == "active" and child is None and self._dead(owner):
+                reason = "ACTIVE_LEASE_UNPROVABLE"
+            elif probe_identity(owner) == LIVE:
+                reason = "OWNER_LIVE"
+            else:
+                reason = "OWNER_UNKNOWN"
+            plan.append({
+                "sequence": row["sequence"], "ticket": row["ticket"],
+                "writer_version": row["writer_version"], "status": row["status"],
+                "boot": row["boot_id"],
+                "owner": {
+                    "host_id": row["host_id"], "boot_id": row["boot_id"],
+                    "pid": row["pid"], "start_token": row["start_token"],
+                },
+                "decision": decision, "proof": proof, "reason": reason,
+            })
+        return plan
+
+    def _create_backup_file(self) -> Path:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        target = self.root / (
+            "admission.sqlite3.reconcile-" + stamp + "-" + secrets.token_hex(8) + ".bak"
+        )
+        fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        return target
+
+    def _perform_backup(self, source, destination_path: Path) -> None:
+        """Isolated seam: the only call site touching the sqlite backup API."""
+        with sqlite3.connect(destination_path) as dest:
+            source.backup(dest)
+
+    def apply_reconcile(self, plan):
+        """Exact-snapshot CAS each 'reclaim' decision; a stale snapshot is a no-op.
+
+        Backup-before-mutate: Connection.backup to an exclusively created 0600
+        file, verified by integrity_check plus a row-count match, BEFORE the
+        writer transaction opens (sqlite3's backup API retries against its own
+        connection's held write lock otherwise -- it must run outside BEGIN
+        IMMEDIATE). A verify failure leaves the live database byte-for-byte
+        untouched; the exact-snapshot CAS below is unaffected by the small
+        gap between verifying and mutating, since a changed row simply misses
+        its CAS match (ROW_CHANGED) rather than being silently overwritten.
+        """
+        backup_path = self._create_backup_file()
+        try:
+            with self._connection() as source:
+                self._perform_backup(source, backup_path)
+                live_count = source.execute(
+                    "SELECT COUNT(*) FROM managed_admissions"
+                ).fetchone()[0]
+            with sqlite3.connect(
+                backup_path.as_uri() + "?mode=ro", uri=True
+            ) as check:
+                ok = check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+                backup_count = check.execute(
+                    "SELECT COUNT(*) FROM managed_admissions"
+                ).fetchone()[0]
+            if not ok or backup_count != live_count:
+                raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED")
+        except ManagedAdmissionRefused as error:
+            backup_path.unlink(missing_ok=True)
+            # Any refusal during the backup/verify phase -- including one
+            # translated by _connection() from an OSError/sqlite3.Error -- is
+            # a backup failure from reconcile's point of view.
+            if error.code == "RECONCILE_BACKUP_FAILED":
+                raise
+            raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED") from error
+        except (OSError, sqlite3.Error) as error:
+            backup_path.unlink(missing_ok=True)
+            raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED") from error
+        backup_info = {
+            "path": str(backup_path),
+            "sha256": hashlib.sha256(backup_path.read_bytes()).hexdigest(),
+        }
+        reclaimed, row_changed = [], []
+        with self._transaction() as c:
+            for item in plan:
+                if item["decision"] != "reclaim":
+                    continue
+                owner = item["owner"]
+                n = c.execute(
+                    "UPDATE managed_admissions SET status='reclaimed',limiting_resource=? "
+                    "WHERE sequence=? AND ticket=? AND writer_version=? AND status=? "
+                    "AND host_id=? AND boot_id=? AND pid=? AND start_token=?",
+                    (
+                        "reconcile:" + item["proof"], item["sequence"], item["ticket"],
+                        item["writer_version"], item["status"],
+                        owner["host_id"], owner["boot_id"], owner["pid"], owner["start_token"],
+                    ),
+                ).rowcount
+                (reclaimed if n == 1 else row_changed).append(item["sequence"])
+        return {"reclaimed": reclaimed, "row_changed": row_changed, "backup": backup_info}
+
+    def reconcile(self, *, apply=False):
+        """dry-run by default; ``apply=True`` is the only path that mutates."""
+        plan = self.reconcile_plan()
+        if not apply:
+            return {"applied": False, "plan": plan, "reclaimed": [], "row_changed": [], "backup": None}
+        result = self.apply_reconcile(plan)
+        return {"applied": True, "plan": plan, **result}
 
     def acquire(
         self, *, state_root, run_id, timeout=None, poll_interval=0.2, **request

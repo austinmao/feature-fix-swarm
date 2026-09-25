@@ -1620,6 +1620,73 @@ def cmd_migration_rollback(args: argparse.Namespace) -> int:
         return _migration_refusal(error, run_id=args.run_id)
 
 
+_ADMISSION_CODES = {
+    "MANAGED_ADMISSION_STORE_MISSING": 2, "INVALID_REQUEST": 2,
+    "LEGACY_OPAQUE_REMAINS": 3,
+    "RECONCILE_BACKUP_FAILED": 5,
+}
+
+
+def _admission_refusal(code: str, **extra) -> int:
+    return _fixture_refusal(code, exit_code=_ADMISSION_CODES.get(code, 6), **extra)
+
+
+def _admission_row_report(item: dict) -> dict:
+    """Never includes the raw ticket value."""
+    return {key: item[key] for key in (
+        "sequence", "writer_version", "status", "boot", "owner", "decision", "proof", "reason",
+    )}
+
+
+def _run_admission_command(root: str | None, *, apply: bool | None) -> int:
+    """``apply=None`` is the read-only ``inspect`` command; ``False``/``True``
+    are ``reconcile``'s dry-run default and ``--apply``."""
+    from run_state.managed_admission import (
+        LEGACY_OPAQUE_GATE_SQL, ManagedAdmissionQueue, ManagedAdmissionRefused, global_admission_root,
+    )
+    try:
+        resolved_root = Path(root).resolve() if root else global_admission_root()
+    except ManagedAdmissionRefused as error:
+        return _admission_refusal(error.code)
+    database = resolved_root / "admission.sqlite3"
+    if not database.exists():
+        # The queue constructor would create a store on first open; inspect
+        # and reconcile must never do that -- refuse before opening it.
+        return _admission_refusal("MANAGED_ADMISSION_STORE_MISSING", database=str(database))
+    try:
+        queue = ManagedAdmissionQueue(resolved_root)
+        with queue._connection() as c:
+            gate_before = c.execute(LEGACY_OPAQUE_GATE_SQL).fetchone() is not None
+        result = queue.reconcile(apply=bool(apply))
+        with queue._connection() as c:
+            gate_after = c.execute(LEGACY_OPAQUE_GATE_SQL).fetchone() is not None
+    except ManagedAdmissionRefused as error:
+        return _admission_refusal(error.code, database=str(database))
+    counts: dict[str, int] = {}
+    for item in result["plan"]:
+        key = str(item["writer_version"]) + "/" + item["status"]
+        counts[key] = counts.get(key, 0) + 1
+    payload = {
+        "schema_version": 1, "ok": True,
+        "mode": "inspect" if apply is None else ("apply" if apply else "dry-run"),
+        "database": str(database), "gate_armed_before": gate_before, "gate_armed_after": gate_after,
+        "counts": counts, "rows": [_admission_row_report(item) for item in result["plan"]],
+        "backup": result["backup"],
+    }
+    print(json.dumps(payload, sort_keys=True))
+    if apply and gate_after:
+        return 3  # LEGACY_OPAQUE_REMAINS: apply ran, but some row is still unreclaimed.
+    return 0
+
+
+def cmd_admission_inspect(args: argparse.Namespace) -> int:
+    return _run_admission_command(args.root, apply=None)
+
+
+def cmd_admission_reconcile(args: argparse.Namespace) -> int:
+    return _run_admission_command(args.root, apply=bool(args.apply))
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     store = _store()
     if args.phase:
@@ -1946,6 +2013,18 @@ def main(argv=None) -> int:
     s = migration_sub.add_parser("rollback")
     migration_arguments(s, run_id=True)
     s.set_defaults(func=cmd_migration_rollback)
+
+    admission = sub.add_parser("admission")
+    admission_sub = admission.add_subparsers(dest="admission_command", required=True)
+
+    s = admission_sub.add_parser("inspect")
+    s.add_argument("--root", default=None)
+    s.set_defaults(func=cmd_admission_inspect)
+
+    s = admission_sub.add_parser("reconcile")
+    s.add_argument("--root", default=None)
+    s.add_argument("--apply", action="store_true")
+    s.set_defaults(func=cmd_admission_reconcile)
 
     s = sub.add_parser("describe-upstream-runtime")
     s.add_argument("--module-root", required=True)
