@@ -8,57 +8,6 @@ all skills.
 
 ## Unreleased
 
-### Fixed (2026-09-25, spec-014 Release C: F25 review round 1)
-
-- inspect and reconcile (no --apply) used to construct a migrating queue
-  object, so a read-only inspection of a legacy store silently upgraded its
-  schema and installed a fence trigger before anything was ever backed up.
-  Both commands now open the store strictly read-only and never migrate or
-  create anything.
-- reconcile --apply took its backup outside the writer's own lock and after
-  the store was already migrated, so the backup was not a true preimage and
-  a v1 store's backup showed the post-migration schema. --apply now takes
-  the writer lock first, backs up from a separate read-only connection
-  while holding that lock (a concurrent writer's own attempt to write is
-  blocked or refused for the whole window), and only migrates afterward,
-  still inside the same lock, so a v1 store's backup faithfully shows
-  version 1.
-- The exact-snapshot compare-and-swap that applies a reclaim decision did
-  not check a row's bound child process identity, so a child bound between
-  planning and applying a reconcile could be silently overwritten. The
-  check now covers child identity too, null-safe.
-- A backup verification failure, a corrupt or short backup, and lock
-  contention while taking the backup now all refuse cleanly with the same
-  typed code instead of one silently passing or crashing with a raw
-  traceback. A failed backup never leaves a partial file behind, and it
-  never deletes a file reconcile did not create itself.
-- The terminal-reclaimed protection only blocked changing a reclaimed row's
-  status; it now also blocks deleting a reclaimed row outright.
-- A symlinked --root used to be resolved before its symlink was checked, so
-  it was silently followed instead of refused. The raw path is now checked
-  first.
-- An admission_policy table with zero rows used to crash with a raw
-  TypeError; it now refuses with a typed schema-invalid code.
-- When reconcile --apply's compare-and-swap misses because something else
-  changed the row first, that is no longer silently swallowed into a
-  success. It is now reported by sequence number in the JSON output and
-  produces its own distinct nonzero exit code.
-- A raw sqlite error (a contended writer lock, a missing table, a failed
-  connect) could still escape both inspect and reconcile as an unhandled
-  traceback instead of the typed refusal the rest of the command already
-  promised. Every sqlite-level failure through the whole reconcile --apply
-  flow, and the reads read-only inspect performs after opening the store,
-  now map to a typed refusal instead.
-- A close() failure right after the backup file's own exclusive create
-  could leak that file. It is now removed before the failure is reported.
-- inspect and reconcile now refuse a WAL-mode or truncated store before
-  ever opening a sqlite connection to it, instead of risking side-effect
-  file creation (or a raw crash) on what is supposed to be a strictly
-  read-only path.
-- A stale legacy-opaque tag left on a waiting row now clears the moment
-  reconcile --apply's own transaction disarms the gate, instead of
-  persisting until the next unrelated admission attempt happens to notice.
-
 ### Fixed (2026-09-25, spec-014 Release C: F25 admission wedge and reconcile CLI)
 
 - A legacy (writer_version=1) managed admission row kept try_admit's
@@ -67,22 +16,36 @@ all skills.
   a prior boot. A childless waiting v2 row whose owner died could get stuck
   the same way. Neither case had any path back to a working admission
   queue.
+- An earlier waiting ticket whose owner had died could permanently shadow a
+  later, live waiter of the same run, because the fairness scheduler picked
+  the earliest row for a run before checking whether its owner was alive.
+- While the legacy gate is armed, the resource watchdog now reports
+  RESOURCE_WAIT with reason LEGACY_ADMISSION_OPAQUE instead of a misleading
+  provider or local-resource guess.
 - New CLI: run-state admission inspect and run-state admission reconcile.
-  Both refuse on a missing store instead of creating one. reconcile is
-  dry-run by default; only reconcile --apply mutates the database, and
-  only after backing it up to an exclusively created 0600 file and
-  verifying the backup with an integrity check and a row count match. Each
-  reclaimed row is proof carrying: either the owner is dead and its boot no
-  longer exists, or it is a childless waiting row whose owner died on the
-  same boot and can never be granted by any other path. A reconciled row
-  is now terminal; no later write, including raw legacy SQL, can move it
-  to any other status. JSON output never includes a ticket value.
-- Fixed a related admission scheduling bug: an earlier waiting ticket whose
-  owner had died could permanently shadow a later, live waiter of the same
-  run, since the fairness scheduler picked the earliest row for a run
-  before checking whether its owner was still alive.
-- Operator order: inspect, then reconcile with no flags to preview, then
-  reconcile --apply. Full reference: docs/configuration.md.
+  - Both refuse on a missing store instead of creating one. inspect and a
+    plain reconcile (dry run) open the store strictly read-only: they never
+    create, migrate or write, and they refuse a WAL-mode or truncated store
+    before connecting. A symlinked --root is refused.
+  - reconcile --apply takes the writer lock first and holds it through the
+    commit. Under that lock it backs the store up from a separate read-only
+    connection into an exclusively created 0600 file, verifies the backup
+    (integrity check and row count), migrates if needed, applies each
+    reclaim with an exact-snapshot compare-and-swap that includes child
+    identity, and clears stale legacy-opaque tags once the gate disarms.
+    The backup is kept only when the apply commits.
+  - Each reclaimed row is proof carrying: either its owner is dead and its
+    boot no longer exists, or it is a childless waiting row whose owner died
+    on the same boot and can never be granted by any other path. A reclaimed
+    row is terminal: no later write, including raw legacy SQL, can change
+    its status or delete it.
+  - Every failure is a typed JSON refusal, never a traceback. Exit codes: 0
+    ok, 2 store missing or invalid request, 3 legacy rows still kept, 4 a
+    snapshot changed (defensive), 5 backup failed, 6 unsafe, unavailable or
+    invalid store. JSON output never includes a ticket value.
+  - Operator order: inspect, then reconcile with no flags to preview, then
+    reconcile --apply. Full reference, including the trust boundary:
+    docs/configuration.md.
 
 ### Fixed (2026-09-25, spec-014 Release C: F32 managed frontend prompt)
 
