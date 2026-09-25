@@ -250,7 +250,7 @@ def test_apply_backup_create_enospc_is_exit5_no_bak_left(tmp_path, monkeypatch, 
 
     real_open = managed_admission.os.open
 
-    def enospc_on_backup_file(path, flags, mode=0o777, *a, **k):
+    def enospc_on_backup_file(path, flags, mode=0o600, *a, **k):
         if str(path).endswith(".bak"):
             raise OSError(errno.ENOSPC, "No space left on device")
         return real_open(path, flags, mode, *a, **k)
