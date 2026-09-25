@@ -387,15 +387,65 @@ def test_failed_sealed_check_without_a_repair_producer_hands_back_and_refuses_tr
     assert (again.stage, again.outer, again.native, again.actions) == ("RECOVER", 1, 0, {"execute": 1})
 
 
-def test_planning_frontend_without_a_phase_scope_refuses_before_any_outer_launch(tmp_path, monkeypatch, capsys):
+def test_execute_frontend_without_a_phase_scope_refuses_before_any_outer_launch(tmp_path, monkeypatch, capsys):
+    # feature-spec/fix/code-uplift are permanently unstaged (#F32 defect 3) and
+    # refuse as MANAGED_FRONTEND_COMMAND_UNSTAGED regardless of scope; only a
+    # still-staged execute-family frontend (task-swarm/feature-implement)
+    # exercises the scope-required refusal.
     primary, authority, repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
     runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
     draft = _draft(tmp_path)
-    result = _frontend_start(env, authority, "fx", runtime, fake, catalog, draft, "fix")
+    result = _frontend_start(env, authority, "fx", runtime, fake, catalog, draft, "task-swarm")
     assert result == 78 and _last_code(capsys) == "PRELAUNCH_PHASE_SCOPE_REQUIRED"
     facts = _facts(authority, repository_id, "fx")
     assert facts.outer == 0 and facts.native == 0 and facts.actions == {}
+
+
+def test_deferred_frontend_refuses_as_unstaged_before_any_outer_launch(tmp_path, monkeypatch, capsys):
+    primary, authority, repository_id, env = _setup(tmp_path)
+    monkeypatch.chdir(primary)
+    runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
+    draft = _draft(tmp_path)
+    result = _frontend_start(env, authority, "df", runtime, fake, catalog, draft, "fix")
+    assert result == 78 and _last_code(capsys) == "MANAGED_FRONTEND_COMMAND_UNSTAGED"
+    facts = _facts(authority, repository_id, "df")
+    assert facts.outer == 0 and facts.native == 0 and facts.actions == {}
+
+
+def test_frontend_prompt_names_staged_command_with_real_scope_and_project(tmp_path, monkeypatch):
+    """Call-site proof (#F32 defects 1-2): the real token.planning_scope and
+    context.upstream['project'] -- not the operator's invocation text or a
+    getattr fallback -- reach the prompt through the real
+    prepare_managed_codex_session wiring."""
+    import run_state.frontend_producers as frontend_producers
+
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    monkeypatch.chdir(primary)
+    for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
+        monkeypatch.delenv(key, raising=False)
+    runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
+    captured = {}
+
+    def capture_drive(store, token, context, session, *, acceptance_draft=None):
+        request, _adapter = session.prepare_outer()
+        captured["prompt"] = request.codex_material.argv[-1]
+        session.close(None, None, None)
+        return 0
+
+    monkeypatch.setattr(frontend_producers, "drive_managed_session", capture_drive)
+    result = _frontend_start(
+        env, authority, "cs", runtime, fake, catalog, None, "task-swarm",
+        "--scope", "03", "--invocation-text", "add --version flag",
+        "--project", "demo-project",
+    )
+    assert result == 0
+    prompt = captured["prompt"]
+    command_line = prompt.split("\n", 1)[0]
+    assert command_line == "$gsd-execute-phase 03"
+    assert "add --version flag" not in command_line
+    assert "Operator request: add --version flag" in prompt
+    assert "GSD project: demo-project" in prompt
 
 
 def test_legacy_managed_start_without_a_seal_executes_once_as_before(tmp_path, monkeypatch):
