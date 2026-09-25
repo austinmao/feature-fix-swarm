@@ -911,8 +911,8 @@ def test_doctor_rejects_unsupported_codex_cli(tmp_path: Path) -> None:
     )
     report = json.loads(result.stdout)
     assert result.returncode == 1
+    assert any(check["id"] == "codex-cli-version" and check["status"] == "fail" for check in report["checks"])
     failure = next(check for check in report["checks"] if check["id"] == "codex-cli-version")
-    assert failure["status"] == "fail"
     assert ffs_installer.CODEX_VERSION_POLICY in failure["message"]
     assert "0.156.1" in failure["remediation"]
 
