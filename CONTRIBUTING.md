@@ -56,7 +56,7 @@ variables, `tests/test_m4_upstream_binding.py` fails and some broker tests
 skip:
 
 ```bash
-out="$(mktemp -d)/upstream-runtime.json"
+out="$(cd "$(mktemp -d)" && pwd -P)/upstream-runtime.json"
 PYTHONPATH=lib python3 -m run_state.cli describe-upstream-runtime \
   --module-root node_modules/@opengsd/gsd-core/gsd-core/bin/lib \
   --node "$(command -v node)" --output "$out"
@@ -64,6 +64,9 @@ export FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR="$out"
 export FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR_SHA256="$(shasum -a 256 "$out" | cut -d' ' -f1)"
 ```
 
+The descriptor path must contain no symlinks. On macOS `mktemp -d` returns a
+path under `/var`, which is a symlink to `/private/var`, so `pwd -P` resolves
+it first; without that, about 180 tests fail with `UPSTREAM_RUNTIME_DRIFT`.
 The output path must not exist yet; the command refuses to overwrite a
 descriptor (`UPSTREAM_RUNTIME_DESCRIPTOR_EXISTS`). The test suites use a
 per-test managed-admission root, so they never write your real
