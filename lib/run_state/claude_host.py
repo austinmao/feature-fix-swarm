@@ -14,8 +14,9 @@ from typing import Final
 import uuid
 
 from host_capabilities import (
-    CapabilityError, GsdSupervisorEnvironment, _binary_chain, _closed_gsd_keys,
-    gsd_supervisor_environment_from_process, validate_gsd_supervisor_environment,
+    CapabilityError, GsdSupervisorEnvironment, _binary_chain, _is_closed_gsd_key_set,
+    _validate_gsd_scope_segment, gsd_supervisor_environment_from_process,
+    validate_gsd_supervisor_environment,
 )
 from model_requests import ModelRequestError, resolve_request
 
@@ -207,7 +208,7 @@ def claude_closed_environment(home: Path, tmpdir: Path, binary: Path,
 
 def claude_environment_policy(environment: dict[str, str], *, preview: bool = False) -> dict[str, str]:
     gsd_keys = set(environment) - _BASE_ENVIRONMENT
-    allowed = _BASE_ENVIRONMENT | (gsd_keys if _closed_gsd_keys(gsd_keys) else frozenset())
+    allowed = _BASE_ENVIRONMENT | (gsd_keys if _is_closed_gsd_key_set(gsd_keys) else frozenset())
     if set(environment) != allowed or any(not isinstance(value, str) for value in environment.values()):
         raise ClaudeHostRefused("CLAUDE_ENVIRONMENT_INVALID")
     for key in ("HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"):
@@ -228,6 +229,12 @@ def claude_environment_policy(environment: dict[str, str], *, preview: bool = Fa
                     raise ValueError
             except (ValueError, TypeError, json.JSONDecodeError) as error:
                 raise ClaudeHostRefused("CLAUDE_ENVIRONMENT_INVALID") from error
+            for key, label in (("GSD_PROJECT", "project"), ("GSD_WORKSTREAM", "workstream")):
+                if key in additions:
+                    try:
+                        _validate_gsd_scope_segment(additions[key], label)
+                    except CapabilityError as error:
+                        raise ClaudeHostRefused("CLAUDE_ENVIRONMENT_INVALID") from error
         else:
             try:
                 valid = validate_gsd_supervisor_environment(additions)

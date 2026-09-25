@@ -1232,9 +1232,9 @@ class Supervisor:
             "HOME", "CODEX_HOME", "TMPDIR", "PATH", "LANG", "LC_ALL", "NO_COLOR",
             "FFS_HOOK_OBSERVATION", "FFS_HOOK_NONCE",
         }
-        from host_capabilities import validate_gsd_supervisor_environment, CapabilityError, _closed_gsd_keys
+        from host_capabilities import validate_gsd_supervisor_environment, CapabilityError, _is_closed_gsd_key_set
         gsd_keys = set(environment) - required
-        if (not required <= set(environment) or not _closed_gsd_keys(gsd_keys)
+        if (not required <= set(environment) or not _is_closed_gsd_key_set(gsd_keys)
                 or any(not isinstance(key, str) or not isinstance(value, str) or "\0" in value
                        for key, value in environment.items())
                 or environment["HOME"] != material.runtime_home

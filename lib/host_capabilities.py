@@ -79,18 +79,28 @@ _GSD_SCOPE_ENVIRONMENT = {"GSD_PROJECT", "GSD_WORKSTREAM"}
 _GSD_SCOPE_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _closed_gsd_keys(keys) -> bool:
+def _is_closed_gsd_key_set(keys) -> bool:
     """True when ``keys`` is exactly the 4 required GSD addition keys, plus
     zero or more of the 2 optional GSD_PROJECT/GSD_WORKSTREAM scope keys."""
     keys = frozenset(keys)
     return _GSD_ENVIRONMENT <= keys <= _GSD_ENVIRONMENT | _GSD_SCOPE_ENVIRONMENT
 
 
-def _validate_gsd_scope_segment(value: object, label: str) -> str | None:
-    if value is None:
-        return None
-    if (not isinstance(value, str) or not value or len(value.encode("utf-8")) > 160
-            or ".." in value or _GSD_SCOPE_SEGMENT.fullmatch(value) is None):
+def _validate_gsd_scope_segment(value: object, label: str) -> str:
+    """Validate one PRESENT GSD_PROJECT/GSD_WORKSTREAM value.
+
+    Never call this for an omitted key -- an omitted key means default scope
+    (``None``), decided by the caller before this function runs. A present
+    key's value must be a non-empty ASCII segment; None is never accepted
+    here (a present key with a None value is a malformed addition set, not
+    "no scope"). The charset check runs BEFORE the byte-length check so a
+    non-UTF-8-encodable value (e.g. a lone surrogate) refuses CapabilityError
+    instead of letting UnicodeEncodeError escape from ``value.encode()``.
+    """
+    if (not isinstance(value, str) or not value
+            or _GSD_SCOPE_SEGMENT.fullmatch(value) is None or ".." in value):
+        raise CapabilityError(f"GSD supervisor {label} is unsafe")
+    if len(value.encode("utf-8")) > 160:
         raise CapabilityError(f"GSD supervisor {label} is unsafe")
     return value
 
@@ -193,7 +203,7 @@ def validate_gsd_supervisor_environment(value: object) -> GsdSupervisorEnvironme
         values = value
     else:
         raise CapabilityError("GSD supervisor environment additions are malformed")
-    if not _closed_gsd_keys(values) or any(not isinstance(key, str) for key in values):
+    if not _is_closed_gsd_key_set(values) or any(not isinstance(key, str) for key in values):
         raise CapabilityError("GSD supervisor environment additions are not closed")
     if values["GSD_DISPATCH_MODE"] != _GSD_DISPATCH_MODE:
         raise CapabilityError("GSD supervisor dispatch mode is unsupported")
@@ -205,19 +215,30 @@ def validate_gsd_supervisor_environment(value: object) -> GsdSupervisorEnvironme
         raise CapabilityError("GSD supervisor admission file must be absolute")
     _private_regular(Path(admission), "GSD supervisor admission file")
     command_json = _validate_gsd_command_json(values["FFS_SUPERVISED_DISPATCH_COMMAND_JSON"])
-    project = _validate_gsd_scope_segment(values.get("GSD_PROJECT"), "project")
-    workstream = _validate_gsd_scope_segment(values.get("GSD_WORKSTREAM"), "workstream")
+    # A PRESENT scope key is always validated (never silently dropped for a
+    # None value); an OMITTED key means default scope.
+    project = _validate_gsd_scope_segment(values["GSD_PROJECT"], "project") if "GSD_PROJECT" in values else None
+    workstream = (
+        _validate_gsd_scope_segment(values["GSD_WORKSTREAM"], "workstream")
+        if "GSD_WORKSTREAM" in values else None
+    )
     return GsdSupervisorEnvironment(
         _GSD_DISPATCH_MODE, _GSD_COMMIT_MODE, admission, command_json, project, workstream,
     )
 
 
 def gsd_supervisor_environment_from_process() -> GsdSupervisorEnvironment | None:
-    """Read the optional closed addition set from the invoking GSD process."""
+    """Read the optional closed addition set from the invoking GSD process,
+    including the optional GSD_PROJECT/GSD_WORKSTREAM scope when the process
+    env carries them (validated, never silently dropped)."""
     present = _GSD_ENVIRONMENT.intersection(os.environ)
     if not present:
         return None
-    return validate_gsd_supervisor_environment({key: os.environ.get(key) for key in _GSD_ENVIRONMENT})
+    values = {key: os.environ[key] for key in _GSD_ENVIRONMENT}
+    for key in _GSD_SCOPE_ENVIRONMENT:
+        if key in os.environ:
+            values[key] = os.environ[key]
+    return validate_gsd_supervisor_environment(values)
 
 
 def codex_closed_environment(home: Path, tmpdir: Path, binary: Path,
@@ -257,7 +278,7 @@ def codex_environment_policy(environment: dict[str, str]) -> dict[str, str]:
         raise CapabilityError("Codex closed environment is malformed")
     gsd_keys = set(environment) - _CODEX_ENVIRONMENT
     if (not _CODEX_ENVIRONMENT <= set(environment)
-            or (gsd_keys and not _closed_gsd_keys(gsd_keys))
+            or (gsd_keys and not _is_closed_gsd_key_set(gsd_keys))
             or any(not isinstance(key, str) or not isinstance(value, str)
                    for key, value in environment.items())):
         raise CapabilityError("Codex closed environment is malformed")
@@ -293,7 +314,7 @@ def preview_gsd_codex_environment_policy_hash(environment: dict[str, str]) -> st
     if not isinstance(environment, dict):
         raise CapabilityError("Codex closed environment is malformed")
     gsd_keys = set(environment) - _CODEX_ENVIRONMENT
-    if not _CODEX_ENVIRONMENT <= set(environment) or not _closed_gsd_keys(gsd_keys):
+    if not _CODEX_ENVIRONMENT <= set(environment) or not _is_closed_gsd_key_set(gsd_keys):
         raise CapabilityError("Codex closed environment is malformed")
     base = {key: environment[key] for key in _CODEX_ENVIRONMENT}
     policy = codex_environment_policy(base)
@@ -308,8 +329,12 @@ def preview_gsd_codex_environment_policy_hash(environment: dict[str, str]) -> st
     additions["FFS_SUPERVISED_DISPATCH_COMMAND_JSON"] = _validate_gsd_command_json(
         additions.get("FFS_SUPERVISED_DISPATCH_COMMAND_JSON")
     )
-    _validate_gsd_scope_segment(additions.get("GSD_PROJECT"), "project")
-    _validate_gsd_scope_segment(additions.get("GSD_WORKSTREAM"), "workstream")
+    # Iterate PRESENT scope keys only -- a present key is always validated
+    # (never silently dropped for a None value); an omitted key means
+    # default scope.
+    for key, label in (("GSD_PROJECT", "project"), ("GSD_WORKSTREAM", "workstream")):
+        if key in additions:
+            _validate_gsd_scope_segment(additions[key], label)
     policy.update(additions)
     policy["FFS_SUPERVISED_ADMISSION_FILE"] = str(Path(admission).resolve().parent / "<admission>")
     return closed_environment_hash(policy)
