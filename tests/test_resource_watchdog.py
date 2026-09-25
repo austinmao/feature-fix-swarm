@@ -102,6 +102,19 @@ def test_unneeded_io_and_unknown_provider_do_not_become_structural_failure():
     assert status.structural_evidence == ("PROVIDER_EXPLORATION",)
 
 
+def test_legacy_opaque_wait_reports_legacy_opaque_not_provider():
+    # Without the override this demand+observation combination is HEALTHY:
+    # cpu is satisfied and the provider has known available capacity. The
+    # admission_verdict must still surface the real block reason.
+    target = WatchdogTarget("legacy", ResourceDemand(cpu=1, provider="codex", provider_units=1),
+                            admission_verdict="legacy-opaque")
+    status = ResourceWatchdog(lambda: observation(10, providers={"codex": 1}), Registry([target]),
+                              policy=policy(), clock_ns=lambda: 10).check_once()[0]
+    assert status.code == RESOURCE_WAIT
+    assert status.limiting_resources == ("legacy-opaque",)
+    assert status.structural_evidence == ("LEGACY_ADMISSION_OPAQUE",)
+
+
 def test_known_provider_capacity_is_not_reported_as_unknown():
     target = WatchdogTarget("provider", ResourceDemand(cpu=1, provider="codex", provider_units=1))
     status = ResourceWatchdog(lambda: observation(10, providers={"codex": 1}), Registry([target]),

@@ -247,7 +247,8 @@ class _AdmissionWatchdogRegistry:
         from .resource_watchdog import WatchdogTarget
         for ticket, request in zip(self.tickets, self.requests):
             row = self.queue.status(ticket)
-            yield WatchdogTarget(ticket.ticket, request['demand'], row['last_progress_ns'])
+            verdict = row['limiting_resource'] if row['status'] == 'waiting' else None
+            yield WatchdogTarget(ticket.ticket, request['demand'], row['last_progress_ns'], verdict)
 
     def persist_resource_watchdog_status(self, status):
         with self.queue._transaction() as connection:

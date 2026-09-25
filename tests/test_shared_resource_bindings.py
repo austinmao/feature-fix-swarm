@@ -6,9 +6,55 @@ from process_identity import ProcessIdentity
 from run_state.managed_admission import LeaseIdentity, ManagedAdmissionQueue
 from run_state.ownership import release_owner
 from run_state.shared_resources import ControlStoreLeaseEvidenceReader, record_admission_request
-from run_state.shared_resources import SharedResourceCoordinator
+from run_state.shared_resources import SharedResourceCoordinator, _AdmissionWatchdogRegistry
 from run_state.resource_observation import ResourceDemand, ResourceObservation
+from run_state.resource_watchdog import RESOURCE_WAIT, ResourceWatchdog, ResourceWatchdogPolicy
 from test_runtime_receipt_authority import _managed_store
+from test_resource_admission import OWNER, _observation, _raw_v1_root
+
+
+def test_admission_watchdog_registry_verdict_is_legacy_opaque_only_while_waiting(tmp_path, monkeypatch):
+    """F25 finding 15: the registry->watchdog admission_verdict hookup was
+    untested -- a mutant that always passes None would have passed. Prove a
+    waiting ticket blocked by an unreclaimed legacy row carries the verdict
+    all the way to the published watchdog status, and an admitted ticket
+    carries none.
+    """
+    import run_state.managed_admission as managed_admission
+
+    root = _raw_v1_root(
+        tmp_path, ticket="legacy", host_id=OWNER.host_id, boot_id=OWNER.boot_id,
+        pid=55, start_token="legacy-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda _: "LIVE")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+
+    waiting_ticket = queue.enqueue(state_root=tmp_path / "waiting", run_id="waiting", demand=ResourceDemand(cpu=1))
+    assert queue.try_admit(waiting_ticket) is False
+    assert queue.status(waiting_ticket)["limiting_resource"] == "legacy-opaque"
+
+    # Zero demand bypasses the opaque gate (nothing to convert to zero cost),
+    # so this ticket can still reach 'active' while the legacy row remains.
+    active_ticket = queue.enqueue(state_root=tmp_path / "active", run_id="active",
+                                  demand=ResourceDemand(cpu=0, processes=0))
+    assert queue.try_admit(active_ticket)
+
+    registry = _AdmissionWatchdogRegistry(
+        queue, (waiting_ticket, active_ticket),
+        ({"demand": ResourceDemand(cpu=1)}, {"demand": ResourceDemand(cpu=0, processes=0)}),
+    )
+    targets = {target.scope: target for target in registry.resource_watchdog_targets()}
+    assert targets[waiting_ticket.ticket].admission_verdict == "legacy-opaque"
+    assert targets[active_ticket.ticket].admission_verdict is None
+
+    statuses = ResourceWatchdog(
+        lambda: _observation(), registry, policy=ResourceWatchdogPolicy("test/admission-verdict/v1"),
+    ).check_once()
+    waiting_status = next(status for status in statuses if status.scope == waiting_ticket.ticket)
+    assert waiting_status.code == RESOURCE_WAIT
+    assert waiting_status.limiting_resources == ("legacy-opaque",)
+    assert waiting_status.structural_evidence == ("LEGACY_ADMISSION_OPAQUE",)
 
 
 def test_prespawn_proof_requires_retired_exact_request_and_dead_writer(tmp_path, monkeypatch):

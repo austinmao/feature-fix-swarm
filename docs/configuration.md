@@ -320,6 +320,196 @@ success without relaunching. There is no dedicated inspect or reconcile
 command yet for `inspect_*` and `reconcile_intent`; they name the step an
 operator takes by hand. Contract: `specs/014-parallel-host-parity/contracts/run-context.md`.
 
+#### `run-state admission inspect|reconcile` (spec-014 Release C, F25)
+
+The `ManagedAdmissionRefused` recovery action `inspect_managed_admission`
+(above) names this CLI. It exists because a legacy (`writer_version=1`)
+admission row keeps `try_admit`'s legacy-opaque gate armed for every managed
+run sharing the store — including a row whose owning process died on a
+prior boot, or a `waiting` v2 row whose owner died with no child ever
+bound — and neither case self-heals from the normal admission path.
+
+```bash
+python3 -m run_state.cli admission inspect [--root PATH]
+python3 -m run_state.cli admission reconcile [--root PATH] [--apply]
+```
+
+`--root` defaults to `global_admission_root()` (the `FFS_MANAGED_ADMISSION_ROOT`
+row above); the raw, unresolved path is checked for a symlink before it is
+ever resolved, so a symlinked `--root` refuses `MANAGED_ADMISSION_ROOT_UNSAFE`
+rather than silently following it. **Neither command ever creates a store**:
+if `<root>/admission.sqlite3` does not exist, both refuse
+`MANAGED_ADMISSION_STORE_MISSING` (exit 2) without touching the filesystem —
+unlike `ManagedAdmissionQueue`'s own constructor, which creates one on first
+open. `reconcile` is dry-run unless `--apply` is given; there is no `--force`.
+
+`inspect` and dry-run `reconcile` open the store strictly read-only
+(`open_read_only`/`read_only_report`: a genuine sqlite `mode=ro` connection,
+the same root/file safety checks as the writable path, never a create).
+Neither ever migrates a v1 store or installs a fence trigger — a store that
+started as `writer_version=1`/`admission_policy.version=1` stays exactly
+that after any number of `inspect` or dry-run `reconcile` calls; only
+`--apply` may migrate it. A schema this reader cannot make sense of
+(including an `admission_policy` table with zero rows) refuses
+`MANAGED_ADMISSION_SCHEMA_INVALID` instead of crashing. Before either
+read-only command ever opens a sqlite connection,
+`_refuse_unless_legacy_journal_format` reads the file's header bytes 18-19
+directly (`O_RDONLY|O_NOFOLLOW`) and refuses `MANAGED_ADMISSION_STORE_UNSAFE`
+unless they are `\x01\x01` (legacy rollback-journal format) — this is also
+the code path for a file shorter than the 100-byte sqlite header (an
+incomplete header is refused as UNSAFE, not SCHEMA_INVALID, whatever
+bytes 18-19 hold): opening a WAL-mode database even `mode=ro` creates
+`-wal`/`-shm` sidecar files as a side effect (SQLite's WAL reader needs
+them to read consistently), which a strictly read-only path must never do.
+A store this package creates is always DELETE-journal, so this only fires
+against a tampered, truncated, or foreign file. Any other sqlite-level
+failure opening or reading the store (a corrupt file, a locked file) maps
+to `MANAGED_ADMISSION_SCHEMA_INVALID` or `MANAGED_ADMISSION_STORE_UNAVAILABLE`
+rather than a raw traceback.
+
+Every row is probed outside SQLite (boot id and process liveness), never
+assumed. `--apply` runs these same probes while holding the write lock
+(below); each probe is a few local syscalls, a few milliseconds per row,
+but it still counts against every *other* writer's 2-second busy timeout
+for the whole duration of the apply. A row is only ever reclaimed on one
+of two proofs: the recorded
+owner is dead **and** its boot no longer exists (`boot-changed` — the host
+rebooted, so nothing from that incarnation survives, v1 or v2, any status),
+or it is a childless v2 `waiting` row whose owner died on the *same* boot
+(`dead-waiter` — `try_admit` only ever grants `waiting -> active` to the
+live ticket owner, so a dead-owned waiting row can never be granted by any
+other path either). Everything else is kept, with a reason:
+`LEGACY_SAME_BOOT_UNPROVABLE` (a same-boot v1 row has no child identity to
+fall back on), `RELEASED_RETAINED` (a v2 `released` row may still be
+requeued by group retry), `ACTIVE_LEASE_UNPROVABLE` (a childless v2 `active`
+row's descendant cannot be ruled out), `OWNER_LIVE`, or `OWNER_UNKNOWN`.
+`reclaimed` is terminal: a database trigger aborts any later write, including
+raw legacy SQL, that tries to move a reclaimed row to any other status.
+
+JSON output (stdout, one object):
+
+```json
+{
+  "schema_version": 1, "ok": true, "mode": "inspect|dry-run|apply",
+  "database": "…/admission.sqlite3",
+  "gate_armed_before": true, "gate_armed_after": false,
+  "counts": {"1/waiting": 1, "2/waiting": 3},
+  "rows": [{"sequence": 1, "writer_version": 1, "status": "released",
+             "boot": "…", "owner": {"host_id": "…", "boot_id": "…", "pid": 7, "start_token": "…"},
+             "child": null,
+             "decision": "reclaim", "proof": "boot-changed", "reason": null}],
+  "backup": {"path": "…/admission.sqlite3.reconcile-<utc>-<hex>.bak", "sha256": "…"},
+  "reclaimed": [1], "row_changed": []
+}
+```
+
+The output **never includes a ticket value** (the row's admission ticket is a
+capability secret, not diagnostic data). `gate_armed_before`/`_after` are the
+same gate query try_admit itself runs (`LEGACY_OPAQUE_GATE_SQL` once the
+store is v2; a v1-only, still-unmigrated store has no `writer_version`
+column at all, so every row on it counts as legacy). `counts` keys are
+`"<writer_version>/<status>"`. `backup` is `null` for `inspect` and for a
+dry-run `reconcile`. `reclaimed`/`row_changed` are always present (sequence
+numbers); both are empty for `inspect` and dry-run `reconcile`, since
+neither ever applies anything.
+
+`--apply` order (`apply_reconcile_at_root`, the one `--apply` entrypoint):
+open the store directly by path (never create); take the writer's own lock
+(`BEGIN IMMEDIATE`) **before any migration** — a store that started as
+`writer_version=1` is migrated only after this point, so its backup (below)
+still shows `admission_policy.version=1`; back the live database up with
+`Connection.backup`, from a SEPARATE read-only connection to the same file
+while this connection holds the writer's lock (readers are still allowed
+under a `RESERVED` lock; a concurrent writer's own `BEGIN IMMEDIATE` blocks
+or fails busy against it for the whole window), to an exclusively created
+`0600` file named `admission.sqlite3.reconcile-<utc>-<hex>.bak` next to it;
+verify the backup with `PRAGMA integrity_check` plus a row-count match
+against the live table; migrate the schema if it was v1, still inside the
+same lock; exact-snapshot compare-and-swap each `reclaim` decision
+(`sequence`, ticket, `host_id`/`boot_id`/`pid`/`start_token`,
+`writer_version`, `status`, and NULL-safe `child_host_id`/`child_boot_id`/
+`child_pid`/`child_start_token` must all still match, or the row is left
+alone and its sequence lands in `row_changed`, never overwritten); commit.
+Any failure after the backup file is created removes it — a failed backup,
+verify, migrate, or CAS leaves the live database byte-for-byte untouched and
+refuses; nothing is ever applied without a verified backup on disk first,
+and no `.bak` file survives a failed apply. This includes a close() failure
+on the backup file's own exclusive create (the file it just made is
+unlinked before the failure is reported) and any raw `sqlite3.Error` from
+the writer connection itself — a contended lock, a missing table, a failed
+connect — which is chained into `MANAGED_ADMISSION_STORE_UNAVAILABLE`
+rather than escaping as a traceback. Once the gate has disarmed (the last
+`writer_version=1` row is reclaimed), the same transaction also clears any
+`'legacy-opaque'` tag left on a waiting row, the same cleanup `try_admit`
+performs when it notices the gate is clear — an apply that clears the last
+legacy row leaves no stale tag behind for the next `try_admit` to find.
+
+Exit codes: `0` ok; `2` `MANAGED_ADMISSION_STORE_MISSING` / `INVALID_REQUEST`;
+`3` `LEGACY_OPAQUE_REMAINS` — `--apply` ran but at least one row is still
+kept, so the gate is still armed; `4` `ROW_CHANGED` — `--apply` ran but at
+least one `reclaim` decision's exact snapshot no longer matched. In normal
+use this should not occur: the CLI builds the plan from the same rows it
+CASes, under the one continuous writer lock it holds from before the
+backup through the commit, so there is no external window for anything to
+change the snapshot in between. It exists as a defensive guard (a stale
+snapshot is reported, never silently overwritten) rather than a plan that
+is ever expected to go stale in practice; `5` `RECONCILE_BACKUP_FAILED`
+(rolled back, database untouched, no `.bak` left); `6`
+`MANAGED_ADMISSION_STORE_UNSAFE` / `_STORE_UNAVAILABLE` / `_SCHEMA_INVALID`
+/ `_ROOT_UNSAFE` / `_IDENTITY_UNKNOWN` (the caller's own process identity
+could not be captured). Both exit 3 and exit 4 payloads carry `code`,
+`cause`, and `recovery_action` alongside `ok: true`, the same shape as a
+`ManagedAdmissionRefused` envelope, even though the operation itself did
+not raise.
+
+**Operator order:** `inspect` first (read-only; confirms which rows are
+actually reclaimable and why the rest are kept) -> `reconcile` with no flags
+(dry run; same report, still no write) -> `reconcile --apply` only once the
+dry-run plan looks right. Never run `--apply` against a shared per-user store
+without reading the dry-run plan first — reclaiming a row is a one-way,
+terminal decision.
+
+**Backup-file TOCTOU window (F25 review round 1, finding 7):** the backup
+file is created via an exclusive `O_EXCL|O_NOFOLLOW` open, then reopened by
+pathname (for the sqlite backup call, the integrity-check read, and the
+sha256 hash) rather than held open across all three. Chosen response:
+**document the existing same-UID trust boundary rather than add a private
+`mkdtemp` staging directory.** `_lstat_root_and_path` already requires the
+admission root to be a `0700` directory owned by the calling UID before
+either command does anything; only that same UID can create, replace, or
+symlink anything inside it during the reopen window. That UID already has
+full read/write access to the live `admission.sqlite3` and to the calling
+process itself, so closing the window would not remove any privilege a
+same-UID actor doesn't already have — it would only harden against a
+different-UID attacker, who is already excluded by the root's `0700` check.
+
+**Trust boundary.** The store is always opened by pathname (`root /
+"admission.sqlite3"`), never by an already-held file descriptor passed in
+from outside. `_lstat_root_and_path` checks only the leaf root directory:
+owned by the calling UID, mode `0700`, and (per `_read_root_and_path`,
+checked on the raw path before it is ever resolved) not a symlink. Nothing
+above that leaf is re-checked — every ancestor directory is trusted exactly
+the way the rest of the calling user's home directory already is; this
+package adds no additional isolation above the leaf. Consequently, **a
+multi-user host must never point `FFS_MANAGED_ADMISSION_ROOT`
+(`GLOBAL_ROOT_ENV` in `managed_admission.py`) at a path under a shared,
+writable ancestor directory** (for example anything under a
+world-or-group-writable `/tmp`, or a shared project directory writable by
+more than the intended UID) — a leaf directory can be `0700` and
+owner-correct while an untrusted party still controls an ancestor and could
+replace the leaf itself between checks. The default,
+`~/.local/state/feature-fix-swarm/managed-admission`, is safe because
+`$HOME` itself is expected to be single-user.
+
+**`managed_resource_group.py`'s parent-ticket watchdog caller is still
+unwired** (F25 design section 4's `admission_verdict` plumbing): the
+`WatchdogTarget` it constructs for a prepaid parent group's pre-reservation
+polling loop never carries an `admission_verdict`, unlike
+`shared_resources.py`'s `_AdmissionWatchdogRegistry`. Deferred, not a
+regression — no ticket exists yet at that call site for most of the loop's
+iterations, and wiring it without a covering test risked a silent bug in an
+already-complex prepaid-group path.
+
 ### Kill-switches
 
 All default to on. Set to `off` to disable.

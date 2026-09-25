@@ -1620,6 +1620,94 @@ def cmd_migration_rollback(args: argparse.Namespace) -> int:
         return _migration_refusal(error, run_id=args.run_id)
 
 
+_ADMISSION_CODES = {
+    "MANAGED_ADMISSION_STORE_MISSING": 2, "INVALID_REQUEST": 2,
+    "RECONCILE_BACKUP_FAILED": 5,
+}
+
+
+def _admission_refusal(code: str, **extra) -> int:
+    cause, action = (
+        ("the admission store could not be read or written safely", "inspect_managed_admission")
+        if code != "INVALID_REQUEST" else
+        ("the fixture authority could not prove the requested transition", "correct_request")
+    )
+    return _fixture_refusal(
+        code, exit_code=_ADMISSION_CODES.get(code, 6), cause=cause,
+        recovery_action={"action": action}, **extra,
+    )
+
+
+def _admission_row_report(item: dict) -> dict:
+    """Never includes the raw ticket value."""
+    return {key: item[key] for key in (
+        "sequence", "writer_version", "status", "boot", "owner", "child", "decision", "proof", "reason",
+    )}
+
+
+def _admission_payload(mode, database, plan, gate_before, gate_after, *, backup, reclaimed=(), row_changed=()):
+    counts: dict[str, int] = {}
+    for item in plan:
+        key = str(item["writer_version"]) + "/" + item["status"]
+        counts[key] = counts.get(key, 0) + 1
+    payload = {
+        "schema_version": 1, "ok": True, "mode": mode, "database": database,
+        "gate_armed_before": gate_before, "gate_armed_after": gate_after,
+        "counts": counts, "rows": [_admission_row_report(item) for item in plan],
+        "backup": backup, "reclaimed": list(reclaimed), "row_changed": list(row_changed),
+    }
+    exit_code = 0
+    if row_changed:
+        exit_code = 4  # ROW_CHANGED: a decision's exact snapshot raced a concurrent writer.
+        payload.update(
+            code="ROW_CHANGED",
+            cause="a reconcile decision no longer matched its exact snapshot when applied",
+            recovery_action={"action": "inspect_managed_admission"},
+        )
+    elif mode == "apply" and gate_after:
+        exit_code = 3  # LEGACY_OPAQUE_REMAINS: apply ran, but some row is still unreclaimed.
+        payload.update(
+            code="LEGACY_OPAQUE_REMAINS",
+            cause="global managed-run admission could not be fully proved",
+            recovery_action={"action": "inspect_managed_admission"},
+        )
+    print(json.dumps(payload, sort_keys=True))
+    return exit_code
+
+
+def _admission_read_only(root, *, mode) -> int:
+    from run_state.managed_admission import ManagedAdmissionRefused, read_only_report
+    try:
+        report = read_only_report(root)
+    except ManagedAdmissionRefused as error:
+        return _admission_refusal(error.code)
+    return _admission_payload(
+        mode, report["database"], report["plan"], report["gate_before"], report["gate_after"], backup=None,
+    )
+
+
+def _admission_apply(root) -> int:
+    from run_state.managed_admission import ManagedAdmissionRefused, apply_reconcile_at_root
+    try:
+        report = apply_reconcile_at_root(root)
+    except ManagedAdmissionRefused as error:
+        return _admission_refusal(error.code)
+    return _admission_payload(
+        "apply", report["database"], report["plan"], report["gate_before"], report["gate_after"],
+        backup=report["backup"], reclaimed=report["reclaimed"], row_changed=report["row_changed"],
+    )
+
+
+def cmd_admission_inspect(args: argparse.Namespace) -> int:
+    return _admission_read_only(args.root, mode="inspect")
+
+
+def cmd_admission_reconcile(args: argparse.Namespace) -> int:
+    if args.apply:
+        return _admission_apply(args.root)
+    return _admission_read_only(args.root, mode="dry-run")
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     store = _store()
     if args.phase:
@@ -1946,6 +2034,18 @@ def main(argv=None) -> int:
     s = migration_sub.add_parser("rollback")
     migration_arguments(s, run_id=True)
     s.set_defaults(func=cmd_migration_rollback)
+
+    admission = sub.add_parser("admission")
+    admission_sub = admission.add_subparsers(dest="admission_command", required=True)
+
+    s = admission_sub.add_parser("inspect")
+    s.add_argument("--root", default=None)
+    s.set_defaults(func=cmd_admission_inspect)
+
+    s = admission_sub.add_parser("reconcile")
+    s.add_argument("--root", default=None)
+    s.add_argument("--apply", action="store_true")
+    s.set_defaults(func=cmd_admission_reconcile)
 
     s = sub.add_parser("describe-upstream-runtime")
     s.add_argument("--module-root", required=True)

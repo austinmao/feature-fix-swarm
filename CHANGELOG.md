@@ -8,6 +8,45 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-25, spec-014 Release C: F25 admission wedge and reconcile CLI)
+
+- A legacy (writer_version=1) managed admission row kept try_admit's
+  legacy-opaque gate armed forever for every run sharing the store, even
+  after the row was released, and even when its owning process had died on
+  a prior boot. A childless waiting v2 row whose owner died could get stuck
+  the same way. Neither case had any path back to a working admission
+  queue.
+- An earlier waiting ticket whose owner had died could permanently shadow a
+  later, live waiter of the same run, because the fairness scheduler picked
+  the earliest row for a run before checking whether its owner was alive.
+- While the legacy gate is armed, the resource watchdog now reports
+  RESOURCE_WAIT with reason LEGACY_ADMISSION_OPAQUE instead of a misleading
+  provider or local-resource guess.
+- New CLI: run-state admission inspect and run-state admission reconcile.
+  - Both refuse on a missing store instead of creating one. inspect and a
+    plain reconcile (dry run) open the store strictly read-only: they never
+    create, migrate or write, and they refuse a WAL-mode or truncated store
+    before connecting. A symlinked --root is refused.
+  - reconcile --apply takes the writer lock first and holds it through the
+    commit. Under that lock it backs the store up from a separate read-only
+    connection into an exclusively created 0600 file, verifies the backup
+    (integrity check and row count), migrates if needed, applies each
+    reclaim with an exact-snapshot compare-and-swap that includes child
+    identity, and clears stale legacy-opaque tags once the gate disarms.
+    The backup is kept only when the apply commits.
+  - Each reclaimed row is proof carrying: either its owner is dead and its
+    boot no longer exists, or it is a childless waiting row whose owner died
+    on the same boot and can never be granted by any other path. A reclaimed
+    row is terminal: no later write, including raw legacy SQL, can change
+    its status or delete it.
+  - Every failure is a typed JSON refusal, never a traceback. Exit codes: 0
+    ok, 2 store missing or invalid request, 3 legacy rows still kept, 4 a
+    snapshot changed (defensive), 5 backup failed, 6 unsafe, unavailable or
+    invalid store. JSON output never includes a ticket value.
+  - Operator order: inspect, then reconcile with no flags to preview, then
+    reconcile --apply. Full reference, including the trust boundary:
+    docs/configuration.md.
+
 ### Changed (2026-09-25, Codex CLI 0.156.1 compatibility pin)
 
 - Codex CLI `0.156.1` is admitted as a third exact compatibility pin,

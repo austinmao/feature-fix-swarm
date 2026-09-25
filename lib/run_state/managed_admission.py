@@ -3,6 +3,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,10 @@ from .resource_scheduler import ResourceScheduler, demand_from_record
 DEFAULT_MANAGED_RUN_CAPACITY = 2  # compatibility symbol, never an authority bound
 GLOBAL_ROOT_ENV = "FFS_MANAGED_ADMISSION_ROOT"
 _V2 = 2
+# Shared by try_admit's gate and the reconcile CLI's gate_armed_before/after.
+LEGACY_OPAQUE_GATE_SQL = (
+    "SELECT 1 FROM managed_admissions WHERE writer_version=1 AND status!='reclaimed' LIMIT 1"
+)
 
 
 class ManagedAdmissionRefused(RuntimeError):
@@ -140,6 +145,131 @@ def _encode(demand):
     return json.dumps(demand.record(), sort_keys=True, separators=(",", ":"))
 
 
+def _dead_probe(identity, liveness_probe=None):
+    """Free-standing so the read-only reconcile report can reuse it without
+    a live ``ManagedAdmissionQueue`` instance."""
+    if identity is None:
+        return False
+    try:
+        return (
+            probe_identity(identity) == DEAD
+            and (DEAD if liveness_probe is None else liveness_probe(identity)) == DEAD
+        )
+    except Exception:
+        return False
+
+
+# Columns a raw, unmigrated v1 table never has; defaulting them here lets the
+# same plan logic run against a v1-only row shape (read-only reconcile) and a
+# fully migrated v2 row shape without two copies of the decision tree.
+_V2_ONLY_DEFAULTS = (
+    ("writer_version", 1), ("repository_id", ""), ("request_key", ""),
+    ("child_host_id", None), ("child_boot_id", None),
+    ("child_pid", None), ("child_start_token", None),
+)
+
+
+def _normalize_admission_row(row):
+    keys = row.keys()
+    out = {name: row[name] for name in
+           ("sequence", "ticket", "status", "host_id", "boot_id", "pid", "start_token")}
+    for name, default in _V2_ONLY_DEFAULTS:
+        out[name] = row[name] if name in keys else default
+    return out
+
+
+def _plan_rows(rows, *, current_boot, liveness_probe=None):
+    """Pure decision logic: read-only reconcile (a v1-only or v2 row shape)
+    and the writable queue's own probe share this one implementation.
+
+    Boot proof (any writer version, any status): the recorded owner is dead
+    AND its boot no longer exists -- the host rebooted, so nothing from that
+    incarnation survives. Dead-waiter proof (v2, same boot): a childless
+    waiting row can never be granted by any other path once its owner is
+    dead (try_admit requires the live owner). v2 released rows and v1
+    same-boot rows are always kept: a release may still be resurrected
+    (resource_groups.retry_expired_staging), and a same-boot v1 DEAD reading
+    alone is not distinguishable from a live descendant.
+    """
+    plan = []
+    for raw in rows:
+        row = _normalize_admission_row(raw)
+        if row["status"] == "reclaimed":
+            continue
+        owner = _identity(row)
+        child = _identity(row, "child_")
+        decision, proof, reason = "keep", None, None
+        if owner is None:
+            reason = "OWNER_UNKNOWN"
+        elif row["writer_version"] == 1:
+            if row["boot_id"] == current_boot:
+                reason = "LEGACY_SAME_BOOT_UNPROVABLE"
+            elif _dead_probe(owner, liveness_probe):
+                decision, proof = "reclaim", "boot-changed"
+            elif probe_identity(owner) == LIVE:
+                reason = "OWNER_LIVE"
+            else:
+                reason = "OWNER_UNKNOWN"
+        elif row["status"] == "released":
+            reason = "RELEASED_RETAINED"
+        elif row["boot_id"] != current_boot and _dead_probe(owner, liveness_probe):
+            decision, proof = "reclaim", "boot-changed"
+        elif row["status"] == "waiting" and child is None and _dead_probe(owner, liveness_probe):
+            decision, proof = "reclaim", "dead-waiter"
+        elif row["status"] == "active" and child is None and _dead_probe(owner, liveness_probe):
+            reason = "ACTIVE_LEASE_UNPROVABLE"
+        elif probe_identity(owner) == LIVE:
+            reason = "OWNER_LIVE"
+        else:
+            reason = "OWNER_UNKNOWN"
+        plan.append({
+            "sequence": row["sequence"], "ticket": row["ticket"],
+            "writer_version": row["writer_version"], "status": row["status"],
+            "boot": row["boot_id"],
+            "owner": {
+                "host_id": row["host_id"], "boot_id": row["boot_id"],
+                "pid": row["pid"], "start_token": row["start_token"],
+            },
+            "child": None if child is None else {
+                "host_id": child.host_id, "boot_id": child.boot_id,
+                "pid": child.pid, "start_token": child.start_token,
+            },
+            "decision": decision, "proof": proof, "reason": reason,
+        })
+    return plan
+
+
+def _apply_plan_cas(c, plan):
+    """Exact-snapshot CAS each 'reclaim' decision against an already-open
+    connection inside an already-open writer transaction. A stale snapshot
+    (any proof-relevant column -- including child identity -- no longer
+    matching) simply misses its CAS and is reported as row_changed, never
+    overwritten. Returns (reclaimed, row_changed) sequence-number lists.
+    """
+    reclaimed, row_changed = [], []
+    for item in plan:
+        if item["decision"] != "reclaim":
+            continue
+        owner, child = item["owner"], item["child"]
+        n = c.execute(
+            "UPDATE managed_admissions SET status='reclaimed',limiting_resource=? "
+            "WHERE sequence=? AND ticket=? AND writer_version=? AND status=? "
+            "AND host_id=? AND boot_id=? AND pid=? AND start_token=? "
+            "AND child_host_id IS ? AND child_boot_id IS ? AND child_pid IS ? AND child_start_token IS ?",
+            (
+                "reconcile:" + item["proof"], item["sequence"], item["ticket"],
+                item["writer_version"], item["status"],
+                owner["host_id"], owner["boot_id"], owner["pid"], owner["start_token"],
+                None if child is None else child["host_id"],
+                None if child is None else child["boot_id"],
+                None if child is None else child["pid"],
+                None if child is None else child["start_token"],
+            ),
+        ).rowcount
+        (reclaimed if n == 1 else row_changed).append(item["sequence"])
+    return reclaimed, row_changed
+
+
 class ManagedAdmissionQueue:
     """One private DELETE-journal database; active count is only a metric."""
 
@@ -232,6 +362,15 @@ class ManagedAdmissionQueue:
         c.execute(
             "CREATE TRIGGER IF NOT EXISTS admission_fence_activate BEFORE UPDATE OF status ON managed_admissions WHEN OLD.status='waiting' AND NEW.status='active' AND OLD.writer_version!=2 BEGIN SELECT RAISE(ABORT,'LEGACY_ADMISSION_WRITE_REFUSED'); END"
         )
+        # A reconciled row is a terminal, proof-carrying fact. No writer -- old
+        # or new -- may move it to any other status, including raw legacy SQL,
+        # nor delete it outright.
+        c.execute(
+            "CREATE TRIGGER IF NOT EXISTS admission_fence_reclaimed_terminal BEFORE UPDATE OF status ON managed_admissions WHEN OLD.status='reclaimed' AND NEW.status!='reclaimed' BEGIN SELECT RAISE(ABORT,'RECLAIMED_ADMISSION_IMMUTABLE'); END"
+        )
+        c.execute(
+            "CREATE TRIGGER IF NOT EXISTS admission_fence_reclaimed_no_delete BEFORE DELETE ON managed_admissions WHEN OLD.status='reclaimed' BEGIN SELECT RAISE(ABORT,'RECLAIMED_ADMISSION_IMMUTABLE'); END"
+        )
 
     def _initialize(self):
         stage = self.root / (".admission-" + secrets.token_hex(16) + ".sqlite3")
@@ -277,56 +416,8 @@ class ManagedAdmissionQueue:
                 raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNSAFE")
             if c.execute("PRAGMA journal_mode").fetchone()[0] != "delete":
                 raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNSAFE")
-            version = c.execute(
-                "SELECT version FROM admission_policy WHERE singleton=1"
-            ).fetchone()[0]
-            if version == _V2:
-                c.execute("BEGIN IMMEDIATE")
-                self._fences(c)
-                c.commit()
-                return
-            if version != 1:
-                raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID")
             c.execute("BEGIN IMMEDIATE")
-            nonce = secrets.token_hex(32)
-            # SQLite cannot remove v1 CHECK(version=1) with ALTER.  Rebuild
-            # only the one-row policy table inside this same database file;
-            # managed_admissions (and its inode, fields, rows and release SQL)
-            # are never copied or replaced.
-            c.execute(
-                "CREATE TABLE admission_policy_v2 (singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2),writer_nonce TEXT NOT NULL,scheduler_cursor TEXT,last_progress_ns INTEGER NOT NULL DEFAULT 0)"
-            )
-            c.execute(
-                "INSERT INTO admission_policy_v2(singleton,version,writer_nonce) VALUES(1,2,?)",
-                (nonce,),
-            )
-            c.execute("DROP TABLE admission_policy")
-            c.execute("ALTER TABLE admission_policy_v2 RENAME TO admission_policy")
-            # Defaults mark old rows v1; old ticket columns are unchanged and legacy release SQL still works.
-            for col in (
-                "repository_id TEXT NOT NULL DEFAULT ''",
-                "request_key TEXT NOT NULL DEFAULT ''",
-                "generation INTEGER NOT NULL DEFAULT 1",
-                "writer_version INTEGER NOT NULL DEFAULT 1",
-                'demand_json TEXT NOT NULL DEFAULT \'{"cpu":1,"disk_bytes":0,"io_units":0,"memory_bytes":0,"processes":1,"provider":null,"provider_units":0}\'',
-                "group_id TEXT",
-                "group_width INTEGER NOT NULL DEFAULT 1",
-                "group_age_ns INTEGER NOT NULL DEFAULT 0",
-                "next_recheck_ns INTEGER NOT NULL DEFAULT 0",
-                "limiting_resource TEXT",
-                "observation_age_ns INTEGER",
-                "last_progress_ns INTEGER NOT NULL DEFAULT 0",
-                "launch_intent_id TEXT",
-                "child_host_id TEXT",
-                "child_boot_id TEXT",
-                "child_pid INTEGER",
-                "child_start_token TEXT",
-            ):
-                c.execute("ALTER TABLE managed_admissions ADD COLUMN " + col)
-            c.execute(
-                "CREATE INDEX IF NOT EXISTS admission_group ON managed_admissions(status,group_id,sequence)"
-            )
-            self._fences(c)
+            self._migrate_locked(c)
             c.commit()
         except BaseException:
             if c.in_transaction:
@@ -334,6 +425,66 @@ class ManagedAdmissionQueue:
             raise
         finally:
             c.close()
+
+    @staticmethod
+    def _migrate_locked(c):
+        """Run schema migration and fences on a connection the caller has
+        already put inside an open writer transaction (``BEGIN IMMEDIATE``
+        already executed). The caller owns commit/rollback/close -- this is
+        the seam that lets the reconcile ``--apply`` CLI migrate a v1 store
+        inside the SAME writer lock it took its pre-migration backup under,
+        instead of a separate, unprotected migration step.
+        """
+        row = c.execute(
+            "SELECT version FROM admission_policy WHERE singleton=1"
+        ).fetchone()
+        if row is None:
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID")
+        version = row["version"]
+        if version == _V2:
+            ManagedAdmissionQueue._fences(c)
+            return
+        if version != 1:
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID")
+        nonce = secrets.token_hex(32)
+        # SQLite cannot remove v1 CHECK(version=1) with ALTER.  Rebuild
+        # only the one-row policy table inside this same database file;
+        # managed_admissions (and its inode, fields, rows and release SQL)
+        # are never copied or replaced.
+        c.execute(
+            "CREATE TABLE admission_policy_v2 (singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2),writer_nonce TEXT NOT NULL,scheduler_cursor TEXT,last_progress_ns INTEGER NOT NULL DEFAULT 0)"
+        )
+        c.execute(
+            "INSERT INTO admission_policy_v2(singleton,version,writer_nonce) VALUES(1,2,?)",
+            (nonce,),
+        )
+        c.execute("DROP TABLE admission_policy")
+        c.execute("ALTER TABLE admission_policy_v2 RENAME TO admission_policy")
+        # Defaults mark old rows v1; old ticket columns are unchanged and legacy release SQL still works.
+        for col in (
+            "repository_id TEXT NOT NULL DEFAULT ''",
+            "request_key TEXT NOT NULL DEFAULT ''",
+            "generation INTEGER NOT NULL DEFAULT 1",
+            "writer_version INTEGER NOT NULL DEFAULT 1",
+            'demand_json TEXT NOT NULL DEFAULT \'{"cpu":1,"disk_bytes":0,"io_units":0,"memory_bytes":0,"processes":1,"provider":null,"provider_units":0}\'',
+            "group_id TEXT",
+            "group_width INTEGER NOT NULL DEFAULT 1",
+            "group_age_ns INTEGER NOT NULL DEFAULT 0",
+            "next_recheck_ns INTEGER NOT NULL DEFAULT 0",
+            "limiting_resource TEXT",
+            "observation_age_ns INTEGER",
+            "last_progress_ns INTEGER NOT NULL DEFAULT 0",
+            "launch_intent_id TEXT",
+            "child_host_id TEXT",
+            "child_boot_id TEXT",
+            "child_pid INTEGER",
+            "child_start_token TEXT",
+        ):
+            c.execute("ALTER TABLE managed_admissions ADD COLUMN " + col)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS admission_group ON managed_admissions(status,group_id,sequence)"
+        )
+        ManagedAdmissionQueue._fences(c)
 
     @contextmanager
     def _connection(self):
@@ -485,20 +636,7 @@ class ManagedAdmissionQueue:
             return out
 
     def _dead(self, identity):
-        if identity is None:
-            return False
-        try:
-            return (
-                probe_identity(identity) == DEAD
-                and (
-                    DEAD
-                    if self._liveness_probe is None
-                    else self._liveness_probe(identity)
-                )
-                == DEAD
-            )
-        except Exception:
-            return False
+        return _dead_probe(identity, self._liveness_probe)
 
     def _reclaim_dead(self):
         with self._connection() as c:
@@ -550,12 +688,15 @@ class ManagedAdmissionQueue:
                         ),
                     )
 
-    def _candidates(self, c):
+    def _candidates(self, c, live_waiters):
         first = {}
         for row in c.execute(
             "SELECT * FROM managed_admissions WHERE status='waiting' ORDER BY sequence"
         ):
-            first.setdefault((row["repository_id"], row["run_id"]), row)
+            # A dead earliest waiter must never shadow a live later waiter of
+            # the same (repo, run): filter live owners before setdefault.
+            if _identity(row) in live_waiters:
+                first.setdefault((row["repository_id"], row["run_id"]), row)
         keys = sorted(first)
         cursor = c.execute(
             "SELECT scheduler_cursor FROM admission_policy WHERE singleton=1"
@@ -603,7 +744,7 @@ class ManagedAdmissionQueue:
                 )
             if own["status"] == "active":
                 return True
-            choices = [row for row in self._candidates(c) if _identity(row) in live_waiters]
+            choices = self._candidates(c, live_waiters)
             from .provider_feedback import effective_observation
             providers = [demand_from_record(row["demand_json"]).provider for row in choices]
             observation = effective_observation(
@@ -612,9 +753,12 @@ class ManagedAdmissionQueue:
             )
             # Legacy demand remains opaque even after legacy release.  It
             # cannot be silently converted to zero CPU/memory/provider cost.
-            opaque = c.execute(
-                "SELECT 1 FROM managed_admissions WHERE writer_version=1 AND status!='reclaimed' LIMIT 1"
-            ).fetchone()
+            opaque = c.execute(LEGACY_OPAQUE_GATE_SQL).fetchone()
+            if opaque is None:
+                # The gate just disarmed (e.g. reconcile reclaimed the last
+                # legacy row). Any 'legacy-opaque' tag left over from before
+                # is now stale diagnostic text, not a live block reason.
+                _clear_stale_legacy_opaque_tags(c)
             requested_demand = demand_from_record(own["demand_json"])
             if opaque is not None and any(
                 (
@@ -884,6 +1028,57 @@ class ManagedAdmissionQueue:
             if c.execute(sql, values).rowcount != 1:
                 raise ManagedAdmissionRefused("MANAGED_ADMISSION_TICKET_INVALID")
 
+    def reconcile_plan(self):
+        """Read-only: probe every row outside SQLite; never mutates the database."""
+        try:
+            current_boot = ProcessIdentity.current().boot_id
+        except (OSError, ValueError) as error:
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_IDENTITY_UNKNOWN") from error
+        with self._connection() as c:
+            rows = c.execute(
+                "SELECT * FROM managed_admissions ORDER BY sequence"
+            ).fetchall()
+        return _plan_rows(rows, current_boot=current_boot, liveness_probe=self._liveness_probe)
+
+    def _create_backup_file(self, *, name=None) -> Path:
+        return _create_backup_file_in(self.root, name=name)
+
+    def apply_reconcile(self, plan):
+        """Exact-snapshot CAS each 'reclaim' decision; a stale snapshot is a no-op.
+
+        The backup runs from a SEPARATE read-only connection while THIS
+        writer transaction holds the RESERVED lock: readers are still
+        allowed under RESERVED, but a concurrent writer's own BEGIN
+        IMMEDIATE blocks/fails busy against it, so the backup, its verify,
+        and the CAS updates below all happen inside one continuous writer
+        transaction -- a genuine apply preimage, not a snapshot with a gap a
+        concurrent write could land in. A verify failure rolls back this
+        whole transaction and leaves the live database byte-for-byte
+        untouched.
+        """
+        try:
+            backup_path = self._create_backup_file()
+        except OSError as error:
+            raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED") from error
+        try:
+            with self._transaction() as c:
+                backup_info = _backup_locked(c, self.path, backup_path)
+                reclaimed, row_changed = _apply_plan_cas(c, plan)
+                if not _gate_armed(c, _V2):
+                    _clear_stale_legacy_opaque_tags(c)
+            return {"reclaimed": reclaimed, "row_changed": row_changed, "backup": backup_info}
+        except BaseException:
+            backup_path.unlink(missing_ok=True)
+            raise
+
+    def reconcile(self, *, apply=False):
+        """dry-run by default; ``apply=True`` is the only path that mutates."""
+        plan = self.reconcile_plan()
+        if not apply:
+            return {"applied": False, "plan": plan, "reclaimed": [], "row_changed": [], "backup": None}
+        result = self.apply_reconcile(plan)
+        return {"applied": True, "plan": plan, **result}
+
     def acquire(
         self, *, state_root, run_id, timeout=None, poll_interval=0.2, **request
     ):
@@ -920,3 +1115,277 @@ class ManagedAdmissionQueue:
         finally:
             if not ok:
                 self.release(ticket)
+
+
+# --- Reconcile CLI support: read-only inspect/dry-run and the one --apply
+# entrypoint. Neither ever creates a store; a missing or unsafe store
+# refuses with a typed code instead of mutating anything.
+
+
+def _read_root_and_path(root):
+    root = global_admission_root() if root is None else Path(root)
+    # Check the raw, unresolved path for a symlink FIRST -- resolving before
+    # checking would silently follow a symlinked root instead of refusing it.
+    if not root.is_absolute() or ".." in root.parts or root.is_symlink():
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_ROOT_UNSAFE")
+    root = root.resolve()
+    return root, root / "admission.sqlite3"
+
+
+def _lstat_root_and_path(root, path):
+    try:
+        ri = root.lstat()
+    except OSError as error:
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_MISSING") from error
+    if (
+        not stat.S_ISDIR(ri.st_mode)
+        or ri.st_uid != os.getuid()
+        or stat.S_IMODE(ri.st_mode) != 0o700
+    ):
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_ROOT_UNSAFE")
+    try:
+        di = path.lstat()
+    except OSError as error:
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_MISSING") from error
+    if (
+        not stat.S_ISREG(di.st_mode)
+        or di.st_uid != os.getuid()
+        or stat.S_IMODE(di.st_mode) != 0o600
+    ):
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNSAFE")
+
+
+def _current_boot():
+    try:
+        return ProcessIdentity.current().boot_id
+    except (OSError, ValueError) as error:
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_IDENTITY_UNKNOWN") from error
+
+
+def _refuse_unless_legacy_journal_format(path):
+    """Read the sqlite header directly (O_RDONLY|O_NOFOLLOW, no sqlite3
+    connection yet) and refuse before a strictly read-only open ever touches
+    a WAL-mode store: SQLite's WAL reader needs -wal/-shm sidecar files
+    (and, in some cases, a checkpoint), which inspect/dry-run must never
+    create or perform. Header bytes 18-19 are the file-format write/read
+    version; ``\\x01\\x01`` is the legacy rollback-journal format this store
+    always uses. A file shorter than the 100-byte header cannot be a valid
+    SQLite database at all, so that is reported as UNSAFE (a filesystem-level
+    integrity problem) rather than SCHEMA_INVALID (reserved for a
+    structurally valid file with the wrong table/row shape).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            header = os.read(fd, 100)
+        finally:
+            os.close(fd)
+    except OSError as error:
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNAVAILABLE") from error
+    if len(header) < 100 or header[18:20] != b"\x01\x01":
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNSAFE")
+
+
+def _clear_stale_legacy_opaque_tags(c):
+    """The same stale-tag cleanup try_admit performs once its own gate query
+    returns nothing -- shared so an apply that clears the last legacy row
+    also clears any waiting row's leftover 'legacy-opaque' diagnostic tag in
+    the same transaction, instead of waiting for the next try_admit call.
+    """
+    c.execute(
+        "UPDATE managed_admissions SET limiting_resource=NULL "
+        "WHERE limiting_resource='legacy-opaque'"
+    )
+
+
+def _gate_armed(c, version):
+    """The same opaque-legacy gate try_admit runs, adapted for a v1-only
+    (pre-migration) row shape that has no writer_version column at all --
+    every row on such a table is implicitly legacy."""
+    sql = (
+        LEGACY_OPAQUE_GATE_SQL
+        if version == _V2
+        else "SELECT 1 FROM managed_admissions WHERE status!='reclaimed' LIMIT 1"
+    )
+    return c.execute(sql).fetchone() is not None
+
+
+def _discard(c):
+    """Best-effort rollback (if a transaction is still open) plus close,
+    swallowing sqlite3.Error from either step. A refusal already in flight
+    (a typed ManagedAdmissionRefused, or one about to be raised) must never
+    be replaced by a secondary failure from cleanup -- closing a connection
+    discards any still-open transaction anyway, so a rollback failure here
+    is not a correctness problem, only a noisy one.
+    """
+    try:
+        if c.in_transaction:
+            c.rollback()
+    except sqlite3.Error:
+        pass
+    try:
+        c.close()
+    except sqlite3.Error:
+        pass
+
+
+def open_read_only(root):
+    """Open the store strictly read-only: never creates, never migrates,
+    never writes. Returns ``(connection, version, path)``. Refuses on a
+    missing store, an unsafe root/file, or a schema this reader cannot make
+    sense of (including an admission_policy table with zero rows).
+    """
+    root, path = _read_root_and_path(root)
+    _lstat_root_and_path(root, path)
+    _refuse_unless_legacy_journal_format(path)
+    try:
+        c = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=2000")
+        row = c.execute(
+            "SELECT version FROM admission_policy WHERE singleton=1"
+        ).fetchone()
+    except sqlite3.Error as error:
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID") from error
+    if row is None or row["version"] not in (1, _V2):
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID")
+    return c, row["version"], path
+
+
+def read_only_report(root):
+    """The whole ``inspect`` / dry-run ``reconcile`` report. Never mutates."""
+    c, version, path = open_read_only(root)
+    try:
+        try:
+            current_boot = _current_boot()
+            gate_armed = _gate_armed(c, version)
+            rows = c.execute(
+                "SELECT * FROM managed_admissions ORDER BY sequence"
+            ).fetchall()
+            plan = _plan_rows(rows, current_boot=current_boot)
+        except sqlite3.Error as error:
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID") from error
+    finally:
+        _discard(c)
+    return {
+        "database": str(path), "plan": plan,
+        "gate_before": gate_armed, "gate_after": gate_armed,
+    }
+
+
+def _create_backup_file_in(root, *, name=None) -> Path:
+    if name is None:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        name = "admission.sqlite3.reconcile-" + stamp + "-" + secrets.token_hex(8) + ".bak"
+    target = root / name
+    fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.close(fd)
+    except OSError:
+        # The file this call itself just created must not leak if closing
+        # its own fd fails; the caller maps this OSError to exit 5.
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def _perform_backup(source, destination_path: Path) -> None:
+    """Isolated seam: the only call site touching the sqlite backup API."""
+    with sqlite3.connect(destination_path) as dest:
+        source.backup(dest)
+
+
+def _backup_locked(c, path, backup_path):
+    """Back up ``path`` from a SEPARATE read-only connection while ``c``
+    holds the writer's lock (readers are still allowed under RESERVED),
+    verify with integrity_check plus a row-count match against what ``c``
+    itself sees, and hash it -- all mapped to RECONCILE_BACKUP_FAILED on any
+    OSError/sqlite3.Error, so a create/backup/verify/hash failure never
+    escapes as a raw traceback.
+    """
+    try:
+        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as source:
+            _perform_backup(source, backup_path)
+        with sqlite3.connect(backup_path.as_uri() + "?mode=ro", uri=True) as check:
+            ok = check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            backup_count = check.execute(
+                "SELECT COUNT(*) FROM managed_admissions"
+            ).fetchone()[0]
+        live_count = c.execute("SELECT COUNT(*) FROM managed_admissions").fetchone()[0]
+        if not ok or backup_count != live_count:
+            raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED")
+        digest = hashlib.sha256(backup_path.read_bytes()).hexdigest()
+    except ManagedAdmissionRefused:
+        raise
+    except (OSError, sqlite3.Error) as error:
+        raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED") from error
+    return {"path": str(backup_path), "sha256": digest}
+
+
+def apply_reconcile_at_root(root, *, backup_name=None):
+    """The one ``--apply`` entrypoint. Opens root/path directly (never
+    creates); takes the writer lock BEFORE any migration; backs up under
+    that lock (the true pre-migration bytes -- a store that started as v1
+    backs up as v1); verifies; migrates if needed, still inside the same
+    lock; CASes each reclaim decision; commits. A concurrent writer's own
+    BEGIN IMMEDIATE blocks/fails busy for the whole window.
+    """
+    root, path = _read_root_and_path(root)
+    _lstat_root_and_path(root, path)
+    current_boot = _current_boot()
+    try:
+        backup_path = _create_backup_file_in(root, name=backup_name)
+    except OSError as error:
+        raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED") from error
+    c = None
+    try:
+        c = sqlite3.connect(
+            path.as_uri() + "?mode=rw", uri=True, isolation_level=None, timeout=2
+        )
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=2000")
+        if c.execute("PRAGMA journal_mode").fetchone()[0] != "delete":
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNSAFE")
+        c.execute("BEGIN IMMEDIATE")
+        backup_info = _backup_locked(c, path, backup_path)
+        version_row = c.execute(
+            "SELECT version FROM admission_policy WHERE singleton=1"
+        ).fetchone()
+        if version_row is None or version_row["version"] not in (1, _V2):
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID")
+        pre_rows = c.execute(
+            "SELECT * FROM managed_admissions ORDER BY sequence"
+        ).fetchall()
+        plan = _plan_rows(pre_rows, current_boot=current_boot)
+        gate_before = _gate_armed(c, version_row["version"])
+        ManagedAdmissionQueue._migrate_locked(c)
+        reclaimed, row_changed = _apply_plan_cas(c, plan)
+        gate_after = _gate_armed(c, _V2)
+        if not gate_after:
+            # This apply may be the one that reclaimed the last legacy row;
+            # clear the tag in the same transaction rather than waiting for
+            # the next try_admit call to notice the gate disarmed.
+            _clear_stale_legacy_opaque_tags(c)
+        c.commit()
+    except ManagedAdmissionRefused:
+        # Anything short of a committed apply leaves no artifact behind --
+        # only a successful apply's backup is kept.
+        backup_path.unlink(missing_ok=True)
+        raise
+    except sqlite3.Error as error:
+        backup_path.unlink(missing_ok=True)
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNAVAILABLE") from error
+    except BaseException:
+        backup_path.unlink(missing_ok=True)
+        raise
+    finally:
+        # _discard rolls back only if a transaction is still open (a no-op
+        # after a successful commit) and swallows any rollback/close
+        # failure, so cleanup itself can never replace the typed refusal
+        # (or overwrite a clean success) already in flight above.
+        if c is not None:
+            _discard(c)
+    return {
+        "database": str(path), "plan": plan, "reclaimed": reclaimed, "row_changed": row_changed,
+        "backup": backup_info, "gate_before": gate_before, "gate_after": gate_after,
+    }
