@@ -758,10 +758,7 @@ class ManagedAdmissionQueue:
                 # The gate just disarmed (e.g. reconcile reclaimed the last
                 # legacy row). Any 'legacy-opaque' tag left over from before
                 # is now stale diagnostic text, not a live block reason.
-                c.execute(
-                    "UPDATE managed_admissions SET limiting_resource=NULL "
-                    "WHERE limiting_resource='legacy-opaque'"
-                )
+                _clear_stale_legacy_opaque_tags(c)
             requested_demand = demand_from_record(own["demand_json"])
             if opaque is not None and any(
                 (
@@ -1067,6 +1064,8 @@ class ManagedAdmissionQueue:
             with self._transaction() as c:
                 backup_info = _backup_locked(c, self.path, backup_path)
                 reclaimed, row_changed = _apply_plan_cas(c, plan)
+                if not _gate_armed(c, _V2):
+                    _clear_stale_legacy_opaque_tags(c)
             return {"reclaimed": reclaimed, "row_changed": row_changed, "backup": backup_info}
         except BaseException:
             backup_path.unlink(missing_ok=True)
@@ -1163,6 +1162,42 @@ def _current_boot():
         raise ManagedAdmissionRefused("MANAGED_ADMISSION_IDENTITY_UNKNOWN") from error
 
 
+def _refuse_unless_legacy_journal_format(path):
+    """Read the sqlite header directly (O_RDONLY|O_NOFOLLOW, no sqlite3
+    connection yet) and refuse before a strictly read-only open ever touches
+    a WAL-mode store: SQLite's WAL reader needs -wal/-shm sidecar files
+    (and, in some cases, a checkpoint), which inspect/dry-run must never
+    create or perform. Header bytes 18-19 are the file-format write/read
+    version; ``\\x01\\x01`` is the legacy rollback-journal format this store
+    always uses. A file shorter than the 100-byte header cannot be a valid
+    SQLite database at all, so that is reported as UNSAFE (a filesystem-level
+    integrity problem) rather than SCHEMA_INVALID (reserved for a
+    structurally valid file with the wrong table/row shape).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            header = os.read(fd, 100)
+        finally:
+            os.close(fd)
+    except OSError as error:
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNAVAILABLE") from error
+    if len(header) < 100 or header[18:20] != b"\x01\x01":
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNSAFE")
+
+
+def _clear_stale_legacy_opaque_tags(c):
+    """The same stale-tag cleanup try_admit performs once its own gate query
+    returns nothing -- shared so an apply that clears the last legacy row
+    also clears any waiting row's leftover 'legacy-opaque' diagnostic tag in
+    the same transaction, instead of waiting for the next try_admit call.
+    """
+    c.execute(
+        "UPDATE managed_admissions SET limiting_resource=NULL "
+        "WHERE limiting_resource='legacy-opaque'"
+    )
+
+
 def _gate_armed(c, version):
     """The same opaque-legacy gate try_admit runs, adapted for a v1-only
     (pre-migration) row shape that has no writer_version column at all --
@@ -1183,6 +1218,7 @@ def open_read_only(root):
     """
     root, path = _read_root_and_path(root)
     _lstat_root_and_path(root, path)
+    _refuse_unless_legacy_journal_format(path)
     try:
         c = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)
         c.row_factory = sqlite3.Row
@@ -1201,12 +1237,15 @@ def read_only_report(root):
     """The whole ``inspect`` / dry-run ``reconcile`` report. Never mutates."""
     c, version, path = open_read_only(root)
     try:
-        current_boot = _current_boot()
-        gate_armed = _gate_armed(c, version)
-        rows = c.execute(
-            "SELECT * FROM managed_admissions ORDER BY sequence"
-        ).fetchall()
-        plan = _plan_rows(rows, current_boot=current_boot)
+        try:
+            current_boot = _current_boot()
+            gate_armed = _gate_armed(c, version)
+            rows = c.execute(
+                "SELECT * FROM managed_admissions ORDER BY sequence"
+            ).fetchall()
+            plan = _plan_rows(rows, current_boot=current_boot)
+        except sqlite3.Error as error:
+            raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID") from error
     finally:
         c.close()
     return {
@@ -1221,7 +1260,13 @@ def _create_backup_file_in(root, *, name=None) -> Path:
         name = "admission.sqlite3.reconcile-" + stamp + "-" + secrets.token_hex(8) + ".bak"
     target = root / name
     fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    os.close(fd)
+    try:
+        os.close(fd)
+    except OSError:
+        # The file this call itself just created must not leak if closing
+        # its own fd fails; the caller maps this OSError to exit 5.
+        target.unlink(missing_ok=True)
+        raise
     return target
 
 
@@ -1273,10 +1318,11 @@ def apply_reconcile_at_root(root, *, backup_name=None):
         backup_path = _create_backup_file_in(root, name=backup_name)
     except OSError as error:
         raise ManagedAdmissionRefused("RECONCILE_BACKUP_FAILED") from error
-    c = sqlite3.connect(
-        path.as_uri() + "?mode=rw", uri=True, isolation_level=None, timeout=2
-    )
+    c = None
     try:
+        c = sqlite3.connect(
+            path.as_uri() + "?mode=rw", uri=True, isolation_level=None, timeout=2
+        )
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA busy_timeout=2000")
         if c.execute("PRAGMA journal_mode").fetchone()[0] != "delete":
@@ -1296,16 +1342,32 @@ def apply_reconcile_at_root(root, *, backup_name=None):
         ManagedAdmissionQueue._migrate_locked(c)
         reclaimed, row_changed = _apply_plan_cas(c, plan)
         gate_after = _gate_armed(c, _V2)
+        if not gate_after:
+            # This apply may be the one that reclaimed the last legacy row;
+            # clear the tag in the same transaction rather than waiting for
+            # the next try_admit call to notice the gate disarmed.
+            _clear_stale_legacy_opaque_tags(c)
         c.commit()
-    except BaseException:
-        if c.in_transaction:
+    except ManagedAdmissionRefused:
+        if c is not None and c.in_transaction:
             c.rollback()
         # Anything short of a committed apply leaves no artifact behind --
         # only a successful apply's backup is kept.
         backup_path.unlink(missing_ok=True)
         raise
+    except sqlite3.Error as error:
+        if c is not None and c.in_transaction:
+            c.rollback()
+        backup_path.unlink(missing_ok=True)
+        raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNAVAILABLE") from error
+    except BaseException:
+        if c is not None and c.in_transaction:
+            c.rollback()
+        backup_path.unlink(missing_ok=True)
+        raise
     finally:
-        c.close()
+        if c is not None:
+            c.close()
     return {
         "database": str(path), "plan": plan, "reclaimed": reclaimed, "row_changed": row_changed,
         "backup": backup_info, "gate_before": gate_before, "gate_after": gate_after,
