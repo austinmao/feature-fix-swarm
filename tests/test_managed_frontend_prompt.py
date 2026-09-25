@@ -186,6 +186,29 @@ def test_invocation_text_mentioning_dry_run_as_free_text_still_passes(tmp_path):
     assert prompt.split("\n", 1)[0] == "$gsd-execute-phase 1"
 
 
+def test_a_quoted_task_naming_a_mode_flag_stays_one_token_and_passes(tmp_path):
+    # shlex.split keeps a quoted phrase as one token, so --dry-run inside it
+    # never matches the mode-flag set.
+    invocation, prompt, role = _managed_prompt(
+        _root(), _operation('"add --dry-run support"'), ("task-swarm",),
+        staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+        project=None, workstream=None, planning_scope="1",
+    )
+    assert prompt.split("\n", 1)[0] == "$gsd-execute-phase 1"
+
+
+def test_unbalanced_quotes_fall_back_to_whitespace_split_and_still_refuse(tmp_path):
+    # shlex.split raises ValueError on unbalanced quotes; the fallback plain
+    # split still finds the bare --dry-run token and fails closed.
+    with pytest.raises(SupervisorRefused) as excinfo:
+        _managed_prompt(
+            _root(), _operation('"add --dry-run'), ("task-swarm",),
+            staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+            project=None, workstream=None, planning_scope="1",
+        )
+    assert excinfo.value.code == "MANAGED_FRONTEND_MODE_UNSUPPORTED"
+
+
 @pytest.mark.parametrize(("project", "workstream"), [
     ("demo-project", None), (None, "demo-workstream"), ("demo-project", "demo-workstream"),
 ])
@@ -212,7 +235,12 @@ def test_non_default_project_refuses_for_a_raw_gsd_command_too(tmp_path):
     assert excinfo.value.code == "MANAGED_PROJECT_SCOPE_UNSUPPORTED"
 
 
-@pytest.mark.parametrize("bad_planning_root", ["/tmp/x\x07", "/tmp/x\x7f", "/tmp/x\x00y", "/tmp/x\x1f"])
+@pytest.mark.parametrize("bad_planning_root", [
+    "/tmp/x\x07", "/tmp/x\x7f", "/tmp/x\x00y", "/tmp/x\x1f",
+    "/tmp/x\u0085y",  # NEL (C1, Cc)
+    "/tmp/x y",  # LINE SEPARATOR (Zl)
+    "/tmp/x y",  # PARAGRAPH SEPARATOR (Zp)
+])
 def test_planning_root_with_a_control_character_refuses(tmp_path, bad_planning_root):
     with pytest.raises(SupervisorRefused) as excinfo:
         _managed_prompt(
@@ -250,3 +278,4 @@ def test_each_staged_frontend_command_is_a_real_gsd_skill_that_passes_the_stagin
     for value in _MANAGED_FRONTEND_STAGED_COMMAND.values():
         assert _GSD_SKILL.fullmatch(value) is not None
         assert (skills_root / value).is_dir()
+        assert (skills_root / value / "SKILL.md").is_file()
