@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import uuid
 
 import pytest
@@ -11,10 +12,47 @@ import pytest
 from host_capabilities import _binary_chain
 from run_state.claude_host import (
     ClaudeHostAdapter, ClaudeHostRefused, ClaudeTelemetryRefused,
-    QualifiedClaudeRuntime, claude_closed_environment, claude_environment_policy_hash,
-    parse_claude_host_request, parse_claude_telemetry,
+    QualifiedClaudeRuntime, claude_closed_environment, claude_environment_policy,
+    claude_environment_policy_hash, parse_claude_host_request, parse_claude_telemetry,
 )
 from run_state.claude_runtime_staging import STAGE_MANIFEST_NAME, stage_private_claude_runtime
+
+
+def _gsd_environment(tmp_path: Path, name: str = "admission.json") -> dict[str, str]:
+    admission = tmp_path / name
+    admission.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission.chmod(0o600)
+    bridge = tmp_path / "gsd_wave_bridge.py"
+    bridge.write_text("#!/usr/bin/env python3\n")
+    command = json.dumps([sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"))
+    return {
+        "GSD_DISPATCH_MODE": "ffs-supervised-process",
+        "FFS_SUPERVISED_COMMIT_MODE": "patches",
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission),
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command,
+    }
+
+
+def test_claude_policy_accepts_scoped_additions(tmp_path: Path) -> None:
+    """F34 5.7: runs the preview and final policy. Rules out a Codex-only fix
+    (claude_host.py's own 4-key exact-set check)."""
+    base = {
+        "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+        "TMPDIR": str(tmp_path / "tmp" / "leaf"), "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1", "CI": "1",
+        "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+    }
+    additions = _gsd_environment(tmp_path)
+    scoped = {**base, **additions, "GSD_PROJECT": "demo-project", "GSD_WORKSTREAM": "demo-ws"}
+
+    preview_policy = claude_environment_policy(scoped, preview=True)
+    assert preview_policy["GSD_PROJECT"] == "demo-project"
+    assert preview_policy["GSD_WORKSTREAM"] == "demo-ws"
+
+    final_policy = claude_environment_policy(scoped, preview=False)
+    assert final_policy["GSD_PROJECT"] == "demo-project"
+    assert final_policy["GSD_WORKSTREAM"] == "demo-ws"
 
 
 def _sha(path: Path) -> str:

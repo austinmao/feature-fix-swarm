@@ -27,10 +27,12 @@ Review round 3 follow-up defects fixed here:
    runs in a way gsd-execute-phase cannot honor, so it refuses
    MANAGED_FRONTEND_MODE_UNSUPPORTED instead of silently running for real
    (or running gsd-execute-phase instead of gsd-quick).
-6. A non-default project or workstream never reaches the qualified host
-   process env (it is stripped along with every other GSD_*/FFS_* var), so
-   it refuses MANAGED_PROJECT_SCOPE_UNSUPPORTED instead of only appearing as
-   prompt prose the executor cannot honor.
+6. F34: a non-default project or workstream now reaches the qualified host
+   process env as GSD_PROJECT/GSD_WORKSTREAM (the closed GSD env addition
+   set carries them when set), so it is accepted instead of refusing
+   MANAGED_PROJECT_SCOPE_UNSUPPORTED. Each value is still validated against
+   the resolver's segment rule, raising MANAGED_PROMPT_VALUE_UNSAFE for an
+   unsafe one.
 7. A raw prompt value (planning_root/project) carrying a control character
    refuses MANAGED_PROMPT_VALUE_UNSAFE.
 8. is_valid_phase_scope is ASCII-only (covered in test_prelaunch_inventory.py).
@@ -212,27 +214,42 @@ def test_unbalanced_quotes_fall_back_to_whitespace_split_and_still_refuse(tmp_pa
 @pytest.mark.parametrize(("project", "workstream"), [
     ("demo-project", None), (None, "demo-workstream"), ("demo-project", "demo-workstream"),
 ])
-def test_non_default_project_or_workstream_refuses_for_a_staged_frontend(tmp_path, project, workstream):
+def test_non_default_project_or_workstream_is_accepted_for_a_staged_frontend(tmp_path, project, workstream):
+    # F34: the closed GSD env addition set now carries GSD_PROJECT/
+    # GSD_WORKSTREAM, so a non-default scope reaches the host and is no
+    # longer refused as MANAGED_PROJECT_SCOPE_UNSUPPORTED.
+    invocation, prompt, role = _managed_prompt(
+        _root(), _operation(""), ("task-swarm",),
+        staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+        project=project, workstream=workstream, planning_scope="1",
+    )
+    assert prompt.split("\n", 1)[0] == "$gsd-execute-phase 1"
+
+
+def test_non_default_project_is_accepted_for_a_raw_gsd_command_too(tmp_path):
+    # Applied at the shared function for every managed prompt: a non-default
+    # scope is accepted for ANY managed prompt, not only a staged frontend.
+    invocation, prompt, role = _managed_prompt(
+        _root(), None, ("/gsd-plan-phase", "1"),
+        staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+        project="demo-project", workstream=None, planning_scope="1",
+    )
+    assert invocation == ("/gsd-plan-phase", "1")
+
+
+@pytest.mark.parametrize("field", ["project", "workstream"])
+@pytest.mark.parametrize("bad_value", [
+    "../x", "a/b", "a..b", "-f", ".h", "x y", "é", "9" * 161, "",
+])
+def test_unsafe_project_or_workstream_segment_refuses_value_unsafe(tmp_path, field, bad_value):
+    kwargs = {"project": None, "workstream": None, field: bad_value}
     with pytest.raises(SupervisorRefused) as excinfo:
         _managed_prompt(
             _root(), _operation(""), ("task-swarm",),
             staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-            project=project, workstream=workstream, planning_scope="1",
+            planning_scope="1", **kwargs,
         )
-    assert excinfo.value.code == "MANAGED_PROJECT_SCOPE_UNSUPPORTED"
-
-
-def test_non_default_project_refuses_for_a_raw_gsd_command_too(tmp_path):
-    # Applied at the shared function for every managed prompt (review round 3
-    # item 2): the qualified host env cannot carry GSD_PROJECT for ANY
-    # managed prompt, not only a staged frontend.
-    with pytest.raises(SupervisorRefused) as excinfo:
-        _managed_prompt(
-            _root(), None, ("/gsd-plan-phase", "1"),
-            staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-            project="demo-project", workstream=None, planning_scope="1",
-        )
-    assert excinfo.value.code == "MANAGED_PROJECT_SCOPE_UNSUPPORTED"
+    assert excinfo.value.code == "MANAGED_PROMPT_VALUE_UNSAFE"
 
 
 @pytest.mark.parametrize("bad_planning_root", [

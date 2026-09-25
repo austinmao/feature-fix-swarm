@@ -104,6 +104,98 @@ def test_artifact_review_material_is_closed_and_uses_the_typed_model_resolver(tm
         )
 
 
+def test_default_additions_are_byte_identical(tmp_path):
+    """F34 5.4: with no scope, as_dict() returns exactly the 4 keys and the
+    policy hash matches an independently-built policy dict. Rules out
+    emitting "" scope keys, which would drift every retained runtime to
+    ENVIRONMENT_POLICY_DRIFT."""
+    spec = importlib.util.spec_from_file_location(
+        "ffs_host_default_additions", ROOT / "lib/host_capabilities.py"
+    )
+    assert spec and spec.loader
+    admission = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = admission
+    spec.loader.exec_module(admission)
+
+    home = tmp_path.resolve() / "home"
+    home.mkdir(parents=True)
+    admission_file = home / "admission.json"
+    admission_file.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission_file.chmod(0o600)
+    bridge = home / "gsd_wave_bridge.py"
+    bridge.write_text("#!/usr/bin/env python3\n")
+    command_json = json.dumps([sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"))
+
+    additions = admission.GsdSupervisorEnvironment(
+        "ffs-supervised-process", "patches", str(admission_file), command_json,
+        project=None, workstream=None,
+    )
+    assert additions.project is None and additions.workstream is None
+    assert set(additions.as_dict()) == {
+        "GSD_DISPATCH_MODE", "FFS_SUPERVISED_COMMIT_MODE",
+        "FFS_SUPERVISED_ADMISSION_FILE", "FFS_SUPERVISED_DISPATCH_COMMAND_JSON",
+    }
+
+    environment = {
+        "HOME": str(home), "CODEX_HOME": str(home), "TMPDIR": str(home / "policy-tmp"),
+        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
+        **additions.as_dict(),
+    }
+    golden_policy = {
+        "HOME": str(home), "CODEX_HOME": str(home), "TMPDIR": str(home),
+        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
+        "GSD_DISPATCH_MODE": "ffs-supervised-process", "FFS_SUPERVISED_COMMIT_MODE": "patches",
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission_file.resolve().parent / "<admission>"),
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
+    }
+    golden_hash = hashlib.sha256(
+        json.dumps(golden_policy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert admission.codex_environment_policy_hash(environment) == golden_hash
+
+    scoped = admission.GsdSupervisorEnvironment(
+        "ffs-supervised-process", "patches", str(admission_file), command_json,
+        project="demo-project", workstream=None,
+    )
+    scoped_environment = {**environment, **scoped.as_dict()}
+    assert admission.codex_environment_policy_hash(scoped_environment) != golden_hash
+
+
+def test_scope_keys_validated_and_set_stays_closed(tmp_path):
+    """F34 5.5: GSD_PROJECT="../x" raises; an extra GSD_SESSION_KEY raises; a
+    lone GSD_WORKSTREAM is accepted. Rules out widening the check to `>=`."""
+    spec = importlib.util.spec_from_file_location(
+        "ffs_host_scope_validation", ROOT / "lib/host_capabilities.py"
+    )
+    assert spec and spec.loader
+    admission = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = admission
+    spec.loader.exec_module(admission)
+
+    admission_file = tmp_path / "admission.json"
+    admission_file.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission_file.chmod(0o600)
+    bridge = tmp_path / "gsd_wave_bridge.py"
+    bridge.write_text("#!/usr/bin/env python3\n")
+    command_json = json.dumps([sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"))
+    base = {
+        "GSD_DISPATCH_MODE": "ffs-supervised-process",
+        "FFS_SUPERVISED_COMMIT_MODE": "patches",
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission_file),
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
+    }
+
+    with pytest.raises(admission.CapabilityError):
+        admission.validate_gsd_supervisor_environment({**base, "GSD_PROJECT": "../x"})
+
+    with pytest.raises(admission.CapabilityError, match="closed"):
+        admission.validate_gsd_supervisor_environment({**base, "GSD_SESSION_KEY": "s"})
+
+    additions = admission.validate_gsd_supervisor_environment({**base, "GSD_WORKSTREAM": "demo-ws"})
+    assert additions.workstream == "demo-ws"
+    assert additions.project is None
+
+
 def test_content_contract_accepts_empty_and_large_text_but_bounds_encoded_json(tmp_path):
     spec = importlib.util.spec_from_file_location("ffs_host_content_bounds", ROOT / "lib/host_capabilities.py")
     assert spec and spec.loader

@@ -91,7 +91,11 @@ def test_is_valid_phase_scope_rejects_non_ascii_and_non_token_values(scope):
 def test_rebase_planning_root_rebases_the_relative_planning_path(tmp_path):
     root_workspace = tmp_path / "root"
     preparation_path = tmp_path / "child"
-    upstream = {"planning_root": str(root_workspace / ".planning" / "demo-project")}
+    # F34: rebase_planning_root now cross-checks the relative planning path
+    # against upstream['project']/['workstream'] -- the project key must
+    # match the path segment it names.
+    upstream = {"planning_root": str(root_workspace / ".planning" / "demo-project"),
+                "project": "demo-project", "workstream": None}
     result = rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=preparation_path)
     assert result == preparation_path / ".planning" / "demo-project"
 
@@ -126,3 +130,38 @@ def test_rebase_planning_root_refuses_a_dot_dot_part(tmp_path):
     upstream = {"planning_root": str(tmp_path / "root" / ".." / "escape" / ".planning")}
     with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
         rebase_planning_root(upstream, root_workspace=str(tmp_path / "root"), preparation_path=tmp_path / "child")
+
+
+def test_rebase_refuses_planning_root_inconsistent_with_scope_fields(tmp_path):
+    """F34 5.11: case (None, .planning/demo) and case (demo, .planning)
+    refuse. Workstream-only passes. Rules out the env and inventory naming
+    different scopes."""
+    root_workspace = tmp_path / "root"
+    child = tmp_path / "child"
+
+    # project is unset, but the planning_root path names one.
+    upstream = {"planning_root": str(root_workspace / ".planning" / "demo"),
+                "project": None, "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    # project is set, but the planning_root path names the default root.
+    upstream = {"planning_root": str(root_workspace / ".planning"),
+                "project": "demo", "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    # workstream-only scope, no project: accepted.
+    upstream = {"planning_root": str(root_workspace / ".planning" / "workstreams" / "w"),
+                "project": None, "workstream": "w"}
+    result = rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+    assert result == child / ".planning" / "workstreams" / "w"
+
+
+def test_missing_phases_root_refuses_typed(tmp_path):
+    """F34 5.12: rules out a raw FileNotFoundError for an unknown project --
+    `phases_root.resolve(strict=True)` on a never-created phases directory
+    (an unknown scoped project) must map to a typed refusal."""
+    phases_root = tmp_path.resolve() / "phases"  # never created
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        select_active_phase(_runtime(), phases_root, "1")

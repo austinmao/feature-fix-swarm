@@ -195,6 +195,33 @@ def test_adapter_binds_typed_gsd_environment_and_normalizes_admission_leaf(monke
         adapter.release_launch_material(second)
 
 
+def test_launch_env_carries_scope_and_policy_binds_it(monkeypatch, tmp_path: Path) -> None:
+    """F34 5.6: launch env has GSD_PROJECT. The same qualified runtime with a
+    different project gives ENVIRONMENT_POLICY_DRIFT. Rules out an unbound,
+    launch-only value."""
+    runtime, binary, _workspace = _runtime(tmp_path)
+    additions = _gsd_environment(tmp_path)
+    scoped_additions = {**additions, "GSD_PROJECT": "demo-project"}
+    policy_environment = codex_host.codex_closed_environment(
+        tmp_path / "home", tmp_path / "home" / "ffs-codex-policy-tmp", binary,
+        {"launcher_sha256": "a" * 64}, scoped_additions,
+    )
+    runtime = replace(runtime, observation=(("environment_sha256", codex_environment_policy_hash(policy_environment)),))
+    monkeypatch.setattr(codex_host, "_binary_chain", lambda path: {"launcher_sha256": "a" * 64})
+    adapter = CodexHostAdapter(runtime, binary, "0.150.0")
+    material = adapter.build_launch_material("do work", attempt=0, gsd_environment=scoped_additions)
+    try:
+        assert dict(material.environment)["GSD_PROJECT"] == "demo-project"
+    finally:
+        adapter.release_launch_material(material)
+
+    other_project_additions = {**additions, "GSD_PROJECT": "other-project"}
+    with pytest.raises(CodexHostRefused, match="ENVIRONMENT_POLICY_DRIFT"):
+        CodexHostAdapter(runtime, binary, "0.150.0").build_launch_material(
+            "do work", attempt=1, gsd_environment=other_project_additions,
+        )
+
+
 def test_adapter_rejects_untyped_or_noncanonical_gsd_environment(monkeypatch, tmp_path: Path) -> None:
     runtime, binary, _workspace = _runtime(tmp_path)
     additions = _gsd_environment(tmp_path)
