@@ -1210,6 +1210,25 @@ def _gate_armed(c, version):
     return c.execute(sql).fetchone() is not None
 
 
+def _discard(c):
+    """Best-effort rollback (if a transaction is still open) plus close,
+    swallowing sqlite3.Error from either step. A refusal already in flight
+    (a typed ManagedAdmissionRefused, or one about to be raised) must never
+    be replaced by a secondary failure from cleanup -- closing a connection
+    discards any still-open transaction anyway, so a rollback failure here
+    is not a correctness problem, only a noisy one.
+    """
+    try:
+        if c.in_transaction:
+            c.rollback()
+    except sqlite3.Error:
+        pass
+    try:
+        c.close()
+    except sqlite3.Error:
+        pass
+
+
 def open_read_only(root):
     """Open the store strictly read-only: never creates, never migrates,
     never writes. Returns ``(connection, version, path)``. Refuses on a
@@ -1247,7 +1266,7 @@ def read_only_report(root):
         except sqlite3.Error as error:
             raise ManagedAdmissionRefused("MANAGED_ADMISSION_SCHEMA_INVALID") from error
     finally:
-        c.close()
+        _discard(c)
     return {
         "database": str(path), "plan": plan,
         "gate_before": gate_armed, "gate_after": gate_armed,
@@ -1349,25 +1368,23 @@ def apply_reconcile_at_root(root, *, backup_name=None):
             _clear_stale_legacy_opaque_tags(c)
         c.commit()
     except ManagedAdmissionRefused:
-        if c is not None and c.in_transaction:
-            c.rollback()
         # Anything short of a committed apply leaves no artifact behind --
         # only a successful apply's backup is kept.
         backup_path.unlink(missing_ok=True)
         raise
     except sqlite3.Error as error:
-        if c is not None and c.in_transaction:
-            c.rollback()
         backup_path.unlink(missing_ok=True)
         raise ManagedAdmissionRefused("MANAGED_ADMISSION_STORE_UNAVAILABLE") from error
     except BaseException:
-        if c is not None and c.in_transaction:
-            c.rollback()
         backup_path.unlink(missing_ok=True)
         raise
     finally:
+        # _discard rolls back only if a transaction is still open (a no-op
+        # after a successful commit) and swallows any rollback/close
+        # failure, so cleanup itself can never replace the typed refusal
+        # (or overwrite a clean success) already in flight above.
         if c is not None:
-            c.close()
+            _discard(c)
     return {
         "database": str(path), "plan": plan, "reclaimed": reclaimed, "row_changed": row_changed,
         "backup": backup_info, "gate_before": gate_before, "gate_after": gate_after,
