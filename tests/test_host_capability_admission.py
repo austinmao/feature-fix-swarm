@@ -116,7 +116,10 @@ def _normalized_policy_hash(policy: dict, root: str) -> str:
         key: value.replace(root, "<ROOT>").replace(sys.executable, "<PY>")
         for key, value in policy.items()
     }
-    return hashlib.sha256(
+    # "sha256:<hex>" is the credential gate's audited pinned-digest shape
+    # (tests/test_seam_wiring.py _WHITELIST_SHAPES); a bare 64-hex literal
+    # would trip its hex-run family.
+    return "sha256:" + hashlib.sha256(
         json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     ).hexdigest()
 
@@ -169,7 +172,7 @@ def test_default_additions_are_byte_identical(tmp_path):
     assert "GSD_PROJECT" not in environment and "GSD_WORKSTREAM" not in environment
 
     policy = admission.codex_environment_policy(environment)
-    golden_hash = "d78700f4efa3756d5ab9823e80825c6832e4b562288a3d8437b330e0a3708e65"
+    golden_hash = "sha256:d78700f4efa3756d5ab9823e80825c6832e4b562288a3d8437b330e0a3708e65"
     assert _normalized_policy_hash(policy, root) == golden_hash
     # The normalized-and-hand-hashed policy must still be the exact same
     # dict the real production wrapper hashes.
