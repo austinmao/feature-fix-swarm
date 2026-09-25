@@ -234,7 +234,11 @@ def gsd_supervisor_environment_from_process() -> GsdSupervisorEnvironment | None
     present = _GSD_ENVIRONMENT.intersection(os.environ)
     if not present:
         return None
-    values = {key: os.environ[key] for key in _GSD_ENVIRONMENT}
+    # A partial set (some but not all of the 4 required keys) must still
+    # reach validate_gsd_supervisor_environment as a typed CapabilityError,
+    # never a raw KeyError -- .get() leaves a missing required key as None,
+    # which the closed-set/type checks below reject typed.
+    values = {key: os.environ.get(key) for key in _GSD_ENVIRONMENT}
     for key in _GSD_SCOPE_ENVIRONMENT:
         if key in os.environ:
             values[key] = os.environ[key]

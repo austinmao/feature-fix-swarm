@@ -248,15 +248,19 @@ def select_active_phase(runtime: UpstreamRuntime, phases_root: Path, phase_scope
     runtime.verify()
     try:
         unsafe = not phases_root.is_absolute() or phases_root.resolve(strict=True) != phases_root
-    except OSError as error:
+    except FileNotFoundError as error:
         # An unknown scoped project (upstream.py's resolver allows a missing
         # leaf) resolves to a phases root that was never created -- this is
         # "no phase could be selected", the same failure this function
         # already reports for an ambiguous directory or a scanner crash, not
-        # an unsafe (as opposed to simply absent) path. Map the raw
-        # FileNotFoundError to that same typed refusal instead of a
-        # PATH_UNSAFE that would misleadingly imply maliciousness.
+        # an unsafe (as opposed to simply absent) path. Map only an actually
+        # absent path to that same typed refusal instead of a PATH_UNSAFE
+        # that would misleadingly imply maliciousness.
         raise PrelaunchInventoryRefused('PRELAUNCH_PHASE_SELECTION_FAILED') from error
+    except OSError as error:
+        # Any other resolve() failure (permission, symlink loop, etc.) is a
+        # genuinely unsafe path, not simply an absent one.
+        raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE') from error
     if unsafe:
         raise PrelaunchInventoryRefused('PRELAUNCH_PLAN_PATH_UNSAFE')
     descriptor = os.open(phases_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
