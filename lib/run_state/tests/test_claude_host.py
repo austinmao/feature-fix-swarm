@@ -85,6 +85,9 @@ def _normalized_policy_hash(policy: dict[str, str], root: str) -> str:
     path) before hashing, so a literal golden stays valid across machines
     and OSes (review round 4: the prior literals embedded sys.executable and
     a macOS-only /private/tmp path, so they broke on Linux CI)."""
+    # The placeholders must not already occur in the raw policy, or a policy
+    # that emitted them literally would normalize to the same golden.
+    assert not any("<ROOT>" in value or "<PY>" in value for value in policy.values())
     normalized = {
         key: value.replace(root, "<ROOT>").replace(sys.executable, "<PY>")
         for key, value in policy.items()
