@@ -425,3 +425,242 @@ def test_default_root_resolves_via_ffs_managed_admission_root_env(tmp_path, monk
 
     assert returncode == 0
     assert payload["database"] == str(root / "admission.sqlite3")
+
+
+# --- Round 3 (review round-1 open findings) -----------------------------
+
+
+def test_apply_store_unavailable_exit6_when_writer_lock_contended(tmp_path, monkeypatch, capsys):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    contender = sqlite3.connect(str(root / "admission.sqlite3"), isolation_level=None, timeout=1)
+    contender.execute("PRAGMA busy_timeout=500")
+    contender.execute("BEGIN IMMEDIATE")
+    try:
+        returncode = cli.main(["admission", "reconcile", "--root", str(root), "--apply"])
+        payload = _last_payload(capsys)
+        assert returncode == 6
+        assert payload["code"] == "MANAGED_ADMISSION_STORE_UNAVAILABLE"
+    finally:
+        contender.rollback()
+        contender.close()
+    assert not any(entry.name.endswith(".bak") for entry in root.iterdir())
+
+
+def test_inspect_missing_managed_admissions_table_refuses_typed_schema_invalid(tmp_path, capsys):
+    root = tmp_path / "admission"
+    root.mkdir(mode=0o700)
+    path = root / "admission.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE admission_policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2),writer_nonce TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO admission_policy VALUES(1,2,'nonce')")
+        # managed_admissions deliberately never created.
+    path.chmod(0o600)
+
+    returncode = cli.main(["admission", "inspect", "--root", str(root)])
+    payload = _last_payload(capsys)
+
+    assert returncode == 6
+    assert payload["code"] == "MANAGED_ADMISSION_SCHEMA_INVALID"
+
+
+def test_apply_connect_failure_leaves_no_bak_behind(tmp_path, monkeypatch, capsys):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    real_connect = managed_admission.sqlite3.connect
+
+    def failing_connect(target, *a, **k):
+        if "mode=rw" in str(target):
+            raise sqlite3.OperationalError("simulated connect failure")
+        return real_connect(target, *a, **k)
+
+    monkeypatch.setattr(managed_admission.sqlite3, "connect", failing_connect)
+    before = (root / "admission.sqlite3").read_bytes()
+
+    returncode = cli.main(["admission", "reconcile", "--root", str(root), "--apply"])
+    payload = _last_payload(capsys)
+
+    assert returncode == 6
+    assert payload["code"] == "MANAGED_ADMISSION_STORE_UNAVAILABLE"
+    assert (root / "admission.sqlite3").read_bytes() == before
+    assert not any(entry.name.endswith(".bak") for entry in root.iterdir())
+
+
+def _wal_mode_root(tmp_path):
+    root = tmp_path / "admission"
+    root.mkdir(mode=0o700)
+    path = root / "admission.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            "CREATE TABLE admission_policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2),writer_nonce TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO admission_policy VALUES(1,2,'nonce')")
+        connection.execute(
+            "CREATE TABLE managed_admissions (sequence INTEGER PRIMARY KEY AUTOINCREMENT,ticket TEXT NOT NULL UNIQUE,state_root TEXT NOT NULL,run_id TEXT NOT NULL,host_id TEXT NOT NULL,boot_id TEXT NOT NULL,pid INTEGER NOT NULL CHECK(pid>0),start_token TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('waiting','active','released','reclaimed')))"
+        )
+        connection.commit()
+    with sqlite3.connect(path) as connection:
+        # journal_mode=WAL persists in the file header even after a
+        # checkpoint truncate; only the -wal/-shm sidecars go away.
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for suffix in ("-wal", "-shm"):
+        (root / (path.name + suffix)).unlink(missing_ok=True)
+    path.chmod(0o600)
+    return root
+
+
+def test_inspect_refuses_wal_mode_store_without_creating_sidecars(tmp_path, capsys):
+    root = _wal_mode_root(tmp_path)
+    path = root / "admission.sqlite3"
+    with open(path, "rb") as handle:
+        assert handle.read(100)[18:20] == b"\x02\x02", "fixture must actually be WAL-format"
+    before_listing = sorted(entry.name for entry in root.iterdir())
+
+    returncode = cli.main(["admission", "inspect", "--root", str(root)])
+    payload = _last_payload(capsys)
+
+    assert returncode == 6
+    assert payload["code"] == "MANAGED_ADMISSION_STORE_UNSAFE"
+    assert sorted(entry.name for entry in root.iterdir()) == before_listing
+
+
+def test_inspect_refuses_file_too_short_for_a_sqlite_header(tmp_path, capsys):
+    root = tmp_path / "admission"
+    root.mkdir(mode=0o700)
+    path = root / "admission.sqlite3"
+    path.write_bytes(b"short")
+    path.chmod(0o600)
+
+    returncode = cli.main(["admission", "inspect", "--root", str(root)])
+    payload = _last_payload(capsys)
+
+    assert returncode == 6
+    assert payload["code"] == "MANAGED_ADMISSION_STORE_UNSAFE"
+
+
+def test_apply_reconcile_at_root_clears_stale_legacy_opaque_tag(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    stuck = queue.enqueue(state_root=tmp_path / "stuck", run_id="stuck")
+    assert queue.try_admit(stuck) is False
+    assert queue.status(stuck)["limiting_resource"] == "legacy-opaque"
+
+    report = managed_admission.apply_reconcile_at_root(root)
+    assert report["reclaimed"] == [1]
+
+    # No try_admit call happens between apply and this assertion -- apply
+    # itself must clear the stale tag inside its own transaction.
+    with sqlite3.connect(root / "admission.sqlite3") as connection:
+        value = connection.execute(
+            "SELECT limiting_resource FROM managed_admissions WHERE ticket=?", (stuck.ticket,)
+        ).fetchone()[0]
+    assert value is None
+
+
+def test_apply_blocks_a_concurrent_writer_during_the_cas_phase_too(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_cas = managed_admission._apply_plan_cas
+
+    def paused_cas(c, plan):
+        entered.set()
+        release.wait(5)
+        return real_cas(c, plan)
+
+    monkeypatch.setattr(managed_admission, "_apply_plan_cas", paused_cas)
+
+    results = {}
+
+    def run_apply():
+        results["report"] = managed_admission.apply_reconcile_at_root(root)
+
+    worker = threading.Thread(target=run_apply)
+    worker.start()
+    assert entered.wait(2), "CAS phase never started"
+
+    contender = sqlite3.connect(str(root / "admission.sqlite3"), isolation_level=None, timeout=1)
+    try:
+        contender.execute("PRAGMA busy_timeout=500")
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            contender.execute("BEGIN IMMEDIATE")
+    finally:
+        contender.close()
+
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert results["report"]["reclaimed"] == [1]
+
+
+def test_apply_holds_one_continuous_writer_lock_never_releases_mid_flight(tmp_path, monkeypatch):
+    """Timing-based contention probes cannot reliably catch a release then
+    immediate reacquire of the SAME kind of lock (no thread ever gets a
+    chance to intervene in that synchronous gap). Assert directly, by
+    intercepting the writer connection's own calls, that
+    apply_reconcile_at_root issues exactly one BEGIN IMMEDIATE and exactly
+    one commit -- never releases the lock mid-flight and reacquires it.
+    """
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+
+    real_connect = managed_admission.sqlite3.connect
+    calls: list = []
+
+    class _CountingConnection:
+        def __init__(self, inner):
+            self.__dict__["_inner"] = inner
+
+        def execute(self, sql, *a, **k):
+            calls.append(sql)
+            return self._inner.execute(sql, *a, **k)
+
+        def commit(self):
+            calls.append("COMMIT")
+            return self._inner.commit()
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __setattr__(self, name, value):
+            setattr(self._inner, name, value)
+
+    def wrapped_connect(target, *a, **k):
+        connection = real_connect(target, *a, **k)
+        # Only the one live writer connection matters -- _backup_locked's own
+        # read-only source/check connections must not pollute the count.
+        return _CountingConnection(connection) if "mode=rw" in str(target) else connection
+
+    monkeypatch.setattr(managed_admission.sqlite3, "connect", wrapped_connect)
+
+    report = managed_admission.apply_reconcile_at_root(root)
+
+    assert report["reclaimed"] == [1]
+    assert calls.count("BEGIN IMMEDIATE") == 1, calls
+    assert calls.count("COMMIT") == 1, calls

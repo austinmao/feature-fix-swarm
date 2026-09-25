@@ -706,3 +706,38 @@ def test_try_admit_clears_stale_legacy_opaque_tag_once_gate_disarms(tmp_path, mo
     live_waiter = queue.enqueue(state_root=tmp_path / "poke", run_id="poke")
     assert queue.try_admit(live_waiter)
     assert queue.status(stuck)["limiting_resource"] is None
+
+
+# --- Round 3 (review round-1 open findings) -----------------------------
+
+
+def test_create_backup_file_close_failure_unlinks_created_file(tmp_path, monkeypatch):
+    root = tmp_path / "admission"
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        managed_admission.os, "close",
+        lambda fd: (_ for _ in ()).throw(OSError("simulated close failure")),
+    )
+    with pytest.raises(OSError):
+        managed_admission._create_backup_file_in(root, name="pinned.bak")
+    assert not (root / "pinned.bak").exists()
+
+
+def test_apply_reconcile_clears_stale_legacy_opaque_tag_without_try_admit(tmp_path, monkeypatch):
+    root = _raw_v1_root(
+        tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
+        pid=7, start_token="prior-start", status="waiting",
+    )
+    monkeypatch.setattr(managed_admission.ProcessIdentity, "current", staticmethod(lambda: OWNER))
+    monkeypatch.setattr(managed_admission, "probe_identity", lambda identity: "LIVE" if identity == OWNER else "DEAD")
+    queue = ManagedAdmissionQueue(root, observation_provider=lambda: _observation())
+    stuck = queue.enqueue(state_root=tmp_path / "stuck", run_id="stuck")
+    assert queue.try_admit(stuck) is False
+    assert queue.status(stuck)["limiting_resource"] == "legacy-opaque"
+
+    result = queue.reconcile(apply=True)
+    assert result["reclaimed"] == [1]
+
+    # No try_admit call happens between apply and this assertion -- apply
+    # itself must have cleared the stale tag in the same transaction.
+    assert queue.status(stuck)["limiting_resource"] is None
