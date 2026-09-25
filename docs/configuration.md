@@ -320,6 +320,88 @@ success without relaunching. There is no dedicated inspect or reconcile
 command yet for `inspect_*` and `reconcile_intent`; they name the step an
 operator takes by hand. Contract: `specs/014-parallel-host-parity/contracts/run-context.md`.
 
+#### `run-state admission inspect|reconcile` (spec-014 Release C, F25)
+
+The `ManagedAdmissionRefused` recovery action `inspect_managed_admission`
+(above) names this CLI. It exists because a legacy (`writer_version=1`)
+admission row keeps `try_admit`'s legacy-opaque gate armed for every managed
+run sharing the store — including a row whose owning process died on a
+prior boot, or a `waiting` v2 row whose owner died with no child ever
+bound — and neither case self-heals from the normal admission path.
+
+```bash
+python3 -m run_state.cli admission inspect [--root PATH]
+python3 -m run_state.cli admission reconcile [--root PATH] [--apply]
+```
+
+`--root` defaults to `global_admission_root()` (the `FFS_MANAGED_ADMISSION_ROOT`
+row above). **Neither command ever creates a store**: if `<root>/admission.sqlite3`
+does not exist, both refuse `MANAGED_ADMISSION_STORE_MISSING` (exit 2) without
+touching the filesystem — unlike `ManagedAdmissionQueue`'s own constructor,
+which creates one on first open. `reconcile` is dry-run unless `--apply` is
+given; there is no `--force`.
+
+Every row is probed outside SQLite (boot id and process liveness), never
+assumed. A row is only ever reclaimed on one of two proofs: the recorded
+owner is dead **and** its boot no longer exists (`boot-changed` — the host
+rebooted, so nothing from that incarnation survives, v1 or v2, any status),
+or it is a childless v2 `waiting` row whose owner died on the *same* boot
+(`dead-waiter` — `try_admit` only ever grants `waiting -> active` to the
+live ticket owner, so a dead-owned waiting row can never be granted by any
+other path either). Everything else is kept, with a reason:
+`LEGACY_SAME_BOOT_UNPROVABLE` (a same-boot v1 row has no child identity to
+fall back on), `RELEASED_RETAINED` (a v2 `released` row may still be
+requeued by group retry), `ACTIVE_LEASE_UNPROVABLE` (a childless v2 `active`
+row's descendant cannot be ruled out), `OWNER_LIVE`, or `OWNER_UNKNOWN`.
+`reclaimed` is terminal: a database trigger aborts any later write, including
+raw legacy SQL, that tries to move a reclaimed row to any other status.
+
+JSON output (stdout, one object):
+
+```json
+{
+  "schema_version": 1, "ok": true, "mode": "inspect|dry-run|apply",
+  "database": "…/admission.sqlite3",
+  "gate_armed_before": true, "gate_armed_after": false,
+  "counts": {"1/waiting": 1, "2/waiting": 3},
+  "rows": [{"sequence": 1, "writer_version": 1, "status": "released",
+             "boot": "…", "owner": {"host_id": "…", "boot_id": "…", "pid": 7, "start_token": "…"},
+             "decision": "reclaim", "proof": "boot-changed", "reason": null}],
+  "backup": {"path": "…/admission.sqlite3.reconcile-<utc>-<hex>.bak", "sha256": "…"}
+}
+```
+
+The output **never includes a ticket value** (the row's admission ticket is a
+capability secret, not diagnostic data). `gate_armed_before`/`_after` are the
+same `LEGACY_OPAQUE_GATE_SQL` query try_admit itself runs. `counts` keys are
+`"<writer_version>/<status>"`. `backup` is `null` for `inspect` and for a
+dry-run `reconcile`.
+
+`--apply` order: probe every row outside SQLite; back up the live database
+with `Connection.backup` to an exclusively created `0600` file named
+`admission.sqlite3.reconcile-<utc>-<hex>.bak` next to it; verify the backup
+with `PRAGMA integrity_check` plus a row-count match against the live table;
+only then open one writer transaction and exact-snapshot compare-and-swap
+each `reclaim` decision (`sequence`, ticket, `host_id`/`boot_id`/`pid`/
+`start_token`, `writer_version`, `status` must all still match, or the row
+is left alone — a race, e.g. a concurrent `resume_legacy`, is reported, not
+overwritten). A failed backup or verify leaves the live database
+byte-for-byte untouched and refuses; nothing is ever applied without a
+verified backup on disk first.
+
+Exit codes: `0` ok; `2` `MANAGED_ADMISSION_STORE_MISSING` / `INVALID_REQUEST`;
+`3` `LEGACY_OPAQUE_REMAINS` — `--apply` ran but at least one row is still
+kept, so the gate is still armed; `5` `RECONCILE_BACKUP_FAILED` (rolled
+back, database untouched); `6` `MANAGED_ADMISSION_STORE_UNSAFE` /
+`_STORE_UNAVAILABLE` / `_SCHEMA_INVALID` / `_ROOT_UNSAFE`.
+
+**Operator order:** `inspect` first (read-only; confirms which rows are
+actually reclaimable and why the rest are kept) -> `reconcile` with no flags
+(dry run; same report, still no write) -> `reconcile --apply` only once the
+dry-run plan looks right. Never run `--apply` against a shared per-user store
+without reading the dry-run plan first — reclaiming a row is a one-way,
+terminal decision.
+
 ### Kill-switches
 
 All default to on. Set to `off` to disable.

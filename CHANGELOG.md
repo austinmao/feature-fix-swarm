@@ -8,6 +8,31 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-25, spec-014 Release C: F25 admission wedge and reconcile CLI)
+
+- A legacy (writer_version=1) managed admission row kept try_admit's
+  legacy-opaque gate armed forever for every run sharing the store, even
+  after the row was released, and even when its owning process had died on
+  a prior boot. A childless waiting v2 row whose owner died could get stuck
+  the same way. Neither case had any path back to a working admission
+  queue.
+- New CLI: run-state admission inspect and run-state admission reconcile.
+  Both refuse on a missing store instead of creating one. reconcile is
+  dry-run by default; only reconcile --apply mutates the database, and
+  only after backing it up to an exclusively created 0600 file and
+  verifying the backup with an integrity check and a row count match. Each
+  reclaimed row is proof carrying: either the owner is dead and its boot no
+  longer exists, or it is a childless waiting row whose owner died on the
+  same boot and can never be granted by any other path. A reconciled row
+  is now terminal; no later write, including raw legacy SQL, can move it
+  to any other status. JSON output never includes a ticket value.
+- Fixed a related admission scheduling bug: an earlier waiting ticket whose
+  owner had died could permanently shadow a later, live waiter of the same
+  run, since the fairness scheduler picked the earliest row for a run
+  before checking whether its owner was still alive.
+- Operator order: inspect, then reconcile with no flags to preview, then
+  reconcile --apply. Full reference: docs/configuration.md.
+
 ### Fixed (2026-09-25, spec-014 Release C: F32 managed frontend prompt)
 
 - A managed `task-swarm` or `feature-implement` run now asks the host to run
