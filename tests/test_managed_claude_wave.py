@@ -151,8 +151,9 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
         str(tmp_path / "candidate"), str(tmp_path / "credential"), str(tmp_path / "claude"),
         "claude-opus-5", None, "workspace-write", False, 23, 60,
     )
-    token = SimpleNamespace(repository_id="repo", run_id="run", generation=1)
-    context = SimpleNamespace(activity_id="parent", evidence_root=tmp_path / "evidence")
+    token = SimpleNamespace(repository_id="repo", run_id="run", generation=1, planning_scope="1")
+    context = SimpleNamespace(activity_id="parent", evidence_root=tmp_path / "evidence",
+                              upstream={"project": None, "workstream": None, "session_key": None})
     assert managed.run_managed_claude_command(
         Store(), token, context, ("/gsd-execute-phase", "1"), "request", request,
     ) == 0
@@ -310,8 +311,9 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
         str(tmp_path / "candidate"), str(tmp_path / "credential"), str(tmp_path / "claude"),
         "claude-opus-5", None, "workspace-write", False, 23, 60,
     )
-    token = SimpleNamespace(repository_id="repo", run_id="run", generation=1)
-    context = SimpleNamespace(activity_id="parent", evidence_root=tmp_path / "evidence")
+    token = SimpleNamespace(repository_id="repo", run_id="run", generation=1, planning_scope="1")
+    context = SimpleNamespace(activity_id="parent", evidence_root=tmp_path / "evidence",
+                              upstream={"project": None, "workstream": None, "session_key": None})
     store = Store()
     with pytest.raises(managed.SupervisorRefused, match=expected_code):
         managed.run_managed_claude_command(

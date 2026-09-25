@@ -3113,20 +3113,19 @@ def run_managed_command(store, token, context, command, request_key,
 
 # A bare frontend word (feature-spec, feature-implement, fix, code-uplift,
 # task-swarm) is never staged into the private Codex runtime -- only gsd-*
-# skills are (runtime_staging.py's manifest check). Each frontend's managed
-# lifecycle actually drives one of these staged commands for its already-
-# selected, already-planned scope; name that command instead (#F32).
+# skills are (runtime_staging.py's manifest check). feature-implement and
+# task-swarm's managed lifecycle actually drives gsd-execute-phase for their
+# already-selected, already-planned scope; name that command instead (#F32).
+# feature-spec/fix/code-uplift's staged mapping is a deferred design item
+# (not yet decided) -- they refuse as unstaged rather than guess.
 _MANAGED_FRONTEND_STAGED_COMMAND: dict[str, str] = {
     "feature-implement": "gsd-execute-phase",
     "task-swarm": "gsd-execute-phase",
-    "feature-spec": "gsd-plan-phase",
-    "fix": "gsd-plan-phase",
-    "code-uplift": "gsd-code-review",
 }
 
 
 def _managed_prompt(root, operation, command, *, staged_codex_home, planning_root: str,
-                    project: str | None) -> tuple[tuple[str, ...], str, str]:
+                    project: str | None, planning_scope: str) -> tuple[tuple[str, ...], str, str]:
     """Return ``(invocation, prompt, role)`` for a managed host command."""
     invocation = tuple(command)
     if len(invocation) == 1 and invocation[0] in {
@@ -3141,9 +3140,16 @@ def _managed_prompt(root, operation, command, *, staged_codex_home, planning_roo
         staged_command = _MANAGED_FRONTEND_STAGED_COMMAND.get(invocation[0])
         if staged_command is None:
             raise SupervisorRefused("MANAGED_FRONTEND_COMMAND_UNSTAGED")
-        prompt_command = "$" + staged_command
+        # The staged command's argument is the already-selected planning scope
+        # (frontend-start --scope), never the operator's free-text invocation --
+        # no skill named by this map is staged with an invocation-text argument.
+        if not planning_scope:
+            raise SupervisorRefused("PRELAUNCH_PHASE_SCOPE_REQUIRED")
+        prompt_command = "$" + staged_command + " " + planning_scope
         if invocation_text:
-            prompt_command += " " + invocation_text
+            # The operator's request is context for the executor, never a
+            # command argument: keep it on its own clearly labelled line.
+            prompt_command += "\n\nOperator request: " + invocation_text
     else:
         head = invocation[0]
         prompt_command = ("$" + head[1:] if head.startswith("/") else head) + (
@@ -3356,11 +3362,12 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
     except (CapabilityError, OSError, ValueError) as error:
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
-    upstream = getattr(context, "upstream", None) or {}
+    upstream = context.upstream or {}
     planning_root = upstream.get("planning_root") or str(ready.path / ".planning")
     invocation, prompt, role = _managed_prompt(
         root, operation, command, staged_codex_home=outer_home,
         planning_root=planning_root, project=upstream.get("project"),
+        planning_scope=token.planning_scope,
     )
     contract_material = {
         "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
