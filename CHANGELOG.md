@@ -18,17 +18,29 @@ all skills.
   no way to honor, and every non-default run refused
   `MANAGED_PROJECT_SCOPE_UNSUPPORTED`; that refusal is retired.
 - Each scope value is still validated against the resolver's own segment
-  rule (plain ASCII, no path separators, no `..`, at most 160 bytes)
-  before it reaches the prompt or the host environment, refusing
-  `MANAGED_PROMPT_VALUE_UNSAFE` for an unsafe one.
-- `rebase_planning_root` now refuses `PRELAUNCH_PLAN_PATH_UNSAFE` when the
-  persisted planning root's relative path is inconsistent with the
-  upstream project/workstream fields, instead of silently rebasing a
-  scope the env and the frozen plan inventory would otherwise disagree
-  about.
+  rule before it reaches the prompt or the host environment: it must
+  start with a letter or digit, then contain only letters, digits, `.`,
+  `_`, or `-`; it may never contain `..`; and it is at most 160 bytes.
+  An unsafe value refuses `MANAGED_PROMPT_VALUE_UNSAFE` at the prompt
+  boundary, or `CapabilityError` at the host environment boundary. A
+  present `GSD_PROJECT`/`GSD_WORKSTREAM` key is always validated -- a
+  non-string value (including `None`) is never silently treated as an
+  omitted (default-scope) key.
+- `rebase_planning_root` now validates the upstream project/workstream
+  fields against that same rule before composing a path (a non-string or
+  unsafe field refuses typed, never raises `TypeError`), and refuses
+  `PRELAUNCH_PLAN_PATH_UNSAFE` when the persisted planning root's
+  relative path is inconsistent with those fields, instead of silently
+  rebasing a scope the env and the frozen plan inventory would otherwise
+  disagree about.
 - Selecting the active phase under an unknown scoped project now refuses
-  `PRELAUNCH_PLAN_PATH_UNSAFE` instead of letting a raw
+  `PRELAUNCH_PHASE_SELECTION_FAILED` (the same code an ambiguous or
+  failed selection already uses) instead of letting a raw
   `FileNotFoundError` escape.
+- `claude_environment_policy`'s preview mode now validates scope values
+  too, and `gsd_supervisor_environment_from_process` now carries an
+  ambient `GSD_PROJECT`/`GSD_WORKSTREAM` from the process environment
+  into the validated result instead of silently dropping it.
 - The default (unscoped) run stays byte-identical: the closed GSD addition
   set's keys, its qualification preparation digest, and its policy hash
   are unchanged when no project or workstream is set.
