@@ -356,9 +356,9 @@ read-only command ever opens a sqlite connection,
 `_refuse_unless_legacy_journal_format` reads the file's header bytes 18-19
 directly (`O_RDONLY|O_NOFOLLOW`) and refuses `MANAGED_ADMISSION_STORE_UNSAFE`
 unless they are `\x01\x01` (legacy rollback-journal format) — this is also
-the code path for a file shorter than the 100-byte sqlite header (too
-short to even hold a format-version byte, so it is UNSAFE, not
-SCHEMA_INVALID): opening a WAL-mode database even `mode=ro` creates
+the code path for a file shorter than the 100-byte sqlite header (an
+incomplete header is refused as UNSAFE, not SCHEMA_INVALID, whatever
+bytes 18-19 hold): opening a WAL-mode database even `mode=ro` creates
 `-wal`/`-shm` sidecar files as a side effect (SQLite's WAL reader needs
 them to read consistently), which a strictly read-only path must never do.
 A store this package creates is always DELETE-journal, so this only fires
