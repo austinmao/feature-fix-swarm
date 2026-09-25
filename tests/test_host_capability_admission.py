@@ -104,18 +104,32 @@ def test_artifact_review_material_is_closed_and_uses_the_typed_model_resolver(tm
         )
 
 
+def _normalized_policy_hash(policy: dict, root: str) -> str:
+    """Normalize away machine-specific values (the tmp root, the interpreter
+    path) before hashing, so a literal golden stays valid across machines
+    and OSes (review round 4: the prior literals embedded sys.executable and
+    a macOS-only /private/tmp path, so they broke on Linux CI)."""
+    normalized = {
+        key: value.replace(root, "<ROOT>").replace(sys.executable, "<PY>")
+        for key, value in policy.items()
+    }
+    return hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+
+
 def test_default_additions_are_byte_identical(tmp_path):
     """F34 5.4: with no scope, as_dict() returns exactly the 4 keys and the
-    policy hash matches a LITERAL sha256 computed at origin/main 59bff1d
-    (pre-F34) with these same fixed inputs (review round 3 item 4) -- not a
-    value recomputed by the current code under test -- so this proves
-    byte-identity with the pre-F34 policy, not just internal
-    self-consistency. Rules out emitting "" scope keys, which would drift
-    every retained runtime to ENVIRONMENT_POLICY_DRIFT. Golden inputs and
-    computation:
-    /private/tmp/claude-502/-Users-luminamao-Documents-Github-openclaw/
-    c2e40b87-25d4-44ab-8c8d-e8bc1d6f8e92/scratchpad/compute_golden.py, run
-    against a detached worktree of 59bff1d."""
+    normalized policy hash (tmp root -> "<ROOT>", sys.executable -> "<PY>")
+    matches a LITERAL sha256 computed at origin/main 59bff1d (pre-F34) with
+    the SAME normalization (review round 3 item 4, made machine-independent
+    per review round 4) -- not a value recomputed by the current code under
+    test -- so this proves byte-identity with the pre-F34 policy across
+    machines, not just internal self-consistency. Rules out emitting ""
+    scope keys, which would drift every retained runtime to
+    ENVIRONMENT_POLICY_DRIFT. Recomputed identical at 3e8f422/HEAD.
+    Computation: compute_golden_normalized.py (session scratchpad), run
+    against a detached worktree of 59bff1d and against HEAD."""
     spec = importlib.util.spec_from_file_location(
         "ffs_host_default_additions", ROOT / "lib/host_capabilities.py"
     )
@@ -124,8 +138,9 @@ def test_default_additions_are_byte_identical(tmp_path):
     sys.modules[spec.name] = admission
     spec.loader.exec_module(admission)
 
-    home = Path("/private/tmp/ffs-f34-golden-codex/home")
-    home.mkdir(parents=True, exist_ok=True)
+    root = str(tmp_path.resolve())
+    home = tmp_path.resolve() / "home"
+    home.mkdir(parents=True)
     admission_file = home / "admission.json"
     admission_file.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
     admission_file.chmod(0o600)
@@ -148,15 +163,22 @@ def test_default_additions_are_byte_identical(tmp_path):
         "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
         **additions.as_dict(),
     }
-    golden_hash = "17b5eb435c98b6e601bcf57e5e707fe662fb30f869e3ef84ed39317adf58c96c"
-    assert admission.codex_environment_policy_hash(environment) == golden_hash
+    assert "GSD_PROJECT" not in environment and "GSD_WORKSTREAM" not in environment
+
+    policy = admission.codex_environment_policy(environment)
+    golden_hash = "d78700f4efa3756d5ab9823e80825c6832e4b562288a3d8437b330e0a3708e65"
+    assert _normalized_policy_hash(policy, root) == golden_hash
+    # The normalized-and-hand-hashed policy must still be the exact same
+    # dict the real production wrapper hashes.
+    assert admission.codex_environment_policy_hash(environment) == admission.closed_environment_hash(policy)
 
     scoped = admission.GsdSupervisorEnvironment(
         "ffs-supervised-process", "patches", str(admission_file), command_json,
         project="demo-project", workstream=None,
     )
     scoped_environment = {**environment, **scoped.as_dict()}
-    assert admission.codex_environment_policy_hash(scoped_environment) != golden_hash
+    scoped_policy = admission.codex_environment_policy(scoped_environment)
+    assert _normalized_policy_hash(scoped_policy, root) != golden_hash
 
 
 def test_scope_keys_validated_and_set_stays_closed(tmp_path):

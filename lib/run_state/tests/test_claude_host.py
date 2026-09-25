@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from host_capabilities import _binary_chain
+from host_capabilities import _binary_chain, closed_environment_hash
 from run_state.claude_host import (
     ClaudeHostAdapter, ClaudeHostRefused, ClaudeTelemetryRefused,
     QualifiedClaudeRuntime, claude_closed_environment, claude_environment_policy,
@@ -80,22 +80,38 @@ def test_claude_preview_policy_validates_scope_segments(tmp_path: Path) -> None:
         claude_environment_policy(scoped, preview=False)
 
 
+def _normalized_policy_hash(policy: dict[str, str], root: str) -> str:
+    """Normalize away machine-specific values (the tmp root, the interpreter
+    path) before hashing, so a literal golden stays valid across machines
+    and OSes (review round 4: the prior literals embedded sys.executable and
+    a macOS-only /private/tmp path, so they broke on Linux CI)."""
+    normalized = {
+        key: value.replace(root, "<ROOT>").replace(sys.executable, "<PY>")
+        for key, value in policy.items()
+    }
+    return hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+
+
 def test_claude_default_scope_policy_hash_is_golden(tmp_path: Path) -> None:
-    """Review round 1 item 15, pinned per review round 3 item 4: the
-    default-scope (4-key) Claude environment policy hash must equal a
-    LITERAL sha256 computed at origin/main 59bff1d (pre-F34) with these same
-    fixed inputs -- not a value recomputed by the current code under test --
-    so this proves byte-identity with the pre-F34 policy, not just internal
-    self-consistency. Golden inputs and computation:
-    /private/tmp/claude-502/-Users-luminamao-Documents-Github-openclaw/
-    c2e40b87-25d4-44ab-8c8d-e8bc1d6f8e92/scratchpad/compute_golden.py, run
-    against a detached worktree of 59bff1d."""
-    home = Path("/private/tmp/ffs-f34-golden-claude/home")
-    home.mkdir(parents=True, exist_ok=True)
+    """Review round 1 item 15, pinned per review round 3 item 4, made
+    machine-independent per review round 4: the default-scope (4-key)
+    Claude environment policy hash, normalized (tmp root -> "<ROOT>",
+    sys.executable -> "<PY>"), must equal a LITERAL sha256 computed at
+    origin/main 59bff1d (pre-F34) with the SAME normalization -- not a
+    value recomputed by the current code under test -- so this proves
+    byte-identity with the pre-F34 policy across machines, not just
+    internal self-consistency. Recomputed identical at 3e8f422/HEAD.
+    Computation: compute_golden_normalized.py (session scratchpad), run
+    against a detached worktree of 59bff1d and against HEAD."""
+    root = str(tmp_path.resolve())
+    home = tmp_path.resolve() / "home"
+    home.mkdir(parents=True)
     config = home / "config"
-    config.mkdir(exist_ok=True)
+    config.mkdir()
     tmp_leaf = home / "tmp" / "leaf"
-    tmp_leaf.mkdir(parents=True, exist_ok=True)
+    tmp_leaf.mkdir(parents=True)
     admission = home / "admission.json"
     admission.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
     admission.chmod(0o600)
@@ -111,12 +127,19 @@ def test_claude_default_scope_policy_hash_is_golden(tmp_path: Path) -> None:
         "FFS_SUPERVISED_ADMISSION_FILE": str(admission),
         "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
     }
-    golden_hash = "ae545cf608aaed7bd8c2a62f4dd52e4c56d9eaae175646de6d5c9a927a701ce3"
-    assert claude_environment_policy_hash(environment) == golden_hash
+    assert "GSD_PROJECT" not in environment and "GSD_WORKSTREAM" not in environment
+
+    policy = claude_environment_policy(environment)
+    golden_hash = "6793d4216257626348a9dfaa8785186a0e0cb0d457825fcf0889e25e887b1471"
+    assert _normalized_policy_hash(policy, root) == golden_hash
+    # The normalized-and-hand-hashed policy must still be the exact same
+    # dict the real production wrapper hashes.
+    assert claude_environment_policy_hash(environment) == closed_environment_hash(policy)
 
     scoped_additions = _gsd_environment(tmp_path, "admission-scoped.json")
     scoped_environment = {**_claude_base(tmp_path), **scoped_additions, "GSD_PROJECT": "demo-project"}
-    assert claude_environment_policy_hash(scoped_environment) != golden_hash
+    scoped_policy = claude_environment_policy(scoped_environment)
+    assert _normalized_policy_hash(scoped_policy, str(tmp_path.resolve())) != golden_hash
 
 
 def test_claude_policy_closed_set_lower_bound_never_keyerror(tmp_path: Path) -> None:
