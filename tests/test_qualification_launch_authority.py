@@ -130,7 +130,7 @@ def test_probe_material_accepts_scope_rejects_unknown_key(tmp_path):
     bridge.write_text("# bridge\n")
     command_json = json.dumps([sys.executable, str(bridge)], separators=(",", ":"))
 
-    def _environment(**extra):
+    def _environment(*, omit=(), **extra):
         base = {
             "HOME": str(runtime), "CODEX_HOME": str(runtime), "TMPDIR": str(cwd / "tmp-leaf"),
             "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "NO_COLOR": "1",
@@ -139,6 +139,8 @@ def test_probe_material_accepts_scope_rejects_unknown_key(tmp_path):
             "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
             "FFS_HOOK_OBSERVATION": str(runtime / "hooks.jsonl"), "FFS_HOOK_NONCE": "probe-nonce",
         }
+        for key in omit:
+            del base[key]
         base.update(extra)
         return tuple(sorted(base.items()))
 
@@ -168,6 +170,25 @@ def test_probe_material_accepts_scope_rejects_unknown_key(tmp_path):
 
     with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
         Supervisor._validate_qualification_material(_request(_environment(GSD_SESSION_KEY="s")))
+
+    # Review round 1 item 12: closed-set lower bound. A lone GSD_PROJECT (all
+    # 4 required GSD_* keys missing), and 3 of the 4 required keys plus a
+    # scope key, must refuse QUALIFICATION_MATERIAL_INVALID -- never KeyError.
+    lone_scope = _environment(
+        omit=("GSD_DISPATCH_MODE", "FFS_SUPERVISED_COMMIT_MODE",
+              "FFS_SUPERVISED_ADMISSION_FILE", "FFS_SUPERVISED_DISPATCH_COMMAND_JSON"),
+        GSD_PROJECT="demo-project",
+    )
+    with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
+        Supervisor._validate_qualification_material(_request(lone_scope))
+
+    three_of_four = _environment(omit=("FFS_SUPERVISED_DISPATCH_COMMAND_JSON",), GSD_PROJECT="demo-project")
+    with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
+        Supervisor._validate_qualification_material(_request(three_of_four))
+
+    # Review round 1 item 14 (probe-material half): GSD_PROJECT="../x" refuses.
+    with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
+        Supervisor._validate_qualification_material(_request(_environment(GSD_PROJECT="../x")))
 
 
 def test_policy_qualification_grant_binds_exact_closed_probe_contract(tmp_path):

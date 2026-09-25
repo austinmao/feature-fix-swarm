@@ -55,6 +55,68 @@ def test_claude_policy_accepts_scoped_additions(tmp_path: Path) -> None:
     assert final_policy["GSD_WORKSTREAM"] == "demo-ws"
 
 
+def _claude_base(tmp_path: Path) -> dict[str, str]:
+    return {
+        "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+        "TMPDIR": str(tmp_path / "tmp" / "leaf"), "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1", "CI": "1",
+        "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+    }
+
+
+def test_claude_preview_policy_validates_scope_segments(tmp_path: Path) -> None:
+    """Review round 1 item 5: claude_environment_policy(preview=True) must
+    validate GSD_PROJECT/GSD_WORKSTREAM too -- an unsafe value (".." escape)
+    must refuse CLAUDE_ENVIRONMENT_INVALID in preview mode, not only in the
+    final (non-preview) policy."""
+    additions = _gsd_environment(tmp_path)
+    scoped = {**_claude_base(tmp_path), **additions, "GSD_PROJECT": "../x"}
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy(scoped, preview=True)
+    # Review round 1 item 14 (Claude final-policy half): the same unsafe
+    # value refuses in the final (non-preview) policy too.
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy(scoped, preview=False)
+
+
+def test_claude_default_scope_policy_hash_is_golden(tmp_path: Path) -> None:
+    """Review round 1 item 15: pin the default-scope (4-key) Claude
+    environment policy hash to an independently-built golden dict, the same
+    pattern as the Codex 5.4 golden."""
+    additions = _gsd_environment(tmp_path)
+    environment = {**_claude_base(tmp_path), **additions}
+    golden_policy = dict(environment)
+    golden_policy["TMPDIR"] = str((tmp_path / "tmp").resolve() / "<invocation>")
+    golden_policy["FFS_SUPERVISED_ADMISSION_FILE"] = str(
+        Path(additions["FFS_SUPERVISED_ADMISSION_FILE"]).resolve().parent / "<admission>"
+    )
+    golden_hash = hashlib.sha256(
+        json.dumps(golden_policy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert claude_environment_policy_hash(environment) == golden_hash
+
+    scoped_additions = _gsd_environment(tmp_path, "admission-scoped.json")
+    scoped_environment = {**_claude_base(tmp_path), **scoped_additions, "GSD_PROJECT": "demo-project"}
+    assert claude_environment_policy_hash(scoped_environment) != golden_hash
+
+
+def test_claude_policy_closed_set_lower_bound_never_keyerror(tmp_path: Path) -> None:
+    """Review round 1 item 12: a lone GSD_PROJECT, and 3 of the 4 required
+    GSD keys plus a scope key, refuse CLAUDE_ENVIRONMENT_INVALID -- never
+    KeyError -- at both the preview and final Claude policy."""
+    base = _claude_base(tmp_path)
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy({**base, "GSD_PROJECT": "demo-project"}, preview=False)
+    full = _gsd_environment(tmp_path, "admission-partial.json")
+    partial = dict(full)
+    del partial["FFS_SUPERVISED_DISPATCH_COMMAND_JSON"]
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy({**base, **partial, "GSD_PROJECT": "demo-project"}, preview=True)
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy({**base, **partial, "GSD_PROJECT": "demo-project"}, preview=False)
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

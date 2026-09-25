@@ -29,7 +29,7 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _setup(tmp_path, *, project: str | None = None):
+def _setup(tmp_path, *, project: str | None = None, workstream: str | None = None):
     """Production shape: an anchored planning root with one frozen active-phase plan.
 
     ``run_managed_command`` launches the outer orchestrator only inside a parent
@@ -37,12 +37,17 @@ def _setup(tmp_path, *, project: str | None = None):
     the registered upstream runtime.  Both are part of the real ingress contract
     (``cmd_managed_start``/``prepare_frontend_run`` always supply the runtime).
 
-    ``project`` (F34) scopes the fixture phase under ``.planning/<project>/phases``
-    instead of the default ``.planning/phases``, matching where the resolver
-    binds a non-default project's planning root.
+    ``project``/``workstream`` (F34) scope the fixture phase under
+    ``.planning[/<project>][/workstreams/<workstream>]/phases`` instead of the
+    default ``.planning/phases``, matching where the resolver binds a
+    non-default project/workstream's planning root.
     """
     primary = _repository(tmp_path)
-    planning_root = primary / ".planning" if project is None else primary / ".planning" / project
+    planning_root = primary / ".planning"
+    if project is not None:
+        planning_root = planning_root / project
+    if workstream is not None:
+        planning_root = planning_root / "workstreams" / workstream
     phase = planning_root / "phases" / "01-fixture"
     phase.mkdir(parents=True, exist_ok=True)
     (phase / "01-01-PLAN.md").write_text("---\nphase: 01\nplan: 01\n---\nPlan\n")
@@ -52,7 +57,7 @@ def _setup(tmp_path, *, project: str | None = None):
     repository_id = _register(primary, authority)
     selection = _write_manifest(tmp_path, _manifest(
         primary, repository_id,
-        upstream={"project": project, "workstream": None, "session_key": "ingress-session"},
+        upstream={"project": project, "workstream": workstream, "session_key": "ingress-session"},
     ))
     runtime, digest = _registered_runtime()
     env = _env(tmp_path)
@@ -257,26 +262,36 @@ def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path
     assert "outer orchestrator must never edit a plan's declared target files" in retained
 
 
-def test_non_default_project_reaches_host_process_env(tmp_path, monkeypatch):
-    """F34 5.10: the fake codex echoes os.environ["GSD_PROJECT"]; assert the
-    retained stdout contains "demo" and that every qualify() call saw
-    gsd_environment.project == "demo". Rules out removing the refusal
-    without propagating the scope (the prompt says demo, the env is empty)."""
-    primary, authority, _repository_id, env = _setup(tmp_path, project="demo")
+@pytest.mark.parametrize(("project", "workstream"), [
+    ("demo", None), (None, "w"), ("p", "w"),
+])
+def test_non_default_project_reaches_host_process_env(tmp_path, monkeypatch, project, workstream):
+    """F34 5.10, parametrized (review round 1 item 11): the fake codex echoes
+    os.environ["GSD_PROJECT"]/["GSD_WORKSTREAM"]; assert the retained stdout
+    and every qualify() call carry the exact scope for all three non-default
+    combinations, not only a lone project. Mutant checked: drop
+    workstream=upstream.get("workstream") at supervisor.py's
+    prepare_managed_codex_session GsdSupervisorEnvironment(...) call ->
+    the (None, "w") and ("p", "w") cases fail (GSD_WORKSTREAM never reaches
+    the host)."""
+    primary, authority, _repository_id, env = _setup(tmp_path, project=project, workstream=workstream)
     fake_script = (
         "#!/usr/bin/python3\n"
         "import json, os\n"
         "print(json.dumps({'type':'thread.started','thread_id':'managed-thread'}), flush=True)\n"
         "print(json.dumps({'type':'item.completed','item':{'type':'agent_message',"
-        "'text':'GSD_PROJECT=' + str(os.environ.get('GSD_PROJECT'))}}), flush=True)\n"
+        "'text':'GSD_PROJECT=' + str(os.environ.get('GSD_PROJECT')) + "
+        "' GSD_WORKSTREAM=' + str(os.environ.get('GSD_WORKSTREAM'))}}), flush=True)\n"
         "print(json.dumps({'type':'turn.completed','usage':{"
         "'input_tokens':7,'cached_input_tokens':2,'cache_write_input_tokens':1,"
         "'output_tokens':3,'reasoning_output_tokens':2}}), flush=True)\n"
     )
-    seen_projects = []
+    seen_scope = []
     request = _qualified_host(
         tmp_path, monkeypatch, fake_script=fake_script,
-        on_qualify=lambda gsd_environment: seen_projects.append(gsd_environment.project),
+        on_qualify=lambda gsd_environment: seen_scope.append(
+            (gsd_environment.project, gsd_environment.workstream),
+        ),
     )
     monkeypatch.chdir(primary)
 
@@ -308,8 +323,9 @@ def test_non_default_project_reaches_host_process_env(tmp_path, monkeypatch):
     retained = Path(
         json.loads(intent["completion_evidence_json"])["locator"]
     ).with_name("stdout.log").read_text()
-    assert "GSD_PROJECT=demo" in retained
-    assert seen_projects and all(project == "demo" for project in seen_projects)
+    assert f"GSD_PROJECT={project}" in retained
+    assert f"GSD_WORKSTREAM={workstream}" in retained
+    assert seen_scope and all(scope == (project, workstream) for scope in seen_scope)
 
 
 def test_empty_upstream_refuses_before_any_allocation(tmp_path, monkeypatch):

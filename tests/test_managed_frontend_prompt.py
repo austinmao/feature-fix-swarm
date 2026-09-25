@@ -224,6 +224,15 @@ def test_non_default_project_or_workstream_is_accepted_for_a_staged_frontend(tmp
         project=project, workstream=workstream, planning_scope="1",
     )
     assert prompt.split("\n", 1)[0] == "$gsd-execute-phase 1"
+    # Review round 1 item 17: the scope must reach wherever _managed_prompt
+    # itself carries it -- the "GSD project: X" prompt line. workstream is
+    # not embedded in prompt text at all (only in the env additions a higher
+    # layer builds); that path is proven end-to-end by
+    # test_managed_codex_dispatch.py's parametrized 5.10 and
+    # test_managed_claude_wave.py's scoped-outer-qualify test.
+    expected_project_line = "GSD project: " + (project if project is not None else "(default)")
+    assert expected_project_line in prompt
+    assert invocation == ("task-swarm",)
 
 
 def test_non_default_project_is_accepted_for_a_raw_gsd_command_too(tmp_path):
@@ -235,6 +244,7 @@ def test_non_default_project_is_accepted_for_a_raw_gsd_command_too(tmp_path):
         project="demo-project", workstream=None, planning_scope="1",
     )
     assert invocation == ("/gsd-plan-phase", "1")
+    assert "GSD project: demo-project" in prompt
 
 
 @pytest.mark.parametrize("field", ["project", "workstream"])

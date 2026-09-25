@@ -27,13 +27,45 @@ from test_qualification_launch_authority import (
 )
 
 
-def _gsd(tmp_path: Path) -> host.GsdSupervisorEnvironment:
+def _gsd(tmp_path: Path, *, project: str | None = None, workstream: str | None = None,
+        name: str = "admission.json") -> host.GsdSupervisorEnvironment:
     bridge = tmp_path / "gsd_wave_bridge.py"
-    bridge.write_text("# identity only\n")
+    if not bridge.exists():
+        bridge.write_text("# identity only\n")
     return host.GsdSupervisorEnvironment(
-        "ffs-supervised-process", "patches", str(tmp_path / "admission.json"),
-        json.dumps([str(bridge)], separators=(",", ":")),
+        "ffs-supervised-process", "patches", str(tmp_path / name),
+        json.dumps([str(bridge)], separators=(",", ":")), project, workstream,
     )
+
+
+def test_scoped_preview_hash_matches_final_hash_after_publication(tmp_path):
+    """Review round 1 item 10 (HIGH): the preview hash (admission-file
+    existence deferred) must equal the final codex_environment_policy_hash
+    once the admission file is published, for a SCOPED (project/workstream)
+    environment too. Mutant checked: drop the GSD_PROJECT/GSD_WORKSTREAM
+    additions from preview_gsd_codex_environment_policy_hash's ``policy``
+    merge -> the preview and final hashes diverge for a scoped run."""
+    home = tmp_path.resolve() / "home"
+    home.mkdir(parents=True)
+    binary = home / "codex"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o700)
+    gsd = _gsd(home, project="demo-project", workstream="demo-ws")
+    # The real preview caller (codex-runtime-observer.py's
+    # preview_qualification_runtime) builds the base environment WITHOUT the
+    # gsd_environment arg (which would validate admission-file existence),
+    # then merges the raw as_dict() -- that is exactly how it defers
+    # admission-file existence.
+    environment = host.codex_closed_environment(
+        home, home / "ffs-codex-policy-tmp", binary, {"launcher_sha256": host._digest(binary)},
+    )
+    environment.update(gsd.as_dict())
+    preview_hash = host.preview_gsd_codex_environment_policy_hash(environment)
+    admission_file = Path(gsd.admission_file)
+    admission_file.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission_file.chmod(0o600)
+    final_hash = host.codex_environment_policy_hash(environment)
+    assert preview_hash == final_hash
 
 
 def test_frozen_plan_previews_exact_verified_runtime_after_publication(tmp_path, monkeypatch):

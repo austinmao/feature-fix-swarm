@@ -68,8 +68,8 @@ def test_resolver_safe_native_segments_are_accepted_without_remapping(
 
 
 @pytest.mark.parametrize("value", [
-    "demo-project", "release.", "feature_one",
-    "../x", "a/b", "a..b", "-f", ".h", "x y", "é", "9" * 161, "",
+    "demo-project", "release.", "feature_one", "9" * 160,
+    "../x", "a/b", "a..b", "-f", ".h", "x y", "é", "9" * 161, "", "demo\n",
 ])
 def test_env_scope_validator_matches_resolver_and_bridge(value: str) -> None:
     """F34 5.9: a name table checked against `_validate_segment` plus the

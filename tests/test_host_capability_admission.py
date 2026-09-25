@@ -196,6 +196,106 @@ def test_scope_keys_validated_and_set_stays_closed(tmp_path):
     assert additions.project is None
 
 
+def _scope_fixture(tmp_path, spec_name):
+    spec = importlib.util.spec_from_file_location(spec_name, ROOT / "lib/host_capabilities.py")
+    assert spec and spec.loader
+    admission = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = admission
+    spec.loader.exec_module(admission)
+    admission_file = tmp_path / "admission.json"
+    admission_file.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission_file.chmod(0o600)
+    bridge = tmp_path / "gsd_wave_bridge.py"
+    bridge.write_text("#!/usr/bin/env python3\n")
+    command_json = json.dumps([sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"))
+    base = {
+        "GSD_DISPATCH_MODE": "ffs-supervised-process",
+        "FFS_SUPERVISED_COMMIT_MODE": "patches",
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission_file),
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
+    }
+    return admission, base
+
+
+def test_present_scope_key_with_a_none_value_refuses(tmp_path):
+    """Review round 1 item 1: a PRESENT GSD_PROJECT/GSD_WORKSTREAM key whose
+    value is not a str (including None) must refuse CapabilityError, not be
+    silently treated as an omitted key. None is only valid for a key that is
+    genuinely absent (the dataclass field default), never for a key that IS
+    present in the dict with a None value."""
+    admission, base = _scope_fixture(tmp_path, "ffs_host_scope_none_value")
+    with pytest.raises(admission.CapabilityError):
+        admission.validate_gsd_supervisor_environment({**base, "GSD_PROJECT": None})
+    with pytest.raises(admission.CapabilityError):
+        admission.validate_gsd_supervisor_environment({**base, "GSD_WORKSTREAM": None})
+    with pytest.raises(admission.CapabilityError):
+        admission.validate_gsd_supervisor_environment({**base, "GSD_PROJECT": 7})
+
+
+def test_preview_hash_refuses_a_present_scope_key_with_a_none_value(tmp_path):
+    """Review round 1 item 1, applied at preview_gsd_codex_environment_policy_hash:
+    it must iterate PRESENT scope keys, not silently drop a None value."""
+    admission, base = _scope_fixture(tmp_path, "ffs_host_preview_scope_none_value")
+    codex_base = {
+        "HOME": str(tmp_path), "CODEX_HOME": str(tmp_path), "TMPDIR": str(tmp_path / "tmp"),
+        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
+    }
+    with pytest.raises(admission.CapabilityError):
+        admission.preview_gsd_codex_environment_policy_hash({**codex_base, **base, "GSD_PROJECT": None})
+
+
+def test_scope_segment_rejects_a_lone_surrogate_without_crashing(tmp_path):
+    """Review round 1 item 2: the ASCII segment regex must run BEFORE the
+    byte-length check, so a lone surrogate refuses CapabilityError instead of
+    letting UnicodeEncodeError escape from value.encode("utf-8")."""
+    admission, base = _scope_fixture(tmp_path, "ffs_host_scope_surrogate")
+    with pytest.raises(admission.CapabilityError):
+        admission.validate_gsd_supervisor_environment({**base, "GSD_PROJECT": "\ud800"})
+
+
+def test_process_environment_carries_optional_scope_when_present(tmp_path, monkeypatch):
+    """Review round 1 item 6: gsd_supervisor_environment_from_process must
+    carry an ambient GSD_PROJECT/GSD_WORKSTREAM into the returned object
+    (validated), instead of silently dropping them."""
+    admission, base = _scope_fixture(tmp_path, "ffs_host_process_scope")
+    for key, value in base.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("GSD_PROJECT", "demo-project")
+    monkeypatch.delenv("GSD_WORKSTREAM", raising=False)
+    result = admission.gsd_supervisor_environment_from_process()
+    assert result is not None
+    assert result.project == "demo-project"
+    assert result.workstream is None
+
+    monkeypatch.setenv("GSD_PROJECT", "../x")
+    with pytest.raises(admission.CapabilityError):
+        admission.gsd_supervisor_environment_from_process()
+
+
+def test_codex_policy_closed_set_lower_bound_and_unsafe_scope(tmp_path):
+    """Review round 1 items 12+14 (Codex half): a lone GSD_PROJECT (missing
+    the 4 required GSD keys), and GSD_PROJECT="../x" with all 4 required keys
+    present, both refuse CapabilityError at codex_environment_policy and at
+    preview_gsd_codex_environment_policy_hash -- never KeyError."""
+    admission, base = _scope_fixture(tmp_path, "ffs_host_codex_lower_bound")
+    codex_base = {
+        "HOME": str(tmp_path), "CODEX_HOME": str(tmp_path), "TMPDIR": str(tmp_path / "tmp"),
+        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
+    }
+
+    lone_scope = {**codex_base, "GSD_PROJECT": "demo-project"}
+    with pytest.raises(admission.CapabilityError):
+        admission.codex_environment_policy(lone_scope)
+    with pytest.raises(admission.CapabilityError):
+        admission.preview_gsd_codex_environment_policy_hash(lone_scope)
+
+    unsafe_scope = {**codex_base, **base, "GSD_PROJECT": "../x"}
+    with pytest.raises(admission.CapabilityError):
+        admission.codex_environment_policy(unsafe_scope)
+    with pytest.raises(admission.CapabilityError):
+        admission.preview_gsd_codex_environment_policy_hash(unsafe_scope)
+
+
 def test_content_contract_accepts_empty_and_large_text_but_bounds_encoded_json(tmp_path):
     spec = importlib.util.spec_from_file_location("ffs_host_content_bounds", ROOT / "lib/host_capabilities.py")
     assert spec and spec.loader

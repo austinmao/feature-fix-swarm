@@ -266,3 +266,103 @@ def test_managed_probe_material_binds_each_isolated_claude_profile(tmp_path, mon
         material = request.claude_qualification_material
         assert material.runtime_home == dict(material.environment)["CLAUDE_CONFIG_DIR"]
         assert material.runtime_home != str(evidence / "runtimes" / request.activity_id)
+
+
+def test_qualify_managed_claude_runtime_threads_scope_into_probe_environment(tmp_path, monkeypatch):
+    """Review round 1 item 9 (HIGH, internal-construction half): calling the
+    REAL qualify_managed_claude_runtime (not a caller-level mock) with
+    project="demo" must carry GSD_PROJECT=demo into both the returned
+    additions and every probe's closed environment. Mutant checked: delete
+    project=project, workstream=workstream from qualify_managed_claude_
+    runtime's own GsdSupervisorEnvironment(...) construction -> additions.project
+    goes back to None and this test fails."""
+    candidate, workspace, evidence = tmp_path / "candidate", tmp_path / "work", tmp_path / "evidence"
+    candidate.mkdir()
+    workspace.mkdir()
+    evidence.mkdir()
+    owned = candidate / "gsd-core" / "bin" / "gsd-tools.cjs"
+    owned.parent.mkdir(parents=True)
+    owned.write_text("fixture")
+    (candidate / "settings.json").write_text("{}")
+    (candidate / "gsd-file-manifest.json").write_text(json.dumps({
+        "version": "1.14.0", "runtime": "claude",
+        "files": {"gsd-core/bin/gsd-tools.cjs": qualification._digest(owned)},
+    }))
+    credential = tmp_path / "credential.json"
+    credential.write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "fixture-access", "refreshToken": "excluded-refresh",
+        "expiresAt": 9999999999999, "refreshTokenExpiresAt": 9999999999999,
+        "scopes": ["user:inference"], "subscriptionType": "fixture",
+        "rateLimitTier": "fixture",
+    }}))
+    credential.chmod(0o600)
+    binary = tmp_path / "claude"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o700)
+    bridge = tmp_path / "gsd_wave_bridge.py"
+    bridge.write_text("# fixture\n")
+
+    class Store:
+        def get_run_policy_budget(self, **_kwargs):
+            return None
+
+        def create_child_activity(self, _token, **kwargs):
+            return SimpleNamespace(id=kwargs["activity_id"], state="pending")
+
+        def transition_activity(self, _token, activity_id, **_kwargs):
+            return SimpleNamespace(id=activity_id, state="active")
+
+        def runtime_tuple_hash(self, _runtime):
+            return "7" * 64
+
+        def promote_qualified_activity(self, _token, activity_id, **_kwargs):
+            return SimpleNamespace(id=activity_id, state="pending")
+
+        def commit_runtime_receipt(self, _token, _activity_id, _runtime):
+            return SimpleNamespace(receipt_sha256="8" * 64)
+
+    class Supervisor:
+        def __init__(self):
+            self.requests = []
+
+        def launch_qualification(self, request, *, qualification_contract):
+            self.requests.append((request, qualification_contract))
+            return request
+
+        def finish(self, request, *, timeout):
+            material = request.claude_qualification_material
+            root = evidence / material.probe_name
+            root.mkdir()
+            stdout, stderr = root / "stdout", root / "stderr"
+            stdout.write_text("{}\n")
+            stderr.write_text("")
+            if material.credential_path is not None:
+                Path(material.credential_path).unlink()
+            return {"returncode": 0, "streams": {"stdout": {"locator": str(stdout)},
+                    "stderr": {"locator": str(stderr)}}, "host_receipt": {"passed": True}}
+
+    def publish(plan, _results):
+        plan.output.write_text("{}\n")
+        plan.output.chmod(0o600)
+        return object()
+
+    monkeypatch.setattr(managed, "publish_claude_qualification_results", publish)
+    token = SimpleNamespace(repository_id="repo", run_id="run", generation=1)
+    prepared = SimpleNamespace(id="workspace", parent_activity_id="parent", child_request_key="request",
+                               ready=True, path=workspace, input_digest="a" * 64, base_commit="b" * 40)
+    supervisor = Supervisor()
+    _activity, _qualified, _receipt, _runtime, additions = managed.qualify_managed_claude_runtime(
+        Store(), token, activity_id="22222222-2222-4222-8222-222222222222",
+        activity_request_key="request", parent_activity_id="parent", workspace=prepared,
+        host_request=ClaudeHostRequest(str(candidate), str(credential), str(binary), "claude-opus-5", None,
+                                       "workspace-write", False, 0, 60),
+        role="worker", evidence_root=evidence, final_contract_hash="c" * 64,
+        supervisor=supervisor, bridge_command=json.dumps([str(bridge)], separators=(",", ":")),
+        project="demo", workstream=None,
+    )
+    assert additions.project == "demo"
+    assert additions.workstream is None
+    assert additions.as_dict()["GSD_PROJECT"] == "demo"
+    for request, _contract in supervisor.requests:
+        material = request.claude_qualification_material
+        assert dict(material.environment).get("GSD_PROJECT") == "demo"

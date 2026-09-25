@@ -158,10 +158,49 @@ def test_rebase_refuses_planning_root_inconsistent_with_scope_fields(tmp_path):
     assert result == child / ".planning" / "workstreams" / "w"
 
 
-def test_missing_phases_root_refuses_typed(tmp_path):
-    """F34 5.12: rules out a raw FileNotFoundError for an unknown project --
-    `phases_root.resolve(strict=True)` on a never-created phases directory
-    (an unknown scoped project) must map to a typed refusal."""
-    phases_root = tmp_path.resolve() / "phases"  # never created
+def test_rebase_accepts_combined_project_and_workstream_scope(tmp_path):
+    """Review round 1 item 13: ("p","w") with .planning/p/workstreams/w rebases;
+    a project mismatch (project "a", planning root names "b") refuses."""
+    root_workspace = tmp_path / "root"
+    child = tmp_path / "child"
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "p" / "workstreams" / "w"),
+                "project": "p", "workstream": "w"}
+    result = rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+    assert result == child / ".planning" / "p" / "workstreams" / "w"
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "b"), "project": "a", "workstream": None}
     with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+
+def test_rebase_refuses_a_non_str_project_typed_instead_of_typeerror(tmp_path):
+    """Review round 1 item 3: a non-str upstream['project']/['workstream']
+    (e.g. 7) must refuse PRELAUNCH_PLAN_PATH_UNSAFE, never TypeError, and the
+    validation must happen BEFORE composing the expected Path."""
+    root_workspace = tmp_path / "root"
+    child = tmp_path / "child"
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "7"), "project": 7, "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    upstream = {"planning_root": str(root_workspace / ".planning"), "project": None, "workstream": 7}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "a..b"), "project": "a..b", "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+
+def test_missing_phases_root_refuses_typed(tmp_path):
+    """F34 5.12 (reworded, review round 1 item 4): a never-created scoped
+    phases directory maps FileNotFoundError to the same typed refusal
+    select_active_phase already uses for an ambiguous/failed selection
+    (PRELAUNCH_PHASE_SELECTION_FAILED), rather than a distinct PATH_UNSAFE
+    that would misleadingly imply an unsafe (as opposed to simply absent)
+    path."""
+    phases_root = tmp_path.resolve() / "phases"  # never created
+    with pytest.raises(PrelaunchInventoryRefused, match='SELECTION_FAILED'):
         select_active_phase(_runtime(), phases_root, "1")
