@@ -110,6 +110,87 @@ def _reserve(store, token, contract, *, tokens=7):
     )
 
 
+def test_probe_material_accepts_scope_rejects_unknown_key(tmp_path):
+    """F34 5.8: rules out QUALIFICATION_MATERIAL_INVALID at the probe
+    material's environment key-set check, which would be masked as
+    HOST_CAPABILITY_UNQUALIFIED by qualify_runtime's broad except clause."""
+    from run_state.supervisor import (
+        DispatchRequest, QualificationLaunchMaterial, Supervisor, SupervisorRefused,
+        _canonical as supervisor_canonical,
+    )
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    cwd = tmp_path.resolve() / "workspace"
+    cwd.mkdir()
+    admission = runtime / "admission.json"
+    admission.write_text("{}")
+    admission.chmod(0o600)
+    bridge = tmp_path / "gsd_wave_bridge.py"
+    bridge.write_text("# bridge\n")
+    command_json = json.dumps([sys.executable, str(bridge)], separators=(",", ":"))
+
+    def _environment(*, omit=(), **extra):
+        base = {
+            "HOME": str(runtime), "CODEX_HOME": str(runtime), "TMPDIR": str(cwd / "tmp-leaf"),
+            "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "NO_COLOR": "1",
+            "GSD_DISPATCH_MODE": "ffs-supervised-process", "FFS_SUPERVISED_COMMIT_MODE": "patches",
+            "FFS_SUPERVISED_ADMISSION_FILE": str(admission),
+            "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
+            "FFS_HOOK_OBSERVATION": str(runtime / "hooks.jsonl"), "FFS_HOOK_NONCE": "probe-nonce",
+        }
+        for key in omit:
+            del base[key]
+        base.update(extra)
+        return tuple(sorted(base.items()))
+
+    def _request(environment):
+        argv = (sys.executable, "-c", "print('probe')")
+        contract = {
+            "schema": "ffs.codex-qualification-probe/v1", "probe_name": "ordinary",
+            "argv_sha256": hashlib.sha256(supervisor_canonical(argv)).hexdigest(),
+            "environment_sha256": hashlib.sha256(supervisor_canonical(environment)).hexdigest(),
+            "cwd": str(cwd), "runtime_home": str(runtime), "runtime_template_sha256": "3" * 64,
+        }
+        contract_sha256 = hashlib.sha256(supervisor_canonical(contract)).hexdigest()
+        material = QualificationLaunchMaterial(
+            probe_name="ordinary", argv=argv, environment=environment, cwd=str(cwd),
+            contract_sha256=contract_sha256, envelope_sha256="5" * 64,
+            runtime_home=str(runtime), runtime_template_sha256="3" * 64,
+        )
+        return DispatchRequest(
+            activity_id=str(uuid.uuid4()), request_key="probe", command=argv,
+            workspace=str(cwd), expected_head="0" * 40, runtime_identity="5" * 64,
+            contract_hash="5" * 64, qualification_material=material,
+        )
+
+    Supervisor._validate_qualification_material(
+        _request(_environment(GSD_PROJECT="demo-project", GSD_WORKSTREAM="demo-ws"))
+    )
+
+    with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
+        Supervisor._validate_qualification_material(_request(_environment(GSD_SESSION_KEY="s")))
+
+    # Review round 1 item 12: closed-set lower bound. A lone GSD_PROJECT (all
+    # 4 required GSD_* keys missing), and 3 of the 4 required keys plus a
+    # scope key, must refuse QUALIFICATION_MATERIAL_INVALID -- never KeyError.
+    lone_scope = _environment(
+        omit=("GSD_DISPATCH_MODE", "FFS_SUPERVISED_COMMIT_MODE",
+              "FFS_SUPERVISED_ADMISSION_FILE", "FFS_SUPERVISED_DISPATCH_COMMAND_JSON"),
+        GSD_PROJECT="demo-project",
+    )
+    with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
+        Supervisor._validate_qualification_material(_request(lone_scope))
+
+    three_of_four = _environment(omit=("FFS_SUPERVISED_DISPATCH_COMMAND_JSON",), GSD_PROJECT="demo-project")
+    with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
+        Supervisor._validate_qualification_material(_request(three_of_four))
+
+    # Review round 1 item 14 (probe-material half): GSD_PROJECT="../x" refuses.
+    with pytest.raises(SupervisorRefused, match="QUALIFICATION_MATERIAL_INVALID"):
+        Supervisor._validate_qualification_material(_request(_environment(GSD_PROJECT="../x")))
+
+
 def test_policy_qualification_grant_binds_exact_closed_probe_contract(tmp_path):
     import time
     from process_identity import ProcessIdentity

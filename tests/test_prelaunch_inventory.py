@@ -91,7 +91,11 @@ def test_is_valid_phase_scope_rejects_non_ascii_and_non_token_values(scope):
 def test_rebase_planning_root_rebases_the_relative_planning_path(tmp_path):
     root_workspace = tmp_path / "root"
     preparation_path = tmp_path / "child"
-    upstream = {"planning_root": str(root_workspace / ".planning" / "demo-project")}
+    # F34: rebase_planning_root now cross-checks the relative planning path
+    # against upstream['project']/['workstream'] -- the project key must
+    # match the path segment it names.
+    upstream = {"planning_root": str(root_workspace / ".planning" / "demo-project"),
+                "project": "demo-project", "workstream": None}
     result = rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=preparation_path)
     assert result == preparation_path / ".planning" / "demo-project"
 
@@ -126,3 +130,96 @@ def test_rebase_planning_root_refuses_a_dot_dot_part(tmp_path):
     upstream = {"planning_root": str(tmp_path / "root" / ".." / "escape" / ".planning")}
     with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
         rebase_planning_root(upstream, root_workspace=str(tmp_path / "root"), preparation_path=tmp_path / "child")
+
+
+def test_rebase_refuses_planning_root_inconsistent_with_scope_fields(tmp_path):
+    """F34 5.11: case (None, .planning/demo) and case (demo, .planning)
+    refuse. Workstream-only passes. Rules out the env and inventory naming
+    different scopes."""
+    root_workspace = tmp_path / "root"
+    child = tmp_path / "child"
+
+    # project is unset, but the planning_root path names one.
+    upstream = {"planning_root": str(root_workspace / ".planning" / "demo"),
+                "project": None, "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    # project is set, but the planning_root path names the default root.
+    upstream = {"planning_root": str(root_workspace / ".planning"),
+                "project": "demo", "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    # workstream-only scope, no project: accepted.
+    upstream = {"planning_root": str(root_workspace / ".planning" / "workstreams" / "w"),
+                "project": None, "workstream": "w"}
+    result = rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+    assert result == child / ".planning" / "workstreams" / "w"
+
+
+def test_rebase_accepts_combined_project_and_workstream_scope(tmp_path):
+    """Review round 1 item 13: ("p","w") with .planning/p/workstreams/w rebases;
+    a project mismatch (project "a", planning root names "b") refuses."""
+    root_workspace = tmp_path / "root"
+    child = tmp_path / "child"
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "p" / "workstreams" / "w"),
+                "project": "p", "workstream": "w"}
+    result = rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+    assert result == child / ".planning" / "p" / "workstreams" / "w"
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "b"), "project": "a", "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+
+def test_rebase_refuses_a_non_str_project_typed_instead_of_typeerror(tmp_path):
+    """Review round 1 item 3: a non-str upstream['project']/['workstream']
+    (e.g. 7) must refuse PRELAUNCH_PLAN_PATH_UNSAFE, never TypeError, and the
+    validation must happen BEFORE composing the expected Path."""
+    root_workspace = tmp_path / "root"
+    child = tmp_path / "child"
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "7"), "project": 7, "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    upstream = {"planning_root": str(root_workspace / ".planning"), "project": None, "workstream": 7}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+    upstream = {"planning_root": str(root_workspace / ".planning" / "a..b"), "project": "a..b", "workstream": None}
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        rebase_planning_root(upstream, root_workspace=str(root_workspace), preparation_path=child)
+
+
+def test_missing_phases_root_refuses_typed(tmp_path):
+    """F34 5.12 (reworded, review round 1 item 4): a never-created scoped
+    phases directory maps FileNotFoundError to the same typed refusal
+    select_active_phase already uses for an ambiguous/failed selection
+    (PRELAUNCH_PHASE_SELECTION_FAILED), rather than a distinct PATH_UNSAFE
+    that would misleadingly imply an unsafe (as opposed to simply absent)
+    path."""
+    phases_root = tmp_path.resolve() / "phases"  # never created
+    with pytest.raises(PrelaunchInventoryRefused, match='SELECTION_FAILED'):
+        select_active_phase(_runtime(), phases_root, "1")
+
+
+def test_non_missing_os_error_on_resolve_stays_path_unsafe(tmp_path, monkeypatch):
+    """Review round 3 item 2: only an actually-absent phases root
+    (FileNotFoundError) maps to PRELAUNCH_PHASE_SELECTION_FAILED; any other
+    OSError from resolve(strict=True) (permission, symlink loop, etc.) must
+    stay PRELAUNCH_PLAN_PATH_UNSAFE."""
+    phases_root = tmp_path.resolve() / "phases"
+    phases_root.mkdir()
+    original_resolve = Path.resolve
+
+    def _fake_resolve(self, *args, **kwargs):
+        if self == phases_root:
+            raise PermissionError("fixture: permission denied")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _fake_resolve)
+    with pytest.raises(PrelaunchInventoryRefused, match='PATH_UNSAFE'):
+        select_active_phase(_runtime(), phases_root, "1")

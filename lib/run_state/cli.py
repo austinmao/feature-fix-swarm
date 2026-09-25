@@ -132,13 +132,9 @@ _MANAGED_PROMPT_REFUSALS = {
         "the invocation text names a mode (--dry-run or --adhoc) the staged "
         "gsd-execute-phase command cannot honor",
         "drop_the_unsupported_mode_flag"),
-    "MANAGED_PROJECT_SCOPE_UNSUPPORTED": (
-        "a non-default project or workstream never reaches the qualified host "
-        "process env, so it cannot be honored",
-        "use_the_default_project"),
     "MANAGED_PROMPT_VALUE_UNSAFE": (
-        "the planning root or project carries a control character and cannot be "
-        "placed in the host prompt",
+        "the planning root, project, or workstream carries a control character "
+        "or an unsafe segment and cannot be placed in the host prompt",
         "rename_the_planning_path"),
 }
 

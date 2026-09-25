@@ -250,8 +250,9 @@ qualification has run, so treat it as experimental. Known limits today:
   (`--dry-run` or `--adhoc`) the mapped command cannot honor
   (`MANAGED_FRONTEND_MODE_UNSUPPORTED`); it is never forwarded to the
   executor, as a command argument or otherwise. A non-default project or
-  workstream never reaches the qualified host process env, so it refuses
-  `MANAGED_PROJECT_SCOPE_UNSUPPORTED` instead of silently running unscoped.
+  workstream reaches the qualified host process env as
+  `GSD_PROJECT`/`GSD_WORKSTREAM` (F34) instead of silently running
+  unscoped; an unsafe value refuses `MANAGED_PROMPT_VALUE_UNSAFE`.
 - A run cannot resume after its real outer launch. A replay refuses instead
   (see the refusals below).
 - A failed mapped check has no repair producer yet. It hands back and refuses
@@ -310,8 +311,7 @@ managed run, the recovery action depends on the code:
 | `PRELAUNCH_PHASE_SCOPE_REQUIRED` | The frontend has no selected planning scope (`frontend-start --scope`) to stage as the command argument | `supply_a_phase_scope` |
 | `PRELAUNCH_PLAN_PATH_UNSAFE` | The persisted upstream planning root could not be rebased onto this run's prepared workspace | `reconcile_upstream_binding` |
 | `MANAGED_FRONTEND_MODE_UNSUPPORTED` | The invocation text names a mode (`--dry-run` or `--adhoc`) the staged `gsd-execute-phase` command cannot honor | `drop_the_unsupported_mode_flag` |
-| `MANAGED_PROJECT_SCOPE_UNSUPPORTED` | A non-default project or workstream never reaches the qualified host process env, so it cannot be honored | `use_the_default_project` |
-| `MANAGED_PROMPT_VALUE_UNSAFE` | The planning root or project carries a control character and cannot be placed in the host prompt | `rename_the_planning_path` |
+| `MANAGED_PROMPT_VALUE_UNSAFE` | The planning root, project, or workstream carries a control character or an unsafe segment and cannot be placed in the host prompt | `rename_the_planning_path` |
 | any other supervisor code, e.g. `HOST_CAPABILITY_UNQUALIFIED`, `WAVE_EXECUTION_UNPROVEN` | The selected host backend has not demonstrated managed admission | `qualify_host_adapter` |
 | a policy code, e.g. `FRONTEND_CHECK_CANDIDATE_STALE` | The managed run policy refused the transition | `correct_request` |
 

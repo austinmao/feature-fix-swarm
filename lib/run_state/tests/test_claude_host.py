@@ -4,17 +4,164 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import uuid
 
 import pytest
 
-from host_capabilities import _binary_chain
+from host_capabilities import _binary_chain, closed_environment_hash
 from run_state.claude_host import (
     ClaudeHostAdapter, ClaudeHostRefused, ClaudeTelemetryRefused,
-    QualifiedClaudeRuntime, claude_closed_environment, claude_environment_policy_hash,
-    parse_claude_host_request, parse_claude_telemetry,
+    QualifiedClaudeRuntime, claude_closed_environment, claude_environment_policy,
+    claude_environment_policy_hash, parse_claude_host_request, parse_claude_telemetry,
 )
 from run_state.claude_runtime_staging import STAGE_MANIFEST_NAME, stage_private_claude_runtime
+
+
+def _gsd_environment(tmp_path: Path, name: str = "admission.json") -> dict[str, str]:
+    admission = tmp_path / name
+    admission.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission.chmod(0o600)
+    bridge = tmp_path / "gsd_wave_bridge.py"
+    bridge.write_text("#!/usr/bin/env python3\n")
+    command = json.dumps([sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"))
+    return {
+        "GSD_DISPATCH_MODE": "ffs-supervised-process",
+        "FFS_SUPERVISED_COMMIT_MODE": "patches",
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission),
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command,
+    }
+
+
+def test_claude_policy_accepts_scoped_additions(tmp_path: Path) -> None:
+    """F34 5.7: runs the preview and final policy. Rules out a Codex-only fix
+    (claude_host.py's own 4-key exact-set check)."""
+    base = {
+        "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+        "TMPDIR": str(tmp_path / "tmp" / "leaf"), "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1", "CI": "1",
+        "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+    }
+    additions = _gsd_environment(tmp_path)
+    scoped = {**base, **additions, "GSD_PROJECT": "demo-project", "GSD_WORKSTREAM": "demo-ws"}
+
+    preview_policy = claude_environment_policy(scoped, preview=True)
+    assert preview_policy["GSD_PROJECT"] == "demo-project"
+    assert preview_policy["GSD_WORKSTREAM"] == "demo-ws"
+
+    final_policy = claude_environment_policy(scoped, preview=False)
+    assert final_policy["GSD_PROJECT"] == "demo-project"
+    assert final_policy["GSD_WORKSTREAM"] == "demo-ws"
+
+
+def _claude_base(tmp_path: Path) -> dict[str, str]:
+    return {
+        "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+        "TMPDIR": str(tmp_path / "tmp" / "leaf"), "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1", "CI": "1",
+        "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+    }
+
+
+def test_claude_preview_policy_validates_scope_segments(tmp_path: Path) -> None:
+    """Review round 1 item 5: claude_environment_policy(preview=True) must
+    validate GSD_PROJECT/GSD_WORKSTREAM too -- an unsafe value (".." escape)
+    must refuse CLAUDE_ENVIRONMENT_INVALID in preview mode, not only in the
+    final (non-preview) policy."""
+    additions = _gsd_environment(tmp_path)
+    scoped = {**_claude_base(tmp_path), **additions, "GSD_PROJECT": "../x"}
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy(scoped, preview=True)
+    # Review round 1 item 14 (Claude final-policy half): the same unsafe
+    # value refuses in the final (non-preview) policy too.
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy(scoped, preview=False)
+
+
+def _normalized_policy_hash(policy: dict[str, str], root: str) -> str:
+    """Normalize away machine-specific values (the tmp root, the interpreter
+    path) before hashing, so a literal golden stays valid across machines
+    and OSes (review round 4: the prior literals embedded sys.executable and
+    a macOS-only /private/tmp path, so they broke on Linux CI)."""
+    # The placeholders must not already occur in the raw policy, or a policy
+    # that emitted them literally would normalize to the same golden.
+    assert not any("<ROOT>" in value or "<PY>" in value for value in policy.values())
+    normalized = {
+        key: value.replace(root, "<ROOT>").replace(sys.executable, "<PY>")
+        for key, value in policy.items()
+    }
+    # "sha256:<hex>" is the credential gate's audited pinned-digest shape
+    # (tests/test_seam_wiring.py _WHITELIST_SHAPES); a bare 64-hex literal
+    # would trip its hex-run family.
+    return "sha256:" + hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+
+
+def test_claude_default_scope_policy_hash_is_golden(tmp_path: Path) -> None:
+    """Review round 1 item 15, pinned per review round 3 item 4, made
+    machine-independent per review round 4: the default-scope (4-key)
+    Claude environment policy hash, normalized (tmp root -> "<ROOT>",
+    sys.executable -> "<PY>"), must equal a LITERAL sha256 computed at
+    origin/main 59bff1d (pre-F34) with the SAME normalization -- not a
+    value recomputed by the current code under test -- so this proves
+    byte-identity with the pre-F34 policy across machines, not just
+    internal self-consistency. Recomputed identical at 3e8f422/HEAD.
+    Computation: compute_golden_normalized.py (session scratchpad), run
+    against a detached worktree of 59bff1d and against HEAD."""
+    root = str(tmp_path.resolve())
+    home = tmp_path.resolve() / "home"
+    home.mkdir(parents=True)
+    config = home / "config"
+    config.mkdir()
+    tmp_leaf = home / "tmp" / "leaf"
+    tmp_leaf.mkdir(parents=True)
+    admission = home / "admission.json"
+    admission.write_text('{"schema":"ffs.supervisor-admission/v1","available":true}\n')
+    admission.chmod(0o600)
+    bridge = home / "gsd_wave_bridge.py"
+    bridge.write_text("#!/usr/bin/env python3\n")
+    command_json = json.dumps([sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"))
+    environment = {
+        "HOME": str(home), "CLAUDE_CONFIG_DIR": str(config), "TMPDIR": str(tmp_leaf),
+        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1", "CI": "1",
+        "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+        "GSD_DISPATCH_MODE": "ffs-supervised-process", "FFS_SUPERVISED_COMMIT_MODE": "patches",
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission),
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": command_json,
+    }
+    assert "GSD_PROJECT" not in environment and "GSD_WORKSTREAM" not in environment
+
+    policy = claude_environment_policy(environment)
+    golden_hash = "sha256:6793d4216257626348a9dfaa8785186a0e0cb0d457825fcf0889e25e887b1471"
+    assert _normalized_policy_hash(policy, root) == golden_hash
+    # The normalized-and-hand-hashed policy must still be the exact same
+    # dict the real production wrapper hashes.
+    assert claude_environment_policy_hash(environment) == closed_environment_hash(policy)
+
+    scoped_additions = _gsd_environment(tmp_path, "admission-scoped.json")
+    scoped_environment = {**_claude_base(tmp_path), **scoped_additions, "GSD_PROJECT": "demo-project"}
+    scoped_policy = claude_environment_policy(scoped_environment)
+    assert _normalized_policy_hash(scoped_policy, str(tmp_path.resolve())) != golden_hash
+
+
+def test_claude_policy_closed_set_lower_bound_never_keyerror(tmp_path: Path) -> None:
+    """Review round 1 item 12: a lone GSD_PROJECT, and 3 of the 4 required
+    GSD keys plus a scope key, refuse CLAUDE_ENVIRONMENT_INVALID -- never
+    KeyError -- at both the preview and final Claude policy."""
+    base = _claude_base(tmp_path)
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy({**base, "GSD_PROJECT": "demo-project"}, preview=False)
+    full = _gsd_environment(tmp_path, "admission-partial.json")
+    partial = dict(full)
+    del partial["FFS_SUPERVISED_DISPATCH_COMMAND_JSON"]
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy({**base, **partial, "GSD_PROJECT": "demo-project"}, preview=True)
+    with pytest.raises(ClaudeHostRefused, match="CLAUDE_ENVIRONMENT_INVALID"):
+        claude_environment_policy({**base, **partial, "GSD_PROJECT": "demo-project"}, preview=False)
 
 
 def _sha(path: Path) -> str:

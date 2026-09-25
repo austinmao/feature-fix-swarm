@@ -65,3 +65,31 @@ def test_resolver_safe_native_segments_are_accepted_without_remapping(
     assert result["planning_root"] == str(expected)
     assert result["session_key"] == "segment-compatibility"
     assert result["effective_session_key"] == "gsd-session-key-segment-compatibility"
+
+
+@pytest.mark.parametrize("value", [
+    "demo-project", "release.", "feature_one", "9" * 160,
+    "../x", "a/b", "a..b", "-f", ".h", "x y", "é", "9" * 161, "", "demo\n",
+])
+def test_env_scope_validator_matches_resolver_and_bridge(value: str) -> None:
+    """F34 5.9: a name table checked against `_validate_segment` plus the
+    `..` ban (upstream_bridge.cjs's isSegment) must agree with
+    host_capabilities' own copy of that rule. Rules out two regexes
+    drifting apart -- host_capabilities cannot import run_state
+    (layering), so it copies the resolver's segment rule."""
+    import host_capabilities
+    from run_state.upstream import UpstreamRefused, _validate_segment
+
+    try:
+        _validate_segment(value, allow_none=False)
+        resolver_accepts = ".." not in value
+    except UpstreamRefused:
+        resolver_accepts = False
+
+    try:
+        host_capabilities._validate_gsd_scope_segment(value, "project")
+        host_accepts = True
+    except host_capabilities.CapabilityError:
+        host_accepts = False
+
+    assert host_accepts == resolver_accepts

@@ -29,25 +29,35 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _setup(tmp_path):
+def _setup(tmp_path, *, project: str | None = None, workstream: str | None = None):
     """Production shape: an anchored planning root with one frozen active-phase plan.
 
     ``run_managed_command`` launches the outer orchestrator only inside a parent
     resource group, and that group freezes the admitted phase's plan bytes from
     the registered upstream runtime.  Both are part of the real ingress contract
     (``cmd_managed_start``/``prepare_frontend_run`` always supply the runtime).
+
+    ``project``/``workstream`` (F34) scope the fixture phase under
+    ``.planning[/<project>][/workstreams/<workstream>]/phases`` instead of the
+    default ``.planning/phases``, matching where the resolver binds a
+    non-default project/workstream's planning root.
     """
     primary = _repository(tmp_path)
-    phase = primary / ".planning" / "phases" / "01-fixture"
+    planning_root = primary / ".planning"
+    if project is not None:
+        planning_root = planning_root / project
+    if workstream is not None:
+        planning_root = planning_root / "workstreams" / workstream
+    phase = planning_root / "phases" / "01-fixture"
     phase.mkdir(parents=True, exist_ok=True)
     (phase / "01-01-PLAN.md").write_text("---\nphase: 01\nplan: 01\n---\nPlan\n")
-    _git("add", ".planning/phases", cwd=primary)
+    _git("add", ".planning", cwd=primary)
     _git("commit", "-qm", "fixture frozen plan", cwd=primary)
     authority = tmp_path / "authority"
     repository_id = _register(primary, authority)
     selection = _write_manifest(tmp_path, _manifest(
         primary, repository_id,
-        upstream={"project": None, "workstream": None, "session_key": "ingress-session"},
+        upstream={"project": project, "workstream": workstream, "session_key": "ingress-session"},
     ))
     runtime, digest = _registered_runtime()
     env = _env(tmp_path)
@@ -59,12 +69,15 @@ def _setup(tmp_path):
     return primary, authority, repository_id, env
 
 
-def _qualified_host(tmp_path, monkeypatch):
+def _qualified_host(tmp_path, monkeypatch, *, fake_script: str | None = None, on_qualify=None):
     """Fixture host plus qualify/stage/admit_cli seams for a real prepare_outer().
 
     Shared by every test in this file that needs qualification to actually
     succeed (not the qualification's own correctness -- that is a fixture
     stand-in -- but the surrounding session/contract plumbing this repo owns).
+
+    ``fake_script`` (F34) overrides the fake codex CLI body; ``on_qualify``,
+    when supplied, is called with each ``qualify()`` call's ``gsd_environment``.
     """
     # The supervisor builds its shared coordinator on the machine-global
     # admission queue with the live observer.  Keep that production path but
@@ -86,7 +99,7 @@ def _qualified_host(tmp_path, monkeypatch):
     (runtime / "auth.json").write_text("{}\n")
     (runtime / "auth.json").chmod(0o600)
     fake = tmp_path / "qualified-codex"
-    fake.write_text(
+    fake.write_text(fake_script if fake_script is not None else (
         "#!/usr/bin/python3\n"
         "import json\n"
         "print(json.dumps({'type':'thread.started','thread_id':'managed-thread'}), flush=True)\n"
@@ -94,7 +107,7 @@ def _qualified_host(tmp_path, monkeypatch):
         "print(json.dumps({'type':'turn.completed','usage':{"
         "'input_tokens':7,'cached_input_tokens':2,'cache_write_input_tokens':1,"
         "'output_tokens':3,'reasoning_output_tokens':2}}), flush=True)\n"
-    )
+    ))
     fake.chmod(0o700)
 
     def stage(_template, home, worktree):
@@ -116,6 +129,8 @@ def _qualified_host(tmp_path, monkeypatch):
                 workspace, runtime_home, binary, gsd_environment, host_request, role,
                 evidence_root, final_contract_hash, supervisor, observer_module=None):
         del evidence_root, supervisor, observer_module
+        if on_qualify is not None:
+            on_qualify(gsd_environment)
         if activity_id in retained:
             # A resume replays qualification for the same activity: the real
             # qualify_managed_runtime detects the retained binding and returns
@@ -245,6 +260,72 @@ def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path
     retained = Path(json.loads(intent["completion_evidence_json"])["locator"]).with_name("stdout.log").read_text()
     assert "FFS-supervised-process compatibility path is mandatory" in retained
     assert "outer orchestrator must never edit a plan's declared target files" in retained
+
+
+@pytest.mark.parametrize(("project", "workstream"), [
+    ("demo", None), (None, "w"), ("p", "w"),
+])
+def test_non_default_project_reaches_host_process_env(tmp_path, monkeypatch, project, workstream):
+    """F34 5.10, parametrized (review round 1 item 11): the fake codex echoes
+    os.environ["GSD_PROJECT"]/["GSD_WORKSTREAM"]; assert the retained stdout
+    and every qualify() call carry the exact scope for all three non-default
+    combinations, not only a lone project. Mutant checked: drop
+    workstream=upstream.get("workstream") at supervisor.py's
+    prepare_managed_codex_session GsdSupervisorEnvironment(...) call ->
+    the (None, "w") and ("p", "w") cases fail (GSD_WORKSTREAM never reaches
+    the host)."""
+    primary, authority, _repository_id, env = _setup(tmp_path, project=project, workstream=workstream)
+    fake_script = (
+        "#!/usr/bin/python3\n"
+        "import json, os\n"
+        "print(json.dumps({'type':'thread.started','thread_id':'managed-thread'}), flush=True)\n"
+        "print(json.dumps({'type':'item.completed','item':{'type':'agent_message',"
+        "'text':'GSD_PROJECT=' + str(os.environ.get('GSD_PROJECT')) + "
+        "' GSD_WORKSTREAM=' + str(os.environ.get('GSD_WORKSTREAM'))}}), flush=True)\n"
+        "print(json.dumps({'type':'turn.completed','usage':{"
+        "'input_tokens':7,'cached_input_tokens':2,'cache_write_input_tokens':1,"
+        "'output_tokens':3,'reasoning_output_tokens':2}}), flush=True)\n"
+    )
+    seen_scope = []
+    request = _qualified_host(
+        tmp_path, monkeypatch, fake_script=fake_script,
+        on_qualify=lambda gsd_environment: seen_scope.append(
+            (gsd_environment.project, gsd_environment.workstream),
+        ),
+    )
+    monkeypatch.chdir(primary)
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        return run_managed_command(
+            store, token, context, command=("/gsd-plan-phase", "1"),
+            request_key="scoped-dispatch", dispatch_limit=3, token_limit=1000,
+            host_request=request, upstream_runtime=upstream_runtime,
+        )
+
+    assert prepare_managed_run(
+        objective="scoped dispatch", state_root=authority,
+        selection_manifest=env["FFS_SELECTION_MANIFEST"],
+        upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        request_key="scoped-dispatch", command=("/gsd-plan-phase", "1"),
+        dispatch_limit=3, token_limit=1000, on_ready=execute,
+        run_id="scoped-dispatch", activity="plan", scope="1",
+        host_request=request,
+    ) == 0
+    store = ControlStore(authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        intent = tx.execute("SELECT * FROM authority_launch_intents").fetchone()
+    retained = Path(
+        json.loads(intent["completion_evidence_json"])["locator"]
+    ).with_name("stdout.log").read_text()
+    assert f"GSD_PROJECT={project}" in retained
+    assert f"GSD_WORKSTREAM={workstream}" in retained
+    assert seen_scope and all(scope == (project, workstream) for scope in seen_scope)
 
 
 def test_empty_upstream_refuses_before_any_allocation(tmp_path, monkeypatch):

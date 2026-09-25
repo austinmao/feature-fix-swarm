@@ -108,8 +108,8 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
 
     def qualify(_store, _token, *, activity_id, activity_request_key, parent_activity_id,
                 workspace, host_request, role, evidence_root, final_contract_hash,
-                supervisor, bridge_command):
-        del host_request, evidence_root, supervisor, bridge_command
+                supervisor, bridge_command, project=None, workstream=None):
+        del host_request, evidence_root, supervisor, bridge_command, project, workstream
         qualification_calls.append({
             "activity_id": activity_id, "request_key": activity_request_key,
             "parent": parent_activity_id, "workspace": workspace, "role": role,
@@ -176,6 +176,120 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
         "activity_id": "wave-activity", "request_key": "wave-request", "parent": "parent",
         "workspace": wave_ready, "role": "worker", "contract": "d" * 64,
     }
+
+
+def test_managed_claude_outer_qualify_receives_scoped_project(tmp_path, monkeypatch):
+    """Review round 1 item 9 (HIGH, caller half): a Claude analogue of the
+    Codex 5.10 e2e. A scoped upstream {"project": "demo"} must reach
+    qualify_managed_claude_runtime's project=/workstream= kwargs (the
+    prepare_managed_claude_session caller). Mutant checked: delete
+    ``project=upstream.get("project"), workstream=upstream.get("workstream")``
+    from the qualify_runtime closure's qualify_managed_claude_runtime(...)
+    call in managed_claude_qualification.py -> captured_scope stays
+    [(None, None)] and this test fails."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ready = SimpleNamespace(
+        id="outer-workspace", parent_activity_id="parent", child_request_key="managed-host:request",
+        ready=True, path=workspace, input_digest="a" * 64, base_commit="b" * 40,
+    )
+
+    class Transaction:
+        def execute(self, sql, *_args):
+            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt",
+                                                  "runtime_identity FROM authority_child_bindings",
+                                                  "idempotency_key='frontend-operation'")):
+                return SimpleNamespace(fetchone=lambda: None)
+            return SimpleNamespace(fetchone=lambda: {"state": "ready", "kind": "execute"})
+
+    class Store:
+        def get_run_policy_budget(self, **_kwargs):
+            return None
+
+        def get_sealed_acceptance(self, **_kwargs):
+            return None
+
+        @contextmanager
+        def read_transaction(self):
+            yield Transaction()
+
+        def runtime_tuple_hash(self, runtime):
+            return "runtime:" + getattr(runtime, "marker", runtime)
+
+    class Channel:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            return None
+
+        def attach_wave_consumer(self, _consumer):
+            return None
+
+        def close(self):
+            return None
+
+    class Supervisor:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class WaveConsumer:
+        def __init__(self, _supervisor, _prepare_child, *, finish_timeout):
+            assert finish_timeout == 60
+
+    captured_scope = []
+
+    def qualify(_store, _token, *, activity_id, activity_request_key, parent_activity_id,
+                workspace, host_request, role, evidence_root, final_contract_hash,
+                supervisor, bridge_command, project=None, workstream=None):
+        del host_request, evidence_root, supervisor, bridge_command
+        captured_scope.append((project, workstream))
+        qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
+        return (
+            SimpleNamespace(id=activity_id, state="active"), qualified,
+            SimpleNamespace(receipt_sha256="receipt:" + activity_id), tmp_path / activity_id,
+            SimpleNamespace(),
+        )
+
+    class Adapter:
+        def __init__(self, _qualified, _binary, _version):
+            pass
+
+        def build_launch_material(self, prompt, *, attempt, session_id, gsd_environment):
+            assert gsd_environment is not None
+            return SimpleNamespace(argv=("claude", prompt))
+
+    monkeypatch.setattr(managed, "_from_row", lambda _row: SimpleNamespace(
+        base_commit="b" * 40, repository_path=workspace,
+    ))
+    monkeypatch.setattr(managed, "load_input_snapshot", lambda *_args: SimpleNamespace(manifest={}))
+    monkeypatch.setattr(managed, "_verify_snapshot_complete", lambda *_args: None)
+    monkeypatch.setattr(managed, "begin_child_workspace_preparation", lambda *_args, **_kwargs: ready)
+    monkeypatch.setattr(managed, "prepare_workspace", lambda *_args, **_kwargs: ready)
+    monkeypatch.setattr(managed, "WorkerChannelServer", Channel)
+    monkeypatch.setattr(managed, "Supervisor", Supervisor)
+    monkeypatch.setattr(managed, "WaveConsumer", WaveConsumer)
+    monkeypatch.setattr(managed, "qualify_managed_claude_runtime", qualify)
+    monkeypatch.setattr(managed, "ClaudeHostAdapter", Adapter)
+
+    request = ClaudeHostRequest(
+        str(tmp_path / "candidate"), str(tmp_path / "credential"), str(tmp_path / "claude"),
+        "claude-opus-5", None, "workspace-write", False, 23, 60,
+    )
+    token = SimpleNamespace(repository_id="repo", run_id="run", generation=1, planning_scope="1")
+    root_workspace = tmp_path / "root-workspace"
+    context = SimpleNamespace(
+        activity_id="parent", evidence_root=tmp_path / "evidence", workspace=str(root_workspace),
+        upstream={"project": "demo", "workstream": None, "session_key": None,
+                  "planning_root": str(root_workspace / ".planning" / "demo")},
+    )
+
+    session = managed.prepare_managed_claude_session(
+        Store(), token, context, ("/gsd-execute-phase", "1"), "request", request,
+    )
+    session.prepare_outer()
+
+    assert captured_scope == [("demo", None)]
 
 
 # A frontend operation with no sealed draft now refuses before staging or launch
@@ -395,8 +509,8 @@ def test_managed_claude_outer_prompt_for_task_swarm_names_staged_command_under_t
 
     def qualify(_store, _token, *, activity_id, activity_request_key, parent_activity_id,
                 workspace, host_request, role, evidence_root, final_contract_hash,
-                supervisor, bridge_command):
-        del host_request, supervisor, bridge_command
+                supervisor, bridge_command, project=None, workstream=None):
+        del host_request, supervisor, bridge_command, project, workstream
         staged_homes.append(managed.claude_runtime_home(evidence_root, activity_id))
         qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
         return (
