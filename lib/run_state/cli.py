@@ -136,6 +136,10 @@ _MANAGED_PROMPT_REFUSALS = {
         "a non-default project or workstream never reaches the qualified host "
         "process env, so it cannot be honored",
         "use_the_default_project"),
+    "MANAGED_PROMPT_VALUE_UNSAFE": (
+        "the planning root or project carries a control character and cannot be "
+        "placed in the host prompt",
+        "rename_the_planning_path"),
 }
 
 
