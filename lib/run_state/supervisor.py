@@ -13,12 +13,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import socket
 import stat
 import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 
 from process_identity import DEAD, LIVE, ProcessIdentity, probe_identity
@@ -3044,8 +3046,13 @@ def _managed_command_requires_wave_proof(invocation: tuple[str, ...]) -> bool | 
 
 
 def _assert_managed_prompt_value_safe(value: str | None) -> None:
-    """Refuse a raw prompt value carrying a control character (injection risk)."""
-    if value is not None and any(ord(character) < 0x20 or ord(character) == 0x7f for character in value):
+    """Refuse a raw prompt value carrying a control character or Unicode line
+    break (injection risk). Cc covers C0, DEL, and C1 (including U+0085 NEL);
+    Zl/Zp catch U+2028/U+2029, which are not Cc but still break line-based
+    parsing of the prompt."""
+    if value is not None and any(
+        unicodedata.category(character) in {"Cc", "Zl", "Zp"} for character in value
+    ):
         raise SupervisorRefused("MANAGED_PROMPT_VALUE_UNSAFE")
 
 
@@ -3176,7 +3183,15 @@ def _managed_prompt(root, operation, command, *, staged_runtime_home, planning_r
                 raise SupervisorRefused("MANAGED_COMMAND_CONTEXT_CONFLICT") from None
             if not isinstance(invocation_text, str):
                 raise SupervisorRefused("MANAGED_COMMAND_CONTEXT_CONFLICT")
-            if _MANAGED_FRONTEND_MODE_FLAGS.intersection(invocation_text.split()):
+            try:
+                # Shell-aware tokenizing: a quoted task like '"add --dry-run
+                # support"' stays one token and must not match the flag set.
+                mode_tokens = shlex.split(invocation_text)
+            except ValueError:
+                # Unbalanced quotes: fall back to plain whitespace split,
+                # which still fails closed on a bare flag token.
+                mode_tokens = invocation_text.split()
+            if _MANAGED_FRONTEND_MODE_FLAGS.intersection(mode_tokens):
                 raise SupervisorRefused("MANAGED_FRONTEND_MODE_UNSUPPORTED")
         staged_command = _MANAGED_FRONTEND_STAGED_COMMAND.get(invocation[0])
         if staged_command is None:
