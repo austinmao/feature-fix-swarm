@@ -1078,6 +1078,14 @@ EOF
   [ -f "$BATS_TEST_TMPDIR/codex.probed" ]
 }
 
+@test "Codex CLI 0.157.0 is an explicitly supported compatibility release" {
+  FFS_HOST=codex FAKE_CODEX_VERSION=0.157.0 CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
 @test "Codex CLI policy preserves the legacy range and rejects untested gaps, patches, and malformed versions" {
   for version in 0.137.0 0.147.99; do
     FFS_HOST=codex FAKE_CODEX_VERSION="$version" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
@@ -1085,7 +1093,7 @@ EOF
     [ "$status" -eq 0 ]
   done
 
-  for version in 0.136.9 0.148.0 0.153.99 0.154.1 0.154.0.1 0.154.0-dev 0.155.0 0.155.2 0.155.1.1 0.155.1-dev 0.154 0.156.0 0.156.2 0.156.1.1 0.156.1-dev 0.156 0.1561.0 1.156.1; do
+  for version in 0.136.9 0.148.0 0.153.99 0.154.1 0.154.0.1 0.154.0-dev 0.155.0 0.155.2 0.155.1.1 0.155.1-dev 0.154 0.156.0 0.156.2 0.156.1.1 0.156.1-dev 0.156 0.1561.0 1.156.1 0.157.1 0.157 0.1571.0 1.157.0; do
     rm -f "$BATS_TEST_TMPDIR/codex.probed"
     FFS_HOST=codex FAKE_CODEX_VERSION="$version" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
       run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
