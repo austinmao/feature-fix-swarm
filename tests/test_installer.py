@@ -911,7 +911,10 @@ def test_doctor_rejects_unsupported_codex_cli(tmp_path: Path) -> None:
     )
     report = json.loads(result.stdout)
     assert result.returncode == 1
-    assert any(check["id"] == "codex-cli-version" and check["status"] == "fail" for check in report["checks"])
+    failure = next(check for check in report["checks"] if check["id"] == "codex-cli-version")
+    assert failure["status"] == "fail"
+    assert ffs_installer.CODEX_VERSION_POLICY in failure["message"]
+    assert "0.156.1" in failure["remediation"]
 
 
 def test_codex_version_policy_preserves_legacy_range_and_exact_compatibility_pins_only() -> None:
@@ -925,7 +928,9 @@ def test_codex_version_policy_preserves_legacy_range_and_exact_compatibility_pin
         (0, 155, 2),
         (0, 156, 0),
         (0, 156, 2),
+        (0, 1561, 0),
         (1, 154, 0),
+        (1, 156, 1),
     )
 
     assert all(ffs_installer.codex_version_is_supported(version) for version in accepted)
