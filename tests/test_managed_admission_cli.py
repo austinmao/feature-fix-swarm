@@ -621,7 +621,8 @@ def test_apply_holds_one_continuous_writer_lock_never_releases_mid_flight(tmp_pa
     chance to intervene in that synchronous gap). Assert directly, by
     intercepting the writer connection's own calls, that
     apply_reconcile_at_root issues exactly one BEGIN IMMEDIATE and exactly
-    one commit -- never releases the lock mid-flight and reacquires it.
+    one commit -- never releases the lock mid-flight and reacquires it --
+    and, on this clean success path, never calls rollback at all.
     """
     root = _raw_v1_root(
         tmp_path, ticket="old", host_id=OWNER.host_id, boot_id="prior-boot",
@@ -645,6 +646,10 @@ def test_apply_holds_one_continuous_writer_lock_never_releases_mid_flight(tmp_pa
             calls.append("COMMIT")
             return self._inner.commit()
 
+        def rollback(self):
+            calls.append("ROLLBACK")
+            return self._inner.rollback()
+
         def __getattr__(self, name):
             return getattr(self._inner, name)
 
@@ -664,3 +669,41 @@ def test_apply_holds_one_continuous_writer_lock_never_releases_mid_flight(tmp_pa
     assert report["reclaimed"] == [1]
     assert calls.count("BEGIN IMMEDIATE") == 1, calls
     assert calls.count("COMMIT") == 1, calls
+    assert "ROLLBACK" not in calls, calls
+
+
+# --- Round 4 (review round-1 open findings) -----------------------------
+
+
+def test_apply_refusal_survives_a_rollback_failure_exit6_no_bak(tmp_path, capsys, monkeypatch):
+    """A rollback (or close) failure during cleanup must never replace the
+    typed refusal already in flight, and must not leave a backup behind.
+    """
+    root = _empty_admission_policy_root(tmp_path)
+    real_connect = managed_admission.sqlite3.connect
+
+    class _RollbackFailsConnection:
+        def __init__(self, inner):
+            self.__dict__["_inner"] = inner
+
+        def rollback(self):
+            raise sqlite3.OperationalError("simulated rollback failure")
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __setattr__(self, name, value):
+            setattr(self._inner, name, value)
+
+    def wrapped_connect(target, *a, **k):
+        connection = real_connect(target, *a, **k)
+        return _RollbackFailsConnection(connection) if "mode=rw" in str(target) else connection
+
+    monkeypatch.setattr(managed_admission.sqlite3, "connect", wrapped_connect)
+
+    returncode = cli.main(["admission", "reconcile", "--root", str(root), "--apply"])
+    payload = _last_payload(capsys)
+
+    assert returncode == 6
+    assert payload["code"] == "MANAGED_ADMISSION_SCHEMA_INVALID"
+    assert not any(entry.name.endswith(".bak") for entry in root.iterdir())
