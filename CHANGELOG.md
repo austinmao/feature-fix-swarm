@@ -8,6 +8,32 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-25, spec-014 Release C: F32 managed frontend prompt)
+
+- A managed `task-swarm` or `feature-implement` run now asks the host to run
+  the staged `gsd-execute-phase <scope>` command. Before, it named the bare
+  frontend (`$task-swarm ...`), which is never staged into the private
+  runtime (only `gsd-*` skills are), so the outer host did no work. The
+  argument is the selected phase scope, validated as a plain ASCII phase
+  token. `feature-spec`, `fix` and `code-uplift` have no staged mapping yet
+  and refuse `MANAGED_FRONTEND_COMMAND_UNSTAGED`.
+- The operator's invocation text is validated and never forwarded into the
+  host prompt, so it cannot add GSD flags or forge prompt lines. A run whose
+  invocation text carries `--dry-run` or `--adhoc` refuses
+  `MANAGED_FRONTEND_MODE_UNSUPPORTED` instead of silently executing the phase.
+- The prompt's planning root is the persisted upstream planning root rebased
+  onto the run's own prepared workspace, not the root workspace's path.
+  `freeze_managed_plan_inventory` uses the same helper.
+- A run bound to a non-default GSD project or workstream refuses
+  `MANAGED_PROJECT_SCOPE_UNSUPPORTED`. The qualified host environment strips
+  every `GSD_*` variable, so the host could not honor that scope and would
+  have run against the default planning root.
+- Prompt values carrying a control character or Unicode line break refuse
+  `MANAGED_PROMPT_VALUE_UNSAFE`.
+- All of these refusals happen before the worker channel directory or the
+  private runtime (which holds an auth copy) is created, and each one reports
+  its own recovery action instead of `qualify_host_adapter`.
+
 ### Fixed (2026-09-24 — spec-014 managed run-state live E2E findings)
 
 - A managed run no longer counts a succeeded qualification probe as the
