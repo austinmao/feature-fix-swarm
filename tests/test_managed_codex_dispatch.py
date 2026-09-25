@@ -59,8 +59,13 @@ def _setup(tmp_path):
     return primary, authority, repository_id, env
 
 
-def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path, monkeypatch):
-    primary, authority, _repository_id, env = _setup(tmp_path)
+def _qualified_host(tmp_path, monkeypatch):
+    """Fixture host plus qualify/stage/admit_cli seams for a real prepare_outer().
+
+    Shared by every test in this file that needs qualification to actually
+    succeed (not the qualification's own correctness -- that is a fixture
+    stand-in -- but the surrounding session/contract plumbing this repo owns).
+    """
     # The supervisor builds its shared coordinator on the machine-global
     # admission queue with the live observer.  Keep that production path but
     # give it an isolated root and a fixture observation, as the resource-group
@@ -105,10 +110,17 @@ def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path
             }) + "\n")
         return json.loads((home / runtime_staging.STAGE_MANIFEST_NAME).read_text())
 
+    retained = {}
+
     def qualify(store, token, *, activity_id, activity_request_key, parent_activity_id,
                 workspace, runtime_home, binary, gsd_environment, host_request, role,
                 evidence_root, final_contract_hash, supervisor, observer_module=None):
         del evidence_root, supervisor, observer_module
+        if activity_id in retained:
+            # A resume replays qualification for the same activity: the real
+            # qualify_managed_runtime detects the retained binding and returns
+            # it without re-creating or re-transitioning the activity.
+            return retained[activity_id]
         home, worktree = Path(runtime_home), workspace.path
         admission = {
             "schema": "ffs.supervisor-admission/v1", "available": True,
@@ -168,20 +180,27 @@ def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path
             token, activity.id, expected="pending", new="active", reason="fixture qualified",
         )
         receipt = store.commit_runtime_receipt(token, activity.id, qualified)
-        return SimpleNamespace(
+        bundle = SimpleNamespace(
             activity=activity, qualified_runtime=qualified, runtime_receipt=receipt,
         )
+        retained[activity_id] = bundle
+        return bundle
 
     monkeypatch.setattr(runtime_staging, "stage_or_reuse_private_codex_runtime", stage)
     monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify)
     monkeypatch.setattr(host_capabilities, "admit_cli", lambda _binary: {"version": "0.154.0"})
-    monkeypatch.chdir(primary)
-    request = parse_codex_host_request(
+    return parse_codex_host_request(
         runtime_home=str(runtime), binary=str(fake),
         model_request_json='{"kind":"tier","name":"execution"}',
         sandbox="workspace-write", network_enabled=False,
         token_reservation=100, timeout_seconds=30,
     )
+
+
+def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path, monkeypatch):
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    request = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
 
     def execute(store, token, context):
         from run_state.cli import _load_upstream_runtime
@@ -226,6 +245,125 @@ def test_managed_codex_dispatch_commits_receipt_before_supervised_spawn(tmp_path
     retained = Path(json.loads(intent["completion_evidence_json"])["locator"]).with_name("stdout.log").read_text()
     assert "FFS-supervised-process compatibility path is mandatory" in retained
     assert "outer orchestrator must never edit a plan's declared target files" in retained
+
+
+def test_empty_upstream_refuses_before_any_allocation(tmp_path, monkeypatch):
+    """#F32 review round 3 item 5: rebase_planning_root's missing-planning_root
+    refusal must fire before any allocation, the same discriminating proof
+    round 2 already applies to the naming refusals (host/runtimes absent, no
+    /tmp/ffs-worker-* dir)."""
+    import tempfile as tempfile_module
+    from dataclasses import replace
+    from run_context import resolve_evidence
+    from run_state.supervisor import SupervisorRefused, prepare_managed_codex_session
+
+    primary, authority, repository_id, env = _setup(tmp_path)
+    request = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
+
+    mkdtemp_calls = []
+    real_mkdtemp = tempfile_module.mkdtemp
+
+    def spy(*args, **kwargs):
+        if kwargs.get("prefix") == "ffs-worker-":
+            mkdtemp_calls.append(kwargs)
+        return real_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile_module, "mkdtemp", spy)
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        broken_context = replace(context, upstream={})
+        with pytest.raises(SupervisorRefused) as excinfo:
+            prepare_managed_codex_session(
+                store, token, broken_context, command=("/gsd-plan-phase", "1"),
+                request_key="empty-upstream", host_request=request, upstream_runtime=upstream_runtime,
+            )
+        assert excinfo.value.code == "PRELAUNCH_PLAN_PATH_UNSAFE"
+        return 0
+
+    assert prepare_managed_run(
+        objective="empty upstream", state_root=authority,
+        selection_manifest=env["FFS_SELECTION_MANIFEST"],
+        upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        request_key="empty-upstream", command=("/gsd-plan-phase", "1"),
+        dispatch_limit=3, token_limit=1000, on_ready=execute,
+        run_id="empty-upstream", activity="plan", scope="1",
+        host_request=request,
+    ) == 0
+    assert mkdtemp_calls == []
+    evidence_root = resolve_evidence(authority, "empty-upstream", repository_id)
+    assert not (evidence_root / "host" / "runtimes").exists()
+
+
+def test_resumed_outer_run_that_was_qualified_but_never_launched_reproduces_the_same_prompt(
+    tmp_path, monkeypatch,
+):
+    """#F32 review round 3 item 8: outer_activity_id (retained_outer_activity)
+    and ready.path (feeding rebase_planning_root) must both be stable across a
+    resume of a run that was qualified but never launched, or
+    qualify_managed_runtime's retained-contract_hash replay check would
+    mismatch and refuse QUALIFICATION_PREPARATION_CONFLICT."""
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    request = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
+
+    contract_hashes = []
+    original_qualify = managed_qualification.qualify_managed_runtime
+
+    def capture(*args, **kwargs):
+        contract_hashes.append(kwargs.get("final_contract_hash"))
+        return original_qualify(*args, **kwargs)
+
+    monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", capture)
+
+    results = []
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        from run_state.supervisor import prepare_managed_codex_session
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        # A resumed CLI process re-enters through the same admitted store/
+        # token/context (the outer admission -- requested_material -- refuses
+        # a second full preparation once an activity has a bound child, so a
+        # resume can only re-request a *session* for the already-admitted
+        # context, never re-run prepare_managed_run itself). Never call
+        # session.execute(): qualification completes (the activity and child
+        # binding are journaled) but no real launch intent is ever created --
+        # exactly "qualified but never launched", then resumed.
+        for _ in range(2):
+            session = prepare_managed_codex_session(
+                store, token, context, command=("/gsd-plan-phase", "1"),
+                request_key="resume-stability", host_request=request, upstream_runtime=upstream_runtime,
+            )
+            req, _adapter = session.prepare_outer()
+            results.append((session.outer_activity_id, req.codex_material.argv[-1]))
+        return 0
+
+    assert prepare_managed_run(
+        objective="resume stability", state_root=authority,
+        selection_manifest=env["FFS_SELECTION_MANIFEST"],
+        upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        request_key="resume-stability", command=("/gsd-plan-phase", "1"),
+        dispatch_limit=3, token_limit=1000, on_ready=execute,
+        run_id="resume-stability", activity="plan", scope="1",
+        host_request=request,
+    ) == 0
+
+    assert len(results) == 2
+    assert results[0][0] == results[1][0], "outer_activity_id drifted across resume"
+    assert results[0][1] == results[1][1], "the prompt drifted across resume"
+    assert len(contract_hashes) >= 2
+    assert contract_hashes[0] == contract_hashes[-1], "final_contract_hash drifted across resume"
 
 
 def _retain_outer(store, token, context, *, launch):

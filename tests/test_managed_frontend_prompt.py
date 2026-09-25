@@ -21,6 +21,19 @@ Review-gate follow-up defects fixed here:
 4. The dispatch doc/script relative paths are shared module constants, and
    are checked against the real vendored @opengsd/gsd-core layout this repo
    ships (not just compared to themselves).
+
+Review round 3 follow-up defects fixed here:
+5. A mode flag (--dry-run, --adhoc) in invocation_text changes what actually
+   runs in a way gsd-execute-phase cannot honor, so it refuses
+   MANAGED_FRONTEND_MODE_UNSUPPORTED instead of silently running for real
+   (or running gsd-execute-phase instead of gsd-quick).
+6. A non-default project or workstream never reaches the qualified host
+   process env (it is stripped along with every other GSD_*/FFS_* var), so
+   it refuses MANAGED_PROJECT_SCOPE_UNSUPPORTED instead of only appearing as
+   prompt prose the executor cannot honor.
+7. A raw prompt value (planning_root/project) carrying a control character
+   refuses MANAGED_PROMPT_VALUE_UNSAFE.
+8. is_valid_phase_scope is ASCII-only (covered in test_prelaunch_inventory.py).
 """
 from __future__ import annotations
 
@@ -29,7 +42,8 @@ import json
 import pytest
 
 from run_state.supervisor import (
-    _DISPATCH_DOC_RELATIVE, _DISPATCH_SCRIPT_RELATIVE, SupervisorRefused, _managed_prompt,
+    _DISPATCH_DOC_RELATIVE, _DISPATCH_SCRIPT_RELATIVE, SupervisorRefused,
+    _managed_gsd_prompt, _managed_prompt,
 )
 from test_m4_upstream_context_acceptance import ROOT
 
@@ -38,7 +52,7 @@ def _root(kind: str = "review") -> dict:
     return {"kind": kind}
 
 
-def _operation(invocation_text: str) -> str:
+def _operation(invocation_text) -> str:
     return json.dumps({"data": {"invocation_text": invocation_text}})
 
 
@@ -50,7 +64,7 @@ def test_task_swarm_prompt_names_staged_command_and_never_leaks_invocation_text(
         _root(), _operation("add --version flag; --interactive"), ("task-swarm",),
         staged_runtime_home=staged_runtime_home,
         planning_root=str(tmp_path / "workspace" / ".planning"),
-        project="demo-project", planning_scope="03",
+        project=None, workstream=None, planning_scope="03",
     )
 
     assert invocation == ("task-swarm",)
@@ -65,8 +79,7 @@ def test_task_swarm_prompt_names_staged_command_and_never_leaks_invocation_text(
     assert "--interactive" not in prompt
     assert "Operator request" not in prompt
     assert "invocation" not in prompt.lower()
-    # Project comes from the real persisted upstream data.
-    assert "GSD project: demo-project" in prompt
+    assert "GSD project: (default)" in prompt
     assert str(staged_runtime_home / _DISPATCH_DOC_RELATIVE) in prompt
     assert str(staged_runtime_home / _DISPATCH_SCRIPT_RELATIVE) in prompt
     assert str(tmp_path / "workspace" / ".planning") in prompt
@@ -76,7 +89,7 @@ def test_feature_implement_prompt_with_no_operation_payload(tmp_path):
     invocation, prompt, role = _managed_prompt(
         _root("execute"), None, ("feature-implement",),
         staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-        project=None, planning_scope="1.2",
+        project=None, workstream=None, planning_scope="1.2",
     )
 
     assert prompt.split("\n", 1)[0] == "$gsd-execute-phase 1.2"
@@ -91,7 +104,7 @@ def test_scope_that_is_not_a_plain_phase_token_refuses_before_naming_a_command(t
         _managed_prompt(
             _root(), _operation("add --version flag"), ("task-swarm",),
             staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-            project=None, planning_scope=scope,
+            project=None, workstream=None, planning_scope=scope,
         )
     assert excinfo.value.code == "PRELAUNCH_PHASE_SCOPE_REQUIRED"
 
@@ -101,7 +114,7 @@ def test_plain_phase_token_scopes_are_accepted(tmp_path, scope):
     invocation, prompt, role = _managed_prompt(
         _root(), _operation(""), ("task-swarm",),
         staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-        project=None, planning_scope=scope,
+        project=None, workstream=None, planning_scope=scope,
     )
     assert prompt.split("\n", 1)[0] == "$gsd-execute-phase " + scope
 
@@ -112,7 +125,7 @@ def test_deferred_frontends_always_refuse_as_unstaged(frontend, tmp_path):
         _managed_prompt(
             _root(), _operation(""), (frontend,),
             staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-            project=None, planning_scope="1",
+            project=None, workstream=None, planning_scope="1",
         )
     assert excinfo.value.code == "MANAGED_FRONTEND_COMMAND_UNSTAGED"
 
@@ -126,7 +139,7 @@ def test_unmapped_frontend_refuses_instead_of_emitting_unstaged_prompt(tmp_path,
         _managed_prompt(
             _root(), _operation("03"), ("task-swarm",),
             staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-            project=None, planning_scope="1",
+            project=None, workstream=None, planning_scope="1",
         )
     assert excinfo.value.code == "MANAGED_FRONTEND_COMMAND_UNSTAGED"
 
@@ -136,9 +149,87 @@ def test_malformed_operation_payload_refuses_as_context_conflict(tmp_path):
         _managed_prompt(
             _root(), "not json", ("task-swarm",),
             staged_runtime_home=tmp_path, planning_root=str(tmp_path),
-            project=None, planning_scope="1",
+            project=None, workstream=None, planning_scope="1",
         )
     assert excinfo.value.code == "MANAGED_COMMAND_CONTEXT_CONFLICT"
+
+
+@pytest.mark.parametrize("invocation_text", [None, ["--gaps-only"], 4])
+def test_invocation_text_that_is_not_a_string_refuses_as_context_conflict(tmp_path, invocation_text):
+    with pytest.raises(SupervisorRefused) as excinfo:
+        _managed_prompt(
+            _root(), _operation(invocation_text), ("task-swarm",),
+            staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+            project=None, workstream=None, planning_scope="1",
+        )
+    assert excinfo.value.code == "MANAGED_COMMAND_CONTEXT_CONFLICT"
+
+
+@pytest.mark.parametrize("invocation_text", ["--dry-run", "1.2 --dry-run", "--adhoc", '--adhoc "add x"'])
+def test_invocation_text_naming_an_unsupported_mode_refuses(tmp_path, invocation_text):
+    with pytest.raises(SupervisorRefused) as excinfo:
+        _managed_prompt(
+            _root(), _operation(invocation_text), ("task-swarm",),
+            staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+            project=None, workstream=None, planning_scope="1",
+        )
+    assert excinfo.value.code == "MANAGED_FRONTEND_MODE_UNSUPPORTED"
+
+
+def test_invocation_text_mentioning_dry_run_as_free_text_still_passes(tmp_path):
+    # Whole-token match only: "dry-run" inside prose is not the flag "--dry-run".
+    invocation, prompt, role = _managed_prompt(
+        _root(), _operation("please do a dry-run of this"), ("task-swarm",),
+        staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+        project=None, workstream=None, planning_scope="1",
+    )
+    assert prompt.split("\n", 1)[0] == "$gsd-execute-phase 1"
+
+
+@pytest.mark.parametrize(("project", "workstream"), [
+    ("demo-project", None), (None, "demo-workstream"), ("demo-project", "demo-workstream"),
+])
+def test_non_default_project_or_workstream_refuses_for_a_staged_frontend(tmp_path, project, workstream):
+    with pytest.raises(SupervisorRefused) as excinfo:
+        _managed_prompt(
+            _root(), _operation(""), ("task-swarm",),
+            staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+            project=project, workstream=workstream, planning_scope="1",
+        )
+    assert excinfo.value.code == "MANAGED_PROJECT_SCOPE_UNSUPPORTED"
+
+
+def test_non_default_project_refuses_for_a_raw_gsd_command_too(tmp_path):
+    # Applied at the shared function for every managed prompt (review round 3
+    # item 2): the qualified host env cannot carry GSD_PROJECT for ANY
+    # managed prompt, not only a staged frontend.
+    with pytest.raises(SupervisorRefused) as excinfo:
+        _managed_prompt(
+            _root(), None, ("/gsd-plan-phase", "1"),
+            staged_runtime_home=tmp_path, planning_root=str(tmp_path),
+            project="demo-project", workstream=None, planning_scope="1",
+        )
+    assert excinfo.value.code == "MANAGED_PROJECT_SCOPE_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("bad_planning_root", ["/tmp/x\x07", "/tmp/x\x7f", "/tmp/x\x00y", "/tmp/x\x1f"])
+def test_planning_root_with_a_control_character_refuses(tmp_path, bad_planning_root):
+    with pytest.raises(SupervisorRefused) as excinfo:
+        _managed_prompt(
+            _root(), None, ("/gsd-plan-phase", "1"),
+            staged_runtime_home=tmp_path, planning_root=bad_planning_root,
+            project=None, workstream=None, planning_scope="1",
+        )
+    assert excinfo.value.code == "MANAGED_PROMPT_VALUE_UNSAFE"
+
+
+def test_managed_gsd_prompt_itself_refuses_a_control_character_in_project(tmp_path):
+    with pytest.raises(SupervisorRefused) as excinfo:
+        _managed_gsd_prompt(
+            "$gsd-plan-phase 1", dispatch_doc=tmp_path / "doc.md", dispatch_script=tmp_path / "script.cjs",
+            planning_root=str(tmp_path), project="demo\x07project",
+        )
+    assert excinfo.value.code == "MANAGED_PROMPT_VALUE_UNSAFE"
 
 
 def test_dispatch_doc_and_script_paths_match_the_real_vendored_gsd_core_layout():
@@ -149,3 +240,13 @@ def test_dispatch_doc_and_script_paths_match_the_real_vendored_gsd_core_layout()
     assert (package_root / _DISPATCH_DOC_RELATIVE).is_file()
     patch_text = (ROOT / "patches" / "gsd-1.14-ffs-supervised-dispatch.patch").read_text()
     assert f"+++ b/{_DISPATCH_SCRIPT_RELATIVE.as_posix()}" in patch_text
+
+
+def test_each_staged_frontend_command_is_a_real_gsd_skill_that_passes_the_staging_filter():
+    from run_state.runtime_staging import _GSD_SKILL
+    from run_state.supervisor import _MANAGED_FRONTEND_STAGED_COMMAND
+
+    skills_root = ROOT / "node_modules" / "@opengsd" / "gsd-core" / "skills"
+    for value in _MANAGED_FRONTEND_STAGED_COMMAND.values():
+        assert _GSD_SKILL.fullmatch(value) is not None
+        assert (skills_root / value).is_dir()

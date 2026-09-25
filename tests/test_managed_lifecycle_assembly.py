@@ -280,8 +280,12 @@ def _facts(authority, repository_id, run_id):
                            reviews=reviews, actions=grants, store=store)
 
 
+def _last_envelope(capsys) -> dict:
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
 def _last_code(capsys) -> str:
-    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])["code"]
+    return _last_envelope(capsys)["code"]
 
 
 @requires_local_confinement
@@ -430,7 +434,11 @@ def test_execute_frontend_without_a_phase_scope_refuses_before_any_outer_launch(
     draft = _draft(tmp_path)
     mkdtemp_calls = _spy_ffs_worker_mkdtemp(monkeypatch)
     result = _frontend_start(env, authority, "fx", runtime, fake, catalog, draft, "task-swarm")
-    assert result == 78 and _last_code(capsys) == "PRELAUNCH_PHASE_SCOPE_REQUIRED"
+    envelope = _last_envelope(capsys)
+    assert result == 78 and envelope["code"] == "PRELAUNCH_PHASE_SCOPE_REQUIRED"
+    # #F32 review round 3 item 9: an honest operator remedy, not the generic
+    # host-adapter-qualification fallback.
+    assert envelope["recovery_action"] == {"action": "supply_a_phase_scope"}
     facts = _facts(authority, repository_id, "fx")
     assert facts.outer == 0 and facts.native == 0 and facts.actions == {}
     _assert_no_outer_staging_leak(authority, repository_id, "fx", mkdtemp_calls)
@@ -443,29 +451,44 @@ def test_deferred_frontend_refuses_as_unstaged_before_any_outer_launch(tmp_path,
     draft = _draft(tmp_path)
     mkdtemp_calls = _spy_ffs_worker_mkdtemp(monkeypatch)
     result = _frontend_start(env, authority, "df", runtime, fake, catalog, draft, "fix")
-    assert result == 78 and _last_code(capsys) == "MANAGED_FRONTEND_COMMAND_UNSTAGED"
+    envelope = _last_envelope(capsys)
+    assert result == 78 and envelope["code"] == "MANAGED_FRONTEND_COMMAND_UNSTAGED"
+    # #F32 review round 3 item 9: an honest operator remedy, not the generic
+    # host-adapter-qualification fallback.
+    assert envelope["recovery_action"] == {"action": "select_a_staged_frontend"}
     facts = _facts(authority, repository_id, "df")
     assert facts.outer == 0 and facts.native == 0 and facts.actions == {}
     _assert_no_outer_staging_leak(authority, repository_id, "df", mkdtemp_calls)
 
 
-def test_frontend_prompt_names_staged_command_with_real_scope_project_and_rebased_planning_root(
+def test_frontend_prompt_names_staged_command_with_real_scope_and_rebased_planning_root(
     tmp_path, monkeypatch,
 ):
-    """Call-site proof (#F32 review defects 1, 2, 5): the real
-    token.planning_scope and context.upstream['project'] reach the prompt
-    through the real prepare_managed_codex_session wiring; the planning root
-    is rebased onto the workspace the outer process actually runs in
-    (request.workspace, an isolated .ffs-children/<id>-style directory --
-    never the root run workspace's absolute upstream['planning_root'] as-is,
-    and never the operator's free-text invocation_text)."""
+    """Call-site proof (#F32 review defects 1, 2, 5, and round 3 item 7): the
+    real token.planning_scope reaches the prompt through the real
+    prepare_managed_codex_session wiring; the planning root is rebased onto
+    the workspace the outer process actually runs in (request.workspace, an
+    isolated .ffs-children/<id>-style directory -- never the root run
+    workspace's absolute upstream['planning_root'] as-is, and never the
+    operator's free-text invocation_text); and the dispatch doc/script paths
+    named in the prompt sit under the exact home the staging fake actually
+    received, not just a value that happens to look right."""
     import run_state.frontend_producers as frontend_producers
+    from run_state.supervisor import _DISPATCH_DOC_RELATIVE, _DISPATCH_SCRIPT_RELATIVE
 
     primary, authority, _repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
     for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
         monkeypatch.delenv(key, raising=False)
     runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
+    staged_homes = []
+    real_stage = runtime_staging.stage_or_reuse_private_codex_runtime
+
+    def record_stage(_template, home, worktree):
+        staged_homes.append(Path(home))
+        return real_stage(_template, home, worktree)
+
+    monkeypatch.setattr(runtime_staging, "stage_or_reuse_private_codex_runtime", record_stage)
     captured = {}
 
     def capture_drive(store, token, context, session, *, acceptance_draft=None):
@@ -479,7 +502,6 @@ def test_frontend_prompt_names_staged_command_with_real_scope_project_and_rebase
     result = _frontend_start(
         env, authority, "cs", runtime, fake, catalog, None, "task-swarm",
         "--scope", "03", "--invocation-text", "add --version flag",
-        "--project", "demo-project",
     )
     assert result == 0
     prompt = captured["prompt"]
@@ -488,12 +510,22 @@ def test_frontend_prompt_names_staged_command_with_real_scope_project_and_rebase
     # The operator's invocation text never enters the prompt anywhere (#F32
     # review defect 5) -- not as a command argument, not on any other line.
     assert "add --version flag" not in prompt
-    assert "GSD project: demo-project" in prompt
+    assert "GSD project: (default)" in prompt
     # The prompt's workspace is the isolated child the outer process actually
     # runs in (never the primary/root checkout), and the planning root line
-    # is that same workspace rebased with project (#F32 review defect 1).
+    # is that same workspace rebased (#F32 review defect 1).
     assert captured["workspace"] != str(primary)
-    assert f"Planning root: {captured['workspace']}/.planning/demo-project" in prompt
+    assert f"Planning root: {captured['workspace']}/.planning" in prompt
+    # The dispatch doc/script paths named in the prompt sit under the exact
+    # home the staging fake actually received (#F32 review round 3 item 7).
+    # prepare_outer() stages the outer home twice (once eagerly in
+    # prepare_managed_codex_session before the prompt, once again inside its
+    # own qualification) -- both calls must agree on the same directory.
+    assert staged_homes
+    assert len(set(staged_homes)) == 1
+    home = staged_homes[0]
+    assert str(home / _DISPATCH_DOC_RELATIVE) in prompt
+    assert str(home / _DISPATCH_SCRIPT_RELATIVE) in prompt
 
 
 def test_legacy_managed_start_without_a_seal_executes_once_as_before(tmp_path, monkeypatch):

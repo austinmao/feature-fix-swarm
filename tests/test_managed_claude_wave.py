@@ -397,7 +397,7 @@ def test_managed_claude_outer_prompt_for_task_swarm_names_staged_command_under_t
                 workspace, host_request, role, evidence_root, final_contract_hash,
                 supervisor, bridge_command):
         del host_request, supervisor, bridge_command
-        staged_homes.append(Path(evidence_root) / "runtimes" / activity_id)
+        staged_homes.append(managed.claude_runtime_home(evidence_root, activity_id))
         qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
         return (
             SimpleNamespace(id=activity_id, state="active"), qualified,
