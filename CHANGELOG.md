@@ -8,6 +8,18 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-09-26, spec-014 Release C: Codex CLI 0.157.0 compatibility pin)
+
+- Codex CLI `0.157.0` is admitted as a fourth exact compatibility pin,
+  alongside the existing `0.154.0`, `0.155.1`, and `0.156.1` pins, on top of
+  the unchanged `>=0.137.0,<0.148.0` range. The runner host auto-updated to
+  `0.157.0`; `codex --version` and `codex exec --help` show every flag FFS
+  requires. The live probe of a read-only, ephemeral Codex exec session
+  under subscription auth could not run because host Codex auth returned
+  401. The operator chose to admit the pin on fake-binary unit and bats
+  coverage only, with no live probe and no native qualification. `0.157.1`
+  and every other untested 0.157.x or later release stay refused.
+
 ### Added
 
 - `gates.py run-gate` accepts a configurable `--timeout <seconds>` (falling
