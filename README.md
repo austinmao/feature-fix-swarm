@@ -210,7 +210,7 @@ the legacy alias bridge.
 
 - macOS with Bash or zsh
 - Ubuntu with Bash
-- Codex CLI `>=0.137.0,<0.148.0` or exact `0.154.0` / `0.155.1` / `0.156.1` / `0.157.0` (`0.146.x`, `0.147.x`, `0.154.0`, `0.155.1`, `0.156.1`, and `0.157.0` are tested; intervening and other later releases are refused)
+- Codex CLI `>=0.137.0,<0.148.0` or exact `0.154.0` / `0.155.1` / `0.156.1` / `0.157.0` (`0.146.x`, `0.147.x`, `0.154.0`, `0.155.1`, and `0.156.1` are tested; `0.157.0` is admitted without a live probe, pending qualification; intervening and other later releases are refused)
 - Claude Code using the corresponding host-native skills
 - Windows is not currently supported
 

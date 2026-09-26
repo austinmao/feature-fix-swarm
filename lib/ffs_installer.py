@@ -57,8 +57,11 @@ GSD_COMPATIBILITY_OUTPUT = {
 }
 CODEX_MIN_VERSION = (0, 137, 0)
 CODEX_MAX_VERSION = (0, 148, 0)
-# Compatibility pins are admitted one release at a time after a live probe of
-# the runner's subscription-authenticated, read-only exec and hooks surface.
+# Compatibility pins are normally admitted one release at a time after a live
+# probe of the runner's subscription-authenticated, read-only exec and hooks
+# surface. An exact pin may occasionally be admitted on fake-binary unit and
+# bats coverage alone when the live probe cannot run (host auth failure,
+# etc.) -- see CHANGELOG.md for the per-pin evidence, or lack thereof.
 CODEX_EXACT_COMPATIBILITY_VERSIONS = {(0, 154, 0), (0, 155, 1), (0, 156, 1), (0, 157, 0)}
 CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1 / 0.156.1 / 0.157.0"
 
@@ -2567,7 +2570,7 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             "codex-cli-version",
             "fail",
             f"Codex CLI {rendered} is outside supported range {CODEX_VERSION_POLICY}",
-            "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 / 0.155.1 / 0.156.1 / 0.157.0 are tested",
+            "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 / 0.155.1 / 0.156.1 are tested; exact 0.157.0 is admitted without a live probe (pending qualification)",
         )
         return
     # The doctor must not admit a binary solely from its release number.  Keep

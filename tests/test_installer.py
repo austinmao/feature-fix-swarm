@@ -941,7 +941,16 @@ def test_codex_version_policy_preserves_legacy_range_and_exact_compatibility_pin
     assert not any(ffs_installer.codex_version_is_supported(version) for version in rejected)
 
 
-@pytest.mark.parametrize("output", ("codex-cli 0.154", "codex-cli 0.154.0.1", "codex-cli 0.154.0-dev"))
+@pytest.mark.parametrize(
+    "output",
+    (
+        "codex-cli 0.154",
+        "codex-cli 0.154.0.1",
+        "codex-cli 0.154.0-dev",
+        "codex-cli 0.157.0.1",
+        "codex-cli 0.157.0-dev",
+    ),
+)
 def test_parse_cli_version_rejects_malformed_or_suffixed_exact_compatibility_versions(output: str) -> None:
     assert ffs_installer.parse_cli_version(output) is None
 
