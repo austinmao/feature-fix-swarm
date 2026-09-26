@@ -8,6 +8,28 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-26, spec-014 Release C: F36 canonical wave-manifest writer)
+
+- The FFS-supervised dispatch adapter rejected a wave manifest unless its raw
+  bytes were already bounded canonical JSON, and the workflow doc's exclusive
+  writer for that manifest wrote whatever byte order the caller supplied, with
+  no canonicalizer and no definition of what "canonical" meant. A real Codex
+  executor built the manifest object with keys in ordinary insertion order and
+  got rejected before any worker launched. The adapter now accepts a
+  `--write-manifest <path>` mode that reads the manifest JSON from stdin,
+  bounded to the same 16 KiB the existing check enforces, and republishes it
+  as the adapter's own `canonicalJson()` bytes through the same exclusive
+  create, fsync, and 0600 discipline the rest of the file already uses. It
+  writes nothing on invalid JSON, oversize input, an already-existing target
+  path, or a symlink target. The `--manifest`/`--output` path is unchanged,
+  including its strict canonical-JSON check. The workflow doc's exclusive
+  writer step now pipes the manifest into `--write-manifest` instead of a raw
+  `Buffer.from(process.argv[2])` one-liner, and states plainly that the
+  manifest's keys may be in any order because the adapter canonicalizes them.
+  Pinned hashes for the patched doc and the new adapter file were regenerated
+  in `lib/ffs_installer.py` and `tests/verification/test_gsd114_compatibility_patch.py`,
+  along with the pinned hash of the patch file itself.
+
 ### Changed (2026-09-26, spec-014 Release C: Codex CLI 0.157.0 compatibility pin)
 
 - Codex CLI `0.157.0` is admitted as a fourth exact compatibility pin,
