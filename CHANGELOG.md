@@ -20,6 +20,18 @@ all skills.
   coverage only, with no live probe and no native qualification. `0.157.1`
   and every other untested 0.157.x or later release stay refused.
 
+### Added
+
+- `gates.py run-gate` accepts a configurable `--timeout <seconds>` (falling
+  back to env `GATES_RUN_TIMEOUT`, then the existing 1800s default), rejecting
+  malformed values (non-integer, <= 0, or above the 86400s cap) with
+  `GATE-REJECTED` and exit 1 rather than silently applying a default.
+  `subprocess.TimeoutExpired` no longer crashes `run_gate()` with an
+  uncaught traceback and no recorded evidence — a timeout is now recorded as
+  `exit_code: 124` with `failure_sig: "run-gate timeout after <N>s"`, so
+  `verify-done` correctly reports NOT-DONE instead of leaving the task with
+  no evidence at all.
+
 ### Fixed (2026-09-25, spec-014 Release C: F34 managed project/workstream scope)
 
 - A managed run bound to a non-default GSD project or workstream now

@@ -181,7 +181,7 @@ Completion authority for autonomous runs — evidence, not agent self-report.
 | `gates.py record-gate T042 --exit N --cmd ... --before ... --after ...` | Record a task's test-gate outcome in the evidence store (`$GATES_STORE`, default `.feature-fix-swarm/evidence.json`) |
 | `gates.py verify-done T042` | Exit 0 iff passing gate evidence exists — the ONLY thing that legalizes an `[X]` flip. Prints `executed_by` |
 | `gates.py verify-done T042 --strict` | (or `GATES_STRICT=1`) additionally reject caller-recorded evidence — only `run-gate` runner evidence passes. The loop runs strict (v3.14.0) |
-| `gates.py run-gate T042 -- CMD…` | PREFERRED: execute the gate and record the REAL exit code — evidence bound to the runner |
+| `gates.py run-gate T042 -- CMD…` | PREFERRED: execute the gate and record the REAL exit code — evidence bound to the runner. Default timeout 1800s; override with `--timeout <seconds>` or `GATES_RUN_TIMEOUT` (flag wins, cap 86400s); a timeout records `exit_code: 124` instead of crashing |
 | `gates.py run-red T041 -- CMD…` | PREFERRED: execute the RED test; proof stored only if it really failed |
 | `gates.py record-red T041 --exit N < log` | Store a RED proof; rejected unless the log shows a real failure. Prints a forgeability WARNING |
 | `gates.py check-red T041` | Exit 0 iff RED proven — blocks the paired GREEN task until then |

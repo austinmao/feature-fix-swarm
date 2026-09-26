@@ -508,6 +508,99 @@ def test_run_gate_binds_evidence_to_real_execution(tmp_path) -> None:
     assert rc == 3 and gates.verify_done(store, "T051") is False
 
 
+def test_run_gate_default_timeout_is_1800(tmp_path) -> None:
+    """Default unchanged when neither --timeout nor GATES_RUN_TIMEOUT given —
+    asserted via the seam (the timeout kwarg passed to subprocess.run), not
+    by waiting 1800s."""
+    import unittest.mock as mock
+
+    store = tmp_path / "evidence.json"
+    with mock.patch.object(gates.subprocess, "run") as m:
+        m.return_value = gates.subprocess.CompletedProcess(
+            args=["true"], returncode=0, stdout="ok", stderr="")
+        gates.run_gate(store, "T900", ["true"])
+    assert m.call_args.kwargs["timeout"] == 1800
+
+
+def test_run_gate_timeout_expired_records_evidence_not_traceback(tmp_path) -> None:
+    """A `sleep 3` with --timeout 1 must record exit_code 124 and NOT raise."""
+    store = tmp_path / "evidence.json"
+    rc = gates.run_gate(store, "T901",
+                        ["python3", "-c", "import time; time.sleep(3)"], timeout=1)
+    assert rc == 124
+    data = json.loads(store.read_text())
+    gate = data["T901"]["gate"]
+    assert gate["exit_code"] == 124
+    assert gate["executed_by"] == "run_gate"
+    assert gate["failure_sig"] == "run-gate timeout after 1s"
+    assert gates.verify_done(store, "T901") is False
+
+
+def test_cli_run_gate_timeout_flag_honored(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"))
+    r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "run-gate", "T902",
+                 "--timeout", "1", "--",
+                 "python3", "-c", "import time; time.sleep(3)"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 124
+    assert "GATE-EXIT 124" in r.stdout
+
+
+def test_cli_run_gate_env_timeout_honored(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"),
+               GATES_RUN_TIMEOUT="1")
+    r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "run-gate", "T903",
+                 "--", "python3", "-c", "import time; time.sleep(3)"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 124
+    assert "GATE-EXIT 124" in r.stdout
+
+
+def test_cli_run_gate_flag_beats_env_timeout(tmp_path) -> None:
+    """--timeout wins over GATES_RUN_TIMEOUT: env says 1 (would time out),
+    flag says 5 (long enough for a `sleep 0` no-op) — command completes."""
+    import os as _os
+    import subprocess as _sp
+
+    env = dict(_os.environ, GATES_STORE=str(tmp_path / "evidence.json"),
+               GATES_RUN_TIMEOUT="1")
+    r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "run-gate", "T904",
+                 "--timeout", "5", "--", "python3", "-c", "print('ok')"],
+                capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert "GATE-EXIT 0" in r.stdout
+
+
+def test_cli_run_gate_malformed_timeout_rejected_no_store_write(tmp_path) -> None:
+    import os as _os
+    import subprocess as _sp
+
+    store = tmp_path / "evidence.json"
+    env = dict(_os.environ, GATES_STORE=str(store))
+    for bad in ("0", "-1", "abc", "3.5", "99999999"):
+        r = _sp.run(["python3", str(DISPATCH_DIR / "gates.py"), "run-gate", "T905",
+                     "--timeout", bad, "--", "python3", "-c", "print('ok')"],
+                    capture_output=True, text=True, env=env)
+        assert r.returncode == 1, bad
+        assert "GATE-REJECTED" in r.stderr, bad
+        assert "--timeout must be a positive integer" in r.stderr, bad
+    assert not store.exists()
+
+
+def test_verify_done_not_done_after_timeout_record(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.run_gate(store, "T906", ["python3", "-c", "import time; time.sleep(3)"],
+                   timeout=1)
+    assert gates.verify_done(store, "T906") is False
+    assert gates.verify_done(store, "T906", strict=True) is False
+
+
 def test_run_red_uses_real_exit_code(tmp_path) -> None:
     store = tmp_path / "evidence.json"
     # passing command can never be a RED proof
