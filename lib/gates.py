@@ -13,6 +13,10 @@ Usage (inline heredoc in SKILL.md):
     python3 lib/gates.py run-gate     T042 -- pytest -q     # PREFERRED: executes
     python3 lib/gates.py run-gate stg-web --artifact name@sha256:<64hex> -- pytest -q
                                                   # staging gate bound to artifact
+    python3 lib/gates.py run-gate T042 --timeout 3600 -- pytest -q
+                                                  # override the 1800s default (or
+                                                  # set GATES_RUN_TIMEOUT); a timeout
+                                                  # records exit 124, never crashes
     python3 lib/gates.py run-red      T041 -- pytest tests/test_new.py
     python3 lib/gates.py record-gate  T042 --exit 0 --cmd "pytest -q" \
         --before "6 passed" --after "8 passed"   # trusted-caller only
@@ -597,11 +601,28 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800, *,
     """Execute the gate command and record the REAL exit code (P1: evidence
     bound to the runner, not caller-supplied --exit). When `artifact` is
     supplied, bind the runner-produced evidence to that immutable identity so
-    it can later satisfy a promotion check. Returns the exit code."""
+    it can later satisfy a promotion check. Returns the exit code.
+
+    On subprocess.TimeoutExpired the previous behavior was an uncaught
+    traceback with NO evidence recorded — a long-running suite would crash
+    the gate and leave verify-done with nothing to reject. Instead, record
+    exit_code 124 (the shell convention for a timed-out command) from
+    whatever partial output the child produced before the kill, and return
+    124 so callers see a real, verify-done-rejecting exit code."""
     if artifact is not None and not _valid_artifact(artifact):
         raise ValueError("run-gate artifact must be an immutable digest or commit sha")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    full = proc.stdout + proc.stderr
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        full = proc.stdout + proc.stderr
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        # stdout/stderr on TimeoutExpired are bytes (or None) even with
+        # text=True was requested for the completed-run path — decode
+        # defensively so a partial UTF-8 boundary never crashes the gate.
+        out = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        err = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        full = out + err
+        returncode = 124
     tail = full[-2000:]
     lines = tail.splitlines()
     # Failure signature = the DISCRIMINATING failing lines, not the final
@@ -609,23 +630,26 @@ def run_gate(store: Path, task_id: str, cmd: list[str], timeout: int = 1800, *,
     # round 2, v3.14). Scan the FULL output (round 3: truncating first drops
     # early traceback lines); last 3 marker lines, else last line as fallback.
     marker_lines = [ln for ln in full.splitlines() if FAILURE_MARKERS.search(ln)]
-    failure_sig = " | ".join(marker_lines[-3:])[:400] if proc.returncode != 0 else ""
+    if returncode == 124:
+        failure_sig = f"run-gate timeout after {timeout}s"
+    else:
+        failure_sig = " | ".join(marker_lines[-3:])[:400] if returncode != 0 else ""
     with _StoreLock(store):
         data = _load_store(store)
         entry = data.setdefault(task_id, {})
         gate = {
-            "exit_code": proc.returncode,
+            "exit_code": returncode,
             "cmd": " ".join(cmd),
             "tests_before": "",
             "tests_after": lines[-1] if lines else "",
-            "failure_sig": failure_sig or (lines[-1] if lines and proc.returncode != 0 else ""),
+            "failure_sig": failure_sig or (lines[-1] if lines and returncode != 0 else ""),
             "executed_by": "run_gate",
         }
         if artifact is not None:
             gate["artifact"] = artifact
         entry["gate"] = gate
         _save_store(store, data)
-    return proc.returncode
+    return returncode
 
 
 def run_red(store: Path, task_id: str, cmd: list[str], timeout: int = 1800) -> bool:
@@ -3825,6 +3849,22 @@ def _flag(args: list[str], name: str, default: str = "") -> str:
     return default
 
 
+GATES_RUN_TIMEOUT_MAX = 86400  # 24h cap — a malformed huge value must not hang a run forever
+
+
+def _parse_gate_timeout(raw: str) -> int | None:
+    """Parse a --timeout/GATES_RUN_TIMEOUT value. Returns the positive int
+    seconds, or None if malformed (non-integer, <= 0, or above the cap) —
+    fail closed, never silently fall back to the default on a bad value."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value > GATES_RUN_TIMEOUT_MAX:
+        return None
+    return value
+
+
 def _extract_flags(
     args: list[str], names: set[str], num_positional: int = 0
 ) -> tuple[list[str], dict[str, str]]:
@@ -4190,10 +4230,24 @@ def main(argv: list[str]) -> int:
         if "--artifact" in gate_args and artifact is None:
             print("GATE-REJECTED: --artifact requires a value", file=sys.stderr)
             return 1
+        timeout_raw = _flag(gate_args, "--timeout") or None
+        if "--timeout" in gate_args and timeout_raw is None:
+            print("GATE-REJECTED: --timeout requires a value", file=sys.stderr)
+            return 1
+        if timeout_raw is None:
+            timeout_raw = os.environ.get("GATES_RUN_TIMEOUT")
+        if timeout_raw is None:
+            timeout = 1800
+        else:
+            timeout = _parse_gate_timeout(timeout_raw)
+            if timeout is None:
+                print("GATE-REJECTED: --timeout must be a positive integer (seconds)",
+                      file=sys.stderr)
+                return 1
         try:
             rc = run_gate(
                 store, args[0], args[sep + 1:] if "--" in args else args[1:],
-                artifact=artifact,
+                timeout=timeout, artifact=artifact,
             )
         except ValueError as exc:
             print(f"GATE-REJECTED: {exc}", file=sys.stderr)
