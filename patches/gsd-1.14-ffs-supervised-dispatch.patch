@@ -18,10 +18,10 @@ index c3f5473..187a9ba 100755
    }
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 0000000..f4e6e54
+index 0000000..b668a7f
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,349 @@
+@@ -0,0 +1,408 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -267,44 +267,103 @@ index 0000000..f4e6e54
 +  });
 +}
 +
++const MAX_WRITE_MANIFEST_RAW_BYTES = 64 * 1024;
++const MAX_WRITE_MANIFEST_CANONICAL_BYTES = 16 * 1024;
++
++// Reads stdin to completion, bounded to maxBytes. Resolves on 'end' (the
++// event a file redirected onto stdin reliably emits); a plain pipe emits
++// both 'end' and 'close', so listening on 'end' alone still drains pipes
++// correctly. 'close' without a prior 'end' (a premature close) is treated
++// as a failure. Once one outcome has settled, later events are no-ops.
 +function readStdinBounded(maxBytes) {
 +  return new Promise((resolve, reject) => {
 +    const chunks = [];
 +    let bytes = 0;
-+    let overflowed = false;
++    let settled = false;
++    const settle = (fn, value) => {
++      if (settled) return;
++      settled = true;
++      fn(value);
++    };
 +    process.stdin.on('data', (chunk) => {
 +      bytes += chunk.length;
-+      if (bytes > maxBytes) { overflowed = true; process.stdin.destroy(); return; }
++      if (bytes > maxBytes) {
++        settle(reject, new Error(`manifest JSON on stdin exceeds the ${maxBytes} byte bound`));
++        process.stdin.destroy();
++        return;
++      }
 +      chunks.push(chunk);
 +    });
-+    process.stdin.on('error', reject);
-+    process.stdin.on('close', () => {
-+      if (overflowed) reject(new Error('manifest JSON on stdin exceeds the 16 KiB bound'));
-+      else resolve(Buffer.concat(chunks));
-+    });
++    process.stdin.on('error', (error) => settle(reject, error));
++    process.stdin.on('end', () => settle(resolve, Buffer.concat(chunks)));
++    process.stdin.on('close', () => settle(reject, new Error('manifest JSON on stdin closed before it ended')));
 +  });
 +}
 +
 +// Executors write wave manifests with keys in whatever order they build the
 +// object; only this process's own canonicalJson() defines "canonical". This
-+// mode reads the raw manifest from stdin and republishes it as the exact
-+// bytes the strict --manifest/--output path below requires, using the same
-+// exclusive-create + fsync discipline as `publish()`.
++// mode reads a bounded raw manifest from stdin, requires it to decode as
++// strict UTF-8 and parse as JSON, requires its canonical form to fit the
++// same 16 KiB bound the strict --manifest check enforces, and requires it
++// to pass the same validateManifest() the strict --manifest check runs.
++// Only then is anything written to disk: the canonical bytes go to a
++// private temporary file created in the manifest's own directory
++// (O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600, fsynced before closing),
++// and that temporary file is published at the target path with a hard
++// link, so an existing file or a symlink already at the target path is
++// refused with EEXIST rather than overwritten or followed. The temporary
++// file is always removed afterwards, whether the link succeeded or not,
++// and the manifest's directory is fsynced once the link succeeds so the
++// new directory entry is durable, mirroring what `publish()` does for the
++// result and receipt files below.
 +async function writeManifestFromStdin(targetPath) {
-+  const raw = await readStdinBounded(16 * 1024);
++  const raw = await readStdinBounded(MAX_WRITE_MANIFEST_RAW_BYTES);
++  let text;
++  try {
++    text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
++  } catch (error) {
++    throw new Error(`manifest JSON on stdin is not valid UTF-8: ${error.message}`);
++  }
 +  let value;
 +  try {
-+    value = JSON.parse(raw.toString('utf8'));
++    value = JSON.parse(text);
 +  } catch (error) {
 +    throw new Error(`manifest JSON on stdin is invalid: ${error.message}`);
 +  }
 +  const canonical = Buffer.from(canonicalJson(value), 'utf8');
-+  const fd = fs.openSync(targetPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
++  if (canonical.length > MAX_WRITE_MANIFEST_CANONICAL_BYTES) {
++    throw new Error(`manifest JSON on stdin exceeds the ${MAX_WRITE_MANIFEST_CANONICAL_BYTES} byte canonical bound`);
++  }
++  validateManifest(value);
++  const directory = path.dirname(targetPath);
++  const temporaryPath = path.join(
++    directory,
++    `.${path.basename(targetPath)}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
++  );
 +  try {
-+    fs.writeFileSync(fd, canonical);
-+    fs.fsyncSync(fd);
++    const fd = fs.openSync(temporaryPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
++    try {
++      fs.writeFileSync(fd, canonical);
++      fs.fsyncSync(fd);
++    } finally {
++      fs.closeSync(fd);
++    }
++    try {
++      fs.linkSync(temporaryPath, targetPath);
++    } catch (error) {
++      if (error.code === 'EEXIST') {
++        throw new Error(`refusing to write manifest: target path already exists or is a symlink (EEXIST): ${targetPath}`);
++      }
++      throw error;
++    }
 +  } finally {
-+    fs.closeSync(fd);
++    try { fs.unlinkSync(temporaryPath); } catch (error) { /* best-effort cleanup; never mask the primary error */ }
++  }
++  const directoryFd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
++  try {
++    fs.fsyncSync(directoryFd);
++  } finally {
++    fs.closeSync(directoryFd);
 +  }
 +}
 +
@@ -487,10 +546,10 @@ index eb9464b..e962e92 100644
  
     Omit `isolation="worktree"` from the Agent call. Before composing the prompt, read and execute
 diff --git a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-index 2c7eaa8..f0e8632 100644
+index 2c7eaa8..dba1068 100644
 --- a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
 +++ b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-@@ -338,3 +338,148 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
+@@ -338,3 +338,151 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
  
  > **Declared-scope conformance (#2596):** ADR-1239 specifies that *both* isolation adapters route their merge through a check that each plan branch's committed diff stayed inside its declared `files_modified` scope. That check now exists, advisory-first, and is wired into **both** paths: this one passes `--files "$PLAN_FILES"` to `worktree create` above, the harness path passes it to `worktree record-agent`, and `cleanup-wave` runs the one comparison for both. A path outside the declared scope is reported in the result's `warnings` array; it does not block the merge. Promotion to a hard gate is a separate, disclosed change.
  
@@ -597,9 +656,12 @@ index 2c7eaa8..f0e8632 100644
 +   incomplete. Fresh manifests are created only through this exclusive writer.
 +   `FFS_WAVE_MANIFEST_JSON` is the complete manifest object and its keys may be
 +   in any order: pipe it into the adapter's `--write-manifest` mode, which
-+   canonicalizes it with the same `canonicalJson()` the strict `--manifest`
-+   check below requires, then writes it exclusively. Nothing is written on
-+   invalid JSON, input over 16 KiB, an already-existing target path, or a
++   decodes it as strict UTF-8, parses it as JSON, canonicalizes it with the
++   same `canonicalJson()` the strict `--manifest` check below requires, and
++   runs it through the same `validateManifest()` that check runs, before
++   writing anything. Nothing is written on invalid JSON, input that is not
++   valid UTF-8, raw input over 64 KiB, a canonical form over 16 KiB, a
++   manifest that fails validation, an already-existing target path, or a
 +   symlink target:
 +
 +   ```bash

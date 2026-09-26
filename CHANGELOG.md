@@ -16,19 +16,34 @@ all skills.
   no canonicalizer and no definition of what "canonical" meant. A real Codex
   executor built the manifest object with keys in ordinary insertion order and
   got rejected before any worker launched. The adapter now accepts a
-  `--write-manifest <path>` mode that reads the manifest JSON from stdin,
-  bounded to the same 16 KiB the existing check enforces, and republishes it
-  as the adapter's own `canonicalJson()` bytes through the same exclusive
-  create, fsync, and 0600 discipline the rest of the file already uses. It
-  writes nothing on invalid JSON, oversize input, an already-existing target
+  `--write-manifest <path>` mode that reads a bounded raw manifest from stdin
+  (bounded to 64 KiB), decodes it as strict UTF-8, parses it as JSON, requires
+  its canonicalized form to fit the same 16 KiB bound the strict `--manifest`
+  check enforces, and runs it through the same `validateManifest()` that check
+  runs, before writing anything to disk. It writes the canonical bytes to a
+  private temp file created in the manifest's own directory
+  (`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, fsynced before close), then
+  publishes it at the target path with a hard link, so an already-existing
+  path or a symlink there is refused (`EEXIST`) rather than overwritten or
+  followed; the temp file is always removed afterwards, and the manifest's
+  directory is fsynced once the link succeeds. It writes nothing on invalid
+  JSON, input that is not valid UTF-8, raw input over 64 KiB, a canonical form
+  over 16 KiB, a manifest that fails validation, an already-existing target
   path, or a symlink target. The `--manifest`/`--output` path is unchanged,
   including its strict canonical-JSON check. The workflow doc's exclusive
   writer step now pipes the manifest into `--write-manifest` instead of a raw
   `Buffer.from(process.argv[2])` one-liner, and states plainly that the
   manifest's keys may be in any order because the adapter canonicalizes them.
-  Pinned hashes for the patched doc and the new adapter file were regenerated
-  in `lib/ffs_installer.py` and `tests/verification/test_gsd114_compatibility_patch.py`,
-  along with the pinned hash of the patch file itself.
+  A round of review also caught two bugs in the first pass at this fix: the
+  stdin reader resolved only on the stream's `close` event, which a file
+  redirected onto stdin does not reliably emit, so feeding the writer from a
+  file (rather than a pipe) exited 0 without writing anything; and the raw
+  input bound was set to the same 16 KiB as the canonical bound, so a
+  pretty-printed manifest whose canonical form fit well inside 16 KiB was
+  wrongly rejected as oversize before it was ever parsed. Both are fixed and
+  covered by regression tests. Pinned hashes for the patched doc, the new
+  adapter file, and the patch file itself were regenerated in
+  `lib/ffs_installer.py` and `tests/verification/test_gsd114_compatibility_patch.py`.
 
 ### Changed (2026-09-26, spec-014 Release C: Codex CLI 0.157.0 compatibility pin)
 
