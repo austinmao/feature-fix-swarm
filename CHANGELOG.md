@@ -25,8 +25,11 @@ all skills.
   (`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, fsynced before close), then
   publishes it at the target path with a hard link, so an already-existing
   path or a symlink there is refused (`EEXIST`) rather than overwritten or
-  followed; the temp file is always removed afterwards, and the manifest's
-  directory is fsynced once the link succeeds. It writes nothing on invalid
+  followed. The temp file has a short name of its own, and the writer removes
+  it afterwards only if it created it; if that removal fails after a
+  successful link, the writer exits nonzero and names the leftover file rather
+  than reporting success. The manifest's directory is fsynced once the link
+  succeeds. It writes nothing on invalid
   JSON, input that is not valid UTF-8, raw input over 64 KiB, a canonical form
   over 16 KiB, a manifest that fails validation, an already-existing target
   path, or a symlink target. The `--manifest`/`--output` path is unchanged,
@@ -41,7 +44,13 @@ all skills.
   input bound was set to the same 16 KiB as the canonical bound, so a
   pretty-printed manifest whose canonical form fit well inside 16 KiB was
   wrongly rejected as oversize before it was ever parsed. Both are fixed and
-  covered by regression tests. Pinned hashes for the patched doc, the new
+  covered by regression tests. A second round caught three more: the temp
+  name embedded the whole target basename, so a legal long target name
+  failed with `ENAMETOOLONG`; cleanup unlinked the temp name even when this
+  process had failed to create it, so a name collision could delete someone
+  else's entry; and a failed cleanup after a successful link was swallowed,
+  leaving a second hard link to the manifest while reporting success. All
+  three are fixed; the long-name case has a regression test. Pinned hashes for the patched doc, the new
   adapter file, and the patch file itself were regenerated in
   `lib/ffs_installer.py` and `tests/verification/test_gsd114_compatibility_patch.py`.
 

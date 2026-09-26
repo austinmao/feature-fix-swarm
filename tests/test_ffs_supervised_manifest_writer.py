@@ -204,6 +204,20 @@ def test_write_manifest_accepts_pretty_printed_input_over_16kib_raw_but_canonica
     assert manifest_path.read_text() == _canonical_json(document)
 
 
+def test_write_manifest_accepts_long_target_name(patched_package: Path, tmp_path: Path) -> None:
+    """Regression for round-2 review: the temporary name embedded the whole
+    target basename plus a suffix, so a legal 240-byte target name overflowed
+    the 255-byte name limit (ENAMETOOLONG)."""
+    write_dir = tmp_path / "write"
+    write_dir.mkdir()
+    document = _valid_manifest(tmp_path / "workspace")
+    manifest_path = write_dir / ("m" * 235 + ".json")
+    result = _run_write_manifest(patched_package / ADAPTER_RELATIVE, manifest_path, input_bytes=json.dumps(document).encode())
+    assert result.returncode == 0, result.stderr
+    assert manifest_path.read_text() == _canonical_json(document)
+    assert _leftover_entries(write_dir, manifest_path) == []
+
+
 def test_write_manifest_refuses_invalid_json(patched_package: Path, tmp_path: Path) -> None:
     write_dir = tmp_path / "write"
     write_dir.mkdir()
