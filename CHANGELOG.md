@@ -8,6 +8,31 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-27, spec-014 Release C: F39 clean selected inputs in overlay form)
+
+- A managed frontend run whose `--select-file` inputs were identical to
+  their base blobs could never bind its first wave: the sealed input digest
+  recorded each such file as a `copy` entry, while the wave capture records
+  only the overlay against base and omits unchanged files, so the candidate
+  chain's first-wave digest comparison always refused
+  (`FRONTEND_INTEGRATION_CHAIN_INVALID`). `build_frontend_selection` now
+  omits a selected file from the `copy` entries only when its bytes and mode
+  equal the raw base blob (`git cat-file blob`, read only after the listed
+  size and mode match, so no attribute, conversion or filter driver is
+  consulted); it is retained as required context with the reason
+  `selected input unchanged at base` (prefixed to the operator's reason when
+  the path is also required context) and kept out of the digest. Snapshot
+  validation holds the source to that blob, and snapshot application holds
+  the prepared checkout to it, so a line-ending-only source change refuses
+  `SOURCE_CHANGED` and a checkout that converts the blob (for example
+  `eol=crlf`) blocks the workspace (`WORKSPACE_PREPARE_FAILED`) instead of
+  running on bytes the selection did not name. A clean selected file that a
+  checkout converts keeps its `copy` entry, as before. Resume maps the marked
+  rows back to the explicit `--select-file` paths, so old retained runs
+  (which always kept `copy` entries) and new ones both resume, and a changed
+  path list still refuses. Found by a live operator E2E run (attempt 7) that
+  reached the chain for the first time after F38.
+
 ### Fixed (2026-09-27, spec-014 Release C: F38 wave execution bind hashes the live preparation)
 
 - A managed frontend run that executed at least one supervised wave refused

@@ -10,13 +10,26 @@ import stat
 from run_context import registered_repository_identity, resolve_repository, validate_state_root
 from run_state.selection import InputSelection
 from run_state.workspace import (
+    SELECTED_UNCHANGED_REASON,
     WorkspaceRefused,
+    _base_blob_matches,
     _base_entry_material,
     _git,
     _read_anchored_regular_metadata,
     parse_input_selection,
     validate_selected_inputs,
 )
+
+
+def _with_unchanged_selection(required: list[dict], unchanged: set[str]) -> list[dict]:
+    rows = [
+        {"path": row["path"], "reason": SELECTED_UNCHANGED_REASON + "; " + row["reason"]}
+        if row["path"] in unchanged else row
+        for row in required
+    ]
+    listed = {row["path"] for row in required}
+    return rows + [{"path": path, "reason": SELECTED_UNCHANGED_REASON}
+                   for path in sorted(unchanged - listed)]
 
 
 def build_frontend_selection(
@@ -60,11 +73,14 @@ def build_frontend_selection(
             "upstream": upstream,
         }
         draft = parse_input_selection(value)
-        entries = []
+        entries, unchanged = [], set()
         for entry in draft.entries:
             if entry.operation == "copy":
                 data, metadata = _read_anchored_regular_metadata(repository, entry.path)
                 mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+                if _base_blob_matches(repository, base, entry.path, data, mode):
+                    unchanged.add(entry.path)
+                    continue
             else:
                 data, mode = _base_entry_material(repository, base, entry.path)
             entries.append({
@@ -72,6 +88,7 @@ def build_frontend_selection(
                 "sha256": hashlib.sha256(data).hexdigest(), "git_mode": mode,
             })
         value["entries"] = entries
+        value["required_context"] = _with_unchanged_selection(value["required_context"], unchanged)
         selection = parse_input_selection(value)
         validate_selected_inputs(repository, selection)
         return selection
@@ -161,10 +178,14 @@ def resume_frontend_selection(
             ],
             "upstream": upstream,
         })
+        # A retained unchanged-selection row stands for an explicit --select-file;
+        # a combined reason also carries the operator's required context.
+        marked = {r.path for r in retained.required_context if r.reason.startswith(SELECTED_UNCHANGED_REASON)}
         if (
             {(e.operation, e.path) for e in draft.entries}
-            != {(e.operation, e.path) for e in retained.entries}
-            or {r.path for r in draft.required_context} != {r.path for r in retained.required_context}
+            != {(e.operation, e.path) for e in retained.entries} | {("copy", path) for path in marked}
+            or {r.path for r in draft.required_context}
+            != {r.path for r in retained.required_context if r.reason != SELECTED_UNCHANGED_REASON}
             or draft.upstream != retained.upstream
         ):
             if cached is not None:

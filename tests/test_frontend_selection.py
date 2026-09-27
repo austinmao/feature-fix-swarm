@@ -136,6 +136,187 @@ def test_required_context_cannot_be_silently_omitted(registered, kind):
     assert _authority(store, primary) == before
 
 
+def test_clean_selected_file_normalizes_to_overlay_form(registered):
+    # F39: a selected file identical to its base blob is not overlay material,
+    # so the sealed digest must equal the empty overlay a wave capture records.
+    primary, store, _identity = registered
+    before = _authority(store, primary)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert selection.entries == ()
+    assert [(r.path, r.reason) for r in selection.required_context] == [
+        ("src/unrelated.txt", frontend_selection.SELECTED_UNCHANGED_REASON)]
+    assert selection.input_digest == _build(primary).input_digest
+    both = _build(primary, selected_files=("src/unrelated.txt",), required_context=("src/unrelated.txt",))
+    assert both.entries == ()
+    assert [(r.path, r.reason) for r in both.required_context] == [
+        ("src/unrelated.txt", frontend_selection.SELECTED_UNCHANGED_REASON + "; frontend bootstrap context")]
+    assert _authority(store, primary) == before
+
+
+def test_selected_file_differing_from_base_only_in_mode_stays_overlay(registered):
+    primary, _store, _identity = registered
+    (primary / "src/unrelated.txt").chmod(0o755)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert [(e.operation, e.path, e.git_mode) for e in selection.entries] == [
+        ("copy", "src/unrelated.txt", "100755")]
+    assert selection.required_context == ()
+
+
+def _crlf_checkout_file(primary, *, checked_out: bool):
+    (primary / ".gitattributes").write_text("src/eol.txt text eol=crlf\n")
+    (primary / "src/eol.txt").write_bytes(b"one\ntwo\n")
+    _git("add", ".gitattributes", "src/eol.txt", cwd=primary)
+    _git("commit", "-qm", "crlf checkout fixture", cwd=primary)
+    if checked_out:
+        (primary / "src/eol.txt").unlink()
+        _git("checkout", "--", "src/eol.txt", cwd=primary)
+    return primary / "src/eol.txt"
+
+
+def test_normalization_compares_raw_blob_bytes(registered):
+    # No checkout conversion is predicted: only the raw blob itself is omitted.
+    primary, _store, _identity = registered
+    source = _crlf_checkout_file(primary, checked_out=False)
+    assert source.read_bytes() == b"one\ntwo\n"  # the raw blob
+    normalized = _build(primary, selected_files=("src/eol.txt",))
+    assert normalized.entries == ()
+    assert [r.path for r in normalized.required_context] == ["src/eol.txt"]
+    source.unlink()
+    _git("checkout", "--", "src/eol.txt", cwd=primary)
+    assert source.read_bytes() == b"one\r\ntwo\r\n"
+    kept = _build(primary, selected_files=("src/eol.txt",))
+    assert [(e.operation, e.path, e.sha256) for e in kept.entries] == [
+        ("copy", "src/eol.txt", hashlib.sha256(b"one\r\ntwo\r\n").hexdigest())]
+
+
+@pytest.mark.parametrize(("checked_out", "replacement"), [(False, b"one\r\ntwo\r\n"), (True, b"one\ntwo\n")])
+def test_line_ending_only_source_change_after_read_refuses(registered, monkeypatch, checked_out, replacement):
+    # Git's own clean check normalizes line endings, so it cannot see this race.
+    primary, _store, _identity = registered
+    _crlf_checkout_file(primary, checked_out=checked_out)
+    original = frontend_selection._read_anchored_regular_metadata
+    calls = []
+
+    def mutate_after_first_read(root, relative, **kwargs):
+        captured = original(root, relative, **kwargs)
+        if not calls:
+            (root / relative).write_bytes(replacement)
+        calls.append(relative)
+        return captured
+
+    monkeypatch.setattr(frontend_selection, "_read_anchored_regular_metadata", mutate_after_first_read)
+    with pytest.raises(WorkspaceRefused) as refused:
+        _build(primary, selected_files=("src/eol.txt",))
+    assert refused.value.code == "SOURCE_CHANGED"
+
+
+def test_base_read_failure_refuses_instead_of_keeping_a_copy(registered, monkeypatch):
+    import subprocess
+    primary, _store, _identity = registered
+    run = subprocess.run
+
+    def time_out_listing(args, *rest, **kwargs):
+        if "ls-tree" in args:
+            raise subprocess.TimeoutExpired(args, 1)
+        return run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", time_out_listing)
+    with pytest.raises(WorkspaceRefused) as refused:
+        _build(primary, selected_files=("src/unrelated.txt",))
+    assert refused.value.code == "SOURCE_CHANGED"
+
+
+def test_line_ending_only_change_after_construction_refuses_at_snapshot(registered, tmp_path):
+    # The omitted selection has no copy entry to hash, so snapshot preparation
+    # must itself hold the source to the raw blob.
+    from run_state.workspace import snapshot_inputs
+    primary, _store, _identity = registered
+    source = _crlf_checkout_file(primary, checked_out=False)
+    selection = _build(primary, selected_files=("src/eol.txt",))
+    assert selection.entries == ()
+    source.write_bytes(b"one\r\ntwo\r\n")
+    assert _git("diff", "--quiet", "HEAD", "--", "src/eol.txt", cwd=primary, check=False).returncode == 0
+    with pytest.raises(WorkspaceRefused) as refused:
+        snapshot_inputs(primary, selection, tmp_path / "staging")
+    assert refused.value.code == "SOURCE_CHANGED"
+    assert not (tmp_path / "staging").exists()
+
+
+def _start(primary, tmp_path, value, run_id):
+    from test_m4_upstream_context_acceptance import _runtime_flags
+    from test_m4_workspace_acceptance import _cli, _env
+    manifest = tmp_path / (run_id + ".json")
+    manifest.write_text(json.dumps({"schema": "ffs.input-selection/v1", "upstream": UPSTREAM, **value}))
+    return _cli(primary.parent / "authority", primary, "start", "--skill", "fix",
+                "--objective", "omitted selection checkout", "--activity", "plan",
+                "--run-id", run_id, "--request-key", run_id + "-request",
+                "--selection-manifest", str(manifest), *_runtime_flags(), "--json", env=_env(tmp_path))
+
+
+def test_prepared_checkout_that_converts_an_omitted_selection_refuses(registered, tmp_path):
+    # With eol=crlf the prepared checkout writes CRLF, not the LF blob the
+    # selection omitted; preparation refuses instead of running on other bytes.
+    from test_m4_workspace_hardening import _track_planning_context
+    primary, _store, _identity = registered
+    _track_planning_context(primary)
+    _crlf_checkout_file(primary, checked_out=False)
+    selection = _build(primary, selected_files=("src/eol.txt",))
+    assert selection.entries == ()
+    result = _start(primary, tmp_path, {
+        "base_oid": selection.base_oid, "repository_id": selection.repository_id, "entries": [],
+        "required_context": [{"path": r.path, "reason": r.reason} for r in selection.required_context],
+    }, "frontend-eol")
+    assert result.returncode != 0
+    refusal = json.loads(result.stdout)
+    # Every preparation refusal publishes as a blocked, owned workspace.
+    assert (refusal["code"], refusal["workspace_state"]) == ("WORKSPACE_PREPARE_FAILED", "blocked")
+
+
+def test_marker_reason_on_a_copied_path_does_not_refuse_the_copy(registered, tmp_path):
+    from test_m4_workspace_hardening import _track_planning_context
+    primary, _store, _identity = registered
+    _track_planning_context(primary)
+    (primary / "src/unrelated.txt").write_bytes(b"operator copy\n")
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    [entry] = selection.entries
+    result = _start(primary, tmp_path, {
+        "base_oid": selection.base_oid, "repository_id": selection.repository_id,
+        "entries": [{"operation": "copy", "path": entry.path, "sha256": entry.sha256, "git_mode": entry.git_mode}],
+        "required_context": [{"path": entry.path, "reason": frontend_selection.SELECTED_UNCHANGED_REASON}],
+    }, "frontend-copied-marker")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_base_blob_is_read_only_when_its_size_matches(registered, monkeypatch):
+    import subprocess
+    primary, _store, _identity = registered
+    (primary / "src/unrelated.txt").write_bytes(b"x")
+    run, reads = subprocess.run, []
+
+    def record(args, *rest, **kwargs):
+        if "cat-file" in args and "blob" in args:
+            reads.append(args)
+        return run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", record)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert [e.path for e in selection.entries] == ["src/unrelated.txt"]
+    assert reads == []
+
+
+def test_filter_driver_is_never_run_during_construction(registered, tmp_path):
+    primary, _store, _identity = registered
+    (primary / ".gitattributes").write_text("src/unrelated.txt filter=probe\n")
+    _git("add", ".gitattributes", cwd=primary)
+    _git("commit", "-qm", "filter attribute", cwd=primary)
+    marker = tmp_path / "filter-ran"
+    for kind in ("smudge", "clean"):
+        _git("config", f"filter.probe.{kind}", f"touch {marker}; cat", cwd=primary)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert selection.entries == ()
+    assert not marker.exists()
+
+
 def test_clean_tracked_required_context_is_valid_without_overlay(registered):
     primary, store, _identity = registered
     before = _authority(store, primary)
@@ -203,6 +384,18 @@ def test_nested_directory_uses_repository_relative_anchor(registered):
 
 @pytest.fixture
 def retained_frontend(registered, tmp_path):
+    return _retain(registered, tmp_path, selected_files=("src/selected.sh",),
+                   required_context=("src/selected.sh",))
+
+
+@pytest.fixture
+def retained_clean_frontend(registered, tmp_path):
+    # F39: src/unrelated.txt is selected but identical to its base blob.
+    return _retain(registered, tmp_path, selected_files=("src/selected.sh", "src/unrelated.txt"),
+                   required_context=())
+
+
+def _retain(registered, tmp_path, *, selected_files, required_context):
     from test_m4_upstream_context_acceptance import _registered_runtime, _runtime_flags
     from test_m4_workspace_acceptance import _cli, _env
     from test_m4_workspace_hardening import _track_planning_context
@@ -211,8 +404,8 @@ def retained_frontend(registered, tmp_path):
     primary, store, _identity = registered
     _track_planning_context(primary)
     (primary / "src/selected.sh").write_bytes(b"retained explicit input\n")
-    selection = _build(primary, selected_files=("src/selected.sh",),
-                       deleted_files=("src/delete.txt",), required_context=("src/selected.sh",))
+    selection = _build(primary, selected_files=selected_files,
+                       deleted_files=("src/delete.txt",), required_context=required_context)
     manifest = tmp_path / "frontend-selection.json"
     # Serialize the public canonical selection projection, excluding capture locators.
     value = {
@@ -233,8 +426,8 @@ def retained_frontend(registered, tmp_path):
     runtime = UpstreamRuntime.from_manifest(json.loads(runtime_path.read_bytes()))
     runtime.verify()
     args = dict(state_root=primary.parent / "authority", run_id="frontend-retained",
-                selected_files=("src/selected.sh",), deleted_files=("src/delete.txt",),
-                required_context=("src/selected.sh",), upstream=UPSTREAM,
+                selected_files=selected_files, deleted_files=("src/delete.txt",),
+                required_context=required_context, upstream=UPSTREAM,
                 runtime=runtime, runtime_manifest_sha256=runtime_sha,
                 request_key="frontend-retained-request")
     return primary, store, selection, args
@@ -257,6 +450,23 @@ def test_resume_selection_uses_retained_material_without_current_source_or_head(
     assert resumed == original
     assert resumed.manifest_sha256 == original.manifest_sha256
     assert resumed.input_digest == original.input_digest
+    assert _authority(store, primary) == before
+
+
+def test_resume_maps_retained_unchanged_selection_back_to_explicit_paths(retained_clean_frontend):
+    primary, store, original, args = retained_clean_frontend
+    assert [e.path for e in original.entries if e.operation == "copy"] == ["src/selected.sh"]
+    assert [(r.path, r.reason) for r in original.required_context] == [
+        ("src/unrelated.txt", frontend_selection.SELECTED_UNCHANGED_REASON)]
+    before = _authority(store, primary)
+    resumed = resume_frontend_selection(primary, **args)
+    assert resumed == original
+    assert resumed.input_digest == original.input_digest
+    from run_state.upstream import UpstreamRefused
+    for changed in ({"selected_files": ("src/selected.sh",)},
+                    {"selected_files": ("src/selected.sh",), "required_context": ("src/unrelated.txt",)}):
+        with pytest.raises((UpstreamRefused, WorkspaceRefused)):
+            resume_frontend_selection(primary, **{**args, **changed})
     assert _authority(store, primary) == before
 
 
