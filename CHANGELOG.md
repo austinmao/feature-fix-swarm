@@ -16,17 +16,22 @@ all skills.
   only the overlay against base and omits unchanged files, so the candidate
   chain's first-wave digest comparison always refused
   (`FRONTEND_INTEGRATION_CHAIN_INVALID`). `build_frontend_selection` now
-  keeps a selected file as a `copy` entry only when its bytes or mode differ
-  from base; an unchanged one is retained as required context with the
-  reason `selected input unchanged at base` (prefixed to the operator's
-  reason when the path is also required context), which re-validates it as
-  unchanged and keeps it out of the digest. Resume maps those rows back to
-  the explicit `--select-file` paths, so old retained runs (which always
-  kept `copy` entries) and new ones both resume, and a changed path list
-  still refuses. A selected file that matched base when read and diverged
-  before validation still refuses `SOURCE_CHANGED`. Found by a live
-  operator E2E run (attempt 7) that reached the chain for the first time
-  after F38.
+  omits a selected file from the `copy` entries only when its bytes and mode
+  equal the raw base blob (`git cat-file blob`, read only after the listed
+  size and mode match, so no attribute, conversion or filter driver is
+  consulted); it is retained as required context with the reason
+  `selected input unchanged at base` (prefixed to the operator's reason when
+  the path is also required context) and kept out of the digest. Snapshot
+  validation holds the source to that blob, and snapshot application holds
+  the prepared checkout to it, so a line-ending-only source change refuses
+  `SOURCE_CHANGED` and a checkout that converts the blob (for example
+  `eol=crlf`) blocks the workspace (`WORKSPACE_PREPARE_FAILED`) instead of
+  running on bytes the selection did not name. A clean selected file that a
+  checkout converts keeps its `copy` entry, as before. Resume maps the marked
+  rows back to the explicit `--select-file` paths, so old retained runs
+  (which always kept `copy` entries) and new ones both resume, and a changed
+  path list still refuses. Found by a live operator E2E run (attempt 7) that
+  reached the chain for the first time after F38.
 
 ### Fixed (2026-09-27, spec-014 Release C: F38 wave execution bind hashes the live preparation)
 
