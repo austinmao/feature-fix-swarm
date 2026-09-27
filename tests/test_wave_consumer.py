@@ -703,3 +703,46 @@ def test_transient_unknown_requester_probe_is_retried(tmp_path, monkeypatch):
         reply = f.consumer(f.event)
     assert [item["status"] for item in reply["results"]] == ["complete"]
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("peer_alive", [True, False])
+def test_admitted_peer_collects_reply_after_orchestrator_exit(tmp_path, monkeypatch, peer_alive):
+    # F37b: admission still requires a live descendant of the live
+    # orchestrator. For delivery only, the same admitted peer incarnation may
+    # collect its reply after the orchestrator has exited.
+    import time
+    from process_identity import ProcessIdentity
+    pid_file = tmp_path / "peer.pid"
+    outer_command = (sys.executable, "-c",
+                     "import subprocess, sys, time\n"
+                     "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                     "open(sys.argv[1], 'w').write(str(p.pid))\n"
+                     "time.sleep(180)\n", str(pid_file))
+    peer = None
+    with wave_fixture(tmp_path, monkeypatch, plans=1, record=False, outer_command=outer_command) as f:
+        try:
+            deadline = time.monotonic() + 15
+            while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            peer = ProcessIdentity.from_pid(int(pid_file.read_text()))
+            event = f.channel._request(peer, f.message)["event_id"]
+            os.kill(f.outer.identity.pid, signal.SIGTERM)
+            f.outer.process.wait(timeout=5)
+            assert probe_identity(f.outer.identity) != LIVE
+            if peer_alive:
+                reply = f.consumer(event)
+                assert [item["status"] for item in reply["results"]] == ["complete"]
+                with f.store.read_transaction() as tx:
+                    assert tx.execute(
+                        "SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+                        (f.outer.activity_id, f"gsd-wave:{event}:reply"),
+                    ).fetchone() is not None
+            else:
+                os.kill(peer.pid, signal.SIGKILL)
+                while probe_identity(peer) == LIVE:
+                    time.sleep(0.01)
+                with pytest.raises(WorkerChannelRefused, match="IPC_DESCENDANT_ANCESTRY_MISMATCH"):
+                    f.consumer(event)
+        finally:
+            if peer is not None and probe_identity(peer) == LIVE:
+                os.kill(peer.pid, signal.SIGKILL)
