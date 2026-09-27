@@ -542,3 +542,35 @@ def test_planning_config_restore_event_precedes_the_write(tmp_path, monkeypatch)
             keys = [row[0] for row in tx.execute("SELECT idempotency_key FROM authority_event_keys")]
     assert [item["status"] for item in reply["results"]] == ["failed"]
     assert sum(key.endswith(":planning-config-restored") for key in keys) == 1
+
+
+def test_planning_config_replaced_by_a_directory_fails_only_that_plan(tmp_path, monkeypatch):
+    _with_planning_config(monkeypatch, tmp_path / "post-checkout-ran")
+    replace_with_directory = (
+        "import os\nfrom pathlib import Path\n"
+        "os.remove('.planning/config.json')\nos.mkdir('.planning/config.json')\n"
+        "Path('result-0.txt').write_text('done')\n"
+    )
+    with wave_fixture(tmp_path, monkeypatch, plans=1,
+                      commands=[(sys.executable, "-c", replace_with_directory)]) as f:
+        reply = f.consumer(f.event)
+    [result] = reply["results"]
+    assert result["status"] == "failed"
+    assert "WAVE_SCOPE_VIOLATION" in result["summary"]
+
+
+def test_planning_config_read_is_bounded_by_the_head_blob(tmp_path, monkeypatch):
+    import run_state.wave_consumer as consumer_module
+    _with_planning_config(monkeypatch, tmp_path / "post-checkout-ran")
+    original, bounds = consumer_module._read_anchored_regular_metadata, []
+
+    def record(root, relative, **kwargs):
+        bounds.append(kwargs.get("max_bytes"))
+        return original(root, relative, **kwargs)
+
+    monkeypatch.setattr(consumer_module, "_read_anchored_regular_metadata", record)
+    oversized = "import os\nfrom pathlib import Path\n" + _CONFIG_SET.replace("_auto_chain_active", "x" * 4096)
+    with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", oversized)]) as f:
+        reply = f.consumer(f.event)
+    assert [item["status"] for item in reply["results"]] == ["complete"]
+    assert bounds == [len('{"workflow": {}}\n')]

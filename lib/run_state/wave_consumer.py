@@ -88,7 +88,8 @@ def _planning_config_drift(workspace: Path, head: str, plan: dict, snapshot) -> 
     except WorkspaceRefused:
         return None
     try:
-        data, metadata = _read_anchored_regular_metadata(workspace, _PLANNING_CONFIG)
+        # Bounded by the HEAD blob: a larger file is drift without reading it.
+        data, metadata = _read_anchored_regular_metadata(workspace, _PLANNING_CONFIG, max_bytes=len(base[0]))
     except (OSError, WorkspaceRefused):
         return base
     return None if (data, "100755" if metadata.st_mode & stat.S_IXUSR else "100644") == base else base
@@ -992,10 +993,15 @@ class WaveConsumer:
                                     context.request_key + ":planning-config-restored",
                                     {"plan_id": context.plan["id"], "path": _PLANNING_CONFIG},
                                 )
-                            _atomic_snapshot_write(
-                                context.preparation.path, _PLANNING_CONFIG, restore[0],
-                                0o755 if restore[1] == "100755" else 0o644,
-                            )
+                            try:
+                                _atomic_snapshot_write(
+                                    context.preparation.path, _PLANNING_CONFIG, restore[0],
+                                    0o755 if restore[1] == "100755" else 0o644,
+                                )
+                            except OSError as error:
+                                # e.g. the worker left a directory there: the
+                                # undeclared path stays out of scope.
+                                raise WorkspaceRefused("WAVE_SCOPE_VIOLATION") from error
                         with productive_work(self.store, self.token, kind="harvest"):
                             harvested = harvest_scoped_patch(
                                 context.preparation.path,
