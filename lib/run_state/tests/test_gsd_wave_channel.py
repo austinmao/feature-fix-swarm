@@ -227,24 +227,27 @@ def test_delivery_to_admitted_peer_requires_a_dead_orchestrator(tmp_path, monkey
             server.assert_authorized_wave_peer(binding.intent_id, peer)
 
 
-
 @contextmanager
 def _file_channel_server(tmp_path):
-    """A real server with one registered file channel and a stubbed handler."""
+    """A real server whose file channels use a stubbed request handler."""
     workspace = tmp_path.resolve() / "workspace"
     workspace.mkdir()
     binding = _binding(workspace)
     with tempfile.TemporaryDirectory(prefix="ffs-lock-", dir="/tmp") as directory:
         server = WorkerChannelServer(_Store(), object(), Path(directory).resolve() / "worker.sock")
         server._verify_binding = lambda _tx, _binding: None
-        server._primary_bindings[binding.intent_id] = binding
-        channel = server.register_file_transport(binding.intent_id)
-        server.handled = []
-        server._request = lambda _peer, message: server.handled.append(message["operation"]) or {"ok": True}
+        server._request = lambda _peer, _message: {"ok": True}
         try:
-            yield server, binding, Path(channel["root"]), channel["capability"]
+            yield server, binding
         finally:
             server.close()
+
+
+def _register(server, binding, intent_id="intent"):
+    binding = replace(binding, intent_id=intent_id)
+    server._primary_bindings[intent_id] = binding
+    channel = server.register_file_transport(intent_id)
+    return binding, Path(channel["root"]), channel["capability"]
 
 
 def _file_request_file(root, capability, binding, operation, key):
@@ -259,38 +262,61 @@ def _file_request_file(root, capability, binding, operation, key):
     return root / "responses" / name
 
 
-def test_supervisor_lock_is_taken_once_when_a_wave_is_first_served(tmp_path):
-    # F37b: one held lock per wave-serving channel, not one per registration.
-    with _file_channel_server(tmp_path) as (server, binding, root, capability):
-        lock = root / "supervisor.lock"
-        assert not lock.exists()
-        _file_request_file(root, capability, binding, "progress", "progress-1")
-        assert server._serve_file_once()
-        assert not lock.exists()
-        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
-        assert server._serve_file_once()
-        held = dict(server._file_locks)
-        assert list(held) == [root]
-        assert not channel_module._supervisor_lock_released(root)
-        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-2")
-        assert server._serve_file_once()
-        assert dict(server._file_locks) == held
-        assert server.handled == ["progress", "gsd-wave-request", "gsd-wave-request"]
+def _held(root):
+    return (root / "supervisor.lock").is_file() and not channel_module._supervisor_lock_released(root)
+
+
+def test_supervisor_lock_is_held_from_registration(tmp_path):
+    # F37b: a client whose supervisor dies before its first pickup must
+    # still find the lock, so it exists from registration on.
+    with _file_channel_server(tmp_path) as (server, binding):
+        _binding, root, _capability = _register(server, binding)
+        assert _held(root)
     assert channel_module._supervisor_lock_released(root)
 
 
-def test_wave_is_refused_rather_than_served_without_its_lock(tmp_path):
-    with _file_channel_server(tmp_path) as (server, binding, root, capability):
-        (root / "supervisor.lock").write_text("")
-        response = _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
-        assert server._serve_file_once()
-        assert json.loads(response.read_text()) == {"ok": False, "code": "IPC_FILE_CHANNEL_UNSAFE"}
-        assert server.handled == []
+def test_registrations_on_one_filesystem_share_one_held_lock(tmp_path):
+    with _file_channel_server(tmp_path) as (server, binding):
+        roots = [_register(server, binding, f"intent-{index}")[1] for index in range(20)]
+        assert len(server._lock_fds) == 1
+        assert len({(root / "supervisor.lock").stat().st_ino for root in roots}) == 1
+        assert all(_held(root) for root in roots)
 
 
-def test_close_keeps_the_lock_while_a_wave_is_still_being_served(tmp_path):
-    # A waiting bridge must not see its supervisor gone before its reply.
-    with _file_channel_server(tmp_path) as (server, binding, root, capability):
+def test_other_filesystem_gets_its_own_held_lock(tmp_path, monkeypatch):
+    import errno
+
+    def cross_device(*_args, **_kwargs):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    with _file_channel_server(tmp_path) as (server, binding):
+        monkeypatch.setattr(channel_module.os, "link", cross_device)
+        _binding, root, _capability = _register(server, binding)
+        assert len(server._lock_fds) == 2
+        assert (root / "supervisor.lock").stat().st_ino != server._supervisor_lock.stat().st_ino
+        assert _held(root)
+
+
+def test_failed_lock_leaves_no_descriptor_and_refuses_registration(tmp_path, monkeypatch):
+    def refused(*_args, **_kwargs):
+        raise BlockingIOError("lock held elsewhere")
+
+    with _file_channel_server(tmp_path) as (server, binding):
+        before = len(os.listdir("/dev/fd"))
+        monkeypatch.setattr(channel_module.fcntl, "flock", refused)
+        with pytest.raises(WorkerChannelRefused, match="IPC_FILE_CHANNEL_UNSAFE"):
+            _register(server, binding)
+        monkeypatch.undo()
+        assert server._lock_fds == []
+        assert len(os.listdir("/dev/fd")) == before
+
+
+def test_lock_outlives_a_busy_close_until_the_reply_is_written(tmp_path):
+    # close() during a wave keeps the lock so the waiting bridge does not see
+    # its supervisor gone; the serving thread releases it once it has
+    # published that reply and stopped, so later clients are not stranded.
+    with _file_channel_server(tmp_path) as (server, binding):
+        binding, root, capability = _register(server, binding)
         entered, release = threading.Event(), threading.Event()
 
         def busy(_peer, _message):
@@ -300,15 +326,12 @@ def test_close_keeps_the_lock_while_a_wave_is_still_being_served(tmp_path):
 
         server._request = busy
         server.start()
-        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
+        response = _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
         assert entered.wait(timeout=10)
         server.close()
-        try:
-            assert server._thread.is_alive()
-            assert not channel_module._supervisor_lock_released(root)
-        finally:
-            release.set()
-            server._thread.join(timeout=10)
-            for held in dict(server._file_locks).values():
-                os.close(held)
-            server._file_locks.clear()
+        assert server._thread.is_alive()
+        assert _held(root)
+        release.set()
+        server._thread.join(timeout=10)
+        assert json.loads(response.read_text()) == {"ok": True}
+        assert channel_module._supervisor_lock_released(root)
