@@ -44,10 +44,15 @@ all skills.
     Each file channel it registers hard-links that file in as
     `supervisor.lock`, so every channel shares one held lock (flock is per
     inode); a channel on another filesystem gets one held lock per device.
-    A registration whose lock cannot be created, linked or taken is refused
-    with `IPC_FILE_CHANNEL_UNSAFE` and leaves nothing open. Closing the
-    channel while a wave is still being served keeps the lock until that
-    reply is written, then the serving thread releases it as it stops.
+    A link is kept only if it names the very inode the supervisor holds; a
+    lock path that was removed or replaced by another file gets a fresh held
+    lock instead, and an old per-device lock no channel links any more is
+    released. A registration whose lock cannot be created, linked or taken
+    is refused with `IPC_FILE_CHANNEL_UNSAFE` and leaves nothing open.
+    Closing the channel while a wave is still being served keeps the lock
+    until that reply is written; the serving thread then releases it and
+    removes the lock file beside the socket as it stops, so a new server at
+    the same endpoint can register.
     About once a second the waiting request probes the supervisor named in
     its scope and tries a non-blocking lock on that file; it fails with
     `IPC_SUPERVISOR_GONE` once the supervisor probes dead or the lock can be

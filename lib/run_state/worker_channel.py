@@ -329,7 +329,8 @@ class WorkerChannelServer:
         # even when this process only probes UNKNOWN from its PID namespace.
         # A root on another filesystem gets one held lock per device.
         self._supervisor_lock: Path | None = None
-        self._device_locks: dict[int, Path] = {}
+        self._master_fd: int | None = None
+        self._device_locks: dict[int, tuple[Path, int]] = {}
         self._lock_fds: list[int] = []
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -576,7 +577,7 @@ class WorkerChannelServer:
         # supervisor cannot probe; record the orchestrator, as before F37b.
         return requester if requester.host_id == binding.identity.host_id else binding.identity
 
-    def _held_lock(self, path: Path) -> None:
+    def _held_lock(self, path: Path) -> int:
         """Create a lock file and hold LOCK_EX on it for this server's life.
 
         os.open descriptors are non-inheritable, so no spawned process keeps
@@ -590,28 +591,52 @@ class WorkerChannelServer:
             path.unlink(missing_ok=True)
             raise
         self._lock_fds.append(held)
+        return held
 
     def _link_supervisor_lock(self, root: Path, device: int) -> None:
-        """Link the held supervisor lock into a new root (caller holds _lock)."""
+        """Link the held supervisor lock into a new root (caller holds _lock).
+
+        A source path is trusted only while it still names the inode this
+        server holds: a replaced file would let a client see a live
+        supervisor as gone.
+        """
         if self._supervisor_lock is None:
             master = self.endpoint.with_name(self.endpoint.name + ".lock")
-            self._held_lock(master)
+            self._master_fd = self._held_lock(master)
             self._supervisor_lock = master
+        source, held = self._device_locks.get(device, (self._supervisor_lock, self._master_fd))
         target = root / _SUPERVISOR_LOCK
         try:
-            os.link(self._device_locks.get(device, self._supervisor_lock), target,
-                    follow_symlinks=False)
+            os.link(source, target, follow_symlinks=False)
         except OSError as error:
-            # EXDEV: another filesystem holds its own lock. ENOENT on a device
-            # lock: the root holding it was removed, so hold a fresh one.
-            if error.errno != errno.EXDEV and not (error.errno == errno.ENOENT
-                                                   and device in self._device_locks):
+            # EXDEV: another filesystem needs its own lock. ENOENT: the file
+            # holding it was removed (a finished worktree's root).
+            if error.errno not in (errno.EXDEV, errno.ENOENT):
                 raise
-            self._held_lock(target)
-            self._device_locks[device] = target
+        else:
+            linked, expected = target.lstat(), os.fstat(held)
+            if (linked.st_dev, linked.st_ino) == (expected.st_dev, expected.st_ino):
+                return
+            target.unlink()
+        fresh = self._held_lock(target)
+        previous = self._device_locks.get(device)
+        self._device_locks[device] = (target, fresh)
+        if previous is not None and os.fstat(previous[1]).st_nlink == 0:
+            # No channel links the old inode any more, so no client probes it.
+            self._lock_fds.remove(previous[1])
+            os.close(previous[1])
 
-    def _release_supervisor_locks(self) -> None:
+    def _release_supervisor_locks(self, *, remove_master: bool) -> None:
+        """Idempotent: close every held lock, first removing the master file
+        while its path still names the inode this server holds."""
         with self._lock:
+            if remove_master and self._master_fd in self._lock_fds:
+                try:
+                    named, held = self._supervisor_lock.lstat(), os.fstat(self._master_fd)
+                    if (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino):
+                        self._supervisor_lock.unlink()
+                except OSError:
+                    pass  # the descriptors below must still be released
             while self._lock_fds:
                 os.close(self._lock_fds.pop())
 
@@ -1020,7 +1045,7 @@ class WorkerChannelServer:
             finally:
                 # Stopped after publishing its last reply: a busy close()
                 # left the supervisor locks held for exactly that reply.
-                self._release_supervisor_locks()
+                self._release_supervisor_locks(remove_master=self._stop.is_set())
 
         self._thread = threading.Thread(target=serve, name="ffs-worker-requests", daemon=True)
         self._thread.start()
@@ -1040,9 +1065,7 @@ class WorkerChannelServer:
             self._broker_bootstrap_intents.clear()
             self._file_bindings.clear()
         if stopped:
-            self._release_supervisor_locks()
-            if self._supervisor_lock is not None:
-                self._supervisor_lock.unlink(missing_ok=True)
+            self._release_supervisor_locks(remove_master=True)
         parent = self.endpoint.parent
         try:
             if ((parent.stat().st_dev, parent.stat().st_ino) == self._parent_identity
