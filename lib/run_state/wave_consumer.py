@@ -14,6 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 import threading
 import time
 from typing import Callable
@@ -43,7 +44,10 @@ from .worker_channel import (
 from .workspace import (
     WorkspacePreparation,
     WorkspaceRefused,
+    _atomic_snapshot_write,
+    _base_entry_material,
     _git,
+    _read_anchored_regular_metadata,
     begin_child_workspace_preparation,
     inspect_workspace,
     prepare_workspace,
@@ -54,15 +58,20 @@ from .workspace import (
 _PLANNING_CONFIG = ".planning/config.json"
 
 
-def _restore_planning_config(workspace: Path, head: str, plan: dict, snapshot) -> bool:
-    """Reset an undeclared GSD config edit in one worker's workspace to HEAD (F40).
+def _planning_config_drift(workspace: Path, head: str, plan: dict, snapshot) -> tuple[bytes, str] | None:
+    """HEAD bytes and mode for an undeclared GSD config edit in one worker's workspace (F40).
 
     GSD bookkeeping (``config-set``) rewrites the tracked config with a
     temp-file rename, so no file mode stops it, and the edit is never plan
-    output; left alone, the scope check refuses the whole plan. A declared or
-    overlaid config, or one HEAD does not track, is left to that check.
-    Returns whether the file was reset.
+    output; left alone, the scope check refuses the whole plan. The file's
+    actual bytes are compared with the raw HEAD blob, so index flags cannot
+    hide an edit, and the caller restores them with a no-follow write rather
+    than ``git checkout`` (no hook or filter runs). A declared or overlaid
+    config, or one HEAD does not track as a regular file, is left to that
+    check. Returns None when there is nothing to restore.
     """
+    # ponytail: raw-blob compare; a checkout that converted line endings reads
+    # as drift and is rewritten as the blob, which Git's scope diff treats as clean.
     declared = (*plan.get("files_modified", ()), *plan.get("files_deleted", ()))
     overlaid = snapshot is not None and any(
         entry.path == _PLANNING_CONFIG for entry in snapshot.selection.entries
@@ -72,10 +81,17 @@ def _restore_planning_config(workspace: Path, head: str, plan: dict, snapshot) -
         _PLANNING_CONFIG in declared
         or overlaid
         or _git(workspace, "cat-file", "-e", f"{head}:{_PLANNING_CONFIG}", check=False).returncode
-        or not _git(workspace, "diff", "--quiet", head, "--", _PLANNING_CONFIG, check=False).returncode
     ):
-        return False
-    return not _git(workspace, "checkout", head, "--", _PLANNING_CONFIG, check=False).returncode
+        return None
+    try:
+        base = _base_entry_material(workspace, head, _PLANNING_CONFIG)
+    except WorkspaceRefused:
+        return None
+    try:
+        data, metadata = _read_anchored_regular_metadata(workspace, _PLANNING_CONFIG)
+    except (OSError, WorkspaceRefused):
+        return base
+    return None if (data, "100755" if metadata.st_mode & stat.S_IXUSR else "100644") == base else base
 
 
 def _canonical(value):
@@ -963,9 +979,12 @@ class WaveConsumer:
                         # immutable staging step; recheck it immediately before
                         # the later terminal publication.
                         check()
-                        if _restore_planning_config(
+                        restore = _planning_config_drift(
                             context.preparation.path, manifest["initial_head"], context.plan, snapshot,
-                        ):
+                        )
+                        if restore is not None:
+                            # The event precedes the write so a crash between
+                            # them keeps the audit record; both repeat safely.
                             with self.store.transaction() as tx:
                                 guard(tx)
                                 self.store._record_event_once_tx(
@@ -973,6 +992,10 @@ class WaveConsumer:
                                     context.request_key + ":planning-config-restored",
                                     {"plan_id": context.plan["id"], "path": _PLANNING_CONFIG},
                                 )
+                            _atomic_snapshot_write(
+                                context.preparation.path, _PLANNING_CONFIG, restore[0],
+                                0o755 if restore[1] == "100755" else 0o644,
+                            )
                         with productive_work(self.store, self.token, kind="harvest"):
                             harvested = harvest_scoped_patch(
                                 context.preparation.path,

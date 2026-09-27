@@ -143,8 +143,8 @@ _MANAGED_PROMPT_REFUSALS = {
 _WAVE_REFUSALS = {
     "WAVE_EXECUTION_REFUSED": (
         "a supervised GSD wave was refused or one of its plans did not complete; "
-        "the wave reply in the run evidence names each plan's reason",
-        "inspect_wave_reply"),
+        "the wave's refusal or reply event in the run evidence names the reason",
+        "inspect_wave_outcome"),
     "WAVE_EXECUTION_UNPROVEN": (
         "the outer run ended without a verified reply for every supervised GSD wave it requested",
         "inspect_wave_evidence"),
