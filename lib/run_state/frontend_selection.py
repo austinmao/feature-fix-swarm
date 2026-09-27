@@ -12,7 +12,7 @@ from run_state.selection import InputSelection
 from run_state.workspace import (
     SELECTED_UNCHANGED_REASON,
     WorkspaceRefused,
-    _base_blob_material,
+    _base_blob_matches,
     _base_entry_material,
     _git,
     _read_anchored_regular_metadata,
@@ -78,7 +78,7 @@ def build_frontend_selection(
             if entry.operation == "copy":
                 data, metadata = _read_anchored_regular_metadata(repository, entry.path)
                 mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
-                if _base_blob_material(repository, base, entry.path) == (data, mode):
+                if _base_blob_matches(repository, base, entry.path, data, mode):
                     unchanged.add(entry.path)
                     continue
             else:

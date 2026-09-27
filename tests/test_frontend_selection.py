@@ -242,32 +242,66 @@ def test_line_ending_only_change_after_construction_refuses_at_snapshot(register
     assert not (tmp_path / "staging").exists()
 
 
+def _start(primary, tmp_path, value, run_id):
+    from test_m4_upstream_context_acceptance import _runtime_flags
+    from test_m4_workspace_acceptance import _cli, _env
+    manifest = tmp_path / (run_id + ".json")
+    manifest.write_text(json.dumps({"schema": "ffs.input-selection/v1", "upstream": UPSTREAM, **value}))
+    return _cli(primary.parent / "authority", primary, "start", "--skill", "fix",
+                "--objective", "omitted selection checkout", "--activity", "plan",
+                "--run-id", run_id, "--request-key", run_id + "-request",
+                "--selection-manifest", str(manifest), *_runtime_flags(), "--json", env=_env(tmp_path))
+
+
 def test_prepared_checkout_that_converts_an_omitted_selection_refuses(registered, tmp_path):
     # With eol=crlf the prepared checkout writes CRLF, not the LF blob the
     # selection omitted; preparation refuses instead of running on other bytes.
-    from test_m4_upstream_context_acceptance import _runtime_flags
-    from test_m4_workspace_acceptance import _cli, _env
     from test_m4_workspace_hardening import _track_planning_context
     primary, _store, _identity = registered
     _track_planning_context(primary)
     _crlf_checkout_file(primary, checked_out=False)
     selection = _build(primary, selected_files=("src/eol.txt",))
     assert selection.entries == ()
-    manifest = tmp_path / "frontend-selection.json"
-    manifest.write_text(json.dumps({
-        "schema": "ffs.input-selection/v1", "base_oid": selection.base_oid,
-        "repository_id": selection.repository_id, "entries": [],
+    result = _start(primary, tmp_path, {
+        "base_oid": selection.base_oid, "repository_id": selection.repository_id, "entries": [],
         "required_context": [{"path": r.path, "reason": r.reason} for r in selection.required_context],
-        "upstream": UPSTREAM,
-    }))
-    result = _cli(primary.parent / "authority", primary, "start", "--skill", "fix",
-                  "--objective", "omitted selection checkout", "--activity", "plan",
-                  "--run-id", "frontend-eol", "--request-key", "frontend-eol-request",
-                  "--selection-manifest", str(manifest), *_runtime_flags(), "--json", env=_env(tmp_path))
+    }, "frontend-eol")
     assert result.returncode != 0
     refusal = json.loads(result.stdout)
     # Every preparation refusal publishes as a blocked, owned workspace.
     assert (refusal["code"], refusal["workspace_state"]) == ("WORKSPACE_PREPARE_FAILED", "blocked")
+
+
+def test_marker_reason_on_a_copied_path_does_not_refuse_the_copy(registered, tmp_path):
+    from test_m4_workspace_hardening import _track_planning_context
+    primary, _store, _identity = registered
+    _track_planning_context(primary)
+    (primary / "src/unrelated.txt").write_bytes(b"operator copy\n")
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    [entry] = selection.entries
+    result = _start(primary, tmp_path, {
+        "base_oid": selection.base_oid, "repository_id": selection.repository_id,
+        "entries": [{"operation": "copy", "path": entry.path, "sha256": entry.sha256, "git_mode": entry.git_mode}],
+        "required_context": [{"path": entry.path, "reason": frontend_selection.SELECTED_UNCHANGED_REASON}],
+    }, "frontend-copied-marker")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_base_blob_is_read_only_when_its_size_matches(registered, monkeypatch):
+    import subprocess
+    primary, _store, _identity = registered
+    (primary / "src/unrelated.txt").write_bytes(b"x")
+    run, reads = subprocess.run, []
+
+    def record(args, *rest, **kwargs):
+        if "cat-file" in args and "blob" in args:
+            reads.append(args)
+        return run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", record)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert [e.path for e in selection.entries] == ["src/unrelated.txt"]
+    assert reads == []
 
 
 def test_filter_driver_is_never_run_during_construction(registered, tmp_path):

@@ -2256,11 +2256,13 @@ def _remove_new_capture(staging: Path, parent: Path, *, parent_created: bool) ->
 SELECTED_UNCHANGED_REASON = "selected input unchanged at base"
 
 
-def _base_blob_material(repository: Path, base: str, path: str) -> tuple[bytes, str] | None:
-    """Raw blob bytes and mode of ``path`` at ``base``, or None when it is no regular file there.
+def _base_blob_matches(repository: Path, base: str, path: str, data: bytes, mode: str) -> bool:
+    """Whether ``data`` and ``mode`` are exactly the raw blob of ``path`` at ``base``.
 
     Reads the object itself, so no attribute, conversion or filter driver is
-    consulted. A Git failure refuses instead of reading as absence.
+    consulted, and only after the listed size matches, so the read is bounded
+    by ``data``. A path that is no regular file at ``base`` does not match. A
+    Git failure refuses instead of reading as a mismatch.
     """
     def git(*args: str) -> bytes:
         try:
@@ -2272,11 +2274,12 @@ def _base_blob_material(repository: Path, base: str, path: str) -> tuple[bytes, 
             raise WorkspaceRefused("SOURCE_CHANGED")
         return done.stdout
 
-    header, _, listed = git("ls-tree", "-z", base, "--", path).rstrip(b"\0").partition(b"\t")
+    header, _, listed = git("ls-tree", "-l", "-z", base, "--", path).rstrip(b"\0").partition(b"\t")
     fields = header.split()
-    if listed != path.encode() or len(fields) != 3 or fields[1] != b"blob" or fields[0] not in {b"100644", b"100755"}:
-        return None
-    return git("cat-file", "blob", fields[2].decode()), fields[0].decode()
+    if (listed != path.encode() or len(fields) != 4 or fields[1] != b"blob"
+            or fields[0] != mode.encode() or fields[3] != str(len(data)).encode()):
+        return False
+    return git("cat-file", "blob", fields[2].decode()) == data
 
 
 def _unchanged_selection_holds(root: Path, repository: Path, base: str, path: str) -> bool:
@@ -2286,7 +2289,7 @@ def _unchanged_selection_holds(root: Path, repository: Path, base: str, path: st
     except (OSError, WorkspaceRefused):
         return False
     mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
-    return _base_blob_material(repository, base, path) == (data, mode)
+    return _base_blob_matches(repository, base, path, data, mode)
 
 
 def validate_selected_inputs(primary: Path, selection: InputSelection) -> dict[str, bytes]:
@@ -2605,14 +2608,15 @@ def _apply_input_snapshot_locked(
             data,
             0o755 if entry["git_mode"] == "100755" else 0o644,
         )
-    if preparation.base_commit == manifest["base_oid"]:
-        # A checkout may convert a blob (eol, ident, encoding); an omitted
-        # selection is valid only where the prepared bytes are the blob itself.
-        for required in manifest["required_context"]:
-            if required["reason"].startswith(SELECTED_UNCHANGED_REASON) and not _unchanged_selection_holds(
-                preparation.path, preparation.path, preparation.base_commit, required["path"],
-            ):
-                raise WorkspaceRefused("SOURCE_CHANGED")
+    # A checkout may convert a blob (eol, ident, encoding), and a child may be
+    # prepared from another base; an omitted selection is valid only where the
+    # prepared bytes are the selection base's blob itself.
+    copied = {entry["path"] for entry in manifest["entries"]}
+    for required in manifest["required_context"]:
+        if (required["reason"].startswith(SELECTED_UNCHANGED_REASON) and required["path"] not in copied
+                and not _unchanged_selection_holds(
+                    preparation.path, preparation.path, manifest["base_oid"], required["path"])):
+            raise WorkspaceRefused("SOURCE_CHANGED")
     receipt = {
         "schema": "ffs.input-snapshot-completion/v1",
         "repository_id": preparation.repository_id,
