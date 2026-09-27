@@ -18,10 +18,10 @@ index c3f5473..187a9ba 100755
    }
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 0000000..a2612b9
+index 0000000..5d97693
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,429 @@
+@@ -0,0 +1,438 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -318,9 +318,10 @@ index 0000000..a2612b9
 +// not; it never removes a name it did not create. The manifest's directory
 +// is fsynced once the link succeeds so the new directory entry is durable,
 +// mirroring what `publish()` does for the result and receipt files below.
-+// If the removal fails after a successful link, the directory is still
-+// fsynced and the writer then fails, naming the leftover file, instead of
-+// reporting success; after an earlier failure, the earlier error is the one
++// If the removal fails after a successful link, the directory fsync is
++// still attempted, and the writer then fails instead of reporting success;
++// its message names the leftover file and, if the fsync also failed, the
++// fsync error. After an earlier failure, the earlier error is the one
 +// reported.
 +async function writeManifestFromStdin(targetPath) {
 +  const raw = await readStdinBounded(MAX_WRITE_MANIFEST_RAW_BYTES);
@@ -377,14 +378,22 @@ index 0000000..a2612b9
 +  if (primaryError) throw primaryError;
 +  // The link succeeded: make the published entry durable even if cleanup
 +  // failed, then report the cleanup failure.
-+  const directoryFd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
++  let fsyncError = null;
 +  try {
-+    fs.fsyncSync(directoryFd);
-+  } finally {
-+    fs.closeSync(directoryFd);
++    const directoryFd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
++    try {
++      fs.fsyncSync(directoryFd);
++    } finally {
++      fs.closeSync(directoryFd);
++    }
++  } catch (error) {
++    fsyncError = error;
 +  }
-+  if (cleanupError) {
-+    throw new Error(`manifest was written to ${targetPath}, but its temporary file ${temporaryPath} could not be removed: ${cleanupError.message}`);
++  const failures = [];
++  if (fsyncError) failures.push(`its directory could not be fsynced: ${fsyncError.message}`);
++  if (cleanupError) failures.push(`its temporary file ${temporaryPath} could not be removed: ${cleanupError.message}`);
++  if (failures.length) {
++    throw new Error(`manifest was linked at ${targetPath}, but ${failures.join('; and ')}`);
 +  }
 +}
 +

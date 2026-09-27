@@ -27,10 +27,11 @@ all skills.
   path or a symlink there is refused (`EEXIST`) rather than overwritten or
   followed. The temp file has a short name of its own, and the writer attempts
   to remove it afterwards only if it created it. The manifest's directory is
-  fsynced once the link succeeds; if the temp-file removal fails after a
-  successful link, the directory is still fsynced and the writer then exits
-  nonzero and names the leftover file rather than reporting success. It
-  writes nothing on invalid
+  fsynced after any successful link, even if the temp-file removal failed.
+  If that fsync or the removal fails, the writer exits nonzero rather than
+  reporting success, and its message names each failure, including the
+  leftover file's path when the removal failed. It writes nothing on
+  invalid
   JSON, input that is not valid UTF-8, raw input over 64 KiB, a canonical form
   over 16 KiB, a manifest that fails validation, an already-existing target
   path, or a symlink target. The `--manifest`/`--output` path is unchanged,
@@ -55,7 +56,8 @@ all skills.
   caught that the first cleanup fix threw before the directory fsync, so a
   linked manifest could be left without a durable directory entry; the
   fsync now runs after any successful link, before the cleanup failure is
-  reported. Pinned hashes for the patched doc, the new
+  reported, and a failed fsync no longer hides a cleanup failure: both are
+  named in one message. Pinned hashes for the patched doc, the new
   adapter file, and the patch file itself were regenerated in
   `lib/ffs_installer.py` and `tests/verification/test_gsd114_compatibility_patch.py`.
 
