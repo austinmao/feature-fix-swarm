@@ -196,6 +196,13 @@ def test_supervisor_lock_is_not_inherited_by_spawned_processes(tmp_path):
         spawned = None
         try:
             channel = server.register_file_transport(handle.intent_id)
+            # The lock is taken when the channel first serves a wave request;
+            # this one is refused later, by admission, but still takes it.
+            scope = server._primary_bindings[handle.intent_id].scope()
+            refused = file_request(channel["root"], channel["capability"], scope,
+                                   request_key="wave-lock", operation="gsd-wave-request",
+                                   body={}, timeout=5)
+            assert refused["ok"] is False
             spawned = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"],
                                        close_fds=False)
             lock = os.open(Path(channel["root"]) / "supervisor.lock", os.O_RDONLY)

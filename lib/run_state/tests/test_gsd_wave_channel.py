@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -224,3 +225,90 @@ def test_delivery_to_admitted_peer_requires_a_dead_orchestrator(tmp_path, monkey
     else:
         with pytest.raises(WorkerChannelRefused, match="IPC_DESCENDANT_ANCESTRY_MISMATCH"):
             server.assert_authorized_wave_peer(binding.intent_id, peer)
+
+
+
+@contextmanager
+def _file_channel_server(tmp_path):
+    """A real server with one registered file channel and a stubbed handler."""
+    workspace = tmp_path.resolve() / "workspace"
+    workspace.mkdir()
+    binding = _binding(workspace)
+    with tempfile.TemporaryDirectory(prefix="ffs-lock-", dir="/tmp") as directory:
+        server = WorkerChannelServer(_Store(), object(), Path(directory).resolve() / "worker.sock")
+        server._verify_binding = lambda _tx, _binding: None
+        server._primary_bindings[binding.intent_id] = binding
+        channel = server.register_file_transport(binding.intent_id)
+        server.handled = []
+        server._request = lambda _peer, message: server.handled.append(message["operation"]) or {"ok": True}
+        try:
+            yield server, binding, Path(channel["root"]), channel["capability"]
+        finally:
+            server.close()
+
+
+def _file_request_file(root, capability, binding, operation, key):
+    message = {"schema_version": 1, **binding.scope(), "request_key": key,
+               "operation": operation, "body": {}}
+    name = key + ".json"
+    descriptor = os.open(root / "requests" / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, channel_module._canonical({"capability": capability, "message": message}))
+    finally:
+        os.close(descriptor)
+    return root / "responses" / name
+
+
+def test_supervisor_lock_is_taken_once_when_a_wave_is_first_served(tmp_path):
+    # F37b: one held lock per wave-serving channel, not one per registration.
+    with _file_channel_server(tmp_path) as (server, binding, root, capability):
+        lock = root / "supervisor.lock"
+        assert not lock.exists()
+        _file_request_file(root, capability, binding, "progress", "progress-1")
+        assert server._serve_file_once()
+        assert not lock.exists()
+        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
+        assert server._serve_file_once()
+        held = dict(server._file_locks)
+        assert list(held) == [root]
+        assert not channel_module._supervisor_lock_released(root)
+        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-2")
+        assert server._serve_file_once()
+        assert dict(server._file_locks) == held
+        assert server.handled == ["progress", "gsd-wave-request", "gsd-wave-request"]
+    assert channel_module._supervisor_lock_released(root)
+
+
+def test_wave_is_refused_rather_than_served_without_its_lock(tmp_path):
+    with _file_channel_server(tmp_path) as (server, binding, root, capability):
+        (root / "supervisor.lock").write_text("")
+        response = _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
+        assert server._serve_file_once()
+        assert json.loads(response.read_text()) == {"ok": False, "code": "IPC_FILE_CHANNEL_UNSAFE"}
+        assert server.handled == []
+
+
+def test_close_keeps_the_lock_while_a_wave_is_still_being_served(tmp_path):
+    # A waiting bridge must not see its supervisor gone before its reply.
+    with _file_channel_server(tmp_path) as (server, binding, root, capability):
+        entered, release = threading.Event(), threading.Event()
+
+        def busy(_peer, _message):
+            entered.set()
+            release.wait(timeout=30)
+            return {"ok": True}
+
+        server._request = busy
+        server.start()
+        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
+        assert entered.wait(timeout=10)
+        server.close()
+        try:
+            assert server._thread.is_alive()
+            assert not channel_module._supervisor_lock_released(root)
+        finally:
+            release.set()
+            server._thread.join(timeout=10)
+            for held in dict(server._file_locks).values():
+                os.close(held)
+            server._file_locks.clear()
