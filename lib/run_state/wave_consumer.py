@@ -50,6 +50,24 @@ from .workspace import (
 )
 
 
+_PLANNING_CONFIG = ".planning/config.json"
+
+
+def _freeze_planning_config(workspace: Path, plan: dict) -> None:
+    """Make an undeclared GSD config read-only in one worker's own workspace.
+
+    A worker running GSD bookkeeping (``config-set``) would otherwise rewrite
+    it outside the plan's declared files and the harvest would refuse the
+    whole plan. Git records only the executable bit, so the scope inventory
+    sees no change; symlinks are left alone.
+    """
+    if _PLANNING_CONFIG in plan.get("files_modified", ()):
+        return
+    path = Path(workspace) / _PLANNING_CONFIG
+    if not path.is_symlink() and path.is_file():
+        path.chmod(0o444)
+
+
 def _canonical(value):
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -660,6 +678,7 @@ class WaveConsumer:
                 )
                 check()
                 request = self.prepare_child(context)
+                _freeze_planning_config(ready.path, plan)
                 with self.store.transaction() as tx:
                     guard(tx)
                     child = tx.execute(
