@@ -185,12 +185,13 @@ def _file_channel_from_environment() -> tuple[str, str] | None:
 
 
 def _self_identity():
-    """Name this bridge as the wave requester; if it cannot be captured the
-    channel falls back to recording the orchestrator, as before F37b."""
+    """Name this bridge as the wave requester. A sandbox that hides the boot
+    session (Codex's macOS seatbelt) leaves only the pid, which the
+    supervisor captures itself (F41)."""
     try:
         return ProcessIdentity.current()
     except ProcessLookupError:
-        return None
+        return {"pid": os.getpid()}
 
 
 def _strict_scope(pairs):
