@@ -136,6 +136,32 @@ def test_required_context_cannot_be_silently_omitted(registered, kind):
     assert _authority(store, primary) == before
 
 
+def test_clean_selected_file_normalizes_to_overlay_form(registered):
+    # F39: a selected file identical to its base blob is not overlay material,
+    # so the sealed digest must equal the empty overlay a wave capture records.
+    primary, store, _identity = registered
+    before = _authority(store, primary)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert selection.entries == ()
+    assert [(r.path, r.reason) for r in selection.required_context] == [
+        ("src/unrelated.txt", frontend_selection.SELECTED_UNCHANGED_REASON)]
+    assert selection.input_digest == _build(primary).input_digest
+    both = _build(primary, selected_files=("src/unrelated.txt",), required_context=("src/unrelated.txt",))
+    assert both.entries == ()
+    assert [(r.path, r.reason) for r in both.required_context] == [
+        ("src/unrelated.txt", frontend_selection.SELECTED_UNCHANGED_REASON + "; frontend bootstrap context")]
+    assert _authority(store, primary) == before
+
+
+def test_selected_file_differing_from_base_only_in_mode_stays_overlay(registered):
+    primary, _store, _identity = registered
+    (primary / "src/unrelated.txt").chmod(0o755)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert [(e.operation, e.path, e.git_mode) for e in selection.entries] == [
+        ("copy", "src/unrelated.txt", "100755")]
+    assert selection.required_context == ()
+
+
 def test_clean_tracked_required_context_is_valid_without_overlay(registered):
     primary, store, _identity = registered
     before = _authority(store, primary)
@@ -203,6 +229,18 @@ def test_nested_directory_uses_repository_relative_anchor(registered):
 
 @pytest.fixture
 def retained_frontend(registered, tmp_path):
+    return _retain(registered, tmp_path, selected_files=("src/selected.sh",),
+                   required_context=("src/selected.sh",))
+
+
+@pytest.fixture
+def retained_clean_frontend(registered, tmp_path):
+    # F39: src/unrelated.txt is selected but identical to its base blob.
+    return _retain(registered, tmp_path, selected_files=("src/selected.sh", "src/unrelated.txt"),
+                   required_context=())
+
+
+def _retain(registered, tmp_path, *, selected_files, required_context):
     from test_m4_upstream_context_acceptance import _registered_runtime, _runtime_flags
     from test_m4_workspace_acceptance import _cli, _env
     from test_m4_workspace_hardening import _track_planning_context
@@ -211,8 +249,8 @@ def retained_frontend(registered, tmp_path):
     primary, store, _identity = registered
     _track_planning_context(primary)
     (primary / "src/selected.sh").write_bytes(b"retained explicit input\n")
-    selection = _build(primary, selected_files=("src/selected.sh",),
-                       deleted_files=("src/delete.txt",), required_context=("src/selected.sh",))
+    selection = _build(primary, selected_files=selected_files,
+                       deleted_files=("src/delete.txt",), required_context=required_context)
     manifest = tmp_path / "frontend-selection.json"
     # Serialize the public canonical selection projection, excluding capture locators.
     value = {
@@ -233,8 +271,8 @@ def retained_frontend(registered, tmp_path):
     runtime = UpstreamRuntime.from_manifest(json.loads(runtime_path.read_bytes()))
     runtime.verify()
     args = dict(state_root=primary.parent / "authority", run_id="frontend-retained",
-                selected_files=("src/selected.sh",), deleted_files=("src/delete.txt",),
-                required_context=("src/selected.sh",), upstream=UPSTREAM,
+                selected_files=selected_files, deleted_files=("src/delete.txt",),
+                required_context=required_context, upstream=UPSTREAM,
                 runtime=runtime, runtime_manifest_sha256=runtime_sha,
                 request_key="frontend-retained-request")
     return primary, store, selection, args
@@ -257,6 +295,23 @@ def test_resume_selection_uses_retained_material_without_current_source_or_head(
     assert resumed == original
     assert resumed.manifest_sha256 == original.manifest_sha256
     assert resumed.input_digest == original.input_digest
+    assert _authority(store, primary) == before
+
+
+def test_resume_maps_retained_unchanged_selection_back_to_explicit_paths(retained_clean_frontend):
+    primary, store, original, args = retained_clean_frontend
+    assert [e.path for e in original.entries if e.operation == "copy"] == ["src/selected.sh"]
+    assert [(r.path, r.reason) for r in original.required_context] == [
+        ("src/unrelated.txt", frontend_selection.SELECTED_UNCHANGED_REASON)]
+    before = _authority(store, primary)
+    resumed = resume_frontend_selection(primary, **args)
+    assert resumed == original
+    assert resumed.input_digest == original.input_digest
+    from run_state.upstream import UpstreamRefused
+    for changed in ({"selected_files": ("src/selected.sh",)},
+                    {"selected_files": ("src/selected.sh",), "required_context": ("src/unrelated.txt",)}):
+        with pytest.raises((UpstreamRefused, WorkspaceRefused)):
+            resume_frontend_selection(primary, **{**args, **changed})
     assert _authority(store, primary) == before
 
 
