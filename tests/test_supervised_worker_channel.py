@@ -1,11 +1,13 @@
 """The actual permit delivers only request routing metadata to its child."""
 from dataclasses import asdict, replace
+import fcntl
 import json
 import os
 import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 
 import pytest
@@ -108,3 +110,107 @@ def test_file_request_stops_waiting_once_the_supervisor_is_dead(tmp_path):
         file_request(root, "x" * 43, scope, request_key="orphaned", operation="progress",
                      body={"sequence": 1, "message": "waiting"}, timeout=10)
     assert time.monotonic() - started < 5
+
+
+
+def _orphan_channel(tmp_path, *, lock: bool):
+    root = tmp_path.resolve() / "channel"
+    for directory in (root, root / "requests", root / "responses"):
+        directory.mkdir(mode=0o700)
+        os.chmod(directory, 0o700)
+    if lock:
+        os.close(os.open(root / "supervisor.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    # A supervisor in another PID namespace (a container with a long-lived
+    # PID 1) never probes DEAD from here, only UNKNOWN.
+    scope = {"repository_id": "repo", "run_id": "run", "activity_id": "activity",
+             "intent_id": "intent", "generation": 1,
+             "supervisor_identity": asdict(ProcessIdentity("elsewhere", "boot", 1, "init"))}
+    return root, scope
+
+
+def _wait_in_thread(root, scope, timeout):
+    outcome = []
+
+    def wait():
+        try:
+            file_request(root, "x" * 43, scope, request_key="orphaned", operation="progress",
+                         body={"sequence": 1, "message": "waiting"}, timeout=timeout)
+            outcome.append("replied")
+        except WorkerChannelRefused as error:
+            outcome.append(error.code)
+
+    thread = threading.Thread(target=wait, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+@pytest.mark.parametrize("lock, expected", [(True, "IPC_SUPERVISOR_GONE"), (False, "IPC_TIMEOUT")])
+def test_released_supervisor_lock_ends_a_wait_the_probe_cannot(tmp_path, lock, expected):
+    # F37b: an unheld supervisor lock proves the supervisor is gone even when
+    # its identity only probes UNKNOWN. With no lock file (a supervisor from
+    # before the lock existed) the wait keeps its old behavior.
+    root, scope = _orphan_channel(tmp_path, lock=lock)
+    thread, outcome = _wait_in_thread(root, scope, timeout=3)
+    thread.join(timeout=10)
+    assert outcome == [expected]
+
+
+def test_held_supervisor_lock_keeps_the_wait_until_its_holder_dies(tmp_path):
+    root, scope = _orphan_channel(tmp_path, lock=True)
+    holder = subprocess.Popen([sys.executable, "-c", (
+        "import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(60)\n"), str(root / "supervisor.lock")], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        thread, outcome = _wait_in_thread(root, scope, timeout=30)
+        time.sleep(2.5)
+        assert thread.is_alive() and outcome == []
+        holder.kill()
+        holder.wait(timeout=5)
+        thread.join(timeout=5)
+        assert outcome == ["IPC_SUPERVISOR_GONE"]
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
+
+
+def test_supervisor_lock_is_not_inherited_by_spawned_processes(tmp_path):
+    # A process the server spawns (an orchestrator) must never keep the lock
+    # alive after the server is gone.
+    original, store, request = setup_owner(tmp_path)
+    with tempfile.TemporaryDirectory(prefix="ffs-ipc-", dir="/tmp") as directory:
+        server = WorkerChannelServer(
+            store, original.token, Path(directory).resolve() / "worker.sock",
+        ).start()
+        supervisor = Supervisor(
+            store, original.token, evidence_root=original.evidence_root,
+            worker_channel=server,
+        )
+        handle = supervisor.launch(replace(
+            request, command=(sys.executable, "-c", "import time; time.sleep(20)"),
+        ))
+        spawned = None
+        try:
+            channel = server.register_file_transport(handle.intent_id)
+            spawned = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"],
+                                       close_fds=False)
+            lock = os.open(Path(channel["root"]) / "supervisor.lock", os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                server.close()
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            finally:
+                os.close(lock)
+        finally:
+            if spawned is not None:
+                spawned.kill()
+                spawned.wait(timeout=5)
+            handle.process.terminate()
+            handle.process.wait(timeout=5)
+            supervisor.finish(handle, timeout=5, token_usage=0)
+            server.close()
