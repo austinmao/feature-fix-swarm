@@ -13,13 +13,15 @@ all skills.
 - A supervised wave worker that ran GSD bookkeeping (`config-set
   workflow._auto_chain_active false`) rewrote `.planning/config.json`, a
   path its plan never declared, so the harvest refused the whole plan with
-  `WAVE_SCOPE_VIOLATION`. GSD offers no way to redirect that write and the
-  worker environment is a closed allowlist, so the wave consumer now makes
-  `.planning/config.json` read-only (0444) in each worker's own disposable
-  workspace after the worker is qualified and before it launches, unless the
-  plan declares that file. A stray `config-set` then fails instead of
-  landing out of scope; Git records only the executable bit, so the scope
-  inventory sees no change.
+  `WAVE_SCOPE_VIOLATION`. GSD offers no way to redirect that write, the
+  worker environment is a closed allowlist, and GSD writes through a temp
+  file and rename, so no file mode stops it. Right before the scope check the
+  wave consumer now resets a tracked, undeclared, changed
+  `.planning/config.json` in that worker's own workspace to its HEAD content
+  and records a `<plan request>:planning-config-restored` event. The worker's
+  bookkeeping edit is dropped; it is never plan output. A plan that declares
+  the file, a selection that overlays it, or a config HEAD does not track is
+  left to the scope check as before.
 - `WAVE_EXECUTION_REFUSED` and `WAVE_EXECUTION_UNPROVEN` refusals reported
   the generic cause "the selected host backend has not demonstrated managed
   admission" with recovery `qualify_host_adapter`. They now name the wave

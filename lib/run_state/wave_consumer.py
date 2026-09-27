@@ -43,6 +43,7 @@ from .worker_channel import (
 from .workspace import (
     WorkspacePreparation,
     WorkspaceRefused,
+    _git,
     begin_child_workspace_preparation,
     inspect_workspace,
     prepare_workspace,
@@ -53,19 +54,28 @@ from .workspace import (
 _PLANNING_CONFIG = ".planning/config.json"
 
 
-def _freeze_planning_config(workspace: Path, plan: dict) -> None:
-    """Make an undeclared GSD config read-only in one worker's own workspace.
+def _restore_planning_config(workspace: Path, head: str, plan: dict, snapshot) -> bool:
+    """Reset an undeclared GSD config edit in one worker's workspace to HEAD (F40).
 
-    A worker running GSD bookkeeping (``config-set``) would otherwise rewrite
-    it outside the plan's declared files and the harvest would refuse the
-    whole plan. Git records only the executable bit, so the scope inventory
-    sees no change; symlinks are left alone.
+    GSD bookkeeping (``config-set``) rewrites the tracked config with a
+    temp-file rename, so no file mode stops it, and the edit is never plan
+    output; left alone, the scope check refuses the whole plan. A declared or
+    overlaid config, or one HEAD does not track, is left to that check.
+    Returns whether the file was reset.
     """
-    if _PLANNING_CONFIG in plan.get("files_modified", ()):
-        return
-    path = Path(workspace) / _PLANNING_CONFIG
-    if not path.is_symlink() and path.is_file():
-        path.chmod(0o444)
+    declared = (*plan.get("files_modified", ()), *plan.get("files_deleted", ()))
+    overlaid = snapshot is not None and any(
+        entry.path == _PLANNING_CONFIG for entry in snapshot.selection.entries
+    )
+    workspace = Path(workspace)
+    if (
+        _PLANNING_CONFIG in declared
+        or overlaid
+        or _git(workspace, "cat-file", "-e", f"{head}:{_PLANNING_CONFIG}", check=False).returncode
+        or not _git(workspace, "diff", "--quiet", head, "--", _PLANNING_CONFIG, check=False).returncode
+    ):
+        return False
+    return not _git(workspace, "checkout", head, "--", _PLANNING_CONFIG, check=False).returncode
 
 
 def _canonical(value):
@@ -678,7 +688,6 @@ class WaveConsumer:
                 )
                 check()
                 request = self.prepare_child(context)
-                _freeze_planning_config(ready.path, plan)
                 with self.store.transaction() as tx:
                     guard(tx)
                     child = tx.execute(
@@ -954,6 +963,16 @@ class WaveConsumer:
                         # immutable staging step; recheck it immediately before
                         # the later terminal publication.
                         check()
+                        if _restore_planning_config(
+                            context.preparation.path, manifest["initial_head"], context.plan, snapshot,
+                        ):
+                            with self.store.transaction() as tx:
+                                guard(tx)
+                                self.store._record_event_once_tx(
+                                    tx, self.token, parent,
+                                    context.request_key + ":planning-config-restored",
+                                    {"plan_id": context.plan["id"], "path": _PLANNING_CONFIG},
+                                )
                         with productive_work(self.store, self.token, kind="harvest"):
                             harvested = harvest_scoped_patch(
                                 context.preparation.path,

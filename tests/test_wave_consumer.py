@@ -488,16 +488,20 @@ def test_wave_worker_cannot_rewrite_undeclared_planning_config(tmp_path, monkeyp
         return primary
 
     monkeypatch.setattr(test_supervised_process, "_repository", with_planning_config)
+    # Same write shape as gsd-core platformWriteSync: temp file, then rename.
     bookkeeping = (
+        "import os\n"
         "from pathlib import Path\n"
-        "try:\n"
-        "    Path('.planning/config.json').write_text('{\"workflow\": {\"_auto_chain_active\": false}}\\n')\n"
-        "except PermissionError:\n"
-        "    pass\n"
+        "Path('.planning/config.json.tmp').write_text('{\"workflow\": {\"_auto_chain_active\": false}}\\n')\n"
+        "os.replace('.planning/config.json.tmp', '.planning/config.json')\n"
         "Path('result-0.txt').write_text('done')\n"
     )
     with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", bookkeeping)]) as f:
         reply = f.consumer(f.event)
         worker = f.prepared[0].preparation.path
+        with f.store.read_transaction() as tx:
+            keys = [row[0] for row in tx.execute("SELECT idempotency_key FROM authority_event_keys")]
     assert [item["status"] for item in reply["results"]] == ["complete"]
+    assert reply["results"][0]["changed_files"] == ["result-0.txt"]
     assert (worker / ".planning" / "config.json").read_text() == '{"workflow": {}}\n'
+    assert sum(key.endswith(":planning-config-restored") for key in keys) == 1
