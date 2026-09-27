@@ -514,8 +514,26 @@ def test_pid_only_requester_falls_back_to_the_orchestrator(tmp_path, who):
     assert WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": pid})) == orchestrator
 
 
-@pytest.mark.parametrize("requester", [{"pid": True}, {"pid": 0}, {"pid": "12"}, {"pid": 12, "extra": 1}])
-def test_malformed_pid_requester_is_refused(tmp_path, requester):
+@pytest.mark.parametrize("pid", [True, 0, -1, "12", 2**31, 10**100])
+def test_malformed_pid_requester_is_refused(tmp_path, pid):
+    # Only a native positive pid is captured; an oversized one must not reach
+    # the start-token lookup (OverflowError would end the serving thread).
     binding = _binding(tmp_path)
-    with pytest.raises((WorkerChannelRefused, TypeError)):
-        WorkerChannelServer._file_requester(binding, _wave_envelope(binding, requester))
+    with pytest.raises(WorkerChannelRefused, match="IPC_SCOPE_MISMATCH"):
+        WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": pid}))
+
+
+def test_pid_requester_with_extra_keys_is_not_a_pid_requester(tmp_path):
+    binding = _binding(tmp_path)
+    with pytest.raises(TypeError):
+        WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": 12, "extra": 1}))
+
+
+def test_uncapturable_pid_falls_back_to_the_orchestrator(tmp_path, monkeypatch):
+    binding = _binding(tmp_path)
+
+    def overflow(_pid):
+        raise OverflowError("start token")
+
+    monkeypatch.setattr(channel_module.ProcessIdentity, "from_pid", staticmethod(overflow))
+    assert WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": 4242})) == binding.identity

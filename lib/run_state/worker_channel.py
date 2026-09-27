@@ -587,11 +587,11 @@ class WorkerChannelServer:
         can name only its pid. Record it only as a live descendant of the
         orchestrator; otherwise record the orchestrator, as before F37b.
         """
-        if type(pid) is not int or pid <= 0:
+        if type(pid) is not int or not 0 < pid < 2**31:  # pid_t is 32-bit on macOS and Linux
             raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
         try:
             captured = ProcessIdentity.from_pid(pid)
-        except (ProcessLookupError, ValueError):
+        except (OSError, ValueError, OverflowError):  # ProcessLookupError is an OSError
             return binding.identity
         return captured if _live_descendant(captured, binding.identity) else binding.identity
 
