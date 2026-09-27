@@ -38,10 +38,16 @@ all skills.
     Without it both the delivery rule above and the F37a requester check
     saw the exited orchestrator and refused. A bridge that cannot capture
     its own identity falls back to the previous behavior.
-  - A file-transport request no longer waits forever: while waiting it
-    probes the supervisor named in its scope about once a second and fails
-    with `IPC_SUPERVISOR_GONE` once that supervisor probes dead, so a
-    detached adapter cannot outlive a dead supervisor indefinitely.
+  - A file-transport request no longer waits forever. Each file channel now
+    has a `supervisor.lock` that the supervisor holds with an exclusive
+    `flock` for its whole life, on a descriptor no spawned process inherits.
+    About once a second the waiting request probes the supervisor named in
+    its scope and tries a non-blocking lock on that file; it fails with
+    `IPC_SUPERVISOR_GONE` once the supervisor probes dead or the lock can be
+    taken. The lock covers a bridge in another PID namespace, where the
+    supervisor only ever probes unknown. A channel without the lock file (an
+    older supervisor) waits as before, so a detached adapter cannot outlive
+    a dead supervisor indefinitely.
   The patch and adapter output hashes are re-pinned in the installer and the
   GSD 1.14 verification test.
 

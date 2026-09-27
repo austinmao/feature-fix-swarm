@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import ctypes
+import fcntl
 import hmac
 import hashlib
 import json
@@ -47,6 +48,7 @@ _MAX_WAVE_REPLY_BYTES = 16 * 1024 * 1024
 _MAX_WAVE_PLANS = 64
 _MAX_WAVE_PROMPT_BYTES = 8 * 1024
 _FILE_CHANNEL_DIRECTORY = ".ffs-worker-channel"
+_SUPERVISOR_LOCK = "supervisor.lock"
 
 
 def _no_duplicate_object(pairs):
@@ -320,6 +322,10 @@ class WorkerChannelServer:
         # workspace.  The Unix socket remains authoritative for native
         # workers and brokers; both transports enter the same fenced handler.
         self._file_bindings: dict[Path, tuple[bytes, WorkerBinding, tuple[int, int]]] = {}
+        # One held supervisor.lock per file channel: the kernel drops it when
+        # this process dies, which a waiting client can see even when this
+        # process's identity only probes UNKNOWN from its PID namespace.
+        self._file_locks: list[int] = []
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -489,6 +495,18 @@ class WorkerChannelServer:
                     if (root.is_symlink() or info.st_uid != os.getuid()
                             or stat.S_IMODE(info.st_mode) != 0o700):
                         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
+                    # os.open descriptors are non-inheritable, so a spawned
+                    # orchestrator never keeps this lock alive.
+                    held = os.open(
+                        root / _SUPERVISOR_LOCK,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                    )
+                    try:
+                        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        os.close(held)
+                        raise
+                    self._file_locks.append(held)
                 except (FileExistsError, OSError) as error:
                     raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
                 token = secrets.token_urlsafe(32)
@@ -979,6 +997,8 @@ class WorkerChannelServer:
             self._broker_bootstraps.clear()
             self._broker_bootstrap_intents.clear()
             self._file_bindings.clear()
+            while self._file_locks:
+                os.close(self._file_locks.pop())
         parent = self.endpoint.parent
         try:
             if ((parent.stat().st_dev, parent.stat().st_ino) == self._parent_identity
@@ -1024,13 +1044,42 @@ def request(endpoint: str | Path, scope: dict, *, request_key: str, operation: s
     return _request_from_supervisor(endpoint, scope, message, timeout)
 
 
+def _supervisor_lock_released(root: Path) -> bool:
+    """True once the file channel's supervisor.lock can be taken: its holder died.
+
+    A missing lock is a supervisor from before the lock existed; like a held
+    lock or an undecidable lock call, it proves nothing and the wait goes on.
+    """
+    try:
+        descriptor = os.open(root / _SUPERVISOR_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return True
+    finally:
+        os.close(descriptor)
+
+
 def file_request(root: str | Path, capability: str, scope: dict, *, request_key: str,
                  operation: str, body: dict, timeout: float | None = 5,
                  requester: ProcessIdentity | None = None) -> dict:
     """Use the workspace file transport when a host sandbox denies AF_UNIX.
 
-    While waiting, the scope's supervisor is probed about once a second; a
-    reply that a dead supervisor can never write ends the wait (F37b).
+    While waiting, about once a second, the scope's supervisor is probed and
+    the channel's supervisor.lock is tried; a supervisor that probes DEAD, or
+    whose lock can be taken, can never write the reply, so the wait ends
+    (F37b).
     """
     try:
         supervisor = ProcessIdentity(**scope["supervisor_identity"])
@@ -1079,7 +1128,7 @@ def file_request(root: str | Path, capability: str, scope: dict, *, request_key:
         if deadline is not None and now >= deadline:
             raise WorkerChannelRefused("IPC_TIMEOUT")
         if now >= next_probe:
-            if probe_identity(supervisor) == DEAD:
+            if probe_identity(supervisor) == DEAD or _supervisor_lock_released(root):
                 raise WorkerChannelRefused("IPC_SUPERVISOR_GONE")
             next_probe = now + 1
         time.sleep(0.02)
