@@ -652,10 +652,11 @@ def test_execution_receipt_binds_ordered_multi_wave_candidate_without_replay_deb
             # A live promotion to a role other than the execution binding's is not the qualification promotion.
             with store.transaction() as tx:
                 tx.execute("UPDATE context_workspaces SET child_role='reviewer' WHERE preparation_id=?", (ready.id,))
-            with pytest.raises(OwnershipRefused, match="ACCEPTANCE_RECEIPT_BINDING_INVALID"):
-                bind_wave_execution_candidate(
-                    store, token, sealed=sealed, handle=wave.outer, request_key=wave.request.request_key,
-                    ready=stale_ready, process_evidence=result["evidence"])
+            for caller_copy in (stale_ready, replace(ready, child_role="reviewer")):
+                with pytest.raises(OwnershipRefused, match="ACCEPTANCE_RECEIPT_BINDING_INVALID"):
+                    bind_wave_execution_candidate(
+                        store, token, sealed=sealed, handle=wave.outer, request_key=wave.request.request_key,
+                        ready=caller_copy, process_evidence=result["evidence"])
             with store.transaction() as tx:
                 tx.execute("UPDATE context_workspaces SET child_role='worker' WHERE preparation_id=?", (ready.id,))
             recorded, bound = bind_wave_execution_candidate(
