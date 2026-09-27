@@ -9,12 +9,13 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 import pytest
 
-from process_identity import LIVE, ProcessIdentity
+from process_identity import DEAD, LIVE, UNKNOWN, ProcessIdentity
 import run_state.worker_channel as channel_module
 from run_state.gsd_wave_bridge import (
     GsdWaveBridgeRefused, _file_channel_from_environment, persist_manifest,
@@ -194,3 +195,275 @@ def test_full_native_ancestry_rejects_pid_reuse_and_orphan(tmp_path):
                 os.kill(child.pid, 15)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize("host_id, recorded", [("host", "requester"), ("host:pidns:9:9", "orchestrator")])
+def test_file_requester_from_another_pid_namespace_records_the_orchestrator(tmp_path, host_id, recorded):
+    # A sandboxed bridge in its own PID namespace names a pid the supervisor
+    # cannot probe; the request falls back to the orchestrator, as before F37b.
+    binding = _binding(tmp_path)
+    requester = {"host_id": host_id, "boot_id": "boot", "pid": 202, "start_token": "bridge"}
+    wrapped = {"capability": "c", "requester": requester,
+               "message": {"operation": "gsd-wave-request", "intent_id": binding.intent_id}}
+    expected = ProcessIdentity(**requester) if recorded == "requester" else binding.identity
+    assert WorkerChannelServer._file_requester(binding, wrapped) == expected
+
+
+@pytest.mark.parametrize("orchestrator, accepted", [(DEAD, True), (UNKNOWN, False)])
+def test_delivery_to_admitted_peer_requires_a_dead_orchestrator(tmp_path, monkeypatch, orchestrator, accepted):
+    # F37b: only an orchestrator that probes DEAD lets the admitted peer
+    # collect its reply outside the live ancestry; UNKNOWN is not proof.
+    binding = _binding(tmp_path)
+    server = object.__new__(WorkerChannelServer)
+    server._lock, server._primary_bindings = threading.RLock(), {binding.intent_id: binding}
+    peer = ProcessIdentity("host", "boot", 202, "peer")
+    monkeypatch.setattr(channel_module, "_live_descendant", lambda _peer, _ancestor: False)
+    monkeypatch.setattr(channel_module, "probe_identity",
+                        lambda identity: orchestrator if identity == binding.identity else LIVE)
+    if accepted:
+        server.assert_authorized_wave_peer(binding.intent_id, peer)
+    else:
+        with pytest.raises(WorkerChannelRefused, match="IPC_DESCENDANT_ANCESTRY_MISMATCH"):
+            server.assert_authorized_wave_peer(binding.intent_id, peer)
+
+
+@contextmanager
+def _file_channel_server(tmp_path):
+    """A real server whose file channels use a stubbed request handler."""
+    workspace = tmp_path.resolve() / "workspace"
+    workspace.mkdir()
+    binding = _binding(workspace)
+    with tempfile.TemporaryDirectory(prefix="ffs-lock-", dir="/tmp") as directory:
+        server = WorkerChannelServer(_Store(), object(), Path(directory).resolve() / "worker.sock")
+        server._verify_binding = lambda _tx, _binding: None
+        server._request = lambda _peer, _message: {"ok": True}
+        try:
+            yield server, binding
+        finally:
+            server.close()
+
+
+def _register(server, binding, intent_id="intent"):
+    binding = replace(binding, intent_id=intent_id)
+    server._primary_bindings[intent_id] = binding
+    channel = server.register_file_transport(intent_id)
+    return binding, Path(channel["root"]), channel["capability"]
+
+
+def _file_request_file(root, capability, binding, operation, key):
+    message = {"schema_version": 1, **binding.scope(), "request_key": key,
+               "operation": operation, "body": {}}
+    name = key + ".json"
+    descriptor = os.open(root / "requests" / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, channel_module._canonical({"capability": capability, "message": message}))
+    finally:
+        os.close(descriptor)
+    return root / "responses" / name
+
+
+def _held(root):
+    return (root / "supervisor.lock").is_file() and not channel_module._supervisor_lock_released(root)
+
+
+def test_lock_unlinked_after_the_client_opened_it_is_inconclusive(tmp_path, monkeypatch):
+    # The client may take an old inode the live server has just let go; only
+    # a lock still named at the channel path says anything.
+    root = tmp_path / "root"
+    root.mkdir()
+    os.close(os.open(root / "supervisor.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    real_open = os.open
+
+    def open_then_unlink(path, *args, **kwargs):
+        descriptor = real_open(path, *args, **kwargs)
+        Path(path).unlink()
+        return descriptor
+
+    monkeypatch.setattr(channel_module.os, "open", open_then_unlink)
+    assert not channel_module._supervisor_lock_released(root)
+
+
+def test_unexpected_serving_exit_removes_the_master_lock(tmp_path, monkeypatch):
+    # A serving loop that dies without close() must not strand the master,
+    # or a successor at the same endpoint can never register.
+    monkeypatch.setattr(threading, "excepthook", lambda _args: None)
+    with _file_channel_server(tmp_path) as (server, binding):
+        _binding, root, _capability = _register(server, binding)
+        master = server._supervisor_lock
+
+        def died():
+            raise RuntimeError("serving loop died")
+
+        server._serve_file_once = died
+        server.start()
+        server._thread.join(timeout=10)
+        assert not server._thread.is_alive()
+        assert not master.exists()
+        assert channel_module._supervisor_lock_released(root)
+
+
+def test_supervisor_lock_is_held_from_registration(tmp_path):
+    # F37b: a client whose supervisor dies before its first pickup must
+    # still find the lock, so it exists from registration on.
+    with _file_channel_server(tmp_path) as (server, binding):
+        _binding, root, _capability = _register(server, binding)
+        assert _held(root)
+    assert channel_module._supervisor_lock_released(root)
+
+
+def test_registrations_on_one_filesystem_share_one_held_lock(tmp_path):
+    with _file_channel_server(tmp_path) as (server, binding):
+        roots = [_register(server, binding, f"intent-{index}")[1] for index in range(20)]
+        assert len(server._lock_fds) == 1
+        assert len({(root / "supervisor.lock").stat().st_ino for root in roots}) == 1
+        assert all(_held(root) for root in roots)
+
+
+def test_other_filesystem_gets_its_own_held_lock(tmp_path, monkeypatch):
+    import errno
+
+    def cross_device(*_args, **_kwargs):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    with _file_channel_server(tmp_path) as (server, binding):
+        monkeypatch.setattr(channel_module.os, "link", cross_device)
+        _binding, root, _capability = _register(server, binding)
+        assert len(server._lock_fds) == 2
+        assert (root / "supervisor.lock").stat().st_ino != server._supervisor_lock.stat().st_ino
+        assert _held(root)
+
+
+def test_removed_device_lock_is_replaced_for_later_registrations(tmp_path, monkeypatch):
+    # The root holding a device's lock may be removed (a finished worktree);
+    # later registrations on that device hold a fresh lock instead of failing.
+    import errno
+    real_link = os.link
+
+    def cross_device_from_master(source, target, **kwargs):
+        if Path(source) == server._supervisor_lock:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_link(source, target, **kwargs)
+
+    with _file_channel_server(tmp_path) as (server, binding):
+        monkeypatch.setattr(channel_module.os, "link", cross_device_from_master)
+        _first, first_root, _capability = _register(server, binding, "intent-a")
+        # Another channel still links the removed root's lock, so the server
+        # keeps that descriptor: existing clients probe that inode.
+        _other, other_root, _capability = _register(server, binding, "intent-a2")
+        (first_root / "supervisor.lock").unlink()
+        _second, second_root, _capability = _register(server, binding, "intent-b")
+        assert len(server._lock_fds) == 3
+        assert _held(second_root)
+        assert _held(other_root)
+
+
+def test_failed_lock_leaves_no_descriptor_and_refuses_registration(tmp_path, monkeypatch):
+    def refused(*_args, **_kwargs):
+        raise BlockingIOError("lock held elsewhere")
+
+    with _file_channel_server(tmp_path) as (server, binding):
+        before = len(os.listdir("/dev/fd"))
+        monkeypatch.setattr(channel_module.fcntl, "flock", refused)
+        with pytest.raises(WorkerChannelRefused, match="IPC_FILE_CHANNEL_UNSAFE"):
+            _register(server, binding)
+        monkeypatch.undo()
+        assert server._lock_fds == []
+        assert len(os.listdir("/dev/fd")) == before
+
+
+def test_lock_outlives_a_busy_close_until_the_reply_is_written(tmp_path):
+    # close() during a wave keeps the lock so the waiting bridge does not see
+    # its supervisor gone; the serving thread releases it once it has
+    # published that reply and stopped, so later clients are not stranded.
+    with _file_channel_server(tmp_path) as (server, binding):
+        binding, root, capability = _register(server, binding)
+        entered, release = threading.Event(), threading.Event()
+
+        def busy(_peer, _message):
+            entered.set()
+            release.wait(timeout=30)
+            return {"ok": True}
+
+        server._request = busy
+        server.start()
+        response = _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
+        assert entered.wait(timeout=10)
+        server.close()
+        assert server._thread.is_alive()
+        assert _held(root)
+        release.set()
+        server._thread.join(timeout=10)
+        assert json.loads(response.read_text()) == {"ok": True}
+        assert channel_module._supervisor_lock_released(root)
+
+
+
+def _cross_device_from_master(monkeypatch, server):
+    import errno
+    real_link = os.link
+
+    def link(source, target, **kwargs):
+        if Path(source) == server._supervisor_lock:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(channel_module.os, "link", link)
+
+
+@pytest.mark.parametrize("source", ["device", "master"])
+def test_replaced_unheld_lock_source_is_never_linked(tmp_path, monkeypatch, source):
+    # A lock path replaced behind the server's back names a file it does not
+    # hold; linking it would let a client see a live supervisor as gone.
+    with _file_channel_server(tmp_path) as (server, binding):
+        if source == "device":
+            _cross_device_from_master(monkeypatch, server)
+        _first, first_root, _capability = _register(server, binding, "intent-a")
+        replaced = first_root / "supervisor.lock" if source == "device" else server._supervisor_lock
+        replaced.unlink()
+        os.close(os.open(replaced, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        _second, second_root, _capability = _register(server, binding, "intent-b")
+        assert _held(second_root)
+
+
+def test_busy_close_removes_the_master_lock_once_the_thread_stops(tmp_path):
+    # Otherwise a new server at the same endpoint could never create its own.
+    with _file_channel_server(tmp_path) as (server, binding):
+        binding, root, capability = _register(server, binding)
+        master = server._supervisor_lock
+        entered, release = threading.Event(), threading.Event()
+
+        def busy(_peer, _message):
+            entered.set()
+            release.wait(timeout=30)
+            return {"ok": True}
+
+        server._request = busy
+        server.start()
+        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
+        assert entered.wait(timeout=10)
+        server.close()
+        assert master.exists()
+        release.set()
+        server._thread.join(timeout=10)
+        assert not master.exists()
+        successor = WorkerChannelServer(_Store(), object(), server.endpoint)
+        try:
+            successor._verify_binding = lambda _tx, _binding: None
+            _later, later_root, _capability = _register(successor, binding, "intent-later")
+            assert _held(later_root)
+        finally:
+            successor.close()
+
+
+def test_replacing_an_unlinked_device_lock_releases_its_descriptor(tmp_path, monkeypatch):
+    # Repeatedly removed device locks must not grow the held descriptors
+    # once no channel links the old inode.
+    with _file_channel_server(tmp_path) as (server, binding):
+        _cross_device_from_master(monkeypatch, server)
+        previous = _register(server, binding, "intent-0")[1]
+        assert len(server._lock_fds) == 2
+        for index in range(1, 4):
+            (previous / "supervisor.lock").unlink()
+            previous = _register(server, binding, f"intent-{index}")[1]
+            assert len(server._lock_fds) == 2
+            assert _held(previous)

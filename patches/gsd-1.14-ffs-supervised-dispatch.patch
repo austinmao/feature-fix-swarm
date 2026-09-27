@@ -18,10 +18,10 @@ index c3f5473..187a9ba 100755
    }
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 0000000..5d97693
+index 0000000..be88fc6
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,491 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -397,6 +397,58 @@ index 0000000..5d97693
 +  }
 +}
 +
++const DETACHED_ENV = 'FFS_SUPERVISED_DISPATCH_DETACHED';
++
++// The orchestrator that runs this command may end its turn and have its
++// process group killed while the supervisor still owes the wave reply. The
++// whole flow (launch, reply wait, validation, publish) therefore runs in a
++// detached copy of this script: a new session, so a signal to this process
++// group or a hangup never reaches it, with the same parent chain, so FFS
++// admission still proves ancestry while the orchestrator lives. Its output
++// goes to a private log beside the result, never to a pipe this process
++// owns; the log's name is removed as soon as the child holds it, so nothing
++// is left behind if this foreground is killed. This foreground waits for the
++// child and relays its log and exit code, so a caller that stays sees no
++// difference; a caller that leaves still gets the result and receipt.
++function runDetached(outputPath) {
++  const log = `${outputPath}.${crypto.randomBytes(8).toString('hex')}.log`;
++  let fd;
++  try {
++    fd = fs.openSync(log, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
++  } catch (error) {
++    return fail(`cannot create private dispatch log: ${error.message}`, 1);
++  }
++  let child;
++  try {
++    child = spawn(process.execPath, [...process.execArgv, __filename, ...process.argv.slice(2)], {
++      detached: true,
++      env: { ...process.env, [DETACHED_ENV]: '1' },
++      stdio: ['ignore', fd, fd],
++    });
++  } finally {
++    fs.unlinkSync(log);
++  }
++  child.on('error', (error) => {
++    fs.closeSync(fd);
++    fail(`cannot start detached dispatch: ${error.message}`, 1);
++  });
++  child.on('exit', (code) => {
++    try {
++      // The child shares this descriptor's offset, so read from 0 by position.
++      const bytes = Buffer.alloc(fs.fstatSync(fd).size);
++      for (let offset = 0, read = 1; offset < bytes.length && read > 0; offset += read) {
++        read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
++      }
++      process.stderr.write(bytes);
++    } catch (error) {
++      process.stderr.write(`ffs-supervised-dispatch: cannot relay the dispatch log: ${error.message}\n`);
++    } finally {
++      fs.closeSync(fd);
++    }
++    process.exitCode = code === null ? 1 : code;
++  });
++}
++
 +async function main() {
 +  const writeManifestPath = option('--write-manifest');
 +  if (writeManifestPath) {
@@ -410,6 +462,7 @@ index 0000000..5d97693
 +  const manifestPath = option('--manifest');
 +  const outputPath = option('--output');
 +  if (!manifestPath || !outputPath) return fail('usage: --manifest <file> --output <file>');
++  if (process.env[DETACHED_ENV] !== '1') return runDetached(outputPath);
 +  try {
 +    const manifest = validateManifest(readJson(manifestPath));
 +    const command = commandFromEnvironment();

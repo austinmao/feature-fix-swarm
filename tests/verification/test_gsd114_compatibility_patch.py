@@ -9,9 +9,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -26,7 +28,7 @@ EXPECTED = {
     "gsd-tools.cjs": "sha256:f0b3dde4d9bca6c81b53459c51547ea5ea5daeec965431481815cd3b94ba3328",
     "execute-phase.md": "sha256:82ad1b4049f3660c8a979bcd41b7fa9b65bc44ad16a2e2de129ffc3cf31f2a97",
     "executor-isolation-dispatch.md": "sha256:89417e244cbb0901b1a69b44a00cded615ecc4ae47e0ba658caa171822d6da45",
-    "ffs-supervised-dispatch.cjs": "sha256:d693c7fc083624e1ff4ff261f166f4b7f6d076a86d59d7124550342bb807445f",
+    "ffs-supervised-dispatch.cjs": "sha256:7405290251e6a3cef9629ae9f5f6acbae03d08866a34d5e7f9905f9bbd38dc74",
 }
 BASELINE = {
     "install.js": "sha256:0acbd01933783537f934b33b6cc9132ff8e11ae37f0fa88ff63bc402aa0ae861",
@@ -477,6 +479,90 @@ def test_dispatch_adapter_reuses_valid_result_receipt_without_relaunch(
     refused = subprocess.run(command, env=env, text=True, capture_output=True)
     assert refused.returncode != 0 and "completion receipt input mismatch" in refused.stderr
     assert calls.read_text() == "x"
+
+
+@pytest.fixture(scope="module")
+def patched_install(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The installed package with the patch applied, as ffs_installer ships it."""
+    package = tmp_path_factory.mktemp("gsd114-installed") / "gsd-core"
+    shutil.copytree(INSTALLED, package, symlinks=True)
+    subprocess.run(["git", "apply", str(PATCH)], cwd=package, check=True)
+    return package
+
+
+def test_dispatch_adapter_publishes_after_its_process_group_is_killed(
+    patched_install: Path, tmp_path: Path,
+) -> None:
+    """F37b: an orchestrator that ends its turn must not lose the wave reply."""
+    from process_identity import LIVE, ProcessIdentity, probe_identity
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manifest, output = tmp_path / "manifest.json", tmp_path / "result.json"
+    marker, release = tmp_path / "dispatch-started", tmp_path / "release-reply"
+    document = _manifest("a" * 40, [workspace / "child"])
+    manifest.write_text(_canonical_json(document))
+    admission = tmp_path / "admission.json"
+    admission.write_text(_canonical_json(document["admission"]))
+    supervisor = tmp_path / "slow-supervisor.py"
+    supervisor.write_text(
+        "import json, os, pathlib, sys, time\n"
+        "m = json.load(sys.stdin); marker, release = map(pathlib.Path, sys.argv[1:3])\n"
+        "staged = marker.with_suffix('.tmp'); staged.write_text(f'{os.getpid()} {os.getppid()}'); staged.rename(marker)\n"
+        "deadline = time.monotonic() + 30\n"
+        "while not release.exists() and time.monotonic() < deadline: time.sleep(0.05)\n"
+        "plan = m['plans'][0]\n"
+        "print(json.dumps({'schema':m['schema'],'mode':m['mode'],'wave':m['wave'],"
+        "'initial_head':m['initial_head'],'apply_between_waves':True,'results':[{'plan_id':plan['id'],"
+        "'status':'complete','summary':'no changes','changed_files':[],'patch':''}]}))\n",
+    )
+    env = os.environ | {
+        "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": json.dumps([sys.executable, str(supervisor), str(marker), str(release)]),
+        "FFS_SUPERVISED_ADMISSION_FILE": str(admission),
+    }
+    adapter = subprocess.Popen(
+        ["node", str(patched_install / "gsd-core/bin/ffs-supervised-dispatch.cjs"),
+         "--manifest", str(manifest), "--output", str(output)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    survivors: list = []
+    try:
+        deadline = time.monotonic() + 15
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        survivors = [ProcessIdentity.from_pid(int(pid)) for pid in marker.read_text().split()]
+        # The orchestrator's turn ends: its whole process group is signalled
+        # and nobody reads the adapter's pipes any more.
+        for signal_number in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(adapter.pid, signal_number)
+            except ProcessLookupError:
+                pass
+        adapter.wait(timeout=5)
+        adapter.stdout.close()
+        adapter.stderr.close()
+        release.touch()
+        receipt = Path(str(output) + ".receipt.json")
+        deadline = time.monotonic() + 15
+        while not receipt.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        while any(probe_identity(item) == LIVE for item in survivors) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        raw = output.read_bytes()
+        assert json.loads(raw)["results"][0]["plan_id"] == document["plans"][0]["id"]
+        assert json.loads(receipt.read_text()) == {
+            "schema": "ffs.gsd-no-commit-completion/v1",
+            "manifest_sha256": hashlib.sha256(_canonical_json(document).encode()).hexdigest(),
+            "result_sha256": hashlib.sha256(raw).hexdigest(),
+            "initial_head": document["initial_head"], "commit_mode": "patches",
+        }
+        assert not [item for item in survivors if probe_identity(item) == LIVE]
+        # The killed foreground never relays; its private log must not linger.
+        assert not list(tmp_path.glob("*.log"))
+    finally:
+        for item in survivors:
+            if probe_identity(item) == LIVE:
+                os.kill(item.pid, signal.SIGKILL)
 
 
 def test_dispatch_adapter_rejects_patch_path_hidden_by_changed_files(

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import ctypes
+import errno
+import fcntl
 import hmac
 import hashlib
 import json
@@ -23,7 +25,7 @@ import sys
 import threading
 import time
 
-from process_identity import LIVE, ProcessIdentity, probe_direct_parent, probe_identity
+from process_identity import DEAD, LIVE, ProcessIdentity, probe_direct_parent, probe_identity
 from .ownership import OwnershipRefused, assert_owner
 from .state import ControlStoreRefused
 
@@ -47,6 +49,7 @@ _MAX_WAVE_REPLY_BYTES = 16 * 1024 * 1024
 _MAX_WAVE_PLANS = 64
 _MAX_WAVE_PROMPT_BYTES = 8 * 1024
 _FILE_CHANNEL_DIRECTORY = ".ffs-worker-channel"
+_SUPERVISOR_LOCK = "supervisor.lock"
 
 
 def _no_duplicate_object(pairs):
@@ -320,6 +323,15 @@ class WorkerChannelServer:
         # workspace.  The Unix socket remains authoritative for native
         # workers and brokers; both transports enter the same fenced handler.
         self._file_bindings: dict[Path, tuple[bytes, WorkerBinding, tuple[int, int]]] = {}
+        # Every file channel root links <root>/supervisor.lock to one lock
+        # file this server holds LOCK_EX on (flock is per inode). The kernel
+        # drops it when this process dies, which a waiting client can see
+        # even when this process only probes UNKNOWN from its PID namespace.
+        # A root on another filesystem gets one held lock per device.
+        self._supervisor_lock: Path | None = None
+        self._master_fd: int | None = None
+        self._device_locks: dict[int, tuple[Path, int]] = {}
+        self._lock_fds: list[int] = []
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -489,6 +501,7 @@ class WorkerChannelServer:
                     if (root.is_symlink() or info.st_uid != os.getuid()
                             or stat.S_IMODE(info.st_mode) != 0o700):
                         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
+                    self._link_supervisor_lock(root, info.st_dev)
                 except (FileExistsError, OSError) as error:
                     raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
                 token = secrets.token_urlsafe(32)
@@ -543,6 +556,90 @@ class WorkerChannelServer:
         finally:
             temporary.unlink(missing_ok=True)
 
+    @staticmethod
+    def _file_requester(binding: WorkerBinding, wrapped: dict) -> ProcessIdentity:
+        """The process a file request is recorded against (F37b).
+
+        The wave bridge names itself so the durable request records it rather
+        than the orchestrator; ``_request`` then applies the socket path's
+        live-descendant-of-the-live-orchestrator admission to it. Only this
+        channel's own wave request may name a requester.
+        """
+        if "requester" not in wrapped:
+            return binding.identity
+        message = wrapped["message"]
+        if (not isinstance(message, dict) or message.get("operation") != "gsd-wave-request"
+                or message.get("intent_id") != binding.intent_id
+                or not isinstance(wrapped["requester"], dict)):
+            raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
+        requester = ProcessIdentity(**wrapped["requester"])
+        # A bridge sandboxed in its own PID namespace names a pid this
+        # supervisor cannot probe; record the orchestrator, as before F37b.
+        return requester if requester.host_id == binding.identity.host_id else binding.identity
+
+    def _held_lock(self, path: Path) -> int:
+        """Create a lock file and hold LOCK_EX on it for this server's life.
+
+        os.open descriptors are non-inheritable, so no spawned process keeps
+        it alive. On failure nothing is left open or behind.
+        """
+        held = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(held)
+            path.unlink(missing_ok=True)
+            raise
+        self._lock_fds.append(held)
+        return held
+
+    def _link_supervisor_lock(self, root: Path, device: int) -> None:
+        """Link the held supervisor lock into a new root (caller holds _lock).
+
+        A source path is trusted only while it still names the inode this
+        server holds: a replaced file would let a client see a live
+        supervisor as gone.
+        """
+        if self._supervisor_lock is None:
+            master = self.endpoint.with_name(self.endpoint.name + ".lock")
+            self._master_fd = self._held_lock(master)
+            self._supervisor_lock = master
+        source, held = self._device_locks.get(device, (self._supervisor_lock, self._master_fd))
+        target = root / _SUPERVISOR_LOCK
+        try:
+            os.link(source, target, follow_symlinks=False)
+        except OSError as error:
+            # EXDEV: another filesystem needs its own lock. ENOENT: the file
+            # holding it was removed (a finished worktree's root).
+            if error.errno not in (errno.EXDEV, errno.ENOENT):
+                raise
+        else:
+            linked, expected = target.lstat(), os.fstat(held)
+            if (linked.st_dev, linked.st_ino) == (expected.st_dev, expected.st_ino):
+                return
+            target.unlink()
+        fresh = self._held_lock(target)
+        previous = self._device_locks.get(device)
+        self._device_locks[device] = (target, fresh)
+        if previous is not None and os.fstat(previous[1]).st_nlink == 0:
+            # No channel links the old inode any more, so no client probes it.
+            self._lock_fds.remove(previous[1])
+            os.close(previous[1])
+
+    def _release_supervisor_locks(self, *, remove_master: bool) -> None:
+        """Idempotent: close every held lock, first removing the master file
+        while its path still names the inode this server holds."""
+        with self._lock:
+            if remove_master and self._master_fd in self._lock_fds:
+                try:
+                    named, held = self._supervisor_lock.lstat(), os.fstat(self._master_fd)
+                    if (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino):
+                        self._supervisor_lock.unlink()
+                except OSError:
+                    pass  # the descriptors below must still be released
+            while self._lock_fds:
+                os.close(self._lock_fds.pop())
+
     def _serve_file_once(self) -> bool:
         with self._lock:
             bindings = tuple(self._file_bindings.items())
@@ -560,10 +657,10 @@ class WorkerChannelServer:
                 try:
                     wrapped = self._file_payload(path, maximum=65536)
                     token_digest = _bootstrap_token_digest(wrapped.get("capability"))
-                    if (set(wrapped) != {"capability", "message"} or token_digest is None
+                    if (set(wrapped) - {"requester"} != {"capability", "message"} or token_digest is None
                             or not hmac.compare_digest(token_digest, expected_token)):
                         raise WorkerChannelRefused("IPC_FILE_CAPABILITY_REFUSED")
-                    response = self._request(binding.identity, wrapped["message"])
+                    response = self._request(self._file_requester(binding, wrapped), wrapped["message"])
                 except (WorkerChannelRefused, OwnershipRefused, ControlStoreRefused) as error:
                     response = {"ok": False, "code": error.code}
                 except Exception as error:
@@ -651,7 +748,14 @@ class WorkerChannelServer:
                 raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
 
     def assert_authorized_wave_peer(self, intent_id: str, peer: ProcessIdentity) -> None:
-        """Revalidate GSD's exact primary or a live, full-ancestry descendant."""
+        """Revalidate GSD's exact primary or a live, full-ancestry descendant.
+
+        Delivery only (F37b): ``peer`` is the identity recorded when the wave
+        was admitted as a live descendant of the live orchestrator. Once that
+        orchestrator probes DEAD, the same incarnation (start token included)
+        may still collect its reply while it probes LIVE.
+        Admission itself stays in ``_wave_binding_for_peer_locked``.
+        """
         with self._lock:
             binding = self._primary_bindings.get(intent_id)
             if binding is None:
@@ -660,8 +764,11 @@ class WorkerChannelServer:
                 if probe_identity(peer) != LIVE:
                     raise WorkerChannelRefused("IPC_PEER_UNKNOWN")
                 return
-            if not _live_descendant(peer, binding.identity):
-                raise WorkerChannelRefused("IPC_DESCENDANT_ANCESTRY_MISMATCH")
+            if _live_descendant(peer, binding.identity):
+                return
+            if probe_identity(binding.identity) == DEAD and probe_identity(peer) == LIVE:
+                return
+            raise WorkerChannelRefused("IPC_DESCENDANT_ANCESTRY_MISMATCH")
 
     def _find_bootstrap(self, token) -> tuple[bytes, _BrokerBootstrap] | None:
         token_digest = _bootstrap_token_digest(token)
@@ -925,15 +1032,20 @@ class WorkerChannelServer:
             raise WorkerChannelRefused("IPC_ALREADY_STARTED")
 
         def serve():
-            while not self._stop.is_set():
-                try:
-                    socket_work = self.serve_once()
-                    file_work = self._serve_file_once()
-                    if not socket_work and not file_work:
-                        self._stop.wait(0.02)
-                except OSError:
-                    if not self._stop.is_set():
-                        self._stop.set()
+            try:
+                while not self._stop.is_set():
+                    try:
+                        socket_work = self.serve_once()
+                        file_work = self._serve_file_once()
+                        if not socket_work and not file_work:
+                            self._stop.wait(0.02)
+                    except OSError:
+                        if not self._stop.is_set():
+                            self._stop.set()
+            finally:
+                # Nothing serves once this thread ends, whether a busy close()
+                # left the locks held for its last reply or the loop died.
+                self._release_supervisor_locks(remove_master=True)
 
         self._thread = threading.Thread(target=serve, name="ffs-worker-requests", daemon=True)
         self._thread.start()
@@ -943,11 +1055,17 @@ class WorkerChannelServer:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=4)
+        # A thread still inside a wave will yet write its reply; it keeps the
+        # supervisor locks held until then, so its waiting client does not
+        # see this supervisor gone, and releases them as it stops.
+        stopped = self._thread is None or not self._thread.is_alive()
         self._socket.close()
         with self._lock:
             self._broker_bootstraps.clear()
             self._broker_bootstrap_intents.clear()
             self._file_bindings.clear()
+        if stopped:
+            self._release_supervisor_locks(remove_master=True)
         parent = self.endpoint.parent
         try:
             if ((parent.stat().st_dev, parent.stat().st_ino) == self._parent_identity
@@ -993,9 +1111,53 @@ def request(endpoint: str | Path, scope: dict, *, request_key: str, operation: s
     return _request_from_supervisor(endpoint, scope, message, timeout)
 
 
+def _supervisor_lock_released(root: Path) -> bool:
+    """True once the file channel's supervisor.lock can be taken: its holder died.
+
+    A missing lock is a supervisor from before the lock existed; like a held
+    lock or an undecidable lock call, it proves nothing and the wait goes on.
+    """
+    try:
+        descriptor = os.open(root / _SUPERVISOR_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        # An inode whose path was unlinked or replaced after we opened it may
+        # have been let go by a live supervisor; only the named lock counts.
+        try:
+            named = os.lstat(root / _SUPERVISOR_LOCK)
+        except OSError:
+            return False
+        return (named.st_dev, named.st_ino) == (info.st_dev, info.st_ino)
+    finally:
+        os.close(descriptor)
+
+
 def file_request(root: str | Path, capability: str, scope: dict, *, request_key: str,
-                 operation: str, body: dict, timeout: float | None = 5) -> dict:
-    """Use the workspace file transport when a host sandbox denies AF_UNIX."""
+                 operation: str, body: dict, timeout: float | None = 5,
+                 requester: ProcessIdentity | None = None) -> dict:
+    """Use the workspace file transport when a host sandbox denies AF_UNIX.
+
+    While waiting, about once a second, the scope's supervisor is probed and
+    the channel's supervisor.lock is tried; a supervisor that probes DEAD, or
+    whose lock can be taken, can never write the reply, so the wait ends
+    (F37b).
+    """
+    try:
+        supervisor = ProcessIdentity(**scope["supervisor_identity"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise WorkerChannelRefused("IPC_SUPERVISOR_MISMATCH") from error
     root = Path(root)
     if not root.is_absolute() or root.resolve() != root:
         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
@@ -1014,7 +1176,10 @@ def file_request(root: str | Path, capability: str, scope: dict, *, request_key:
         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
     message = {"schema_version": 1, **scope, "request_key": request_key,
                "operation": operation, "body": body}
-    wrapped = _canonical({"capability": capability, "message": message})
+    envelope = {"capability": capability, "message": message}
+    if requester is not None:
+        envelope["requester"] = asdict(requester)
+    wrapped = _canonical(envelope)
     if len(wrapped) > 65536:
         raise WorkerChannelRefused("IPC_MESSAGE_TOO_LARGE")
     name = secrets.token_hex(16) + ".json"
@@ -1030,9 +1195,15 @@ def file_request(root: str | Path, capability: str, scope: dict, *, request_key:
         os.close(descriptor)
     response = root / "responses" / name
     deadline = None if timeout is None else time.monotonic() + timeout
+    next_probe = time.monotonic() + 1
     while not response.exists():
-        if deadline is not None and time.monotonic() >= deadline:
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
             raise WorkerChannelRefused("IPC_TIMEOUT")
+        if now >= next_probe:
+            if probe_identity(supervisor) == DEAD or _supervisor_lock_released(root):
+                raise WorkerChannelRefused("IPC_SUPERVISOR_GONE")
+            next_probe = now + 1
         time.sleep(0.02)
     try:
         return WorkerChannelServer._file_payload(response, maximum=_MAX_WAVE_REPLY_BYTES)

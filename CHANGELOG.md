@@ -8,6 +8,61 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-27, spec-014 Release C: F37b wave reply survives the orchestrator's exit)
+
+- A Codex orchestrator that yielded the blocking gsd-core adapter call and
+  ended its turn killed the adapter before it consumed the supervised wave
+  reply, so the wave result and its no-commit receipt were never published.
+  Now:
+  - The adapter (`ffs-supervised-dispatch.cjs`, via the GSD 1.14
+    compatibility patch) re-runs itself detached, in a new session with the
+    same parent chain, and that detached copy does the whole flow: dispatch
+    launch, reply wait, validation, and publishing the result and receipt.
+    Its output goes to a private log beside the result whose name is
+    removed as soon as the child holds it, so a killed foreground leaves no
+    file behind. The foreground waits for it and relays its log and exit
+    code, so a caller that stays sees the same behavior; SIGHUP, SIGTERM or
+    SIGKILL sent to the caller's process group no longer stops the wave
+    from landing.
+  - Admission is unchanged: the wave peer must still be a live descendant of
+    the live orchestrator when the wave is requested. For delivery only,
+    once the registered orchestrator probes dead (not merely unknown), the
+    wave consumer accepts the same admitted peer (identical recorded
+    identity, start token included) while that peer still probes live, and
+    refuses it otherwise with `IPC_DESCENDANT_ANCESTRY_MISMATCH` as before.
+  - Over the workspace file transport that managed Codex and Claude hosts
+    use, the wave bridge now names its own process as the requester. The
+    channel accepts that only for the channel's own wave request and passes
+    it through the same live-descendant admission as the socket path, so
+    the durable request records the bridge rather than the orchestrator.
+    Without it both the delivery rule above and the F37a requester check
+    saw the exited orchestrator and refused. A bridge that cannot capture
+    its own identity falls back to the previous behavior.
+  - A file-transport request no longer waits forever. The supervisor
+    creates one lock file beside its socket and holds an exclusive `flock`
+    on it for its whole life, on a descriptor no spawned process inherits.
+    Each file channel it registers hard-links that file in as
+    `supervisor.lock`, so every channel shares one held lock (flock is per
+    inode); a channel on another filesystem gets one held lock per device.
+    A link is kept only if it names the very inode the supervisor holds; a
+    lock path that was removed or replaced by another file gets a fresh held
+    lock instead, and an old per-device lock no channel links any more is
+    released. A registration whose lock cannot be created, linked or taken
+    is refused with `IPC_FILE_CHANNEL_UNSAFE` and leaves nothing open.
+    Closing the channel while a wave is still being served keeps the lock
+    until that reply is written; the serving thread then releases it and
+    removes the lock file beside the socket as it stops, so a new server at
+    the same endpoint can register.
+    About once a second the waiting request probes the supervisor named in
+    its scope and tries a non-blocking lock on that file; it fails with
+    `IPC_SUPERVISOR_GONE` once the supervisor probes dead or the lock can be
+    taken. The lock covers a bridge in another PID namespace, where the
+    supervisor only ever probes unknown. A channel without the lock file (an
+    older supervisor) waits as before, so a detached adapter cannot outlive
+    a dead supervisor indefinitely.
+  The patch and adapter output hashes are re-pinned in the installer and the
+  GSD 1.14 verification test.
+
 ### Fixed (2026-09-27, spec-014 Release C: F37a typed failure for an unconsumed wave reply)
 
 - When the outer orchestrator exited before its gsd-core adapter consumed a

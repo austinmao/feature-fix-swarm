@@ -158,25 +158,81 @@ def wave_fixture(tmp_path, monkeypatch, *, plans=2, commands=None, wave=2, recor
             channel.close()
 
 
+def _bridge_outer_command(spec_path):
+    """A managed outer that launches the real bridge as its own child."""
+    return (sys.executable, "-c",
+            "import json, pathlib, subprocess, sys, time\n"
+            "spec_path = pathlib.Path(sys.argv[1])\n"
+            "while not spec_path.exists(): time.sleep(0.02)\n"
+            "s = json.loads(spec_path.read_text())\n"
+            "with open(s['stdin'], 'rb') as i, open(s['stdout'], 'wb') as o, open(s['stderr'], 'wb') as e:\n"
+            "    p = subprocess.Popen(s['argv'], stdin=i, stdout=o, stderr=e, env=s['env'], cwd=s['cwd'])\n"
+            "staged = pathlib.Path(s['pid'] + '.tmp'); staged.write_text(str(p.pid)); staged.rename(s['pid'])\n"
+            "p.wait(); rc = pathlib.Path(s['pid'] + '.rc.tmp'); rc.write_text(str(p.returncode))\n"
+            "rc.rename(s['pid'] + '.rc'); time.sleep(180)\n", str(spec_path))
+
+
+def _bridge_completed(tmp_path, stdout, stderr, timeout=15):
+    """The bridge's exit as a CompletedProcess, from the outer's rc file."""
+    import time
+    rc = tmp_path / "bridge.pid.rc"
+    deadline = time.monotonic() + timeout
+    while not rc.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return subprocess.CompletedProcess("bridge", int(rc.read_text()), stdout.read_bytes(), stderr.read_bytes())
+
+
+def _wait_for_pid(path, timeout=15):
+    import time
+    from process_identity import ProcessIdentity
+    deadline = time.monotonic() + timeout
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return ProcessIdentity.from_pid(int(path.read_text()))
+
+
+def _start_bridge_under_outer(f, tmp_path, spec_path):
+    """Run the real bridge over the workspace file transport, as GSD does:
+    a descendant of the orchestrator, so it is the recorded requester."""
+    file_channel = f.channel.register_file_transport(f.outer.intent_id)
+    scope = f.channel._primary_bindings[f.outer.intent_id].scope()
+    f.channel.start()
+    environment = os.environ.copy()
+    library = str(Path(__file__).resolve().parents[1] / "lib")
+    environment["PYTHONPATH"] = library + os.pathsep + environment.get("PYTHONPATH", "")
+    environment["FFS_WORKER_ENDPOINT"] = str(f.channel.endpoint)
+    environment["FFS_WORKER_SCOPE"] = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+    environment["FFS_WORKER_FILE_CHANNEL"] = json.dumps(file_channel, sort_keys=True, separators=(",", ":"))
+    stdin, stdout, stderr = tmp_path / "bridge.in", tmp_path / "bridge.out", tmp_path / "bridge.err"
+    stdin.write_bytes(json.dumps(f.manifest, sort_keys=True, separators=(",", ":")).encode())
+    staged = spec_path.with_suffix(".tmp")
+    staged.write_text(json.dumps({
+        "argv": [sys.executable, "-m", "run_state.gsd_wave_bridge"], "env": environment,
+        "cwd": str(f.parent), "stdin": str(stdin), "stdout": str(stdout),
+        "stderr": str(stderr), "pid": str(tmp_path / "bridge.pid"),
+    }))
+    staged.rename(spec_path)
+    return _wait_for_pid(tmp_path / "bridge.pid"), stdout, stderr
+
+
+def _wait_until_gone(identity, timeout=30):
+    import time
+    deadline = time.monotonic() + timeout
+    while probe_identity(identity) == LIVE and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if probe_identity(identity) == LIVE:
+        os.kill(identity.pid, signal.SIGKILL)
+        raise AssertionError("bridge did not finish")
+
+
 def test_real_bridge_process_uses_workspace_transport_for_wave_cohort(tmp_path, monkeypatch):
-    with wave_fixture(tmp_path, monkeypatch, plans=1, record=False) as f:
+    spec_path = tmp_path / "bridge-spec.json"
+    with wave_fixture(tmp_path, monkeypatch, plans=1, record=False,
+                      outer_command=_bridge_outer_command(spec_path)) as f:
         f.channel.attach_wave_consumer(f.consumer)
-        file_channel = f.channel.register_file_transport(f.outer.intent_id)
-        scope = f.channel._primary_bindings[f.outer.intent_id].scope()
-        f.channel.start()
-        environment = os.environ.copy()
-        library = str(Path(__file__).resolve().parents[1] / "lib")
-        environment["PYTHONPATH"] = library + os.pathsep + environment.get("PYTHONPATH", "")
-        environment["FFS_WORKER_ENDPOINT"] = str(f.channel.endpoint)
-        environment["FFS_WORKER_SCOPE"] = json.dumps(scope, sort_keys=True, separators=(",", ":"))
-        environment["FFS_WORKER_FILE_CHANNEL"] = json.dumps(
-            file_channel, sort_keys=True, separators=(",", ":"),
-        )
-        completed = subprocess.run(
-            [sys.executable, "-m", "run_state.gsd_wave_bridge"],
-            input=json.dumps(f.manifest, sort_keys=True, separators=(",", ":")).encode(),
-            cwd=f.parent, env=environment, capture_output=True, timeout=30,
-        )
+        bridge, stdout, stderr = _start_bridge_under_outer(f, tmp_path, spec_path)
+        _wait_until_gone(bridge)
+        completed = _bridge_completed(tmp_path, stdout, stderr)
         assert completed.returncode == 0, completed.stderr.decode()
         result = json.loads(completed.stdout)
         assert result["wave"] == f.manifest["wave"]
@@ -703,3 +759,89 @@ def test_transient_unknown_requester_probe_is_retried(tmp_path, monkeypatch):
         reply = f.consumer(f.event)
     assert [item["status"] for item in reply["results"]] == ["complete"]
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("peer_alive", [True, False])
+def test_admitted_peer_collects_reply_after_orchestrator_exit(tmp_path, monkeypatch, peer_alive):
+    # F37b: admission still requires a live descendant of the live
+    # orchestrator. For delivery only, the same admitted peer incarnation may
+    # collect its reply after the orchestrator has exited.
+    import time
+    from process_identity import ProcessIdentity
+    pid_file = tmp_path / "peer.pid"
+    outer_command = (sys.executable, "-c",
+                     "import subprocess, sys, time\n"
+                     "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                     "open(sys.argv[1], 'w').write(str(p.pid))\n"
+                     "time.sleep(180)\n", str(pid_file))
+    peer = None
+    with wave_fixture(tmp_path, monkeypatch, plans=1, record=False, outer_command=outer_command) as f:
+        try:
+            deadline = time.monotonic() + 15
+            while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            peer = ProcessIdentity.from_pid(int(pid_file.read_text()))
+            event = f.channel._request(peer, f.message)["event_id"]
+            os.kill(f.outer.identity.pid, signal.SIGTERM)
+            f.outer.process.wait(timeout=5)
+            assert probe_identity(f.outer.identity) != LIVE
+            if peer_alive:
+                reply = f.consumer(event)
+                assert [item["status"] for item in reply["results"]] == ["complete"]
+                with f.store.read_transaction() as tx:
+                    assert tx.execute(
+                        "SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+                        (f.outer.activity_id, f"gsd-wave:{event}:reply"),
+                    ).fetchone() is not None
+            else:
+                os.kill(peer.pid, signal.SIGKILL)
+                while probe_identity(peer) == LIVE:
+                    time.sleep(0.01)
+                with pytest.raises(WorkerChannelRefused, match="IPC_DESCENDANT_ANCESTRY_MISMATCH"):
+                    f.consumer(event)
+        finally:
+            if peer is not None and probe_identity(peer) == LIVE:
+                os.kill(peer.pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("requester_alive", [True, False])
+def test_file_transport_delivers_to_bridge_after_orchestrator_exit(tmp_path, monkeypatch, requester_alive):
+    # F37b over the workspace file transport managed Codex/Claude hosts use:
+    # the real bridge, a descendant of the orchestrator, is the recorded
+    # requester, so it still receives and integrates its reply after the
+    # orchestrator exits, and a dead bridge is still refused.
+    import threading
+    import time
+    spec_path = tmp_path / "bridge-spec.json"
+    refusals, consumed = [], threading.Event()
+    with wave_fixture(tmp_path, monkeypatch, plans=1, record=False,
+                      outer_command=_bridge_outer_command(spec_path)) as f:
+        def consume_after_exit(event_id):
+            try:
+                os.kill(f.outer.identity.pid, signal.SIGTERM)
+                f.outer.process.wait(timeout=5)
+                if not requester_alive:
+                    requester = _wait_for_pid(tmp_path / "bridge.pid")
+                    os.kill(requester.pid, signal.SIGKILL)
+                    while probe_identity(requester) == LIVE:
+                        time.sleep(0.01)
+                return f.consumer(event_id)
+            except Exception as error:
+                refusals.append(getattr(error, "code", repr(error)))
+                raise
+            finally:
+                consumed.set()
+
+        f.channel.attach_wave_consumer(consume_after_exit)
+        bridge, stdout, stderr = _start_bridge_under_outer(f, tmp_path, spec_path)
+        assert consumed.wait(timeout=90)
+        _wait_until_gone(bridge)
+        integrated = (f.parent / "result-0.txt").exists()
+    if requester_alive:
+        assert refusals == [], stderr.read_text()
+        reply = json.loads(stdout.read_text())
+        assert [item["status"] for item in reply["results"]] == ["complete"]
+        assert integrated
+    else:
+        assert refusals == ["IPC_DESCENDANT_ANCESTRY_MISMATCH"]
+        assert not integrated
