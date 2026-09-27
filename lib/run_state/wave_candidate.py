@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from .candidate_chain import _event, _read
 from .ownership import OwnershipRefused
-from .workspace import inspect_workspace
+from .workspace import WorkspaceRefused, inspect_workspace
 
 
 def bind_wave_execution_candidate(store, token, *, sealed, handle, request_key, ready, process_evidence):
@@ -37,8 +37,15 @@ def bind_wave_execution_candidate(store, token, *, sealed, handle, request_key, 
         runtime_hash = tx.execute("SELECT runtime_tuple_hash FROM authority_activities WHERE id=?",
                                   (handle.activity_id,)).fetchone()["runtime_tuple_hash"]
     # Qualification promotion rewrites the preparation's child_role after the
-    # session captured it; the authority hashes the live row, so hash that too.
-    ready = inspect_workspace(store, ready.id)
+    # session captured it, and the authority hashes the live row.  Accept the
+    # live row only when that promotion is its sole difference.
+    try:
+        live = inspect_workspace(store, ready.id)
+    except WorkspaceRefused as error:
+        raise OwnershipRefused("ACCEPTANCE_RECEIPT_BINDING_INVALID") from error
+    if live != ready and (ready.child_role != "inventory" or replace(ready, child_role=live.child_role) != live):
+        raise OwnershipRefused("ACCEPTANCE_RECEIPT_BINDING_INVALID")
+    ready = live
     workspace = Path(integrated["material"]["workspace"])
     manifest = _read({"locator": str(workspace / request["manifest_locator"]), "sha256": request["manifest_sha256"]})
     completion = (workspace / ".planning/.ffs-supervised/waves" / handle.activity_id

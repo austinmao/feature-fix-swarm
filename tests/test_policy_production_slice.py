@@ -642,6 +642,13 @@ def test_execution_receipt_binds_ordered_multi_wave_candidate_without_replay_deb
             # Production hands the bind the session's pre-qualification copy of the
             # preparation; promotion has since rewritten the live row's child_role (F38).
             stale_ready = replace(ready, child_role="inventory")
+            # Any other difference from the live row is still a binding mismatch.
+            for drifted in (replace(stale_ready, selected_manifest_hash="0" * 64),
+                            replace(ready, child_role="reviewer")):
+                with pytest.raises(OwnershipRefused, match="ACCEPTANCE_RECEIPT_BINDING_INVALID"):
+                    bind_wave_execution_candidate(
+                        store, token, sealed=sealed, handle=wave.outer, request_key=wave.request.request_key,
+                        ready=drifted, process_evidence=result["evidence"])
             recorded, bound = bind_wave_execution_candidate(
                 store, token, sealed=sealed, handle=wave.outer, request_key=wave.request.request_key,
                 ready=stale_ready, process_evidence=result["evidence"])
