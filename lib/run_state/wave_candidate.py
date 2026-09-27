@@ -36,14 +36,17 @@ def bind_wave_execution_candidate(store, token, *, sealed, handle, request_key, 
         # A descendant's separately qualified workspace has its own runtime identity.
         runtime_hash = tx.execute("SELECT runtime_tuple_hash FROM authority_activities WHERE id=?",
                                   (handle.activity_id,)).fetchone()["runtime_tuple_hash"]
+        bound = tx.execute("SELECT role FROM authority_child_bindings WHERE activity_id=?",
+                           (handle.activity_id,)).fetchone()
     # Qualification promotion rewrites the preparation's child_role after the
     # session captured it, and the authority hashes the live row.  Accept the
-    # live row only when that promotion is its sole difference.
+    # live row only when that promotion, to the bound role, is its sole difference.
     try:
         live = inspect_workspace(store, ready.id)
     except WorkspaceRefused as error:
         raise OwnershipRefused("ACCEPTANCE_RECEIPT_BINDING_INVALID") from error
-    if live != ready and (ready.child_role != "inventory" or replace(ready, child_role=live.child_role) != live):
+    if live != ready and (ready.child_role != "inventory" or bound is None or live.child_role != bound["role"]
+                          or replace(ready, child_role=live.child_role) != live):
         raise OwnershipRefused("ACCEPTANCE_RECEIPT_BINDING_INVALID")
     ready = live
     workspace = Path(integrated["material"]["workspace"])

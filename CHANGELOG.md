@@ -19,11 +19,13 @@ all skills.
   `bind_wave_execution_candidate` now re-reads the live preparation before
   building the receipt, as the parent-resource and final-review paths already
   do, and accepts it only when its sole difference from the caller's copy is
-  that promotion away from `inventory`; any other difference, or a missing
-  row, refuses with the same `ACCEPTANCE_RECEIPT_BINDING_INVALID`. Found by a
-  live operator E2E run (managed Codex, one wave, worker integrated) that
-  reached the bind for the first time after F36; the regression test hands
-  the bind the pre-promotion copy and two drifted copies.
+  that promotion from `inventory` to the execution child binding's role; any
+  other difference, a promotion to another role, or a missing row refuses
+  with the same `ACCEPTANCE_RECEIPT_BINDING_INVALID`. Found by a live
+  operator E2E run (managed Codex, one wave, worker integrated) that reached
+  the bind for the first time after F36; the regression test hands the bind
+  the pre-promotion copy, two drifted copies, and a live row promoted to the
+  wrong role.
 
 ### Fixed (2026-09-26, spec-014 Release C: F36 canonical wave-manifest writer)
 
