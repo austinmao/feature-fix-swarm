@@ -266,6 +266,42 @@ def _held(root):
     return (root / "supervisor.lock").is_file() and not channel_module._supervisor_lock_released(root)
 
 
+def test_lock_unlinked_after_the_client_opened_it_is_inconclusive(tmp_path, monkeypatch):
+    # The client may take an old inode the live server has just let go; only
+    # a lock still named at the channel path says anything.
+    root = tmp_path / "root"
+    root.mkdir()
+    os.close(os.open(root / "supervisor.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    real_open = os.open
+
+    def open_then_unlink(path, *args, **kwargs):
+        descriptor = real_open(path, *args, **kwargs)
+        Path(path).unlink()
+        return descriptor
+
+    monkeypatch.setattr(channel_module.os, "open", open_then_unlink)
+    assert not channel_module._supervisor_lock_released(root)
+
+
+def test_unexpected_serving_exit_removes_the_master_lock(tmp_path, monkeypatch):
+    # A serving loop that dies without close() must not strand the master,
+    # or a successor at the same endpoint can never register.
+    monkeypatch.setattr(threading, "excepthook", lambda _args: None)
+    with _file_channel_server(tmp_path) as (server, binding):
+        _binding, root, _capability = _register(server, binding)
+        master = server._supervisor_lock
+
+        def died():
+            raise RuntimeError("serving loop died")
+
+        server._serve_file_once = died
+        server.start()
+        server._thread.join(timeout=10)
+        assert not server._thread.is_alive()
+        assert not master.exists()
+        assert channel_module._supervisor_lock_released(root)
+
+
 def test_supervisor_lock_is_held_from_registration(tmp_path):
     # F37b: a client whose supervisor dies before its first pickup must
     # still find the lock, so it exists from registration on.

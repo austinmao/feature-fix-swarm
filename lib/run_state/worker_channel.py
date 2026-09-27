@@ -1043,9 +1043,9 @@ class WorkerChannelServer:
                         if not self._stop.is_set():
                             self._stop.set()
             finally:
-                # Stopped after publishing its last reply: a busy close()
-                # left the supervisor locks held for exactly that reply.
-                self._release_supervisor_locks(remove_master=self._stop.is_set())
+                # Nothing serves once this thread ends, whether a busy close()
+                # left the locks held for its last reply or the loop died.
+                self._release_supervisor_locks(remove_master=True)
 
         self._thread = threading.Thread(target=serve, name="ffs-worker-requests", daemon=True)
         self._thread.start()
@@ -1133,7 +1133,13 @@ def _supervisor_lock_released(root: Path) -> bool:
         except OSError:
             return False
         fcntl.flock(descriptor, fcntl.LOCK_UN)
-        return True
+        # An inode whose path was unlinked or replaced after we opened it may
+        # have been let go by a live supervisor; only the named lock counts.
+        try:
+            named = os.lstat(root / _SUPERVISOR_LOCK)
+        except OSError:
+            return False
+        return (named.st_dev, named.st_ino) == (info.st_dev, info.st_ino)
     finally:
         os.close(descriptor)
 
