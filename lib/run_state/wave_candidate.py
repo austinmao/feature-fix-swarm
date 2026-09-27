@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from .candidate_chain import _event, _read
 from .ownership import OwnershipRefused
+from .workspace import WorkspaceRefused, inspect_workspace
 
 
 def bind_wave_execution_candidate(store, token, *, sealed, handle, request_key, ready, process_evidence):
@@ -35,6 +36,20 @@ def bind_wave_execution_candidate(store, token, *, sealed, handle, request_key, 
         # A descendant's separately qualified workspace has its own runtime identity.
         runtime_hash = tx.execute("SELECT runtime_tuple_hash FROM authority_activities WHERE id=?",
                                   (handle.activity_id,)).fetchone()["runtime_tuple_hash"]
+        bound = tx.execute("SELECT role FROM authority_child_bindings WHERE activity_id=?",
+                           (handle.activity_id,)).fetchone()
+    # Qualification promotion rewrites the preparation's child_role after the
+    # session captured it, and the authority hashes the live row.  The live row
+    # must carry the bound role, and differ from the caller's copy only by that
+    # promotion from inventory.
+    try:
+        live = inspect_workspace(store, ready.id)
+    except WorkspaceRefused as error:
+        raise OwnershipRefused("ACCEPTANCE_RECEIPT_BINDING_INVALID") from error
+    if (bound is None or live.child_role != bound["role"]
+            or live != ready and (ready.child_role != "inventory" or replace(ready, child_role=live.child_role) != live)):
+        raise OwnershipRefused("ACCEPTANCE_RECEIPT_BINDING_INVALID")
+    ready = live
     workspace = Path(integrated["material"]["workspace"])
     manifest = _read({"locator": str(workspace / request["manifest_locator"]), "sha256": request["manifest_sha256"]})
     completion = (workspace / ".planning/.ffs-supervised/waves" / handle.activity_id

@@ -8,6 +8,25 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-27, spec-014 Release C: F38 wave execution bind hashes the live preparation)
+
+- A managed frontend run that executed at least one supervised wave refused
+  at the execution bind with `ACCEPTANCE_RECEIPT_BINDING_INVALID`. The bind
+  received the session's copy of the inventory workspace preparation, captured
+  before qualification promoted the live row's `child_role` to the admitted
+  role, and hashed that stale copy into the receipt's
+  `workspace_preparation_hash`, while the authority hashes the live row.
+  `bind_wave_execution_candidate` now re-reads the live preparation before
+  building the receipt, as the parent-resource and final-review paths already
+  do. The live row must carry the execution child binding's role and may
+  differ from the caller's copy only by that promotion from `inventory`; any
+  other difference, any other role, or a missing row refuses with the same
+  `ACCEPTANCE_RECEIPT_BINDING_INVALID`. Found by a live
+  operator E2E run (managed Codex, one wave, worker integrated) that reached
+  the bind for the first time after F36; the regression test hands the bind
+  the pre-promotion copy, two drifted copies, and a live row promoted to the
+  wrong role.
+
 ### Fixed (2026-09-26, spec-014 Release C: F36 canonical wave-manifest writer)
 
 - The FFS-supervised dispatch adapter rejected a wave manifest unless its raw
