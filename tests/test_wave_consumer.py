@@ -472,3 +472,32 @@ def test_unproven_or_internal_dependencies_refused_before_effects(tmp_path, monk
         with pytest.raises(SupervisorRefused, match=expected):
             f.consumer(record_wave(f, manifest, "dependent-wave"))
         assert not f.prepared
+
+
+def test_wave_worker_cannot_rewrite_undeclared_planning_config(tmp_path, monkeypatch):
+    # F40: GSD bookkeeping (config-set) inside a worker must not become an
+    # out-of-scope write that refuses the whole plan.
+    import test_supervised_process
+    original = test_supervised_process._repository
+
+    def with_planning_config(path):
+        primary = original(path)
+        (primary / ".planning" / "config.json").write_text('{"workflow": {}}\n')
+        git(primary, "add", ".planning/config.json")
+        git(primary, "commit", "-qm", "fixture planning config")
+        return primary
+
+    monkeypatch.setattr(test_supervised_process, "_repository", with_planning_config)
+    bookkeeping = (
+        "from pathlib import Path\n"
+        "try:\n"
+        "    Path('.planning/config.json').write_text('{\"workflow\": {\"_auto_chain_active\": false}}\\n')\n"
+        "except PermissionError:\n"
+        "    pass\n"
+        "Path('result-0.txt').write_text('done')\n"
+    )
+    with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", bookkeeping)]) as f:
+        reply = f.consumer(f.event)
+        worker = f.prepared[0].preparation.path
+    assert [item["status"] for item in reply["results"]] == ["complete"]
+    assert (worker / ".planning" / "config.json").read_text() == '{"workflow": {}}\n'
