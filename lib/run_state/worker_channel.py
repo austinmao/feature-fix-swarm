@@ -322,10 +322,12 @@ class WorkerChannelServer:
         # workspace.  The Unix socket remains authoritative for native
         # workers and brokers; both transports enter the same fenced handler.
         self._file_bindings: dict[Path, tuple[bytes, WorkerBinding, tuple[int, int]]] = {}
-        # One held supervisor.lock per file channel: the kernel drops it when
-        # this process dies, which a waiting client can see even when this
-        # process's identity only probes UNKNOWN from its PID namespace.
-        self._file_locks: list[int] = []
+        # A held supervisor.lock per file channel that has served a wave: the
+        # kernel drops it when this process dies, which a waiting client can
+        # see even when this process's identity only probes UNKNOWN from its
+        # PID namespace. Only the orchestrator's channel sends waves, so this
+        # is about one descriptor per supervisor.
+        self._file_locks: dict[Path, int] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -495,18 +497,6 @@ class WorkerChannelServer:
                     if (root.is_symlink() or info.st_uid != os.getuid()
                             or stat.S_IMODE(info.st_mode) != 0o700):
                         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
-                    # os.open descriptors are non-inheritable, so a spawned
-                    # orchestrator never keeps this lock alive.
-                    held = os.open(
-                        root / _SUPERVISOR_LOCK,
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                    )
-                    try:
-                        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except OSError:
-                        os.close(held)
-                        raise
-                    self._file_locks.append(held)
                 except (FileExistsError, OSError) as error:
                     raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
                 token = secrets.token_urlsafe(32)
@@ -582,6 +572,29 @@ class WorkerChannelServer:
         # supervisor cannot probe; record the orchestrator, as before F37b.
         return requester if requester.host_id == binding.identity.host_id else binding.identity
 
+    def _hold_supervisor_lock(self, root: Path) -> None:
+        """Hold <root>/supervisor.lock before this channel serves its first wave.
+
+        os.open descriptors are non-inheritable, so a spawned orchestrator
+        never keeps the lock alive. A wave is never served without it.
+        """
+        with self._lock:
+            if root in self._file_locks:
+                return
+            try:
+                held = os.open(
+                    root / _SUPERVISOR_LOCK,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                )
+            except OSError as error:
+                raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                os.close(held)
+                raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
+            self._file_locks[root] = held
+
     def _serve_file_once(self) -> bool:
         with self._lock:
             bindings = tuple(self._file_bindings.items())
@@ -602,7 +615,10 @@ class WorkerChannelServer:
                     if (set(wrapped) - {"requester"} != {"capability", "message"} or token_digest is None
                             or not hmac.compare_digest(token_digest, expected_token)):
                         raise WorkerChannelRefused("IPC_FILE_CAPABILITY_REFUSED")
-                    response = self._request(self._file_requester(binding, wrapped), wrapped["message"])
+                    message = wrapped["message"]
+                    if isinstance(message, dict) and message.get("operation") == "gsd-wave-request":
+                        self._hold_supervisor_lock(root)
+                    response = self._request(self._file_requester(binding, wrapped), message)
                 except (WorkerChannelRefused, OwnershipRefused, ControlStoreRefused) as error:
                     response = {"ok": False, "code": error.code}
                 except Exception as error:
@@ -992,13 +1008,17 @@ class WorkerChannelServer:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=4)
+        # A thread still inside a wave will yet write its reply; keep the
+        # locks so its waiting client does not see this supervisor gone. The
+        # kernel drops them when this process exits.
+        serving = self._thread is not None and self._thread.is_alive()
         self._socket.close()
         with self._lock:
             self._broker_bootstraps.clear()
             self._broker_bootstrap_intents.clear()
             self._file_bindings.clear()
-            while self._file_locks:
-                os.close(self._file_locks.pop())
+            while self._file_locks and not serving:
+                os.close(self._file_locks.popitem()[1])
         parent = self.endpoint.parent
         try:
             if ((parent.stat().st_dev, parent.stat().st_ino) == self._parent_identity

@@ -38,9 +38,14 @@ all skills.
     Without it both the delivery rule above and the F37a requester check
     saw the exited orchestrator and refused. A bridge that cannot capture
     its own identity falls back to the previous behavior.
-  - A file-transport request no longer waits forever. Each file channel now
-    has a `supervisor.lock` that the supervisor holds with an exclusive
-    `flock` for its whole life, on a descriptor no spawned process inherits.
+  - A file-transport request no longer waits forever. The first time a file
+    channel serves a wave request, the supervisor creates that channel's
+    `supervisor.lock` and holds an exclusive `flock` on it for its whole
+    life, on a descriptor no spawned process inherits; only the
+    orchestrator's channel sends waves, so this is about one descriptor per
+    supervisor. A wave whose lock cannot be taken is refused with
+    `IPC_FILE_CHANNEL_UNSAFE` instead of being served unguarded, and closing
+    the channel keeps the lock while a wave is still being served.
     About once a second the waiting request probes the supervisor named in
     its scope and tries a non-blocking lock on that file; it fails with
     `IPC_SUPERVISOR_GONE` once the supervisor probes dead or the lock can be
