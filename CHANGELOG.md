@@ -8,6 +8,25 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-27, spec-014 Release C: F40 worker planning config and wave refusal cause)
+
+- A supervised wave worker that ran GSD bookkeeping (`config-set
+  workflow._auto_chain_active false`) rewrote `.planning/config.json`, a
+  path its plan never declared, so the harvest refused the whole plan with
+  `WAVE_SCOPE_VIOLATION`. GSD offers no way to redirect that write and the
+  worker environment is a closed allowlist, so the wave consumer now makes
+  `.planning/config.json` read-only (0444) in each worker's own disposable
+  workspace after the worker is qualified and before it launches, unless the
+  plan declares that file. A stray `config-set` then fails instead of
+  landing out of scope; Git records only the executable bit, so the scope
+  inventory sees no change.
+- `WAVE_EXECUTION_REFUSED` and `WAVE_EXECUTION_UNPROVEN` refusals reported
+  the generic cause "the selected host backend has not demonstrated managed
+  admission" with recovery `qualify_host_adapter`. They now name the wave
+  (`inspect_wave_reply` / `inspect_wave_evidence`); every other supervisor
+  refusal keeps its previous mapping. Found by a live operator E2E run
+  (attempt 9).
+
 ### Fixed (2026-09-27, spec-014 Release C: F39 clean selected inputs in overlay form)
 
 - A managed frontend run whose `--select-file` inputs were identical to
@@ -2668,7 +2687,6 @@ Lifecycle contract changed. Skills no longer require `run-state start` to anchor
 - `skills/fix/SKILL.md` **v1.3.0 → v1.4.0**: added run-state lifecycle (start/update/audit/complete) + Step 4 adversarial audit + flags (`--tokens`, `--no-audit`)
 - `skills/feature/SKILL.md` **v1.2.0 → v1.3.0**: same lifecycle + Step 6 spec-completion audit before `/canary` + 1.5M token default budget
 - `setup.sh`: installs `lib/run_state/`, `bin/run-state`, `scripts/hooks/run-state-*.py`; registers Stop + SessionStart hooks in `~/.claude/settings.json`; checks for `python3`, `jq`, `codex` CLI prerequisites
-
 
 ## [Unreleased]
 
