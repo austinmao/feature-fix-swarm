@@ -2999,7 +2999,7 @@ def _gsd_wave_completion_code(
     """Return the typed refusal for an unproven direct execute completion."""
     with store.read_transaction() as tx:
         wave_events = tx.execute(
-            "SELECT e.id FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+            "SELECT e.id,e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
             "WHERE k.activity_id=? AND k.idempotency_key LIKE ? AND e.event_type=k.idempotency_key",
             (activity_id, "worker-request:" + intent_id + ":gsd-wave:%"),
         ).fetchall()
@@ -3008,12 +3008,25 @@ def _gsd_wave_completion_code(
             "WHERE k.activity_id=? AND k.idempotency_key=?",
             (activity_id, f"gsd-wave:{event['id']}:reply"),
         ).fetchone() for event in wave_events]
+        integrations = [tx.execute(
+            "SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+            "WHERE k.activity_id=? AND k.idempotency_key=?",
+            (activity_id, f"gsd-wave:{event['id']}:integrated"),
+        ).fetchone() for event in wave_events]
         refusals = [tx.execute(
-            "SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+            "SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+            "WHERE k.activity_id=? AND k.idempotency_key=?",
             (activity_id, f"gsd-wave:{event['id']}:refused"),
         ).fetchone() for event in wave_events]
-    if any(refusal is not None and reply is None for refusal, reply in zip(refusals, replies, strict=True)):
-        return "WAVE_EXECUTION_REFUSED"
+    for refusal, reply in zip(refusals, replies, strict=True):
+        if refusal is not None and reply is None:
+            # The consumer refuses a wave whose requesting adapter is gone
+            # before integrating it: nothing would consume that reply (F37a).
+            try:
+                unconsumed = json.loads(refusal["payload"])["data"]["code"] == "WAVE_REPLY_UNCONSUMED"
+            except (KeyError, TypeError, ValueError):
+                unconsumed = False
+            return "WAVE_REPLY_UNCONSUMED" if unconsumed else "WAVE_EXECUTION_REFUSED"
     if not wave_events:
         return "WAVE_EXECUTION_UNPROVEN" if require_wave else None
     if not all(item is not None for item in replies):
@@ -3030,7 +3043,66 @@ def _gsd_wave_completion_code(
                 return "WAVE_EXECUTION_REFUSED"
         except (OSError, KeyError, TypeError, ValueError, SupervisorRefused):
             return "WAVE_EXECUTION_UNPROVEN"
+    # A recorded reply is delivered only once the outer adapter writes its
+    # no-commit receipt; an orchestrator that exited first leaves none (F37a).
+    # The receipt must bind this manifest and reply, as the candidate chain
+    # requires, and is read without following links.
+    for event, integrated, row in zip(wave_events, integrations, replies, strict=True):
+        try:
+            workspace = Path(json.loads(integrated["payload"])["data"]["material"]["workspace"])
+            body = json.loads(event["payload"])["data"]["body"]
+            raw = _read_evidence(workspace / body["manifest_locator"])
+            manifest = json.loads(raw)
+            prefix = str(workspace / ".planning/.ffs-supervised/waves" / activity_id / f"wave-{manifest['wave']}")
+            receipt_raw = _published_receipt(Path(prefix + ".result.json.receipt.json"))
+            if receipt_raw is None:
+                return "WAVE_REPLY_UNCONSUMED"
+            result_raw = _read_evidence(Path(prefix + ".result.json"))
+            receipt = json.loads(receipt_raw)
+            if (hashlib.sha256(raw).hexdigest() != body["manifest_sha256"]
+                    or json.loads(result_raw) != json.loads(row["payload"])["data"]["reply"]
+                    or receipt != {"schema": "ffs.gsd-no-commit-completion/v1",
+                                   "manifest_sha256": hashlib.sha256(_canonical(manifest)).hexdigest(),
+                                   "result_sha256": hashlib.sha256(result_raw).hexdigest(),
+                                   "initial_head": manifest["initial_head"], "commit_mode": "patches"}):
+                return "WAVE_EXECUTION_UNPROVEN"
+        except (OSError, KeyError, TypeError, ValueError, SupervisorRefused):
+            return "WAVE_EXECUTION_UNPROVEN"
     return None
+
+
+# ponytail: fixed grace for an adapter still publishing its receipt after the
+# outer process exited (finish() waits for that process only); F37b, an
+# adapter that outlives the orchestrator, removes the race.
+_RECEIPT_GRACE_SECONDS = 10.0
+
+
+def _published_receipt(path: Path) -> bytes | None:
+    """The adapter's receipt bytes once they parse, or None when still absent at the deadline.
+
+    The adapter creates the receipt path before writing and syncing it, so an
+    empty or partial file is retried within the grace, not judged.
+    """
+    deadline = time.monotonic() + _RECEIPT_GRACE_SECONDS
+    while True:
+        if os.path.lexists(path):
+            raw = _read_evidence(path)
+            try:
+                json.loads(raw)
+                return raw
+            except ValueError:
+                if time.monotonic() >= deadline:
+                    return raw
+        elif time.monotonic() >= deadline:
+            return None
+        time.sleep(0.1)
+
+
+_WAVE_FAILURE_REASONS = {
+    "WAVE_EXECUTION_REFUSED": "GSD wave execution was refused",
+    "WAVE_EXECUTION_UNPROVEN": "GSD execution returned without supervised wave evidence",
+    "WAVE_REPLY_UNCONSUMED": "the outer orchestrator exited before consuming a supervised wave reply",
+}
 
 
 def _managed_command_requires_wave_proof(invocation: tuple[str, ...]) -> bool | None:
@@ -3503,18 +3575,13 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             wave_refusal = _gsd_wave_completion_code(
                 store, child.id, handle.intent_id, require_wave=wave_required,
             )
-            if wave_refusal == "WAVE_EXECUTION_REFUSED":
-                store.transition_activity(
-                    token, child.id, expected="active", new="failed",
-                    result=result["evidence"], reason="GSD wave execution was refused",
-                )
-                raise SupervisorRefused("WAVE_EXECUTION_REFUSED")
             if wave_refusal is not None:
+                code = wave_refusal if wave_refusal in _WAVE_FAILURE_REASONS else "WAVE_EXECUTION_UNPROVEN"
                 store.transition_activity(
                     token, child.id, expected="active", new="failed",
-                    result=result["evidence"], reason="GSD execution returned without supervised wave evidence",
+                    result=result["evidence"], reason=_WAVE_FAILURE_REASONS[code],
                 )
-                raise SupervisorRefused("WAVE_EXECUTION_UNPROVEN")
+                raise SupervisorRefused(code)
         if result["returncode"] == 0:
             # Under the sealed lifecycle the outer activity stays active for the
             # mapped checks and the final review; ``settle`` closes it before DONE.

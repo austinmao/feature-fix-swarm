@@ -296,6 +296,7 @@ def test_managed_claude_outer_qualify_receives_scoped_project(tmp_path, monkeypa
 # (ACCEPTANCE_DRAFT_REQUIRED); the direct execute-phase command still proves the wave rule.
 @pytest.mark.parametrize(("command", "operation_payload", "expected_command", "expected_code"), [
     (("/gsd-execute-phase", "1"), None, "$gsd-execute-phase 1", "WAVE_EXECUTION_UNPROVEN"),
+    (("/gsd-execute-phase", "1"), None, "$gsd-execute-phase 1", "WAVE_REPLY_UNCONSUMED"),
     # The staged command's argument is the real planning scope
     # (token.planning_scope, set to "1" below); invocation_text never enters
     # the prompt (#F32 review defect 5), so it no longer shapes expected_command.
@@ -425,7 +426,7 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
     monkeypatch.setattr(managed, "ClaudeHostAdapter", Adapter)
     monkeypatch.setattr(
         managed, "_gsd_wave_completion_code",
-        lambda *_args, **_kwargs: "WAVE_EXECUTION_UNPROVEN",
+        lambda *_args, **_kwargs: expected_code if expected_code.startswith("WAVE_") else "WAVE_EXECUTION_UNPROVEN",
     )
 
     request = ClaudeHostRequest(
@@ -447,6 +448,10 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
         assert store.transitions == [] and prompts == []
         return
     assert store.transitions[-1][1]["new"] == "failed"
+    if expected_code == "WAVE_REPLY_UNCONSUMED":
+        assert store.transitions[-1][1]["reason"] == "the outer orchestrator exited before consuming a supervised wave reply"
+        assert prompts[0].startswith(expected_command + "\n\n")
+        return
     assert store.transitions[-1][1]["reason"] == "GSD execution returned without supervised wave evidence"
     assert prompts[0].startswith(expected_command + "\n\n")
 

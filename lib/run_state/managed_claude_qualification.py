@@ -22,7 +22,7 @@ from .claude_runtime_staging import stage_private_claude_runtime
 from .host_request import ClaudeHostRequest
 from .supervisor import (
     ClaudeQualificationLaunchMaterial, DispatchRequest, Supervisor,
-    SupervisorRefused, _gsd_wave_completion_code, _managed_command_requires_wave_proof,
+    SupervisorRefused, _WAVE_FAILURE_REASONS, _gsd_wave_completion_code, _managed_command_requires_wave_proof,
     _managed_wave_prompt, finish_owned_wave_client,
 )
 from .wave_consumer import WaveConsumer
@@ -376,18 +376,13 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
             wave_refusal = _gsd_wave_completion_code(
                 store, activity.id, handle.intent_id, require_wave=wave_required,
             )
-            if wave_refusal == "WAVE_EXECUTION_REFUSED":
-                store.transition_activity(
-                    token, activity.id, expected="active", new="failed",
-                    result=result["evidence"], reason="GSD wave execution was refused",
-                )
-                raise SupervisorRefused("WAVE_EXECUTION_REFUSED")
             if wave_refusal is not None:
+                code = wave_refusal if wave_refusal in _WAVE_FAILURE_REASONS else "WAVE_EXECUTION_UNPROVEN"
                 store.transition_activity(
                     token, activity.id, expected="active", new="failed",
-                    result=result["evidence"], reason="GSD execution returned without supervised wave evidence",
+                    result=result["evidence"], reason=_WAVE_FAILURE_REASONS[code],
                 )
-                raise SupervisorRefused("WAVE_EXECUTION_UNPROVEN")
+                raise SupervisorRefused(code)
         if result["returncode"] != 0 or settle_success:
             store.transition_activity(
                 token, activity.id, expected="active", new="succeeded" if result["returncode"] == 0 else "failed",

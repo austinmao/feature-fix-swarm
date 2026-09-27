@@ -148,6 +148,10 @@ _WAVE_REFUSALS = {
     "WAVE_EXECUTION_UNPROVEN": (
         "the outer run ended without a verified reply for every supervised GSD wave it requested",
         "inspect_wave_evidence"),
+    "WAVE_REPLY_UNCONSUMED": (
+        "a supervised GSD wave completed and was integrated, but the outer orchestrator "
+        "exited before its adapter consumed the reply, so the run cannot bind that wave",
+        "inspect_wave_delivery"),
 }
 
 

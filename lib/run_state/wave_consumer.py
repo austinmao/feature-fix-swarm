@@ -20,7 +20,7 @@ import time
 from typing import Callable
 import uuid
 
-from process_identity import ProcessIdentity
+from process_identity import LIVE, UNKNOWN, ProcessIdentity, probe_identity
 from .ownership import OwnershipRefused, assert_owner
 from .run_policy import productive_work
 from .state import ControlStoreRefused
@@ -1119,11 +1119,32 @@ class WaveConsumer:
             return self._integrate_results(event_id, parent, prefix, manifest,
                                            results, reply, guard, check)
 
+    def _requester_gone(self, event_id) -> bool:
+        with self.store.read_transaction() as tx:
+            row = tx.execute("SELECT payload FROM control_events WHERE id=?", (event_id,)).fetchone()
+        requester = ProcessIdentity(**json.loads(row["payload"])["data"]["peer_identity"])
+        # Only a provably live requester earns a new integration. A transient
+        # UNKNOWN (e.g. a probe timeout) is re-probed; one that persists is
+        # treated as gone.
+        # ponytail: fixed 3 probes 0.5s apart; make it a policy knob if hosts need longer.
+        for attempt in range(3):
+            status = probe_identity(requester)
+            if status != UNKNOWN:
+                return status != LIVE
+            if attempt < 2:
+                time.sleep(0.5)
+        return True
+
     def _integrate_results(self, event_id, parent, prefix, manifest, results, reply, guard, check):
         # Hash the exact before/after state in a disposable index before either
         # the pending marker or git apply.  No authority lock spans this work.
         from .integration_journal import read_intent, quarantine
         retained_journal = read_intent(self.store, self.token, wave_key=prefix)
+        if retained_journal is None and self._requester_gone(event_id):
+            # The adapter that requested this wave is gone (its orchestrator
+            # ended), so nothing will consume the reply; leave the outer
+            # workspace untouched instead of integrating into it (F37a).
+            raise SupervisorRefused("WAVE_REPLY_UNCONSUMED")
         with productive_work(self.store, self.token, kind="integration"):
             if retained_journal is None:
                 material_intent = prepare_integration_material(

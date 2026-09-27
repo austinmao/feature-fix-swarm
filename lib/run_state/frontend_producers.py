@@ -366,6 +366,15 @@ def _retained_outer_completion(store, activity_id: str):
             json.loads(row["completion_evidence_json"]))
 
 
+def _refuse_undelivered_retained_wave(store, invocation, activity_id: str, intent_id: str) -> None:
+    from .supervisor import _WAVE_FAILURE_REASONS, _gsd_wave_completion_code, _managed_command_requires_wave_proof
+    required = _managed_command_requires_wave_proof(invocation)
+    code = None if required is None else _gsd_wave_completion_code(
+        store, activity_id, intent_id, require_wave=required)
+    if code is not None:
+        raise SupervisorRefused(code if code in _WAVE_FAILURE_REASONS else "WAVE_EXECUTION_UNPROVEN")
+
+
 def _bind_executed_candidate(store, token, *, sealed, handle, request_key, ready, process_evidence) -> None:
     from .wave_candidate import bind_wave_execution_candidate
     with store.read_transaction() as tx:
@@ -463,7 +472,10 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
             repository_id=token.repository_id, run_id=token.run_id)
         if sealed is None or state is None:
             if retained_outer is not None:
-                # The one legacy execution already completed; replay reports it without a second launch.
+                # The one legacy execution already completed; replay reports it without a second launch,
+                # after the wave-delivery check a crash may have skipped (F37a).
+                _refuse_undelivered_retained_wave(store, session.invocation, request.activity_id,
+                                                  retained_outer[0].intent_id)
                 return 0
             returncode, outcome["handle"], _result = session.execute(request, adapter)
             return returncode
