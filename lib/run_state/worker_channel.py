@@ -602,7 +602,10 @@ class WorkerChannelServer:
             os.link(self._device_locks.get(device, self._supervisor_lock), target,
                     follow_symlinks=False)
         except OSError as error:
-            if error.errno != errno.EXDEV:
+            # EXDEV: another filesystem holds its own lock. ENOENT on a device
+            # lock: the root holding it was removed, so hold a fresh one.
+            if error.errno != errno.EXDEV and not (error.errno == errno.ENOENT
+                                                   and device in self._device_locks):
                 raise
             self._held_lock(target)
             self._device_locks[device] = target

@@ -297,6 +297,26 @@ def test_other_filesystem_gets_its_own_held_lock(tmp_path, monkeypatch):
         assert _held(root)
 
 
+def test_removed_device_lock_is_replaced_for_later_registrations(tmp_path, monkeypatch):
+    # The root holding a device's lock may be removed (a finished worktree);
+    # later registrations on that device hold a fresh lock instead of failing.
+    import errno
+    real_link = os.link
+
+    def cross_device_from_master(source, target, **kwargs):
+        if Path(source) == server._supervisor_lock:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_link(source, target, **kwargs)
+
+    with _file_channel_server(tmp_path) as (server, binding):
+        monkeypatch.setattr(channel_module.os, "link", cross_device_from_master)
+        _first, first_root, _capability = _register(server, binding, "intent-a")
+        (first_root / "supervisor.lock").unlink()
+        _second, second_root, _capability = _register(server, binding, "intent-b")
+        assert len(server._lock_fds) == 3
+        assert _held(second_root)
+
+
 def test_failed_lock_leaves_no_descriptor_and_refuses_registration(tmp_path, monkeypatch):
     def refused(*_args, **_kwargs):
         raise BlockingIOError("lock held elsewhere")
