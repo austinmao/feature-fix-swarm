@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 
-from process_identity import LIVE, ProcessIdentity, probe_direct_parent, probe_identity
+from process_identity import DEAD, LIVE, ProcessIdentity, probe_direct_parent, probe_identity
 from .ownership import OwnershipRefused, assert_owner
 from .state import ControlStoreRefused
 
@@ -543,6 +543,24 @@ class WorkerChannelServer:
         finally:
             temporary.unlink(missing_ok=True)
 
+    @staticmethod
+    def _file_requester(binding: WorkerBinding, wrapped: dict) -> ProcessIdentity:
+        """The process a file request is recorded against (F37b).
+
+        The wave bridge names itself so the durable request records it rather
+        than the orchestrator; ``_request`` then applies the socket path's
+        live-descendant-of-the-live-orchestrator admission to it. Only this
+        channel's own wave request may name a requester.
+        """
+        if "requester" not in wrapped:
+            return binding.identity
+        message = wrapped["message"]
+        if (not isinstance(message, dict) or message.get("operation") != "gsd-wave-request"
+                or message.get("intent_id") != binding.intent_id
+                or not isinstance(wrapped["requester"], dict)):
+            raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
+        return ProcessIdentity(**wrapped["requester"])
+
     def _serve_file_once(self) -> bool:
         with self._lock:
             bindings = tuple(self._file_bindings.items())
@@ -560,10 +578,10 @@ class WorkerChannelServer:
                 try:
                     wrapped = self._file_payload(path, maximum=65536)
                     token_digest = _bootstrap_token_digest(wrapped.get("capability"))
-                    if (set(wrapped) != {"capability", "message"} or token_digest is None
+                    if (set(wrapped) - {"requester"} != {"capability", "message"} or token_digest is None
                             or not hmac.compare_digest(token_digest, expected_token)):
                         raise WorkerChannelRefused("IPC_FILE_CAPABILITY_REFUSED")
-                    response = self._request(binding.identity, wrapped["message"])
+                    response = self._request(self._file_requester(binding, wrapped), wrapped["message"])
                 except (WorkerChannelRefused, OwnershipRefused, ControlStoreRefused) as error:
                     response = {"ok": False, "code": error.code}
                 except Exception as error:
@@ -655,8 +673,8 @@ class WorkerChannelServer:
 
         Delivery only (F37b): ``peer`` is the identity recorded when the wave
         was admitted as a live descendant of the live orchestrator. Once that
-        orchestrator no longer probes LIVE, the same incarnation (start token
-        included) may still collect its reply while it probes LIVE.
+        orchestrator probes DEAD, the same incarnation (start token included)
+        may still collect its reply while it probes LIVE.
         Admission itself stays in ``_wave_binding_for_peer_locked``.
         """
         with self._lock:
@@ -669,7 +687,7 @@ class WorkerChannelServer:
                 return
             if _live_descendant(peer, binding.identity):
                 return
-            if probe_identity(binding.identity) != LIVE and probe_identity(peer) == LIVE:
+            if probe_identity(binding.identity) == DEAD and probe_identity(peer) == LIVE:
                 return
             raise WorkerChannelRefused("IPC_DESCENDANT_ANCESTRY_MISMATCH")
 
@@ -1004,8 +1022,17 @@ def request(endpoint: str | Path, scope: dict, *, request_key: str, operation: s
 
 
 def file_request(root: str | Path, capability: str, scope: dict, *, request_key: str,
-                 operation: str, body: dict, timeout: float | None = 5) -> dict:
-    """Use the workspace file transport when a host sandbox denies AF_UNIX."""
+                 operation: str, body: dict, timeout: float | None = 5,
+                 requester: ProcessIdentity | None = None) -> dict:
+    """Use the workspace file transport when a host sandbox denies AF_UNIX.
+
+    While waiting, the scope's supervisor is probed about once a second; a
+    reply that a dead supervisor can never write ends the wait (F37b).
+    """
+    try:
+        supervisor = ProcessIdentity(**scope["supervisor_identity"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise WorkerChannelRefused("IPC_SUPERVISOR_MISMATCH") from error
     root = Path(root)
     if not root.is_absolute() or root.resolve() != root:
         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
@@ -1024,7 +1051,10 @@ def file_request(root: str | Path, capability: str, scope: dict, *, request_key:
         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
     message = {"schema_version": 1, **scope, "request_key": request_key,
                "operation": operation, "body": body}
-    wrapped = _canonical({"capability": capability, "message": message})
+    envelope = {"capability": capability, "message": message}
+    if requester is not None:
+        envelope["requester"] = asdict(requester)
+    wrapped = _canonical(envelope)
     if len(wrapped) > 65536:
         raise WorkerChannelRefused("IPC_MESSAGE_TOO_LARGE")
     name = secrets.token_hex(16) + ".json"
@@ -1040,9 +1070,15 @@ def file_request(root: str | Path, capability: str, scope: dict, *, request_key:
         os.close(descriptor)
     response = root / "responses" / name
     deadline = None if timeout is None else time.monotonic() + timeout
+    next_probe = time.monotonic() + 1
     while not response.exists():
-        if deadline is not None and time.monotonic() >= deadline:
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
             raise WorkerChannelRefused("IPC_TIMEOUT")
+        if now >= next_probe:
+            if probe_identity(supervisor) == DEAD:
+                raise WorkerChannelRefused("IPC_SUPERVISOR_GONE")
+            next_probe = now + 1
         time.sleep(0.02)
     try:
         return WorkerChannelServer._file_payload(response, maximum=_MAX_WAVE_REPLY_BYTES)

@@ -18,10 +18,10 @@ index c3f5473..187a9ba 100755
    }
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 0000000..7bc0fcc
+index 0000000..be88fc6
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,491 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -406,14 +406,15 @@ index 0000000..7bc0fcc
 +// group or a hangup never reaches it, with the same parent chain, so FFS
 +// admission still proves ancestry while the orchestrator lives. Its output
 +// goes to a private log beside the result, never to a pipe this process
-+// owns. This foreground waits for it and relays its log and exit code, so a
-+// caller that stays sees no difference; a caller that leaves still gets the
-+// result and receipt published.
++// owns; the log's name is removed as soon as the child holds it, so nothing
++// is left behind if this foreground is killed. This foreground waits for the
++// child and relays its log and exit code, so a caller that stays sees no
++// difference; a caller that leaves still gets the result and receipt.
 +function runDetached(outputPath) {
 +  const log = `${outputPath}.${crypto.randomBytes(8).toString('hex')}.log`;
 +  let fd;
 +  try {
-+    fd = fs.openSync(log, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
++    fd = fs.openSync(log, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
 +  } catch (error) {
 +    return fail(`cannot create private dispatch log: ${error.message}`, 1);
 +  }
@@ -425,15 +426,24 @@ index 0000000..7bc0fcc
 +      stdio: ['ignore', fd, fd],
 +    });
 +  } finally {
-+    fs.closeSync(fd);
++    fs.unlinkSync(log);
 +  }
-+  child.on('error', (error) => fail(`cannot start detached dispatch: ${error.message}`, 1));
++  child.on('error', (error) => {
++    fs.closeSync(fd);
++    fail(`cannot start detached dispatch: ${error.message}`, 1);
++  });
 +  child.on('exit', (code) => {
 +    try {
-+      process.stderr.write(fs.readFileSync(log));
-+      fs.unlinkSync(log);
++      // The child shares this descriptor's offset, so read from 0 by position.
++      const bytes = Buffer.alloc(fs.fstatSync(fd).size);
++      for (let offset = 0, read = 1; offset < bytes.length && read > 0; offset += read) {
++        read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
++      }
++      process.stderr.write(bytes);
 +    } catch (error) {
-+      process.stderr.write(`ffs-supervised-dispatch: cannot relay ${log}: ${error.message}\n`);
++      process.stderr.write(`ffs-supervised-dispatch: cannot relay the dispatch log: ${error.message}\n`);
++    } finally {
++      fs.closeSync(fd);
 +    }
 +    process.exitCode = code === null ? 1 : code;
 +  });

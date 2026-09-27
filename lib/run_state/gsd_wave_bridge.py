@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - exercised by installed argv wiring
         WorkerChannelRefused, _MAX_WAVE_MANIFEST_BYTES, file_request,
         parse_gsd_wave_manifest, request,
     )
+from process_identity import ProcessIdentity
 
 
 class GsdWaveBridgeRefused(RuntimeError):
@@ -183,6 +184,15 @@ def _file_channel_from_environment() -> tuple[str, str] | None:
     return value["root"], value["capability"]
 
 
+def _self_identity():
+    """Name this bridge as the wave requester; if it cannot be captured the
+    channel falls back to recording the orchestrator, as before F37b."""
+    try:
+        return ProcessIdentity.current()
+    except ProcessLookupError:
+        return None
+
+
 def _strict_scope(pairs):
     result = {}
     for key, value in pairs:
@@ -208,7 +218,7 @@ def main() -> int:
             "body": {"manifest_locator": locator, "manifest_sha256": digest}, "timeout": None,
         }
         response = (
-            file_request(file_channel[0], file_channel[1], scope, **arguments)
+            file_request(file_channel[0], file_channel[1], scope, requester=_self_identity(), **arguments)
             if file_channel is not None else request(endpoint, scope, **arguments)
         )
     except (OSError, WorkerChannelRefused) as error:

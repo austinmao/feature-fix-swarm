@@ -18,16 +18,30 @@ all skills.
     compatibility patch) re-runs itself detached, in a new session with the
     same parent chain, and that detached copy does the whole flow: dispatch
     launch, reply wait, validation, and publishing the result and receipt.
-    Its output goes to a private log beside the result. The foreground waits
-    for it and relays its log and exit code, so a caller that stays sees the
-    same behavior; SIGHUP, SIGTERM or SIGKILL sent to the caller's process
-    group no longer stops the wave from landing.
+    Its output goes to a private log beside the result whose name is
+    removed as soon as the child holds it, so a killed foreground leaves no
+    file behind. The foreground waits for it and relays its log and exit
+    code, so a caller that stays sees the same behavior; SIGHUP, SIGTERM or
+    SIGKILL sent to the caller's process group no longer stops the wave
+    from landing.
   - Admission is unchanged: the wave peer must still be a live descendant of
     the live orchestrator when the wave is requested. For delivery only,
-    once the registered orchestrator no longer probes live, the wave
-    consumer accepts the same admitted peer (identical recorded identity,
-    start token included) while that peer still probes live, and refuses it
-    otherwise with `IPC_DESCENDANT_ANCESTRY_MISMATCH` as before.
+    once the registered orchestrator probes dead (not merely unknown), the
+    wave consumer accepts the same admitted peer (identical recorded
+    identity, start token included) while that peer still probes live, and
+    refuses it otherwise with `IPC_DESCENDANT_ANCESTRY_MISMATCH` as before.
+  - Over the workspace file transport that managed Codex and Claude hosts
+    use, the wave bridge now names its own process as the requester. The
+    channel accepts that only for the channel's own wave request and passes
+    it through the same live-descendant admission as the socket path, so
+    the durable request records the bridge rather than the orchestrator.
+    Without it both the delivery rule above and the F37a requester check
+    saw the exited orchestrator and refused. A bridge that cannot capture
+    its own identity falls back to the previous behavior.
+  - A file-transport request no longer waits forever: while waiting it
+    probes the supervisor named in its scope about once a second and fails
+    with `IPC_SUPERVISOR_GONE` once that supervisor probes dead, so a
+    detached adapter cannot outlive a dead supervisor indefinitely.
   The patch and adapter output hashes are re-pinned in the installer and the
   GSD 1.14 verification test.
 
