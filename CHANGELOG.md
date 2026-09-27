@@ -28,10 +28,11 @@ all skills.
   followed. The temp file has a short name of its own, and the writer attempts
   to remove it afterwards only if it created it. The manifest's directory is
   fsynced after any successful link, even if the temp-file removal failed.
-  If that fsync or the removal fails, the writer exits nonzero rather than
-  reporting success, and its message names each failure, including the
-  leftover file's path when the removal failed. It writes nothing on
-  invalid
+  If, after a successful link, that fsync or the removal fails, the writer
+  exits nonzero rather than reporting success, and its message names each of
+  those failures, including the leftover file's path when the removal
+  failed. After an earlier write or link failure, only that earlier error is
+  reported. It writes nothing on invalid
   JSON, input that is not valid UTF-8, raw input over 64 KiB, a canonical form
   over 16 KiB, a manifest that fails validation, an already-existing target
   path, or a symlink target. The `--manifest`/`--output` path is unchanged,
