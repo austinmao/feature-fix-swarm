@@ -685,3 +685,14 @@ def test_wave_whose_requester_is_gone_is_not_integrated(tmp_path, monkeypatch, s
         integrated = not (f.parent / "result-0.txt").exists()
     assert code == "WAVE_REPLY_UNCONSUMED"
     assert integrated
+
+
+def test_transient_unknown_requester_probe_is_retried(tmp_path, monkeypatch):
+    # A probe timeout reads UNKNOWN for a requester that is still running.
+    import process_identity
+    import run_state.wave_consumer as consumer_module
+    answers = iter([process_identity.UNKNOWN, process_identity.LIVE])
+    monkeypatch.setattr(consumer_module, "probe_identity", lambda _identity: next(answers, process_identity.LIVE))
+    with wave_fixture(tmp_path, monkeypatch, plans=1) as f:
+        reply = f.consumer(f.event)
+    assert [item["status"] for item in reply["results"]] == ["complete"]
