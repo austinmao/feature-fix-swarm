@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import sys
 import pytest
-from dataclasses import replace
+from dataclasses import asdict, replace
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -24,7 +24,7 @@ from run_state.resource_observation import ResourceObservation
 from run_state.shared_resources import SharedResourceCoordinator, cold_start_demand
 from run_state.state import qualified_runtime_tuple_hash
 from run_state.supervisor import SupervisorRefused
-from run_state.workspace import load_input_snapshot
+from run_state.workspace import inspect_workspace, load_input_snapshot
 from test_runtime_receipt_authority import _qualified
 from test_frontend_lifecycle import _REVIEW
 from run_state.managed import build_frontend_acceptance_draft, prepare_managed_run
@@ -639,11 +639,17 @@ def test_execution_receipt_binds_ordered_multi_wave_candidate_without_replay_deb
             result = supervisor.finish(wave.outer, timeout=15)
             snapshot = capture_wave_snapshot(store, token, ready, second_manifest, authority / "multi-wave-input")
             assert [entry["path"] for entry in snapshot.manifest["entries"]] == ["result-0.txt", "result-1.txt"]
+            # Production hands the bind the session's pre-qualification copy of the
+            # preparation; promotion has since rewritten the live row's child_role (F38).
+            stale_ready = replace(ready, child_role="inventory")
             recorded, bound = bind_wave_execution_candidate(
                 store, token, sealed=sealed, handle=wave.outer, request_key=wave.request.request_key,
-                ready=ready, process_evidence=result["evidence"])
+                ready=stale_ready, process_evidence=result["evidence"])
             receipt = json.loads(recorded.receipt.receipt_json)
             assert receipt["candidate_hash"] == ready.input_digest
+            assert receipt["workspace_preparation_hash"] == hashlib.sha256(json.dumps(
+                asdict(inspect_workspace(store, ready.id)), default=str, sort_keys=True,
+                separators=(",", ":")).encode()).hexdigest()
             assert [item["id"] for item in receipt["evidence"]] == [
                 f"wave-result:gsd-wave:{wave.event}", f"wave-result:gsd-wave:{second_event}", "process-result",
             ]
