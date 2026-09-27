@@ -1,12 +1,16 @@
 """The actual permit delivers only request routing metadata to its child."""
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 import pytest
 
+from process_identity import ProcessIdentity
 from test_supervised_process import setup_owner
 from run_state.supervisor import Supervisor
 from run_state.worker_channel import WorkerChannelRefused, WorkerChannelServer, file_request
@@ -84,3 +88,23 @@ def test_workspace_file_transport_enters_same_fenced_request_handler(tmp_path):
             handle.process.wait(timeout=5)
             supervisor.finish(handle, timeout=5, token_usage=0)
             server.close()
+
+
+def test_file_request_stops_waiting_once_the_supervisor_is_dead(tmp_path):
+    # F37b: a detached wave adapter must not wait forever on a reply file
+    # that a dead supervisor can never write.
+    root = tmp_path.resolve() / "channel"
+    for directory in (root, root / "requests", root / "responses"):
+        directory.mkdir(mode=0o700)
+        os.chmod(directory, 0o700)
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    supervisor = ProcessIdentity.from_pid(sleeper.pid)
+    sleeper.kill()
+    sleeper.wait(timeout=5)
+    scope = {"repository_id": "repo", "run_id": "run", "activity_id": "activity",
+             "intent_id": "intent", "generation": 1, "supervisor_identity": asdict(supervisor)}
+    started = time.monotonic()
+    with pytest.raises(WorkerChannelRefused, match="IPC_SUPERVISOR_GONE"):
+        file_request(root, "x" * 43, scope, request_key="orphaned", operation="progress",
+                     body={"sequence": 1, "message": "waiting"}, timeout=10)
+    assert time.monotonic() - started < 5

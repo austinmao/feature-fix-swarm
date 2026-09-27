@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from process_identity import LIVE, ProcessIdentity
+from process_identity import DEAD, LIVE, UNKNOWN, ProcessIdentity
 import run_state.worker_channel as channel_module
 from run_state.gsd_wave_bridge import (
     GsdWaveBridgeRefused, _file_channel_from_environment, persist_manifest,
@@ -194,3 +194,21 @@ def test_full_native_ancestry_rejects_pid_reuse_and_orphan(tmp_path):
                 os.kill(child.pid, 15)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize("orchestrator, accepted", [(DEAD, True), (UNKNOWN, False)])
+def test_delivery_to_admitted_peer_requires_a_dead_orchestrator(tmp_path, monkeypatch, orchestrator, accepted):
+    # F37b: only an orchestrator that probes DEAD lets the admitted peer
+    # collect its reply outside the live ancestry; UNKNOWN is not proof.
+    binding = _binding(tmp_path)
+    server = object.__new__(WorkerChannelServer)
+    server._lock, server._primary_bindings = threading.RLock(), {binding.intent_id: binding}
+    peer = ProcessIdentity("host", "boot", 202, "peer")
+    monkeypatch.setattr(channel_module, "_live_descendant", lambda _peer, _ancestor: False)
+    monkeypatch.setattr(channel_module, "probe_identity",
+                        lambda identity: orchestrator if identity == binding.identity else LIVE)
+    if accepted:
+        server.assert_authorized_wave_peer(binding.intent_id, peer)
+    else:
+        with pytest.raises(WorkerChannelRefused, match="IPC_DESCENDANT_ANCESTRY_MISMATCH"):
+            server.assert_authorized_wave_peer(binding.intent_id, peer)

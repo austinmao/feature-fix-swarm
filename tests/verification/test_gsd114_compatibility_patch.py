@@ -557,6 +557,8 @@ def test_dispatch_adapter_publishes_after_its_process_group_is_killed(
             "initial_head": document["initial_head"], "commit_mode": "patches",
         }
         assert not [item for item in survivors if probe_identity(item) == LIVE]
+        # The killed foreground never relays; its private log must not linger.
+        assert not list(tmp_path.glob("*.log"))
     finally:
         for item in survivors:
             if probe_identity(item) == LIVE:
