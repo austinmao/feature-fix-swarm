@@ -18,10 +18,10 @@ index c3f5473..187a9ba 100755
    }
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 0000000..441bd22
+index 0000000..a2612b9
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,424 @@
+@@ -0,0 +1,429 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -314,13 +314,14 @@ index 0000000..441bd22
 +// refused with EEXIST rather than overwritten or followed. The temporary
 +// file has a short name of its own, so a long target name cannot push it
 +// past the filesystem's name limit. Once this process has created the
-+// temporary file it removes it, whether the link succeeded or not; it never
-+// removes a name it did not create. If that removal fails after a
-+// successful link, the writer fails and names the leftover file instead of
++// temporary file it attempts to remove it, whether the link succeeded or
++// not; it never removes a name it did not create. The manifest's directory
++// is fsynced once the link succeeds so the new directory entry is durable,
++// mirroring what `publish()` does for the result and receipt files below.
++// If the removal fails after a successful link, the directory is still
++// fsynced and the writer then fails, naming the leftover file, instead of
 +// reporting success; after an earlier failure, the earlier error is the one
-+// reported. The manifest's directory is fsynced once the link succeeds so
-+// the new directory entry is durable, mirroring what `publish()` does for
-+// the result and receipt files below.
++// reported.
 +async function writeManifestFromStdin(targetPath) {
 +  const raw = await readStdinBounded(MAX_WRITE_MANIFEST_RAW_BYTES);
 +  let text;
@@ -367,19 +368,23 @@ index 0000000..441bd22
 +  } catch (error) {
 +    primaryError = error;
 +  }
++  let cleanupError = null;
 +  try {
 +    fs.unlinkSync(temporaryPath);
 +  } catch (error) {
-+    if (!primaryError) {
-+      throw new Error(`manifest was written to ${targetPath}, but its temporary file ${temporaryPath} could not be removed: ${error.message}`);
-+    }
++    cleanupError = error;
 +  }
 +  if (primaryError) throw primaryError;
++  // The link succeeded: make the published entry durable even if cleanup
++  // failed, then report the cleanup failure.
 +  const directoryFd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
 +  try {
 +    fs.fsyncSync(directoryFd);
 +  } finally {
 +    fs.closeSync(directoryFd);
++  }
++  if (cleanupError) {
++    throw new Error(`manifest was written to ${targetPath}, but its temporary file ${temporaryPath} could not be removed: ${cleanupError.message}`);
 +  }
 +}
 +

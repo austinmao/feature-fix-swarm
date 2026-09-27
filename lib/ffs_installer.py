@@ -35,7 +35,7 @@ GSD_VERSION = "1.14.0"
 GSD_COMMIT = "f8542fef67c1f978ffa70912cb6f2aaab76464c6"
 GSD_INTEGRITY = "sha512-e05sV2c8KlcQ2hoJ4U3U1OBjqswQOon4C29Cs75fEAr+tq7qJ/XyFYrN/nwblREWUkPUUoxmVzLVj4Im2KjQxQ=="
 GSD_COMPATIBILITY_PATCH = "gsd-1.14-ffs-supervised-dispatch.patch"
-GSD_COMPATIBILITY_PATCH_SHA256 = "326ec26cd7eea21300aa3440ac5eae1b979ec4cbf5815b666a75d628e181eecd"
+GSD_COMPATIBILITY_PATCH_SHA256 = "2fb86776c26c41a791f4c6ce14b62a2ae5f8c7fbf11275396a9eef18220c1558"
 GSD_COMPATIBILITY_BASELINE = {
     "agents/gsd-executor.md": "40431b7e765a9bf6b656788196bf947a94f8697323285f0f5e552353148deafb",
     "bin/install.js": "0acbd01933783537f934b33b6cc9132ff8e11ae37f0fa88ff63bc402aa0ae861",
@@ -53,7 +53,7 @@ GSD_COMPATIBILITY_OUTPUT = {
     "gsd-core/bin/lib/tdd-red-evidence.cjs": "719e35a5ed6e4365cbe3edf212ee58985565ff332be79e86427bdb108045d784",
     "gsd-core/workflows/execute-phase.md": "b233aec60d03d678fa8f93e1a7b35fb045fe615ecb5488b73735e3cfefd3907b",
     "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "89417e244cbb0901b1a69b44a00cded615ecc4ae47e0ba658caa171822d6da45",
-    "gsd-core/bin/ffs-supervised-dispatch.cjs": "2f22bd36df2b9ff2657f047c5d87770ab824a6ba5aec5f72b6161e95264d699a",
+    "gsd-core/bin/ffs-supervised-dispatch.cjs": "0d79c65af35919b9ed7116ce346838cb2b8238b60b0a2d7b21d7856d1110deae",
 }
 CODEX_MIN_VERSION = (0, 137, 0)
 CODEX_MAX_VERSION = (0, 148, 0)
