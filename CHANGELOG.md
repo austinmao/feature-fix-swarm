@@ -8,6 +8,26 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-27, spec-014 Release C: F39 clean selected inputs in overlay form)
+
+- A managed frontend run whose `--select-file` inputs were identical to
+  their base blobs could never bind its first wave: the sealed input digest
+  recorded each such file as a `copy` entry, while the wave capture records
+  only the overlay against base and omits unchanged files, so the candidate
+  chain's first-wave digest comparison always refused
+  (`FRONTEND_INTEGRATION_CHAIN_INVALID`). `build_frontend_selection` now
+  keeps a selected file as a `copy` entry only when its bytes or mode differ
+  from base; an unchanged one is retained as required context with the
+  reason `selected input unchanged at base` (prefixed to the operator's
+  reason when the path is also required context), which re-validates it as
+  unchanged and keeps it out of the digest. Resume maps those rows back to
+  the explicit `--select-file` paths, so old retained runs (which always
+  kept `copy` entries) and new ones both resume, and a changed path list
+  still refuses. A selected file that matched base when read and diverged
+  before validation still refuses `SOURCE_CHANGED`. Found by a live
+  operator E2E run (attempt 7) that reached the chain for the first time
+  after F38.
+
 ### Fixed (2026-09-27, spec-014 Release C: F38 wave execution bind hashes the live preparation)
 
 - A managed frontend run that executed at least one supervised wave refused
