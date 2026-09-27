@@ -162,6 +162,69 @@ def test_selected_file_differing_from_base_only_in_mode_stays_overlay(registered
     assert selection.required_context == ()
 
 
+def _crlf_checkout_file(primary, *, checked_out: bool):
+    (primary / ".gitattributes").write_text("src/eol.txt text eol=crlf\n")
+    (primary / "src/eol.txt").write_bytes(b"one\ntwo\n")
+    _git("add", ".gitattributes", "src/eol.txt", cwd=primary)
+    _git("commit", "-qm", "crlf checkout fixture", cwd=primary)
+    if checked_out:
+        (primary / "src/eol.txt").unlink()
+        _git("checkout", "--", "src/eol.txt", cwd=primary)
+    return primary / "src/eol.txt"
+
+
+def test_selected_bytes_are_compared_with_the_filtered_checkout_not_the_blob(registered):
+    primary, _store, _identity = registered
+    source = _crlf_checkout_file(primary, checked_out=False)
+    assert source.read_bytes() == b"one\ntwo\n"  # equals the raw blob, not what a checkout writes
+    kept = _build(primary, selected_files=("src/eol.txt",))
+    assert [(e.operation, e.path, e.sha256) for e in kept.entries] == [
+        ("copy", "src/eol.txt", hashlib.sha256(b"one\ntwo\n").hexdigest())]
+    source.unlink()
+    _git("checkout", "--", "src/eol.txt", cwd=primary)
+    assert source.read_bytes() == b"one\r\ntwo\r\n"
+    normalized = _build(primary, selected_files=("src/eol.txt",))
+    assert normalized.entries == ()
+    assert [r.path for r in normalized.required_context] == ["src/eol.txt"]
+
+
+@pytest.mark.parametrize(("checked_out", "replacement"), [(False, b"one\r\ntwo\r\n"), (True, b"one\ntwo\n")])
+def test_line_ending_only_source_change_after_read_refuses(registered, monkeypatch, checked_out, replacement):
+    # Git's own clean check normalizes line endings, so it cannot see this race.
+    primary, _store, _identity = registered
+    _crlf_checkout_file(primary, checked_out=checked_out)
+    original = frontend_selection._read_anchored_regular_metadata
+    calls = []
+
+    def mutate_after_first_read(root, relative, **kwargs):
+        captured = original(root, relative, **kwargs)
+        if not calls:
+            (root / relative).write_bytes(replacement)
+        calls.append(relative)
+        return captured
+
+    monkeypatch.setattr(frontend_selection, "_read_anchored_regular_metadata", mutate_after_first_read)
+    with pytest.raises(WorkspaceRefused) as refused:
+        _build(primary, selected_files=("src/eol.txt",))
+    assert refused.value.code == "SOURCE_CHANGED"
+
+
+def test_base_read_failure_refuses_instead_of_keeping_a_copy(registered, monkeypatch):
+    import subprocess
+    primary, _store, _identity = registered
+    run = subprocess.run
+
+    def time_out_listing(args, *rest, **kwargs):
+        if args[:2] == ["git", "ls-tree"]:
+            raise subprocess.TimeoutExpired(args, 1)
+        return run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(frontend_selection.subprocess, "run", time_out_listing)
+    with pytest.raises(WorkspaceRefused) as refused:
+        _build(primary, selected_files=("src/unrelated.txt",))
+    assert refused.value.code == "SOURCE_CHANGED"
+
+
 def test_clean_tracked_required_context_is_valid_without_overlay(registered):
     primary, store, _identity = registered
     before = _authority(store, primary)

@@ -6,10 +6,14 @@ import json
 import sqlite3
 from pathlib import Path
 import stat
+import subprocess
 
-from run_context import registered_repository_identity, resolve_repository, validate_state_root
+from run_context import (
+    registered_repository_identity, resolve_repository, sanitized_git_environment, validate_state_root,
+)
 from run_state.selection import InputSelection
 from run_state.workspace import (
+    _GIT_TIMEOUT,
     WorkspaceRefused,
     _base_entry_material,
     _git,
@@ -25,12 +29,31 @@ from run_state.workspace import (
 SELECTED_UNCHANGED_REASON = "selected input unchanged at base"
 
 
-def _base_material(repository: Path, base: str, path: str) -> tuple[bytes, str] | None:
-    """The path's regular-file base blob and mode, or None when it has none."""
-    try:
-        return _base_entry_material(repository, base, path)
-    except WorkspaceRefused:
+def _checkout_material(repository: Path, base: str, path: str) -> tuple[bytes, str] | None:
+    """Bytes and mode a checkout of ``base`` writes at ``path``, or None when it has no regular file.
+
+    A checkout applies eol, ident and smudge filters, so the raw blob is not
+    what a prepared workspace holds; ``cat-file --filters`` is. A Git failure
+    refuses instead of reading as absence.
+    """
+    def git(*args: str) -> bytes:
+        try:
+            done = subprocess.run(["git", *args], cwd=repository, env=sanitized_git_environment(),
+                                  capture_output=True, timeout=_GIT_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise WorkspaceRefused("SOURCE_CHANGED") from error
+        if done.returncode:
+            raise WorkspaceRefused("SOURCE_CHANGED")
+        return done.stdout
+
+    listing = git("ls-tree", "-z", base, "--", path)
+    if not listing:
         return None
+    header, _, listed = listing.rstrip(b"\0").partition(b"\t")
+    fields = header.split()
+    if listed != path.encode() or len(fields) != 3 or fields[1] != b"blob" or fields[0] not in {b"100644", b"100755"}:
+        return None
+    return git("cat-file", "--filters", f"{base}:{path}"), fields[0].decode()
 
 
 def _with_unchanged_selection(required: list[dict], unchanged: set[str]) -> list[dict]:
@@ -85,13 +108,13 @@ def build_frontend_selection(
             "upstream": upstream,
         }
         draft = parse_input_selection(value)
-        entries, unchanged = [], set()
+        entries, unchanged = [], {}
         for entry in draft.entries:
             if entry.operation == "copy":
                 data, metadata = _read_anchored_regular_metadata(repository, entry.path)
                 mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
-                if _base_material(repository, base, entry.path) == (data, mode):
-                    unchanged.add(entry.path)
+                if _checkout_material(repository, base, entry.path) == (data, mode):
+                    unchanged[entry.path] = (data, mode)
                     continue
             else:
                 data, mode = _base_entry_material(repository, base, entry.path)
@@ -100,15 +123,20 @@ def build_frontend_selection(
                 "sha256": hashlib.sha256(data).hexdigest(), "git_mode": mode,
             })
         value["entries"] = entries
-        value["required_context"] = _with_unchanged_selection(value["required_context"], unchanged)
+        value["required_context"] = _with_unchanged_selection(value["required_context"], set(unchanged))
         selection = parse_input_selection(value)
         try:
             validate_selected_inputs(repository, selection)
         except WorkspaceRefused as error:
             # An unchanged selected file that then diverged from base is a source race.
-            if error.code == "INPUT_SELECTION_REQUIRED" and error.candidates and set(error.candidates) <= unchanged:
+            if error.code == "INPUT_SELECTION_REQUIRED" and error.candidates and set(error.candidates) <= set(unchanged):
                 raise WorkspaceRefused("SOURCE_CHANGED") from error
             raise
+        # Git's own comparison normalizes line endings; the raw bytes must still match.
+        for path, material in unchanged.items():
+            data, metadata = _read_anchored_regular_metadata(repository, path)
+            if (data, "100755" if metadata.st_mode & stat.S_IXUSR else "100644") != material:
+                raise WorkspaceRefused("SOURCE_CHANGED")
         return selection
     except FileNotFoundError as error:
         raise WorkspaceRefused("SELECTION_INPUT_MISSING") from error
