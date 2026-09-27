@@ -215,14 +215,52 @@ def test_base_read_failure_refuses_instead_of_keeping_a_copy(registered, monkeyp
     run = subprocess.run
 
     def time_out_listing(args, *rest, **kwargs):
-        if args[:2] == ["git", "ls-tree"]:
+        if "ls-tree" in args:
             raise subprocess.TimeoutExpired(args, 1)
         return run(args, *rest, **kwargs)
 
-    monkeypatch.setattr(frontend_selection.subprocess, "run", time_out_listing)
+    monkeypatch.setattr(subprocess, "run", time_out_listing)
     with pytest.raises(WorkspaceRefused) as refused:
         _build(primary, selected_files=("src/unrelated.txt",))
     assert refused.value.code == "SOURCE_CHANGED"
+
+
+def test_line_ending_only_change_after_construction_refuses_at_snapshot(registered, tmp_path):
+    # The unchanged selection has no copy entry to hash, so snapshot preparation
+    # must itself hold the source to the bytes the base checkout writes.
+    from run_state.workspace import snapshot_inputs
+    primary, _store, _identity = registered
+    source = _crlf_checkout_file(primary, checked_out=True)
+    selection = _build(primary, selected_files=("src/eol.txt",))
+    assert selection.entries == ()
+    source.write_bytes(b"one\ntwo\n")
+    assert _git("diff", "--quiet", "HEAD", "--", "src/eol.txt", cwd=primary, check=False).returncode == 0
+    with pytest.raises(WorkspaceRefused) as refused:
+        snapshot_inputs(primary, selection, tmp_path / "staging")
+    assert refused.value.code == "SOURCE_CHANGED"
+    assert not (tmp_path / "staging").exists()
+
+
+def test_checkout_bytes_use_the_base_attributes_not_the_worktree(registered):
+    primary, _store, _identity = registered
+    source = _crlf_checkout_file(primary, checked_out=False)
+    (primary / ".gitattributes").write_text("src/eol.txt text eol=lf\n")
+    assert source.read_bytes() == b"one\ntwo\n"
+    selection = _build(primary, selected_files=("src/eol.txt",))
+    assert [(e.operation, e.path) for e in selection.entries] == [("copy", "src/eol.txt")]
+
+
+def test_filter_driver_is_never_run_and_keeps_the_copy(registered, tmp_path):
+    primary, _store, _identity = registered
+    (primary / ".gitattributes").write_text("src/unrelated.txt filter=probe\n")
+    _git("add", ".gitattributes", cwd=primary)
+    _git("commit", "-qm", "filter attribute", cwd=primary)
+    marker = tmp_path / "filter-ran"
+    for kind in ("smudge", "clean"):
+        _git("config", f"filter.probe.{kind}", f"touch {marker}; cat", cwd=primary)
+    selection = _build(primary, selected_files=("src/unrelated.txt",))
+    assert [(e.operation, e.path) for e in selection.entries] == [("copy", "src/unrelated.txt")]
+    assert not marker.exists()
 
 
 def test_clean_tracked_required_context_is_valid_without_overlay(registered):

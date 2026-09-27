@@ -2248,6 +2248,39 @@ def _remove_new_capture(staging: Path, parent: Path, *, parent_created: bool) ->
         pass
 
 
+# A selected file whose bytes equal what a base checkout writes carries no
+# overlay material.  It is retained as required context under this reason so
+# the sealed input digest has the overlay form a wave capture records (F39).
+SELECTED_UNCHANGED_REASON = "selected input unchanged at base"
+
+
+def _checkout_material(repository: Path, base: str, path: str) -> tuple[bytes, str] | None:
+    """Bytes and mode a checkout of ``base`` writes at ``path``, or None when unpredictable.
+
+    Conversion uses the base tree's attributes, as a fresh checkout does, and
+    never runs a filter driver: a path with one has no predictable bytes. A
+    Git failure refuses instead of reading as absence.
+    """
+    def git(*args: str) -> bytes:
+        try:
+            done = subprocess.run(["git", f"--attr-source={base}", *args], cwd=repository,
+                                  env=sanitized_git_environment(), capture_output=True,
+                                  timeout=_GIT_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise WorkspaceRefused("SOURCE_CHANGED") from error
+        if done.returncode:
+            raise WorkspaceRefused("SOURCE_CHANGED")
+        return done.stdout
+
+    header, _, listed = git("ls-tree", "-z", base, "--", path).rstrip(b"\0").partition(b"\t")
+    fields = header.split()
+    if listed != path.encode() or len(fields) != 3 or fields[1] != b"blob" or fields[0] not in {b"100644", b"100755"}:
+        return None
+    if git("check-attr", "-z", "filter", "--", path).split(b"\0")[2] not in {b"unspecified", b"unset"}:
+        return None
+    return git("cat-file", "--filters", f"{base}:{path}"), fields[0].decode()
+
+
 def validate_selected_inputs(primary: Path, selection: InputSelection) -> dict[str, bytes]:
     """Read and validate registered selected material without writing state.
 
@@ -2284,6 +2317,14 @@ def validate_selected_inputs(primary: Path, selection: InputSelection) -> dict[s
             if required_path.exists() or required_path.is_symlink():
                 raise WorkspaceRefused("INPUT_SELECTION_REQUIRED", candidates=[required.path])
             raise WorkspaceRefused("SELECTION_INPUT_MISSING", candidates=[required.path])
+        if required.reason.startswith(SELECTED_UNCHANGED_REASON):
+            # Git's own diff normalizes line endings; a normalized selection
+            # promises the exact bytes and mode the base checkout writes.
+            data, metadata = _read_anchored_regular_metadata(primary, required.path)
+            mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+            if _checkout_material(primary, selection.base_oid, required.path) != (data, mode):
+                raise WorkspaceRefused("SOURCE_CHANGED")
+            continue
         changed = _git(
             primary,
             "diff",
