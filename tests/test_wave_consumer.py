@@ -670,12 +670,14 @@ def test_completed_wave_whose_reply_was_never_consumed_is_typed(tmp_path, monkey
     assert code == expected
 
 
-def test_wave_whose_requester_is_gone_is_not_integrated(tmp_path, monkeypatch):
-    # F37a: when the adapter that requested a wave is gone, nothing will
-    # consume the reply; the outer workspace must stay untouched.
+@pytest.mark.parametrize("status", ["DEAD", "UNKNOWN"])
+def test_wave_whose_requester_is_gone_is_not_integrated(tmp_path, monkeypatch, status):
+    # F37a: when the adapter that requested a wave is gone, or cannot be
+    # proven live, nothing will consume the reply; the outer workspace must
+    # stay untouched.
+    import process_identity
     import run_state.wave_consumer as consumer_module
-    from process_identity import DEAD
-    monkeypatch.setattr(consumer_module, "probe_identity", lambda _identity: DEAD)
+    monkeypatch.setattr(consumer_module, "probe_identity", lambda _identity: getattr(process_identity, status))
     with wave_fixture(tmp_path, monkeypatch, plans=1) as f:
         with pytest.raises(SupervisorRefused, match="WAVE_REPLY_UNCONSUMED"):
             f.consumer(f.event)

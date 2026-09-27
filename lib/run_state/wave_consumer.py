@@ -20,7 +20,7 @@ import time
 from typing import Callable
 import uuid
 
-from process_identity import DEAD, ProcessIdentity, probe_identity
+from process_identity import LIVE, ProcessIdentity, probe_identity
 from .ownership import OwnershipRefused, assert_owner
 from .run_policy import productive_work
 from .state import ControlStoreRefused
@@ -1122,7 +1122,9 @@ class WaveConsumer:
     def _requester_gone(self, event_id) -> bool:
         with self.store.read_transaction() as tx:
             row = tx.execute("SELECT payload FROM control_events WHERE id=?", (event_id,)).fetchone()
-        return probe_identity(ProcessIdentity(**json.loads(row["payload"])["data"]["peer_identity"])) == DEAD
+        # Only a provably live requester earns a new integration; UNKNOWN (for
+        # example a process exiting between probes) is treated as gone.
+        return probe_identity(ProcessIdentity(**json.loads(row["payload"])["data"]["peer_identity"])) != LIVE
 
     def _integrate_results(self, event_id, parent, prefix, manifest, results, reply, guard, check):
         # Hash the exact before/after state in a disposable index before either
