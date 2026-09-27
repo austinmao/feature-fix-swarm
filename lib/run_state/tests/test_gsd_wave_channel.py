@@ -196,6 +196,18 @@ def test_full_native_ancestry_rejects_pid_reuse_and_orphan(tmp_path):
                 pass
 
 
+@pytest.mark.parametrize("host_id, recorded", [("host", "requester"), ("host:pidns:9:9", "orchestrator")])
+def test_file_requester_from_another_pid_namespace_records_the_orchestrator(tmp_path, host_id, recorded):
+    # A sandboxed bridge in its own PID namespace names a pid the supervisor
+    # cannot probe; the request falls back to the orchestrator, as before F37b.
+    binding = _binding(tmp_path)
+    requester = {"host_id": host_id, "boot_id": "boot", "pid": 202, "start_token": "bridge"}
+    wrapped = {"capability": "c", "requester": requester,
+               "message": {"operation": "gsd-wave-request", "intent_id": binding.intent_id}}
+    expected = ProcessIdentity(**requester) if recorded == "requester" else binding.identity
+    assert WorkerChannelServer._file_requester(binding, wrapped) == expected
+
+
 @pytest.mark.parametrize("orchestrator, accepted", [(DEAD, True), (UNKNOWN, False)])
 def test_delivery_to_admitted_peer_requires_a_dead_orchestrator(tmp_path, monkeypatch, orchestrator, accepted):
     # F37b: only an orchestrator that probes DEAD lets the admitted peer

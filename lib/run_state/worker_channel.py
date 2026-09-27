@@ -559,7 +559,10 @@ class WorkerChannelServer:
                 or message.get("intent_id") != binding.intent_id
                 or not isinstance(wrapped["requester"], dict)):
             raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
-        return ProcessIdentity(**wrapped["requester"])
+        requester = ProcessIdentity(**wrapped["requester"])
+        # A bridge sandboxed in its own PID namespace names a pid this
+        # supervisor cannot probe; record the orchestrator, as before F37b.
+        return requester if requester.host_id == binding.identity.host_id else binding.identity
 
     def _serve_file_once(self) -> bool:
         with self._lock:
