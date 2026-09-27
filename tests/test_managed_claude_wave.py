@@ -448,10 +448,11 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
         assert store.transitions == [] and prompts == []
         return
     assert store.transitions[-1][1]["new"] == "failed"
-    assert store.transitions[-1][1]["reason"] == {
-        "WAVE_EXECUTION_UNPROVEN": "GSD execution returned without supervised wave evidence",
-        "WAVE_REPLY_UNCONSUMED": "the outer orchestrator exited before consuming a supervised wave reply",
-    }[expected_code]
+    if expected_code == "WAVE_REPLY_UNCONSUMED":
+        assert store.transitions[-1][1]["reason"] == "the outer orchestrator exited before consuming a supervised wave reply"
+        assert prompts[0].startswith(expected_command + "\n\n")
+        return
+    assert store.transitions[-1][1]["reason"] == "GSD execution returned without supervised wave evidence"
     assert prompts[0].startswith(expected_command + "\n\n")
 
 
