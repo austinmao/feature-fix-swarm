@@ -1,5 +1,5 @@
 diff --git a/bin/install.js b/bin/install.js
-index c3f5473d1..187a9ba5d 100755
+index c3f5473..187a9ba 100755
 --- a/bin/install.js
 +++ b/bin/install.js
 @@ -10024,9 +10024,10 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
@@ -16,277 +16,12 @@ index c3f5473d1..187a9ba5d 100755
        }
      }
    }
-diff --git a/gsd-core/bin/gsd-tools.cjs b/gsd-core/bin/gsd-tools.cjs
-index 852d40e11..a02510e14 100755
---- a/gsd-core/bin/gsd-tools.cjs
-+++ b/gsd-core/bin/gsd-tools.cjs
-@@ -2056,6 +2056,56 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
-     }
-   }
- 
-+  /**
-+   * FFS compatibility seam.  This is intentionally independent from the
-+   * host capability registry: an FFS supervisor is an admission-bound process
-+   * transport, not a new isolation primitive.  The execute-phase workflow
-+   * calls this only when it has selected the explicit
-+   * `ffs-supervised-process` mode.  Missing or malformed admission is a hard
-+   * refusal, never a silent fallback to inline or unisolated execution.
-+   */
-+  function routeFfsSupervisedDispatch({ args, raw, error }) {
-+    const admissionFile = process.env.FFS_SUPERVISED_ADMISSION_FILE;
-+    const commandJson = process.env.FFS_SUPERVISED_DISPATCH_COMMAND_JSON;
-+    if (!admissionFile || !commandJson) {
-+      error(
-+        'ffs-supervised-process admission is unavailable: set FFS_SUPERVISED_ADMISSION_FILE and FFS_SUPERVISED_DISPATCH_COMMAND_JSON',
-+        ERROR_REASON.SDK_FAIL_FAST,
-+      );
-+    }
-+    let admission;
-+    let command;
-+    try {
-+      admission = JSON.parse(fs.readFileSync(admissionFile, 'utf8'));
-+      command = JSON.parse(commandJson);
-+    } catch (cause) {
-+      error(`ffs-supervised-process admission is unreadable: ${cause.message}`, ERROR_REASON.SDK_FAIL_FAST);
-+    }
-+    if (
-+      !admission || admission.schema !== 'ffs.supervisor-admission/v1' || admission.available !== true ||
-+      !Number.isSafeInteger(admission.generation) || admission.generation < 1 ||
-+      ['activity_id', 'repository_id', 'run_id', 'runtime_identity', 'workspace'].some(
-+        (key) => typeof admission[key] !== 'string' || !admission[key]
-+      ) || !path.isAbsolute(admission.workspace) ||
-+      !Array.isArray(command) || command.length === 0 ||
-+      command.some((part) => typeof part !== 'string' || !part || part.includes('\0'))
-+    ) {
-+      error(
-+        'ffs-supervised-process admission is unavailable or malformed; refusing to dispatch',
-+        ERROR_REASON.SDK_FAIL_FAST,
-+      );
-+    }
-+    const result = {
-+      mode: 'ffs-supervised-process',
-+      admission,
-+      command,
-+      commitMode: process.env.FFS_SUPERVISED_COMMIT_MODE || 'patches',
-+      applyBetweenWaves: true,
-+    };
-+    if (args.indexOf('--json') !== -1) output(result, raw);
-+    else process.stdout.write(result.mode);
-+  }
-+
-   /**
-    * #3673 (ADR-1239 Phase 1) — typed, PURE-READ query exposing the negotiated
-    * `dispatch.maxConcurrency` numeric sub-field. Sibling of `dispatch-isolation`
-@@ -4432,6 +4482,7 @@ const HOST_COMMAND_ROUTERS = {
-     'normalize-test-command': routeNormalizeTestCommand,
-     'dispatch-should-flatten': routeDispatchShouldFlatten,
-     'dispatch-isolation': routeDispatchIsolation,
-+    'dispatch-ffs-supervised': routeFfsSupervisedDispatch,
-     'dispatch-capacity': routeDispatchCapacity,
-     'inspect-dispatch-isolation': routeInspectDispatchIsolation,
-     'record-dispatch-isolation': routeRecordDispatchIsolation,
-@@ -4693,7 +4744,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
-   'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
-   'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, planning, profile-questionnaire, ' +
-   'profile-sample, progress, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
--  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
-+  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-ffs-supervised, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
-   'resolve-execution, review-lane, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
-   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
-   'Global flags:\n' +
-@@ -5280,4 +5331,3 @@ module.exports = {
-   MODEL_ID_SANITIZE_STRIP_RE,
-   MODEL_ID_MAX_LENGTH,
- };
--
-diff --git a/gsd-core/workflows/execute-phase.md b/gsd-core/workflows/execute-phase.md
-index eb9464bd8..e962e9236 100644
---- a/gsd-core/workflows/execute-phase.md
-+++ b/gsd-core/workflows/execute-phase.md
-@@ -13,6 +13,18 @@ Execute all plans in a phase using wave-based parallel execution. Orchestrator s
- Orchestrator coordinates, not executes. Each subagent loads the full execute-plan context. Orchestrator: discover plans → analyze deps → group waves → spawn agents → handle checkpoints → collect results.
- </core_principle>
- 
-+<ffs_supervised_process priority="first">
-+When `GSD_DISPATCH_MODE=ffs-supervised-process`, this is a mandatory transport
-+contract. Before touching any path declared by a plan, read the
-+FFS-supervised-process compatibility section of
-+`gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md`. Build
-+one complete manifest for the current dependency wave and invoke
-+`ffs-supervised-dispatch.cjs`. The outer orchestrator must not edit declared
-+plan targets, call per-plan native agents, or use an inline/sequential fallback.
-+If the adapter cannot run or rejects the wave, stop with the capability failure
-+and leave plan targets unchanged. Continue only from its validated result.
-+</ffs_supervised_process>
-+
- <!-- #2508 runtime-aware-dispatch -->
- 
- > **Runtime-aware dispatch (#2508 Phase 4).** GSD workflows dispatch specialized subagents by role. Before dispatching on a built-in-only runtime (kimi-code — three built-ins only), resolve the role to a built-in via `gsd_run query resolve-dispatch-type --requested <role> --raw`. On named-dispatch runtimes (Claude/OpenCode/…) the role is returned unchanged; on kimi-code it maps to `coder`/`explore`/`plan` by role-suffix. The persona rides `${AGENT_SKILLS_<ROLE>}` (Phase 3) regardless. See @gsd-core/references/runtime-aware-dispatch.md.
-@@ -727,6 +739,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
- 
-    **Orchestrator-managed worktree dispatch** (`ISOLATION=orchestrator-worktree`): read and execute `execute-phase/steps/executor-isolation-dispatch.md`. GSD creates each worktree (`worktree create`) and spawns the executor into it; the orchestrator performs every git operation. Merge-back and cleanup are the existing manifest-scoped gauntlet, unchanged.
- 
-+   **FFS-supervised-process dispatch** (`GSD_DISPATCH_MODE=ffs-supervised-process`): before any per-plan `Agent()` call, read and execute the FFS-supervised-process compatibility section in `execute-phase/steps/executor-isolation-dispatch.md`. It allocates the complete wave, captures the initial HEAD, embeds each fresh prompt, and invokes the FFS process adapter once for that wave. Do not fall through to the per-plan Agent loop, launch a partial wave, or alter `ISOLATION`; after the adapter returns, continue with the existing serialized integration, post-merge validation, and manifest-only cleanup before the next dependency wave.
-+
-    **Sequential mode** (`USE_WORKTREES_FOR_PLAN` is `false` — either project-level `USE_WORKTREES=false`, or per-plan submodule intersection forced it false in step 2.5):
- 
-    Omit `isolation="worktree"` from the Agent call. Before composing the prompt, read and execute
-diff --git a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-index 2c7eaa8c5..3ef17ea1c 100644
---- a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-+++ b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-@@ -338,3 +338,143 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
- 
- > **Declared-scope conformance (#2596):** ADR-1239 specifies that *both* isolation adapters route their merge through a check that each plan branch's committed diff stayed inside its declared `files_modified` scope. That check now exists, advisory-first, and is wired into **both** paths: this one passes `--files "$PLAN_FILES"` to `worktree create` above, the harness path passes it to `worktree record-agent`, and `cleanup-wave` runs the one comparison for both. A path outside the declared scope is reported in the result's `warnings` array; it does not block the merge. Promotion to a hard gate is a separate, disclosed change.
- 
-+## FFS-supervised-process compatibility mode
-+
-+FFS can provide an explicit process supervisor for recovery and for fixture
-+repositories. This mode is selected only when the host sets
-+`GSD_DISPATCH_MODE=ffs-supervised-process`; it is a process transport layered
-+over the existing isolation decision, not a new `ISOLATION` value and never a
-+reason to bypass the isolation guard. A host that has not demonstrated FFS
-+admission must refuse the wave.
-+
-+Resolve the admission descriptor immediately before the first executor in the
-+wave:
-+
-+```bash
-+if [ "${GSD_DISPATCH_MODE:-}" = "ffs-supervised-process" ]; then
-+  FFS_DISPATCH_JSON=$(gsd_run query dispatch-ffs-supervised --json --raw 2>/dev/null) || {
-+    echo "FATAL: ffs-supervised-process was requested but FFS admission is unavailable; refusing to dispatch." >&2
-+    exit 78
-+  }
-+  FFS_MODE=$(printf '%s' "$FFS_DISPATCH_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let j=JSON.parse(s);process.stdout.write(j&&j.mode||"")}catch{}})')
-+  [ "$FFS_MODE" = "ffs-supervised-process" ] || {
-+    echo "FATAL: FFS admission did not return mode ffs-supervised-process; refusing to dispatch." >&2
-+    exit 78
-+  }
-+fi
-+```
-+
-+When this mode is selected, preserve the normal dependency-wave loop and the
-+existing serialized integration/cleanup gauntlet with these additional
-+requirements:
-+
-+1. Capture `EXPECTED_BASE=$(git rev-parse HEAD)` once at wave start, before
-+   requesting any executor. Prepare every plan's complete, fresh prompt before
-+   launching the first process. The FFS supervisor exclusively allocates and
-+   registers each child worktree beneath the current run; GSD must not create
-+   or name executor worktrees in this mode. Each manifest
-+   plan carries `initial_head: "$EXPECTED_BASE"`, `prompt_fresh: true`, a
-+   unique `prompt_nonce`, the SHA-256 of that exact prompt, `files_modified`,
-+   `files_deleted`, and its original `depends_on` plan ids. Dependencies on
-+   completed prior waves remain in the manifest for supervisor verification;
-+   no plan may depend on another plan allocated in the same runnable wave.
-+   A plan whose measured HEAD or prompt hash does not match is a fatal wave
-+   error.
-+2. Bind all wave transport files to the admitted orchestrator workspace before
-+   writing the manifest. `FFS_DISPATCH_JSON.admission.workspace` is the sole
-+   workspace authority. Resolve the current repository root with
-+   `git rev-parse --show-toplevel`; it must be byte-for-byte equal to that
-+   admission workspace. Extract and validate the admission `activity_id` as a
-+   portable path segment (`[A-Za-z0-9][A-Za-z0-9._-]*`). A mismatch, malformed
-+   value, symlink, or non-private directory is a capability refusal. Do not
-+   use `TMPDIR`, `/tmp`, `mktemp`, or an inherited manifest path in this mode.
-+
-+   Use this deterministic private layout. The activity-specific directory has
-+   one immutable manifest/result/receipt set per dependency-wave number:
-+
-+   ```bash
-+   FFS_ADMISSION_BINDING=$(printf '%s' "$FFS_DISPATCH_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s),a=j&&j.admission;if(!a||typeof a.workspace!=="string"||typeof a.activity_id!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(a.activity_id))throw Error();process.stdout.write(a.workspace+"\t"+a.activity_id)}catch{process.exit(1)}})') || exit 78
-+   IFS=$'\t' read -r FFS_ADMISSION_WORKSPACE FFS_ADMISSION_ACTIVITY <<< "$FFS_ADMISSION_BINDING"
-+   FFS_ORCHESTRATOR_WORKSPACE=$(git rev-parse --show-toplevel) || exit 78
-+   [ "$FFS_ORCHESTRATOR_WORKSPACE" = "$FFS_ADMISSION_WORKSPACE" ] || { echo "FATAL: admitted workspace mismatch; refusing wave." >&2; exit 78; }
-+   FFS_WAVE_DIRECTORY="$FFS_ADMISSION_WORKSPACE/.planning/.ffs-supervised/waves/$FFS_ADMISSION_ACTIVITY"
-+   umask 077
-+   for FFS_PRIVATE_DIRECTORY in "$FFS_ADMISSION_WORKSPACE/.planning/.ffs-supervised" "${FFS_ADMISSION_WORKSPACE}/.planning/.ffs-supervised/waves" "$FFS_WAVE_DIRECTORY"; do
-+     [ ! -L "$FFS_PRIVATE_DIRECTORY" ] && { [ -d "$FFS_PRIVATE_DIRECTORY" ] || mkdir -m 700 "$FFS_PRIVATE_DIRECTORY"; } || exit 78
-+     chmod 700 "$FFS_PRIVATE_DIRECTORY" || exit 78
-+   done
-+   [[ "${FFS_WAVE_NUMBER:-}" =~ ^[1-9][0-9]*$ ]] || exit 78
-+   FFS_WAVE_MANIFEST="$FFS_WAVE_DIRECTORY/wave-$FFS_WAVE_NUMBER.manifest.json"
-+   FFS_WAVE_RESULT="$FFS_WAVE_DIRECTORY/wave-$FFS_WAVE_NUMBER.result.json"
-+   FFS_WAVE_RECEIPT="$FFS_WAVE_RESULT.receipt.json"
-+   FFS_WAVE_RETAINED=none
-+   for FFS_WAVE_FILE in "$FFS_WAVE_MANIFEST" "$FFS_WAVE_RESULT" "$FFS_WAVE_RECEIPT"; do
-+     [ ! -L "$FFS_WAVE_FILE" ] || { echo "FATAL: symlinked retained wave evidence; refusing." >&2; exit 78; }
-+     [ -e "$FFS_WAVE_FILE" ] && FFS_WAVE_RETAINED=some
-+   done
-+   if [ "$FFS_WAVE_RETAINED" = some ] && [ -f "$FFS_WAVE_MANIFEST" ] && [ -f "$FFS_WAVE_RESULT" ] && [ -f "$FFS_WAVE_RECEIPT" ]; then
-+     FFS_WAVE_RETAINED=complete
-+   elif [ "$FFS_WAVE_RETAINED" = some ]; then
-+     echo "FATAL: partial retained wave evidence; refusing without relaunch." >&2
-+     exit 78
-+   fi
-+   ```
-+
-+   The pair is owned by this one admitted activity. Create each as a regular
-+   `0600` file without following symlinks. Never overwrite, truncate, or
-+   delete a pre-existing pair: it is recovery evidence for an uncertain
-+   launch. Plans with the same relative file path remain valid when their
-+   worktrees are distinct; the supervisor receives both allocations in one
-+   complete manifest and must not serialize them merely because paths match.
-+   Set FFS_WAVE_NUMBER from the current dependency-wave allocation. On resume,
-+   reuse the exact retained manifest through the adapter; it validates the
-+   bound completion receipt before returning without another invocation.
-+3. If `FFS_WAVE_RETAINED=complete`, invoke the adapter immediately with the
-+   retained manifest/result paths. It validates the retained manifest, result,
-+   and receipt before returning and cannot relaunch. Do not regenerate prompts
-+   or write a replacement manifest in this branch. Otherwise, write one new
-+   manifest for the whole wave with
-+   `schema: "ffs.gsd-supervised-dispatch/v1"`, include the complete admission
-+   object returned by `dispatch-ffs-supervised`,
-+   `mode: "ffs-supervised-process"`, `commit_mode: "patches"`, and
-+   `apply_between_waves: true`. Do not launch a process while the manifest is
-+   incomplete. Fresh manifests are created only through this exclusive writer
-+   (where `FFS_WAVE_MANIFEST_JSON` is the canonical complete manifest):
-+
-+   ```bash
-+   [ "$FFS_WAVE_RETAINED" = none ] || exit 78
-+   node -e 'const fs=require("node:fs");const p=process.argv[1],b=Buffer.from(process.argv[2]);const fd=fs.openSync(p,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);try{fs.writeFileSync(fd,b);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}' "$FFS_WAVE_MANIFEST" "$FFS_WAVE_MANIFEST_JSON" || exit 78
-+   ```
-+
-+   Invoke the installed adapter with that manifest and result path in either
-+   branch:
-+
-+   ```bash
-+   node "${GSD_TOOLS%/*}/ffs-supervised-dispatch.cjs" \
-+     --manifest "$FFS_WAVE_MANIFEST" --output "$FFS_WAVE_RESULT" || {
-+       echo "FATAL: FFS supervisor rejected the allocated wave; retaining manifest, result, and worktrees for recovery." >&2
-+       exit 78
-+     }
-+   ```
-+
-+   The adapter launches `FFS_SUPERVISED_DISPATCH_COMMAND_JSON` as an argv array
-+   with `shell: false`. Admission comes from
-+   `FFS_SUPERVISED_ADMISSION_FILE` and is required by the query above; missing,
-+   malformed, or unavailable admission is a refusal, never inline fallback.
-+4. In recovery mode the supervisor must return one scoped `patch` and one
-+   `summary` per plan, with no repository commit. The orchestrator applies and
-+   reviews those patches only in the existing serialized integration step
-+   between waves. In fixture mode only, set `commit_mode: "fixture-commits"`
-+   and require one verified commit SHA per plan; the same wave barrier and
-+   cleanup rules still apply. A patch-mode response containing a commit is a
-+   protocol error.
-+   Patch mode supersedes upstream per-task and metadata commit instructions.
-+   Workers skip git staging/commit and committed-SUMMARY requirements. Plan
-+   completion and resume use the supervisor result plus the adapter's
-+   `wave-N.result.json.receipt.json`, bound to the complete manifest and
-+   result hashes. Retain this receipt with the manifest and result; never
-+   infer completion from a commit count or replay a changed prompt against it.
-+5. Wait for the complete result, validate every plan id and declared scope,
-+   then complete the normal serialized integration. Retain the private pair on
-+   every refusal, validation failure, interrupted integration, or uncertain
-+   result. Retain completed manifest/result/receipt sets for resume; the next
-+   dependency wave uses its own wave number. Never remove the shared private
-+   directory, another activity's files, or supervisor-owned evidence.
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 000000000..18cc26e4e
+index 0000000..5d97693
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,438 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -532,7 +267,146 @@ index 000000000..18cc26e4e
 +  });
 +}
 +
++const MAX_WRITE_MANIFEST_RAW_BYTES = 64 * 1024;
++const MAX_WRITE_MANIFEST_CANONICAL_BYTES = 16 * 1024;
++
++// Reads stdin to completion, bounded to maxBytes. Resolves on 'end' (the
++// event a file redirected onto stdin reliably emits); a plain pipe emits
++// both 'end' and 'close', so listening on 'end' alone still drains pipes
++// correctly. 'close' without a prior 'end' (a premature close) is treated
++// as a failure. Once one outcome has settled, later events are no-ops.
++function readStdinBounded(maxBytes) {
++  return new Promise((resolve, reject) => {
++    const chunks = [];
++    let bytes = 0;
++    let settled = false;
++    const settle = (fn, value) => {
++      if (settled) return;
++      settled = true;
++      fn(value);
++    };
++    process.stdin.on('data', (chunk) => {
++      bytes += chunk.length;
++      if (bytes > maxBytes) {
++        settle(reject, new Error(`manifest JSON on stdin exceeds the ${maxBytes} byte bound`));
++        process.stdin.destroy();
++        return;
++      }
++      chunks.push(chunk);
++    });
++    process.stdin.on('error', (error) => settle(reject, error));
++    process.stdin.on('end', () => settle(resolve, Buffer.concat(chunks)));
++    process.stdin.on('close', () => settle(reject, new Error('manifest JSON on stdin closed before it ended')));
++  });
++}
++
++// Executors write wave manifests with keys in whatever order they build the
++// object; only this process's own canonicalJson() defines "canonical". This
++// mode reads a bounded raw manifest from stdin, requires it to decode as
++// strict UTF-8 and parse as JSON, requires its canonical form to fit the
++// same 16 KiB bound the strict --manifest check enforces, and requires it
++// to pass the same validateManifest() the strict --manifest check runs.
++// Only then is anything written to disk: the canonical bytes go to a
++// private temporary file created in the manifest's own directory
++// (O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600, fsynced before closing),
++// and that temporary file is published at the target path with a hard
++// link, so an existing file or a symlink already at the target path is
++// refused with EEXIST rather than overwritten or followed. The temporary
++// file has a short name of its own, so a long target name cannot push it
++// past the filesystem's name limit. Once this process has created the
++// temporary file it attempts to remove it, whether the link succeeded or
++// not; it never removes a name it did not create. The manifest's directory
++// is fsynced once the link succeeds so the new directory entry is durable,
++// mirroring what `publish()` does for the result and receipt files below.
++// If the removal fails after a successful link, the directory fsync is
++// still attempted, and the writer then fails instead of reporting success;
++// its message names the leftover file and, if the fsync also failed, the
++// fsync error. After an earlier failure, the earlier error is the one
++// reported.
++async function writeManifestFromStdin(targetPath) {
++  const raw = await readStdinBounded(MAX_WRITE_MANIFEST_RAW_BYTES);
++  let text;
++  try {
++    text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
++  } catch (error) {
++    throw new Error(`manifest JSON on stdin is not valid UTF-8: ${error.message}`);
++  }
++  let value;
++  try {
++    value = JSON.parse(text);
++  } catch (error) {
++    throw new Error(`manifest JSON on stdin is invalid: ${error.message}`);
++  }
++  const canonical = Buffer.from(canonicalJson(value), 'utf8');
++  if (canonical.length > MAX_WRITE_MANIFEST_CANONICAL_BYTES) {
++    throw new Error(`manifest JSON on stdin exceeds the ${MAX_WRITE_MANIFEST_CANONICAL_BYTES} byte canonical bound`);
++  }
++  validateManifest(value);
++  const directory = path.dirname(targetPath);
++  const temporaryPath = path.join(
++    directory,
++    `.ffs-manifest.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
++  );
++  // Outside the cleanup scope: if exclusive creation fails, this process
++  // created nothing, and the name may belong to someone else.
++  const fd = fs.openSync(temporaryPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
++  let primaryError = null;
++  try {
++    try {
++      fs.writeFileSync(fd, canonical);
++      fs.fsyncSync(fd);
++    } finally {
++      fs.closeSync(fd);
++    }
++    try {
++      fs.linkSync(temporaryPath, targetPath);
++    } catch (error) {
++      if (error.code === 'EEXIST') {
++        throw new Error(`refusing to write manifest: target path already exists or is a symlink (EEXIST): ${targetPath}`);
++      }
++      throw error;
++    }
++  } catch (error) {
++    primaryError = error;
++  }
++  let cleanupError = null;
++  try {
++    fs.unlinkSync(temporaryPath);
++  } catch (error) {
++    cleanupError = error;
++  }
++  if (primaryError) throw primaryError;
++  // The link succeeded: make the published entry durable even if cleanup
++  // failed, then report the cleanup failure.
++  let fsyncError = null;
++  try {
++    const directoryFd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
++    try {
++      fs.fsyncSync(directoryFd);
++    } finally {
++      fs.closeSync(directoryFd);
++    }
++  } catch (error) {
++    fsyncError = error;
++  }
++  const failures = [];
++  if (fsyncError) failures.push(`its directory could not be fsynced: ${fsyncError.message}`);
++  if (cleanupError) failures.push(`its temporary file ${temporaryPath} could not be removed: ${cleanupError.message}`);
++  if (failures.length) {
++    throw new Error(`manifest was linked at ${targetPath}, but ${failures.join('; and ')}`);
++  }
++}
++
 +async function main() {
++  const writeManifestPath = option('--write-manifest');
++  if (writeManifestPath) {
++    try {
++      await writeManifestFromStdin(writeManifestPath);
++    } catch (error) {
++      return fail(error.message, 1);
++    }
++    return;
++  }
 +  const manifestPath = option('--manifest');
 +  const outputPath = option('--output');
 +  if (!manifestPath || !outputPath) return fail('usage: --manifest <file> --output <file>');
@@ -586,3 +460,274 @@ index 000000000..18cc26e4e
 +}
 +
 +main();
+diff --git a/gsd-core/bin/gsd-tools.cjs b/gsd-core/bin/gsd-tools.cjs
+index 852d40e..a02510e 100755
+--- a/gsd-core/bin/gsd-tools.cjs
++++ b/gsd-core/bin/gsd-tools.cjs
+@@ -2056,6 +2056,56 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
+     }
+   }
+ 
++  /**
++   * FFS compatibility seam.  This is intentionally independent from the
++   * host capability registry: an FFS supervisor is an admission-bound process
++   * transport, not a new isolation primitive.  The execute-phase workflow
++   * calls this only when it has selected the explicit
++   * `ffs-supervised-process` mode.  Missing or malformed admission is a hard
++   * refusal, never a silent fallback to inline or unisolated execution.
++   */
++  function routeFfsSupervisedDispatch({ args, raw, error }) {
++    const admissionFile = process.env.FFS_SUPERVISED_ADMISSION_FILE;
++    const commandJson = process.env.FFS_SUPERVISED_DISPATCH_COMMAND_JSON;
++    if (!admissionFile || !commandJson) {
++      error(
++        'ffs-supervised-process admission is unavailable: set FFS_SUPERVISED_ADMISSION_FILE and FFS_SUPERVISED_DISPATCH_COMMAND_JSON',
++        ERROR_REASON.SDK_FAIL_FAST,
++      );
++    }
++    let admission;
++    let command;
++    try {
++      admission = JSON.parse(fs.readFileSync(admissionFile, 'utf8'));
++      command = JSON.parse(commandJson);
++    } catch (cause) {
++      error(`ffs-supervised-process admission is unreadable: ${cause.message}`, ERROR_REASON.SDK_FAIL_FAST);
++    }
++    if (
++      !admission || admission.schema !== 'ffs.supervisor-admission/v1' || admission.available !== true ||
++      !Number.isSafeInteger(admission.generation) || admission.generation < 1 ||
++      ['activity_id', 'repository_id', 'run_id', 'runtime_identity', 'workspace'].some(
++        (key) => typeof admission[key] !== 'string' || !admission[key]
++      ) || !path.isAbsolute(admission.workspace) ||
++      !Array.isArray(command) || command.length === 0 ||
++      command.some((part) => typeof part !== 'string' || !part || part.includes('\0'))
++    ) {
++      error(
++        'ffs-supervised-process admission is unavailable or malformed; refusing to dispatch',
++        ERROR_REASON.SDK_FAIL_FAST,
++      );
++    }
++    const result = {
++      mode: 'ffs-supervised-process',
++      admission,
++      command,
++      commitMode: process.env.FFS_SUPERVISED_COMMIT_MODE || 'patches',
++      applyBetweenWaves: true,
++    };
++    if (args.indexOf('--json') !== -1) output(result, raw);
++    else process.stdout.write(result.mode);
++  }
++
+   /**
+    * #3673 (ADR-1239 Phase 1) — typed, PURE-READ query exposing the negotiated
+    * `dispatch.maxConcurrency` numeric sub-field. Sibling of `dispatch-isolation`
+@@ -4432,6 +4482,7 @@ const HOST_COMMAND_ROUTERS = {
+     'normalize-test-command': routeNormalizeTestCommand,
+     'dispatch-should-flatten': routeDispatchShouldFlatten,
+     'dispatch-isolation': routeDispatchIsolation,
++    'dispatch-ffs-supervised': routeFfsSupervisedDispatch,
+     'dispatch-capacity': routeDispatchCapacity,
+     'inspect-dispatch-isolation': routeInspectDispatchIsolation,
+     'record-dispatch-isolation': routeRecordDispatchIsolation,
+@@ -4693,7 +4744,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
+   'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
+   'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, planning, profile-questionnaire, ' +
+   'profile-sample, progress, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
+-  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
++  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-ffs-supervised, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
+   'resolve-execution, review-lane, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
+   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
+   'Global flags:\n' +
+@@ -5280,4 +5331,3 @@ module.exports = {
+   MODEL_ID_SANITIZE_STRIP_RE,
+   MODEL_ID_MAX_LENGTH,
+ };
+-
+diff --git a/gsd-core/workflows/execute-phase.md b/gsd-core/workflows/execute-phase.md
+index eb9464b..e962e92 100644
+--- a/gsd-core/workflows/execute-phase.md
++++ b/gsd-core/workflows/execute-phase.md
+@@ -13,6 +13,18 @@ Execute all plans in a phase using wave-based parallel execution. Orchestrator s
+ Orchestrator coordinates, not executes. Each subagent loads the full execute-plan context. Orchestrator: discover plans → analyze deps → group waves → spawn agents → handle checkpoints → collect results.
+ </core_principle>
+ 
++<ffs_supervised_process priority="first">
++When `GSD_DISPATCH_MODE=ffs-supervised-process`, this is a mandatory transport
++contract. Before touching any path declared by a plan, read the
++FFS-supervised-process compatibility section of
++`gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md`. Build
++one complete manifest for the current dependency wave and invoke
++`ffs-supervised-dispatch.cjs`. The outer orchestrator must not edit declared
++plan targets, call per-plan native agents, or use an inline/sequential fallback.
++If the adapter cannot run or rejects the wave, stop with the capability failure
++and leave plan targets unchanged. Continue only from its validated result.
++</ffs_supervised_process>
++
+ <!-- #2508 runtime-aware-dispatch -->
+ 
+ > **Runtime-aware dispatch (#2508 Phase 4).** GSD workflows dispatch specialized subagents by role. Before dispatching on a built-in-only runtime (kimi-code — three built-ins only), resolve the role to a built-in via `gsd_run query resolve-dispatch-type --requested <role> --raw`. On named-dispatch runtimes (Claude/OpenCode/…) the role is returned unchanged; on kimi-code it maps to `coder`/`explore`/`plan` by role-suffix. The persona rides `${AGENT_SKILLS_<ROLE>}` (Phase 3) regardless. See @gsd-core/references/runtime-aware-dispatch.md.
+@@ -727,6 +739,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
+ 
+    **Orchestrator-managed worktree dispatch** (`ISOLATION=orchestrator-worktree`): read and execute `execute-phase/steps/executor-isolation-dispatch.md`. GSD creates each worktree (`worktree create`) and spawns the executor into it; the orchestrator performs every git operation. Merge-back and cleanup are the existing manifest-scoped gauntlet, unchanged.
+ 
++   **FFS-supervised-process dispatch** (`GSD_DISPATCH_MODE=ffs-supervised-process`): before any per-plan `Agent()` call, read and execute the FFS-supervised-process compatibility section in `execute-phase/steps/executor-isolation-dispatch.md`. It allocates the complete wave, captures the initial HEAD, embeds each fresh prompt, and invokes the FFS process adapter once for that wave. Do not fall through to the per-plan Agent loop, launch a partial wave, or alter `ISOLATION`; after the adapter returns, continue with the existing serialized integration, post-merge validation, and manifest-only cleanup before the next dependency wave.
++
+    **Sequential mode** (`USE_WORKTREES_FOR_PLAN` is `false` — either project-level `USE_WORKTREES=false`, or per-plan submodule intersection forced it false in step 2.5):
+ 
+    Omit `isolation="worktree"` from the Agent call. Before composing the prompt, read and execute
+diff --git a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
+index 2c7eaa8..dba1068 100644
+--- a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
++++ b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
+@@ -338,3 +338,151 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
+ 
+ > **Declared-scope conformance (#2596):** ADR-1239 specifies that *both* isolation adapters route their merge through a check that each plan branch's committed diff stayed inside its declared `files_modified` scope. That check now exists, advisory-first, and is wired into **both** paths: this one passes `--files "$PLAN_FILES"` to `worktree create` above, the harness path passes it to `worktree record-agent`, and `cleanup-wave` runs the one comparison for both. A path outside the declared scope is reported in the result's `warnings` array; it does not block the merge. Promotion to a hard gate is a separate, disclosed change.
+ 
++## FFS-supervised-process compatibility mode
++
++FFS can provide an explicit process supervisor for recovery and for fixture
++repositories. This mode is selected only when the host sets
++`GSD_DISPATCH_MODE=ffs-supervised-process`; it is a process transport layered
++over the existing isolation decision, not a new `ISOLATION` value and never a
++reason to bypass the isolation guard. A host that has not demonstrated FFS
++admission must refuse the wave.
++
++Resolve the admission descriptor immediately before the first executor in the
++wave:
++
++```bash
++if [ "${GSD_DISPATCH_MODE:-}" = "ffs-supervised-process" ]; then
++  FFS_DISPATCH_JSON=$(gsd_run query dispatch-ffs-supervised --json --raw 2>/dev/null) || {
++    echo "FATAL: ffs-supervised-process was requested but FFS admission is unavailable; refusing to dispatch." >&2
++    exit 78
++  }
++  FFS_MODE=$(printf '%s' "$FFS_DISPATCH_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let j=JSON.parse(s);process.stdout.write(j&&j.mode||"")}catch{}})')
++  [ "$FFS_MODE" = "ffs-supervised-process" ] || {
++    echo "FATAL: FFS admission did not return mode ffs-supervised-process; refusing to dispatch." >&2
++    exit 78
++  }
++fi
++```
++
++When this mode is selected, preserve the normal dependency-wave loop and the
++existing serialized integration/cleanup gauntlet with these additional
++requirements:
++
++1. Capture `EXPECTED_BASE=$(git rev-parse HEAD)` once at wave start, before
++   requesting any executor. Prepare every plan's complete, fresh prompt before
++   launching the first process. The FFS supervisor exclusively allocates and
++   registers each child worktree beneath the current run; GSD must not create
++   or name executor worktrees in this mode. Each manifest
++   plan carries `initial_head: "$EXPECTED_BASE"`, `prompt_fresh: true`, a
++   unique `prompt_nonce`, the SHA-256 of that exact prompt, `files_modified`,
++   `files_deleted`, and its original `depends_on` plan ids. Dependencies on
++   completed prior waves remain in the manifest for supervisor verification;
++   no plan may depend on another plan allocated in the same runnable wave.
++   A plan whose measured HEAD or prompt hash does not match is a fatal wave
++   error.
++2. Bind all wave transport files to the admitted orchestrator workspace before
++   writing the manifest. `FFS_DISPATCH_JSON.admission.workspace` is the sole
++   workspace authority. Resolve the current repository root with
++   `git rev-parse --show-toplevel`; it must be byte-for-byte equal to that
++   admission workspace. Extract and validate the admission `activity_id` as a
++   portable path segment (`[A-Za-z0-9][A-Za-z0-9._-]*`). A mismatch, malformed
++   value, symlink, or non-private directory is a capability refusal. Do not
++   use `TMPDIR`, `/tmp`, `mktemp`, or an inherited manifest path in this mode.
++
++   Use this deterministic private layout. The activity-specific directory has
++   one immutable manifest/result/receipt set per dependency-wave number:
++
++   ```bash
++   FFS_ADMISSION_BINDING=$(printf '%s' "$FFS_DISPATCH_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s),a=j&&j.admission;if(!a||typeof a.workspace!=="string"||typeof a.activity_id!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(a.activity_id))throw Error();process.stdout.write(a.workspace+"\t"+a.activity_id)}catch{process.exit(1)}})') || exit 78
++   IFS=$'\t' read -r FFS_ADMISSION_WORKSPACE FFS_ADMISSION_ACTIVITY <<< "$FFS_ADMISSION_BINDING"
++   FFS_ORCHESTRATOR_WORKSPACE=$(git rev-parse --show-toplevel) || exit 78
++   [ "$FFS_ORCHESTRATOR_WORKSPACE" = "$FFS_ADMISSION_WORKSPACE" ] || { echo "FATAL: admitted workspace mismatch; refusing wave." >&2; exit 78; }
++   FFS_WAVE_DIRECTORY="$FFS_ADMISSION_WORKSPACE/.planning/.ffs-supervised/waves/$FFS_ADMISSION_ACTIVITY"
++   umask 077
++   for FFS_PRIVATE_DIRECTORY in "$FFS_ADMISSION_WORKSPACE/.planning/.ffs-supervised" "${FFS_ADMISSION_WORKSPACE}/.planning/.ffs-supervised/waves" "$FFS_WAVE_DIRECTORY"; do
++     [ ! -L "$FFS_PRIVATE_DIRECTORY" ] && { [ -d "$FFS_PRIVATE_DIRECTORY" ] || mkdir -m 700 "$FFS_PRIVATE_DIRECTORY"; } || exit 78
++     chmod 700 "$FFS_PRIVATE_DIRECTORY" || exit 78
++   done
++   [[ "${FFS_WAVE_NUMBER:-}" =~ ^[1-9][0-9]*$ ]] || exit 78
++   FFS_WAVE_MANIFEST="$FFS_WAVE_DIRECTORY/wave-$FFS_WAVE_NUMBER.manifest.json"
++   FFS_WAVE_RESULT="$FFS_WAVE_DIRECTORY/wave-$FFS_WAVE_NUMBER.result.json"
++   FFS_WAVE_RECEIPT="$FFS_WAVE_RESULT.receipt.json"
++   FFS_WAVE_RETAINED=none
++   for FFS_WAVE_FILE in "$FFS_WAVE_MANIFEST" "$FFS_WAVE_RESULT" "$FFS_WAVE_RECEIPT"; do
++     [ ! -L "$FFS_WAVE_FILE" ] || { echo "FATAL: symlinked retained wave evidence; refusing." >&2; exit 78; }
++     [ -e "$FFS_WAVE_FILE" ] && FFS_WAVE_RETAINED=some
++   done
++   if [ "$FFS_WAVE_RETAINED" = some ] && [ -f "$FFS_WAVE_MANIFEST" ] && [ -f "$FFS_WAVE_RESULT" ] && [ -f "$FFS_WAVE_RECEIPT" ]; then
++     FFS_WAVE_RETAINED=complete
++   elif [ "$FFS_WAVE_RETAINED" = some ]; then
++     echo "FATAL: partial retained wave evidence; refusing without relaunch." >&2
++     exit 78
++   fi
++   ```
++
++   The pair is owned by this one admitted activity. Create each as a regular
++   `0600` file without following symlinks. Never overwrite, truncate, or
++   delete a pre-existing pair: it is recovery evidence for an uncertain
++   launch. Plans with the same relative file path remain valid when their
++   worktrees are distinct; the supervisor receives both allocations in one
++   complete manifest and must not serialize them merely because paths match.
++   Set FFS_WAVE_NUMBER from the current dependency-wave allocation. On resume,
++   reuse the exact retained manifest through the adapter; it validates the
++   bound completion receipt before returning without another invocation.
++3. If `FFS_WAVE_RETAINED=complete`, invoke the adapter immediately with the
++   retained manifest/result paths. It validates the retained manifest, result,
++   and receipt before returning and cannot relaunch. Do not regenerate prompts
++   or write a replacement manifest in this branch. Otherwise, write one new
++   manifest for the whole wave with
++   `schema: "ffs.gsd-supervised-dispatch/v1"`, include the complete admission
++   object returned by `dispatch-ffs-supervised`,
++   `mode: "ffs-supervised-process"`, `commit_mode: "patches"`, and
++   `apply_between_waves: true`. Do not launch a process while the manifest is
++   incomplete. Fresh manifests are created only through this exclusive writer.
++   `FFS_WAVE_MANIFEST_JSON` is the complete manifest object and its keys may be
++   in any order: pipe it into the adapter's `--write-manifest` mode, which
++   decodes it as strict UTF-8, parses it as JSON, canonicalizes it with the
++   same `canonicalJson()` the strict `--manifest` check below requires, and
++   runs it through the same `validateManifest()` that check runs, before
++   writing anything. Nothing is written on invalid JSON, input that is not
++   valid UTF-8, raw input over 64 KiB, a canonical form over 16 KiB, a
++   manifest that fails validation, an already-existing target path, or a
++   symlink target:
++
++   ```bash
++   [ "$FFS_WAVE_RETAINED" = none ] || exit 78
++   printf '%s' "$FFS_WAVE_MANIFEST_JSON" | node "${GSD_TOOLS%/*}/ffs-supervised-dispatch.cjs" --write-manifest "$FFS_WAVE_MANIFEST" || exit 78
++   ```
++
++   Invoke the installed adapter with that manifest and result path in either
++   branch:
++
++   ```bash
++   node "${GSD_TOOLS%/*}/ffs-supervised-dispatch.cjs" \
++     --manifest "$FFS_WAVE_MANIFEST" --output "$FFS_WAVE_RESULT" || {
++       echo "FATAL: FFS supervisor rejected the allocated wave; retaining manifest, result, and worktrees for recovery." >&2
++       exit 78
++     }
++   ```
++
++   The adapter launches `FFS_SUPERVISED_DISPATCH_COMMAND_JSON` as an argv array
++   with `shell: false`. Admission comes from
++   `FFS_SUPERVISED_ADMISSION_FILE` and is required by the query above; missing,
++   malformed, or unavailable admission is a refusal, never inline fallback.
++4. In recovery mode the supervisor must return one scoped `patch` and one
++   `summary` per plan, with no repository commit. The orchestrator applies and
++   reviews those patches only in the existing serialized integration step
++   between waves. In fixture mode only, set `commit_mode: "fixture-commits"`
++   and require one verified commit SHA per plan; the same wave barrier and
++   cleanup rules still apply. A patch-mode response containing a commit is a
++   protocol error.
++   Patch mode supersedes upstream per-task and metadata commit instructions.
++   Workers skip git staging/commit and committed-SUMMARY requirements. Plan
++   completion and resume use the supervisor result plus the adapter's
++   `wave-N.result.json.receipt.json`, bound to the complete manifest and
++   result hashes. Retain this receipt with the manifest and result; never
++   infer completion from a commit count or replay a changed prompt against it.
++5. Wait for the complete result, validate every plan id and declared scope,
++   then complete the normal serialized integration. Retain the private pair on
++   every refusal, validation failure, interrupted integration, or uncertain
++   result. Retain completed manifest/result/receipt sets for resume; the next
