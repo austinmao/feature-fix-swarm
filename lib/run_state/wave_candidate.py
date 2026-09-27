@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .candidate_chain import _event, _read
 from .ownership import OwnershipRefused
+from .workspace import inspect_workspace
 
 
 def bind_wave_execution_candidate(store, token, *, sealed, handle, request_key, ready, process_evidence):
@@ -35,6 +36,9 @@ def bind_wave_execution_candidate(store, token, *, sealed, handle, request_key, 
         # A descendant's separately qualified workspace has its own runtime identity.
         runtime_hash = tx.execute("SELECT runtime_tuple_hash FROM authority_activities WHERE id=?",
                                   (handle.activity_id,)).fetchone()["runtime_tuple_hash"]
+    # Qualification promotion rewrites the preparation's child_role after the
+    # session captured it; the authority hashes the live row, so hash that too.
+    ready = inspect_workspace(store, ready.id)
     workspace = Path(integrated["material"]["workspace"])
     manifest = _read({"locator": str(workspace / request["manifest_locator"]), "sha256": request["manifest_sha256"]})
     completion = (workspace / ".planning/.ffs-supervised/waves" / handle.activity_id
