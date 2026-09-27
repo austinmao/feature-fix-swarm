@@ -594,3 +594,26 @@ def test_wave_refusals_name_the_wave_not_the_host_adapter(code, action, capsys):
     assert (body["code"], body["recovery_action"]["action"]) == (code, action)
     host = "the selected host backend has not demonstrated managed admission"
     assert (body["cause"] == host) == (code == "HOST_CAPABILITY_UNQUALIFIED")
+
+
+@pytest.mark.parametrize(("invocation", "code", "raised"), [
+    (("/gsd-execute-phase", "1"), "WAVE_REPLY_UNCONSUMED", "WAVE_REPLY_UNCONSUMED"),
+    (("/gsd-execute-phase", "1"), "WAVE_SOMETHING_ELSE", "WAVE_EXECUTION_UNPROVEN"),
+    (("/gsd-execute-phase", "1"), None, None),
+    (("/gsd-plan-phase", "1"), "WAVE_REPLY_UNCONSUMED", None),
+])
+def test_retained_legacy_replay_rechecks_wave_delivery(monkeypatch, invocation, code, raised):
+    # F37a: a crash after finish() recorded success but before the wave check
+    # must not let the legacy replay report that retained launch as success.
+    import run_state.supervisor as supervisor_module
+    from run_state.frontend_producers import _refuse_undelivered_retained_wave
+    from run_state.supervisor import SupervisorRefused
+    calls = []
+    monkeypatch.setattr(supervisor_module, "_gsd_wave_completion_code",
+                        lambda *_args, **kwargs: calls.append(kwargs) or code)
+    if raised is None:
+        _refuse_undelivered_retained_wave(object(), invocation, "outer", "intent")
+    else:
+        with pytest.raises(SupervisorRefused, match=raised):
+            _refuse_undelivered_retained_wave(object(), invocation, "outer", "intent")
+    assert calls == ([] if invocation[0] == "/gsd-plan-phase" else [{"require_wave": True}])

@@ -11,18 +11,26 @@ all skills.
 ### Fixed (2026-09-27, spec-014 Release C: F37a typed failure for an unconsumed wave reply)
 
 - When the outer orchestrator exited before its gsd-core adapter consumed a
-  recorded supervised wave reply, every plan was complete and integrated,
-  so the outer launch counted as succeeded, and the run failed much later
-  when binding the wave (`FRONTEND_NO_COMMIT_RECEIPT_INVALID`). The worker
-  channel drops a failed reply send silently. The wave completion check now
-  also requires the adapter's no-commit receipt
-  (`.planning/.ffs-supervised/waves/<activity>/wave-<N>.result.json.receipt.json`)
-  in the outer workspace for every wave. A missing receipt fails the launch
-  with `WAVE_REPLY_UNCONSUMED` ("the outer orchestrator exited before
-  consuming a supervised wave reply"), with its own CLI cause and
-  `inspect_wave_delivery` recovery action, instead of a late binding
-  refusal. The candidate chain still verifies the receipt's content. Found
-  by a live operator E2E run (3 of 6 wave runs).
+  recorded supervised wave reply, the wave consumer still integrated the
+  plans into the outer workspace, the outer launch counted as succeeded, and
+  the run failed much later when binding the wave
+  (`FRONTEND_NO_COMMIT_RECEIPT_INVALID`). The worker channel drops a failed
+  reply send silently. Now:
+  - Before integrating, the consumer probes the requesting adapter's
+    recorded process identity; if it is gone, the wave is refused
+    (`WAVE_REPLY_UNCONSUMED`) and the outer workspace is left untouched.
+  - The wave completion check also requires, for every wave, the adapter's
+    no-commit receipt
+    (`.planning/.ffs-supervised/waves/<activity>/wave-<N>.result.json.receipt.json`)
+    in the outer workspace, read without following links and bound to that
+    wave's manifest and reply as the candidate chain requires. A receipt
+    still being written is retried within a short grace. A missing receipt
+    fails the launch with `WAVE_REPLY_UNCONSUMED`; a forged one with
+    `WAVE_EXECUTION_UNPROVEN`.
+  - The legacy unsealed replay of a retained outer launch runs the same
+    check before reporting success.
+  `WAVE_REPLY_UNCONSUMED` has its own CLI cause and `inspect_wave_delivery`
+  recovery action. Found by a live operator E2E run (3 of 6 wave runs).
 
 ### Fixed (2026-09-27, spec-014 Release C: F40 worker planning config and wave refusal cause)
 

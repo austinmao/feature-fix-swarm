@@ -631,16 +631,16 @@ def _consume_reply(f, reply, *, receipt=None):
     return Path(prefix + ".result.json.receipt.json")
 
 
-@pytest.mark.parametrize("delivery", ["missing", "consumed", "forged", "symlink", "late"])
+@pytest.mark.parametrize("delivery", ["missing", "consumed", "forged", "symlink", "late", "partial"])
 def test_completed_wave_whose_reply_was_never_consumed_is_typed(tmp_path, monkeypatch, delivery):
     # F37a: the outer orchestrator can exit before its adapter consumes a
     # recorded reply. The launch must not count as a proven wave, and only a
     # receipt bound to this manifest and reply proves delivery.
     import threading
     import run_state.supervisor as supervisor_module
-    monkeypatch.setattr(supervisor_module, "_RECEIPT_GRACE_SECONDS", 5.0 if delivery == "late" else 0.0)
+    monkeypatch.setattr(supervisor_module, "_RECEIPT_GRACE_SECONDS", 5.0 if delivery in {"late", "partial"} else 0.0)
     expected = {"missing": "WAVE_REPLY_UNCONSUMED", "consumed": None, "forged": "WAVE_EXECUTION_UNPROVEN",
-                "symlink": "WAVE_EXECUTION_UNPROVEN", "late": None}[delivery]
+                "symlink": "WAVE_EXECUTION_UNPROVEN", "late": None, "partial": None}[delivery]
     with wave_fixture(tmp_path, monkeypatch, plans=1) as f:
         reply = f.consumer(f.event)
         assert [item["status"] for item in reply["results"]] == ["complete"]
@@ -657,7 +657,29 @@ def test_completed_wave_whose_reply_was_never_consumed_is_typed(tmp_path, monkey
         elif delivery == "late":
             writer = threading.Timer(0.5, _consume_reply, (f, reply))
             writer.start()
+        elif delivery == "partial":
+            # The adapter creates the receipt path before it writes the bytes.
+            receipt = _consume_reply(f, reply)
+            genuine = receipt.read_bytes()
+            receipt.write_bytes(b"")
+            writer = threading.Timer(0.5, receipt.write_bytes, (genuine,))
+            writer.start()
         code = _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id)
         if writer is not None:
             writer.join()
     assert code == expected
+
+
+def test_wave_whose_requester_is_gone_is_not_integrated(tmp_path, monkeypatch):
+    # F37a: when the adapter that requested a wave is gone, nothing will
+    # consume the reply; the outer workspace must stay untouched.
+    import run_state.wave_consumer as consumer_module
+    from process_identity import DEAD
+    monkeypatch.setattr(consumer_module, "probe_identity", lambda _identity: DEAD)
+    with wave_fixture(tmp_path, monkeypatch, plans=1) as f:
+        with pytest.raises(SupervisorRefused, match="WAVE_REPLY_UNCONSUMED"):
+            f.consumer(f.event)
+        code = _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id)
+        integrated = not (f.parent / "result-0.txt").exists()
+    assert code == "WAVE_REPLY_UNCONSUMED"
+    assert integrated

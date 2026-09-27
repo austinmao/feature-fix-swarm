@@ -3014,11 +3014,19 @@ def _gsd_wave_completion_code(
             (activity_id, f"gsd-wave:{event['id']}:integrated"),
         ).fetchone() for event in wave_events]
         refusals = [tx.execute(
-            "SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+            "SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+            "WHERE k.activity_id=? AND k.idempotency_key=?",
             (activity_id, f"gsd-wave:{event['id']}:refused"),
         ).fetchone() for event in wave_events]
-    if any(refusal is not None and reply is None for refusal, reply in zip(refusals, replies, strict=True)):
-        return "WAVE_EXECUTION_REFUSED"
+    for refusal, reply in zip(refusals, replies, strict=True):
+        if refusal is not None and reply is None:
+            # The consumer refuses a wave whose requesting adapter is gone
+            # before integrating it: nothing would consume that reply (F37a).
+            try:
+                unconsumed = json.loads(refusal["payload"])["data"]["code"] == "WAVE_REPLY_UNCONSUMED"
+            except (KeyError, TypeError, ValueError):
+                unconsumed = False
+            return "WAVE_REPLY_UNCONSUMED" if unconsumed else "WAVE_EXECUTION_REFUSED"
     if not wave_events:
         return "WAVE_EXECUTION_UNPROVEN" if require_wave else None
     if not all(item is not None for item in replies):
@@ -3046,10 +3054,11 @@ def _gsd_wave_completion_code(
             raw = _read_evidence(workspace / body["manifest_locator"])
             manifest = json.loads(raw)
             prefix = str(workspace / ".planning/.ffs-supervised/waves" / activity_id / f"wave-{manifest['wave']}")
-            if not _receipt_published(Path(prefix + ".result.json.receipt.json")):
+            receipt_raw = _published_receipt(Path(prefix + ".result.json.receipt.json"))
+            if receipt_raw is None:
                 return "WAVE_REPLY_UNCONSUMED"
             result_raw = _read_evidence(Path(prefix + ".result.json"))
-            receipt = json.loads(_read_evidence(Path(prefix + ".result.json.receipt.json")))
+            receipt = json.loads(receipt_raw)
             if (hashlib.sha256(raw).hexdigest() != body["manifest_sha256"]
                     or json.loads(result_raw) != json.loads(row["payload"])["data"]["reply"]
                     or receipt != {"schema": "ffs.gsd-no-commit-completion/v1",
@@ -3068,13 +3077,25 @@ def _gsd_wave_completion_code(
 _RECEIPT_GRACE_SECONDS = 10.0
 
 
-def _receipt_published(path: Path) -> bool:
+def _published_receipt(path: Path) -> bytes | None:
+    """The adapter's receipt bytes once they parse, or None when still absent at the deadline.
+
+    The adapter creates the receipt path before writing and syncing it, so an
+    empty or partial file is retried within the grace, not judged.
+    """
     deadline = time.monotonic() + _RECEIPT_GRACE_SECONDS
-    while not os.path.lexists(path):
-        if time.monotonic() >= deadline:
-            return False
+    while True:
+        if os.path.lexists(path):
+            raw = _read_evidence(path)
+            try:
+                json.loads(raw)
+                return raw
+            except ValueError:
+                if time.monotonic() >= deadline:
+                    return raw
+        elif time.monotonic() >= deadline:
+            return None
         time.sleep(0.1)
-    return True
 
 
 _WAVE_FAILURE_REASONS = {
