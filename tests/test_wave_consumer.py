@@ -472,3 +472,141 @@ def test_unproven_or_internal_dependencies_refused_before_effects(tmp_path, monk
         with pytest.raises(SupervisorRefused, match=expected):
             f.consumer(record_wave(f, manifest, "dependent-wave"))
         assert not f.prepared
+
+
+def _with_planning_config(monkeypatch, marker, attribute=None):
+    import test_supervised_process
+    original = test_supervised_process._repository
+
+    def with_planning_config(path):
+        primary = original(path)
+        text = '{"workflow": {}}\n'
+        if attribute is None:
+            (primary / ".planning" / "config.json").write_text(text)
+        else:
+            (primary / ".gitattributes").write_text(f".planning/config.json {attribute}\n")
+            git(primary, "add", ".gitattributes")
+            encoded = text.encode("utf-16-le") if "encoding" in attribute else text.replace("\n", "\r\n").encode()
+            (primary / ".planning" / "config.json").write_bytes(encoded)
+        git(primary, "add", ".planning/config.json")
+        git(primary, "commit", "-qm", "fixture planning config")
+        hook = primary / ".git" / "hooks" / "post-checkout"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        hook.chmod(0o755)
+        return primary
+
+    monkeypatch.setattr(test_supervised_process, "_repository", with_planning_config)
+
+
+_CONFIG_SET = (
+    # Same write shape as gsd-core platformWriteSync: temp file, then rename.
+    "Path('.planning/config.json.tmp').write_text('{\"workflow\": {\"_auto_chain_active\": false}}\\n')\n"
+    "os.replace('.planning/config.json.tmp', '.planning/config.json')\n"
+    "Path('result-0.txt').write_text('done')\n"
+)
+
+
+@pytest.mark.parametrize("hide", [False, True])
+def test_wave_worker_cannot_rewrite_undeclared_planning_config(tmp_path, monkeypatch, hide):
+    # F40: GSD bookkeeping (config-set) inside a worker must not become an
+    # out-of-scope write that refuses the whole plan. The restore compares the
+    # file's own bytes (skip-worktree cannot hide an edit) and never runs a
+    # Git checkout, so a repository hook does not run.
+    marker = tmp_path / "post-checkout-ran"
+    _with_planning_config(monkeypatch, marker)
+    bookkeeping = (
+        "import os, subprocess\n"
+        "from pathlib import Path\n"
+        + ("subprocess.run(['git', 'update-index', '--skip-worktree', '.planning/config.json'], check=True)\n"
+           if hide else "")
+        + _CONFIG_SET
+    )
+    with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", bookkeeping)]) as f:
+        reply = f.consumer(f.event)
+        worker = f.prepared[0].preparation.path
+        with f.store.read_transaction() as tx:
+            keys = [row[0] for row in tx.execute("SELECT idempotency_key FROM authority_event_keys")]
+    assert [item["status"] for item in reply["results"]] == ["complete"]
+    assert reply["results"][0]["changed_files"] == ["result-0.txt"]
+    assert (worker / ".planning" / "config.json").read_text() == '{"workflow": {}}\n'
+    assert sum(key.endswith(":planning-config-restored") for key in keys) == 1
+    assert not marker.exists()
+
+
+def test_planning_config_restore_event_precedes_the_write(tmp_path, monkeypatch):
+    import run_state.wave_consumer as consumer_module
+    from run_state.workspace import WorkspaceRefused
+    _with_planning_config(monkeypatch, tmp_path / "post-checkout-ran")
+
+    def fail_write(*_args, **_kwargs):
+        raise WorkspaceRefused("UNSAFE_SELECTION_PATH")
+
+    monkeypatch.setattr(consumer_module, "_atomic_snapshot_write", fail_write)
+    bookkeeping = "import os\nfrom pathlib import Path\n" + _CONFIG_SET
+    with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", bookkeeping)]) as f:
+        reply = f.consumer(f.event)
+        with f.store.read_transaction() as tx:
+            keys = [row[0] for row in tx.execute("SELECT idempotency_key FROM authority_event_keys")]
+    assert [item["status"] for item in reply["results"]] == ["failed"]
+    assert sum(key.endswith(":planning-config-restored") for key in keys) == 1
+
+
+def test_planning_config_replaced_by_a_directory_fails_only_that_plan(tmp_path, monkeypatch):
+    _with_planning_config(monkeypatch, tmp_path / "post-checkout-ran")
+    replace_with_directory = (
+        "import os\nfrom pathlib import Path\n"
+        "os.remove('.planning/config.json')\nos.mkdir('.planning/config.json')\n"
+        "Path('result-0.txt').write_text('done')\n"
+    )
+    with wave_fixture(tmp_path, monkeypatch, plans=1,
+                      commands=[(sys.executable, "-c", replace_with_directory)]) as f:
+        reply = f.consumer(f.event)
+    [result] = reply["results"]
+    assert result["status"] == "failed"
+    assert "WAVE_SCOPE_VIOLATION" in result["summary"]
+
+
+def test_planning_config_read_is_bounded_by_the_head_blob(tmp_path, monkeypatch):
+    import run_state.wave_consumer as consumer_module
+    _with_planning_config(monkeypatch, tmp_path / "post-checkout-ran")
+    original, bounds = consumer_module._read_anchored_regular_metadata, []
+
+    def record(root, relative, **kwargs):
+        bounds.append(kwargs.get("max_bytes"))
+        return original(root, relative, **kwargs)
+
+    monkeypatch.setattr(consumer_module, "_read_anchored_regular_metadata", record)
+    oversized = "import os\nfrom pathlib import Path\n" + _CONFIG_SET.replace("_auto_chain_active", "x" * 4096)
+    with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", oversized)]) as f:
+        reply = f.consumer(f.event)
+    assert [item["status"] for item in reply["results"]] == ["complete"]
+    assert bounds == [len('{"workflow": {}}\n')]
+
+
+@pytest.mark.parametrize("attribute", ["text eol=crlf", "working-tree-encoding=UTF-16LE"])
+def test_untouched_transformed_planning_config_is_not_drift(tmp_path, monkeypatch, attribute):
+    # A checkout transform makes the file differ from the raw blob although
+    # Git sees no change; writing the blob back would invent a change.
+    _with_planning_config(monkeypatch, tmp_path / "post-checkout-ran", attribute)
+    untouched = "from pathlib import Path\nPath('result-0.txt').write_text('done')\n"
+    with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", untouched)]) as f:
+        reply = f.consumer(f.event)
+        with f.store.read_transaction() as tx:
+            keys = [row[0] for row in tx.execute("SELECT idempotency_key FROM authority_event_keys")]
+    assert [item["status"] for item in reply["results"]] == ["complete"]
+    assert not any(key.endswith(":planning-config-restored") for key in keys)
+
+
+def test_planning_config_io_failure_is_not_a_scope_violation(tmp_path, monkeypatch):
+    import errno
+    import run_state.wave_consumer as consumer_module
+    _with_planning_config(monkeypatch, tmp_path / "post-checkout-ran")
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(consumer_module, "_atomic_snapshot_write", disk_full)
+    bookkeeping = "import os\nfrom pathlib import Path\n" + _CONFIG_SET
+    with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", bookkeeping)]) as f:
+        with pytest.raises(SupervisorRefused, match="WAVE_RESULT_UNCERTAIN"):
+            f.consumer(f.event)

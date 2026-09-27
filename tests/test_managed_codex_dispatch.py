@@ -576,3 +576,20 @@ def test_consumed_runtime_refusal_names_a_new_request_key_only_for_the_outer_chi
     from run_state.supervisor import _retained_runtime_refusal
 
     assert _retained_runtime_refusal(launch, outer=outer) == code
+
+
+@pytest.mark.parametrize(("code", "action"), [
+    ("WAVE_EXECUTION_REFUSED", "inspect_wave_outcome"),
+    ("WAVE_EXECUTION_UNPROVEN", "inspect_wave_evidence"),
+    ("HOST_CAPABILITY_UNQUALIFIED", "qualify_host_adapter"),
+])
+def test_wave_refusals_name_the_wave_not_the_host_adapter(code, action, capsys):
+    # F40: a refused or unproven supervised wave is not an unqualified host.
+    from run_state.cli import _managed_run_refusal
+    from run_state.supervisor import SupervisorRefused
+
+    assert _managed_run_refusal(SupervisorRefused(code), run_id="wave-refusal") == 78
+    body = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (body["code"], body["recovery_action"]["action"]) == (code, action)
+    host = "the selected host backend has not demonstrated managed admission"
+    assert (body["cause"] == host) == (code == "HOST_CAPABILITY_UNQUALIFIED")

@@ -14,6 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 import threading
 import time
 from typing import Callable
@@ -43,11 +44,60 @@ from .worker_channel import (
 from .workspace import (
     WorkspacePreparation,
     WorkspaceRefused,
+    _atomic_snapshot_write,
+    _base_entry_material,
+    _git,
+    _read_anchored_regular_metadata,
     begin_child_workspace_preparation,
     inspect_workspace,
     prepare_workspace,
     load_input_snapshot,
 )
+
+
+_PLANNING_CONFIG = ".planning/config.json"
+
+
+def _planning_config_drift(workspace: Path, head: str, plan: dict, snapshot) -> tuple[bytes, str] | None:
+    """HEAD bytes and mode for an undeclared GSD config edit in one worker's workspace (F40).
+
+    GSD bookkeeping (``config-set``) rewrites the tracked config with a
+    temp-file rename, so no file mode stops it, and the edit is never plan
+    output; left alone, the scope check refuses the whole plan. When Git's
+    own scope view shows no change and no index flag (skip-worktree,
+    assume-unchanged) could hide one, a checkout transform (eol, encoding)
+    is not drift. Otherwise the file's bytes are compared with the raw HEAD
+    blob, and the caller restores them with a no-follow write rather than
+    ``git checkout`` (no hook or filter runs). A declared or overlaid config,
+    or one HEAD does not track as a regular file, is left to that check.
+    Returns None when there is nothing to restore.
+    """
+    declared = (*plan.get("files_modified", ()), *plan.get("files_deleted", ()))
+    overlaid = snapshot is not None and any(
+        entry.path == _PLANNING_CONFIG for entry in snapshot.selection.entries
+    )
+    workspace = Path(workspace)
+    if (
+        _PLANNING_CONFIG in declared
+        or overlaid
+        or _git(workspace, "cat-file", "-e", f"{head}:{_PLANNING_CONFIG}", check=False).returncode
+    ):
+        return None
+    if (
+        not _git(workspace, "diff", "--quiet", head, "--", _PLANNING_CONFIG, check=False).returncode
+        and _git(workspace, "ls-files", "-v", "--", _PLANNING_CONFIG).stdout[:2] == "H "
+    ):
+        return None
+    try:
+        base = _base_entry_material(workspace, head, _PLANNING_CONFIG)
+    except WorkspaceRefused:
+        return None
+    try:
+        # Bounded by the HEAD blob: a larger file is drift without reading it.
+        data, metadata = _read_anchored_regular_metadata(workspace, _PLANNING_CONFIG, max_bytes=len(base[0]))
+    except (OSError, WorkspaceRefused):
+        return base
+    return None if (data, "100755" if metadata.st_mode & stat.S_IXUSR else "100644") == base else base
 
 
 def _canonical(value):
@@ -935,6 +985,28 @@ class WaveConsumer:
                         # immutable staging step; recheck it immediately before
                         # the later terminal publication.
                         check()
+                        restore = _planning_config_drift(
+                            context.preparation.path, manifest["initial_head"], context.plan, snapshot,
+                        )
+                        if restore is not None:
+                            # The event precedes the write so a crash between
+                            # them keeps the audit record; both repeat safely.
+                            with self.store.transaction() as tx:
+                                guard(tx)
+                                self.store._record_event_once_tx(
+                                    tx, self.token, parent,
+                                    context.request_key + ":planning-config-restored",
+                                    {"plan_id": context.plan["id"], "path": _PLANNING_CONFIG},
+                                )
+                            try:
+                                _atomic_snapshot_write(
+                                    context.preparation.path, _PLANNING_CONFIG, restore[0],
+                                    0o755 if restore[1] == "100755" else 0o644,
+                                )
+                            except (IsADirectoryError, NotADirectoryError) as error:
+                                # The worker left a directory there: the
+                                # undeclared path stays out of scope.
+                                raise WorkspaceRefused("WAVE_SCOPE_VIOLATION") from error
                         with productive_work(self.store, self.token, kind="harvest"):
                             harvested = harvest_scoped_patch(
                                 context.preparation.path,

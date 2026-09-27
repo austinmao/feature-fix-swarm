@@ -139,6 +139,18 @@ _MANAGED_PROMPT_REFUSALS = {
 }
 
 
+# Supervisor codes whose cause is a supervised GSD wave, not the host adapter.
+_WAVE_REFUSALS = {
+    "WAVE_EXECUTION_REFUSED": (
+        "a supervised GSD wave was refused or one of its plans did not complete; "
+        "the wave's refusal or reply event in the run evidence names the reason",
+        "inspect_wave_outcome"),
+    "WAVE_EXECUTION_UNPROVEN": (
+        "the outer run ended without a verified reply for every supervised GSD wave it requested",
+        "inspect_wave_evidence"),
+}
+
+
 def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     """The managed-run JSON envelope (exit 78) for one of ``_managed_run_refusals``."""
     from run_state.supervisor import SupervisorRefused
@@ -151,6 +163,9 @@ def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
         extra.update(cause=cause, recovery_action={"action": action})
     elif error.code in _MANAGED_PROMPT_REFUSALS:
         cause, action = _MANAGED_PROMPT_REFUSALS[error.code]
+        extra.update(cause=cause, recovery_action={"action": action})
+    elif error.code in _WAVE_REFUSALS:
+        cause, action = _WAVE_REFUSALS[error.code]
         extra.update(cause=cause, recovery_action={"action": action})
     elif isinstance(error, SupervisorRefused):
         extra.update(cause="the selected host backend has not demonstrated managed admission",

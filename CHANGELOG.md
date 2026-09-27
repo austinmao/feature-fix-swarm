@@ -8,6 +8,33 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-27, spec-014 Release C: F40 worker planning config and wave refusal cause)
+
+- A supervised wave worker that ran GSD bookkeeping (`config-set
+  workflow._auto_chain_active false`) rewrote `.planning/config.json`, a
+  path its plan never declared, so the harvest refused the whole plan with
+  `WAVE_SCOPE_VIOLATION`. GSD offers no way to redirect that write, the
+  worker environment is a closed allowlist, and GSD writes through a temp
+  file and rename, so no file mode stops it. Right before the scope check,
+  when Git's scope view shows a change to that worker's
+  `.planning/config.json` (or an index flag such as skip-worktree could hide
+  one), the wave consumer compares its bytes and mode with the raw HEAD blob
+  (read bounded by the blob size), records a
+  `<plan request>:planning-config-restored` event, and then writes the HEAD
+  blob back through a no-follow write. No `git checkout` runs, so no
+  repository hook or filter runs, and an untouched checkout transform (eol,
+  `working-tree-encoding`) is not treated as drift. A directory left at the
+  path fails only that plan (`WAVE_SCOPE_VIOLATION`). The worker's bookkeeping edit
+  is dropped; it is never plan output. A plan that declares the file, a
+  selection that overlays it, or a config HEAD does not track as a regular
+  file is left to the scope check as before.
+- `WAVE_EXECUTION_REFUSED` and `WAVE_EXECUTION_UNPROVEN` refusals reported
+  the generic cause "the selected host backend has not demonstrated managed
+  admission" with recovery `qualify_host_adapter`. They now name the wave
+  (`inspect_wave_outcome` / `inspect_wave_evidence`); every other supervisor
+  refusal keeps its previous mapping. Found by a live operator E2E run
+  (attempt 9).
+
 ### Fixed (2026-09-27, spec-014 Release C: F39 clean selected inputs in overlay form)
 
 - A managed frontend run whose `--select-file` inputs were identical to
