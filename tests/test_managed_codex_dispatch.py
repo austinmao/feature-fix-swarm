@@ -581,6 +581,7 @@ def test_consumed_runtime_refusal_names_a_new_request_key_only_for_the_outer_chi
 @pytest.mark.parametrize(("code", "action"), [
     ("WAVE_EXECUTION_REFUSED", "inspect_wave_outcome"),
     ("WAVE_EXECUTION_UNPROVEN", "inspect_wave_evidence"),
+    ("WAVE_REPLY_UNCONSUMED", "inspect_wave_delivery"),
     ("HOST_CAPABILITY_UNQUALIFIED", "qualify_host_adapter"),
 ])
 def test_wave_refusals_name_the_wave_not_the_host_adapter(code, action, capsys):

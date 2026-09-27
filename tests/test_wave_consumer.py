@@ -374,6 +374,7 @@ def test_uncertain_cohort_never_relaunches_or_refunds(tmp_path, monkeypatch):
         # Recovery settles those monitors, never calls launch_cohort again.
         reply = f.consumer(f.event)
         assert all(result["status"] == "complete" for result in reply["results"])
+        _consume_reply(f)
         assert _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id) is None
         with f.store.read_transaction() as tx:
             assert [tuple(row) for row in tx.execute("SELECT id,generation,acknowledgement_id,permit_id,child_pid FROM authority_launch_intents ORDER BY id")] == before
@@ -610,3 +611,23 @@ def test_planning_config_io_failure_is_not_a_scope_violation(tmp_path, monkeypat
     with wave_fixture(tmp_path, monkeypatch, plans=1, commands=[(sys.executable, "-c", bookkeeping)]) as f:
         with pytest.raises(SupervisorRefused, match="WAVE_RESULT_UNCERTAIN"):
             f.consumer(f.event)
+
+
+def _consume_reply(f):
+    """Write the no-commit receipt the outer adapter writes once it consumes a reply."""
+    receipt = (Path(f.manifest["orchestrator_root"]) / ".planning/.ffs-supervised/waves" / f.outer.activity_id
+               / f"wave-{f.manifest['wave']}.result.json.receipt.json")
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text("{}\n")
+
+
+def test_completed_wave_whose_reply_was_never_consumed_is_typed(tmp_path, monkeypatch):
+    # F37a: the outer orchestrator can exit before its adapter consumes a
+    # recorded reply. The launch must not count as a proven wave.
+    with wave_fixture(tmp_path, monkeypatch, plans=1) as f:
+        reply = f.consumer(f.event)
+        assert [item["status"] for item in reply["results"]] == ["complete"]
+        code = _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id)
+        assert code == "WAVE_REPLY_UNCONSUMED"
+        _consume_reply(f)
+        assert _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id) is None
