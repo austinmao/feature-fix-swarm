@@ -173,19 +173,20 @@ def _crlf_checkout_file(primary, *, checked_out: bool):
     return primary / "src/eol.txt"
 
 
-def test_selected_bytes_are_compared_with_the_filtered_checkout_not_the_blob(registered):
+def test_normalization_compares_raw_blob_bytes(registered):
+    # No checkout conversion is predicted: only the raw blob itself is omitted.
     primary, _store, _identity = registered
     source = _crlf_checkout_file(primary, checked_out=False)
-    assert source.read_bytes() == b"one\ntwo\n"  # equals the raw blob, not what a checkout writes
-    kept = _build(primary, selected_files=("src/eol.txt",))
-    assert [(e.operation, e.path, e.sha256) for e in kept.entries] == [
-        ("copy", "src/eol.txt", hashlib.sha256(b"one\ntwo\n").hexdigest())]
-    source.unlink()
-    _git("checkout", "--", "src/eol.txt", cwd=primary)
-    assert source.read_bytes() == b"one\r\ntwo\r\n"
+    assert source.read_bytes() == b"one\ntwo\n"  # the raw blob
     normalized = _build(primary, selected_files=("src/eol.txt",))
     assert normalized.entries == ()
     assert [r.path for r in normalized.required_context] == ["src/eol.txt"]
+    source.unlink()
+    _git("checkout", "--", "src/eol.txt", cwd=primary)
+    assert source.read_bytes() == b"one\r\ntwo\r\n"
+    kept = _build(primary, selected_files=("src/eol.txt",))
+    assert [(e.operation, e.path, e.sha256) for e in kept.entries] == [
+        ("copy", "src/eol.txt", hashlib.sha256(b"one\r\ntwo\r\n").hexdigest())]
 
 
 @pytest.mark.parametrize(("checked_out", "replacement"), [(False, b"one\r\ntwo\r\n"), (True, b"one\ntwo\n")])
@@ -226,14 +227,14 @@ def test_base_read_failure_refuses_instead_of_keeping_a_copy(registered, monkeyp
 
 
 def test_line_ending_only_change_after_construction_refuses_at_snapshot(registered, tmp_path):
-    # The unchanged selection has no copy entry to hash, so snapshot preparation
-    # must itself hold the source to the bytes the base checkout writes.
+    # The omitted selection has no copy entry to hash, so snapshot preparation
+    # must itself hold the source to the raw blob.
     from run_state.workspace import snapshot_inputs
     primary, _store, _identity = registered
-    source = _crlf_checkout_file(primary, checked_out=True)
+    source = _crlf_checkout_file(primary, checked_out=False)
     selection = _build(primary, selected_files=("src/eol.txt",))
     assert selection.entries == ()
-    source.write_bytes(b"one\ntwo\n")
+    source.write_bytes(b"one\r\ntwo\r\n")
     assert _git("diff", "--quiet", "HEAD", "--", "src/eol.txt", cwd=primary, check=False).returncode == 0
     with pytest.raises(WorkspaceRefused) as refused:
         snapshot_inputs(primary, selection, tmp_path / "staging")
@@ -241,16 +242,35 @@ def test_line_ending_only_change_after_construction_refuses_at_snapshot(register
     assert not (tmp_path / "staging").exists()
 
 
-def test_checkout_bytes_use_the_base_attributes_not_the_worktree(registered):
+def test_prepared_checkout_that_converts_an_omitted_selection_refuses(registered, tmp_path):
+    # With eol=crlf the prepared checkout writes CRLF, not the LF blob the
+    # selection omitted; preparation refuses instead of running on other bytes.
+    from test_m4_upstream_context_acceptance import _runtime_flags
+    from test_m4_workspace_acceptance import _cli, _env
+    from test_m4_workspace_hardening import _track_planning_context
     primary, _store, _identity = registered
-    source = _crlf_checkout_file(primary, checked_out=False)
-    (primary / ".gitattributes").write_text("src/eol.txt text eol=lf\n")
-    assert source.read_bytes() == b"one\ntwo\n"
+    _track_planning_context(primary)
+    _crlf_checkout_file(primary, checked_out=False)
     selection = _build(primary, selected_files=("src/eol.txt",))
-    assert [(e.operation, e.path) for e in selection.entries] == [("copy", "src/eol.txt")]
+    assert selection.entries == ()
+    manifest = tmp_path / "frontend-selection.json"
+    manifest.write_text(json.dumps({
+        "schema": "ffs.input-selection/v1", "base_oid": selection.base_oid,
+        "repository_id": selection.repository_id, "entries": [],
+        "required_context": [{"path": r.path, "reason": r.reason} for r in selection.required_context],
+        "upstream": UPSTREAM,
+    }))
+    result = _cli(primary.parent / "authority", primary, "start", "--skill", "fix",
+                  "--objective", "omitted selection checkout", "--activity", "plan",
+                  "--run-id", "frontend-eol", "--request-key", "frontend-eol-request",
+                  "--selection-manifest", str(manifest), *_runtime_flags(), "--json", env=_env(tmp_path))
+    assert result.returncode != 0
+    refusal = json.loads(result.stdout)
+    # Every preparation refusal publishes as a blocked, owned workspace.
+    assert (refusal["code"], refusal["workspace_state"]) == ("WORKSPACE_PREPARE_FAILED", "blocked")
 
 
-def test_filter_driver_is_never_run_and_keeps_the_copy(registered, tmp_path):
+def test_filter_driver_is_never_run_during_construction(registered, tmp_path):
     primary, _store, _identity = registered
     (primary / ".gitattributes").write_text("src/unrelated.txt filter=probe\n")
     _git("add", ".gitattributes", cwd=primary)
@@ -259,7 +279,7 @@ def test_filter_driver_is_never_run_and_keeps_the_copy(registered, tmp_path):
     for kind in ("smudge", "clean"):
         _git("config", f"filter.probe.{kind}", f"touch {marker}; cat", cwd=primary)
     selection = _build(primary, selected_files=("src/unrelated.txt",))
-    assert [(e.operation, e.path) for e in selection.entries] == [("copy", "src/unrelated.txt")]
+    assert selection.entries == ()
     assert not marker.exists()
 
 

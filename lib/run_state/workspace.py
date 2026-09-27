@@ -2248,24 +2248,24 @@ def _remove_new_capture(staging: Path, parent: Path, *, parent_created: bool) ->
         pass
 
 
-# A selected file whose bytes equal what a base checkout writes carries no
-# overlay material.  It is retained as required context under this reason so
-# the sealed input digest has the overlay form a wave capture records (F39).
+# A selected file byte-identical to its raw base blob carries no overlay
+# material.  It is retained as required context under this reason so the
+# sealed input digest has the overlay form a wave capture records (F39).
+# Snapshot validation holds the source to that blob, and snapshot application
+# holds the prepared checkout to it, so no checkout conversion is predicted.
 SELECTED_UNCHANGED_REASON = "selected input unchanged at base"
 
 
-def _checkout_material(repository: Path, base: str, path: str) -> tuple[bytes, str] | None:
-    """Bytes and mode a checkout of ``base`` writes at ``path``, or None when unpredictable.
+def _base_blob_material(repository: Path, base: str, path: str) -> tuple[bytes, str] | None:
+    """Raw blob bytes and mode of ``path`` at ``base``, or None when it is no regular file there.
 
-    Conversion uses the base tree's attributes, as a fresh checkout does, and
-    never runs a filter driver: a path with one has no predictable bytes. A
-    Git failure refuses instead of reading as absence.
+    Reads the object itself, so no attribute, conversion or filter driver is
+    consulted. A Git failure refuses instead of reading as absence.
     """
     def git(*args: str) -> bytes:
         try:
-            done = subprocess.run(["git", f"--attr-source={base}", *args], cwd=repository,
-                                  env=sanitized_git_environment(), capture_output=True,
-                                  timeout=_GIT_TIMEOUT, check=False)
+            done = subprocess.run(["git", *args], cwd=repository, env=sanitized_git_environment(),
+                                  capture_output=True, timeout=_GIT_TIMEOUT, check=False)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise WorkspaceRefused("SOURCE_CHANGED") from error
         if done.returncode:
@@ -2276,9 +2276,17 @@ def _checkout_material(repository: Path, base: str, path: str) -> tuple[bytes, s
     fields = header.split()
     if listed != path.encode() or len(fields) != 3 or fields[1] != b"blob" or fields[0] not in {b"100644", b"100755"}:
         return None
-    if git("check-attr", "-z", "filter", "--", path).split(b"\0")[2] not in {b"unspecified", b"unset"}:
-        return None
-    return git("cat-file", "--filters", f"{base}:{path}"), fields[0].decode()
+    return git("cat-file", "blob", fields[2].decode()), fields[0].decode()
+
+
+def _unchanged_selection_holds(root: Path, repository: Path, base: str, path: str) -> bool:
+    """Whether ``root`` holds exactly the raw base blob and mode at ``path``."""
+    try:
+        data, metadata = _read_anchored_regular_metadata(root, path)
+    except (OSError, WorkspaceRefused):
+        return False
+    mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+    return _base_blob_material(repository, base, path) == (data, mode)
 
 
 def validate_selected_inputs(primary: Path, selection: InputSelection) -> dict[str, bytes]:
@@ -2319,10 +2327,8 @@ def validate_selected_inputs(primary: Path, selection: InputSelection) -> dict[s
             raise WorkspaceRefused("SELECTION_INPUT_MISSING", candidates=[required.path])
         if required.reason.startswith(SELECTED_UNCHANGED_REASON):
             # Git's own diff normalizes line endings; a normalized selection
-            # promises the exact bytes and mode the base checkout writes.
-            data, metadata = _read_anchored_regular_metadata(primary, required.path)
-            mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
-            if _checkout_material(primary, selection.base_oid, required.path) != (data, mode):
+            # promises the exact raw blob bytes and mode.
+            if not _unchanged_selection_holds(primary, primary, selection.base_oid, required.path):
                 raise WorkspaceRefused("SOURCE_CHANGED")
             continue
         changed = _git(
@@ -2599,6 +2605,14 @@ def _apply_input_snapshot_locked(
             data,
             0o755 if entry["git_mode"] == "100755" else 0o644,
         )
+    if preparation.base_commit == manifest["base_oid"]:
+        # A checkout may convert a blob (eol, ident, encoding); an omitted
+        # selection is valid only where the prepared bytes are the blob itself.
+        for required in manifest["required_context"]:
+            if required["reason"].startswith(SELECTED_UNCHANGED_REASON) and not _unchanged_selection_holds(
+                preparation.path, preparation.path, preparation.base_commit, required["path"],
+            ):
+                raise WorkspaceRefused("SOURCE_CHANGED")
     receipt = {
         "schema": "ffs.input-snapshot-completion/v1",
         "repository_id": preparation.repository_id,
