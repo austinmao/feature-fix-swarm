@@ -15,12 +15,16 @@ all skills.
   path its plan never declared, so the harvest refused the whole plan with
   `WAVE_SCOPE_VIOLATION`. GSD offers no way to redirect that write, the
   worker environment is a closed allowlist, and GSD writes through a temp
-  file and rename, so no file mode stops it. Right before the scope check the
-  wave consumer now compares that worker's `.planning/config.json` bytes and
-  mode with the raw HEAD blob (index flags such as skip-worktree cannot hide
-  an edit), records a `<plan request>:planning-config-restored` event, and
-  then writes the HEAD blob back through a no-follow write. No `git checkout`
-  runs, so no repository hook or filter runs. The worker's bookkeeping edit
+  file and rename, so no file mode stops it. Right before the scope check,
+  when Git's scope view shows a change to that worker's
+  `.planning/config.json` (or an index flag such as skip-worktree could hide
+  one), the wave consumer compares its bytes and mode with the raw HEAD blob
+  (read bounded by the blob size), records a
+  `<plan request>:planning-config-restored` event, and then writes the HEAD
+  blob back through a no-follow write. No `git checkout` runs, so no
+  repository hook or filter runs, and an untouched checkout transform (eol,
+  `working-tree-encoding`) is not treated as drift. A directory left at the
+  path fails only that plan (`WAVE_SCOPE_VIOLATION`). The worker's bookkeeping edit
   is dropped; it is never plan output. A plan that declares the file, a
   selection that overlays it, or a config HEAD does not track as a regular
   file is left to the scope check as before.
@@ -2691,6 +2695,7 @@ Lifecycle contract changed. Skills no longer require `run-state start` to anchor
 - `skills/fix/SKILL.md` **v1.3.0 → v1.4.0**: added run-state lifecycle (start/update/audit/complete) + Step 4 adversarial audit + flags (`--tokens`, `--no-audit`)
 - `skills/feature/SKILL.md` **v1.2.0 → v1.3.0**: same lifecycle + Step 6 spec-completion audit before `/canary` + 1.5M token default budget
 - `setup.sh`: installs `lib/run_state/`, `bin/run-state`, `scripts/hooks/run-state-*.py`; registers Stop + SessionStart hooks in `~/.claude/settings.json`; checks for `python3`, `jq`, `codex` CLI prerequisites
+
 
 ## [Unreleased]
 

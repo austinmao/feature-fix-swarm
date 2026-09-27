@@ -63,15 +63,15 @@ def _planning_config_drift(workspace: Path, head: str, plan: dict, snapshot) -> 
 
     GSD bookkeeping (``config-set``) rewrites the tracked config with a
     temp-file rename, so no file mode stops it, and the edit is never plan
-    output; left alone, the scope check refuses the whole plan. The file's
-    actual bytes are compared with the raw HEAD blob, so index flags cannot
-    hide an edit, and the caller restores them with a no-follow write rather
-    than ``git checkout`` (no hook or filter runs). A declared or overlaid
-    config, or one HEAD does not track as a regular file, is left to that
-    check. Returns None when there is nothing to restore.
+    output; left alone, the scope check refuses the whole plan. When Git's
+    own scope view shows no change and no index flag (skip-worktree,
+    assume-unchanged) could hide one, a checkout transform (eol, encoding)
+    is not drift. Otherwise the file's bytes are compared with the raw HEAD
+    blob, and the caller restores them with a no-follow write rather than
+    ``git checkout`` (no hook or filter runs). A declared or overlaid config,
+    or one HEAD does not track as a regular file, is left to that check.
+    Returns None when there is nothing to restore.
     """
-    # ponytail: raw-blob compare; a checkout that converted line endings reads
-    # as drift and is rewritten as the blob, which Git's scope diff treats as clean.
     declared = (*plan.get("files_modified", ()), *plan.get("files_deleted", ()))
     overlaid = snapshot is not None and any(
         entry.path == _PLANNING_CONFIG for entry in snapshot.selection.entries
@@ -81,6 +81,11 @@ def _planning_config_drift(workspace: Path, head: str, plan: dict, snapshot) -> 
         _PLANNING_CONFIG in declared
         or overlaid
         or _git(workspace, "cat-file", "-e", f"{head}:{_PLANNING_CONFIG}", check=False).returncode
+    ):
+        return None
+    if (
+        not _git(workspace, "diff", "--quiet", head, "--", _PLANNING_CONFIG, check=False).returncode
+        and _git(workspace, "ls-files", "-v", "--", _PLANNING_CONFIG).stdout[:2] == "H "
     ):
         return None
     try:
@@ -998,8 +1003,8 @@ class WaveConsumer:
                                     context.preparation.path, _PLANNING_CONFIG, restore[0],
                                     0o755 if restore[1] == "100755" else 0o644,
                                 )
-                            except OSError as error:
-                                # e.g. the worker left a directory there: the
+                            except (IsADirectoryError, NotADirectoryError) as error:
+                                # The worker left a directory there: the
                                 # undeclared path stays out of scope.
                                 raise WorkspaceRefused("WAVE_SCOPE_VIOLATION") from error
                         with productive_work(self.store, self.token, kind="harvest"):
