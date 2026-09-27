@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import ctypes
+import errno
 import fcntl
 import hmac
 import hashlib
@@ -322,12 +323,14 @@ class WorkerChannelServer:
         # workspace.  The Unix socket remains authoritative for native
         # workers and brokers; both transports enter the same fenced handler.
         self._file_bindings: dict[Path, tuple[bytes, WorkerBinding, tuple[int, int]]] = {}
-        # A held supervisor.lock per file channel that has served a wave: the
-        # kernel drops it when this process dies, which a waiting client can
-        # see even when this process's identity only probes UNKNOWN from its
-        # PID namespace. Only the orchestrator's channel sends waves, so this
-        # is about one descriptor per supervisor.
-        self._file_locks: dict[Path, int] = {}
+        # Every file channel root links <root>/supervisor.lock to one lock
+        # file this server holds LOCK_EX on (flock is per inode). The kernel
+        # drops it when this process dies, which a waiting client can see
+        # even when this process only probes UNKNOWN from its PID namespace.
+        # A root on another filesystem gets one held lock per device.
+        self._supervisor_lock: Path | None = None
+        self._device_locks: dict[int, Path] = {}
+        self._lock_fds: list[int] = []
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -497,6 +500,7 @@ class WorkerChannelServer:
                     if (root.is_symlink() or info.st_uid != os.getuid()
                             or stat.S_IMODE(info.st_mode) != 0o700):
                         raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE")
+                    self._link_supervisor_lock(root, info.st_dev)
                 except (FileExistsError, OSError) as error:
                     raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
                 token = secrets.token_urlsafe(32)
@@ -572,28 +576,41 @@ class WorkerChannelServer:
         # supervisor cannot probe; record the orchestrator, as before F37b.
         return requester if requester.host_id == binding.identity.host_id else binding.identity
 
-    def _hold_supervisor_lock(self, root: Path) -> None:
-        """Hold <root>/supervisor.lock before this channel serves its first wave.
+    def _held_lock(self, path: Path) -> None:
+        """Create a lock file and hold LOCK_EX on it for this server's life.
 
-        os.open descriptors are non-inheritable, so a spawned orchestrator
-        never keeps the lock alive. A wave is never served without it.
+        os.open descriptors are non-inheritable, so no spawned process keeps
+        it alive. On failure nothing is left open or behind.
         """
+        held = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(held)
+            path.unlink(missing_ok=True)
+            raise
+        self._lock_fds.append(held)
+
+    def _link_supervisor_lock(self, root: Path, device: int) -> None:
+        """Link the held supervisor lock into a new root (caller holds _lock)."""
+        if self._supervisor_lock is None:
+            master = self.endpoint.with_name(self.endpoint.name + ".lock")
+            self._held_lock(master)
+            self._supervisor_lock = master
+        target = root / _SUPERVISOR_LOCK
+        try:
+            os.link(self._device_locks.get(device, self._supervisor_lock), target,
+                    follow_symlinks=False)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            self._held_lock(target)
+            self._device_locks[device] = target
+
+    def _release_supervisor_locks(self) -> None:
         with self._lock:
-            if root in self._file_locks:
-                return
-            try:
-                held = os.open(
-                    root / _SUPERVISOR_LOCK,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                )
-            except OSError as error:
-                raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
-            try:
-                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as error:
-                os.close(held)
-                raise WorkerChannelRefused("IPC_FILE_CHANNEL_UNSAFE") from error
-            self._file_locks[root] = held
+            while self._lock_fds:
+                os.close(self._lock_fds.pop())
 
     def _serve_file_once(self) -> bool:
         with self._lock:
@@ -615,10 +632,7 @@ class WorkerChannelServer:
                     if (set(wrapped) - {"requester"} != {"capability", "message"} or token_digest is None
                             or not hmac.compare_digest(token_digest, expected_token)):
                         raise WorkerChannelRefused("IPC_FILE_CAPABILITY_REFUSED")
-                    message = wrapped["message"]
-                    if isinstance(message, dict) and message.get("operation") == "gsd-wave-request":
-                        self._hold_supervisor_lock(root)
-                    response = self._request(self._file_requester(binding, wrapped), message)
+                    response = self._request(self._file_requester(binding, wrapped), wrapped["message"])
                 except (WorkerChannelRefused, OwnershipRefused, ControlStoreRefused) as error:
                     response = {"ok": False, "code": error.code}
                 except Exception as error:
@@ -990,15 +1004,20 @@ class WorkerChannelServer:
             raise WorkerChannelRefused("IPC_ALREADY_STARTED")
 
         def serve():
-            while not self._stop.is_set():
-                try:
-                    socket_work = self.serve_once()
-                    file_work = self._serve_file_once()
-                    if not socket_work and not file_work:
-                        self._stop.wait(0.02)
-                except OSError:
-                    if not self._stop.is_set():
-                        self._stop.set()
+            try:
+                while not self._stop.is_set():
+                    try:
+                        socket_work = self.serve_once()
+                        file_work = self._serve_file_once()
+                        if not socket_work and not file_work:
+                            self._stop.wait(0.02)
+                    except OSError:
+                        if not self._stop.is_set():
+                            self._stop.set()
+            finally:
+                # Stopped after publishing its last reply: a busy close()
+                # left the supervisor locks held for exactly that reply.
+                self._release_supervisor_locks()
 
         self._thread = threading.Thread(target=serve, name="ffs-worker-requests", daemon=True)
         self._thread.start()
@@ -1008,17 +1027,19 @@ class WorkerChannelServer:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=4)
-        # A thread still inside a wave will yet write its reply; keep the
-        # locks so its waiting client does not see this supervisor gone. The
-        # kernel drops them when this process exits.
-        serving = self._thread is not None and self._thread.is_alive()
+        # A thread still inside a wave will yet write its reply; it keeps the
+        # supervisor locks held until then, so its waiting client does not
+        # see this supervisor gone, and releases them as it stops.
+        stopped = self._thread is None or not self._thread.is_alive()
         self._socket.close()
         with self._lock:
             self._broker_bootstraps.clear()
             self._broker_bootstrap_intents.clear()
             self._file_bindings.clear()
-            while self._file_locks and not serving:
-                os.close(self._file_locks.popitem()[1])
+        if stopped:
+            self._release_supervisor_locks()
+            if self._supervisor_lock is not None:
+                self._supervisor_lock.unlink(missing_ok=True)
         parent = self.endpoint.parent
         try:
             if ((parent.stat().st_dev, parent.stat().st_ino) == self._parent_identity
