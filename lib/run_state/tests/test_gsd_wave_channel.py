@@ -311,10 +311,14 @@ def test_removed_device_lock_is_replaced_for_later_registrations(tmp_path, monke
     with _file_channel_server(tmp_path) as (server, binding):
         monkeypatch.setattr(channel_module.os, "link", cross_device_from_master)
         _first, first_root, _capability = _register(server, binding, "intent-a")
+        # Another channel still links the removed root's lock, so the server
+        # keeps that descriptor: existing clients probe that inode.
+        _other, other_root, _capability = _register(server, binding, "intent-a2")
         (first_root / "supervisor.lock").unlink()
         _second, second_root, _capability = _register(server, binding, "intent-b")
         assert len(server._lock_fds) == 3
         assert _held(second_root)
+        assert _held(other_root)
 
 
 def test_failed_lock_leaves_no_descriptor_and_refuses_registration(tmp_path, monkeypatch):
@@ -355,3 +359,75 @@ def test_lock_outlives_a_busy_close_until_the_reply_is_written(tmp_path):
         server._thread.join(timeout=10)
         assert json.loads(response.read_text()) == {"ok": True}
         assert channel_module._supervisor_lock_released(root)
+
+
+
+def _cross_device_from_master(monkeypatch, server):
+    import errno
+    real_link = os.link
+
+    def link(source, target, **kwargs):
+        if Path(source) == server._supervisor_lock:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(channel_module.os, "link", link)
+
+
+@pytest.mark.parametrize("source", ["device", "master"])
+def test_replaced_unheld_lock_source_is_never_linked(tmp_path, monkeypatch, source):
+    # A lock path replaced behind the server's back names a file it does not
+    # hold; linking it would let a client see a live supervisor as gone.
+    with _file_channel_server(tmp_path) as (server, binding):
+        if source == "device":
+            _cross_device_from_master(monkeypatch, server)
+        _first, first_root, _capability = _register(server, binding, "intent-a")
+        replaced = first_root / "supervisor.lock" if source == "device" else server._supervisor_lock
+        replaced.unlink()
+        os.close(os.open(replaced, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        _second, second_root, _capability = _register(server, binding, "intent-b")
+        assert _held(second_root)
+
+
+def test_busy_close_removes_the_master_lock_once_the_thread_stops(tmp_path):
+    # Otherwise a new server at the same endpoint could never create its own.
+    with _file_channel_server(tmp_path) as (server, binding):
+        binding, root, capability = _register(server, binding)
+        master = server._supervisor_lock
+        entered, release = threading.Event(), threading.Event()
+
+        def busy(_peer, _message):
+            entered.set()
+            release.wait(timeout=30)
+            return {"ok": True}
+
+        server._request = busy
+        server.start()
+        _file_request_file(root, capability, binding, "gsd-wave-request", "wave-1")
+        assert entered.wait(timeout=10)
+        server.close()
+        assert master.exists()
+        release.set()
+        server._thread.join(timeout=10)
+        assert not master.exists()
+        successor = WorkerChannelServer(_Store(), object(), server.endpoint)
+        try:
+            successor._verify_binding = lambda _tx, _binding: None
+            _later, later_root, _capability = _register(successor, binding, "intent-later")
+            assert _held(later_root)
+        finally:
+            successor.close()
+
+
+def test_replacing_an_unlinked_device_lock_releases_its_descriptor(tmp_path, monkeypatch):
+    # Repeatedly removed device locks must not grow the held descriptors
+    # once no channel links the old inode.
+    with _file_channel_server(tmp_path) as (server, binding):
+        _cross_device_from_master(monkeypatch, server)
+        previous = _register(server, binding, "intent-0")[1]
+        assert len(server._lock_fds) == 2
+        for index in range(1, 4):
+            (previous / "supervisor.lock").unlink()
+            previous = _register(server, binding, f"intent-{index}")[1]
+            assert len(server._lock_fds) == 2
+            assert _held(previous)
