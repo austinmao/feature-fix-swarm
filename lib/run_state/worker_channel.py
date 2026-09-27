@@ -651,7 +651,14 @@ class WorkerChannelServer:
                 raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
 
     def assert_authorized_wave_peer(self, intent_id: str, peer: ProcessIdentity) -> None:
-        """Revalidate GSD's exact primary or a live, full-ancestry descendant."""
+        """Revalidate GSD's exact primary or a live, full-ancestry descendant.
+
+        Delivery only (F37b): ``peer`` is the identity recorded when the wave
+        was admitted as a live descendant of the live orchestrator. Once that
+        orchestrator no longer probes LIVE, the same incarnation (start token
+        included) may still collect its reply while it probes LIVE.
+        Admission itself stays in ``_wave_binding_for_peer_locked``.
+        """
         with self._lock:
             binding = self._primary_bindings.get(intent_id)
             if binding is None:
@@ -660,8 +667,11 @@ class WorkerChannelServer:
                 if probe_identity(peer) != LIVE:
                     raise WorkerChannelRefused("IPC_PEER_UNKNOWN")
                 return
-            if not _live_descendant(peer, binding.identity):
-                raise WorkerChannelRefused("IPC_DESCENDANT_ANCESTRY_MISMATCH")
+            if _live_descendant(peer, binding.identity):
+                return
+            if probe_identity(binding.identity) != LIVE and probe_identity(peer) == LIVE:
+                return
+            raise WorkerChannelRefused("IPC_DESCENDANT_ANCESTRY_MISMATCH")
 
     def _find_bootstrap(self, token) -> tuple[bytes, _BrokerBootstrap] | None:
         token_digest = _bootstrap_token_digest(token)

@@ -8,6 +8,29 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-27, spec-014 Release C: F37b wave reply survives the orchestrator's exit)
+
+- A Codex orchestrator that yielded the blocking gsd-core adapter call and
+  ended its turn killed the adapter before it consumed the supervised wave
+  reply, so the wave result and its no-commit receipt were never published.
+  Now:
+  - The adapter (`ffs-supervised-dispatch.cjs`, via the GSD 1.14
+    compatibility patch) re-runs itself detached, in a new session with the
+    same parent chain, and that detached copy does the whole flow: dispatch
+    launch, reply wait, validation, and publishing the result and receipt.
+    Its output goes to a private log beside the result. The foreground waits
+    for it and relays its log and exit code, so a caller that stays sees the
+    same behavior; SIGHUP, SIGTERM or SIGKILL sent to the caller's process
+    group no longer stops the wave from landing.
+  - Admission is unchanged: the wave peer must still be a live descendant of
+    the live orchestrator when the wave is requested. For delivery only,
+    once the registered orchestrator no longer probes live, the wave
+    consumer accepts the same admitted peer (identical recorded identity,
+    start token included) while that peer still probes live, and refuses it
+    otherwise with `IPC_DESCENDANT_ANCESTRY_MISMATCH` as before.
+  The patch and adapter output hashes are re-pinned in the installer and the
+  GSD 1.14 verification test.
+
 ### Fixed (2026-09-27, spec-014 Release C: F37a typed failure for an unconsumed wave reply)
 
 - When the outer orchestrator exited before its gsd-core adapter consumed a
