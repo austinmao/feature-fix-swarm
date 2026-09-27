@@ -168,7 +168,18 @@ def _bridge_outer_command(spec_path):
             "with open(s['stdin'], 'rb') as i, open(s['stdout'], 'wb') as o, open(s['stderr'], 'wb') as e:\n"
             "    p = subprocess.Popen(s['argv'], stdin=i, stdout=o, stderr=e, env=s['env'], cwd=s['cwd'])\n"
             "staged = pathlib.Path(s['pid'] + '.tmp'); staged.write_text(str(p.pid)); staged.rename(s['pid'])\n"
-            "p.wait(); time.sleep(180)\n", str(spec_path))
+            "p.wait(); rc = pathlib.Path(s['pid'] + '.rc.tmp'); rc.write_text(str(p.returncode))\n"
+            "rc.rename(s['pid'] + '.rc'); time.sleep(180)\n", str(spec_path))
+
+
+def _bridge_completed(tmp_path, stdout, stderr, timeout=15):
+    """The bridge's exit as a CompletedProcess, from the outer's rc file."""
+    import time
+    rc = tmp_path / "bridge.pid.rc"
+    deadline = time.monotonic() + timeout
+    while not rc.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return subprocess.CompletedProcess("bridge", int(rc.read_text()), stdout.read_bytes(), stderr.read_bytes())
 
 
 def _wait_for_pid(path, timeout=15):
@@ -221,8 +232,9 @@ def test_real_bridge_process_uses_workspace_transport_for_wave_cohort(tmp_path, 
         f.channel.attach_wave_consumer(f.consumer)
         bridge, stdout, stderr = _start_bridge_under_outer(f, tmp_path, spec_path)
         _wait_until_gone(bridge)
-        assert stdout.read_text(), stderr.read_text()
-        result = json.loads(stdout.read_text())
+        completed = _bridge_completed(tmp_path, stdout, stderr)
+        assert completed.returncode == 0, completed.stderr.decode()
+        result = json.loads(completed.stdout)
         assert result["wave"] == f.manifest["wave"]
         assert result["results"][0]["status"] == "complete"
         assert result["results"][0]["changed_files"] == ["result-0.txt"]

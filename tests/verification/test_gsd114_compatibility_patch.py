@@ -243,7 +243,7 @@ def test_installed_workflow_mechanically_refuses_partial_retained_wave_evidence(
     assert 'FFS_WAVE_RECEIPT="$FFS_WAVE_RESULT.receipt.json"' in section
     assert "FFS_WAVE_RETAINED=complete" in section
     assert "partial retained wave evidence; refusing without relaunch" in section
-    assert "--write-manifest" in section
+    assert "fs.constants.O_EXCL" in section
     assert "Do not regenerate prompts" in section
     assert "write a replacement manifest" in section
 
