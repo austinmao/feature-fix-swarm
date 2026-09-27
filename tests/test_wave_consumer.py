@@ -1,6 +1,7 @@
 """Real registered worktrees and subprocesses for the production wave seam."""
 from contextlib import contextmanager
 from dataclasses import replace
+import hashlib
 import json
 import os
 import signal
@@ -374,7 +375,7 @@ def test_uncertain_cohort_never_relaunches_or_refunds(tmp_path, monkeypatch):
         # Recovery settles those monitors, never calls launch_cohort again.
         reply = f.consumer(f.event)
         assert all(result["status"] == "complete" for result in reply["results"])
-        _consume_reply(f)
+        _consume_reply(f, reply)
         assert _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id) is None
         with f.store.read_transaction() as tx:
             assert [tuple(row) for row in tx.execute("SELECT id,generation,acknowledgement_id,permit_id,child_pid FROM authority_launch_intents ORDER BY id")] == before
@@ -613,21 +614,50 @@ def test_planning_config_io_failure_is_not_a_scope_violation(tmp_path, monkeypat
             f.consumer(f.event)
 
 
-def _consume_reply(f):
-    """Write the no-commit receipt the outer adapter writes once it consumes a reply."""
-    receipt = (Path(f.manifest["orchestrator_root"]) / ".planning/.ffs-supervised/waves" / f.outer.activity_id
-               / f"wave-{f.manifest['wave']}.result.json.receipt.json")
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text("{}\n")
+def _consume_reply(f, reply, *, receipt=None):
+    """Write the manifest/result/receipt triple the outer adapter writes once it consumes a reply."""
+    root = Path(f.manifest["orchestrator_root"]) / ".planning/.ffs-supervised/waves" / f.outer.activity_id
+    root.mkdir(parents=True, exist_ok=True)
+    prefix = str(root / f"wave-{f.manifest['wave']}")
+    manifest_raw = json.dumps(f.manifest, sort_keys=True, separators=(",", ":")).encode()
+    result_raw = (json.dumps(reply, indent=2) + "\n").encode()
+    completion = receipt if receipt is not None else {"schema": "ffs.gsd-no-commit-completion/v1",
+                             "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+                             "result_sha256": hashlib.sha256(result_raw).hexdigest(),
+                             "initial_head": f.manifest["initial_head"], "commit_mode": "patches"}
+    for suffix, raw in ((".manifest.json", manifest_raw), (".result.json", result_raw),
+                        (".result.json.receipt.json", (json.dumps(completion) + "\n").encode())):
+        Path(prefix + suffix).write_bytes(raw)
+    return Path(prefix + ".result.json.receipt.json")
 
 
-def test_completed_wave_whose_reply_was_never_consumed_is_typed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("delivery", ["missing", "consumed", "forged", "symlink", "late"])
+def test_completed_wave_whose_reply_was_never_consumed_is_typed(tmp_path, monkeypatch, delivery):
     # F37a: the outer orchestrator can exit before its adapter consumes a
-    # recorded reply. The launch must not count as a proven wave.
+    # recorded reply. The launch must not count as a proven wave, and only a
+    # receipt bound to this manifest and reply proves delivery.
+    import threading
+    import run_state.supervisor as supervisor_module
+    monkeypatch.setattr(supervisor_module, "_RECEIPT_GRACE_SECONDS", 5.0 if delivery == "late" else 0.0)
+    expected = {"missing": "WAVE_REPLY_UNCONSUMED", "consumed": None, "forged": "WAVE_EXECUTION_UNPROVEN",
+                "symlink": "WAVE_EXECUTION_UNPROVEN", "late": None}[delivery]
     with wave_fixture(tmp_path, monkeypatch, plans=1) as f:
         reply = f.consumer(f.event)
         assert [item["status"] for item in reply["results"]] == ["complete"]
+        writer = None
+        if delivery == "consumed":
+            _consume_reply(f, reply)
+        elif delivery == "forged":
+            _consume_reply(f, reply, receipt={})
+        elif delivery == "symlink":
+            genuine = _consume_reply(f, reply)
+            moved = genuine.with_name("elsewhere.json")
+            genuine.rename(moved)
+            genuine.symlink_to(moved)
+        elif delivery == "late":
+            writer = threading.Timer(0.5, _consume_reply, (f, reply))
+            writer.start()
         code = _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id)
-        assert code == "WAVE_REPLY_UNCONSUMED"
-        _consume_reply(f)
-        assert _gsd_wave_completion_code(f.store, f.outer.activity_id, f.outer.intent_id) is None
+        if writer is not None:
+            writer.join()
+    assert code == expected

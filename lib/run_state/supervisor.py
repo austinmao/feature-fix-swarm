@@ -3037,21 +3037,44 @@ def _gsd_wave_completion_code(
             return "WAVE_EXECUTION_UNPROVEN"
     # A recorded reply is delivered only once the outer adapter writes its
     # no-commit receipt; an orchestrator that exited first leaves none (F37a).
-    # The candidate chain verifies the receipt's content later.
-    for event, integrated in zip(wave_events, integrations, strict=True):
+    # The receipt must bind this manifest and reply, as the candidate chain
+    # requires, and is read without following links.
+    for event, integrated, row in zip(wave_events, integrations, replies, strict=True):
         try:
             workspace = Path(json.loads(integrated["payload"])["data"]["material"]["workspace"])
             body = json.loads(event["payload"])["data"]["body"]
             raw = _read_evidence(workspace / body["manifest_locator"])
-            if hashlib.sha256(raw).hexdigest() != body["manifest_sha256"]:
+            manifest = json.loads(raw)
+            prefix = str(workspace / ".planning/.ffs-supervised/waves" / activity_id / f"wave-{manifest['wave']}")
+            if not _receipt_published(Path(prefix + ".result.json.receipt.json")):
+                return "WAVE_REPLY_UNCONSUMED"
+            result_raw = _read_evidence(Path(prefix + ".result.json"))
+            receipt = json.loads(_read_evidence(Path(prefix + ".result.json.receipt.json")))
+            if (hashlib.sha256(raw).hexdigest() != body["manifest_sha256"]
+                    or json.loads(result_raw) != json.loads(row["payload"])["data"]["reply"]
+                    or receipt != {"schema": "ffs.gsd-no-commit-completion/v1",
+                                   "manifest_sha256": hashlib.sha256(_canonical(manifest)).hexdigest(),
+                                   "result_sha256": hashlib.sha256(result_raw).hexdigest(),
+                                   "initial_head": manifest["initial_head"], "commit_mode": "patches"}):
                 return "WAVE_EXECUTION_UNPROVEN"
-            receipt = (workspace / ".planning/.ffs-supervised/waves" / activity_id
-                       / f"wave-{json.loads(raw)['wave']}.result.json.receipt.json")
         except (OSError, KeyError, TypeError, ValueError, SupervisorRefused):
             return "WAVE_EXECUTION_UNPROVEN"
-        if not receipt.is_file():
-            return "WAVE_REPLY_UNCONSUMED"
     return None
+
+
+# ponytail: fixed grace for an adapter still publishing its receipt after the
+# outer process exited (finish() waits for that process only); F37b, an
+# adapter that outlives the orchestrator, removes the race.
+_RECEIPT_GRACE_SECONDS = 10.0
+
+
+def _receipt_published(path: Path) -> bool:
+    deadline = time.monotonic() + _RECEIPT_GRACE_SECONDS
+    while not os.path.lexists(path):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
 
 
 _WAVE_FAILURE_REASONS = {
