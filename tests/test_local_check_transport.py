@@ -218,9 +218,7 @@ def test_interpreter_check_runs_only_with_its_declared_read_roots(tmp_path):
     # tmp_path included) never fall back to the read-only workspace.
     from run_state.local_check_runtime import _overlap
     prefix, interpreter = _host_interpreter()
-    probe = ("import sys, tempfile\n"
-             "with tempfile.NamedTemporaryFile('w') as scratch: scratch.write('ok')\n"
-             "print(sys.version)")
+    probe = "import sys,tempfile;tempfile.TemporaryFile().write(b'ok');print(sys.version)"
     locator = shlex.join((str(interpreter), "-c", probe))
     if _overlap(prefix, Path.home()):
         # An interpreter installed under HOME cannot be declared at all.
