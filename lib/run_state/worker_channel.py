@@ -572,10 +572,28 @@ class WorkerChannelServer:
                 or message.get("intent_id") != binding.intent_id
                 or not isinstance(wrapped["requester"], dict)):
             raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
+        if set(wrapped["requester"]) == {"pid"}:
+            return WorkerChannelServer._captured_requester(binding, wrapped["requester"]["pid"])
         requester = ProcessIdentity(**wrapped["requester"])
         # A bridge sandboxed in its own PID namespace names a pid this
         # supervisor cannot probe; record the orchestrator, as before F37b.
         return requester if requester.host_id == binding.identity.host_id else binding.identity
+
+    @staticmethod
+    def _captured_requester(binding: WorkerBinding, pid) -> ProcessIdentity:
+        """Capture a pid-only requester here, outside its sandbox (F41).
+
+        Codex's macOS seatbelt hides the boot session from the bridge, so it
+        can name only its pid. Record it only as a live descendant of the
+        orchestrator; otherwise record the orchestrator, as before F37b.
+        """
+        if type(pid) is not int or not 0 < pid < 2**31:  # pid_t is 32-bit on macOS and Linux
+            raise WorkerChannelRefused("IPC_SCOPE_MISMATCH")
+        try:
+            captured = ProcessIdentity.from_pid(pid)
+        except (OSError, ValueError, OverflowError):  # ProcessLookupError is an OSError
+            return binding.identity
+        return captured if _live_descendant(captured, binding.identity) else binding.identity
 
     def _held_lock(self, path: Path) -> int:
         """Create a lock file and hold LOCK_EX on it for this server's life.
@@ -1146,7 +1164,7 @@ def _supervisor_lock_released(root: Path) -> bool:
 
 def file_request(root: str | Path, capability: str, scope: dict, *, request_key: str,
                  operation: str, body: dict, timeout: float | None = 5,
-                 requester: ProcessIdentity | None = None) -> dict:
+                 requester: ProcessIdentity | dict | None = None) -> dict:
     """Use the workspace file transport when a host sandbox denies AF_UNIX.
 
     While waiting, about once a second, the scope's supervisor is probed and
@@ -1178,7 +1196,7 @@ def file_request(root: str | Path, capability: str, scope: dict, *, request_key:
                "operation": operation, "body": body}
     envelope = {"capability": capability, "message": message}
     if requester is not None:
-        envelope["requester"] = asdict(requester)
+        envelope["requester"] = requester if isinstance(requester, dict) else asdict(requester)
     wrapped = _canonical(envelope)
     if len(wrapped) > 65536:
         raise WorkerChannelRefused("IPC_MESSAGE_TOO_LARGE")

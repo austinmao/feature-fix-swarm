@@ -191,7 +191,7 @@ def _wait_for_pid(path, timeout=15):
     return ProcessIdentity.from_pid(int(path.read_text()))
 
 
-def _start_bridge_under_outer(f, tmp_path, spec_path):
+def _start_bridge_under_outer(f, tmp_path, spec_path, argv=None):
     """Run the real bridge over the workspace file transport, as GSD does:
     a descendant of the orchestrator, so it is the recorded requester."""
     file_channel = f.channel.register_file_transport(f.outer.intent_id)
@@ -207,7 +207,7 @@ def _start_bridge_under_outer(f, tmp_path, spec_path):
     stdin.write_bytes(json.dumps(f.manifest, sort_keys=True, separators=(",", ":")).encode())
     staged = spec_path.with_suffix(".tmp")
     staged.write_text(json.dumps({
-        "argv": [sys.executable, "-m", "run_state.gsd_wave_bridge"], "env": environment,
+        "argv": argv or [sys.executable, "-m", "run_state.gsd_wave_bridge"], "env": environment,
         "cwd": str(f.parent), "stdin": str(stdin), "stdout": str(stdout),
         "stderr": str(stderr), "pid": str(tmp_path / "bridge.pid"),
     }))
@@ -845,3 +845,51 @@ def test_file_transport_delivers_to_bridge_after_orchestrator_exit(tmp_path, mon
     else:
         assert refusals == ["IPC_DESCENDANT_ANCESTRY_MISMATCH"]
         assert not integrated
+
+
+
+# The real bridge as Codex's macOS seatbelt runs it: the boot session is
+# hidden, so the bridge cannot capture its own full process identity.
+_SANDBOXED_BRIDGE = [sys.executable, "-c", (
+    "import runpy\n"
+    "from process_identity import ProcessIdentity\n"
+    "def hidden(cls):\n"
+    "    raise ProcessLookupError('boot session hidden by the sandbox')\n"
+    "ProcessIdentity.current = classmethod(hidden)\n"
+    "runpy.run_module('run_state.gsd_wave_bridge', run_name='__main__')\n")]
+
+
+def test_sandboxed_bridge_is_recorded_and_served_after_orchestrator_exit(tmp_path, monkeypatch):
+    # F41 (live, Codex 0.157.0 workspace-write): the bridge names only its
+    # pid, the supervisor captures it, the durable request records the
+    # bridge, and its reply still lands after the orchestrator ends its turn.
+    import threading
+    from dataclasses import asdict
+    spec_path = tmp_path / "bridge-spec.json"
+    refusals, recorded, consumed = [], [], threading.Event()
+    with wave_fixture(tmp_path, monkeypatch, plans=1, record=False,
+                      outer_command=_bridge_outer_command(spec_path)) as f:
+        def consume_after_exit(event_id):
+            try:
+                with f.store.read_transaction() as tx:
+                    row = tx.execute("SELECT payload FROM control_events WHERE id=?", (event_id,)).fetchone()
+                recorded.append(json.loads(row["payload"])["data"]["peer_identity"])
+                os.kill(f.outer.identity.pid, signal.SIGTERM)
+                f.outer.process.wait(timeout=5)
+                return f.consumer(event_id)
+            except Exception as error:
+                refusals.append(getattr(error, "code", repr(error)))
+                raise
+            finally:
+                consumed.set()
+
+        f.channel.attach_wave_consumer(consume_after_exit)
+        bridge, stdout, stderr = _start_bridge_under_outer(f, tmp_path, spec_path, argv=_SANDBOXED_BRIDGE)
+        assert consumed.wait(timeout=90)
+        _wait_until_gone(bridge)
+        integrated = (f.parent / "result-0.txt").exists()
+    assert recorded == [asdict(bridge)]
+    assert refusals == [], stderr.read_text()
+    reply = json.loads(stdout.read_text())
+    assert [item["status"] for item in reply["results"]] == ["complete"]
+    assert integrated

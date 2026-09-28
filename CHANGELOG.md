@@ -8,6 +8,22 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-28, spec-014 Release C: F41 sandboxed wave bridge is still the recorded requester)
+
+- Under Codex 0.157.0's macOS seatbelt (workspace-write) the wave bridge
+  cannot read the boot session (both the `sysctl` binary and
+  `sysctlbyname("kern.bootsessionuuid")` are denied), so it could not
+  capture its own process identity, sent no requester, and the channel
+  recorded the orchestrator. Once the orchestrator ended its turn, F37a
+  refused the wave with `WAVE_REPLY_UNCONSUMED` (live M3 attempt 15). Now
+  the bridge names just its pid when its full identity is unavailable, and
+  the supervisor captures that pid's identity itself, outside the sandbox.
+  The captured identity is recorded, and then admitted as usual, only when
+  it is a live descendant of the orchestrator; a pid that cannot be
+  captured or does not descend from it is recorded as the orchestrator, as
+  before. A full identity is handled as before, and a malformed pid is
+  still refused.
+
 ### Fixed (2026-09-27, spec-014 Release C: F37b wave reply survives the orchestrator's exit)
 
 - A Codex orchestrator that yielded the blocking gsd-core adapter call and

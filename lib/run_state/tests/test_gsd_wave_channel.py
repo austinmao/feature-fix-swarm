@@ -467,3 +467,73 @@ def test_replacing_an_unlinked_device_lock_releases_its_descriptor(tmp_path, mon
             previous = _register(server, binding, f"intent-{index}")[1]
             assert len(server._lock_fds) == 2
             assert _held(previous)
+
+
+
+def test_bridge_names_its_pid_when_its_identity_is_hidden(monkeypatch):
+    # F41: Codex's macOS seatbelt denies the boot-session sysctl, so the
+    # bridge cannot capture its full identity; it names its pid instead.
+    from run_state import gsd_wave_bridge
+
+    def hidden(cls):
+        raise ProcessLookupError("boot session hidden by the sandbox")
+
+    monkeypatch.setattr(gsd_wave_bridge.ProcessIdentity, "current", classmethod(hidden))
+    assert gsd_wave_bridge._self_identity() == {"pid": os.getpid()}
+
+
+def _wave_envelope(binding, requester):
+    return {"capability": "x" * 43, "requester": requester,
+            "message": {"operation": "gsd-wave-request", "intent_id": binding.intent_id}}
+
+
+def test_pid_only_requester_is_captured_when_it_descends_from_the_orchestrator(tmp_path):
+    orchestrator = ProcessIdentity.current()
+    binding = replace(_binding(tmp_path), identity=orchestrator)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        captured = WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": child.pid}))
+        assert captured == ProcessIdentity.from_pid(child.pid)
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("who", ["unrelated", "dead"])
+def test_pid_only_requester_falls_back_to_the_orchestrator(tmp_path, who):
+    # A pid that is not a live descendant of the orchestrator is never
+    # recorded; the request is recorded against the orchestrator, as before.
+    orchestrator = ProcessIdentity.current()
+    binding = replace(_binding(tmp_path), identity=orchestrator)
+    if who == "unrelated":
+        pid = os.getppid()
+    else:
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait(timeout=5)
+        pid = gone.pid
+    assert WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": pid})) == orchestrator
+
+
+@pytest.mark.parametrize("pid", [True, 0, -1, "12", 2**31, 10**100])
+def test_malformed_pid_requester_is_refused(tmp_path, pid):
+    # Only a native positive pid is captured; an oversized one must not reach
+    # the start-token lookup (OverflowError would end the serving thread).
+    binding = _binding(tmp_path)
+    with pytest.raises(WorkerChannelRefused, match="IPC_SCOPE_MISMATCH"):
+        WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": pid}))
+
+
+def test_pid_requester_with_extra_keys_is_not_a_pid_requester(tmp_path):
+    binding = _binding(tmp_path)
+    with pytest.raises(TypeError):
+        WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": 12, "extra": 1}))
+
+
+def test_uncapturable_pid_falls_back_to_the_orchestrator(tmp_path, monkeypatch):
+    binding = _binding(tmp_path)
+
+    def overflow(_pid):
+        raise OverflowError("start token")
+
+    monkeypatch.setattr(channel_module.ProcessIdentity, "from_pid", staticmethod(overflow))
+    assert WorkerChannelServer._file_requester(binding, _wave_envelope(binding, {"pid": 4242})) == binding.identity
