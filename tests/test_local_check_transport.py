@@ -363,3 +363,74 @@ def test_read_root_path_errors_are_refusals(tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "resolve", resolve)
         with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_READ_ROOT_INVALID"):
             validate_runtime_read_roots((str(real),), blocked=())
+
+
+# F42 review round 2: an unusable system temp dir is a typed refusal, and
+# the protected identities are read once per batch, not once per root.
+
+def _no_temp_dir():
+    raise FileNotFoundError(2, "No usable temporary directory found")
+
+
+def test_unusable_temp_dir_is_a_typed_refusal_at_seal(tmp_path, monkeypatch):
+    supervisor, store, request = setup_owner(tmp_path)
+    declared = tmp_path / "declared"
+    declared.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", _no_temp_dir)
+    with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_UNAVAILABLE") as refused:
+        _sealed_command_check(store, supervisor.token, request, read_roots=[str(declared)])
+    assert not isinstance(refused.value, OSError)
+
+
+@requires_local_confinement
+def test_unusable_temp_dir_is_a_typed_refusal_at_launch(tmp_path, monkeypatch):
+    from run_state.local_check_runtime import LocalCheckRefused, build_confined_local_argv
+    (tmp_path / "system-temp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "system-temp"))
+    supervisor, store, request = _owner(tmp_path / "owner")
+    declared = tmp_path / "declared"
+    declared.mkdir()
+    sealed = _sealed_command_check(store, supervisor.token, request, read_roots=[str(declared)])
+    material = _launch_material(store, supervisor, request, sealed)
+    monkeypatch.setattr(tempfile, "gettempdir", _no_temp_dir)
+    with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_CONFINEMENT_UNAVAILABLE"):
+        build_confined_local_argv(store, supervisor.token, request.activity_id, material)
+
+
+def test_read_root_overlap_reads_protected_identities_once_per_batch(tmp_path, monkeypatch):
+    from run_state.local_check_runtime import validate_runtime_read_roots
+    root = tmp_path.resolve()
+    roots = [root / "roots" / f"r{index}" for index in range(10)]
+    blocked = [root / "blocked" / f"b{index}" for index in range(200)]
+    for directory in (*roots, *blocked):
+        directory.mkdir(parents=True)
+    calls = []
+    for name in ("stat", "lstat"):
+        monkeypatch.setattr(os, name, lambda *args, _real=getattr(os, name), **kwargs:
+                            calls.append(1) or _real(*args, **kwargs))
+
+    def stats(count):
+        calls.clear()
+        validate_runtime_read_roots(tuple(map(str, roots[:count])), blocked=tuple(blocked))
+        return len(calls)
+    one, many = stats(1), stats(len(roots))
+    assert one > len(blocked)
+    # Each extra root costs fewer stat calls than there are protected paths.
+    assert many - one < (len(roots) - 1) * len(blocked)
+
+
+def _data_volume_home():
+    spelled = Path("/System/Volumes/Data" + str(Path.home()))
+    return spelled.is_dir() and os.path.samefile(spelled, Path.home())
+
+
+requires_data_volume_home = pytest.mark.skipif(
+    not _data_volume_home(), reason="no macOS data volume spelling of HOME")
+
+
+@requires_data_volume_home
+def test_the_data_volume_root_still_holds_home():
+    # Regression guard: the firmlink spelling refused in round 1 stays refused.
+    from run_state.local_check_runtime import LocalCheckRefused, validate_runtime_read_roots
+    with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+        validate_runtime_read_roots(("/System/Volumes/Data",), blocked=(Path.home(),))
