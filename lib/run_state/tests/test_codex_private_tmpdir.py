@@ -182,6 +182,7 @@ def test_release_refuses_material_whose_tmpdir_sits_in_the_runtime_home(tmp_path
 
 def test_observer_and_adapter_bind_the_same_private_tmpdir_policy(tmp_path, monkeypatch):
     from test_codex_runtime_observer import _runtime as observer_runtime, observer
+    from run_state.managed_qualification import _qualified
     runtime, binary = observer_runtime(tmp_path)
     runtime.chmod(0o700)
     (runtime / "auth.json").write_text("{}\n")
@@ -194,7 +195,9 @@ def test_observer_and_adapter_bind_the_same_private_tmpdir_policy(tmp_path, monk
     )
     assert dict(predicted.execution)["disabled_features"] == list(DISABLED_NATIVE_FEATURES)
     monkeypatch.setattr(codex_host, "_binary_chain", lambda path: dict(predicted.binary))
-    material = CodexHostAdapter(predicted, binary, "0.158.0").build_launch_material("do work", attempt=0)
+    # The observer loads its own host_capabilities copy; admit its tuple as production does.
+    qualified = _qualified(predicted)
+    material = CodexHostAdapter(qualified, binary, "0.158.0").build_launch_material("do work", attempt=0)
     try:
         assert Path(material.execution_environment()["TMPDIR"]).parent == PRIVATE_ROOT
     finally:
