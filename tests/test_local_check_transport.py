@@ -1,9 +1,11 @@
 """Local check confinement effects and unsupported-platform refusal."""
 from dataclasses import replace
+import os
 from pathlib import Path
 import shlex
 import sys
 import socket
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -231,3 +233,133 @@ def test_interpreter_check_runs_only_with_its_declared_read_roots(tmp_path):
     assert allowed.returncode == 0, allowed.stderr
     assert allowed.stdout.strip() == sys.version
     assert bound.execution_environment()["TMPDIR"] == bound.confinement_scratch
+
+
+# F42 review round 1: declared roots overlap by filesystem identity, never
+# name another registered workspace or the system temp dir, and every path
+# error is a refusal.
+
+def _case_alias(path):
+    """``path`` spelled in the other case, or None on a case-sensitive volume."""
+    alias = Path(str(path).swapcase())
+    if str(alias) == str(path) or not alias.exists() or not os.path.samefile(alias, path):
+        return None
+    return alias
+
+
+requires_case_insensitive_home = pytest.mark.skipif(
+    _case_alias(Path.home()) is None, reason="HOME is on a case-sensitive filesystem")
+
+
+def _owner(directory):
+    directory.mkdir(parents=True)
+    return setup_owner(directory)
+
+
+def _register_workspace(store, token, path, *, run_id):
+    path.mkdir(parents=True, exist_ok=True)
+    with store.transaction() as tx:
+        row = dict(tx.execute("SELECT * FROM context_workspaces WHERE repository_id=? LIMIT 1",
+                              (token.repository_id,)).fetchone())
+        key = f"{run_id}-{path.name}"
+        row.update(preparation_id=key, run_id=run_id, path=str(path), path_key=str(path).lower(),
+                   branch_key=key, child_request_key=None)
+        tx.execute(f"INSERT INTO context_workspaces({','.join(row)}) VALUES({','.join('?' * len(row))})",
+                   tuple(row.values()))
+    return path
+
+
+def _launch_material(store, supervisor, request, sealed):
+    from run_state.local_check_runtime import sealed_check_material
+    with store.read_transaction() as tx:
+        child = tx.execute('SELECT * FROM authority_child_bindings WHERE activity_id=?',
+                           (request.activity_id,)).fetchone()
+    return sealed_check_material(sealed=sealed, acceptance_hash=sealed.acceptance_hash,
+        check_id='real-local', candidate_hash=child['candidate_hash'], workspace=request.workspace,
+        workspace_preparation_id=child['workspace_preparation_id'], expected_head=request.expected_head,
+        runtime_identity=request.runtime_identity, generation=supervisor.token.generation)
+
+
+def test_declared_root_overlap_is_by_filesystem_identity(tmp_path):
+    from run_state.local_check_runtime import LocalCheckRefused, validate_runtime_read_roots
+    # A protected root spelled through a symlink names the same directory as
+    # the canonical root, equal to, inside or holding it.
+    root = tmp_path.resolve()
+    state = root / "state"
+    (state / "inner").mkdir(parents=True)
+    spelled = root / "spelled"
+    spelled.symlink_to(state)
+    for declared, blocked in ((state, spelled), (state / "inner", spelled), (state, spelled / "inner")):
+        with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+            validate_runtime_read_roots((str(declared),), blocked=(blocked,))
+
+
+@requires_case_insensitive_home
+def test_sealing_refuses_an_alternate_case_home_root(tmp_path):
+    # On case-insensitive APFS Path.resolve keeps the given case, so the
+    # alias passes the canonical check and only identity overlap refuses it.
+    alias = _case_alias(Path.home())
+    supervisor, store, request = setup_owner(tmp_path)
+    with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+        _sealed_command_check(store, supervisor.token, request, read_roots=[str(alias)])
+
+
+@requires_local_confinement
+def test_declared_root_never_names_another_registered_workspace(tmp_path, monkeypatch):
+    # Outside HOME, another run's workspace at seal and this run's workspace
+    # registered after sealing at launch. The system temp dir is moved aside
+    # so only the workspace rule can refuse.
+    from run_state.local_check_runtime import LocalCheckRefused, build_confined_local_argv
+    (tmp_path / "system-temp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "system-temp"))
+    supervisor, store, request = _owner(tmp_path / "seal")
+    other = _register_workspace(store, supervisor.token, tmp_path / "other-run", run_id="other-run")
+    with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+        _sealed_command_check(store, supervisor.token, request, read_roots=[str(other)])
+
+    supervisor, store, request = _owner(tmp_path / "launch")
+    later = tmp_path / "registered-later"
+    later.mkdir()
+    sealed = _sealed_command_check(store, supervisor.token, request, read_roots=[str(later)])
+    material = _launch_material(store, supervisor, request, sealed)
+    _register_workspace(store, supervisor.token, later, run_id=supervisor.token.run_id)
+    with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+        build_confined_local_argv(store, supervisor.token, request.activity_id, material)
+
+
+def test_sealing_refuses_a_root_equal_to_or_holding_the_system_temp_dir(tmp_path, monkeypatch):
+    system_temp = tmp_path / "system" / "temp"
+    system_temp.mkdir(parents=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(system_temp))
+    for index, declared in enumerate((system_temp, system_temp.parent)):
+        supervisor, store, request = _owner(tmp_path / f"owner-{index}")
+        with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+            _sealed_command_check(store, supervisor.token, request, read_roots=[str(declared)])
+
+
+@requires_local_confinement
+def test_launch_refuses_a_root_holding_the_system_temp_dir(tmp_path, monkeypatch):
+    # The check's scratch is made under the system temp dir at launch.
+    from run_state.local_check_runtime import LocalCheckRefused, build_confined_local_argv
+    declared = tmp_path / "declared"
+    (declared / "temp").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "elsewhere"))
+    supervisor, store, request = _owner(tmp_path / "owner")
+    sealed = _sealed_command_check(store, supervisor.token, request, read_roots=[str(declared)])
+    material = _launch_material(store, supervisor, request, sealed)
+    monkeypatch.setattr(tempfile, "tempdir", str(declared / "temp"))
+    with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+        build_confined_local_argv(store, supervisor.token, request.activity_id, material)
+
+
+def test_read_root_path_errors_are_refusals(tmp_path, monkeypatch):
+    from run_state.local_check_runtime import LocalCheckRefused, validate_runtime_read_roots
+    real = tmp_path.resolve() / "runtime"
+    real.mkdir()
+    for error in (RuntimeError("symlink loop"), ValueError("embedded null")):
+        def resolve(self, strict=False, _error=error):
+            raise _error
+        monkeypatch.setattr(Path, "resolve", resolve)
+        with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_READ_ROOT_INVALID"):
+            validate_runtime_read_roots((str(real),), blocked=())
