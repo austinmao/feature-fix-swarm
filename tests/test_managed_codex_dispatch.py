@@ -453,6 +453,50 @@ def test_resumed_outer_run_that_was_qualified_but_never_launched_reproduces_the_
     assert contract_hashes[0] == contract_hashes[-1], "final_contract_hash drifted across resume"
 
 
+_ORPHAN_ACTIVITY = "88888888-8888-4888-8888-888888888888"
+
+
+def _killed_identity() -> ProcessIdentity:
+    """A supervised child started in its own session, then SIGKILLed: dead, group empty."""
+    killed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    identity = ProcessIdentity.from_pid(killed.pid)
+    killed.kill()
+    killed.wait()
+    return identity
+
+
+def _write_tmpdir_record(records: Path, path: Path, *, activity_id: str, owner: ProcessIdentity) -> None:
+    info = path.stat()
+    (records / (path.name + ".json")).write_text(json.dumps({
+        "schema": "ffs.codex-private-tmpdir/v1", "path": str(path),
+        "device": info.st_dev, "inode": info.st_ino,
+        "activity_id": activity_id, "owner": asdict(owner),
+    }))
+
+
+def _seed_launched_tmpdir(store, token, activity_id: str, path: Path, *, child: ProcessIdentity) -> None:
+    """Journal a launched activity: a permitted intent whose child is dead, and
+    the reserved dispatch request binding its private TMPDIR identity."""
+    info = path.stat()
+    intent = activity_id + ":intent"
+    with store.transaction() as tx:
+        tx.execute(
+            "INSERT INTO authority_activities (id,repository_id,run_id,kind,input_digest,revision,state,"
+            "retry_budget,remaining_retry_budget,runtime_tuple_hash,request_key,generation,created_at,updated_at) "
+            "VALUES(?,?,?,'execute',?,1000,'failed',5,0,?,?,?,'now','now')",
+            (activity_id, token.repository_id, token.run_id, "c" * 64, "d" * 64,
+             "managed-host:f43-" + activity_id, token.generation))
+        tx.execute(
+            "INSERT INTO authority_launch_intents (id,activity_id,attempt_ordinal,state,generation,capacity_exempt,"
+            "child_host_id,child_boot_id,child_pid,child_start_token,permit_id,created_at,updated_at) "
+            "VALUES(?,?,1,'released_to_execute',?,0,?,?,?,?,'permit','now','now')",
+            (intent, activity_id, token.generation, child.host_id, child.boot_id, child.pid, child.start_token))
+    store.record_event_once(token, activity_id, "dispatch-request:f43-" + activity_id, {
+        "intent_id": intent,
+        "request": {"codex_private_tmpdir": {"path": str(path), "device": info.st_dev, "inode": info.st_ino}},
+    })
+
+
 def test_resumed_session_reaps_only_provably_dead_recorded_private_tmpdirs(tmp_path, monkeypatch):
     """F43: a supervisor killed mid-run leaves its launch's private TMPDIR
     behind. The next session for the run reaps it only when the recorded owner
@@ -465,10 +509,7 @@ def test_resumed_session_reaps_only_provably_dead_recorded_private_tmpdirs(tmp_p
     private_root = Path("/tmp").resolve()
     orphan = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=private_root))
     foreign = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=private_root))
-    killed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    owner = ProcessIdentity.from_pid(killed.pid)
-    killed.kill()
-    killed.wait()
+    owner = _killed_identity()
     observed = {}
 
     def execute(store, token, context):
@@ -480,12 +521,9 @@ def test_resumed_session_reaps_only_provably_dead_recorded_private_tmpdirs(tmp_p
         ))
         records = Path(context.evidence_root) / "host" / "private-tmp"
         records.mkdir(mode=0o700, parents=True)
-        info = orphan.stat()
-        (records / (orphan.name + ".json")).write_text(json.dumps({
-            "schema": "ffs.codex-private-tmpdir/v1", "path": str(orphan),
-            "device": info.st_dev, "inode": info.st_ino,
-            "activity_id": "never-launched", "owner": asdict(owner),
-        }))
+        # The durable state a killed launch leaves: its reserved dispatch binds the dir.
+        _seed_launched_tmpdir(store, token, _ORPHAN_ACTIVITY, orphan, child=_killed_identity())
+        _write_tmpdir_record(records, orphan, activity_id=_ORPHAN_ACTIVITY, owner=owner)
         session = prepare_managed_codex_session(
             store, token, context, command=("/gsd-plan-phase", "1"),
             request_key="reap-orphans", host_request=request, upstream_runtime=upstream_runtime,
@@ -526,6 +564,58 @@ def test_resumed_session_reaps_only_provably_dead_recorded_private_tmpdirs(tmp_p
     finally:
         shutil.rmtree(orphan, ignore_errors=True)
         shutil.rmtree(foreign, ignore_errors=True)
+
+
+def test_resume_never_reaps_a_dir_named_by_a_forged_record(tmp_path, monkeypatch):
+    """F43 review round 1 (MEDIUM): a record is only a claim. A same-owner
+    ffs-codex-* dir survives a forged record with a dead owner, whether it names
+    an activity that never existed or a real launched activity whose durable
+    dispatch request bound a different directory."""
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    request = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
+    private_root = Path("/tmp").resolve()
+    bound = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=private_root))
+    forged = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=private_root))
+    claimed = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=private_root))
+    owner = _killed_identity()
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        from run_state.supervisor import prepare_managed_codex_session
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        records = Path(context.evidence_root) / "host" / "private-tmp"
+        records.mkdir(mode=0o700, parents=True)
+        _seed_launched_tmpdir(store, token, _ORPHAN_ACTIVITY, bound, child=_killed_identity())
+        _write_tmpdir_record(records, forged, activity_id="no-such-activity", owner=owner)
+        _write_tmpdir_record(records, claimed, activity_id=_ORPHAN_ACTIVITY, owner=owner)
+        session = prepare_managed_codex_session(
+            store, token, context, command=("/gsd-plan-phase", "1"),
+            request_key="forged-records", host_request=request, upstream_runtime=upstream_runtime,
+        )
+        session.close(None, None, None)
+        return 0
+
+    try:
+        assert prepare_managed_run(
+            objective="forged records", state_root=authority,
+            selection_manifest=env["FFS_SELECTION_MANIFEST"],
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+            request_key="forged-records", command=("/gsd-plan-phase", "1"),
+            dispatch_limit=3, token_limit=1000, on_ready=execute,
+            run_id="forged-records", activity="plan", scope="1",
+            host_request=request,
+        ) == 0
+        assert forged.is_dir()
+        assert claimed.is_dir()
+        assert bound.is_dir()
+    finally:
+        for path in (bound, forged, claimed):
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def test_session_close_releases_launch_material_that_never_launched(tmp_path, monkeypatch):

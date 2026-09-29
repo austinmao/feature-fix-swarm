@@ -13,10 +13,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +47,62 @@ def _writable_roots(argv: tuple[str, ...]) -> list[str]:
     """The workspace-write roots the argv grants with both exclusions on."""
     roots = [argv[argv.index("--cd") + 1]]
     return roots + [argv[index + 1] for index, item in enumerate(argv) if item == "--add-dir"]
+
+
+def _lexical_alias(path: Path) -> Path | None:
+    """Another spelling of ``path`` that resolve() keeps distinct, or None.
+
+    A symlink spelling would not do: resolve() collapses it to the same text,
+    so the lexical check alone would catch it.  A macOS firmlink
+    (/System/Volumes/Data/...) or a case-insensitive volume's other case is
+    one directory that only (st_dev, st_ino) can prove.
+    """
+    for alias in (Path("/System/Volumes/Data" + str(path)), Path(str(path).swapcase())):
+        try:
+            same = os.path.samestat(alias.stat(), path.stat())
+        except OSError:
+            continue
+        if same and alias.resolve() != path.resolve():
+            return alias
+    return None
+
+
+def _guard_with_running_codex() -> tuple[ProcessIdentity, int]:
+    """Kill a guard-like child (own session) whose Codex grandchild shares its group."""
+    guard = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys, time\n"
+         "codex = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+         "print(codex.pid, flush=True)\n"
+         "time.sleep(120)\n"],
+        stdout=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    codex_pid = int(guard.stdout.readline())
+    identity = ProcessIdentity.from_pid(guard.pid)
+    guard.kill()
+    guard.wait()
+    guard.stdout.close()
+    assert probe_identity(identity) == DEAD
+    return identity, codex_pid
+
+
+def _stop_group(pgid: int, codex_pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(codex_pid, signal.SIGKILL)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    raise AssertionError("the killed guard's process group never emptied")
+
+
+def _intent_store(*rows):
+    cursor = SimpleNamespace(fetchall=lambda: list(rows))
+    return SimpleNamespace(read_transaction=lambda: contextlib.nullcontext(
+        SimpleNamespace(execute=lambda _sql, _params: cursor)))
 
 
 def _release_quietly(*materials) -> None:
@@ -119,10 +177,10 @@ def test_private_root_overlapping_a_protected_root_is_refused(tmp_path, monkeypa
 
 def test_private_root_overlap_is_also_detected_by_filesystem_identity(tmp_path, monkeypatch):
     adapter, workspace = _adapter(tmp_path, monkeypatch)
-    alias = Path(str(workspace).swapcase())
-    # A case-insensitive volume names the workspace under another spelling;
-    # only (st_dev, st_ino) proves the two paths are one directory.
-    root = alias if alias.exists() else workspace
+    alias = _lexical_alias(workspace)
+    # Every macOS volume has the firmlink spelling, so identity is exercised there.
+    assert alias is not None or sys.platform != "darwin"
+    root = alias if alias is not None else workspace
     monkeypatch.setattr(codex_host, "codex_private_tmp_root", lambda: root)
     with pytest.raises(CodexHostRefused, match="PRIVATE_TMPDIR_UNSAFE"):
         adapter.build_launch_material("do work", attempt=0)
@@ -242,7 +300,7 @@ def test_resume_reaps_only_recorded_dirs_whose_owner_and_launch_are_provably_dea
     replaced_path.mkdir(mode=0o700)
     foreign = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=PRIVATE_ROOT))
     try:
-        reaped = codex_host.reap_orphan_private_tmpdirs(records, lambda activity: activity == "dead-launch")
+        reaped = codex_host.reap_orphan_private_tmpdirs(records, lambda activity, *_binding: activity == "dead-launch")
         assert reaped == (dead.temporary_dir,)
         assert not os.path.lexists(dead.temporary_dir)
         for kept in (live_owner.temporary_dir, running.temporary_dir, replaced_path, foreign, aside):
@@ -301,9 +359,12 @@ def test_supervisor_finish_releases_a_settled_worker_launch(tmp_path, monkeypatc
         stderr.write_bytes(b"")
         identities = {key: (path.stat().st_dev, path.stat().st_ino)
                       for key, path in (("stdout", stdout), ("stderr", stderr))}
-        process = subprocess.Popen([sys.executable, "-c", ""])
+        process = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                   stdin=subprocess.PIPE, start_new_session=True)
+        child = ProcessIdentity.from_pid(process.pid)
+        process.stdin.close()
         process.wait()
-        handle = ProcessHandle(process, "intent-1", "worker-1", ProcessIdentity.current(), "head", 0.0,
+        handle = ProcessHandle(process, "intent-1", "worker-1", child, "head", 0.0,
                                stdout, stderr, identities, codex_material=material)
         completed = []
         store = SimpleNamespace(complete_launch=lambda intent_id, _token, **_kwargs: completed.append(intent_id))
@@ -316,3 +377,89 @@ def test_supervisor_finish_releases_a_settled_worker_launch(tmp_path, monkeypatc
         assert list(records.iterdir()) == []
     finally:
         _release_quietly(material)
+
+
+def test_reap_keeps_a_recorded_dir_while_the_killed_guard_s_codex_still_runs(tmp_path, monkeypatch):
+    """Review round 1 (HIGH): the acknowledged child is the auth guard, and Codex
+    runs in its process group.  A SIGKILLed guard proves nothing while Codex runs."""
+    from run_state.supervisor import _launches_provably_dead
+
+    records = tmp_path / "records"
+    adapter, _workspace = _adapter(tmp_path, monkeypatch, tmp_records=records, activity_id="guarded")
+    material = adapter.build_launch_material("guarded", attempt=0)
+    record = records / (Path(material.temporary_dir).name + ".json")
+    _set_owner(records, material, _dead_identity())
+    guard, codex_pid = _guard_with_running_codex()
+    store = _intent_store({"permit_id": "permit", "child_host_id": guard.host_id, "child_boot_id": guard.boot_id,
+                           "child_pid": guard.pid, "child_start_token": guard.start_token})
+
+    def launch_dead(activity_id, *_binding):
+        return _launches_provably_dead(store, activity_id)
+
+    try:
+        assert codex_host.reap_orphan_private_tmpdirs(records, launch_dead) == ()
+        assert os.path.isdir(material.temporary_dir) and record.is_file()
+        _stop_group(guard.pid, codex_pid)
+        assert codex_host.reap_orphan_private_tmpdirs(records, launch_dead) == (material.temporary_dir,)
+        assert not os.path.lexists(material.temporary_dir) and not record.exists()
+    finally:
+        _stop_group(guard.pid, codex_pid)
+        _release_quietly(material)
+
+
+def test_supervisor_finish_keeps_a_tmpdir_whose_launch_process_group_still_runs(tmp_path, monkeypatch):
+    from run_state.supervisor import ProcessHandle, Supervisor
+
+    records = tmp_path / "records"
+    adapter, _workspace = _adapter(tmp_path, monkeypatch, tmp_records=records, activity_id="worker-2")
+    material = adapter.build_launch_material("plan prompt", attempt=1)
+    guard, codex_pid = _guard_with_running_codex()
+    try:
+        Path(material.auth_path).unlink()
+        evidence = tmp_path / "evidence" / "intent-2"
+        evidence.mkdir(parents=True, mode=0o700)
+        stdout, stderr = evidence / "stdout.log", evidence / "stderr.log"
+        stdout.write_bytes(_valid_stream())
+        stderr.write_bytes(b"")
+        identities = {key: (path.stat().st_dev, path.stat().st_ino)
+                      for key, path in (("stdout", stdout), ("stderr", stderr))}
+        process = subprocess.Popen([sys.executable, "-c", ""])
+        process.wait()
+        handle = ProcessHandle(process, "intent-2", "worker-2", guard, "head", 0.0,
+                               stdout, stderr, identities, codex_material=material)
+        completed = []
+        store = SimpleNamespace(complete_launch=lambda intent_id, _token, **_kwargs: completed.append(intent_id))
+        supervisor = Supervisor(store, SimpleNamespace(), evidence_root=tmp_path / "evidence")
+        supervisor._handles[handle.intent_id] = handle
+        monkeypatch.setattr(supervisor, "_wait_admitted", lambda owned, _timeout: owned.process.wait())
+        supervisor.finish(handle)
+        assert completed == ["intent-2"]
+        assert os.path.isdir(material.temporary_dir)
+        assert [path.name for path in records.iterdir()] == [Path(material.temporary_dir).name + ".json"]
+    finally:
+        _stop_group(guard.pid, codex_pid)
+        _release_quietly(material)
+
+
+def test_record_collision_refuses_and_keeps_the_record_it_did_not_create(tmp_path, monkeypatch):
+    """Review round 1 (LOW): cleanup unlinks only what this build created."""
+    records = tmp_path / "records"
+    records.mkdir(mode=0o700)
+    adapter, _workspace = _adapter(tmp_path, monkeypatch, tmp_records=records, activity_id="collide")
+    forced = PRIVATE_ROOT / f"ffs-codex-f43-collision-{os.getpid()}"
+
+    def mkdtemp(prefix, dir):
+        path = Path(dir) / forced.name
+        path.mkdir(mode=0o700)
+        return str(path)
+
+    monkeypatch.setattr(codex_host, "tempfile", SimpleNamespace(mkdtemp=mkdtemp))
+    existing = records / (forced.name + ".json")
+    existing.write_text("pre-existing record\n")
+    try:
+        with pytest.raises(CodexHostRefused, match="PRIVATE_TMPDIR_RECORD_UNAVAILABLE"):
+            adapter.build_launch_material("do work", attempt=0)
+        assert existing.read_text() == "pre-existing record\n"
+        assert not os.path.lexists(forced)
+    finally:
+        shutil.rmtree(forced, ignore_errors=True)
