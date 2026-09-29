@@ -916,10 +916,11 @@ def test_doctor_rejects_unsupported_codex_cli(tmp_path: Path) -> None:
     assert ffs_installer.CODEX_VERSION_POLICY in failure["message"]
     assert "0.156.1" in failure["remediation"]
     assert "0.157.0" in failure["remediation"]
+    assert "0.158.0" in failure["remediation"]
 
 
 def test_codex_version_policy_preserves_legacy_range_and_exact_compatibility_pins_only() -> None:
-    accepted = ((0, 137, 0), (0, 147, 99), (0, 154, 0), (0, 155, 1), (0, 156, 1), (0, 157, 0))
+    accepted = ((0, 137, 0), (0, 147, 99), (0, 154, 0), (0, 155, 1), (0, 156, 1), (0, 157, 0), (0, 158, 0))
     rejected = (
         (0, 136, 9),
         (0, 148, 0),
@@ -935,6 +936,10 @@ def test_codex_version_policy_preserves_legacy_range_and_exact_compatibility_pin
         (0, 157, 1),
         (0, 1571, 0),
         (1, 157, 0),
+        (0, 158, 1),
+        (0, 159, 0),
+        (0, 1581, 0),
+        (1, 158, 0),
     )
 
     assert all(ffs_installer.codex_version_is_supported(version) for version in accepted)
@@ -949,13 +954,15 @@ def test_codex_version_policy_preserves_legacy_range_and_exact_compatibility_pin
         "codex-cli 0.154.0-dev",
         "codex-cli 0.157.0.1",
         "codex-cli 0.157.0-dev",
+        "codex-cli 0.158.0.1",
+        "codex-cli 0.158.0-dev",
     ),
 )
 def test_parse_cli_version_rejects_malformed_or_suffixed_exact_compatibility_versions(output: str) -> None:
     assert ffs_installer.parse_cli_version(output) is None
 
 
-@pytest.mark.parametrize("version", ("0.154.0", "0.155.1", "0.156.1", "0.157.0"))
+@pytest.mark.parametrize("version", ("0.154.0", "0.155.1", "0.156.1", "0.157.0", "0.158.0"))
 def test_doctor_accepts_exact_codex_compatibility_pins(tmp_path: Path, version: str) -> None:
     assert run_setup(tmp_path, "--scope", "user").returncode == 0
     fake_bin = tmp_path / "bin"
@@ -982,6 +989,55 @@ def test_doctor_accepts_exact_codex_compatibility_pins(tmp_path: Path, version: 
     report = json.loads(result.stdout)
     assert result.returncode == 0
     assert any(check["id"] == "codex-cli-version" and check["status"] == "pass" for check in report["checks"])
+
+
+NON_CANONICAL_CODEX_VERSIONS = (
+    "0.158.00",
+    "00.158.0",
+    "0.157.00",
+    "0.154.00",
+    "0.155.01",
+    "0.156.01",
+    "0.0158.0",
+    "0.147.00",
+    "0.0147.0",
+    "00.147.0",
+    "0.0137.0",
+)
+
+
+@pytest.mark.parametrize("version", NON_CANONICAL_CODEX_VERSIONS)
+def test_parse_cli_version_rejects_zero_padded_components(version: str) -> None:
+    assert ffs_installer.parse_cli_version(f"codex-cli {version}") is None
+
+
+@pytest.mark.parametrize("version", ("0.158.00", "00.158.0", "0.157.00", "0.147.00"))
+def test_doctor_rejects_zero_padded_codex_version_spellings(tmp_path: Path, version: str) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "codex"
+    fake.write_text(
+        f"#!/usr/bin/env bash\n"
+        f"if [ \"$1\" = \"--version\" ]; then\n"
+        f"  echo 'codex-cli {version}'\n"
+        f"elif [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then\n"
+        f"  echo '--strict-config --ignore-user-config --ignore-rules --sandbox --add-dir --disable --dangerously-bypass-hook-trust'\n"
+        f"fi\n"
+    )
+    fake.chmod(0o755)
+
+    result = run_setup(
+        tmp_path,
+        "--doctor",
+        "--scope",
+        "user",
+        "--json",
+        extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+    report = json.loads(result.stdout)
+    assert result.returncode == 1
+    assert any(check["id"] == "codex-cli-version" and check["status"] == "fail" for check in report["checks"])
 
 
 def test_doctor_reports_ac009_model_routing_advisory_checks(tmp_path: Path) -> None:
