@@ -1,11 +1,15 @@
 """Production managed callback reaches Supervisor with a qualified Codex tuple."""
 from __future__ import annotations
 
+from dataclasses import asdict
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -158,7 +162,7 @@ def _qualified_host(tmp_path, monkeypatch, *, fake_script: str | None = None, on
             "gsd_manifest_sha256": hashlib.sha256(b"manifest").hexdigest(),
         }
         policy = host_capabilities.codex_closed_environment(
-            home, home / "ffs-codex-policy-tmp", fake, _binary_chain(fake), gsd_environment,
+            home, Path("/tmp").resolve() / "ffs-codex-policy-tmp", fake, _binary_chain(fake), gsd_environment,
         )
         qualified = QualifiedCodexRuntime(
             binary=tuple(sorted(_binary_chain(fake).items())),
@@ -445,6 +449,81 @@ def test_resumed_outer_run_that_was_qualified_but_never_launched_reproduces_the_
     assert results[0][1] == results[1][1], "the prompt drifted across resume"
     assert len(contract_hashes) >= 2
     assert contract_hashes[0] == contract_hashes[-1], "final_contract_hash drifted across resume"
+
+
+def test_resumed_session_reaps_only_provably_dead_recorded_private_tmpdirs(tmp_path, monkeypatch):
+    """F43: a supervisor killed mid-run leaves its launch's private TMPDIR
+    behind. The next session for the run reaps it only when the recorded owner
+    and launch are provably dead, never an unrecorded directory; the launch it
+    then binds (the same seam every worker uses) gets a fresh recorded TMPDIR
+    that is a sandbox writable root and is gone, record included, on release."""
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    request = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
+    private_root = Path("/tmp").resolve()
+    orphan = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=private_root))
+    foreign = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=private_root))
+    killed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owner = ProcessIdentity.from_pid(killed.pid)
+    killed.kill()
+    killed.wait()
+    observed = {}
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        from run_state.supervisor import prepare_managed_codex_session
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        records = Path(context.evidence_root) / "host" / "private-tmp"
+        records.mkdir(mode=0o700, parents=True)
+        info = orphan.stat()
+        (records / (orphan.name + ".json")).write_text(json.dumps({
+            "schema": "ffs.codex-private-tmpdir/v1", "path": str(orphan),
+            "device": info.st_dev, "inode": info.st_ino,
+            "activity_id": "never-launched", "owner": asdict(owner),
+        }))
+        session = prepare_managed_codex_session(
+            store, token, context, command=("/gsd-plan-phase", "1"),
+            request_key="reap-orphans", host_request=request, upstream_runtime=upstream_runtime,
+        )
+        try:
+            observed["orphan_survived"] = os.path.lexists(orphan)
+            outer, adapter = session.prepare_outer()
+            material = outer.codex_material
+            observed["tmpdir"] = material.execution_environment()["TMPDIR"]
+            observed["argv"] = material.argv
+            observed["records"] = sorted(path.name for path in records.iterdir())
+            adapter.release_launch_material(material)
+            observed["released"] = (os.path.lexists(material.temporary_dir),
+                                    sorted(path.name for path in records.iterdir()))
+        finally:
+            session.close(None, None, None)
+        return 0
+
+    try:
+        assert prepare_managed_run(
+            objective="reap orphans", state_root=authority,
+            selection_manifest=env["FFS_SELECTION_MANIFEST"],
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+            request_key="reap-orphans", command=("/gsd-plan-phase", "1"),
+            dispatch_limit=3, token_limit=1000, on_ready=execute,
+            run_id="reap-orphans", activity="plan", scope="1",
+            host_request=request,
+        ) == 0
+        assert observed["orphan_survived"] is False
+        assert foreign.is_dir()
+        tmpdir = Path(observed["tmpdir"])
+        assert tmpdir.parent == private_root
+        assert observed["argv"][observed["argv"].index("--add-dir") + 1] == str(tmpdir)
+        assert observed["argv"].index("--add-dir") + 2 == observed["argv"].index("--cd")
+        assert observed["records"] == [tmpdir.name + ".json"]
+        assert observed["released"] == (False, [])
+    finally:
+        shutil.rmtree(orphan, ignore_errors=True)
+        shutil.rmtree(foreign, ignore_errors=True)
 
 
 def _retain_outer(store, token, context, *, launch):
