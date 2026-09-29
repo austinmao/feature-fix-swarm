@@ -299,7 +299,12 @@ state dir, `HOME`, the primary repository or its common Git dir
 `<evidence>/host/private-tmp/` and removed when its launch settles. After a
 supervisor crash, the next session for the run removes only recorded
 directories whose recording supervisor and launches are provably dead
-(`lib/run_state/codex_host.py`, `reap_orphan_private_tmpdirs`).
+(`lib/run_state/codex_host.py`, `reap_orphan_private_tmpdirs`). A launch
+counts as dead only when its child and that child's whole process group are
+gone. Platform limit: a descendant that calls `setsid()` or `setpgid()`
+leaves that group, and macOS has no descendant containment, so such an
+escaped descendant is outside every FFS containment and may lose its
+`TMPDIR` after the launch settles.
 
 **Refusals.** The wrapper's own argument checks print a plain message on
 stderr and exit 2. Every refusal from `run_state.cli` prints one JSON object

@@ -48,6 +48,12 @@ all skills.
     undecidable directories are left alone. A record name that already
     exists is refused (`PRIVATE_TMPDIR_RECORD_UNAVAILABLE`) and left as
     found.
+  Every release path (worker settle, session close including the
+  orchestrator, never-launched material, resume reap) uses this one proof.
+  Platform limit: a descendant that calls `setsid()` or `setpgid()` leaves
+  the launch's process group, so the group check cannot see it, and macOS
+  has no descendant containment; such an escaped descendant is outside
+  every FFS containment and may lose its `TMPDIR` after the launch settles.
   The candidate-chain check is unchanged and stays strict.
 - Compatibility: the qualified environment policy now binds `TMPDIR` under
   the private root; the qualification observer and the adapter compute it

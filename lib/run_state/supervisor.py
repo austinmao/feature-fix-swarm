@@ -2623,14 +2623,16 @@ class Supervisor:
             )
             # Kept until both settle: release and feedback are idempotent, so a replay retries them.
             self._shared_reservations.pop(handle.intent_id, None)
-        if handle.codex_material is not None and _process_group_gone(handle.identity.pid):
-            # F43: the child and every process in its group (Codex runs under
-            # the auth guard) have exited, so its private TMPDIR goes now (every
-            # wave worker settles here).  Otherwise, or on a refusal, the dir
-            # and its record stay for session close or the resume-time reaper.
+        if handle.codex_material is not None:
+            # F43: every wave worker settles here.  Its private TMPDIR goes now
+            # only through the one durable liveness proof (acknowledged child
+            # DEAD and its process group gone; Codex runs under the auth guard).
+            # Otherwise, or on any failure, the dir and its record stay for
+            # session close or the next session's reaper.
             try:
-                CodexHostAdapter.release_launch_material(handle.codex_material)
-            except CodexHostRefused:
+                if _launches_provably_dead(self.store, handle.activity_id):
+                    CodexHostAdapter.release_launch_material(handle.codex_material)
+            except Exception:
                 pass
         handle.recorded = True
         return handle.result
@@ -3685,16 +3687,12 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             socket_root.rmdir()
         except OSError:
             pass
-        if (adapter is not None and material is not None and handle is not None
-                and handle.process is not None and handle.process.poll() is not None):
-            try:
-                adapter.release_launch_material(material)
-            except Exception:
-                # The verified directory is retained for finalization review.
-                pass
-        # F43: every material this session bound (outer and wave workers) whose
-        # launch was never permitted or has provably exited releases its private
-        # TMPDIR now; a live or undecidable launch keeps it for the resume reaper.
+        # F43: every material this session bound (the outer included, which
+        # ``material`` names, and wave workers) releases its private TMPDIR only
+        # through the one durable liveness proof.  An exited monitor is not
+        # proof: Codex outlives a killed auth guard in its process group.  A
+        # live or undecidable launch keeps its dir and record for the next
+        # session's reaper.
         for activity_id, launch_material in bound:
             try:
                 if (os.path.lexists(launch_material.temporary_dir)
