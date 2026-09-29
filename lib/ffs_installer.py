@@ -2531,7 +2531,9 @@ def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) 
 
 
 def parse_cli_version(output: str) -> tuple[int, int, int] | None:
-    match = re.search(r"(?<!\S)(\d+)\.(\d+)\.(\d+)(?!\S)", output)
+    # Canonical ASCII decimal components only (0 or no leading zero): int()
+    # would otherwise read 0.158.00 and 00.158.0 as the exact 0.158.0 pin.
+    match = re.search(r"(?<!\S)(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?!\S)", output)
     return tuple(map(int, match.groups())) if match else None
 
 

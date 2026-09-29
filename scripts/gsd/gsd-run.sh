@@ -1462,7 +1462,9 @@ version_in_supported_codex_range() {
   IFS=. read -r major minor patch <<EOF
 $version
 EOF
-  case "$major:$minor:$patch" in *[!0-9:]*|::*|*::|*:) return 1 ;; esac
+  # Components must be canonical decimal (0 or no leading zero): `-eq` below
+  # reads 0.158.00 and 00.158.0 as the exact pin, so refuse them here.
+  case "$major:$minor:$patch" in *[!0-9:]*|::*|*::|*:|0[0-9]*:*|*:0[0-9]*) return 1 ;; esac
   { [ "$major" -eq 0 ] && [ "$minor" -ge 137 ] && [ "$minor" -lt 148 ]; } \
     || { [ "$major" -eq 0 ] && [ "$minor" -eq 154 ] && [ "$patch" -eq 0 ]; } \
     || { [ "$major" -eq 0 ] && [ "$minor" -eq 155 ] && [ "$patch" -eq 1 ]; } \
