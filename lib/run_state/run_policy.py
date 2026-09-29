@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
+from pathlib import PurePosixPath
 from typing import Mapping
 from contextlib import contextmanager
 
@@ -231,14 +232,34 @@ def _identifier_list(value: object, *, code: str, allow_empty: bool = False) -> 
     return tuple(sorted(values))
 
 
+def _runtime_read_roots(value: object, *, code: str) -> None:
+    """F42: the directories a command check's runtime may also read.
+
+    Only the shape is checked here (unique, absolute, normalized paths);
+    existence, canonical form and overlap are checked when the draft is
+    sealed and again when the check is launched.
+    """
+    if not isinstance(value, list) or not value or any(
+        not isinstance(item, str) or not item.startswith("/") or not item.isprintable()
+        or str(PurePosixPath(item)) != item or len(item.encode("utf-8")) > 4096
+        for item in value
+    ) or len(set(value)) != len(value):
+        raise RunPolicyRefused(code)
+
+
 def _validate_rule_list(value: object, *, code: str, required_key: str) -> tuple[dict, ...]:
     if not isinstance(value, list) or not value:
         raise RunPolicyRefused(code)
     seen: set[str] = set()
     rules: list[dict] = []
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"id", "kind", required_key}:
+        declared_roots = (required_key == "locator" and isinstance(item, dict)
+                          and item.get("kind") == "command" and "runtime_read_roots" in item)
+        allowed = {"id", "kind", required_key} | ({"runtime_read_roots"} if declared_roots else set())
+        if not isinstance(item, dict) or set(item) != allowed:
             raise RunPolicyRefused(code)
+        if declared_roots:
+            _runtime_read_roots(item["runtime_read_roots"], code=code)
         identifier = _identifier(item["id"], code=code)
         if identifier in seen:
             raise RunPolicyRefused(code)

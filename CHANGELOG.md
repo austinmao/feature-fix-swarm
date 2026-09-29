@@ -25,6 +25,32 @@ all skills.
   `--dangerously-bypass-hook-trust`. `0.158.1`, `0.159.0`, and every other
   untested 0.158.x or later release stay refused.
 
+### Fixed (2026-09-28, spec-014 Release C: F42 declared read roots for sealed checks)
+
+- A sealed check that runs a framework or Homebrew Python died with rc -6
+  because dyld could not load the framework's `Python` dylib (blocked by
+  sandbox): the check's runtime could read only the executable's directory,
+  `/usr/lib` and `/System/Library`, not the framework, its standard library
+  or the site-packages holding pytest (live M3 attempt 16). A `command`
+  check in the acceptance draft may now declare `runtime_read_roots`, a
+  list of absolute directories its runtime may also read. The list is
+  sealed into the acceptance and is part of the check material and its
+  hash, so a replay is bound to it. Each root must be an existing,
+  canonical directory, not a symlink and not repeated
+  (`LOCAL_CHECK_READ_ROOT_INVALID`; a malformed list is
+  `POLICY_DRAFT_INVALID`), and must not overlap HOME, the state dir, the
+  primary repository or its common git dir (`LOCAL_CHECK_CONFINEMENT_INVALID`),
+  checked when the draft is sealed and again, with the check's workspace,
+  at launch. Fork stays denied and exec stays limited to the exact
+  executable, so a framework Python's `bin/pythonX.Y`, which only re-execs
+  `Resources/Python.app/Contents/MacOS/Python`, must be named by that
+  binary. The check's bound environment now also sets `TMPDIR` to its
+  scratch directory, so pytest's `tmp_path` no longer falls back to the
+  read-only working directory. Without the field a check's runtime roots
+  and sealed material are exactly as before.
+- Review round 1: root overlap is also tested by filesystem identity, so an alternate-case or symlink spelling of HOME or another protected root is refused; any registered workspace, primary or common git dir (of any run, re-read at launch) and the system temp dir are blocked too; and a RuntimeError or ValueError from path handling is `LOCAL_CHECK_READ_ROOT_INVALID`.
+- Review round 2: an unusable system temp dir is `LOCAL_CHECK_CONFINEMENT_UNAVAILABLE` at seal and launch, not an untyped error, and the protected paths' identities are read once per validation, so N declared roots against M protected paths cost N + M stat walks, not N * M.
+
 ### Fixed (2026-09-28, spec-014 Release C: F41 sandboxed wave bridge is still the recorded requester)
 
 - Under Codex 0.157.0's macOS seatbelt (workspace-write) the wave bridge
