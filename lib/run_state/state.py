@@ -4431,19 +4431,13 @@ class ControlStore:
         """F42: every declared runtime read root is a real, canonical directory
         overlapping no protected root when the draft is sealed; launch checks
         again with the check's own workspace."""
-        from .local_check_runtime import LocalCheckRefused, validate_runtime_read_roots
+        from .local_check_runtime import LocalCheckRefused, protected_roots_tx, validate_runtime_read_roots
 
         declared = [check["runtime_read_roots"] for criterion in material["criteria"]
                     for check in criterion["checks"] if "runtime_read_roots" in check]
         if not declared:
             return
-        blocked = {Path.home(), Path(self.db_path).parent, Path(token.workspace)}
-        for row in tx.execute("SELECT primary_root,common_dir FROM context_repositories WHERE repository_id=?",
-                              (token.repository_id,)).fetchall():
-            blocked.update((Path(row[0]), Path(row[1])))
-        for row in tx.execute("SELECT repository_path,common_dir FROM context_workspaces "
-                              "WHERE repository_id=? AND run_id=?", (token.repository_id, token.run_id)).fetchall():
-            blocked.update((Path(row[0]), Path(row[1])))
+        blocked = protected_roots_tx(tx) | {Path(self.db_path).parent, Path(token.workspace)}
         try:
             for roots in declared:
                 validate_runtime_read_roots(roots, blocked=tuple(blocked))

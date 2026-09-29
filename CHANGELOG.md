@@ -31,6 +31,7 @@ all skills.
   scratch directory, so pytest's `tmp_path` no longer falls back to the
   read-only working directory. Without the field a check's runtime roots
   and sealed material are exactly as before.
+- Review round 1: root overlap is also tested by filesystem identity, so an alternate-case or symlink spelling of HOME or another protected root is refused; any registered workspace, primary or common git dir (of any run, re-read at launch) and the system temp dir are blocked too; and a RuntimeError or ValueError from path handling is `LOCAL_CHECK_READ_ROOT_INVALID`.
 
 ### Fixed (2026-09-28, spec-014 Release C: F41 sandboxed wave bridge is still the recorded requester)
 

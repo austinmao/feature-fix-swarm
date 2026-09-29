@@ -171,8 +171,39 @@ def sealed_check_material(*, sealed: object, acceptance_hash: str, check_id: str
     )
 
 
+def _identity(path) -> tuple[int, int] | None:
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _holds(outer: Path, inner: Path) -> bool:
+    """``outer`` is or contains ``inner`` on the filesystem: some trailing
+    part of ``inner``, looked up under ``outer``, is ``inner`` itself. This
+    catches what a lexical test misses (another case on a case-insensitive
+    volume, a symlink or firmlink spelling). A missing path never matches."""
+    target, parts = _identity(inner), inner.parts[1:]
+    return target is not None and any(
+        _identity(outer.joinpath(*parts[index:])) == target for index in range(len(parts) + 1))
+
+
 def _overlap(first: Path, second: Path) -> bool:
-    return first == second or first in second.parents or second in first.parents
+    return (first == second or first in second.parents or second in first.parents
+            or _holds(first, second) or _holds(second, first))
+
+
+def protected_roots_tx(tx) -> set[Path]:
+    """F42: roots no declared read root may overlap, beyond the caller's own:
+    HOME, the system temp dir (every check's scratch parent) and every
+    registered primary, common git dir and workspace, of any run."""
+    blocked = {Path.home(), Path(tempfile.gettempdir()).resolve()}
+    for row in tx.execute("SELECT primary_root,common_dir FROM context_repositories").fetchall():
+        blocked.update(map(Path, row))
+    for row in tx.execute("SELECT path,repository_path,common_dir FROM context_workspaces").fetchall():
+        blocked.update(map(Path, row))
+    return blocked
 
 
 def validate_runtime_read_roots(roots, *, blocked) -> tuple[Path, ...]:
@@ -180,7 +211,8 @@ def validate_runtime_read_roots(roots, *, blocked) -> tuple[Path, ...]:
 
     A root must be absolute, exist, be a directory and already be canonical
     (no symlink anywhere in it), must not repeat, and must not overlap any
-    ``blocked`` root (HOME, state, primary, common dir, artifact).
+    ``blocked`` root (HOME, state, primary, common dir, artifact), lexically
+    or by filesystem identity.
     """
     paths: list[Path] = []
     for root in roots:
@@ -189,7 +221,7 @@ def validate_runtime_read_roots(roots, *, blocked) -> tuple[Path, ...]:
             if (not isinstance(root, str) or not path.is_absolute() or str(path) != root
                     or path.resolve(strict=True) != path or not path.is_dir() or path in paths):
                 raise LocalCheckRefused("LOCAL_CHECK_READ_ROOT_INVALID")
-        except (OSError, TypeError) as error:
+        except (OSError, TypeError, RuntimeError, ValueError) as error:
             raise LocalCheckRefused("LOCAL_CHECK_READ_ROOT_INVALID") from error
         paths.append(path)
     if any(_overlap(path, Path(other)) for path in paths for other in blocked):
@@ -226,6 +258,8 @@ def build_confined_local_argv(store, token, activity_id: str, material: LocalChe
     with store.read_transaction() as tx:
         child = tx.execute("SELECT * FROM authority_child_bindings WHERE activity_id=?", (activity_id,)).fetchone()
         workspace = tx.execute("SELECT path,state,generation,created_by_ffs,repository_path,common_dir FROM context_workspaces WHERE preparation_id=?", (material.workspace_preparation_id,)).fetchone()
+        # Re-read at launch: workspaces registered after sealing are blocked too.
+        protected = protected_roots_tx(tx) if material.runtime_read_roots else set()
     if (child is None or workspace is None or child["workspace_binding"] != material.workspace
             or workspace["path"] != material.workspace or workspace["state"] != "ready"
             or not workspace["created_by_ffs"] or workspace["generation"] != token.generation
@@ -236,7 +270,7 @@ def build_confined_local_argv(store, token, activity_id: str, material: LocalChe
     try:
         common = Path(workspace['common_dir']).resolve(strict=True)
         declared = validate_runtime_read_roots(
-            material.runtime_read_roots, blocked=(primary, state, common, Path.home(), artifact))
+            material.runtime_read_roots, blocked=(primary, state, common, Path.home(), artifact, *protected))
         runtime = tuple(dict.fromkeys((Path(material.executable).parent, Path("/usr/lib"),
                                        Path("/System/Library"), *declared)))
         if any(not root.is_dir() for root in runtime):
@@ -246,7 +280,8 @@ def build_confined_local_argv(store, token, activity_id: str, material: LocalChe
         if any(_overlap(artifact, blocked) for blocked in (primary, state, common)):
             raise LocalCheckRefused('LOCAL_CHECK_CONFINEMENT_INVALID')
         scratch = Path(tempfile.mkdtemp(prefix="ffs-local-check-")).resolve(strict=True)
-        if any(_overlap(scratch, blocked) for blocked in (artifact, primary, state, common, Path.home())):
+        if (any(_overlap(scratch, blocked) for blocked in (artifact, primary, state, common, Path.home()))
+                or any(_overlap(root, scratch.parent) for root in declared)):
             raise LocalCheckRefused("LOCAL_CHECK_CONFINEMENT_INVALID")
     except OSError as error:
         raise LocalCheckRefused("LOCAL_CHECK_CONFINEMENT_UNAVAILABLE") from error
