@@ -145,7 +145,7 @@ def test_explicit_gsd_additions_bind_the_same_policy_as_the_closed_host_environm
     monkeypatch.setattr(observer._shared, "current_supervisor_identity", lambda: {"fixture": True})
     record = observer.publish_qualification_results(plan, _results(plan))
     expected = observer._shared.codex_closed_environment(
-        runtime, runtime / "different-invocation-tmp", binary,
+        runtime, observer._shared.codex_private_tmp_root() / "different-invocation-tmp", binary,
         observer.executable_chain(binary), additions,
     )
     assert record["observation"]["environment_sha256"] == observer._shared.codex_environment_policy_hash(expected)

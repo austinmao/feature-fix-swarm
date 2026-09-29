@@ -29,7 +29,10 @@ from host_capabilities import (
     ARTIFACT_REVIEW_CONTEXT_LIMIT, ArtifactReviewMaterial, CapabilityError,
     validate_artifact_review_material,
 )
-from .codex_host import CodexLaunchMaterial, TelemetryRefused, parse_codex_telemetry
+from .codex_host import (
+    CodexHostAdapter, CodexHostRefused, CodexLaunchMaterial, TelemetryRefused, parse_codex_telemetry,
+    reap_orphan_private_tmpdirs,
+)
 from .claude_host import (
     ClaudeLaunchMaterial, ClaudeHostRefused, ClaudeTelemetryRefused,
     parse_claude_telemetry,
@@ -1508,6 +1511,13 @@ class Supervisor:
                 "auth_identity": [request.codex_material.auth_device,
                                   request.codex_material.auth_inode],
             }
+            # F43: persisted with the reservation, this is the reaper's authority
+            # for the launch's private TMPDIR record.
+            material["codex_private_tmpdir"] = {
+                "path": request.codex_material.temporary_dir,
+                "device": request.codex_material.temporary_device,
+                "inode": request.codex_material.temporary_inode,
+            }
         if request.claude_material is not None:
             material["claude_material"] = {
                 "runtime_sha256": request.claude_material.runtime_sha256,
@@ -2613,6 +2623,17 @@ class Supervisor:
             )
             # Kept until both settle: release and feedback are idempotent, so a replay retries them.
             self._shared_reservations.pop(handle.intent_id, None)
+        if handle.codex_material is not None:
+            # F43: every wave worker settles here.  Its private TMPDIR goes now
+            # only through the one durable liveness proof (acknowledged child
+            # DEAD and its process group gone; Codex runs under the auth guard).
+            # Otherwise, or on any failure, the dir and its record stay for
+            # session close or the next session's reaper.
+            try:
+                if _launches_provably_dead(self.store, handle.activity_id):
+                    CodexHostAdapter.release_launch_material(handle.codex_material)
+            except Exception:
+                pass
         handle.recorded = True
         return handle.result
 
@@ -3376,6 +3397,71 @@ def _retained_runtime_refusal(launch, *, outer: bool) -> str:
     return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
 
 
+def _process_group_gone(pgid: int) -> bool:
+    """True only when process group ``pgid`` has no member left (ESRCH).
+
+    Every supervised child starts a new session, so its pid is its group id.
+    The acknowledged child of a Codex launch is the auth guard; Codex and its
+    tools run in the guard's group and outlive a SIGKILLed guard.  Any other
+    outcome (a live member, EPERM) is not proof.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _launches_provably_dead(store, activity_id: str) -> bool:
+    """True only when no launch of ``activity_id`` can still be using its TMPDIR.
+
+    An intent with an acknowledged child counts only when that child probes
+    DEAD and its whole process group is gone, whatever ``permit_id`` says: a
+    terminal activity transition clears ``permit_id`` on launches that ran.
+    An intent with no acknowledged child counts as never run only when no
+    permit was ever issued for it.  The durable proof is the
+    ``launch-release-clock:<intent>`` event, written in the same transaction
+    that issues every permit (``authorize_child``, ``authorize_launch_cohort``)
+    and never cleared.  No intent at all means the material never reached a
+    launch.
+    """
+    with store.read_transaction() as tx:
+        rows = tx.execute(
+            "SELECT id,permit_id,child_host_id,child_boot_id,child_pid,child_start_token "
+            "FROM authority_launch_intents WHERE activity_id=?", (activity_id,),
+        ).fetchall()
+        released = {row["idempotency_key"].split(":", 1)[1] for row in tx.execute(
+            "SELECT idempotency_key FROM authority_event_keys "
+            "WHERE activity_id=? AND idempotency_key LIKE 'launch-release-clock:%'", (activity_id,),
+        ).fetchall()}
+    for row in rows:
+        if row["child_pid"] is not None:
+            child = ProcessIdentity(row["child_host_id"], row["child_boot_id"], row["child_pid"],
+                                    row["child_start_token"])
+            if probe_identity(child) != DEAD or not _process_group_gone(row["child_pid"]):
+                return False
+        elif row["permit_id"] is not None or row["id"] in released:
+            return False
+    return True
+
+
+def _recorded_tmpdir_provably_released(store, activity_id: str, path: str, identity: tuple[int, int]) -> bool:
+    """Authority for one reaper record: a durable dispatch request of
+    ``activity_id`` bound exactly this TMPDIR (path, st_dev, st_ino), reserved in
+    the same transaction as its launch, and every launch of it is dead."""
+    with store.read_transaction() as tx:
+        rows = tx.execute(
+            "SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+            "WHERE k.activity_id=? AND k.idempotency_key LIKE 'dispatch-request:%'", (activity_id,),
+        ).fetchall()
+    expected = {"path": path, "device": identity[0], "inode": identity[1]}
+    bound = any(json.loads(row["payload"])["data"].get("request", {}).get("codex_private_tmpdir") == expected
+                for row in rows)
+    return bound and _launches_provably_dead(store, activity_id)
+
+
 def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
                                   upstream_runtime=None, model_request=None, review_catalog=None):
     """Qualification seams, worker channel and outer contract for one Codex host run."""
@@ -3398,6 +3484,12 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     root, operation, child_key, ready = _managed_inventory_workspace(store, token, context, request_key)
     host_evidence = Path(context.evidence_root) / "host"
     runtime_root = host_evidence / "runtimes"
+    # F43: every Codex launch records its private TMPDIR here.  A supervisor
+    # killed mid-run leaves them behind; resume reaps only the provably dead.
+    tmp_records = host_evidence / "private-tmp"
+    bound: list[tuple[str, CodexLaunchMaterial]] = []
+    reap_orphan_private_tmpdirs(tmp_records, lambda activity_id, path, identity:
+                                _recorded_tmpdir_provably_released(store, activity_id, path, identity))
     outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
                                                  child_key=child_key) or str(uuid.uuid4()))
     outer_home = runtime_root / outer_activity_id
@@ -3463,6 +3555,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             )
             adapter = CodexHostAdapter(
                 bundle.qualified_runtime, host_request.binary, str(cli["version"]),
+                state_root=Path(store.db_path).parent, tmp_records=tmp_records, activity_id=activity_id,
             )
         except RetainedRuntimeNotReusable as error:
             raise SupervisorRefused(_retained_runtime_refusal(
@@ -3480,6 +3573,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             )
         except (CapabilityError, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
+        bound.append((qualified.activity.id, launch_material))
         return DispatchRequest(
             activity_id=qualified.activity.id, request_key=launch_request_key,
             command=launch_material.argv, workspace=str(preparation.path),
@@ -3604,12 +3698,18 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             socket_root.rmdir()
         except OSError:
             pass
-        if (adapter is not None and material is not None and handle is not None
-                and handle.process is not None and handle.process.poll() is not None):
+        # F43: every material this session bound (the outer included, which
+        # ``material`` names, and wave workers) releases its private TMPDIR only
+        # through the one durable liveness proof.  An exited monitor is not
+        # proof: Codex outlives a killed auth guard in its process group.  A
+        # live or undecidable launch keeps its dir and record for the next
+        # session's reaper.
+        for activity_id, launch_material in bound:
             try:
-                adapter.release_launch_material(material)
+                if (os.path.lexists(launch_material.temporary_dir)
+                        and _launches_provably_dead(store, activity_id)):
+                    CodexHostAdapter.release_launch_material(launch_material)
             except Exception:
-                # The verified directory is retained for finalization review.
                 pass
 
     catalog_path = catalog_sha256 = None

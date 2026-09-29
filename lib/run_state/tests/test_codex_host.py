@@ -19,6 +19,9 @@ from host_capabilities import (
 from run_state.codex_host import CodexHostAdapter, CodexHostRefused, TelemetryRefused, parse_codex_telemetry
 import run_state.codex_host as codex_host
 
+# F43: every managed launch TMPDIR is a private leaf directly under resolved /tmp.
+PRIVATE_TMP_ROOT = Path("/tmp").resolve()
+
 
 USAGE = {
     "input_tokens": 7,
@@ -46,7 +49,7 @@ def _runtime(tmp_path: Path) -> tuple[QualifiedCodexRuntime, Path, Path]:
     auth = home / "auth.json"; auth.write_text("{}\n"); auth.chmod(0o600)
     workspace_info = workspace.stat()
     policy_environment = codex_closed_environment(
-        home, home / "ffs-codex-policy-tmp", binary, {"launcher_sha256": "a" * 64},
+        home, PRIVATE_TMP_ROOT / "ffs-codex-policy-tmp", binary, {"launcher_sha256": "a" * 64},
     )
     runtime = QualifiedCodexRuntime(
         binary=(("launcher_sha256", "a" * 64),),
@@ -133,12 +136,12 @@ def test_adapter_builds_the_exact_closed_invocation(monkeypatch, tmp_path: Path)
         "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "--disable", "multi_agent",
         "--disable", "multi_agent_v2", "--disable", "plugins", "--disable", "remote_plugin",
         "--disable", "recommended_plugins", "--disable", "plugin_sharing", "--disable", "apps",
-        "--cd", str(workspace), "--color", "never", "do work",
+        "--add-dir", observed["env"]["TMPDIR"], "--cd", str(workspace), "--color", "never", "do work",
     )
     assert observed["cwd"] == str(workspace) and observed["stdin"] is subprocess.DEVNULL
     assert observed["env"]["HOME"] == str(tmp_path / "home")
     assert observed["env"]["CODEX_HOME"] == str(tmp_path / "home")
-    assert Path(observed["env"]["TMPDIR"]).parent == tmp_path / "home"
+    assert Path(observed["env"]["TMPDIR"]).parent == PRIVATE_TMP_ROOT
     assert str(binary.parent) in observed["env"]["PATH"].split(":")
     assert set(observed["env"]) == {"HOME", "CODEX_HOME", "TMPDIR", "PATH", "LANG", "LC_ALL", "NO_COLOR"}
     assert not any("API_KEY" in key for key in observed["env"])
@@ -172,7 +175,7 @@ def test_adapter_binds_typed_gsd_environment_and_normalizes_admission_leaf(monke
     first_additions = _gsd_environment(tmp_path, "admission-one.json")
     second_additions = _gsd_environment(tmp_path, "admission-two.json")
     policy_environment = codex_host.codex_closed_environment(
-        tmp_path / "home", tmp_path / "home" / "ffs-codex-policy-tmp", binary,
+        tmp_path / "home", PRIVATE_TMP_ROOT / "ffs-codex-policy-tmp", binary,
         {"launcher_sha256": "a" * 64}, first_additions,
     )
     runtime = replace(runtime, observation=(("environment_sha256", codex_environment_policy_hash(policy_environment)),))
@@ -203,7 +206,7 @@ def test_launch_env_carries_scope_and_policy_binds_it(monkeypatch, tmp_path: Pat
     additions = _gsd_environment(tmp_path)
     scoped_additions = {**additions, "GSD_PROJECT": "demo-project"}
     policy_environment = codex_host.codex_closed_environment(
-        tmp_path / "home", tmp_path / "home" / "ffs-codex-policy-tmp", binary,
+        tmp_path / "home", PRIVATE_TMP_ROOT / "ffs-codex-policy-tmp", binary,
         {"launcher_sha256": "a" * 64}, scoped_additions,
     )
     runtime = replace(runtime, observation=(("environment_sha256", codex_environment_policy_hash(policy_environment)),))

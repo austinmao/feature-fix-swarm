@@ -245,14 +245,24 @@ def gsd_supervisor_environment_from_process() -> GsdSupervisorEnvironment | None
     return validate_gsd_supervisor_environment(values)
 
 
+def codex_private_tmp_root() -> Path:
+    """Parent of every managed Codex launch's private TMPDIR (F43).
+
+    Resolved ``/tmp`` sits outside the workspace, the FFS state dir (and the
+    staged runtime home inside it), HOME and the repository.  The launch adds
+    its leaf as a sandbox writable root, so tempfile never falls back to cwd.
+    """
+    return Path("/tmp").resolve()
+
+
 def codex_closed_environment(home: Path, tmpdir: Path, binary: Path,
                              chain: dict[str, str] | tuple[tuple[str, str], ...],
                              gsd_environment: object = None) -> dict[str, str]:
     """Build the one closed environment used by production Codex launches.
 
     ``tmpdir`` is a concrete invocation leaf.  The policy hash deliberately
-    canonicalizes it to its runtime-home parent, while the returned mapping
-    retains the leaf for the child process.
+    canonicalizes it to its parent (``codex_private_tmp_root()``), while the
+    returned mapping retains the leaf for the child process.
     """
     home = home.resolve()
     binary = binary.resolve()

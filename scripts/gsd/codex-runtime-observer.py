@@ -481,7 +481,7 @@ def preview_qualification_runtime(
     if prepare_observer_skill(runtime) != seed.skill_token:
         raise ValueError("qualification seed skill identity changed")
     environment = _shared.codex_closed_environment(
-        runtime, runtime / ".ffs-codex-policy-tmp", binary, executable_chain(binary),
+        runtime, _shared.codex_private_tmp_root() / ".ffs-codex-policy-tmp", binary, executable_chain(binary),
     )
     if gsd_environment is not None and callable(getattr(gsd_environment, "as_dict", None)):
         environment.update(gsd_environment.as_dict())
@@ -565,7 +565,7 @@ def prepare_qualification_plan(runtime: Path, binary: Path, worktree: Path, outp
         if not callable(getattr(gsd_environment, "as_dict", None)):
             raise ValueError("invalid GSD supervisor environment")
         production_environment = _shared.codex_closed_environment(
-            runtime, runtime / ".ffs-codex-policy-tmp", binary, executable_chain(binary),
+            runtime, _shared.codex_private_tmp_root() / ".ffs-codex-policy-tmp", binary, executable_chain(binary),
         )
         production_environment.update(gsd_environment.as_dict())
         _shared.preview_gsd_codex_environment_policy_hash(production_environment)
@@ -576,7 +576,7 @@ def prepare_qualification_plan(runtime: Path, binary: Path, worktree: Path, outp
             else gsd_environment
         )
         production_environment = _shared.codex_closed_environment(
-            runtime, runtime / ".ffs-codex-policy-tmp", binary, executable_chain(binary),
+            runtime, _shared.codex_private_tmp_root() / ".ffs-codex-policy-tmp", binary, executable_chain(binary),
             exact_gsd_environment,
         )
     admission_file = production_environment.get("FFS_SUPERVISED_ADMISSION_FILE")

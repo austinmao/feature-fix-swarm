@@ -164,7 +164,7 @@ def _fixture_host(tmp_path, monkeypatch):
             "gsd_manifest_sha256": hashlib.sha256(b"manifest").hexdigest(),
         }
         policy = host_capabilities.codex_closed_environment(
-            home, home / "ffs-codex-policy-tmp", fake, _binary_chain(fake), gsd_environment,
+            home, Path("/tmp").resolve() / "ffs-codex-policy-tmp", fake, _binary_chain(fake), gsd_environment,
         )
         qualified = QualifiedCodexRuntime(
             binary=tuple(sorted(_binary_chain(fake).items())),

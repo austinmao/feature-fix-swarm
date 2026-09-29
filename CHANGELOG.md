@@ -8,6 +8,66 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-29, spec-014 Release C: F43 private TMPDIR per managed Codex launch)
+
+- A managed Codex orchestrator ran pytest inside its workspace-write
+  sandbox. Its `TMPDIR` sat in the staged runtime home, which the sandbox
+  excludes, so Python fell back to the working directory and wrote
+  `pytest-of-<user>/` (with a self-referencing `*current` symlink) into the
+  workspace. The candidate chain then refused the run as
+  `FRONTEND_INTEGRATION_CHAIN_INVALID` (live M3 attempt 17). Now every
+  managed Codex launch, the orchestrator and each wave worker alike:
+  - gets one private 0700 `ffs-codex-*` directory directly under the
+    resolved `/tmp`. It is the launch's `TMPDIR` and its one extra sandbox
+    writable root (`--add-dir`, placed just before `--cd`). Both
+    `exclude_slash_tmp` and `exclude_tmpdir_env_var` stay true, so neither
+    `/tmp` nor `$TMPDIR` is granted wholesale;
+  - is refused with `PRIVATE_TMPDIR_UNSAFE` when that directory would
+    overlap the workspace, the FFS state dir, the runtime home, `HOME`, the
+    primary repository or its common Git dir. Overlap is checked by path and
+    by `(st_dev, st_ino)`, so another spelling of the same directory (a
+    case-insensitive volume, a firmlink) is caught too;
+  - records the directory (path, device, inode, activity and the recording
+    supervisor's process identity) under `<evidence>/host/private-tmp/`
+    before the launch, and removes the directory and its record when the
+    launch settles: the orchestrator when its session closes, as before, and
+    each wave worker in `Supervisor.finish`. Before this fix a worker's
+    directory was never removed. Material that was bound but never launched
+    (a refusal between bind and spawn, or a session that ends first) is
+    released when the session closes. A launch with an acknowledged child
+    counts as over only when that child probes dead and its whole process
+    group is gone (`killpg(pgid, 0)` reports no such group), whatever
+    `permit_id` says: Codex runs in the auth guard's group and outlives a
+    SIGKILLed guard, and a terminal activity transition clears `permit_id`
+    on launches that ran. A launch without an acknowledged child counts as
+    never run only when no permit was ever issued for it, proven by the
+    absence of its `launch-release-clock:<intent>` event, which is written
+    in the same transaction as every permit and never cleared;
+  - is reaped when a later session for the run starts (resume) only if its
+    record is backed by durable state: the recording supervisor probes dead,
+    the reserved dispatch request of that activity (persisted with the
+    launch) bound exactly this path, device and inode, every launch of the
+    activity is over or never ran as above, and the path still names the
+    recorded inode. Unrecorded, forged, replaced or
+    undecidable directories are left alone. A record name that already
+    exists is refused (`PRIVATE_TMPDIR_RECORD_UNAVAILABLE`) and left as
+    found.
+  Every release path (worker settle, session close including the
+  orchestrator, never-launched material, resume reap) uses this one proof.
+  Platform limit: a descendant that calls `setsid()` or `setpgid()` leaves
+  the launch's process group, so the group check cannot see it, and macOS
+  has no descendant containment; such an escaped descendant is outside
+  every FFS containment and may lose its `TMPDIR` after the launch settles.
+  The candidate-chain check is unchanged and stays strict.
+- Compatibility: the qualified environment policy now binds `TMPDIR` under
+  the private root; the qualification observer and the adapter compute it
+  with the same `codex_environment_policy_hash`. An observation retained
+  from an older build therefore refuses `ENVIRONMENT_POLICY_DRIFT` (surfaced
+  as `HOST_CAPABILITY_UNQUALIFIED`) instead of launching. Launch material
+  whose `TMPDIR` sits in the runtime home is refused on release with
+  `LAUNCH_MATERIAL_INVALID` and left in place. Qualification probes keep
+  their `TMPDIR` inside the worktree.
+
 ### Changed (2026-09-29, spec-014 Release C: Codex CLI 0.158.0 compatibility pin)
 
 - Codex CLI `0.158.0` is admitted as a fifth exact compatibility pin,
