@@ -1112,6 +1112,16 @@ EOF
   done
 }
 
+@test "Codex CLI refuses zero-padded spellings of admitted and in-range versions" {
+  for version in 0.158.00 00.158.0 0.157.00 0.154.00 0.155.01 0.156.01 0.0158.0 0.147.00 0.0147.0 00.147.0 0.0137.0; do
+    rm -f "$BATS_TEST_TMPDIR/codex.probed"
+    FFS_HOST=codex FAKE_CODEX_VERSION="$version" CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+      run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+    [ "$status" -eq 78 ]
+    [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  done
+}
+
 @test "Codex drive uses safe workspace sandbox and declared disabled network" {
   OPENAI_API_KEY=must-not-leak FFS_HOST=codex GSD_NETWORK_MODE=none \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \

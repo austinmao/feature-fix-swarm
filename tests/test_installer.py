@@ -991,6 +991,55 @@ def test_doctor_accepts_exact_codex_compatibility_pins(tmp_path: Path, version: 
     assert any(check["id"] == "codex-cli-version" and check["status"] == "pass" for check in report["checks"])
 
 
+NON_CANONICAL_CODEX_VERSIONS = (
+    "0.158.00",
+    "00.158.0",
+    "0.157.00",
+    "0.154.00",
+    "0.155.01",
+    "0.156.01",
+    "0.0158.0",
+    "0.147.00",
+    "0.0147.0",
+    "00.147.0",
+    "0.0137.0",
+)
+
+
+@pytest.mark.parametrize("version", NON_CANONICAL_CODEX_VERSIONS)
+def test_parse_cli_version_rejects_zero_padded_components(version: str) -> None:
+    assert ffs_installer.parse_cli_version(f"codex-cli {version}") is None
+
+
+@pytest.mark.parametrize("version", ("0.158.00", "00.158.0", "0.157.00", "0.147.00"))
+def test_doctor_rejects_zero_padded_codex_version_spellings(tmp_path: Path, version: str) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "codex"
+    fake.write_text(
+        f"#!/usr/bin/env bash\n"
+        f"if [ \"$1\" = \"--version\" ]; then\n"
+        f"  echo 'codex-cli {version}'\n"
+        f"elif [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then\n"
+        f"  echo '--strict-config --ignore-user-config --ignore-rules --sandbox --add-dir --disable --dangerously-bypass-hook-trust'\n"
+        f"fi\n"
+    )
+    fake.chmod(0o755)
+
+    result = run_setup(
+        tmp_path,
+        "--doctor",
+        "--scope",
+        "user",
+        "--json",
+        extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+    report = json.loads(result.stdout)
+    assert result.returncode == 1
+    assert any(check["id"] == "codex-cli-version" and check["status"] == "fail" for check in report["checks"])
+
+
 def test_doctor_reports_ac009_model_routing_advisory_checks(tmp_path: Path) -> None:
     """spec-004 AC-009: stale-bake surface + per-surface catalog/resolver
     warnings are advisory (never fail doctor) and the catalog check fires
