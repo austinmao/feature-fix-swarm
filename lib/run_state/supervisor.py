@@ -3417,23 +3417,34 @@ def _process_group_gone(pgid: int) -> bool:
 def _launches_provably_dead(store, activity_id: str) -> bool:
     """True only when no launch of ``activity_id`` can still be using its TMPDIR.
 
-    A child execs its launch environment only after its permit, and a permit
-    is durable before it is sent: an intent never permitted never ran.  A
-    permitted intent is proof only when its acknowledged child probes DEAD and
-    that child's whole process group is gone.  No intent at all means the
-    material never reached a launch.
+    An intent with an acknowledged child counts only when that child probes
+    DEAD and its whole process group is gone, whatever ``permit_id`` says: a
+    terminal activity transition clears ``permit_id`` on launches that ran.
+    An intent with no acknowledged child counts as never run only when no
+    permit was ever issued for it.  The durable proof is the
+    ``launch-release-clock:<intent>`` event, written in the same transaction
+    that issues every permit (``authorize_child``, ``authorize_launch_cohort``)
+    and never cleared.  No intent at all means the material never reached a
+    launch.
     """
     with store.read_transaction() as tx:
         rows = tx.execute(
-            "SELECT permit_id,child_host_id,child_boot_id,child_pid,child_start_token "
+            "SELECT id,permit_id,child_host_id,child_boot_id,child_pid,child_start_token "
             "FROM authority_launch_intents WHERE activity_id=?", (activity_id,),
         ).fetchall()
-    return all(
-        row["permit_id"] is None or (row["child_pid"] is not None and probe_identity(ProcessIdentity(
-            row["child_host_id"], row["child_boot_id"], row["child_pid"], row["child_start_token"],
-        )) == DEAD and _process_group_gone(row["child_pid"]))
-        for row in rows
-    )
+        released = {row["idempotency_key"].split(":", 1)[1] for row in tx.execute(
+            "SELECT idempotency_key FROM authority_event_keys "
+            "WHERE activity_id=? AND idempotency_key LIKE 'launch-release-clock:%'", (activity_id,),
+        ).fetchall()}
+    for row in rows:
+        if row["child_pid"] is not None:
+            child = ProcessIdentity(row["child_host_id"], row["child_boot_id"], row["child_pid"],
+                                    row["child_start_token"])
+            if probe_identity(child) != DEAD or not _process_group_gone(row["child_pid"]):
+                return False
+        elif row["permit_id"] is not None or row["id"] in released:
+            return False
+    return True
 
 
 def _recorded_tmpdir_provably_released(store, activity_id: str, path: str, identity: tuple[int, int]) -> bool:

@@ -34,17 +34,21 @@ all skills.
     each wave worker in `Supervisor.finish`. Before this fix a worker's
     directory was never removed. Material that was bound but never launched
     (a refusal between bind and spawn, or a session that ends first) is
-    released when the session closes. A launch counts as over only when its
-    acknowledged child probes dead and that child's whole process group is
-    gone (`killpg(pgid, 0)` reports no such group): Codex runs in the auth
-    guard's group and outlives a SIGKILLed guard;
+    released when the session closes. A launch with an acknowledged child
+    counts as over only when that child probes dead and its whole process
+    group is gone (`killpg(pgid, 0)` reports no such group), whatever
+    `permit_id` says: Codex runs in the auth guard's group and outlives a
+    SIGKILLed guard, and a terminal activity transition clears `permit_id`
+    on launches that ran. A launch without an acknowledged child counts as
+    never run only when no permit was ever issued for it, proven by the
+    absence of its `launch-release-clock:<intent>` event, which is written
+    in the same transaction as every permit and never cleared;
   - is reaped when a later session for the run starts (resume) only if its
     record is backed by durable state: the recording supervisor probes dead,
     the reserved dispatch request of that activity (persisted with the
     launch) bound exactly this path, device and inode, every launch of the
-    activity was either never permitted (a child execs its launch
-    environment only after its durable permit) or is over as above, and the
-    path still names the recorded inode. Unrecorded, forged, replaced or
+    activity is over or never ran as above, and the path still names the
+    recorded inode. Unrecorded, forged, replaced or
     undecidable directories are left alone. A record name that already
     exists is refused (`PRIVATE_TMPDIR_RECORD_UNAVAILABLE`) and left as
     found.
