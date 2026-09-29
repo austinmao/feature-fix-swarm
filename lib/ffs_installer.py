@@ -62,8 +62,8 @@ CODEX_MAX_VERSION = (0, 148, 0)
 # surface. An exact pin may occasionally be admitted on fake-binary unit and
 # bats coverage alone when the live probe cannot run (host auth failure,
 # etc.) -- see CHANGELOG.md for the per-pin evidence, or lack thereof.
-CODEX_EXACT_COMPATIBILITY_VERSIONS = {(0, 154, 0), (0, 155, 1), (0, 156, 1), (0, 157, 0)}
-CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1 / 0.156.1 / 0.157.0"
+CODEX_EXACT_COMPATIBILITY_VERSIONS = {(0, 154, 0), (0, 155, 1), (0, 156, 1), (0, 157, 0), (0, 158, 0)}
+CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1 / 0.156.1 / 0.157.0 / 0.158.0"
 
 # Runtime files the shipped scripts resolve at ~/.claude/lib/feature-fix-swarm/
 # (see plan-wall.sh / gsd-run.sh / qa-swarm.sh resolution ladders). Before
@@ -2531,7 +2531,9 @@ def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) 
 
 
 def parse_cli_version(output: str) -> tuple[int, int, int] | None:
-    match = re.search(r"(?<!\S)(\d+)\.(\d+)\.(\d+)(?!\S)", output)
+    # Canonical ASCII decimal components only (0 or no leading zero): int()
+    # would otherwise read 0.158.00 and 00.158.0 as the exact 0.158.0 pin.
+    match = re.search(r"(?<!\S)(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?!\S)", output)
     return tuple(map(int, match.groups())) if match else None
 
 
@@ -2570,7 +2572,7 @@ def add_codex_version_check(checks: list[dict[str, str]]) -> None:
             "codex-cli-version",
             "fail",
             f"Codex CLI {rendered} is outside supported range {CODEX_VERSION_POLICY}",
-            "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 / 0.155.1 / 0.156.1 are tested; exact 0.157.0 is admitted without a live probe (pending qualification)",
+            "install a supported Codex CLI release; 0.146.x, 0.147.x, and exact 0.154.0 / 0.155.1 / 0.156.1 / 0.158.0 are tested; exact 0.157.0 is admitted without a live probe (pending qualification)",
         )
         return
     # The doctor must not admit a binary solely from its release number.  Keep

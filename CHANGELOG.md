@@ -8,6 +8,23 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-09-29, spec-014 Release C: Codex CLI 0.158.0 compatibility pin)
+
+- Codex CLI `0.158.0` is admitted as a fifth exact compatibility pin,
+  alongside the existing `0.154.0`, `0.155.1`, `0.156.1`, and `0.157.0`
+  pins, on top of the unchanged `>=0.137.0,<0.148.0` range. The runner host
+  moved to `0.158.0`, so `setup.sh --doctor` reported `codex-cli-version`
+  as failed. `0.158.0` was admitted after a live probe of a read-only,
+  ephemeral Codex exec session under subscription auth, which returned the
+  probe marker. `codex exec --help` is byte-identical to `0.157.0` (and to
+  `0.154.0` through `0.156.1`), so every flag FFS passes is unchanged,
+  including `--add-dir`. The `UserPromptSubmit` hook seam and the
+  hook-suppression controls behave exactly as on `0.157.0`: hooks default on,
+  `-c features.hooks=false` and `--disable hooks` turn them off,
+  `--ignore-user-config` alone does not, and hooks stay untrusted without
+  `--dangerously-bypass-hook-trust`. `0.158.1`, `0.159.0`, and every other
+  untested 0.158.x or later release stay refused.
+
 ### Fixed (2026-09-28, spec-014 Release C: F42 declared read roots for sealed checks)
 
 - A sealed check that runs a framework or Homebrew Python died with rc -6
