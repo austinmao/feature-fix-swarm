@@ -3388,23 +3388,22 @@ def _retained_runtime_refusal(launch, *, outer: bool) -> str:
 
 
 def _launches_provably_dead(store, activity_id: str) -> bool:
-    """True only when every launch intent of ``activity_id`` has a DEAD child.
+    """True only when no launch of ``activity_id`` can still be using its TMPDIR.
 
-    An intent without an acknowledged child identity may still own a live
-    process, so it is never proof.  No intent at all means the launch material
-    existed only in the (separately proven dead) supervisor that built it.
+    A child execs its launch environment only after its permit, and a permit
+    is durable before it is sent: an intent never permitted never ran.  A
+    permitted intent is proof only when its acknowledged child probes DEAD.
+    No intent at all means the material never reached a launch.
     """
-    # ponytail: an intent reserved but never acknowledged keeps its TMPDIR until
-    # an operator removes it; add a spawn-state proof if such leftovers matter.
     with store.read_transaction() as tx:
         rows = tx.execute(
-            "SELECT child_host_id,child_boot_id,child_pid,child_start_token "
+            "SELECT permit_id,child_host_id,child_boot_id,child_pid,child_start_token "
             "FROM authority_launch_intents WHERE activity_id=?", (activity_id,),
         ).fetchall()
     return all(
-        row["child_pid"] is not None and probe_identity(ProcessIdentity(
+        row["permit_id"] is None or (row["child_pid"] is not None and probe_identity(ProcessIdentity(
             row["child_host_id"], row["child_boot_id"], row["child_pid"], row["child_start_token"],
-        )) == DEAD
+        )) == DEAD)
         for row in rows
     )
 
@@ -3434,6 +3433,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     # F43: every Codex launch records its private TMPDIR here.  A supervisor
     # killed mid-run leaves them behind; resume reaps only the provably dead.
     tmp_records = host_evidence / "private-tmp"
+    bound: list[tuple[str, CodexLaunchMaterial]] = []
     reap_orphan_private_tmpdirs(tmp_records, lambda activity_id: _launches_provably_dead(store, activity_id))
     outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
                                                  child_key=child_key) or str(uuid.uuid4()))
@@ -3518,6 +3518,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             )
         except (CapabilityError, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
+        bound.append((qualified.activity.id, launch_material))
         return DispatchRequest(
             activity_id=qualified.activity.id, request_key=launch_request_key,
             command=launch_material.argv, workspace=str(preparation.path),
@@ -3648,6 +3649,16 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                 adapter.release_launch_material(material)
             except Exception:
                 # The verified directory is retained for finalization review.
+                pass
+        # F43: every material this session bound (outer and wave workers) whose
+        # launch was never permitted or has provably exited releases its private
+        # TMPDIR now; a live or undecidable launch keeps it for the resume reaper.
+        for activity_id, launch_material in bound:
+            try:
+                if (os.path.lexists(launch_material.temporary_dir)
+                        and _launches_provably_dead(store, activity_id)):
+                    CodexHostAdapter.release_launch_material(launch_material)
+            except Exception:
                 pass
 
     catalog_path = catalog_sha256 = None

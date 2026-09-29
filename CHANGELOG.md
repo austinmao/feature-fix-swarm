@@ -32,12 +32,15 @@ all skills.
     before the launch, and removes the directory and its record when the
     launch settles: the orchestrator when its session closes, as before, and
     each wave worker in `Supervisor.finish`. Before this fix a worker's
-    directory was never removed;
+    directory was never removed. Material that was bound but never launched
+    (a refusal between bind and spawn, or a session that ends first) is
+    released when the session closes;
   - is reaped when a later session for the run starts (resume) only if its
     record says so: the recording supervisor probes dead, every launch of
-    its activity has a child identity that probes dead, and the path still
-    names the recorded inode. Unrecorded, replaced or undecidable
-    directories are left alone.
+    its activity was either never permitted (a child execs its launch
+    environment only after its durable permit) or has an acknowledged child
+    that probes dead, and the path still names the recorded inode.
+    Unrecorded, replaced or undecidable directories are left alone.
   The candidate-chain check is unchanged and stays strict.
 - Compatibility: the qualified environment policy now binds `TMPDIR` under
   the private root; the qualification observer and the adapter compute it
