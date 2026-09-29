@@ -261,11 +261,15 @@ def test_launch_is_provably_dead_only_when_every_intent_child_is_dead():
 
     dead, live = _dead_identity(), ProcessIdentity.current()
 
-    def store(*children):
+    def store(*children, permitted=True):
+        # A permit is durable before it is sent, and a child execs its launch
+        # environment (TMPDIR included) only after receiving one.
         rows = [{"child_host_id": None, "child_boot_id": None, "child_pid": None, "child_start_token": None}
                 if child is None else {"child_host_id": child.host_id, "child_boot_id": child.boot_id,
                                        "child_pid": child.pid, "child_start_token": child.start_token}
                 for child in children]
+        for row in rows:
+            row["permit_id"] = "permit" if permitted else None
         cursor = SimpleNamespace(fetchall=lambda: rows)
         return SimpleNamespace(read_transaction=lambda: contextlib.nullcontext(
             SimpleNamespace(execute=lambda _sql, _params: cursor)))
@@ -274,6 +278,11 @@ def test_launch_is_provably_dead_only_when_every_intent_child_is_dead():
     assert _launches_provably_dead(store(dead, dead), "settled") is True
     assert _launches_provably_dead(store(dead, live), "running") is False
     assert _launches_provably_dead(store(dead, None), "unacknowledged") is False
+    # Reserved but never permitted: no process ever ran with this launch's TMPDIR,
+    # even when a waiting child was acknowledged (a crash between reserve and permit).
+    assert _launches_provably_dead(store(None, permitted=False), "reserved") is True
+    assert _launches_provably_dead(store(live, permitted=False), "acknowledged-unpermitted") is True
+    assert _launches_provably_dead(store(dead, None, permitted=False), "never-permitted") is True
 
 
 def test_supervisor_finish_releases_a_settled_worker_launch(tmp_path, monkeypatch):

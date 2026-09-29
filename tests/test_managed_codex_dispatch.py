@@ -431,6 +431,8 @@ def test_resumed_outer_run_that_was_qualified_but_never_launched_reproduces_the_
             )
             req, _adapter = session.prepare_outer()
             results.append((session.outer_activity_id, req.codex_material.argv[-1]))
+            # Cleanup only: the never-launched material's private TMPDIR is released on close.
+            session.close(None, None, None)
         return 0
 
     assert prepare_managed_run(
@@ -524,6 +526,58 @@ def test_resumed_session_reaps_only_provably_dead_recorded_private_tmpdirs(tmp_p
     finally:
         shutil.rmtree(orphan, ignore_errors=True)
         shutil.rmtree(foreign, ignore_errors=True)
+
+
+def test_session_close_releases_launch_material_that_never_launched(tmp_path, monkeypatch):
+    """F43: launch material bound but never launched (a refusal between bind and
+    spawn, or a session that ends before its launch) must not leave its private
+    TMPDIR or record behind: close releases every bound material whose launch
+    was never permitted or has provably exited. Outer and wave workers share
+    this bind seam."""
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    request = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
+    observed = {}
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        from run_state.supervisor import prepare_managed_codex_session
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        session = prepare_managed_codex_session(
+            store, token, context, command=("/gsd-plan-phase", "1"),
+            request_key="never-launched", host_request=request, upstream_runtime=upstream_runtime,
+        )
+        records = Path(context.evidence_root) / "host" / "private-tmp"
+        material = None
+        try:
+            outer, _adapter = session.prepare_outer()
+            material = outer.codex_material
+            observed["bound"] = (os.path.isdir(material.temporary_dir),
+                                 sorted(path.name for path in records.iterdir()))
+        finally:
+            session.close(None, None, None)
+        observed["closed"] = (os.path.lexists(material.temporary_dir),
+                              sorted(path.name for path in records.iterdir()))
+        # Cleanup only, should the release under test not have happened.
+        shutil.rmtree(material.temporary_dir, ignore_errors=True)
+        observed["name"] = Path(material.temporary_dir).name + ".json"
+        return 0
+
+    assert prepare_managed_run(
+        objective="never launched", state_root=authority,
+        selection_manifest=env["FFS_SELECTION_MANIFEST"],
+        upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        request_key="never-launched", command=("/gsd-plan-phase", "1"),
+        dispatch_limit=3, token_limit=1000, on_ready=execute,
+        run_id="never-launched", activity="plan", scope="1",
+        host_request=request,
+    ) == 0
+    assert observed["bound"] == (True, [observed["name"]])
+    assert observed["closed"] == (False, [])
 
 
 def _retain_outer(store, token, context, *, launch):
