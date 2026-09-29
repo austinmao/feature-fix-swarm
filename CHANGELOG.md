@@ -34,13 +34,20 @@ all skills.
     each wave worker in `Supervisor.finish`. Before this fix a worker's
     directory was never removed. Material that was bound but never launched
     (a refusal between bind and spawn, or a session that ends first) is
-    released when the session closes;
+    released when the session closes. A launch counts as over only when its
+    acknowledged child probes dead and that child's whole process group is
+    gone (`killpg(pgid, 0)` reports no such group): Codex runs in the auth
+    guard's group and outlives a SIGKILLed guard;
   - is reaped when a later session for the run starts (resume) only if its
-    record says so: the recording supervisor probes dead, every launch of
-    its activity was either never permitted (a child execs its launch
-    environment only after its durable permit) or has an acknowledged child
-    that probes dead, and the path still names the recorded inode.
-    Unrecorded, replaced or undecidable directories are left alone.
+    record is backed by durable state: the recording supervisor probes dead,
+    the reserved dispatch request of that activity (persisted with the
+    launch) bound exactly this path, device and inode, every launch of the
+    activity was either never permitted (a child execs its launch
+    environment only after its durable permit) or is over as above, and the
+    path still names the recorded inode. Unrecorded, forged, replaced or
+    undecidable directories are left alone. A record name that already
+    exists is refused (`PRIVATE_TMPDIR_RECORD_UNAVAILABLE`) and left as
+    found.
   The candidate-chain check is unchanged and stays strict.
 - Compatibility: the qualified environment policy now binds `TMPDIR` under
   the private root; the qualification observer and the adapter compute it

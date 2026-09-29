@@ -249,14 +249,17 @@ def _discard(temporary: Path, record: Path | None) -> None:
         record.unlink(missing_ok=True)
 
 
-def reap_orphan_private_tmpdirs(records: Path, launch_dead: Callable[[str], bool]) -> tuple[str, ...]:
+def reap_orphan_private_tmpdirs(records: Path,
+                                launch_dead: Callable[[str, str, tuple[int, int]], bool]) -> tuple[str, ...]:
     """Remove recorded private TMPDIRs whose owner and launch are provably dead.
 
     A supervisor killed mid-run leaves its launches' directories behind.  Only
     a directory this module recorded is a candidate, and only when the
-    recording supervisor probes DEAD, ``launch_dead`` proves the launch dead,
-    and the path still names the recorded (st_dev, st_ino).  Unrecorded or
-    replaced directories are never touched.  Returns the reaped paths.
+    recording supervisor probes DEAD, ``launch_dead(activity_id, path,
+    (st_dev, st_ino))`` proves durable state bound exactly that directory to a
+    launch that is dead, and the path still names that identity.  A record is
+    only a claim: unrecorded, unbound or replaced directories are never touched.
+    Returns the reaped paths.
     """
     try:
         if records.is_symlink() or not records.is_dir():
@@ -275,7 +278,7 @@ def reap_orphan_private_tmpdirs(records: Path, launch_dead: Callable[[str], bool
                     or entry.name != path.name + ".json" or not path.name.startswith(_PRIVATE_TMP_PREFIX)
                     or any(type(value) is not int for value in identity)
                     or probe_identity(ProcessIdentity(**record["owner"])) != DEAD
-                    or not launch_dead(record["activity_id"])):
+                    or not launch_dead(record["activity_id"], str(path), identity)):
                 continue
         except Exception:
             # An unreadable, foreign or undecidable record is never proof.
@@ -443,15 +446,19 @@ class CodexHostAdapter:
                     or any(_overlaps(temporary, item) for item in protected)):
                 raise CodexHostRefused("PRIVATE_TMPDIR_UNSAFE")
             if self.tmp_records is not None:
-                record = self.tmp_records / (temporary.name + ".json")
-                self._record_private_tmpdir(record, temporary, info)
+                record = self._record_private_tmpdir(temporary, info)
         except BaseException:
             _discard(temporary, record)
             raise
         return temporary, record
 
-    def _record_private_tmpdir(self, record: Path, temporary: Path, info: os.stat_result) -> None:
-        """Durably name the directory, its identity and its owner before any launch."""
+    def _record_private_tmpdir(self, temporary: Path, info: os.stat_result) -> Path:
+        """Durably name the directory, its identity and its owner before any launch.
+
+        Only a record this call created is ever unlinked on failure; a name
+        that already exists is refused and left exactly as found.
+        """
+        record = self.tmp_records / (temporary.name + ".json")
         value = {"schema": _PRIVATE_TMP_SCHEMA, "path": str(temporary), "device": info.st_dev,
                  "inode": info.st_ino, "activity_id": self.activity_id}
         try:
@@ -459,12 +466,19 @@ class CodexHostAdapter:
             record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             _private_directory(record.parent, "PRIVATE_TMPDIR_RECORDS")
             descriptor = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except OSError as error:
+            raise CodexHostRefused("PRIVATE_TMPDIR_RECORD_UNAVAILABLE") from error
+        try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 json.dump(value, stream, sort_keys=True)
                 stream.flush()
                 os.fsync(stream.fileno())
-        except OSError as error:
-            raise CodexHostRefused("PRIVATE_TMPDIR_RECORD_UNAVAILABLE") from error
+        except BaseException as error:
+            record.unlink(missing_ok=True)
+            if isinstance(error, OSError):
+                raise CodexHostRefused("PRIVATE_TMPDIR_RECORD_UNAVAILABLE") from error
+            raise
+        return record
 
     @staticmethod
     def _argv(binary: Path, model: str, effort: str, sandbox: str, cwd: Path, prompt: str,
