@@ -4431,16 +4431,18 @@ class ControlStore:
         """F42: every declared runtime read root is a real, canonical directory
         overlapping no protected root when the draft is sealed; launch checks
         again with the check's own workspace."""
-        from .local_check_runtime import LocalCheckRefused, protected_roots_tx, validate_runtime_read_roots
+        from .local_check_runtime import (
+            LocalCheckRefused, overlap_test, protected_roots_tx, validate_runtime_read_roots)
 
         declared = [check["runtime_read_roots"] for criterion in material["criteria"]
                     for check in criterion["checks"] if "runtime_read_roots" in check]
         if not declared:
             return
-        blocked = protected_roots_tx(tx) | {Path(self.db_path).parent, Path(token.workspace)}
         try:
+            # Protected identities are read once for every check's roots.
+            overlaps = overlap_test(protected_roots_tx(tx) | {Path(self.db_path).parent, Path(token.workspace)})
             for roots in declared:
-                validate_runtime_read_roots(roots, blocked=tuple(blocked))
+                validate_runtime_read_roots(roots, blocked=overlaps)
         except LocalCheckRefused as error:
             _refuse(error.code)
 

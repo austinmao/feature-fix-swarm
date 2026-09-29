@@ -179,26 +179,52 @@ def _identity(path) -> tuple[int, int] | None:
     return info.st_dev, info.st_ino
 
 
-def _holds(outer: Path, inner: Path) -> bool:
-    """``outer`` is or contains ``inner`` on the filesystem: some trailing
-    part of ``inner``, looked up under ``outer``, is ``inner`` itself. This
-    catches what a lexical test misses (another case on a case-insensitive
-    volume, a symlink or firmlink spelling). A missing path never matches."""
-    target, parts = _identity(inner), inner.parts[1:]
-    return target is not None and any(
-        _identity(outer.joinpath(*parts[index:])) == target for index in range(len(parts) + 1))
+# macOS: firmlinked directories (/Users, /private, ...) are also reachable
+# under the data volume root, whose identity is not that of "/".
+_DATA_VOLUME = Path("/System/Volumes/Data")
+
+
+def _lineage(path: Path) -> set[tuple[int, int]]:
+    """Identities of ``path`` and its ancestors, spelled as given, resolved,
+    and through the data volume when that names the same directory."""
+    real = Path(os.path.realpath(path))
+    spellings = [path, real]
+    own, firmlinked = _identity(path), _DATA_VOLUME.joinpath(*real.parts[1:])
+    if own is not None and _identity(firmlinked) == own:
+        spellings.append(firmlinked)
+    items = {item for spelling in spellings for item in (spelling, *spelling.parents)}
+    return {identity for identity in map(_identity, items) if identity is not None}
+
+
+def overlap_test(blocked):
+    """F42: a test of whether a path is, lies in or holds any ``blocked``
+    path, lexically or by filesystem identity (another case on a
+    case-insensitive volume, a symlink or firmlink spelling). The blocked
+    identities are read once here, so testing N paths costs N + M stat
+    walks, not N * M (review round 2)."""
+    blocked = tuple(map(Path, blocked))
+    held = set().union(*map(_lineage, blocked))
+    targets = {identity for identity in map(_identity, blocked) if identity is not None}
+
+    def overlaps(path: Path) -> bool:
+        return (any(path == other or path in other.parents or other in path.parents for other in blocked)
+                or _identity(path) in held or not _lineage(path).isdisjoint(targets))
+    return overlaps
 
 
 def _overlap(first: Path, second: Path) -> bool:
-    return (first == second or first in second.parents or second in first.parents
-            or _holds(first, second) or _holds(second, first))
+    return overlap_test((second,))(first)
 
 
 def protected_roots_tx(tx) -> set[Path]:
     """F42: roots no declared read root may overlap, beyond the caller's own:
     HOME, the system temp dir (every check's scratch parent) and every
     registered primary, common git dir and workspace, of any run."""
-    blocked = {Path.home(), Path(tempfile.gettempdir()).resolve()}
+    try:
+        temp = Path(tempfile.gettempdir()).resolve()
+    except (OSError, RuntimeError) as error:
+        raise LocalCheckRefused("LOCAL_CHECK_CONFINEMENT_UNAVAILABLE") from error
+    blocked = {Path.home(), temp}
     for row in tx.execute("SELECT primary_root,common_dir FROM context_repositories").fetchall():
         blocked.update(map(Path, row))
     for row in tx.execute("SELECT path,repository_path,common_dir FROM context_workspaces").fetchall():
@@ -212,7 +238,8 @@ def validate_runtime_read_roots(roots, *, blocked) -> tuple[Path, ...]:
     A root must be absolute, exist, be a directory and already be canonical
     (no symlink anywhere in it), must not repeat, and must not overlap any
     ``blocked`` root (HOME, state, primary, common dir, artifact), lexically
-    or by filesystem identity.
+    or by filesystem identity. ``blocked`` is those paths, or an
+    ``overlap_test`` of them built once for a batch of calls.
     """
     paths: list[Path] = []
     for root in roots:
@@ -224,7 +251,7 @@ def validate_runtime_read_roots(roots, *, blocked) -> tuple[Path, ...]:
         except (OSError, TypeError, RuntimeError, ValueError) as error:
             raise LocalCheckRefused("LOCAL_CHECK_READ_ROOT_INVALID") from error
         paths.append(path)
-    if any(_overlap(path, Path(other)) for path in paths for other in blocked):
+    if any(map(blocked if callable(blocked) else overlap_test(blocked), paths)):
         raise LocalCheckRefused("LOCAL_CHECK_CONFINEMENT_INVALID")
     return tuple(paths)
 
@@ -275,7 +302,7 @@ def build_confined_local_argv(store, token, activity_id: str, material: LocalChe
                                        Path("/System/Library"), *declared)))
         if any(not root.is_dir() for root in runtime):
             raise LocalCheckRefused("LOCAL_CHECK_CONFINEMENT_UNAVAILABLE")
-        if any(_overlap(root, blocked) for root in runtime for blocked in (primary, state, common, Path.home())):
+        if any(map(overlap_test((primary, state, common, Path.home())), runtime)):
             raise LocalCheckRefused("LOCAL_CHECK_CONFINEMENT_INVALID")
         if any(_overlap(artifact, blocked) for blocked in (primary, state, common)):
             raise LocalCheckRefused('LOCAL_CHECK_CONFINEMENT_INVALID')

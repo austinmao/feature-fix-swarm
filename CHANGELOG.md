@@ -32,6 +32,7 @@ all skills.
   read-only working directory. Without the field a check's runtime roots
   and sealed material are exactly as before.
 - Review round 1: root overlap is also tested by filesystem identity, so an alternate-case or symlink spelling of HOME or another protected root is refused; any registered workspace, primary or common git dir (of any run, re-read at launch) and the system temp dir are blocked too; and a RuntimeError or ValueError from path handling is `LOCAL_CHECK_READ_ROOT_INVALID`.
+- Review round 2: an unusable system temp dir is `LOCAL_CHECK_CONFINEMENT_UNAVAILABLE` at seal and launch, not an untyped error, and the protected paths' identities are read once per validation, so N declared roots against M protected paths cost N + M stat walks, not N * M.
 
 ### Fixed (2026-09-28, spec-014 Release C: F41 sandboxed wave bridge is still the recorded requester)
 
