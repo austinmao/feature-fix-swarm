@@ -700,6 +700,140 @@ def test_session_close_keeps_the_outer_tmpdir_while_a_killed_guard_s_codex_runs(
             shutil.rmtree(observed["tmpdir"], ignore_errors=True)
 
 
+def _run_with_outer(tmp_path, monkeypatch, key: str, body) -> None:
+    """Prepare a real managed Codex session, bind its outer, and hand both to ``body``."""
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    request = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
+
+    def execute(store, token, context):
+        from run_state.cli import _load_upstream_runtime
+        from run_state.supervisor import prepare_managed_codex_session
+        upstream_runtime, _digest = _load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        ))
+        session = prepare_managed_codex_session(
+            store, token, context, command=("/gsd-plan-phase", "1"),
+            request_key=key, host_request=request, upstream_runtime=upstream_runtime,
+        )
+        outer, adapter = session.prepare_outer()
+        body(store, token, context, session, outer, adapter)
+        return 0
+
+    assert prepare_managed_run(
+        objective=key, state_root=authority,
+        selection_manifest=env["FFS_SELECTION_MANIFEST"],
+        upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"],
+        request_key=key, command=("/gsd-plan-phase", "1"),
+        dispatch_limit=3, token_limit=1000, on_ready=execute,
+        run_id=key, activity="plan", scope="1",
+        host_request=request,
+    ) == 0
+
+
+def _reserve_outer(store, token, session, outer):
+    """Reserve the outer through the real policy action and store, persisting its dispatch material."""
+    from dataclasses import replace
+    request = session.supervisor.reserve_request_action(replace(outer, monitor_result=True), action="execute")
+    return store.reserve_launch(
+        request.activity_id, token, token_reservation=request.token_reservation,
+        request_key=request.request_key, request_payload=session.supervisor._dispatch_material(request),
+        runtime_receipt_sha256=request.runtime_receipt_sha256,
+        managed_input_sha256=request.managed_input_sha256, policy_action_id=request.policy_action_id,
+    )
+
+
+def test_revoked_outer_launch_keeps_its_tmpdir_while_the_guard_s_group_runs(tmp_path, monkeypatch):
+    """F43 review round 3 (HIGH): the real terminal transition clears permit_id
+    on a launch that ran. With its guard dead and Codex alive in the guard's
+    process group, session close and the next reap keep the dir and record;
+    once the group is empty the reap removes them."""
+    from run_state.codex_host import reap_orphan_private_tmpdirs
+    from run_state.supervisor import _recorded_tmpdir_provably_released
+    from run_state.tests.test_codex_private_tmpdir import _stop_group
+
+    observed = {}
+
+    def body(store, token, context, session, outer, adapter):
+        material = outer.codex_material
+        tmpdir = Path(material.temporary_dir)
+        record = Path(context.evidence_root) / "host" / "private-tmp" / (tmpdir.name + ".json")
+        observed["tmpdir"] = tmpdir
+        intent = _reserve_outer(store, token, session, outer)
+        guard = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess, sys, time\n"
+             "codex = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+             "print(codex.pid, flush=True)\n"
+             "time.sleep(120)\n"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        observed["group"] = (guard.pid, int(guard.stdout.readline()))
+        guard.stdout.close()
+        acknowledgement = store.acknowledge_child(intent.id, token, ProcessIdentity.from_pid(guard.pid))
+        store.authorize_child(acknowledgement, token)
+        store.transition_activity(token, outer.activity_id, expected="active", new="failed",
+                                  reason="F43 review round 3 fixture: terminal revoke")
+        with store.read_transaction() as tx:
+            observed["permit_after_revoke"] = tx.execute(
+                "SELECT permit_id FROM authority_launch_intents WHERE id=?", (intent.id,)).fetchone()["permit_id"]
+        guard.kill()
+        guard.wait()
+        monitor = subprocess.Popen([sys.executable, "-c", ""])
+        monitor.wait()
+        session.close(SimpleNamespace(process=monitor, activity_id=outer.activity_id), adapter, material)
+        observed["after_close"] = (tmpdir.is_dir(), record.is_file())
+        if record.is_file():
+            stored = json.loads(record.read_text())
+            stored["owner"] = asdict(_killed_identity())
+            record.write_text(json.dumps(stored))
+
+        def reap():
+            reap_orphan_private_tmpdirs(record.parent, lambda activity_id, path, identity:
+                                        _recorded_tmpdir_provably_released(store, activity_id, path, identity))
+            return tmpdir.is_dir(), record.is_file()
+
+        observed["reap_while_running"] = reap()
+        _stop_group(*observed["group"])
+        observed["reap_after_exit"] = reap()
+
+    try:
+        _run_with_outer(tmp_path, monkeypatch, "revoked-guard", body)
+        assert observed["permit_after_revoke"] is None
+        assert observed["after_close"] == (True, True)
+        assert observed["reap_while_running"] == (True, True)
+        assert observed["reap_after_exit"] == (False, False)
+    finally:
+        if "group" in observed:
+            _stop_group(*observed["group"])
+        if "tmpdir" in observed:
+            shutil.rmtree(observed["tmpdir"], ignore_errors=True)
+
+
+def test_session_close_releases_a_reserved_but_never_permitted_outer(tmp_path, monkeypatch):
+    """F43 review round 3: an intent reserved through the real store but never
+    permitted (no child, no permit-issued event) still releases on close."""
+    observed = {}
+
+    def body(store, token, context, session, outer, adapter):
+        material = outer.codex_material
+        tmpdir = Path(material.temporary_dir)
+        record = Path(context.evidence_root) / "host" / "private-tmp" / (tmpdir.name + ".json")
+        observed["tmpdir"] = tmpdir
+        _reserve_outer(store, token, session, outer)
+        session.close(None, adapter, material)
+        observed["after_close"] = (os.path.lexists(tmpdir), record.exists())
+
+    try:
+        _run_with_outer(tmp_path, monkeypatch, "reserved-only", body)
+        assert observed["after_close"] == (False, False)
+    finally:
+        if "tmpdir" in observed:
+            shutil.rmtree(observed["tmpdir"], ignore_errors=True)
+
+
 def test_session_close_releases_launch_material_that_never_launched(tmp_path, monkeypatch):
     """F43: launch material bound but never launched (a refusal between bind and
     spawn, or a session that ends before its launch) must not leave its private

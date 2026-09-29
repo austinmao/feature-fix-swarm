@@ -110,15 +110,21 @@ def _stop_group(pgid: int, codex_pid: int) -> None:
     raise AssertionError("the killed guard's process group never emptied")
 
 
-def _intent_row(child: ProcessIdentity) -> dict:
-    return {"permit_id": "permit", "child_host_id": child.host_id, "child_boot_id": child.boot_id,
+def _intent_row(child: ProcessIdentity, *, permit_id: str | None = "permit", released: bool = True) -> dict:
+    """One launch intent; ``released`` is the durable permit-issued event, which a
+    terminal activity transition keeps even when it clears ``permit_id``."""
+    return {"id": "intent-" + str(child.pid), "permit_id": permit_id, "released": released,
+            "child_host_id": child.host_id, "child_boot_id": child.boot_id,
             "child_pid": child.pid, "child_start_token": child.start_token}
 
 
 def _intent_store(*rows):
-    cursor = SimpleNamespace(fetchall=lambda: list(rows))
-    return SimpleNamespace(read_transaction=lambda: contextlib.nullcontext(
-        SimpleNamespace(execute=lambda _sql, _params: cursor)))
+    clock = [{"idempotency_key": "launch-release-clock:" + row["id"]} for row in rows if row["released"]]
+
+    def execute(sql, _params):
+        return SimpleNamespace(fetchall=lambda: clock if "launch-release-clock" in sql else list(rows))
+
+    return SimpleNamespace(read_transaction=lambda: contextlib.nullcontext(SimpleNamespace(execute=execute)))
 
 
 def _release_quietly(*materials) -> None:
@@ -337,18 +343,19 @@ def test_launch_is_provably_dead_only_when_every_intent_child_is_dead():
 
     dead, live = _dead_identity(), ProcessIdentity.current()
 
-    def store(*children, permitted=True):
+    def store(*children, permitted=True, revoked=False):
         # A permit is durable before it is sent, and a child execs its launch
-        # environment (TMPDIR included) only after receiving one.
+        # environment (TMPDIR included) only after receiving one.  A terminal
+        # activity transition clears permit_id but keeps the permit-issued event.
         rows = [{"child_host_id": None, "child_boot_id": None, "child_pid": None, "child_start_token": None}
                 if child is None else {"child_host_id": child.host_id, "child_boot_id": child.boot_id,
                                        "child_pid": child.pid, "child_start_token": child.start_token}
                 for child in children]
-        for row in rows:
-            row["permit_id"] = "permit" if permitted else None
-        cursor = SimpleNamespace(fetchall=lambda: rows)
-        return SimpleNamespace(read_transaction=lambda: contextlib.nullcontext(
-            SimpleNamespace(execute=lambda _sql, _params: cursor)))
+        for index, row in enumerate(rows):
+            row["id"] = f"intent-{index}"
+            row["permit_id"] = "permit" if permitted and not revoked else None
+            row["released"] = permitted or revoked
+        return _intent_store(*rows)
 
     assert _launches_provably_dead(store(), "never-launched") is True
     assert _launches_provably_dead(store(dead, dead), "settled") is True
@@ -357,8 +364,13 @@ def test_launch_is_provably_dead_only_when_every_intent_child_is_dead():
     # Reserved but never permitted: no process ever ran with this launch's TMPDIR,
     # even when a waiting child was acknowledged (a crash between reserve and permit).
     assert _launches_provably_dead(store(None, permitted=False), "reserved") is True
-    assert _launches_provably_dead(store(live, permitted=False), "acknowledged-unpermitted") is True
+    # Review round 3: an acknowledged child counts only by its own death and its
+    # empty process group, whatever permit_id says (this expectation was True).
+    assert _launches_provably_dead(store(live, permitted=False), "acknowledged-unpermitted") is False
     assert _launches_provably_dead(store(dead, None, permitted=False), "never-permitted") is True
+    # A permit was issued and later cleared: a missing child identity is not proof.
+    assert _launches_provably_dead(store(None, revoked=True), "revoked-unacknowledged") is False
+    assert _launches_provably_dead(store(dead, revoked=True), "revoked-settled") is True
 
 
 def test_supervisor_finish_releases_a_settled_worker_launch(tmp_path, monkeypatch):
@@ -488,3 +500,53 @@ def test_record_collision_refuses_and_keeps_the_record_it_did_not_create(tmp_pat
         assert not os.path.lexists(forced)
     finally:
         shutil.rmtree(forced, ignore_errors=True)
+
+
+def test_worker_settle_and_reap_keep_a_revoked_launch_s_tmpdir_while_its_group_runs(tmp_path, monkeypatch):
+    """Review round 3 (HIGH): a terminal transition clears permit_id on a launch
+    that ran.  The guard is dead but Codex lives in its group: the worker
+    settle and the reaper both retain the dir and record until the group empties."""
+    from run_state.supervisor import ProcessHandle, Supervisor, _launches_provably_dead
+
+    records = tmp_path / "records"
+    adapter, _workspace = _adapter(tmp_path, monkeypatch, tmp_records=records, activity_id="revoked")
+    material = adapter.build_launch_material("plan prompt", attempt=1)
+    record = records / (Path(material.temporary_dir).name + ".json")
+    guard, codex_pid = _guard_with_running_codex()
+    revoked = _intent_store(_intent_row(guard, permit_id=None, released=True))
+    try:
+        Path(material.auth_path).unlink()
+        evidence = tmp_path / "evidence" / "intent-3"
+        evidence.mkdir(parents=True, mode=0o700)
+        stdout, stderr = evidence / "stdout.log", evidence / "stderr.log"
+        stdout.write_bytes(_valid_stream())
+        stderr.write_bytes(b"")
+        identities = {key: (path.stat().st_dev, path.stat().st_ino)
+                      for key, path in (("stdout", stdout), ("stderr", stderr))}
+        process = subprocess.Popen([sys.executable, "-c", ""])
+        process.wait()
+        handle = ProcessHandle(process, "intent-3", "revoked", guard, "head", 0.0,
+                               stdout, stderr, identities, codex_material=material)
+        store = SimpleNamespace(complete_launch=lambda _intent_id, _token, **_kwargs: None,
+                                read_transaction=revoked.read_transaction)
+        supervisor = Supervisor(store, SimpleNamespace(), evidence_root=tmp_path / "evidence")
+        supervisor._handles[handle.intent_id] = handle
+        monkeypatch.setattr(supervisor, "_wait_admitted", lambda owned, _timeout: owned.process.wait())
+        supervisor.finish(handle)
+        assert os.path.isdir(material.temporary_dir) and record.is_file()
+
+        _set_owner(records, material, _dead_identity())
+
+        def launch_dead(activity_id, *_binding):
+            return _launches_provably_dead(revoked, activity_id)
+
+        assert codex_host.reap_orphan_private_tmpdirs(records, launch_dead) == ()
+        assert os.path.isdir(material.temporary_dir) and record.is_file()
+        _stop_group(guard.pid, codex_pid)
+        assert codex_host.reap_orphan_private_tmpdirs(records, launch_dead) == (material.temporary_dir,)
+        assert not os.path.lexists(material.temporary_dir) and not record.exists()
+    finally:
+        try:
+            _stop_group(guard.pid, codex_pid)
+        finally:
+            _release_quietly(material)
