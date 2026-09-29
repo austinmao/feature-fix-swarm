@@ -4387,6 +4387,7 @@ class ControlStore:
             ).fetchone()
             if sealed_generation is not None:
                 raise OwnershipRefused("ACCEPTANCE_SEAL_GENERATION_CONFLICT")
+            self._assert_declared_read_roots_tx(tx, token, draft.material)
             row = tx.execute(
                 "SELECT COALESCE(MAX(acceptance_generation),0) AS generation "
                 "FROM authority_sealed_acceptances WHERE repository_id=? AND run_id=?",
@@ -4425,6 +4426,25 @@ class ControlStore:
                 draft.draft_hash, current.generation, current.contract_hash, acceptance_hash,
                 draft.material,
             )
+
+    def _assert_declared_read_roots_tx(self, tx, token, material: dict) -> None:
+        """F42: every declared runtime read root is a real, canonical directory
+        overlapping no protected root when the draft is sealed; launch checks
+        again with the check's own workspace."""
+        from .local_check_runtime import (
+            LocalCheckRefused, overlap_test, protected_roots_tx, validate_runtime_read_roots)
+
+        declared = [check["runtime_read_roots"] for criterion in material["criteria"]
+                    for check in criterion["checks"] if "runtime_read_roots" in check]
+        if not declared:
+            return
+        try:
+            # Protected identities are read once for every check's roots.
+            overlaps = overlap_test(protected_roots_tx(tx) | {Path(self.db_path).parent, Path(token.workspace)})
+            for roots in declared:
+                validate_runtime_read_roots(roots, blocked=overlaps)
+        except LocalCheckRefused as error:
+            _refuse(error.code)
 
     def get_sealed_acceptance(
         self, *, repository_id: str, run_id: str, acceptance_generation: int | None = None,
@@ -5815,7 +5835,8 @@ class ControlStore:
                           if item["id"] == material.check_id]
             except (TypeError, KeyError, ValueError, json.JSONDecodeError):
                 raise OwnershipRefused("LOCAL_CHECK_SEAL_INVALID") from None
-            if len(checks) != 1 or checks[0].get("kind") != "command" or checks[0].get("locator") != material.locator:
+            if (len(checks) != 1 or checks[0].get("kind") != "command" or checks[0].get("locator") != material.locator
+                    or tuple(checks[0].get("runtime_read_roots", ())) != material.runtime_read_roots):
                 raise OwnershipRefused("LOCAL_CHECK_SEAL_INVALID")
             existing = tx.execute(
                 "SELECT * FROM authority_local_check_receipts WHERE receipt_sha256=?", (receipt_sha256,),
@@ -5860,6 +5881,8 @@ class ControlStore:
             raw_material["argv"] = tuple(raw_material["argv"])
             raw_material["environment"] = tuple(tuple(item) for item in raw_material["environment"])
             raw_material["source_closure"] = tuple(tuple(item) for item in raw_material["source_closure"])
+            if "runtime_read_roots" in raw_material:
+                raw_material["runtime_read_roots"] = tuple(raw_material["runtime_read_roots"])
             material = LocalCheckMaterial(**raw_material)
             validate_local_check_material(material)
         except (TypeError, KeyError, ValueError, json.JSONDecodeError, LocalCheckRefused) as error:
