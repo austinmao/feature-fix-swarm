@@ -95,6 +95,8 @@ def _stop_group(pgid: int, codex_pid: int) -> None:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return
+        except PermissionError:
+            pass  # Darwin reports EPERM while the killed member is still an unreaped zombie.
         time.sleep(0.05)
     raise AssertionError("the killed guard's process group never emptied")
 
@@ -403,8 +405,10 @@ def test_reap_keeps_a_recorded_dir_while_the_killed_guard_s_codex_still_runs(tmp
         assert codex_host.reap_orphan_private_tmpdirs(records, launch_dead) == (material.temporary_dir,)
         assert not os.path.lexists(material.temporary_dir) and not record.exists()
     finally:
-        _stop_group(guard.pid, codex_pid)
-        _release_quietly(material)
+        try:
+            _stop_group(guard.pid, codex_pid)
+        finally:
+            _release_quietly(material)
 
 
 def test_supervisor_finish_keeps_a_tmpdir_whose_launch_process_group_still_runs(tmp_path, monkeypatch):
@@ -437,8 +441,10 @@ def test_supervisor_finish_keeps_a_tmpdir_whose_launch_process_group_still_runs(
         assert os.path.isdir(material.temporary_dir)
         assert [path.name for path in records.iterdir()] == [Path(material.temporary_dir).name + ".json"]
     finally:
-        _stop_group(guard.pid, codex_pid)
-        _release_quietly(material)
+        try:
+            _stop_group(guard.pid, codex_pid)
+        finally:
+            _release_quietly(material)
 
 
 def test_record_collision_refuses_and_keeps_the_record_it_did_not_create(tmp_path, monkeypatch):
