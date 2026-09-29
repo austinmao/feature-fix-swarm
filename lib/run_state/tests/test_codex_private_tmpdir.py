@@ -67,6 +67,15 @@ def _lexical_alias(path: Path) -> Path | None:
     return None
 
 
+# A distinct spelling of the temp volume exists only on some platforms (macOS
+# firmlinks, case-insensitive volumes); elsewhere the identity test cannot
+# discriminate from the lexical check, so it does not run there.
+requires_lexical_alias = pytest.mark.skipif(
+    _lexical_alias(Path(tempfile.gettempdir()).resolve()) is None,
+    reason="no spelling of the temp volume that resolve() keeps distinct (e.g. Linux)",
+)
+
+
 def _guard_with_running_codex() -> tuple[ProcessIdentity, int]:
     """Kill a guard-like child (own session) whose Codex grandchild shares its group."""
     guard = subprocess.Popen(
@@ -99,6 +108,11 @@ def _stop_group(pgid: int, codex_pid: int) -> None:
             pass  # Darwin reports EPERM while the killed member is still an unreaped zombie.
         time.sleep(0.05)
     raise AssertionError("the killed guard's process group never emptied")
+
+
+def _intent_row(child: ProcessIdentity) -> dict:
+    return {"permit_id": "permit", "child_host_id": child.host_id, "child_boot_id": child.boot_id,
+            "child_pid": child.pid, "child_start_token": child.start_token}
 
 
 def _intent_store(*rows):
@@ -177,12 +191,14 @@ def test_private_root_overlapping_a_protected_root_is_refused(tmp_path, monkeypa
     assert sorted(os.listdir(root)) == before
 
 
+@requires_lexical_alias
 def test_private_root_overlap_is_also_detected_by_filesystem_identity(tmp_path, monkeypatch):
     adapter, workspace = _adapter(tmp_path, monkeypatch)
     alias = _lexical_alias(workspace)
     # Every macOS volume has the firmlink spelling, so identity is exercised there.
     assert alias is not None or sys.platform != "darwin"
-    root = alias if alias is not None else workspace
+    assert alias is not None and alias.resolve() != workspace.resolve()
+    root = alias
     monkeypatch.setattr(codex_host, "codex_private_tmp_root", lambda: root)
     with pytest.raises(CodexHostRefused, match="PRIVATE_TMPDIR_UNSAFE"):
         adapter.build_launch_material("do work", attempt=0)
@@ -369,7 +385,9 @@ def test_supervisor_finish_releases_a_settled_worker_launch(tmp_path, monkeypatc
         handle = ProcessHandle(process, "intent-1", "worker-1", child, "head", 0.0,
                                stdout, stderr, identities, codex_material=material)
         completed = []
-        store = SimpleNamespace(complete_launch=lambda intent_id, _token, **_kwargs: completed.append(intent_id))
+        # The durable intent the launch settled: the same liveness proof as close and reap.
+        store = SimpleNamespace(complete_launch=lambda intent_id, _token, **_kwargs: completed.append(intent_id),
+                                read_transaction=_intent_store(_intent_row(child)).read_transaction)
         supervisor = Supervisor(store, SimpleNamespace(), evidence_root=tmp_path / "evidence")
         supervisor._handles[handle.intent_id] = handle
         monkeypatch.setattr(supervisor, "_wait_admitted", lambda owned, _timeout: owned.process.wait())
@@ -432,7 +450,8 @@ def test_supervisor_finish_keeps_a_tmpdir_whose_launch_process_group_still_runs(
         handle = ProcessHandle(process, "intent-2", "worker-2", guard, "head", 0.0,
                                stdout, stderr, identities, codex_material=material)
         completed = []
-        store = SimpleNamespace(complete_launch=lambda intent_id, _token, **_kwargs: completed.append(intent_id))
+        store = SimpleNamespace(complete_launch=lambda intent_id, _token, **_kwargs: completed.append(intent_id),
+                                read_transaction=_intent_store(_intent_row(guard)).read_transaction)
         supervisor = Supervisor(store, SimpleNamespace(), evidence_root=tmp_path / "evidence")
         supervisor._handles[handle.intent_id] = handle
         monkeypatch.setattr(supervisor, "_wait_admitted", lambda owned, _timeout: owned.process.wait())
