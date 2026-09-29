@@ -8,6 +8,46 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-29, spec-014 Release C: F43 private TMPDIR per managed Codex launch)
+
+- A managed Codex orchestrator ran pytest inside its workspace-write
+  sandbox. Its `TMPDIR` sat in the staged runtime home, which the sandbox
+  excludes, so Python fell back to the working directory and wrote
+  `pytest-of-<user>/` (with a self-referencing `*current` symlink) into the
+  workspace. The candidate chain then refused the run as
+  `FRONTEND_INTEGRATION_CHAIN_INVALID` (live M3 attempt 17). Now every
+  managed Codex launch, the orchestrator and each wave worker alike:
+  - gets one private 0700 `ffs-codex-*` directory directly under the
+    resolved `/tmp`. It is the launch's `TMPDIR` and its one extra sandbox
+    writable root (`--add-dir`, placed just before `--cd`). Both
+    `exclude_slash_tmp` and `exclude_tmpdir_env_var` stay true, so neither
+    `/tmp` nor `$TMPDIR` is granted wholesale;
+  - is refused with `PRIVATE_TMPDIR_UNSAFE` when that directory would
+    overlap the workspace, the FFS state dir, the runtime home, `HOME`, the
+    primary repository or its common Git dir. Overlap is checked by path and
+    by `(st_dev, st_ino)`, so another spelling of the same directory (a
+    case-insensitive volume, a firmlink) is caught too;
+  - records the directory (path, device, inode, activity and the recording
+    supervisor's process identity) under `<evidence>/host/private-tmp/`
+    before the launch, and removes the directory and its record when the
+    launch settles: the orchestrator when its session closes, as before, and
+    each wave worker in `Supervisor.finish`. Before this fix a worker's
+    directory was never removed;
+  - is reaped when a later session for the run starts (resume) only if its
+    record says so: the recording supervisor probes dead, every launch of
+    its activity has a child identity that probes dead, and the path still
+    names the recorded inode. Unrecorded, replaced or undecidable
+    directories are left alone.
+  The candidate-chain check is unchanged and stays strict.
+- Compatibility: the qualified environment policy now binds `TMPDIR` under
+  the private root; the qualification observer and the adapter compute it
+  with the same `codex_environment_policy_hash`. An observation retained
+  from an older build therefore refuses `ENVIRONMENT_POLICY_DRIFT` (surfaced
+  as `HOST_CAPABILITY_UNQUALIFIED`) instead of launching. Launch material
+  whose `TMPDIR` sits in the runtime home is refused on release with
+  `LAUNCH_MATERIAL_INVALID` and left in place. Qualification probes keep
+  their `TMPDIR` inside the worktree.
+
 ### Fixed (2026-09-28, spec-014 Release C: F41 sandboxed wave bridge is still the recorded requester)
 
 - Under Codex 0.157.0's macOS seatbelt (workspace-write) the wave bridge

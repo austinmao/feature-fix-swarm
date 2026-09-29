@@ -290,6 +290,17 @@ It runs `python3 -m run_state.cli frontend-start` with the package's own
 then one native final review, then `DONE`. A worked invocation is in
 `skills/task-swarm/SKILL.md` under "Managed ingress".
 
+**Codex launch TMPDIR.** Each managed Codex launch (orchestrator and wave
+workers) gets one private 0700 `/tmp/ffs-codex-*` directory as its `TMPDIR`
+and as its one extra sandbox writable root (`--add-dir`); `/tmp` and
+`$TMPDIR` stay excluded otherwise. It must not overlap the workspace, the
+state dir, `HOME`, the primary repository or its common Git dir
+(`PRIVATE_TMPDIR_UNSAFE`). Each directory is recorded under
+`<evidence>/host/private-tmp/` and removed when its launch settles. After a
+supervisor crash, the next session for the run removes only recorded
+directories whose recording supervisor and launches are provably dead
+(`lib/run_state/codex_host.py`, `reap_orphan_private_tmpdirs`).
+
 **Refusals.** The wrapper's own argument checks print a plain message on
 stderr and exit 2. Every refusal from `run_state.cli` prints one JSON object
 on stdout:

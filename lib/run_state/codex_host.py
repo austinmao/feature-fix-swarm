@@ -7,7 +7,7 @@ uncertain result.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
@@ -17,7 +17,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from typing import Final
+from typing import Callable, Final
 
 from host_capabilities import (
     CapabilityError,
@@ -25,12 +25,15 @@ from host_capabilities import (
     GsdSupervisorEnvironment,
     QualifiedCodexRuntime,
     _binary_chain,
+    _canonical_git_worktree,
     _native_jsonl,
     codex_closed_environment,
     codex_environment_policy_hash,
+    codex_private_tmp_root,
     gsd_supervisor_environment_from_process,
     validate_gsd_supervisor_environment,
 )
+from process_identity import DEAD, ProcessIdentity, probe_identity
 
 
 _MAX_TELEMETRY_BYTES: Final = 2 * 1024 * 1024
@@ -40,6 +43,8 @@ _TOKEN_FIELDS: Final = frozenset((
     "cache_write_input_tokens", "reasoning_output_tokens",
 ))
 _TERMINAL_TYPES: Final = frozenset(("turn.completed", "turn.failed", "turn.cancelled", "error"))
+_PRIVATE_TMP_PREFIX: Final = "ffs-codex-"
+_PRIVATE_TMP_SCHEMA: Final = "ffs.codex-private-tmpdir/v1"
 
 
 class CodexHostRefused(ValueError):
@@ -87,6 +92,7 @@ class CodexLaunchMaterial:
 
     ``temporary_dir`` is part of the closed environment and must be released
     with ``release_launch_material`` after the Supervisor closes the child.
+    ``temporary_record`` names its durable orphan record, when one was written.
     """
 
     binary: tuple[tuple[str, str], ...]
@@ -107,6 +113,7 @@ class CodexLaunchMaterial:
     auth_device: int
     auth_inode: int
     runtime_sha256: str = ""
+    temporary_record: str = ""
 
     def execution_environment(self) -> dict[str, str]:
         """Return a fresh mapping so no caller can mutate this material."""
@@ -208,6 +215,88 @@ def _regular_digest(path: Path, label: str) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _ancestry(path: Path) -> set[tuple[int, int]]:
+    """The (st_dev, st_ino) of ``path`` and of every existing ancestor."""
+    return {identity for identity in map(_identity, (path, *path.parents)) if identity is not None}
+
+
+def _overlaps(first: Path, second: Path) -> bool:
+    """Either directory contains the other, lexically or by filesystem identity.
+
+    A case-insensitive volume or a firmlink gives one directory several
+    spellings; only (st_dev, st_ino) proves two of them are the same place.
+    """
+    first, second = first.resolve(), second.resolve()
+    if first.is_relative_to(second) or second.is_relative_to(first):
+        return True
+    first_id, second_id = _identity(first), _identity(second)
+    return ((second_id is not None and second_id in _ancestry(first))
+            or (first_id is not None and first_id in _ancestry(second)))
+
+
+def _discard(temporary: Path, record: Path | None) -> None:
+    """Remove a private TMPDIR; drop its record only once the directory is gone."""
+    shutil.rmtree(temporary, ignore_errors=True)
+    if record is not None and not os.path.lexists(temporary):
+        record.unlink(missing_ok=True)
+
+
+def reap_orphan_private_tmpdirs(records: Path, launch_dead: Callable[[str], bool]) -> tuple[str, ...]:
+    """Remove recorded private TMPDIRs whose owner and launch are provably dead.
+
+    A supervisor killed mid-run leaves its launches' directories behind.  Only
+    a directory this module recorded is a candidate, and only when the
+    recording supervisor probes DEAD, ``launch_dead`` proves the launch dead,
+    and the path still names the recorded (st_dev, st_ino).  Unrecorded or
+    replaced directories are never touched.  Returns the reaped paths.
+    """
+    try:
+        if records.is_symlink() or not records.is_dir():
+            return ()
+        entries = sorted(records.glob(_PRIVATE_TMP_PREFIX + "*.json"))[:4096]
+    except OSError:
+        return ()
+    root, reaped = codex_private_tmp_root(), []
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+            record = json.loads(entry.read_text(encoding="utf-8"))
+            path, identity = Path(record["path"]), (record["device"], record["inode"])
+            if (record["schema"] != _PRIVATE_TMP_SCHEMA or path.parent != root
+                    or entry.name != path.name + ".json" or not path.name.startswith(_PRIVATE_TMP_PREFIX)
+                    or any(type(value) is not int for value in identity)
+                    or probe_identity(ProcessIdentity(**record["owner"])) != DEAD
+                    or not launch_dead(record["activity_id"])):
+                continue
+        except Exception:
+            # An unreadable, foreign or undecidable record is never proof.
+            continue
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            entry.unlink(missing_ok=True)
+            continue
+        except OSError:
+            continue
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and (info.st_dev, info.st_ino) == identity:
+            _discard(path, entry)
+            if not os.path.lexists(path):
+                reaped.append(str(path))
+        else:
+            # The recorded directory is gone; whatever holds its name now is not ours.
+            entry.unlink(missing_ok=True)
+    return tuple(reaped)
+
+
 def verify_artifact_review_session(runtime: Path, *, thread_id: str, workspace: Path,
                                    model: str, effort: str) -> dict[str, str]:
     """Bind an artifact review to actual native model/turn and zero tool calls.
@@ -262,14 +351,22 @@ class CodexHostAdapter:
     """Run one prompt through the immutable, qualified Codex configuration."""
 
     def __init__(self, runtime: QualifiedCodexRuntime, binary: str | Path, version: str,
-                 gsd_environment: object = None) -> None:
+                 gsd_environment: object = None, *, state_root: str | Path | None = None,
+                 tmp_records: str | Path | None = None, activity_id: str = "") -> None:
+        """``state_root`` is kept disjoint from each launch's private TMPDIR;
+        ``tmp_records`` (with its ``activity_id``) receives the durable orphan record."""
         if not isinstance(runtime, QualifiedCodexRuntime):
             raise CodexHostRefused("RUNTIME_UNQUALIFIED")
         if not isinstance(version, str) or not version or "\0" in version or len(version) > 128:
             raise CodexHostRefused("VERSION_INVALID")
+        if tmp_records is not None and (not isinstance(activity_id, str) or not activity_id):
+            raise CodexHostRefused("PRIVATE_TMPDIR_RECORD_INVALID")
         self.runtime = runtime
         self.binary = Path(binary)
         self.version = version
+        self.state_root = None if state_root is None else Path(state_root)
+        self.tmp_records = None if tmp_records is None else Path(tmp_records)
+        self.activity_id = activity_id
         if gsd_environment is not None:
             try:
                 self.gsd_environment = validate_gsd_supervisor_environment(gsd_environment)
@@ -325,8 +422,53 @@ class CodexHostAdapter:
             raise CodexHostRefused("BINARY_DRIFT")
         return home, cwd, model, effort, sandbox, tuple(sorted(observed_binary.items()))
 
+    def _private_tmpdir(self, home: Path, cwd: Path) -> tuple[Path, Path | None]:
+        """Create and record this launch's 0700 TMPDIR outside every protected root."""
+        try:
+            primary = _canonical_git_worktree(cwd)
+        except CapabilityError as error:
+            raise CodexHostRefused("PRIVATE_TMPDIR_UNSAFE") from error
+        protected = [cwd, home, Path.home(), *(() if primary is None else (primary, primary / ".git")),
+                     *(() if self.state_root is None else (self.state_root,))]
+        root = codex_private_tmp_root()
+        try:
+            temporary = Path(tempfile.mkdtemp(prefix=_PRIVATE_TMP_PREFIX, dir=root))
+        except OSError as error:
+            raise CodexHostRefused("PRIVATE_TMPDIR_UNAVAILABLE") from error
+        record = None
+        try:
+            info = temporary.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700 or temporary.parent != root
+                    or any(_overlaps(temporary, item) for item in protected)):
+                raise CodexHostRefused("PRIVATE_TMPDIR_UNSAFE")
+            if self.tmp_records is not None:
+                record = self.tmp_records / (temporary.name + ".json")
+                self._record_private_tmpdir(record, temporary, info)
+        except BaseException:
+            _discard(temporary, record)
+            raise
+        return temporary, record
+
+    def _record_private_tmpdir(self, record: Path, temporary: Path, info: os.stat_result) -> None:
+        """Durably name the directory, its identity and its owner before any launch."""
+        value = {"schema": _PRIVATE_TMP_SCHEMA, "path": str(temporary), "device": info.st_dev,
+                 "inode": info.st_ino, "activity_id": self.activity_id}
+        try:
+            value["owner"] = asdict(ProcessIdentity.current())
+            record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _private_directory(record.parent, "PRIVATE_TMPDIR_RECORDS")
+            descriptor = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(value, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as error:
+            raise CodexHostRefused("PRIVATE_TMPDIR_RECORD_UNAVAILABLE") from error
+
     @staticmethod
-    def _argv(binary: Path, model: str, effort: str, sandbox: str, cwd: Path, prompt: str) -> tuple[str, ...]:
+    def _argv(binary: Path, model: str, effort: str, sandbox: str, cwd: Path, prompt: str,
+              tmpdir: Path) -> tuple[str, ...]:
         disabled = (
             "multi_agent", "multi_agent_v2", "plugins", "remote_plugin",
             "recommended_plugins", "plugin_sharing", "apps",
@@ -341,7 +483,9 @@ class CodexHostAdapter:
             str(binary.resolve()), "exec", "--json", "-c", f'model="{model}"', "-c",
             f'model_reasoning_effort="{effort}"', "--strict-config", "--ignore-user-config",
             "--ignore-rules", "--dangerously-bypass-hook-trust", "--sandbox", sandbox,
-            *sandbox_argv, *disabled_argv, "--cd", str(cwd),
+            # F43: the launch's private TMPDIR is its one extra writable root;
+            # both exclusions stay on, so /tmp and $TMPDIR are never granted wholesale.
+            *sandbox_argv, *disabled_argv, "--add-dir", str(tmpdir), "--cd", str(cwd),
             "--color", "never", prompt,
         )
 
@@ -362,7 +506,7 @@ class CodexHostAdapter:
             raise CodexHostRefused("ATTEMPT_INVALID")
         home, cwd, model, effort, sandbox, binary = self._material()
         additions = self._gsd_environment(gsd_environment)
-        temporary = Path(tempfile.mkdtemp(prefix="ffs-codex-", dir=home))
+        temporary, record = self._private_tmpdir(home, cwd)
         try:
             environment = self._environment(home, temporary, self.binary, binary, additions)
             observation = _mapping(self.runtime.observation, "OBSERVATION")
@@ -375,36 +519,43 @@ class CodexHostAdapter:
             except CapabilityError as error:
                 raise CodexHostRefused("ENVIRONMENT_POLICY_INVALID") from error
             if observed_policy != expected_policy:
+                # Also a pre-F43 observation, whose policy TMPDIR was the runtime home.
                 raise CodexHostRefused("ENVIRONMENT_POLICY_DRIFT")
+            temporary_info = temporary.stat()
+            auth = home / "auth.json"
+            try:
+                auth_info = auth.lstat()
+                auth_sha256 = hashlib.sha256(auth.read_bytes()).hexdigest()
+            except OSError as error:
+                raise CodexHostRefused("RUNTIME_AUTH_UNAVAILABLE") from error
+            if (auth.is_symlink() or not auth.is_file() or auth_info.st_uid != os.getuid()
+                    or auth_info.st_nlink != 1 or stat.S_IMODE(auth_info.st_mode) != 0o600):
+                raise CodexHostRefused("RUNTIME_AUTH_UNSAFE")
         except BaseException:
-            shutil.rmtree(temporary, ignore_errors=True)
+            _discard(temporary, record)
             raise
-        temporary_info = temporary.stat()
-        auth = home / "auth.json"
-        try:
-            auth_info = auth.lstat()
-            auth_sha256 = hashlib.sha256(auth.read_bytes()).hexdigest()
-        except OSError as error:
-            shutil.rmtree(temporary, ignore_errors=True)
-            raise CodexHostRefused("RUNTIME_AUTH_UNAVAILABLE") from error
-        if (auth.is_symlink() or not auth.is_file() or auth_info.st_uid != os.getuid()
-                or auth_info.st_nlink != 1 or stat.S_IMODE(auth_info.st_mode) != 0o600):
-            shutil.rmtree(temporary, ignore_errors=True)
-            raise CodexHostRefused("RUNTIME_AUTH_UNSAFE")
-        return CodexLaunchMaterial(binary, self.version, self._argv(self.binary, model, effort, sandbox, cwd, prompt),
+        return CodexLaunchMaterial(binary, self.version,
+                                   self._argv(self.binary, model, effort, sandbox, cwd, prompt, temporary),
                                    tuple(sorted(environment.items())), str(cwd), model, effort, self.runtime,
                                    _mapping(self.runtime.runtime, "RUNTIME")["config_sha256"], attempt, str(temporary),
                                    temporary_info.st_dev, temporary_info.st_ino, str(auth), auth_sha256,
-                                   auth_info.st_dev, auth_info.st_ino, _runtime_sha256(self.runtime))
+                                   auth_info.st_dev, auth_info.st_ino, _runtime_sha256(self.runtime),
+                                   "" if record is None else str(record))
 
     @staticmethod
     def release_launch_material(material: CodexLaunchMaterial) -> None:
-        """Remove only the private temporary directory allocated by this adapter."""
+        """Remove only the private temporary directory allocated by this adapter.
+
+        Material whose directory sits anywhere but the private root (a pre-F43
+        runtime-home leaf included) is refused and left in place.
+        """
         if not isinstance(material, CodexLaunchMaterial):
             raise CodexHostRefused("LAUNCH_MATERIAL_INVALID")
         temporary = Path(material.temporary_dir)
-        home = Path(_mapping(material.runtime.runtime, "RUNTIME").get("path", ""))
-        if (not temporary.is_absolute() or temporary.parent != home or not temporary.name.startswith("ffs-codex-")):
+        record = Path(material.temporary_record) if material.temporary_record else None
+        if (not temporary.is_absolute() or temporary.parent != codex_private_tmp_root()
+                or not temporary.name.startswith(_PRIVATE_TMP_PREFIX)
+                or (record is not None and record.name != temporary.name + ".json")):
             raise CodexHostRefused("LAUNCH_MATERIAL_INVALID")
         try:
             info = temporary.lstat()
@@ -413,7 +564,7 @@ class CodexHostAdapter:
         if (temporary.is_symlink() or not temporary.is_dir() or info.st_uid != os.getuid()
                 or (info.st_dev, info.st_ino) != (material.temporary_device, material.temporary_inode)):
             raise CodexHostRefused("LAUNCH_MATERIAL_INVALID")
-        shutil.rmtree(temporary, ignore_errors=True)
+        _discard(temporary, record)
 
     def invoke(self, prompt: str, *, attempt: int, timeout_seconds: int = 600,
                gsd_environment: object = None) -> CodexInvocationReceipt:

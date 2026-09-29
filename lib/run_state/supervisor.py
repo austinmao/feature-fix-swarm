@@ -29,7 +29,10 @@ from host_capabilities import (
     ARTIFACT_REVIEW_CONTEXT_LIMIT, ArtifactReviewMaterial, CapabilityError,
     validate_artifact_review_material,
 )
-from .codex_host import CodexLaunchMaterial, TelemetryRefused, parse_codex_telemetry
+from .codex_host import (
+    CodexHostAdapter, CodexHostRefused, CodexLaunchMaterial, TelemetryRefused, parse_codex_telemetry,
+    reap_orphan_private_tmpdirs,
+)
 from .claude_host import (
     ClaudeLaunchMaterial, ClaudeHostRefused, ClaudeTelemetryRefused,
     parse_claude_telemetry,
@@ -2613,6 +2616,14 @@ class Supervisor:
             )
             # Kept until both settle: release and feedback are idempotent, so a replay retries them.
             self._shared_reservations.pop(handle.intent_id, None)
+        if handle.codex_material is not None:
+            # F43: the child has exited, so its private TMPDIR goes now (every
+            # wave worker settles here).  A refusal keeps the directory and its
+            # record for the resume-time orphan reaper.
+            try:
+                CodexHostAdapter.release_launch_material(handle.codex_material)
+            except CodexHostRefused:
+                pass
         handle.recorded = True
         return handle.result
 
@@ -3376,6 +3387,28 @@ def _retained_runtime_refusal(launch, *, outer: bool) -> str:
     return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
 
 
+def _launches_provably_dead(store, activity_id: str) -> bool:
+    """True only when every launch intent of ``activity_id`` has a DEAD child.
+
+    An intent without an acknowledged child identity may still own a live
+    process, so it is never proof.  No intent at all means the launch material
+    existed only in the (separately proven dead) supervisor that built it.
+    """
+    # ponytail: an intent reserved but never acknowledged keeps its TMPDIR until
+    # an operator removes it; add a spawn-state proof if such leftovers matter.
+    with store.read_transaction() as tx:
+        rows = tx.execute(
+            "SELECT child_host_id,child_boot_id,child_pid,child_start_token "
+            "FROM authority_launch_intents WHERE activity_id=?", (activity_id,),
+        ).fetchall()
+    return all(
+        row["child_pid"] is not None and probe_identity(ProcessIdentity(
+            row["child_host_id"], row["child_boot_id"], row["child_pid"], row["child_start_token"],
+        )) == DEAD
+        for row in rows
+    )
+
+
 def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
                                   upstream_runtime=None, model_request=None, review_catalog=None):
     """Qualification seams, worker channel and outer contract for one Codex host run."""
@@ -3398,6 +3431,10 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     root, operation, child_key, ready = _managed_inventory_workspace(store, token, context, request_key)
     host_evidence = Path(context.evidence_root) / "host"
     runtime_root = host_evidence / "runtimes"
+    # F43: every Codex launch records its private TMPDIR here.  A supervisor
+    # killed mid-run leaves them behind; resume reaps only the provably dead.
+    tmp_records = host_evidence / "private-tmp"
+    reap_orphan_private_tmpdirs(tmp_records, lambda activity_id: _launches_provably_dead(store, activity_id))
     outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
                                                  child_key=child_key) or str(uuid.uuid4()))
     outer_home = runtime_root / outer_activity_id
@@ -3463,6 +3500,7 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             )
             adapter = CodexHostAdapter(
                 bundle.qualified_runtime, host_request.binary, str(cli["version"]),
+                state_root=Path(store.db_path).parent, tmp_records=tmp_records, activity_id=activity_id,
             )
         except RetainedRuntimeNotReusable as error:
             raise SupervisorRefused(_retained_runtime_refusal(
