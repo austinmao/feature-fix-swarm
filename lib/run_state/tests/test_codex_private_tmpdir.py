@@ -119,7 +119,9 @@ def _intent_row(child: ProcessIdentity, *, permit_id: str | None = "permit", rel
 
 
 def _intent_store(*rows):
-    clock = [{"idempotency_key": "launch-release-clock:" + row["id"]} for row in rows if row["released"]]
+    # A row without an explicit ``released`` was permitted exactly when it holds a permit.
+    clock = [{"idempotency_key": "launch-release-clock:" + row.get("id", "intent")}
+             for row in rows if row.get("released", row["permit_id"] is not None)]
 
     def execute(sql, _params):
         return SimpleNamespace(fetchall=lambda: clock if "launch-release-clock" in sql else list(rows))
