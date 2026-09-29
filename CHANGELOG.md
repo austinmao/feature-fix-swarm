@@ -74,14 +74,15 @@ all skills.
   alongside the existing `0.154.0`, `0.155.1`, `0.156.1`, `0.157.0`, and
   `0.158.0` pins, on top of the unchanged `>=0.137.0,<0.148.0` range. The
   runner host moved to `0.159.0`, so `setup.sh --doctor` reported
-  `codex-cli-version` as failed. On the host, `codex exec --help` lists
-  every flag FFS passes (`--add-dir`, `--sandbox`, `--strict-config`,
-  `--ignore-user-config`, `--ignore-rules`, `--disable`, and
-  `--dangerously-bypass-hook-trust`); the Python and bats compatibility-pin
-  suites cover the acceptance and refusal boundaries on fake binaries. No
-  live subscription-auth probe and no `0.158.0` help diff were run for this
-  admission. `0.159.1`, `0.160.0`, and every other untested 0.159.x or later
-  release stay refused.
+  `codex-cli-version` as failed. `0.159.0` was admitted after the same
+  host checks as `0.158.0`: `codex exec --help` is byte-identical to
+  `0.158.0` (every flag FFS passes is unchanged, including `--add-dir`), the
+  read-only ephemeral subscription-auth `probe_host` shape returned
+  `FFS_HOST_PROBE_READY`, and the `UserPromptSubmit` hook seam and every
+  hook-suppression control gave the same result as `0.158.0`. The Python
+  and bats compatibility-pin suites cover the acceptance and refusal
+  boundaries on fake binaries. `0.159.1`, `0.160.0`, and every other
+  untested 0.159.x or later release stay refused.
 
 ### Changed (2026-09-29, spec-014 Release C: Codex CLI 0.158.0 compatibility pin)
 
