@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .native_review_runtime import NativeReviewRuntimeRefused, _read_checked
 from .ownership import OwnershipRefused, assert_owner
+from .run_policy import RECEIPT_PROCESS_RESULT_ID
 from .supervisor import SupervisorRefused, _canonical, artifact_review_inputs
 from .workspace import WorkspaceRefused, _from_row
 
@@ -177,7 +178,15 @@ def validate_native_review_evidence(output, context):
             criterion = criteria[identifier]
             permitted = pool(check['id'] for check in criterion['checks'])
             pools = {rule['id']: permitted for rule in criterion['evidence_rules']}
+            # A seal written before drafts refused colliding ids may hold a check id equal to
+            # another criterion's rule id, or the receipt-reserved id. Citing it could make the
+            # flattened receipt non-unique, so such a check id is not a label for its criterion.
+            unlabelable = {RECEIPT_PROCESS_RESULT_ID} | {
+                rule['id'] for other in context['criteria'] if other['id'] != identifier
+                for rule in other['evidence_rules']}
             for check in criterion['checks']:
+                if check['id'] in unlabelable:
+                    continue
                 own = pool([check['id']])
                 # The published grammar lets a mapped check ID label its own terminal
                 # receipt. A shared rule/check ID must satisfy both meanings.

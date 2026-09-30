@@ -299,8 +299,15 @@ def build_draft_material(
     }
 
 
-def validate_draft_material(value: object) -> AcceptanceDraft:
+# Evidence id that record_final_review reserves for the reviewer process result row.
+RECEIPT_PROCESS_RESULT_ID = "review-process-result"
+
+
+def validate_draft_material(value: object, *, new_draft: bool = False) -> AcceptanceDraft:
     """Validate immutable executable criteria, evidence and identity bindings.
+
+    ``new_draft`` is True only where a draft is created. It adds the F54 label rules
+    that older builds did not enforce, so a draft or seal they stored stays readable.
 
     A draft has no dispatch-envelope field by design.  It is intentionally a
     closed schema so a future control-significant field cannot be smuggled in
@@ -352,9 +359,11 @@ def validate_draft_material(value: object) -> AcceptanceDraft:
         # F54: final review flattens every criterion's evidence (labelled by one of its own
         # rule or mapped check ids) plus the reserved process-result row into one receipt
         # whose ids must be unique. A check id may equal a rule id only inside its own
-        # criterion, and nothing may take the reserved id.
+        # criterion, and nothing may take the reserved id. Read-back of a stored draft or
+        # seal skips this (see validate_native_review_evidence for the legacy handling).
         own_checks, own_rules = {rule["id"] for rule in checks}, {rule["id"] for rule in evidence_rules}
-        if (own_checks | own_rules) & {"review-process-result"} or own_checks & evidence_ids or own_rules & check_ids:
+        if new_draft and ((own_checks | own_rules) & {RECEIPT_PROCESS_RESULT_ID}
+                          or own_checks & evidence_ids or own_rules & check_ids):
             raise RunPolicyRefused("POLICY_DRAFT_INVALID")
         check_ids.update(rule["id"] for rule in checks)
         evidence_ids.update(rule["id"] for rule in evidence_rules)

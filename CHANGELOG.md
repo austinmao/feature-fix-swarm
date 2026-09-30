@@ -39,6 +39,11 @@ all skills.
   `record_final_review` flattens every criterion's evidence plus the reserved
   process-result row into one receipt. A check id equal to a rule id of the
   same criterion stays accepted.
+  The refusal applies to newly created drafts only (`new_draft=True`, passed by
+  `create_acceptance_draft`), so a draft or seal stored by an older build still
+  reads back, and on such a seal `validate_native_review_evidence` does not
+  offer a check id that equals another criterion's rule id, or
+  `review-process-result`, as an evidence label for its criterion.
 
 ### Fixed (2026-09-30, spec-014 Release C: F49 gsd's ephemeral auto-chain flag write is no change)
 

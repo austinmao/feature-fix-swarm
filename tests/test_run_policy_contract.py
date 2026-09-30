@@ -367,7 +367,7 @@ def test_draft_refuses_a_check_id_equal_to_another_criterions_evidence_rule_id(c
     with pytest.raises(RunPolicyRefused, match="POLICY_RECEIPT_INVALID"):
         validate_role_receipt(_flattened_receipt(draft))
     with pytest.raises(RunPolicyRefused, match="POLICY_DRAFT_INVALID"):
-        validate_draft_material(draft)
+        validate_draft_material(draft, new_draft=True)
 
 
 @pytest.mark.parametrize("kind", ["checks", "evidence_rules"])
@@ -378,7 +378,7 @@ def test_draft_refuses_the_receipt_reserved_process_result_id(kind):
     with pytest.raises(RunPolicyRefused, match="POLICY_RECEIPT_INVALID"):
         validate_role_receipt(_flattened_receipt(draft))
     with pytest.raises(RunPolicyRefused, match="POLICY_DRAFT_INVALID"):
-        validate_draft_material(draft)
+        validate_draft_material(draft, new_draft=True)
 
 
 def test_draft_with_distinct_labels_across_criteria_still_flattens_to_a_valid_receipt():
@@ -387,7 +387,7 @@ def test_draft_with_distinct_labels_across_criteria_still_flattens_to_a_valid_re
         _criterion("AC-1", ["same", "check-1"], ["same", "rule-1"]),
         _criterion("AC-2", ["check-2"], ["rule-2"]),
     )
-    validate_draft_material(draft)
+    validate_draft_material(draft, new_draft=True)
     receipt = validate_role_receipt(_flattened_receipt(draft))
     assert [item["id"] for item in receipt.evidence].count("same") == 1
     assert "review-process-result" in {item["id"] for item in receipt.evidence}
