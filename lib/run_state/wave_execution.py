@@ -204,14 +204,14 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
             # conflict-free tree. Refuse any future or repository-specific
             # status instead of guessing how to snapshot it.
             raise WorkspaceRefused("WAVE_CHANGE_UNSUPPORTED")
-    # Honor only the repository's own in-tree .gitignore files. Never
-    # --exclude-standard: it also reads .git/info/exclude and core.excludesFile,
-    # which are host-local and would make digests differ between hosts. The
-    # filtered view is listed first, so a .gitignore that appears later is
-    # still caught by the unfiltered view below.
+    # Honor every in-tree per-directory .gitignore, tracked or untracked (pytest
+    # and ruff each write a self-ignoring one into their cache directory). An
+    # ignore rule only hides untracked files, so it can leave files out of the
+    # candidate but never put anything in. Never --exclude-standard: it also
+    # reads .git/info/exclude and core.excludesFile, which are host-local and
+    # would make digests differ between hosts.
     visible = _untracked_paths(workspace, "--exclude-per-directory=.gitignore")
     everything = _untracked_paths(workspace)
-    _refuse_untracked_gitignore(everything)
     # Safety checks keep seeing ignored paths; only the entries are filtered.
     _refuse_unsafe_runtime_roots(workspace, everything)
     untracked = [
@@ -246,19 +246,6 @@ def _untracked_paths(workspace: Path, *options: str) -> list[str]:
             )
         )
     ]
-
-
-def _refuse_untracked_gitignore(untracked: list[str]) -> None:
-    """Refuse any untracked .gitignore so a worker cannot add ignore rules.
-
-    Tracked .gitignore edits are ordinary tracked changes and already pass the
-    scope check. The name is compared NFC and case-folded because a
-    case-insensitive volume reads ``.GitIgnore`` as ``.gitignore``.
-    """
-    for item in untracked:
-        name = unicodedata.normalize("NFC", item.rsplit("/", 1)[-1]).casefold()
-        if name == ".gitignore":
-            raise WorkspaceRefused("UNSAFE_SELECTION_PATH")
 
 
 def _refuse_untracked_specials(workspace: Path) -> None:

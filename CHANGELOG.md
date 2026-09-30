@@ -22,19 +22,19 @@ all skills.
   candidate chain, frontend completion, local check verification and recovery
   trial checks all read that one inventory, so they agree on which files
   count. The change is narrow on purpose:
-  - only in-tree `.gitignore` files count. `--exclude-standard` is not used,
-    because it also reads `.git/info/exclude` and the user's
-    `core.excludesFile`, which are host-local and would make input digests
-    differ between hosts;
-  - a worker cannot add ignore rules of its own. Any untracked file named
-    `.gitignore` (compared case-insensitively) anywhere in the workspace is
-    refused with `UNSAFE_SELECTION_PATH`. It is found from the unfiltered
-    untracked listing, so a self-ignoring `.gitignore` containing `*` is caught
-    too. This also covers a `.gitignore` that a tool writes inside its own
-    cache directory, which pytest and ruff both do, so a worker should run
-    those tools with their caches off (`-p no:cacheprovider`, `--no-cache`). A
-    tracked `.gitignore` edit is an ordinary tracked change and goes through
-    the scope check;
+  - only in-tree `.gitignore` files count, tracked or untracked.
+    `--exclude-standard` is not used, because it also reads
+    `.git/info/exclude` and the user's `core.excludesFile`, which are
+    host-local and would make input digests differ between hosts;
+  - an untracked `.gitignore` is honored too, because pytest and ruff each
+    write one containing `*` into their own cache directory. That is safe
+    because an ignore rule only hides untracked files. Hidden files are never
+    harvested or integrated, and sealed checks run in a freshly prepared
+    workspace that holds only manifest entries, so a rule can only leave things
+    out and never inject them. A missing deliverable fails the checks. An
+    untracked `.gitignore` that does not ignore itself is itself an untracked
+    change and is scope-checked like any other file, and a tracked
+    `.gitignore` edit is an ordinary tracked change under the scope check;
   - the safety checks still see ignored paths. An ignored `.gsd` symlink, a
     case alias such as `.GSD` and an ignored FIFO or other special node are
     still refused with `UNSAFE_SELECTION_PATH`. Only the inventory entries that
