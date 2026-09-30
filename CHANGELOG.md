@@ -8,6 +8,53 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F47 sealed checks write their output through pipes)
+
+- The supervisor opened `stdout.log` and `stderr.log` in the launch's evidence
+  root and handed those regular files to the child as fds 1 and 2. A sealed
+  local check runs under a Seatbelt profile that grants no `file-read-metadata`
+  on the evidence root, so `fstat(1)` and `fstat(2)` failed with EPERM inside
+  the check. pytest's fd capture calls `os.fstat(targetfd)`, treats the fd as
+  invalid on error, dup2s `/dev/null` over fds 1 and 2 and closes them when it
+  finishes, so Python then exited 120 with empty output. The F46 tests missed
+  it because they ran the argv with pipes, where `fstat` is allowed. A sealed
+  check (a launch that carries local check material) now gets a pipe for each
+  of stdout and stderr, and the supervisor copies both into the same two log
+  files, created with the same flags and mode as before. No sandbox grant was
+  added. Workers, the orchestrator and qualification launches keep file-backed
+  stdio unchanged. A known limit of this design: if the supervisor itself dies
+  mid-check, the check loses its output pipe and its logs stay incomplete.
+  Nothing certifies them, because a resumed run refuses with
+  `FRONTEND_CHECK_RECONCILIATION_REQUIRED` and only a live handle reads check
+  logs.
+  - One selector thread reads both pipes in 64 KiB chunks and writes the bytes
+    unchanged, so neither stream can stall the child while the other is read
+    and nothing is buffered beyond one chunk. A failed log write is recorded
+    while the pipes keep being read, so the child never blocks on a full pipe.
+  - The stream evidence (locator, sha256, byte count) is still computed from
+    the final log files, after the copy has finished: `_wait_admitted` now
+    settles the copy once the child is reaped. The drain carries an explicit
+    `complete` state, true only when both pipes reached EOF and every chunk was
+    written and closed cleanly, and the settle refuses with `EVIDENCE_CHANGED`
+    unless it is true. That covers a copy that never started (the selector
+    could not be created), one that died, a failed log write, one still running
+    after a bounded wait, and one cut off before EOF because a stray descendant
+    still holds a pipe open. The thread closes the pipes and both logs when it
+    ends, so a held pipe cannot keep it alive. If the copy thread cannot be
+    started at all, both pipe readers are closed before the launch fails. On a
+    timeout or a launch that fails after the spawn, the copy is settled with a
+    bounded wait and never blocks the failure path.
+  - Tests run real sealed checks through `Supervisor.launch_sealed_check`: both
+    fds can be fstat'd and are pipes, a pytest-style dup and dup2 capture
+    works, 2 MiB of interleaved output on each stream is copied byte for byte
+    with matching sha256 and byte counts, a check stopped mid-output leaves
+    complete closed logs, and a launch that fails after the spawn leaves no
+    copy thread. Further tests pin that a check whose copy cannot start is
+    refused with no result published, that a copy cut off before EOF is
+    refused, that both pipe readers are closed, each on its own, and the
+    original error propagates when the copy thread cannot be built or started,
+    and that other launches keep file-backed stdio.
+
 ### Fixed (2026-09-30, spec-014 Release C: F46 sealed checks may open /dev/null)
 
 - A sealed local check runs under `sandbox-exec` with a profile that starts
