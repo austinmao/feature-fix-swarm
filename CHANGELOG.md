@@ -44,7 +44,11 @@ all skills.
     during group close used to escape as a Python traceback),
     `ManagedAdmissionRefused` (was exit 6 with no managed cause) and
     `ControlStoreRefused` with a `RESOURCE_` code, such as
-    `RESOURCE_PARENT_GROUP_ENDED` (was exit 5). Other authority refusals, for
+    `RESOURCE_PARENT_GROUP_ENDED` (was exit 5). A `SupervisorRefused` whose
+    code starts with `RESOURCE_` (the `_bind_shared_resource` backstop, the
+    spawn-safety check) is classified as a resource refusal too, ahead of the
+    generic supervisor branch, so its recovery action is
+    `inspect_managed_admission` and not `qualify_host_adapter`. Other authority refusals, for
     example `FENCE_REVOKED` (exit 4), are re-raised unchanged and keep their
     own contract. No caller below the boundary relies on these escaping.
   - Tests use real stores, supervisors, admission queue and coordinators. The

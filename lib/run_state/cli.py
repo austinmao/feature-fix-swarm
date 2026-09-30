@@ -182,12 +182,15 @@ def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     elif error.code in _WAVE_REFUSALS:
         cause, action = _WAVE_REFUSALS[error.code]
         extra.update(cause=cause, recovery_action={"action": action})
+    elif isinstance(error, _resource_refusals()) or (
+            isinstance(error, SupervisorRefused) and error.code.startswith("RESOURCE_")):
+        # The supervisor types resource-layer refusals as SupervisorRefused (_bind_shared_resource,
+        # _assert_shared_spawn_safe); they are still resource refusals, not a host-qualification gap.
+        extra.update(cause="a shared-resource admission or prepaid-group refusal ended the managed run",
+                     recovery_action={"action": "inspect_managed_admission"})
     elif isinstance(error, SupervisorRefused):
         extra.update(cause="the selected host backend has not demonstrated managed admission",
                      recovery_action={"action": "qualify_host_adapter"})
-    elif isinstance(error, _resource_refusals()):
-        extra.update(cause="a shared-resource admission or prepaid-group refusal ended the managed run",
-                     recovery_action={"action": "inspect_managed_admission"})
     else:
         extra["cause"] = "the managed run policy refused the transition"
     return _fixture_refusal(error.code, run_id=run_id, exit_code=78, **extra)
