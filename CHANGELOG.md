@@ -8,6 +8,33 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F44 gsd runtime state stays out of wave snapshots)
+
+- After gsd-core's `dispatch-isolation` step ran in the orchestrator's
+  worktree, the candidate chain refused the run as
+  `FRONTEND_INTEGRATION_CHAIN_INVALID`. That step writes
+  `.gsd/dispatch-isolation-sentinel.json` before the first wave. The wave
+  inventory exempted only FFS's own transport directories, so the untracked
+  sentinel entered the wave snapshot and changed its input digest, which then
+  no longer matched the clean preparation digest the acceptance receipt
+  carries. The wave worker's worktree gets the same untracked `.gsd/`, so the
+  file could also reach the candidate output. Snapshot capture, output harvest
+  and the candidate chain all read one inventory, so it now skips untracked
+  files under `.gsd/`. The exemption is narrow on purpose:
+  - it covers untracked regular files only. A tracked `.gsd/` file that is
+    modified or deleted stays in the inventory, the harvest and the candidate
+    chain exactly as before;
+  - the top-level `.gsd` must be a real directory, tracked or not. A `.gsd`
+    that is a file or a symlink is refused, and so are a case alias such as
+    `.GSD` or `.Gsd` (which case-insensitive volumes treat as the same name)
+    and an untracked symlink or special node (FIFO, socket, device) inside
+    `.gsd/`. All are refused with `UNSAFE_SELECTION_PATH` instead of being
+    exempted or captured. Untracked entries under `.gsd/` must be regular
+    files. Tracked symlinks inside `.gsd/` are ordinary repository content and
+    are treated like any other tracked symlink;
+  - anything else untracked, such as `newfile.py`, `.gsdfoo.txt` or
+    `pkg/.gsd/kept.py`, is still captured.
+
 ### Fixed (2026-09-29, spec-014 Release C: F43 private TMPDIR per managed Codex launch)
 
 - A managed Codex orchestrator ran pytest inside its workspace-write
