@@ -22,7 +22,11 @@ all skills.
   of stdout and stderr, and the supervisor copies both into the same two log
   files, created with the same flags and mode as before. No sandbox grant was
   added. Workers, the orchestrator and qualification launches keep file-backed
-  stdio unchanged.
+  stdio unchanged. A known limit of this design: if the supervisor itself dies
+  mid-check, the check loses its output pipe and its logs stay incomplete.
+  Nothing certifies them, because a resumed run refuses with
+  `FRONTEND_CHECK_RECONCILIATION_REQUIRED` and only a live handle reads check
+  logs.
   - One selector thread reads both pipes in 64 KiB chunks and writes the bytes
     unchanged, so neither stream can stall the child while the other is read
     and nothing is buffered beyond one chunk. A failed log write is recorded
@@ -47,8 +51,9 @@ all skills.
     complete closed logs, and a launch that fails after the spawn leaves no
     copy thread. Further tests pin that a check whose copy cannot start is
     refused with no result published, that a copy cut off before EOF is
-    refused, that the pipe readers are closed when the copy thread cannot
-    start, and that other launches keep file-backed stdio.
+    refused, that both pipe readers are closed, each on its own, and the
+    original error propagates when the copy thread cannot be built or started,
+    and that other launches keep file-backed stdio.
 
 ### Fixed (2026-09-30, spec-014 Release C: F46 sealed checks may open /dev/null)
 

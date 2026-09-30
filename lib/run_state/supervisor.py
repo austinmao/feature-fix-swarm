@@ -247,15 +247,18 @@ class _PipeDrain:
 
     def __init__(self, process: subprocess.Popen, stdout, stderr) -> None:
         self._streams = ((process.stdout, stdout), (process.stderr, stderr))
-        self._exited = threading.Event()
         self.error: BaseException | None = None
         self.complete = False
-        self._thread = threading.Thread(target=self._run, name="ffs-pipe-drain", daemon=True)
         try:
+            self._exited = threading.Event()
+            self._thread = threading.Thread(target=self._run, name="ffs-pipe-drain", daemon=True)
             self._thread.start()
         except BaseException:
             for pipe, _log in self._streams:  # the caller still owns the logs
-                pipe.close()
+                try:
+                    pipe.close()
+                except OSError:
+                    pass  # each reader is closed on its own; the original error is what propagates
             raise
 
     def _run(self) -> None:
@@ -2041,7 +2044,12 @@ class Supervisor:
         # F47: a sealed check's profile grants no file-read-metadata on the
         # evidence root, so a regular-file stdio fd fails fstat with EPERM and
         # pytest's fd capture then closes it.  Its stdio is a pair of pipes
-        # that a supervisor thread copies into the same two logs.
+        # that a supervisor thread copies into the same two logs.  Known limit
+        # (operator decision D5): if the supervisor dies mid-check, the check
+        # loses its output pipe (EPIPE/SIGPIPE) and its logs stay incomplete.
+        # Nothing certifies them: a resumed run refuses with
+        # FRONTEND_CHECK_RECONCILIATION_REQUIRED (frontend_policy
+        # _completed_check), and only a live handle reads check logs.
         piped = request.local_check_material is not None
         proc = drain = None
         try:
