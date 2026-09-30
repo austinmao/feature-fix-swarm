@@ -458,15 +458,16 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
                 _sha(pin, "qualified chain pin")
         try:
             node = codex_node_binary(binary, request.node_sha256 is not None)
-            native = codex_native_binary(binary) if js else None
+            if node is not None:
+                # The platform probe below runs this Node, so its bytes meet the pin first.
+                provenance["node_binary"], provenance["node_sha256"] = _bind_binary(
+                    node, request.node_sha256, _BOUND_BINARIES[0][2])
+            native = codex_native_binary(binary, node)
         except CapabilityError as error:
             raise NativeReviewRuntimeRefused(str(error)) from error
-        if js and native is None:
-            raise NativeReviewRuntimeRefused("Codex JS launcher has no resolved native CLI")
-        for found, pin, (path_key, sha_key, label) in ((node, request.node_sha256, _BOUND_BINARIES[0]),
-                                                       (native, request.native_sha256, _BOUND_BINARIES[1])):
-            if found is not None:
-                provenance[path_key], provenance[sha_key] = _bind_binary(found, pin, label)
+        if native is not None:
+            provenance["native_binary"], provenance["native_sha256"] = _bind_binary(
+                native, request.native_sha256, _BOUND_BINARIES[1][2])
     elif request.node_sha256 is not None or request.native_sha256 is not None:
         raise NativeReviewRuntimeRefused("Claude review cannot bind a Node or vendor binary")
     path = _review_path(request.host, binary, node)

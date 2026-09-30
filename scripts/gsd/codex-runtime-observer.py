@@ -66,19 +66,15 @@ def executable_chain(binary: Path) -> dict[str, str]:
     if not launcher.is_file() or launcher.is_symlink():
         raise ValueError("Codex launcher is not a regular executable")
     chain = {"launcher_sha256": sha(launcher)}
-    is_js = launcher.suffix == ".js"
-    try:
-        if is_js:
-            chain["node_sha256"] = sha(_shared.codex_node_binary(launcher, True))
-        # The vendor executable is the launcher's own platform-package selection, not a wildcard
-        # or ambient CODEX_NATIVE_BINARY choice (codex_native_binary refuses a conflicting override).
-        native = _shared.codex_native_binary(launcher)
-    except _shared.CapabilityError as error:
-        raise ValueError(str(error)) from error
-    if native is not None:
-        chain["native_sha256"] = sha(native)
-    if is_js and "native_sha256" not in chain:
-        raise ValueError("Codex JS launcher has no resolved native CLI")
+    if launcher.suffix == ".js":
+        try:
+            node = _shared.codex_node_binary(launcher, True)
+            chain["node_sha256"] = sha(node)
+            # The vendor executable is the launcher's own platform-package selection under this
+            # Node, not a wildcard or an ambient CODEX_NATIVE_BINARY choice.
+            chain["native_sha256"] = sha(_shared.codex_native_binary(launcher, node))
+        except _shared.CapabilityError as error:
+            raise ValueError(str(error)) from error
     return chain
 
 def runtime_hashes(runtime: Path) -> dict[str, str]:

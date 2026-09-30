@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import stat
 import subprocess
@@ -279,65 +278,87 @@ def codex_node_binary(binary: Path, required: bool = False) -> Path | None:
 
 
 # codex-cli/bin/codex.js, byte-identical at rust-v0.154.0 and rust-v0.159.0: PLATFORM_PACKAGE_BY_TARGET
-# for the platforms FFS runs on.  Other platforms are unknown shapes and resolve to nothing.
+# for the platforms FFS runs on.  Other platform/arch pairs are unknown shapes and refuse.
 _CODEX_TARGETS = {
     ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
     ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
     ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
     ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
 }
+_NODE_PROBE_TIMEOUT = 10.0
 
 
-def _codex_target() -> tuple[str, str] | None:
-    """(target triple, platform package) the launcher's platform/arch switch picks here."""
-    system = "darwin" if sys.platform == "darwin" else "linux" if sys.platform.startswith("linux") else None
-    arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(platform.machine().lower())
-    return _CODEX_TARGETS.get((system, arch))
+def _codex_target(node: Path) -> tuple[str, str]:
+    """(target triple, platform package) codex.js picks under this very Node.
 
-
-def _launcher_native_executable(launcher: Path) -> Path | None:
-    """Replay ``findCodexExecutable`` of codex.js: the file the launcher spawns, or None.
-
-    ``require.resolve("<platform package>/package.json")`` from the launcher's own directory
-    (each ancestor's ``node_modules``, nearest first; NODE_PATH and global folders are not
-    modelled), then ``<package>/vendor/<triple>/bin/codex``.  Only when the package does not
-    resolve does it fall back to ``<launcher package>/vendor/<triple>/bin/codex``; a resolved
-    package without the executable is an error in the launcher, not a fallback.  A package
-    manifest with ``exports`` is a shape the launcher answers differently, so it is refused.
+    codex.js switches on Node's ``process.platform`` / ``process.arch``, which can differ
+    from Python's (Rosetta, an x64 Node on arm64), so the verified Node reports them itself:
+    run by absolute path, fixed minimal environment, bounded time, nothing else printed.
     """
-    target = _codex_target()
+    try:
+        done = subprocess.run(
+            [str(node), "-p", "process.platform+' '+process.arch"], cwd="/", stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=_NODE_PROBE_TIMEOUT, check=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"})
+        reported = done.stdout.decode("ascii").strip()
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as error:
+        raise CapabilityError("Codex Node platform probe failed") from error
+    match = re.fullmatch(r"([a-z0-9]{1,16}) ([a-z0-9_]{1,16})", reported)
+    if done.returncode != 0 or match is None:
+        raise CapabilityError("Codex Node platform probe gave no platform and arch")
+    system, arch = match.groups()
+    target = _CODEX_TARGETS.get(("linux" if system == "android" else system, arch))
     if target is None:
-        return None
-    triple, package = target
-    vendor_root = launcher.parent.parent / "vendor"
+        raise CapabilityError(f"Codex has no platform package for Node platform {system} {arch}")
+    return target
+
+
+def _launcher_native_executable(launcher: Path, node: Path) -> Path:
+    """Replay ``findCodexExecutable`` of codex.js: the file the launcher spawns.
+
+    ``require.resolve("<platform package>/package.json")`` from the launcher's own directory:
+    each ancestor's ``node_modules``, nearest first, which Node consults before NODE_PATH and
+    the global folders.  Those later steps, and codex.js's own fallback to a local ``vendor/``
+    dir once they fail, are not modelled, so a package found in no ancestor refuses rather than
+    guessing.  A resolved package without ``vendor/<triple>/bin/codex`` is an error in the
+    launcher too, and a manifest with ``exports`` is a shape it answers differently: both refuse.
+    """
+    triple, package = _codex_target(node)
+    refusal = "Codex JS launcher has no resolved native CLI"
     for directory in (launcher.parent, *launcher.parent.parents):
         manifest = directory / "node_modules" / package / "package.json"
-        if directory.name != "node_modules" and manifest.is_file():
-            try:
-                if json.loads(manifest.read_text(encoding="utf-8")).get("exports") is not None:
-                    return None
-            except (OSError, ValueError, AttributeError):
-                return None
-            vendor_root = manifest.resolve().parent / "vendor"
-            break
-    executable = vendor_root / triple / "bin" / "codex"
-    if executable.is_file() and not executable.is_symlink():
+        if directory.name == "node_modules" or not manifest.is_file():
+            continue
+        try:
+            exports = json.loads(manifest.read_text(encoding="utf-8")).get("exports")
+        except (OSError, ValueError, AttributeError):
+            raise CapabilityError(f"{refusal}: {package} has an unreadable manifest") from None
+        if exports is not None:
+            raise CapabilityError(f"{refusal}: {package} declares an exports map, a shape not modelled")
+        executable = manifest.resolve().parent / "vendor" / triple / "bin" / "codex"
+        if not executable.is_file() or executable.is_symlink():
+            raise CapabilityError(f"{refusal}: {package} resolves but has no regular vendor/{triple}/bin/codex")
         return executable.resolve()
-    return None
+    raise CapabilityError(
+        f"{refusal}: {package} is in no ancestor node_modules of the launcher "
+        "(a local vendor dir, NODE_PATH and the global folders are not modelled)")
 
 
-def codex_native_binary(launcher: Path) -> Path | None:
-    """The vendor executable a resolved npm ``.js`` launcher spawns, or None.
+def codex_native_binary(launcher: Path, node: Path | None) -> Path | None:
+    """The vendor executable a resolved npm ``.js`` launcher spawns, else None (native launcher).
 
-    The one resolution shared by host qualification and the native review.  It is the
-    launcher's own selection, never an ambient one: ``CODEX_NATIVE_BINARY`` does not
-    override it, and a value naming any other file is refused rather than silently ignored.
+    The one resolution shared by host qualification, the runtime observer and the native
+    review, under the verified ``node``.  It is the launcher's own selection, never an ambient
+    one: ``CODEX_NATIVE_BINARY`` does not override it, and a value naming any other file is
+    refused rather than silently ignored.
     """
     if launcher.suffix != ".js":
         return None
-    executable = _launcher_native_executable(launcher)
+    if node is None:
+        raise CapabilityError("Codex JS launcher has no resolved regular Node binary")
+    executable = _launcher_native_executable(launcher, node)
     override = os.environ.get("CODEX_NATIVE_BINARY")
-    if override and (executable is None or Path(override).resolve() != executable):
+    if override and Path(override).resolve() != executable:
         raise CapabilityError("CODEX_NATIVE_BINARY names a different executable than the launcher spawns")
     return executable
 
@@ -905,14 +926,10 @@ def _binary_chain(binary: Path) -> dict[str, str]:
     if launcher.is_symlink() or not launcher.is_file():
         raise CapabilityError("Codex launcher is unsafe")
     chain = {"launcher_sha256": _digest(launcher)}
-    is_js = launcher.suffix == ".js"
-    if is_js:
-        chain["node_sha256"] = _digest(codex_node_binary(launcher, True))
-    native = codex_native_binary(launcher)
-    if native is not None:
-        chain["native_sha256"] = _digest(native)
-    if is_js and "native_sha256" not in chain:
-        raise CapabilityError("Codex JS launcher has no resolved native CLI")
+    if launcher.suffix == ".js":
+        node = codex_node_binary(launcher, True)
+        chain["node_sha256"] = _digest(node)
+        chain["native_sha256"] = _digest(codex_native_binary(launcher, node))
     return chain
 
 

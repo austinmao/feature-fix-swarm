@@ -283,7 +283,9 @@ def test_qualification_refuses_when_the_node_platform_probe_fails(tmp_path: Path
     launcher, node, _native, _triple = _layouts()._npm_layout(tmp_path, node_body=body)
     monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
     monkeypatch.delenv("CODEX_NATIVE_BINARY", raising=False)
-    monkeypatch.setattr(host_capabilities, "_NODE_PROBE_TIMEOUT", 0.3, raising=False)
+    # The observer loads its own copy of host_capabilities; bound the probe in both.
+    for module in (host_capabilities, observer._shared):
+        monkeypatch.setattr(module, "_NODE_PROBE_TIMEOUT", 0.3, raising=False)
 
     for error, chain in _chains(launcher):
         with pytest.raises(error, match="Node"):

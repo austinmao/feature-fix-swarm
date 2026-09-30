@@ -44,19 +44,28 @@ all skills.
     or `node` on PATH). The vendor executable the launcher spawns, which the review
     material previously did not bind at all, is bound the same way. It is located by
     replaying the launcher's own `findCodexExecutable` (`codex-cli/bin/codex.js`, byte
-    identical at `rust-v0.154.0` and `rust-v0.159.0`): the platform/arch target triple and
-    platform package from its table, `require.resolve("<package>/package.json")` from
-    the launcher's directory (each ancestor `node_modules`, nearest first), then
-    `<package>/vendor/<triple>/bin/codex`; only when the package does not resolve, the
-    launcher's local `vendor/` directory. A resolved package without the executable, or
-    with an `exports` map, resolves to nothing and refuses. The previous wildcard
-    (`codex-*/vendor/*/bin/codex`, first match) and an ambient `CODEX_NATIVE_BINARY` could
-    bind a decoy, so both are gone. An ambient `CODEX_NATIVE_BINARY` naming any file other
-    than the one the launcher spawns now refuses with a clear reason instead of being
-    silently honoured or silently ignored. Host qualification (`_binary_chain`) and the
-    runtime observer (`executable_chain`) use the same `codex_node_binary` and
-    `codex_native_binary` helpers, so the qualified chain and the review bind one
-    executable.
+    identical at `rust-v0.154.0` and `rust-v0.159.0`): the platform package and target
+    triple come from its table, keyed by `process.platform` and `process.arch` as reported
+    by the verified Node itself (run by absolute path, fixed minimal environment, 10 s
+    timeout; a failed probe, malformed output or an unknown pair refuses), not by Python's
+    `platform.machine()`, which can differ under Rosetta or with an x64 Node on arm64. Then
+    `require.resolve("<package>/package.json")` from the launcher's directory (each ancestor
+    `node_modules`, nearest first, the first step of Node's order), then
+    `<package>/vendor/<triple>/bin/codex`. A resolved package without the executable, or with
+    an `exports` map, refuses. The previous wildcard (`codex-*/vendor/*/bin/codex`, first
+    match) and an ambient `CODEX_NATIVE_BINARY` could bind a decoy, so both are gone. An
+    ambient `CODEX_NATIVE_BINARY` naming any file other than the one the launcher spawns now
+    refuses with a clear reason instead of being silently honoured or silently ignored. Host
+    qualification (`_binary_chain`), the runtime observer (`executable_chain`) and the native
+    review use the same `codex_node_binary` and `codex_native_binary` helpers, so the
+    qualified chain and the review bind one executable. The Node is checked against its pin
+    before it is run for the probe.
+  - Limitation: the native review does not emulate the rest of Node's resolution order
+    (NODE_PATH, `$HOME/.node_modules`, `$HOME/.node_libraries`, `$PREFIX/lib/node`) or the
+    launcher's fallback to a local `vendor/` directory, which only applies once those fail.
+    A Codex install whose platform package is found in no ancestor `node_modules` of the
+    launcher, including one carrying only a local `vendor/` dir, therefore refuses native
+    review (and qualification) instead of binding a guess.
   - The material records `node_binary`, `node_sha256`, `native_binary` and
     `native_sha256` in its provenance. Replay never consults the ambient environment: it
     re-hashes both stored paths, recomputes the expected `PATH` from the stored binary
