@@ -195,8 +195,10 @@ def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str
         catalog_path=seam.catalog_path if seam.host == "codex" else None,
         catalog_sha256=seam.catalog_sha256 if seam.host == "codex" else None,
         session_id=str(uuid.uuid4()) if seam.host == "claude" else None,
-        # A `.js` launcher runs under the Node its runtime was qualified with (chain pin).
+        # A `.js` launcher runs under the Node, and spawns the vendor executable, that its runtime
+        # was qualified with (chain pins); native review binds and re-verifies both.
         node_sha256=dict(qualified_binary).get("node_sha256") if seam.host == "codex" else None,
+        native_sha256=dict(qualified_binary).get("native_sha256") if seam.host == "codex" else None,
     )
 
 

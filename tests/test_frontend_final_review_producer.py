@@ -520,3 +520,18 @@ def test_native_request_carries_the_qualified_node_pin_for_codex_only(tmp_path):
                            qualified_binary={"launcher_sha256": "a" * 64}).node_sha256 is None
     claude = SimpleNamespace(**{**vars(seam), "host": "claude", "catalog_path": None, "catalog_sha256": None})
     assert _native_request(claude, runtime_identity="r", prompt="p", qualified_binary=chain).node_sha256 is None
+
+
+def test_native_request_carries_the_qualified_vendor_pin_for_codex_only(tmp_path):
+    """F53 review: the vendor executable a `.js` launcher spawns is pinned by the qualified chain."""
+    launcher = tmp_path / "codex.js"
+    launcher.write_bytes(b"#!/usr/bin/env node\n")
+    seam = SimpleNamespace(host="codex", binary=str(launcher), cli_version=CODEX_CLI_VERSION, model="gpt-5.6-terra",
+                           effort="high", catalog_path=str(tmp_path / "models.json"), catalog_sha256="c" * 64)
+    chain = {"launcher_sha256": "a" * 64, "node_sha256": "b" * 64, "native_sha256": "d" * 64}
+
+    assert _native_request(seam, runtime_identity="r", prompt="p", qualified_binary=chain).native_sha256 == "d" * 64
+    assert _native_request(seam, runtime_identity="r", prompt="p",
+                           qualified_binary={"launcher_sha256": "a" * 64}).native_sha256 is None
+    claude = SimpleNamespace(**{**vars(seam), "host": "claude", "catalog_path": None, "catalog_sha256": None})
+    assert _native_request(claude, runtime_identity="r", prompt="p", qualified_binary=chain).native_sha256 is None

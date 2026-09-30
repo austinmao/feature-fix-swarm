@@ -19,25 +19,35 @@ all skills.
   supervisor launches with `launch_environment = material.execution_environment()`);
   the separate artifact-envelope `PATH` in `produce_final_review` is never used to
   launch it, is not compared with it, and is left as it was.
-  - The Codex review `PATH` is now built exactly as the host launch builds it:
-    the launcher's parent, the Node parent for a `.js` launcher, then
-    `/usr/bin:/bin`. The construction moved into two shared helpers in
-    `host_capabilities` (`codex_node_binary`, `codex_path_entries`) that
-    `codex_closed_environment` now also uses, so the two cannot drift. A native
-    (non-`.js`) binary gets its own parent plus the system dirs and no Node
-    directory, even when Node is ambient. Claude review material is unchanged.
-  - Node is the one the reviewer runtime was qualified with:
-    `produce_final_review` passes the qualified chain's `node_sha256` through
-    `NativeReviewRequest.node_sha256`, and preparation refuses a Node whose bytes
-    differ (the path is located as the host launch locates it, through
-    `CODEX_NODE_BINARY` or `node` on PATH). A `.js` launcher with no resolvable
-    regular Node refuses before any runtime directory is created.
-  - The material records `node_binary` and `node_sha256` in its provenance.
-    Replay never consults the ambient environment: it re-hashes the stored Node
-    path, recomputes the expected `PATH` from the stored binary and Node, and
-    refuses a tampered `PATH`, a swapped or forged Node, or a `.js` material that
-    sheds its Node identity. Every `PATH` entry must be absolute and free of the
-    separator.
+  - The Codex review `PATH` is now built exactly as the host launch builds it, through
+    shared helpers in `host_capabilities` (`codex_node_binary`, `codex_native_binary`,
+    `codex_path_entries`) that `codex_closed_environment` also uses, so the two cannot
+    drift: the verified Node's directory first, then the launcher's parent, then
+    `/usr/bin:/bin`. Node goes first because `#!/usr/bin/env node` takes the first `node`
+    on PATH; with the launcher's directory first, a different `node` placed beside
+    `codex.js` would have run (the host launch had the same order). The Node directory
+    must also resolve `node` to the verified file, or the launch refuses. A native
+    (non-`.js`) binary gets its own parent plus the system dirs and no Node directory,
+    even when Node is ambient. Claude review material is unchanged. Because the host
+    launch shares the helper, a `.js` launcher's closed environment (and so its policy hash)
+    now lists Node first; a runtime qualified before this change for an npm install is
+    re-qualified, while a native binary's PATH is unchanged.
+  - A `.js` launcher requires both pins from the reviewer runtime's qualified chain,
+    `node_sha256` and `native_sha256` (`NativeReviewRequest`, threaded by
+    `produce_final_review`); a request without them refuses before any runtime
+    directory exists. Preparation reads each binary once, the read whose digest is
+    recorded, and compares that digest with the pin, so a swap after resolution cannot
+    be recorded. The Node is located as the host launch locates it (`CODEX_NODE_BINARY`
+    or `node` on PATH). The vendor executable the launcher spawns, which the review
+    material previously did not bind at all, is located by the same resolution
+    qualification uses (`CODEX_NATIVE_BINARY`, then the platform packages next to the
+    launcher) and is bound the same way.
+  - The material records `node_binary`, `node_sha256`, `native_binary` and
+    `native_sha256` in its provenance. Replay never consults the ambient environment: it
+    re-hashes both stored paths, recomputes the expected `PATH` from the stored binary
+    and Node, and refuses a tampered `PATH`, a swapped or forged Node or vendor
+    executable, or a `.js` material that sheds either identity. Every `PATH` entry must
+    be absolute and free of the separator.
 
 ### Fixed (2026-09-30, spec-014 Release C: F52 native review admits Codex CLI 0.159.0)
 

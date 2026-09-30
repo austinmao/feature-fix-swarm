@@ -255,30 +255,51 @@ def codex_private_tmp_root() -> Path:
     return Path("/tmp").resolve()
 
 
-def codex_node_binary(binary: Path, node_sha256: str | None = None) -> Path | None:
+def codex_node_binary(binary: Path, required: bool = False) -> Path | None:
     """Resolved Node binary a resolved Codex launcher needs on PATH, else None.
 
-    A ``.js`` launcher (every npm install) or a qualified chain that pins
-    ``node_sha256`` needs Node: ``CODEX_NODE_BINARY`` or ``node`` on PATH,
-    resolved and regular, and equal to the pin when there is one.  A native
-    binary needs none.  Shared by the host launch and the native review.
+    A ``.js`` launcher (every npm install), or a caller whose qualified chain pins
+    ``node_sha256`` (``required``), needs Node: ``CODEX_NODE_BINARY`` or ``node`` on
+    PATH, resolved and regular.  A native binary needs none.  Callers compare the
+    returned file with their pin; this only locates it.  Because the launch puts the
+    Node directory first on PATH, ``node`` there must resolve to this very file.
     """
-    if binary.suffix != ".js" and node_sha256 is None:
+    if binary.suffix != ".js" and not required:
         return None
     node = Path(os.environ.get("CODEX_NODE_BINARY") or shutil.which("node") or "").resolve()
     if not node.is_absolute() or not node.is_file() or node.is_symlink():
         raise CapabilityError("Codex JS launcher has no resolved regular Node binary")
-    if node_sha256 is not None and node_sha256 != _digest(node):
-        raise CapabilityError("Codex Node binary differs from qualified chain")
+    if (node.parent / "node").resolve() != node:
+        raise CapabilityError("Codex Node directory does not resolve `node` to the verified binary")
     return node
 
 
+def codex_native_binary(launcher: Path) -> Path | None:
+    """The vendor executable an npm ``.js`` launcher spawns, resolved, or None.
+
+    ``CODEX_NATIVE_BINARY`` first, then the platform packages next to the launcher:
+    the one resolution shared by host qualification and the native review.
+    """
+    override = os.environ.get("CODEX_NATIVE_BINARY")
+    candidates = [Path(override)] if override else []
+    if len(launcher.parents) >= 3:
+        candidates.extend(launcher.parents[2].glob("codex-*/vendor/*/bin/codex"))
+    if len(launcher.parents) >= 2:
+        candidates.extend(launcher.parents[1].glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
+    for native in candidates:
+        if native.is_file() and not native.is_symlink():
+            return native.resolve()
+    return None
+
+
 def codex_path_entries(binary: Path, node: Path | None) -> list[str]:
-    """PATH of a Codex launch: binary parent, Node parent when needed, then the system dirs."""
-    entries = [str(binary.parent)]
-    if node is not None:
-        entries.append(str(node.parent))
-    entries.extend(("/usr/bin", "/bin"))
+    """PATH of a Codex launch: the verified Node's directory first, then the launcher's, then the system dirs.
+
+    Node goes first because ``#!/usr/bin/env node`` takes the first ``node`` on PATH; a
+    different ``node`` placed beside the launcher must never shadow the verified one.
+    """
+    entries = [str(node.parent)] if node is not None else []
+    entries.extend((str(binary.parent), "/usr/bin", "/bin"))
     return list(dict.fromkeys(entries))
 
 
@@ -294,7 +315,10 @@ def codex_closed_environment(home: Path, tmpdir: Path, binary: Path,
     home = home.resolve()
     binary = binary.resolve()
     chain = dict(chain)
-    node = codex_node_binary(binary, chain.get("node_sha256"))
+    pin = chain.get("node_sha256")
+    node = codex_node_binary(binary, pin is not None)
+    if pin is not None and pin != _digest(node):
+        raise CapabilityError("Codex Node binary differs from qualified chain")
     environment = {
         "HOME": str(home), "CODEX_HOME": str(home), "TMPDIR": str(tmpdir.resolve()),
         "PATH": os.pathsep.join(codex_path_entries(binary, node)),
@@ -837,16 +861,9 @@ def _binary_chain(binary: Path) -> dict[str, str]:
         if not node.is_file() or node.is_symlink():
             raise CapabilityError("Codex JS launcher has no resolved regular Node binary")
         chain["node_sha256"] = _digest(node.resolve())
-    override = os.environ.get("CODEX_NATIVE_BINARY")
-    candidates = [Path(override)] if override else []
-    if len(launcher.parents) >= 3:
-        candidates.extend(launcher.parents[2].glob("codex-*/vendor/*/bin/codex"))
-    if len(launcher.parents) >= 2:
-        candidates.extend(launcher.parents[1].glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
-    for native in candidates:
-        if native.is_file() and not native.is_symlink():
-            chain["native_sha256"] = _digest(native.resolve())
-            break
+    native = codex_native_binary(launcher)
+    if native is not None:
+        chain["native_sha256"] = _digest(native)
     if is_js and "native_sha256" not in chain:
         raise CapabilityError("Codex JS launcher has no resolved native CLI")
     return chain
