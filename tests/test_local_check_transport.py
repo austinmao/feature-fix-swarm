@@ -3,8 +3,10 @@ from dataclasses import replace
 import functools
 import os
 from pathlib import Path
+import selectors
 import shlex
 import signal
+import subprocess
 import sys
 import socket
 import tempfile
@@ -485,17 +487,22 @@ def test_the_data_volume_root_still_holds_home():
 # capture (which fstats fds 1 and 2) then closes them and exits 120. Each test
 # below runs through Supervisor.launch_sealed_check, not through a bare argv.
 
-def _launch_sealed_check(tmp_path, code, *, fault=None):
-    """Launch ``code`` as a sealed check via the real launch path; None if HOME holds the interpreter."""
+def _interpreter_outside_home():
     from run_state.local_check_runtime import _overlap
+    return not _overlap(_host_interpreter()[0], Path.home())
+
+
+requires_interpreter_outside_home = pytest.mark.skipif(
+    not _interpreter_outside_home(),
+    reason="the host interpreter is installed under HOME, which a sealed check cannot declare as a read root")
+
+
+def _launch_sealed_check(tmp_path, code, *, fault=None):
+    """Return (supervisor, launch) for ``code`` as a sealed check on the real launch path."""
     prefix, interpreter = _host_interpreter()
     tmp_path.mkdir(exist_ok=True)
     supervisor, store, request = setup_owner(tmp_path, fault=fault)
     locator = shlex.join((str(interpreter), "-c", code))
-    if _overlap(prefix, Path.home()):
-        with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
-            _sealed_command_check(store, supervisor.token, request, locator, [str(prefix)])
-        return None
     sealed = _sealed_command_check(store, supervisor.token, request, locator, [str(prefix)])
     request = replace(request, contract_hash=sealed.acceptance_hash)
     return supervisor, functools.partial(
@@ -503,10 +510,7 @@ def _launch_sealed_check(tmp_path, code, *, fault=None):
 
 
 def _finish_sealed_check(tmp_path, code):
-    launched = _launch_sealed_check(tmp_path, code)
-    if launched is None:
-        return None
-    supervisor, launch = launched
+    supervisor, launch = _launch_sealed_check(tmp_path, code)
     return supervisor.finish(launch(), timeout=60)
 
 
@@ -515,37 +519,35 @@ def _logs(result):
 
 
 @requires_local_confinement
+@requires_interpreter_outside_home
 def test_sealed_check_can_fstat_its_own_stdout_and_stderr(tmp_path):
     code = 'import os,sys; os.fstat(1); os.fstat(2); print("out"); print("err", file=sys.stderr)'
     result = _finish_sealed_check(tmp_path, code)
-    if result is None:
-        return
     assert result["returncode"] == 0, _logs(result)
     assert _logs(result) == {"stdout": b"out\n", "stderr": b"err\n"}
 
 
 @requires_local_confinement
+@requires_interpreter_outside_home
 def test_sealed_check_survives_the_fd_dance_of_pytest_capture(tmp_path):
     code = ('import os,tempfile;t=tempfile.TemporaryFile();fd=os.dup(1);os.fstat(1);'
             'os.dup2(t.fileno(),1);os.dup2(fd,1);print("ok")')
     result = _finish_sealed_check(tmp_path, code)
-    if result is None:
-        return
     assert result["returncode"] == 0, _logs(result)
     assert _logs(result)["stdout"] == b"ok\n"
 
 
 @requires_local_confinement
+@requires_interpreter_outside_home
 def test_sealed_check_stdout_and_stderr_are_pipes(tmp_path):
     code = 'import os,stat as t;print(t.S_ISFIFO(os.fstat(1).st_mode),t.S_ISFIFO(os.fstat(2).st_mode))'
     result = _finish_sealed_check(tmp_path, code)
-    if result is None:
-        return
     assert result["returncode"] == 0, _logs(result)
     assert _logs(result)["stdout"] == b"True True\n"
 
 
 @requires_local_confinement
+@requires_interpreter_outside_home
 def test_sealed_check_large_interleaved_output_is_copied_without_deadlock(tmp_path):
     import hashlib
     # 2 MiB on each stream, alternating 4 KiB writes: a supervisor that drains
@@ -553,8 +555,6 @@ def test_sealed_check_large_interleaved_output_is_copied_without_deadlock(tmp_pa
     code = ('import os;os.fstat(1);os.fstat(2);b=bytes(range(256))*16;'
             '[(os.write(1,b),os.write(2,b[::-1]))for _ in range(512)]')
     result = _finish_sealed_check(tmp_path, code)
-    if result is None:
-        return
     chunk = bytes(range(256)) * 16
     expected = {"stdout": chunk * 512, "stderr": chunk[::-1] * 512}
     assert result["returncode"] == 0
@@ -578,12 +578,10 @@ def test_other_launches_keep_file_backed_stdio(tmp_path):
 
 
 @requires_local_confinement
+@requires_interpreter_outside_home
 def test_sealed_check_stopped_mid_output_leaves_complete_closed_logs(tmp_path):
     code = 'import sys,time;print("partial",flush=True);print("oops",file=sys.stderr,flush=True);time.sleep(300)'
-    launched = _launch_sealed_check(tmp_path, code)
-    if launched is None:
-        return
-    supervisor, launch = launched
+    supervisor, launch = _launch_sealed_check(tmp_path, code)
     handle = launch()
     try:
         with pytest.raises(SupervisorRefused, match="CHILD_DEADLINE_EXCEEDED"):
@@ -601,17 +599,77 @@ def test_sealed_check_stopped_mid_output_leaves_complete_closed_logs(tmp_path):
 
 
 @requires_local_confinement
+@requires_interpreter_outside_home
 def test_sealed_check_launch_that_fails_after_spawn_leaves_no_copy_thread(tmp_path):
     def crash(point):
         if point == "after_spawn_before_ack":
             raise RuntimeError("injected crash")
-    launched = _launch_sealed_check(tmp_path, "print(1)", fault=crash)
-    if launched is None:
-        return
-    _supervisor, launch = launched
+    _supervisor, launch = _launch_sealed_check(tmp_path, "print(1)", fault=crash)
     with pytest.raises(RuntimeError, match="injected crash"):
         launch()
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and any(t.name == "ffs-pipe-drain" for t in threading.enumerate()):
         time.sleep(.05)
     assert not any(t.name == "ffs-pipe-drain" for t in threading.enumerate())
+
+
+# F47 review round 1: the copy must PROVE it finished. Strict settle refuses
+# logs that a copy which never started, died, or was cut off before EOF left.
+
+@requires_local_confinement
+@requires_interpreter_outside_home
+def test_sealed_check_is_refused_when_the_copy_cannot_start(tmp_path, monkeypatch):
+    import run_state.supervisor as supervisor_module
+
+    def no_selector():
+        raise OSError(24, "injected: too many open files")
+    monkeypatch.setattr(supervisor_module, "selectors", SimpleNamespace(
+        DefaultSelector=no_selector, EVENT_READ=selectors.EVENT_READ))
+    supervisor, launch = _launch_sealed_check(tmp_path, 'print("out")')
+    handle = launch()
+    with pytest.raises(SupervisorRefused, match="EVIDENCE_CHANGED"):
+        supervisor.finish(handle, timeout=60)
+    assert not (handle.stdout_path.parent / "result.json").exists()
+
+
+def test_drain_cut_off_before_eof_is_refused_when_strict(tmp_path):
+    from run_state.supervisor import _PipeDrain
+    out_read, out_write = os.pipe()
+    err_read, err_write = os.pipe()
+    process = SimpleNamespace(stdout=os.fdopen(out_read, "rb"), stderr=os.fdopen(err_read, "rb"))
+    drain = _PipeDrain(process, open(tmp_path / "out.log", "wb"), open(tmp_path / "err.log", "wb"))
+    try:
+        os.write(out_write, b"partial")
+        os.close(err_write)  # stderr reaches EOF; stdout's writer outlives the child
+        time.sleep(.3)  # well past one 100 ms poll
+        started = time.monotonic()
+        drain.settle(exited=False)  # a child still running is never waited for
+        assert time.monotonic() - started < 1
+        with pytest.raises(SupervisorRefused, match="EVIDENCE_CHANGED"):
+            drain.settle(exited=True, strict=True)
+        assert (tmp_path / "out.log").read_bytes() == b"partial"
+    finally:
+        os.close(out_write)
+
+
+@requires_local_confinement
+@requires_interpreter_outside_home
+def test_launch_closes_the_pipe_readers_when_the_copy_thread_cannot_start(tmp_path, monkeypatch):
+    real_start, real_popen, spawned = threading.Thread.start, subprocess.Popen, []
+
+    def start(self):
+        if self.name == "ffs-pipe-drain":
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    def spy(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+    _supervisor, launch = _launch_sealed_check(tmp_path, "print(1)")
+    monkeypatch.setattr(threading.Thread, "start", start)
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        launch()
+    (child,) = [process for process in spawned if "_child" in process.args]
+    assert child.stdout.closed and child.stderr.closed
