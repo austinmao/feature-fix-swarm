@@ -8,6 +8,23 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F44 gsd runtime state stays out of wave snapshots)
+
+- After gsd-core's `dispatch-isolation` step ran in the orchestrator's
+  worktree, the candidate chain refused the run as
+  `FRONTEND_INTEGRATION_CHAIN_INVALID`. That step writes
+  `.gsd/dispatch-isolation-sentinel.json` before the first wave. The wave
+  inventory exempted only FFS's own transport directories, so the untracked
+  sentinel entered the wave snapshot and changed its input digest, which then
+  no longer matched the clean preparation digest the acceptance receipt
+  carries. The wave worker's worktree gets the same untracked `.gsd/`, so the
+  file could also reach the candidate output. `.gsd` is now an internal root
+  alongside `.ffs-observer-tmp` and the `.planning/.ffs-*` directories.
+  Snapshot capture, output harvest and the candidate chain all read one
+  inventory, so all three ignore it. The exemption is that one root only;
+  untracked deliverables such as `newfile.py` or `pkg/.gsd/kept.py` are still
+  captured.
+
 ### Fixed (2026-09-29, spec-014 Release C: F43 private TMPDIR per managed Codex launch)
 
 - A managed Codex orchestrator ran pytest inside its workspace-write

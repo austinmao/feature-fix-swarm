@@ -37,6 +37,7 @@ _GIT_TIMEOUT = 30.0
 _SHA1 = re.compile(r"[0-9a-f]{40}")
 _WAVE_REQUEST_PREFIX = ".planning/.ffs-wave-requests/"
 _INTERNAL_DIRECTORY_ROOTS = (
+    ".gsd",
     ".ffs-observer-tmp",
     ".planning/.ffs-wave-requests",
     ".planning/.ffs-worker-channel",
