@@ -405,6 +405,41 @@ def test_producer_replays_through_interruption_without_a_second_review(tmp_path,
     _run_case(tmp_path, monkeypatch, "codex", check)
 
 
+def test_producer_replays_a_crash_after_qualification_created_the_inventory_child(tmp_path, monkeypatch):
+    """F48: a crash between inventory-child creation and promotion resumes on the retained workspace."""
+    key = "final-review:reviewer"
+
+    def check(case):
+        create, crashed = case.store.create_child_activity, []
+
+        def create_then_crash(*args, **kwargs):
+            activity = create(*args, **kwargs)
+            if not crashed:
+                crashed.append(True)
+                raise RuntimeError("fixture crash")
+            return activity
+
+        monkeypatch.setattr(case.store, "create_child_activity", create_then_crash)
+        with pytest.raises(RuntimeError, match="fixture crash"):
+            _produce(case)
+        assert crashed
+        with case.store.read_transaction() as tx:
+            retained = [tuple(row) for row in tx.execute(
+                "SELECT preparation_id,child_role FROM context_workspaces WHERE child_request_key=?", (key,))]
+        # Qualification was interrupted: the retained workspace is still the inventory one.
+        assert len(retained) == 1 and retained[0][1] == "inventory"
+        recorded = _produce(case, supervisor=case.new_supervisor())
+        assert recorded.receipt.role == "review" and recorded.receipt.completion_status == "succeeded"
+        assert _counts(case.store, case.worker.id) == _ONE
+        with case.store.read_transaction() as tx:
+            workspaces = [tuple(row) for row in tx.execute(
+                "SELECT preparation_id,child_role FROM context_workspaces WHERE child_request_key=?", (key,))]
+            activities = tx.execute("SELECT count(*) FROM authority_activities WHERE request_key=?", (key,)).fetchone()[0]
+        # The same workspace was replayed and then promoted; no second activity was created.
+        assert workspaces == [(retained[0][0], "reviewer")] and activities == 1
+    _run_case(tmp_path, monkeypatch, "codex", check)
+
+
 def test_producer_refuses_replay_of_an_unacknowledged_intent_without_a_second_launch(tmp_path, monkeypatch):
     def check(case):
         def probe(point):
