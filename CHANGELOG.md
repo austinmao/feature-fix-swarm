@@ -63,6 +63,72 @@ all skills.
     admission refusal, with a guard that `FENCE_REVOKED` still exits 4. The Codex
     binary, runtime staging and the observer's real probes are fixture stand-ins.
 
+### Fixed (2026-09-30, spec-014 Release C: F49 gsd's ephemeral auto-chain flag write is no change)
+
+- gsd-core's `execute-phase` workflow tells the orchestrator to run
+  `gsd_run query config-set workflow._auto_chain_active false` before any
+  config read, and `setConfigValue` (`gsd-core/bin/lib/config.cjs`) always
+  rewrites the tracked `.planning/config.json` as
+  `JSON.stringify(config, null, 2)`. An orchestrator that ran the step left a
+  tracked modification in its workspace, the wave overlay captured it, and the
+  candidate input digest no longer matched the clean preparation, so the run
+  refused `FRONTEND_INTEGRATION_CHAIN_INVALID`. Orchestrators that skip the
+  step never hit it, so the failure was nondeterministic. A worker that runs
+  `execute-phase` in its own child workspace can do the same, which
+  `harvest_scoped_patch` counts as an out-of-scope modification. gsd-core
+  documents the key as "Internal: tracks whether autonomous chaining is active"
+  (default false). Per operator decision D8, FFS now treats exactly that edit as
+  no change. The one shared inventory (`_inventory_and_hidden`) first restores
+  the base bytes of `.planning/config.json` when `workflow._auto_chain_active`
+  set to the JSON boolean `false` is the ONLY difference from the base commit's
+  blob. Wave and prelaunch snapshots, every `harvest_scoped_patch` inventory
+  pass, the candidate chain, frontend completion, local check verification and
+  recovery trial checks all read that inventory, so they agree. F40 already
+  restored an undeclared config edit in a worker workspace just before harvest;
+  this covers the orchestrator workspace and every other seam. The match is
+  exact and fails toward "still modified". gsd-core's rewrite is
+  deterministic from the base blob, so the file counts as the flag write only
+  when its bytes equal `json.dumps(expected, indent=2, ensure_ascii=False)` with
+  no trailing newline, where `expected` is the strictly parsed base with
+  `workflow._auto_chain_active` set to `false` (appended last in `workflow`
+  when absent, kept in place when present):
+  - the file is exactly `.planning/config.json`, with case-exact names, a real
+    `.planning` directory, and a single-link regular file (no symlink, no hard
+    link), and the base commit has a blob for it;
+  - the base parses as a JSON object with a `workflow` object, with no
+    duplicate keys and no `NaN` or `Infinity`; the base's own flag is absent or
+    exactly `false`;
+  - a moved existing flag, a whitespace change, a trailing newline or any other
+    edit is a different byte sequence, so it still counts;
+  - Python and JS can serialize some inputs differently, so the base must not
+    hold an integer-like object key (JS orders those first), any float (`1.0`,
+    `1e21`, `-0.0`, `1e400`), an integer beyond 2**53, or a lone surrogate.
+    Such a file is never normalized and keeps counting as modified, which is
+    the safe side. Integers within 2**53 are fine, and so are the real
+    configs checked (no floats, no integer-like keys);
+  - the executable bit matches the base mode.
+  The restore writes in place through one verified inode, with no rename and no
+  temporary file, because POSIX cannot rename only if the inode still matches.
+  `.planning` is opened no-follow from the workspace and `config.json` is opened
+  through that directory descriptor with `O_RDWR|O_NOFOLLOW`. The same
+  descriptor is read, checked (regular file, single link) and, if the bytes
+  match, truncated and rewritten, so the write can only ever touch the inode
+  that was read and a hard link can never make it write another path's file.
+  Right before the write the open file must still be the one read (same link
+  count, size and times), the path must still name it, and `.planning` must
+  still be the directory under the workspace; on any mismatch nothing is written
+  and the file counts as modified. A swap or move after that check leaves the
+  path showing other content, which also counts. A directory that moves after
+  the write, and a write that fails after the truncate, are refused with
+  `SOURCE_CHANGED`. Permission bits and ownership stay as they were. Accepted
+  limit: while the base bytes are written in place, a concurrent reader (only
+  the workspace's own model process) can briefly see empty or partial config;
+  every FFS inventory decision reads through the verified fd or re-reads after
+  the write. Tests cover the inventory, a worker harvest, wave and prelaunch
+  snapshots on a real orchestrator workspace (digest equal to a clean
+  capture), negative cases for every rule above, and races injected after the
+  read, right before the final check, at the commit call and after the write.
+
 ### Fixed (2026-09-30, spec-014 Release C: F48 final-review workspace is prepared as inventory)
 
 - The managed native final review refused with `WORKSPACE_BINDING_MISMATCH` as
