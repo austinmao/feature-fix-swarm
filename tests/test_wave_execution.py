@@ -1315,3 +1315,160 @@ def test_gsd_auto_chain_flag_write_does_not_enter_prelaunch_snapshot(
         assert (parent / _CONFIG).read_bytes() == base
 
     _with_orchestrator(tmp_path, monkeypatch, primary, body)
+
+
+# F49 review round 1: the restore is exact bytes and is bound to directory fds.
+
+_SEMANTIC_NO_OPS = [
+    pytest.param(
+        _gsd_json({"workflow": {_FLAG: False, "research": True}}),
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}),
+        id="existing-false-flag-moved",
+    ),
+    pytest.param(
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}, indent=4, suffix="\n"),
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}, indent=3),
+        id="whitespace-change-when-base-has-the-flag",
+    ),
+    pytest.param(
+        _gsd_json({"workflow": {"research": True}}),
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}, suffix="\n"),
+        id="trailing-newline-gsd-does-not-write",
+    ),
+    pytest.param(
+        b'{\n  "limit": 1e400,\n  "workflow": {\n    "research": true\n  }\n}',
+        b'{\n  "limit": 2e400,\n  "workflow": {\n    "research": true,\n'
+        b'    "_auto_chain_active": false\n  }\n}',
+        id="overflowing-number-edited-alongside-the-flag",
+    ),
+]
+
+
+@pytest.mark.parametrize("base, candidate", _SEMANTIC_NO_OPS)
+def test_only_gsds_exact_rewrite_is_the_flag_write(
+    tmp_path: Path, base: bytes, candidate: bytes,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, base)
+    (repository / _CONFIG).write_bytes(candidate)
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == candidate
+
+
+def test_flag_already_false_in_the_base_is_rewritten_in_place_with_non_ascii_values(
+    tmp_path: Path,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    config = {"name": "café ☃", "workflow": {_FLAG: False, "research": True}}
+    base = _gsd_json(config, indent=4, suffix="\n")
+    head = _track_config(repository, base)
+    (repository / _CONFIG).write_bytes(_gsd_json(config))
+
+    assert _inventory(repository, head).changed == ()
+    assert (repository / _CONFIG).read_bytes() == base
+
+
+def _race_once(monkeypatch: pytest.MonkeyPatch, when: str, action) -> None:
+    """Run ``action`` once at a named point inside the restore."""
+    import run_state.wave_execution as module
+
+    fired: list[bool] = []
+
+    def fire() -> None:
+        if not fired:
+            fired.append(True)
+            action()
+
+    if when == "after-read":
+        real_base = module._base_material
+
+        def base_material(*args):
+            result = real_base(*args)
+            fire()
+            return result
+
+        monkeypatch.setattr(module, "_base_material", base_material)
+        return
+    real_fsync = os.fsync
+
+    def fsync(descriptor: int) -> None:
+        real_fsync(descriptor)
+        # A synced regular file is the temporary file: the rename is next. A
+        # synced directory means the rename already happened.
+        if stat.S_ISREG(os.fstat(descriptor).st_mode) == (when == "before-rename"):
+            fire()
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+
+@pytest.mark.parametrize("when", ["after-read", "before-rename"])
+def test_restore_does_not_write_over_a_config_swapped_after_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    planning = repository / ".planning"
+    swapped = _gsd_json({"swapped": True})
+
+    def swap() -> None:
+        (planning / "config.json").rename(planning / "config.orig")
+        (planning / "config.json").write_bytes(swapped)
+
+    _race_once(monkeypatch, when, swap)
+
+    _inventory(repository, head)
+
+    assert (planning / "config.json").read_bytes() == swapped
+    assert (planning / "config.orig").read_bytes() == flagged
+    assert sorted(item.name for item in planning.iterdir()) == ["config.json", "config.orig"]
+
+
+@pytest.mark.parametrize("when", ["after-read", "before-rename"])
+def test_restore_does_not_write_through_a_planning_directory_moved_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    moved = tmp_path / "moved-planning"
+
+    def move_out() -> None:
+        (repository / ".planning").rename(moved)
+        (repository / ".planning").mkdir()
+        (repository / _CONFIG).write_bytes(b"replacement\n")
+
+    _race_once(monkeypatch, when, move_out)
+
+    _inventory(repository, head)
+
+    assert (moved / "config.json").read_bytes() == flagged
+    assert sorted(item.name for item in moved.iterdir()) == ["config.json"]
+    assert (repository / _CONFIG).read_bytes() == b"replacement\n"
+    assert sorted(item.name for item in (repository / ".planning").iterdir()) == ["config.json"]
+
+
+def test_planning_directory_moved_after_the_rename_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    _gsd_sets_flag(repository)
+    _race_once(
+        monkeypatch, "after-rename",
+        lambda: (repository / ".planning").rename(tmp_path / "moved-planning"),
+    )
+
+    with pytest.raises(WorkspaceRefused, match="SOURCE_CHANGED"):
+        _inventory(repository, head)
