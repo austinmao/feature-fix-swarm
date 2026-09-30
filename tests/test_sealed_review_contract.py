@@ -353,6 +353,60 @@ def test_criterion_evidence_check_ids_stay_scoped_to_their_own_check(mutation):
         validate_native_review_evidence(_criterion_output(rule_item, bad), context)
 
 
+def _legacy_collision_context(shape):
+    """A seal written by an older build: a check id that could collide in the flattened receipt."""
+    def check(name, digit):
+        return {'status': 'passed', 'evidence': [{'locator': f'/fixture/{name}/result.json',
+                                                  'sha256': digit * 64}]}
+    if shape == 'foreign-rule':  # AC-1 check `shared` equals AC-2 evidence rule `shared`
+        colliding, rule_2 = 'shared', 'shared'
+    else:  # the receipt-reserved process-result id used as a check id
+        colliding, rule_2 = 'review-process-result', 'rule-2'
+    return colliding, {
+        'criteria': [
+            {'id': 'AC-1', 'checks': [{'id': colliding}], 'evidence_rules': [{'id': 'rule-1', 'required': True}]},
+            {'id': 'AC-2', 'checks': [{'id': 'check-2'}], 'evidence_rules': [{'id': rule_2, 'required': True}]},
+        ],
+        'global_invariants': [], 'checks': {colliding: check(colliding, '1'), 'check-2': check('check-2', '2')},
+    }
+
+
+def _legacy_output(context, rule_2, first_label):
+    def cite(check_id, label):
+        return {'id': label, **context['checks'][check_id]['evidence'][0]}
+    return {'criteria': {'AC-1': {'status': 'passed', 'evidence': [cite(context['criteria'][0]['checks'][0]['id'], first_label)]},
+                         'AC-2': {'status': 'passed', 'evidence': [cite('check-2', rule_2)]}},
+            'findings': []}
+
+
+@pytest.mark.parametrize('shape', ['foreign-rule', 'reserved'])
+def test_legacy_colliding_check_id_is_not_a_criterion_evidence_label(shape):
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.supervisor import SupervisorRefused
+    colliding, context = _legacy_collision_context(shape)
+    rule_2 = context['criteria'][1]['evidence_rules'][0]['id']
+    with pytest.raises(SupervisorRefused, match='FINAL_REVIEW_EVIDENCE_SCOPE_INVALID'):
+        validate_native_review_evidence(_legacy_output(context, rule_2, colliding), context)
+
+
+@pytest.mark.parametrize('shape', ['foreign-rule', 'reserved'])
+def test_legacy_colliding_seal_records_a_receipt_when_the_rule_ids_are_cited(shape):
+    from types import SimpleNamespace
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.run_policy import validate_role_receipt
+    from test_run_policy_contract import _receipt
+    _colliding, context = _legacy_collision_context(shape)
+    rule_2 = context['criteria'][1]['evidence_rules'][0]['id']
+    output = _legacy_output(context, rule_2, 'rule-1')
+    validate_native_review_evidence(output, context)
+    # record_final_review flattens the process-result row plus every criterion's evidence.
+    receipt = _receipt(SimpleNamespace(acceptance_hash='1' * 64))
+    receipt['evidence'] = [{'id': 'review-process-result', 'sha256': '9' * 64, 'locator': 'evidence://process'}] + [
+        {'id': item['id'], 'sha256': item['sha256'], 'locator': item['locator']}
+        for checked in output['criteria'].values() for item in checked['evidence']]
+    assert len(validate_role_receipt(receipt).evidence) == 3
+
+
 def test_contract_criterion_evidence_id_text_names_rule_and_mapped_check_ids_only():
     from run_state.sealed_review import final_review_output_contract
     text = final_review_output_contract(_sealed(), candidate_hash='1' * 64)['evidence']['id']

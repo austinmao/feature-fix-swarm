@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +26,7 @@ from run_state.run_policy import (
     validate_draft_material,
     validate_role_receipt,
 )
-from run_state.state import ControlStore
+from run_state.state import ControlStore, ControlStoreRefused
 
 
 def _digest(character: str) -> str:
@@ -389,3 +391,76 @@ def test_draft_with_distinct_labels_across_criteria_still_flattens_to_a_valid_re
     receipt = validate_role_receipt(_flattened_receipt(draft))
     assert [item["id"] for item in receipt.evidence].count("same") == 1
     assert "review-process-result" in {item["id"] for item in receipt.evidence}
+
+
+# Each shape edits the clean two-criterion `_draft`: REQ-1 owns check-1/evidence-1 and REQ-2 owns
+# check-2/evidence-2, each a single-item list, so an edit never changes the canonical sort order.
+_COLLIDING_SHAPES = {
+    "check-equals-foreign-rule": lambda material: material["criteria"][0]["checks"][0].update(id="evidence-2"),
+    "rule-equals-foreign-check": lambda material: material["criteria"][0]["evidence_rules"][0].update(id="check-2"),
+    "reserved-check": lambda material: material["criteria"][0]["checks"][0].update(id="review-process-result"),
+    "reserved-rule": lambda material: material["criteria"][0]["evidence_rules"][0].update(id="review-process-result"),
+}
+
+
+def _rewrite_as_legacy_seal(store, token, binding, legacy, shape):
+    """Store a clean draft and seal, then rewrite both rows as an older build would have written them.
+
+    Builds that predate the cross-criterion label rule accepted these shapes, so their stored drafts and
+    seals carry them; the hashes are recomputed with the store's own binding functions.
+    """
+    draft = store.create_acceptance_draft(
+        token, draft_id="legacy", revision=1, acceptance_contract_hash=legacy.contract_hash,
+        material=_draft(binding),
+    )
+    sealed = store.seal_acceptance_draft(
+        token, draft_id="legacy", revision=1, acceptance_contract_hash=legacy.contract_hash,
+    )
+    material = json.loads(json.dumps(draft.material))
+    _COLLIDING_SHAPES[shape](material)
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    material_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    identity = {"repository_id": "repository", "run_id": "managed-run"}
+    draft_hash = store._acceptance_policy_hash(kind="draft", body={
+        **identity, "draft_id": "legacy", "revision": 1, "legacy_generation": legacy.generation,
+        "legacy_contract_hash": legacy.contract_hash, "material_hash": material_hash,
+    })
+    acceptance_hash = store._acceptance_policy_hash(kind="seal", body={
+        **identity, "acceptance_generation": sealed.acceptance_generation, "draft_id": "legacy",
+        "draft_revision": 1, "draft_hash": draft_hash, "legacy_generation": legacy.generation,
+        "legacy_contract_hash": legacy.contract_hash, "material_hash": material_hash,
+    })
+    with store.transaction() as tx:
+        tx.execute("UPDATE authority_acceptance_drafts SET draft_hash=?,material_json=?,material_hash=? "
+                   "WHERE draft_id='legacy'", (draft_hash, encoded, material_hash))
+        tx.execute("UPDATE authority_sealed_acceptances SET draft_hash=?,acceptance_hash=?,material_json=?,"
+                   "material_hash=? WHERE draft_id='legacy'", (draft_hash, acceptance_hash, encoded, material_hash))
+    return material
+
+
+@pytest.mark.parametrize("shape", sorted(_COLLIDING_SHAPES))
+def test_a_stored_legacy_draft_and_seal_with_colliding_labels_still_read_back(tmp_path, monkeypatch, shape):
+    # Older builds sealed these shapes; read-back must not make such a run unreadable after upgrade.
+    store, token, binding, legacy = _managed_run(tmp_path, monkeypatch)
+    material = _rewrite_as_legacy_seal(store, token, binding, legacy, shape)
+    sealed = store.get_sealed_acceptance(repository_id="repository", run_id="managed-run")
+    assert sealed is not None and sealed.material["criteria"] == sorted(material["criteria"], key=lambda item: item["id"])
+    replay = store.seal_acceptance_draft(
+        token, draft_id="legacy", revision=1, acceptance_contract_hash=legacy.contract_hash,
+    )
+    assert replay.reused and replay.acceptance_hash == sealed.acceptance_hash
+    with store.read_transaction() as tx:
+        row = tx.execute("SELECT * FROM authority_acceptance_drafts WHERE draft_id='legacy'").fetchone()
+        assert store._acceptance_draft_from_row(row).material == sealed.material
+
+
+@pytest.mark.parametrize("shape", sorted(_COLLIDING_SHAPES))
+def test_creating_a_new_draft_with_colliding_labels_still_refuses(tmp_path, monkeypatch, shape):
+    store, token, binding, legacy = _managed_run(tmp_path, monkeypatch)
+    material = _draft(binding)
+    _COLLIDING_SHAPES[shape](material)
+    with pytest.raises(ControlStoreRefused, match="POLICY_DRAFT_INVALID"):
+        store.create_acceptance_draft(
+            token, draft_id="fresh", revision=1, acceptance_contract_hash=legacy.contract_hash,
+            material=material,
+        )
