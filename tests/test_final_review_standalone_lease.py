@@ -23,6 +23,7 @@ import pytest
 
 import run_state.managed_qualification as managed_qualification
 from run_state.managed_admission import ManagedAdmissionQueue, ManagedAdmissionRefused
+from run_state.managed_resource_group import ManagedParentResourceCoordinator
 from run_state.resource_groups import ResourceGroupRefused, ResourceParentGroupRegistry
 from run_state.resource_observation import ResourceObservation
 from run_state.shared_resources import SharedResourceCoordinator, cold_start_demand
@@ -436,3 +437,21 @@ def test_a_generic_authority_refusal_keeps_its_own_exit_code(tmp_path, monkeypat
     result, _facts_unused = _assembly_run(tmp_path, monkeypatch, "fr", at_reviewer=lose_fence)
     envelope = _last_envelope(capsys)
     assert (result, envelope["code"]) == (4, "FENCE_REVOKED")
+
+
+@requires_local_confinement
+def test_slot_claim_refusal_through_the_supervisor_names_the_admission_recovery(tmp_path, monkeypatch, capsys):
+    # _bind_shared_resource types the registry refusal as a SupervisorRefused; it is still a resource refusal.
+    def refuse(_registry, _plan, _binding, _demand):
+        raise ResourceGroupRefused("RESOURCE_GROUP_SLOT_UNAVAILABLE")
+
+    def child_bind(store, token, kwargs, outer):
+        # A child on the outer supervisor, with the ended-group guard stood down so it reaches the claim.
+        monkeypatch.setattr(ManagedParentResourceCoordinator, "_group_state", lambda _self: "reserved")
+        monkeypatch.setattr(ResourceParentGroupRegistry, "claim_child", refuse)
+        _reviewer_probe(store, token, kwargs, tmp_path, outer, [])
+
+    result, _facts_unused = _assembly_run(tmp_path, monkeypatch, "sc", at_reviewer=child_bind)
+    envelope = _last_envelope(capsys)
+    assert (result, envelope["code"], envelope["recovery_action"]["action"]) == (
+        78, "RESOURCE_GROUP_SLOT_UNAVAILABLE", "inspect_managed_admission")
