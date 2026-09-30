@@ -22,8 +22,8 @@ from types import SimpleNamespace
 import pytest
 
 import run_state.managed_qualification as managed_qualification
-from run_state.managed_admission import ManagedAdmissionQueue
-from run_state.resource_groups import ResourceGroupRefused
+from run_state.managed_admission import ManagedAdmissionQueue, ManagedAdmissionRefused
+from run_state.resource_groups import ResourceGroupRefused, ResourceParentGroupRegistry
 from run_state.resource_observation import ResourceObservation
 from run_state.shared_resources import SharedResourceCoordinator, cold_start_demand
 from run_state.state import ControlStoreRefused
@@ -33,7 +33,7 @@ from run_state.workspace import (
     begin_child_workspace_preparation, inspect_workspace, load_input_snapshot, prepare_workspace,
 )
 from test_managed_lifecycle_assembly import (
-    _draft, _facts, _fixture_host, _frontend_start, _setup, requires_local_confinement,
+    _draft, _facts, _fixture_host, _frontend_start, _last_envelope, _setup, requires_local_confinement,
 )
 from test_qualification_launch_authority import PROBES
 from test_supervised_process import setup_owner
@@ -346,3 +346,93 @@ def test_claude_qualify_runtime_routes_a_given_supervisor(tmp_path, monkeypatch)
                          supervisor=review_supervisor)
     session.seam.qualify("worker-activity", ready, "worker-key", "parent", "d" * 64, "worker")
     assert routed == [review_supervisor, session.supervisor]
+
+
+def _assembly_run(tmp_path, monkeypatch, run_id, *, at_reviewer=None):
+    """The lifecycle assembly; ``at_reviewer(store, token, kwargs, outer)`` runs inside the reviewer's qualification.
+
+    ``outer`` is the supervisor the outer orchestrator's qualification was given (its prepaid group has
+    ended by the time the reviewer qualifies), ``kwargs`` the reviewer's ``qualify_managed_runtime`` call.
+    """
+    primary, authority, repository_id, env = _setup(tmp_path)
+    monkeypatch.chdir(primary)
+    for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
+        monkeypatch.delenv(key, raising=False)
+    runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
+    import run_state.supervisor as supervisor_module
+    monkeypatch.setattr(supervisor_module, "_gsd_wave_completion_code", lambda *_args, require_wave=True: None)
+    fixture_qualify = managed_qualification.qualify_managed_runtime
+    seen = {}
+
+    def qualify(store, token, **kwargs):
+        bundle = fixture_qualify(store, token, **kwargs)
+        if kwargs["role"] != "reviewer":
+            seen["outer"] = kwargs["supervisor"]
+        elif at_reviewer is not None:
+            at_reviewer(store, token, kwargs, seen["outer"])
+        return bundle
+
+    monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify)
+    result = _frontend_start(env, authority, run_id, runtime, fake, catalog, _draft(tmp_path), "task-swarm",
+                             "--scope", "1")
+    return result, _facts(authority, repository_id, run_id)
+
+
+def _reviewer_probe(store, token, kwargs, tmp_path, supervisor, probes):
+    """Launch one scripted probe for the reviewer's parent on ``supervisor``; its activity id goes to ``probes``."""
+    workspace = kwargs["workspace"]
+    request, contract = _scripted_probe(
+        store, token, parent_activity_id=kwargs["parent_activity_id"], base_commit=workspace.base_commit,
+        repository_path=workspace.repository_path, root=tmp_path, key="boundary-probe")
+    probes.append(request.activity_id)
+    supervisor.launch_qualification(request, qualification_contract=contract)
+
+
+@requires_local_confinement
+def test_late_child_on_an_ended_group_is_a_typed_managed_refusal(tmp_path, monkeypatch, capsys):
+    # The outer supervisor's group is closed by now: a late child must not reach a slot claim.
+    probes = []
+    result, facts = _assembly_run(tmp_path, monkeypatch, "lc", at_reviewer=lambda store, token, kwargs, outer:
+                                  _reviewer_probe(store, token, kwargs, tmp_path, outer, probes))
+    envelope = _last_envelope(capsys)
+    assert (result, envelope["ok"], envelope["code"]) == (78, False, "RESOURCE_PARENT_GROUP_ENDED")
+    assert len(probes) == 1 and _intent_count(facts.store, probes[0]) == 0
+
+
+@requires_local_confinement
+def test_group_close_refusal_is_a_typed_managed_refusal(tmp_path, monkeypatch, capsys):
+    def refuse(_registry, _plan):
+        raise ResourceGroupRefused("RESOURCE_GROUP_CAS_FAILED")
+
+    monkeypatch.setattr(ResourceParentGroupRegistry, "close_after_parent_end", refuse)
+    result, _facts_unused = _assembly_run(tmp_path, monkeypatch, "gc")
+    envelope = _last_envelope(capsys)
+    assert (result, envelope["ok"], envelope["code"]) == (78, False, "RESOURCE_GROUP_CAS_FAILED")
+
+
+@requires_local_confinement
+def test_reviewer_admission_refusal_is_a_typed_managed_refusal(tmp_path, monkeypatch, capsys):
+    def refuse(_coordinator, _requests, *, group_key=None):
+        raise ManagedAdmissionRefused("RESOURCE_OBSERVATION_UNAVAILABLE")
+
+    probes = []
+
+    def reviewer_admission(store, token, kwargs, _outer):
+        monkeypatch.setattr(SharedResourceCoordinator, "acquire", refuse)
+        _reviewer_probe(store, token, kwargs, tmp_path, kwargs["supervisor"], probes)
+
+    result, facts = _assembly_run(tmp_path, monkeypatch, "ra", at_reviewer=reviewer_admission)
+    envelope = _last_envelope(capsys)
+    assert (result, envelope["ok"], envelope["code"]) == (78, False, "RESOURCE_OBSERVATION_UNAVAILABLE")
+    assert len(probes) == 1 and _intent_count(facts.store, probes[0]) == 0
+
+
+@requires_local_confinement
+def test_a_generic_authority_refusal_keeps_its_own_exit_code(tmp_path, monkeypatch, capsys):
+    # Guard: only resource-layer refusals move to the managed boundary; a lost fence stays exit 4.
+    def lose_fence(_store, _token, _kwargs, _outer):
+        raise ControlStoreRefused("FENCE_REVOKED")
+
+    result, _facts_unused = _assembly_run(tmp_path, monkeypatch, "fr", at_reviewer=lose_fence)
+    envelope = _last_envelope(capsys)
+    assert (result, envelope["code"]) == (4, "FENCE_REVOKED")
