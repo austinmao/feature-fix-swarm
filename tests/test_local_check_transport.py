@@ -473,3 +473,94 @@ def test_the_data_volume_root_still_holds_home():
     from run_state.local_check_runtime import LocalCheckRefused, validate_runtime_read_roots
     with pytest.raises(LocalCheckRefused, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
         validate_runtime_read_roots(("/System/Volumes/Data",), blocked=(Path.home(),))
+
+
+# F47: a sealed check's stdout and stderr are pipes the supervisor drains into
+# the evidence logs. The profile grants no file-read-metadata on the evidence
+# root, so a regular-file stdio fd fails fstat with EPERM, and pytest's fd
+# capture (which fstats fds 1 and 2) then closes them and exits 120. Each test
+# below runs through Supervisor.launch_sealed_check, not through a bare argv.
+
+def _finish_sealed_check(tmp_path, code):
+    """Run ``code`` as a sealed check via the real launch path; None if HOME holds the interpreter."""
+    from run_state.local_check_runtime import _overlap
+    prefix, interpreter = _host_interpreter()
+    tmp_path.mkdir(exist_ok=True)
+    supervisor, store, request = setup_owner(tmp_path)
+    locator = shlex.join((str(interpreter), "-c", code))
+    if _overlap(prefix, Path.home()):
+        with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+            _sealed_command_check(store, supervisor.token, request, locator, [str(prefix)])
+        return None
+    sealed = _sealed_command_check(store, supervisor.token, request, locator, [str(prefix)])
+    request = replace(request, contract_hash=sealed.acceptance_hash)
+    handle = supervisor.launch_sealed_check(request, acceptance_hash=sealed.acceptance_hash,
+                                            check_id="real-local")
+    return supervisor.finish(handle, timeout=60)
+
+
+def _logs(result):
+    return {key: Path(result["streams"][key]["locator"]).read_bytes() for key in ("stdout", "stderr")}
+
+
+@requires_local_confinement
+def test_sealed_check_can_fstat_its_own_stdout_and_stderr(tmp_path):
+    code = 'import os,sys; os.fstat(1); os.fstat(2); print("out"); print("err", file=sys.stderr)'
+    result = _finish_sealed_check(tmp_path, code)
+    if result is None:
+        return
+    assert result["returncode"] == 0, _logs(result)
+    assert _logs(result) == {"stdout": b"out\n", "stderr": b"err\n"}
+
+
+@requires_local_confinement
+def test_sealed_check_survives_the_fd_dance_of_pytest_capture(tmp_path):
+    code = ('import os,tempfile;t=tempfile.TemporaryFile();fd=os.dup(1);os.fstat(1);'
+            'os.dup2(t.fileno(),1);os.dup2(fd,1);print("ok")')
+    result = _finish_sealed_check(tmp_path, code)
+    if result is None:
+        return
+    assert result["returncode"] == 0, _logs(result)
+    assert _logs(result)["stdout"] == b"ok\n"
+
+
+@requires_local_confinement
+def test_sealed_check_stdout_and_stderr_are_pipes(tmp_path):
+    code = 'import os,stat as t;print(t.S_ISFIFO(os.fstat(1).st_mode),t.S_ISFIFO(os.fstat(2).st_mode))'
+    result = _finish_sealed_check(tmp_path, code)
+    if result is None:
+        return
+    assert result["returncode"] == 0, _logs(result)
+    assert _logs(result)["stdout"] == b"True True\n"
+
+
+@requires_local_confinement
+def test_sealed_check_large_interleaved_output_is_copied_without_deadlock(tmp_path):
+    import hashlib
+    # 2 MiB on each stream, alternating 4 KiB writes: a supervisor that drains
+    # one pipe at a time, or only after exit, stalls the child on the other.
+    code = ('import os;os.fstat(1);os.fstat(2);b=bytes(range(256))*16;'
+            '[(os.write(1,b),os.write(2,b[::-1]))for _ in range(512)]')
+    result = _finish_sealed_check(tmp_path, code)
+    if result is None:
+        return
+    chunk = bytes(range(256)) * 16
+    expected = {"stdout": chunk * 512, "stderr": chunk[::-1] * 512}
+    assert result["returncode"] == 0
+    logs = _logs(result)
+    assert logs == expected
+    for key, raw in expected.items():
+        stream = result["streams"][key]
+        assert stream["bytes"] == len(raw) == 2 * 1024 * 1024
+        assert stream["sha256"] == hashlib.sha256(raw).hexdigest()
+        assert stream["locator"].endswith(f"/{key}.log")
+
+
+def test_other_launches_keep_file_backed_stdio(tmp_path):
+    supervisor, _store, request = setup_owner(tmp_path)
+    code = "import os,stat;print(stat.S_ISREG(os.fstat(1).st_mode),stat.S_ISREG(os.fstat(2).st_mode))"
+    handle = supervisor.launch(replace(request, command=(sys.executable, "-c", code)))
+    result = supervisor.finish(handle, timeout=30, token_usage=0)
+    assert result["returncode"] == 0
+    assert handle.process.stdout is None and handle.process.stderr is None
+    assert Path(result["streams"]["stdout"]["locator"]).read_bytes() == b"True True\n"
