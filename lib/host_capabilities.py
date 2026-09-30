@@ -255,6 +255,33 @@ def codex_private_tmp_root() -> Path:
     return Path("/tmp").resolve()
 
 
+def codex_node_binary(binary: Path, node_sha256: str | None = None) -> Path | None:
+    """Resolved Node binary a resolved Codex launcher needs on PATH, else None.
+
+    A ``.js`` launcher (every npm install) or a qualified chain that pins
+    ``node_sha256`` needs Node: ``CODEX_NODE_BINARY`` or ``node`` on PATH,
+    resolved and regular, and equal to the pin when there is one.  A native
+    binary needs none.  Shared by the host launch and the native review.
+    """
+    if binary.suffix != ".js" and node_sha256 is None:
+        return None
+    node = Path(os.environ.get("CODEX_NODE_BINARY") or shutil.which("node") or "").resolve()
+    if not node.is_absolute() or not node.is_file() or node.is_symlink():
+        raise CapabilityError("Codex JS launcher has no resolved regular Node binary")
+    if node_sha256 is not None and node_sha256 != _digest(node):
+        raise CapabilityError("Codex Node binary differs from qualified chain")
+    return node
+
+
+def codex_path_entries(binary: Path, node: Path | None) -> list[str]:
+    """PATH of a Codex launch: binary parent, Node parent when needed, then the system dirs."""
+    entries = [str(binary.parent)]
+    if node is not None:
+        entries.append(str(node.parent))
+    entries.extend(("/usr/bin", "/bin"))
+    return list(dict.fromkeys(entries))
+
+
 def codex_closed_environment(home: Path, tmpdir: Path, binary: Path,
                              chain: dict[str, str] | tuple[tuple[str, str], ...],
                              gsd_environment: object = None) -> dict[str, str]:
@@ -267,18 +294,10 @@ def codex_closed_environment(home: Path, tmpdir: Path, binary: Path,
     home = home.resolve()
     binary = binary.resolve()
     chain = dict(chain)
-    path_entries = [str(binary.parent)]
-    if binary.suffix == ".js" or "node_sha256" in chain:
-        node = Path(os.environ.get("CODEX_NODE_BINARY") or shutil.which("node") or "").resolve()
-        if not node.is_absolute() or not node.is_file() or node.is_symlink():
-            raise CapabilityError("Codex JS launcher has no resolved regular Node binary")
-        if "node_sha256" in chain and chain["node_sha256"] != _digest(node):
-            raise CapabilityError("Codex Node binary differs from qualified chain")
-        path_entries.append(str(node.parent))
-    path_entries.extend(("/usr/bin", "/bin"))
+    node = codex_node_binary(binary, chain.get("node_sha256"))
     environment = {
         "HOME": str(home), "CODEX_HOME": str(home), "TMPDIR": str(tmpdir.resolve()),
-        "PATH": os.pathsep.join(dict.fromkeys(path_entries)),
+        "PATH": os.pathsep.join(codex_path_entries(binary, node)),
         "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
     }
     if gsd_environment is not None:

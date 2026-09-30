@@ -19,6 +19,7 @@ import stat
 from typing import TYPE_CHECKING, Final
 import uuid
 
+from host_capabilities import CapabilityError, codex_node_binary, codex_path_entries
 from .claude_host import SUPPORTED_CLAUDE_VERSION
 
 if TYPE_CHECKING:
@@ -56,6 +57,8 @@ _CODEX_PINS: Final = {
 # feature key, so these are passed for exactly the listed versions.  From 0.156.1 spec_plan.rs
 # registers send_message_to_user_async when that (default-off) feature is enabled.
 _CODEX_EXTRA_DISABLED: Final = {"0.159.0": ("send_message_to_user_async",)}
+# Provenance rows naming the Node binary a `.js` Codex launcher runs under (F53).
+_NODE_PROVENANCE: Final = ("node_binary", "node_sha256")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MODEL = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _VERSION = re.compile(r"[A-Za-z0-9._+-]{1,128}\Z")
@@ -260,12 +263,44 @@ def _claude_mcp() -> bytes:
     return b'{"mcpServers":{}}\n'
 
 
-def _environment(host, root, workspace):
+def _review_path(host: str, binary: Path, node: Path | None) -> str:
+    """PATH of the review process.  Codex gets what its host launch gets (binary parent,
+    Node parent for a `.js` launcher, then the system dirs); Claude keeps the system dirs."""
+    if host != "codex":
+        return "/usr/bin:/bin"
+    entries = codex_path_entries(binary, node)
+    if any("\0" in entry or os.pathsep in entry or not os.path.isabs(entry) for entry in entries):
+        raise NativeReviewRuntimeRefused("native review PATH is unsafe")
+    return os.pathsep.join(entries)
+
+
+def _environment(host, root, workspace, path):
     return tuple(sorted({"HOME": str(root),
                          "CODEX_HOME" if host == "codex" else "CLAUDE_CONFIG_DIR":
                              str(root if host == "codex" else root / "claude-config"),
-                         "PWD": str(workspace), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                         "PWD": str(workspace), "PATH": path, "LANG": "C.UTF-8",
                          "LC_ALL": "C.UTF-8", "NO_COLOR": "1"}.items()))
+
+
+def _bound_node(host: str, binary: str, provenance: object) -> dict[str, str]:
+    """Node identity a stored Codex material carries, re-hashed from its stored path.
+
+    Replay never consults the ambient ``CODEX_NODE_BINARY``/PATH: the preparing process
+    resolved Node once and bound it, and any other process must find the same bytes.
+    """
+    try:
+        given = dict(provenance)
+    except (TypeError, ValueError):
+        raise NativeReviewRuntimeRefused("native review provenance drifted") from None
+    bound = {key: given[key] for key in _NODE_PROVENANCE if key in given}
+    if host != "codex" or (not bound and Path(binary).suffix != ".js"):
+        return {}  # a stray node row on anything else fails the provenance comparison
+    if set(bound) != set(_NODE_PROVENANCE) or not all(isinstance(item, str) for item in bound.values()):
+        raise NativeReviewRuntimeRefused("Codex JS launcher material lacks its Node identity")
+    digest, _identity = _read_checked(Path(bound["node_binary"]), "Node binary", binary=True)
+    if digest != _sha(bound["node_sha256"], "Node binary"):
+        raise NativeReviewRuntimeRefused("Node binary drifted")
+    return bound
 
 
 def _validate_session_id(host, session_id):
@@ -311,6 +346,8 @@ class NativeReviewRequest:
     catalog_path: str | None = None
     catalog_sha256: str | None = None
     session_id: str | None = None
+    # The Node the reviewer runtime was qualified with (qualified chain ``node_sha256``).
+    node_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -387,6 +424,20 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
     binary_digest, _binary_identity = _read_checked(binary, "CLI binary", binary=True)
     if binary_digest != _sha(request.binary_sha256, "CLI binary"):
         raise NativeReviewRuntimeRefused("CLI binary differs from caller-resolved identity")
+    node = None
+    if request.node_sha256 is not None:
+        _sha(request.node_sha256, "qualified Node binary")
+    if request.host == "codex":
+        try:
+            node = codex_node_binary(binary, request.node_sha256)
+            if node is not None:
+                node_digest, _node_identity = _read_checked(node, "Node binary", binary=True)
+                provenance.update(node_binary=str(node), node_sha256=node_digest)
+        except CapabilityError as error:
+            raise NativeReviewRuntimeRefused(str(error)) from error
+    elif request.node_sha256 is not None:
+        raise NativeReviewRuntimeRefused("Claude review cannot bind a Node binary")
+    path = _review_path(request.host, binary, node)
     if (not isinstance(request.runtime_identity, str) or not request.runtime_identity
             or "\0" in request.runtime_identity or len(request.runtime_identity) > 512):
         raise NativeReviewRuntimeRefused("runtime identity is malformed")
@@ -406,7 +457,7 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
     except OSError as error:
         raise NativeReviewRuntimeRefused("cannot create private runtime root") from error
     root, root_identity = _private_directory(root, "private runtime root")
-    environment = _environment(request.host, root, workspace)
+    environment = _environment(request.host, root, workspace, path)
     config_path = catalog_path = mcp_path = None
     config_digest = catalog_digest = source_digest = mcp_digest = None
     claude_config_identity = (None, None)
@@ -469,12 +520,15 @@ def validate_native_review_material(value: object) -> NativeReviewMaterial:
     binary_digest, _binary_identity = _read_checked(Path(value.binary), "CLI binary", binary=True)
     if binary_digest != _sha(value.binary_sha256, "CLI binary"):
         raise NativeReviewRuntimeRefused("CLI binary drifted")
-    expected_environment = _environment(value.host, root, workspace)
-    if value.environment != expected_environment:
-        raise NativeReviewRuntimeRefused("native review environment is not closed")
     model = _text(value.requested_model, "requested model", _MODEL)
     version = _text(value.cli_version, "CLI version", _VERSION)
     expected_provenance = _pinned_provenance(value.host, version)
+    bound_node = _bound_node(value.host, value.binary, value.provenance)
+    expected_provenance.update(bound_node)
+    expected_path = _review_path(value.host, Path(value.binary),
+                                 Path(bound_node["node_binary"]) if bound_node else None)
+    if value.environment != _environment(value.host, root, workspace, expected_path):
+        raise NativeReviewRuntimeRefused("native review environment is not closed")
     if value.host == "codex":
         if value.claude_config_device is not None or value.claude_config_inode is not None:
             raise NativeReviewRuntimeRefused("Codex material cannot bind a Claude config")

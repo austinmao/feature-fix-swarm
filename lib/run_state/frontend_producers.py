@@ -180,7 +180,8 @@ def _published_request(supervisor, *, activity_id, launch_key, acceptance_hash, 
     return None
 
 
-def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str) -> NativeReviewRequest:
+def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str,
+                    qualified_binary=()) -> NativeReviewRequest:
     binary = Path(seam.binary)
     try:
         binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
@@ -194,6 +195,8 @@ def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str
         catalog_path=seam.catalog_path if seam.host == "codex" else None,
         catalog_sha256=seam.catalog_sha256 if seam.host == "codex" else None,
         session_id=str(uuid.uuid4()) if seam.host == "claude" else None,
+        # A `.js` launcher runs under the Node its runtime was qualified with (chain pin).
+        node_sha256=dict(qualified_binary).get("node_sha256") if seam.host == "codex" else None,
     )
 
 
@@ -291,7 +294,8 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
         else:
             try:
                 native = prepare_native_review_runtime(
-                    _native_request(seam, runtime_identity=tuple_hash, prompt=artifact.prompt),
+                    _native_request(seam, runtime_identity=tuple_hash, prompt=artifact.prompt,
+                                    qualified_binary=qualified.qualified.binary),
                     runtime_root=private / uuid.uuid4().hex, workspace=ready.path)
                 material = prepare_native_review_launch(native=native, artifact=artifact, ordinary=ordinary,
                                                         runtime_receipt_sha256=qualified.receipt.receipt_sha256)
