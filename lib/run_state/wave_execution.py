@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import math
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
@@ -14,7 +13,6 @@ import stat
 import subprocess
 import tempfile
 import unicodedata
-import uuid
 
 from run_context import (
     ContextRefused,
@@ -175,26 +173,34 @@ def _split_nul(raw: bytes) -> tuple[bytes, ...]:
     return tuple(item for item in raw.split(b"\0") if item)
 
 
-def _finite_float(text: str) -> float:
-    value = float(text)
-    if not math.isfinite(value):
-        raise ValueError(text)
-    return value
+# A key JS orders ahead of the others (up to 2**32-2; refused without the bound).
+_JS_INTEGER_KEY = re.compile(r"0|[1-9][0-9]*")
 
 
 def _strict_gsd_config(data: bytes) -> dict:
     def unique(pairs):
-        if len({key for key, _ in pairs}) != len(pairs):
-            raise ValueError("duplicate key")
+        keys = [key for key, _ in pairs]
+        # JS orders integer-like keys first, and spells floats and big ints its
+        # own way: refuse them all, so a Python/JS difference can only ever
+        # leave the file counting as modified. Lone surrogates fail to encode.
+        if len(set(keys)) != len(keys) or any(_JS_INTEGER_KEY.fullmatch(key) for key in keys):
+            raise ValueError("duplicate or integer-like key")
         return dict(pairs)
 
-    def refuse(constant):
-        raise ValueError(constant)
+    def refuse(text):
+        raise ValueError(text)
+
+    def exact_int(text):
+        value = int(text)
+        if abs(value) > 2**53:
+            raise ValueError(text)
+        return value
 
     config = json.loads(
         data.decode("utf-8"),
         object_pairs_hook=unique,
-        parse_float=_finite_float,
+        parse_int=exact_int,
+        parse_float=refuse,
         parse_constant=refuse,
     )
     if not isinstance(config, dict) or not isinstance(config.get("workflow"), dict):
@@ -207,10 +213,9 @@ def _gsd_written_config(base: bytes) -> bytes:
 
     ``JSON.stringify(config, null, 2)`` is deterministic from the parsed base:
     the same key order (a key that is present keeps its place, a new one goes
-    last in ``workflow``), a two-space indent and no trailing newline. Python
-    and JS can spell exotic inputs differently (integer-like keys, float
-    spelling, lone surrogates). That can only make the bytes differ, so the
-    file keeps counting as modified; it can never restore the wrong thing.
+    last in ``workflow``), a two-space indent and no trailing newline.
+    ``_strict_gsd_config`` refuses the inputs Python and JS can spell
+    differently, so a difference can only make the file count as modified.
     """
     config = _strict_gsd_config(base)
     if config["workflow"].get(_GSD_AUTO_CHAIN_FLAG, False) is not False:
@@ -234,24 +239,19 @@ def _planning_identity(workspace: Path) -> tuple[int, int] | None:
 
 
 def _gsd_restore_plan(
-    workspace: Path, base: str, planning_fd: int,
+    workspace: Path, base: str, planning_fd: int, descriptor: int,
 ) -> tuple[os.stat_result, bytes] | None:
-    """What was read and the base bytes to restore, when config.json is exactly gsd's flag write."""
+    """What was read and the base bytes to write, when the open file is exactly gsd's flag write."""
     try:
         # Case-exact names: a case-insensitive volume would open an alias.
         if ".planning" not in os.listdir(workspace) or "config.json" not in os.listdir(
             planning_fd
         ):
             return None
-        descriptor = os.open(
-            "config.json",
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0),
-            dir_fd=planning_fd,
-        )
-        with os.fdopen(descriptor, "rb") as handle:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1 << 20:
-                return None
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1 << 20:
+            return None
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
             data = handle.read((1 << 20) + 1)
         if len(data) > 1 << 20 or _GSD_AUTO_CHAIN_FLAG.encode() not in data:
             return None
@@ -268,63 +268,40 @@ def _gsd_restore_plan(
         return None
 
 
-def _replace_gsd_config(
-    workspace: Path, planning_fd: int, read: os.stat_result, data: bytes,
-) -> None:
-    """Put ``data`` in ``config.json`` through ``planning_fd``, only while nothing has moved.
+def _write_gsd_config(
+    workspace: Path, planning_fd: int, descriptor: int, read: os.stat_result, data: bytes,
+) -> bool:
+    """Write ``data`` into the file behind ``descriptor``, the inode that was read and checked.
 
-    The temporary file is created and renamed inside the directory descriptor,
-    so a swapped ``config.json`` or a ``.planning`` moved away cannot redirect
-    the write. The target's identity and the directory's place under the
-    workspace are checked before the temporary file exists and again right
-    before the rename; any mismatch leaves the file as it is, so it counts as
-    modified. A directory moved after the rename cannot be undone, so that is
-    refused.
+    There is no rename, so nothing can redirect the write to another inode: a
+    swapped or moved ``config.json`` only leaves the path showing other content,
+    which counts as modified. Right before the write the open file must still
+    be the one read (single link, same size and times), the path must still
+    name it, and ``.planning`` must still be the directory under the workspace;
+    otherwise nothing is written. A write that fails after the truncate, and a
+    directory moved after the write, cannot be undone and are refused loudly.
     """
-    directory = os.fstat(planning_fd)
-
-    def intact() -> bool:
-        try:
-            target = os.stat("config.json", dir_fd=planning_fd, follow_symlinks=False)
-        except OSError:
-            return False
-        return (
-            stat.S_ISREG(target.st_mode)
-            and _file_identity(target) == _file_identity(read)
+    try:
+        directory = os.fstat(planning_fd)
+        target = os.stat("config.json", dir_fd=planning_fd, follow_symlinks=False)
+        if not (
+            _file_identity(os.fstat(descriptor)) == _file_identity(read) == _file_identity(target)
+            and stat.S_ISREG(target.st_mode)
             and _planning_identity(workspace) == (directory.st_dev, directory.st_ino)
-        )
-
-    if not intact():
-        return
-    temporary = f".config.json.{uuid.uuid4().hex}.tmp"
-    try:
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-            dir_fd=planning_fd,
-        )
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fchmod(descriptor, stat.S_IMODE(read.st_mode))
-            os.fsync(descriptor)
-        if not intact():
-            return
-        os.rename(temporary, "config.json", src_dir_fd=planning_fd, dst_dir_fd=planning_fd)
+        ):
+            return False
     except OSError:
-        return
-    finally:
-        try:
-            os.unlink(temporary, dir_fd=planning_fd)
-        except OSError:
-            pass
+        return False
     try:
-        os.fsync(planning_fd)
-    except OSError:
-        pass  # durability only: the rename already happened
-    if _planning_identity(workspace) != (directory.st_dev, directory.st_ino):
-        raise WorkspaceRefused("SOURCE_CHANGED")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    except OSError as error:
+        raise WorkspaceRefused("SOURCE_CHANGED") from error
+    return True
 
 
 def _restore_gsd_auto_chain_write(workspace: Path, base: str) -> None:
@@ -341,19 +318,35 @@ def _restore_gsd_auto_chain_write(workspace: Path, base: str) -> None:
     bytes the base bytes are written back before the inventory reads the tree.
     Anything else leaves the file alone and counts as a modification: any
     other byte, a flag already set or not false in the base, duplicate keys,
-    nonfinite or overflowing numbers, a mode change, a symlink, a hard link, a
-    config without a ``workflow`` object, or no base blob. The read and the
-    replacement are bound to one directory descriptor (see
-    ``_replace_gsd_config``).
+    integer-like keys, floats, ints beyond 2**53, a mode change, a symlink, a
+    hard link, a config without a ``workflow`` object, or no base blob. The
+    file is opened once through the ``.planning`` directory descriptor and read,
+    checked and rewritten in place through that one descriptor.
     """
     try:
         planning_fd = _open_directory_chain(workspace, (".planning",), create=False)
     except (OSError, WorkspaceRefused):
         return
     try:
-        plan = _gsd_restore_plan(workspace, base, planning_fd)
-        if plan is not None:
-            _replace_gsd_config(workspace, planning_fd, *plan)
+        try:
+            directory = os.fstat(planning_fd)
+            descriptor = os.open(
+                "config.json",
+                os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=planning_fd,
+            )
+        except OSError:
+            return
+        try:
+            plan = _gsd_restore_plan(workspace, base, planning_fd, descriptor)
+            if plan is None or not _write_gsd_config(
+                workspace, planning_fd, descriptor, *plan
+            ):
+                return
+        finally:
+            os.close(descriptor)
+        if _planning_identity(workspace) != (directory.st_dev, directory.st_ino):
+            raise WorkspaceRefused("SOURCE_CHANGED")
     finally:
         os.close(planning_fd)
 
