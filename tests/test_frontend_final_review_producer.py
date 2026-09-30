@@ -32,7 +32,8 @@ from run_state.claude_host import ClaudeLaunchMaterial
 from run_state.codex_host import CodexLaunchMaterial
 from run_state.frontend_policy import FrontendPolicyController
 from run_state.frontend_producers import (
-    HostRuntimeSeam, QualifiedHostRuntime, _current_candidate, _reviewer_workspace, produce_final_review,
+    HostRuntimeSeam, QualifiedHostRuntime, _current_candidate, _native_request, _reviewer_workspace,
+    produce_final_review,
 )
 from run_state.managed import prepare_managed_run
 from run_state.managed_admission import ManagedAdmissionQueue
@@ -504,3 +505,18 @@ def test_reviewer_workspace_qualifies_as_inventory_and_replay_reads_the_promoted
         replayed = reviewer_workspace(fresh.id)
         assert replayed.id == fresh.id and replayed.child_role == "reviewer"
     _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+def test_native_request_carries_the_qualified_node_pin_for_codex_only(tmp_path):
+    """F53: the reviewer's Node identity is the one its runtime was qualified with."""
+    launcher = tmp_path / "codex.js"
+    launcher.write_bytes(b"#!/usr/bin/env node\n")
+    seam = SimpleNamespace(host="codex", binary=str(launcher), cli_version=CODEX_CLI_VERSION, model="gpt-5.6-terra",
+                           effort="high", catalog_path=str(tmp_path / "models.json"), catalog_sha256="c" * 64)
+    chain = {"launcher_sha256": "a" * 64, "node_sha256": "b" * 64}
+
+    assert _native_request(seam, runtime_identity="r", prompt="p", qualified_binary=chain).node_sha256 == "b" * 64
+    assert _native_request(seam, runtime_identity="r", prompt="p",
+                           qualified_binary={"launcher_sha256": "a" * 64}).node_sha256 is None
+    claude = SimpleNamespace(**{**vars(seam), "host": "claude", "catalog_path": None, "catalog_sha256": None})
+    assert _native_request(claude, runtime_identity="r", prompt="p", qualified_binary=chain).node_sha256 is None
