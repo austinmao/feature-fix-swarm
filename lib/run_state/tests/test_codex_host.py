@@ -330,29 +330,39 @@ def test_host_launch_path_resolves_the_verified_node_before_a_sibling_node(tmp_p
     assert found is not None and Path(found).resolve() == node.resolve() != rogue.resolve()
 
 
-def _npm_layout(tmp_path):
-    """A `.js` launcher, a verified Node, and the launcher's own platform package."""
-    import platform
-    import sys
-    arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}[platform.machine().lower()]
-    triple, package = {
-        ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
-        ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
-        ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
-        ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
-    }[("darwin" if sys.platform == "darwin" else "linux", arch)]
+# codex-cli/bin/codex.js PLATFORM_PACKAGE_BY_TARGET (rust-v0.154.0 and v0.159.0), restated as an oracle.
+CODEX_TARGETS = {
+    ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
+    ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
+    ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
+    ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
+}
+
+
+def _npm_executable(tmp_path, pair):
+    triple, package = CODEX_TARGETS[pair]
+    return tmp_path / "npm" / "node_modules" / package / "vendor" / triple / "bin" / "codex"
+
+
+def _npm_layout(tmp_path, reported=("darwin", "arm64"), installed=None, node_body=None):
+    """A `.js` launcher, a verified Node that reports `reported` as process.platform/arch, and a
+    platform package for each installed pair (default: just the reported one)."""
     bin_dir, node_dir = tmp_path / "npm" / "bin", tmp_path / "nodejs" / "bin"
-    vendor = tmp_path / "npm" / "node_modules" / package / "vendor" / triple / "bin"
-    for directory in (bin_dir, node_dir, vendor):
-        directory.mkdir(parents=True)
-    # `require.resolve("<package>/package.json")` is how the launcher finds its platform package.
-    (vendor.parents[2] / "package.json").write_text('{"name": "@openai/codex", "version": "0.0.0-fake"}')
-    launcher, node, native = bin_dir / "codex.js", node_dir / "node", vendor / "codex"
-    for path, body in ((launcher, "#!/usr/bin/env node\n"), (node, "#!/bin/sh\necho node\n"),
-                       (native, "#!/bin/sh\necho native\n")):
+    bin_dir.mkdir(parents=True)
+    node_dir.mkdir(parents=True)
+    launcher, node = bin_dir / "codex.js", node_dir / "node"
+    bodies = [(launcher, "#!/usr/bin/env node\n"),
+              (node, node_body if node_body is not None else f"#!/bin/sh\necho '{reported[0]} {reported[1]}'\n")]
+    for pair in (installed or [reported]):
+        native = _npm_executable(tmp_path, pair)
+        native.parent.mkdir(parents=True)
+        # `require.resolve("<package>/package.json")` is how the launcher finds its platform package.
+        (native.parents[3] / "package.json").write_text('{"name": "@openai/codex", "version": "0.0.0-fake"}')
+        bodies.append((native, f"#!/bin/sh\necho native-{pair[0]}-{pair[1]}\n"))
+    for path, body in bodies:
         path.write_text(body)
         path.chmod(0o755)
-    return launcher, node, native, triple
+    return launcher, node, _npm_executable(tmp_path, reported), CODEX_TARGETS[reported][0]
 
 
 def test_qualification_chain_binds_the_platform_package_executable_not_a_decoy(tmp_path, monkeypatch):

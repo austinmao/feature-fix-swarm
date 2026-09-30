@@ -1,9 +1,7 @@
 import hashlib
 import json
 import os
-import platform
 import shutil
-import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -352,32 +350,42 @@ def test_codex_0159_config_without_the_async_gate_fails_validation(tmp_path: Pat
 # F53: an npm-installed Codex is a `.js` launcher (`#!/usr/bin/env node`), so the review
 # process needs the qualified Node on PATH.  PATH is built as the host launch builds it:
 # binary parent, Node parent (only for a `.js` launcher), then /usr/bin:/bin.
-def _js_launcher(tmp_path: Path) -> tuple[Path, Path]:
+DEFAULT_PAIR = ("darwin", "arm64")  # process.platform / process.arch the fake Node reports
+
+
+def _js_launcher(tmp_path: Path, reported: tuple[str, str] = DEFAULT_PAIR,
+                 installed: list[tuple[str, str]] | None = None, node_body: bytes | None = None):
     bin_dir = tmp_path / "npm" / "bin"
     node_dir = tmp_path / "nodejs" / "bin"
     bin_dir.mkdir(parents=True)
     node_dir.mkdir(parents=True)
     launcher = _write(bin_dir / "codex.js", b"#!/usr/bin/env node\n// fixture launcher, never executed\n", 0o755)
-    node = _write(node_dir / "node", b"#!/bin/sh\nexit 0\n", 0o755)
+    # The verified Node itself reports process.platform and process.arch (codex.js reads those).
+    node = _write(node_dir / "node",
+                  node_body if node_body is not None else f"#!/bin/sh\necho '{reported[0]} {reported[1]}'\n".encode(),
+                  0o755)
     # The JS launcher spawns a separate vendor executable (the host chain's `native_sha256`).
-    _platform_package(launcher.parents[1] / "node_modules", b"#!/bin/sh\nexit 0\n")
+    for pair in installed or [reported]:
+        _platform_package(launcher.parents[1] / "node_modules", f"#!/bin/sh\necho {pair}\n".encode(), pair=pair)
     return launcher, node
 
 
-def _target() -> tuple[str, str]:
-    """codex-cli/bin/codex.js (rust-v0.154.0 and v0.159.0): target triple and platform package."""
-    arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}[platform.machine().lower()]
-    system = "darwin" if sys.platform == "darwin" else "linux"
-    return {
-        ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
-        ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
-        ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
-        ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
-    }[(system, arch)]
+# codex-cli/bin/codex.js (rust-v0.154.0 and v0.159.0) PLATFORM_PACKAGE_BY_TARGET, restated as an oracle.
+_TARGETS = {
+    ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
+    ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
+    ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
+    ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
+}
 
 
-def _platform_package(node_modules: Path, content: bytes, *, exports: bool = False) -> Path:
-    triple, package = _target()
+def _target(pair: tuple[str, str] = DEFAULT_PAIR) -> tuple[str, str]:
+    return _TARGETS[pair]
+
+
+def _platform_package(node_modules: Path, content: bytes, *, pair: tuple[str, str] = DEFAULT_PAIR,
+                      exports: bool = False) -> Path:
+    triple, package = _target(pair)
     root = node_modules / package
     (root / "vendor" / triple / "bin").mkdir(parents=True)
     (root / "package.json").write_text(json.dumps(
@@ -385,8 +393,8 @@ def _platform_package(node_modules: Path, content: bytes, *, exports: bool = Fal
     return _write(root / "vendor" / triple / "bin" / "codex", content, 0o755)
 
 
-def _vendor(launcher: Path) -> Path:
-    triple, package = _target()
+def _vendor(launcher: Path, pair: tuple[str, str] = DEFAULT_PAIR) -> Path:
+    triple, package = _target(pair)
     return launcher.parents[1] / "node_modules" / package / "vendor" / triple / "bin" / "codex"
 
 
@@ -740,11 +748,14 @@ def test_platform_package_is_found_by_node_resolution_from_the_launcher(tmp_path
     assert _bound_vendor(material) == str(hoisted.resolve())
 
 
-def test_local_vendor_directory_is_the_launchers_fallback_when_no_platform_package(tmp_path: Path,
-                                                                                   monkeypatch) -> None:
-    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+def test_package_absent_from_every_ancestor_refuses_even_with_a_local_vendor_dir(tmp_path: Path,
+                                                                                monkeypatch) -> None:
+    """Node consults NODE_PATH and the global folders before codex.js falls back to its local vendor
+    dir, and those are not modelled: a package Node might find elsewhere is never replaced by a guess."""
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
     launcher, node = _js_launcher(tmp_path)
     triple, _package = _target()
+    request = _js_request(launcher, catalog, node)
     _vendor(launcher).unlink()
     (_vendor(launcher).parents[3] / "package.json").unlink()
     local = launcher.parents[1] / "vendor" / triple / "bin"
@@ -752,11 +763,10 @@ def test_local_vendor_directory_is_the_launchers_fallback_when_no_platform_packa
     _write(local / "codex", b"#!/bin/sh\necho local\n", 0o755)
     monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
 
-    material = prepare_native_review_runtime(
-        replace(_request(launcher, catalog), node_sha256=_sha(node), native_sha256=_sha(local / "codex")),
-        runtime_root=tmp_path / "private" / "one", workspace=tmp_path / "review-workspace")
-
-    assert _bound_vendor(material) == str((local / "codex").resolve())
+    with pytest.raises(NativeReviewRuntimeRefused, match="native"):
+        prepare_native_review_runtime(replace(request, native_sha256=_sha(local / "codex")),
+                                      runtime_root=parent / "one", workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
 
 
 @pytest.mark.parametrize("shape", ["package-without-executable", "package-with-exports"])
@@ -812,3 +822,38 @@ def test_node_retargeted_or_replaced_after_prepare_refuses_validation(tmp_path: 
 
     with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
         validate_native_review_material(material)
+
+
+# F53 review round 3: platform and arch come from the verified Node (what codex.js reads), not Python.
+@pytest.mark.parametrize("reported", [("darwin", "arm64"), ("darwin", "x64"), ("linux", "x64")])
+def test_native_review_binds_the_package_for_the_platform_the_verified_node_reports(
+        tmp_path: Path, monkeypatch, reported: tuple[str, str]) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path, reported=reported, installed=list(_TARGETS))
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = replace(_request(launcher, catalog), node_sha256=_sha(node),
+                      native_sha256=_sha(_vendor(launcher, reported)))
+
+    material = prepare_native_review_runtime(request, runtime_root=tmp_path / "private" / "one",
+                                             workspace=tmp_path / "review-workspace")
+
+    assert _bound_vendor(material) == str(_vendor(launcher, reported).resolve())
+    assert validate_native_review_material(material) is material
+
+
+@pytest.mark.parametrize("body", [b"#!/bin/sh\nexit 1\n", b"#!/bin/sh\necho not a pair\n",
+                                  b"#!/bin/sh\necho 'freebsd x64'\n", b"#!/bin/sh\nexit 0\n",
+                                  b"#!/bin/sh\nexec sleep 5\n"],
+                         ids=["nonzero", "malformed", "unknown-pair", "empty", "timeout"])
+def test_native_review_refuses_when_the_node_platform_probe_fails(tmp_path: Path, monkeypatch,
+                                                                  body: bytes) -> None:
+    import host_capabilities
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path, node_body=body)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.setattr(host_capabilities, "_NODE_PROBE_TIMEOUT", 0.3, raising=False)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
+        prepare_native_review_runtime(_js_request(launcher, catalog, node), runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
