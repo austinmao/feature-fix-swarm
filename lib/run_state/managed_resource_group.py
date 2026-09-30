@@ -164,6 +164,9 @@ class ManagedParentResourceCoordinator(SharedResourceCoordinator):
                 self._reserve_group()
         elif self.plan is None or len(bindings) > self.child_width:
             raise ControlStoreRefused('RESOURCE_GROUP_CHUNK_REQUIRED')
+        elif self._group_state() != 'reserved':
+            # The parent ended: no child may claim a slot (F50), and no intent is reserved for it.
+            raise ControlStoreRefused('RESOURCE_PARENT_GROUP_ENDED')
         if self.reservation is None:
             raise ControlStoreRefused('RESOURCE_PARENT_GROUP_REQUIRED')
         result = []

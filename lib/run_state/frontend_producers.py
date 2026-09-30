@@ -53,7 +53,8 @@ class HostRuntimeSeam:
     """The managed host adapters' reusable runtime preparation plus host-resolved identities.
 
     ``qualify(activity_id, workspace, activity_request_key, parent_activity_id,
-    final_contract_hash, role)`` returns ``QualifiedHostRuntime``;
+    final_contract_hash, role, *, supervisor=None)`` returns ``QualifiedHostRuntime``
+    (``supervisor`` defaults to the outer orchestrator's; the reviewer passes its own);
     ``bind(qualified, prompt, workspace, final_contract_hash, launch_request_key)``
     returns ``(DispatchRequest with codex_material/claude_material, adapter)``.
     """
@@ -251,8 +252,9 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
             retained_preparation_id=retained_preparation_id)
     except WorkspaceRefused as error:
         raise SupervisorRefused(error.code) from error
+    # The outer orchestrator's prepaid group has ended by now: qualify on this channel-less supervisor.
     qualified = seam.qualify(retained_activity_id or str(uuid.uuid4()), ready, reviewer_key,
-                             parent_activity_id, acceptance_hash, "reviewer")
+                             parent_activity_id, acceptance_hash, "reviewer", supervisor=supervisor)
     activity = qualified.activity
     tuple_hash = store.runtime_tuple_hash(qualified.qualified)
     selected = _selected_artifacts(store, ready)
