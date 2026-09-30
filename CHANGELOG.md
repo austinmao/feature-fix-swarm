@@ -8,6 +8,30 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F48 final-review workspace is prepared as inventory)
+
+- The managed native final review refused with `WORKSPACE_BINDING_MISMATCH` as
+  soon as it tried to qualify its reviewer runtime, after both sealed checks had
+  passed, and no reviewer activity row was created. `produce_final_review`
+  prepared the reviewer workspace with `role="reviewer"`, but
+  `qualify_managed_runtime` (Codex and Claude) always creates its child activity
+  as `inventory`, and `create_child_activity` requires the workspace `child_role`
+  to equal the role it is given. Qualification then promotes activity, binding
+  and workspace to the final role, and `promote_qualified_activity` in turn
+  requires the workspace to still read `inventory`. Workers already follow this
+  path (they prepare `inventory` and are promoted to `worker`); the final review
+  was the only caller that skipped it. `_reviewer_workspace` now prepares the
+  reviewer workspace as `inventory` and accepts `inventory` (before promotion) or
+  `reviewer` (a retained preparation replayed after promotion). Every other
+  reader of the reviewer workspace role (`final_review_context`, the
+  `child_role=b.role` joins in `cli.py`, `_assert_release_binding`) runs after
+  promotion or compares the workspace with its binding, so it holds in both
+  states. The producer test's `qualify` stub had created the reviewer child
+  directly, a shape production cannot produce, which is why the suite never saw
+  this. It now runs the real sequence against the real store (inventory child,
+  four completed probes, `promote_qualified_activity`), and a focused test
+  drives `_reviewer_workspace` through qualification and replay.
+
 ### Fixed (2026-09-30, spec-014 Release C: F46 sealed checks may open /dev/null)
 
 - A sealed local check runs under `sandbox-exec` with a profile that starts
