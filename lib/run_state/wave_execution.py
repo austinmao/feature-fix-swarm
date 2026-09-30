@@ -26,6 +26,7 @@ from .workspace import (
     InputSnapshot,
     WorkspacePreparation,
     WorkspaceRefused,
+    _atomic_snapshot_write,
     _base_entry_material,
     _read_anchored_regular_metadata,
     inspect_workspace,
@@ -46,6 +47,8 @@ _INTERNAL_DIRECTORY_ROOTS = (
 # gsd-core runtime state: exempt only as UNTRACKED regular files under a real
 # top-level directory. Tracked changes under these roots stay in the inventory.
 _UNTRACKED_RUNTIME_ROOTS = (".gsd",)
+_GSD_CONFIG = ".planning/config.json"
+_GSD_AUTO_CHAIN_FLAG = "_auto_chain_active"
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,70 @@ def _split_nul(raw: bytes) -> tuple[bytes, ...]:
     return tuple(item for item in raw.split(b"\0") if item)
 
 
+def _strict_gsd_config(data: bytes) -> dict:
+    def unique(pairs):
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("duplicate key")
+        return dict(pairs)
+
+    def refuse(constant):
+        raise ValueError(constant)
+
+    config = json.loads(
+        data.decode("utf-8"), object_pairs_hook=unique, parse_constant=refuse,
+    )
+    if not isinstance(config, dict) or not isinstance(config.get("workflow"), dict):
+        raise ValueError("unexpected config shape")
+    return config
+
+
+def _restore_gsd_auto_chain_write(workspace: Path, base: str) -> None:
+    """Treat gsd-core's ephemeral ``workflow._auto_chain_active=false`` write as no change (F49).
+
+    gsd-core's execute-phase workflow tells the orchestrator to run
+    ``config-set workflow._auto_chain_active false`` before any config read, and
+    ``setConfigValue`` (@opengsd/gsd-core ``gsd-core/bin/lib/config.cjs``)
+    rewrites the tracked ``.planning/config.json`` as
+    ``JSON.stringify(config, null, 2)``. The key is documented as "Internal:
+    tracks whether autonomous chaining is active"
+    (``gsd-core/references/planning-config.md``), never plan output. When that
+    flag is the ONLY difference from the base blob, the base bytes are written
+    back before the inventory reads the tree. Anything else leaves the file
+    alone and counts as a modification: flag true or not the JSON boolean
+    false, any other key, key order or value type, duplicate keys, a mode
+    change, a symlink, a hard link, a config without a ``workflow`` object, or
+    no base blob.
+    """
+    try:
+        # Case-exact names: a case-insensitive volume would open an alias.
+        if ".planning" not in os.listdir(workspace) or "config.json" not in os.listdir(
+            workspace / ".planning"
+        ):
+            return
+        data, info = _read_anchored_regular_metadata(workspace, _GSD_CONFIG, max_bytes=1 << 20)
+        if _GSD_AUTO_CHAIN_FLAG.encode() not in data:
+            return
+        candidate = _strict_gsd_config(data)
+        if candidate["workflow"].pop(_GSD_AUTO_CHAIN_FLAG, None) is not False:
+            return
+        blob = _base_material(workspace, base, _GSD_CONFIG)
+        if (
+            blob is None
+            or blob.data == data
+            or ("100755" if info.st_mode & stat.S_IXUSR else "100644") != blob.mode
+        ):
+            return
+        original = _strict_gsd_config(blob.data)
+        if original["workflow"].pop(_GSD_AUTO_CHAIN_FLAG, False) is not False:
+            return
+        # Serialized, not ==: Python equates 1 with true and ignores key order.
+        if json.dumps(candidate, ensure_ascii=False) != json.dumps(original, ensure_ascii=False):
+            return
+        _atomic_snapshot_write(workspace, _GSD_CONFIG, blob.data, stat.S_IMODE(info.st_mode))
+    except (OSError, ValueError, RecursionError, WorkspaceRefused):
+        return
+
+
 def _inventory(workspace: Path, base: str) -> _Inventory:
     return _inventory_and_hidden(workspace, base)[0]
 
@@ -181,7 +248,12 @@ def _inventory_and_hidden(
     The inventory itself knows nothing about scope, so every consumer agrees on
     it. ``harvest_scoped_patch`` uses the hidden set to refuse a declared output
     that a rule would otherwise drop from the patch without a word.
+
+    Every inventory consumer (wave and prelaunch snapshots, scoped harvest, the
+    candidate-chain and local-check re-inventories) routes through here, so the
+    one tolerated config edit is undone once, before anything reads the tree.
     """
+    _restore_gsd_auto_chain_write(workspace, base)
     if _git_bytes(workspace, "ls-files", "-u", "-z"):
         raise WorkspaceRefused("WAVE_CONFLICTS_PRESENT")
     fields = _split_nul(

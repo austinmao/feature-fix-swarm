@@ -1194,6 +1194,23 @@ def test_symlinked_planning_directory_is_left_alone(tmp_path: Path) -> None:
     assert real.read_bytes() == flagged
 
 
+def test_case_aliased_planning_directory_is_left_alone(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    # On a case-insensitive volume `.Planning` still opens as `.planning`; on a
+    # case-sensitive one the config is simply gone from its tracked path.
+    (repository / ".planning").rename(repository / ".Planning")
+
+    try:
+        _inventory(repository, head)
+    except WorkspaceRefused:
+        pass
+    assert (repository / ".Planning/config.json").read_bytes() == flagged
+
+
 def _with_orchestrator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: Path, body) -> None:
     monkeypatch.chdir(primary)
     for key in INHERITED_CONTEXT_KEYS:

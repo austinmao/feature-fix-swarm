@@ -8,6 +8,47 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F49 gsd's ephemeral auto-chain flag write is no change)
+
+- gsd-core's `execute-phase` workflow tells the orchestrator to run
+  `gsd_run query config-set workflow._auto_chain_active false` before any
+  config read, and `setConfigValue` (`gsd-core/bin/lib/config.cjs`) always
+  rewrites the tracked `.planning/config.json` as
+  `JSON.stringify(config, null, 2)`. An orchestrator that ran the step left a
+  tracked modification in its workspace, the wave overlay captured it, and the
+  candidate input digest no longer matched the clean preparation, so the run
+  refused `FRONTEND_INTEGRATION_CHAIN_INVALID`. Orchestrators that skip the
+  step never hit it, so the failure was nondeterministic. A worker that runs
+  `execute-phase` in its own child workspace can do the same, which
+  `harvest_scoped_patch` counts as an out-of-scope modification. gsd-core
+  documents the key as "Internal: tracks whether autonomous chaining is active"
+  (default false). Per operator decision D8, FFS now treats exactly that edit as
+  no change. The one shared inventory (`_inventory_and_hidden`) first restores
+  the base bytes of `.planning/config.json` when `workflow._auto_chain_active`
+  set to the JSON boolean `false` is the ONLY difference from the base commit's
+  blob. Wave and prelaunch snapshots, every `harvest_scoped_patch` inventory
+  pass, the candidate chain, frontend completion, local check verification and
+  recovery trial checks all read that inventory, so they agree. F40 already
+  restored an undeclared config edit in a worker workspace just before harvest;
+  this covers the orchestrator workspace and every other seam. The match is
+  strict and fails toward "still modified":
+  - the file is exactly `.planning/config.json`, with case-exact names, a real
+    `.planning` directory, and a single-link regular file (no symlink, no hard
+    link), and the base commit has a blob for it;
+  - both sides parse as JSON objects with a `workflow` object, with no
+    duplicate keys and no `NaN` or `Infinity`;
+  - the candidate's flag is exactly `false` (not `0`, `null`, `"false"` or
+    `true`), the base's own value is absent or exactly `false`, and the two
+    documents are identical once that key is removed, compared serialized so
+    that `1` versus `true` and a reordered key both count as a difference;
+  - the executable bit matches the base mode.
+  The restore writes the base bytes atomically (temp file in the same
+  directory, fsync, rename) and keeps the file's permission bits. Any other
+  edit, including the flag set to `true` or alongside another change, is
+  inventoried as before. Tests cover the inventory, a worker harvest, wave and
+  prelaunch snapshots on a real orchestrator workspace (digest equal to a clean
+  capture), and negative cases for every rule above.
+
 ### Fixed (2026-09-30, spec-014 Release C: F46 sealed checks may open /dev/null)
 
 - A sealed local check runs under `sandbox-exec` with a profile that starts
