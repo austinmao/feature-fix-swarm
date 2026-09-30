@@ -85,6 +85,15 @@ def _internal_path(relative: str) -> bool:
 
 def _refuse_unsafe_runtime_roots(workspace: Path, untracked: list[str]) -> None:
     """Refuse a runtime root that is an alias, a non-directory or holds a non-regular file."""
+    for root in _UNTRACKED_RUNTIME_ROOTS:
+        try:
+            mode = os.lstat(workspace / root).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise WorkspaceRefused("SOURCE_CHANGED") from error
+        if not stat.S_ISDIR(mode):
+            raise WorkspaceRefused("UNSAFE_SELECTION_PATH")
     for item in untracked:
         top = unicodedata.normalize("NFC", item.split("/", 1)[0]).casefold()
         if top in _UNTRACKED_RUNTIME_ROOTS and not _untracked_runtime_path(item):

@@ -24,11 +24,14 @@ all skills.
   - it covers untracked regular files only. A tracked `.gsd/` file that is
     modified or deleted stays in the inventory, the harvest and the candidate
     chain exactly as before;
-  - the top-level `.gsd` must be a real directory. An untracked `.gsd` that is
-    a file or a symlink, a symlink or a special node (FIFO, socket, device)
-    inside `.gsd/`, and a case alias such as `.GSD` or `.Gsd` (which
-    case-insensitive volumes treat as the same name) are refused with
-    `UNSAFE_SELECTION_PATH` instead of being exempted or captured;
+  - the top-level `.gsd` must be a real directory, tracked or not. A `.gsd`
+    that is a file or a symlink is refused, and so are a case alias such as
+    `.GSD` or `.Gsd` (which case-insensitive volumes treat as the same name)
+    and an untracked symlink or special node (FIFO, socket, device) inside
+    `.gsd/`. All are refused with `UNSAFE_SELECTION_PATH` instead of being
+    exempted or captured. Untracked entries under `.gsd/` must be regular
+    files. Tracked symlinks inside `.gsd/` are ordinary repository content and
+    are treated like any other tracked symlink;
   - anything else untracked, such as `newfile.py`, `.gsdfoo.txt` or
     `pkg/.gsd/kept.py`, is still captured.
 
