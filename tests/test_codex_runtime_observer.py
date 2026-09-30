@@ -213,3 +213,26 @@ def test_agent_report_and_allowed_file_do_not_prove_shell_denial(tmp_path: Path)
                              allowed=allowed, blocked=blocked)
     assert record["observed"]["shell_denied"] is False
     assert record["observed"]["write_boundary"] is False
+
+
+def test_observer_chain_matches_the_host_capability_chain_for_a_js_launcher(tmp_path: Path, monkeypatch):
+    """F53 review: the observer produces the qualified chain, so it must resolve as host_capabilities does."""
+    import sys
+    sys.path.insert(0, str(ROOT / "lib"))
+    from host_capabilities import _binary_chain
+    sys.path.pop(0)
+    sys.path.insert(0, str(ROOT / "lib" / "run_state" / "tests"))
+    from test_codex_host import _npm_layout
+    sys.path.pop(0)
+    launcher, node, native, triple = _npm_layout(tmp_path)
+    decoy = tmp_path / "codex-0-decoy" / "vendor" / triple / "bin"
+    decoy.mkdir(parents=True)
+    (decoy / "codex").write_text("#!/bin/sh\necho decoy\n")
+    (decoy / "codex").chmod(0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.delenv("CODEX_NATIVE_BINARY", raising=False)
+
+    chain = observer.executable_chain(launcher)
+
+    assert chain == _binary_chain(launcher)
+    assert chain["native_sha256"] == __import__("hashlib").sha256(native.read_bytes()).hexdigest()

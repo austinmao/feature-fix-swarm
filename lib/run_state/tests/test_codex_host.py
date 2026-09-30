@@ -328,3 +328,60 @@ def test_host_launch_path_resolves_the_verified_node_before_a_sibling_node(tmp_p
 
     found = shutil.which("node", path=environment["PATH"])
     assert found is not None and Path(found).resolve() == node.resolve() != rogue.resolve()
+
+
+def _npm_layout(tmp_path):
+    """A `.js` launcher, a verified Node, and the launcher's own platform package."""
+    import platform
+    import sys
+    arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}[platform.machine().lower()]
+    triple, package = {
+        ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
+        ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
+        ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
+        ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
+    }[("darwin" if sys.platform == "darwin" else "linux", arch)]
+    bin_dir, node_dir = tmp_path / "npm" / "bin", tmp_path / "nodejs" / "bin"
+    vendor = tmp_path / "npm" / "node_modules" / package / "vendor" / triple / "bin"
+    for directory in (bin_dir, node_dir, vendor):
+        directory.mkdir(parents=True)
+    launcher, node, native = bin_dir / "codex.js", node_dir / "node", vendor / "codex"
+    for path, body in ((launcher, "#!/usr/bin/env node\n"), (node, "#!/bin/sh\necho node\n"),
+                       (native, "#!/bin/sh\necho native\n")):
+        path.write_text(body)
+        path.chmod(0o755)
+    return launcher, node, native, triple
+
+
+def test_qualification_chain_binds_the_platform_package_executable_not_a_decoy(tmp_path, monkeypatch):
+    """F53 review: qualification and native review resolve the vendor executable as the launcher does."""
+    from host_capabilities import CapabilityError, _binary_chain
+    launcher, node, native, triple = _npm_layout(tmp_path)
+    decoy = tmp_path / "codex-0-decoy" / "vendor" / triple / "bin"
+    decoy.mkdir(parents=True)
+    (decoy / "codex").write_text("#!/bin/sh\necho decoy\n")
+    (decoy / "codex").chmod(0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.delenv("CODEX_NATIVE_BINARY", raising=False)
+
+    chain = _binary_chain(launcher)
+    assert chain["native_sha256"] == hashlib.sha256(native.read_bytes()).hexdigest()
+
+    # An ambient override naming another executable is refused; naming the launcher's own is fine.
+    monkeypatch.setenv("CODEX_NATIVE_BINARY", str(decoy / "codex"))
+    with pytest.raises(CapabilityError, match="CODEX_NATIVE_BINARY"):
+        _binary_chain(launcher)
+    monkeypatch.setenv("CODEX_NATIVE_BINARY", str(native))
+    assert _binary_chain(launcher) == chain
+
+
+def test_host_launch_refuses_a_symlinked_node(tmp_path, monkeypatch):
+    from host_capabilities import CapabilityError
+    launcher, node, _native, _triple = _npm_layout(tmp_path)
+    real = node.rename(node.with_name("node20"))
+    node.symlink_to(real.name)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    chain = {"launcher_sha256": "a" * 64, "node_sha256": hashlib.sha256(real.read_bytes()).hexdigest()}
+
+    with pytest.raises(CapabilityError, match="symlink"):
+        codex_closed_environment(tmp_path / "home", PRIVATE_TMP_ROOT / "ffs-codex-policy-tmp", launcher, chain)
