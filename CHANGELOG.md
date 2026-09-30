@@ -65,11 +65,14 @@ all skills.
   and the file counts as modified. A swap or move after that check leaves the
   path showing other content, which also counts. A directory that moves after
   the write, and a write that fails after the truncate, are refused with
-  `SOURCE_CHANGED`. Permission bits and ownership stay as they were. Tests cover
-  the inventory, a worker harvest, wave and prelaunch snapshots on a real
-  orchestrator workspace (digest equal to a clean capture), negative cases for
-  every rule above, and races injected after the read, right before the final
-  check, at the commit call and after the write.
+  `SOURCE_CHANGED`. Permission bits and ownership stay as they were. Accepted
+  limit: while the base bytes are written in place, a concurrent reader (only
+  the workspace's own model process) can briefly see empty or partial config;
+  every FFS inventory decision reads through the verified fd or re-reads after
+  the write. Tests cover the inventory, a worker harvest, wave and prelaunch
+  snapshots on a real orchestrator workspace (digest equal to a clean
+  capture), negative cases for every rule above, and races injected after the
+  read, right before the final check, at the commit call and after the write.
 
 ### Fixed (2026-09-30, spec-014 Release C: F46 sealed checks may open /dev/null)
 

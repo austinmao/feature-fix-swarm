@@ -293,6 +293,10 @@ def _write_gsd_config(
     except OSError:
         return False
     try:
+        # Accepted limit: between the truncate and the last write a concurrent
+        # reader (only the workspace's own model process) can see empty or partial
+        # config. Every FFS inventory decision reads through the verified fd or
+        # re-reads after this write.
         os.lseek(descriptor, 0, os.SEEK_SET)
         os.ftruncate(descriptor, 0)
         view = memoryview(data)
