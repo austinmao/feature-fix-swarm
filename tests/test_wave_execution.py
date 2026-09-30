@@ -350,3 +350,98 @@ def test_harvest_rejects_head_drift_without_evidence(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceRefused, match="WAVE_HEAD_MISMATCH"):
         harvest_scoped_patch(repository, head, ("tracked.txt",), (), tmp_path / "evidence")
     assert not (tmp_path / "evidence").exists()
+
+
+def _write_gsd_sentinel(root: Path) -> None:
+    sentinel = root / ".gsd/dispatch-isolation-sentinel.json"
+    sentinel.parent.mkdir(exist_ok=True)
+    sentinel.write_text('{"step": "dispatch-isolation"}\n')
+
+
+def test_gsd_runtime_state_does_not_enter_wave_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = _repository(tmp_path)
+    monkeypatch.chdir(primary)
+    for key in INHERITED_CONTEXT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    def capture(store, token, context):
+        with store.transaction() as tx:
+            preparation_id = tx.execute(
+                "SELECT preparation_id FROM context_runs WHERE repository_id=? AND run_id=?",
+                (token.repository_id, token.run_id),
+            ).fetchone()[0]
+            retained = json.dumps({
+                "schema": "ffs.input-snapshot/v1",
+                "upstream": {
+                    "project": "fixture-project",
+                    "workstream": "feature-014",
+                    "session_key": "fixture-session",
+                },
+            }, sort_keys=True, separators=(",", ":"))
+            tx.execute(
+                "UPDATE context_workspaces SET selected_manifest_json=? WHERE preparation_id=?",
+                (retained, preparation_id),
+            )
+        preparation = inspect_workspace(store, preparation_id)
+        parent = Path(token.workspace)
+        (parent / "src/input.txt").write_bytes(b"accepted wave one\n")
+        (parent / "newfile.py").write_text("deliverable\n")
+        head = git(parent, "rev-parse", "HEAD")
+        manifest = wave_manifest(token, context, head)
+
+        clean = capture_wave_snapshot(
+            store, token, preparation, manifest, tmp_path / "clean-evidence",
+        )
+        _write_gsd_sentinel(parent)
+        with_gsd = capture_wave_snapshot(
+            store, token, preparation, manifest, tmp_path / "gsd-evidence",
+        )
+
+        def overlay(snapshot) -> list[str]:
+            files = snapshot.staging / "files"
+            return sorted(
+                item.relative_to(files).as_posix()
+                for item in files.rglob("*") if item.is_file()
+            )
+
+        assert overlay(with_gsd) == overlay(clean) == ["newfile.py", "src/input.txt"]
+        assert with_gsd.manifest["entries"] == clean.manifest["entries"]
+        assert with_gsd.input_digest == clean.input_digest
+        return 0
+
+    assert _cmd_fixture_start(_args(tmp_path / "authority"), on_ready=capture) == 0
+
+
+def test_gsd_runtime_state_does_not_enter_wave_output(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory, _material_entries
+
+    repository, head = fixture_repo(tmp_path)
+    (repository / "tracked.txt").write_text("changed\n")
+    (repository / "newfile.py").write_text("deliverable\n")
+    clean_entries = _material_entries(repository, head, _inventory(repository, head))
+    _write_gsd_sentinel(repository)
+
+    assert _inventory(repository, head).untracked == ("newfile.py",)
+    assert _material_entries(repository, head, _inventory(repository, head)) == clean_entries
+    result = harvest_scoped_patch(
+        repository, head, ("tracked.txt", "newfile.py"), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == ("newfile.py", "tracked.txt")
+    assert ".gsd" not in result.patch
+
+
+def test_gsd_exemption_is_not_blanket_for_deliverable_untracked_files(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = fixture_repo(tmp_path)
+    deliverables = ("newfile.py", ".gsdfoo.txt", "pkg/.gsd/kept.py")
+    for relative in deliverables:
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("deliverable\n")
+
+    assert _inventory(repository, head).untracked == tuple(sorted(deliverables))
+    result = harvest_scoped_patch(repository, head, deliverables, (), tmp_path / "evidence")
+    assert result.changed_files == tuple(sorted(deliverables))
