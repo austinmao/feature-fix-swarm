@@ -902,3 +902,96 @@ def test_ignore_matching_is_case_sensitive_whatever_the_repository_config(
 
     with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
         harvest_scoped_patch(repository, head, (), (), tmp_path / "scope-evidence")
+
+
+@pytest.mark.parametrize("declared", ["build//out.txt", "./build/out.txt", "Build/Out.txt"])
+def test_declared_output_hidden_by_an_ignore_rule_is_refused_for_any_spelling(
+    tmp_path: Path, declared: str,
+) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    (repository / "build").mkdir()
+    (repository / "build/out.txt").write_text("deliverable\n")
+
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(
+            repository, head, (declared, "tracked.txt"), (), tmp_path / "evidence",
+        )
+
+
+def _create_during_harvest(
+    monkeypatch: pytest.MonkeyPatch, repository: Path, stage: str, relative: str,
+) -> None:
+    """Create ``relative`` between two of harvest's inventories."""
+    import run_state.wave_execution as module
+
+    original = getattr(module, stage)
+
+    def hooked(*args, **kwargs):
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("appeared during harvest\n")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, stage, hooked)
+
+
+@pytest.mark.parametrize("stage", ["_patch", "_write_evidence"])
+def test_unrelated_ignored_file_created_during_harvest_is_harmless(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\ncache/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    _create_during_harvest(monkeypatch, repository, stage, "cache/noise")
+
+    result = harvest_scoped_patch(
+        repository, head, ("build/out.txt", "tracked.txt"), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == ("tracked.txt",)
+
+
+@pytest.mark.parametrize("stage", ["_patch", "_write_evidence"])
+def test_declared_output_that_becomes_hidden_during_harvest_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    _create_during_harvest(monkeypatch, repository, stage, "build/out.txt")
+
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(
+            repository, head, ("build/out.txt", "tracked.txt"), (), tmp_path / "evidence",
+        )
+
+
+@pytest.mark.parametrize("filtered, unfiltered", [
+    (["Tracked.TXT"], ["Tracked.TXT"]),
+    ([], ["Tracked.TXT"]),
+])
+def test_untracked_name_that_case_folds_onto_a_tracked_path_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    filtered: list[str], unfiltered: list[str],
+) -> None:
+    import run_state.wave_execution as module
+
+    # tracked.txt is tracked; a case-insensitive volume can report a case-only
+    # rename as an untracked name while the tracked diff still knows the old one.
+    repository, head = fixture_repo(tmp_path)
+    monkeypatch.setattr(
+        module, "_untracked_paths",
+        lambda workspace, *options: list(filtered if options else unfiltered),
+    )
+
+    with pytest.raises(WorkspaceRefused, match="UNSAFE_SELECTION_PATH"):
+        module._inventory(repository, head)
+
+
+def test_untracked_name_unrelated_to_tracked_paths_is_not_a_case_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import run_state.wave_execution as module
+
+    repository, head = fixture_repo(tmp_path)
+    monkeypatch.setattr(module, "_untracked_paths", lambda workspace, *options: ["newfile.py"])
+
+    assert module._inventory(repository, head).untracked == ("newfile.py",)
