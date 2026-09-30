@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 import pytest
@@ -21,6 +22,7 @@ from run_state.run_policy import (
     classify_finding,
     guard_transition,
     validate_draft_material,
+    validate_role_receipt,
 )
 from run_state.state import ControlStore
 
@@ -319,3 +321,71 @@ def test_policy_validator_rejects_dispatch_hash_laundering_and_pure_guards_fail_
     assert guard_transition(LifecycleState.SPEC_REVIEW, "seal").allowed is False
     assert guard_transition(LifecycleState.SPEC_REVIEW, "seal", acceptance_sealed=True).next_state is LifecycleState.SEALED
     assert guard_transition(LifecycleState.EXECUTE, "anything", capability_failure=True).next_state is LifecycleState.CAPABILITY_FAILURE
+
+
+def _criterion(identifier, checks, rules):
+    return {
+        "id": identifier, "objective_clause": f"{identifier} clause",
+        "checks": [{"id": item, "kind": "command", "locator": "pytest tests/a.py"} for item in checks],
+        "evidence_rules": [{"id": item, "kind": "test-output", "required": True} for item in rules],
+    }
+
+
+def _draft_of(*criteria):
+    return build_draft_material(
+        objective_digest=_digest("a"), criteria=list(criteria), exclusions=[], global_invariants=[],
+        requested_runtime_hash=_digest("e"), effective_runtime_hash=_digest("f"),
+        candidate_hash=_digest("d"), generation=1, command_mode="feature-spec",
+    )
+
+
+def _flattened_receipt(draft):
+    """The worst-case final-review receipt: every label a reviewer may use, flattened.
+
+    Mirrors sealed_review.record_final_review: the process-result row, then each
+    criterion's evidence, where a criterion labels an item with one of its own
+    evidence-rule ids or mapped check ids (one label per criterion, so a label
+    a criterion owns twice still appears once).
+    """
+    identifiers = ["review-process-result"]
+    for criterion in draft["criteria"]:
+        identifiers += sorted({rule["id"] for rule in criterion["checks"] + criterion["evidence_rules"]})
+    receipt = _receipt(SimpleNamespace(acceptance_hash=_digest("1")))
+    receipt["evidence"] = [{"id": item, "sha256": _digest("8"), "locator": "evidence://review"}
+                           for item in identifiers]
+    return receipt
+
+
+@pytest.mark.parametrize("check_criterion_first", [True, False])
+def test_draft_refuses_a_check_id_equal_to_another_criterions_evidence_rule_id(check_criterion_first):
+    owns_check = _criterion("AC-1", ["shared"], ["rule-1"])
+    owns_rule = _criterion("AC-2", ["check-2"], ["shared"])
+    draft = _draft_of(*((owns_check, owns_rule) if check_criterion_first else (owns_rule, owns_check)))
+    # Why the draft must refuse: the flattened receipt would carry "shared" twice.
+    with pytest.raises(RunPolicyRefused, match="POLICY_RECEIPT_INVALID"):
+        validate_role_receipt(_flattened_receipt(draft))
+    with pytest.raises(RunPolicyRefused, match="POLICY_DRAFT_INVALID"):
+        validate_draft_material(draft)
+
+
+@pytest.mark.parametrize("kind", ["checks", "evidence_rules"])
+def test_draft_refuses_the_receipt_reserved_process_result_id(kind):
+    criterion = _criterion("AC-1", ["check-1"], ["rule-1"])
+    criterion[kind][0]["id"] = "review-process-result"
+    draft = _draft_of(criterion, _criterion("AC-2", ["check-2"], ["rule-2"]))
+    with pytest.raises(RunPolicyRefused, match="POLICY_RECEIPT_INVALID"):
+        validate_role_receipt(_flattened_receipt(draft))
+    with pytest.raises(RunPolicyRefused, match="POLICY_DRAFT_INVALID"):
+        validate_draft_material(draft)
+
+
+def test_draft_with_distinct_labels_across_criteria_still_flattens_to_a_valid_receipt():
+    # A check id may equal an evidence-rule id of its OWN criterion (one label per criterion).
+    draft = _draft_of(
+        _criterion("AC-1", ["same", "check-1"], ["same", "rule-1"]),
+        _criterion("AC-2", ["check-2"], ["rule-2"]),
+    )
+    validate_draft_material(draft)
+    receipt = validate_role_receipt(_flattened_receipt(draft))
+    assert [item["id"] for item in receipt.evidence].count("same") == 1
+    assert "review-process-result" in {item["id"] for item in receipt.evidence}
