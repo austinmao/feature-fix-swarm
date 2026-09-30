@@ -120,7 +120,12 @@ def _current_candidate(store, token, *, parent_activity_id: str, preparation):
 
 def _reviewer_workspace(store, token, supervisor, *, preparation, parent_activity_id, runtime_identity,
                         reviewer_key, candidate_hash, retained_preparation_id):
-    """Capture the candidate once; replay reuses the retained reviewer preparation."""
+    """Capture the candidate once; replay reuses the retained reviewer preparation.
+
+    Qualification only admits an ``inventory`` workspace and promotes it to the
+    reviewer role, so the capture is prepared as inventory.  A retained
+    preparation reads ``reviewer`` once promoted, ``inventory`` before.
+    """
     if retained_preparation_id is not None:
         ready = inspect_workspace(store, retained_preparation_id)
         if not ready.ready:
@@ -131,11 +136,11 @@ def _reviewer_workspace(store, token, supervisor, *, preparation, parent_activit
         if snapshot.input_digest != candidate_hash:
             raise SupervisorRefused("FRONTEND_REVIEW_CANDIDATE_STALE")
         pending = begin_child_workspace_preparation(
-            store, token, parent_activity_id=parent_activity_id, request_key=reviewer_key, role="reviewer",
+            store, token, parent_activity_id=parent_activity_id, request_key=reviewer_key, role="inventory",
             base_commit=preparation.base_commit, selected_input_manifest=snapshot.manifest,
             repository_path=preparation.repository_path)
         ready = prepare_workspace(store, token, pending, input_snapshot=snapshot)
-    if ready.input_digest != candidate_hash or ready.child_role != "reviewer":
+    if ready.input_digest != candidate_hash or ready.child_role not in {"inventory", "reviewer"}:
         raise SupervisorRefused("FRONTEND_REVIEW_CANDIDATE_STALE")
     return ready
 
