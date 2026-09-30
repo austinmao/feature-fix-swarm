@@ -673,3 +673,45 @@ def test_launch_closes_the_pipe_readers_when_the_copy_thread_cannot_start(tmp_pa
         launch()
     (child,) = [process for process in spawned if "_child" in process.args]
     assert child.stdout.closed and child.stderr.closed
+
+
+# F47 review round 2: a drain that cannot be built closes BOTH pipe readers
+# and raises the error that stopped it, whatever a reader's close does.
+
+class _Reader:
+    def __init__(self, *, close_fails=False):
+        self.closed, self._close_fails = False, close_fails
+
+    def close(self):
+        self.closed = True
+        if self._close_fails:
+            raise OSError(5, "injected: close failed")
+
+
+def _unbuilt_drain(monkeypatch, *, construct_fails, first_close_fails):
+    import run_state.supervisor as supervisor_module
+    first, second = _Reader(close_fails=first_close_fails), _Reader()
+    if construct_fails:
+        def thread(*_args, **_kwargs):
+            raise RuntimeError("can't create thread")
+        monkeypatch.setattr(supervisor_module, "threading",
+                            SimpleNamespace(Event=threading.Event, Thread=thread))
+    else:
+        def start(self):
+            raise RuntimeError("can't start new thread")
+        monkeypatch.setattr(threading.Thread, "start", start)
+    with pytest.raises(RuntimeError, match="can't (create|start)"):
+        supervisor_module._PipeDrain(SimpleNamespace(stdout=first, stderr=second), None, None)
+    return first, second
+
+
+@pytest.mark.parametrize("construct_fails", [True, False])
+def test_unbuilt_drain_closes_both_readers_and_raises_the_original_error(monkeypatch, construct_fails):
+    first, second = _unbuilt_drain(monkeypatch, construct_fails=construct_fails, first_close_fails=False)
+    assert first.closed and second.closed
+
+
+@pytest.mark.parametrize("construct_fails", [True, False])
+def test_unbuilt_drain_closes_the_second_reader_when_the_first_close_fails(monkeypatch, construct_fails):
+    first, second = _unbuilt_drain(monkeypatch, construct_fails=construct_fails, first_close_fails=True)
+    assert first.closed and second.closed
