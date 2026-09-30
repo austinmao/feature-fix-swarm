@@ -715,3 +715,31 @@ def test_native_review_cannot_relabel_an_unrelated_valid_file_as_criterion_proof
         with pytest.raises(SupervisorRefused, match='FINAL_REVIEW_EVIDENCE_SCOPE_INVALID'):
             record_final_review(supervisor, handle, acceptance_hash=sealed.acceptance_hash)
     _run_case(tmp_path, monkeypatch, 'codex', check)
+
+
+def _edit_criterion_evidence(request, edit):
+    response = Path(request.workspace) / 'review-output.json'
+    output = json.loads(response.read_text())
+    edit(next(iter(output['criteria'].values()))['evidence'])
+    response.write_text(json.dumps(output))
+
+
+def test_native_review_records_a_mapped_check_id_beside_the_required_rule_id(tmp_path, monkeypatch):
+    # F54: the reviewer labelled criterion evidence with the rule id and the mapped check id.
+    def check(supervisor, store, request, sealed, source, material):
+        _edit_criterion_evidence(request, lambda evidence: evidence.append({**evidence[0], 'id': 'fixture-check'}))
+        handle = supervisor.launch_native_review(request)
+        assert supervisor.finish(handle, timeout=15)['host_receipt']['status'] == 'complete'
+        accepted = record_final_review(supervisor, handle, acceptance_hash=sealed.acceptance_hash)
+        assert {item['id'] for item in accepted.receipt.evidence} >= {'fixture-evidence', 'fixture-check'}
+    _run_case(tmp_path, monkeypatch, 'codex', check)
+
+
+def test_native_review_pass_without_the_required_rule_id_is_still_missing_evidence(tmp_path, monkeypatch):
+    def check(supervisor, store, request, sealed, source, material):
+        _edit_criterion_evidence(request, lambda evidence: evidence[0].update(id='fixture-check'))
+        handle = supervisor.launch_native_review(request)
+        assert supervisor.finish(handle, timeout=15)['host_receipt']['status'] == 'complete'
+        with pytest.raises(SupervisorRefused, match='FINAL_REVIEW_EVIDENCE_MISSING'):
+            record_final_review(supervisor, handle, acceptance_hash=sealed.acceptance_hash)
+    _run_case(tmp_path, monkeypatch, 'codex', check)

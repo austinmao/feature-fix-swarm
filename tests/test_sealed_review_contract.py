@@ -293,6 +293,73 @@ def test_review_evidence_accepts_scoped_check_and_invariant_references():
         validate_native_review_evidence(output, context)
 
 
+def _mapped_check_context():
+    """One criterion with a required rule and two mapped checks, plus a foreign criterion."""
+    def check(name, digit):
+        return {'status': 'passed', 'evidence': [{'locator': f'/fixture/{name}/result.json',
+                                                  'sha256': digit * 64}]}
+    return {
+        'criteria': [
+            {'id': 'AC-1', 'checks': [{'id': 'version-flag'}, {'id': 'help-flag'}],
+             'evidence_rules': [{'id': 'check-logs', 'required': True}]},
+            {'id': 'AC-2', 'checks': [{'id': 'other-check'}],
+             'evidence_rules': [{'id': 'proof-2', 'required': True}]},
+        ],
+        'global_invariants': [{'id': 'invariant-1'}],
+        'checks': {'version-flag': check('version-flag', '1'), 'help-flag': check('help-flag', '2'),
+                   'other-check': check('other-check', '3')},
+    }
+
+
+def _cite(context, check_id, identifier):
+    return {'id': identifier, **context['checks'][check_id]['evidence'][0]}
+
+
+def _criterion_output(*evidence):
+    return {'criteria': {'AC-1': {'status': 'passed', 'evidence': list(evidence)}}, 'findings': []}
+
+
+def test_criterion_evidence_accepts_a_mapped_check_id_beside_the_required_rule_id():
+    # F54 live shape: the reviewer followed the published grammar ("rule/check
+    # ... ID") and labelled one item with the rule and one with a mapped check.
+    from run_state.final_review_context import validate_native_review_evidence
+    context = _mapped_check_context()
+    validate_native_review_evidence(_criterion_output(
+        _cite(context, 'version-flag', 'check-logs'), _cite(context, 'version-flag', 'version-flag')), context)
+    # The rule id still pools every mapped check; each check id pools only its own.
+    validate_native_review_evidence(_criterion_output(
+        _cite(context, 'help-flag', 'check-logs'), _cite(context, 'version-flag', 'version-flag'),
+        _cite(context, 'help-flag', 'help-flag')), context)
+
+
+@pytest.mark.parametrize('mutation', ['other-criterion-check', 'other-criterion-locator', 'wrong-check-locator',
+                                     'duplicate-id', 'unknown-id', 'invariant-id', 'source-under-check-id'])
+def test_criterion_evidence_check_ids_stay_scoped_to_their_own_check(mutation):
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.supervisor import SupervisorRefused
+    context = _mapped_check_context()
+    rule_item = _cite(context, 'version-flag', 'check-logs')
+    bad = {'other-criterion-check': _cite(context, 'other-check', 'other-check'),
+           'other-criterion-locator': _cite(context, 'other-check', 'version-flag'),
+           'wrong-check-locator': _cite(context, 'help-flag', 'version-flag'),
+           'duplicate-id': _cite(context, 'version-flag', 'check-logs'),
+           'unknown-id': _cite(context, 'version-flag', 'no-such-id'),
+           'invariant-id': _cite(context, 'version-flag', 'invariant-1')}.get(mutation)
+    if mutation == 'source-under-check-id':
+        reference = {'locator': '/fixture/capture/src/input.txt', 'sha256': 'a' * 64}
+        context['selected_sources'] = {'src/input.txt': reference}
+        bad = {'id': 'version-flag', **reference}
+    with pytest.raises(SupervisorRefused, match='FINAL_REVIEW_EVIDENCE_SCOPE_INVALID'):
+        validate_native_review_evidence(_criterion_output(rule_item, bad), context)
+
+
+def test_contract_criterion_evidence_id_text_names_rule_and_mapped_check_ids_only():
+    from run_state.sealed_review import final_review_output_contract
+    text = final_review_output_contract(_sealed(), candidate_hash='1' * 64)['evidence']['id']
+    assert 'mapped check' in text and 'rule' in text
+    assert 'invariant' not in text  # invariant ids are finding-only, so the grammar must not offer them
+
+
 @pytest.mark.parametrize('scope', ['criterion', 'invariant', 'check', 'pass'])
 def test_selected_source_evidence_supports_findings_but_not_check_proof(scope):
     from run_state.final_review_context import validate_native_review_evidence
