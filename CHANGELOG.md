@@ -40,12 +40,23 @@ all skills.
     leaves an ignored file out. `harvest_scoped_patch` therefore refuses with
     `WAVE_SCOPE_VIOLATION` when a path in `files_modified` exists on disk as an
     ignored untracked file, instead of completing the wave with an empty or
-    partial patch. An ignored file the plan never declared stays harmless;
+    partial patch. Declared paths need not be canonical, so the comparison uses
+    normalized, NFC, case-folded keys on both sides: `build//out.txt`,
+    `./build/out.txt` and `Build/Out.txt` all match a hidden `build/out.txt`,
+    and any doubt refuses. The check repeats at every inventory of a harvest
+    but looks only at declared paths. An ignored file the plan never declared,
+    including one that appears while the harvest runs, stays harmless, while a
+    declared output that becomes hidden mid-harvest is refused;
   - ignore matching is case sensitive whatever the repository's local
     `core.ignoreCase`: both untracked listings run with
     `-c core.ignoreCase=false`, so the same workspace inventories the same way
     everywhere. A case-mismatched file (`X.TSBUILDINFO` against a
-    `*.tsbuildinfo` rule) stays visible and scope-checked, which fails closed;
+    `*.tsbuildinfo` rule) stays visible and scope-checked, which fails closed.
+    The tracked diff does not share that pin, so an untracked name that
+    NFC-casefolds onto a tracked path but spells it differently is refused with
+    `UNSAFE_SELECTION_PATH`. That is what a case-only rename of a tracked file
+    (tracked `Foo.txt`, on disk `foo.txt`) looks like on a case-insensitive
+    volume;
   - the safety checks still see ignored paths. An ignored `.gsd` symlink, a
     case alias such as `.GSD` and an ignored FIFO or other special node are
     still refused with `UNSAFE_SELECTION_PATH`. Only the inventory entries that
