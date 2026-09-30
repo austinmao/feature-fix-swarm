@@ -108,7 +108,8 @@ def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
 
     retained_runtimes = {}
 
-    def qualify(activity_id, workspace, activity_request_key, parent_activity_id, final_contract_hash, role):
+    def qualify(activity_id, workspace, activity_request_key, parent_activity_id, final_contract_hash, role, *,
+                supervisor=None):
         # Production replays read the retained qualification observation; the
         # fixture keeps the same qualified tuple per reviewer activity likewise.
         qualified = retained_runtimes.setdefault(

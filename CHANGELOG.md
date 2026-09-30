@@ -8,6 +8,43 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F50 the final reviewer qualifies on a standalone lease)
+
+- The managed frontend crashed at the native final review's first
+  qualification probe with an uncaught
+  `run_state.resource_groups.ResourceGroupRefused: RESOURCE_GROUP_NOT_AVAILABLE`
+  (Python traceback, exit 1). The Codex and Claude `qualify_runtime` closures
+  were bound to the outer orchestrator's supervisor, whose coordinator is the
+  `ManagedParentResourceCoordinator`. That coordinator's prepaid group is marked
+  `parent_ended` and then `closed` when the outer launch finishes, which is
+  before any final review starts, and `claim_child` only claims from a
+  `reserved` group. Sealed checks and the native review launch already ran on
+  the separate channel-less review supervisor with plain standalone leases; only
+  the reviewer's qualification probes were left on the outer one.
+  - Routing: both `qualify_runtime` closures take an optional keyword
+    `supervisor`, defaulting to the outer supervisor, and `produce_final_review`
+    passes the channel-less supervisor it was given. The reviewer's probes now
+    take standalone leases like the sealed checks. The `HostRuntimeSeam.qualify`
+    positional contract is unchanged, and wave workers still qualify on the
+    outer supervisor inside its prepaid group. The `bind` closure needed no
+    change: the reviewer launch already runs on the channel-less supervisor.
+  - Fail early: `ManagedParentResourceCoordinator.acquire` refuses a non-parent
+    request with `RESOURCE_PARENT_GROUP_ENDED` when the group is no longer
+    `reserved`. The check runs before any launch or qualification intent is
+    reserved, so no orphan intent is left behind.
+  - Backstop: `Supervisor._bind_shared_resource` converts `ResourceGroupRefused`
+    to `SupervisorRefused` with the same code, so no path can escape as an
+    untyped traceback.
+  - Tests use real stores, supervisors, admission queue and coordinators. The
+    lifecycle assembly runs the real Codex `qualify_runtime` closure and
+    `produce_final_review` with a scripted probe launched through the
+    supervisor the closure hands over: the reviewer probe takes a standalone
+    lease (null `group_id`), the orchestrator stays on the outer supervisor, and
+    the run reaches DONE. Further tests cover the ended-group refusal with no
+    intent row, the typed backstop, a wave-worker probe that still claims its
+    prepaid slot, and the Claude closure routing a given supervisor. The Codex
+    binary, runtime staging and the observer's real probes are fixture stand-ins.
+
 ### Fixed (2026-09-30, spec-014 Release C: F47 sealed checks write their output through pipes)
 
 - The supervisor opened `stdout.log` and `stderr.log` in the launch's evidence
