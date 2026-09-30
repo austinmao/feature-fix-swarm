@@ -372,6 +372,9 @@ def _darwin_artifact_review_profile(policy: ArtifactReviewPolicy) -> str:
         # limited to the reviewed roots above.
         f"(allow file-read* {metadata_rules} {read_rules})",
         f"(allow file-write* {write_rules})",
+        # Nearly every tool opens the null device (pytest's output capture does).
+        # Exactly this literal: no /dev subtree, no other device node.
+        '(allow file-read* file-write* (literal "/dev/null"))',
         f"(allow process-exec (literal {json.dumps(policy.executable)}))",
         "(deny process-fork)", "(deny network*)",
     ))
