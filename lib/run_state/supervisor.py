@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from .run_policy import productive_work
 
+import contextlib
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path
+import selectors
 import shlex
 import socket
 import stat
@@ -231,6 +233,67 @@ def _read_evidence(path: Path, expected_identity: tuple[int, int] | None = None)
         raise SupervisorRefused("EVIDENCE_CHANGED") from error
 
 
+class _PipeDrain:
+    """Copy a child's stdout and stderr pipes into its evidence logs, in chunks.
+
+    One selector thread serves both pipes, so neither can stall the child while
+    the other is read.  The thread owns the pipes and the logs and closes them
+    when both pipes reach EOF, or once ``settle`` reports the direct child
+    reaped and nothing is left to read (a pipe an orphan still holds cannot
+    keep it alive).
+    """
+    _CHUNK = 64 * 1024
+
+    def __init__(self, process: subprocess.Popen, stdout, stderr) -> None:
+        self._streams = ((process.stdout, stdout), (process.stderr, stderr))
+        self._exited = threading.Event()
+        self.error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, name="ffs-pipe-drain", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        selector = selectors.DefaultSelector()
+        try:
+            for pipe, log in self._streams:
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, log)
+            while selector.get_map():
+                ready = selector.select(timeout=.1)
+                for key, _ in ready:
+                    try:
+                        chunk = os.read(key.fd, self._CHUNK)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    elif self.error is None:  # after a failed write keep reading so the child never stalls
+                        try:
+                            key.data.write(chunk)
+                            key.data.flush()
+                        except OSError as error:
+                            self.error = error
+                if not ready and self._exited.is_set():
+                    break
+        except Exception as error:
+            self.error = self.error or error
+        finally:
+            selector.close()
+            for pipe, log in self._streams:
+                for stream in (pipe, log):
+                    try:
+                        stream.close()
+                    except OSError as error:
+                        self.error = self.error or error
+
+    def settle(self, *, exited: bool, strict: bool = False, wait: float = 5.0) -> None:
+        """Bounded wait for the copy to finish.  Strict: refuse logs that are incomplete or still growing."""
+        if exited:
+            self._exited.set()
+        self._thread.join(wait if exited else 0)  # a live child holds the pipes open: nothing to wait for
+        if strict and (self._thread.is_alive() or self.error is not None):
+            raise SupervisorRefused("EVIDENCE_CHANGED")
+
+
 @dataclass(frozen=True)
 class DispatchRequest:
     activity_id: str
@@ -318,6 +381,7 @@ class ProcessHandle:
     qualification_material: QualificationLaunchMaterial | None = None
     claude_qualification_material: ClaudeQualificationLaunchMaterial | None = None
     local_check_material: LocalCheckMaterial | None = None
+    drain: _PipeDrain | None = None
 
 
 @dataclass
@@ -1961,7 +2025,12 @@ class Supervisor:
                 del env[key]
         # The child receives no owner token or database path.
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-        proc = None
+        # F47: a sealed check's profile grants no file-read-metadata on the
+        # evidence root, so a regular-file stdio fd fails fstat with EPERM and
+        # pytest's fd capture then closes it.  Its stdio is a pair of pipes
+        # that a supervisor thread copies into the same two logs.
+        piped = request.local_check_material is not None
+        proc = drain = None
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
             stdout_fd = os.open("stdout.log", flags, 0o600, dir_fd=root_fd)
@@ -1970,7 +2039,9 @@ class Supervisor:
             except BaseException:
                 os.close(stdout_fd)
                 raise
-            with os.fdopen(stdout_fd, "wb") as stdout, os.fdopen(stderr_fd, "wb") as stderr:
+            with contextlib.ExitStack() as logs:
+                stdout = logs.enter_context(os.fdopen(stdout_fd, "wb"))
+                stderr = logs.enter_context(os.fdopen(stderr_fd, "wb"))
                 identities = {}
                 for key, stream in (("stdout", stdout), ("stderr", stderr)):
                     info = os.fstat(stream.fileno())
@@ -1983,9 +2054,13 @@ class Supervisor:
                     proc = subprocess.Popen(
                         [sys.executable, "-m", "run_state.supervisor", "_child", str(child.fileno())],
                         cwd=request.workspace, env=env, pass_fds=(child.fileno(),),
-                        stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                        start_new_session=True,
+                        stdin=subprocess.DEVNULL, start_new_session=True,
+                        stdout=subprocess.PIPE if piped else stdout,
+                        stderr=subprocess.PIPE if piped else stderr,
                     )
+                    if piped:
+                        drain = _PipeDrain(proc, stdout, stderr)
+                        logs.pop_all()  # the drain thread now owns and closes both logs
             child.close()
             self._fault("after_spawn_before_ack")
             _send(parent, self._child_request(
@@ -2036,7 +2111,7 @@ class Supervisor:
                                    claude_material=request.claude_material,
                                    qualification_material=request.qualification_material,
                                    claude_qualification_material=request.claude_qualification_material,
-                                   local_check_material=request.local_check_material)
+                                   local_check_material=request.local_check_material, drain=drain)
             self._handles[intent_id] = handle
             return handle
         except BaseException:
@@ -2049,6 +2124,8 @@ class Supervisor:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass  # execution may have begun; never infer death
+            if drain is not None:
+                drain.settle(exited=proc.poll() is not None)
             raise
         finally:
             parent.close()
@@ -2287,6 +2364,18 @@ class Supervisor:
         return (remaining, True) if timeout is None or remaining <= timeout else (timeout, False)
 
     def _wait_admitted(self, handle: ProcessHandle, timeout: float | None) -> int:
+        """Wait for the child, then finish copying its pipes so the logs are final."""
+        try:
+            returncode = self._wait_for_exit(handle, timeout)
+        except BaseException:
+            if handle.drain is not None:
+                handle.drain.settle(exited=handle.process.poll() is not None)
+            raise
+        if handle.drain is not None:
+            handle.drain.settle(exited=True, strict=True)
+        return returncode
+
+    def _wait_for_exit(self, handle: ProcessHandle, timeout: float | None) -> int:
         completed = handle.process.poll() if handle.process is not None else None
         if completed is not None:
             return completed

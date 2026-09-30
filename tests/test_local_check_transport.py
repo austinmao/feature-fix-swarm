@@ -1,11 +1,15 @@
 """Local check confinement effects and unsupported-platform refusal."""
 from dataclasses import replace
+import functools
 import os
 from pathlib import Path
 import shlex
+import signal
 import sys
 import socket
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -481,12 +485,12 @@ def test_the_data_volume_root_still_holds_home():
 # capture (which fstats fds 1 and 2) then closes them and exits 120. Each test
 # below runs through Supervisor.launch_sealed_check, not through a bare argv.
 
-def _finish_sealed_check(tmp_path, code):
-    """Run ``code`` as a sealed check via the real launch path; None if HOME holds the interpreter."""
+def _launch_sealed_check(tmp_path, code, *, fault=None):
+    """Launch ``code`` as a sealed check via the real launch path; None if HOME holds the interpreter."""
     from run_state.local_check_runtime import _overlap
     prefix, interpreter = _host_interpreter()
     tmp_path.mkdir(exist_ok=True)
-    supervisor, store, request = setup_owner(tmp_path)
+    supervisor, store, request = setup_owner(tmp_path, fault=fault)
     locator = shlex.join((str(interpreter), "-c", code))
     if _overlap(prefix, Path.home()):
         with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
@@ -494,9 +498,16 @@ def _finish_sealed_check(tmp_path, code):
         return None
     sealed = _sealed_command_check(store, supervisor.token, request, locator, [str(prefix)])
     request = replace(request, contract_hash=sealed.acceptance_hash)
-    handle = supervisor.launch_sealed_check(request, acceptance_hash=sealed.acceptance_hash,
-                                            check_id="real-local")
-    return supervisor.finish(handle, timeout=60)
+    return supervisor, functools.partial(
+        supervisor.launch_sealed_check, request, acceptance_hash=sealed.acceptance_hash, check_id="real-local")
+
+
+def _finish_sealed_check(tmp_path, code):
+    launched = _launch_sealed_check(tmp_path, code)
+    if launched is None:
+        return None
+    supervisor, launch = launched
+    return supervisor.finish(launch(), timeout=60)
 
 
 def _logs(result):
@@ -564,3 +575,43 @@ def test_other_launches_keep_file_backed_stdio(tmp_path):
     assert result["returncode"] == 0
     assert handle.process.stdout is None and handle.process.stderr is None
     assert Path(result["streams"]["stdout"]["locator"]).read_bytes() == b"True True\n"
+
+
+@requires_local_confinement
+def test_sealed_check_stopped_mid_output_leaves_complete_closed_logs(tmp_path):
+    code = 'import sys,time;print("partial",flush=True);print("oops",file=sys.stderr,flush=True);time.sleep(300)'
+    launched = _launch_sealed_check(tmp_path, code)
+    if launched is None:
+        return
+    supervisor, launch = launched
+    handle = launch()
+    try:
+        with pytest.raises(SupervisorRefused, match="CHILD_DEADLINE_EXCEEDED"):
+            supervisor.finish(handle, timeout=5)
+    finally:
+        try:
+            os.killpg(handle.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        handle.process.wait(timeout=10)
+    # The copy ends with the child: strict settle refuses a thread still alive.
+    handle.drain.settle(exited=True, strict=True)
+    assert handle.stdout_path.read_bytes() == b"partial\n"
+    assert handle.stderr_path.read_bytes() == b"oops\n"
+
+
+@requires_local_confinement
+def test_sealed_check_launch_that_fails_after_spawn_leaves_no_copy_thread(tmp_path):
+    def crash(point):
+        if point == "after_spawn_before_ack":
+            raise RuntimeError("injected crash")
+    launched = _launch_sealed_check(tmp_path, "print(1)", fault=crash)
+    if launched is None:
+        return
+    _supervisor, launch = launched
+    with pytest.raises(RuntimeError, match="injected crash"):
+        launch()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and any(t.name == "ffs-pipe-drain" for t in threading.enumerate()):
+        time.sleep(.05)
+    assert not any(t.name == "ffs-pipe-drain" for t in threading.enumerate())
