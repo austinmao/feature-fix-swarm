@@ -303,6 +303,19 @@ def build_draft_material(
 RECEIPT_PROCESS_RESULT_ID = "review-process-result"
 
 
+def labelable_check_ids(criteria, criterion) -> frozenset:
+    """Mapped check ids of ``criterion`` that may label its final-review evidence.
+
+    record_final_review flattens every criterion's evidence plus the reserved process-result
+    row into one receipt of unique ids, so a check id equal to another criterion's evidence-rule
+    id or to the reserved id cannot be a label. New drafts forbid those ids; a seal from an
+    older build may hold them. The validator and the published contract both use this.
+    """
+    barred = {RECEIPT_PROCESS_RESULT_ID}.union(
+        rule["id"] for other in criteria if other["id"] != criterion["id"] for rule in other["evidence_rules"])
+    return frozenset(check["id"] for check in criterion["checks"]) - barred
+
+
 def validate_draft_material(value: object, *, new_draft: bool = False) -> AcceptanceDraft:
     """Validate immutable executable criteria, evidence and identity bindings.
 
