@@ -27,6 +27,8 @@ from .workspace import (
     WorkspacePreparation,
     WorkspaceRefused,
     _base_entry_material,
+    _directory_identity,
+    _open_directory_chain,
     _read_anchored_regular_metadata,
     inspect_workspace,
     parse_input_selection,
@@ -46,6 +48,8 @@ _INTERNAL_DIRECTORY_ROOTS = (
 # gsd-core runtime state: exempt only as UNTRACKED regular files under a real
 # top-level directory. Tracked changes under these roots stay in the inventory.
 _UNTRACKED_RUNTIME_ROOTS = (".gsd",)
+_GSD_CONFIG = ".planning/config.json"
+_GSD_AUTO_CHAIN_FLAG = "_auto_chain_active"
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,188 @@ def _split_nul(raw: bytes) -> tuple[bytes, ...]:
     return tuple(item for item in raw.split(b"\0") if item)
 
 
+# A key JS orders ahead of the others (up to 2**32-2; refused without the bound).
+_JS_INTEGER_KEY = re.compile(r"0|[1-9][0-9]*")
+
+
+def _strict_gsd_config(data: bytes) -> dict:
+    def unique(pairs):
+        keys = [key for key, _ in pairs]
+        # JS orders integer-like keys first, and spells floats and big ints its
+        # own way: refuse them all, so a Python/JS difference can only ever
+        # leave the file counting as modified. Lone surrogates fail to encode.
+        if len(set(keys)) != len(keys) or any(_JS_INTEGER_KEY.fullmatch(key) for key in keys):
+            raise ValueError("duplicate or integer-like key")
+        return dict(pairs)
+
+    def refuse(text):
+        raise ValueError(text)
+
+    def exact_int(text):
+        value = int(text)
+        if abs(value) > 2**53:
+            raise ValueError(text)
+        return value
+
+    config = json.loads(
+        data.decode("utf-8"),
+        object_pairs_hook=unique,
+        parse_int=exact_int,
+        parse_float=refuse,
+        parse_constant=refuse,
+    )
+    if not isinstance(config, dict) or not isinstance(config.get("workflow"), dict):
+        raise ValueError("unexpected config shape")
+    return config
+
+
+def _gsd_written_config(base: bytes) -> bytes:
+    """The bytes gsd-core leaves after ``config-set workflow._auto_chain_active false`` on ``base``.
+
+    ``JSON.stringify(config, null, 2)`` is deterministic from the parsed base:
+    the same key order (a key that is present keeps its place, a new one goes
+    last in ``workflow``), a two-space indent and no trailing newline.
+    ``_strict_gsd_config`` refuses the inputs Python and JS can spell
+    differently, so a difference can only make the file count as modified.
+    """
+    config = _strict_gsd_config(base)
+    if config["workflow"].get(_GSD_AUTO_CHAIN_FLAG, False) is not False:
+        raise ValueError("base flag is set")
+    config["workflow"][_GSD_AUTO_CHAIN_FLAG] = False
+    return json.dumps(config, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_nlink, info.st_size,
+        info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def _planning_identity(workspace: Path) -> tuple[int, int] | None:
+    try:
+        return _directory_identity(workspace, (".planning",))
+    except WorkspaceRefused:
+        return None
+
+
+def _gsd_restore_plan(
+    workspace: Path, base: str, planning_fd: int, descriptor: int,
+) -> tuple[os.stat_result, bytes] | None:
+    """What was read and the base bytes to write, when the open file is exactly gsd's flag write."""
+    try:
+        # Case-exact names: a case-insensitive volume would open an alias.
+        if ".planning" not in os.listdir(workspace) or "config.json" not in os.listdir(
+            planning_fd
+        ):
+            return None
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1 << 20:
+            return None
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            data = handle.read((1 << 20) + 1)
+        if len(data) > 1 << 20 or _GSD_AUTO_CHAIN_FLAG.encode() not in data:
+            return None
+        blob = _base_material(workspace, base, _GSD_CONFIG)
+        if (
+            blob is None
+            or blob.data == data
+            or ("100755" if info.st_mode & stat.S_IXUSR else "100644") != blob.mode
+            or data != _gsd_written_config(blob.data)
+        ):
+            return None
+        return info, blob.data
+    except (OSError, ValueError, RecursionError, WorkspaceRefused):
+        return None
+
+
+def _write_gsd_config(
+    workspace: Path, planning_fd: int, descriptor: int, read: os.stat_result, data: bytes,
+) -> bool:
+    """Write ``data`` into the file behind ``descriptor``, the inode that was read and checked.
+
+    There is no rename, so nothing can redirect the write to another inode: a
+    swapped or moved ``config.json`` only leaves the path showing other content,
+    which counts as modified. Right before the write the open file must still
+    be the one read (single link, same size and times), the path must still
+    name it, and ``.planning`` must still be the directory under the workspace;
+    otherwise nothing is written. A write that fails after the truncate, and a
+    directory moved after the write, cannot be undone and are refused loudly.
+    """
+    try:
+        directory = os.fstat(planning_fd)
+        target = os.stat("config.json", dir_fd=planning_fd, follow_symlinks=False)
+        if not (
+            _file_identity(os.fstat(descriptor)) == _file_identity(read) == _file_identity(target)
+            and stat.S_ISREG(target.st_mode)
+            and _planning_identity(workspace) == (directory.st_dev, directory.st_ino)
+        ):
+            return False
+    except OSError:
+        return False
+    try:
+        # Accepted limit: between the truncate and the last write a concurrent
+        # reader (only the workspace's own model process) can see empty or partial
+        # config. Every FFS inventory decision reads through the verified fd or
+        # re-reads after this write.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    except OSError as error:
+        raise WorkspaceRefused("SOURCE_CHANGED") from error
+    return True
+
+
+def _restore_gsd_auto_chain_write(workspace: Path, base: str) -> None:
+    """Treat gsd-core's ephemeral ``workflow._auto_chain_active=false`` write as no change (F49).
+
+    gsd-core's execute-phase workflow tells the orchestrator to run
+    ``config-set workflow._auto_chain_active false`` before any config read, and
+    ``setConfigValue`` (@opengsd/gsd-core ``gsd-core/bin/lib/config.cjs``)
+    rewrites the tracked ``.planning/config.json`` as
+    ``JSON.stringify(config, null, 2)``. The key is documented as "Internal:
+    tracks whether autonomous chaining is active"
+    (``gsd-core/references/planning-config.md``), never plan output. That write
+    is deterministic from the base blob, so when the file is EXACTLY those
+    bytes the base bytes are written back before the inventory reads the tree.
+    Anything else leaves the file alone and counts as a modification: any
+    other byte, a flag already set or not false in the base, duplicate keys,
+    integer-like keys, floats, ints beyond 2**53, a mode change, a symlink, a
+    hard link, a config without a ``workflow`` object, or no base blob. The
+    file is opened once through the ``.planning`` directory descriptor and read,
+    checked and rewritten in place through that one descriptor.
+    """
+    try:
+        planning_fd = _open_directory_chain(workspace, (".planning",), create=False)
+    except (OSError, WorkspaceRefused):
+        return
+    try:
+        try:
+            directory = os.fstat(planning_fd)
+            descriptor = os.open(
+                "config.json",
+                os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=planning_fd,
+            )
+        except OSError:
+            return
+        try:
+            plan = _gsd_restore_plan(workspace, base, planning_fd, descriptor)
+            if plan is None or not _write_gsd_config(
+                workspace, planning_fd, descriptor, *plan
+            ):
+                return
+        finally:
+            os.close(descriptor)
+        if _planning_identity(workspace) != (directory.st_dev, directory.st_ino):
+            raise WorkspaceRefused("SOURCE_CHANGED")
+    finally:
+        os.close(planning_fd)
+
+
 def _inventory(workspace: Path, base: str) -> _Inventory:
     return _inventory_and_hidden(workspace, base)[0]
 
@@ -181,7 +367,12 @@ def _inventory_and_hidden(
     The inventory itself knows nothing about scope, so every consumer agrees on
     it. ``harvest_scoped_patch`` uses the hidden set to refuse a declared output
     that a rule would otherwise drop from the patch without a word.
+
+    Every inventory consumer (wave and prelaunch snapshots, scoped harvest, the
+    candidate-chain and local-check re-inventories) routes through here, so the
+    one tolerated config edit is undone once, before anything reads the tree.
     """
+    _restore_gsd_auto_chain_write(workspace, base)
     if _git_bytes(workspace, "ls-files", "-u", "-z"):
         raise WorkspaceRefused("WAVE_CONFLICTS_PRESENT")
     fields = _split_nul(
