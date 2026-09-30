@@ -9,10 +9,13 @@ native host qualification.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,17 +27,20 @@ requires_local_confinement = pytest.mark.skipif(
 )
 pytestmark = requires_local_confinement
 
+from process_identity import ProcessIdentity
 from run_state.claude_host import ClaudeLaunchMaterial
 from run_state.codex_host import CodexLaunchMaterial
 from run_state.frontend_policy import FrontendPolicyController
-from run_state.frontend_producers import HostRuntimeSeam, QualifiedHostRuntime, produce_final_review
+from run_state.frontend_producers import (
+    HostRuntimeSeam, QualifiedHostRuntime, _current_candidate, _reviewer_workspace, produce_final_review,
+)
 from run_state.managed import prepare_managed_run
 from run_state.managed_admission import ManagedAdmissionQueue
 from run_state.native_review_runtime import CLAUDE_CLI_VERSION, CODEX_CLI_VERSION
 from run_state.resource_observation import ResourceObservation
 from run_state.shared_resources import SharedResourceCoordinator, cold_start_demand
 from run_state.state import qualified_runtime_tuple_hash
-from run_state.supervisor import DispatchRequest, Supervisor, SupervisorRefused
+from run_state.supervisor import DispatchRequest, Supervisor, SupervisorRefused, _publish
 from run_state.wave_execution import capture_prelaunch_snapshot
 from run_state.workspace import (
     begin_child_workspace_preparation, inspect_workspace, prepare_workspace,
@@ -93,6 +99,69 @@ def _version(host: str) -> str:
     return CODEX_CLI_VERSION if host == "codex" else CLAUDE_CLI_VERSION
 
 
+_PROBES = ("ordinary", "native-positive", "native-negative", "native-multi-agent")
+
+
+def _canonical(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _admit_as_qualification_does(store, token, evidence_root, *, activity_id, workspace, activity_request_key,
+                                 parent_activity_id, final_contract_hash, role, qualified):
+    """The authority calls ``qualify_managed_runtime`` makes on a prepared workspace.
+
+    Qualification only ever admits an ``inventory`` child: it creates the activity
+    as inventory, completes the four probes, then promotes activity, binding and
+    workspace to the final role.  F48 hid because this stub created the child as
+    ``reviewer`` directly, a shape production cannot produce.
+    """
+    cohort = "qualification:" + activity_request_key
+    contracts = {name: {"probe_name": name, "command_sha256": _sha((name + "-command").encode()),
+                        "environment_sha256": _sha((name + "-environment").encode()),
+                        "qualification_request_id": cohort + ":" + name} for name in _PROBES}
+    hashes = {name: _sha(_canonical(contract).encode()) for name, contract in contracts.items()}
+    envelope = {
+        "schema": "ffs.qualification-envelope/v1", "qualification_cohort_id": cohort,
+        "probes": [{"probe_name": name, "probe_contract_sha256": hashes[name]} for name in _PROBES],
+        "runtime_template_sha256": "3" * 64, "workspace_binding": str(workspace.path),
+        "candidate_input_sha256": workspace.input_digest, "model": "fixture-model", "effort": "high",
+        "sandbox": "workspace-write", "roots": [str(workspace.path)], "policy_sha256": final_contract_hash,
+    }
+    envelope_sha256 = _sha(_canonical(envelope).encode())
+    child = store.create_child_activity(
+        token, parent_activity_id=parent_activity_id, role="inventory", request_key=activity_request_key,
+        candidate_hash=workspace.input_digest, contract_hash=envelope_sha256, runtime_identity=envelope_sha256,
+        workspace_binding=str(workspace.path), workspace_preparation_id=workspace.id,
+        retry_budget=len(_PROBES) + 1, activity_id=activity_id,
+    )
+    store.transition_activity(token, child.id, expected="pending", new="active", reason="fixture qualification")
+    for index, name in enumerate(_PROBES):
+        request_key = contracts[name]["qualification_request_id"]
+        action = store.reserve_policy_action(token, action="qualification", logical_key=request_key,
+                                             input_hash=hashes[name])
+        intent = store.reserve_qualification_launch(
+            child.id, token, request_key=request_key, policy_action_id=action.id,
+            qualification_contract={"schema": "ffs.qualification-launch/v1", "probe_contract": contracts[name],
+                                    "qualification_envelope": envelope,
+                                    "qualification_envelope_sha256": envelope_sha256},
+            token_reservation=1, managed_input_sha256=workspace.input_digest)
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            store.authorize_child(store.acknowledge_child(intent.id, token, ProcessIdentity.from_pid(sleeper.pid)), token)
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=10)
+        # The class method, not ``store.complete_launch``: the crash-boundary tests patch the
+        # instance attribute to interrupt the review launch, not these probes.
+        type(store).complete_launch(store, intent.id, token, status="succeeded", token_usage=0,
+                                    evidence=_publish(evidence_root, f"{activity_id}-probe-{index}.json", {"probe": name}))
+    promoted = store.promote_qualified_activity(
+        token, child.id, qualification_request_key=cohort, expected_contract_hashes=hashes,
+        runtime_identity=qualified_runtime_tuple_hash(qualified), final_contract_hash=final_contract_hash,
+        role=role, observation_evidence=_publish(evidence_root, activity_id + "-observation.json", {"qualified": True}))
+    return promoted, store.commit_runtime_receipt(token, promoted.id, qualified)
+
+
 def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
     private = tmp_path / (host + "-private")
     private.mkdir(mode=0o700)
@@ -106,6 +175,8 @@ def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
     if host == "codex":
         catalog = _write(private / "models.json", json.dumps({"models": [{"slug": model}]}).encode())
 
+    evidence = tmp_path / (host + "-qualification-evidence")
+    evidence.mkdir(mode=0o700)
     retained_runtimes = {}
 
     def qualify(activity_id, workspace, activity_request_key, parent_activity_id, final_contract_hash, role):
@@ -113,7 +184,6 @@ def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
         # fixture keeps the same qualified tuple per reviewer activity likewise.
         qualified = retained_runtimes.setdefault(
             activity_id, _ordinary_runtime(host, workspace.path, home, binary, model, effort))
-        tuple_hash = qualified_runtime_tuple_hash(qualified)
         with store.read_transaction() as tx:
             existing = tx.execute("SELECT 1 FROM authority_activities WHERE id=?", (activity_id,)).fetchone()
             receipt_row = tx.execute("SELECT receipt_sha256 FROM authority_runtime_receipts "
@@ -122,13 +192,10 @@ def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
             # Replay: the same reviewer activity, runtime and receipt are retained.
             return QualifiedHostRuntime(store.get_activity(activity_id), qualified,
                                         SimpleNamespace(receipt_sha256=receipt_row["receipt_sha256"]), None, None)
-        child = store.create_child_activity(
-            token, parent_activity_id=parent_activity_id, role=role, request_key=activity_request_key,
-            candidate_hash=workspace.input_digest, contract_hash=final_contract_hash,
-            runtime_identity=tuple_hash, workspace_binding=str(workspace.path),
-            workspace_preparation_id=workspace.id, retry_budget=2, activity_id=activity_id,
-        )
-        _tuple, receipt = _commit_same_activity_runtime(store, token, child, qualified)
+        child, receipt = _admit_as_qualification_does(
+            store, token, evidence, activity_id=activity_id, workspace=workspace,
+            activity_request_key=activity_request_key, parent_activity_id=parent_activity_id,
+            final_contract_hash=final_contract_hash, role=role, qualified=qualified)
         return QualifiedHostRuntime(store.get_activity(child.id), qualified, receipt, None, None)
 
     def bind(qualified, prompt, workspace, final_contract_hash, launch_request_key):
@@ -244,16 +311,22 @@ def _produce(case, supervisor=None):
         seam=case.seam, parent_activity_id=case.worker.id, preparation=case.ready, timeout_seconds=15)
 
 
+_NOT_A_PROBE = "NOT EXISTS (SELECT 1 FROM authority_qualification_launches q WHERE q.intent_id=i.id)"
+
+
 def _counts(store, parent_activity_id):
     with store.read_transaction() as tx:
         ids = [row[0] for row in tx.execute(
             "SELECT activity_id FROM authority_child_bindings WHERE parent_activity_id=? AND role='reviewer'",
             (parent_activity_id,)).fetchall()]
         marks = ",".join("?" for _ in ids) or "''"
-        intents = tx.execute(f"SELECT count(*) FROM authority_launch_intents WHERE activity_id IN ({marks})", ids).fetchone()[0]
+        # Qualification probes are their own intents; only the review launch counts here.
+        intents = tx.execute(f"SELECT count(*) FROM authority_launch_intents i WHERE i.activity_id IN ({marks}) "
+                             f"AND {_NOT_A_PROBE}", ids).fetchone()[0]
         actions = tx.execute("SELECT count(*) FROM authority_policy_actions WHERE action='final_review' AND state<>'cancelled'").fetchone()[0]
         attempts = tx.execute(f"SELECT count(*) FROM authority_policy_action_attempts p JOIN authority_launch_intents i "
-                              f"ON i.id=p.intent_id WHERE i.activity_id IN ({marks})", ids).fetchone()[0]
+                              f"ON i.id=p.intent_id WHERE i.activity_id IN ({marks}) "
+                              f"AND {_NOT_A_PROBE}", ids).fetchone()[0]
         receipts = tx.execute("SELECT count(*) FROM authority_acceptance_receipts "
                               "WHERE json_extract(receipt_json,'$.role')='review'").fetchone()[0]
     return {"reviewers": len(ids), "intents": intents, "actions": actions, "attempts": attempts, "receipts": receipts}
@@ -347,5 +420,33 @@ def test_producer_refuses_replay_of_an_unacknowledged_intent_without_a_second_la
         with case.store.read_transaction() as tx:
             assert tx.execute(
                 "SELECT count(*) FROM authority_launch_intents i JOIN authority_child_bindings b ON b.activity_id=i.activity_id "
-                "WHERE b.role='reviewer' AND i.child_pid IS NOT NULL").fetchone()[0] == 0
+                "WHERE b.role='reviewer' AND i.child_pid IS NOT NULL AND " + _NOT_A_PROBE).fetchone()[0] == 0
+    _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+def test_reviewer_workspace_qualifies_as_inventory_and_replay_reads_the_promoted_role(tmp_path, monkeypatch):
+    """F48: qualification admits only an inventory workspace and promotes it to the final role."""
+    def check(case):
+        frozen = case.controller.sealed()
+        preparation, parent_id, runtime_identity = _current_candidate(
+            case.store, case.token, parent_activity_id=case.worker.id, preparation=case.ready)
+
+        def reviewer_workspace(retained_preparation_id):
+            return _reviewer_workspace(
+                case.store, case.token, case.supervisor, preparation=preparation, parent_activity_id=parent_id,
+                runtime_identity=runtime_identity, reviewer_key="final-review:reviewer",
+                candidate_hash=frozen.candidate_hash, retained_preparation_id=retained_preparation_id)
+
+        fresh = reviewer_workspace(None)
+        activity_id = str(uuid.uuid4())
+        qualified = case.seam.qualify(activity_id, fresh, "final-review:reviewer", parent_id,
+                                      frozen.acceptance_hash, "reviewer")
+        assert qualified.activity.id == activity_id
+        with case.store.read_transaction() as tx:
+            assert tx.execute("SELECT role FROM authority_child_bindings WHERE activity_id=?",
+                              (activity_id,)).fetchone()[0] == "reviewer"
+        assert inspect_workspace(case.store, fresh.id).child_role == "reviewer"
+        # Replay after promotion reads the retained, already-promoted workspace.
+        replayed = reviewer_workspace(fresh.id)
+        assert replayed.id == fresh.id and replayed.child_role == "reviewer"
     _run_case(tmp_path, monkeypatch, "codex", check)
