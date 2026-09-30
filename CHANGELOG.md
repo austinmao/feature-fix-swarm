@@ -29,11 +29,15 @@ all skills.
     while the pipes keep being read, so the child never blocks on a full pipe.
   - The stream evidence (locator, sha256, byte count) is still computed from
     the final log files, after the copy has finished: `_wait_admitted` now
-    settles the copy once the child is reaped, and refuses with
-    `EVIDENCE_CHANGED` if a log write failed or the copy is still running after
-    a bounded wait. The thread closes the pipes and both logs when the pipes
-    reach EOF, or once the direct child is reaped and nothing is left to read,
-    so a pipe held open by a stray descendant cannot keep it alive. On a
+    settles the copy once the child is reaped. The drain carries an explicit
+    `complete` state, true only when both pipes reached EOF and every chunk was
+    written and closed cleanly, and the settle refuses with `EVIDENCE_CHANGED`
+    unless it is true. That covers a copy that never started (the selector
+    could not be created), one that died, a failed log write, one still running
+    after a bounded wait, and one cut off before EOF because a stray descendant
+    still holds a pipe open. The thread closes the pipes and both logs when it
+    ends, so a held pipe cannot keep it alive. If the copy thread cannot be
+    started at all, both pipe readers are closed before the launch fails. On a
     timeout or a launch that fails after the spawn, the copy is settled with a
     bounded wait and never blocks the failure path.
   - Tests run real sealed checks through `Supervisor.launch_sealed_check`: both
@@ -41,8 +45,10 @@ all skills.
     works, 2 MiB of interleaved output on each stream is copied byte for byte
     with matching sha256 and byte counts, a check stopped mid-output leaves
     complete closed logs, and a launch that fails after the spawn leaves no
-    copy thread. A further test pins that other launches keep file-backed
-    stdio.
+    copy thread. Further tests pin that a check whose copy cannot start is
+    refused with no result published, that a copy cut off before EOF is
+    refused, that the pipe readers are closed when the copy thread cannot
+    start, and that other launches keep file-backed stdio.
 
 ### Fixed (2026-09-30, spec-014 Release C: F46 sealed checks may open /dev/null)
 

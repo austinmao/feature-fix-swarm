@@ -240,7 +240,8 @@ class _PipeDrain:
     the other is read.  The thread owns the pipes and the logs and closes them
     when both pipes reach EOF, or once ``settle`` reports the direct child
     reaped and nothing is left to read (a pipe an orphan still holds cannot
-    keep it alive).
+    keep it alive).  ``complete`` is true only when both pipes reached EOF and
+    every chunk was written and closed cleanly; nothing else may be certified.
     """
     _CHUNK = 64 * 1024
 
@@ -248,12 +249,20 @@ class _PipeDrain:
         self._streams = ((process.stdout, stdout), (process.stderr, stderr))
         self._exited = threading.Event()
         self.error: BaseException | None = None
+        self.complete = False
         self._thread = threading.Thread(target=self._run, name="ffs-pipe-drain", daemon=True)
-        self._thread.start()
+        try:
+            self._thread.start()
+        except BaseException:
+            for pipe, _log in self._streams:  # the caller still owns the logs
+                pipe.close()
+            raise
 
     def _run(self) -> None:
-        selector = selectors.DefaultSelector()
+        selector = None
+        drained = False
         try:
+            selector = selectors.DefaultSelector()
             for pipe, log in self._streams:
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, log)
@@ -274,23 +283,27 @@ class _PipeDrain:
                             self.error = error
                 if not ready and self._exited.is_set():
                     break
+            else:
+                drained = True  # both pipes reached EOF
         except Exception as error:
             self.error = self.error or error
         finally:
-            selector.close()
+            closers = [] if selector is None else [selector]
             for pipe, log in self._streams:
-                for stream in (pipe, log):
-                    try:
-                        stream.close()
-                    except OSError as error:
-                        self.error = self.error or error
+                closers += [pipe, log]
+            for closer in closers:
+                try:
+                    closer.close()
+                except OSError as error:
+                    self.error = self.error or error
+            self.complete = drained and self.error is None
 
     def settle(self, *, exited: bool, strict: bool = False, wait: float = 5.0) -> None:
-        """Bounded wait for the copy to finish.  Strict: refuse logs that are incomplete or still growing."""
+        """Bounded wait for the copy to finish.  Strict: refuse unless the copy is proven complete."""
         if exited:
             self._exited.set()
         self._thread.join(wait if exited else 0)  # a live child holds the pipes open: nothing to wait for
-        if strict and (self._thread.is_alive() or self.error is not None):
+        if strict and (self._thread.is_alive() or not self.complete):
             raise SupervisorRefused("EVIDENCE_CHANGED")
 
 
