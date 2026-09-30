@@ -831,3 +831,74 @@ def test_ignored_caches_do_not_change_snapshot_input_digest(
         return 0
 
     assert _cmd_fixture_start(_args(tmp_path / "authority"), on_ready=capture) == 0
+
+
+def test_declared_output_hidden_by_an_ignore_rule_is_refused(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    declared = ("build/out.txt", "tracked.txt")
+
+    # Guard: a declared output that was never written is an ordinary partial result.
+    result = harvest_scoped_patch(repository, head, declared, (), tmp_path / "absent")
+    assert result.changed_files == ("tracked.txt",)
+
+    (repository / "build").mkdir()
+    (repository / "build/out.txt").write_text("deliverable\n")
+    # The shared inventory stays scope-blind: it only leaves the file out.
+    assert _inventory(repository, head).untracked == ()
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(repository, head, declared, (), tmp_path / "hidden")
+
+
+def test_undeclared_ignored_file_does_not_block_a_harvest(tmp_path: Path) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    (repository / "build").mkdir()
+    (repository / "build/out.txt").write_text("scratch\n")
+
+    result = harvest_scoped_patch(
+        repository, head, ("tracked.txt",), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == ("tracked.txt",)
+
+
+@pytest.mark.parametrize("filtered, unfiltered, code", [
+    ([".GSD/x"], [], "UNSAFE_SELECTION_PATH|SOURCE_CHANGED"),
+    (["newfile.py"], [], "SOURCE_CHANGED"),
+    (["newfile.py"], ["other.py"], "SOURCE_CHANGED"),
+])
+def test_filtered_listing_must_be_a_subset_of_the_unfiltered_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    filtered: list[str], unfiltered: list[str], code: str,
+) -> None:
+    import run_state.wave_execution as module
+
+    repository, head = fixture_repo(tmp_path)
+    monkeypatch.setattr(
+        module, "_untracked_paths",
+        lambda workspace, *options: list(filtered if options else unfiltered),
+    )
+
+    with pytest.raises(WorkspaceRefused, match=code):
+        module._inventory(repository, head)
+
+
+def test_ignore_matching_is_case_sensitive_whatever_the_repository_config(
+    tmp_path: Path,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = ignoring_repo(tmp_path, extra="*.tsbuildinfo\n")
+    (repository / "X.TSBUILDINFO").write_text("case mismatch\n")
+
+    observed = {}
+    for value in ("false", "true"):
+        git(repository, "config", "core.ignoreCase", value)
+        observed[value] = _inventory(repository, head)
+    assert observed["true"] == observed["false"]
+    assert observed["true"].untracked == ("X.TSBUILDINFO",)
+
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(repository, head, (), (), tmp_path / "scope-evidence")
