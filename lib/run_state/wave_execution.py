@@ -169,6 +169,18 @@ def _split_nul(raw: bytes) -> tuple[bytes, ...]:
 
 
 def _inventory(workspace: Path, base: str) -> _Inventory:
+    return _inventory_and_hidden(workspace, base)[0]
+
+
+def _inventory_and_hidden(
+    workspace: Path, base: str
+) -> tuple[_Inventory, frozenset[str]]:
+    """Return the inventory plus the untracked paths an ignore rule hides from it.
+
+    The inventory itself knows nothing about scope, so every consumer agrees on
+    it. ``harvest_scoped_patch`` uses the hidden set to refuse a declared output
+    that a rule would otherwise drop from the patch without a word.
+    """
     if _git_bytes(workspace, "ls-files", "-u", "-z"):
         raise WorkspaceRefused("WAVE_CONFLICTS_PRESENT")
     fields = _split_nul(
@@ -213,7 +225,12 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
     visible = _untracked_paths(workspace, "--exclude-per-directory=.gitignore")
     everything = _untracked_paths(workspace)
     # Safety checks keep seeing ignored paths; only the entries are filtered.
-    _refuse_unsafe_runtime_roots(workspace, everything)
+    # The two listings are separate git calls, so check the union, and refuse a
+    # filtered path the unfiltered listing does not know (the tree changed).
+    _refuse_unsafe_runtime_roots(workspace, [*everything, *visible])
+    if not set(visible) <= set(everything):
+        raise WorkspaceRefused("SOURCE_CHANGED")
+    hidden = frozenset(set(everything) - set(visible))
     untracked = [
         item
         for item in visible
@@ -224,11 +241,20 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
     if len(portable) != len(set(portable)):
         raise WorkspaceRefused("SELECTION_CONFLICT")
     _refuse_untracked_specials(workspace)
-    return _Inventory(
-        tuple(sorted(modified)),
-        tuple(sorted(deleted)),
-        tuple(sorted(untracked)),
+    return (
+        _Inventory(
+            tuple(sorted(modified)),
+            tuple(sorted(deleted)),
+            tuple(sorted(untracked)),
+        ),
+        hidden,
     )
+
+
+def _refuse_hidden_outputs(hidden: frozenset[str], declared: tuple[str, ...]) -> None:
+    """Refuse a declared output that an ignore rule hides, so it is never dropped."""
+    if hidden.intersection(declared):
+        raise WorkspaceRefused("WAVE_SCOPE_VIOLATION")
 
 
 def _untracked_paths(workspace: Path, *options: str) -> list[str]:
@@ -237,6 +263,11 @@ def _untracked_paths(workspace: Path, *options: str) -> list[str]:
         for item in _split_nul(
             _git_bytes(
                 workspace,
+                # Pin ignore matching: repository-local core.ignoreCase must not
+                # decide what is inventoried. A case-mismatched file stays visible
+                # and scope-checked, which fails closed.
+                "-c",
+                "core.ignoreCase=false",
                 "--literal-pathspecs",
                 "ls-files",
                 "--others",
@@ -852,7 +883,8 @@ def harvest_scoped_patch(
     deleted_scope = _declared_paths(declared_deleted, field="declared_deleted")
     if set(modified_scope) & set(deleted_scope):
         raise WorkspaceRefused("WAVE_SCOPE_INVALID")
-    raw = _inventory(workspace, expected_head)
+    raw, hidden = _inventory_and_hidden(workspace, expected_head)
+    _refuse_hidden_outputs(hidden, modified_scope)
     overlay = _snapshot_overlay(workspace, expected_head, baseline_snapshot)
     inventory, material = _virtual_changes(workspace, expected_head, raw, overlay)
     actual_modified = inventory.modified
@@ -861,7 +893,7 @@ def harvest_scoped_patch(
     ).issubset(deleted_scope):
         raise WorkspaceRefused("WAVE_SCOPE_VIOLATION")
     payload = _patch(material, Path(evidence_root)) if inventory.changed else b""
-    after_raw = _inventory(workspace, expected_head)
+    after_raw, after_hidden = _inventory_and_hidden(workspace, expected_head)
     after_overlay = _snapshot_overlay(workspace, expected_head, baseline_snapshot)
     after_inventory, after_material = _virtual_changes(
         workspace,
@@ -872,13 +904,14 @@ def harvest_scoped_patch(
     if (
         _head(workspace) != expected_head
         or after_raw != raw
+        or after_hidden != hidden
         or after_overlay != overlay
         or after_inventory != inventory
         or after_material != material
     ):
         raise WorkspaceRefused("SOURCE_CHANGED")
     evidence_path, digest = _write_evidence(Path(evidence_root), payload)
-    final_raw = _inventory(workspace, expected_head)
+    final_raw, final_hidden = _inventory_and_hidden(workspace, expected_head)
     final_overlay = _snapshot_overlay(workspace, expected_head, baseline_snapshot)
     final_inventory, final_material = _virtual_changes(
         workspace,
@@ -889,6 +922,7 @@ def harvest_scoped_patch(
     if (
         _head(workspace) != expected_head
         or final_raw != raw
+        or final_hidden != hidden
         or final_overlay != overlay
         or final_inventory != inventory
         or final_material != material

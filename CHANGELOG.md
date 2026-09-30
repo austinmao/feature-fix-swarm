@@ -35,10 +35,24 @@ all skills.
     untracked `.gitignore` that does not ignore itself is itself an untracked
     change and is scope-checked like any other file, and a tracked
     `.gitignore` edit is an ordinary tracked change under the scope check;
+  - a declared output that an ignore rule hides is refused. The inventory is
+    scope-blind on purpose, so every consumer agrees on it, and it simply
+    leaves an ignored file out. `harvest_scoped_patch` therefore refuses with
+    `WAVE_SCOPE_VIOLATION` when a path in `files_modified` exists on disk as an
+    ignored untracked file, instead of completing the wave with an empty or
+    partial patch. An ignored file the plan never declared stays harmless;
+  - ignore matching is case sensitive whatever the repository's local
+    `core.ignoreCase`: both untracked listings run with
+    `-c core.ignoreCase=false`, so the same workspace inventories the same way
+    everywhere. A case-mismatched file (`X.TSBUILDINFO` against a
+    `*.tsbuildinfo` rule) stays visible and scope-checked, which fails closed;
   - the safety checks still see ignored paths. An ignored `.gsd` symlink, a
     case alias such as `.GSD` and an ignored FIFO or other special node are
     still refused with `UNSAFE_SELECTION_PATH`. Only the inventory entries that
-    feed snapshots, harvest, material and digests are filtered;
+    feed snapshots, harvest, material and digests are filtered. The filtered and
+    unfiltered listings are two separate git calls, so the runtime-root checks
+    run on the union of both, and a filtered path the unfiltered listing does
+    not contain (the tree changed in between) is refused with `SOURCE_CHANGED`;
   - an untracked file that no gitignore rule matches, such as `newfile.py`, is
     still captured, and an out of scope one still raises
     `WAVE_SCOPE_VIOLATION`.
