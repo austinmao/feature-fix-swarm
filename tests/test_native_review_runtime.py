@@ -1,11 +1,13 @@
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from run_state import native_review_runtime as review_runtime
 from run_state.native_review_runtime import (
     CLAUDE_CLI_VERSION,
     CODEX_CLI_VERSION,
@@ -355,7 +357,24 @@ def _js_launcher(tmp_path: Path) -> tuple[Path, Path]:
     node_dir.mkdir(parents=True)
     launcher = _write(bin_dir / "codex.js", b"#!/usr/bin/env node\n// fixture launcher, never executed\n", 0o755)
     node = _write(node_dir / "node", b"#!/bin/sh\nexit 0\n", 0o755)
+    # The JS launcher spawns a separate vendor executable (the host chain's `native_sha256`).
+    vendor = launcher.parents[1] / "node_modules" / "@openai" / "codex-fake" / "vendor" / "fake" / "bin"
+    vendor.mkdir(parents=True)
+    _write(vendor / "codex", b"#!/bin/sh\nexit 0\n", 0o755)
     return launcher, node
+
+
+def _vendor(launcher: Path) -> Path:
+    return launcher.parents[1] / "node_modules/@openai/codex-fake/vendor/fake/bin/codex"
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _js_request(launcher: Path, catalog: Path, node: Path) -> NativeReviewRequest:
+    """A `.js` request as the producer builds it: Node and vendor pins from the qualified chain."""
+    return replace(_request(launcher, catalog), node_sha256=_sha(node), native_sha256=_sha(_vendor(launcher)))
 
 
 def _path_of(material) -> str:
@@ -371,11 +390,12 @@ def test_js_launcher_gets_its_node_directory_on_path(tmp_path: Path, monkeypatch
     launcher, node = _js_launcher(tmp_path)
     monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
 
-    material = prepare_native_review_runtime(_request(launcher, catalog),
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
                                              runtime_root=parent / "one", workspace=workspace)
 
     entries = _path_of(material).split(os.pathsep)
-    assert entries == [str(launcher.resolve().parent), str(node.resolve().parent), "/usr/bin", "/bin"]
+    # The verified Node's directory comes first: `env node` must not find a sibling of the launcher.
+    assert entries == [str(node.resolve().parent), str(launcher.resolve().parent), "/usr/bin", "/bin"]
     assert all(os.path.isabs(entry) for entry in entries)
     assert dict(material.provenance)["node_sha256"] == hashlib.sha256(node.read_bytes()).hexdigest()
     assert validate_native_review_material(material) is material
@@ -388,25 +408,25 @@ def test_js_launcher_node_is_bound_to_the_qualified_chain_pin(tmp_path: Path, mo
     monkeypatch.setenv("PATH", f"{node.parent}:/usr/bin:/bin")
     pin = hashlib.sha256(node.read_bytes()).hexdigest()
 
-    material = prepare_native_review_runtime(replace(_request(launcher, catalog), node_sha256=pin),
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
                                              runtime_root=parent / "one", workspace=workspace)
     assert str(node.resolve().parent) in _path_of(material).split(os.pathsep)
     assert dict(material.provenance)["node_sha256"] == pin
 
     with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
-        prepare_native_review_runtime(replace(_request(launcher, catalog), node_sha256="0" * 64),
+        prepare_native_review_runtime(replace(_js_request(launcher, catalog, node), node_sha256="0" * 64),
                                       runtime_root=parent / "two", workspace=workspace)
     assert not (parent / "two").exists()
 
 
 def test_js_launcher_without_a_resolvable_node_refuses(tmp_path: Path, monkeypatch) -> None:
     parent, workspace, _binary, catalog = _inputs(tmp_path)
-    launcher, _node = _js_launcher(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
     monkeypatch.delenv("CODEX_NODE_BINARY", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
-        prepare_native_review_runtime(_request(launcher, catalog),
+    with pytest.raises(NativeReviewRuntimeRefused, match="no resolved regular Node"):
+        prepare_native_review_runtime(_js_request(launcher, catalog, node),
                                       runtime_root=parent / "one", workspace=workspace)
     assert not (parent / "one").exists()
 
@@ -430,7 +450,7 @@ def test_js_launcher_material_with_a_tampered_path_fails_validation(tmp_path: Pa
     parent, workspace, _binary, catalog = _inputs(tmp_path)
     launcher, node = _js_launcher(tmp_path)
     monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
-    material = prepare_native_review_runtime(_request(launcher, catalog),
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
                                              runtime_root=parent / "one", workspace=workspace)
     entries = _path_of(material).split(os.pathsep)
     tampered = {
@@ -458,7 +478,7 @@ def test_js_launcher_validation_pins_the_stored_node_not_the_ambient_one(tmp_pat
     parent, workspace, _binary, catalog = _inputs(tmp_path)
     launcher, node = _js_launcher(tmp_path)
     monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
-    material = prepare_native_review_runtime(_request(launcher, catalog),
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
                                              runtime_root=parent / "one", workspace=workspace)
 
     # Another process (supervisor, monitor) replays without the preparer's ambient node.
@@ -480,9 +500,166 @@ def test_js_launcher_material_cannot_shed_its_node_identity(tmp_path: Path, monk
     parent, workspace, _binary, catalog = _inputs(tmp_path)
     launcher, node = _js_launcher(tmp_path)
     monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
-    material = prepare_native_review_runtime(_request(launcher, catalog),
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
                                              runtime_root=parent / "one", workspace=workspace)
     bare = tuple((key, value) for key, value in material.provenance if not key.startswith("node_"))
 
     with pytest.raises(NativeReviewRuntimeRefused):
         validate_native_review_material(_with_path(replace(material, provenance=bare), "/usr/bin:/bin"))
+
+
+# F53 review round 1: the verified Node must be the first `node` the launch finds, the vendor
+# executable the launcher spawns must be bound and re-verified, and a JS launcher requires pins.
+def _prepare(tmp_path: Path, launcher: Path, catalog: Path, node: Path, name: str = "one"):
+    parent, workspace = tmp_path / "private", tmp_path / "review-workspace"
+    return prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                         runtime_root=parent / name, workspace=workspace)
+
+
+def test_a_sibling_node_beside_the_launcher_is_never_the_one_resolved(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    rogue = _write(launcher.parent / "node", b"#!/bin/sh\necho rogue\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = _prepare(tmp_path, launcher, catalog, node)
+
+    found = shutil.which("node", path=_path_of(material))
+    assert found is not None and Path(found).resolve() == node.resolve() != rogue.resolve()
+
+
+def test_node_directory_whose_node_is_not_the_verified_file_refuses(tmp_path: Path, monkeypatch) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    renamed = node.rename(node.with_name("node20"))
+    _write(node.parent / "node", b"#!/bin/sh\necho other\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(renamed))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
+        _prepare(tmp_path, launcher, catalog, renamed)
+    assert not (parent / "one").exists()
+
+
+def test_js_launcher_binds_the_vendor_executable_it_spawns(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = _prepare(tmp_path, launcher, catalog, node)
+
+    bound = dict(material.provenance)
+    assert bound["native_binary"] == str(_vendor(launcher).resolve())
+    assert bound["native_sha256"] == _sha(_vendor(launcher))
+    assert validate_native_review_material(material) is material
+
+
+def test_vendor_executable_replaced_after_qualification_refuses_prepare(tmp_path: Path, monkeypatch) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = _js_request(launcher, catalog, node)
+    _write(_vendor(launcher), b"#!/bin/sh\necho swapped\n", 0o755)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="vendor"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+def test_vendor_executable_replaced_after_prepare_refuses_validation(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = _prepare(tmp_path, launcher, catalog, node)
+    _write(_vendor(launcher), b"#!/bin/sh\necho swapped\n", 0o755)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="vendor"):
+        validate_native_review_material(material)
+
+
+def test_vendor_executable_is_resolved_as_the_host_launch_resolves_it(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    override = _write(tmp_path / "override-codex", b"#!/bin/sh\necho override\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.setenv("CODEX_NATIVE_BINARY", str(override))
+
+    material = prepare_native_review_runtime(
+        replace(_js_request(launcher, catalog, node), native_sha256=_sha(override)),
+        runtime_root=tmp_path / "private" / "one", workspace=tmp_path / "review-workspace")
+
+    assert dict(material.provenance)["native_binary"] == str(override.resolve())
+
+
+def test_js_launcher_without_a_resolvable_vendor_executable_refuses(tmp_path: Path, monkeypatch) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    request = _js_request(launcher, catalog, node)
+    _vendor(launcher).unlink()
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="native"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+def test_js_launcher_request_with_no_qualified_pins_refuses(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="pin"):
+        prepare_native_review_runtime(_request(launcher, catalog), runtime_root=parent / "one",
+                                      workspace=workspace)
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("missing", ["node_sha256", "native_sha256"])
+def test_js_launcher_request_without_a_qualified_pin_refuses(tmp_path: Path, monkeypatch, missing: str) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = replace(_js_request(launcher, catalog, node), **{missing: None})
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="pin"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("target,resolver", [("node", "codex_node_binary"), ("vendor", "codex_native_binary")])
+def test_binary_swapped_after_resolution_cannot_be_recorded(tmp_path: Path, monkeypatch, target: str,
+                                                            resolver: str) -> None:
+    """The digest bound into the material is one read, compared with the qualified pin."""
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = _js_request(launcher, catalog, node)
+    victim = node if target == "node" else _vendor(launcher)
+    real = getattr(review_runtime, resolver)
+
+    def swapping(*args, **kwargs):
+        result = real(*args, **kwargs)
+        _write(victim, b"#!/bin/sh\necho swapped\n", 0o755)
+        return result
+
+    monkeypatch.setattr(review_runtime, resolver, swapping)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node|vendor"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("shed", ["native", "node", "both"])
+def test_js_material_cannot_shed_a_bound_identity(tmp_path: Path, monkeypatch, shed: str) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = _prepare(tmp_path, launcher, catalog, node)
+    drop = {"native": ("native_",), "node": ("node_",), "both": ("native_", "node_")}[shed]
+    kept = tuple((key, value) for key, value in material.provenance if not key.startswith(drop))
+
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(replace(material, provenance=kept))

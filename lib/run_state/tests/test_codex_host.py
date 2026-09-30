@@ -304,3 +304,27 @@ def test_adapter_refuses_drifted_or_unsafe_qualified_material(monkeypatch, tmp_p
     monkeypatch.setattr(codex_host, "_binary_chain", lambda path: chain)
     with pytest.raises(CodexHostRefused):
         CodexHostAdapter(runtime, binary, "0.150.0").build_launch_material("do work", attempt=2)
+
+
+def test_host_launch_path_resolves_the_verified_node_before_a_sibling_node(tmp_path, monkeypatch):
+    """F53 review: `#!/usr/bin/env node` must find the qualified Node, not one beside the launcher."""
+    import shutil
+    bin_dir, node_dir = tmp_path / "npm" / "bin", tmp_path / "nodejs" / "bin"
+    bin_dir.mkdir(parents=True)
+    node_dir.mkdir(parents=True)
+    launcher = bin_dir / "codex.js"
+    launcher.write_text("#!/usr/bin/env node\n")
+    rogue = bin_dir / "node"
+    rogue.write_text("#!/bin/sh\necho rogue\n")
+    node = node_dir / "node"
+    node.write_text("#!/bin/sh\necho verified\n")
+    for path in (launcher, rogue, node):
+        path.chmod(0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    chain = {"launcher_sha256": "a" * 64, "node_sha256": hashlib.sha256(node.read_bytes()).hexdigest()}
+
+    environment = codex_closed_environment(tmp_path / "home", PRIVATE_TMP_ROOT / "ffs-codex-policy-tmp",
+                                           launcher, chain)
+
+    found = shutil.which("node", path=environment["PATH"])
+    assert found is not None and Path(found).resolve() == node.resolve() != rogue.resolve()
