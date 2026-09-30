@@ -34,6 +34,28 @@ CLAUDE_CLI_VERSION: Final = SUPPORTED_CLAUDE_VERSION
 CODEX_TOOL_SOURCE_SHA256: Final = "451622e76c45dd1585318c200fdee9a00d7aaf785d4a540facca1010146307b7"
 CODEX_CONFIG_SCHEMA_SHA256: Final = "2e1fcf1cbb20f255c3baca2e174b4a3c954cef577a130587b8935e2d12c8ade6"
 CODEX_MODELS_SOURCE_SHA256: Final = "2e9923d405a497441a0b264efc07de6ce21cdb108442e660a8b9fb63ca415aed"
+# Audited snapshots, keyed by Codex CLI version.  Each row is the openai/codex tag commit
+# plus the SHA-256 of the raw bytes of spec_plan.rs (tool registration), config.schema.json
+# and openai_models.rs (model protocol) at that tag.  The constants above are the 0.154.0
+# row, kept under their original names.  A version absent here is refused.
+_CODEX_PINS: Final = {
+    CODEX_CLI_VERSION: {
+        "codex_release": CODEX_RELEASE, "codex_commit": CODEX_COMMIT,
+        "tool_registration_sha256": CODEX_TOOL_SOURCE_SHA256,
+        "config_schema_sha256": CODEX_CONFIG_SCHEMA_SHA256,
+        "model_protocol_sha256": CODEX_MODELS_SOURCE_SHA256,
+    },
+    "0.159.0": {
+        "codex_release": "rust-v0.159.0", "codex_commit": "687a119f0fcaace47e1f1abcc77cec6c813fd6da",
+        "tool_registration_sha256": "849ef21d4e5c83febdc31eacd7609911d43e3f69a35168fe02ae899273b5ef3e",
+        "config_schema_sha256": "eda7251b7e46e0b9d0f3d8eef5dab451e11a55d723e2b802e152b7208045836a",
+        "model_protocol_sha256": "4c8b5cafd8c55db269f669e352321f787fcaf83785bce4476cb887abfce75dc6",
+    },
+}
+# Features whose key exists only in some audited schemas.  --strict-config rejects an unknown
+# feature key, so these are passed for exactly the listed versions.  From 0.156.1 spec_plan.rs
+# registers send_message_to_user_async when that (default-off) feature is enabled.
+_CODEX_EXTRA_DISABLED: Final = {"0.159.0": ("send_message_to_user_async",)}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MODEL = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _VERSION = re.compile(r"[A-Za-z0-9._+-]{1,128}\Z")
@@ -52,6 +74,19 @@ _DISABLED_FEATURES = (
 
 class NativeReviewRuntimeRefused(ValueError):
     """The staged review closure is absent, unsafe, or no longer identical."""
+
+
+def _pinned_provenance(host: str, version: str) -> dict[str, str]:
+    """Provenance row for the exact CLI version, or refuse.  Claude material keeps the
+    original 0.154.0 rows (it always did); only its own CLI version is checked."""
+    if (host == "claude" and version == CLAUDE_CLI_VERSION) or (host == "codex" and version in _CODEX_PINS):
+        pin = _CODEX_PINS[CODEX_CLI_VERSION if host == "claude" else version]
+        return {**pin, "preparation_only": "qualification-and-receipts-required"}
+    raise NativeReviewRuntimeRefused("CLI version is not the pinned native review version")
+
+
+def _disabled_features(version: str) -> tuple[str, ...]:
+    return (*_DISABLED_FEATURES, *_CODEX_EXTRA_DISABLED.get(version, ()))
 
 
 def _canonical(value: object) -> bytes:
@@ -198,22 +233,23 @@ def _catalog_model(source: object, requested_model: str) -> tuple[dict[str, obje
     return catalog, _digest(_canonical(catalog))
 
 
-def _codex_overrides(catalog: Path) -> tuple[str, ...]:
+def _codex_overrides(catalog: Path, version: str) -> tuple[str, ...]:
     return (f'model_catalog_json={json.dumps(str(catalog))}', 'web_search="disabled"',
             'tools.experimental_request_user_input.enabled=false', 'tools.update_plan.enabled=false',
-            'mcp_servers={}', *(f'features.{feature}=false' for feature in _DISABLED_FEATURES))
+            'mcp_servers={}', *(f'features.{feature}=false' for feature in _disabled_features(version)))
 
 
-def _codex_config(catalog: Path) -> bytes:
+def _codex_config(catalog: Path, version: str) -> bytes:
     # Tool registration in pinned spec_plan.rs has independent routes: shell
-    # registration, apply_patch_tool_type, experimental catalog tools, and the
-    # request-input/plan gates.  All are closed here, rather than treating a
-    # quiet transcript as proof of tool absence.
+    # registration, apply_patch_tool_type, experimental catalog tools, the
+    # request-input/plan gates and, in versions whose audited schema has the key,
+    # the send_message_to_user_async feature gate.  All are closed here for every
+    # admitted version, rather than treating a quiet transcript as proof of tool absence.
     rendered = "\n".join((
         f'model_catalog_json = {json.dumps(str(catalog))}',
         'web_search = "disabled"',
         '', '[features]',
-        *(f'{feature} = false' for feature in _DISABLED_FEATURES),
+        *(f'{feature} = false' for feature in _disabled_features(version)),
         '', '[tools.experimental_request_user_input]', 'enabled = false',
         '', '[tools.update_plan]', 'enabled = false', '',
     ))
@@ -244,7 +280,7 @@ def _validate_session_id(host, session_id):
         raise NativeReviewRuntimeRefused("Claude review requires a canonical session UUID") from error
 
 
-def _argv(host, binary, model, effort, workspace, catalog, mcp, session_id):
+def _argv(host, binary, model, effort, workspace, catalog, mcp, session_id, version):
     _validate_session_id(host, session_id)
     if not (host == "claude" and effort is None) and (
             not isinstance(effort, str) or effort not in {"low", "medium", "high", "xhigh", "max"}):
@@ -253,7 +289,7 @@ def _argv(host, binary, model, effort, workspace, catalog, mcp, session_id):
         return (binary, "exec", "--json", "--strict-config", "--ignore-user-config", "--ignore-rules",
                 "--sandbox", "read-only", "--cd", str(workspace), "--color", "never", "--model", model,
                 "-c", f'model_reasoning_effort="{effort}"',
-                *(part for value in _codex_overrides(Path(catalog)) for part in ("-c", value)))
+                *(part for value in _codex_overrides(Path(catalog), version) for part in ("-c", value)))
     effort_args = () if effort is None else ("--effort", effort)
     return (binary, "--model", model, *effort_args, "--tools", "", "--disable-slash-commands",
             "--strict-mcp-config", "--mcp-config", str(mcp), "--setting-sources", "",
@@ -344,9 +380,7 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
     _validate_session_id(request.host, request.session_id)
     model = _text(request.requested_model, "requested model", _MODEL)
     version = _text(request.cli_version, "CLI version", _VERSION)
-    if ((request.host == "codex" and version != CODEX_CLI_VERSION)
-            or (request.host == "claude" and version != CLAUDE_CLI_VERSION)):
-        raise NativeReviewRuntimeRefused("CLI version is not the pinned native review version")
+    provenance = _pinned_provenance(request.host, version)
     binary = Path(request.binary)
     if not binary.is_absolute():
         raise NativeReviewRuntimeRefused("CLI binary must be absolute")
@@ -373,13 +407,6 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
         raise NativeReviewRuntimeRefused("cannot create private runtime root") from error
     root, root_identity = _private_directory(root, "private runtime root")
     environment = _environment(request.host, root, workspace)
-    provenance = {
-        "codex_release": CODEX_RELEASE, "codex_commit": CODEX_COMMIT,
-        "tool_registration_sha256": CODEX_TOOL_SOURCE_SHA256,
-        "config_schema_sha256": CODEX_CONFIG_SCHEMA_SHA256,
-        "model_protocol_sha256": CODEX_MODELS_SOURCE_SHA256,
-        "preparation_only": "qualification-and-receipts-required",
-    }
     config_path = catalog_path = mcp_path = None
     config_digest = catalog_digest = source_digest = mcp_digest = None
     claude_config_identity = (None, None)
@@ -403,7 +430,7 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
         if written_catalog != catalog_digest:
             raise NativeReviewRuntimeRefused("private review catalog changed during publication")
         config_path = root / "config.toml"
-        config_digest, _config_identity = _write_private_new(config_path, _codex_config(catalog_path))
+        config_digest, _config_identity = _write_private_new(config_path, _codex_config(catalog_path, version))
     else:
         # Claude's empty private MCP plus these flags disable built-ins/slash
         # commands and all settings sources while retaining subscription OAuth;
@@ -418,7 +445,7 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
         mcp_path = profile / "empty-mcp.json"
         mcp_digest, _mcp_identity = _write_private_new(mcp_path, _claude_mcp())
     argv = (*_argv(request.host, str(binary.resolve()), model, request.effort, workspace,
-                   catalog_path, mcp_path, request.session_id), request.prompt)
+                   catalog_path, mcp_path, request.session_id, version), request.prompt)
     return NativeReviewMaterial(
         NATIVE_REVIEW_SCHEMA, request.host, model, version, str(binary.resolve()), request.binary_sha256,
         request.runtime_identity, str(root), root_identity[0], root_identity[1], str(workspace),
@@ -447,9 +474,7 @@ def validate_native_review_material(value: object) -> NativeReviewMaterial:
         raise NativeReviewRuntimeRefused("native review environment is not closed")
     model = _text(value.requested_model, "requested model", _MODEL)
     version = _text(value.cli_version, "CLI version", _VERSION)
-    if ((value.host == "codex" and version != CODEX_CLI_VERSION)
-            or (value.host == "claude" and version != CLAUDE_CLI_VERSION)):
-        raise NativeReviewRuntimeRefused("CLI version is not the pinned native review version")
+    expected_provenance = _pinned_provenance(value.host, version)
     if value.host == "codex":
         if value.claude_config_device is not None or value.claude_config_inode is not None:
             raise NativeReviewRuntimeRefused("Codex material cannot bind a Claude config")
@@ -469,7 +494,7 @@ def validate_native_review_material(value: object) -> NativeReviewMaterial:
         rebuilt, expected_catalog = _catalog_model(catalog, model)
         if expected_catalog != value.catalog_sha256 or rebuilt != catalog:
             raise NativeReviewRuntimeRefused("private review catalog permits unapproved tools")
-        expected_config = _codex_config(Path(value.catalog_path))
+        expected_config = _codex_config(Path(value.catalog_path), version)
         if config_data != expected_config:
             raise NativeReviewRuntimeRefused("private review config differs from tool restriction proof")
     elif value.host == "claude":
@@ -488,12 +513,7 @@ def validate_native_review_material(value: object) -> NativeReviewMaterial:
     else:
         raise NativeReviewRuntimeRefused("review host is unsupported")
     expected_argv = _argv(value.host, value.binary, model, value.effort, workspace,
-                          value.catalog_path, value.mcp_path, value.session_id)
-    expected_provenance = {"codex_release": CODEX_RELEASE, "codex_commit": CODEX_COMMIT,
-                           "tool_registration_sha256": CODEX_TOOL_SOURCE_SHA256,
-                           "config_schema_sha256": CODEX_CONFIG_SCHEMA_SHA256,
-                           "model_protocol_sha256": CODEX_MODELS_SOURCE_SHA256,
-                           "preparation_only": "qualification-and-receipts-required"}
+                          value.catalog_path, value.mcp_path, value.session_id, version)
     if value.provenance != tuple(sorted(expected_provenance.items())):
         raise NativeReviewRuntimeRefused("native review provenance drifted")
     if (not isinstance(value.argv, tuple) or not value.argv or tuple(value.argv[:-1]) != expected_argv

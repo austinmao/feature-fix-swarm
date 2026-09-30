@@ -8,6 +8,40 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F52 native review admits Codex CLI 0.159.0)
+
+- Every managed native final review on a Codex 0.159.0 host refused with
+  `NATIVE_REVIEW_MATERIAL_INVALID`. `native_review_runtime` pinned one audited
+  Codex snapshot (`0.154.0`: release, commit and the SHA-256 of `spec_plan.rs`,
+  `config.schema.json` and `openai_models.rs`) and refused any other CLI version
+  in both `prepare_native_review_runtime` and `validate_native_review_material`,
+  even though `0.159.0` was already admitted for ordinary runs. The pin is now a
+  table keyed by CLI version with two rows, `0.154.0` (unchanged, constants keep
+  their names) and `0.159.0` (tag `rust-v0.159.0`, commit `687a119f0fca...`,
+  tool digest `849ef21d...`, config digest `eda7251b...`, model digest
+  `4c8b5caf...`, each recomputed from the raw upstream files at that tag). The
+  provenance emitted into the material and the provenance checked on replay both
+  come from the row for the material's own version, so a `0.159.0` material
+  carrying `0.154.0` digests (or the reverse, or any mixed row) is refused as
+  provenance drift. Every other Codex version (`0.155.1`, `0.156.1`, `0.157.0`,
+  `0.158.0`, `0.159.1`, ...) still refuses. Claude review material is unchanged.
+  - Since `0.156.1`, `spec_plan.rs` also registers a `send_message_to_user_async`
+    tool when the default-off, under-development feature of the same name is
+    enabled. Nothing enables it under FFS's private `CODEX_HOME` and
+    `--ignore-user-config`, but the "all tool routes are closed" claim in the
+    review closure would no longer have been strictly true. For `0.159.0` the
+    review argv (`-c features.send_message_to_user_async=false`) and the private
+    `config.toml` now disable it too; replay rejects a `0.159.0` config or argv
+    that lacks it. It is deliberately not passed for `0.154.0`, whose audited
+    schema has no such key and where `--strict-config` rejects unknown features.
+    The other 33 disabled features, `tools.experimental_request_user_input`,
+    `tools.update_plan`, `web_search`, `mcp_servers`, `model_catalog_json` and
+    `model_reasoning_effort` have identical schema shapes in `0.159.0`.
+  - Audit basis: the per-version source audit, not a live model run. The
+    behavioural tool-absence proof on a real `0.159.0` session is the separate
+    live native-review probe; this change makes that probe (and real final
+    reviews) possible.
+
 ### Fixed (2026-09-30, spec-014 Release C: F48 final-review workspace is prepared as inventory)
 
 - The managed native final review refused with `WORKSPACE_BINDING_MISMATCH` as
