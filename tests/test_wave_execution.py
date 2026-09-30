@@ -553,3 +553,28 @@ def test_gsd_case_alias_is_refused_not_exempted(tmp_path: Path, alias: str) -> N
 
     with pytest.raises(WorkspaceRefused, match="UNSAFE_SELECTION_PATH"):
         _inventory(repository, head)
+
+
+def test_tracked_unchanged_gsd_symlink_is_refused(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    (repository / "real").mkdir()
+    (repository / "real/config.json").write_text("{}\n")
+    os.symlink("real", repository / ".gsd")
+    git(repository, "add", "real/config.json", ".gsd")
+    git(repository, "commit", "-qm", "track gsd symlink")
+    head = git(repository, "rev-parse", "HEAD")
+
+    with pytest.raises(WorkspaceRefused, match="UNSAFE_SELECTION_PATH"):
+        _inventory(repository, head)
+
+
+def test_tracked_unchanged_gsd_directory_gives_empty_inventory(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _commit_tracked_gsd(repository)
+
+    inventory = _inventory(repository, head)
+    assert inventory.changed == ()
