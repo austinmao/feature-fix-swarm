@@ -285,15 +285,19 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
     supervisor = Supervisor(store, token, evidence_root=host_evidence, worker_channel=channel)
 
+    outer_supervisor = supervisor
+
     def qualify_runtime(activity_id: str, preparation, activity_request_key: str,
-                        parent_activity_id: str, final_contract_hash: str, child_role: str):
-        """Qualify one workspace-bound Claude runtime."""
+                        parent_activity_id: str, final_contract_hash: str, child_role: str, *,
+                        supervisor=None):
+        """Qualify one workspace-bound Claude runtime (F50: the final reviewer passes its own supervisor)."""
         try:
             activity, qualified, receipt, _runtime, additions = qualify_managed_claude_runtime(
                 store, token, activity_id=activity_id, activity_request_key=activity_request_key,
                 parent_activity_id=parent_activity_id, workspace=preparation,
                 host_request=host_request, role=child_role, evidence_root=host_evidence,
-                final_contract_hash=final_contract_hash, supervisor=supervisor,
+                final_contract_hash=final_contract_hash,
+                supervisor=outer_supervisor if supervisor is None else supervisor,
                 bridge_command=bridge_command,
                 project=upstream.get("project"), workstream=upstream.get("workstream"),
             )

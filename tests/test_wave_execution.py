@@ -995,3 +995,606 @@ def test_untracked_name_unrelated_to_tracked_paths_is_not_a_case_collision(
     monkeypatch.setattr(module, "_untracked_paths", lambda workspace, *options: ["newfile.py"])
 
     assert module._inventory(repository, head).untracked == ("newfile.py",)
+
+
+# F49: gsd-core's ephemeral workflow._auto_chain_active=false write is no change.
+#
+# execute-phase tells the orchestrator to run
+# `gsd_run query config-set workflow._auto_chain_active false`, and gsd-core's
+# setConfigValue (gsd-core/bin/lib/config.cjs) rewrites the tracked
+# .planning/config.json with JSON.stringify(config, null, 2). FFS treats exactly
+# that one edit as no change and every other config edit as a modification.
+
+_CONFIG = ".planning/config.json"
+_FLAG = "_auto_chain_active"
+
+
+def _gsd_json(config, *, indent: int = 2, suffix: str = "") -> bytes:
+    # indent=2, ensure_ascii=False and no trailing newline is JSON.stringify(x, null, 2).
+    return (json.dumps(config, indent=indent, ensure_ascii=False) + suffix).encode()
+
+
+def _gsd_config(**workflow) -> dict:
+    return {
+        "mode": "interactive", "retries": 1,
+        "workflow": {"research": True, "plan_check": True, **workflow},
+    }
+
+
+def _track_config(repository: Path, data: bytes) -> str:
+    target = repository / _CONFIG
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(data)
+    git(repository, "add", _CONFIG)
+    git(repository, "commit", "-qm", "track gsd config")
+    return git(repository, "rev-parse", "HEAD")
+
+
+def _gsd_sets_flag(root: Path, value=False, relative: str = _CONFIG) -> bytes:
+    """Leave on disk what `config-set workflow._auto_chain_active <value>` leaves."""
+    target = root / relative
+    config = json.loads(target.read_bytes())
+    config["workflow"][_FLAG] = value
+    data = _gsd_json(config)
+    target.write_bytes(data)
+    return data
+
+
+@pytest.mark.parametrize("indent, suffix", [(2, ""), (2, "\n"), (4, "\n")])
+def test_gsd_auto_chain_flag_write_is_no_inventory_change(
+    tmp_path: Path, indent: int, suffix: str,
+) -> None:
+    from run_state.wave_execution import _inventory, _material_entries
+
+    repository, _ = fixture_repo(tmp_path)
+    base = _gsd_json(_gsd_config(), indent=indent, suffix=suffix)
+    head = _track_config(repository, base)
+    (repository / _CONFIG).chmod(0o664)
+    flagged = _gsd_sets_flag(repository)
+    assert flagged != base
+
+    inventory = _inventory(repository, head)
+
+    assert inventory.changed == ()
+    assert _material_entries(repository, head, inventory) == ()
+    assert (repository / _CONFIG).read_bytes() == base
+    assert stat.S_IMODE((repository / _CONFIG).stat().st_mode) == 0o664
+    assert sorted(item.name for item in (repository / ".planning").iterdir()) == ["config.json"]
+
+
+def test_worker_gsd_auto_chain_flag_write_is_not_out_of_scope(tmp_path: Path) -> None:
+    repository, _ = fixture_repo(tmp_path)
+    base = _gsd_json(_gsd_config())
+    head = _track_config(repository, base)
+    (repository / "tracked.txt").write_text("planned change\n")
+    _gsd_sets_flag(repository)
+
+    result = harvest_scoped_patch(
+        repository, head, ("tracked.txt",), (), tmp_path / "evidence",
+    )
+
+    assert result.changed_files == ("tracked.txt",)
+    assert _CONFIG not in result.patch
+    assert (repository / _CONFIG).read_bytes() == base
+
+
+def _flagged(value, *, top=None, **workflow) -> dict:
+    config = _gsd_config(**workflow)
+    config.update(top or {})
+    config["workflow"][_FLAG] = value
+    return config
+
+
+_STILL_COUNTS = [
+    pytest.param(_gsd_config(), _gsd_json(_flagged(True)), id="flag-true"),
+    pytest.param(_gsd_config(), _gsd_json(_flagged(None)), id="flag-null"),
+    pytest.param(_gsd_config(), _gsd_json(_flagged(0)), id="flag-zero"),
+    pytest.param(_gsd_config(), _gsd_json(_flagged("false")), id="flag-string"),
+    pytest.param(
+        _gsd_config(), _gsd_json(_flagged(False, research=False)),
+        id="flag-false-and-workflow-key-changed",
+    ),
+    pytest.param(
+        _gsd_config(), _gsd_json(_flagged(False, top={"mode": "yolo"})),
+        id="flag-false-and-top-level-key-changed",
+    ),
+    pytest.param(
+        _gsd_config(), _gsd_json(_flagged(False, top={"retries": True})),
+        id="flag-false-and-one-became-true",
+    ),
+    pytest.param(
+        _gsd_config(), _gsd_json({**_gsd_config(), _FLAG: False}),
+        id="flag-false-at-top-level",
+    ),
+    pytest.param(_gsd_config(), _gsd_json(_gsd_config(), indent=4), id="formatting-only-no-flag"),
+    pytest.param(_flagged(True), _gsd_json(_flagged(False)), id="base-flag-true"),
+    pytest.param(
+        _gsd_config(),
+        _gsd_json(_flagged(False)).replace(
+            b'"_auto_chain_active": false',
+            b'"_auto_chain_active": false, "_auto_chain_active": false',
+        ),
+        id="duplicate-key",
+    ),
+    pytest.param(
+        {"mode": "interactive"},
+        _gsd_json({"mode": "interactive", "workflow": {_FLAG: False}}),
+        id="base-without-workflow",
+    ),
+]
+
+
+@pytest.mark.parametrize("base_config, candidate", _STILL_COUNTS)
+def test_anything_but_the_false_flag_write_still_counts_as_modified(
+    tmp_path: Path, base_config: dict, candidate: bytes,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(base_config))
+    (repository / _CONFIG).write_bytes(candidate)
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == candidate
+
+
+def test_flag_write_with_a_mode_change_still_counts_as_modified(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    (repository / _CONFIG).chmod(0o755)
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == flagged
+
+
+def test_flag_write_to_an_untracked_config_stays_untracked(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = fixture_repo(tmp_path)
+    (repository / ".planning").mkdir()
+    (repository / _CONFIG).write_bytes(_gsd_json(_flagged(False)))
+
+    assert _inventory(repository, head).untracked == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == _gsd_json(_flagged(False))
+
+
+def test_symlinked_config_is_left_alone(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_json(_flagged(False))
+    (repository / "real-config.json").write_bytes(flagged)
+    (repository / _CONFIG).unlink()
+    os.symlink("../real-config.json", repository / _CONFIG)
+
+    assert _CONFIG in _inventory(repository, head).modified
+    assert (repository / _CONFIG).is_symlink()
+    assert (repository / "real-config.json").read_bytes() == flagged
+
+
+def test_symlinked_planning_directory_is_left_alone(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    (repository / ".planning").rename(repository / "real-planning")
+    real = repository / "real-planning/config.json"
+    flagged = _gsd_sets_flag(repository, relative="real-planning/config.json")
+    os.symlink("real-planning", repository / ".planning")
+
+    try:
+        _inventory(repository, head)
+    except WorkspaceRefused:
+        pass
+    assert (repository / ".planning").is_symlink()
+    assert real.read_bytes() == flagged
+
+
+def test_case_aliased_planning_directory_is_left_alone(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    # On a case-insensitive volume `.Planning` still opens as `.planning`; on a
+    # case-sensitive one the config is simply gone from its tracked path.
+    (repository / ".planning").rename(repository / ".Planning")
+
+    try:
+        _inventory(repository, head)
+    except WorkspaceRefused:
+        pass
+    assert (repository / ".Planning/config.json").read_bytes() == flagged
+
+
+def _with_orchestrator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: Path, body) -> None:
+    monkeypatch.chdir(primary)
+    for key in INHERITED_CONTEXT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    def capture(store, token, context):
+        with store.transaction() as tx:
+            preparation_id = tx.execute(
+                "SELECT preparation_id FROM context_runs WHERE repository_id=? AND run_id=?",
+                (token.repository_id, token.run_id),
+            ).fetchone()[0]
+            retained = json.dumps({
+                "schema": "ffs.input-snapshot/v1",
+                "upstream": {
+                    "project": "fixture-project",
+                    "workstream": "feature-014",
+                    "session_key": "fixture-session",
+                },
+            }, sort_keys=True, separators=(",", ":"))
+            tx.execute(
+                "UPDATE context_workspaces SET selected_manifest_json=? WHERE preparation_id=?",
+                (retained, preparation_id),
+            )
+        body(store, token, context, inspect_workspace(store, preparation_id))
+        return 0
+
+    assert _cmd_fixture_start(_args(tmp_path / "authority"), on_ready=capture) == 0
+
+
+def test_gsd_auto_chain_flag_write_does_not_enter_wave_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = _repository(tmp_path)
+    base = _gsd_json(_gsd_config(), suffix="\n")
+    _track_config(primary, base)
+
+    def body(store, token, context, preparation) -> None:
+        parent = Path(token.workspace)
+        head = git(parent, "rev-parse", "HEAD")
+        manifest = wave_manifest(token, context, head)
+        clean = capture_wave_snapshot(store, token, preparation, manifest, tmp_path / "clean")
+        _gsd_sets_flag(parent)
+
+        snapshot = capture_wave_snapshot(store, token, preparation, manifest, tmp_path / "flagged")
+
+        assert snapshot.manifest["entries"] == clean.manifest["entries"] == []
+        assert snapshot.input_digest == clean.input_digest
+        assert (parent / _CONFIG).read_bytes() == base
+
+    _with_orchestrator(tmp_path, monkeypatch, primary, body)
+
+
+def test_gsd_auto_chain_flag_write_leaves_real_wave_changes_in_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = _repository(tmp_path)
+    base = _gsd_json(_gsd_config())
+    _track_config(primary, base)
+
+    def body(store, token, context, preparation) -> None:
+        parent = Path(token.workspace)
+        (parent / "src/input.txt").write_bytes(b"accepted wave one\n")
+        head = git(parent, "rev-parse", "HEAD")
+        manifest = wave_manifest(token, context, head)
+        clean = capture_wave_snapshot(store, token, preparation, manifest, tmp_path / "clean")
+        _gsd_sets_flag(parent)
+        flagged = capture_wave_snapshot(store, token, preparation, manifest, tmp_path / "flagged")
+
+        assert [entry["path"] for entry in flagged.manifest["entries"]] == ["src/input.txt"]
+        assert flagged.manifest["entries"] == clean.manifest["entries"]
+        assert flagged.input_digest == clean.input_digest
+        assert (parent / _CONFIG).read_bytes() == base
+
+    _with_orchestrator(tmp_path, monkeypatch, primary, body)
+
+
+def test_gsd_auto_chain_flag_write_does_not_enter_prelaunch_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from run_state.wave_execution import capture_prelaunch_snapshot
+
+    primary = _repository(tmp_path)
+    base = _gsd_json(_gsd_config())
+    _track_config(primary, base)
+
+    def body(store, token, context, preparation) -> None:
+        parent = Path(token.workspace)
+
+        def capture(label: str):
+            return capture_prelaunch_snapshot(
+                store, token, preparation, activity_id=context.activity_id,
+                runtime_identity="runtime-fixture", evidence_root=tmp_path / label,
+            )
+
+        clean = capture("clean")
+        _gsd_sets_flag(parent)
+
+        snapshot = capture("flagged")
+
+        assert snapshot.manifest["entries"] == clean.manifest["entries"] == []
+        assert snapshot.input_digest == clean.input_digest
+        assert (parent / _CONFIG).read_bytes() == base
+
+    _with_orchestrator(tmp_path, monkeypatch, primary, body)
+
+
+# F49 review round 1: the restore is exact bytes and is bound to directory fds.
+
+_SEMANTIC_NO_OPS = [
+    pytest.param(
+        _gsd_json({"workflow": {_FLAG: False, "research": True}}),
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}),
+        id="existing-false-flag-moved",
+    ),
+    pytest.param(
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}, indent=4, suffix="\n"),
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}, indent=3),
+        id="whitespace-change-when-base-has-the-flag",
+    ),
+    pytest.param(
+        _gsd_json({"workflow": {"research": True}}),
+        _gsd_json({"workflow": {"research": True, _FLAG: False}}, suffix="\n"),
+        id="trailing-newline-gsd-does-not-write",
+    ),
+    pytest.param(
+        b'{\n  "limit": 1e400,\n  "workflow": {\n    "research": true\n  }\n}',
+        b'{\n  "limit": 2e400,\n  "workflow": {\n    "research": true,\n'
+        b'    "_auto_chain_active": false\n  }\n}',
+        id="overflowing-number-edited-alongside-the-flag",
+    ),
+]
+
+
+@pytest.mark.parametrize("base, candidate", _SEMANTIC_NO_OPS)
+def test_only_gsds_exact_rewrite_is_the_flag_write(
+    tmp_path: Path, base: bytes, candidate: bytes,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, base)
+    (repository / _CONFIG).write_bytes(candidate)
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == candidate
+
+
+def test_flag_already_false_in_the_base_is_rewritten_in_place_with_non_ascii_values(
+    tmp_path: Path,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    config = {"name": "café ☃", "workflow": {_FLAG: False, "research": True}}
+    base = _gsd_json(config, indent=4, suffix="\n")
+    head = _track_config(repository, base)
+    (repository / _CONFIG).write_bytes(_gsd_json(config))
+
+    assert _inventory(repository, head).changed == ()
+    assert (repository / _CONFIG).read_bytes() == base
+
+
+def _race_once(monkeypatch: pytest.MonkeyPatch, when: str, action) -> None:
+    """Run ``action`` once at a named point inside the restore."""
+    import run_state.wave_execution as module
+
+    fired: list[bool] = []
+
+    def fire() -> None:
+        if not fired:
+            fired.append(True)
+            action()
+
+    if when == "after-read":
+        real_base = module._base_material
+
+        def base_material(*args):
+            result = real_base(*args)
+            fire()
+            return result
+
+        monkeypatch.setattr(module, "_base_material", base_material)
+        return
+    if when == "before-final-check":
+        real_stat = os.stat
+
+        def stat_through_directory(path, *args, **kwargs):
+            # The restore's last look at config.json goes through the directory fd.
+            if kwargs.get("dir_fd") is not None:
+                fire()
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat_through_directory)
+        return
+    if when == "at-commit":
+        # The moment the bytes are committed: nothing can check after this call.
+        for name in ("rename", "ftruncate"):
+
+            def commit(*args, _real=getattr(os, name), **kwargs):
+                fire()
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(os, name, commit)
+        return
+    real_fsync = os.fsync
+
+    def fsync(descriptor: int) -> None:
+        real_fsync(descriptor)
+        # The synced regular file is the restored config: the write is done.
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            fire()
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+
+@pytest.mark.parametrize("when", ["after-read", "before-final-check"])
+def test_restore_does_not_write_over_a_config_swapped_after_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    planning = repository / ".planning"
+    swapped = _gsd_json({"swapped": True})
+
+    def swap() -> None:
+        (planning / "config.json").rename(planning / "config.orig")
+        (planning / "config.json").write_bytes(swapped)
+
+    _race_once(monkeypatch, when, swap)
+
+    _inventory(repository, head)
+
+    assert (planning / "config.json").read_bytes() == swapped
+    assert (planning / "config.orig").read_bytes() == flagged
+    assert sorted(item.name for item in planning.iterdir()) == ["config.json", "config.orig"]
+
+
+@pytest.mark.parametrize("when", ["after-read", "before-final-check"])
+def test_restore_does_not_write_through_a_planning_directory_moved_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    moved = tmp_path / "moved-planning"
+
+    def move_out() -> None:
+        (repository / ".planning").rename(moved)
+        (repository / ".planning").mkdir()
+        (repository / _CONFIG).write_bytes(b"replacement\n")
+
+    _race_once(monkeypatch, when, move_out)
+
+    _inventory(repository, head)
+
+    assert (moved / "config.json").read_bytes() == flagged
+    assert sorted(item.name for item in moved.iterdir()) == ["config.json"]
+    assert (repository / _CONFIG).read_bytes() == b"replacement\n"
+    assert sorted(item.name for item in (repository / ".planning").iterdir()) == ["config.json"]
+
+
+def test_planning_directory_moved_after_the_write_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    _gsd_sets_flag(repository)
+    _race_once(
+        monkeypatch, "after-write",
+        lambda: (repository / ".planning").rename(tmp_path / "moved-planning"),
+    )
+
+    with pytest.raises(WorkspaceRefused, match="SOURCE_CHANGED"):
+        _inventory(repository, head)
+
+
+# F49 review round 2: the restore writes in place through the verified inode,
+# and refuses inputs whose Python and JS spellings can differ.
+
+
+def test_hard_linked_config_is_not_restored(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    other = tmp_path / "other-link.json"
+    os.link(repository / _CONFIG, other)
+    assert (repository / _CONFIG).stat().st_nlink == 2
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == flagged
+    assert other.read_bytes() == flagged
+
+
+def test_config_hard_linked_after_the_read_never_writes_the_other_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    other = tmp_path / "other-link.json"
+    _race_once(monkeypatch, "after-read", lambda: os.link(repository / _CONFIG, other))
+
+    _inventory(repository, head)
+
+    assert other.read_bytes() == flagged
+    assert (repository / _CONFIG).read_bytes() == flagged
+
+
+def test_a_config_swapped_after_the_last_check_is_never_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    _gsd_sets_flag(repository)
+    planning = repository / ".planning"
+    swapped = _gsd_json({"swapped": True})
+
+    def swap() -> None:
+        (planning / "config.json").rename(planning / "config.orig")
+        (planning / "config.json").write_bytes(swapped)
+
+    _race_once(monkeypatch, "at-commit", swap)
+
+    _inventory(repository, head)
+
+    # No check can follow the commit point, so the verified inode (now
+    # config.orig) may be rewritten, but the file swapped in must stay as it is.
+    assert (planning / "config.json").read_bytes() == swapped
+
+
+def _python_spelling(base: bytes) -> bytes:
+    """What json.dumps(..., indent=2, ensure_ascii=False) writes for the base plus the flag."""
+    config = json.loads(base)
+    config["workflow"][_FLAG] = False
+    return json.dumps(config, indent=2, ensure_ascii=False).encode("utf-8", "surrogatepass")
+
+
+_JS_SPELLING_DIFFERS = [
+    pytest.param(b'{"2": "a", "1": "b", "workflow": {}}', id="integer-like-keys"),
+    pytest.param(b'{"workflow": {}, "0": true}', id="integer-like-key-zero"),
+    pytest.param(b'{"workflow": {}, "ratio": 1.0}', id="float-one-point-zero"),
+    pytest.param(b'{"workflow": {}, "ratio": 1e21}', id="float-exponent"),
+    pytest.param(b'{"workflow": {}, "ratio": -0.0}', id="float-negative-zero"),
+    pytest.param(b'{"workflow": {}, "big": 9007199254740993}', id="int-above-2-53"),
+    pytest.param(b'{"workflow": {}, "big": -9007199254740993}', id="int-below-minus-2-53"),
+    pytest.param(b'{"workflow": {}, "name": "\\ud800"}', id="lone-surrogate"),
+]
+
+
+@pytest.mark.parametrize("base", _JS_SPELLING_DIFFERS)
+def test_inputs_python_and_js_may_spell_differently_are_never_restored(
+    tmp_path: Path, base: bytes,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, base)
+    candidate = _python_spelling(base)
+    (repository / _CONFIG).write_bytes(candidate)
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == candidate
+
+
+def test_ints_within_2_53_are_still_restored(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    base = _gsd_json({"workflow": {}, "hi": 2**53, "lo": -(2**53), "zero": 0})
+    head = _track_config(repository, base)
+    (repository / _CONFIG).write_bytes(_python_spelling(base))
+
+    assert _inventory(repository, head).changed == ()
+    assert (repository / _CONFIG).read_bytes() == base
