@@ -18,6 +18,8 @@ LIB = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
+from test_frontend_supervised_checks import requires_local_confinement  # noqa: E402
+
 
 REPOSITORY = "artifact-review-repository"
 RUN = "artifact-review-run"
@@ -183,6 +185,20 @@ def test_artifact_review_policy_hash_binds_runtime_and_manifest(tmp_path: Path) 
     assert manifest_changed.manifest_sha256 == "f" * 64
     assert policy.policy_sha256 != runtime_changed.policy_sha256
     assert policy.policy_sha256 != manifest_changed.policy_sha256
+
+
+def test_artifact_review_profile_grants_only_the_dev_null_literal(tmp_path: Path) -> None:
+    from run_state.worker_policy import _darwin_artifact_review_profile, build_artifact_review_policy
+
+    executable = _tool(tmp_path)
+    context, registration, roots, _paths = _inputs(
+        tmp_path, executable=executable, runtime_roots=(str(Path(executable).parent),),
+    )
+    profile = _darwin_artifact_review_profile(build_artifact_review_policy(context, registration, roots))
+    assert '(allow file-read* file-write* (literal "/dev/null"))' in profile
+    assert '(subpath "/dev")' not in profile
+    # No other device node, and no /dev subtree, is named anywhere in the profile.
+    assert profile.count('"/dev') == 1
 
 
 def _build_probe(runtime: Path) -> str:
@@ -361,3 +377,26 @@ def test_macos_artifact_review_policy_enforces_narrow_os_effects(tmp_path: Path)
             listener.accept()
     finally:
         listener.close()
+
+
+@requires_local_confinement
+def test_macos_artifact_review_policy_opens_dev_null_and_no_other_device(tmp_path: Path) -> None:
+    from run_state.worker_policy import build_artifact_review_policy
+
+    runtime = _private(tmp_path / "fixture-runtime")
+    executable = _build_probe(runtime)
+    context, registration, roots, paths = _inputs(
+        tmp_path, executable=executable, runtime_roots=(str(runtime), "/usr/lib", "/System/Library"),
+    )
+    policy = build_artifact_review_policy(context, registration, roots)
+    # `write` opens O_WRONLY|O_CREAT|O_TRUNC, the same call as open(os.devnull, "wb").
+    for mode in ("read", "write"):
+        completed = _run(policy, (policy.executable, mode, "/dev/null"), paths["scratch"])
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    # Negative control: each other device opens fine unconfined, so a denial is the profile's.
+    for device in ("/dev/zero", "/dev/random"):
+        for mode in ("read", "write"):
+            free = subprocess.run([policy.executable, mode, device], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+            assert free.returncode == 0, free.stderr.decode("utf-8", "replace")
+            assert _run(policy, (policy.executable, mode, device), paths["scratch"]).returncode != 0

@@ -101,6 +101,33 @@ def test_registered_local_policy_denies_writes_escape_network_and_fork(tmp_path)
 
 
 
+@requires_local_confinement
+def test_registered_local_policy_opens_dev_null_and_no_other_device(tmp_path):
+    from run_state.local_check_runtime import sealed_check_material, build_confined_local_argv
+    from test_artifact_review_containment import _build_probe, _run
+    supervisor, store, request = setup_owner(tmp_path)
+    runtime = tmp_path / 'native-probe'
+    runtime.mkdir(mode=0o700)
+    executable = _build_probe(runtime)
+    sealed = _sealed_command_check(store, supervisor.token, request, shlex.join((executable, 'thread')))
+    with store.read_transaction() as tx:
+        child = tx.execute('SELECT * FROM authority_child_bindings WHERE activity_id=?',
+                           (request.activity_id,)).fetchone()
+    material = sealed_check_material(sealed=sealed, acceptance_hash=sealed.acceptance_hash,
+        check_id='real-local', candidate_hash=child['candidate_hash'], workspace=request.workspace,
+        workspace_preparation_id=child['workspace_preparation_id'], expected_head=request.expected_head,
+        runtime_identity=request.runtime_identity, generation=supervisor.token.generation)
+    bound, _argv, policy = build_confined_local_argv(store, supervisor.token, request.activity_id, material)
+    scratch = Path(bound.confinement_scratch)
+    def run(*args):
+        return _run(policy, (executable, *args), scratch).returncode
+    # pytest's output capture opens os.devnull for writing; tools open it for reading.
+    assert run('read', '/dev/null') == 0
+    assert run('write', '/dev/null') == 0
+    assert run('read', '/dev/zero') != 0
+    assert run('write', '/dev/zero') != 0
+
+
 # F42: declared read roots for a sealed check's runtime.
 
 def _draft_with_roots(roots, kind="command"):
