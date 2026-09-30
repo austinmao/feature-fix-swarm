@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import stat
 import subprocess
@@ -261,35 +262,84 @@ def codex_node_binary(binary: Path, required: bool = False) -> Path | None:
     A ``.js`` launcher (every npm install), or a caller whose qualified chain pins
     ``node_sha256`` (``required``), needs Node: ``CODEX_NODE_BINARY`` or ``node`` on
     PATH, resolved and regular.  A native binary needs none.  Callers compare the
-    returned file with their pin; this only locates it.  Because the launch puts the
-    Node directory first on PATH, ``node`` there must resolve to this very file.
+    returned file with their pin; this only locates it.  The launch puts this file's
+    directory first on PATH, so ``env node`` runs exactly it only if the resolved file is
+    itself named ``node``: a symlinked ``node`` (``node -> node20``) could be retargeted
+    after verification, so it is refused.
     """
     if binary.suffix != ".js" and not required:
         return None
     node = Path(os.environ.get("CODEX_NODE_BINARY") or shutil.which("node") or "").resolve()
     if not node.is_absolute() or not node.is_file() or node.is_symlink():
         raise CapabilityError("Codex JS launcher has no resolved regular Node binary")
-    if (node.parent / "node").resolve() != node:
-        raise CapabilityError("Codex Node directory does not resolve `node` to the verified binary")
+    if node.name != "node":
+        raise CapabilityError(
+            f"Codex Node must be a regular file named node; a symlinked node (resolves to {node.name}) is refused")
     return node
 
 
-def codex_native_binary(launcher: Path) -> Path | None:
-    """The vendor executable an npm ``.js`` launcher spawns, resolved, or None.
+# codex-cli/bin/codex.js, byte-identical at rust-v0.154.0 and rust-v0.159.0: PLATFORM_PACKAGE_BY_TARGET
+# for the platforms FFS runs on.  Other platforms are unknown shapes and resolve to nothing.
+_CODEX_TARGETS = {
+    ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
+    ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
+    ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
+    ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
+}
 
-    ``CODEX_NATIVE_BINARY`` first, then the platform packages next to the launcher:
-    the one resolution shared by host qualification and the native review.
+
+def _codex_target() -> tuple[str, str] | None:
+    """(target triple, platform package) the launcher's platform/arch switch picks here."""
+    system = "darwin" if sys.platform == "darwin" else "linux" if sys.platform.startswith("linux") else None
+    arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(platform.machine().lower())
+    return _CODEX_TARGETS.get((system, arch))
+
+
+def _launcher_native_executable(launcher: Path) -> Path | None:
+    """Replay ``findCodexExecutable`` of codex.js: the file the launcher spawns, or None.
+
+    ``require.resolve("<platform package>/package.json")`` from the launcher's own directory
+    (each ancestor's ``node_modules``, nearest first; NODE_PATH and global folders are not
+    modelled), then ``<package>/vendor/<triple>/bin/codex``.  Only when the package does not
+    resolve does it fall back to ``<launcher package>/vendor/<triple>/bin/codex``; a resolved
+    package without the executable is an error in the launcher, not a fallback.  A package
+    manifest with ``exports`` is a shape the launcher answers differently, so it is refused.
     """
-    override = os.environ.get("CODEX_NATIVE_BINARY")
-    candidates = [Path(override)] if override else []
-    if len(launcher.parents) >= 3:
-        candidates.extend(launcher.parents[2].glob("codex-*/vendor/*/bin/codex"))
-    if len(launcher.parents) >= 2:
-        candidates.extend(launcher.parents[1].glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
-    for native in candidates:
-        if native.is_file() and not native.is_symlink():
-            return native.resolve()
+    target = _codex_target()
+    if target is None:
+        return None
+    triple, package = target
+    vendor_root = launcher.parent.parent / "vendor"
+    for directory in (launcher.parent, *launcher.parent.parents):
+        manifest = directory / "node_modules" / package / "package.json"
+        if directory.name != "node_modules" and manifest.is_file():
+            try:
+                if json.loads(manifest.read_text(encoding="utf-8")).get("exports") is not None:
+                    return None
+            except (OSError, ValueError, AttributeError):
+                return None
+            vendor_root = manifest.resolve().parent / "vendor"
+            break
+    executable = vendor_root / triple / "bin" / "codex"
+    if executable.is_file() and not executable.is_symlink():
+        return executable.resolve()
     return None
+
+
+def codex_native_binary(launcher: Path) -> Path | None:
+    """The vendor executable a resolved npm ``.js`` launcher spawns, or None.
+
+    The one resolution shared by host qualification and the native review.  It is the
+    launcher's own selection, never an ambient one: ``CODEX_NATIVE_BINARY`` does not
+    override it, and a value naming any other file is refused rather than silently ignored.
+    """
+    if launcher.suffix != ".js":
+        return None
+    executable = _launcher_native_executable(launcher)
+    override = os.environ.get("CODEX_NATIVE_BINARY")
+    if override and (executable is None or Path(override).resolve() != executable):
+        raise CapabilityError("CODEX_NATIVE_BINARY names a different executable than the launcher spawns")
+    return executable
 
 
 def codex_path_entries(binary: Path, node: Path | None) -> list[str]:
@@ -857,10 +907,7 @@ def _binary_chain(binary: Path) -> dict[str, str]:
     chain = {"launcher_sha256": _digest(launcher)}
     is_js = launcher.suffix == ".js"
     if is_js:
-        node = Path(os.environ.get("CODEX_NODE_BINARY") or shutil.which("node") or "").resolve()
-        if not node.is_file() or node.is_symlink():
-            raise CapabilityError("Codex JS launcher has no resolved regular Node binary")
-        chain["node_sha256"] = _digest(node.resolve())
+        chain["node_sha256"] = _digest(codex_node_binary(launcher, True))
     native = codex_native_binary(launcher)
     if native is not None:
         chain["native_sha256"] = _digest(native)

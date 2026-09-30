@@ -25,8 +25,11 @@ all skills.
     drift: the verified Node's directory first, then the launcher's parent, then
     `/usr/bin:/bin`. Node goes first because `#!/usr/bin/env node` takes the first `node`
     on PATH; with the launcher's directory first, a different `node` placed beside
-    `codex.js` would have run (the host launch had the same order). The Node directory
-    must also resolve `node` to the verified file, or the launch refuses. A native
+    `codex.js` would have run (the host launch had the same order). The resolved Node must
+    be a regular file named `node`: a symlinked `node` (`node -> node20`) could be
+    retargeted after verification and would run an unverified Node, so it is refused at
+    prepare and again at replay (Homebrew Cellar and nvm installs have a regular
+    `bin/node`; a Volta shim is refused). A native
     (non-`.js`) binary gets its own parent plus the system dirs and no Node directory,
     even when Node is ambient. Claude review material is unchanged. Because the host
     launch shares the helper, a `.js` launcher's closed environment (and so its policy hash)
@@ -39,9 +42,21 @@ all skills.
     recorded, and compares that digest with the pin, so a swap after resolution cannot
     be recorded. The Node is located as the host launch locates it (`CODEX_NODE_BINARY`
     or `node` on PATH). The vendor executable the launcher spawns, which the review
-    material previously did not bind at all, is located by the same resolution
-    qualification uses (`CODEX_NATIVE_BINARY`, then the platform packages next to the
-    launcher) and is bound the same way.
+    material previously did not bind at all, is bound the same way. It is located by
+    replaying the launcher's own `findCodexExecutable` (`codex-cli/bin/codex.js`, byte
+    identical at `rust-v0.154.0` and `rust-v0.159.0`): the platform/arch target triple and
+    platform package from its table, `require.resolve("<package>/package.json")` from
+    the launcher's directory (each ancestor `node_modules`, nearest first), then
+    `<package>/vendor/<triple>/bin/codex`; only when the package does not resolve, the
+    launcher's local `vendor/` directory. A resolved package without the executable, or
+    with an `exports` map, resolves to nothing and refuses. The previous wildcard
+    (`codex-*/vendor/*/bin/codex`, first match) and an ambient `CODEX_NATIVE_BINARY` could
+    bind a decoy, so both are gone. An ambient `CODEX_NATIVE_BINARY` naming any file other
+    than the one the launcher spawns now refuses with a clear reason instead of being
+    silently honoured or silently ignored. Host qualification (`_binary_chain`) and the
+    runtime observer (`executable_chain`) use the same `codex_node_binary` and
+    `codex_native_binary` helpers, so the qualified chain and the review bind one
+    executable.
   - The material records `node_binary`, `node_sha256`, `native_binary` and
     `native_sha256` in its provenance. Replay never consults the ambient environment: it
     re-hashes both stored paths, recomputes the expected `PATH` from the stored binary

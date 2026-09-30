@@ -314,6 +314,8 @@ def _bound_binaries(host: str, binary: str, provenance: object) -> dict[str, str
             continue
         if set(row) != {path_key, sha_key} or not all(isinstance(item, str) for item in row.values()):
             raise NativeReviewRuntimeRefused(f"Codex JS launcher material lacks its {label} identity")
+        if path_key == "node_binary" and Path(row[path_key]).name != "node":
+            raise NativeReviewRuntimeRefused("Node binary drifted: `node` must be the regular file itself")
         digest, _identity = _read_checked(Path(row[path_key]), label, binary=True)
         if digest != _sha(row[sha_key], label):
             raise NativeReviewRuntimeRefused(f"{label} drifted")

@@ -61,26 +61,22 @@ def tree_sha(root: Path, excluded_top: frozenset[str] = frozenset()) -> str:
     return digest.hexdigest()
 
 def executable_chain(binary: Path) -> dict[str, str]:
+    """The qualified executable chain; resolved by the same helpers as host_capabilities._binary_chain."""
     launcher = binary.resolve()
     if not launcher.is_file() or launcher.is_symlink():
         raise ValueError("Codex launcher is not a regular executable")
     chain = {"launcher_sha256": sha(launcher)}
     is_js = launcher.suffix == ".js"
-    if is_js:
-        node = Path(os.environ.get("CODEX_NODE_BINARY") or shutil.which("node") or "").resolve()
-        if not node.is_file() or node.is_symlink():
-            raise ValueError("Codex JS launcher has no resolved regular Node binary")
-        chain["node_sha256"] = sha(node.resolve())
-    candidates = [Path(os.environ["CODEX_NATIVE_BINARY"])] if os.environ.get("CODEX_NATIVE_BINARY") else []
-    # Homebrew/npm launchers live at @openai/codex/bin/codex.js while the
-    # platform binary is its @openai/codex-*/vendor sibling.
-    if len(launcher.parents) >= 3:
-        candidates.extend(launcher.parents[2].glob("codex-*/vendor/*/bin/codex"))
-    if len(launcher.parents) >= 2:
-        candidates.extend(launcher.parents[1].glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
-    for candidate in candidates:
-        if candidate.is_file() and not candidate.is_symlink():
-            chain["native_sha256"] = sha(candidate.resolve()); break
+    try:
+        if is_js:
+            chain["node_sha256"] = sha(_shared.codex_node_binary(launcher, True))
+        # The vendor executable is the launcher's own platform-package selection, not a wildcard
+        # or ambient CODEX_NATIVE_BINARY choice (codex_native_binary refuses a conflicting override).
+        native = _shared.codex_native_binary(launcher)
+    except _shared.CapabilityError as error:
+        raise ValueError(str(error)) from error
+    if native is not None:
+        chain["native_sha256"] = sha(native)
     if is_js and "native_sha256" not in chain:
         raise ValueError("Codex JS launcher has no resolved native CLI")
     return chain

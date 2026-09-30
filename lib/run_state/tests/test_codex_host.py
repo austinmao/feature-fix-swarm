@@ -345,6 +345,8 @@ def _npm_layout(tmp_path):
     vendor = tmp_path / "npm" / "node_modules" / package / "vendor" / triple / "bin"
     for directory in (bin_dir, node_dir, vendor):
         directory.mkdir(parents=True)
+    # `require.resolve("<package>/package.json")` is how the launcher finds its platform package.
+    (vendor.parents[2] / "package.json").write_text('{"name": "@openai/codex", "version": "0.0.0-fake"}')
     launcher, node, native = bin_dir / "codex.js", node_dir / "node", vendor / "codex"
     for path, body in ((launcher, "#!/usr/bin/env node\n"), (node, "#!/bin/sh\necho node\n"),
                        (native, "#!/bin/sh\necho native\n")):
