@@ -195,10 +195,14 @@ def test_artifact_review_profile_grants_only_the_dev_null_literal(tmp_path: Path
         tmp_path, executable=executable, runtime_roots=(str(Path(executable).parent),),
     )
     profile = _darwin_artifact_review_profile(build_artifact_review_policy(context, registration, roots))
-    assert '(allow file-read* file-write* (literal "/dev/null"))' in profile
+    assert '(allow file-read-data file-write-data (literal "/dev/null"))' in profile
     assert '(subpath "/dev")' not in profile
     # No other device node, and no /dev subtree, is named anywhere in the profile.
     assert profile.count('"/dev') == 1
+    # Data operations only. file-write* would also allow unlink, mode and xattr
+    # changes on the node, and file-read* more than a read of its data.
+    (rule,) = (line for line in profile.splitlines() if '"/dev/null"' in line)
+    assert "file-write*" not in rule and "file-read*" not in rule
 
 
 def _build_probe(runtime: Path) -> str:
@@ -235,6 +239,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "copy") && argc == 4) return copy_file(argv[2], argv[3]);
     if (!strcmp(argv[1], "read") && argc == 3) { int fd=open(argv[2],O_RDONLY); if(fd<0)return fail("read"); close(fd); return 0; }
     if (!strcmp(argv[1], "write") && argc == 3) { int fd=open(argv[2],O_WRONLY|O_CREAT|O_TRUNC,0600); if(fd<0)return fail("write"); close(fd); return 0; }
+    if (!strcmp(argv[1], "device") && argc == 4) { char path[64]; snprintf(path,sizeof(path),"/dev/%s",argv[3]); int fd=open(path,!strcmp(argv[2],"write")?(O_WRONLY|O_CREAT|O_TRUNC):O_RDONLY,0600); if(fd<0)return fail(path); close(fd); return 0; }
     if (!strcmp(argv[1], "symlink-read") && argc == 4) { if(symlink(argv[3],argv[2]))return fail("symlink"); char path[1024]; snprintf(path,sizeof(path),"%s/secret.txt",argv[2]); int fd=open(path,O_RDONLY); if(fd<0)return fail("symlink-read"); close(fd); return 0; }
     if (!strcmp(argv[1], "hardlink") && argc == 4) { if(link(argv[2],argv[3]))return fail("link"); return 0; }
     if (!strcmp(argv[1], "rename") && argc == 4) { if(rename(argv[2],argv[3]))return fail("rename"); return 0; }

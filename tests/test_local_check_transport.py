@@ -100,34 +100,6 @@ def test_registered_local_policy_denies_writes_escape_network_and_fork(tmp_path)
         assert run('network', str(listener.getsockname()[1])) != 0
 
 
-
-@requires_local_confinement
-def test_registered_local_policy_opens_dev_null_and_no_other_device(tmp_path):
-    from run_state.local_check_runtime import sealed_check_material, build_confined_local_argv
-    from test_artifact_review_containment import _build_probe, _run
-    supervisor, store, request = setup_owner(tmp_path)
-    runtime = tmp_path / 'native-probe'
-    runtime.mkdir(mode=0o700)
-    executable = _build_probe(runtime)
-    sealed = _sealed_command_check(store, supervisor.token, request, shlex.join((executable, 'thread')))
-    with store.read_transaction() as tx:
-        child = tx.execute('SELECT * FROM authority_child_bindings WHERE activity_id=?',
-                           (request.activity_id,)).fetchone()
-    material = sealed_check_material(sealed=sealed, acceptance_hash=sealed.acceptance_hash,
-        check_id='real-local', candidate_hash=child['candidate_hash'], workspace=request.workspace,
-        workspace_preparation_id=child['workspace_preparation_id'], expected_head=request.expected_head,
-        runtime_identity=request.runtime_identity, generation=supervisor.token.generation)
-    bound, _argv, policy = build_confined_local_argv(store, supervisor.token, request.activity_id, material)
-    scratch = Path(bound.confinement_scratch)
-    def run(*args):
-        return _run(policy, (executable, *args), scratch).returncode
-    # pytest's output capture opens os.devnull for writing; tools open it for reading.
-    assert run('read', '/dev/null') == 0
-    assert run('write', '/dev/null') == 0
-    assert run('read', '/dev/zero') != 0
-    assert run('write', '/dev/zero') != 0
-
-
 # F42: declared read roots for a sealed check's runtime.
 
 def _draft_with_roots(roots, kind="command"):
@@ -260,6 +232,45 @@ def test_interpreter_check_runs_only_with_its_declared_read_roots(tmp_path):
     assert allowed.returncode == 0, allowed.stderr
     assert allowed.stdout.strip() == sys.version
     assert bound.execution_environment()["TMPDIR"] == bound.confinement_scratch
+
+
+# F46: the argv `build_confined_local_argv` returns is what runs. Both tests
+# execute exactly that argv, sealed from the command they name.
+
+@requires_local_confinement
+def test_sealed_check_argv_opens_dev_null_and_no_other_device(tmp_path):
+    from test_artifact_review_containment import _build_probe
+    runtime = tmp_path / 'native-probe'
+    runtime.mkdir(mode=0o700)
+    probe = _build_probe(runtime)
+
+    def launch(name, mode, device):
+        # The probe names the device itself: a sealed command may not name a
+        # file operand outside the workspace, and /dev/null is one.
+        return _confined_check(tmp_path / name, shlex.join((probe, 'device', mode, device)), None)[1]
+    for mode in ('read', 'write'):
+        opened = launch(f'null-{mode}', mode, 'null')
+        assert opened.returncode == 0, opened.stderr
+        # Negative control: the grant is the one literal, not the device class.
+        assert launch(f'zero-{mode}', mode, 'zero').returncode != 0
+        assert launch(f'random-{mode}', mode, 'random').returncode != 0
+
+
+@requires_local_confinement
+def test_sealed_interpreter_opens_dev_null_as_pytest_capture_and_logging_do(tmp_path):
+    from run_state.local_check_runtime import _overlap
+    prefix, interpreter = _host_interpreter()
+    # open(os.devnull) is pytest's capture; FileHandler(os.devnull) its logging plugin.
+    # (The locator is capped at 256 bytes, hence the terse spelling.)
+    probe = ('import os,logging;n=os.devnull;open(n).read();open(n,"w").write("x");'
+             'logging.FileHandler(n).close()')
+    locator = shlex.join((str(interpreter), "-c", probe))
+    if _overlap(prefix, Path.home()):
+        with pytest.raises(Exception, match="LOCAL_CHECK_CONFINEMENT_INVALID"):
+            _confined_check(tmp_path, locator, [str(prefix)])
+        return
+    _bound, completed = _confined_check(tmp_path, locator, [str(prefix)])
+    assert completed.returncode == 0, completed.stderr
 
 
 # F42 review round 1: declared roots overlap by filesystem identity, never
