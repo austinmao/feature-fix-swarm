@@ -30,6 +30,15 @@ all skills.
   check sharing one id must satisfy both pools. The grammar text now says
   exactly this and names invariant ids as finding-only. Findings evidence
   validation already matched the grammar and is unchanged.
+- Follow-up: because a criterion may now label evidence with a mapped check
+  id, `validate_draft_material` refuses `POLICY_DRAFT_INVALID` when a check id
+  equals an evidence-rule id of a different criterion (either order), or when
+  any check or evidence-rule id is `review-process-result`. Otherwise a review
+  could pass evidence validation and then fail receipt recording
+  (`POLICY_RECEIPT_INVALID`, non-unique evidence ids) once
+  `record_final_review` flattens every criterion's evidence plus the reserved
+  process-result row into one receipt. A check id equal to a rule id of the
+  same criterion stays accepted.
 
 ### Fixed (2026-09-30, spec-014 Release C: F49 gsd's ephemeral auto-chain flag write is no change)
 

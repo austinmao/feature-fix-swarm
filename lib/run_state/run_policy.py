@@ -349,6 +349,13 @@ def validate_draft_material(value: object) -> AcceptanceDraft:
         evidence_rules = _validate_rule_list(item["evidence_rules"], code="POLICY_DRAFT_INVALID", required_key="required")
         if check_ids.intersection(rule["id"] for rule in checks) or evidence_ids.intersection(rule["id"] for rule in evidence_rules):
             raise RunPolicyRefused("POLICY_DRAFT_INVALID")
+        # F54: final review flattens every criterion's evidence (labelled by one of its own
+        # rule or mapped check ids) plus the reserved process-result row into one receipt
+        # whose ids must be unique. A check id may equal a rule id only inside its own
+        # criterion, and nothing may take the reserved id.
+        own_checks, own_rules = {rule["id"] for rule in checks}, {rule["id"] for rule in evidence_rules}
+        if (own_checks | own_rules) & {"review-process-result"} or own_checks & evidence_ids or own_rules & check_ids:
+            raise RunPolicyRefused("POLICY_DRAFT_INVALID")
         check_ids.update(rule["id"] for rule in checks)
         evidence_ids.update(rule["id"] for rule in evidence_rules)
         criteria.append({
