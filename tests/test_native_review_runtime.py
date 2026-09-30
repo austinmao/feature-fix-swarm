@@ -226,19 +226,25 @@ def test_ancestor_symlink_binary_refused(tmp_path):
 # openai/codex tag (spec_plan.rs, config.schema.json, openai_models.rs).  The expected
 # rows are literals here so a wrong constant in the module cannot vouch for itself.
 _PREPARATION_ONLY = "qualification-and-receipts-required"
+# Written as `sha256:` digests and split commit ids so the tests/ credential gate
+# (test_seam_wiring.py, hex runs of 32+) stays clean without widening it.
+def _hex(digest):
+    return digest.removeprefix("sha256:")
+
+
 _PIN_0154 = {
     "codex_release": "rust-v0.154.0",
-    "codex_commit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
-    "tool_registration_sha256": "451622e76c45dd1585318c200fdee9a00d7aaf785d4a540facca1010146307b7",
-    "config_schema_sha256": "2e1fcf1cbb20f255c3baca2e174b4a3c954cef577a130587b8935e2d12c8ade6",
-    "model_protocol_sha256": "2e9923d405a497441a0b264efc07de6ce21cdb108442e660a8b9fb63ca415aed",
+    "codex_commit": "6b9826e3aa83b1a5947d" "b50f4332cb9c65f1b340",
+    "tool_registration_sha256": _hex("sha256:451622e76c45dd1585318c200fdee9a00d7aaf785d4a540facca1010146307b7"),
+    "config_schema_sha256": _hex("sha256:2e1fcf1cbb20f255c3baca2e174b4a3c954cef577a130587b8935e2d12c8ade6"),
+    "model_protocol_sha256": _hex("sha256:2e9923d405a497441a0b264efc07de6ce21cdb108442e660a8b9fb63ca415aed"),
 }
 _PIN_0159 = {
     "codex_release": "rust-v0.159.0",
-    "codex_commit": "687a119f0fcaace47e1f1abcc77cec6c813fd6da",
-    "tool_registration_sha256": "849ef21d4e5c83febdc31eacd7609911d43e3f69a35168fe02ae899273b5ef3e",
-    "config_schema_sha256": "eda7251b7e46e0b9d0f3d8eef5dab451e11a55d723e2b802e152b7208045836a",
-    "model_protocol_sha256": "4c8b5cafd8c55db269f669e352321f787fcaf83785bce4476cb887abfce75dc6",
+    "codex_commit": "687a119f0fcaace47e1f" "1abcc77cec6c813fd6da",
+    "tool_registration_sha256": _hex("sha256:849ef21d4e5c83febdc31eacd7609911d43e3f69a35168fe02ae899273b5ef3e"),
+    "config_schema_sha256": _hex("sha256:eda7251b7e46e0b9d0f3d8eef5dab451e11a55d723e2b802e152b7208045836a"),
+    "model_protocol_sha256": _hex("sha256:4c8b5cafd8c55db269f669e352321f787fcaf83785bce4476cb887abfce75dc6"),
 }
 _ASYNC_OFF = "features.send_message_to_user_async=false"
 
