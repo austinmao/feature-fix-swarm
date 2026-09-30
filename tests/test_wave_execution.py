@@ -1394,19 +1394,39 @@ def _race_once(monkeypatch: pytest.MonkeyPatch, when: str, action) -> None:
 
         monkeypatch.setattr(module, "_base_material", base_material)
         return
+    if when == "before-final-check":
+        real_stat = os.stat
+
+        def stat_through_directory(path, *args, **kwargs):
+            # The restore's last look at config.json goes through the directory fd.
+            if kwargs.get("dir_fd") is not None:
+                fire()
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat_through_directory)
+        return
+    if when == "at-commit":
+        # The moment the bytes are committed: nothing can check after this call.
+        for name in ("rename", "ftruncate"):
+
+            def commit(*args, _real=getattr(os, name), **kwargs):
+                fire()
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(os, name, commit)
+        return
     real_fsync = os.fsync
 
     def fsync(descriptor: int) -> None:
         real_fsync(descriptor)
-        # A synced regular file is the temporary file: the rename is next. A
-        # synced directory means the rename already happened.
-        if stat.S_ISREG(os.fstat(descriptor).st_mode) == (when == "before-rename"):
+        # The synced regular file is the restored config: the write is done.
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
             fire()
 
     monkeypatch.setattr(os, "fsync", fsync)
 
 
-@pytest.mark.parametrize("when", ["after-read", "before-rename"])
+@pytest.mark.parametrize("when", ["after-read", "before-final-check"])
 def test_restore_does_not_write_over_a_config_swapped_after_the_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str,
 ) -> None:
@@ -1431,7 +1451,7 @@ def test_restore_does_not_write_over_a_config_swapped_after_the_read(
     assert sorted(item.name for item in planning.iterdir()) == ["config.json", "config.orig"]
 
 
-@pytest.mark.parametrize("when", ["after-read", "before-rename"])
+@pytest.mark.parametrize("when", ["after-read", "before-final-check"])
 def test_restore_does_not_write_through_a_planning_directory_moved_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str,
 ) -> None:
@@ -1457,7 +1477,7 @@ def test_restore_does_not_write_through_a_planning_directory_moved_out(
     assert sorted(item.name for item in (repository / ".planning").iterdir()) == ["config.json"]
 
 
-def test_planning_directory_moved_after_the_rename_is_refused(
+def test_planning_directory_moved_after_the_write_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from run_state.wave_execution import _inventory
@@ -1466,9 +1486,115 @@ def test_planning_directory_moved_after_the_rename_is_refused(
     head = _track_config(repository, _gsd_json(_gsd_config()))
     _gsd_sets_flag(repository)
     _race_once(
-        monkeypatch, "after-rename",
+        monkeypatch, "after-write",
         lambda: (repository / ".planning").rename(tmp_path / "moved-planning"),
     )
 
     with pytest.raises(WorkspaceRefused, match="SOURCE_CHANGED"):
         _inventory(repository, head)
+
+
+# F49 review round 2: the restore writes in place through the verified inode,
+# and refuses inputs whose Python and JS spellings can differ.
+
+
+def test_hard_linked_config_is_not_restored(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    other = tmp_path / "other-link.json"
+    os.link(repository / _CONFIG, other)
+    assert (repository / _CONFIG).stat().st_nlink == 2
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == flagged
+    assert other.read_bytes() == flagged
+
+
+def test_config_hard_linked_after_the_read_never_writes_the_other_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    flagged = _gsd_sets_flag(repository)
+    other = tmp_path / "other-link.json"
+    _race_once(monkeypatch, "after-read", lambda: os.link(repository / _CONFIG, other))
+
+    _inventory(repository, head)
+
+    assert other.read_bytes() == flagged
+    assert (repository / _CONFIG).read_bytes() == flagged
+
+
+def test_a_config_swapped_after_the_last_check_is_never_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, _gsd_json(_gsd_config()))
+    _gsd_sets_flag(repository)
+    planning = repository / ".planning"
+    swapped = _gsd_json({"swapped": True})
+
+    def swap() -> None:
+        (planning / "config.json").rename(planning / "config.orig")
+        (planning / "config.json").write_bytes(swapped)
+
+    _race_once(monkeypatch, "at-commit", swap)
+
+    _inventory(repository, head)
+
+    # No check can follow the commit point, so the verified inode (now
+    # config.orig) may be rewritten, but the file swapped in must stay as it is.
+    assert (planning / "config.json").read_bytes() == swapped
+
+
+def _python_spelling(base: bytes) -> bytes:
+    """What json.dumps(..., indent=2, ensure_ascii=False) writes for the base plus the flag."""
+    config = json.loads(base)
+    config["workflow"][_FLAG] = False
+    return json.dumps(config, indent=2, ensure_ascii=False).encode("utf-8", "surrogatepass")
+
+
+_JS_SPELLING_DIFFERS = [
+    pytest.param(b'{"2": "a", "1": "b", "workflow": {}}', id="integer-like-keys"),
+    pytest.param(b'{"workflow": {}, "0": true}', id="integer-like-key-zero"),
+    pytest.param(b'{"workflow": {}, "ratio": 1.0}', id="float-one-point-zero"),
+    pytest.param(b'{"workflow": {}, "ratio": 1e21}', id="float-exponent"),
+    pytest.param(b'{"workflow": {}, "ratio": -0.0}', id="float-negative-zero"),
+    pytest.param(b'{"workflow": {}, "big": 9007199254740993}', id="int-above-2-53"),
+    pytest.param(b'{"workflow": {}, "big": -9007199254740993}', id="int-below-minus-2-53"),
+    pytest.param(b'{"workflow": {}, "name": "\\ud800"}', id="lone-surrogate"),
+]
+
+
+@pytest.mark.parametrize("base", _JS_SPELLING_DIFFERS)
+def test_inputs_python_and_js_may_spell_differently_are_never_restored(
+    tmp_path: Path, base: bytes,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _track_config(repository, base)
+    candidate = _python_spelling(base)
+    (repository / _CONFIG).write_bytes(candidate)
+
+    assert _inventory(repository, head).modified == (_CONFIG,)
+    assert (repository / _CONFIG).read_bytes() == candidate
+
+
+def test_ints_within_2_53_are_still_restored(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    base = _gsd_json({"workflow": {}, "hi": 2**53, "lo": -(2**53), "zero": 0})
+    head = _track_config(repository, base)
+    (repository / _CONFIG).write_bytes(_python_spelling(base))
+
+    assert _inventory(repository, head).changed == ()
+    assert (repository / _CONFIG).read_bytes() == base
