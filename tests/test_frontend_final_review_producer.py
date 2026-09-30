@@ -128,38 +128,55 @@ def _admit_as_qualification_does(store, token, evidence_root, *, activity_id, wo
         "sandbox": "workspace-write", "roots": [str(workspace.path)], "policy_sha256": final_contract_hash,
     }
     envelope_sha256 = _sha(_canonical(envelope).encode())
-    child = store.create_child_activity(
-        token, parent_activity_id=parent_activity_id, role="inventory", request_key=activity_request_key,
-        candidate_hash=workspace.input_digest, contract_hash=envelope_sha256, runtime_identity=envelope_sha256,
-        workspace_binding=str(workspace.path), workspace_preparation_id=workspace.id,
-        retry_budget=len(_PROBES) + 1, activity_id=activity_id,
-    )
-    store.transition_activity(token, child.id, expected="pending", new="active", reason="fixture qualification")
-    for index, name in enumerate(_PROBES):
-        request_key = contracts[name]["qualification_request_id"]
-        action = store.reserve_policy_action(token, action="qualification", logical_key=request_key,
-                                             input_hash=hashes[name])
-        intent = store.reserve_qualification_launch(
-            child.id, token, request_key=request_key, policy_action_id=action.id,
-            qualification_contract={"schema": "ffs.qualification-launch/v1", "probe_contract": contracts[name],
-                                    "qualification_envelope": envelope,
-                                    "qualification_envelope_sha256": envelope_sha256},
-            token_reservation=1, managed_input_sha256=workspace.input_digest)
-        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        try:
-            store.authorize_child(store.acknowledge_child(intent.id, token, ProcessIdentity.from_pid(sleeper.pid)), token)
-        finally:
-            sleeper.terminate()
-            sleeper.wait(timeout=10)
-        # The class method, not ``store.complete_launch``: the crash-boundary tests patch the
-        # instance attribute to interrupt the review launch, not these probes.
-        type(store).complete_launch(store, intent.id, token, status="succeeded", token_usage=0,
-                                    evidence=_publish(evidence_root, f"{activity_id}-probe-{index}.json", {"probe": name}))
-    promoted = store.promote_qualified_activity(
-        token, child.id, qualification_request_key=cohort, expected_contract_hashes=hashes,
-        runtime_identity=qualified_runtime_tuple_hash(qualified), final_contract_hash=final_contract_hash,
-        role=role, observation_evidence=_publish(evidence_root, activity_id + "-observation.json", {"qualified": True}))
-    return promoted, store.commit_runtime_receipt(token, promoted.id, qualified)
+    with store.read_transaction() as tx:
+        binding = tx.execute("SELECT role FROM authority_child_bindings WHERE activity_id=?", (activity_id,)).fetchone()
+    # Like qualify_managed_runtime, resume an unpromoted child: the store calls below are
+    # idempotent by activity id, and completed probes are skipped.  A promoted one has only
+    # its receipt left to commit.
+    if binding is None or binding["role"] == "inventory":
+        child = store.create_child_activity(
+            token, parent_activity_id=parent_activity_id, role="inventory", request_key=activity_request_key,
+            candidate_hash=workspace.input_digest, contract_hash=envelope_sha256, runtime_identity=envelope_sha256,
+            workspace_binding=str(workspace.path), workspace_preparation_id=workspace.id,
+            retry_budget=len(_PROBES) + 1, activity_id=activity_id,
+        )
+        if child.state == "pending":
+            store.transition_activity(token, child.id, expected="pending", new="active", reason="fixture qualification")
+        for index, name in enumerate(_PROBES):
+            request_key = contracts[name]["qualification_request_id"]
+            with store.read_transaction() as tx:
+                completed = tx.execute(
+                    "SELECT 1 FROM authority_qualification_launches q JOIN authority_launch_intents i "
+                    "ON i.id=q.intent_id WHERE q.activity_id=? AND q.request_key=? "
+                    "AND i.state='completed_succeeded'", (activity_id, request_key)).fetchone()
+            if completed is not None:
+                continue
+            action = store.reserve_policy_action(token, action="qualification", logical_key=request_key,
+                                                 input_hash=hashes[name])
+            intent = store.reserve_qualification_launch(
+                child.id, token, request_key=request_key, policy_action_id=action.id,
+                qualification_contract={"schema": "ffs.qualification-launch/v1", "probe_contract": contracts[name],
+                                        "qualification_envelope": envelope,
+                                        "qualification_envelope_sha256": envelope_sha256},
+                token_reservation=1, managed_input_sha256=workspace.input_digest)
+            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            try:
+                store.authorize_child(
+                    store.acknowledge_child(intent.id, token, ProcessIdentity.from_pid(sleeper.pid)), token)
+            finally:
+                sleeper.terminate()
+                sleeper.wait(timeout=10)
+            # The class method, not ``store.complete_launch``: the crash-boundary tests patch the
+            # instance attribute to interrupt the review launch, not these probes.
+            type(store).complete_launch(
+                store, intent.id, token, status="succeeded", token_usage=0,
+                evidence=_publish(evidence_root, f"{activity_id}-probe-{index}.json", {"probe": name}))
+        store.promote_qualified_activity(
+            token, child.id, qualification_request_key=cohort, expected_contract_hashes=hashes,
+            runtime_identity=qualified_runtime_tuple_hash(qualified), final_contract_hash=final_contract_hash,
+            role=role, observation_evidence=_publish(evidence_root, activity_id + "-observation.json",
+                                                     {"qualified": True}))
+    return store.get_activity(activity_id), store.commit_runtime_receipt(token, activity_id, qualified)
 
 
 def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
@@ -185,11 +202,13 @@ def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
         qualified = retained_runtimes.setdefault(
             activity_id, _ordinary_runtime(host, workspace.path, home, binary, model, effort))
         with store.read_transaction() as tx:
-            existing = tx.execute("SELECT 1 FROM authority_activities WHERE id=?", (activity_id,)).fetchone()
+            binding = tx.execute("SELECT role FROM authority_child_bindings WHERE activity_id=?",
+                                 (activity_id,)).fetchone()
             receipt_row = tx.execute("SELECT receipt_sha256 FROM authority_runtime_receipts "
                                      "WHERE producer_activity_id=? ORDER BY created_at DESC", (activity_id,)).fetchone()
-        if existing is not None:
-            # Replay: the same reviewer activity, runtime and receipt are retained.
+        if binding is not None and binding["role"] != "inventory" and receipt_row is not None:
+            # Replay: the same reviewer activity, runtime and receipt are retained.  An activity
+            # still bound as inventory, or promoted without its receipt, resumes below.
             return QualifiedHostRuntime(store.get_activity(activity_id), qualified,
                                         SimpleNamespace(receipt_sha256=receipt_row["receipt_sha256"]), None, None)
         child, receipt = _admit_as_qualification_does(
