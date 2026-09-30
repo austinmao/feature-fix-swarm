@@ -37,12 +37,14 @@ _GIT_TIMEOUT = 30.0
 _SHA1 = re.compile(r"[0-9a-f]{40}")
 _WAVE_REQUEST_PREFIX = ".planning/.ffs-wave-requests/"
 _INTERNAL_DIRECTORY_ROOTS = (
-    ".gsd",
     ".ffs-observer-tmp",
     ".planning/.ffs-wave-requests",
     ".planning/.ffs-worker-channel",
     ".planning/.ffs-supervised",
 )
+# gsd-core runtime state: exempt only as UNTRACKED regular files under a real
+# top-level directory. Tracked changes under these roots stay in the inventory.
+_UNTRACKED_RUNTIME_ROOTS = (".gsd",)
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,25 @@ def _internal_path(relative: str) -> bool:
         relative == root or relative.startswith(root + "/")
         for root in _INTERNAL_DIRECTORY_ROOTS
     )
+
+
+def _refuse_unsafe_runtime_roots(workspace: Path, untracked: list[str]) -> None:
+    """Refuse a runtime root that is an alias, a non-directory or holds a non-regular file."""
+    for item in untracked:
+        top = unicodedata.normalize("NFC", item.split("/", 1)[0]).casefold()
+        if top in _UNTRACKED_RUNTIME_ROOTS and not _untracked_runtime_path(item):
+            raise WorkspaceRefused("UNSAFE_SELECTION_PATH")
+        if _untracked_runtime_path(item):
+            try:
+                mode = os.lstat(workspace / item).st_mode
+            except OSError as error:
+                raise WorkspaceRefused("SOURCE_CHANGED") from error
+            if not stat.S_ISREG(mode):
+                raise WorkspaceRefused("UNSAFE_SELECTION_PATH")
+
+
+def _untracked_runtime_path(relative: str) -> bool:
+    return any(relative.startswith(root + "/") for root in _UNTRACKED_RUNTIME_ROOTS)
 
 
 def _git_bytes(workspace: Path, *args: str, allowed: tuple[int, ...] = (0,)) -> bytes:
@@ -187,7 +208,12 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
             )
         )
     ]
-    untracked = [item for item in untracked if not _internal_path(item)]
+    _refuse_unsafe_runtime_roots(workspace, untracked)
+    untracked = [
+        item
+        for item in untracked
+        if not _internal_path(item) and not _untracked_runtime_path(item)
+    ]
     all_paths = [*modified, *deleted, *untracked]
     portable = [unicodedata.normalize("NFC", item).casefold() for item in all_paths]
     if len(portable) != len(set(portable)):

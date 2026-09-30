@@ -18,12 +18,19 @@ all skills.
   sentinel entered the wave snapshot and changed its input digest, which then
   no longer matched the clean preparation digest the acceptance receipt
   carries. The wave worker's worktree gets the same untracked `.gsd/`, so the
-  file could also reach the candidate output. `.gsd` is now an internal root
-  alongside `.ffs-observer-tmp` and the `.planning/.ffs-*` directories.
-  Snapshot capture, output harvest and the candidate chain all read one
-  inventory, so all three ignore it. The exemption is that one root only;
-  untracked deliverables such as `newfile.py` or `pkg/.gsd/kept.py` are still
-  captured.
+  file could also reach the candidate output. Snapshot capture, output harvest
+  and the candidate chain all read one inventory, so it now skips untracked
+  files under `.gsd/`. The exemption is narrow on purpose:
+  - it covers untracked regular files only. A tracked `.gsd/` file that is
+    modified or deleted stays in the inventory, the harvest and the candidate
+    chain exactly as before;
+  - the top-level `.gsd` must be a real directory. An untracked `.gsd` that is
+    a file or a symlink, a symlink or a special node (FIFO, socket, device)
+    inside `.gsd/`, and a case alias such as `.GSD` or `.Gsd` (which
+    case-insensitive volumes treat as the same name) are refused with
+    `UNSAFE_SELECTION_PATH` instead of being exempted or captured;
+  - anything else untracked, such as `newfile.py`, `.gsdfoo.txt` or
+    `pkg/.gsd/kept.py`, is still captured.
 
 ### Fixed (2026-09-29, spec-014 Release C: F43 private TMPDIR per managed Codex launch)
 
