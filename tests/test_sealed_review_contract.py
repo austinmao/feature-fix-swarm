@@ -357,7 +357,8 @@ def test_contract_criterion_evidence_id_text_names_rule_and_mapped_check_ids_onl
     from run_state.sealed_review import final_review_output_contract
     text = final_review_output_contract(_sealed(), candidate_hash='1' * 64)['evidence']['id']
     assert 'mapped check' in text and 'rule' in text
-    assert 'invariant' not in text  # invariant ids are finding-only, so the grammar must not offer them
+    # Invariant ids are finding-only: any sentence offering them must say so.
+    assert all(sentence.startswith('Finding') for sentence in text.split('. ') if 'invariant' in sentence)
 
 
 @pytest.mark.parametrize('scope', ['criterion', 'invariant', 'check', 'pass'])

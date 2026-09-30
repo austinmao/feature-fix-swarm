@@ -50,7 +50,7 @@ def final_review_output_contract(sealed, *, candidate_hash: str) -> dict:
         "criteria_membership": "Exactly the listed criterion IDs; each value follows criterion_result; no omissions or extra IDs.",
         "evidence": {
             "required_fields": ["id", "locator", "sha256"], "additional_fields": False,
-            "id": "Supplied rule/check/invariant ID, never an artifact name; unique across criterion evidence references.",
+            "id": "Criterion evidence: an evidence-rule ID or a mapped check ID of that criterion, never an artifact name; unique per criterion. Finding evidence may also use invariant IDs.",
             "locator": "Absolute path of the supplied retained evidence file.",
             "sha256": "Exact lowercase SHA-256 of that supplied evidence file.",
         },

@@ -8,6 +8,29 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-01, spec-014 Release C: F54 final-review evidence ids follow the published grammar)
+
+- The sealed final-review response grammar (`final_review_output_contract`,
+  `evidence.id`) told the reviewer a criterion evidence id is a
+  "rule/check/invariant" id, but `validate_native_review_evidence` pooled
+  criterion evidence only under the criterion's evidence-rule ids. A reviewer
+  that followed the grammar, citing the required rule id (`check-logs`) plus one
+  of the criterion's mapped check ids (`version-flag`) with that check's real
+  `result.json` locator and sha256, was refused
+  `FINAL_REVIEW_EVIDENCE_SCOPE_INVALID`, the lifecycle handed back, and the run
+  ended with no recovery producer (M3 attempt 33, Codex 0.159.0). The spec has
+  no rule for criterion evidence ids, so the published grammar governs: a
+  criterion evidence item may now be labelled by one of that criterion's
+  evidence-rule ids (pool: the terminal receipts of all its checks, as before)
+  or by one of its mapped check ids (pool: only that check's own receipt, which
+  is stricter). Ids stay unique per criterion, `(locator, sha256)` must come
+  from the pool, a pass still needs every required rule id
+  (`FINAL_REVIEW_EVIDENCE_MISSING`), and another criterion's check id, an
+  invariant id, an unknown id and a selected source stay refused. A rule and a
+  check sharing one id must satisfy both pools. The grammar text now says
+  exactly this and names invariant ids as finding-only. Findings evidence
+  validation already matched the grammar and is unchanged.
+
 ### Fixed (2026-09-30, spec-014 Release C: F49 gsd's ephemeral auto-chain flag write is no change)
 
 - gsd-core's `execute-phase` workflow tells the orchestrator to run

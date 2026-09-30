@@ -145,9 +145,11 @@ def final_review_input_context(store, token, *, acceptance_hash, candidate_hash,
 def validate_native_review_evidence(output, context):
     """Restrict reported references to their supplied criterion/check scope.
 
-    Rules may name a supervised terminal receipt for their own criterion.
-    Findings may also cite exact selected source captures through criterion
-    rule or invariant IDs. Check IDs and criterion verdicts stay check-only.
+    Criterion evidence is labelled by one of that criterion's rule IDs (any of
+    its checks' terminal receipts) or by one of its mapped check IDs (only that
+    check's own receipt). Findings may also cite exact selected source captures
+    through criterion rule or invariant IDs. Check IDs and criterion verdicts
+    stay check-only.
     """
     def refused():
         raise SupervisorRefused('FINAL_REVIEW_EVIDENCE_SCOPE_INVALID')
@@ -174,7 +176,13 @@ def validate_native_review_evidence(output, context):
         for identifier, checked in output['criteria'].items():
             criterion = criteria[identifier]
             permitted = pool(check['id'] for check in criterion['checks'])
-            references(checked['evidence'], {rule['id']: permitted for rule in criterion['evidence_rules']})
+            pools = {rule['id']: permitted for rule in criterion['evidence_rules']}
+            for check in criterion['checks']:
+                own = pool([check['id']])
+                # The published grammar lets a mapped check ID label its own terminal
+                # receipt. A shared rule/check ID must satisfy both meanings.
+                pools[check['id']] = pools.get(check['id'], own) & own
+            references(checked['evidence'], pools)
         for finding in output['findings']:
             criterion_ids, check_ids, invariant_ids = (
                 finding[key] for key in ('criterion_ids', 'check_ids', 'invariant_ids'))
