@@ -445,3 +445,111 @@ def test_gsd_exemption_is_not_blanket_for_deliverable_untracked_files(tmp_path: 
     assert _inventory(repository, head).untracked == tuple(sorted(deliverables))
     result = harvest_scoped_patch(repository, head, deliverables, (), tmp_path / "evidence")
     assert result.changed_files == tuple(sorted(deliverables))
+
+
+def _commit_tracked_gsd(repository: Path) -> str:
+    (repository / ".gsd").mkdir(exist_ok=True)
+    (repository / ".gsd/config.json").write_text('{"mode": "base"}\n')
+    (repository / ".gsd/gone.json").write_text("{}\n")
+    git(repository, "add", ".gsd/config.json", ".gsd/gone.json")
+    git(repository, "commit", "-qm", "track gsd files")
+    return git(repository, "rev-parse", "HEAD")
+
+
+def test_tracked_gsd_changes_stay_in_wave_inventory_and_harvest(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, _ = fixture_repo(tmp_path)
+    head = _commit_tracked_gsd(repository)
+    (repository / ".gsd/config.json").write_text('{"mode": "changed"}\n')
+    (repository / ".gsd/gone.json").unlink()
+    _write_gsd_sentinel(repository)
+
+    inventory = _inventory(repository, head)
+    assert inventory.modified == (".gsd/config.json",)
+    assert inventory.deleted == (".gsd/gone.json",)
+    assert inventory.untracked == ()
+    result = harvest_scoped_patch(
+        repository, head, (".gsd/config.json",), (".gsd/gone.json",), tmp_path / "evidence",
+    )
+    assert result.changed_files == (".gsd/config.json", ".gsd/gone.json")
+
+
+def test_tracked_gsd_changes_stay_in_wave_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = _repository(tmp_path)
+    _commit_tracked_gsd(primary)
+    monkeypatch.chdir(primary)
+    for key in INHERITED_CONTEXT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    def capture(store, token, context):
+        with store.transaction() as tx:
+            preparation_id = tx.execute(
+                "SELECT preparation_id FROM context_runs WHERE repository_id=? AND run_id=?",
+                (token.repository_id, token.run_id),
+            ).fetchone()[0]
+            retained = json.dumps({
+                "schema": "ffs.input-snapshot/v1",
+                "upstream": {
+                    "project": "fixture-project",
+                    "workstream": "feature-014",
+                    "session_key": "fixture-session",
+                },
+            }, sort_keys=True, separators=(",", ":"))
+            tx.execute(
+                "UPDATE context_workspaces SET selected_manifest_json=? WHERE preparation_id=?",
+                (retained, preparation_id),
+            )
+        preparation = inspect_workspace(store, preparation_id)
+        parent = Path(token.workspace)
+        (parent / ".gsd/config.json").write_text('{"mode": "changed"}\n')
+        (parent / ".gsd/gone.json").unlink()
+        _write_gsd_sentinel(parent)
+        head = git(parent, "rev-parse", "HEAD")
+
+        snapshot = capture_wave_snapshot(
+            store, token, preparation, wave_manifest(token, context, head),
+            tmp_path / "evidence",
+        )
+
+        assert [(entry["operation"], entry["path"]) for entry in snapshot.manifest["entries"]] == [
+            ("copy", ".gsd/config.json"),
+            ("delete", ".gsd/gone.json"),
+        ]
+        return 0
+
+    assert _cmd_fixture_start(_args(tmp_path / "authority"), on_ready=capture) == 0
+
+
+@pytest.mark.parametrize("kind", ["symlink", "file", "fifo-inside", "symlink-inside"])
+def test_unsafe_gsd_nodes_are_refused(tmp_path: Path, kind: str) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = fixture_repo(tmp_path)
+    if kind == "symlink":
+        os.symlink("tracked.txt", repository / ".gsd")
+    elif kind == "file":
+        (repository / ".gsd").write_text("not a directory\n")
+    else:
+        (repository / ".gsd").mkdir()
+        if kind == "fifo-inside":
+            os.mkfifo(repository / ".gsd/pipe")
+        else:
+            os.symlink("../tracked.txt", repository / ".gsd/link")
+
+    with pytest.raises(WorkspaceRefused, match="UNSAFE_SELECTION_PATH"):
+        _inventory(repository, head)
+
+
+@pytest.mark.parametrize("alias", [".GSD", ".Gsd"])
+def test_gsd_case_alias_is_refused_not_exempted(tmp_path: Path, alias: str) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = fixture_repo(tmp_path)
+    (repository / alias).mkdir()
+    (repository / alias / "x").write_text("alias\n")
+
+    with pytest.raises(WorkspaceRefused, match="UNSAFE_SELECTION_PATH"):
+        _inventory(repository, head)
