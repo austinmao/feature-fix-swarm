@@ -407,6 +407,55 @@ def test_legacy_colliding_seal_records_a_receipt_when_the_rule_ids_are_cited(sha
     assert len(validate_role_receipt(receipt).evidence) == 3
 
 
+def _contract_for(context):
+    """The published output contract for a seal holding exactly this context's criteria."""
+    from run_state.sealed_review import final_review_output_contract
+    criteria = [{'id': item['id'], 'objective_clause': 'fixture clause',
+                 'checks': [{'id': check['id'], 'kind': 'command', 'locator': '/usr/bin/true'}
+                            for check in item['checks']],
+                 'evidence_rules': [{'id': rule['id'], 'kind': 'log', 'required': rule['required']}
+                                    for rule in item['evidence_rules']]} for item in context['criteria']]
+    sealed = _sealed()
+    return final_review_output_contract(replace(sealed, material={**sealed.material, 'criteria': criteria}),
+                                        candidate_hash='1' * 64)
+
+
+@pytest.mark.parametrize('shape', ['foreign-rule', 'reserved'])
+def test_contract_lists_exactly_the_criterion_evidence_ids_the_validator_accepts(shape):
+    # R3-1: the published grammar must not permit a label that the validator refuses.
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.supervisor import SupervisorRefused
+    colliding, context = _legacy_collision_context(shape)
+    contract = _contract_for(context)
+    for criterion in context['criteria']:
+        listed = set(contract['criteria'][criterion['id']]['evidence_ids'])
+        candidates = {item['id'] for item in criterion['checks'] + criterion['evidence_rules']}
+        receipt = context['checks'][criterion['checks'][0]['id']]['evidence'][0]
+        for candidate in sorted(candidates):
+            output = {'criteria': {criterion['id']: {'status': 'passed', 'evidence': [{'id': candidate, **receipt}]}},
+                      'findings': []}
+            try:
+                validate_native_review_evidence(output, context)
+                accepted = True
+            except SupervisorRefused:
+                accepted = False
+            assert accepted == (candidate in listed), (criterion['id'], candidate)
+    assert colliding not in contract['criteria']['AC-1']['evidence_ids']
+    assert 'rule-1' in contract['criteria']['AC-1']['evidence_ids']
+
+
+def test_contract_lists_every_rule_and_mapped_check_id_when_nothing_can_collide():
+    from run_state.sealed_review import final_review_output_contract
+    contract = final_review_output_contract(_sealed(), candidate_hash='1' * 64)
+    assert contract['criteria']['AC-1']['evidence_ids'] == ['check-1', 'optional', 'proof-1']
+
+
+def test_contract_evidence_id_text_points_at_the_per_criterion_list():
+    from run_state.sealed_review import final_review_output_contract
+    text = final_review_output_contract(_sealed(), candidate_hash='1' * 64)['evidence']['id']
+    assert 'evidence_ids' in text
+
+
 def test_contract_criterion_evidence_id_text_names_rule_and_mapped_check_ids_only():
     from run_state.sealed_review import final_review_output_contract
     text = final_review_output_contract(_sealed(), candidate_hash='1' * 64)['evidence']['id']
