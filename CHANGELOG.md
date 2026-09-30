@@ -8,6 +8,41 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F45 wave inventories honor the repository's .gitignore)
+
+- A wave worker that ran pytest, coverage and ruff in its worktree left
+  untracked `.coverage`, `.pytest_cache/`, `.ruff_cache/`, `__pycache__/` and
+  `tests/__pycache__/`, all ignored by the repository's own gitignore rules.
+  The wave inventory listed untracked files with no exclude options, so
+  `harvest_scoped_patch` counted them as out-of-scope modifications and
+  refused the wave with `WAVE_SCOPE_VIOLATION` even though the tracked changes
+  matched the plan's `files_modified` exactly. The inventory now lists
+  untracked files with `git ls-files --others
+  --exclude-per-directory=.gitignore`. Snapshot capture, output harvest, the
+  candidate chain, frontend completion, local check verification and recovery
+  trial checks all read that one inventory, so they agree on which files
+  count. The change is narrow on purpose:
+  - only in-tree `.gitignore` files count. `--exclude-standard` is not used,
+    because it also reads `.git/info/exclude` and the user's
+    `core.excludesFile`, which are host-local and would make input digests
+    differ between hosts;
+  - a worker cannot add ignore rules of its own. Any untracked file named
+    `.gitignore` (compared case-insensitively) anywhere in the workspace is
+    refused with `UNSAFE_SELECTION_PATH`. It is found from the unfiltered
+    untracked listing, so a self-ignoring `.gitignore` containing `*` is caught
+    too. This also covers a `.gitignore` that a tool writes inside its own
+    cache directory, which pytest and ruff both do, so a worker should run
+    those tools with their caches off (`-p no:cacheprovider`, `--no-cache`). A
+    tracked `.gitignore` edit is an ordinary tracked change and goes through
+    the scope check;
+  - the safety checks still see ignored paths. An ignored `.gsd` symlink, a
+    case alias such as `.GSD` and an ignored FIFO or other special node are
+    still refused with `UNSAFE_SELECTION_PATH`. Only the inventory entries that
+    feed snapshots, harvest, material and digests are filtered;
+  - an untracked file that no gitignore rule matches, such as `newfile.py`, is
+    still captured, and an out of scope one still raises
+    `WAVE_SCOPE_VIOLATION`.
+
 ### Fixed (2026-09-30, spec-014 Release C: F44 gsd runtime state stays out of wave snapshots)
 
 - After gsd-core's `dispatch-isolation` step ran in the orchestrator's

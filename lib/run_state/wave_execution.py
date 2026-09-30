@@ -204,23 +204,19 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
             # conflict-free tree. Refuse any future or repository-specific
             # status instead of guessing how to snapshot it.
             raise WorkspaceRefused("WAVE_CHANGE_UNSUPPORTED")
-    untracked = [
-        _path(item)
-        for item in _split_nul(
-            _git_bytes(
-                workspace,
-                "--literal-pathspecs",
-                "ls-files",
-                "--others",
-                "-z",
-                "--",
-            )
-        )
-    ]
-    _refuse_unsafe_runtime_roots(workspace, untracked)
+    # Honor only the repository's own in-tree .gitignore files. Never
+    # --exclude-standard: it also reads .git/info/exclude and core.excludesFile,
+    # which are host-local and would make digests differ between hosts. The
+    # filtered view is listed first, so a .gitignore that appears later is
+    # still caught by the unfiltered view below.
+    visible = _untracked_paths(workspace, "--exclude-per-directory=.gitignore")
+    everything = _untracked_paths(workspace)
+    _refuse_untracked_gitignore(everything)
+    # Safety checks keep seeing ignored paths; only the entries are filtered.
+    _refuse_unsafe_runtime_roots(workspace, everything)
     untracked = [
         item
-        for item in untracked
+        for item in visible
         if not _internal_path(item) and not _untracked_runtime_path(item)
     ]
     all_paths = [*modified, *deleted, *untracked]
@@ -233,6 +229,36 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
         tuple(sorted(deleted)),
         tuple(sorted(untracked)),
     )
+
+
+def _untracked_paths(workspace: Path, *options: str) -> list[str]:
+    return [
+        _path(item)
+        for item in _split_nul(
+            _git_bytes(
+                workspace,
+                "--literal-pathspecs",
+                "ls-files",
+                "--others",
+                *options,
+                "-z",
+                "--",
+            )
+        )
+    ]
+
+
+def _refuse_untracked_gitignore(untracked: list[str]) -> None:
+    """Refuse any untracked .gitignore so a worker cannot add ignore rules.
+
+    Tracked .gitignore edits are ordinary tracked changes and already pass the
+    scope check. The name is compared NFC and case-folded because a
+    case-insensitive volume reads ``.GitIgnore`` as ``.gitignore``.
+    """
+    for item in untracked:
+        name = unicodedata.normalize("NFC", item.rsplit("/", 1)[-1]).casefold()
+        if name == ".gitignore":
+            raise WorkspaceRefused("UNSAFE_SELECTION_PATH")
 
 
 def _refuse_untracked_specials(workspace: Path) -> None:
