@@ -35,6 +35,18 @@ all skills.
   - Backstop: `Supervisor._bind_shared_resource` converts `ResourceGroupRefused`
     to `SupervisorRefused` with the same code, so no path can escape as an
     untyped traceback.
+  - Boundary (F50 review round 1): resource-layer refusals now surface as the
+    managed-run typed envelope (exit 78, the refusal's own code, recovery action
+    `inspect_managed_admission`) at the one place that already maps
+    `SupervisorRefused`, `FrontendPolicyRefused` and `RunPolicyRefused`
+    (`_managed_run_refusals` in `cli.py`, used by `_cmd_fixture_start` and
+    `prepare_frontend_run`). That covers `ResourceGroupRefused` (a refusal
+    during group close used to escape as a Python traceback),
+    `ManagedAdmissionRefused` (was exit 6 with no managed cause) and
+    `ControlStoreRefused` with a `RESOURCE_` code, such as
+    `RESOURCE_PARENT_GROUP_ENDED` (was exit 5). Other authority refusals, for
+    example `FENCE_REVOKED` (exit 4), are re-raised unchanged and keep their
+    own contract. No caller below the boundary relies on these escaping.
   - Tests use real stores, supervisors, admission queue and coordinators. The
     lifecycle assembly runs the real Codex `qualify_runtime` closure and
     `produce_final_review` with a scripted probe launched through the
@@ -42,7 +54,9 @@ all skills.
     lease (null `group_id`), the orchestrator stays on the outer supervisor, and
     the run reaches DONE. Further tests cover the ended-group refusal with no
     intent row, the typed backstop, a wave-worker probe that still claims its
-    prepaid slot, and the Claude closure routing a given supervisor. The Codex
+    prepaid slot, the Claude closure routing a given supervisor, and the
+    boundary envelope for a late child, a group-close refusal and a reviewer
+    admission refusal, with a guard that `FENCE_REVOKED` still exits 4. The Codex
     binary, runtime staging and the observer's real probes are fixture stand-ins.
 
 ### Fixed (2026-09-30, spec-014 Release C: F47 sealed checks write their output through pipes)

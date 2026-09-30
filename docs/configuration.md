@@ -328,6 +328,7 @@ managed run, the recovery action depends on the code:
 | `PRELAUNCH_PLAN_PATH_UNSAFE` | The persisted upstream planning root could not be rebased onto this run's prepared workspace | `reconcile_upstream_binding` |
 | `MANAGED_FRONTEND_MODE_UNSUPPORTED` | The invocation text names a mode (`--dry-run` or `--adhoc`) the staged `gsd-execute-phase` command cannot honor | `drop_the_unsupported_mode_flag` |
 | `MANAGED_PROMPT_VALUE_UNSAFE` | The planning root, project, or workstream carries a control character or an unsafe segment and cannot be placed in the host prompt | `rename_the_planning_path` |
+| a shared-resource code, e.g. `RESOURCE_PARENT_GROUP_ENDED`, `RESOURCE_OBSERVATION_UNAVAILABLE` | A shared-resource admission or prepaid-parent-group refusal ended the managed run (other authority refusals such as `FENCE_REVOKED` keep their own exit code) | `inspect_managed_admission` |
 | any other supervisor code, e.g. `HOST_CAPABILITY_UNQUALIFIED`, `WAVE_EXECUTION_UNPROVEN` | The selected host backend has not demonstrated managed admission | `qualify_host_adapter` |
 | a policy code, e.g. `FRONTEND_CHECK_CANDIDATE_STALE` | The managed run policy refused the transition | `correct_request` |
 
