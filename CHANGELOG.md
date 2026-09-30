@@ -8,6 +8,66 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-09-30, spec-014 Release C: F45 wave inventories honor the repository's .gitignore)
+
+- A wave worker that ran pytest, coverage and ruff in its worktree left
+  untracked `.coverage`, `.pytest_cache/`, `.ruff_cache/`, `__pycache__/` and
+  `tests/__pycache__/`, all ignored by the repository's own gitignore rules.
+  The wave inventory listed untracked files with no exclude options, so
+  `harvest_scoped_patch` counted them as out-of-scope modifications and
+  refused the wave with `WAVE_SCOPE_VIOLATION` even though the tracked changes
+  matched the plan's `files_modified` exactly. The inventory now lists
+  untracked files with `git ls-files --others
+  --exclude-per-directory=.gitignore`. Snapshot capture, output harvest, the
+  candidate chain, frontend completion, local check verification and recovery
+  trial checks all read that one inventory, so they agree on which files
+  count. The change is narrow on purpose:
+  - only in-tree `.gitignore` files count, tracked or untracked.
+    `--exclude-standard` is not used, because it also reads
+    `.git/info/exclude` and the user's `core.excludesFile`, which are
+    host-local and would make input digests differ between hosts;
+  - an untracked `.gitignore` is honored too, because pytest and ruff each
+    write one containing `*` into their own cache directory. That is safe
+    because an ignore rule only hides untracked files. Hidden files are never
+    harvested or integrated, and sealed checks run in a freshly prepared
+    workspace that holds only manifest entries, so a rule can only leave things
+    out and never inject them. A missing deliverable fails the checks. An
+    untracked `.gitignore` that does not ignore itself is itself an untracked
+    change and is scope-checked like any other file, and a tracked
+    `.gitignore` edit is an ordinary tracked change under the scope check;
+  - a declared output that an ignore rule hides is refused. The inventory is
+    scope-blind on purpose, so every consumer agrees on it, and it simply
+    leaves an ignored file out. `harvest_scoped_patch` therefore refuses with
+    `WAVE_SCOPE_VIOLATION` when a path in `files_modified` exists on disk as an
+    ignored untracked file, instead of completing the wave with an empty or
+    partial patch. Declared paths need not be canonical, so the comparison uses
+    normalized, NFC, case-folded keys on both sides: `build//out.txt`,
+    `./build/out.txt` and `Build/Out.txt` all match a hidden `build/out.txt`,
+    and any doubt refuses. The check repeats at every inventory of a harvest
+    but looks only at declared paths. An ignored file the plan never declared,
+    including one that appears while the harvest runs, stays harmless, while a
+    declared output that becomes hidden mid-harvest is refused;
+  - ignore matching is case sensitive whatever the repository's local
+    `core.ignoreCase`: both untracked listings run with
+    `-c core.ignoreCase=false`, so the same workspace inventories the same way
+    everywhere. A case-mismatched file (`X.TSBUILDINFO` against a
+    `*.tsbuildinfo` rule) stays visible and scope-checked, which fails closed.
+    The tracked diff does not share that pin, so an untracked name that
+    NFC-casefolds onto a tracked path but spells it differently is refused with
+    `UNSAFE_SELECTION_PATH`. That is what a case-only rename of a tracked file
+    (tracked `Foo.txt`, on disk `foo.txt`) looks like on a case-insensitive
+    volume;
+  - the safety checks still see ignored paths. An ignored `.gsd` symlink, a
+    case alias such as `.GSD` and an ignored FIFO or other special node are
+    still refused with `UNSAFE_SELECTION_PATH`. Only the inventory entries that
+    feed snapshots, harvest, material and digests are filtered. The filtered and
+    unfiltered listings are two separate git calls, so the runtime-root checks
+    run on the union of both, and a filtered path the unfiltered listing does
+    not contain (the tree changed in between) is refused with `SOURCE_CHANGED`;
+  - an untracked file that no gitignore rule matches, such as `newfile.py`, is
+    still captured, and an out of scope one still raises
+    `WAVE_SCOPE_VIOLATION`.
+
 ### Fixed (2026-09-30, spec-014 Release C: F44 gsd runtime state stays out of wave snapshots)
 
 - After gsd-core's `dispatch-isolation` step ran in the orchestrator's

@@ -578,3 +578,420 @@ def test_tracked_unchanged_gsd_directory_gives_empty_inventory(tmp_path: Path) -
 
     inventory = _inventory(repository, head)
     assert inventory.changed == ()
+
+
+# F45: untracked wave inventories honor the repository's own in-tree .gitignore.
+
+_CACHE_IGNORES = ".coverage\n.pytest_cache/\n.ruff_cache/\n__pycache__/\n"
+
+
+def ignoring_repo(
+    tmp_path: Path, extra: str = "", base: str = _CACHE_IGNORES,
+) -> tuple[Path, str]:
+    repository, _ = fixture_repo(tmp_path)
+    (repository / ".gitignore").write_text(base + extra)
+    git(repository, "add", ".gitignore")
+    git(repository, "commit", "-qm", "ignore tool caches")
+    return repository, git(repository, "rev-parse", "HEAD")
+
+
+def write_tool_caches(root: Path) -> None:
+    (root / ".coverage").write_bytes(b"coverage\0")
+    for relative in (
+        ".pytest_cache/x", ".ruff_cache/y", "__pycache__/m.pyc", "tests/__pycache__/m.pyc",
+    ):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"cache\0")
+
+
+def test_ignored_tool_caches_are_not_wave_changes(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = ignoring_repo(tmp_path)
+    (repository / "tracked.txt").write_text("changed\n")
+    write_tool_caches(repository)
+
+    assert _inventory(repository, head).untracked == ()
+    result = harvest_scoped_patch(
+        repository, head, ("tracked.txt",), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == result.modified_files == ("tracked.txt",)
+    assert result.patch.count("diff --git ") == 1
+    for name in (".coverage", "pytest_cache", "ruff_cache", "__pycache__", ".pyc"):
+        assert name not in result.patch
+
+
+def test_ignored_caches_do_not_hide_an_out_of_scope_untracked_file(tmp_path: Path) -> None:
+    repository, head = ignoring_repo(tmp_path)
+    write_tool_caches(repository)
+    assert harvest_scoped_patch(repository, head, (), (), tmp_path / "clean").changed_files == ()
+
+    (repository / "undeclared.txt").write_text("outside\n")
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(repository, head, (), (), tmp_path / "scope-evidence")
+
+
+def test_self_ignoring_tool_cache_dirs_are_not_wave_changes(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    # pytest and ruff each write a .gitignore containing "*" into their cache
+    # directory. The tracked .gitignore here does not list either directory.
+    repository, head = ignoring_repo(tmp_path, base=".coverage\n__pycache__/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    for relative, content in (
+        (".pytest_cache/.gitignore", "# Created by pytest automatically.\n*\n"),
+        (".pytest_cache/v/x", "cache\n"),
+        (".ruff_cache/.gitignore", "*\n"),
+        (".ruff_cache/0/y", "cache\n"),
+        ("__pycache__/m.pyc", "cache\n"),
+    ):
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    (repository / ".coverage").write_bytes(b"coverage\0")
+
+    assert _inventory(repository, head).untracked == ()
+    result = harvest_scoped_patch(
+        repository, head, ("tracked.txt",), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == result.modified_files == ("tracked.txt",)
+    assert result.patch.count("diff --git ") == 1
+    for name in ("pytest_cache", "ruff_cache", "__pycache__", ".coverage"):
+        assert name not in result.patch
+
+
+def test_self_ignoring_untracked_gitignore_hides_itself_and_is_not_integrated(
+    tmp_path: Path,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = fixture_repo(tmp_path)
+    (repository / "sub").mkdir()
+    (repository / "sub/.gitignore").write_text("*\n")
+    (repository / "sub/evil.py").write_text("evil\n")
+
+    assert _inventory(repository, head).changed == ()
+    result = harvest_scoped_patch(repository, head, (), (), tmp_path / "evidence")
+    assert result.changed_files == ()
+    assert result.patch == ""
+
+
+def test_untracked_gitignore_that_is_not_self_ignoring_is_an_ordinary_change(
+    tmp_path: Path,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = fixture_repo(tmp_path)
+    (repository / "sub").mkdir()
+    (repository / "sub/.gitignore").write_text("*.log\n")
+    (repository / "sub/noise.log").write_text("hidden\n")
+
+    assert _inventory(repository, head).untracked == ("sub/.gitignore",)
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(repository, head, (), (), tmp_path / "scope-evidence")
+    result = harvest_scoped_patch(
+        repository, head, ("sub/.gitignore",), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == ("sub/.gitignore",)
+    assert "noise.log" not in result.patch
+
+
+def test_tracked_gitignore_change_is_scope_checked_like_any_tracked_change(
+    tmp_path: Path,
+) -> None:
+    repository, head = ignoring_repo(tmp_path)
+    (repository / ".gitignore").write_text(_CACHE_IGNORES + "newfile.py\n")
+    (repository / "newfile.py").write_text("hidden by a tracked edit\n")
+
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(repository, head, (), (), tmp_path / "evidence")
+
+
+@pytest.mark.parametrize("source", ["global-excludes", "info-exclude"])
+def test_host_local_excludes_do_not_hide_untracked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = fixture_repo(tmp_path)
+    (repository / "newfile.py").write_text("deliverable\n")
+    if source == "global-excludes":
+        ignored = tmp_path / "global.ignore"
+        ignored.write_text("newfile.py\n")
+        config = tmp_path / "global.gitconfig"
+        config.write_text(f"[core]\n\texcludesFile = {ignored}\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    else:
+        exclude = Path(git(
+            repository, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude",
+        ))
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text("newfile.py\n")
+
+    # Control: the host-local source really would hide the file.
+    assert git(repository, "ls-files", "--others", "--exclude-standard") == ""
+    assert _inventory(repository, head).untracked == ("newfile.py",)
+    result = harvest_scoped_patch(
+        repository, head, ("newfile.py",), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == ("newfile.py",)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["symlink", "fifo-inside", "fifo-elsewhere", "case-alias", "fifo-under-untracked-rule"],
+)
+def test_ignored_unsafe_nodes_are_still_refused(tmp_path: Path, kind: str) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = ignoring_repo(tmp_path, extra=".gsd\n.GSD\ncache/\n")
+    if kind == "symlink":
+        os.symlink("tracked.txt", repository / ".gsd")
+    elif kind == "fifo-inside":
+        (repository / ".gsd").mkdir()
+        os.mkfifo(repository / ".gsd/pipe")
+    elif kind == "fifo-elsewhere":
+        (repository / "cache").mkdir()
+        os.mkfifo(repository / "cache/pipe")
+    elif kind == "fifo-under-untracked-rule":
+        (repository / "sub").mkdir()
+        (repository / "sub/.gitignore").write_text("*\n")
+        os.mkfifo(repository / "sub/pipe")
+    else:
+        (repository / ".GSD").mkdir()
+        (repository / ".GSD/x").write_text("alias\n")
+
+    with pytest.raises(WorkspaceRefused, match="UNSAFE_SELECTION_PATH"):
+        _inventory(repository, head)
+
+
+def test_ignored_caches_do_not_change_wave_material_entries(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory, _material_entries
+
+    repository, head = ignoring_repo(tmp_path)
+    (repository / "tracked.txt").write_text("changed\n")
+    (repository / "newfile.py").write_text("deliverable\n")
+    clean = _material_entries(repository, head, _inventory(repository, head))
+    write_tool_caches(repository)
+
+    assert _inventory(repository, head).changed == ("newfile.py", "tracked.txt")
+    assert _material_entries(repository, head, _inventory(repository, head)) == clean
+
+
+def test_ignored_caches_do_not_change_snapshot_input_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = _repository(tmp_path)
+    (primary / ".gitignore").write_text(_CACHE_IGNORES)
+    git(primary, "add", ".gitignore")
+    git(primary, "commit", "-qm", "ignore tool caches")
+    monkeypatch.chdir(primary)
+    for key in INHERITED_CONTEXT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    def capture(store, token, context):
+        with store.transaction() as tx:
+            preparation_id = tx.execute(
+                "SELECT preparation_id FROM context_runs WHERE repository_id=? AND run_id=?",
+                (token.repository_id, token.run_id),
+            ).fetchone()[0]
+            retained = json.dumps({
+                "schema": "ffs.input-snapshot/v1",
+                "upstream": {
+                    "project": "fixture-project",
+                    "workstream": "feature-014",
+                    "session_key": "fixture-session",
+                },
+            }, sort_keys=True, separators=(",", ":"))
+            tx.execute(
+                "UPDATE context_workspaces SET selected_manifest_json=? WHERE preparation_id=?",
+                (retained, preparation_id),
+            )
+        preparation = inspect_workspace(store, preparation_id)
+        parent = Path(token.workspace)
+        (parent / "src/input.txt").write_bytes(b"accepted wave one\n")
+        (parent / "newfile.py").write_text("deliverable\n")
+        manifest = wave_manifest(token, context, git(parent, "rev-parse", "HEAD"))
+
+        clean = capture_wave_snapshot(
+            store, token, preparation, manifest, tmp_path / "clean-evidence",
+        )
+        write_tool_caches(parent)
+        with_caches = capture_wave_snapshot(
+            store, token, preparation, manifest, tmp_path / "cache-evidence",
+        )
+
+        files = with_caches.staging / "files"
+        assert sorted(
+            item.relative_to(files).as_posix() for item in files.rglob("*") if item.is_file()
+        ) == ["newfile.py", "src/input.txt"]
+        assert with_caches.manifest["entries"] == clean.manifest["entries"]
+        assert with_caches.input_digest == clean.input_digest
+        return 0
+
+    assert _cmd_fixture_start(_args(tmp_path / "authority"), on_ready=capture) == 0
+
+
+def test_declared_output_hidden_by_an_ignore_rule_is_refused(tmp_path: Path) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    declared = ("build/out.txt", "tracked.txt")
+
+    # Guard: a declared output that was never written is an ordinary partial result.
+    result = harvest_scoped_patch(repository, head, declared, (), tmp_path / "absent")
+    assert result.changed_files == ("tracked.txt",)
+
+    (repository / "build").mkdir()
+    (repository / "build/out.txt").write_text("deliverable\n")
+    # The shared inventory stays scope-blind: it only leaves the file out.
+    assert _inventory(repository, head).untracked == ()
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(repository, head, declared, (), tmp_path / "hidden")
+
+
+def test_undeclared_ignored_file_does_not_block_a_harvest(tmp_path: Path) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    (repository / "build").mkdir()
+    (repository / "build/out.txt").write_text("scratch\n")
+
+    result = harvest_scoped_patch(
+        repository, head, ("tracked.txt",), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == ("tracked.txt",)
+
+
+@pytest.mark.parametrize("filtered, unfiltered, code", [
+    ([".GSD/x"], [], "UNSAFE_SELECTION_PATH|SOURCE_CHANGED"),
+    (["newfile.py"], [], "SOURCE_CHANGED"),
+    (["newfile.py"], ["other.py"], "SOURCE_CHANGED"),
+])
+def test_filtered_listing_must_be_a_subset_of_the_unfiltered_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    filtered: list[str], unfiltered: list[str], code: str,
+) -> None:
+    import run_state.wave_execution as module
+
+    repository, head = fixture_repo(tmp_path)
+    monkeypatch.setattr(
+        module, "_untracked_paths",
+        lambda workspace, *options: list(filtered if options else unfiltered),
+    )
+
+    with pytest.raises(WorkspaceRefused, match=code):
+        module._inventory(repository, head)
+
+
+def test_ignore_matching_is_case_sensitive_whatever_the_repository_config(
+    tmp_path: Path,
+) -> None:
+    from run_state.wave_execution import _inventory
+
+    repository, head = ignoring_repo(tmp_path, extra="*.tsbuildinfo\n")
+    (repository / "X.TSBUILDINFO").write_text("case mismatch\n")
+
+    observed = {}
+    for value in ("false", "true"):
+        git(repository, "config", "core.ignoreCase", value)
+        observed[value] = _inventory(repository, head)
+    assert observed["true"] == observed["false"]
+    assert observed["true"].untracked == ("X.TSBUILDINFO",)
+
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(repository, head, (), (), tmp_path / "scope-evidence")
+
+
+@pytest.mark.parametrize("declared", ["build//out.txt", "./build/out.txt", "Build/Out.txt"])
+def test_declared_output_hidden_by_an_ignore_rule_is_refused_for_any_spelling(
+    tmp_path: Path, declared: str,
+) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    (repository / "build").mkdir()
+    (repository / "build/out.txt").write_text("deliverable\n")
+
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(
+            repository, head, (declared, "tracked.txt"), (), tmp_path / "evidence",
+        )
+
+
+def _create_during_harvest(
+    monkeypatch: pytest.MonkeyPatch, repository: Path, stage: str, relative: str,
+) -> None:
+    """Create ``relative`` between two of harvest's inventories."""
+    import run_state.wave_execution as module
+
+    original = getattr(module, stage)
+
+    def hooked(*args, **kwargs):
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("appeared during harvest\n")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, stage, hooked)
+
+
+@pytest.mark.parametrize("stage", ["_patch", "_write_evidence"])
+def test_unrelated_ignored_file_created_during_harvest_is_harmless(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\ncache/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    _create_during_harvest(monkeypatch, repository, stage, "cache/noise")
+
+    result = harvest_scoped_patch(
+        repository, head, ("build/out.txt", "tracked.txt"), (), tmp_path / "evidence",
+    )
+    assert result.changed_files == ("tracked.txt",)
+
+
+@pytest.mark.parametrize("stage", ["_patch", "_write_evidence"])
+def test_declared_output_that_becomes_hidden_during_harvest_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    repository, head = ignoring_repo(tmp_path, extra="build/\n")
+    (repository / "tracked.txt").write_text("changed\n")
+    _create_during_harvest(monkeypatch, repository, stage, "build/out.txt")
+
+    with pytest.raises(WorkspaceRefused, match="WAVE_SCOPE_VIOLATION"):
+        harvest_scoped_patch(
+            repository, head, ("build/out.txt", "tracked.txt"), (), tmp_path / "evidence",
+        )
+
+
+@pytest.mark.parametrize("filtered, unfiltered", [
+    (["Tracked.TXT"], ["Tracked.TXT"]),
+    ([], ["Tracked.TXT"]),
+])
+def test_untracked_name_that_case_folds_onto_a_tracked_path_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    filtered: list[str], unfiltered: list[str],
+) -> None:
+    import run_state.wave_execution as module
+
+    # tracked.txt is tracked; a case-insensitive volume can report a case-only
+    # rename as an untracked name while the tracked diff still knows the old one.
+    repository, head = fixture_repo(tmp_path)
+    monkeypatch.setattr(
+        module, "_untracked_paths",
+        lambda workspace, *options: list(filtered if options else unfiltered),
+    )
+
+    with pytest.raises(WorkspaceRefused, match="UNSAFE_SELECTION_PATH"):
+        module._inventory(repository, head)
+
+
+def test_untracked_name_unrelated_to_tracked_paths_is_not_a_case_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import run_state.wave_execution as module
+
+    repository, head = fixture_repo(tmp_path)
+    monkeypatch.setattr(module, "_untracked_paths", lambda workspace, *options: ["newfile.py"])
+
+    assert module._inventory(repository, head).untracked == ("newfile.py",)

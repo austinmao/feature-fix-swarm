@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import stat
 import subprocess
@@ -169,6 +170,18 @@ def _split_nul(raw: bytes) -> tuple[bytes, ...]:
 
 
 def _inventory(workspace: Path, base: str) -> _Inventory:
+    return _inventory_and_hidden(workspace, base)[0]
+
+
+def _inventory_and_hidden(
+    workspace: Path, base: str
+) -> tuple[_Inventory, frozenset[str]]:
+    """Return the inventory plus the untracked paths an ignore rule hides from it.
+
+    The inventory itself knows nothing about scope, so every consumer agrees on
+    it. ``harvest_scoped_patch`` uses the hidden set to refuse a declared output
+    that a rule would otherwise drop from the patch without a word.
+    """
     if _git_bytes(workspace, "ls-files", "-u", "-z"):
         raise WorkspaceRefused("WAVE_CONFLICTS_PRESENT")
     fields = _split_nul(
@@ -204,23 +217,25 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
             # conflict-free tree. Refuse any future or repository-specific
             # status instead of guessing how to snapshot it.
             raise WorkspaceRefused("WAVE_CHANGE_UNSUPPORTED")
-    untracked = [
-        _path(item)
-        for item in _split_nul(
-            _git_bytes(
-                workspace,
-                "--literal-pathspecs",
-                "ls-files",
-                "--others",
-                "-z",
-                "--",
-            )
-        )
-    ]
-    _refuse_unsafe_runtime_roots(workspace, untracked)
+    # Honor every in-tree per-directory .gitignore, tracked or untracked (pytest
+    # and ruff each write a self-ignoring one into their cache directory). An
+    # ignore rule only hides untracked files, so it can leave files out of the
+    # candidate but never put anything in. Never --exclude-standard: it also
+    # reads .git/info/exclude and core.excludesFile, which are host-local and
+    # would make digests differ between hosts.
+    visible = _untracked_paths(workspace, "--exclude-per-directory=.gitignore")
+    everything = _untracked_paths(workspace)
+    # Safety checks keep seeing ignored paths; only the entries are filtered.
+    # The two listings are separate git calls, so check the union, and refuse a
+    # filtered path the unfiltered listing does not know (the tree changed).
+    _refuse_unsafe_runtime_roots(workspace, [*everything, *visible])
+    if not set(visible) <= set(everything):
+        raise WorkspaceRefused("SOURCE_CHANGED")
+    _refuse_tracked_case_collisions(workspace, [*everything, *visible])
+    hidden = frozenset(set(everything) - set(visible))
     untracked = [
         item
-        for item in untracked
+        for item in visible
         if not _internal_path(item) and not _untracked_runtime_path(item)
     ]
     all_paths = [*modified, *deleted, *untracked]
@@ -228,11 +243,71 @@ def _inventory(workspace: Path, base: str) -> _Inventory:
     if len(portable) != len(set(portable)):
         raise WorkspaceRefused("SELECTION_CONFLICT")
     _refuse_untracked_specials(workspace)
-    return _Inventory(
-        tuple(sorted(modified)),
-        tuple(sorted(deleted)),
-        tuple(sorted(untracked)),
+    return (
+        _Inventory(
+            tuple(sorted(modified)),
+            tuple(sorted(deleted)),
+            tuple(sorted(untracked)),
+        ),
+        hidden,
     )
+
+
+def _fold(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _refuse_hidden_outputs(hidden: frozenset[str], declared: tuple[str, ...]) -> None:
+    """Refuse a declared output that an ignore rule hides, so it is never dropped.
+
+    Declared paths need not be canonical (``build//out.txt``, ``./build/out.txt``),
+    so both sides compare as normalized, NFC, case-folded keys. When in doubt this
+    refuses more, which fails closed.
+    """
+    keys = {_fold(posixpath.normpath(item)) for item in hidden}
+    if any(_fold(posixpath.normpath(item)) in keys for item in declared):
+        raise WorkspaceRefused("WAVE_SCOPE_VIOLATION")
+
+
+def _refuse_tracked_case_collisions(workspace: Path, untracked: list[str]) -> None:
+    """Refuse an untracked name that case-folds onto a tracked path spelled differently.
+
+    The untracked listings pin ``core.ignoreCase=false`` but the tracked diff does
+    not, so a case-only rename on a case-insensitive volume (tracked ``Foo.txt``,
+    on disk ``foo.txt``) can appear as an untracked file while the diff still
+    knows the tracked name.
+    """
+    if not untracked:
+        return
+    tracked = {
+        item.decode("utf-8", "surrogateescape")
+        for item in _split_nul(_git_bytes(workspace, "ls-files", "-z"))
+    }
+    keys = {_fold(item) for item in tracked}
+    if any(_fold(item) in keys and item not in tracked for item in untracked):
+        raise WorkspaceRefused("UNSAFE_SELECTION_PATH")
+
+
+def _untracked_paths(workspace: Path, *options: str) -> list[str]:
+    return [
+        _path(item)
+        for item in _split_nul(
+            _git_bytes(
+                workspace,
+                # Pin ignore matching: repository-local core.ignoreCase must not
+                # decide what is inventoried. A case-mismatched file stays visible
+                # and scope-checked, which fails closed.
+                "-c",
+                "core.ignoreCase=false",
+                "--literal-pathspecs",
+                "ls-files",
+                "--others",
+                *options,
+                "-z",
+                "--",
+            )
+        )
+    ]
 
 
 def _refuse_untracked_specials(workspace: Path) -> None:
@@ -839,7 +914,8 @@ def harvest_scoped_patch(
     deleted_scope = _declared_paths(declared_deleted, field="declared_deleted")
     if set(modified_scope) & set(deleted_scope):
         raise WorkspaceRefused("WAVE_SCOPE_INVALID")
-    raw = _inventory(workspace, expected_head)
+    raw, hidden = _inventory_and_hidden(workspace, expected_head)
+    _refuse_hidden_outputs(hidden, modified_scope)
     overlay = _snapshot_overlay(workspace, expected_head, baseline_snapshot)
     inventory, material = _virtual_changes(workspace, expected_head, raw, overlay)
     actual_modified = inventory.modified
@@ -848,7 +924,8 @@ def harvest_scoped_patch(
     ).issubset(deleted_scope):
         raise WorkspaceRefused("WAVE_SCOPE_VIOLATION")
     payload = _patch(material, Path(evidence_root)) if inventory.changed else b""
-    after_raw = _inventory(workspace, expected_head)
+    after_raw, after_hidden = _inventory_and_hidden(workspace, expected_head)
+    _refuse_hidden_outputs(after_hidden, modified_scope)
     after_overlay = _snapshot_overlay(workspace, expected_head, baseline_snapshot)
     after_inventory, after_material = _virtual_changes(
         workspace,
@@ -865,7 +942,8 @@ def harvest_scoped_patch(
     ):
         raise WorkspaceRefused("SOURCE_CHANGED")
     evidence_path, digest = _write_evidence(Path(evidence_root), payload)
-    final_raw = _inventory(workspace, expected_head)
+    final_raw, final_hidden = _inventory_and_hidden(workspace, expected_head)
+    _refuse_hidden_outputs(final_hidden, modified_scope)
     final_overlay = _snapshot_overlay(workspace, expected_head, baseline_snapshot)
     final_inventory, final_material = _virtual_changes(
         workspace,
