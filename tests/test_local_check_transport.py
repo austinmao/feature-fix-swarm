@@ -100,6 +100,7 @@ def test_registered_local_policy_denies_writes_escape_network_and_fork(tmp_path)
         assert run('network', str(listener.getsockname()[1])) != 0
 
 
+
 # F42: declared read roots for a sealed check's runtime.
 
 def _draft_with_roots(roots, kind="command"):

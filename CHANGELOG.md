@@ -16,15 +16,20 @@ all skills.
   `/dev/null` failed with `PermissionError: [Errno 1] Operation not permitted`.
   pytest does this in its output capture (`open(os.devnull)`), which made every
   pytest-based sealed check fail before it ran a single test. The artifact
-  review profile now also allows `file-read*` and `file-write*` on exactly the
-  literal `/dev/null`. No `/dev` subpath and no other device node is granted,
-  so `/dev/zero` and `/dev/random` stay denied. The profile is rendered from the
-  policy at launch and only `build_confined_local_argv` calls it, so the grant
-  reaches sealed local checks only. No hash covers the rendered profile text
-  (the policy hash covers the policy fields), so no receipt or qualification
-  needs to be redone. Tests cover the rendered text, a real `sandbox-exec` run
-  of the reviewed probe, and the sealed local check path, each with a negative
-  control on `/dev/zero`.
+  review profile now also allows `file-read-data` and `file-write-data` on
+  exactly the literal `/dev/null`. The grant is data-only: `file-write*` would
+  also allow unlink, mode and xattr changes on the node, so it is not used. No
+  `/dev` subpath and no other device node is granted, so `/dev/zero` and
+  `/dev/random` stay denied. The profile is rendered from the policy at launch
+  and only `build_confined_local_argv` calls it, so the grant reaches sealed
+  local checks only. No hash covers the rendered profile text (the policy hash
+  covers the policy fields), so no receipt or qualification needs to be redone.
+  Tests cover the rendered text, a real `sandbox-exec` run of the reviewed
+  probe, and two sealed local checks that execute the argv returned by
+  `build_confined_local_argv`: the probe, and the host interpreter doing what
+  pytest's capture and logging plugins do (`open(os.devnull)` for reading and
+  writing, `logging.FileHandler(os.devnull)`). Each has a negative control on
+  `/dev/zero`.
 
 ### Fixed (2026-09-30, spec-014 Release C: F45 wave inventories honor the repository's .gitignore)
 
