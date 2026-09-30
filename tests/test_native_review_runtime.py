@@ -1,11 +1,13 @@
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from run_state import native_review_runtime as review_runtime
 from run_state.native_review_runtime import (
     CLAUDE_CLI_VERSION,
     CODEX_CLI_VERSION,
@@ -218,3 +220,646 @@ def test_ancestor_symlink_binary_refused(tmp_path):
     with pytest.raises(NativeReviewRuntimeRefused):
         prepare_native_review_runtime(_request(alias / binary.name, catalog),
                                       runtime_root=parent / 'alias-test', workspace=workspace)
+
+
+# F52: the native review pin is a per-version table, each row audited against its own
+# openai/codex tag (spec_plan.rs, config.schema.json, openai_models.rs).  The expected
+# rows are literals here so a wrong constant in the module cannot vouch for itself.
+_PREPARATION_ONLY = "qualification-and-receipts-required"
+# Written as `sha256:` digests and split commit ids so the tests/ credential gate
+# (test_seam_wiring.py, hex runs of 32+) stays clean without widening it.
+def _hex(digest):
+    return digest.removeprefix("sha256:")
+
+
+_PIN_0154 = {
+    "codex_release": "rust-v0.154.0",
+    "codex_commit": "6b9826e3aa83b1a5947d" "b50f4332cb9c65f1b340",
+    "tool_registration_sha256": _hex("sha256:451622e76c45dd1585318c200fdee9a00d7aaf785d4a540facca1010146307b7"),
+    "config_schema_sha256": _hex("sha256:2e1fcf1cbb20f255c3baca2e174b4a3c954cef577a130587b8935e2d12c8ade6"),
+    "model_protocol_sha256": _hex("sha256:2e9923d405a497441a0b264efc07de6ce21cdb108442e660a8b9fb63ca415aed"),
+}
+_PIN_0159 = {
+    "codex_release": "rust-v0.159.0",
+    "codex_commit": "687a119f0fcaace47e1f" "1abcc77cec6c813fd6da",
+    "tool_registration_sha256": _hex("sha256:849ef21d4e5c83febdc31eacd7609911d43e3f69a35168fe02ae899273b5ef3e"),
+    "config_schema_sha256": _hex("sha256:eda7251b7e46e0b9d0f3d8eef5dab451e11a55d723e2b802e152b7208045836a"),
+    "model_protocol_sha256": _hex("sha256:4c8b5cafd8c55db269f669e352321f787fcaf83785bce4476cb887abfce75dc6"),
+}
+_ASYNC_OFF = "features.send_message_to_user_async=false"
+
+
+def _provenance(pin: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted({**pin, "preparation_only": _PREPARATION_ONLY}.items()))
+
+
+def _overrides(material) -> list[str]:
+    return [material.argv[i + 1] for i, item in enumerate(material.argv[:-1]) if item == "-c"]
+
+
+def test_codex_0159_material_carries_its_own_audited_provenance(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+
+    material = prepare_native_review_runtime(_request(binary, catalog, version="0.159.0"),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    assert material.cli_version == "0.159.0"
+    assert material.provenance == _provenance(_PIN_0159)
+    assert material.replay_binding()["provenance"] == {**_PIN_0159, "preparation_only": _PREPARATION_ONLY}
+    assert validate_native_review_material(material) is material
+
+
+def test_codex_0159_disables_send_message_to_user_async_and_0154_does_not(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    new = prepare_native_review_runtime(_request(binary, catalog, version="0.159.0"),
+                                        runtime_root=parent / "new", workspace=workspace)
+    old = prepare_native_review_runtime(_request(binary, catalog),
+                                        runtime_root=parent / "old", workspace=workspace)
+
+    assert _ASYNC_OFF in _overrides(new)
+    assert "send_message_to_user_async = false" in Path(new.config_path).read_text()
+    # 0.154.0's audited schema has no such key and --strict-config rejects unknown features.
+    assert _ASYNC_OFF not in _overrides(old)
+    assert "send_message_to_user_async" not in Path(old.config_path).read_text()
+    # The closed list is otherwise identical: exactly one more feature override.
+    def features(material) -> list[str]:
+        return [item for item in _overrides(material) if item.startswith("features.")]
+
+    assert features(new) == [*features(old), _ASYNC_OFF]
+    for feature in ("shell_tool", "multi_agent_v2", "code_mode_only", "context_management"):
+        assert f"features.{feature}=false" in _overrides(new)
+
+
+def test_codex_0154_keeps_its_original_provenance(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+
+    material = prepare_native_review_runtime(_request(binary, catalog),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    assert material.cli_version == "0.154.0"
+    assert material.provenance == _provenance(_PIN_0154)
+    assert validate_native_review_material(material) is material
+
+
+@pytest.mark.parametrize("version", ["0.155.1", "0.156.1", "0.157.0", "0.158.0", "0.159.1", "0.159.0-dev",
+                                     "0.160.0", "0.154.1"])
+def test_every_other_codex_version_still_refuses(tmp_path: Path, version: str) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    with pytest.raises(NativeReviewRuntimeRefused, match="pinned native review version"):
+        prepare_native_review_runtime(_request(binary, catalog, version=version),
+                                      runtime_root=parent / "one", workspace=workspace)
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("prepared,claimed", [("0.154.0", "0.159.0"), ("0.159.0", "0.154.0"),
+                                              ("0.159.0", "0.158.0"), ("0.154.0", "0.155.1")])
+def test_stored_material_cannot_change_codex_version(tmp_path: Path, prepared: str, claimed: str) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version=prepared),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(replace(material, cli_version=claimed))
+
+
+@pytest.mark.parametrize("prepared,other", [("0.159.0", _PIN_0154), ("0.154.0", _PIN_0159)])
+def test_stored_material_cannot_carry_another_versions_provenance(tmp_path: Path, prepared: str,
+                                                                  other: dict[str, str]) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version=prepared),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
+        validate_native_review_material(replace(material, provenance=_provenance(other)))
+    for field in ("codex_commit", "tool_registration_sha256", "config_schema_sha256", "model_protocol_sha256"):
+        mixed = {**(_PIN_0159 if prepared == "0.159.0" else _PIN_0154), field: other[field]}
+        with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
+            validate_native_review_material(replace(material, provenance=_provenance(mixed)))
+
+
+def test_codex_0159_config_without_the_async_gate_fails_validation(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version="0.159.0"),
+                                             runtime_root=parent / "one", workspace=workspace)
+    stripped = "".join(line for line in Path(material.config_path).read_text().splitlines(keepends=True)
+                       if "send_message_to_user_async" not in line).encode()
+    Path(material.config_path).write_bytes(stripped)
+    Path(material.config_path).chmod(0o600)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="tool restriction proof"):
+        validate_native_review_material(replace(material, config_sha256=hashlib.sha256(stripped).hexdigest()))
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(replace(
+            material, argv=tuple(item for item in material.argv if item != _ASYNC_OFF)))
+
+
+# F53: an npm-installed Codex is a `.js` launcher (`#!/usr/bin/env node`), so the review
+# process needs the qualified Node on PATH.  PATH is built as the host launch builds it:
+# binary parent, Node parent (only for a `.js` launcher), then /usr/bin:/bin.
+DEFAULT_PAIR = ("darwin", "arm64")  # process.platform / process.arch the fake Node reports
+
+
+def _js_launcher(tmp_path: Path, reported: tuple[str, str] = DEFAULT_PAIR,
+                 installed: list[tuple[str, str]] | None = None, node_body: bytes | None = None):
+    bin_dir = tmp_path / "npm" / "bin"
+    node_dir = tmp_path / "nodejs" / "bin"
+    bin_dir.mkdir(parents=True)
+    node_dir.mkdir(parents=True)
+    launcher = _write(bin_dir / "codex.js", b"#!/usr/bin/env node\n// fixture launcher, never executed\n", 0o755)
+    # The verified Node itself reports process.platform and process.arch (codex.js reads those).
+    node = _write(node_dir / "node",
+                  node_body if node_body is not None else f"#!/bin/sh\necho '{reported[0]} {reported[1]}'\n".encode(),
+                  0o755)
+    # The JS launcher spawns a separate vendor executable (the host chain's `native_sha256`).
+    for pair in installed or [reported]:
+        _platform_package(launcher.parents[1] / "node_modules", f"#!/bin/sh\necho {pair}\n".encode(), pair=pair)
+    return launcher, node
+
+
+# codex-cli/bin/codex.js (rust-v0.154.0 and v0.159.0) PLATFORM_PACKAGE_BY_TARGET, restated as an oracle.
+_TARGETS = {
+    ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
+    ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
+    ("darwin", "x64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
+    ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
+}
+
+
+def _target(pair: tuple[str, str] = DEFAULT_PAIR) -> tuple[str, str]:
+    return _TARGETS[pair]
+
+
+def _platform_package(node_modules: Path, content: bytes, *, pair: tuple[str, str] = DEFAULT_PAIR,
+                      exports: bool = False) -> Path:
+    triple, package = _target(pair)
+    root = node_modules / package
+    (root / "vendor" / triple / "bin").mkdir(parents=True)
+    (root / "package.json").write_text(json.dumps(
+        {"name": "@openai/codex", "version": "0.0.0-fake", **({"exports": {".": "./x.js"}} if exports else {})}))
+    return _write(root / "vendor" / triple / "bin" / "codex", content, 0o755)
+
+
+def _vendor(launcher: Path, pair: tuple[str, str] = DEFAULT_PAIR) -> Path:
+    triple, package = _target(pair)
+    return launcher.parents[1] / "node_modules" / package / "vendor" / triple / "bin" / "codex"
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _js_request(launcher: Path, catalog: Path, node: Path) -> NativeReviewRequest:
+    """A `.js` request as the producer builds it: Node and vendor pins from the qualified chain."""
+    return replace(_request(launcher, catalog), node_sha256=_sha(node), native_sha256=_sha(_vendor(launcher)))
+
+
+def _path_of(material) -> str:
+    return dict(material.environment)["PATH"]
+
+
+def _with_path(material, path: str):
+    return replace(material, environment=tuple(sorted({**dict(material.environment), "PATH": path}.items())))
+
+
+def test_js_launcher_gets_its_node_directory_on_path(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    entries = _path_of(material).split(os.pathsep)
+    # The verified Node's directory comes first: `env node` must not find a sibling of the launcher.
+    assert entries == [str(node.resolve().parent), str(launcher.resolve().parent), "/usr/bin", "/bin"]
+    assert all(os.path.isabs(entry) for entry in entries)
+    assert dict(material.provenance)["node_sha256"] == hashlib.sha256(node.read_bytes()).hexdigest()
+    assert validate_native_review_material(material) is material
+
+
+def test_js_launcher_node_is_bound_to_the_qualified_chain_pin(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.delenv("CODEX_NODE_BINARY", raising=False)
+    monkeypatch.setenv("PATH", f"{node.parent}:/usr/bin:/bin")
+    pin = hashlib.sha256(node.read_bytes()).hexdigest()
+
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                             runtime_root=parent / "one", workspace=workspace)
+    assert str(node.resolve().parent) in _path_of(material).split(os.pathsep)
+    assert dict(material.provenance)["node_sha256"] == pin
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
+        prepare_native_review_runtime(replace(_js_request(launcher, catalog, node), node_sha256="0" * 64),
+                                      runtime_root=parent / "two", workspace=workspace)
+    assert not (parent / "two").exists()
+
+
+def test_js_launcher_without_a_resolvable_node_refuses(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.delenv("CODEX_NODE_BINARY", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="no resolved regular Node"):
+        prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                      runtime_root=parent / "one", workspace=workspace)
+    assert not (parent / "one").exists()
+
+
+def test_native_binary_gets_no_node_directory_even_when_node_is_ambient(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    _launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = prepare_native_review_runtime(_request(binary, catalog),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    assert _path_of(material).split(os.pathsep) == [str(binary.resolve().parent), "/usr/bin", "/bin"]
+    assert "node_sha256" not in dict(material.provenance)
+    assert validate_native_review_material(material) is material
+
+
+@pytest.mark.parametrize("tamper", ["drop-node", "swap-node-dir", "extra-entry", "relative-entry", "bare"])
+def test_js_launcher_material_with_a_tampered_path_fails_validation(tmp_path: Path, monkeypatch,
+                                                                    tamper: str) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                             runtime_root=parent / "one", workspace=workspace)
+    entries = _path_of(material).split(os.pathsep)
+    tampered = {
+        "drop-node": [entries[0], "/usr/bin", "/bin"],
+        "swap-node-dir": [entries[0], str(tmp_path), "/usr/bin", "/bin"],
+        "extra-entry": [*entries, str(tmp_path / "evil")],
+        "relative-entry": [entries[0], "bin", *entries[1:]],
+        "bare": ["/usr/bin", "/bin"],
+    }[tamper]
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="environment"):
+        validate_native_review_material(_with_path(material, os.pathsep.join(tampered)))
+
+
+def test_native_binary_material_with_a_tampered_path_fails_validation(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog),
+                                             runtime_root=parent / "one", workspace=workspace)
+    for path in ("/usr/bin:/bin", f"{tmp_path}:{tmp_path / 'evil'}:/usr/bin:/bin", "relative:/usr/bin:/bin"):
+        with pytest.raises(NativeReviewRuntimeRefused, match="environment"):
+            validate_native_review_material(_with_path(material, path))
+
+
+def test_js_launcher_validation_pins_the_stored_node_not_the_ambient_one(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    # Another process (supervisor, monitor) replays without the preparer's ambient node.
+    monkeypatch.delenv("CODEX_NODE_BINARY")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert validate_native_review_material(material) is material
+
+    # A swapped Node binary, or a forged node identity, is a drift.
+    forged = tuple((key, "f" * 64 if key == "node_sha256" else value) for key, value in material.provenance)
+    with pytest.raises(NativeReviewRuntimeRefused, match="provenance|Node"):
+        validate_native_review_material(replace(material, provenance=forged))
+    node.write_bytes(b"#!/bin/sh\nexit 1\n")
+    node.chmod(0o755)
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
+        validate_native_review_material(material)
+
+
+def test_js_launcher_material_cannot_shed_its_node_identity(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                             runtime_root=parent / "one", workspace=workspace)
+    bare = tuple((key, value) for key, value in material.provenance if not key.startswith("node_"))
+
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(_with_path(replace(material, provenance=bare), "/usr/bin:/bin"))
+
+
+# F53 review round 1: the verified Node must be the first `node` the launch finds, the vendor
+# executable the launcher spawns must be bound and re-verified, and a JS launcher requires pins.
+def _prepare(tmp_path: Path, launcher: Path, catalog: Path, node: Path, name: str = "one"):
+    parent, workspace = tmp_path / "private", tmp_path / "review-workspace"
+    return prepare_native_review_runtime(_js_request(launcher, catalog, node),
+                                         runtime_root=parent / name, workspace=workspace)
+
+
+def test_a_sibling_node_beside_the_launcher_is_never_the_one_resolved(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    rogue = _write(launcher.parent / "node", b"#!/bin/sh\necho rogue\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = _prepare(tmp_path, launcher, catalog, node)
+
+    found = shutil.which("node", path=_path_of(material))
+    assert found is not None and Path(found).resolve() == node.resolve() != rogue.resolve()
+
+
+def test_node_directory_whose_node_is_not_the_verified_file_refuses(tmp_path: Path, monkeypatch) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    renamed = node.rename(node.with_name("node20"))
+    _write(node.parent / "node", b"#!/bin/sh\necho other\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(renamed))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
+        _prepare(tmp_path, launcher, catalog, renamed)
+    assert not (parent / "one").exists()
+
+
+def test_js_launcher_binds_the_vendor_executable_it_spawns(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = _prepare(tmp_path, launcher, catalog, node)
+
+    bound = dict(material.provenance)
+    assert bound["native_binary"] == str(_vendor(launcher).resolve())
+    assert bound["native_sha256"] == _sha(_vendor(launcher))
+    assert validate_native_review_material(material) is material
+
+
+def test_vendor_executable_replaced_after_qualification_refuses_prepare(tmp_path: Path, monkeypatch) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = _js_request(launcher, catalog, node)
+    _write(_vendor(launcher), b"#!/bin/sh\necho swapped\n", 0o755)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="vendor"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+def test_vendor_executable_replaced_after_prepare_refuses_validation(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = _prepare(tmp_path, launcher, catalog, node)
+    _write(_vendor(launcher), b"#!/bin/sh\necho swapped\n", 0o755)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="vendor"):
+        validate_native_review_material(material)
+
+
+def test_ambient_native_override_naming_another_executable_refuses(tmp_path: Path, monkeypatch) -> None:
+    """The launcher ignores CODEX_NATIVE_BINARY, so an override naming another file is refused."""
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    decoy = _write(tmp_path / "decoy-codex", b"#!/bin/sh\necho decoy\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.setenv("CODEX_NATIVE_BINARY", str(decoy))
+
+    for pin in (_sha(decoy), _sha(_vendor(launcher))):
+        with pytest.raises(NativeReviewRuntimeRefused, match="CODEX_NATIVE_BINARY"):
+            prepare_native_review_runtime(replace(_js_request(launcher, catalog, node), native_sha256=pin),
+                                          runtime_root=parent / "one", workspace=workspace)
+        assert not (parent / "one").exists()
+
+
+def test_ambient_native_override_naming_the_launchers_own_executable_is_accepted(tmp_path: Path,
+                                                                                 monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.setenv("CODEX_NATIVE_BINARY", str(_vendor(launcher)))
+
+    material = _prepare(tmp_path, launcher, catalog, node)
+
+    assert dict(material.provenance)["native_binary"] == str(_vendor(launcher).resolve())
+
+
+def test_js_launcher_without_a_resolvable_vendor_executable_refuses(tmp_path: Path, monkeypatch) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    request = _js_request(launcher, catalog, node)
+    _vendor(launcher).unlink()
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="native"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+def test_js_launcher_request_with_no_qualified_pins_refuses(tmp_path: Path, monkeypatch) -> None:
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="pin"):
+        prepare_native_review_runtime(_request(launcher, catalog), runtime_root=parent / "one",
+                                      workspace=workspace)
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("missing", ["node_sha256", "native_sha256"])
+def test_js_launcher_request_without_a_qualified_pin_refuses(tmp_path: Path, monkeypatch, missing: str) -> None:
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = replace(_js_request(launcher, catalog, node), **{missing: None})
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="pin"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("target,resolver", [("node", "codex_node_binary"), ("vendor", "codex_native_binary")])
+def test_binary_swapped_after_resolution_cannot_be_recorded(tmp_path: Path, monkeypatch, target: str,
+                                                            resolver: str) -> None:
+    """The digest bound into the material is one read, compared with the qualified pin."""
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = _js_request(launcher, catalog, node)
+    victim = node if target == "node" else _vendor(launcher)
+    real = getattr(review_runtime, resolver)
+
+    def swapping(*args, **kwargs):
+        result = real(*args, **kwargs)
+        _write(victim, b"#!/bin/sh\necho swapped\n", 0o755)
+        return result
+
+    monkeypatch.setattr(review_runtime, resolver, swapping)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node|vendor"):
+        prepare_native_review_runtime(request, runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("shed", ["native", "node", "both"])
+def test_js_material_cannot_shed_a_bound_identity(tmp_path: Path, monkeypatch, shed: str) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = _prepare(tmp_path, launcher, catalog, node)
+    drop = {"native": ("native_",), "node": ("node_",), "both": ("native_", "node_")}[shed]
+    kept = tuple((key, value) for key, value in material.provenance if not key.startswith(drop))
+
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(replace(material, provenance=kept))
+
+
+# F53 review round 2: the vendor executable is the one the audited launcher selects (platform
+# package by node resolution from the launcher, else the local vendor dir), and `node` on PATH
+# must be the verified regular file itself.
+def _bound_vendor(material) -> str:
+    return dict(material.provenance)["native_binary"]
+
+
+def test_decoy_codex_directory_that_sorts_first_is_never_the_bound_executable(tmp_path: Path, monkeypatch) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    triple, _package = _target()
+    decoys = [tmp_path / "codex-0-decoy" / "vendor" / triple / "bin",
+              launcher.parents[1] / "node_modules" / "@openai" / "codex-0-decoy" / "vendor" / triple / "bin"]
+    for decoy in decoys:
+        decoy.mkdir(parents=True)
+        _write(decoy / "codex", b"#!/bin/sh\necho decoy\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = _prepare(tmp_path, launcher, catalog, node)
+
+    assert _bound_vendor(material) == str(_vendor(launcher).resolve())
+    assert dict(material.provenance)["native_sha256"] == _sha(_vendor(launcher))
+
+
+def test_platform_package_is_found_by_node_resolution_from_the_launcher(tmp_path: Path, monkeypatch) -> None:
+    """A hoisted `node_modules` above the launcher's package resolves, nearest first."""
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    _vendor(launcher).unlink()
+    (_vendor(launcher).parents[3] / "package.json").unlink()
+    hoisted = _platform_package(tmp_path / "node_modules", b"#!/bin/sh\necho hoisted\n")
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    material = prepare_native_review_runtime(
+        replace(_request(launcher, catalog), node_sha256=_sha(node), native_sha256=_sha(hoisted)),
+        runtime_root=tmp_path / "private" / "one", workspace=tmp_path / "review-workspace")
+
+    assert _bound_vendor(material) == str(hoisted.resolve())
+
+
+def test_package_absent_from_every_ancestor_refuses_even_with_a_local_vendor_dir(tmp_path: Path,
+                                                                                monkeypatch) -> None:
+    """Node consults NODE_PATH and the global folders before codex.js falls back to its local vendor
+    dir, and those are not modelled: a package Node might find elsewhere is never replaced by a guess."""
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    triple, _package = _target()
+    request = _js_request(launcher, catalog, node)
+    _vendor(launcher).unlink()
+    (_vendor(launcher).parents[3] / "package.json").unlink()
+    local = launcher.parents[1] / "vendor" / triple / "bin"
+    local.mkdir(parents=True)
+    _write(local / "codex", b"#!/bin/sh\necho local\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="native"):
+        prepare_native_review_runtime(replace(request, native_sha256=_sha(local / "codex")),
+                                      runtime_root=parent / "one", workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("shape", ["package-without-executable", "package-with-exports"])
+def test_unresolvable_platform_package_does_not_fall_back_to_another_executable(tmp_path: Path, monkeypatch,
+                                                                                shape: str) -> None:
+    """A resolved platform package with no executable is an error in the launcher, not a fallback."""
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    triple, _package = _target()
+    request = _js_request(launcher, catalog, node)
+    if shape == "package-without-executable":
+        _vendor(launcher).unlink()
+    else:
+        (_vendor(launcher).parents[3] / "package.json").write_text(json.dumps({"name": "x", "exports": {".": "./x"}}))
+    local = launcher.parents[1] / "vendor" / triple / "bin"
+    local.mkdir(parents=True)
+    _write(local / "codex", b"#!/bin/sh\necho local\n", 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="native"):
+        prepare_native_review_runtime(replace(request, native_sha256=_sha(local / "codex")),
+                                      runtime_root=parent / "one", workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
+
+
+def test_symlinked_node_refuses_at_prepare(tmp_path: Path, monkeypatch) -> None:
+    """`env node` would follow a symlinked `node`, so the verified file must be `node` itself."""
+    parent, workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    real = node.rename(node.with_name("node20"))
+    node.symlink_to(real.name)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="symlink"):
+        prepare_native_review_runtime(_js_request(launcher, catalog, real),
+                                      runtime_root=parent / "one", workspace=workspace)
+    assert not (parent / "one").exists()
+
+
+@pytest.mark.parametrize("change", ["retargeted-symlink", "replaced-file", "replaced-by-copy-symlink"])
+def test_node_retargeted_or_replaced_after_prepare_refuses_validation(tmp_path: Path, monkeypatch,
+                                                                     change: str) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    material = _prepare(tmp_path, launcher, catalog, node)
+    same_bytes = _write(node.with_name("node20"), node.read_bytes(), 0o755)
+    node.unlink()
+    if change == "replaced-file":
+        _write(node, b"#!/bin/sh\necho other\n", 0o755)
+    else:  # `node` becomes a symlink: even to identical bytes, `env node` no longer runs the verified file
+        node.symlink_to(same_bytes.name if change == "retargeted-symlink" else same_bytes)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
+        validate_native_review_material(material)
+
+
+# F53 review round 3: platform and arch come from the verified Node (what codex.js reads), not Python.
+@pytest.mark.parametrize("reported", [("darwin", "arm64"), ("darwin", "x64"), ("linux", "x64")])
+def test_native_review_binds_the_package_for_the_platform_the_verified_node_reports(
+        tmp_path: Path, monkeypatch, reported: tuple[str, str]) -> None:
+    _parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path, reported=reported, installed=list(_TARGETS))
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    request = replace(_request(launcher, catalog), node_sha256=_sha(node),
+                      native_sha256=_sha(_vendor(launcher, reported)))
+
+    material = prepare_native_review_runtime(request, runtime_root=tmp_path / "private" / "one",
+                                             workspace=tmp_path / "review-workspace")
+
+    assert _bound_vendor(material) == str(_vendor(launcher, reported).resolve())
+    assert validate_native_review_material(material) is material
+
+
+@pytest.mark.parametrize("body", [b"#!/bin/sh\nexit 1\n", b"#!/bin/sh\necho not a pair\n",
+                                  b"#!/bin/sh\necho 'freebsd x64'\n", b"#!/bin/sh\nexit 0\n",
+                                  b"#!/bin/sh\nexec sleep 5\n"],
+                         ids=["nonzero", "malformed", "unknown-pair", "empty", "timeout"])
+def test_native_review_refuses_when_the_node_platform_probe_fails(tmp_path: Path, monkeypatch,
+                                                                  body: bytes) -> None:
+    import host_capabilities
+    parent, _workspace, _binary, catalog = _inputs(tmp_path)
+    launcher, node = _js_launcher(tmp_path, node_body=body)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.setattr(host_capabilities, "_NODE_PROBE_TIMEOUT", 0.3, raising=False)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="Node"):
+        prepare_native_review_runtime(_js_request(launcher, catalog, node), runtime_root=parent / "one",
+                                      workspace=tmp_path / "review-workspace")
+    assert not (parent / "one").exists()
