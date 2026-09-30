@@ -31,23 +31,37 @@ all skills.
   recovery trial checks all read that inventory, so they agree. F40 already
   restored an undeclared config edit in a worker workspace just before harvest;
   this covers the orchestrator workspace and every other seam. The match is
-  strict and fails toward "still modified":
+  exact and fails toward "still modified". gsd-core's rewrite is
+  deterministic from the base blob, so the file counts as the flag write only
+  when its bytes equal `json.dumps(expected, indent=2, ensure_ascii=False)` with
+  no trailing newline, where `expected` is the strictly parsed base with
+  `workflow._auto_chain_active` set to `false` (appended last in `workflow`
+  when absent, kept in place when present):
   - the file is exactly `.planning/config.json`, with case-exact names, a real
     `.planning` directory, and a single-link regular file (no symlink, no hard
     link), and the base commit has a blob for it;
-  - both sides parse as JSON objects with a `workflow` object, with no
-    duplicate keys and no `NaN` or `Infinity`;
-  - the candidate's flag is exactly `false` (not `0`, `null`, `"false"` or
-    `true`), the base's own value is absent or exactly `false`, and the two
-    documents are identical once that key is removed, compared serialized so
-    that `1` versus `true` and a reordered key both count as a difference;
+  - the base parses as a JSON object with a `workflow` object, with no
+    duplicate keys, no `NaN` or `Infinity`, and no number that overflows to
+    infinity (`1e400`); the base's own flag is absent or exactly `false`;
+  - a moved existing flag, a whitespace change, a trailing newline or any other
+    edit is a different byte sequence, so it still counts;
+  - Python and JS can serialize exotic inputs differently (integer-like keys,
+    float spelling, lone surrogates). That only ever makes the bytes differ, so
+    such a file counts as modified and is never restored wrongly;
   - the executable bit matches the base mode.
-  The restore writes the base bytes atomically (temp file in the same
-  directory, fsync, rename) and keeps the file's permission bits. Any other
-  edit, including the flag set to `true` or alongside another change, is
-  inventoried as before. Tests cover the inventory, a worker harvest, wave and
-  prelaunch snapshots on a real orchestrator workspace (digest equal to a clean
-  capture), and negative cases for every rule above.
+  The restore is bound to one directory descriptor. `.planning` is opened
+  no-follow from the workspace, `config.json` is read through it, and the
+  temporary file is created and renamed inside it, so a swapped `config.json`
+  or a `.planning` moved out of the workspace after the read cannot redirect the
+  write. The target's identity and the directory's place under the workspace are
+  checked before the temporary file exists and again right before the rename;
+  on any mismatch nothing is written and the file counts as modified. A
+  directory that moves after the rename cannot be undone and is refused with
+  `SOURCE_CHANGED`. The file's permission bits are kept. Tests cover the
+  inventory, a worker harvest, wave and prelaunch snapshots on a real
+  orchestrator workspace (digest equal to a clean capture), negative cases for
+  every rule above, and races injected after the read, before the rename and
+  after the rename.
 
 ### Fixed (2026-09-30, spec-014 Release C: F46 sealed checks may open /dev/null)
 
