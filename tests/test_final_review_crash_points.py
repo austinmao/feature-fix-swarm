@@ -150,3 +150,40 @@ def test_a_crash_at_each_final_review_step_resumes_to_done_once(tmp_path, monkey
     if unfinished:
         assert [row[0] for row in resumed] == [_REVIEWER, _REVIEWER + ":2"]
         assert resumed[-1][1] == "ready"
+
+
+@pytest.mark.parametrize("foreign", ["other-run", "same-run-other-workspace"])
+def test_only_this_childs_own_settled_activity_skips_the_rebind(tmp_path, foreign):
+    """F51c-R1-1: the settled-activity exception uses the rebind's own run and workspace binding."""
+    from run_state.ownership import OwnershipRefused
+    from test_supervised_process import _allocate_registered_child, setup_owner
+    supervisor, store, request = setup_owner(tmp_path)
+    token = supervisor.token
+    with store.read_transaction() as tx:
+        preparation_id = tx.execute("SELECT workspace_preparation_id FROM authority_child_bindings "
+                                    "WHERE activity_id=?", (request.activity_id,)).fetchone()[0]
+    evidence = {"locator": str(tmp_path / "settled"), "sha256": "e" * 64}
+    if foreign == "other-run":
+        # Another run's succeeded activity, even one bound to this run's READY workspace.
+        foreign_id = "other-run-activity"
+        with store.transaction() as tx:
+            tx.execute(
+                "INSERT INTO authority_activities (id,repository_id,run_id,kind,input_digest,revision,state,"
+                "retry_budget,remaining_retry_budget,runtime_tuple_hash,request_key,generation,created_at,updated_at) "
+                "VALUES(?,?,'other-run','execute',?,1,'succeeded',1,0,?,'other-run-key',?,'now','now')",
+                (foreign_id, token.repository_id, "c" * 64, "b" * 64, token.generation))
+            tx.execute(
+                "INSERT INTO authority_child_bindings (activity_id,parent_activity_id,role,candidate_hash,"
+                "contract_hash,runtime_identity,workspace_binding,workspace_preparation_id,created_at) "
+                "VALUES(?,?,'worker',?,?,?,?,?,'now')",
+                (foreign_id, request.activity_id, "c" * 64, "d" * 64, "b" * 64, request.workspace, preparation_id))
+    else:
+        # This run's succeeded activity bound to a different workspace.
+        other, _ready = _allocate_registered_child(store, token, key="second-child")
+        store.transition_activity(token, other.id, expected="pending", new="succeeded", result=evidence)
+        foreign_id = other.id
+    with pytest.raises(OwnershipRefused, match="FENCE_REVOKED"):
+        frontend_producers.rebind_retained_child(store, token, foreign_id, preparation_id)
+    # The child's own activity, settled succeeded by this run, is left as it is.
+    store.transition_activity(token, request.activity_id, expected="pending", new="succeeded", result=evidence)
+    assert frontend_producers.rebind_retained_child(store, token, request.activity_id, preparation_id).id == preparation_id
