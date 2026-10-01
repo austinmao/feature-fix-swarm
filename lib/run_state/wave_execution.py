@@ -670,9 +670,9 @@ def _capture_bound_snapshot(store, token, parent_preparation, current, admission
     with store.transaction() as tx:
         assert_owner(tx, token)
         row = tx.execute(
-            "SELECT created_by_ffs,parent_preparation_id,parent_activity_id,child_role "
+            "SELECT created_by_ffs,parent_preparation_id,parent_activity_id,child_role,generation "
             "FROM context_workspaces WHERE preparation_id=? AND repository_id=? "
-            "AND run_id=? AND path=? AND generation=? AND state='ready'",
+            "AND run_id=? AND path=? AND generation<=? AND state='ready'",
             (
                 current.id,
                 token.repository_id,
@@ -681,7 +681,10 @@ def _capture_bound_snapshot(store, token, parent_preparation, current, admission
                 token.generation,
             ),
         ).fetchone()
-        if row is None or not row["created_by_ffs"]:
+        # F51b: a retained child row keeps the earlier generation a sealed receipt hashed; its
+        # fence is the bound activity, required below at this generation.  The root is rebound.
+        if (row is None or not row["created_by_ffs"]
+                or (row["parent_preparation_id"] is None and row["generation"] != token.generation)):
             raise WorkspaceRefused("WORKSPACE_OWNERSHIP_MISMATCH")
         from .integration_journal import assert_settled_tx
         assert_settled_tx(tx, current.id)

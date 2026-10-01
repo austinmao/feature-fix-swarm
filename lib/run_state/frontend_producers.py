@@ -445,15 +445,20 @@ def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
 
 
 def rebind_retained_child(store, token, activity_id: str | None, preparation_id: str):
-    """F51: put one retained child's READY workspace, then its activity, on the resumed owner's fence.
+    """F51: put one retained child on the resumed owner's fence.
 
     The workspace takes the existing READY revalidation, which refuses while any
-    launch on it is unsettled.  Only then may a pending or active activity bound
-    to it move to this generation; nothing is launched, debited or re-qualified.
+    launch on it is unsettled.  F51b: a child with an activity may have a sealed
+    receipt that hashes its workspace row (the outer's execution receipt), so
+    that row is revalidated without a write and only the pending or active
+    activity bound to it moves to this generation; capture and candidate
+    resolution accept the retained row through that activity.  A preparation
+    with no activity yet (no receipt can bind it) is rebound as before.
+    Nothing is launched, debited or re-qualified.
     """
     from .ownership import OwnershipRefused, assert_owner
     try:
-        ready = revalidate_ready_fence(store, token, preparation_id)
+        ready = revalidate_ready_fence(store, token, preparation_id, rebind=activity_id is None)
     except WorkspaceRefused as error:
         raise SupervisorRefused(error.code) from error
     if activity_id is None:
@@ -465,7 +470,7 @@ def rebind_retained_child(store, token, activity_id: str | None, preparation_id:
                 "UPDATE authority_activities SET generation=?,updated_at=? WHERE id=? AND repository_id=? "
                 "AND run_id=? AND state IN ('pending','active') AND EXISTS (SELECT 1 FROM authority_child_bindings b "
                 "JOIN context_workspaces w ON w.preparation_id=b.workspace_preparation_id "
-                "WHERE b.activity_id=authority_activities.id AND w.preparation_id=? AND w.generation=? "
+                "WHERE b.activity_id=authority_activities.id AND w.preparation_id=? AND w.generation<=? "
                 "AND w.state='ready')",
                 (token.generation, store._now(), activity_id, token.repository_id, token.run_id,
                  preparation_id, token.generation)).rowcount

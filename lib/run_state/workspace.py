@@ -581,11 +581,18 @@ def finalize_ready_unlock(
         _unlock_workspace_locked(store, token, preparation, admission_guard=admission_guard)
 
 
-def revalidate_ready_fence(store, token: OwnerToken, preparation_id: str) -> WorkspacePreparation:
-    """Bind an existing physical READY workspace to a newly reclaimed fence."""
+def revalidate_ready_fence(store, token: OwnerToken, preparation_id: str, *,
+                           rebind: bool = True) -> WorkspacePreparation:
+    """Bind an existing physical READY workspace to a newly reclaimed fence.
+
+    ``rebind=False`` (F51b) runs the same proofs for a retained child workspace
+    and writes nothing: a sealed receipt may hash its row, so its fence is
+    carried by its activity instead (``frontend_producers.rebind_retained_child``).
+    """
     preparation = inspect_workspace(store, preparation_id)
     if (
-        preparation.run_id != token.run_id
+        (not rebind and preparation.parent_preparation_id is None)
+        or preparation.run_id != token.run_id
         or (preparation.parent_preparation_id is None
             and durable_workspace_key(os.fspath(preparation.path))
             != durable_workspace_key(token.workspace))
@@ -614,6 +621,8 @@ def revalidate_ready_fence(store, token: OwnerToken, preparation_id: str) -> Wor
                 _assert_preparation_binding(row, token, require_generation=False, tx=tx)
                 if row["generation"] != token.generation:
                     _assert_child_recovery_reconciled(tx, row)
+                if not rebind:
+                    return _from_row(row)
                 changed_workspace = tx.execute(
                     "UPDATE context_workspaces SET generation = ?, updated_at = ? "
                     "WHERE preparation_id = ? AND repository_id = ? AND run_id = ? AND state = 'ready'",
