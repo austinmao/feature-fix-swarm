@@ -157,8 +157,9 @@ def test_resume_keeps_the_receipt_hashed_outer_row_and_reverifies_it_to_done(tmp
 
         def final_review(frozen):
             outer = inspect_workspace(store, retained["ready"])
-            snapshot = capture_prelaunch_snapshot(store, token, outer, activity_id=child_id,
-                                                  runtime_identity="b" * 64, evidence_root=authority / "resume-capture")
+            snapshot = capture_prelaunch_snapshot(
+                store, token, outer, activity_id=child_id, evidence_root=authority / "resume-capture",
+                runtime_identity=store.get_activity(child_id).runtime_tuple_hash)
             assert snapshot.input_digest == frozen.candidate_hash
             pending = begin_child_workspace_preparation(
                 store, token, parent_activity_id=child_id, request_key="resume-final-review", role="reviewer",
@@ -176,7 +177,7 @@ def test_resume_keeps_the_receipt_hashed_outer_row_and_reverifies_it_to_done(tmp
                  sealed.material["criteria"][0]["id"]),
                 str(review_ready.path), review_ready.base_commit, "b" * 64, contract_hash=sealed.acceptance_hash))
             handle = supervisor.launch(supervisor.reserve_request_action(request, action="final_review"))
-            supervisor.finish(handle, timeout=15)
+            supervisor.finish(handle, timeout=15, token_usage=0)
             record_final_review(supervisor, handle, acceptance_hash=sealed.acceptance_hash)
             reviews.append((reviewer.id, handle.result["evidence"]))
 
@@ -187,7 +188,7 @@ def test_resume_keeps_the_receipt_hashed_outer_row_and_reverifies_it_to_done(tmp
                                       result=retained["process_evidence"])
 
         def unexpected(_value):
-            raise AssertionError("the resumed lifecycle neither re-executes nor recovers")
+            raise AssertionError("the resumed lifecycle neither re-executes nor recovers: " + repr(_value)[:800])
 
         stage = drive_frontend_lifecycle(
             store, token, supervisor=supervisor, controller=controller, workspace=str(inspect_workspace(
