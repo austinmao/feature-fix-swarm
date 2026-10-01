@@ -379,10 +379,11 @@ def test_a_live_member_of_a_dead_probes_group_blocks_the_close_until_it_exits(tm
     group.mkdir()
     template, fake, catalog = _real_host(tmp_path, monkeypatch, group_dir=group)
     argv = _argv(env, authority, template, fake, catalog, _draft(tmp_path))
-    member = None
+    member_group = None
     try:
         _sigkilled_run(tmp_path, primary, argv, "probe-released", group_dir=group)
-        member = int((group / "member.pid").read_text())
+        # The member waits on the release file, so its group id is read while it is alive.
+        member_group = os.getpgid(int((group / "member.pid").read_text()))
         store = ControlStore(authority / "control.sqlite3")
         [probe] = _reviewer_probes(store)
         _wait_dead(ProcessIdentity(probe["child_host_id"], probe["child_boot_id"], probe["child_pid"],
@@ -416,11 +417,16 @@ def test_a_live_member_of_a_dead_probes_group_blocks_the_close_until_it_exits(tm
         assert _held_resources(tmp_path) == {}
     finally:
         (group / "release").touch()
-        if member is not None:
-            try:
-                os.kill(member, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        if member_group is not None:
+            deadline = time.monotonic() + 10
+            while not _group_gone(member_group) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not _group_gone(member_group):
+                # A group with a live member keeps its id, so this never signals a recycled pid.
+                try:
+                    os.killpg(member_group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 @requires_local_confinement
