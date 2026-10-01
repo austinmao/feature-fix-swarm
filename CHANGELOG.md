@@ -30,9 +30,23 @@ all skills.
   `revalidate_ready_fence` (which refuses `INTENT_RECONCILIATION_REQUIRED`
   while any launch on it is unsettled) and only then moves the outer activity
   to the current generation. The final review producer does the same for a
-  retained ready reviewer workspace and its reviewer, so the reviewer's
-  qualification resumes through the existing replay-safe seam on the
-  channel-less review supervisor with standalone leases (F50).
+  retained ready reviewer workspace that has no reviewer activity yet.
+- A reviewer qualified under an earlier owner fence is never re-qualified
+  (review r1, R1-1/R1-2): its admission file, probe settlements and private
+  home bind that fence, its home fails strict staging reuse once probes wrote
+  evidence, and a probe released when the owner died stays unsettled.
+  `_current_reviewer` abandons it instead: each unfinished probe must pass
+  the new `ControlStore.close_dead_qualification_intent` (a qualification
+  launch of an earlier generation whose released run owner and child both
+  probe DEAD on this boot becomes `closed_dead`, its debit retained and its
+  result never adopted; anything else refuses
+  `INTENT_RECONCILIATION_REQUIRED`), the reviewer is aborted, and a fresh
+  reviewer (next attempt key, new activity, workspace and private home)
+  qualifies on the channel-less review supervisor with standalone leases
+  (F50). The dead probe's admission is reclaimed by the queue's dead-owner
+  rule. The DONE gate accepts a `closed_dead` qualification probe only on a
+  failed or aborted activity. A review grant already reserved against such a
+  reviewer refuses `REVIEW_RECONCILIATION_REQUIRED`.
 - A final review launch retained from a crashed owner is never launched again:
   reserved or acknowledged without a permit still refuses
   `INTENT_RECONCILIATION_REQUIRED`; one issued by an earlier owner fence now
@@ -41,7 +55,10 @@ all skills.
   the issuing fence. A crash after the review was recorded finishes to `DONE`
   idempotently. Tests: `tests/test_final_review_resume.py` (real store and
   CLI entry; nothing held in the admission queue after the crash or the
-  resume).
+  resume) and `tests/test_final_review_resume_sigkill.py` (a SIGKILLed child
+  process, then the real qualify_runtime closure, staging and
+  qualify_managed_runtime; only the Codex observer and verify_runtime are
+  scripted).
 
 ### Fixed (2026-10-01, spec-014 Release C: F54 final-review evidence ids follow the published grammar)
 

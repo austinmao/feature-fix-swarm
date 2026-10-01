@@ -119,8 +119,8 @@ _REQUEST_KEY_REFUSALS = {
         "reconcile_intent"),
     # F51: a second final review would spend the run's single review grant again.
     "REVIEW_RECONCILIATION_REQUIRED": (
-        "the run's final review was launched by an earlier owner fence and is not recorded; its completion "
-        "proof binds that fence, so this owner cannot record it, and it is never launched again",
+        "the run's final review was launched, or its grant reserved, under an earlier owner fence and is not "
+        "recorded; its proof binds that fence, so this owner cannot record it, and it is never launched again",
         "inspect_retained_review"),
 }
 

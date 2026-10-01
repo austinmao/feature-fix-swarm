@@ -90,14 +90,50 @@ def _retained_action(store, token, logical_key: str):
 def _retained_reviewer(store, token, *, parent_activity_id: str, reviewer_key: str):
     with store.read_transaction() as tx:
         activity = tx.execute(
-            "SELECT a.id FROM authority_activities a JOIN authority_child_bindings b ON b.activity_id=a.id "
-            "WHERE b.parent_activity_id=? AND a.request_key=? AND a.repository_id=? AND a.run_id=?",
-            (parent_activity_id, reviewer_key, token.repository_id, token.run_id)).fetchone()
+            "SELECT a.id,a.state,a.generation FROM authority_activities a JOIN authority_child_bindings b "
+            "ON b.activity_id=a.id WHERE b.parent_activity_id=? AND a.request_key=? AND a.repository_id=? "
+            "AND a.run_id=?", (parent_activity_id, reviewer_key, token.repository_id, token.run_id)).fetchone()
         preparation = tx.execute(
             "SELECT preparation_id FROM context_workspaces WHERE repository_id=? AND run_id=? AND child_request_key=?",
             (token.repository_id, token.run_id, reviewer_key)).fetchone()
-    return (None if activity is None else activity["id"],
-            None if preparation is None else preparation["preparation_id"])
+    return activity, None if preparation is None else preparation["preparation_id"]
+
+
+def _current_reviewer(store, token, *, parent_activity_id: str, base_key: str, action):
+    """The reviewer this owner may qualify: ``(key, retained activity id, retained preparation id)``.
+
+    F51: a reviewer qualified under an earlier owner fence cannot be re-qualified
+    here (its admission file, probe settlements and runtime home bind that
+    fence), so it is abandoned: each unfinished probe must be a dead owner's
+    dead child (``close_dead_qualification_intent``), the reviewer is aborted,
+    and the next attempt key gets a fresh activity, workspace and private home.
+    A review grant already reserved against it is never moved to another reviewer.
+    """
+    from .ownership import OwnershipRefused
+    attempt = 1
+    while True:
+        key = base_key if attempt == 1 else f"{base_key}:{attempt}"
+        activity, preparation_id = _retained_reviewer(store, token, parent_activity_id=parent_activity_id,
+                                                      reviewer_key=key)
+        if activity is not None and activity["state"] in {"failed", "aborted"}:
+            attempt += 1
+            continue
+        if activity is None or activity["generation"] == token.generation:
+            return key, None if activity is None else activity["id"], preparation_id
+        if action is not None:
+            raise SupervisorRefused("REVIEW_RECONCILIATION_REQUIRED")
+        with store.read_transaction() as tx:
+            unfinished = [row["id"] for row in tx.execute(
+                "SELECT id FROM authority_launch_intents WHERE activity_id=? "
+                "AND state NOT IN ('completed_succeeded','completed_failed','closed_dead')", (activity["id"],))]
+        try:
+            for intent_id in unfinished:
+                store.close_dead_qualification_intent(intent_id, token)
+            store.transition_activity(token, activity["id"], expected=activity["state"], new="aborted",
+                                      reason="reviewer of an earlier owner fence abandoned unreviewed (F51)")
+        except OwnershipRefused as error:
+            raise SupervisorRefused(error.code) from error
+        attempt += 1
 
 
 def _current_candidate(store, token, *, parent_activity_id: str, preparation):
@@ -239,7 +275,7 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
     if sealed is None or sealed.acceptance_hash != frozen.acceptance_hash:
         raise SupervisorRefused("ACCEPTANCE_SEAL_REQUIRED")
     acceptance_hash, candidate_hash = frozen.acceptance_hash, frozen.candidate_hash
-    launch_key, reviewer_key = request_key + ":launch", request_key + ":reviewer"
+    launch_key = request_key + ":launch"
 
     action, intent = _retained_action(store, token, launch_key)
     if intent is not None:
@@ -256,8 +292,8 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
     try:
         preparation, parent_activity_id, runtime_identity = _current_candidate(
             store, token, parent_activity_id=parent_activity_id, preparation=preparation)
-        retained_activity_id, retained_preparation_id = _retained_reviewer(
-            store, token, parent_activity_id=parent_activity_id, reviewer_key=reviewer_key)
+        reviewer_key, retained_activity_id, retained_preparation_id = _current_reviewer(
+            store, token, parent_activity_id=parent_activity_id, base_key=request_key + ":reviewer", action=action)
         ready = _reviewer_workspace(
             store, token, supervisor, preparation=preparation, parent_activity_id=parent_activity_id,
             runtime_identity=runtime_identity, reviewer_key=reviewer_key, candidate_hash=candidate_hash,

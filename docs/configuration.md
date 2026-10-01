@@ -321,7 +321,7 @@ managed run, the recovery action depends on the code:
 |---|---|---|
 | `REQUEST_ALREADY_COMPLETED` | A launch under this request key already settled and may have done its work. It is never resumed, and a new key could repeat it | `inspect_completed_launch` |
 | `INTENT_RECONCILIATION_REQUIRED` | A launch under this request key has not settled; only owner-fence reconciliation may settle it | `reconcile_intent` |
-| `REVIEW_RECONCILIATION_REQUIRED` | The run's final review was launched by an earlier owner fence and is not recorded. Its completion proof binds that fence, so this owner cannot record it, and it is never launched again | `inspect_retained_review` |
+| `REVIEW_RECONCILIATION_REQUIRED` | The run's final review was launched, or its grant reserved, under an earlier owner fence and is not recorded. Its proof binds that fence, so this owner cannot record it, and it is never launched again | `inspect_retained_review` |
 | `RETAINED_RUNTIME_NOT_REUSABLE` | The retained outer runtime cannot be resumed, and no outer launch ran under it | `resume_with_new_request_key` |
 | `CHILD_RUNTIME_NOT_REUSABLE` | A wave child or final-reviewer runtime cannot be resumed. A new key would start a new outer run | `inspect_retained_child` |
 | `MANAGED_FRONTEND_COMMAND_UNSTAGED` | `feature-spec`/`fix`/`code-uplift` have no staged `gsd-*` command mapping yet; only `feature-implement` and `task-swarm` do | `select_a_staged_frontend` |
@@ -336,8 +336,10 @@ managed run, the recovery action depends on the code:
 A replay of a run whose lifecycle already reached `DONE` returns its recorded
 success without relaunching. A same-key replay of a sealed run at
 `FINAL_REVIEW` whose outer launch settled `completed_succeeded` continues the
-lifecycle from that stage without the outer runtime (F51). There is no dedicated inspect or reconcile
-command yet for `inspect_*` and `reconcile_intent`; they name the step an
+lifecycle from that stage without the outer runtime; a final reviewer
+qualified under the earlier owner is abandoned and a fresh one qualified
+(F51). There is no dedicated inspect or reconcile command yet for `inspect_*`
+and `reconcile_intent`; they name the step an
 operator takes by hand. Contract: `specs/014-parallel-host-parity/contracts/run-context.md`.
 
 #### `run-state admission inspect|reconcile` (spec-014 Release C, F25)
