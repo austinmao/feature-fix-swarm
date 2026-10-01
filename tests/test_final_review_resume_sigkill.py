@@ -416,17 +416,13 @@ def test_a_live_member_of_a_dead_probes_group_blocks_the_close_until_it_exits(tm
         assert [row["state"] for row in _reviewer_probes(store)] == ["closed_dead"] + ["completed_succeeded"] * 4
         assert _held_resources(tmp_path) == {}
     finally:
+        # The member exits on its own once released; cleanup never signals a pid or group id
+        # that could have been recycled.
         (group / "release").touch()
         if member_group is not None:
             deadline = time.monotonic() + 10
             while not _group_gone(member_group) and time.monotonic() < deadline:
                 time.sleep(0.05)
-            if not _group_gone(member_group):
-                # A group with a live member keeps its id, so this never signals a recycled pid.
-                try:
-                    os.killpg(member_group, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
 
 
 @requires_local_confinement
