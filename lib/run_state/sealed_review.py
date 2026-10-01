@@ -30,6 +30,17 @@ def final_review_output_contract(sealed, *, candidate_hash: str) -> dict:
     dimensions = material.get("required_review_dimensions")
     if dimensions is None:
         raise ValueError("sealed review dimensions are required")
+
+    def criterion_entry(item):
+        entry = {"required_evidence_ids_for_pass": sorted(
+            rule["id"] for rule in item["evidence_rules"] if rule["required"])}
+        # Only a legacy seal can map a check id that may not label evidence; a collision-free
+        # seal adds no key, so its contract keeps its size.
+        excluded = {check["id"] for check in item["checks"]} - labelable_check_ids(material["criteria"], item)
+        if excluded:
+            entry["non_label_check_ids"] = sorted(excluded)
+        return entry
+
     fixed = {"schema": "ffs.sealed-final-review/v1", "acceptance_hash": sealed.acceptance_hash,
              "candidate_hash": candidate_hash, "review_dimensions": dimensions}
     return {
@@ -41,18 +52,11 @@ def final_review_output_contract(sealed, *, candidate_hash: str) -> dict:
             "required_fields": ["status", "evidence"], "additional_fields": False,
             "status_values": ["passed", "failed"], "evidence_type": "array",
         },
-        "criteria": {
-            item["id"]: {
-                "required_evidence_ids_for_pass": sorted(
-                    rule["id"] for rule in item["evidence_rules"] if rule["required"]),
-                "evidence_ids": sorted({rule["id"] for rule in item["evidence_rules"]}
-                                       | labelable_check_ids(material["criteria"], item)),
-            } for item in material["criteria"]
-        },
+        "criteria": {item["id"]: criterion_entry(item) for item in material["criteria"]},
         "criteria_membership": "Exactly the listed criterion IDs; each value follows criterion_result; no omissions or extra IDs.",
         "evidence": {
             "required_fields": ["id", "locator", "sha256"], "additional_fields": False,
-            "id": "Criterion evidence: an evidence-rule ID or a mapped check ID of that criterion, exactly as listed in criteria.<criterion ID>.evidence_ids, never an artifact name; unique per criterion. Finding evidence may also use invariant IDs.",
+            "id": "Criterion evidence: an evidence-rule ID or a mapped check ID of that criterion, except any check ID listed in criteria.<criterion ID>.non_label_check_ids, never an artifact name; unique per criterion. Finding evidence may also use invariant IDs.",
             "locator": "Absolute path of the supplied retained evidence file.",
             "sha256": "Exact lowercase SHA-256 of that supplied evidence file.",
         },

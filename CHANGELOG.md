@@ -44,10 +44,11 @@ all skills.
   reads back, and on such a seal `validate_native_review_evidence` does not
   offer a check id that equals another criterion's rule id, or
   `review-process-result`, as an evidence label for its criterion.
-  The published output contract now lists each criterion's permitted evidence
-  ids (`criteria.<ID>.evidence_ids`, computed by the same `labelable_check_ids`
-  helper the validator uses), so the grammar never permits a label the
-  validator refuses.
+  The published output contract now states the same rule: a criterion carries
+  `non_label_check_ids` (the mapped check ids minus `labelable_check_ids`, the
+  helper the validator uses) only when that list is non-empty, so the grammar
+  never permits a label the validator refuses and a collision-free seal's
+  contract is no larger than before.
 
 ### Fixed (2026-09-30, spec-014 Release C: F49 gsd's ephemeral auto-chain flag write is no change)
 
