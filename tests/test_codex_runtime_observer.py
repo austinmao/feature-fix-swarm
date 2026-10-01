@@ -213,3 +213,97 @@ def test_agent_report_and_allowed_file_do_not_prove_shell_denial(tmp_path: Path)
                              allowed=allowed, blocked=blocked)
     assert record["observed"]["shell_denied"] is False
     assert record["observed"]["write_boundary"] is False
+
+
+def test_observer_chain_matches_the_host_capability_chain_for_a_js_launcher(tmp_path: Path, monkeypatch):
+    """F53 review: the observer produces the qualified chain, so it must resolve as host_capabilities does."""
+    import sys
+    sys.path.insert(0, str(ROOT / "lib"))
+    from host_capabilities import _binary_chain
+    sys.path.pop(0)
+    sys.path.insert(0, str(ROOT / "lib" / "run_state" / "tests"))
+    from test_codex_host import _npm_layout
+    sys.path.pop(0)
+    launcher, node, native, triple = _npm_layout(tmp_path)
+    decoy = tmp_path / "codex-0-decoy" / "vendor" / triple / "bin"
+    decoy.mkdir(parents=True)
+    (decoy / "codex").write_text("#!/bin/sh\necho decoy\n")
+    (decoy / "codex").chmod(0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.delenv("CODEX_NATIVE_BINARY", raising=False)
+
+    chain = observer.executable_chain(launcher)
+
+    assert chain == _binary_chain(launcher)
+    assert chain["native_sha256"] == __import__("hashlib").sha256(native.read_bytes()).hexdigest()
+
+
+def _layouts():
+    import sys
+    sys.path.insert(0, str(ROOT / "lib" / "run_state" / "tests"))
+    import test_codex_host
+    sys.path.pop(0)
+    return test_codex_host
+
+
+def _chains(launcher):
+    """Both qualification entry points; they must agree with each other and with native review."""
+    import sys
+    sys.path.insert(0, str(ROOT / "lib"))
+    from host_capabilities import CapabilityError, _binary_chain
+    sys.path.pop(0)
+    return (CapabilityError, _binary_chain), (ValueError, observer.executable_chain)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("reported", [("darwin", "arm64"), ("darwin", "x64"), ("linux", "x64")])
+def test_qualification_takes_platform_and_arch_from_the_verified_node(tmp_path: Path, monkeypatch, reported):
+    layouts = _layouts()
+    launcher, node, native, _triple = layouts._npm_layout(tmp_path, reported=reported,
+                                                          installed=list(layouts.CODEX_TARGETS))
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.delenv("CODEX_NATIVE_BINARY", raising=False)
+    expected = __import__("hashlib").sha256(native.read_bytes()).hexdigest()
+
+    for _error, chain in _chains(launcher):
+        assert chain(launcher)["native_sha256"] == expected
+
+
+@pytest.mark.parametrize("body", ["#!/bin/sh\nexit 1\n", "#!/bin/sh\necho not a pair\n",
+                                  "#!/bin/sh\necho 'freebsd x64'\n", "#!/bin/sh\nexit 0\n",
+                                  "#!/bin/sh\nexec sleep 5\n"],
+                         ids=["nonzero", "malformed", "unknown-pair", "empty", "timeout"])
+def test_qualification_refuses_when_the_node_platform_probe_fails(tmp_path: Path, monkeypatch, body):
+    import sys
+    sys.path.insert(0, str(ROOT / "lib"))
+    import host_capabilities
+    sys.path.pop(0)
+    launcher, node, _native, _triple = _layouts()._npm_layout(tmp_path, node_body=body)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.delenv("CODEX_NATIVE_BINARY", raising=False)
+    # The observer loads its own copy of host_capabilities; bound the probe in both.
+    for module in (host_capabilities, observer._shared):
+        monkeypatch.setattr(module, "_NODE_PROBE_TIMEOUT", 0.3, raising=False)
+
+    for error, chain in _chains(launcher):
+        with pytest.raises(error, match="Node"):
+            chain(launcher)
+
+
+def test_qualification_refuses_a_package_absent_from_every_ancestor_even_with_a_local_vendor_dir(
+        tmp_path: Path, monkeypatch):
+    launcher, node, native, triple = _layouts()._npm_layout(tmp_path)
+    (native.parents[3] / "package.json").unlink()
+    native.unlink()
+    local = tmp_path / "npm" / "vendor" / triple / "bin"
+    local.mkdir(parents=True)
+    (local / "codex").write_text("#!/bin/sh\necho local\n")
+    (local / "codex").chmod(0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.delenv("CODEX_NATIVE_BINARY", raising=False)
+
+    for error, chain in _chains(launcher):
+        with pytest.raises(error, match="native"):
+            chain(launcher)

@@ -71,12 +71,19 @@ def _fixture_refusal(
     return _FIXTURE_CODES.get(code, 5) if exit_code is None else exit_code
 
 
+def _resource_refusals() -> tuple[type[Exception], ...]:
+    """Shared-resource layer refusals (F50): the admission queue, the prepaid parent group and their authority."""
+    from run_state.managed_admission import ManagedAdmissionRefused
+    from run_state.resource_groups import ResourceGroupRefused
+    return ResourceGroupRefused, ManagedAdmissionRefused, ControlStoreRefused
+
+
 def _managed_run_refusals() -> tuple[type[Exception], ...]:
     """Typed refusals which can escape a managed host run's callback."""
     from run_state.frontend_policy import FrontendPolicyRefused
     from run_state.run_policy import RunPolicyRefused
     from run_state.supervisor import SupervisorRefused
-    return SupervisorRefused, FrontendPolicyRefused, RunPolicyRefused
+    return (SupervisorRefused, FrontendPolicyRefused, RunPolicyRefused) + _resource_refusals()
 
 
 _REFUSAL_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
@@ -158,6 +165,10 @@ _WAVE_REFUSALS = {
 def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     """The managed-run JSON envelope (exit 78) for one of ``_managed_run_refusals``."""
     from run_state.supervisor import SupervisorRefused
+    if isinstance(error, ControlStoreRefused) and not error.code.startswith("RESOURCE_"):
+        # Only resource-layer codes are normalized here.  Any other authority refusal (FENCE_REVOKED, ...)
+        # keeps its own exit code through ``_cmd_fixture_start``.
+        raise error
     extra = {}
     detail = _refusal_detail(error)
     if detail is not None:
@@ -171,6 +182,12 @@ def _managed_run_refusal(error: Exception, *, run_id: str) -> int:
     elif error.code in _WAVE_REFUSALS:
         cause, action = _WAVE_REFUSALS[error.code]
         extra.update(cause=cause, recovery_action={"action": action})
+    elif isinstance(error, _resource_refusals()) or (
+            isinstance(error, SupervisorRefused) and error.code.startswith("RESOURCE_")):
+        # The supervisor types resource-layer refusals as SupervisorRefused (_bind_shared_resource,
+        # _assert_shared_spawn_safe); they are still resource refusals, not a host-qualification gap.
+        extra.update(cause="a shared-resource admission or prepaid-group refusal ended the managed run",
+                     recovery_action={"action": "inspect_managed_admission"})
     elif isinstance(error, SupervisorRefused):
         extra.update(cause="the selected host backend has not demonstrated managed admission",
                      recovery_action={"action": "qualify_host_adapter"})

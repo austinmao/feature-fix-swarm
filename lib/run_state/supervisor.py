@@ -502,7 +502,11 @@ class Supervisor:
         reservation = reservation or self._shared_reservations.get(intent_id)
         if reservation is None:
             raise SupervisorRefused("SHARED_RESOURCE_LEASE_REQUIRED")
-        self.shared_resource_coordinator.bind_intent(reservation, intent_id, consumer=consumer)
+        from .resource_groups import ResourceGroupRefused
+        try:
+            self.shared_resource_coordinator.bind_intent(reservation, intent_id, consumer=consumer)
+        except ResourceGroupRefused as error:
+            raise SupervisorRefused(error.code) from error
         self._shared_reservations[intent_id] = reservation
 
     def _assert_shared_spawn_safe(self, intent_id):
@@ -3639,9 +3643,16 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         [sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"),
     )
 
+    outer_supervisor = supervisor
+
     def qualify_runtime(activity_id: str, preparation, activity_request_key: str,
-                        parent_activity_id: str, final_contract_hash: str, child_role: str):
-        """Stage one private runtime and qualify it; replay reads the retained observation."""
+                        parent_activity_id: str, final_contract_hash: str, child_role: str, *,
+                        supervisor=None):
+        """Stage one private runtime and qualify it; replay reads the retained observation.
+
+        Wave workers qualify on the outer supervisor (inside its prepaid group).  The final
+        reviewer runs after that group ended, so it passes its channel-less supervisor (F50).
+        """
         private_home = runtime_root / activity_id
         try:
             with productive_work(store, token, kind="preparation"):
@@ -3661,7 +3672,8 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                 runtime_home=private_home, binary=Path(host_request.binary),
                 gsd_environment=additions, host_request=staged_request,
                 role=child_role, evidence_root=host_evidence,
-                final_contract_hash=final_contract_hash, supervisor=supervisor,
+                final_contract_hash=final_contract_hash,
+                supervisor=outer_supervisor if supervisor is None else supervisor,
             )
             adapter = CodexHostAdapter(
                 bundle.qualified_runtime, host_request.binary, str(cli["version"]),

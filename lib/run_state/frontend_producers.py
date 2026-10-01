@@ -53,7 +53,8 @@ class HostRuntimeSeam:
     """The managed host adapters' reusable runtime preparation plus host-resolved identities.
 
     ``qualify(activity_id, workspace, activity_request_key, parent_activity_id,
-    final_contract_hash, role)`` returns ``QualifiedHostRuntime``;
+    final_contract_hash, role, *, supervisor=None)`` returns ``QualifiedHostRuntime``
+    (``supervisor`` defaults to the outer orchestrator's; the reviewer passes its own);
     ``bind(qualified, prompt, workspace, final_contract_hash, launch_request_key)``
     returns ``(DispatchRequest with codex_material/claude_material, adapter)``.
     """
@@ -180,7 +181,8 @@ def _published_request(supervisor, *, activity_id, launch_key, acceptance_hash, 
     return None
 
 
-def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str) -> NativeReviewRequest:
+def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str,
+                    qualified_binary=()) -> NativeReviewRequest:
     binary = Path(seam.binary)
     try:
         binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
@@ -194,6 +196,10 @@ def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str
         catalog_path=seam.catalog_path if seam.host == "codex" else None,
         catalog_sha256=seam.catalog_sha256 if seam.host == "codex" else None,
         session_id=str(uuid.uuid4()) if seam.host == "claude" else None,
+        # A `.js` launcher runs under the Node, and spawns the vendor executable, that its runtime
+        # was qualified with (chain pins); native review binds and re-verifies both.
+        node_sha256=dict(qualified_binary).get("node_sha256") if seam.host == "codex" else None,
+        native_sha256=dict(qualified_binary).get("native_sha256") if seam.host == "codex" else None,
     )
 
 
@@ -251,8 +257,9 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
             retained_preparation_id=retained_preparation_id)
     except WorkspaceRefused as error:
         raise SupervisorRefused(error.code) from error
+    # The outer orchestrator's prepaid group has ended by now: qualify on this channel-less supervisor.
     qualified = seam.qualify(retained_activity_id or str(uuid.uuid4()), ready, reviewer_key,
-                             parent_activity_id, acceptance_hash, "reviewer")
+                             parent_activity_id, acceptance_hash, "reviewer", supervisor=supervisor)
     activity = qualified.activity
     tuple_hash = store.runtime_tuple_hash(qualified.qualified)
     selected = _selected_artifacts(store, ready)
@@ -291,7 +298,8 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
         else:
             try:
                 native = prepare_native_review_runtime(
-                    _native_request(seam, runtime_identity=tuple_hash, prompt=artifact.prompt),
+                    _native_request(seam, runtime_identity=tuple_hash, prompt=artifact.prompt,
+                                    qualified_binary=qualified.qualified.binary),
                     runtime_root=private / uuid.uuid4().hex, workspace=ready.path)
                 material = prepare_native_review_launch(native=native, artifact=artifact, ordinary=ordinary,
                                                         runtime_receipt_sha256=qualified.receipt.receipt_sha256)

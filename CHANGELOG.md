@@ -50,6 +50,160 @@ all skills.
   never permits a label the validator refuses and a collision-free seal's
   contract is no larger than before.
 
+### Fixed (2026-09-30, spec-014 Release C: F53 native review runs the Codex JS launcher with its Node)
+
+- The managed native final review exited within about a second on an
+  npm-installed Codex (M3 attempt 31, Codex `0.154.0`): stderr read
+  `env: node: No such file or directory`, then `AUTH_REVOCATION_UNPROVEN`. Every
+  npm install is a `.js` launcher (`bin/codex.js`, `#!/usr/bin/env node`), but
+  the native review environment hardcoded `PATH=/usr/bin:/bin`, so `env` could
+  not find Node. The review process receives `native.environment` (the
+  supervisor launches with `launch_environment = material.execution_environment()`);
+  the separate artifact-envelope `PATH` in `produce_final_review` is never used to
+  launch it, is not compared with it, and is left as it was.
+  - The Codex review `PATH` is now built exactly as the host launch builds it, through
+    shared helpers in `host_capabilities` (`codex_node_binary`, `codex_native_binary`,
+    `codex_path_entries`) that `codex_closed_environment` also uses, so the two cannot
+    drift: the verified Node's directory first, then the launcher's parent, then
+    `/usr/bin:/bin`. Node goes first because `#!/usr/bin/env node` takes the first `node`
+    on PATH; with the launcher's directory first, a different `node` placed beside
+    `codex.js` would have run (the host launch had the same order). The resolved Node must
+    be a regular file named `node`: a symlinked `node` (`node -> node20`) could be
+    retargeted after verification and would run an unverified Node, so it is refused at
+    prepare and again at replay (Homebrew Cellar and nvm installs have a regular
+    `bin/node`; a Volta shim is refused). A native
+    (non-`.js`) binary gets its own parent plus the system dirs and no Node directory,
+    even when Node is ambient. Claude review material is unchanged. Because the host
+    launch shares the helper, a `.js` launcher's closed environment (and so its policy hash)
+    now lists Node first; a runtime qualified before this change for an npm install is
+    re-qualified, while a native binary's PATH is unchanged.
+  - A `.js` launcher requires both pins from the reviewer runtime's qualified chain,
+    `node_sha256` and `native_sha256` (`NativeReviewRequest`, threaded by
+    `produce_final_review`); a request without them refuses before any runtime
+    directory exists. Preparation reads each binary once, the read whose digest is
+    recorded, and compares that digest with the pin, so a swap after resolution cannot
+    be recorded. The Node is located as the host launch locates it (`CODEX_NODE_BINARY`
+    or `node` on PATH). The vendor executable the launcher spawns, which the review
+    material previously did not bind at all, is bound the same way. It is located by
+    replaying the launcher's own `findCodexExecutable` (`codex-cli/bin/codex.js`, byte
+    identical at `rust-v0.154.0` and `rust-v0.159.0`): the platform package and target
+    triple come from its table, keyed by `process.platform` and `process.arch` as reported
+    by the verified Node itself (run by absolute path, fixed minimal environment, 10 s
+    timeout; a failed probe, malformed output or an unknown pair refuses), not by Python's
+    `platform.machine()`, which can differ under Rosetta or with an x64 Node on arm64. Then
+    `require.resolve("<package>/package.json")` from the launcher's directory (each ancestor
+    `node_modules`, nearest first, the first step of Node's order), then
+    `<package>/vendor/<triple>/bin/codex`. A resolved package without the executable, or with
+    an `exports` map, refuses. The previous wildcard (`codex-*/vendor/*/bin/codex`, first
+    match) and an ambient `CODEX_NATIVE_BINARY` could bind a decoy, so both are gone. An
+    ambient `CODEX_NATIVE_BINARY` naming any file other than the one the launcher spawns now
+    refuses with a clear reason instead of being silently honoured or silently ignored. Host
+    qualification (`_binary_chain`), the runtime observer (`executable_chain`) and the native
+    review use the same `codex_node_binary` and `codex_native_binary` helpers, so the
+    qualified chain and the review bind one executable. The Node is checked against its pin
+    before it is run for the probe.
+  - Limitation: the native review does not emulate the rest of Node's resolution order
+    (NODE_PATH, `$HOME/.node_modules`, `$HOME/.node_libraries`, `$PREFIX/lib/node`) or the
+    launcher's fallback to a local `vendor/` directory, which only applies once those fail.
+    A Codex install whose platform package is found in no ancestor `node_modules` of the
+    launcher, including one carrying only a local `vendor/` dir, therefore refuses native
+    review (and qualification) instead of binding a guess.
+  - The material records `node_binary`, `node_sha256`, `native_binary` and
+    `native_sha256` in its provenance. Replay never consults the ambient environment: it
+    re-hashes both stored paths, recomputes the expected `PATH` from the stored binary
+    and Node, and refuses a tampered `PATH`, a swapped or forged Node or vendor
+    executable, or a `.js` material that sheds either identity. Every `PATH` entry must
+    be absolute and free of the separator.
+
+### Fixed (2026-09-30, spec-014 Release C: F52 native review admits Codex CLI 0.159.0)
+
+- Every managed native final review on a Codex 0.159.0 host refused with
+  `NATIVE_REVIEW_MATERIAL_INVALID`. `native_review_runtime` pinned one audited
+  Codex snapshot (`0.154.0`: release, commit and the SHA-256 of `spec_plan.rs`,
+  `config.schema.json` and `openai_models.rs`) and refused any other CLI version
+  in both `prepare_native_review_runtime` and `validate_native_review_material`,
+  even though `0.159.0` was already admitted for ordinary runs. The pin is now a
+  table keyed by CLI version with two rows, `0.154.0` (unchanged, constants keep
+  their names) and `0.159.0` (tag `rust-v0.159.0`, commit `687a119f0fca...`,
+  tool digest `849ef21d...`, config digest `eda7251b...`, model digest
+  `4c8b5caf...`, each recomputed from the raw upstream files at that tag). The
+  provenance emitted into the material and the provenance checked on replay both
+  come from the row for the material's own version, so a `0.159.0` material
+  carrying `0.154.0` digests (or the reverse, or any mixed row) is refused as
+  provenance drift. Every other Codex version (`0.155.1`, `0.156.1`, `0.157.0`,
+  `0.158.0`, `0.159.1`, ...) still refuses. Claude review material is unchanged.
+  - Since `0.156.1`, `spec_plan.rs` also registers a `send_message_to_user_async`
+    tool when the default-off, under-development feature of the same name is
+    enabled. Nothing enables it under FFS's private `CODEX_HOME` and
+    `--ignore-user-config`, but the "all tool routes are closed" claim in the
+    review closure would no longer have been strictly true. For `0.159.0` the
+    review argv (`-c features.send_message_to_user_async=false`) and the private
+    `config.toml` now disable it too; replay rejects a `0.159.0` config or argv
+    that lacks it. It is deliberately not passed for `0.154.0`, whose audited
+    schema has no such key and where `--strict-config` rejects unknown features.
+    The other 33 disabled features, `tools.experimental_request_user_input`,
+    `tools.update_plan`, `web_search`, `mcp_servers`, `model_catalog_json` and
+    `model_reasoning_effort` have identical schema shapes in `0.159.0`.
+  - Audit basis: the per-version source audit, not a live model run. The
+    behavioural tool-absence proof on a real `0.159.0` session is the separate
+    live native-review probe; this change makes that probe (and real final
+    reviews) possible.
+
+### Fixed (2026-09-30, spec-014 Release C: F50 the final reviewer qualifies on a standalone lease)
+
+- The managed frontend crashed at the native final review's first
+  qualification probe with an uncaught
+  `run_state.resource_groups.ResourceGroupRefused: RESOURCE_GROUP_NOT_AVAILABLE`
+  (Python traceback, exit 1). The Codex and Claude `qualify_runtime` closures
+  were bound to the outer orchestrator's supervisor, whose coordinator is the
+  `ManagedParentResourceCoordinator`. That coordinator's prepaid group is marked
+  `parent_ended` and then `closed` when the outer launch finishes, which is
+  before any final review starts, and `claim_child` only claims from a
+  `reserved` group. Sealed checks and the native review launch already ran on
+  the separate channel-less review supervisor with plain standalone leases; only
+  the reviewer's qualification probes were left on the outer one.
+  - Routing: both `qualify_runtime` closures take an optional keyword
+    `supervisor`, defaulting to the outer supervisor, and `produce_final_review`
+    passes the channel-less supervisor it was given. The reviewer's probes now
+    take standalone leases like the sealed checks. The `HostRuntimeSeam.qualify`
+    positional contract is unchanged, and wave workers still qualify on the
+    outer supervisor inside its prepaid group. The `bind` closure needed no
+    change: the reviewer launch already runs on the channel-less supervisor.
+  - Fail early: `ManagedParentResourceCoordinator.acquire` refuses a non-parent
+    request with `RESOURCE_PARENT_GROUP_ENDED` when the group is no longer
+    `reserved`. The check runs before any launch or qualification intent is
+    reserved, so no orphan intent is left behind.
+  - Backstop: `Supervisor._bind_shared_resource` converts `ResourceGroupRefused`
+    to `SupervisorRefused` with the same code, so no path can escape as an
+    untyped traceback.
+  - Boundary (F50 review round 1): resource-layer refusals now surface as the
+    managed-run typed envelope (exit 78, the refusal's own code, recovery action
+    `inspect_managed_admission`) at the one place that already maps
+    `SupervisorRefused`, `FrontendPolicyRefused` and `RunPolicyRefused`
+    (`_managed_run_refusals` in `cli.py`, used by `_cmd_fixture_start` and
+    `prepare_frontend_run`). That covers `ResourceGroupRefused` (a refusal
+    during group close used to escape as a Python traceback),
+    `ManagedAdmissionRefused` (was exit 6 with no managed cause) and
+    `ControlStoreRefused` with a `RESOURCE_` code, such as
+    `RESOURCE_PARENT_GROUP_ENDED` (was exit 5). A `SupervisorRefused` whose
+    code starts with `RESOURCE_` (the `_bind_shared_resource` backstop, the
+    spawn-safety check) is classified as a resource refusal too, ahead of the
+    generic supervisor branch, so its recovery action is
+    `inspect_managed_admission` and not `qualify_host_adapter`. Other authority refusals, for
+    example `FENCE_REVOKED` (exit 4), are re-raised unchanged and keep their
+    own contract. No caller below the boundary relies on these escaping.
+  - Tests use real stores, supervisors, admission queue and coordinators. The
+    lifecycle assembly runs the real Codex `qualify_runtime` closure and
+    `produce_final_review` with a scripted probe launched through the
+    supervisor the closure hands over: the reviewer probe takes a standalone
+    lease (null `group_id`), the orchestrator stays on the outer supervisor, and
+    the run reaches DONE. Further tests cover the ended-group refusal with no
+    intent row, the typed backstop, a wave-worker probe that still claims its
+    prepaid slot, the Claude closure routing a given supervisor, and the
+    boundary envelope for a late child, a group-close refusal and a reviewer
+    admission refusal, with a guard that `FENCE_REVOKED` still exits 4. The Codex
+    binary, runtime staging and the observer's real probes are fixture stand-ins.
+
 ### Fixed (2026-09-30, spec-014 Release C: F49 gsd's ephemeral auto-chain flag write is no change)
 
 - gsd-core's `execute-phase` workflow tells the orchestrator to run
