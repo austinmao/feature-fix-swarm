@@ -94,9 +94,9 @@ def _retained_reviewer(store, token, *, parent_activity_id: str, reviewer_key: s
             "ON b.activity_id=a.id WHERE b.parent_activity_id=? AND a.request_key=? AND a.repository_id=? "
             "AND a.run_id=?", (parent_activity_id, reviewer_key, token.repository_id, token.run_id)).fetchone()
         preparation = tx.execute(
-            "SELECT preparation_id FROM context_workspaces WHERE repository_id=? AND run_id=? AND child_request_key=?",
-            (token.repository_id, token.run_id, reviewer_key)).fetchone()
-    return activity, None if preparation is None else preparation["preparation_id"]
+            "SELECT preparation_id,state,generation FROM context_workspaces WHERE repository_id=? AND run_id=? "
+            "AND child_request_key=?", (token.repository_id, token.run_id, reviewer_key)).fetchone()
+    return activity, preparation
 
 
 def _current_reviewer(store, token, *, parent_activity_id: str, base_key: str, action):
@@ -108,16 +108,24 @@ def _current_reviewer(store, token, *, parent_activity_id: str, base_key: str, a
     dead child (``close_dead_qualification_intent``), the reviewer is aborted,
     and the next attempt key gets a fresh activity, workspace and private home.
     A review grant already reserved against it is never moved to another reviewer.
+    F51c: a reviewer workspace an earlier owner began but never made READY (and
+    so never bound to a reviewer) is not finished here either; it is left
+    exactly as retained, as evidence, and the next attempt key captures afresh.
     """
     from .ownership import OwnershipRefused
     attempt = 1
     while True:
         key = base_key if attempt == 1 else f"{base_key}:{attempt}"
-        activity, preparation_id = _retained_reviewer(store, token, parent_activity_id=parent_activity_id,
-                                                      reviewer_key=key)
+        activity, preparation = _retained_reviewer(store, token, parent_activity_id=parent_activity_id,
+                                                   reviewer_key=key)
         if activity is not None and activity["state"] in {"failed", "aborted"}:
             attempt += 1
             continue
+        if (activity is None and preparation is not None and preparation["state"] != "ready"
+                and preparation["generation"] != token.generation):
+            attempt += 1
+            continue
+        preparation_id = None if preparation is None else preparation["preparation_id"]
         if activity is None or activity["generation"] == token.generation:
             return key, None if activity is None else activity["id"], preparation_id
         if action is not None:
@@ -463,18 +471,22 @@ def rebind_retained_child(store, token, activity_id: str | None, preparation_id:
         raise SupervisorRefused(error.code) from error
     if activity_id is None:
         return ready
+    bound = ("FROM authority_activities a WHERE a.id=? AND a.repository_id=? AND a.run_id=? AND a.state IN ({}) "
+             "AND EXISTS (SELECT 1 FROM authority_child_bindings b JOIN context_workspaces w "
+             "ON w.preparation_id=b.workspace_preparation_id WHERE b.activity_id=a.id AND w.preparation_id=? "
+             "AND w.generation<=? AND w.state='ready')")
+    scope = (activity_id, token.repository_id, token.run_id, preparation_id, token.generation)
     with store.fenced_operation(token):
         with store.transaction() as tx:
             assert_owner(tx, token)
             changed = tx.execute(
-                "UPDATE authority_activities SET generation=?,updated_at=? WHERE id=? AND repository_id=? "
-                "AND run_id=? AND state IN ('pending','active') AND EXISTS (SELECT 1 FROM authority_child_bindings b "
-                "JOIN context_workspaces w ON w.preparation_id=b.workspace_preparation_id "
-                "WHERE b.activity_id=authority_activities.id AND w.preparation_id=? AND w.generation<=? "
-                "AND w.state='ready')",
-                (token.generation, store._now(), activity_id, token.repository_id, token.run_id,
-                 preparation_id, token.generation)).rowcount
-    if changed != 1:
+                "UPDATE authority_activities SET generation=?,updated_at=? WHERE id IN (SELECT a.id "
+                + bound.format("'pending','active'") + ")", (token.generation, store._now(), *scope)).rowcount
+            # F51c: this child's own activity, already settled succeeded by this run (the outer between
+            # settle and DONE), is never re-fenced; nothing captures from it again.  Same predicates,
+            # same transaction (R1-1): another run's or workspace's activity never qualifies.
+            settled = changed == 0 and tx.execute("SELECT 1 " + bound.format("'succeeded'"), scope).fetchone()
+    if changed != 1 and not settled:
         raise OwnershipRefused("FENCE_REVOKED")
     return ready
 
