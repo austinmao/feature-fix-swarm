@@ -163,6 +163,10 @@ class SharedResourceCoordinator:
         # Queue validates actual consumer death outside its SQLite writer.
         self.queue.release(reservation[0])
 
+    def release_unbound(self, reservation):
+        """F55: free a reservation of a refused launch that no intent or child bound."""
+        return self.queue.release_unbound(reservation[0])
+
     def restore_bound_intent(self, intent_id):
         """Recover an exact same-writer ticket without changing registry authority."""
         try:
@@ -313,19 +317,54 @@ class ControlStoreLeaseEvidenceReader:
                 if next(row for row in owners if row["resource_type"] == "run")["resource_key"] != run_key:
                     return None
                 # The immutable dispatch key is the only valid link to an
-                # intent. Any retained intent requires its own full settlement.
-                intent = tx.execute(
-                    "SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+                # intent. An unbound lease proves only its intent's absence; a
+                # bound one proves its exact intent was never forked (R1-3).
+                dispatch = tx.execute(
+                    "SELECT k.payload_hash,e.payload FROM authority_event_keys k JOIN control_events e "
+                    "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?",
                     (data["activity_id"], "dispatch-request:" + data["dispatch_request_key"]),
                 ).fetchone()
-                if identity.launch_intent_id is not None or intent is not None:
-                    return None
-                proof = {"request": data, "owner_rows": [dict(row) for row in owners],
-                         "intent_absent": True}
+                if identity.launch_intent_id is None:
+                    if dispatch is not None:
+                        return None
+                    evidence = {"intent_absent": True}
+                else:
+                    intent = _never_forked_intent(tx, identity, data, dispatch)
+                    if intent is None:
+                        return None
+                    evidence = {"intent_never_forked": intent}
+                proof = {"request": data, "owner_rows": [dict(row) for row in owners], **evidence}
                 return FencedLeaseRecord(
-                    identity.repository_id, identity.run_id, identity.request_key, None,
+                    identity.repository_id, identity.run_id, identity.request_key, identity.launch_intent_id,
                     identity.generation, identity.supervisor, "never_authorized", "generation_fenced",
                     hashlib.sha256(_encoded(proof).encode()).hexdigest(),
                 )
         except (ControlStoreRefused, OSError, ValueError, KeyError, TypeError, sqlite3.Error):
             return None
+
+
+def _never_forked_intent(tx, identity, data, dispatch):
+    """The bound intent the dispatch event names, only if no child was ever forked for it.
+
+    Every intent-consuming fork commits ``spawn-attempt:<intent>`` before
+    ``subprocess.Popen``; its absence, with no ACK, child identity, permit or
+    completion, proves the dead owner stopped before forking.  A marker without
+    an ACK stays uncertain.  Launch authority is only read, never changed.
+    """
+    if identity.consumer is not None or dispatch is None:
+        return None
+    wrapped = json.loads(dispatch["payload"])
+    if (wrapped["run_id"] != identity.run_id or wrapped["activity_id"] != data["activity_id"]
+            or hashlib.sha256(_encoded(wrapped["data"]).encode()).hexdigest() != dispatch["payload_hash"]
+            or wrapped["data"]["intent_id"] != identity.launch_intent_id):
+        return None
+    intent = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (identity.launch_intent_id,)).fetchone()
+    if (intent is None or intent["activity_id"] != data["activity_id"] or intent["generation"] != identity.generation
+            or intent["state"] not in {"reserved", "reconcile_required"}
+            or any(intent[column] is not None for column in (
+                "acknowledgement_id", "permit_id", "child_host_id", "child_boot_id", "child_pid",
+                "child_start_token", "completion_status", "completion_evidence_json", "completed_at"))):
+        return None
+    marker = tx.execute("SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+                        (data["activity_id"], "spawn-attempt:" + identity.launch_intent_id)).fetchone()
+    return None if marker is not None else dict(intent)

@@ -510,6 +510,29 @@ class Supervisor:
             raise SupervisorRefused(error.code) from error
         self._shared_reservations[intent_id] = reservation
 
+    @contextlib.contextmanager
+    def _released_if_unbound(self, reservations):
+        """F55: a raise while reserving/binding authority frees the shared tickets it never bound.
+
+        The original exception always propagates unchanged; a cleanup failure leaves the
+        ticket to the lazy reclaim.  Bound tickets are untouched (the release is a CAS).
+        """
+        try:
+            yield
+        except BaseException:
+            for reservation in reservations:
+                try:
+                    self.shared_resource_coordinator.release_unbound(reservation)
+                except Exception:
+                    pass
+            raise
+
+    def _record_spawn_attempt(self, activity_id, intent_id):
+        # R1-3: committed before every intent-consuming fork.  Its absence (with no ACK)
+        # proves a dead owner never forked this intent; its presence keeps it uncertain.
+        self.store.record_event_once(self.token, activity_id, "spawn-attempt:" + intent_id,
+                                     {"intent_id": intent_id})
+
     def _assert_shared_spawn_safe(self, intent_id):
         from .managed_resource_group import ManagedParentResourceCoordinator
         coordinator = self.shared_resource_coordinator
@@ -1744,22 +1767,23 @@ class Supervisor:
             # intent, including a completed one, without a second spawn.
             material = self._dispatch_material(request)
             shared = self._reserve_shared_resources((request,))
-            intent = self.store.reserve_launch(
-                request.activity_id, self.token, token_reservation=request.token_reservation,
-                request_key=request.request_key, request_payload=material,
-                admission_guard=admission_guard,
-                runtime_receipt_sha256=request.runtime_receipt_sha256,
-                local_check_receipt_sha256=request.local_check_receipt_sha256,
-                managed_input_sha256=request.managed_input_sha256,
-                managed_outer_capacity_exempt=managed_outer_capacity_exempt,
-                policy_action_id=request.policy_action_id,
-            )
-            if intent.reused:
-                if intent.state in {"completed_succeeded", "completed_failed"}:
-                    raise SupervisorRefused("REQUEST_ALREADY_COMPLETED")
-                raise SupervisorRefused("INTENT_RECONCILIATION_REQUIRED")
-            if shared:
-                self._bind_shared_resource(intent.id, shared[0])
+            with self._released_if_unbound(shared):
+                intent = self.store.reserve_launch(
+                    request.activity_id, self.token, token_reservation=request.token_reservation,
+                    request_key=request.request_key, request_payload=material,
+                    admission_guard=admission_guard,
+                    runtime_receipt_sha256=request.runtime_receipt_sha256,
+                    local_check_receipt_sha256=request.local_check_receipt_sha256,
+                    managed_input_sha256=request.managed_input_sha256,
+                    managed_outer_capacity_exempt=managed_outer_capacity_exempt,
+                    policy_action_id=request.policy_action_id,
+                )
+                if intent.reused:
+                    if intent.state in {"completed_succeeded", "completed_failed"}:
+                        raise SupervisorRefused("REQUEST_ALREADY_COMPLETED")
+                    raise SupervisorRefused("INTENT_RECONCILIATION_REQUIRED")
+                if shared:
+                    self._bind_shared_resource(intent.id, shared[0])
             self._fault("after_intent_commit")
             return self._spawn(request, intent.id, preparation, workspace_identity, admission_guard=admission_guard)
 
@@ -1782,19 +1806,20 @@ class Supervisor:
                 request, action="qualification", qualification_contract=qualification_contract,
             )
             shared = self._reserve_shared_resources((request,))
-            intent = self.store.reserve_qualification_launch(
-                request.activity_id, self.token, request_key=request.request_key,
-                qualification_contract=qualification_contract,
-                token_reservation=request.token_reservation,
-                managed_input_sha256=request.managed_input_sha256,
-                policy_action_id=request.policy_action_id,
-            )
-            if intent.reused:
-                if intent.state in {"completed_succeeded", "completed_failed"}:
-                    raise SupervisorRefused("REQUEST_ALREADY_COMPLETED")
-                raise SupervisorRefused("INTENT_RECONCILIATION_REQUIRED")
-            if shared:
-                self._bind_shared_resource(intent.id, shared[0])
+            with self._released_if_unbound(shared):
+                intent = self.store.reserve_qualification_launch(
+                    request.activity_id, self.token, request_key=request.request_key,
+                    qualification_contract=qualification_contract,
+                    token_reservation=request.token_reservation,
+                    managed_input_sha256=request.managed_input_sha256,
+                    policy_action_id=request.policy_action_id,
+                )
+                if intent.reused:
+                    if intent.state in {"completed_succeeded", "completed_failed"}:
+                        raise SupervisorRefused("REQUEST_ALREADY_COMPLETED")
+                    raise SupervisorRefused("INTENT_RECONCILIATION_REQUIRED")
+                if shared:
+                    self._bind_shared_resource(intent.id, shared[0])
             self._fault("after_intent_commit")
             return self._spawn(
                 request, intent.id, preparation, workspace_identity,
@@ -1834,19 +1859,20 @@ class Supervisor:
                 "managed_input_sha256": request.managed_input_sha256,
             } for request, _preparation, _identity in prepared)
             shared = self._reserve_shared_resources(tuple(item[0] for item in prepared), group_key=request_key)
-            cohort = self.store.reserve_launch_cohort(
-                self.token, request_key=request_key, members=members,
-                admission_guard=admission_guard,
-                policy_action_ids={request.request_key: request.policy_action_id
-                                   for request, _preparation, _identity in prepared
-                                   if request.policy_action_id is not None} or None,
-            )
-            if cohort.reused:
-                raise SupervisorRefused("COHORT_RECONCILIATION_REQUIRED")
-            intents = {intent.activity_id: intent for intent in cohort.members}
-            if shared:
-                for (request, _preparation, _identity), reservation in zip(prepared, shared):
-                    self._bind_shared_resource(intents[request.activity_id].id, reservation)
+            with self._released_if_unbound(shared):
+                cohort = self.store.reserve_launch_cohort(
+                    self.token, request_key=request_key, members=members,
+                    admission_guard=admission_guard,
+                    policy_action_ids={request.request_key: request.policy_action_id
+                                       for request, _preparation, _identity in prepared
+                                       if request.policy_action_id is not None} or None,
+                )
+                if cohort.reused:
+                    raise SupervisorRefused("COHORT_RECONCILIATION_REQUIRED")
+                intents = {intent.activity_id: intent for intent in cohort.members}
+                if shared:
+                    for (request, _preparation, _identity), reservation in zip(prepared, shared):
+                        self._bind_shared_resource(intents[request.activity_id].id, reservation)
             waiting: list[_WaitingCohortChild] = []
             try:
                 for request, preparation, workspace_identity in prepared:
@@ -1965,6 +1991,7 @@ class Supervisor:
                     if admission_guard is not None:
                         with self.store.transaction() as tx:
                             admission_guard(tx)
+                    self._record_spawn_attempt(request.activity_id, intent_id)
                     proc = subprocess.Popen(
                         [sys.executable, "-m", "run_state.supervisor",
                          "_monitor" if request.monitor_result else "_child", str(child.fileno())],
@@ -2077,6 +2104,7 @@ class Supervisor:
                     if admission_guard is not None:
                         with self.store.transaction() as tx:
                             admission_guard(tx)
+                    self._record_spawn_attempt(request.activity_id, intent_id)
                     proc = subprocess.Popen(
                         [sys.executable, "-m", "run_state.supervisor", "_child", str(child.fileno())],
                         cwd=request.workspace, env=env, pass_fds=(child.fileno(),),
@@ -2190,6 +2218,7 @@ class Supervisor:
                     info = os.fstat(stream.fileno())
                     identities[key] = (info.st_dev, info.st_ino)
                 self._verify_physical_workspace(preparation, workspace_identity)
+                self._record_spawn_attempt(request.activity_id, intent_id)
                 proc = subprocess.Popen(
                     [sys.executable, "-m", "run_state.supervisor",
                      "_monitor_native" if request.native_review_material is not None else "_monitor",

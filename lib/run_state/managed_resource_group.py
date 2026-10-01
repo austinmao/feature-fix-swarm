@@ -29,6 +29,11 @@ class _Evidence:
         proof = self.reader.read_fenced_lease(lease)
         return proof is not None and proof.intent_state == 'never_authorized'
 
+    def proves_never_forked(self, lease):
+        # R1-3: the exact bound intent, dead writer, no ACK and no spawn-attempt marker.
+        proof = self.reader.read_fenced_lease(lease)
+        return lease.launch_intent_id is not None and proof is not None and proof.proves_never_authorized(lease)
+
 
 class ManagedParentResourceCoordinator(SharedResourceCoordinator):
     """One native parent plus reusable, resource-derived child slots.
@@ -346,6 +351,20 @@ class ManagedParentResourceCoordinator(SharedResourceCoordinator):
                 if not self._slot_released(data['request_key'], False):
                     raise
 
+    def release_unbound(self, reservation):
+        """F55: a refused launch frees what its acquire reserved and nothing bound.
+
+        A child acquire claimed nothing (slots are claimed only at bind_intent), so the
+        shared parent ticket stays.  A refused parent closes its own never-bound group as
+        the live owner; a same-generation retry then refuses typed at ``registry.reserve``
+        (RESOURCE_GROUP_NOT_AVAILABLE) before any intent.
+        """
+        if not reservation[1]['is_parent'] or self.plan is None:
+            return False
+        self.registry.release_owned_hold(self.plan)
+        self.plan = self.reservation = None
+        return True
+
     def _group_state(self):
         with self.queue._connection() as connection:
             row = connection.execute('SELECT state FROM resource_parent_groups WHERE group_id=?',
@@ -393,7 +412,10 @@ def settle_predecessor_groups(store, token, queue) -> list[dict]:
             intent = tx.execute('SELECT i.state,i.generation,a.repository_id,a.run_id FROM authority_launch_intents i '
                                 'JOIN authority_activities a ON a.id=i.activity_id WHERE i.id=?',
                                 (binding.launch_intent_id,)).fetchone()
-        if (intent is None or intent['state'] not in _SETTLED_INTENTS or intent['generation'] != binding.generation
+        # A never-ACKed claim may still be 'reserved' (no recover_intent ran); the registry's
+        # finish/end calls then require the never-forked proof (R1-3) for it.
+        accepted = _SETTLED_INTENTS | ({'reserved'} if binding.consumer is None else set())
+        if (intent is None or intent['state'] not in accepted or intent['generation'] != binding.generation
                 or (intent['repository_id'], intent['run_id']) != (token.repository_id, token.run_id)):
             raise ResourceGroupRefused('RESOURCE_GROUP_PARENT_PROOF_INVALID')
         return _hash(dict(intent))
