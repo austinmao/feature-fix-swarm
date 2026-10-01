@@ -18,6 +18,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,8 +26,8 @@ from process_identity import ProcessIdentity
 from run_state.managed_admission import ManagedAdmissionQueue
 from run_state.managed_resource_group import settle_predecessor_groups
 from run_state.ownership import OwnershipRefused, StartRequest, reserve_resources
-from run_state.resource_groups import ResourceGroupRefused
-from run_state.resource_observation import ResourceObservation
+from run_state.resource_groups import GroupMember, GroupPlan, ResourceGroupRefused, ResourceParentGroupRegistry
+from run_state.resource_observation import ResourceDemand, ResourceObservation
 from run_state.shared_resources import SharedResourceCoordinator, cold_start_demand
 from run_state.state import ControlStore
 from run_state.supervisor import DispatchRequest, Supervisor, SupervisorRefused
@@ -84,10 +85,61 @@ def test_plain_launch_refused_at_reserve_releases_its_ticket_and_a_same_request_
     [row] = queue.snapshot()
     assert _lease(row) == _UNBOUND_RELEASE
     assert _authority(store) == before  # the refusal charged nothing
-    # Same generation, same request: the owner's released ticket is re-queued and admitted once.
+    # Same generation, same request: admitted once, behind anything queued meanwhile.
     handle = supervisor.launch(request)
     assert supervisor.finish(handle, timeout=10, token_usage=0)["returncode"] == 0
-    assert [(item["sequence"], item["status"]) for item in queue.snapshot()] == [(row["sequence"], "released")]
+    assert len(queue.snapshot()) == 2  # the released row stays as evidence; the retry queued anew
+    first, retried = queue.snapshot()
+    assert first == row
+    assert retried["sequence"] > row["sequence"] and retried["group_age_ns"] > row["group_age_ns"]
+    assert (retried["status"], retried["launch_intent_id"]) == ("released", handle.intent_id)
+
+
+def test_owner_retry_after_an_unbound_release_queues_behind_requests_that_arrived_meanwhile(tmp_path):
+    queue = ManagedAdmissionQueue(tmp_path / "shared", observation_provider=_observation)
+    request = dict(state_root=tmp_path, run_id="run", repository_id="repo", generation=1, demand=ResourceDemand(cpu=1))
+    first = queue.enqueue(request_key="a", **request)
+    assert queue.try_admit(first) and queue.release_unbound(first)
+    arrived = queue.enqueue(request_key="b", **request)
+    retry = queue.enqueue(request_key="a", **request)
+    assert retry.sequence > arrived.sequence
+    assert queue.try_admit(retry) is False and queue.try_admit(arrived) is True
+    assert _lease(queue.status(first)) == _UNBOUND_RELEASE
+
+
+def test_a_retried_request_restores_its_own_bound_lease_after_an_unbound_release(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    with pytest.raises(OwnershipRefused, match="TOKEN_LIMIT_EXHAUSTED"):
+        supervisor.launch(replace(request, token_reservation=101))
+    handle = supervisor.launch(request)
+    handle.process.wait(timeout=15)
+    resumed = Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
+                         shared_resource_coordinator=supervisor.shared_resource_coordinator,
+                         resource_demand_policy=cold_start_demand)
+    recovered = resumed.resume_monitored(handle.intent_id)
+    assert resumed.finish(recovered, timeout=15, token_usage=0)["returncode"] == 0
+    assert [row["status"] for row in queue.snapshot()] == ["released", "released"]
+    first, retried = queue.snapshot()
+    assert _lease(first) == _UNBOUND_RELEASE and retried["launch_intent_id"] == handle.intent_id
+
+
+def test_a_cleanup_failure_never_replaces_the_launch_refusal(tmp_path, monkeypatch):
+    supervisor, _store, request, queue = _plain(tmp_path)
+
+    def interrupted(_reservation):
+        raise KeyboardInterrupt("cleanup interrupted")
+
+    monkeypatch.setattr(supervisor.shared_resource_coordinator, "release_unbound", interrupted)
+    raised = []
+    try:
+        supervisor.launch(replace(request, token_reservation=101))
+    except BaseException as error:  # noqa: B036 - the cleanup's KeyboardInterrupt must not escape the test
+        raised.append(error)
+    assert [(type(error).__name__, getattr(error, "code", None)) for error in raised] == [
+        ("OwnershipRefused", "TOKEN_LIMIT_EXHAUSTED")]
+    [row] = queue.snapshot()
+    assert row["status"] == "active"  # cleanup failed: the lazy reclaim stays the fallback
 
 
 def test_qualification_probe_refused_at_reserve_releases_its_standalone_ticket(tmp_path):
@@ -195,6 +247,55 @@ def test_managed_child_refused_never_releases_the_shared_parent_ticket_or_group(
     handle = supervisor.launch(replace(parent, command=(sys.executable, "-c", "print('parent')")))
     assert supervisor.finish(handle, timeout=10, token_usage=0)["returncode"] == 0
     assert all(row["status"] == "released" for row in queue.snapshot())
+
+
+def test_queue_never_releases_a_prepaid_group_slot_as_unbound(tmp_path):
+    supervisor, _store, parent, _ready, queue = _managed_group(tmp_path)
+    coordinator = supervisor.shared_resource_coordinator
+    coordinator._reserve_group()
+    with queue._connection() as connection:
+        slots = connection.execute("SELECT * FROM resource_parent_group_slots ORDER BY slot_id").fetchall()
+    before = queue.snapshot()
+    assert [queue.release_unbound(coordinator.registry._ticket(slot)) for slot in slots] == [False] * len(slots)
+    assert queue.snapshot() == before
+    handle = supervisor.launch(replace(parent, command=(sys.executable, "-c", "print('parent')")))
+    assert supervisor.finish(handle, timeout=10, token_usage=0)["returncode"] == 0
+    assert all(row["status"] == "released" for row in queue.snapshot())
+
+
+def _foreign_hold_release(shared):
+    """Subprocess body: another process names the live owner and tries to close its held group."""
+    queue = ManagedAdmissionQueue(Path(shared), observation_provider=_observation)
+    with queue._connection() as connection:
+        group = connection.execute("SELECT * FROM resource_parent_groups").fetchone()
+        owner = connection.execute("SELECT owner_json FROM resource_parent_group_slots LIMIT 1").fetchone()[0]
+    record = json.loads(group["plan_json"])
+    plan = GroupPlan(record["group_id"], record["repository_id"], record["run_id"], record["generation"],
+                     record["state_root"], record["parent_request_key"],
+                     tuple(GroupMember(item["slot_id"], item["role"], ResourceDemand(**item["demand"]))
+                           for item in record["members"]),
+                     group["inventory_sha256"], group["expires_ns"], record.get("plan_inventory_sha256"))
+    registry = ResourceParentGroupRegistry(queue, SimpleNamespace(
+        native_state=lambda _identity: "LIVE", proves_never_authorized=lambda _lease: False))
+    try:
+        registry.release_unissued_hold(plan, "0" * 64, live_owner=ProcessIdentity(**json.loads(owner)))
+        print(json.dumps({"code": None}))
+    except ResourceGroupRefused as error:
+        print(json.dumps({"code": error.code}))
+
+
+def test_a_foreign_process_cannot_close_a_live_owners_held_group(tmp_path):
+    supervisor, _store, _parent, _ready, queue = _managed_group(tmp_path)
+    supervisor.shared_resource_coordinator._reserve_group()
+    before, group = queue.snapshot(), _group(queue)
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "lib") + os.pathsep + str(Path(__file__).parent)
+    foreign = subprocess.run([sys.executable, "-c",
+                              "import sys, test_admission_release_before_spawn as t; t._foreign_hold_release(sys.argv[1])",
+                              str(tmp_path / "shared")], env=environment, capture_output=True, text=True, timeout=120)
+    assert foreign.returncode == 0, foreign.stderr[-2000:]
+    assert json.loads(foreign.stdout.strip().splitlines()[-1]) == {"code": "RESOURCE_GROUP_MEMBER_RETAINED"}
+    assert queue.snapshot() == before and _group(queue) == group
 
 
 def test_managed_parent_refused_closes_its_never_bound_group_and_a_same_generation_retry_refuses_typed(tmp_path):
