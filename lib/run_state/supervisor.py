@@ -26,6 +26,7 @@ import unicodedata
 import uuid
 
 from process_identity import DEAD, LIVE, ProcessIdentity, probe_identity
+from process_identity import process_group_gone as _process_group_gone
 from run_context import git_admin_lock, resolve_repository, sanitized_git_environment
 from host_capabilities import (
     ARTIFACT_REVIEW_CONTEXT_LIMIT, ArtifactReviewMaterial, CapabilityError,
@@ -3511,23 +3512,6 @@ def _retained_runtime_refusal(launch, *, outer: bool) -> str:
     return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
 
 
-def _process_group_gone(pgid: int) -> bool:
-    """True only when process group ``pgid`` has no member left (ESRCH).
-
-    Every supervised child starts a new session, so its pid is its group id.
-    The acknowledged child of a Codex launch is the auth guard; Codex and its
-    tools run in the guard's group and outlive a SIGKILLed guard.  Any other
-    outcome (a live member, EPERM) is not proof.
-    """
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    return False
-
-
 def _launches_provably_dead(store, activity_id: str) -> bool:
     """True only when no launch of ``activity_id`` can still be using its TMPDIR.
 
@@ -3582,7 +3566,8 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     from host_capabilities import GsdSupervisorEnvironment, admit_cli
     from run_state.codex_host import CodexHostAdapter
     from run_state.frontend_producers import (
-        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_launch, retained_outer_activity,
+        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, rebind_retained_child,
+        resumable_outer_completion, retained_launch, retained_outer_activity,
     )
     from run_state.managed_qualification import (
         ManagedQualificationRefused, qualify_managed_runtime,
@@ -3715,31 +3700,39 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         return bind_launch(qualified, child_prompt, preparation, final_contract_hash, launch_request_key)
 
     launch = retained_launch(store, outer_activity_id)
-    if launch is not None:
+    # F51: once the sealed lifecycle is past execution, a settled succeeded outer
+    # launch is retained input; the session resumes the lifecycle without the outer runtime.
+    resume = resumable_outer_completion(store, token, outer_activity_id, launch)
+    if launch is not None and not resume:
         # A real outer launch holds Codex state in its home and may have done work:
         # never re-stage, re-qualify, relaunch or replay it as a success.  Resuming
         # after a real launch would first need its wave proof checked again.
         raise SupervisorRefused(_replayed_launch_refusal(launch))
-    try:
-        with productive_work(store, token, kind="preparation"):
-            stage_or_reuse_private_codex_runtime(
-                Path(host_request.runtime_home), outer_home, ready.path,
-            )
-    except RetainedRuntimeNotReusable as error:
-        # Only qualification consumed the outer stage; this request key cannot resume it.
-        raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
-    except (CapabilityError, OSError, ValueError) as error:
-        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
-    contract_material = {
-        "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
-        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-        "host_request": host_request.material(), "input_digest": ready.input_digest,
-        "runtime_stage_sha256": hashlib.sha256(
-            (outer_home / STAGE_MANIFEST_NAME).read_bytes(),
-        ).hexdigest(),
-        "gsd_bridge_sha256": hashlib.sha256(bridge.read_bytes()).hexdigest(),
-    }
-    contract_hash = hashlib.sha256(_canonical(contract_material)).hexdigest()
+    contract_hash = None
+    if resume:
+        # Checks and the final reviewer capture from, and parent under, the retained outer.
+        ready = rebind_retained_child(store, token, outer_activity_id, ready.id)
+    else:
+        try:
+            with productive_work(store, token, kind="preparation"):
+                stage_or_reuse_private_codex_runtime(
+                    Path(host_request.runtime_home), outer_home, ready.path,
+                )
+        except RetainedRuntimeNotReusable as error:
+            # Only qualification consumed the outer stage; this request key cannot resume it.
+            raise SupervisorRefused("RETAINED_RUNTIME_NOT_REUSABLE") from error
+        except (CapabilityError, OSError, ValueError) as error:
+            raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
+        contract_material = {
+            "schema": "ffs.managed-codex-contract/v2", "command": list(invocation),
+            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            "host_request": host_request.material(), "input_digest": ready.input_digest,
+            "runtime_stage_sha256": hashlib.sha256(
+                (outer_home / STAGE_MANIFEST_NAME).read_bytes(),
+            ).hexdigest(),
+            "gsd_bridge_sha256": hashlib.sha256(bridge.read_bytes()).hexdigest(),
+        }
+        contract_hash = hashlib.sha256(_canonical(contract_material)).hexdigest()
 
     def prepare_wave_child(wave_context):
         request, _adapter = prepare_runtime(
@@ -3757,6 +3750,9 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     channel.attach_wave_consumer(wave_consumer)
 
     def prepare_outer():
+        if resume:
+            # The resumed lifecycle binds the retained outer completion; it is never re-qualified.
+            raise SupervisorRefused(_replayed_launch_refusal(launch))
         return prepare_runtime(
             outer_activity_id, ready, child_key, context.activity_id,
             contract_hash, role, prompt, child_key + ":launch",

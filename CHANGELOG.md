@@ -8,6 +8,60 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-01, spec-014 Release C: F51 a crash after the settled outer launch resumes to DONE)
+
+- M5 (`e2e-m5a-phase02`) killed `frontend-start` at policy stage
+  `FINAL_REVIEW` while the native reviewer's qualification probes ran. The
+  outer orchestrator's launch had settled `completed_succeeded`, so the
+  same-key resume refused `REQUEST_ALREADY_COMPLETED` before the lifecycle
+  could continue, and the run could never reach `DONE`.
+  `prepare_managed_codex_session` now asks `resumable_outer_completion`
+  first: a settled, succeeded outer launch whose completion evidence still
+  verifies, under a sealed lifecycle already at `FINAL_REVIEW` (entered only
+  after the execute producer bound the candidate and its wave proof), is
+  retained input. The session skips outer staging, re-qualification and the
+  outer contract (its `prepare_outer` refuses), and `drive_managed_session`
+  binds the retained outer completion as before. Any other settled launch,
+  including `completed_failed`, `closed_dead`, a legacy unsealed run and a run
+  at `EXECUTE` or `RECOVER`, keeps its refusal.
+- A resumed owner holds a new fence generation, and capture, child workspaces
+  and qualification require the current one. `rebind_retained_child` puts the
+  retained outer's READY workspace through the existing
+  `revalidate_ready_fence` (which refuses `INTENT_RECONCILIATION_REQUIRED`
+  while any launch on it is unsettled) and only then moves the outer activity
+  to the current generation. The final review producer does the same for a
+  retained ready reviewer workspace that has no reviewer activity yet.
+- A reviewer qualified under an earlier owner fence is never re-qualified
+  (review r1, R1-1/R1-2): its admission file, probe settlements and private
+  home bind that fence, its home fails strict staging reuse once probes wrote
+  evidence, and a probe released when the owner died stays unsettled.
+  `_current_reviewer` abandons it instead: each unfinished probe must pass
+  the new `ControlStore.close_dead_qualification_intent` (a qualification
+  launch of an earlier generation whose released run owner and child both
+  probe DEAD on this boot, and whose child's whole process group is gone
+  (the `_launches_provably_dead` proof, now `process_identity.process_group_gone`;
+  review r2, R2-1), becomes `closed_dead`, its debit retained and its
+  result never adopted; anything else refuses
+  `INTENT_RECONCILIATION_REQUIRED`), the reviewer is aborted, and a fresh
+  reviewer (next attempt key, new activity, workspace and private home)
+  qualifies on the channel-less review supervisor with standalone leases
+  (F50). The dead probe's admission is reclaimed by the queue's dead-owner
+  rule. The DONE gate accepts a `closed_dead` qualification probe only on a
+  failed or aborted activity. A review grant already reserved against such a
+  reviewer refuses `REVIEW_RECONCILIATION_REQUIRED`.
+- A final review launch retained from a crashed owner is never launched again:
+  reserved or acknowledged without a permit still refuses
+  `INTENT_RECONCILIATION_REQUIRED`; one issued by an earlier owner fence now
+  refuses the new `REVIEW_RECONCILIATION_REQUIRED`
+  (`inspect_retained_review`), because native review completion proof binds
+  the issuing fence. A crash after the review was recorded finishes to `DONE`
+  idempotently. Tests: `tests/test_final_review_resume.py` (real store and
+  CLI entry; nothing held in the admission queue after the crash or the
+  resume) and `tests/test_final_review_resume_sigkill.py` (a SIGKILLed child
+  process, then the real qualify_runtime closure, staging and
+  qualify_managed_runtime; only the Codex observer and verify_runtime are
+  scripted).
+
 ### Fixed (2026-10-01, spec-014 Release C: F54 final-review evidence ids follow the published grammar)
 
 - The sealed final-review response grammar (`final_review_output_contract`,

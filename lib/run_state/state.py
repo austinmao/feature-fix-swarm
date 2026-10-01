@@ -4867,8 +4867,11 @@ class ControlStore:
                         'SELECT b.activity_id FROM authority_child_bindings b JOIN descendants d ON b.parent_activity_id=d.id) '
                         "SELECT 1 FROM authority_activities a JOIN descendants d ON d.id=a.id WHERE a.id<>? "
                         "AND a.state NOT IN ('succeeded','failed','aborted') LIMIT 1", (root['id'],root['id'])).fetchone()
+                    # F51: a closed dead probe of an abandoned (terminal) qualification left no work to settle.
                     unsettled = tx.execute('SELECT 1 FROM authority_launch_intents i JOIN authority_activities a ON a.id=i.activity_id '
-                        "WHERE a.repository_id=? AND a.run_id=? AND i.state NOT IN ('completed_succeeded','completed_failed') LIMIT 1",
+                        "WHERE a.repository_id=? AND a.run_id=? AND i.state NOT IN ('completed_succeeded','completed_failed') "
+                        "AND NOT (i.state='closed_dead' AND a.state IN ('failed','aborted') AND EXISTS "
+                        "(SELECT 1 FROM authority_qualification_launches q WHERE q.intent_id=i.id)) LIMIT 1",
                         (token.repository_id,token.run_id)).fetchone()
                     if outstanding is not None or unsettled is not None:
                         raise OwnershipRefused('FRONTEND_COMPLETION_OBLIGATIONS_REMAIN')
@@ -8015,6 +8018,61 @@ class ControlStore:
             )
             current = tx.execute("SELECT * FROM authority_launch_intents WHERE id = ?", (intent_id,)).fetchone()
             return self._intent_from_row(current)
+
+    def close_dead_qualification_intent(self, intent_id: str, token) -> LaunchIntent:
+        """F51: a successor closes one unfinished qualification probe of a dead earlier owner.
+
+        Narrower than ``recover_intent``, which keeps an earlier generation's
+        released intent at ``reconcile_required``: only a qualification launch
+        with no recorded completion, issued by an earlier generation whose run
+        fence was released, whose owner and child both probe DEAD on this boot,
+        becomes ``closed_dead``, and only once the child's whole process group is
+        gone.  Its debit stays charged and its result is never adopted; any other
+        intent is refused for reconciliation.
+        """
+        from dataclasses import asdict
+        from .ownership import OwnershipRefused, _token_keys
+        from process_identity import DEAD, ProcessIdentity, probe_identity, process_group_gone
+        self.ensure_authority_schema()
+        with self.read_transaction() as tx:
+            row = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone()
+            probe = owners = None
+            if row is not None:
+                probe = tx.execute("SELECT 1 FROM authority_qualification_launches WHERE intent_id=?",
+                                   (intent_id,)).fetchone()
+                owners = tx.execute(
+                    "SELECT host_id,boot_id,pid,start_token,held FROM control_reservations "
+                    "WHERE resource_type='run' AND resource_key=? AND generation=?",
+                    (_token_keys(token)[0][1], row["generation"]),
+                ).fetchall()
+        child = None if row is None else self._intent_from_row(row).child_identity
+        if (row is None or probe is None or child is None or row["generation"] >= token.generation
+                or row["completion_status"] is not None
+                or row["state"] not in {"acknowledged", "released_to_execute", "reconcile_required"}
+                or len(owners) != 1 or owners[0]["held"]):
+            raise OwnershipRefused("INTENT_RECONCILIATION_REQUIRED")
+        owner = ProcessIdentity(owners[0]["host_id"], owners[0]["boot_id"], owners[0]["pid"],
+                                owners[0]["start_token"])
+        boot = ProcessIdentity.current().boot_id
+        # R2-1: the child leads its own process group; a member still in it (Codex under a killed
+        # guard, a probe's descendant) means the launch may still be working.
+        if (any(item.boot_id != boot or probe_identity(item) != DEAD for item in (owner, child))
+                or not process_group_gone(child.pid)):
+            raise OwnershipRefused("INTENT_RECONCILIATION_REQUIRED")
+        with self.transaction() as tx:
+            self._assert_activity_binding(tx, token, row["activity_id"])
+            current = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone()
+            if current is None or dict(current) != dict(row):
+                raise OwnershipRefused("INTENT_RECONCILIATION_REQUIRED")
+            tx.execute("UPDATE authority_launch_intents SET state='closed_dead',updated_at=? WHERE id=?",
+                       (self._now(), intent_id))
+            self._record_acceptance_event_tx(tx, "qualification_intent_closed_dead", {
+                "repository_id": token.repository_id, "run_id": token.run_id, "intent_id": intent_id,
+                "issuing_generation": row["generation"], "settling_generation": token.generation,
+                "dead_owner": asdict(owner), "dead_child": asdict(child),
+            })
+            return self._intent_from_row(
+                tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone())
 
     @staticmethod
     def _monitored_ack_binding_tx(tx, row) -> bool:
