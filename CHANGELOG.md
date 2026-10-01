@@ -8,6 +8,35 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-01, spec-014 Release C: F51b a resume keeps the workspace row a sealed receipt hashed)
+
+- Live M5 (`e2e-m5c-phase02`, after F51 rolled out): the same-key resume of a
+  run killed at `FINAL_REVIEW` refused `ACCEPTANCE_RECEIPT_BINDING_INVALID`
+  (rc 5) at the lifecycle's first candidate resolution. The outer's execution
+  receipt, recorded by `bind_wave_execution_candidate` before the crash,
+  hashes the outer workspace's full `context_workspaces` row, generation
+  included; F51's `rebind_retained_child` re-fenced that row through
+  `revalidate_ready_fence`, so the re-verified receipt no longer matched. The
+  F51 tests used a host that runs no supervised GSD wave, so no execution
+  receipt or frontend candidate existed for the resume to re-verify.
+- `rebind_retained_child` no longer writes a child's workspace row when the
+  child has an activity: `revalidate_ready_fence(..., rebind=False)` runs the
+  same READY, worktree, snapshot and unsettled-launch proofs without a write,
+  and only the bound pending or active activity moves to the current
+  generation. A preparation with no activity yet is rebound as before. The
+  preparation-hash formula and what a receipt binds are unchanged.
+- Readers of that row take the bound activity as its fence: prelaunch and
+  wave capture (`_capture_bound_snapshot`) accept a child row of an earlier
+  generation only through a current-generation active activity bound to it
+  (the root row must still be current), and
+  `resolve_current_frontend_candidate` checks the row's binding without its
+  generation and keeps requiring the selected activity at this generation.
+  An activity reaches a new generation only through a launch on a current
+  row or this revalidated resume. Tests:
+  `tests/test_final_review_resume_receipt.py` (the receipt recorded through
+  the real wave path, the resume runs the F51 seam and the real lifecycle to
+  `DONE` with the hashed row unchanged).
+
 ### Fixed (2026-10-01, spec-014 Release C: F51 a crash after the settled outer launch resumes to DONE)
 
 - M5 (`e2e-m5a-phase02`) killed `frontend-start` at policy stage

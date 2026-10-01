@@ -237,7 +237,9 @@ def resolve_current_frontend_candidate(store, token) -> CurrentFrontendCandidate
                 if selected is None and activity['state'] == 'active' and child['workspace_binding'] == location['workspace']:
                     ready = tx.execute('SELECT * FROM context_workspaces WHERE preparation_id=?',
                                        (child['workspace_preparation_id'],)).fetchone()
-                    _assert_preparation_binding(ready, token, require_generation=True, tx=tx)
+                    # F51b: the selected activity's generation is this row's fence; a resume keeps
+                    # the row the execution receipt hashed (frontend_producers.rebind_retained_child).
+                    _assert_preparation_binding(ready, token, require_generation=False, tx=tx)
                     if (activity['generation'] != token.generation or ready['state'] != 'ready' or not ready['created_by_ffs']
                             or ready['path'] != location['workspace'] or ready['base_commit'] != location['initial_head']
                             or ready['parent_activity_id'] != child['parent_activity_id'] or ready['child_role'] != child['role']
