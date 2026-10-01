@@ -523,7 +523,7 @@ class Supervisor:
             for reservation in reservations:
                 try:
                     self.shared_resource_coordinator.release_unbound(reservation)
-                except Exception:
+                except BaseException:  # noqa: B036 - the original refusal always propagates
                     pass
             raise
 

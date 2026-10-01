@@ -143,6 +143,14 @@ def _identity(row, prefix=""):
     )
 
 
+def _prepaid_slots(c):
+    """(sequence, ticket) of every prepaid group slot: a slot settles only through its whole group."""
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                 "AND name='resource_parent_group_slots'").fetchone() is None:
+        return set()
+    return {tuple(row) for row in c.execute("SELECT ticket_sequence,ticket FROM resource_parent_group_slots")}
+
+
 def _encode(demand):
     return json.dumps(demand.record(), sort_keys=True, separators=(",", ":"))
 
@@ -576,27 +584,22 @@ class ManagedAdmissionQueue:
         resolved_state_root = str(Path(state_root).resolve())
         with self._transaction() as c:
             if repository_id and request_key:
+                # An owner's never-bound release (F55) stays as evidence; a retry
+                # of the same request queues anew (new sequence and age).
                 retained = c.execute(
                     "SELECT * FROM managed_admissions WHERE repository_id=? AND run_id=? "
-                    "AND request_key=? AND generation=?",
-                    (repository_id, run_id, request_key, generation),
+                    "AND request_key=? AND generation=? AND NOT (status='released' AND limiting_resource IS ? "
+                    "AND launch_intent_id IS NULL AND child_pid IS NULL)",
+                    (repository_id, run_id, request_key, generation, UNBOUND_RELEASE),
                 ).fetchall()
                 if retained:
                     row = retained[0]
-                    # The owner's own never-bound release (F55) re-queues for the same request.
-                    revive = row["status"] == "released" and row["limiting_resource"] == UNBOUND_RELEASE
                     if (len(retained) != 1 or _identity(row) != owner
                             or row["state_root"] != resolved_state_root
                             or row["demand_json"] != _encode(demand)
                             or row["group_id"] != group_id or row["group_width"] != group_width
                             or (launch_intent_id is not None and row["launch_intent_id"] != launch_intent_id)
-                            or (row["status"] not in {"waiting", "active"} and not revive)):
-                        raise ManagedAdmissionRefused("LEASE_RECONCILIATION_REQUIRED")
-                    if revive and c.execute(
-                            "UPDATE managed_admissions SET status='waiting',limiting_resource=NULL,next_recheck_ns=0 "
-                            "WHERE sequence=? AND status='released' AND limiting_resource=? "
-                            "AND launch_intent_id IS NULL AND child_pid IS NULL",
-                            (row["sequence"], UNBOUND_RELEASE)).rowcount != 1:
+                            or row["status"] not in {"waiting", "active"}):
                         raise ManagedAdmissionRefused("LEASE_RECONCILIATION_REQUIRED")
                     return AdmissionTicket(row["sequence"], row["ticket"], owner)
             seq = c.execute(
@@ -653,10 +656,7 @@ class ManagedAdmissionQueue:
             rows = c.execute(
                 "SELECT * FROM managed_admissions WHERE status IN ('waiting','active')"
             ).fetchall()
-            grouped = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                                "AND name='resource_parent_group_slots'").fetchone()
-            prepaid = set() if grouped is None else {
-                tuple(slot) for slot in c.execute("SELECT ticket_sequence,ticket FROM resource_parent_group_slots")}
+            prepaid = _prepaid_slots(c)
         # Missing child identity is uncertainty, not evidence of no child.
         # This deliberately retains lease-before-intent and legacy demand.
         # Only authority proves a lease never forked: no intent, or its intent
@@ -1005,10 +1005,13 @@ class ManagedAdmissionQueue:
     def release_unbound(self, ticket):
         """F55: the live owner frees its own ticket that no intent or child ever bound.
 
-        A bound, consumed or foreign ticket is left untouched (returns False).
+        A bound, consumed or foreign ticket, or any prepaid group slot, is left
+        untouched (returns False).
         """
         owner = self._owner(ticket.owner)
         with self._transaction() as c:
+            if (ticket.sequence, ticket.ticket) in _prepaid_slots(c):
+                return False
             return c.execute(
                 "UPDATE managed_admissions SET status='released',limiting_resource=? WHERE sequence=? AND ticket=? "
                 "AND host_id=? AND boot_id=? AND pid=? AND start_token=? AND status IN ('waiting','active') "

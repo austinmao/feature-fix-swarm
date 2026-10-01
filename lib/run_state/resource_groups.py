@@ -525,6 +525,11 @@ class ResourceParentGroupRegistry:
             owners = connection.execute("SELECT owner_json FROM resource_parent_group_slots WHERE group_id=?",
                                         (plan.group_id,)).fetchall()
         owners = [_parse_identity(json.loads(row["owner_json"])) for row in owners]
+        if live_owner is not None:
+            try:
+                self.queue._owner(live_owner)  # only the calling, live process may speak for itself
+            except ManagedAdmissionRefused as error:
+                raise ResourceGroupRefused("RESOURCE_GROUP_MEMBER_RETAINED") from error
         if not owners or any(owner != live_owner if live_owner is not None else self._native_state(owner) != "DEAD"
                              for owner in owners):
             raise ResourceGroupRefused("RESOURCE_GROUP_MEMBER_RETAINED")

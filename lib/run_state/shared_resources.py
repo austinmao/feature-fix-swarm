@@ -152,7 +152,8 @@ class SharedResourceCoordinator:
             assert_owner(tx, self.token)
             for ticket, binding, item in zip(tickets, bindings, requests):
                 self.store._record_event_once_tx(
-                    tx, self.token, binding["activity_id"], "resource-lease:" + binding["request_key"],
+                    tx, self.token, binding["activity_id"],
+                    "resource-lease:" + binding["request_key"] + ":" + str(ticket.sequence),
                     {"schema": "ffs.shared-resource-lease/v1", "sequence": ticket.sequence,
                      "ticket": ticket.ticket, "request": binding, "demand": item["demand"].record(),
                      "group_id": group_id, "group_width": len(requests)},
@@ -214,19 +215,28 @@ class SharedResourceCoordinator:
                 binding = event("resource-request:" + queue_key)
                 if binding is None:
                     return None  # Legacy and prepaid group paths use different admission records.
-                lease = event("resource-lease:" + queue_key)
-                if (dispatch is None or lease is None or dispatch["intent_id"] != intent_id
+                # One lease per ticket: an unbound-released ticket and its retry both retain theirs.
+                prefix = "resource-lease:" + queue_key + ":"
+                leases = [(row["idempotency_key"], event(row["idempotency_key"])) for row in tx.execute(
+                    "SELECT idempotency_key FROM authority_event_keys WHERE activity_id=? "
+                    "AND substr(idempotency_key,1,?)=?", (intent["activity_id"], len(prefix), prefix))]
+                if (dispatch is None or dispatch["intent_id"] != intent_id
                         or binding["schema"] != "ffs.shared-admission-request/v1"
                         or binding["repository_id"] != self.token.repository_id
                         or binding["run_id"] != self.token.run_id or binding["activity_id"] != intent["activity_id"]
                         or binding["generation"] != self.token.generation or binding["supervisor"] != asdict(current)
                         or binding["request_key"] != queue_key or binding["dispatch_request_key"] != request_key
                         or binding["request_sha256"] != hashlib.sha256(_encoded(dispatch["request"]).encode()).hexdigest()
-                        or lease["schema"] != "ffs.shared-resource-lease/v1" or lease["request"] != binding
-                        or type(lease["sequence"]) is not int or not isinstance(lease["ticket"], str)):
+                        or any(lease["schema"] != "ffs.shared-resource-lease/v1" or lease["request"] != binding
+                               or type(lease["sequence"]) is not int or not isinstance(lease["ticket"], str)
+                               or key != prefix + str(lease["sequence"]) for key, lease in leases)):
                     raise ValueError("retained lease binding changed")
-            ticket = AdmissionTicket(lease["sequence"], lease["ticket"], current)
-            row = self.queue.status(ticket)
+            bound = [(lease, AdmissionTicket(lease["sequence"], lease["ticket"], current)) for _key, lease in leases]
+            bound = [(lease, ticket, self.queue.status(ticket)) for lease, ticket in bound]
+            bound = [item for item in bound if item[2]["launch_intent_id"] == intent_id]
+            if len(bound) != 1:
+                raise ValueError("retained lease binding changed")
+            lease, ticket, row = bound[0]
             if (any(row[key] != binding[key] for key in ("repository_id", "run_id", "request_key", "generation"))
                     or {key: row[key] for key in ("host_id", "boot_id", "pid", "start_token")} != asdict(current)
                     or any(row["child_" + key] != intent["child_" + key]
