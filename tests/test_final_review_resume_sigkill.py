@@ -33,7 +33,7 @@ from run_state import cli
 import run_state.managed_qualification as managed_qualification
 from run_state.state import ControlStore
 from test_final_review_resume import _held_resources, _outer_intents
-from test_managed_lifecycle_assembly import _REVIEW, _draft, _last_envelope, _setup, requires_local_confinement
+from test_managed_lifecycle_assembly import _REVIEW, _draft, _setup, requires_local_confinement
 
 ROOT = Path(__file__).resolve().parents[1]
 _PROBES = ("ordinary", "native-positive", "native-negative", "native-multi-agent")
@@ -263,6 +263,12 @@ sys.exit(cli.main(config["argv"]))
 
 def _sigkilled_run(tmp_path, primary, argv, point, group_dir=None) -> None:
     """Run frontend-start in a child process that SIGKILLs itself at ``point``."""
+    result = _driven_run(tmp_path, primary, argv, point, group_dir)
+    assert result.returncode == -signal.SIGKILL, (result.stdout[-2000:], result.stderr[-4000:])
+
+
+def _driven_run(tmp_path, primary, argv, point, group_dir=None) -> subprocess.CompletedProcess:
+    """Run frontend-start in a child process; it exits (or is SIGKILLed at ``point``) and its fence is left."""
     driver, config = tmp_path / "driver.py", tmp_path / "driver.json"
     driver.write_text(_DRIVER)
     config.write_text(json.dumps({"tmp_path": str(tmp_path), "argv": argv, "point": point,
@@ -270,9 +276,8 @@ def _sigkilled_run(tmp_path, primary, argv, point, group_dir=None) -> None:
     env = {key: value for key, value in os.environ.items()
            if key not in {"GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME", "PYTHONPATH"}}
     env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "lib"), str(ROOT / "tests")))
-    result = subprocess.run([sys.executable, str(driver), str(config)], cwd=primary, env=env,
-                            capture_output=True, text=True, timeout=900)
-    assert result.returncode == -signal.SIGKILL, (result.stdout[-2000:], result.stderr[-4000:])
+    return subprocess.run([sys.executable, str(driver), str(config)], cwd=primary, env=env,
+                          capture_output=True, text=True, timeout=900)
 
 
 def _reviewer_probes(store) -> list[dict]:
@@ -365,7 +370,7 @@ def _group_gone(pgid: int) -> bool:
 
 
 @requires_local_confinement
-def test_a_live_member_of_a_dead_probes_group_blocks_the_close_until_it_exits(tmp_path, monkeypatch, capsys):
+def test_a_live_member_of_a_dead_probes_group_blocks_the_close_until_it_exits(tmp_path, monkeypatch):
     primary, authority, repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
     for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
@@ -385,9 +390,10 @@ def test_a_live_member_of_a_dead_probes_group_blocks_the_close_until_it_exits(tm
         # The owner and the recorded probe child are dead; a member of the child's group still runs.
         assert probe["state"] == "released_to_execute" and not _group_gone(probe["child_pid"])
 
-        capsys.readouterr()
-        assert cli.main(argv) == 78
-        assert _last_envelope(capsys)["code"] == "INTENT_RECONCILIATION_REQUIRED"
+        # A refusing owner keeps its fence while a launch is unsettled; this resume runs, refuses and exits.
+        resumed = _driven_run(tmp_path, primary, argv, "none", group_dir=group)
+        assert resumed.returncode == 78, (resumed.stdout[-2000:], resumed.stderr[-4000:])
+        assert json.loads(resumed.stdout.strip().splitlines()[-1])["code"] == "INTENT_RECONCILIATION_REQUIRED"
         refused = _facts(store, repository_id)
         assert (refused.stage, refused.reviews, refused.review_launches) == ("FINAL_REVIEW", 0, 0)
         # Nothing was closed and no fresh reviewer qualified.
