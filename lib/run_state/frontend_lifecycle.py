@@ -54,6 +54,21 @@ def _review_recorded(store, token, acceptance_hash: str) -> bool:
             (token.repository_id, token.run_id, acceptance_hash)).fetchone() is not None
 
 
+def _reviewed(store, token, acceptance_hash: str, candidate_hash: str) -> bool:
+    """F51c: a succeeded review receipt already binds this exact candidate.
+
+    The review ran only after this candidate's checks passed; a resume after
+    settle (the outer is terminal) cannot capture it again, and the DONE gate
+    re-verifies the checks, the receipt and the candidate bytes.
+    """
+    with store.read_transaction() as tx:
+        return tx.execute(
+            "SELECT 1 FROM authority_acceptance_receipts WHERE repository_id=? AND run_id=? AND acceptance_hash=? "
+            "AND json_extract(receipt_json,'$.role')='review' AND json_extract(receipt_json,'$.candidate_hash')=? "
+            "AND json_extract(receipt_json,'$.completion_status')='succeeded'",
+            (token.repository_id, token.run_id, acceptance_hash, candidate_hash)).fetchone() is not None
+
+
 def _failed_criteria(sealed, checks: dict) -> list[str]:
     return sorted(criterion["id"] for criterion in sealed.material["criteria"]
                   if any(checks.get(check["id"], {}).get("status") != "passed" for check in criterion["checks"]))
@@ -118,7 +133,8 @@ def drive_frontend_lifecycle(store, token, *, supervisor, controller, workspace:
             if checked("EXECUTE"):
                 move("EXECUTE", "FINAL_REVIEW")
         elif stage == "FINAL_REVIEW":
-            if not checked("FINAL_REVIEW"):
+            if (not _reviewed(store, token, sealed.acceptance_hash, current.candidate_hash)
+                    and not checked("FINAL_REVIEW")):
                 continue
             if not _review_recorded(store, token, sealed.acceptance_hash):
                 try:

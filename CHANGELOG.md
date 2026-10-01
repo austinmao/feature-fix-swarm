@@ -8,6 +8,37 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-01, spec-014 Release C: F51c every final-review crash point resumes or refuses typed)
+
+- Live M5 (`e2e-m5e-phase02`): `frontend-start` died while the final
+  reviewer's workspace was `preparing` (generation N-1, no reviewer
+  activity). The same-key resume took the retained not-ready preparation and
+  ran `prepare_workspace` on it, which refused `FENCE_REVOKED` (rc 4) in
+  `_guarded_workspace_effect`. `_current_reviewer` now leaves a reviewer
+  workspace an earlier owner began but never made READY exactly as retained
+  (row, worktree and branch kept as evidence; nothing finished, nothing
+  deleted) and captures a fresh one under the next attempt key. A READY
+  workspace with no reviewer is still revalidated and reused.
+- A crash after `settle` (outer succeeded) and before `DONE` refused
+  `FENCE_REVOKED`: the resume could neither re-fence the settled outer nor
+  re-capture the candidate from it. `rebind_retained_child` leaves an
+  activity this run already settled `succeeded` as it is, and
+  `drive_frontend_lifecycle` skips `FINAL_REVIEW` checks only when a succeeded
+  review receipt binds the current candidate (the review ran after those
+  checks passed; the `DONE` gate re-verifies checks, receipt and candidate
+  bytes). An ancestor's review never skips the checks.
+- Crash points between `FINAL_REVIEW` and `DONE`, with their resume outcome:
+  stage entered, reviewer workspace begun, worktree created before its
+  native identity, overlay interrupted, overlay applied but unpublished,
+  READY but locked, READY with no reviewer, reviewer activity created, probes
+  released with a dead group or completed, reviewer promoted, review recorded,
+  reviewer settled, everything settled: `DONE` with one review. A probe
+  reserved and never spawned or with a live child or group member:
+  `INTENT_RECONCILIATION_REQUIRED`. A review grant reserved, or a review
+  launched by an earlier owner: `REVIEW_RECONCILIATION_REQUIRED`; a review
+  intent never acknowledged or permitted: `INTENT_RECONCILIATION_REQUIRED`.
+  Tests: `tests/test_final_review_crash_points.py` plus the F51 resume files.
+
 ### Fixed (2026-10-01, spec-014 Release C: F51b a resume keeps the workspace row a sealed receipt hashed)
 
 - Live M5 (`e2e-m5c-phase02`, after F51 rolled out): the same-key resume of a
