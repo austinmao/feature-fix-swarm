@@ -471,20 +471,22 @@ def rebind_retained_child(store, token, activity_id: str | None, preparation_id:
         raise SupervisorRefused(error.code) from error
     if activity_id is None:
         return ready
+    bound = ("FROM authority_activities a WHERE a.id=? AND a.repository_id=? AND a.run_id=? AND a.state IN ({}) "
+             "AND EXISTS (SELECT 1 FROM authority_child_bindings b JOIN context_workspaces w "
+             "ON w.preparation_id=b.workspace_preparation_id WHERE b.activity_id=a.id AND w.preparation_id=? "
+             "AND w.generation<=? AND w.state='ready')")
+    scope = (activity_id, token.repository_id, token.run_id, preparation_id, token.generation)
     with store.fenced_operation(token):
         with store.transaction() as tx:
             assert_owner(tx, token)
             changed = tx.execute(
-                "UPDATE authority_activities SET generation=?,updated_at=? WHERE id=? AND repository_id=? "
-                "AND run_id=? AND state IN ('pending','active') AND EXISTS (SELECT 1 FROM authority_child_bindings b "
-                "JOIN context_workspaces w ON w.preparation_id=b.workspace_preparation_id "
-                "WHERE b.activity_id=authority_activities.id AND w.preparation_id=? AND w.generation<=? "
-                "AND w.state='ready')",
-                (token.generation, store._now(), activity_id, token.repository_id, token.run_id,
-                 preparation_id, token.generation)).rowcount
-    # F51c: an activity this run already settled succeeded (the outer, before DONE) is never
-    # re-fenced; nothing captures from it again (frontend_lifecycle skips a reviewed candidate's checks).
-    if changed != 1 and store.get_activity(activity_id).state != "succeeded":
+                "UPDATE authority_activities SET generation=?,updated_at=? WHERE id IN (SELECT a.id "
+                + bound.format("'pending','active'") + ")", (token.generation, store._now(), *scope)).rowcount
+            # F51c: this child's own activity, already settled succeeded by this run (the outer between
+            # settle and DONE), is never re-fenced; nothing captures from it again.  Same predicates,
+            # same transaction (R1-1): another run's or workspace's activity never qualifies.
+            settled = changed == 0 and tx.execute("SELECT 1 " + bound.format("'succeeded'"), scope).fetchone()
+    if changed != 1 and not settled:
         raise OwnershipRefused("FENCE_REVOKED")
     return ready
 
