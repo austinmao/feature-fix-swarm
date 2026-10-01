@@ -4287,7 +4287,7 @@ class ControlStore:
         if not self._valid_digest(acceptance_contract_hash):
             _refuse("ACCEPTANCE_DRAFT_BINDING_INVALID")
         try:
-            draft = validate_draft_material(material)
+            draft = validate_draft_material(material, new_draft=True)
         except RunPolicyRefused as error:
             self._refuse_policy_error(error)
         self.ensure_context_schema()

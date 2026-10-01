@@ -299,8 +299,28 @@ def build_draft_material(
     }
 
 
-def validate_draft_material(value: object) -> AcceptanceDraft:
+# Evidence id that record_final_review reserves for the reviewer process result row.
+RECEIPT_PROCESS_RESULT_ID = "review-process-result"
+
+
+def labelable_check_ids(criteria, criterion) -> frozenset:
+    """Mapped check ids of ``criterion`` that may label its final-review evidence.
+
+    record_final_review flattens every criterion's evidence plus the reserved process-result
+    row into one receipt of unique ids, so a check id equal to another criterion's evidence-rule
+    id or to the reserved id cannot be a label. New drafts forbid those ids; a seal from an
+    older build may hold them. The validator and the published contract both use this.
+    """
+    barred = {RECEIPT_PROCESS_RESULT_ID}.union(
+        rule["id"] for other in criteria if other["id"] != criterion["id"] for rule in other["evidence_rules"])
+    return frozenset(check["id"] for check in criterion["checks"]) - barred
+
+
+def validate_draft_material(value: object, *, new_draft: bool = False) -> AcceptanceDraft:
     """Validate immutable executable criteria, evidence and identity bindings.
+
+    ``new_draft`` is True only where a draft is created. It adds the F54 label rules
+    that older builds did not enforce, so a draft or seal they stored stays readable.
 
     A draft has no dispatch-envelope field by design.  It is intentionally a
     closed schema so a future control-significant field cannot be smuggled in
@@ -348,6 +368,15 @@ def validate_draft_material(value: object) -> AcceptanceDraft:
         checks = _validate_rule_list(item["checks"], code="POLICY_DRAFT_INVALID", required_key="locator")
         evidence_rules = _validate_rule_list(item["evidence_rules"], code="POLICY_DRAFT_INVALID", required_key="required")
         if check_ids.intersection(rule["id"] for rule in checks) or evidence_ids.intersection(rule["id"] for rule in evidence_rules):
+            raise RunPolicyRefused("POLICY_DRAFT_INVALID")
+        # F54: final review flattens every criterion's evidence (labelled by one of its own
+        # rule or mapped check ids) plus the reserved process-result row into one receipt
+        # whose ids must be unique. A check id may equal a rule id only inside its own
+        # criterion, and nothing may take the reserved id. Read-back of a stored draft or
+        # seal skips this (see validate_native_review_evidence for the legacy handling).
+        own_checks, own_rules = {rule["id"] for rule in checks}, {rule["id"] for rule in evidence_rules}
+        if new_draft and ((own_checks | own_rules) & {RECEIPT_PROCESS_RESULT_ID}
+                          or own_checks & evidence_ids or own_rules & check_ids):
             raise RunPolicyRefused("POLICY_DRAFT_INVALID")
         check_ids.update(rule["id"] for rule in checks)
         evidence_ids.update(rule["id"] for rule in evidence_rules)

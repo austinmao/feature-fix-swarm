@@ -8,6 +8,48 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-01, spec-014 Release C: F54 final-review evidence ids follow the published grammar)
+
+- The sealed final-review response grammar (`final_review_output_contract`,
+  `evidence.id`) told the reviewer a criterion evidence id is a
+  "rule/check/invariant" id, but `validate_native_review_evidence` pooled
+  criterion evidence only under the criterion's evidence-rule ids. A reviewer
+  that followed the grammar, citing the required rule id (`check-logs`) plus one
+  of the criterion's mapped check ids (`version-flag`) with that check's real
+  `result.json` locator and sha256, was refused
+  `FINAL_REVIEW_EVIDENCE_SCOPE_INVALID`, the lifecycle handed back, and the run
+  ended with no recovery producer (M3 attempt 33, Codex 0.159.0). The spec has
+  no rule for criterion evidence ids, so the published grammar governs: a
+  criterion evidence item may now be labelled by one of that criterion's
+  evidence-rule ids (pool: the terminal receipts of all its checks, as before)
+  or by one of its mapped check ids (pool: only that check's own receipt, which
+  is stricter). Ids stay unique per criterion, `(locator, sha256)` must come
+  from the pool, a pass still needs every required rule id
+  (`FINAL_REVIEW_EVIDENCE_MISSING`), and another criterion's check id, an
+  invariant id, an unknown id and a selected source stay refused. A rule and a
+  check sharing one id must satisfy both pools. The grammar text now says
+  exactly this and names invariant ids as finding-only. Findings evidence
+  validation already matched the grammar and is unchanged.
+- Follow-up: because a criterion may now label evidence with a mapped check
+  id, `validate_draft_material` refuses `POLICY_DRAFT_INVALID` when a check id
+  equals an evidence-rule id of a different criterion (either order), or when
+  any check or evidence-rule id is `review-process-result`. Otherwise a review
+  could pass evidence validation and then fail receipt recording
+  (`POLICY_RECEIPT_INVALID`, non-unique evidence ids) once
+  `record_final_review` flattens every criterion's evidence plus the reserved
+  process-result row into one receipt. A check id equal to a rule id of the
+  same criterion stays accepted.
+  The refusal applies to newly created drafts only (`new_draft=True`, passed by
+  `create_acceptance_draft`), so a draft or seal stored by an older build still
+  reads back, and on such a seal `validate_native_review_evidence` does not
+  offer a check id that equals another criterion's rule id, or
+  `review-process-result`, as an evidence label for its criterion.
+  The published output contract now states the same rule: a criterion carries
+  `non_label_check_ids` (the mapped check ids minus `labelable_check_ids`, the
+  helper the validator uses) only when that list is non-empty, so the grammar
+  never permits a label the validator refuses and a collision-free seal's
+  contract is no larger than before.
+
 ### Fixed (2026-09-30, spec-014 Release C: F53 native review runs the Codex JS launcher with its Node)
 
 - The managed native final review exited within about a second on an

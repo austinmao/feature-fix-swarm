@@ -293,6 +293,189 @@ def test_review_evidence_accepts_scoped_check_and_invariant_references():
         validate_native_review_evidence(output, context)
 
 
+def _mapped_check_context():
+    """One criterion with a required rule and two mapped checks, plus a foreign criterion."""
+    def check(name, digit):
+        return {'status': 'passed', 'evidence': [{'locator': f'/fixture/{name}/result.json',
+                                                  'sha256': digit * 64}]}
+    return {
+        'criteria': [
+            {'id': 'AC-1', 'checks': [{'id': 'version-flag'}, {'id': 'help-flag'}],
+             'evidence_rules': [{'id': 'check-logs', 'required': True}]},
+            {'id': 'AC-2', 'checks': [{'id': 'other-check'}],
+             'evidence_rules': [{'id': 'proof-2', 'required': True}]},
+        ],
+        'global_invariants': [{'id': 'invariant-1'}],
+        'checks': {'version-flag': check('version-flag', '1'), 'help-flag': check('help-flag', '2'),
+                   'other-check': check('other-check', '3')},
+    }
+
+
+def _cite(context, check_id, identifier):
+    return {'id': identifier, **context['checks'][check_id]['evidence'][0]}
+
+
+def _criterion_output(*evidence):
+    return {'criteria': {'AC-1': {'status': 'passed', 'evidence': list(evidence)}}, 'findings': []}
+
+
+def test_criterion_evidence_accepts_a_mapped_check_id_beside_the_required_rule_id():
+    # F54 live shape: the reviewer followed the published grammar ("rule/check
+    # ... ID") and labelled one item with the rule and one with a mapped check.
+    from run_state.final_review_context import validate_native_review_evidence
+    context = _mapped_check_context()
+    validate_native_review_evidence(_criterion_output(
+        _cite(context, 'version-flag', 'check-logs'), _cite(context, 'version-flag', 'version-flag')), context)
+    # The rule id still pools every mapped check; each check id pools only its own.
+    validate_native_review_evidence(_criterion_output(
+        _cite(context, 'help-flag', 'check-logs'), _cite(context, 'version-flag', 'version-flag'),
+        _cite(context, 'help-flag', 'help-flag')), context)
+
+
+@pytest.mark.parametrize('mutation', ['other-criterion-check', 'other-criterion-locator', 'wrong-check-locator',
+                                     'duplicate-id', 'unknown-id', 'invariant-id', 'source-under-check-id'])
+def test_criterion_evidence_check_ids_stay_scoped_to_their_own_check(mutation):
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.supervisor import SupervisorRefused
+    context = _mapped_check_context()
+    rule_item = _cite(context, 'version-flag', 'check-logs')
+    bad = {'other-criterion-check': _cite(context, 'other-check', 'other-check'),
+           'other-criterion-locator': _cite(context, 'other-check', 'version-flag'),
+           'wrong-check-locator': _cite(context, 'help-flag', 'version-flag'),
+           'duplicate-id': _cite(context, 'version-flag', 'check-logs'),
+           'unknown-id': _cite(context, 'version-flag', 'no-such-id'),
+           'invariant-id': _cite(context, 'version-flag', 'invariant-1')}.get(mutation)
+    if mutation == 'source-under-check-id':
+        reference = {'locator': '/fixture/capture/src/input.txt', 'sha256': 'a' * 64}
+        context['selected_sources'] = {'src/input.txt': reference}
+        bad = {'id': 'version-flag', **reference}
+    with pytest.raises(SupervisorRefused, match='FINAL_REVIEW_EVIDENCE_SCOPE_INVALID'):
+        validate_native_review_evidence(_criterion_output(rule_item, bad), context)
+
+
+def _legacy_collision_context(shape):
+    """A seal written by an older build: a check id that could collide in the flattened receipt."""
+    def check(name, digit):
+        return {'status': 'passed', 'evidence': [{'locator': f'/fixture/{name}/result.json',
+                                                  'sha256': digit * 64}]}
+    if shape == 'foreign-rule':  # AC-1 check `shared` equals AC-2 evidence rule `shared`
+        colliding, rule_2 = 'shared', 'shared'
+    else:  # the receipt-reserved process-result id used as a check id
+        colliding, rule_2 = 'review-process-result', 'rule-2'
+    return colliding, {
+        'criteria': [
+            {'id': 'AC-1', 'checks': [{'id': colliding}], 'evidence_rules': [{'id': 'rule-1', 'required': True}]},
+            {'id': 'AC-2', 'checks': [{'id': 'check-2'}], 'evidence_rules': [{'id': rule_2, 'required': True}]},
+        ],
+        'global_invariants': [], 'checks': {colliding: check(colliding, '1'), 'check-2': check('check-2', '2')},
+    }
+
+
+def _legacy_output(context, rule_2, first_label):
+    def cite(check_id, label):
+        return {'id': label, **context['checks'][check_id]['evidence'][0]}
+    return {'criteria': {'AC-1': {'status': 'passed', 'evidence': [cite(context['criteria'][0]['checks'][0]['id'], first_label)]},
+                         'AC-2': {'status': 'passed', 'evidence': [cite('check-2', rule_2)]}},
+            'findings': []}
+
+
+@pytest.mark.parametrize('shape', ['foreign-rule', 'reserved'])
+def test_legacy_colliding_check_id_is_not_a_criterion_evidence_label(shape):
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.supervisor import SupervisorRefused
+    colliding, context = _legacy_collision_context(shape)
+    rule_2 = context['criteria'][1]['evidence_rules'][0]['id']
+    with pytest.raises(SupervisorRefused, match='FINAL_REVIEW_EVIDENCE_SCOPE_INVALID'):
+        validate_native_review_evidence(_legacy_output(context, rule_2, colliding), context)
+
+
+@pytest.mark.parametrize('shape', ['foreign-rule', 'reserved'])
+def test_legacy_colliding_seal_records_a_receipt_when_the_rule_ids_are_cited(shape):
+    from types import SimpleNamespace
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.run_policy import validate_role_receipt
+    from test_run_policy_contract import _receipt
+    _colliding, context = _legacy_collision_context(shape)
+    rule_2 = context['criteria'][1]['evidence_rules'][0]['id']
+    output = _legacy_output(context, rule_2, 'rule-1')
+    validate_native_review_evidence(output, context)
+    # record_final_review flattens the process-result row plus every criterion's evidence.
+    receipt = _receipt(SimpleNamespace(acceptance_hash='1' * 64))
+    receipt['evidence'] = [{'id': 'review-process-result', 'sha256': '9' * 64, 'locator': 'evidence://process'}] + [
+        {'id': item['id'], 'sha256': item['sha256'], 'locator': item['locator']}
+        for checked in output['criteria'].values() for item in checked['evidence']]
+    assert len(validate_role_receipt(receipt).evidence) == 3
+
+
+def _contract_for(context):
+    """The published output contract for a seal holding exactly this context's criteria."""
+    from run_state.sealed_review import final_review_output_contract
+    criteria = [{'id': item['id'], 'objective_clause': 'fixture clause',
+                 'checks': [{'id': check['id'], 'kind': 'command', 'locator': '/usr/bin/true'}
+                            for check in item['checks']],
+                 'evidence_rules': [{'id': rule['id'], 'kind': 'log', 'required': rule['required']}
+                                    for rule in item['evidence_rules']]} for item in context['criteria']]
+    sealed = _sealed()
+    return final_review_output_contract(replace(sealed, material={**sealed.material, 'criteria': criteria}),
+                                        candidate_hash='1' * 64)
+
+
+def _contract_permitted_ids(contract, criterion):
+    """What the published grammar permits: rule ids and mapped check ids, minus the published exceptions."""
+    excluded = set(contract['criteria'][criterion['id']].get('non_label_check_ids', []))
+    return {item['id'] for item in criterion['checks'] + criterion['evidence_rules']} - excluded
+
+
+@pytest.mark.parametrize('shape', ['foreign-rule', 'reserved', 'none'])
+def test_contract_permits_exactly_the_criterion_evidence_ids_the_validator_accepts(shape):
+    # R3-1/R4-1: the published grammar must not permit a label that the validator refuses, and
+    # must not forbid one the validator accepts.
+    from run_state.final_review_context import validate_native_review_evidence
+    from run_state.supervisor import SupervisorRefused
+    colliding, context = _legacy_collision_context('foreign-rule' if shape == 'none' else shape)
+    if shape == 'none':  # the same criteria with the collision renamed away
+        context['criteria'][0]['checks'][0]['id'] = 'check-1'
+        context['checks'] = {'check-1': context['checks'][colliding], 'check-2': context['checks']['check-2']}
+    contract = _contract_for(context)
+    for criterion in context['criteria']:
+        permitted = _contract_permitted_ids(contract, criterion)
+        receipt = context['checks'][criterion['checks'][0]['id']]['evidence'][0]
+        for candidate in sorted({item['id'] for item in criterion['checks'] + criterion['evidence_rules']}):
+            output = {'criteria': {criterion['id']: {'status': 'passed', 'evidence': [{'id': candidate, **receipt}]}},
+                      'findings': []}
+            try:
+                validate_native_review_evidence(output, context)
+                accepted = True
+            except SupervisorRefused:
+                accepted = False
+            assert accepted == (candidate in permitted), (criterion['id'], candidate)
+    if shape == 'none':
+        assert all('non_label_check_ids' not in entry for entry in contract['criteria'].values())
+    else:
+        assert contract['criteria']['AC-1']['non_label_check_ids'] == [colliding]
+        assert 'non_label_check_ids' not in contract['criteria']['AC-2']
+
+
+def test_contract_adds_no_key_when_nothing_can_collide():
+    from run_state.sealed_review import final_review_output_contract
+    contract = final_review_output_contract(_sealed(), candidate_hash='1' * 64)
+    assert contract['criteria']['AC-1'] == {'required_evidence_ids_for_pass': ['proof-1']}
+
+
+def test_contract_evidence_id_text_states_the_published_exception_rule():
+    from run_state.sealed_review import final_review_output_contract
+    text = final_review_output_contract(_sealed(), candidate_hash='1' * 64)['evidence']['id']
+    assert 'non_label_check_ids' in text
+
+
+def test_contract_criterion_evidence_id_text_names_rule_and_mapped_check_ids_only():
+    from run_state.sealed_review import final_review_output_contract
+    text = final_review_output_contract(_sealed(), candidate_hash='1' * 64)['evidence']['id']
+    assert 'mapped check' in text and 'rule' in text
+    # Invariant ids are finding-only: any sentence offering them must say so.
+    assert all(sentence.startswith('Finding') for sentence in text.split('. ') if 'invariant' in sentence)
+
+
 @pytest.mark.parametrize('scope', ['criterion', 'invariant', 'check', 'pass'])
 def test_selected_source_evidence_supports_findings_but_not_check_proof(scope):
     from run_state.final_review_context import validate_native_review_evidence
@@ -370,3 +553,36 @@ def test_sixty_criteria_keep_full_semantics_and_outputs_within_combined_limit():
     context['checks']['check-000']['result']['stdout']['contents'] = 'x' * 65536
     with pytest.raises(CapabilityError):
         _material(output_contract=contract, review_context=context)
+
+
+def test_thirty_long_id_criteria_without_collisions_still_build_review_material():
+    # R4-1: the reviewer's case. Publishing only exceptions keeps a collision-free seal's
+    # contract the same size it was before the label rule existed.
+    from run_state.final_review_context import SOURCE_EVIDENCE_POLICY
+    from run_state.sealed_review import final_review_output_contract
+    sealed = _sealed()
+    criteria, checks = [], {}
+    for index in range(30):
+        check_id, rule_id = (f'{kind}-{index:03}-' + kind[0] * (240 - len(f'{kind}-{index:03}-')) for kind in ('check', 'proof'))
+        assert len(check_id) == len(rule_id) == 240
+        criteria.append({'id': f'AC-{index:03}', 'objective_clause': 'fixture requirement ' + 'x' * 80,
+                         'checks': [{'id': check_id, 'kind': 'command', 'locator': '/' + 'x' * 60}],
+                         'evidence_rules': [{'id': rule_id, 'kind': 'log', 'required': True}]})
+        checks[check_id] = {'status': 'passed',
+                            'evidence': [{'locator': '/private/fixture/current-run/evidence/' + f'{index:03}/result.json',
+                                          'sha256': 'f' * 64}],
+                            'result': {'returncode': 0,
+                                       'stdout': {'sha256': 'f' * 64, 'contents': 'fixture check passed'},
+                                       'stderr': {'sha256': 'e' * 64, 'contents': ''}}}
+    sealed = replace(sealed, material={**sealed.material, 'criteria': criteria})
+    context = {'schema': 'ffs.sealed-final-review-context/v1', 'acceptance_hash': sealed.acceptance_hash,
+               'candidate_hash': '1' * 64, 'runtime_hash': 'b' * 64, 'objective_digest': 'a' * 64,
+               'criteria': criteria, 'checks': checks, 'global_invariants': sealed.material['global_invariants'],
+               'exclusions': sealed.material['exclusions'],
+               'selected_sources': {'input.txt': {'locator': '/private/fixture/capture/files/input.txt',
+                                                  'sha256': 'a' * 64}},
+               'source_scope': 'exact-selected-review-inputs', 'source_evidence_policy': SOURCE_EVIDENCE_POLICY}
+    contract = final_review_output_contract(sealed, candidate_hash='1' * 64)
+    material = _material(output_contract=contract, review_context=context)
+    assert len(material.output_contract_json.encode()) <= 32768
+    assert len(material.prompt.encode()) <= 65536
