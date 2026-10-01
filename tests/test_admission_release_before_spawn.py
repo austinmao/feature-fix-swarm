@@ -221,10 +221,34 @@ def test_managed_parent_refused_closes_its_never_bound_group_and_a_same_generati
 # --- R1-3: an owner killed after its intent committed, before any fork ----------------------------
 
 
-def _crashing_owner(mode, boundary, root, metadata):
+# The store's own fault point: the launch intent and debit committed, the shared ticket not yet bound.
+WINDOW = "reserve_launch.after_commit_before_return"
+FORK_MARKER = "spawn-attempt/v1"
+
+
+def _write_pre_upgrade_admission_requests():
+    """Simulate a pre-upgrade writer: its admission request records carry no fork-marker field."""
+    original = ControlStore._record_event_once_tx
+
+    def without_marker(record):
+        return {name: value for name, value in record.items() if name != "fork_marker"}
+
+    def record_event_once_tx(tx, token, activity_id, key, payload):
+        if key.startswith("resource-request:"):
+            payload = without_marker(payload)
+        elif key.startswith("resource-lease:"):
+            payload = {**payload, "request": without_marker(payload["request"])}
+        return original(tx, token, activity_id, key, payload)
+
+    ControlStore._record_event_once_tx = staticmethod(record_event_once_tx)
+
+
+def _crashing_owner(mode, boundary, root, metadata, legacy=""):
     """Subprocess body: build one owner, then ``os._exit`` at ``boundary`` of the armed launch."""
     root, metadata = Path(root), Path(metadata)
     root.mkdir(parents=True, exist_ok=True)
+    if legacy:
+        _write_pre_upgrade_admission_requests()
     armed = []
 
     def crash(point):
@@ -245,6 +269,7 @@ def _crashing_owner(mode, boundary, root, metadata):
             handle = supervisor.launch(parent)
             launch = _nested(store, supervisor.token, parent, ready, "crashed-child")
             payload.update(parent_intent=handle.intent_id, activity_id=launch.activity_id)
+    store.fault_probe = crash
     payload.update(db=str(store.db_path), generation=supervisor.token.generation,
                    evidence_root=str(supervisor.evidence_root), owner_pid=os.getpid())
     metadata.write_text(json.dumps(payload))
@@ -253,13 +278,13 @@ def _crashing_owner(mode, boundary, root, metadata):
     os._exit(1)  # the armed fault never fired
 
 
-def _crash(tmp_path, mode, boundary):
+def _crash(tmp_path, mode, boundary, *, legacy=False):
     root, metadata = tmp_path / "owner", tmp_path / "owner.json"
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "lib") + os.pathsep + str(Path(__file__).parent)
     owner = subprocess.Popen([sys.executable, "-c",
                               "import sys, test_admission_release_before_spawn as t; t._crashing_owner(*sys.argv[1:])",
-                              mode, boundary, str(root), str(metadata)], env=environment)
+                              mode, boundary, str(root), str(metadata), "legacy" if legacy else ""], env=environment)
     try:
         assert owner.wait(timeout=180) == 9
     finally:
@@ -287,6 +312,14 @@ def _crashed_intent(store, activity_id):
     return dict(intent), marker is not None
 
 
+def _admission_request(store, activity_id):
+    with store.read_transaction() as tx:
+        [row] = tx.execute("SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+                           "WHERE k.activity_id=? AND k.idempotency_key LIKE 'resource-request:%'",
+                           (activity_id,)).fetchall()
+    return json.loads(row[0])["data"]
+
+
 def _managed_writer(store, value="ffs-supervisor/1"):
     """Fixture: the scripted owner launched under the unmanaged writer; R1-3 proofs cover managed runs only."""
     with store.transaction() as tx:
@@ -295,19 +328,21 @@ def _managed_writer(store, value="ffs-supervisor/1"):
     return previous
 
 
-@pytest.mark.parametrize(("boundary", "spawned"), [("after_intent_commit", False), ("after_spawn_before_ack", True)])
-def test_plain_owner_killed_before_fork_has_its_bound_ticket_reclaimed_lazily(tmp_path, boundary, spawned):
-    payload, store, successor, queue = _crash(tmp_path, "plain", boundary)
+def _plain_owner_killed_before_fork(tmp_path, boundary, legacy):
+    spawned, bound = boundary == "after_spawn_before_ack", boundary != WINDOW
+    payload, store, successor, queue = _crash(tmp_path, "plain", boundary, legacy=legacy)
     intent, marker = _crashed_intent(store, payload["activity_id"])
     assert marker is spawned  # a fork was attempted only past the marker
     [row] = queue.snapshot()
-    assert (row["status"], row["launch_intent_id"], row["child_pid"]) == ("active", intent["id"], None)
+    assert (row["status"], row["launch_intent_id"], row["child_pid"]) == ("active", intent["id"] if bound else None, None)
     authority = _authority(store)
     previous = _managed_writer(store)
     queue._reclaim_dead()
     [row] = queue.snapshot()
     if spawned:
         assert row["status"] == "active"  # a fork may exist: uncertain, retained
+    elif legacy:
+        assert row["status"] == "active"  # a pre-upgrade request never promised a fork marker: retained
     else:
         assert (row["status"], row["limiting_resource"]) == ("reclaimed", "pre-spawn-proved")
     _managed_writer(store, previous)
@@ -321,6 +356,18 @@ def test_plain_owner_killed_before_fork_has_its_bound_ticket_reclaimed_lazily(tm
                                   request_payload=_dispatch_request(store, payload)["request"])
     assert (replay.reused, replay.id, replay.state) == (True, intent["id"], "reserved")
     assert _authority(store) == authority
+    assert _admission_request(store, payload["activity_id"]).get("fork_marker") == (None if legacy else FORK_MARKER)
+
+
+@pytest.mark.parametrize(("boundary", "spawned", "legacy"), [
+    ("after_intent_commit", False, False), ("after_spawn_before_ack", True, False), ("after_intent_commit", False, True)])
+def test_plain_owner_killed_before_fork_has_its_bound_ticket_reclaimed_lazily(tmp_path, boundary, spawned, legacy):
+    _plain_owner_killed_before_fork(tmp_path, boundary, legacy)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_plain_owner_killed_between_reserve_commit_and_bind_has_its_ticket_reclaimed_lazily(tmp_path, legacy):
+    _plain_owner_killed_before_fork(tmp_path, WINDOW, legacy)
 
 
 def _dispatch_request(store, payload):
@@ -345,10 +392,20 @@ def _finish_resumed_parent(store, successor, payload):
             time.sleep(.02)
 
 
-@pytest.mark.parametrize("who", ["parent", "child"])
-@pytest.mark.parametrize(("boundary", "spawned"), [("after_intent_commit", False), ("after_spawn_before_ack", True)])
-def test_successor_settles_a_group_whose_bound_claim_was_never_forked(tmp_path, who, boundary, spawned):
-    payload, store, successor, queue = _crash(tmp_path, who, boundary)
+@pytest.mark.parametrize(("who", "boundary", "legacy", "settled"), [
+    ("parent", "after_intent_commit", False, "closed"),
+    ("child", "after_intent_commit", False, "closed"),
+    ("parent", "after_spawn_before_ack", False, "retained"),
+    ("child", "after_spawn_before_ack", False, "retained"),
+    # A pre-upgrade request never promised a fork marker: its group stays retained.
+    ("parent", "after_intent_commit", True, "retained"),
+    ("child", "after_intent_commit", True, "retained"),
+    # Guard: reserved before the parent bound; authority shows an unsettled intent, never per-ticket reclaim.
+    ("parent", WINDOW, False, "retained"),
+])
+def test_successor_settles_a_group_whose_bound_claim_was_never_forked(tmp_path, who, boundary, legacy, settled):
+    spawned, bound = boundary == "after_spawn_before_ack", boundary != WINDOW
+    payload, store, successor, queue = _crash(tmp_path, who, boundary, legacy=legacy)
     try:
         with store.read_transaction() as tx:
             activity = payload.get("activity_id") or tx.execute(
@@ -358,22 +415,25 @@ def test_successor_settles_a_group_whose_bound_claim_was_never_forked(tmp_path, 
         group, _slots, claims = _group(queue)
         assert group["state"] == "reserved" and claims == int(who == "child")
         before = queue.snapshot()
-        if who == "parent":
-            assert json.loads(group["parent_binding_json"])["launch_intent_id"] == intent["id"]
-            # A prepaid slot is settled only through its group, never by the per-ticket lazy reclaim.
-            queue._reclaim_dead()
-            assert queue.snapshot() == before
-        else:
+        if who == "child":
             _finish_resumed_parent(store, successor, payload)
         authority = _authority(store)
         _managed_writer(store)
+        if who == "parent":
+            parent_binding = group["parent_binding_json"]
+            assert (json.loads(parent_binding)["launch_intent_id"] if bound else parent_binding) == (
+                intent["id"] if bound else None)
+            # A prepaid slot is settled only through its group, never by the per-ticket lazy reclaim.
+            queue._reclaim_dead()
+            assert queue.snapshot() == before
         outcomes = settle_predecessor_groups(store, successor, queue)
-        assert [item["state"] for item in outcomes] == ["retained" if spawned else "closed"], outcomes
+        assert [item["state"] for item in outcomes] == [settled], outcomes
         rows = queue.snapshot()
-        if spawned:
+        if settled == "retained":
             assert [row["status"] for row in rows] == [row["status"] for row in before]
         else:
             assert all(row["status"] == "released" for row in rows), rows
         assert _authority(store) == authority  # the never-forked intent and its debit stay as they were
+        assert _admission_request(store, activity).get("fork_marker") == (None if legacy else FORK_MARKER)
     finally:
         (Path(payload["workspace"]) / "release").touch()
