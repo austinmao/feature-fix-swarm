@@ -659,15 +659,15 @@ class ManagedAdmissionQueue:
                 tuple(slot) for slot in c.execute("SELECT ticket_sequence,ticket FROM resource_parent_group_slots")}
         # Missing child identity is uncertainty, not evidence of no child.
         # This deliberately retains lease-before-intent and legacy demand.
-        # Only authority proves a lease never forked: no intent, or a bound
-        # intent with no spawn-attempt marker (R1-3).  A bound prepaid slot
-        # settles only through its whole group, never ticket by ticket.
+        # Only authority proves a lease never forked: no intent, or its intent
+        # with no spawn-attempt marker (R1-3).  A prepaid slot settles only
+        # through its whole group, never ticket by ticket.
         doomed = []
         for row in rows:
             supervisor, child = _identity(row), _identity(row, "child_")
             if (supervisor is not None and child is None and row["writer_version"] == 2
                     and row["repository_id"] and row["request_key"]
-                    and (row["launch_intent_id"] is None or (row["sequence"], row["ticket"]) not in prepaid)
+                    and (row["sequence"], row["ticket"]) not in prepaid
                     and self._dead(supervisor)):
                 from .shared_resources import ControlStoreLeaseEvidenceReader
                 lease = LeaseIdentity(row["repository_id"], row["run_id"], row["request_key"],

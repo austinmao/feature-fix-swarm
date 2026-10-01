@@ -19,6 +19,12 @@ from .resource_observation import ResourceDemand
 from .state import ControlStore, ControlStoreRefused
 
 
+# Positive marker-era field of an admission request (R1-3): its writer commits a
+# ``spawn-attempt:<intent>`` event before every intent-consuming fork.  A request
+# without it (pre-upgrade bytes) never proves an intent was not forked.
+FORK_MARKER = "spawn-attempt/v1"
+
+
 def _encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -64,6 +70,7 @@ def record_admission_request(store, token, *, activity_id, request_key, material
             "dispatch_request_key": request_key, "generation": token.generation,
             "request_sha256": request_digest, "owner_set": owner["owner_set"],
             "supervisor": {key: owner[key] for key in ("host_id", "boot_id", "pid", "start_token")},
+            "fork_marker": FORK_MARKER,
         }
         store._record_event_once_tx(tx, token, activity_id, "resource-request:" + queue_key, payload)
     return payload
@@ -317,16 +324,15 @@ class ControlStoreLeaseEvidenceReader:
                 if next(row for row in owners if row["resource_type"] == "run")["resource_key"] != run_key:
                     return None
                 # The immutable dispatch key is the only valid link to an
-                # intent. An unbound lease proves only its intent's absence; a
-                # bound one proves its exact intent was never forked (R1-3).
+                # intent. Without one the lease proves its intent's absence;
+                # with one (bound, or still in the reserve-to-bind window) a
+                # marker-era request proves that intent was never forked (R1-3).
                 dispatch = tx.execute(
                     "SELECT k.payload_hash,e.payload FROM authority_event_keys k JOIN control_events e "
                     "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?",
                     (data["activity_id"], "dispatch-request:" + data["dispatch_request_key"]),
                 ).fetchone()
-                if identity.launch_intent_id is None:
-                    if dispatch is not None:
-                        return None
+                if identity.launch_intent_id is None and dispatch is None:
                     evidence = {"intent_absent": True}
                 else:
                     intent = _never_forked_intent(tx, identity, data, dispatch)
@@ -344,21 +350,25 @@ class ControlStoreLeaseEvidenceReader:
 
 
 def _never_forked_intent(tx, identity, data, dispatch):
-    """The bound intent the dispatch event names, only if no child was ever forked for it.
+    """The intent the dispatch event names, only if no child was ever forked for it.
 
     Every intent-consuming fork commits ``spawn-attempt:<intent>`` before
     ``subprocess.Popen``; its absence, with no ACK, child identity, permit or
-    completion, proves the dead owner stopped before forking.  A marker without
-    an ACK stays uncertain.  Launch authority is only read, never changed.
+    completion, proves the dead owner stopped before forking.  Only a request
+    whose writer promised that marker counts.  A bound lease must name the same
+    intent; an unbound one is in the reserve-to-bind window (bind precedes any
+    fork).  A marker without an ACK stays uncertain.  Authority is only read.
     """
-    if identity.consumer is not None or dispatch is None:
+    if identity.consumer is not None or dispatch is None or data.get("fork_marker") != FORK_MARKER:
         return None
     wrapped = json.loads(dispatch["payload"])
+    intent_id = wrapped["data"]["intent_id"]
     if (wrapped["run_id"] != identity.run_id or wrapped["activity_id"] != data["activity_id"]
             or hashlib.sha256(_encoded(wrapped["data"]).encode()).hexdigest() != dispatch["payload_hash"]
-            or wrapped["data"]["intent_id"] != identity.launch_intent_id):
+            or not isinstance(intent_id, str)
+            or identity.launch_intent_id not in {None, intent_id}):
         return None
-    intent = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (identity.launch_intent_id,)).fetchone()
+    intent = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone()
     if (intent is None or intent["activity_id"] != data["activity_id"] or intent["generation"] != identity.generation
             or intent["state"] not in {"reserved", "reconcile_required"}
             or any(intent[column] is not None for column in (
@@ -366,5 +376,5 @@ def _never_forked_intent(tx, identity, data, dispatch):
                 "child_start_token", "completion_status", "completion_evidence_json", "completed_at"))):
         return None
     marker = tx.execute("SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
-                        (data["activity_id"], "spawn-attempt:" + identity.launch_intent_id)).fetchone()
+                        (data["activity_id"], "spawn-attempt:" + intent_id)).fetchone()
     return None if marker is not None else dict(intent)
