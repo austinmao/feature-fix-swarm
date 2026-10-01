@@ -26,6 +26,7 @@ import unicodedata
 import uuid
 
 from process_identity import DEAD, LIVE, ProcessIdentity, probe_identity
+from process_identity import process_group_gone as _process_group_gone
 from run_context import git_admin_lock, resolve_repository, sanitized_git_environment
 from host_capabilities import (
     ARTIFACT_REVIEW_CONTEXT_LIMIT, ArtifactReviewMaterial, CapabilityError,
@@ -3509,23 +3510,6 @@ def _retained_runtime_refusal(launch, *, outer: bool) -> str:
     # Only the outer child's runtime is named by the request key.  A new key starts a new
     # outer run, so it never repairs a wave child or the final reviewer.
     return "RETAINED_RUNTIME_NOT_REUSABLE" if outer else "CHILD_RUNTIME_NOT_REUSABLE"
-
-
-def _process_group_gone(pgid: int) -> bool:
-    """True only when process group ``pgid`` has no member left (ESRCH).
-
-    Every supervised child starts a new session, so its pid is its group id.
-    The acknowledged child of a Codex launch is the auth guard; Codex and its
-    tools run in the guard's group and outlive a SIGKILLed guard.  Any other
-    outcome (a live member, EPERM) is not proof.
-    """
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    return False
 
 
 def _launches_provably_dead(store, activity_id: str) -> bool:

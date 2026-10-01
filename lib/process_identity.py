@@ -154,6 +154,23 @@ def probe_identity(expected: ProcessIdentity) -> str:
     return LIVE if str(token) == expected.start_token else DEAD
 
 
+def process_group_gone(pgid: int) -> bool:
+    """True only when process group ``pgid`` has no member left (ESRCH).
+
+    Every supervised child starts a new session, so its pid is its group id.
+    The acknowledged child of a Codex launch is the auth guard; Codex and its
+    tools run in the guard's group and outlive a SIGKILLed guard.  Any other
+    outcome (a live member, EPERM) is not proof.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def probe_direct_parent(child: ProcessIdentity, parent: ProcessIdentity) -> str:
     """Prove that two live identities have a native direct-parent relationship."""
     child_status = probe_identity(child)

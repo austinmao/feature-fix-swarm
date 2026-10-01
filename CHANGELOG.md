@@ -38,7 +38,9 @@ all skills.
   `_current_reviewer` abandons it instead: each unfinished probe must pass
   the new `ControlStore.close_dead_qualification_intent` (a qualification
   launch of an earlier generation whose released run owner and child both
-  probe DEAD on this boot becomes `closed_dead`, its debit retained and its
+  probe DEAD on this boot, and whose child's whole process group is gone
+  (the `_launches_provably_dead` proof, now `process_identity.process_group_gone`;
+  review r2, R2-1), becomes `closed_dead`, its debit retained and its
   result never adopted; anything else refuses
   `INTENT_RECONCILIATION_REQUIRED`), the reviewer is aborted, and a fresh
   reviewer (next attempt key, new activity, workspace and private home)

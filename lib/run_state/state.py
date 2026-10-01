@@ -8026,12 +8026,13 @@ class ControlStore:
         released intent at ``reconcile_required``: only a qualification launch
         with no recorded completion, issued by an earlier generation whose run
         fence was released, whose owner and child both probe DEAD on this boot,
-        becomes ``closed_dead``.  Its debit stays charged and its result is never
-        adopted; any other intent is refused for reconciliation.
+        becomes ``closed_dead``, and only once the child's whole process group is
+        gone.  Its debit stays charged and its result is never adopted; any other
+        intent is refused for reconciliation.
         """
         from dataclasses import asdict
         from .ownership import OwnershipRefused, _token_keys
-        from process_identity import DEAD, ProcessIdentity, probe_identity
+        from process_identity import DEAD, ProcessIdentity, probe_identity, process_group_gone
         self.ensure_authority_schema()
         with self.read_transaction() as tx:
             row = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone()
@@ -8053,7 +8054,10 @@ class ControlStore:
         owner = ProcessIdentity(owners[0]["host_id"], owners[0]["boot_id"], owners[0]["pid"],
                                 owners[0]["start_token"])
         boot = ProcessIdentity.current().boot_id
-        if any(item.boot_id != boot or probe_identity(item) != DEAD for item in (owner, child)):
+        # R2-1: the child leads its own process group; a member still in it (Codex under a killed
+        # guard, a probe's descendant) means the launch may still be working.
+        if (any(item.boot_id != boot or probe_identity(item) != DEAD for item in (owner, child))
+                or not process_group_gone(child.pid)):
             raise OwnershipRefused("INTENT_RECONCILIATION_REQUIRED")
         with self.transaction() as tx:
             self._assert_activity_binding(tx, token, row["activity_id"])
