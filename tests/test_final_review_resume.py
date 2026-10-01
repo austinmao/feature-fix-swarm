@@ -194,6 +194,41 @@ def test_crash_inside_the_review_launch_refuses_typed_and_never_launches_a_secon
 
 
 @requires_local_confinement
+def test_review_grant_reserved_by_an_earlier_owner_is_never_moved_or_launched(tmp_path, monkeypatch, capsys):
+    from run_state.supervisor import Supervisor
+    authority, repository_id, run = _start(tmp_path, monkeypatch)
+    launch, reviews = Supervisor._launch, []
+
+    def crash_after_the_grant(self, request, **kwargs):
+        if kwargs.get("native_review"):
+            reviews.append(request.activity_id)
+            if len(reviews) == 1:
+                raise _Killed()  # final_review reserved; no launch intent yet
+        return launch(self, request, **kwargs)
+
+    monkeypatch.setattr(Supervisor, "_launch", crash_after_the_grant)
+    _crash(run, authority)
+    crashed = _facts(authority, repository_id, "rs")
+    assert (crashed.stage, crashed.native, crashed.reviews, crashed.actions["final_review"]) == (
+        "FINAL_REVIEW", 0, 0, 1)
+
+    capsys.readouterr()
+    assert run() == 78
+    envelope = _last_envelope(capsys)
+    assert (envelope["code"], envelope["recovery_action"]) == (
+        "REVIEW_RECONCILIATION_REQUIRED", {"action": "inspect_retained_review"})
+    facts = _facts(authority, repository_id, "rs")
+    # The grant binds the earlier owner's reviewer: it is neither launched nor given to a new reviewer.
+    assert (facts.stage, facts.native, facts.reviews, facts.actions["final_review"]) == ("FINAL_REVIEW", 0, 0, 1)
+    with facts.store.read_transaction() as tx:
+        reviewers = tx.execute("SELECT a.request_key,a.state FROM authority_activities a JOIN authority_child_bindings "
+                               "b ON b.activity_id=a.id WHERE a.request_key LIKE 'final-review:reviewer%'").fetchall()
+    assert [tuple(row) for row in reviewers] == [("final-review:reviewer", "active")]
+    assert len(reviews) == 1
+    assert _held_resources(tmp_path) == {}
+
+
+@requires_local_confinement
 def test_crash_after_the_review_recorded_finishes_to_done_idempotently(tmp_path, monkeypatch):
     authority, repository_id, run = _start(tmp_path, monkeypatch)
     settle = frontend_producers._settle_reviewers
