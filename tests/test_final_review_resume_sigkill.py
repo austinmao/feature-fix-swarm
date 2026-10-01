@@ -234,19 +234,28 @@ config = json.loads(Path(sys.argv[1]).read_text())
 patch = pytest.MonkeyPatch()
 group = config["group_dir"] and Path(config["group_dir"])
 harness._real_host(Path(config["tmp_path"]), patch, group_dir=group)
-qualification, review = Supervisor.launch_qualification, Supervisor.launch_native_review
+qualification, review, fault = Supervisor.launch_qualification, Supervisor.launch_native_review, Supervisor._fault
+probing = []
 
 
 def launch_qualification(self, request, *, qualification_contract):
     reviewer = request.request_key.startswith("final-review:reviewer:")
     if group and reviewer:
         (group / "spawn").touch()  # this probe leaves a sleeper in its process group
+    if reviewer:
+        probing.append(request.request_key)
     handle = qualification(self, request, qualification_contract=qualification_contract)
     if config["point"] == "probe-released" and reviewer:
         while group and not (group / "member.pid").exists():
             time.sleep(0.02)
         os.kill(os.getpid(), signal.SIGKILL)  # the reviewer's first probe is released and running
     return handle
+
+
+def crash_at(self, name):
+    if config["point"] == "probe-reserved" and probing and name == "after_intent_commit":
+        os.kill(os.getpid(), signal.SIGKILL)  # the reviewer's first probe intent is reserved, never spawned
+    return fault(self, name)
 
 
 def launch_native_review(self, request):
@@ -257,6 +266,7 @@ def launch_native_review(self, request):
 
 patch.setattr(Supervisor, "launch_qualification", launch_qualification)
 patch.setattr(Supervisor, "launch_native_review", launch_native_review)
+patch.setattr(Supervisor, "_fault", crash_at)
 sys.exit(cli.main(config["argv"]))
 '''
 
@@ -480,3 +490,26 @@ def test_successor_closes_only_a_dead_owners_dead_qualification_probe(tmp_path, 
     finally:
         with store.transaction() as tx:
             release_owner(tx, token)
+
+
+@requires_local_confinement
+def test_a_reviewer_probe_reserved_by_a_dead_owner_refuses_typed_and_qualifies_no_fresh_reviewer(
+        tmp_path, monkeypatch):
+    # F51c crash point: no child was ever spawned, so nothing proves no process ran; never closed.
+    primary, authority, repository_id, env = _setup(tmp_path)
+    monkeypatch.chdir(primary)
+    for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
+        monkeypatch.delenv(key, raising=False)
+    template, fake, catalog = _real_host(tmp_path, monkeypatch)
+    argv = _argv(env, authority, template, fake, catalog, _draft(tmp_path))
+    _sigkilled_run(tmp_path, primary, argv, "probe-reserved")
+    store = ControlStore(authority / "control.sqlite3")
+    assert [(row["state"], row["child_pid"]) for row in _reviewer_probes(store)] == [("reserved", None)]
+
+    resumed = _driven_run(tmp_path, primary, argv, "none")
+    assert resumed.returncode == 78, (resumed.stdout[-2000:], resumed.stderr[-4000:])
+    assert json.loads(resumed.stdout.strip().splitlines()[-1])["code"] == "INTENT_RECONCILIATION_REQUIRED"
+    refused = _facts(store, repository_id)
+    assert (refused.stage, refused.reviews, refused.review_launches) == ("FINAL_REVIEW", 0, 0)
+    assert [(row["activity_key"], row["state"]) for row in _reviewer_probes(store)] == [
+        ("final-review:reviewer", "reserved")]
