@@ -8,6 +8,41 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-01, spec-014 Release C: F51 a crash after the settled outer launch resumes to DONE)
+
+- M5 (`e2e-m5a-phase02`) killed `frontend-start` at policy stage
+  `FINAL_REVIEW` while the native reviewer's qualification probes ran. The
+  outer orchestrator's launch had settled `completed_succeeded`, so the
+  same-key resume refused `REQUEST_ALREADY_COMPLETED` before the lifecycle
+  could continue, and the run could never reach `DONE`.
+  `prepare_managed_codex_session` now asks `resumable_outer_completion`
+  first: a settled, succeeded outer launch whose completion evidence still
+  verifies, under a sealed lifecycle already at `FINAL_REVIEW` (entered only
+  after the execute producer bound the candidate and its wave proof), is
+  retained input. The session skips outer staging, re-qualification and the
+  outer contract (its `prepare_outer` refuses), and `drive_managed_session`
+  binds the retained outer completion as before. Any other settled launch,
+  including `completed_failed`, `closed_dead`, a legacy unsealed run and a run
+  at `EXECUTE` or `RECOVER`, keeps its refusal.
+- A resumed owner holds a new fence generation, and capture, child workspaces
+  and qualification require the current one. `rebind_retained_child` puts the
+  retained outer's READY workspace through the existing
+  `revalidate_ready_fence` (which refuses `INTENT_RECONCILIATION_REQUIRED`
+  while any launch on it is unsettled) and only then moves the outer activity
+  to the current generation. The final review producer does the same for a
+  retained ready reviewer workspace and its reviewer, so the reviewer's
+  qualification resumes through the existing replay-safe seam on the
+  channel-less review supervisor with standalone leases (F50).
+- A final review launch retained from a crashed owner is never launched again:
+  reserved or acknowledged without a permit still refuses
+  `INTENT_RECONCILIATION_REQUIRED`; one issued by an earlier owner fence now
+  refuses the new `REVIEW_RECONCILIATION_REQUIRED`
+  (`inspect_retained_review`), because native review completion proof binds
+  the issuing fence. A crash after the review was recorded finishes to `DONE`
+  idempotently. Tests: `tests/test_final_review_resume.py` (real store and
+  CLI entry; nothing held in the admission queue after the crash or the
+  resume).
+
 ### Fixed (2026-10-01, spec-014 Release C: F54 final-review evidence ids follow the published grammar)
 
 - The sealed final-review response grammar (`final_review_output_contract`,

@@ -117,6 +117,11 @@ _REQUEST_KEY_REFUSALS = {
     "INTENT_RECONCILIATION_REQUIRED": (
         "a launch for this request key has not settled; only owner-fence reconciliation may settle it",
         "reconcile_intent"),
+    # F51: a second final review would spend the run's single review grant again.
+    "REVIEW_RECONCILIATION_REQUIRED": (
+        "the run's final review was launched by an earlier owner fence and is not recorded; its completion "
+        "proof binds that fence, so this owner cannot record it, and it is never launched again",
+        "inspect_retained_review"),
 }
 
 # Supervisor codes whose cause is the staged prompt itself never having been

@@ -29,7 +29,7 @@ from .supervisor import DispatchRequest, SupervisorRefused, artifact_review_inpu
 from .wave_execution import capture_prelaunch_snapshot
 from .workspace import (
     WorkspaceRefused, begin_child_workspace_preparation, inspect_workspace, load_input_snapshot,
-    prepare_workspace,
+    prepare_workspace, revalidate_ready_fence,
 )
 
 
@@ -119,16 +119,19 @@ def _current_candidate(store, token, *, parent_activity_id: str, preparation):
 
 
 def _reviewer_workspace(store, token, supervisor, *, preparation, parent_activity_id, runtime_identity,
-                        reviewer_key, candidate_hash, retained_preparation_id):
+                        reviewer_key, candidate_hash, retained_preparation_id, retained_activity_id=None):
     """Capture the candidate once; replay reuses the retained reviewer preparation.
 
     Qualification only admits an ``inventory`` workspace and promotes it to the
     reviewer role, so the capture is prepared as inventory.  A retained
-    preparation reads ``reviewer`` once promoted, ``inventory`` before.
+    preparation reads ``reviewer`` once promoted, ``inventory`` before; a ready
+    one (and its reviewer) is rebound to a resumed owner's fence (F51).
     """
     if retained_preparation_id is not None:
         ready = inspect_workspace(store, retained_preparation_id)
-        if not ready.ready:
+        if ready.ready:
+            ready = rebind_retained_child(store, token, retained_activity_id, ready.id)
+        else:
             ready = prepare_workspace(store, token, ready, input_snapshot=load_input_snapshot(store, ready))
     else:
         snapshot = capture_prelaunch_snapshot(store, token, preparation, activity_id=parent_activity_id,
@@ -243,6 +246,10 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
         if not intent["permit_id"] or intent["child_pid"] is None:
             # Reserved but never acknowledged: only owner-fence reconciliation may settle it.
             raise SupervisorRefused("INTENT_RECONCILIATION_REQUIRED")
+        if intent["generation"] != token.generation:
+            # F51: a native review's completion proof binds the owner fence that issued it, so a
+            # resumed owner can neither re-verify nor record it, and never launches a second one.
+            raise SupervisorRefused("REVIEW_RECONCILIATION_REQUIRED")
         return _settle(supervisor, supervisor.resume_monitored(intent["id"]),
                        acceptance_hash=acceptance_hash, timeout_seconds=timeout_seconds)
 
@@ -254,7 +261,7 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
         ready = _reviewer_workspace(
             store, token, supervisor, preparation=preparation, parent_activity_id=parent_activity_id,
             runtime_identity=runtime_identity, reviewer_key=reviewer_key, candidate_hash=candidate_hash,
-            retained_preparation_id=retained_preparation_id)
+            retained_preparation_id=retained_preparation_id, retained_activity_id=retained_activity_id)
     except WorkspaceRefused as error:
         raise SupervisorRefused(error.code) from error
     # The outer orchestrator's prepaid group has ended by now: qualify on this channel-less supervisor.
@@ -377,6 +384,58 @@ def _retained_outer_completion(store, activity_id: str):
     identity = ProcessIdentity(row["child_host_id"], row["child_boot_id"], row["child_pid"], row["child_start_token"])
     return (SimpleNamespace(intent_id=row["id"], activity_id=activity_id, identity=identity),
             json.loads(row["completion_evidence_json"]))
+
+
+def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
+    """F51: the settled outer launch a same-key resume continues past instead of refusing.
+
+    Only a succeeded launch whose completion evidence still verifies, under a
+    sealed lifecycle already at FINAL_REVIEW, qualifies.  That stage is entered
+    only after the execute producer bound the candidate (and its wave proof),
+    so the lifecycle needs the retained activity, never the outer runtime again.
+    """
+    from .ownership import OwnershipRefused
+    if launch is None or launch["state"] != "completed_succeeded":
+        return False
+    state = store.get_frontend_policy_state(repository_id=token.repository_id, run_id=token.run_id)
+    retained = _retained_outer_completion(store, activity_id)
+    if state is None or state.stage != "FINAL_REVIEW" or retained is None:
+        return False
+    try:
+        store._verified_evidence(retained[1])
+    except OwnershipRefused:
+        return False
+    return True
+
+
+def rebind_retained_child(store, token, activity_id: str | None, preparation_id: str):
+    """F51: put one retained child's READY workspace, then its activity, on the resumed owner's fence.
+
+    The workspace takes the existing READY revalidation, which refuses while any
+    launch on it is unsettled.  Only then may a pending or active activity bound
+    to it move to this generation; nothing is launched, debited or re-qualified.
+    """
+    from .ownership import OwnershipRefused, assert_owner
+    try:
+        ready = revalidate_ready_fence(store, token, preparation_id)
+    except WorkspaceRefused as error:
+        raise SupervisorRefused(error.code) from error
+    if activity_id is None:
+        return ready
+    with store.fenced_operation(token):
+        with store.transaction() as tx:
+            assert_owner(tx, token)
+            changed = tx.execute(
+                "UPDATE authority_activities SET generation=?,updated_at=? WHERE id=? AND repository_id=? "
+                "AND run_id=? AND state IN ('pending','active') AND EXISTS (SELECT 1 FROM authority_child_bindings b "
+                "JOIN context_workspaces w ON w.preparation_id=b.workspace_preparation_id "
+                "WHERE b.activity_id=authority_activities.id AND w.preparation_id=? AND w.generation=? "
+                "AND w.state='ready')",
+                (token.generation, store._now(), activity_id, token.repository_id, token.run_id,
+                 preparation_id, token.generation)).rowcount
+    if changed != 1:
+        raise OwnershipRefused("FENCE_REVOKED")
+    return ready
 
 
 def _refuse_undelivered_retained_wave(store, invocation, activity_id: str, intent_id: str) -> None:
