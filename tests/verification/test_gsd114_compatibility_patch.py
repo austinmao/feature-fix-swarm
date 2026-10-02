@@ -27,8 +27,8 @@ EXPECTED = {
     "install.js": "sha256:3669a79b6f80f2f373a78a2e0cecf58c5f8cac736f17eb08d49ee368672b197c",
     "gsd-tools.cjs": "sha256:f0b3dde4d9bca6c81b53459c51547ea5ea5daeec965431481815cd3b94ba3328",
     "execute-phase.md": "sha256:82ad1b4049f3660c8a979bcd41b7fa9b65bc44ad16a2e2de129ffc3cf31f2a97",
-    "executor-isolation-dispatch.md": "sha256:89417e244cbb0901b1a69b44a00cded615ecc4ae47e0ba658caa171822d6da45",
-    "ffs-supervised-dispatch.cjs": "sha256:7405290251e6a3cef9629ae9f5f6acbae03d08866a34d5e7f9905f9bbd38dc74",
+    "executor-isolation-dispatch.md": "sha256:f204df84b2523dc28b399edbc9d7e9e4c63816e028bdce3c8c081acffe861732",
+    "ffs-supervised-dispatch.cjs": "sha256:9579f3b394c6657eb6ac379a717425e3540b54ecb0fb3d4fb7cdf6aa9747c21b",
 }
 BASELINE = {
     "install.js": "sha256:0acbd01933783537f934b33b6cc9132ff8e11ae37f0fa88ff63bc402aa0ae861",
@@ -158,6 +158,28 @@ def _manifest(base: str, worktrees: list[Path], *, commit_mode: str = "patches")
     }
 
 
+def _run_prepare_block(
+    script: str, workspace: Path, admission: dict, package: Path, wave: str, **environment: str,
+) -> subprocess.CompletedProcess:
+    """Run the documented --prepare-wave block alone in a fresh shell with the
+    documented environment, and render its JSON as the manifest and result
+    paths, one per line, so callers compare paths."""
+    admission_file = workspace.parent / "admission.json"
+    admission_file.write_text(json.dumps(admission))
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script], cwd=workspace,
+        env=os.environ | {
+            "FFS_SUPERVISED_ADMISSION_FILE": str(admission_file),
+            "FFS_SUPERVISED_DISPATCH_COMMAND_JSON": json.dumps([sys.executable, "-c", "pass"]),
+            "CODEX_HOME": str(package), "FFS_WAVE_NUMBER": wave,
+        } | environment, text=True, capture_output=True, check=False,
+    )
+    if result.returncode == 0:
+        prepared = json.loads(result.stdout)
+        result.stdout = f"{prepared['manifest_path']}\n{prepared['result_path']}\n"
+    return result
+
+
 def test_patch_applies_to_exact_pinned_source_and_installed_baseline_hashes(patched_gsd: Path) -> None:
     assert _sha256(INSTALLED / "bin/install.js") == BASELINE["install.js"]
     assert _sha256(INSTALLED / "gsd-core/bin/gsd-tools.cjs") == BASELINE["gsd-tools.cjs"]
@@ -177,7 +199,7 @@ def test_installed_compatibility_contract_derives_private_wave_paths_without_tmp
     """
     workflow = (patched_gsd / "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md").read_text()
     section = workflow.split("## FFS-supervised-process compatibility mode\n", 1)[1]
-    match = re.search(r"```bash\n(?P<setup>[^`]*FFS_ADMISSION_BINDING[^`]*)\n   ```", section)
+    match = re.search(r"```bash\n(?P<setup>[^`]*--prepare-wave[^`]*)\n   ```", section)
     assert match is not None
     setup = match.group("setup")
     assert "mktemp" not in setup
@@ -191,15 +213,8 @@ def test_installed_compatibility_contract_derives_private_wave_paths_without_tmp
         "repository_id": "repo", "run_id": "run", "activity_id": "activity-1",
         "generation": 1, "workspace": str(workspace), "runtime_identity": "runtime",
     }
-    script = setup + '\nprintf "%s\\n%s\\n" "$FFS_WAVE_MANIFEST" "$FFS_WAVE_RESULT"\n'
-    result = subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", script], cwd=workspace,
-        env=os.environ | {
-            "FFS_DISPATCH_JSON": json.dumps({"mode": "ffs-supervised-process", "admission": admission}),
-            "TMPDIR": "/not-usable-by-codex",
-            "FFS_WAVE_NUMBER": "2",
-        }, text=True, capture_output=True, check=False,
-    )
+    script = setup
+    result = _run_prepare_block(script, workspace, admission, patched_gsd, "2", TMPDIR="/not-usable-by-codex")
     assert result.returncode == 0, result.stderr
     manifest, output = result.stdout.splitlines()
     private = workspace / ".planning/.ffs-supervised/waves/activity-1"
@@ -214,23 +229,13 @@ def test_installed_compatibility_contract_derives_private_wave_paths_without_tmp
     Path(manifest).write_text("retained manifest")
     Path(output).write_text("retained result")
     Path(str(output) + ".receipt.json").write_text("retained receipt")
-    retained = subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", script], cwd=workspace,
-        env=os.environ | {"FFS_DISPATCH_JSON": json.dumps({"mode": "ffs-supervised-process", "admission": admission}),
-                          "FFS_WAVE_NUMBER": "2"},
-        text=True, capture_output=True, check=False,
-    )
+    retained = _run_prepare_block(script, workspace, admission, patched_gsd, "2")
     assert retained.returncode == 0
     assert retained.stdout.splitlines() == [manifest, output]
 
     assert Path(manifest).read_text() == "retained manifest"
     assert Path(output).read_text() == "retained result"
-    next_wave = subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", script], cwd=workspace,
-        env=os.environ | {"FFS_DISPATCH_JSON": json.dumps({"mode": "ffs-supervised-process", "admission": admission}),
-                          "FFS_WAVE_NUMBER": "3"},
-        text=True, capture_output=True, check=False,
-    )
+    next_wave = _run_prepare_block(script, workspace, admission, patched_gsd, "3")
     assert next_wave.returncode == 0, next_wave.stderr
     assert next_wave.stdout.splitlines() == [str(private / "wave-3.manifest.json"), str(private / "wave-3.result.json")]
 

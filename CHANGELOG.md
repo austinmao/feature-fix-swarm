@@ -8,6 +8,96 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-02, spec-014 Release C: 1c r1 cross-vendor review follow-up)
+
+Seven findings on the wave helper, each with a test in
+`tests/test_ffs_supervised_wave_helper.py`:
+
+- `--dispatch-wave` could launch the same manifest twice (a repeat after a
+  launch that died, or two at once); the removed template refused a
+  manifest-only set. It now takes a private exclusive claim
+  (`wave-<N>.dispatch-claim.json`, `0600`, created `O_EXCL|O_NOFOLLOW`, fsynced
+  with its directory) before it launches, and removes it only after the result
+  and receipt are published. A claim with no complete result and receipt is an
+  uncertain launch: exit 78, never a relaunch, and it also makes the set
+  partial for `--prepare-wave` and `--write-wave-manifest`. A complete set still
+  validates its receipt and returns; a claim left beside one is ignored. A
+  dispatch whose claim succeeds only after the winner released (it passed the
+  result/receipt check first) re-checks after claiming, releases its own claim,
+  and validates the winner's receipt instead of launching again. No
+  reader enumerates the wave directory: `supervisor.py`, `wave_candidate.py` and
+  `candidate_chain.py` build explicit `wave-<N>.*` paths, and the workspace
+  inventory in `wave_execution.py` prunes the whole `.planning/.ffs-supervised`
+  subtree.
+- `--dispatch-wave` now runs the writer's manifest binding (`wave`, `admission`,
+  `orchestrator_root`) on the manifest it reads, before it validates a receipt
+  or launches, so another wave's retained evidence is refused.
+- `.planning` must be a real directory (not a symlink, not a file): `mkdir`
+  resolved the path string, so a symlink there moved the private directories out
+  of the workspace. After creation the wave directory's real path must equal its
+  expected path before any file is created or read. Residual: a process of the
+  same user can still swap a path component between those checks and the later
+  path-based opens (Node has no `openat`); the `0700` directories keep every
+  other user out.
+- A failing `fchmod` or `close` while preparing a private directory is a named
+  refusal (78), not a raw exit 1.
+- Each documented block refuses with a named exit-78 message, before it runs
+  `node`, when neither `CODEX_HOME` nor `CLAUDE_CONFIG_DIR` is set.
+- A wave mode is recognized only as the first argument, so a legacy form whose
+  value happens to be a mode name keeps its exact former behavior.
+- `--write-wave-manifest` refusing a lone result or a lone receipt is pinned by
+  a test instead of by a prose match in the doc.
+
+### Fixed (2026-10-02, spec-014 Release C: 1c shipped supervised-dispatch wave helper)
+
+- Live M5b (`e2e-m5b-phase02`, FFS `1ebe2a3`): the outer GSD orchestrator
+  hand-wrote the admission-binding and wave-directory script that the patched
+  `executor-isolation-dispatch.md` shipped as a bash+node template, read an
+  unexported `FFS_ROOT` carried from an earlier tool call, `set -e` aborted
+  silently, and FFS refused `WAVE_EXECUTION_UNPROVEN` at EXECUTE. Each tool
+  call of the outer model is a fresh shell, so no documented step may depend on
+  a variable from another.
+- The shipped adapter `gsd-core/bin/ffs-supervised-dispatch.cjs` now owns that
+  binding through three modes that take only the wave number and re-derive the
+  rest from `FFS_SUPERVISED_ADMISSION_FILE`,
+  `FFS_SUPERVISED_DISPATCH_COMMAND_JSON` and the current directory, one shared
+  resolver for all three:
+  - `--prepare-wave <N>` reads and validates the admission exactly as
+    `gsd-tools` `dispatch-ffs-supervised` does (plus the exact admission key
+    set a manifest embeds), requires `git rev-parse --show-toplevel` to equal
+    the admission workspace byte for byte, validates `activity_id` and the wave
+    number, creates the three private `0700` directories without following a
+    symlink, classifies retained evidence, and prints one JSON object (`wave`,
+    `admission`, `mode`, `commit_mode`, `apply_between_waves`, `manifest_path`,
+    `result_path`, `receipt_path`, `retained` = `none` or `complete`).
+  - `--write-wave-manifest <N>` re-runs the binding, refuses unless `retained`
+    is `none`, requires the manifest's `wave`, `admission` and
+    `orchestrator_root` to be the bound ones, and writes through the unchanged
+    `writeManifestFromStdin` path.
+  - `--dispatch-wave <N>` re-runs the binding and then runs the unchanged
+    `--manifest`/`--output` logic on the resolved paths, including the detached
+    re-spawn and the retained-complete receipt validation that never relaunches.
+  Every refusal (missing or malformed admission, workspace mismatch, bad
+  `activity_id` or wave number, a symlinked private directory or retained file,
+  a partial retained set, no manifest to dispatch) exits 78 with one named
+  reason on stderr and writes nothing. The `--write-manifest <file>` and
+  `--manifest <file> --output <file>` forms and the
+  `.planning/.ffs-supervised/waves/<activity_id>/wave-<N>.*` layout read by
+  `supervisor.py`, `wave_candidate.py` and `candidate_chain.py` are unchanged.
+- The doc section now has three fenced blocks (prepare, write, dispatch). Each
+  runs alone in a fresh `bash -euo pipefail` with only the host environment
+  (`FFS_SUPERVISED_*`, `CODEX_HOME` or `CLAUDE_CONFIG_DIR` to locate the
+  adapter) plus `FFS_WAVE_NUMBER` and, for the write step,
+  `FFS_WAVE_MANIFEST_JSON`; the `dispatch-ffs-supervised` descriptor block and
+  the `FFS_ADMISSION_BINDING` `node -e` block are gone. `_managed_gsd_prompt` is
+  unchanged.
+- The pinned patch digest and the doc and adapter output digests are updated in
+  `lib/ffs_installer.py` and `tests/verification/test_gsd114_compatibility_patch.py`.
+  `test_doc_writer_step_uses_write_manifest_and_drops_raw_buffer_writer` pins
+  the new `--write-wave-manifest` block in place of the removed
+  `--write-manifest "$FFS_WAVE_MANIFEST"` template lines. Tests:
+  `tests/test_ffs_supervised_wave_helper.py`.
+
 ### Fixed (2026-10-01, spec-014 Release C: F51c every final-review crash point resumes or refuses typed)
 
 - Live M5 (`e2e-m5e-phase02`): `frontend-start` died while the final
