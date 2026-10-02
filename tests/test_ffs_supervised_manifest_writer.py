@@ -317,12 +317,14 @@ def test_write_manifest_refuses_symlink_target(patched_package: Path, tmp_path: 
 
 
 def test_doc_writer_step_uses_write_manifest_and_drops_raw_buffer_writer(patched_package: Path) -> None:
-    """The patched doc's exclusive-writer step invokes --write-manifest and
-    no longer contains the raw Buffer.from(process.argv[2]) one-liner."""
+    """The patched doc's exclusive-writer step pipes the manifest into the
+    adapter's writer (since 1c through --write-wave-manifest, which calls the
+    same --write-manifest path) and no longer contains the raw
+    Buffer.from(process.argv[2]) one-liner."""
     doc = (patched_package / DOC_RELATIVE).read_text()
     assert "Buffer.from(process.argv[2])" not in doc
     section = doc.split("## FFS-supervised-process compatibility mode\n", 1)[1]
-    assert '--write-manifest "$FFS_WAVE_MANIFEST"' in section
-    assert '[ "$FFS_WAVE_RETAINED" = none ] || exit 78' in section
-    assert 'printf \'%s\' "$FFS_WAVE_MANIFEST_JSON" | node "${GSD_TOOLS%/*}/ffs-supervised-dispatch.cjs" --write-manifest "$FFS_WAVE_MANIFEST" || exit 78' in section
+    assert '--write-wave-manifest "${FFS_WAVE_NUMBER:-}"' in section
+    assert "`retained` is `none`" in section
+    assert 'printf \'%s\' "${FFS_WAVE_MANIFEST_JSON:-}" | node "${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}/gsd-core/bin/ffs-supervised-dispatch.cjs" --write-wave-manifest "${FFS_WAVE_NUMBER:-}" || {' in section
     assert "keys may be" in section and "any order" in section

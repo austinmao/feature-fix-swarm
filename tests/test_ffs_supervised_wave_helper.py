@@ -294,7 +294,7 @@ BINDING_REFUSALS = {
     "workspace-mismatch": _case_workspace_mismatch,
     "not-a-git-workspace": _case_not_a_git_workspace,
     **{f"activity-{index}": _case_admission("activity_id", activity_id=value)
-       for index, value in enumerate(["../escape", "a/b", ".hidden", "-lead", "", "has space"])},
+       for index, value in enumerate(["../escape", "a/b", ".hidden", "-lead", "has space", "caf\u00e9"])},
     **{f"wave-{index}": _case_wave(value)
        for index, value in enumerate(["0", "01", "1a", "", "-1", "1.5", " 1", "99999999999999999999"])},
 }
@@ -488,6 +488,8 @@ def test_m5b_each_documented_block_runs_alone_in_a_fresh_shell_and_the_wave_comp
     blocks = _fenced_bash_blocks(section)
     for block in blocks:
         assert "node -e" not in block, "the outer model must not hand-run node glue"
+        for glue in ("gsd_run", "FFS_ADMISSION_BINDING", "mktemp", "TMPDIR"):
+            assert glue not in block, f"{glue} is hand-copied binding glue"
         referenced = set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", block))
         assigned = set(re.findall(
             r"(?m)(?:^|[;&|({]\s*|\bexport\s+|\bdo\s+)([A-Za-z_][A-Za-z0-9_]*)=", block,
@@ -495,8 +497,7 @@ def test_m5b_each_documented_block_runs_alone_in_a_fresh_shell_and_the_wave_comp
         assert referenced <= DOCUMENTED_INPUTS | assigned, (
             f"variable defined only in another block: {sorted(referenced - DOCUMENTED_INPUTS - assigned)}"
         )
-    for glue in ("gsd_run", "FFS_ADMISSION_BINDING", "mktemp"):
-        assert glue not in section
+    assert "FFS_ADMISSION_BINDING" not in section
     assert [tuple(mode in block for mode in MODES) for block in blocks] == [
         (True, False, False), (False, True, False), (False, False, True),
     ]
