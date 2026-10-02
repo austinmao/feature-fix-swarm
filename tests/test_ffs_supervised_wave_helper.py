@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -41,10 +42,13 @@ MODES = ("--prepare-wave", "--write-wave-manifest", "--dispatch-wave")
 DOCUMENTED_INPUTS = {"FFS_WAVE_NUMBER", "FFS_WAVE_MANIFEST_JSON", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
 
 FAKE_SUPERVISOR = """\
-import json, sys
+import json, os, sys, time
 with open({counter!r}, "a") as handle:
     handle.write("launch\\n")
 manifest = json.load(sys.stdin)
+time.sleep(float(os.environ.get("FAKE_SUPERVISOR_SLEEP", "0")))
+if os.environ.get("FAKE_SUPERVISOR_EXIT"):
+    sys.exit(int(os.environ["FAKE_SUPERVISOR_EXIT"]))
 results = [
     dict(plan_id=p["id"], status="complete", summary="ok", changed_files=[], patch="")
     for p in manifest["plans"]
@@ -521,3 +525,229 @@ def test_m5b_each_documented_block_runs_alone_in_a_fresh_shell_and_the_wave_comp
     assert _prepared(_run_block(bench, blocks[0], environment))["retained"] == "complete"
     assert _run_block(bench, blocks[2], environment).returncode == 0
     assert bench.launches() == 1
+
+
+# ---------------------------------------------------------------------------
+# r1 review findings (Codex cross-vendor review of 45c2ff7)
+# ---------------------------------------------------------------------------
+
+STUB_FS_FAILURE = """\
+const fs = require('node:fs');
+const real = { closeSync: fs.closeSync };
+const kind = process.env.FAKE_FS_FAILURE;
+if (kind === 'fchmod') {
+  fs.fchmodSync = () => { const e = new Error('EPERM: operation not permitted, fchmod'); e.code = 'EPERM'; throw e; };
+}
+if (kind === 'close') {
+  fs.closeSync = (fd) => {
+    real.closeSync(fd);
+    if (new Error().stack.includes('privateDirectory')) {
+      const e = new Error('EIO: i/o error, close'); e.code = 'EIO'; throw e;
+    }
+  };
+}
+"""
+
+
+def _written_wave(bench: Bench, wave: int = 1, **overrides: object) -> dict:
+    """prepare-wave then write the manifest through the writer; returns the manifest."""
+    prepared = _prepared(bench.adapter("--prepare-wave", str(wave)))
+    manifest = _manifest_for(prepared) | overrides
+    written = bench.adapter("--write-wave-manifest", str(wave), stdin=json.dumps(manifest))
+    assert written.returncode == 0, written.stderr
+    return manifest
+
+
+def test_dispatch_wave_never_relaunches_after_an_uncertain_launch(bench: Bench) -> None:
+    """r1-1: the removed template refused a manifest-only set on re-run. A launch
+    that died before it published a result leaves exactly that set; a second
+    dispatch-wave must refuse, not launch the same manifest again."""
+    _written_wave(bench)
+    crashed = bench.adapter("--dispatch-wave", "1", env=bench.env(FAKE_SUPERVISOR_EXIT="3"))
+    assert crashed.returncode != 0 and bench.launches() == 1
+    assert not bench.wave_file("result").exists() and not bench.wave_file("receipt").exists()
+    before = _snapshot(bench.root)
+    again = bench.adapter("--dispatch-wave", "1")
+    _assert_refused(again, "uncertain launch")
+    assert bench.launches() == 1, "an uncertain launch must never be relaunched"
+    assert _snapshot(bench.root) == before
+    # The uncertain set blocks every other mode too, exactly like any partial set.
+    _assert_refused(bench.adapter("--prepare-wave", "1"), "partial retained wave evidence")
+    _assert_refused(
+        bench.adapter("--write-wave-manifest", "1", stdin=_stdin_for("--write-wave-manifest", bench)),
+        "partial retained wave evidence",
+    )
+
+
+def test_concurrent_dispatch_wave_launches_the_wave_once(bench: Bench) -> None:
+    """r1-1: a durable exclusive claim is taken before the launch, so a second
+    dispatch-wave started while the first is in flight refuses."""
+    _written_wave(bench)
+    manifest_name = bench.wave_file("manifest").name
+    first = subprocess.Popen(
+        ["node", str(bench.package / ADAPTER_RELATIVE), "--dispatch-wave", "1"], cwd=bench.workspace,
+        env=bench.env(FAKE_SUPERVISOR_SLEEP="3"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while bench.launches() < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert bench.launches() == 1, "the first supervisor never started"
+        claims = [entry for entry in bench.wave_dir.iterdir() if entry.name != manifest_name]
+        assert len(claims) == 1, [entry.name for entry in claims]
+        assert claims[0].stat().st_mode & 0o777 == 0o600 and not claims[0].is_symlink()
+        second = bench.adapter("--dispatch-wave", "1")
+        _assert_refused(second, "uncertain launch")
+        assert bench.launches() == 1
+    finally:
+        _, first_error = first.communicate(timeout=60)
+    assert first.returncode == 0, first_error
+    assert bench.launches() == 1
+    assert sorted(entry.name for entry in bench.wave_dir.iterdir()) == [
+        manifest_name, bench.wave_file("result").name, bench.wave_file("receipt").name,
+    ], "a completed wave keeps exactly its manifest, result and receipt"
+
+
+def test_the_wave_directory_is_never_enumerated_by_the_run_state_readers() -> None:
+    """r1-1: the dispatch claim lives in the wave directory. The supervisor,
+    wave_candidate and candidate_chain readers build explicit wave-N paths and
+    never list the directory, and the workspace inventory prunes the whole
+    .planning/.ffs-supervised subtree. (Coverage: passes on 45c2ff7 too.)"""
+    sys.path.insert(0, str(ROOT / "lib"))
+    from run_state.wave_execution import _internal_path
+
+    assert _internal_path(f".planning/.ffs-supervised/waves/{ACTIVITY}/wave-1.dispatch-claim.json")
+    for reader in ("supervisor.py", "wave_candidate.py", "candidate_chain.py"):
+        source = (ROOT / "lib" / "run_state" / reader).read_text()
+        assert not re.search(r"iterdir|\.glob\(|rglob|listdir|scandir|os\.walk", source), reader
+
+
+@pytest.mark.parametrize("override", [
+    {"wave": 2}, {"admission_run_id": "another-run"}, {"orchestrator_root": "elsewhere"},
+], ids=["wave", "admission", "orchestrator-root"])
+def test_dispatch_wave_refuses_a_retained_manifest_that_is_not_for_this_wave(
+    bench: Bench, override: dict,
+) -> None:
+    """r1-2: dispatch-wave must run the same manifest binding as the writer."""
+    prepared = _prepared(bench.adapter("--prepare-wave", "1"))
+    manifest = _manifest_for(prepared)
+    if "admission_run_id" in override:
+        manifest["admission"] = prepared["admission"] | {"run_id": override["admission_run_id"]}
+    elif "orchestrator_root" in override:
+        manifest["orchestrator_root"] = str(bench.root)
+    else:
+        manifest |= override
+    legacy = bench.adapter("--write-manifest", str(bench.wave_file("manifest")), stdin=json.dumps(manifest))
+    assert legacy.returncode == 0, legacy.stderr
+    before = _snapshot(bench.root)
+    result = bench.adapter("--dispatch-wave", "1")
+    _assert_refused(result, next(iter(override)).split("_")[0])
+    assert bench.launches() == 0
+    assert _snapshot(bench.root) == before
+
+
+def test_dispatch_wave_refuses_another_waves_complete_evidence(bench: Bench) -> None:
+    """r1-2: a complete, receipt-valid set copied from wave 2 into wave 1's
+    names must not satisfy dispatch-wave 1."""
+    _written_wave(bench, wave=2)
+    dispatched = bench.adapter("--dispatch-wave", "2")
+    assert dispatched.returncode == 0, dispatched.stderr
+    bench.seed_wave_dir()
+    for kind in ("manifest", "result", "receipt"):
+        bench.wave_file(kind, 1).write_bytes(bench.wave_file(kind, 2).read_bytes())
+        bench.wave_file(kind, 1).chmod(0o600)
+    before = _snapshot(bench.root)
+    _assert_refused(bench.adapter("--dispatch-wave", "1"), "wave")
+    assert bench.launches() == 1
+    assert _snapshot(bench.root) == before
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("kind", ["symlink", "file"])
+def test_a_symlinked_or_non_directory_planning_is_refused_before_anything_is_created(
+    bench: Bench, mode: str, kind: str,
+) -> None:
+    """r1-3: mkdir resolved the path string, so a symlinked .planning redirected
+    the private directories outside the workspace."""
+    decoy = bench.root / "decoy"
+    decoy.mkdir()
+    planning = bench.workspace / ".planning"
+    planning.rmdir()
+    if kind == "symlink":
+        planning.symlink_to(decoy)
+    else:
+        planning.write_text("not a directory")
+    before = _snapshot(bench.root)
+    result = bench.adapter(mode, "1", stdin=_stdin_for(mode, bench))
+    _assert_refused(result, ".planning must be a real directory")
+    assert list(decoy.iterdir()) == []
+    assert _snapshot(bench.root) == before
+    assert bench.launches() == 0
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("failure", ["fchmod", "close"])
+def test_a_chmod_or_close_failure_while_binding_is_a_named_refusal(
+    bench: Bench, tmp_path: Path, mode: str, failure: str,
+) -> None:
+    """r1-4: privateDirectory's fchmod/close ran outside the Refusal conversion,
+    so a failure exited 1 with a raw errno message."""
+    stub = tmp_path / "stub-fs-failure.cjs"
+    stub.write_text(STUB_FS_FAILURE)
+    environment = bench.env(NODE_OPTIONS=f"--require {stub}", FAKE_FS_FAILURE=failure)
+    result = bench.adapter(mode, "1", stdin=_stdin_for(mode, bench), env=environment)
+    _assert_refused(result, "0700")
+
+
+@pytest.mark.parametrize("runtime_home", ["unset", "empty"])
+@pytest.mark.parametrize("index", [0, 1, 2], ids=["prepare", "write", "dispatch"])
+def test_each_documented_block_refuses_before_node_when_no_runtime_home_is_set(
+    bench: Bench, tmp_path: Path, index: int, runtime_home: str,
+) -> None:
+    """r1-5: with neither CODEX_HOME nor CLAUDE_CONFIG_DIR the adapter path
+    expanded to /gsd-core/... and node failed with exit 1. The block must name
+    the missing variables and exit 78 without invoking node."""
+    marker = tmp_path / "node-invoked"
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "node").write_text(f"#!/bin/sh\necho invoked >> {marker}\nexit 1\n")
+    (shim / "node").chmod(0o755)
+    block = _fenced_bash_blocks(_doc_section(bench.package))[index]
+    blank = None if runtime_home == "unset" else ""
+    environment = bench.env(
+        CODEX_HOME=blank, CLAUDE_CONFIG_DIR=blank, FFS_WAVE_NUMBER="1", FFS_WAVE_MANIFEST_JSON="{}",
+        PATH=f"{shim}:{os.environ['PATH']}",
+    )
+    result = _run_block(bench, block, environment)
+    assert not marker.exists(), "node must not run without a runtime home"
+    assert result.returncode == 78, (result.returncode, result.stderr)
+    assert "CODEX_HOME" in result.stderr and "CLAUDE_CONFIG_DIR" in result.stderr
+
+
+def test_a_wave_mode_is_recognized_only_as_the_first_argument(bench: Bench, tmp_path: Path) -> None:
+    """r1-6: a legacy form whose value happens to be a mode name keeps its
+    former behavior: here --write-manifest writes a file literally named
+    --dispatch-wave."""
+    legacy_cwd = tmp_path / "legacy-cwd"
+    legacy_cwd.mkdir()
+    result = bench.adapter(
+        "--write-manifest", "--dispatch-wave", stdin=_stdin_for("--write-wave-manifest", bench), cwd=legacy_cwd,
+    )
+    assert result.returncode == 0, result.stderr
+    assert [entry.name for entry in legacy_cwd.iterdir()] == ["--dispatch-wave"]
+    assert bench.launches() == 0
+
+
+@pytest.mark.parametrize("kind", ["result", "receipt"])
+def test_write_wave_manifest_refuses_a_lone_result_or_receipt_and_writes_no_manifest(
+    bench: Bench, kind: str,
+) -> None:
+    """r1-7: the doc assertion for the retained-is-none guard matches prose;
+    this pins the behavior. (Coverage: passes on 45c2ff7 too.)"""
+    bench.seed_wave_dir()
+    bench.wave_file(kind).write_text(f"retained {kind}")
+    before = _snapshot(bench.root)
+    result = bench.adapter("--write-wave-manifest", "1", stdin=_stdin_for("--write-wave-manifest", bench))
+    _assert_refused(result, "partial retained wave evidence")
+    assert not bench.wave_file("manifest").exists()
+    assert _snapshot(bench.root) == before
