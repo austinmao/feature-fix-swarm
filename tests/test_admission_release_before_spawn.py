@@ -1,0 +1,638 @@
+"""F55 + F51 R1-3: a shared admission that never reached a spawned child is released.
+
+F55: the live owner frees the unbound reservations of a launch refused at its authority
+reservation (or a reused intent, or a failed bind).  R1-3: an owner that died after the
+launch intent committed but before any child process was forked is proven never-spawned
+from durable authority (no ``spawn-attempt:`` marker), so the lazy reclaim / successor
+settlement frees its capacity.  Launch authority never changes: intents, debits and the
+INTENT_RECONCILIATION_REQUIRED refusal stay exactly as the crash left them.
+
+Real ControlStore, Supervisor, ManagedAdmissionQueue and registry; scripted python children
+and a fixture resource observation.  Crashes are real ``os._exit`` of a subprocess owner.
+Not host, model or capacity-measurement qualification.
+"""
+from dataclasses import replace
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from process_identity import ProcessIdentity
+from run_state.managed_admission import ManagedAdmissionQueue
+from run_state.managed_resource_group import settle_predecessor_groups
+from run_state.ownership import OwnershipRefused, StartRequest, reserve_resources
+from run_state.resource_groups import GroupMember, GroupPlan, ResourceGroupRefused, ResourceParentGroupRegistry
+from run_state.resource_observation import ResourceDemand, ResourceObservation
+from run_state.shared_resources import SharedResourceCoordinator, cold_start_demand
+from run_state.state import ControlStore, ControlStoreRefused
+from run_state.supervisor import DispatchRequest, Supervisor, SupervisorRefused
+from run_state.workspace import (
+    begin_child_workspace_preparation, inspect_workspace, load_input_snapshot, prepare_workspace,
+)
+from test_final_review_standalone_lease import _managed_group, _scripted_probe
+from test_supervised_process import _allocate_registered_child, _receipt_bound_request, setup_owner
+
+RELEASED_UNBOUND = "owner-released-unbound"
+_WAIT = ("import time; from pathlib import Path; end=time.monotonic()+60\n"
+         "while not Path('release').exists():\n if time.monotonic()>end: raise RuntimeError('deadline')\n"
+         " time.sleep(.01)")
+
+
+def _observation():
+    return ResourceObservation(time.monotonic_ns(), 8, 4 << 30, 4 << 30, 100, 100, {}, "fixture")
+
+
+def _plain(root, *, fault=None):
+    supervisor, store, request = setup_owner(root, fault=fault)
+    queue = ManagedAdmissionQueue(root / "shared", observation_provider=_observation)
+    supervisor.shared_resource_coordinator = SharedResourceCoordinator(store, supervisor.token, queue=queue)
+    supervisor.resource_demand_policy = cold_start_demand
+    return supervisor, store, request, queue
+
+
+def _authority(store):
+    with store.read_transaction() as tx:
+        return {table: [dict(row) for row in tx.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+                for table in ("authority_launch_intents", "authority_launch_accounting", "authority_run_limits")}
+
+
+_UNBOUND_RELEASE = ("released", RELEASED_UNBOUND, None, None)
+
+
+def _lease(row):
+    return row["status"], row["limiting_resource"], row["launch_intent_id"], row["child_pid"]
+
+
+def _set_limits(store, **values):
+    with store.transaction() as tx:
+        for column, value in values.items():
+            tx.execute(f"UPDATE authority_run_limits SET {column}=?", (value,))
+
+
+# --- F55: the live owner releases an unbound reservation the moment its launch is refused ---------
+
+
+def test_plain_launch_refused_at_reserve_releases_its_ticket_and_a_same_request_retry_is_readmitted(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    before = _authority(store)
+    with pytest.raises(OwnershipRefused, match="TOKEN_LIMIT_EXHAUSTED"):
+        supervisor.launch(replace(request, token_reservation=101))
+    [row] = queue.snapshot()
+    assert _lease(row) == _UNBOUND_RELEASE
+    assert _authority(store) == before  # the refusal charged nothing
+    # Same generation, same request: admitted once, behind anything queued meanwhile.
+    handle = supervisor.launch(request)
+    assert supervisor.finish(handle, timeout=10, token_usage=0)["returncode"] == 0
+    assert len(queue.snapshot()) == 2  # the released row stays as evidence; the retry queued anew
+    first, retried = queue.snapshot()
+    assert first == row
+    assert retried["sequence"] > row["sequence"] and retried["group_age_ns"] > row["group_age_ns"]
+    assert (retried["status"], retried["launch_intent_id"]) == ("released", handle.intent_id)
+
+
+def test_owner_retry_after_an_unbound_release_queues_behind_requests_that_arrived_meanwhile(tmp_path):
+    queue = ManagedAdmissionQueue(tmp_path / "shared", observation_provider=_observation)
+    request = dict(state_root=tmp_path, run_id="run", repository_id="repo", generation=1, demand=ResourceDemand(cpu=1))
+    first = queue.enqueue(request_key="a", **request)
+    assert queue.try_admit(first) and queue.release_unbound(first)
+    arrived = queue.enqueue(request_key="b", **request)
+    retry = queue.enqueue(request_key="a", **request)
+    assert retry.sequence > arrived.sequence
+    assert queue.try_admit(retry) is False and queue.try_admit(arrived) is True
+    assert _lease(queue.status(first)) == _UNBOUND_RELEASE
+
+
+def test_a_retried_request_restores_its_own_bound_lease_after_an_unbound_release(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    with pytest.raises(OwnershipRefused, match="TOKEN_LIMIT_EXHAUSTED"):
+        supervisor.launch(replace(request, token_reservation=101))
+    handle = supervisor.launch(request)
+    handle.process.wait(timeout=15)
+    resumed = Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
+                         shared_resource_coordinator=supervisor.shared_resource_coordinator,
+                         resource_demand_policy=cold_start_demand)
+    recovered = resumed.resume_monitored(handle.intent_id)
+    assert resumed.finish(recovered, timeout=15, token_usage=0)["returncode"] == 0
+    assert [row["status"] for row in queue.snapshot()] == ["released", "released"]
+    first, retried = queue.snapshot()
+    assert _lease(first) == _UNBOUND_RELEASE and retried["launch_intent_id"] == handle.intent_id
+
+
+def test_restore_ignores_a_longer_request_keys_lease_on_the_same_activity(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    handle = supervisor.launch(request)
+    # A colon-extended request key on the same activity leaves its own lease event (it was refused).
+    with pytest.raises(SupervisorRefused, match="INTENT_RECONCILIATION_REQUIRED"):
+        supervisor.launch(replace(request, request_key=request.request_key + ":b"))
+    with store.read_transaction() as tx:
+        keys = sorted(row[0] for row in tx.execute(
+            "SELECT idempotency_key FROM authority_event_keys WHERE activity_id=? "
+            "AND idempotency_key LIKE 'resource-lease:%'", (request.activity_id,)))
+    assert len(keys) == 2 and keys[1].startswith(keys[0].rsplit(":", 1)[0] + ":b:")
+    handle.process.wait(timeout=15)
+    resumed = Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
+                         shared_resource_coordinator=supervisor.shared_resource_coordinator,
+                         resource_demand_policy=cold_start_demand)
+    recovered = resumed.resume_monitored(handle.intent_id)
+    assert resumed.finish(recovered, timeout=15, token_usage=0)["returncode"] == 0
+    assert [row["launch_intent_id"] for row in queue.snapshot() if row["status"] == "released"][0] == handle.intent_id
+
+
+def _resume(supervisor, store):
+    return Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
+                      shared_resource_coordinator=supervisor.shared_resource_coordinator,
+                      resource_demand_policy=cold_start_demand)
+
+
+def test_restore_skips_a_pre_change_single_key_lease_of_another_request_on_the_same_activity(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    token = supervisor.token
+    # An earlier writer (pre-change code) keyed one lease per request: 'resource-lease:<queue_key>'.
+    # Request 'first:42' on this activity therefore left 'resource-lease:<activity>:first:42'.
+    other = request.activity_id + ":" + request.request_key + ":42"
+    with store.read_transaction() as tx:
+        owner = tx.execute("SELECT * FROM control_reservations WHERE resource_type='run' AND held=1").fetchone()
+    binding = {"schema": "ffs.shared-admission-request/v1", "repository_id": token.repository_id,
+               "run_id": token.run_id, "activity_id": request.activity_id, "request_key": other,
+               "dispatch_request_key": request.request_key + ":42", "generation": token.generation,
+               "request_sha256": "c" * 64, "owner_set": owner["owner_set"],
+               "supervisor": {key: owner[key] for key in ("host_id", "boot_id", "pid", "start_token")}}
+    store.record_event_once(token, request.activity_id, "resource-lease:" + other, {
+        "schema": "ffs.shared-resource-lease/v1", "sequence": 7, "ticket": "f" * 64, "request": binding,
+        "demand": cold_start_demand(request).record(), "group_id": None, "group_width": 1})
+    request = replace(request, monitor_result=True)
+    handle = supervisor.launch(request)
+    handle.process.wait(timeout=15)
+    resumed = _resume(supervisor, store)
+    recovered = resumed.resume_monitored(handle.intent_id)
+    assert resumed.finish(recovered, timeout=15, token_usage=0)["returncode"] == 0
+    assert [(row["status"], row["launch_intent_id"]) for row in queue.snapshot()] == [("released", handle.intent_id)]
+
+
+def test_restore_still_refuses_a_tampered_lease_of_its_own_request(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    handle = supervisor.launch(request)
+    handle.process.wait(timeout=15)
+    with store.transaction() as tx:
+        [row] = tx.execute("SELECT k.event_id,e.payload FROM authority_event_keys k JOIN control_events e "
+                           "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key LIKE 'resource-lease:%'",
+                           (request.activity_id,)).fetchall()
+        wrapped = json.loads(row["payload"])
+        wrapped["data"]["request"]["request_sha256"] = "0" * 64  # still names this request, consistently rehashed
+        data = json.dumps(wrapped["data"], sort_keys=True, separators=(",", ":"))
+        tx.execute("UPDATE control_events SET payload=? WHERE id=?",
+                   (json.dumps(wrapped, sort_keys=True, separators=(",", ":")), row["event_id"]))
+        tx.execute("UPDATE authority_event_keys SET payload_hash=? WHERE event_id=?",
+                   (hashlib.sha256(data.encode()).hexdigest(), row["event_id"]))
+    with pytest.raises(ControlStoreRefused, match="SHARED_RESOURCE_LEASE_RESTORE_REQUIRED"):
+        _resume(supervisor, store).resume_monitored(handle.intent_id)
+    assert queue.snapshot()[0]["status"] == "active"
+
+
+def test_restore_refuses_a_malformed_lease_that_names_its_own_request(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    with pytest.raises(OwnershipRefused, match="TOKEN_LIMIT_EXHAUSTED"):
+        supervisor.launch(replace(request, token_reservation=101))
+    handle = supervisor.launch(request)  # the same-request retry takes its own, valid lease
+    handle.process.wait(timeout=15)
+    first = queue.snapshot()[0]
+    with store.transaction() as tx:
+        [row] = tx.execute("SELECT k.event_id,e.payload FROM authority_event_keys k JOIN control_events e "
+                           "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?",
+                           (request.activity_id, "resource-lease:" + request.activity_id + ":" + request.request_key
+                            + ":" + str(first["sequence"]))).fetchall()
+        wrapped = json.loads(row["payload"])
+        wrapped["data"]["sequence"] = 0  # still names this request; its key no longer matches, consistently rehashed
+        data = json.dumps(wrapped["data"], sort_keys=True, separators=(",", ":"))
+        tx.execute("UPDATE control_events SET payload=? WHERE id=?",
+                   (json.dumps(wrapped, sort_keys=True, separators=(",", ":")), row["event_id"]))
+        tx.execute("UPDATE authority_event_keys SET payload_hash=? WHERE event_id=?",
+                   (hashlib.sha256(data.encode()).hexdigest(), row["event_id"]))
+    with pytest.raises(ControlStoreRefused, match="SHARED_RESOURCE_LEASE_RESTORE_REQUIRED"):
+        _resume(supervisor, store).resume_monitored(handle.intent_id)
+
+
+def test_a_cleanup_failure_never_replaces_the_launch_refusal(tmp_path, monkeypatch):
+    supervisor, _store, request, queue = _plain(tmp_path)
+
+    def interrupted(_reservation):
+        raise KeyboardInterrupt("cleanup interrupted")
+
+    monkeypatch.setattr(supervisor.shared_resource_coordinator, "release_unbound", interrupted)
+    raised = []
+    try:
+        supervisor.launch(replace(request, token_reservation=101))
+    except BaseException as error:  # noqa: B036 - the cleanup's KeyboardInterrupt must not escape the test
+        raised.append(error)
+    assert [(type(error).__name__, getattr(error, "code", None)) for error in raised] == [
+        ("OwnershipRefused", "TOKEN_LIMIT_EXHAUSTED")]
+    [row] = queue.snapshot()
+    assert row["status"] == "active"  # cleanup failed: the lazy reclaim stays the fallback
+
+
+def test_qualification_probe_refused_at_reserve_releases_its_standalone_ticket(tmp_path):
+    supervisor, store, parent, queue = _plain(tmp_path)
+    token = supervisor.token
+    store.transition_activity(token, parent.activity_id, expected="pending", new="active", reason="fixture parent")
+    with store.read_transaction() as tx:
+        preparation_id = tx.execute("SELECT workspace_preparation_id FROM authority_child_bindings WHERE activity_id=?",
+                                    (parent.activity_id,)).fetchone()[0]
+    ready = inspect_workspace(store, preparation_id)
+    request, contract = _scripted_probe(store, token, parent_activity_id=parent.activity_id,
+                                        base_commit=ready.base_commit, repository_path=ready.repository_path,
+                                        root=tmp_path, key="refused-probe")
+    with store.transaction() as tx:  # qualification probes exist only under the managed writer
+        tx.execute("UPDATE context_runs SET writer_version='ffs-supervisor/1'")
+    _set_limits(store, token_limit=request.token_reservation - 1)
+    with pytest.raises(OwnershipRefused, match="TOKEN_LIMIT_EXHAUSTED"):
+        supervisor.launch_qualification(request, qualification_contract=contract)
+    [row] = queue.snapshot()
+    assert _lease(row) == _UNBOUND_RELEASE  # the M5d reviewer-probe shape: no lazy reclaim needed
+
+
+def test_replayed_launch_of_an_in_flight_intent_releases_only_its_own_unbound_ticket(tmp_path):
+    fired = []
+
+    def crash_once(point):
+        if point == "after_intent_commit" and not fired:
+            fired.append(point)
+            raise RuntimeError("injected crash")
+
+    supervisor, store, request, queue = _plain(tmp_path, fault=crash_once)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        supervisor.launch(request)
+    [original] = queue.snapshot()
+    with store.read_transaction() as tx:
+        [intent] = tx.execute("SELECT * FROM authority_launch_intents").fetchall()
+    assert (original["status"], original["launch_intent_id"]) == ("active", intent["id"])
+    authority = _authority(store)
+    # The identical request resolves the same bound ticket: nothing unbound to release.
+    with pytest.raises(SupervisorRefused, match="INTENT_RECONCILIATION_REQUIRED"):
+        supervisor.launch(request)
+    assert queue.snapshot() == [original]
+    # Another request for the in-flight activity takes a new ticket; only that one is released.
+    with pytest.raises(SupervisorRefused, match="INTENT_RECONCILIATION_REQUIRED"):
+        supervisor.launch(replace(request, request_key="first-replay"))
+    first, second = queue.snapshot()
+    assert first == original
+    assert _lease(second) == _UNBOUND_RELEASE
+    assert _authority(store) == authority
+
+
+def test_refused_cohort_releases_every_member_ticket(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    child, ready = _allocate_registered_child(store, supervisor.token, key="second")
+    second = DispatchRequest(child.id, "second", request.command, str(ready.path), ready.base_commit,
+                             request.runtime_identity, contract_hash=request.contract_hash)
+    requests = tuple(_receipt_bound_request(store, supervisor.token, value) for value in (request, second))
+    _set_limits(store, dispatch_limit=1)
+    before = _authority(store)
+    with pytest.raises(OwnershipRefused, match="DISPATCH_LIMIT_EXHAUSTED"):
+        supervisor.launch_cohort(requests, request_key="pair")
+    rows = queue.snapshot()
+    assert [_lease(row) for row in rows] == [_UNBOUND_RELEASE] * 2
+    assert _authority(store) == before
+
+
+def _nested(store, token, parent, ready, key):
+    snapshot = load_input_snapshot(store, ready)
+    pending = begin_child_workspace_preparation(
+        store, token, parent_activity_id=parent.activity_id, request_key=key + "-workspace", role="worker",
+        base_commit=ready.base_commit, selected_input_manifest=snapshot.manifest,
+        repository_path=ready.repository_path)
+    child_ready = prepare_workspace(store, token, pending, input_snapshot=snapshot)
+    child = store.create_child_activity(
+        token, parent_activity_id=parent.activity_id, role="worker", request_key=key + "-activity",
+        candidate_hash=child_ready.input_digest, contract_hash=parent.contract_hash,
+        runtime_identity=parent.runtime_identity, workspace_binding=str(child_ready.path),
+        workspace_preparation_id=child_ready.id, retry_budget=1)
+    return replace(parent, activity_id=child.id, request_key=key + "-launch", workspace=str(child_ready.path),
+                   monitor_result=True, command=(sys.executable, "-c", "print('nested')"))
+
+
+def _group(queue):
+    with queue._connection() as connection:
+        group = dict(connection.execute("SELECT * FROM resource_parent_groups").fetchone())
+        slots = [dict(row) for row in connection.execute("SELECT * FROM resource_parent_group_slots ORDER BY slot_id")]
+        claims = connection.execute("SELECT COUNT(*) FROM resource_parent_group_claims").fetchone()[0]
+    return group, slots, claims
+
+
+def test_managed_child_refused_never_releases_the_shared_parent_ticket_or_group(tmp_path):
+    """Guard: a child acquire claims nothing; even an unbound prepaid parent ticket stays held."""
+    supervisor, store, parent, ready, queue = _managed_group(tmp_path)
+    coordinator = supervisor.shared_resource_coordinator
+    coordinator._reserve_group()  # the envelope is held; its parent ticket is not yet bound
+    request = _nested(store, supervisor.token, parent, ready, "refused-child")
+    tickets, group = queue.snapshot(), _group(queue)
+    assert all(row["status"] == "active" and row["launch_intent_id"] is None for row in tickets)
+    _set_limits(store, dispatch_limit=0)
+    with pytest.raises(OwnershipRefused, match="DISPATCH_LIMIT_EXHAUSTED"):
+        supervisor.launch(request)
+    assert queue.snapshot() == tickets and _group(queue) == group
+    assert coordinator.plan is not None and coordinator._group_state() == "reserved"
+    _set_limits(store, dispatch_limit=3)
+    handle = supervisor.launch(replace(parent, command=(sys.executable, "-c", "print('parent')")))
+    assert supervisor.finish(handle, timeout=10, token_usage=0)["returncode"] == 0
+    assert all(row["status"] == "released" for row in queue.snapshot())
+
+
+def test_queue_never_releases_a_prepaid_group_slot_as_unbound(tmp_path):
+    supervisor, _store, parent, _ready, queue = _managed_group(tmp_path)
+    coordinator = supervisor.shared_resource_coordinator
+    coordinator._reserve_group()
+    with queue._connection() as connection:
+        slots = connection.execute("SELECT * FROM resource_parent_group_slots ORDER BY slot_id").fetchall()
+    before = queue.snapshot()
+    assert [queue.release_unbound(coordinator.registry._ticket(slot)) for slot in slots] == [False] * len(slots)
+    assert queue.snapshot() == before
+    handle = supervisor.launch(replace(parent, command=(sys.executable, "-c", "print('parent')")))
+    assert supervisor.finish(handle, timeout=10, token_usage=0)["returncode"] == 0
+    assert all(row["status"] == "released" for row in queue.snapshot())
+
+
+def _foreign_hold_release(shared):
+    """Subprocess body: another process names the live owner and tries to close its held group."""
+    queue = ManagedAdmissionQueue(Path(shared), observation_provider=_observation)
+    with queue._connection() as connection:
+        group = connection.execute("SELECT * FROM resource_parent_groups").fetchone()
+        owner = connection.execute("SELECT owner_json FROM resource_parent_group_slots LIMIT 1").fetchone()[0]
+    record = json.loads(group["plan_json"])
+    plan = GroupPlan(record["group_id"], record["repository_id"], record["run_id"], record["generation"],
+                     record["state_root"], record["parent_request_key"],
+                     tuple(GroupMember(item["slot_id"], item["role"], ResourceDemand(**item["demand"]))
+                           for item in record["members"]),
+                     group["inventory_sha256"], group["expires_ns"], record.get("plan_inventory_sha256"))
+    registry = ResourceParentGroupRegistry(queue, SimpleNamespace(
+        native_state=lambda _identity: "LIVE", proves_never_authorized=lambda _lease: False))
+    try:
+        registry.release_unissued_hold(plan, "0" * 64, live_owner=ProcessIdentity(**json.loads(owner)))
+        print(json.dumps({"code": None}))
+    except ResourceGroupRefused as error:
+        print(json.dumps({"code": error.code}))
+
+
+def test_a_foreign_process_cannot_close_a_live_owners_held_group(tmp_path):
+    supervisor, _store, _parent, _ready, queue = _managed_group(tmp_path)
+    supervisor.shared_resource_coordinator._reserve_group()
+    before, group = queue.snapshot(), _group(queue)
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "lib") + os.pathsep + str(Path(__file__).parent)
+    foreign = subprocess.run([sys.executable, "-c",
+                              "import sys, test_admission_release_before_spawn as t; t._foreign_hold_release(sys.argv[1])",
+                              str(tmp_path / "shared")], env=environment, capture_output=True, text=True, timeout=120)
+    assert foreign.returncode == 0, foreign.stderr[-2000:]
+    assert json.loads(foreign.stdout.strip().splitlines()[-1]) == {"code": "RESOURCE_GROUP_MEMBER_RETAINED"}
+    assert queue.snapshot() == before and _group(queue) == group
+
+
+def test_managed_parent_refused_closes_its_never_bound_group_and_a_same_generation_retry_refuses_typed(tmp_path):
+    supervisor, store, parent, _ready, queue = _managed_group(tmp_path)
+    coordinator = supervisor.shared_resource_coordinator
+    _set_limits(store, dispatch_limit=0)
+    with pytest.raises(OwnershipRefused, match="DISPATCH_LIMIT_EXHAUSTED"):
+        supervisor.launch(parent)
+    rows = queue.snapshot()
+    assert [row["status"] for row in rows] == ["released", "released"]
+    group, slots, claims = _group(queue)
+    assert (group["state"], group["parent_binding_json"], claims) == ("closed", None, 0)
+    assert all(slot["state"] == "reserved" and slot["binding_json"] is None for slot in slots)
+    assert coordinator.plan is None and coordinator.reservation is None
+    # The closed envelope is terminal for this generation: a retry refuses typed before any intent.
+    _set_limits(store, dispatch_limit=3)
+    with pytest.raises(ResourceGroupRefused, match="RESOURCE_GROUP_NOT_AVAILABLE"):
+        supervisor.launch(parent)
+    assert queue.snapshot() == rows
+    with store.read_transaction() as tx:
+        assert tx.execute("SELECT COUNT(*) FROM authority_launch_intents").fetchone()[0] == 0
+
+
+# --- R1-3: an owner killed after its intent committed, before any fork ----------------------------
+
+
+# The store's own fault point: the launch intent and debit committed, the shared ticket not yet bound.
+WINDOW = "reserve_launch.after_commit_before_return"
+FORK_MARKER = "spawn-attempt/v1"
+
+
+def _write_pre_upgrade_admission_requests():
+    """Simulate a pre-upgrade writer: its admission request records carry no fork-marker field."""
+    original = ControlStore._record_event_once_tx
+
+    def without_marker(record):
+        return {name: value for name, value in record.items() if name != "fork_marker"}
+
+    def record_event_once_tx(tx, token, activity_id, key, payload):
+        if key.startswith("resource-request:"):
+            payload = without_marker(payload)
+        elif key.startswith("resource-lease:"):
+            payload = {**payload, "request": without_marker(payload["request"])}
+        return original(tx, token, activity_id, key, payload)
+
+    ControlStore._record_event_once_tx = staticmethod(record_event_once_tx)
+
+
+def _crashing_owner(mode, boundary, root, metadata, legacy=""):
+    """Subprocess body: build one owner, then ``os._exit`` at ``boundary`` of the armed launch."""
+    root, metadata = Path(root), Path(metadata)
+    root.mkdir(parents=True, exist_ok=True)
+    if legacy:
+        _write_pre_upgrade_admission_requests()
+    armed = []
+
+    def crash(point):
+        if armed and point == boundary:
+            os._exit(9)
+
+    if mode == "plain":
+        supervisor, store, request, _queue = _plain(root, fault=crash)
+        sibling, _sibling_ready = _allocate_registered_child(store, supervisor.token, key="sibling")
+        payload = {"activity_id": request.activity_id, "request_key": request.request_key, "sibling": sibling.id}
+        launch = request
+    else:
+        supervisor, store, parent, ready, _queue = _managed_group(root)
+        supervisor.fault_probe = crash
+        parent = replace(parent, monitor_result=True, command=(sys.executable, "-c", _WAIT))
+        payload, launch = {"workspace": str(ready.path)}, parent
+        if mode == "child":
+            handle = supervisor.launch(parent)
+            launch = _nested(store, supervisor.token, parent, ready, "crashed-child")
+            payload.update(parent_intent=handle.intent_id, activity_id=launch.activity_id)
+    store.fault_probe = crash
+    payload.update(db=str(store.db_path), generation=supervisor.token.generation,
+                   evidence_root=str(supervisor.evidence_root), owner_pid=os.getpid())
+    metadata.write_text(json.dumps(payload))
+    armed.append(True)
+    supervisor.launch(launch)
+    os._exit(1)  # the armed fault never fired
+
+
+def _crash(tmp_path, mode, boundary, *, legacy=False):
+    root, metadata = tmp_path / "owner", tmp_path / "owner.json"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "lib") + os.pathsep + str(Path(__file__).parent)
+    owner = subprocess.Popen([sys.executable, "-c",
+                              "import sys, test_admission_release_before_spawn as t; t._crashing_owner(*sys.argv[1:])",
+                              mode, boundary, str(root), str(metadata), "legacy" if legacy else ""], env=environment)
+    try:
+        assert owner.wait(timeout=180) == 9
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=5)
+    payload = json.loads(metadata.read_text())
+    store = ControlStore(Path(payload["db"]))
+    with store.read_transaction() as tx:
+        run = tx.execute("SELECT * FROM context_runs").fetchone()
+    successor = reserve_resources(store, StartRequest(
+        run["run_id"], run["workspace"], run["objective_digest"], ProcessIdentity.current(),
+        repository_id=run["repository_id"], planning_scope=run["planning_scope"])).token
+    assert successor.generation > payload["generation"]
+    queue = ManagedAdmissionQueue(root / "shared", observation_provider=_observation)
+    return payload, store, successor, queue
+
+
+def _crashed_intent(store, activity_id):
+    with store.read_transaction() as tx:
+        [intent] = tx.execute("SELECT * FROM authority_launch_intents WHERE activity_id=?", (activity_id,)).fetchall()
+        marker = tx.execute("SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+                            (activity_id, "spawn-attempt:" + intent["id"])).fetchone()
+    assert intent["state"] == "reserved" and intent["child_pid"] is None and intent["acknowledgement_id"] is None
+    return dict(intent), marker is not None
+
+
+def _admission_request(store, activity_id):
+    with store.read_transaction() as tx:
+        [row] = tx.execute("SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+                           "WHERE k.activity_id=? AND k.idempotency_key LIKE 'resource-request:%'",
+                           (activity_id,)).fetchall()
+    return json.loads(row[0])["data"]
+
+
+def _managed_writer(store, value="ffs-supervisor/1"):
+    """Fixture: the scripted owner launched under the unmanaged writer; R1-3 proofs cover managed runs only."""
+    with store.transaction() as tx:
+        previous = tx.execute("SELECT writer_version FROM context_runs").fetchone()[0]
+        tx.execute("UPDATE context_runs SET writer_version=?", (value,))
+    return previous
+
+
+def _plain_owner_killed_before_fork(tmp_path, boundary, legacy):
+    spawned, bound = boundary == "after_spawn_before_ack", boundary != WINDOW
+    payload, store, successor, queue = _crash(tmp_path, "plain", boundary, legacy=legacy)
+    intent, marker = _crashed_intent(store, payload["activity_id"])
+    assert marker is spawned  # a fork was attempted only past the marker
+    [row] = queue.snapshot()
+    assert (row["status"], row["launch_intent_id"], row["child_pid"]) == ("active", intent["id"] if bound else None, None)
+    authority = _authority(store)
+    previous = _managed_writer(store)
+    queue._reclaim_dead()
+    [row] = queue.snapshot()
+    if spawned:
+        assert row["status"] == "active"  # a fork may exist: uncertain, retained
+    elif legacy:
+        assert row["status"] == "active"  # a pre-upgrade request never promised a fork marker: retained
+    else:
+        assert (row["status"], row["limiting_resource"]) == ("reclaimed", "pre-spawn-proved")
+    _managed_writer(store, previous)
+    # Launch authority is unchanged: the intent and its debit stay; nothing may launch past it.
+    assert _authority(store) == authority
+    with store.read_transaction() as tx:
+        assert tx.execute("SELECT dispatch_used FROM authority_run_limits").fetchone()[0] == 1
+    with pytest.raises(OwnershipRefused, match="INTENT_RECONCILIATION_REQUIRED"):
+        store.reserve_launch(payload["sibling"], successor, request_key="sibling-launch")
+    replay = store.reserve_launch(payload["activity_id"], successor, request_key=payload["request_key"],
+                                  request_payload=_dispatch_request(store, payload)["request"])
+    assert (replay.reused, replay.id, replay.state) == (True, intent["id"], "reserved")
+    assert _authority(store) == authority
+    assert _admission_request(store, payload["activity_id"]).get("fork_marker") == (None if legacy else FORK_MARKER)
+
+
+@pytest.mark.parametrize(("boundary", "spawned", "legacy"), [
+    ("after_intent_commit", False, False), ("after_spawn_before_ack", True, False), ("after_intent_commit", False, True)])
+def test_plain_owner_killed_before_fork_has_its_bound_ticket_reclaimed_lazily(tmp_path, boundary, spawned, legacy):
+    _plain_owner_killed_before_fork(tmp_path, boundary, legacy)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_plain_owner_killed_between_reserve_commit_and_bind_has_its_ticket_reclaimed_lazily(tmp_path, legacy):
+    _plain_owner_killed_before_fork(tmp_path, WINDOW, legacy)
+
+
+def _dispatch_request(store, payload):
+    with store.read_transaction() as tx:
+        row = tx.execute("SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+                         "WHERE k.activity_id=? AND k.idempotency_key=?",
+                         (payload["activity_id"], "dispatch-request:" + payload["request_key"])).fetchone()
+    return json.loads(row[0])["data"]
+
+
+def _finish_resumed_parent(store, successor, payload):
+    resumed = Supervisor(store, successor, evidence_root=Path(payload["evidence_root"]))
+    handle = resumed.resume_monitored(payload["parent_intent"])
+    (Path(payload["workspace"]) / "release").touch()
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            assert resumed.finish(handle, token_usage=0)["returncode"] == 0
+            return
+        except SupervisorRefused as error:
+            assert error.code == "MONITOR_RESULT_PENDING" and time.monotonic() < deadline
+            time.sleep(.02)
+
+
+@pytest.mark.parametrize(("who", "boundary", "legacy", "settled"), [
+    ("parent", "after_intent_commit", False, "closed"),
+    ("child", "after_intent_commit", False, "closed"),
+    ("parent", "after_spawn_before_ack", False, "retained"),
+    ("child", "after_spawn_before_ack", False, "retained"),
+    # A pre-upgrade request never promised a fork marker: its group stays retained.
+    ("parent", "after_intent_commit", True, "retained"),
+    ("child", "after_intent_commit", True, "retained"),
+    # Guard: reserved before the parent bound; authority shows an unsettled intent, never per-ticket reclaim.
+    ("parent", WINDOW, False, "retained"),
+])
+def test_successor_settles_a_group_whose_bound_claim_was_never_forked(tmp_path, who, boundary, legacy, settled):
+    spawned, bound = boundary == "after_spawn_before_ack", boundary != WINDOW
+    payload, store, successor, queue = _crash(tmp_path, who, boundary, legacy=legacy)
+    try:
+        with store.read_transaction() as tx:
+            activity = payload.get("activity_id") or tx.execute(
+                "SELECT activity_id FROM authority_launch_intents").fetchone()[0]
+        intent, marker = _crashed_intent(store, activity)
+        assert marker is spawned
+        group, _slots, claims = _group(queue)
+        assert group["state"] == "reserved" and claims == int(who == "child")
+        before = queue.snapshot()
+        if who == "child":
+            _finish_resumed_parent(store, successor, payload)
+        authority = _authority(store)
+        _managed_writer(store)
+        if who == "parent":
+            parent_binding = group["parent_binding_json"]
+            assert (json.loads(parent_binding)["launch_intent_id"] if bound else parent_binding) == (
+                intent["id"] if bound else None)
+            # A prepaid slot is settled only through its group, never by the per-ticket lazy reclaim.
+            queue._reclaim_dead()
+            assert queue.snapshot() == before
+        outcomes = settle_predecessor_groups(store, successor, queue)
+        assert [item["state"] for item in outcomes] == [settled], outcomes
+        rows = queue.snapshot()
+        if settled == "retained":
+            assert [row["status"] for row in rows] == [row["status"] for row in before]
+        else:
+            assert all(row["status"] == "released" for row in rows), rows
+        assert _authority(store) == authority  # the never-forked intent and its debit stay as they were
+        assert _admission_request(store, activity).get("fork_marker") == (None if legacy else FORK_MARKER)
+    finally:
+        (Path(payload["workspace"]) / "release").touch()

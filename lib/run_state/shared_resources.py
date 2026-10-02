@@ -19,6 +19,12 @@ from .resource_observation import ResourceDemand
 from .state import ControlStore, ControlStoreRefused
 
 
+# Positive marker-era field of an admission request (R1-3): its writer commits a
+# ``spawn-attempt:<intent>`` event before every intent-consuming fork.  A request
+# without it (pre-upgrade bytes) never proves an intent was not forked.
+FORK_MARKER = "spawn-attempt/v1"
+
+
 def _encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -64,6 +70,7 @@ def record_admission_request(store, token, *, activity_id, request_key, material
             "dispatch_request_key": request_key, "generation": token.generation,
             "request_sha256": request_digest, "owner_set": owner["owner_set"],
             "supervisor": {key: owner[key] for key in ("host_id", "boot_id", "pid", "start_token")},
+            "fork_marker": FORK_MARKER,
         }
         store._record_event_once_tx(tx, token, activity_id, "resource-request:" + queue_key, payload)
     return payload
@@ -145,7 +152,8 @@ class SharedResourceCoordinator:
             assert_owner(tx, self.token)
             for ticket, binding, item in zip(tickets, bindings, requests):
                 self.store._record_event_once_tx(
-                    tx, self.token, binding["activity_id"], "resource-lease:" + binding["request_key"],
+                    tx, self.token, binding["activity_id"],
+                    "resource-lease:" + binding["request_key"] + ":" + str(ticket.sequence),
                     {"schema": "ffs.shared-resource-lease/v1", "sequence": ticket.sequence,
                      "ticket": ticket.ticket, "request": binding, "demand": item["demand"].record(),
                      "group_id": group_id, "group_width": len(requests)},
@@ -162,6 +170,10 @@ class SharedResourceCoordinator:
     def release(self, reservation):
         # Queue validates actual consumer death outside its SQLite writer.
         self.queue.release(reservation[0])
+
+    def release_unbound(self, reservation):
+        """F55: free a reservation of a refused launch that no intent or child bound."""
+        return self.queue.release_unbound(reservation[0])
 
     def restore_bound_intent(self, intent_id):
         """Recover an exact same-writer ticket without changing registry authority."""
@@ -203,19 +215,38 @@ class SharedResourceCoordinator:
                 binding = event("resource-request:" + queue_key)
                 if binding is None:
                     return None  # Legacy and prepaid group paths use different admission records.
-                lease = event("resource-lease:" + queue_key)
-                if (dispatch is None or lease is None or dispatch["intent_id"] != intent_id
+                # One lease per ticket: an unbound-released ticket and its retry both retain theirs.
+                prefix = "resource-lease:" + queue_key + ":"
+                # A lease is this request's only when its key has an all-digit suffix and
+                # its payload names this request.  Any other one (a colon-extended request
+                # key, or a pre-change single-key lease such as request 'first:42') is
+                # another request's record and is skipped; one naming this request is
+                # validated strictly, including its canonical key.
+                leases = [(row["idempotency_key"], event(row["idempotency_key"])) for row in tx.execute(
+                    "SELECT idempotency_key FROM authority_event_keys WHERE activity_id=? "
+                    "AND substr(idempotency_key,1,?)=?", (intent["activity_id"], len(prefix), prefix))
+                    if row["idempotency_key"][len(prefix):].isascii()
+                    and row["idempotency_key"][len(prefix):].isdigit()]
+                leases = [(key, lease) for key, lease in leases
+                          if isinstance(lease, dict) and isinstance(lease.get("request"), dict)
+                          and lease["request"].get("request_key") == queue_key]
+                if (dispatch is None or dispatch["intent_id"] != intent_id
                         or binding["schema"] != "ffs.shared-admission-request/v1"
                         or binding["repository_id"] != self.token.repository_id
                         or binding["run_id"] != self.token.run_id or binding["activity_id"] != intent["activity_id"]
                         or binding["generation"] != self.token.generation or binding["supervisor"] != asdict(current)
                         or binding["request_key"] != queue_key or binding["dispatch_request_key"] != request_key
                         or binding["request_sha256"] != hashlib.sha256(_encoded(dispatch["request"]).encode()).hexdigest()
-                        or lease["schema"] != "ffs.shared-resource-lease/v1" or lease["request"] != binding
-                        or type(lease["sequence"]) is not int or not isinstance(lease["ticket"], str)):
+                        or any(lease["schema"] != "ffs.shared-resource-lease/v1" or lease["request"] != binding
+                               or type(lease["sequence"]) is not int or not isinstance(lease["ticket"], str)
+                               or key != prefix + str(lease["sequence"]) for key, lease in leases)):
                     raise ValueError("retained lease binding changed")
-            ticket = AdmissionTicket(lease["sequence"], lease["ticket"], current)
-            row = self.queue.status(ticket)
+            bound = [(lease, AdmissionTicket(lease["sequence"], lease["ticket"], current)) for _key, lease in leases]
+            bound = [(lease, ticket, self.queue.status(ticket)) for lease, ticket in bound]
+            bound = [item for item in bound if item[2]["launch_intent_id"] == intent_id]
+            if len(bound) != 1:
+                raise ValueError("retained lease binding changed")
+            lease, ticket, row = bound[0]
             if (any(row[key] != binding[key] for key in ("repository_id", "run_id", "request_key", "generation"))
                     or {key: row[key] for key in ("host_id", "boot_id", "pid", "start_token")} != asdict(current)
                     or any(row["child_" + key] != intent["child_" + key]
@@ -313,19 +344,57 @@ class ControlStoreLeaseEvidenceReader:
                 if next(row for row in owners if row["resource_type"] == "run")["resource_key"] != run_key:
                     return None
                 # The immutable dispatch key is the only valid link to an
-                # intent. Any retained intent requires its own full settlement.
-                intent = tx.execute(
-                    "SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+                # intent. Without one the lease proves its intent's absence;
+                # with one (bound, or still in the reserve-to-bind window) a
+                # marker-era request proves that intent was never forked (R1-3).
+                dispatch = tx.execute(
+                    "SELECT k.payload_hash,e.payload FROM authority_event_keys k JOIN control_events e "
+                    "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?",
                     (data["activity_id"], "dispatch-request:" + data["dispatch_request_key"]),
                 ).fetchone()
-                if identity.launch_intent_id is not None or intent is not None:
-                    return None
-                proof = {"request": data, "owner_rows": [dict(row) for row in owners],
-                         "intent_absent": True}
+                if identity.launch_intent_id is None and dispatch is None:
+                    evidence = {"intent_absent": True}
+                else:
+                    intent = _never_forked_intent(tx, identity, data, dispatch)
+                    if intent is None:
+                        return None
+                    evidence = {"intent_never_forked": intent}
+                proof = {"request": data, "owner_rows": [dict(row) for row in owners], **evidence}
                 return FencedLeaseRecord(
-                    identity.repository_id, identity.run_id, identity.request_key, None,
+                    identity.repository_id, identity.run_id, identity.request_key, identity.launch_intent_id,
                     identity.generation, identity.supervisor, "never_authorized", "generation_fenced",
                     hashlib.sha256(_encoded(proof).encode()).hexdigest(),
                 )
         except (ControlStoreRefused, OSError, ValueError, KeyError, TypeError, sqlite3.Error):
             return None
+
+
+def _never_forked_intent(tx, identity, data, dispatch):
+    """The intent the dispatch event names, only if no child was ever forked for it.
+
+    Every intent-consuming fork commits ``spawn-attempt:<intent>`` before
+    ``subprocess.Popen``; its absence, with no ACK, child identity, permit or
+    completion, proves the dead owner stopped before forking.  Only a request
+    whose writer promised that marker counts.  A bound lease must name the same
+    intent; an unbound one is in the reserve-to-bind window (bind precedes any
+    fork).  A marker without an ACK stays uncertain.  Authority is only read.
+    """
+    if identity.consumer is not None or dispatch is None or data.get("fork_marker") != FORK_MARKER:
+        return None
+    wrapped = json.loads(dispatch["payload"])
+    intent_id = wrapped["data"]["intent_id"]
+    if (wrapped["run_id"] != identity.run_id or wrapped["activity_id"] != data["activity_id"]
+            or hashlib.sha256(_encoded(wrapped["data"]).encode()).hexdigest() != dispatch["payload_hash"]
+            or not isinstance(intent_id, str)
+            or identity.launch_intent_id not in {None, intent_id}):
+        return None
+    intent = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone()
+    if (intent is None or intent["activity_id"] != data["activity_id"] or intent["generation"] != identity.generation
+            or intent["state"] not in {"reserved", "reconcile_required"}
+            or any(intent[column] is not None for column in (
+                "acknowledgement_id", "permit_id", "child_host_id", "child_boot_id", "child_pid",
+                "child_start_token", "completion_status", "completion_evidence_json", "completed_at"))):
+        return None
+    marker = tx.execute("SELECT 1 FROM authority_event_keys WHERE activity_id=? AND idempotency_key=?",
+                        (data["activity_id"], "spawn-attempt:" + intent_id)).fetchone()
+    return None if marker is not None else dict(intent)

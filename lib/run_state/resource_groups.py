@@ -35,6 +35,9 @@ class GroupEvidenceReader(Protocol):
 
     def proves_never_authorized(self, lease: LeaseIdentity) -> bool: ...
 
+    # Optional (R1-3): ``proves_never_forked(lease) -> bool`` proves a bound, never-ACKed
+    # intent was never forked.  A reader without it keeps the native-DEAD-only rule.
+
 
 def _canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -428,7 +431,7 @@ class ResourceParentGroupRegistry:
         if not isinstance(claim, ChildClaim):
             raise ResourceGroupRefused("RESOURCE_GROUP_BINDING_INVALID")
         self._ensure_plan(plan)
-        if plan.group_id != claim.group_id or self._native_state(claim.binding.consumer) != "DEAD":
+        if plan.group_id != claim.group_id or not self._consumer_gone(claim.binding):
             raise ResourceGroupRefused("RESOURCE_GROUP_CHILD_RETAINED")
         with self.queue._transaction() as connection:
             self._stored_plan(connection, plan)
@@ -453,7 +456,7 @@ class ResourceParentGroupRegistry:
         self._ensure_binding(plan, binding, parent=True)
         if not _sha(proof_sha256):
             raise ResourceGroupRefused("RESOURCE_GROUP_PARENT_PROOF_INVALID")
-        if self._native_state(binding.consumer) != "DEAD":
+        if not self._consumer_gone(binding):
             raise ResourceGroupRefused("RESOURCE_GROUP_PARENT_RETAINED")
         with self.queue._transaction() as connection:
             self._stored_plan(connection, plan)
@@ -474,7 +477,7 @@ class ResourceParentGroupRegistry:
                                         (plan.group_id,)).fetchone()
         if parent is None or not parent["binding_json"]:
             raise ResourceGroupRefused("RESOURCE_GROUP_PARENT_PROOF_INVALID")
-        if self._native_state(self._binding(parent["binding_json"]).consumer) != "DEAD":
+        if not self._consumer_gone(self._binding(parent["binding_json"])):
             raise ResourceGroupRefused("RESOURCE_GROUP_PARENT_RETAINED")
         with self.queue._transaction() as connection:
             self._stored_plan(connection, plan)
@@ -496,12 +499,23 @@ class ResourceParentGroupRegistry:
                     raise ResourceGroupRefused("RESOURCE_GROUP_CAS_FAILED")
             connection.execute("UPDATE resource_parent_groups SET state='closed' WHERE group_id=?", (plan.group_id,))
 
-    def release_unissued_hold(self, plan: GroupPlan, proof_sha256: str) -> None:
+    def release_owned_hold(self, plan: GroupPlan) -> None:
+        """F55: the live reserving owner closes its own held envelope after its parent launch was refused.
+
+        Same slot/admission checks as ``release_unissued_hold``; the dead-owner probe is
+        replaced by an exact match of every slot owner with the calling live process.
+        """
+        owner = self.queue._owner()
+        self.release_unissued_hold(plan, _hash({"group_id": plan.group_id, "live_owner": _identity(owner)}),
+                                   live_owner=owner)
+
+    def release_unissued_hold(self, plan: GroupPlan, proof_sha256: str, *, live_owner: ProcessIdentity | None = None) -> None:
         """Close a held envelope that never bound a parent, on caller proof that no launch was issued.
 
         The caller proves through launch authority that the fenced reserving owner issued no
-        authorized intent.  This registry independently requires the reserving process dead and
-        every slot and admission still free of any intent, binding or consumer.
+        authorized intent.  This registry independently requires the reserving process dead (or
+        it is ``live_owner`` itself) and every slot and admission still free of any intent,
+        binding or consumer.
         """
         self._ensure_plan(plan)
         if not _sha(proof_sha256):
@@ -510,7 +524,14 @@ class ResourceParentGroupRegistry:
             self._stored_plan(connection, plan)
             owners = connection.execute("SELECT owner_json FROM resource_parent_group_slots WHERE group_id=?",
                                         (plan.group_id,)).fetchall()
-        if not owners or any(self._native_state(_parse_identity(json.loads(row["owner_json"]))) != "DEAD" for row in owners):
+        owners = [_parse_identity(json.loads(row["owner_json"])) for row in owners]
+        if live_owner is not None:
+            try:
+                self.queue._owner(live_owner)  # only the calling, live process may speak for itself
+            except ManagedAdmissionRefused as error:
+                raise ResourceGroupRefused("RESOURCE_GROUP_MEMBER_RETAINED") from error
+        if not owners or any(owner != live_owner if live_owner is not None else self._native_state(owner) != "DEAD"
+                             for owner in owners):
             raise ResourceGroupRefused("RESOURCE_GROUP_MEMBER_RETAINED")
         with self.queue._transaction() as connection:
             self._stored_plan(connection, plan)
@@ -651,6 +672,20 @@ class ResourceParentGroupRegistry:
         if result not in {"DEAD", "LIVE", "UNKNOWN"}:
             raise ResourceGroupRefused("RESOURCE_GROUP_NATIVE_PROBE_UNKNOWN")
         return result
+
+    def _consumer_gone(self, binding: LaunchBinding) -> bool:
+        """A bound consumer is natively DEAD; a never-bound one is proven never forked (R1-3)."""
+        if binding.consumer is not None:
+            return self._native_state(binding.consumer) == "DEAD"
+        prove = getattr(self.evidence_reader, "proves_never_forked", None)
+        if prove is None:
+            return False
+        lease = LeaseIdentity(binding.repository_id, binding.run_id, binding.request_key,
+                              binding.launch_intent_id, binding.generation, binding.supervisor)
+        try:
+            return prove(lease) is True
+        except Exception as error:
+            raise ResourceGroupRefused("RESOURCE_GROUP_NATIVE_PROBE_UNKNOWN") from error
 
     @staticmethod
     def _binding(raw: str) -> LaunchBinding:
