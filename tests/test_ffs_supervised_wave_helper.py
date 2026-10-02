@@ -751,3 +751,16 @@ def test_write_wave_manifest_refuses_a_lone_result_or_receipt_and_writes_no_mani
     _assert_refused(result, "partial retained wave evidence")
     assert not bench.wave_file("manifest").exists()
     assert _snapshot(bench.root) == before
+
+
+def test_a_leftover_dispatch_claim_beside_a_complete_set_neither_blocks_nor_relaunches(bench: Bench) -> None:
+    """r1-1: the claim is removed once the receipt exists; if a crash left it
+    behind, the complete set still validates and nothing launches."""
+    _written_wave(bench)
+    assert bench.adapter("--dispatch-wave", "1").returncode == 0
+    bench.wave_dir.joinpath("wave-1.dispatch-claim.json").write_text("{}\n")
+    bench.wave_dir.joinpath("wave-1.dispatch-claim.json").chmod(0o600)
+    assert _prepared(bench.adapter("--prepare-wave", "1"))["retained"] == "complete"
+    again = bench.adapter("--dispatch-wave", "1")
+    assert again.returncode == 0, again.stderr
+    assert bench.launches() == 1

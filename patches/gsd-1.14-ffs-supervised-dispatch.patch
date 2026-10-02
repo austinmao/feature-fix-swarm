@@ -18,10 +18,10 @@ index c3f5473..187a9ba 100755
    }
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 0000000..47ad572
+index 0000000..b6d27e1
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,692 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -456,6 +456,15 @@ index 0000000..47ad572
 +  });
 +}
 +
++// Exclusive, private (0600), fsynced publication of one file and its directory
++// entry; EEXIST if the name is taken, never following a symlink.
++function publishPrivateFile(file, bytes) {
++  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
++  try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
++  const directory = fs.openSync(require('node:path').dirname(file), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
++  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
++}
++
 +// Wave helper modes. The outer orchestrator is a fresh shell per tool call, so
 +// every mode takes only the wave number and re-derives everything else from
 +// the admission environment and the current directory (nothing is trusted
@@ -480,7 +489,10 @@ index 0000000..47ad572
 +  } catch (error) {
 +    refuse(`private wave directory ${directory} is a symlink or not a directory; refusing wave.`);
 +  }
-+  try { fs.fchmodSync(fd, 0o700); } finally { fs.closeSync(fd); }
++  let failure = null;
++  try { fs.fchmodSync(fd, 0o700); } catch (error) { failure = error; }
++  try { fs.closeSync(fd); } catch (error) { failure = failure || error; }
++  if (failure) refuse(`cannot make private wave directory ${directory} 0700: ${failure.message}`);
 +}
 +
 +// Admission (the same checks as gsd-tools' routeFfsSupervisedDispatch), the
@@ -517,14 +529,30 @@ index 0000000..47ad572
 +    refuse('cannot resolve the git toplevel of the current directory; refusing wave.');
 +  }
 +  if (toplevel !== admission.workspace) refuse('admitted workspace mismatch; refusing wave.');
++  // `.planning` is the project's own directory (never chmod'ed), but mkdir
++  // resolves the path string, so a symlink here would redirect every private
++  // directory outside the workspace. Residual: a same-uid process can still
++  // swap a component between these lstat/O_NOFOLLOW checks and the later
++  // path-based opens (Node has no openat); the realpath check below narrows
++  // that window, and the 0700 directories keep every other uid out.
++  const planning = path.join(admission.workspace, '.planning');
++  let planningInfo = null;
++  try { planningInfo = fs.lstatSync(planning); } catch (error) { planningInfo = null; }
++  if (!planningInfo || planningInfo.isSymbolicLink() || !planningInfo.isDirectory()) {
++    refuse('.planning must be a real directory inside the admitted workspace (it is missing, a symlink, or not a directory); refusing wave.');
++  }
 +  process.umask(0o077);
-+  const waves = path.join(admission.workspace, '.planning', '.ffs-supervised', 'waves');
++  const waves = path.join(planning, '.ffs-supervised', 'waves');
 +  const directory = path.join(waves, admission.activity_id);
 +  for (const dir of [path.dirname(waves), waves, directory]) privateDirectory(dir);
++  let resolved;
++  try { resolved = fs.realpathSync(directory); } catch (error) { resolved = null; }
++  if (resolved !== directory) refuse(`wave directory ${directory} does not resolve to itself (a path component is a symlink); refusing wave.`);
 +  const manifestPath = path.join(directory, `wave-${waveText}.manifest.json`);
 +  const resultPath = path.join(directory, `wave-${waveText}.result.json`);
 +  const receiptPath = `${resultPath}.receipt.json`;
-+  const present = [manifestPath, resultPath, receiptPath].map((file) => {
++  const claimPath = path.join(directory, `wave-${waveText}.dispatch-claim.json`);
++  const present = [manifestPath, resultPath, receiptPath, claimPath].map((file) => {
 +    try {
 +      const info = fs.lstatSync(file);
 +      if (info.isSymbolicLink()) refuse('symlinked retained wave evidence; refusing.');
@@ -535,11 +563,14 @@ index 0000000..47ad572
 +      return refuse(`cannot inspect retained wave evidence ${file}: ${error.message}`);
 +    }
 +  });
-+  const retained = present.every((info) => info === null) ? 'none'
-+    : present.every((info) => info && info.isFile()) ? 'complete' : 'partial';
++  // A dispatch claim without a complete manifest/result/receipt set is an
++  // uncertain launch, so it makes the set partial; a leftover claim beside a
++  // complete set is harmless.
++  const complete = present.slice(0, 3).every((info) => info && info.isFile());
++  const retained = present.every((info) => info === null) ? 'none' : complete ? 'complete' : 'partial';
 +  return {
-+    number: Number(waveText), admission, retained, manifestPath, resultPath, receiptPath,
-+    manifestPresent: Boolean(present[0] && present[0].isFile()),
++    number: Number(waveText), admission, retained, manifestPath, resultPath, receiptPath, claimPath,
++    manifestPresent: Boolean(present[0] && present[0].isFile()), claimPresent: present[3] !== null,
 +  };
 +}
 +
@@ -547,6 +578,34 @@ index 0000000..47ad572
 +  if (manifest.wave !== wave.number) refuse(`manifest wave ${manifest.wave} is not the requested wave ${wave.number}; refusing.`);
 +  if (canonicalJson(manifest.admission) !== canonicalJson(wave.admission)) refuse('manifest admission is not the bound admission; refusing.');
 +  if (manifest.orchestrator_root !== wave.admission.workspace) refuse('manifest orchestrator_root is not the admitted workspace; refusing.');
++}
++
++const claimedMessage = (wave) => `wave ${wave.number} dispatch was already claimed and no complete result is retained (uncertain launch); refusing to relaunch.`;
++
++// Taken before the supervisor is launched: a private (0600) file created
++// exclusively and fsynced with its directory. Whoever finds it later without a
++// complete result and receipt refuses instead of launching the manifest again.
++function claimWave(wave, manifestDigest) {
++  const claim = { schema: 'ffs.gsd-dispatch-claim/v1', wave: wave.number, manifest_sha256: manifestDigest };
++  try {
++    publishPrivateFile(wave.claimPath, `${JSON.stringify(claim)}\n`);
++  } catch (error) {
++    if (error.code === 'EEXIST') refuse(claimedMessage(wave));
++    throw error;
++  }
++}
++
++// The claim only guards the window before the result and receipt exist; once
++// both are published the receipt itself prevents a relaunch. A leftover claim
++// is harmless, so a failure here warns instead of failing a complete wave.
++function releaseClaim(wave) {
++  try {
++    fs.unlinkSync(wave.claimPath);
++    const fd = fs.openSync(path.dirname(wave.claimPath), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
++    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
++  } catch (error) {
++    process.stderr.write(`ffs-supervised-dispatch: wave ${wave.number} is complete, but its dispatch claim could not be removed: ${error.message}\n`);
++  }
 +}
 +
 +async function runWaveMode(flag) {
@@ -567,8 +626,10 @@ index 0000000..47ad572
 +}
 +
 +async function main() {
-+  const waveFlag = WAVE_MODES.find((flag) => process.argv.includes(flag));
-+  if (waveFlag && (process.argv.length !== 4 || process.argv[2] !== waveFlag)) {
++  // A wave mode is recognized only as the first argument; every legacy form
++  // keeps its exact former parsing, whatever its values are.
++  const waveFlag = WAVE_MODES.includes(process.argv[2]) ? process.argv[2] : null;
++  if (waveFlag && process.argv.length !== 4) {
 +    return fail(`usage: ${waveFlag} <wave-number> (takes no other argument)`);
 +  }
 +  if (waveFlag && waveFlag !== '--dispatch-wave') {
@@ -590,10 +651,12 @@ index 0000000..47ad572
 +  }
 +  let manifestPath = option('--manifest');
 +  let outputPath = option('--output');
++  let wave = null;
 +  if (waveFlag) {
 +    try {
-+      const wave = bindWave(process.argv[3]);
++      wave = bindWave(process.argv[3]);
 +      if (!wave.manifestPresent) refuse(`no wave manifest at ${wave.manifestPath}; run --write-wave-manifest first.`);
++      if (wave.claimPresent && wave.retained !== 'complete') refuse(claimedMessage(wave));
 +      manifestPath = wave.manifestPath;
 +      outputPath = wave.resultPath;
 +    } catch (error) {
@@ -605,6 +668,7 @@ index 0000000..47ad572
 +  if (process.env[DETACHED_ENV] !== '1') return runDetached(outputPath);
 +  try {
 +    const manifest = validateManifest(readJson(manifestPath));
++    if (wave) assertManifestForWave(manifest, wave);
 +    const command = commandFromEnvironment();
 +    const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 +    const receiptPath = outputPath + '.receipt.json';
@@ -631,22 +695,19 @@ index 0000000..47ad572
 +      validateReply(JSON.parse(raw.toString('utf8')), manifest);
 +      return;
 +    }
++    // ponytail: the exists check above and this claim are two syscalls; a process descheduled for a whole launch could claim after the winner released. Close with a re-check if it ever matters.
++    if (wave) claimWave(wave, manifestDigest);
 +    const reply = validateReply(await launch(command, manifest), manifest);
 +    const raw = `${JSON.stringify(reply, null, 2)}\n`;
-+    const publish = (file, bytes) => {
-+      const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-+      try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-+      const directory = fs.openSync(require('node:path').dirname(file), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
-+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
-+    };
-+    publish(outputPath, raw);
-+    publish(receiptPath, JSON.stringify({schema:'ffs.gsd-no-commit-completion/v1',
++    publishPrivateFile(outputPath, raw);
++    publishPrivateFile(receiptPath, JSON.stringify({schema:'ffs.gsd-no-commit-completion/v1',
 +      manifest_sha256:manifestDigest, result_sha256:digest(raw), initial_head:manifest.initial_head,
 +      commit_mode:manifest.commit_mode}) + '\n');
++    if (wave) releaseClaim(wave);
 +  } catch (error) {
 +    return fail(
 +      error.message,
-+      error.message.includes('admission') || error.message.includes('FFS_SUPERVISED_')
++      error instanceof Refusal || error.message.includes('admission') || error.message.includes('FFS_SUPERVISED_')
 +        ? ADMISSION_EXIT : 1,
 +    );
 +  }
@@ -769,10 +830,10 @@ index eb9464b..e962e92 100644
  
     Omit `isolation="worktree"` from the Agent call. Before composing the prompt, read and execute
 diff --git a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-index 2c7eaa8..3ae628e 100644
+index 2c7eaa8..bc850f2 100644
 --- a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
 +++ b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-@@ -338,3 +338,149 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
+@@ -338,3 +338,163 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
  
  > **Declared-scope conformance (#2596):** ADR-1239 specifies that *both* isolation adapters route their merge through a check that each plan branch's committed diff stayed inside its declared `files_modified` scope. That check now exists, advisory-first, and is wired into **both** paths: this one passes `--files "$PLAN_FILES"` to `worktree create` above, the harness path passes it to `worktree record-agent`, and `cleanup-wave` runs the one comparison for both. A path outside the declared scope is reported in the result's `warnings` array; it does not block the merge. Promotion to a hard gate is a separate, disclosed change.
  
@@ -793,7 +854,8 @@ index 2c7eaa8..3ae628e 100644
 +directory is the admitted workspace, using only the environment the FFS host
 +already provides (`FFS_SUPERVISED_ADMISSION_FILE`,
 +`FFS_SUPERVISED_DISPATCH_COMMAND_JSON`, `FFS_SUPERVISED_COMMIT_MODE`, and
-+`CODEX_HOME` or `CLAUDE_CONFIG_DIR`, which locates the adapter) plus the inputs
++`CODEX_HOME` or `CLAUDE_CONFIG_DIR`, which locates the adapter; each block
++refuses with exit 78 when neither is set) plus the inputs
 +you `export` at the top of that same tool call: `FFS_WAVE_NUMBER` (the current
 +dependency-wave number) and, for the write step only, `FFS_WAVE_MANIFEST_JSON`.
 +Never carry a shell variable from one tool call into the next, and never write
@@ -819,6 +881,7 @@ index 2c7eaa8..3ae628e 100644
 +   `--prepare-wave` mode (the first block):
 +
 +   ```bash
++   [ -n "${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}" ] || { echo "FATAL: neither CODEX_HOME nor CLAUDE_CONFIG_DIR is set; cannot locate the FFS adapter." >&2; exit 78; }
 +   node "${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}/gsd-core/bin/ffs-supervised-dispatch.cjs" --prepare-wave "${FFS_WAVE_NUMBER:-}" || {
 +     echo "FATAL: FFS admission or wave directory refused; refusing to dispatch." >&2
 +     exit 78
@@ -831,10 +894,11 @@ index 2c7eaa8..3ae628e 100644
 +   workspace authority: `git rev-parse --show-toplevel` of the current
 +   directory must be byte-for-byte equal to it. It validates the admission
 +   `activity_id` as a portable path segment (`[A-Za-z0-9][A-Za-z0-9._-]*`) and
-+   `FFS_WAVE_NUMBER` as `[1-9][0-9]*`, creates `.planning/.ffs-supervised`,
-+   its `waves` directory, and the activity directory as private `0700`
++   `FFS_WAVE_NUMBER` as `[1-9][0-9]*`, requires `.planning` to be a real
++   directory (never a symlink), creates `.planning/.ffs-supervised`, its
++   `waves` directory, and the activity directory as private `0700`
 +   directories without ever following a symlink, and classifies retained
-+   evidence. A missing, unreadable, or malformed admission, a workspace
++   evidence (a dispatch claim without a complete set counts as partial). A missing, unreadable, or malformed admission, a workspace
 +   mismatch, a malformed value, a symlink, a non-private directory, or a
 +   partial retained set (`partial retained wave evidence; refusing without
 +   relaunch`) is a capability refusal: exit 78, one named reason on stderr,
@@ -882,6 +946,7 @@ index 2c7eaa8..3ae628e 100644
 +   or a symlink target:
 +
 +   ```bash
++   [ -n "${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}" ] || { echo "FATAL: neither CODEX_HOME nor CLAUDE_CONFIG_DIR is set; cannot locate the FFS adapter." >&2; exit 78; }
 +   printf '%s' "${FFS_WAVE_MANIFEST_JSON:-}" | node "${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}/gsd-core/bin/ffs-supervised-dispatch.cjs" --write-wave-manifest "${FFS_WAVE_NUMBER:-}" || {
 +     echo "FATAL: FFS wave manifest was not accepted; refusing to dispatch." >&2
 +     exit 78
@@ -889,11 +954,21 @@ index 2c7eaa8..3ae628e 100644
 +   ```
 +
 +   Then dispatch the wave in either branch with the adapter's `--dispatch-wave`
-+   mode (the third block). It re-runs the same binding and runs the manifest at
-+   the resolved path, with its result and receipt beside it; there is no path
-+   to pass:
++   mode (the third block). It re-runs the same binding, requires the retained
++   manifest's `wave`, `admission`, and `orchestrator_root` to be the bound ones
++   (before it validates a receipt or launches anything), and runs the manifest
++   at the resolved path, with its result and receipt beside it; there is no
++   path to pass. Before it launches the supervisor it takes a private
++   exclusive claim for the wave (a `0600` file beside the manifest) and removes
++   it only after the result and receipt are published. A claim with no
++   complete result and receipt means the launch is uncertain (another dispatch
++   is still running, or one died or was rejected): the adapter refuses with
++   exit 78 and never relaunches, so keep the manifest, claim, and worktrees as
++   recovery evidence. A complete retained set validates its receipt and
++   returns without launching:
 +
 +   ```bash
++   [ -n "${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}" ] || { echo "FATAL: neither CODEX_HOME nor CLAUDE_CONFIG_DIR is set; cannot locate the FFS adapter." >&2; exit 78; }
 +   node "${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}/gsd-core/bin/ffs-supervised-dispatch.cjs" --dispatch-wave "${FFS_WAVE_NUMBER:-}" || {
 +     echo "FATAL: FFS supervisor rejected the allocated wave; retaining manifest, result, and worktrees for recovery." >&2
 +     exit 78

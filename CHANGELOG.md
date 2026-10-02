@@ -8,6 +8,43 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-02, spec-014 Release C: 1c r1 cross-vendor review follow-up)
+
+Seven findings on the wave helper, each with a test in
+`tests/test_ffs_supervised_wave_helper.py`:
+
+- `--dispatch-wave` could launch the same manifest twice (a repeat after a
+  launch that died, or two at once); the removed template refused a
+  manifest-only set. It now takes a private exclusive claim
+  (`wave-<N>.dispatch-claim.json`, `0600`, created `O_EXCL|O_NOFOLLOW`, fsynced
+  with its directory) before it launches, and removes it only after the result
+  and receipt are published. A claim with no complete result and receipt is an
+  uncertain launch: exit 78, never a relaunch, and it also makes the set
+  partial for `--prepare-wave` and `--write-wave-manifest`. A complete set still
+  validates its receipt and returns; a claim left beside one is ignored. No
+  reader enumerates the wave directory: `supervisor.py`, `wave_candidate.py` and
+  `candidate_chain.py` build explicit `wave-<N>.*` paths, and the workspace
+  inventory in `wave_execution.py` prunes the whole `.planning/.ffs-supervised`
+  subtree.
+- `--dispatch-wave` now runs the writer's manifest binding (`wave`, `admission`,
+  `orchestrator_root`) on the manifest it reads, before it validates a receipt
+  or launches, so another wave's retained evidence is refused.
+- `.planning` must be a real directory (not a symlink, not a file): `mkdir`
+  resolved the path string, so a symlink there moved the private directories out
+  of the workspace. After creation the wave directory's real path must equal its
+  expected path before any file is created or read. Residual: a process of the
+  same user can still swap a path component between those checks and the later
+  path-based opens (Node has no `openat`); the `0700` directories keep every
+  other user out.
+- A failing `fchmod` or `close` while preparing a private directory is a named
+  refusal (78), not a raw exit 1.
+- Each documented block refuses with a named exit-78 message, before it runs
+  `node`, when neither `CODEX_HOME` nor `CLAUDE_CONFIG_DIR` is set.
+- A wave mode is recognized only as the first argument, so a legacy form whose
+  value happens to be a mode name keeps its exact former behavior.
+- `--write-wave-manifest` refusing a lone result or a lone receipt is pinned by
+  a test instead of by a prose match in the doc.
+
 ### Fixed (2026-10-02, spec-014 Release C: 1c shipped supervised-dispatch wave helper)
 
 - Live M5b (`e2e-m5b-phase02`, FFS `1ebe2a3`): the outer GSD orchestrator
