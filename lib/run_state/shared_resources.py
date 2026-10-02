@@ -217,13 +217,19 @@ class SharedResourceCoordinator:
                     return None  # Legacy and prepaid group paths use different admission records.
                 # One lease per ticket: an unbound-released ticket and its retry both retain theirs.
                 prefix = "resource-lease:" + queue_key + ":"
-                # Only an all-digit suffix (the ticket sequence) is this request's lease;
-                # a longer, colon-extended request key on the same activity is ignored.
+                # A lease is this request's only when its key ends in its own ticket
+                # sequence and its payload names this request.  Any other one (a
+                # colon-extended request key, or a pre-change single-key lease such as
+                # request 'first:42') is another request's record and is skipped.
                 leases = [(row["idempotency_key"], event(row["idempotency_key"])) for row in tx.execute(
                     "SELECT idempotency_key FROM authority_event_keys WHERE activity_id=? "
                     "AND substr(idempotency_key,1,?)=?", (intent["activity_id"], len(prefix), prefix))
                     if row["idempotency_key"][len(prefix):].isascii()
                     and row["idempotency_key"][len(prefix):].isdigit()]
+                leases = [(key, lease) for key, lease in leases
+                          if isinstance(lease, dict) and isinstance(lease.get("request"), dict)
+                          and lease["request"].get("request_key") == queue_key
+                          and key == prefix + str(lease.get("sequence"))]
                 if (dispatch is None or dispatch["intent_id"] != intent_id
                         or binding["schema"] != "ffs.shared-admission-request/v1"
                         or binding["repository_id"] != self.token.repository_id
@@ -233,7 +239,7 @@ class SharedResourceCoordinator:
                         or binding["request_sha256"] != hashlib.sha256(_encoded(dispatch["request"]).encode()).hexdigest()
                         or any(lease["schema"] != "ffs.shared-resource-lease/v1" or lease["request"] != binding
                                or type(lease["sequence"]) is not int or not isinstance(lease["ticket"], str)
-                               or key != prefix + str(lease["sequence"]) for key, lease in leases)):
+                               for _key, lease in leases)):
                     raise ValueError("retained lease binding changed")
             bound = [(lease, AdmissionTicket(lease["sequence"], lease["ticket"], current)) for _key, lease in leases]
             bound = [(lease, ticket, self.queue.status(ticket)) for lease, ticket in bound]
