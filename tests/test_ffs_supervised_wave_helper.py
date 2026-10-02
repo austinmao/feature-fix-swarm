@@ -764,3 +764,71 @@ def test_a_leftover_dispatch_claim_beside_a_complete_set_neither_blocks_nor_rela
     again = bench.adapter("--dispatch-wave", "1")
     assert again.returncode == 0, again.stderr
     assert bench.launches() == 1
+
+
+STUB_CLAIM_GATE = """\
+const fs = require('node:fs');
+const gate = process.env.FAKE_CLAIM_GATE;
+const parked = process.env.FAKE_CLAIM_PARKED;
+if (gate && parked) {
+  const realOpen = fs.openSync;
+  fs.openSync = function (file, ...rest) {
+    if (typeof file === 'string' && file.endsWith('.dispatch-claim.json')) {
+      fs.writeFileSync(parked, JSON.stringify({
+        pid: process.pid, detached: process.env.FFS_SUPERVISED_DISPATCH_DETACHED === '1',
+      }));
+      const sleeper = new Int32Array(new SharedArrayBuffer(4));
+      while (!fs.existsSync(gate)) Atomics.wait(sleeper, 0, 0, 20);
+    }
+    return realOpen.call(this, file, ...rest);
+  };
+}
+"""
+
+
+def test_a_dispatch_that_claims_after_the_winner_released_does_not_relaunch(
+    bench: Bench, tmp_path: Path,
+) -> None:
+    """r1-1 residual: P2 passes the result/receipt exists() check, the winner P1
+    then claims, launches, publishes and releases, and P2's claim succeeds. P2
+    must re-check after claiming and take the receipt-validation path.
+
+    The race is made deterministic with a --require preload that parks the
+    process opening a *.dispatch-claim.json (the claim create) until a gate file
+    exists. NODE_OPTIONS reaches the detached child through its inherited
+    environment; the parked marker proves the preload ran in the child that
+    claims, not in the foreground."""
+    _written_wave(bench)
+    preload = tmp_path / "claim-gate.cjs"
+    preload.write_text(STUB_CLAIM_GATE)
+    gate, parked = tmp_path / "gate", tmp_path / "parked.json"
+    second_environment = bench.env(
+        NODE_OPTIONS=f"--require {preload}", FAKE_CLAIM_GATE=str(gate), FAKE_CLAIM_PARKED=str(parked),
+    )
+    second = subprocess.Popen(
+        ["node", str(bench.package / ADAPTER_RELATIVE), "--dispatch-wave", "1"], cwd=bench.workspace,
+        env=second_environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not parked.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert parked.exists(), "the preload never parked the process that creates the claim"
+        marker = json.loads(parked.read_text())
+        assert marker["detached"] is True and marker["pid"] != second.pid
+        assert bench.launches() == 0, "P2 must be parked before it launches"
+        winner = bench.adapter("--dispatch-wave", "1")
+        assert winner.returncode == 0, winner.stderr
+        assert bench.launches() == 1
+        assert sorted(entry.name for entry in bench.wave_dir.iterdir()) == [
+            bench.wave_file("manifest").name, bench.wave_file("result").name, bench.wave_file("receipt").name,
+        ], "the winner published and released its claim"
+    finally:
+        gate.write_text("go")
+        _, second_error = second.communicate(timeout=60)
+    assert bench.launches() == 1, "the late claimer launched the wave a second time"
+    # P2 validates the winner's receipt and returns normally (0), not a refusal.
+    assert second.returncode == 0, second_error
+    assert sorted(entry.name for entry in bench.wave_dir.iterdir()) == [
+        bench.wave_file("manifest").name, bench.wave_file("result").name, bench.wave_file("receipt").name,
+    ], "the late claimer released its own claim"
