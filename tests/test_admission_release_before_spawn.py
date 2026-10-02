@@ -124,6 +124,27 @@ def test_a_retried_request_restores_its_own_bound_lease_after_an_unbound_release
     assert _lease(first) == _UNBOUND_RELEASE and retried["launch_intent_id"] == handle.intent_id
 
 
+def test_restore_ignores_a_longer_request_keys_lease_on_the_same_activity(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    handle = supervisor.launch(request)
+    # A colon-extended request key on the same activity leaves its own lease event (it was refused).
+    with pytest.raises(SupervisorRefused, match="INTENT_RECONCILIATION_REQUIRED"):
+        supervisor.launch(replace(request, request_key=request.request_key + ":b"))
+    with store.read_transaction() as tx:
+        keys = sorted(row[0] for row in tx.execute(
+            "SELECT idempotency_key FROM authority_event_keys WHERE activity_id=? "
+            "AND idempotency_key LIKE 'resource-lease:%'", (request.activity_id,)))
+    assert len(keys) == 2 and keys[1].startswith(keys[0].rsplit(":", 1)[0] + ":b:")
+    handle.process.wait(timeout=15)
+    resumed = Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
+                         shared_resource_coordinator=supervisor.shared_resource_coordinator,
+                         resource_demand_policy=cold_start_demand)
+    recovered = resumed.resume_monitored(handle.intent_id)
+    assert resumed.finish(recovered, timeout=15, token_usage=0)["returncode"] == 0
+    assert [row["launch_intent_id"] for row in queue.snapshot() if row["status"] == "released"][0] == handle.intent_id
+
+
 def test_a_cleanup_failure_never_replaces_the_launch_refusal(tmp_path, monkeypatch):
     supervisor, _store, request, queue = _plain(tmp_path)
 
