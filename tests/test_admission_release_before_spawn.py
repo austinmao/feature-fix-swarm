@@ -12,6 +12,7 @@ and a fixture resource observation.  Crashes are real ``os._exit`` of a subproce
 Not host, model or capacity-measurement qualification.
 """
 from dataclasses import replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,7 +30,7 @@ from run_state.ownership import OwnershipRefused, StartRequest, reserve_resource
 from run_state.resource_groups import GroupMember, GroupPlan, ResourceGroupRefused, ResourceParentGroupRegistry
 from run_state.resource_observation import ResourceDemand, ResourceObservation
 from run_state.shared_resources import SharedResourceCoordinator, cold_start_demand
-from run_state.state import ControlStore
+from run_state.state import ControlStore, ControlStoreRefused
 from run_state.supervisor import DispatchRequest, Supervisor, SupervisorRefused
 from run_state.workspace import (
     begin_child_workspace_preparation, inspect_workspace, load_input_snapshot, prepare_workspace,
@@ -143,6 +144,58 @@ def test_restore_ignores_a_longer_request_keys_lease_on_the_same_activity(tmp_pa
     recovered = resumed.resume_monitored(handle.intent_id)
     assert resumed.finish(recovered, timeout=15, token_usage=0)["returncode"] == 0
     assert [row["launch_intent_id"] for row in queue.snapshot() if row["status"] == "released"][0] == handle.intent_id
+
+
+def _resume(supervisor, store):
+    return Supervisor(store, supervisor.token, evidence_root=supervisor.evidence_root,
+                      shared_resource_coordinator=supervisor.shared_resource_coordinator,
+                      resource_demand_policy=cold_start_demand)
+
+
+def test_restore_skips_a_pre_change_single_key_lease_of_another_request_on_the_same_activity(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    token = supervisor.token
+    # An earlier writer (pre-change code) keyed one lease per request: 'resource-lease:<queue_key>'.
+    # Request 'first:42' on this activity therefore left 'resource-lease:<activity>:first:42'.
+    other = request.activity_id + ":" + request.request_key + ":42"
+    with store.read_transaction() as tx:
+        owner = tx.execute("SELECT * FROM control_reservations WHERE resource_type='run' AND held=1").fetchone()
+    binding = {"schema": "ffs.shared-admission-request/v1", "repository_id": token.repository_id,
+               "run_id": token.run_id, "activity_id": request.activity_id, "request_key": other,
+               "dispatch_request_key": request.request_key + ":42", "generation": token.generation,
+               "request_sha256": "c" * 64, "owner_set": owner["owner_set"],
+               "supervisor": {key: owner[key] for key in ("host_id", "boot_id", "pid", "start_token")}}
+    store.record_event_once(token, request.activity_id, "resource-lease:" + other, {
+        "schema": "ffs.shared-resource-lease/v1", "sequence": 7, "ticket": "f" * 64, "request": binding,
+        "demand": cold_start_demand(request).record(), "group_id": None, "group_width": 1})
+    request = replace(request, monitor_result=True)
+    handle = supervisor.launch(request)
+    handle.process.wait(timeout=15)
+    resumed = _resume(supervisor, store)
+    recovered = resumed.resume_monitored(handle.intent_id)
+    assert resumed.finish(recovered, timeout=15, token_usage=0)["returncode"] == 0
+    assert [(row["status"], row["launch_intent_id"]) for row in queue.snapshot()] == [("released", handle.intent_id)]
+
+
+def test_restore_still_refuses_a_tampered_lease_of_its_own_request(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    handle = supervisor.launch(request)
+    handle.process.wait(timeout=15)
+    with store.transaction() as tx:
+        [row] = tx.execute("SELECT k.event_id,e.payload FROM authority_event_keys k JOIN control_events e "
+                           "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key LIKE 'resource-lease:%'",
+                           (request.activity_id,)).fetchall()
+        wrapped = json.loads(row["payload"])
+        wrapped["data"]["request"]["request_sha256"] = "0" * 64  # still names this request, consistently rehashed
+        data = json.dumps(wrapped["data"], sort_keys=True, separators=(",", ":"))
+        tx.execute("UPDATE control_events SET payload=? WHERE id=?",
+                   (json.dumps(wrapped, sort_keys=True, separators=(",", ":")), row["event_id"]))
+        tx.execute("UPDATE authority_event_keys SET payload_hash=? WHERE event_id=?",
+                   (hashlib.sha256(data.encode()).hexdigest(), row["event_id"]))
+    with pytest.raises(ControlStoreRefused, match="SHARED_RESOURCE_LEASE_RESTORE_REQUIRED"):
+        _resume(supervisor, store).resume_monitored(handle.intent_id)
+    assert queue.snapshot()[0]["status"] == "active"
 
 
 def test_a_cleanup_failure_never_replaces_the_launch_refusal(tmp_path, monkeypatch):
