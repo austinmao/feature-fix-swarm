@@ -18,10 +18,10 @@ index c3f5473..187a9ba 100755
    }
 diff --git a/gsd-core/bin/ffs-supervised-dispatch.cjs b/gsd-core/bin/ffs-supervised-dispatch.cjs
 new file mode 100644
-index 0000000..b6d27e1
+index 0000000..969aca6
 --- /dev/null
 +++ b/gsd-core/bin/ffs-supervised-dispatch.cjs
-@@ -0,0 +1,692 @@
+@@ -0,0 +1,698 @@
 +#!/usr/bin/env node
 +'use strict';
 +
@@ -686,17 +686,23 @@ index 0000000..b6d27e1
 +    // Completion binds the entire frozen request, not merely plan IDs or HEAD.
 +    // A partial publication is uncertain and must never launch a second wave.
 +    const exists = file => { try { fs.lstatSync(file); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } };
-+    if (exists(outputPath) || exists(receiptPath)) {
-+      const raw = privateBytes(outputPath);
-+      const receipt = JSON.parse(privateBytes(receiptPath).toString('utf8'));
-+      const expected = {schema:'ffs.gsd-no-commit-completion/v1', manifest_sha256:manifestDigest,
-+        result_sha256:digest(raw), initial_head:manifest.initial_head, commit_mode:manifest.commit_mode};
-+      if (canonicalJson(receipt) !== canonicalJson(expected)) throw new Error('completion receipt input mismatch');
-+      validateReply(JSON.parse(raw.toString('utf8')), manifest);
-+      return;
++    // The winner publishes its result and receipt before it releases its claim,
++    // so a dispatch whose claim succeeds late finds them on the second pass:
++    // it releases its own claim and validates instead of launching again.
++    for (let claimed = false; ; claimed = true) {
++      if (exists(outputPath) || exists(receiptPath)) {
++        if (claimed) releaseClaim(wave);
++        const raw = privateBytes(outputPath);
++        const receipt = JSON.parse(privateBytes(receiptPath).toString('utf8'));
++        const expected = {schema:'ffs.gsd-no-commit-completion/v1', manifest_sha256:manifestDigest,
++          result_sha256:digest(raw), initial_head:manifest.initial_head, commit_mode:manifest.commit_mode};
++        if (canonicalJson(receipt) !== canonicalJson(expected)) throw new Error('completion receipt input mismatch');
++        validateReply(JSON.parse(raw.toString('utf8')), manifest);
++        return;
++      }
++      if (!wave || claimed) break;
++      claimWave(wave, manifestDigest);
 +    }
-+    // ponytail: the exists check above and this claim are two syscalls; a process descheduled for a whole launch could claim after the winner released. Close with a re-check if it ever matters.
-+    if (wave) claimWave(wave, manifestDigest);
 +    const reply = validateReply(await launch(command, manifest), manifest);
 +    const raw = `${JSON.stringify(reply, null, 2)}\n`;
 +    publishPrivateFile(outputPath, raw);

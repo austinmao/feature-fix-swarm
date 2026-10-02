@@ -28,7 +28,7 @@ EXPECTED = {
     "gsd-tools.cjs": "sha256:f0b3dde4d9bca6c81b53459c51547ea5ea5daeec965431481815cd3b94ba3328",
     "execute-phase.md": "sha256:82ad1b4049f3660c8a979bcd41b7fa9b65bc44ad16a2e2de129ffc3cf31f2a97",
     "executor-isolation-dispatch.md": "sha256:f204df84b2523dc28b399edbc9d7e9e4c63816e028bdce3c8c081acffe861732",
-    "ffs-supervised-dispatch.cjs": "sha256:7e64c86ecc588a2313e861ebb69448cdb62a26ab12e705e3100ead3110ca25dc",
+    "ffs-supervised-dispatch.cjs": "sha256:9579f3b394c6657eb6ac379a717425e3540b54ecb0fb3d4fb7cdf6aa9747c21b",
 }
 BASELINE = {
     "install.js": "sha256:0acbd01933783537f934b33b6cc9132ff8e11ae37f0fa88ff63bc402aa0ae861",

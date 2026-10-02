@@ -21,7 +21,10 @@ Seven findings on the wave helper, each with a test in
   and receipt are published. A claim with no complete result and receipt is an
   uncertain launch: exit 78, never a relaunch, and it also makes the set
   partial for `--prepare-wave` and `--write-wave-manifest`. A complete set still
-  validates its receipt and returns; a claim left beside one is ignored. No
+  validates its receipt and returns; a claim left beside one is ignored. A
+  dispatch whose claim succeeds only after the winner released (it passed the
+  result/receipt check first) re-checks after claiming, releases its own claim,
+  and validates the winner's receipt instead of launching again. No
   reader enumerates the wave directory: `supervisor.py`, `wave_candidate.py` and
   `candidate_chain.py` build explicit `wave-<N>.*` paths, and the workspace
   inventory in `wave_execution.py` prunes the whole `.planning/.ffs-supervised`
