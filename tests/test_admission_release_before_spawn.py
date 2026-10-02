@@ -198,6 +198,30 @@ def test_restore_still_refuses_a_tampered_lease_of_its_own_request(tmp_path):
     assert queue.snapshot()[0]["status"] == "active"
 
 
+def test_restore_refuses_a_malformed_lease_that_names_its_own_request(tmp_path):
+    supervisor, store, request, queue = _plain(tmp_path)
+    request = replace(request, monitor_result=True)
+    with pytest.raises(OwnershipRefused, match="TOKEN_LIMIT_EXHAUSTED"):
+        supervisor.launch(replace(request, token_reservation=101))
+    handle = supervisor.launch(request)  # the same-request retry takes its own, valid lease
+    handle.process.wait(timeout=15)
+    first = queue.snapshot()[0]
+    with store.transaction() as tx:
+        [row] = tx.execute("SELECT k.event_id,e.payload FROM authority_event_keys k JOIN control_events e "
+                           "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?",
+                           (request.activity_id, "resource-lease:" + request.activity_id + ":" + request.request_key
+                            + ":" + str(first["sequence"]))).fetchall()
+        wrapped = json.loads(row["payload"])
+        wrapped["data"]["sequence"] = 0  # still names this request; its key no longer matches, consistently rehashed
+        data = json.dumps(wrapped["data"], sort_keys=True, separators=(",", ":"))
+        tx.execute("UPDATE control_events SET payload=? WHERE id=?",
+                   (json.dumps(wrapped, sort_keys=True, separators=(",", ":")), row["event_id"]))
+        tx.execute("UPDATE authority_event_keys SET payload_hash=? WHERE event_id=?",
+                   (hashlib.sha256(data.encode()).hexdigest(), row["event_id"]))
+    with pytest.raises(ControlStoreRefused, match="SHARED_RESOURCE_LEASE_RESTORE_REQUIRED"):
+        _resume(supervisor, store).resume_monitored(handle.intent_id)
+
+
 def test_a_cleanup_failure_never_replaces_the_launch_refusal(tmp_path, monkeypatch):
     supervisor, _store, request, queue = _plain(tmp_path)
 
