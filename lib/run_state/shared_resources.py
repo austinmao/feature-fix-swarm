@@ -217,9 +217,13 @@ class SharedResourceCoordinator:
                     return None  # Legacy and prepaid group paths use different admission records.
                 # One lease per ticket: an unbound-released ticket and its retry both retain theirs.
                 prefix = "resource-lease:" + queue_key + ":"
+                # Only an all-digit suffix (the ticket sequence) is this request's lease;
+                # a longer, colon-extended request key on the same activity is ignored.
                 leases = [(row["idempotency_key"], event(row["idempotency_key"])) for row in tx.execute(
                     "SELECT idempotency_key FROM authority_event_keys WHERE activity_id=? "
-                    "AND substr(idempotency_key,1,?)=?", (intent["activity_id"], len(prefix), prefix))]
+                    "AND substr(idempotency_key,1,?)=?", (intent["activity_id"], len(prefix), prefix))
+                    if row["idempotency_key"][len(prefix):].isascii()
+                    and row["idempotency_key"][len(prefix):].isdigit()]
                 if (dispatch is None or dispatch["intent_id"] != intent_id
                         or binding["schema"] != "ffs.shared-admission-request/v1"
                         or binding["repository_id"] != self.token.repository_id
