@@ -30,7 +30,7 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
         def execute(self, sql, *_args):
             # The session seam asks for retained replay rows before preparing anything;
             # a fresh run has none.  The root workspace row is the only retained row here.
-            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt",
+            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt", "authority_launch_intents",
                                                   "runtime_identity FROM authority_child_bindings",
                                                   "idempotency_key='frontend-operation'")):
                 return SimpleNamespace(fetchone=lambda: None)
@@ -196,7 +196,7 @@ def test_managed_claude_outer_qualify_receives_scoped_project(tmp_path, monkeypa
 
     class Transaction:
         def execute(self, sql, *_args):
-            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt",
+            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt", "authority_launch_intents",
                                                   "runtime_identity FROM authority_child_bindings",
                                                   "idempotency_key='frontend-operation'")):
                 return SimpleNamespace(fetchone=lambda: None)
@@ -318,7 +318,7 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
             if "idempotency_key='frontend-operation'" in sql:
                 return SimpleNamespace(fetchone=lambda: None if operation_payload is None
                                        else {"payload": operation_payload})
-            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt",
+            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt", "authority_launch_intents",
                                                   "runtime_identity FROM authority_child_bindings")):
                 return SimpleNamespace(fetchone=lambda: None)
             return SimpleNamespace(fetchone=lambda: {"state": "ready", "kind": "execute"})
@@ -475,7 +475,7 @@ def test_managed_claude_outer_prompt_for_task_swarm_names_staged_command_under_t
 
     class Transaction:
         def execute(self, sql, *_args):
-            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt",
+            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt", "authority_launch_intents",
                                                   "runtime_identity FROM authority_child_bindings",
                                                   "idempotency_key='frontend-operation'")):
                 return SimpleNamespace(fetchone=lambda: None)
