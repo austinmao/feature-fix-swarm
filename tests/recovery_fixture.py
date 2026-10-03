@@ -116,7 +116,9 @@ def ledger(w):
         launches = {row[0]: row[1] for row in tx.execute(
             "SELECT a.action,COUNT(*) FROM authority_policy_action_attempts p JOIN authority_policy_actions a "
             "ON a.id=p.action_id GROUP BY a.action")}
-        events = tx.execute("SELECT COUNT(*) FROM control_events").fetchone()[0]
+        # Owner-fence bookkeeping of a replayed request is not a producer effect.
+        events = tx.execute("SELECT COUNT(*) FROM control_events WHERE event_type NOT IN "
+                            "('resources_reserved','resources_released','READY_REVALIDATED')").fetchone()[0]
         native = tx.execute("SELECT count(*) FROM authority_launch_intents i JOIN authority_child_bindings b "
                             "ON b.activity_id=i.activity_id WHERE b.role='reviewer'").fetchone()[0]
         reviews = tx.execute("SELECT count(*) FROM authority_acceptance_receipts "

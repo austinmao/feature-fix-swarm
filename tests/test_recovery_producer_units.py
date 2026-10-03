@@ -116,7 +116,7 @@ def test_claude_qualification_admits_the_recovery_role_and_still_refuses_invento
 @pytest.mark.parametrize("action", ["diagnosis", "recovery_trial"])
 def test_an_unlaunched_diagnosis_or_trial_reservation_cancels_and_an_issued_one_never_does(
         tmp_path, action, _stable_test_identity):
-    from test_run_policy_budget import INPUT_A, INPUT_B, _owned
+    from test_run_policy_budget import INPUT_A, _owned
     store, owner, activity = _owned(tmp_path)
     token = owner.token
     cycle = 1 if action == "recovery_trial" else None
@@ -130,7 +130,7 @@ def test_an_unlaunched_diagnosis_or_trial_reservation_cancels_and_an_issued_one_
     with pytest.raises(OwnershipRefused, match="POLICY_ACTION_CANCELLED"):
         store.reserve_policy_action(token, action=action, logical_key="launch", input_hash=INPUT_A,
                                     recovery_cycle=cycle)
-    issued = store.reserve_policy_action(token, action=action, logical_key="launch", input_hash=INPUT_B,
+    issued = store.reserve_policy_action(token, action=action, logical_key="issued", input_hash=INPUT_A,
                                          recovery_cycle=cycle)
     store.reserve_launch(activity.id, token, policy_action_id=issued.id)
     with pytest.raises(OwnershipRefused, match="POLICY_ACTION_ALREADY_ISSUED"):
@@ -235,6 +235,16 @@ CODEX_MESSAGE = {"type": "item.completed", "item": {"type": "agent_message", "te
 def test_host_final_text_returns_the_single_final_message(host, records, text):
     from run_state.sealed_review import _host_final_text
     assert _host_final_text({"host_receipt": {"status": "complete", **host}}, _stream(*records)) == text
+
+
+def test_host_final_text_takes_the_last_message_of_a_full_tool_child_only_when_not_single():
+    from run_state.sealed_review import _host_final_text
+    narrated = {"type": "item.completed", "item": {"type": "agent_message", "text": "narration"}}
+    result = {"host_receipt": {"status": "complete", "schema": "ffs.codex-invocation-receipt/v1"}}
+    raw = _stream(narrated, CODEX_MESSAGE)
+    assert _host_final_text(result, raw, single=False) == "diagnosis text"
+    with pytest.raises(ValueError):
+        _host_final_text(result, raw)
 
 
 @pytest.mark.parametrize(("host", "records"), [

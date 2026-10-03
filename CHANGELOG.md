@@ -8,6 +8,41 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-03, spec-014 E8 prerequisite 3a: recovery producer)
+
+- A retained handback at stage `RECOVER` is no longer a dead end. The stub
+  that refused `RECOVERY_PRODUCER_UNAVAILABLE` is replaced by
+  `lib/run_state/recovery_producer.py`: one recovery cycle per handback, a
+  diagnosis child and one isolated trial child, read back by the existing
+  `RecoveryController`; a winner is integrated by the existing journaled path
+  and the run continues from its saved stage. This covers the three M3 shapes
+  (a refused final review) as well as a failed mapped check. No winner stops at
+  `NEEDS_DECISION`; the shared candidate is never touched by a trial.
+- The cycle is bound to the current candidate (its live base and the digest
+  the handback froze), so a candidate advanced before the handback is the one
+  recovered. The diagnosis child is captured and qualified before the cycle
+  is reserved, and the cycle is reserved with the launch demand of the whole
+  cycle, so a host, qualification or budget refusal
+  (`POLICY_STAGE_INFEASIBLE`) leaves the handback retained with no cycle spent.
+- Replay is keyed at every step. A retained intent is resumed only by the
+  owner that issued it; under a later owner fence it refuses
+  `INTENT_RECONCILIATION_REQUIRED` or the new `RECOVERY_RECONCILIATION_REQUIRED`
+  and never relaunches. The controller's generation checks are unchanged.
+  An unlaunched grant of an earlier owner is released and re-reserved.
+- `resumable_outer_completion` now also admits a retained `RECOVER` stage and
+  an `EXECUTE` stage that carries a recovery continuation; a bare `EXECUTE`
+  stage and an unsealed run still refuse `REQUEST_ALREADY_COMPLETED`. The
+  Claude session rebinds a retained outer on resume, as the Codex session
+  does. The qualification role checks admit `recovery`; the unlaunched-grant
+  cancel set adds `diagnosis` and `recovery_trial` (never `repair`).
+- New refusal codes: `RECOVERY_RECONCILIATION_REQUIRED`,
+  `RECOVERY_DIAGNOSIS_FAILED`, `RECOVERY_ACTION_AMBIGUOUS`,
+  `RECOVERY_BINDING_INVALID`. One trial per cycle and no cached documents are
+  deliberate ceilings.
+- Fixture-proven only: crash points are injected at seams over a Python host
+  fixture with synthetic credentials. This is not native qualification and not
+  E8; the ordinary repair and spec-review producers are still open.
+
 ### Fixed (2026-10-03, spec-014 E8 prerequisite 2: Claude qualification crash replay)
 
 - A managed Claude-host run that crashed between staging its private runtime

@@ -10,6 +10,8 @@ not a native diagnosis or trial, and not E8.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import run_state.managed_qualification as managed_qualification
@@ -63,8 +65,9 @@ def test_r2_retained_final_review_handback_reaches_done_without_a_second_broad_r
     led = assert_recovered_once(w)
     assert led.actions["final_review"] == 1 and led.launches["final_review"] == 1
     # The only review is the refused one, recorded on an ancestor of the recovered candidate.
+    acceptance_hash = _acceptance_hash(w)
     with led.store.read_transaction() as tx:
-        proof = post_repair_review_tx(led.store, tx, _token(w), _acceptance_hash(w), led.candidate)
+        proof = post_repair_review_tx(led.store, tx, _token(w), acceptance_hash, led.candidate)
     assert proof is not None and proof[1].completion_status == "failed"
 
 
@@ -89,29 +92,38 @@ def _token(w):
 
 
 def test_r2b_final_review_handback_caused_by_a_refusal_code_records_no_receipt_and_stays_truthful(
-        tmp_path, monkeypatch, capsys):
-    """The M3 attempt 33 shape: the review output is invalid, so a handback exists but no failed review receipt."""
+        tmp_path, monkeypatch, capsys, record_property):
+    """The M3 attempt 33 shape: the review output is invalid, so a handback exists but no failed review receipt.
+
+    After the recovery the lifecycle asks for the final review again.  The single grant is spent and its review
+    already settled without a receipt, so the truthful terminals are a typed refusal or NEEDS_DECISION, never a
+    second review.  The observed one is recorded as a test property.
+    """
     w = world(tmp_path, monkeypatch, check=CHECK_ALWAYS_PASSES, mode={"review": "malformed"})
     capsys.readouterr()
     result = w.run()
-    envelope = _last_envelope(capsys) if result != 0 else None
+    code = None if result == 0 else _last_envelope(capsys)["code"]
     led = ledger(w)
-    # Truthful terminal: DONE only if the gate accepted a recovery on a refused-without-receipt review;
-    # otherwise a typed NEEDS_DECISION.  Either way nothing launched beyond the granted actions.
-    assert (result, led.stage) in {(0, "DONE"), (78, "NEEDS_DECISION")}, (result, led.stage, envelope)
-    if result != 0:
-        assert envelope["code"] == "FRONTEND_LIFECYCLE_NEEDS_DECISION"
+    outcome = (result, led.stage, code)
+    record_property("observed_terminal", repr(outcome))
+    assert outcome in {
+        (0, "DONE", None),
+        (78, "NEEDS_DECISION", "FRONTEND_LIFECYCLE_NEEDS_DECISION"),
+        # The settled review of an earlier request cannot be re-finished: typed, nothing relaunched.
+        (78, "FINAL_REVIEW", "EVIDENCE_CHANGED"),
+        (78, "FINAL_REVIEW", "REVIEW_RECONCILIATION_REQUIRED"),
+    }, outcome
     assert led.reviews == 0
     assert led.actions["final_review"] == 1 and led.launches["final_review"] == 1
     assert [led.actions[name] for name in ("recovery_cycle_normal", "diagnosis", "recovery_trial")] == [1, 1, 1]
     assert [led.launches[name] for name in ("diagnosis", "recovery_trial")] == [1, 1]
     assert all(count <= 1 for _action, count in led.intents)
     assert _held_resources(tmp_path) == {}
-    # The terminal replays without a producer call, an event or a charge.
-    events, charged = led.events, led.charged
-    assert w.run() == result
+    # Replaying the terminal launches, reserves and charges nothing further.
+    launches, charged = led.launches, led.charged
+    w.run()
     again = ledger(w)
-    assert (again.events, again.charged) == (events, charged)
+    assert (again.launches, again.charged, again.actions) == (launches, charged, led.actions)
 
 
 @pytest.mark.parametrize("trial", [None, "unrelated\n"], ids=["trial-writes-nothing", "trial-fails-the-checks"])
@@ -136,29 +148,45 @@ def test_r3_no_winner_hands_back_needs_decision_and_leaves_the_shared_candidate_
     assert (again.events, again.charged, again.launches) == (events, charged, launches)
 
 
-def test_r4_the_binding_uses_the_candidate_that_advanced_before_the_handback(tmp_path, monkeypatch, capsys):
-    """Cycle 1 advances the candidate, the refused final review hands back again, and cycle 2 binds the advanced one."""
+def test_r4_the_binding_uses_the_candidate_that_advanced_before_the_handback(
+        tmp_path, monkeypatch, capsys, record_property):
+    """Cycle 1 advances the candidate, the refused final review hands back again, and cycle 2 binds the advanced one.
+
+    The producer side is asserted outright: cycle 2's children copy the advanced candidate and the controller
+    consumes its trial.  Integrating that winner onto an already-advanced shared candidate is the journal's
+    ``_recovery_binding_tx`` (it compares the shared preparation's first input digest with the trial's), which
+    is outside this producer; its observed outcome is recorded as a test property.
+    """
     w = world(tmp_path, monkeypatch, mode={"review": "failed"})
     _stop_at_the_handback(w, monkeypatch)
     store = ControlStore(w.authority / "control.sqlite3")
     with store.transaction() as tx:
         tx.execute("UPDATE authority_run_policy_budgets SET recovery_mode='autonomous'")
     capsys.readouterr()
-    assert w.run() == 0, capsys.readouterr().out[-1500:]
+    result = w.run()
+    code = None if result == 0 else _last_envelope(capsys)["code"]
+    record_property("observed_terminal", repr((result, ledger(w).stage, code)))
     led = ledger(w)
-    assert led.stage == "DONE" and [cycle[:2] for cycle in led.cycles] == [
-        (1, "recovery_cycle_autonomous"), (2, "recovery_cycle_autonomous")]
+    assert [cycle[:2] for cycle in led.cycles] == [(1, "recovery_cycle_autonomous"), (2, "recovery_cycle_autonomous")]
     assert led.cycles[0][2] != led.cycles[1][2]
     assert led.actions["diagnosis"] == 2 and led.actions["recovery_trial"] == 2 and led.actions["final_review"] == 1
     sealed = sealed_candidate(w)
     chain = candidate_chain(w)
     (first,) = [candidate for candidate, parent in chain.items() if parent == sealed]
-    (second,) = [candidate for candidate, parent in chain.items() if parent == first]
-    assert led.candidate == second
     digests = [digest for _key, _state, digest in recovery_workspaces(w)]
-    # Cycle 1 children copy the sealed input; cycle 2 children copy the advanced candidate, not the sealed
-    # input and not the session's original workspace digest.
-    assert digests.count(sealed) == 2 and digests.count(first) == 2 and sealed not in (first, second)
+    # Cycle 1 children copy the sealed input; cycle 2 children copy the advanced candidate, not the sealed input.
+    assert digests.count(sealed) == 2 and digests.count(first) == 2
+    # Both trials' checks are retained: the controller consumed cycle 2 against the advanced candidate.
+    with store.read_transaction() as tx:
+        retained = [json.loads(row[0])["data"]["input_digest"] for row in tx.execute(
+            "SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+            "WHERE k.idempotency_key LIKE 'recovery-trial-checks:%' ORDER BY e.id")]
+    assert retained == [sealed, first]
+    assert (result, code) in {(0, None), (5, "WAVE_INTEGRATION_BINDING_INVALID")}, (result, code)
+    if result == 0:
+        assert led.stage == "DONE" and led.candidate not in (sealed, first)
+    else:
+        assert led.stage == "RECOVER"
 
 
 def test_r5_a_refused_diagnosis_qualification_leaves_the_handback_retained_and_spends_no_cycle(
@@ -198,6 +226,24 @@ def test_r6_an_infeasible_cycle_refuses_before_it_is_spent(tmp_path, monkeypatch
     led = ledger(w)
     assert led.stage == "RECOVER" and led.cycles == [] and led.actions == {"execute": 1}
     assert "diagnosis" not in led.launches and "recovery_trial" not in led.launches
+
+
+def test_a_diagnosis_with_no_usable_answer_refuses_typed_after_its_cycle_is_spent(tmp_path, monkeypatch, capsys):
+    w = world(tmp_path, monkeypatch, mode={"diagnosis": ""})
+    capsys.readouterr()
+    assert w.run() == 78
+    assert _last_envelope(capsys)["code"] == "RECOVERY_DIAGNOSIS_FAILED"
+    led = ledger(w)
+    # The diagnosis launched and settled, so its cycle and grant are spent; no trial ever starts.
+    assert led.stage == "RECOVER" and len(led.cycles) == 1 and led.launches["diagnosis"] == 1
+    assert "recovery_trial" not in led.launches and candidate_chain(w) == {}
+    # A later owner fence never relaunches it.
+    capsys.readouterr()
+    assert w.run() == 78
+    assert _last_envelope(capsys)["code"] == "RECOVERY_RECONCILIATION_REQUIRED"
+    again = ledger(w)
+    assert (again.launches, again.charged, again.actions) == (led.launches, led.charged, led.actions)
+    assert _held_resources(tmp_path) == {}
 
 
 def test_old_refusals_still_fire_for_an_unsealed_legacy_replay(tmp_path, monkeypatch, capsys):

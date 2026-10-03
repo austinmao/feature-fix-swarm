@@ -117,6 +117,12 @@ _REQUEST_KEY_REFUSALS = {
     "INTENT_RECONCILIATION_REQUIRED": (
         "a launch for this request key has not settled; only owner-fence reconciliation may settle it",
         "reconcile_intent"),
+    # A diagnosis or trial of the one recovery cycle was issued under an earlier fence: relaunching it would
+    # spend the cycle again, and its receipts, workspace and trial record bind that fence.
+    "RECOVERY_RECONCILIATION_REQUIRED": (
+        "a recovery diagnosis or trial was issued under an earlier owner fence; its receipt, workspace and "
+        "trial record bind that fence, so this owner cannot consume them, and it is never launched again",
+        "inspect_retained_recovery"),
     # F51: a second final review would spend the run's single review grant again.
     "REVIEW_RECONCILIATION_REQUIRED": (
         "the run's final review was launched, or its grant reserved, under an earlier owner fence and is not "

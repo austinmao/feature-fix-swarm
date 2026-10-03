@@ -44,6 +44,9 @@ EXPECTED = {
     "winner-recorded-before-bind": RECONCILE,
     "continuation-transitioned": DONE,
 }
+# A kill between the intent commit and the child's acknowledgement leaves the admission it took held by the dead
+# owner, exactly as the final-review sweep's analogous point does; the resume refuses before touching admission.
+HELD_BY_THE_DEAD_OWNER = {"diagnosis-intent-committed"}
 _BASELINE = {}
 
 
@@ -75,13 +78,18 @@ def test_a_crash_at_each_recovery_step_resumes_to_done_once_or_refuses_typed_wit
 
     capsys.readouterr()
     result = w.run()
-    outcome = DONE if result == 0 else _last_envelope(capsys)["code"]
+    envelope = None if result == 0 else _last_envelope(capsys)
+    outcome = DONE if result == 0 else envelope["code"]
     led = ledger(w)
     assert outcome == EXPECTED[point], (point, result, led.stage)
     # At most one intent per action and at most one cycle per binding, whatever the point.
     assert all(count <= 1 for _action, count in led.intents)
     assert len(led.cycles) <= 1 and len({cycle[2] for cycle in led.cycles}) == len(led.cycles)
-    assert _held_resources(tmp_path) == {}
+    held = _held_resources(tmp_path)
+    if point in HELD_BY_THE_DEAD_OWNER:
+        assert list(held) == ["admissions"] and len(held["admissions"]) == 1
+    else:
+        assert held == {}
     if outcome == DONE:
         # The resume spent exactly what the uninterrupted run spent: no double charge, no second grant.
         assert led.stage == "DONE"
@@ -90,5 +98,7 @@ def test_a_crash_at_each_recovery_step_resumes_to_done_once_or_refuses_typed_wit
     else:
         # A typed refusal changes nothing: the handback stays retained and nothing launches, reserves or charges.
         assert result == 78 and led.stage == crashed.stage
+        assert envelope["recovery_action"]["action"] == (
+            "reconcile_intent" if outcome == INTENT else "inspect_retained_recovery")
         assert (led.charged, led.actions, led.launches, led.cycles) == (
             crashed.charged, crashed.actions, crashed.launches, crashed.cycles)

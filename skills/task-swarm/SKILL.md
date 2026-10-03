@@ -184,8 +184,9 @@ bash scripts/gsd/ffs-frontend.sh task-swarm --select-file <path> ...
 The descriptor SHA-256 is bound at start and revalidated on every resume
 (`UPSTREAM_RUNTIME_DRIFT`); the sealed draft's criterion ids must be the run's
 accepted requirement ids (`objective:<sha256(objective)>`). The lifecycle runs
-execute -> mapped checks -> one native final review -> DONE; a failed check with
-no repair producer hands back and refuses `RECOVERY_PRODUCER_UNAVAILABLE`.
+execute -> mapped checks -> one native final review -> DONE; a failed check
+hands back to one recovery cycle (a diagnosis, then one isolated trial), and no
+winner stops at `NEEDS_DECISION` (there is no ordinary repair producer yet).
 `FFS_ACCEPTANCE_DRAFT` is required (`ACCEPTANCE_DRAFT_REQUIRED` otherwise), and
 task-swarm must deliver its work through a supervised GSD wave
 (`WAVE_EXECUTION_UNPROVEN` otherwise).

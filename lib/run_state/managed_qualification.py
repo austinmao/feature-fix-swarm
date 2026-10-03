@@ -279,7 +279,7 @@ def qualify_managed_runtime(
         if (
             not canonical_activity_id
             or not isinstance(activity_request_key, str) or not activity_request_key
-            or not isinstance(role, str) or role not in {"worker", "reviewer"}
+            or not isinstance(role, str) or role not in {"worker", "reviewer", "recovery"}
             or type(workspace) is not WorkspacePreparation or not workspace.ready
             or workspace.state != "ready" or workspace.child_role not in {"inventory", role}
             or workspace.parent_activity_id != parent_activity_id
