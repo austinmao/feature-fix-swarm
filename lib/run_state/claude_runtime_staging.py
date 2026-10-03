@@ -173,6 +173,15 @@ def _access_only_oauth(value: object) -> dict[str, object]:
     return allowed
 
 
+def _encoded(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _credential_bytes(credential_value: dict[str, object]) -> bytes:
+    """The exact access-only projection staging writes; reuse derives its expectation from the same bytes."""
+    return _encoded({"claudeAiOauth": _access_only_oauth(credential_value["claudeAiOauth"])})
+
+
 def _source_closure(candidate_home: Path, credential_source: Path, workspace: Path):
     """Validate what a stage is built from: the installed candidate, the workspace and the credential.
 
@@ -231,16 +240,13 @@ def stage_private_claude_runtime(candidate_home: Path, credential_source: Path,
         # MCP OAuth grants, refresh bearers, and unrelated credential families
         # never enter the execution runtime.
         auth_fd = os.open(auth, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(auth_fd, "w", encoding="utf-8") as output:
-            json.dump({"claudeAiOauth": _access_only_oauth(credential_value["claudeAiOauth"])}, output,
-                      sort_keys=True, separators=(",", ":"))
-            output.write("\n")
+        with os.fdopen(auth_fd, "wb") as output:
+            output.write(_credential_bytes(credential_value))
         settings = _settings(candidate / "settings.json", target, worktree)
         settings_path = target / "settings.json"
         descriptor = os.open(settings_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(settings, output, sort_keys=True, separators=(",", ":"))
-            output.write("\n")
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(_encoded(settings))
         for directory in (path for path in target.rglob("*") if path.is_dir()):
             directory.chmod(0o700)
         records = {relative: _digest(target / relative) for relative in sorted(files)}
@@ -284,7 +290,8 @@ def _retained_stage(candidate_home: Path, credential_source: Path, target: Path,
     home = _directory(target, "retained Claude home")
     if stat.S_IMODE(home.lstat().st_mode) != 0o700:
         raise ClaudeRuntimeStagingError("retained Claude home is not private mode 0700")
-    candidate, worktree, _credential, files, source = _source_closure(candidate_home, credential_source, workspace)
+    candidate, worktree, credential_value, files, source = _source_closure(
+        candidate_home, credential_source, workspace)
     manifest_path = home / STAGE_MANIFEST_NAME
     _regular(manifest_path, "retained stage manifest", private=True)
     manifest = _json(manifest_path, "retained stage manifest")
@@ -298,18 +305,22 @@ def _retained_stage(candidate_home: Path, credential_source: Path, target: Path,
     records = bound.get("files")
     if not isinstance(records, dict) or set(records) != set(modes):
         raise ClaudeRuntimeStagingError("retained stage file inventory is malformed")
-    for relative, expected in sorted(records.items()):
+    # Every expected digest is derived from the present source, never from the retained manifest,
+    # which lives in the same home and could be rewritten together with the bytes it records.
+    expected = {relative: _digest(path) for relative, path in files.items()}
+    expected.update({
+        "gsd-file-manifest.json": _digest(candidate / "gsd-file-manifest.json"),
+        "settings.json": hashlib.sha256(_encoded(_settings(candidate / "settings.json", home, worktree))).hexdigest(),
+        ".credentials.json": hashlib.sha256(_credential_bytes(credential_value)).hexdigest(),
+    })
+    for relative, recorded in sorted(records.items()):
         path = home / _safe_relative(relative)
         info = _regular(path, f"retained staged file {relative}")
         if info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != modes[relative]:
             raise ClaudeRuntimeStagingError(f"retained staged file is not private: {relative}")
         _private_directory_chain(path, home)
-        if _digest(path) != expected:
-            raise ClaudeRuntimeStagingError(f"retained staged file has drifted: {relative}")
-    settings = _settings(candidate / "settings.json", home, worktree)
-    if records["settings.json"] != hashlib.sha256(
-            (json.dumps(settings, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest():
-        raise ClaudeRuntimeStagingError("retained staged settings no longer match the candidate")
+        if recorded != expected[relative] or _digest(path) != expected[relative]:
+            raise ClaudeRuntimeStagingError(f"retained staged file does not match its source: {relative}")
     return manifest
 
 
