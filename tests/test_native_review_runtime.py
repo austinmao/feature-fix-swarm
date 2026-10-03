@@ -335,6 +335,10 @@ def test_codex_0160_config_without_the_async_gate_fails_validation(tmp_path: Pat
     parent, workspace, binary, catalog = _inputs(tmp_path)
     material = prepare_native_review_runtime(_request(binary, catalog, version="0.160.0"),
                                              runtime_root=parent / "one", workspace=workspace)
+    # Untouched sibling: its config.toml still matches its recorded hash, so the argv case below
+    # can only be refused by the argv check itself, not by a stale config.
+    fresh = prepare_native_review_runtime(_request(binary, catalog, version="0.160.0"),
+                                          runtime_root=parent / "two", workspace=workspace)
     stripped = "".join(line for line in Path(material.config_path).read_text().splitlines(keepends=True)
                        if "send_message_to_user_async" not in line).encode()
     Path(material.config_path).write_bytes(stripped)
@@ -342,9 +346,10 @@ def test_codex_0160_config_without_the_async_gate_fails_validation(tmp_path: Pat
 
     with pytest.raises(NativeReviewRuntimeRefused, match="tool restriction proof"):
         validate_native_review_material(replace(material, config_sha256=hashlib.sha256(stripped).hexdigest()))
-    with pytest.raises(NativeReviewRuntimeRefused):
+    assert validate_native_review_material(fresh) is fresh
+    with pytest.raises(NativeReviewRuntimeRefused, match="native review argv was retargeted"):
         validate_native_review_material(replace(
-            material, argv=tuple(item for item in material.argv if item != _ASYNC_OFF)))
+            fresh, argv=tuple(item for item in fresh.argv if item != _ASYNC_OFF)))
 
 
 def test_codex_0154_keeps_its_original_provenance(tmp_path: Path) -> None:
