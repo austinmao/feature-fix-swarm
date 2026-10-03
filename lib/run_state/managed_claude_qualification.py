@@ -104,11 +104,12 @@ def _replace_qualification_admission(path: Path, expected: dict[str, object],
             pass
 
 
-def _publish_placeholder(path: Path, placeholder: dict[str, object]) -> None:
-    """Create the qualification admission placeholder once; a replay accepts what an earlier attempt left.
+def _publish_placeholder(path: Path, placeholder: dict[str, object], binding) -> None:
+    """Create the qualification admission placeholder once; a replay accepts only what the journal allows.
 
-    The retained file is the placeholder or, after the promotion, the admitted descriptor: the same
-    document with a 64-hex runtime identity.  It is never rewritten here.
+    Before the promotion (no child binding, or still the inventory role) only the exact placeholder
+    bytes are acceptable.  After it, the placeholder or the exact admitted descriptor carrying the
+    binding's runtime_tuple_hash.  It is never rewritten here.
     """
     encoded = _canonical(placeholder) + b"\n"
     # ponytail: a kill between this open and the write leaves an empty file the replay refuses
@@ -120,14 +121,10 @@ def _publish_placeholder(path: Path, placeholder: dict[str, object]) -> None:
         if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
             raise ManagedClaudeQualificationRefused("ADMISSION_CONFLICT") from None
-        try:
-            retained = json.loads(path.read_bytes())
-        except (OSError, ValueError, UnicodeError):
-            retained = None
-        identity = retained.get("runtime_identity") if isinstance(retained, dict) else None
-        admitted = isinstance(identity, str) and len(identity) == 64 and set(identity) <= set("0123456789abcdef")
-        if not isinstance(retained, dict) or {**retained, "runtime_identity": "qualification"} != placeholder or not (
-                identity == "qualification" or admitted):
+        accepted = {encoded}
+        if binding is not None and binding["role"] != "inventory":
+            accepted.add(_canonical({**placeholder, "runtime_identity": binding["runtime_tuple_hash"]}) + b"\n")
+        if path.read_bytes() not in accepted:
             raise ManagedClaudeQualificationRefused("ADMISSION_CONFLICT") from None
         return
     with os.fdopen(fd, "wb") as output:
@@ -214,7 +211,7 @@ def qualify_managed_claude_runtime(
             if retained is not None and (
                     not retained_runtime or {key: retained.get(key) for key in binding} != binding):
                 raise ManagedClaudeQualificationRefused("QUALIFICATION_PREPARATION_CONFLICT")
-            _publish_placeholder(admission, placeholder)
+            _publish_placeholder(admission, placeholder, existing)
             plan = prepare_claude_qualification_plan(
                 runtime, Path(host_request.binary), workspace.path, runtime / "qualification.json",
                 version=SUPPORTED_CLAUDE_VERSION, model=host_request.model, effort=host_request.effort,
@@ -314,14 +311,17 @@ def qualify_managed_claude_runtime(
                 completion = supervisor.finish(handle, timeout=probe.timeout_seconds)
             with productive_work(store, token, kind="qualification"):
                 receipt = completion.get("host_receipt", {})
-                if receipt.get("status") == "uncertain" or receipt.get("passed") is not True or (
-                        replayed and (receipt.get("probe_name"), receipt.get("contract_sha256"),
-                                      receipt.get("envelope_sha256")) != (probe.name, material_contract, envelope_sha)):
+                if receipt.get("status") == "uncertain" or receipt.get("passed") is not True:
                     raise ManagedClaudeQualificationRefused("QUALIFICATION_UNCERTAIN")
-                results.append(QualificationResult(
-                    probe.name, _stream_text(completion, "stdout", verified=replayed),
-                    _stream_text(completion, "stderr", verified=replayed), completion["returncode"],
-                ))
+                stdout = _stream_text(completion, "stdout", verified=replayed)
+                stderr = _stream_text(completion, "stderr", verified=replayed)
+                if replayed and tuple(receipt.get(key) for key in (
+                        "schema", "probe_name", "contract_sha256", "envelope_sha256",
+                        "runtime_template_sha256", "exit_code", "telemetry_sha256")) != (
+                        "ffs.claude-qualification-invocation/v1", probe.name, material_contract, envelope_sha,
+                        template, completion["returncode"], completion["streams"]["stdout"]["sha256"]):
+                    raise ManagedClaudeQualificationRefused("QUALIFICATION_UNCERTAIN")
+                results.append(QualificationResult(probe.name, stdout, stderr, completion["returncode"]))
         except (SupervisorRefused, OSError, KeyError, TypeError, ValueError) as error:
             raise ManagedClaudeQualificationRefused("QUALIFICATION_UNCERTAIN") from error
     with productive_work(store, token, kind="qualification"):

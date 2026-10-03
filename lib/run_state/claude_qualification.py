@@ -125,27 +125,48 @@ def _probe(name: str, argv: tuple[str, ...], environment: dict[str, str], cwd: P
                               None if credential_record is None else int(credential_record["inode"]))
 
 
-def _create_or_verify(destination: Path, data: bytes, replay: bool) -> None:
-    """Create ``destination`` exclusively; on replay accept an identical retained file, never rewrite it."""
+def _create_or_verify(destination: Path, data: bytes, replay: bool, existing_only: bool = False) -> None:
+    """Create ``destination`` exclusively, or on replay accept the identical retained file.
+
+    A retained file must be an owner-owned regular file with one link, mode 0600 and the exact
+    bytes; it is never rewritten.  ``existing_only`` (a seeded replay: every file was made before
+    the seed was recorded) never creates, so a missing file is a refusal.
+    """
+    if not existing_only:
+        try:
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            if not replay:
+                raise ClaudeQualificationRefused("qualification scratch already exists") from None
+        else:
+            with os.fdopen(fd, "wb") as output:
+                output.write(data)
+            return
     try:
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:
-        if not replay or destination.is_symlink() or destination.read_bytes() != data:
-            raise ClaudeQualificationRefused("qualification scratch conflicts with the retained file") from None
-        return
-    with os.fdopen(fd, "wb") as output:
-        output.write(data)
+        info = destination.lstat()
+    except FileNotFoundError:
+        raise ClaudeQualificationRefused("qualification scratch is missing on replay") from None
+    if (destination.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or destination.read_bytes() != data):
+        raise ClaudeQualificationRefused("qualification scratch conflicts with the retained file")
 
 
-def _private_directory(path: Path, replay: bool) -> None:
+def _private_directory(path: Path, replay: bool, existing_only: bool = False) -> None:
+    if not existing_only:
+        try:
+            path.mkdir(mode=0o700)
+            path.chmod(0o700)
+            return
+        except FileExistsError:
+            if not replay:
+                raise ClaudeQualificationRefused("qualification scratch already exists") from None
     try:
-        path.mkdir(mode=0o700)
-        path.chmod(0o700)
-    except FileExistsError:
         info = path.lstat()
-        if (not replay or path.is_symlink() or not stat.S_ISDIR(info.st_mode)
-                or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
-            raise ClaudeQualificationRefused("qualification scratch is unsafe or already exists") from None
+    except FileNotFoundError:
+        raise ClaudeQualificationRefused("qualification scratch is missing on replay") from None
+    if (path.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ClaudeQualificationRefused("qualification scratch is unsafe")
 
 
 def _copy_private(source: Path, destination: Path, replay: bool = False) -> None:
@@ -157,7 +178,7 @@ def _copy_private(source: Path, destination: Path, replay: bool = False) -> None
 
 
 def _write_probe_settings(source: Path, destination: Path, denied_credentials: list[str],
-                          replay: bool = False) -> None:
+                          replay: bool = False, existing_only: bool = False) -> None:
     try:
         value = json.loads(source.read_text(encoding="utf-8"))
         filesystem = value["sandbox"]["filesystem"]
@@ -167,7 +188,8 @@ def _write_probe_settings(source: Path, destination: Path, denied_credentials: l
         raise ClaudeQualificationRefused("runtime sandbox filesystem settings are malformed")
     filesystem["denyRead"] = denied_credentials
     filesystem["denyWrite"] = denied_credentials
-    _create_or_verify(destination, (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode(), replay)
+    _create_or_verify(destination, (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+                      replay, existing_only)
 
 
 def _checked_seed(seed: object) -> dict[str, object] | None:
@@ -209,6 +231,7 @@ def prepare_claude_qualification_plan(runtime: Path, binary: Path, workspace: Pa
     runtime, binary, workspace, output = map(Path, (runtime, binary, workspace, output))
     seed = _checked_seed(seed)
     replay = resume or seed is not None
+    strict = seed is not None   # every scratch file existed before the seed was recorded
     if (output.exists() and not replay) or output.parent != runtime:
         raise ClaudeQualificationRefused("qualification output must be a new runtime-owned file")
     if version != SUPPORTED_CLAUDE_VERSION or sandbox != "workspace-write":
@@ -223,12 +246,12 @@ def prepare_claude_qualification_plan(runtime: Path, binary: Path, workspace: Pa
     temporary = runtime / ".ffs-claude-qualification-tmp"
     negative = runtime / ".ffs-claude-noauth"
     for directory in (temporary, negative):
-        _private_directory(directory, replay)
+        _private_directory(directory, replay, strict)
     # The negative profile intentionally has settings but no credential.  A
     # successful auth status would prove ambient HOME/keychain fallback.
     settings = runtime / "settings.json"
     negative_settings = negative / "settings.json"
-    _create_or_verify(negative_settings, settings.read_bytes(), replay)
+    _create_or_verify(negative_settings, settings.read_bytes(), replay, strict)
     base = claude_closed_environment(runtime, temporary, binary, gsd_environment)
     negative_env = dict(base)
     negative_env["HOME"] = str(negative.parent)
@@ -258,14 +281,14 @@ def prepare_claude_qualification_plan(runtime: Path, binary: Path, workspace: Pa
     ]
     for name, session, prompt, timeout in zip(QUALIFICATION_PROBES[1:], sessions, prompts, (60, 90, 60)):
         profile = profiles[name]
-        _private_directory(profile, replay)
+        _private_directory(profile, replay, strict)
         profile_settings = profile / "settings.json"
-        _write_probe_settings(settings, profile_settings, denied_credentials, replay)
+        _write_probe_settings(settings, profile_settings, denied_credentials, replay, strict)
         profile_credential = profile / ".credentials.json"
         if seed is None:
             _copy_private(runtime / ".credentials.json", profile_credential, replay)
         profile_tmp = profile / "tmp"
-        _private_directory(profile_tmp, replay)
+        _private_directory(profile_tmp, replay, strict)
         probe_environment = claude_closed_environment(profile, profile_tmp, binary, gsd_environment)
         probes.append(_probe(name, common(binary, workspace, profile_settings, model, effort, session, prompt),
                              probe_environment, workspace, session, timeout, profile_credential,
