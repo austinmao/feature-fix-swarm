@@ -246,6 +246,15 @@ _PIN_0159 = {
     "config_schema_sha256": _hex("sha256:eda7251b7e46e0b9d0f3d8eef5dab451e11a55d723e2b802e152b7208045836a"),
     "model_protocol_sha256": _hex("sha256:4c8b5cafd8c55db269f669e352321f787fcaf83785bce4476cb887abfce75dc6"),
 }
+# rust-v0.160.0 (recomputed from the raw upstream files at that tag): the tool-registration digest
+# equals 0.159.0's; the commit, config schema and model protocol differ.
+_PIN_0160 = {
+    "codex_release": "rust-v0.160.0",
+    "codex_commit": "a956835d020762cb2b57" "0053af06f643a11c0ecc",
+    "tool_registration_sha256": _hex("sha256:849ef21d4e5c83febdc31eacd7609911d43e3f69a35168fe02ae899273b5ef3e"),
+    "config_schema_sha256": _hex("sha256:7ce31bde1ed6ef15c53a96ba460bb1d0fb7b99fd9ab719b567c94c474f62b023"),
+    "model_protocol_sha256": _hex("sha256:961f3051af96a988f37151b9a3c1e92103d6d76a81a01a1a2fb8a30328e4282d"),
+}
 _ASYNC_OFF = "features.send_message_to_user_async=false"
 
 
@@ -290,6 +299,54 @@ def test_codex_0159_disables_send_message_to_user_async_and_0154_does_not(tmp_pa
         assert f"features.{feature}=false" in _overrides(new)
 
 
+def test_codex_0160_material_carries_its_own_audited_provenance(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+
+    material = prepare_native_review_runtime(_request(binary, catalog, version="0.160.0"),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    assert material.cli_version == "0.160.0"
+    assert material.provenance == _provenance(_PIN_0160)
+    assert material.replay_binding()["provenance"] == {**_PIN_0160, "preparation_only": _PREPARATION_ONLY}
+    assert validate_native_review_material(material) is material
+
+
+def test_codex_0160_disables_send_message_to_user_async_like_0159(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    new = prepare_native_review_runtime(_request(binary, catalog, version="0.160.0"),
+                                        runtime_root=parent / "new", workspace=workspace)
+    prior = prepare_native_review_runtime(_request(binary, catalog, version="0.159.0"),
+                                          runtime_root=parent / "prior", workspace=workspace)
+    old = prepare_native_review_runtime(_request(binary, catalog),
+                                        runtime_root=parent / "old", workspace=workspace)
+
+    assert _ASYNC_OFF in _overrides(new)
+    assert "send_message_to_user_async = false" in Path(new.config_path).read_text()
+    # Same closed feature list as the audited 0.159.0 row; 0.154.0 still lacks the key.
+    def features(material) -> list[str]:
+        return [item for item in _overrides(material) if item.startswith("features.")]
+
+    assert features(new) == features(prior)
+    assert features(new) == [*features(old), _ASYNC_OFF]
+    assert _ASYNC_OFF not in _overrides(old)
+
+
+def test_codex_0160_config_without_the_async_gate_fails_validation(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version="0.160.0"),
+                                             runtime_root=parent / "one", workspace=workspace)
+    stripped = "".join(line for line in Path(material.config_path).read_text().splitlines(keepends=True)
+                       if "send_message_to_user_async" not in line).encode()
+    Path(material.config_path).write_bytes(stripped)
+    Path(material.config_path).chmod(0o600)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="tool restriction proof"):
+        validate_native_review_material(replace(material, config_sha256=hashlib.sha256(stripped).hexdigest()))
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(replace(
+            material, argv=tuple(item for item in material.argv if item != _ASYNC_OFF)))
+
+
 def test_codex_0154_keeps_its_original_provenance(tmp_path: Path) -> None:
     parent, workspace, binary, catalog = _inputs(tmp_path)
 
@@ -302,7 +359,7 @@ def test_codex_0154_keeps_its_original_provenance(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("version", ["0.155.1", "0.156.1", "0.157.0", "0.158.0", "0.159.1", "0.159.0-dev",
-                                     "0.160.0", "0.154.1"])
+                                     "0.160.1", "0.160.0-dev", "0.154.1"])
 def test_every_other_codex_version_still_refuses(tmp_path: Path, version: str) -> None:
     parent, workspace, binary, catalog = _inputs(tmp_path)
     with pytest.raises(NativeReviewRuntimeRefused, match="pinned native review version"):
@@ -333,6 +390,40 @@ def test_stored_material_cannot_carry_another_versions_provenance(tmp_path: Path
         validate_native_review_material(replace(material, provenance=_provenance(other)))
     for field in ("codex_commit", "tool_registration_sha256", "config_schema_sha256", "model_protocol_sha256"):
         mixed = {**(_PIN_0159 if prepared == "0.159.0" else _PIN_0154), field: other[field]}
+        with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
+            validate_native_review_material(replace(material, provenance=_provenance(mixed)))
+
+
+@pytest.mark.parametrize("prepared,claimed", [("0.160.0", "0.159.0"), ("0.159.0", "0.160.0"),
+                                              ("0.160.0", "0.154.0"), ("0.154.0", "0.160.0"),
+                                              ("0.160.0", "0.160.1")])
+def test_stored_material_cannot_change_codex_version_across_0160(tmp_path: Path, prepared: str,
+                                                                 claimed: str) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version=prepared),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(replace(material, cli_version=claimed))
+
+
+_PINS_BY_VERSION = {"0.154.0": _PIN_0154, "0.159.0": _PIN_0159, "0.160.0": _PIN_0160}
+
+
+@pytest.mark.parametrize("prepared,other", [("0.160.0", "0.154.0"), ("0.160.0", "0.159.0"),
+                                            ("0.159.0", "0.160.0"), ("0.154.0", "0.160.0")])
+def test_stored_material_cannot_carry_0160_provenance_of_another_version(tmp_path: Path, prepared: str,
+                                                                         other: str) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version=prepared),
+                                             runtime_root=parent / "one", workspace=workspace)
+    own, foreign = _PINS_BY_VERSION[prepared], _PINS_BY_VERSION[other]
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
+        validate_native_review_material(replace(material, provenance=_provenance(foreign)))
+    # 0.159.0 and 0.160.0 share the tool-registration digest, so only differing fields can drift.
+    for field in (name for name in own if own[name] != foreign[name]):
+        mixed = {**own, field: foreign[field]}
         with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
             validate_native_review_material(replace(material, provenance=_provenance(mixed)))
 
