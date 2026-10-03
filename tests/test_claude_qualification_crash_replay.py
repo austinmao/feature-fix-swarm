@@ -13,10 +13,12 @@ identity) against the files and rows the crash left behind.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -104,7 +106,7 @@ class _Store:
             if any(self.binding.get(name) != kwargs.get(name) for name in fields):
                 raise OwnershipRefused("IDEMPOTENCY_CONFLICT")
         else:
-            self.binding, self.state = dict(kwargs), "pending"
+            self.binding, self.state = {**kwargs, "runtime_tuple_hash": kwargs["runtime_identity"]}, "pending"
         self._fire("after-create")
         return SimpleNamespace(id=kwargs["activity_id"], state=self.state)
 
@@ -133,7 +135,8 @@ class _Store:
                 raise OwnershipRefused("QUALIFICATION_INCOMPLETE")
             self.promotions.append(record)
             self.binding.update(role=kwargs["role"], contract_hash=kwargs["final_contract_hash"],
-                                runtime_identity=kwargs["runtime_identity"])
+                                runtime_identity=kwargs["runtime_identity"],
+                                runtime_tuple_hash=kwargs["runtime_identity"])
         self._fire("after-promote")
         return SimpleNamespace(id=activity_id, state=self.state)
 
@@ -222,6 +225,7 @@ class _World:
     def __init__(self, tmp_path, monkeypatch):
         self.mp = monkeypatch
         candidate, self.workspace = tmp_path / "candidate", tmp_path / "work"
+        self.candidate = candidate
         self.evidence = tmp_path / "evidence"
         for directory in (candidate, self.workspace, self.evidence):
             directory.mkdir()
@@ -446,6 +450,131 @@ def test_a_replayed_probe_must_bind_this_plan_and_its_own_streams(world, defect,
         row["completion_evidence_json"] = json.dumps({**evidence, "sha256": hashlib.sha256(encoded).hexdigest()})
     world.new_process()
     with pytest.raises(managed.ManagedClaudeQualificationRefused, match=code):
+        world.qualify()
+    assert world.launched_probes() == ["auth-negative"] and world.store.promotions == []
+
+
+# --- r1 review: source binding, scratch strictness, admission identity, stage permissions, receipt fields ---
+
+
+def _admission(world):
+    return world.runtime / "supervisor-admission.json"
+
+
+@pytest.mark.parametrize("change", ["credential", "settings", "installer-file", "candidate-path"])
+def test_an_unseeded_stage_is_not_reused_for_a_different_source(world, tmp_path, change):
+    not_reusable = _not_reusable()
+    world.crash_at("before-seed")
+    if change == "credential":
+        world.credential.write_text(json.dumps({"claudeAiOauth": {"accessToken": "another-synthetic-token"}}))
+    elif change == "settings":
+        (world.candidate / "settings.json").write_text('{"hooks":{"PreToolUse":[]}}')
+    elif change == "installer-file":
+        (world.candidate / "gsd-core" / "bin" / "gsd-tools.cjs").write_text("drifted")
+    else:
+        copy = tmp_path / "candidate-copy"
+        shutil.copytree(world.candidate, copy)
+        world.host_request = replace(world.host_request, runtime_home=str(copy))
+    left = world.snapshot()
+    world.new_process()
+    with pytest.raises(not_reusable):
+        world.qualify()
+    assert world.store.events == {} and world.store.binding is None and world.supervisor.launched == []
+    assert world.snapshot() == left
+
+
+@pytest.mark.parametrize(("crash", "defect"), [
+    ("after-create", "mode"), ("after-create", "missing"), ("after-create", "hardlink"),
+    ("after-create", "noauth-missing"), ("after-create", "scratch-directory-missing"),
+    ("before-seed", "mode"), ("before-seed", "hardlink"),
+])
+def test_replay_requires_retained_scratch_to_be_present_private_and_unlinked(world, tmp_path, crash, defect):
+    world.crash_at(crash)
+    probe = world.runtime / ".ffs-claude-probe-session-model" / "settings.json"
+    target = {"noauth-missing": world.runtime / ".ffs-claude-noauth" / "settings.json",
+              "scratch-directory-missing": world.runtime / ".ffs-claude-qualification-tmp"}.get(defect, probe)
+    if defect == "mode":
+        target.chmod(0o666)
+    elif defect == "hardlink":
+        os.link(target, tmp_path / "alias")
+    elif defect == "scratch-directory-missing":
+        target.rmdir()
+    else:
+        target.unlink()
+    world.new_process()
+    with pytest.raises(managed.ManagedClaudeQualificationRefused, match="QUALIFICATION_PREPARATION_INVALID"):
+        world.qualify()
+    assert world.supervisor.launched == []
+    assert defect not in ("missing", "noauth-missing", "scratch-directory-missing") or not os.path.lexists(target)
+
+
+def test_an_unpromoted_admission_must_be_the_exact_placeholder(world):
+    world.crash_at("after-create")
+    placeholder = json.loads(_admission(world).read_text())
+    _admission(world).write_bytes(managed._canonical({**placeholder, "runtime_identity": "e" * 64}) + b"\n")
+    world.new_process()
+    with pytest.raises(managed.ManagedClaudeQualificationRefused) as refused:
+        world.qualify()
+    assert world.supervisor.launched == [], "a probe ran under an admission that is not the placeholder"
+    assert str(refused.value) == "ADMISSION_CONFLICT"
+
+
+def test_a_promoted_admission_must_carry_the_promoted_identity(world):
+    world.crash_at("after-promote")
+    placeholder = json.loads(_admission(world).read_text())
+    _admission(world).write_bytes(managed._canonical({**placeholder, "runtime_identity": "e" * 64}) + b"\n")
+    receipts = list(world.store.receipts)
+    world.new_process()
+    with pytest.raises(managed.ManagedClaudeQualificationRefused) as refused:
+        world.qualify()
+    assert world.store.receipts == receipts, "a receipt was committed under an unrelated admitted identity"
+    assert str(refused.value) == "ADMISSION_CONFLICT"
+
+
+@pytest.mark.parametrize("defect", ["settings-mode", "closure-file-mode", "hardlinked-file",
+                                    "directory-mode", "inventory-record-removed"])
+def test_a_retained_stage_must_keep_its_modes_links_and_inventory(world, tmp_path, defect):
+    not_reusable = _not_reusable()
+    world.crash_at("before-seed" if defect == "inventory-record-removed" else "after-create")
+    closure = world.runtime / "gsd-core" / "bin" / "gsd-tools.cjs"
+    if defect == "settings-mode":
+        (world.runtime / "settings.json").chmod(0o666)
+    elif defect == "closure-file-mode":
+        closure.chmod(0o644)
+    elif defect == "hardlinked-file":
+        os.link(world.runtime / "settings.json", tmp_path / "alias")
+    elif defect == "directory-mode":
+        (world.runtime / "gsd-core").chmod(0o755)
+    else:
+        manifest = world.runtime / staging.STAGE_MANIFEST_NAME
+        value = json.loads(manifest.read_text())
+        del value["target"]["files"]["gsd-core/bin/gsd-tools.cjs"]
+        manifest.write_text(json.dumps(value))
+    tampered = world.snapshot()
+    world.new_process()
+    with pytest.raises(not_reusable):
+        world.qualify()
+    assert world.supervisor.launched == [] and world.store.promotions == []
+    assert world.snapshot() == tampered
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("schema", "ffs.codex-qualification-invocation/v1"),
+    ("runtime_template_sha256", "0" * 64),
+    ("exit_code", 0),
+    ("telemetry_sha256", "0" * 64),
+])
+def test_a_replayed_probe_receipt_must_match_the_plan_and_its_completion(world, field, value):
+    world.crash_at("after-probe-1")
+    row = world.store.completions[(ACTIVITY, "request:qualification:" + ACTIVITY + ":ordinary")]
+    evidence = json.loads(row["completion_evidence_json"])
+    result = json.loads(Path(evidence["locator"]).read_text())
+    result["host_receipt"][field] = value
+    encoded = json.dumps(result, sort_keys=True).encode()
+    Path(evidence["locator"]).write_bytes(encoded)
+    row["completion_evidence_json"] = json.dumps({**evidence, "sha256": hashlib.sha256(encoded).hexdigest()})
+    world.new_process()
+    with pytest.raises(managed.ManagedClaudeQualificationRefused, match="QUALIFICATION_UNCERTAIN"):
         world.qualify()
     assert world.launched_probes() == ["auth-negative"] and world.store.promotions == []
 
