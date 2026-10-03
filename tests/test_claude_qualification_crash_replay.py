@@ -427,6 +427,29 @@ def test_tampered_retained_stage_is_a_typed_non_reusable_refusal_and_is_not_repa
     assert world.snapshot() == tampered
 
 
+@pytest.mark.parametrize(("defect", "code"), [
+    ("receipt-contract", "QUALIFICATION_UNCERTAIN"),
+    ("receipt-probe", "QUALIFICATION_UNCERTAIN"),
+    ("stream-bytes", "QUALIFICATION_RESULT_INVALID"),
+])
+def test_a_replayed_probe_must_bind_this_plan_and_its_own_streams(world, defect, code):
+    world.crash_at("after-probe-1")
+    row = world.store.completions[(ACTIVITY, "request:qualification:" + ACTIVITY + ":ordinary")]
+    evidence = json.loads(row["completion_evidence_json"])
+    result = json.loads(Path(evidence["locator"]).read_text())
+    if defect == "stream-bytes":
+        Path(result["streams"]["stdout"]["locator"]).write_text('{"loggedIn":true}')
+    else:
+        result["host_receipt"]["contract_sha256" if defect == "receipt-contract" else "probe_name"] = "session-model"
+        encoded = json.dumps(result, sort_keys=True).encode()
+        Path(evidence["locator"]).write_bytes(encoded)
+        row["completion_evidence_json"] = json.dumps({**evidence, "sha256": hashlib.sha256(encoded).hexdigest()})
+    world.new_process()
+    with pytest.raises(managed.ManagedClaudeQualificationRefused, match=code):
+        world.qualify()
+    assert world.launched_probes() == ["auth-negative"] and world.store.promotions == []
+
+
 def test_a_record_written_before_replay_support_stays_fail_closed(world):
     """No ``qualification-preparation`` event but a retained activity: today's refusal, not a replay."""
     world.crash_at("after-create")
