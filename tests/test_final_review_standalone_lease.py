@@ -277,7 +277,7 @@ def test_claude_qualify_runtime_routes_a_given_supervisor(tmp_path, monkeypatch)
 
     class Transaction:
         def execute(self, sql, *_args):
-            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt",
+            if any(marker in sql for marker in ("child_request_key", "a.request_key", "capacity_exempt", "authority_launch_intents",
                                                   "runtime_identity FROM authority_child_bindings",
                                                   "idempotency_key='frontend-operation'")):
                 return SimpleNamespace(fetchone=lambda: None)

@@ -1,6 +1,7 @@
 """Hermetic checks for the owner-planned Claude qualification transport."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -192,6 +193,14 @@ def test_managed_probe_material_binds_each_isolated_claude_profile(tmp_path, mon
         def get_run_policy_budget(self, **_kwargs):
             return None
 
+        @contextmanager
+        def read_transaction(self):
+            # A first attempt: no retained preparation record, binding or completed probe.
+            yield SimpleNamespace(execute=lambda *_args: SimpleNamespace(fetchone=lambda: None))
+
+        def record_event_once(self, *_args):
+            return {}
+
         def create_child_activity(self, _token, **kwargs):
             self.created = kwargs
             return SimpleNamespace(id=kwargs["activity_id"], state="pending")
@@ -305,6 +314,14 @@ def test_qualify_managed_claude_runtime_threads_scope_into_probe_environment(tmp
     class Store:
         def get_run_policy_budget(self, **_kwargs):
             return None
+
+        @contextmanager
+        def read_transaction(self):
+            # A first attempt: no retained preparation record, binding or completed probe.
+            yield SimpleNamespace(execute=lambda *_args: SimpleNamespace(fetchone=lambda: None))
+
+        def record_event_once(self, *_args):
+            return {}
 
         def create_child_activity(self, _token, **kwargs):
             return SimpleNamespace(id=kwargs["activity_id"], state="pending")

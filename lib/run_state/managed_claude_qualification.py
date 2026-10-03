@@ -18,12 +18,18 @@ from .claude_qualification import (
     QUALIFICATION_PROBES, QualificationResult, prepare_claude_qualification_plan,
     publish_claude_qualification_results,
 )
-from .claude_runtime_staging import stage_private_claude_runtime
+from .claude_runtime_staging import (
+    STAGE_MANIFEST_NAME, RetainedClaudeRuntimeNotReusable, stage_or_reuse_private_claude_runtime,
+)
 from .host_request import ClaudeHostRequest
+from .managed_qualification import (
+    ManagedQualificationRefused, _completed_probe, _preparation_event, _read_result_stream,
+)
+from .ownership import OwnershipRefused
 from .supervisor import (
     ClaudeQualificationLaunchMaterial, DispatchRequest, Supervisor,
     SupervisorRefused, _WAVE_FAILURE_REASONS, _gsd_wave_completion_code, _managed_command_requires_wave_proof,
-    _managed_wave_prompt, finish_owned_wave_client,
+    _managed_wave_prompt, _replayed_launch_refusal, _retained_runtime_refusal, finish_owned_wave_client,
 )
 from .wave_consumer import WaveConsumer
 from .worker_channel import WorkerChannelServer
@@ -66,8 +72,12 @@ def _replace_qualification_admission(path: Path, expected: dict[str, object],
         info = path.lstat()
         if (path.is_symlink() or not stat.S_ISREG(info.st_mode)
                 or info.st_uid != os.getuid() or info.st_nlink != 1
-                or stat.S_IMODE(info.st_mode) != 0o600
-                or path.read_bytes() != expected_bytes):
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ManagedClaudeQualificationRefused("ADMISSION_CONFLICT")
+        current = path.read_bytes()
+        if current == admitted_bytes:
+            return  # a replay after the crash that followed the promotion: never rewrite it
+        if current != expected_bytes:
             raise ManagedClaudeQualificationRefused("ADMISSION_CONFLICT")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(temporary, flags, 0o600)
@@ -94,6 +104,61 @@ def _replace_qualification_admission(path: Path, expected: dict[str, object],
             pass
 
 
+def _publish_placeholder(path: Path, placeholder: dict[str, object]) -> None:
+    """Create the qualification admission placeholder once; a replay accepts what an earlier attempt left.
+
+    The retained file is the placeholder or, after the promotion, the admitted descriptor: the same
+    document with a 64-hex runtime identity.  It is never rewritten here.
+    """
+    encoded = _canonical(placeholder) + b"\n"
+    # ponytail: a kill between this open and the write leaves an empty file the replay refuses
+    # (ADMISSION_CONFLICT, fail-closed); write-to-temp + link if that window ever bites.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        info = path.lstat()
+        if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ManagedClaudeQualificationRefused("ADMISSION_CONFLICT") from None
+        try:
+            retained = json.loads(path.read_bytes())
+        except (OSError, ValueError, UnicodeError):
+            retained = None
+        identity = retained.get("runtime_identity") if isinstance(retained, dict) else None
+        admitted = isinstance(identity, str) and len(identity) == 64 and set(identity) <= set("0123456789abcdef")
+        if not isinstance(retained, dict) or {**retained, "runtime_identity": "qualification"} != placeholder or not (
+                identity == "qualification" or admitted):
+            raise ManagedClaudeQualificationRefused("ADMISSION_CONFLICT") from None
+        return
+    with os.fdopen(fd, "wb") as output:
+        output.write(encoded)
+
+
+def _child_binding(store, activity_id: str):
+    with store.read_transaction() as tx:
+        return tx.execute(
+            "SELECT a.request_key,a.runtime_tuple_hash,b.* FROM authority_activities a "
+            "JOIN authority_child_bindings b ON b.activity_id=a.id WHERE a.id=?", (activity_id,),
+        ).fetchone()
+
+
+def _replayed_completion(store, activity_id: str, request_key: str):
+    """A probe an earlier attempt already ran to completion, else None."""
+    try:
+        return _completed_probe(store, activity_id, request_key)
+    except ManagedQualificationRefused as error:
+        raise ManagedClaudeQualificationRefused(error.code) from error
+
+
+def _stream_text(completion: dict, name: str, *, verified: bool) -> str:
+    if not verified:
+        return Path(completion["streams"][name]["locator"]).read_text()
+    try:
+        return _read_result_stream(completion, name)
+    except ManagedQualificationRefused as error:
+        raise ManagedClaudeQualificationRefused(error.code) from error
+
+
 def qualify_managed_claude_runtime(
     store, token, *, activity_id: str, activity_request_key: str,
     parent_activity_id: str, workspace, host_request: ClaudeHostRequest,
@@ -109,17 +174,18 @@ def qualify_managed_claude_runtime(
     ):
         raise ManagedClaudeQualificationRefused("QUALIFICATION_INPUT_INVALID")
     with productive_work(store, token, kind="qualification"):
-        # Known limit (fail-closed): Claude qualification is not replay-safe.  Probe
-        # material carries fresh session ids and staging requires a new target, so
-        # an activity retained after a crash between create_child_activity and the
-        # outer launch cannot be re-qualified; resume refuses HOST_CAPABILITY_UNQUALIFIED.
-        # Deferred until before native Claude qualification: persist the plan for
-        # replay, as the Codex path's stage_or_reuse + retained observation does.
+        # Replay-safe: the plan (session ids, sentinel suffix, probe credential identities; no
+        # credential bytes) is persisted once, under qualification-preparation:<activity_id>, before the
+        # activity exists.  A resume restages nothing, re-runs no completed probe and rewrites no
+        # hash-bound byte.  A retained activity with no such record predates replay support: fail closed.
         runtime = claude_runtime_home(evidence_root, activity_id)
+        preparation_key = "qualification-preparation:" + activity_id
+        qualification_key = activity_request_key + ":qualification:" + activity_id
+        retained_runtime = os.path.lexists(runtime)
         try:
             runtime.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             runtime.parent.chmod(0o700)
-            stage_private_claude_runtime(
+            stage_or_reuse_private_claude_runtime(
                 Path(host_request.runtime_home), Path(host_request.credential_source), runtime, workspace.path,
             )
             additions = GsdSupervisorEnvironment(
@@ -131,19 +197,44 @@ def qualify_managed_claude_runtime(
                            "repository_id": token.repository_id, "run_id": token.run_id,
                            "activity_id": activity_id, "generation": token.generation,
                            "workspace": str(workspace.path), "runtime_identity": "qualification"}
-            fd = os.open(admission, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
-                json.dump(placeholder, output, sort_keys=True, separators=(",", ":"))
-                output.write("\n")
+            retained = _preparation_event(store, token, parent_activity_id, preparation_key)
+            existing = _child_binding(store, activity_id)
+            if retained is None and existing is not None:
+                raise ManagedClaudeQualificationRefused("QUALIFICATION_PREPARATION_INVALID")
+            binding = {
+                "schema": "ffs.claude-qualification-preparation/v1", "activity_id": activity_id,
+                "activity_request_key": activity_request_key, "qualification_request_key": qualification_key,
+                "workspace_preparation_id": workspace.id, "workspace": str(workspace.path),
+                "candidate_input_sha256": workspace.input_digest,
+                "runtime_stage_sha256": hashlib.sha256((runtime / STAGE_MANIFEST_NAME).read_bytes()).hexdigest(),
+                "gsd_environment_sha256": _digest(additions.as_dict()),
+                "host_request_sha256": _digest(host_request.material()),
+                "role": role, "final_contract_hash": final_contract_hash,
+            }
+            if retained is not None and (
+                    not retained_runtime or {key: retained.get(key) for key in binding} != binding):
+                raise ManagedClaudeQualificationRefused("QUALIFICATION_PREPARATION_CONFLICT")
+            _publish_placeholder(admission, placeholder)
             plan = prepare_claude_qualification_plan(
                 runtime, Path(host_request.binary), workspace.path, runtime / "qualification.json",
                 version=SUPPORTED_CLAUDE_VERSION, model=host_request.model, effort=host_request.effort,
-                gsd_environment=additions,
+                gsd_environment=additions, seed=None if retained is None else retained.get("plan_seed"),
+                resume=retained_runtime,
             )
-        except (OSError, ValueError, ClaudeHostRefused) as error:
+            record = {**binding, "plan_envelope_sha256": plan.envelope_sha256, "plan_seed": plan.seed}
+            if retained is None:
+                store.record_event_once(token, parent_activity_id, preparation_key, record)
+            elif {key: retained.get(key) for key in record} != record:
+                raise ManagedClaudeQualificationRefused("QUALIFICATION_PREPARATION_CONFLICT")
+        except (RetainedClaudeRuntimeNotReusable, ManagedClaudeQualificationRefused):
+            raise
+        except OwnershipRefused as error:
+            raise ManagedClaudeQualificationRefused(
+                "QUALIFICATION_PREPARATION_CONFLICT" if error.code == "IDEMPOTENCY_CONFLICT"
+                else "QUALIFICATION_PREPARATION_INVALID") from error
+        except (OSError, ValueError, ClaudeHostRefused, ManagedQualificationRefused) as error:
             raise ManagedClaudeQualificationRefused("QUALIFICATION_PREPARATION_INVALID") from error
         template = hashlib.sha256(plan.envelope_sha256.encode()).hexdigest()
-        qualification_key = activity_request_key + ":qualification:" + activity_id
         contracts = {}
         for authority_name, probe in zip(_AUTHORITY_PROBES, plan.probes, strict=True):
             contracts[authority_name] = {
@@ -162,16 +253,29 @@ def qualify_managed_claude_runtime(
         }
         envelope_sha = _digest(envelope)
         try:
-            activity = store.create_child_activity(
-                token, parent_activity_id=parent_activity_id, role="inventory",
-                request_key=activity_request_key, candidate_hash=workspace.input_digest,
-                contract_hash=envelope_sha, runtime_identity=envelope_sha,
-                workspace_binding=str(workspace.path), workspace_preparation_id=workspace.id,
-                retry_budget=5, activity_id=activity_id,
-            )
-            if activity.state == "pending":
-                activity = store.transition_activity(token, activity.id, expected="pending", new="active",
-                                                     reason="Claude qualification inventory")
+            if existing is None or existing["role"] == "inventory":
+                activity = store.create_child_activity(
+                    token, parent_activity_id=parent_activity_id, role="inventory",
+                    request_key=activity_request_key, candidate_hash=workspace.input_digest,
+                    contract_hash=envelope_sha, runtime_identity=envelope_sha,
+                    workspace_binding=str(workspace.path), workspace_preparation_id=workspace.id,
+                    retry_budget=5, activity_id=activity_id,
+                )
+                if activity.state == "pending":
+                    activity = store.transition_activity(token, activity.id, expected="pending", new="active",
+                                                         reason="Claude qualification inventory")
+            elif (existing["role"] == role and existing["request_key"] == activity_request_key
+                    and existing["candidate_hash"] == workspace.input_digest
+                    and existing["contract_hash"] == final_contract_hash
+                    and existing["workspace_preparation_id"] == workspace.id):
+                # Promoted by an earlier attempt: its retained evidence must still be there.
+                if not os.path.lexists(plan.output):
+                    raise ManagedClaudeQualificationRefused("QUALIFICATION_RESULT_INVALID")
+                activity = store.get_activity(activity_id)
+            else:
+                raise ManagedClaudeQualificationRefused("QUALIFICATION_PREPARATION_CONFLICT")
+        except ManagedClaudeQualificationRefused:
+            raise
         except Exception as error:
             raise ManagedClaudeQualificationRefused("QUALIFICATION_BINDING_INVALID") from error
     results = []
@@ -203,15 +307,20 @@ def qualify_managed_claude_runtime(
             managed_input_sha256=workspace.input_digest,
         )
         try:
-            handle = supervisor.launch_qualification(request, qualification_contract=contract)
-            completion = supervisor.finish(handle, timeout=probe.timeout_seconds)
+            completion = _replayed_completion(store, activity.id, request_key)
+            replayed = completion is not None
+            if completion is None:
+                handle = supervisor.launch_qualification(request, qualification_contract=contract)
+                completion = supervisor.finish(handle, timeout=probe.timeout_seconds)
             with productive_work(store, token, kind="qualification"):
                 receipt = completion.get("host_receipt", {})
-                if receipt.get("status") == "uncertain" or receipt.get("passed") is not True:
+                if receipt.get("status") == "uncertain" or receipt.get("passed") is not True or (
+                        replayed and (receipt.get("probe_name"), receipt.get("contract_sha256"),
+                                      receipt.get("envelope_sha256")) != (probe.name, material_contract, envelope_sha)):
                     raise ManagedClaudeQualificationRefused("QUALIFICATION_UNCERTAIN")
                 results.append(QualificationResult(
-                    probe.name, Path(completion["streams"]["stdout"]["locator"]).read_text(),
-                    Path(completion["streams"]["stderr"]["locator"]).read_text(), completion["returncode"],
+                    probe.name, _stream_text(completion, "stdout", verified=replayed),
+                    _stream_text(completion, "stderr", verified=replayed), completion["returncode"],
                 ))
         except (SupervisorRefused, OSError, KeyError, TypeError, ValueError) as error:
             raise ManagedClaudeQualificationRefused("QUALIFICATION_UNCERTAIN") from error
@@ -250,7 +359,10 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
                                    upstream_runtime=None, model_request=None):
     """Qualification seams, worker channel and outer contract for one Claude host run."""
     import tempfile
-    from .frontend_producers import HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, retained_outer_activity
+    from .frontend_producers import (
+        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, resumable_outer_completion, retained_launch,
+        retained_outer_activity,
+    )
     from .prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
     from .supervisor import _managed_inventory_workspace, _managed_prompt
 
@@ -280,6 +392,13 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
     if bridge.is_symlink() or not bridge.is_file():
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
+    launch = retained_launch(store, outer_activity_id)
+    # F51: a settled succeeded outer launch under a lifecycle at FINAL_REVIEW is resumed, never relaunched.
+    resume = resumable_outer_completion(store, token, outer_activity_id, launch)
+    if launch is not None and not resume:
+        # A real outer launch holds Claude state in its home and may have done work: never re-stage,
+        # re-qualify, relaunch or replay it as a success.  Refused before any resource is allocated.
+        raise SupervisorRefused(_replayed_launch_refusal(launch))
     bridge_command = json.dumps([str(Path(sys.executable).resolve()), str(bridge)], separators=(",", ":"))
     socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
     channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
@@ -305,6 +424,9 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
             if observed_version != SUPPORTED_CLAUDE_VERSION:
                 raise ClaudeHostRefused("VERSION_INVALID")
             adapter = ClaudeHostAdapter(qualified, host_request.binary, observed_version)
+        except RetainedClaudeRuntimeNotReusable as error:
+            raise SupervisorRefused(_retained_runtime_refusal(
+                retained_launch(store, activity_id), outer=activity_request_key == child_key)) from error
         except (ManagedClaudeQualificationRefused, ClaudeHostRefused, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
         return QualifiedHostRuntime(activity, qualified, receipt, adapter, additions)
@@ -357,6 +479,9 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
                         "workspace": str(ready.path), "stage_identity": stage_identity})
 
     def prepare_outer():
+        if resume:
+            # The resumed lifecycle binds the retained outer completion; it is never re-qualified.
+            raise SupervisorRefused(_replayed_launch_refusal(launch))
         return prepare_runtime(outer_activity_id, ready, child_key, context.activity_id, contract,
                                role, prompt, child_key + ":launch")
 

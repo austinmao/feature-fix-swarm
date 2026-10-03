@@ -25,6 +25,10 @@ class ClaudeRuntimeStagingError(ValueError):
     pass
 
 
+class RetainedClaudeRuntimeNotReusable(ClaudeRuntimeStagingError):
+    """A retained private stage is not exact, e.g. a launch consumed its credential."""
+
+
 def _digest(path: Path) -> str:
     value = hashlib.sha256()
     with path.open("rb") as stream:
@@ -247,3 +251,49 @@ def stage_private_claude_runtime(candidate_home: Path, credential_source: Path,
         if target.exists() and not target.is_symlink():
             shutil.rmtree(target, ignore_errors=True)
         raise
+
+
+def _retained_stage(candidate_home: Path, target: Path, workspace: Path) -> dict[str, object]:
+    """Prove a retained stage is still what staging wrote, without writing a byte."""
+    home = _directory(target, "retained Claude home")
+    if stat.S_IMODE(home.lstat().st_mode) != 0o700:
+        raise ClaudeRuntimeStagingError("retained Claude home is not private mode 0700")
+    worktree = _directory(workspace, "workspace")
+    candidate = _directory(candidate_home, "candidate Claude home")
+    manifest_path = home / STAGE_MANIFEST_NAME
+    _regular(manifest_path, "retained stage manifest", private=True)
+    manifest = _json(manifest_path, "retained stage manifest")
+    source, bound = manifest.get("source"), manifest.get("target")
+    if (manifest.get("schema") != STAGE_SCHEMA or not isinstance(source, dict) or not isinstance(bound, dict)
+            or bound.get("home") != _identity(home) or bound.get("workspace") != _identity(worktree)
+            or source.get("candidate_manifest_sha256") != _digest(candidate / "gsd-file-manifest.json")):
+        raise ClaudeRuntimeStagingError("retained stage does not bind this candidate and workspace")
+    records = bound.get("files")
+    if (not isinstance(records, dict)
+            or not {"settings.json", "gsd-file-manifest.json", ".credentials.json"} <= set(records)):
+        raise ClaudeRuntimeStagingError("retained stage file inventory is malformed")
+    for relative, expected in sorted(records.items()):
+        path = home / _safe_relative(relative)
+        _regular(path, f"retained staged file {relative}", private=relative == ".credentials.json")
+        if _digest(path) != expected:
+            raise ClaudeRuntimeStagingError(f"retained staged file has drifted: {relative}")
+    return manifest
+
+
+def stage_or_reuse_private_claude_runtime(candidate_home: Path, credential_source: Path,
+                                          target_home: Path, workspace: Path) -> dict[str, object]:
+    """Create the private stage once, or prove the retained one is still exact.
+
+    A retained target is never repaired or replaced: a runtime whose staged
+    credential a launch consumed, or any byte of which drifted, is non-reusable.
+    The source credential is not re-read; the retained copy is bound by its record.
+    """
+    target = Path(target_home)
+    if not target.is_absolute():
+        raise ClaudeRuntimeStagingError("target Claude home must be an absolute path")
+    if not os.path.lexists(target):
+        return stage_private_claude_runtime(candidate_home, credential_source, target, workspace)
+    try:
+        return _retained_stage(Path(candidate_home), target, Path(workspace))
+    except ClaudeRuntimeStagingError as error:
+        raise RetainedClaudeRuntimeNotReusable(str(error)) from error
