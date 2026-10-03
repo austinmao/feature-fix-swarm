@@ -579,6 +579,35 @@ def test_a_replayed_probe_receipt_must_match_the_plan_and_its_completion(world, 
     assert world.launched_probes() == ["auth-negative"] and world.store.promotions == []
 
 
+# --- r2 review: expected bytes come from the present source, never from the retained manifest ---
+
+
+@pytest.mark.parametrize("forgery", ["credential-keeps-refresh-token", "closure-file-altered",
+                                     "installer-manifest-altered"])
+def test_a_retained_stage_is_checked_against_its_source_not_its_own_manifest(world, forgery):
+    not_reusable = _not_reusable()
+    world.crash_at("after-stage")
+    target = {"credential-keeps-refresh-token": ".credentials.json",
+              "closure-file-altered": "gsd-core/bin/gsd-tools.cjs",
+              "installer-manifest-altered": "gsd-file-manifest.json"}[forgery]
+    path = world.runtime / target
+    if forgery == "credential-keeps-refresh-token":
+        forged = world.credential.read_bytes()      # the source document, refresh bearer included
+    else:
+        forged = path.read_bytes() + b" "
+    path.write_bytes(forged)
+    manifest = world.runtime / staging.STAGE_MANIFEST_NAME
+    value = json.loads(manifest.read_text())
+    value["target"]["files"][target] = hashlib.sha256(forged).hexdigest()   # the forger updates the record too
+    manifest.write_text(json.dumps(value))
+    left = world.snapshot()
+    world.new_process()
+    with pytest.raises(not_reusable):
+        world.qualify()
+    assert world.store.events == {} and world.store.binding is None and world.supervisor.launched == []
+    assert world.snapshot() == left
+
+
 def test_a_record_written_before_replay_support_stays_fail_closed(world):
     """No ``qualification-preparation`` event but a retained activity: today's refusal, not a replay."""
     world.crash_at("after-create")
