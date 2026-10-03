@@ -8,6 +8,31 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-03, spec-014 E8 prerequisite 2: Claude qualification crash replay)
+
+- A managed Claude-host run that crashed between staging its private runtime
+  and the outer launch no longer refuses `HOST_CAPABILITY_UNQUALIFIED` on
+  resume. It replays its persisted qualification plan, as the Codex host
+  already does. A non-secret seed (session ids, the outside-sentinel suffix,
+  per-probe credential sha256/device/inode) and a binding record are written
+  under `qualification-preparation:<activity_id>` before the qualification
+  activity exists; any drift on replay refuses
+  `QUALIFICATION_PREPARATION_CONFLICT`.
+- `stage_or_reuse_private_claude_runtime` reuses a retained stage only when
+  every file matches what staging would write from the present source
+  (candidate closure, settings, access-only credential projection) with its
+  staging mode, one link and private directories; otherwise it raises
+  `RetainedClaudeRuntimeNotReusable`. Nothing retained is repaired or rewritten.
+- Completed probes are not re-run; their receipts and streams are verified.
+  Retained scratch, evidence and the admission file are accepted only with exact
+  bytes, owner, mode and link count.
+- `prepare_managed_claude_session` refuses a retained real outer launch before
+  allocating anything (`INTENT_RECONCILIATION_REQUIRED` /
+  `REQUEST_ALREADY_COMPLETED`), mirroring the Codex host. A retained run written
+  before this change (no preparation record) stays fail-closed.
+- Fixture-proven only: crashes are injected at seams. This is not native Claude
+  qualification and not E8.
+
 ### Changed (2026-10-03, spec-014 Release C: Codex CLI 0.160.0 compatibility pin and native review row)
 
 - Codex CLI `0.160.0` is admitted as a seventh exact compatibility pin,
