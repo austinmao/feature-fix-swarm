@@ -330,7 +330,7 @@ def test_host_launch_path_resolves_the_verified_node_before_a_sibling_node(tmp_p
     assert found is not None and Path(found).resolve() == node.resolve() != rogue.resolve()
 
 
-# codex-cli/bin/codex.js PLATFORM_PACKAGE_BY_TARGET (rust-v0.154.0 and v0.159.0), restated as an oracle.
+# codex-cli/bin/codex.js PLATFORM_PACKAGE_BY_TARGET (rust-v0.154.0, v0.159.0 and v0.160.0), restated as an oracle.
 CODEX_TARGETS = {
     ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
     ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),

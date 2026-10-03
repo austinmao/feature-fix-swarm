@@ -467,7 +467,7 @@ def _js_launcher(tmp_path: Path, reported: tuple[str, str] = DEFAULT_PAIR,
     return launcher, node
 
 
-# codex-cli/bin/codex.js (rust-v0.154.0 and v0.159.0) PLATFORM_PACKAGE_BY_TARGET, restated as an oracle.
+# codex-cli/bin/codex.js (rust-v0.154.0, v0.159.0 and v0.160.0) PLATFORM_PACKAGE_BY_TARGET, restated as an oracle.
 _TARGETS = {
     ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
     ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),

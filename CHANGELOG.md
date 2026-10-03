@@ -8,6 +8,39 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-10-03, spec-014 Release C: Codex CLI 0.160.0 compatibility pin and native review row)
+
+- Codex CLI `0.160.0` is admitted as a seventh exact compatibility pin,
+  alongside `0.154.0`, `0.155.1`, `0.156.1`, `0.157.0`, `0.158.0` and
+  `0.159.0`, on top of the unchanged `>=0.137.0,<0.148.0` range. The runner
+  host moved to `0.160.0`, so `setup.sh --doctor` reported `codex-cli-version`
+  as failed. The change is data only: the installer policy, the `gsd-run` range
+  check, the docs and the native review pin table. `codex exec --help` is
+  byte-identical to `0.159.0` (every flag FFS passes is unchanged, including
+  `--add-dir`), the read-only ephemeral subscription-auth `probe_host` shape
+  returned `FFS_HOST_PROBE_READY`, and the `UserPromptSubmit` hook seam and every
+  hook-suppression control gave the same result as `0.159.0`. The npm launcher
+  (`codex.js`) is byte-identical to `0.159.0` and the platform package layout is
+  unchanged, so the F53 Node and vendor-executable bindings resolve as before.
+  The full native review override set (`--strict-config`, 34 `features.*=false`)
+  was run against the `0.160.0` binary and accepted; an unknown feature key is
+  still rejected.
+- Native final review admits `0.160.0`: `_CODEX_PINS["0.160.0"]` carries tag
+  `rust-v0.160.0`, commit `a956835d020762cb2b57...`, tool digest `849ef21d...`
+  (identical to `0.159.0`: `spec_plan.rs` is byte-identical), config digest
+  `7ce31bde...` and model digest `961f3051...`, each recomputed from the raw
+  upstream files at that tag. Versus `0.159.0` the config schema gains two
+  default-off Guardian feature flags and two Guardian `auto_review` keys and the
+  model protocol gains one optional serde-default field; nothing FFS sets was
+  removed or retyped and no new tool registration route appears.
+  `send_message_to_user_async` still exists, so its `false` override stays in the
+  review argv and private `config.toml` for `0.160.0` (`_CODEX_EXTRA_DISABLED`).
+  Provenance and replay use the row for the material's own version, so a
+  `0.160.0` material carrying another version's row is refused as drift.
+  Audit basis is the source audit plus the host probes above, not a live
+  tool-absence review session. `0.160.1`, `0.161.0`, and every other untested
+  0.160.x or later release stay refused.
+
 ### Fixed (2026-10-02, spec-014 Release C: 1c r1 cross-vendor review follow-up)
 
 Seven findings on the wave helper, each with a test in
