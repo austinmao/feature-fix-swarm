@@ -277,7 +277,7 @@ def codex_node_binary(binary: Path, required: bool = False) -> Path | None:
     return node
 
 
-# codex-cli/bin/codex.js, byte-identical at rust-v0.154.0 and rust-v0.159.0: PLATFORM_PACKAGE_BY_TARGET
+# codex-cli/bin/codex.js, byte-identical at rust-v0.154.0, v0.159.0 and v0.160.0: PLATFORM_PACKAGE_BY_TARGET
 # for the platforms FFS runs on.  Other platform/arch pairs are unknown shapes and refuse.
 _CODEX_TARGETS = {
     ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),

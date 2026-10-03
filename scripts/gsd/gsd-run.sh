@@ -1471,7 +1471,8 @@ EOF
     || { [ "$major" -eq 0 ] && [ "$minor" -eq 156 ] && [ "$patch" -eq 1 ]; } \
     || { [ "$major" -eq 0 ] && [ "$minor" -eq 157 ] && [ "$patch" -eq 0 ]; } \
     || { [ "$major" -eq 0 ] && [ "$minor" -eq 158 ] && [ "$patch" -eq 0 ]; } \
-    || { [ "$major" -eq 0 ] && [ "$minor" -eq 159 ] && [ "$patch" -eq 0 ]; }
+    || { [ "$major" -eq 0 ] && [ "$minor" -eq 159 ] && [ "$patch" -eq 0 ]; } \
+    || { [ "$major" -eq 0 ] && [ "$minor" -eq 160 ] && [ "$patch" -eq 0 ]; }
 }
 
 require_supported_codex_cli() {
@@ -1484,7 +1485,7 @@ require_supported_codex_cli() {
   version="$(printf '%s\n' "$raw" | sed -nE 's/^[[:space:]]*[^[:space:]]+[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p' | head -1)"
   if [ -z "$version" ] || ! version_in_supported_codex_range "$version"; then
     CODEX_PREFLIGHT_FATAL=1
-    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1 / 0.156.1 / 0.157.0 / 0.158.0 / 0.159.0" >&2
+    echo "gsd-run: Codex CLI ${version:-unknown} is outside supported range >=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1 / 0.156.1 / 0.157.0 / 0.158.0 / 0.159.0 / 0.160.0" >&2
     return 78
   fi
   CODEX_CLI_VERSION="$version"
