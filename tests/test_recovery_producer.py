@@ -231,17 +231,30 @@ def test_r5_a_refused_diagnosis_qualification_leaves_the_handback_retained_and_s
     assert_recovered_once(w)
 
 
-def _spy_release(monkeypatch) -> list:
-    """The private TMPDIRs the Codex adapter is asked to release, in order (the real release still runs)."""
-    from run_state.codex_host import CodexHostAdapter
-    real, released = CodexHostAdapter.release_launch_material, []
+def _watch_material(monkeypatch):
+    """The TMPDIRs the seam bound for ``produce_recovery``, and whether each still existed when it returned.
 
-    def release(material):
-        released.append(material.temporary_dir)
-        return real(material)
+    The session releases unlaunched material again at close, so only the state AT the producer's exit tells
+    whether the producer itself released what it bound.
+    """
+    import run_state.recovery_producer as recovery_producer
+    real, bound, alive = recovery_producer.produce_recovery, [], []
 
-    monkeypatch.setattr(CodexHostAdapter, "release_launch_material", staticmethod(release))
-    return released
+    def produce(*args, **kwargs):
+        seam = kwargs["seam"]
+
+        def bind(*arguments):
+            request, adapter = seam.bind(*arguments)
+            bound.append(request.codex_material.temporary_dir)
+            return request, adapter
+
+        try:
+            return real(*args, **{**kwargs, "seam": replace(seam, bind=bind)})
+        finally:
+            alive.extend(Path(directory).exists() for directory in bound)
+
+    monkeypatch.setattr(recovery_producer, "produce_recovery", produce)
+    return bound, alive
 
 
 def test_r6_an_infeasible_cycle_refuses_before_it_is_spent_and_releases_the_bound_material(
@@ -251,15 +264,15 @@ def test_r6_an_infeasible_cycle_refuses_before_it_is_spent_and_releases_the_boun
     store = ControlStore(w.authority / "control.sqlite3")
     with store.transaction() as tx:
         tx.execute("UPDATE authority_run_policy_budgets SET launch_charged=launch_limit-2")
-    released = _spy_release(monkeypatch)
+    bound, alive = _watch_material(monkeypatch)
     capsys.readouterr()
     assert w.run() == 78
     assert _last_envelope(capsys)["code"] == "POLICY_STAGE_INFEASIBLE"
     led = ledger(w)
     assert led.stage == "RECOVER" and led.cycles == [] and led.actions == {"execute": 1}
     assert "diagnosis" not in led.launches and "recovery_trial" not in led.launches
-    # The diagnosis material is bound before the cycle is priced, so the refusal must release it.
-    assert len(released) == 1 and not Path(released[0]).exists()
+    # The diagnosis material is bound before the cycle is priced, so the producer must release it on refusal.
+    assert len(bound) == 1 and alive == [False]
 
 
 def _bind_hook(monkeypatch, wrap) -> None:
