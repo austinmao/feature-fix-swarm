@@ -124,6 +124,7 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     ("lib/run_state/recovery_controller.py", "run_state/recovery_controller.py"),
     ("lib/run_state/recovery_docs.py", "run_state/recovery_docs.py"),
     ("lib/run_state/recovery_integration.py", "run_state/recovery_integration.py"),
+    ("lib/run_state/recovery_producer.py", "run_state/recovery_producer.py"),
     ("lib/run_state/recovery_trial_checks.py", "run_state/recovery_trial_checks.py"),
     ("lib/run_state/resource_groups.py", "run_state/resource_groups.py"),
     ("lib/run_state/resource_observation.py", "run_state/resource_observation.py"),
