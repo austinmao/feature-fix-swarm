@@ -255,8 +255,22 @@ qualification has run, so treat it as experimental. Known limits today:
   unscoped; an unsafe value refuses `MANAGED_PROMPT_VALUE_UNSAFE`.
 - A run cannot resume after its real outer launch. A replay refuses instead
   (see the refusals below).
-- A failed mapped check has no repair producer yet. It hands back and refuses
-  `RECOVERY_PRODUCER_UNAVAILABLE`.
+- A failed mapped check has no ordinary repair producer yet. It hands back, and
+  the recovery producer (`lib/run_state/recovery_producer.py`) runs one cycle on
+  the retained handback: a diagnosis child, then one isolated trial child whose
+  frozen checks decide a winner. A winner is integrated and the run continues
+  from its saved stage (a refused final review included); no winner stops at
+  `NEEDS_DECISION` (`RECOVERY_CYCLE_WITHOUT_WINNER`). A winner also lands on a
+  candidate a GSD wave advanced in place. A final review that was refused
+  before it recorded a receipt cannot be repeated (its one grant is spent), so
+  after its recovery the run stops at `NEEDS_DECISION`
+  (`FRONTEND_COMPLETION_REVIEW_REQUIRED`) rather than re-entering that review. A retained handback at
+  `RECOVER` resumes under a new owner fence only until the diagnosis intent
+  exists; from that intent on a resume refuses `INTENT_RECONCILIATION_REQUIRED`
+  or `RECOVERY_RECONCILIATION_REQUIRED` and never relaunches. A host or
+  qualification refusal, or an infeasible launch budget
+  (`POLICY_STAGE_INFEASIBLE`), leaves the handback retained with no cycle
+  spent. Fixture-proven only: not native qualification and not E8.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
@@ -322,6 +336,7 @@ managed run, the recovery action depends on the code:
 | `REQUEST_ALREADY_COMPLETED` | A launch under this request key already settled and may have done its work. It is never resumed, and a new key could repeat it | `inspect_completed_launch` |
 | `INTENT_RECONCILIATION_REQUIRED` | A launch under this request key has not settled; only owner-fence reconciliation may settle it | `reconcile_intent` |
 | `REVIEW_RECONCILIATION_REQUIRED` | The run's final review was launched, or its grant reserved, under an earlier owner fence and is not recorded. Its proof binds that fence, so this owner cannot record it, and it is never launched again | `inspect_retained_review` |
+| `RECOVERY_RECONCILIATION_REQUIRED` | A recovery diagnosis or trial was issued under an earlier owner fence. Its receipt, workspace and trial record bind that fence, so this owner cannot consume them, and it is never launched again | `inspect_retained_recovery` |
 | `RETAINED_RUNTIME_NOT_REUSABLE` | The retained outer runtime cannot be resumed, and no outer launch ran under it | `resume_with_new_request_key` |
 | `CHILD_RUNTIME_NOT_REUSABLE` | A wave child or final-reviewer runtime cannot be resumed. A new key would start a new outer run | `inspect_retained_child` |
 | `MANAGED_FRONTEND_COMMAND_UNSTAGED` | `feature-spec`/`fix`/`code-uplift` have no staged `gsd-*` command mapping yet; only `feature-implement` and `task-swarm` do | `select_a_staged_frontend` |

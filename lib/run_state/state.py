@@ -3113,13 +3113,13 @@ class ControlStore:
                                            action_can_mutate(action), 0, None, None)
 
     def cancel_unlaunched_policy_review(self, token, *, action_id: str) -> None:
-        """Release an unconsumed review reservation, never an issued repair."""
+        """Release an unconsumed review, diagnosis or trial reservation, never an issued action or a repair."""
         from .ownership import OwnershipRefused, assert_owner
         with self.transaction() as tx:
             assert_owner(tx, token)
             row = tx.execute("SELECT * FROM authority_policy_actions WHERE id=? AND repository_id=? AND run_id=?",
                              (action_id, token.repository_id, token.run_id)).fetchone()
-            if (row is None or row["action"] not in {"spec_review", "final_review"}
+            if (row is None or row["action"] not in {"spec_review", "final_review", "diagnosis", "recovery_trial"}
                     or row["transport_attempts"] != 0 or row["intent_id"] is not None
                     or row["state"] not in {"reserved", "cancelled"}
                     or tx.execute("SELECT 1 FROM authority_policy_action_attempts WHERE action_id=?", (action_id,)).fetchone() is not None):
@@ -6698,7 +6698,7 @@ class ControlStore:
             or runtime_identity != runtime_identity.lower()
             or not self._valid_digest(final_contract_hash)
             or final_contract_hash != final_contract_hash.lower()
-            or role not in {"worker", "reviewer"}
+            or role not in {"worker", "reviewer", "recovery"}
         ):
             raise OwnershipRefused("INVALID_QUALIFICATION_PROMOTION")
         evidence = self._verified_evidence(observation_evidence)

@@ -8,6 +8,63 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-03, spec-014 E8 prerequisite 3a: recovery producer)
+
+- A retained handback at stage `RECOVER` is no longer a dead end. The stub
+  that refused `RECOVERY_PRODUCER_UNAVAILABLE` is replaced by
+  `lib/run_state/recovery_producer.py`: one recovery cycle per handback, a
+  diagnosis child and one isolated trial child, read back by the existing
+  `RecoveryController`; a winner is integrated by the existing journaled path
+  and the run continues from its saved stage. A failed mapped check or a failed
+  final-review verdict can recover to DONE; the three M3 shapes (a final review
+  refused before it recorded a receipt) now reach a typed `NEEDS_DECISION`
+  after their recovery instead of a dead end. No winner stops at
+  `NEEDS_DECISION`; the shared candidate is never touched by a trial.
+- The cycle is bound to the current candidate (its live base and the digest
+  the handback froze), so a candidate advanced before the handback is the one
+  recovered. The diagnosis child is captured, qualified and its launch
+  material bound and validated before the cycle is reserved, and the cycle is
+  reserved with the launch demand of the whole cycle, so a host, qualification,
+  bind or budget refusal (`POLICY_STAGE_INFEASIBLE`) leaves the handback
+  retained with no cycle spent; material bound for a refused reservation is
+  released.
+- Replay is keyed at every step. A retained intent is resumed only by the
+  owner that issued it; under a later owner fence it refuses
+  `INTENT_RECONCILIATION_REQUIRED` or the new `RECOVERY_RECONCILIATION_REQUIRED`
+  and never relaunches. The controller's generation checks are unchanged.
+  An unlaunched grant of an earlier owner is released and re-reserved. A new
+  owner reusing a cycle qualifies a fresh child (its probes are charged
+  again), so before any probe it checks the launch budget still covers the
+  child and everything after it, and refuses `POLICY_STAGE_INFEASIBLE` if not.
+- `resumable_outer_completion` now also admits a retained `RECOVER` stage and
+  an `EXECUTE` stage that carries a recovery continuation bound to the current
+  candidate; a bare `EXECUTE` stage, any other decision and an unsealed run
+  still refuse `REQUEST_ALREADY_COMPLETED`. The
+  Claude session rebinds a retained outer on resume, as the Codex session
+  does. The qualification role checks admit `recovery`; the unlaunched-grant
+  cancel set adds `diagnosis` and `recovery_trial` (never `repair`).
+- A recovery winner is journaled onto a candidate a GSD wave already advanced
+  in place on the shared preparation (the production shape of task-swarm). The
+  journal's recovery binding compares the trial's input with the live frontend
+  candidate of that preparation, not with the preparation's first input, so
+  such a winner no longer refuses `WAVE_INTEGRATION_BINDING_INVALID`; the trial
+  input must still equal the live candidate (until its own output is bound,
+  then that output's parent), and the candidate's journals must be on that
+  preparation.
+- A final review refused before it recorded a receipt (the M3 attempt 33
+  shape) spends its one grant and can never be recorded. After the recovery
+  that follows it, the lifecycle moves `FINAL_REVIEW` to `NEEDS_DECISION`
+  (`FRONTEND_COMPLETION_REVIEW_REQUIRED`) from the durable recovery
+  continuation, instead of re-entering that review. A review still in flight
+  (no recovery continuation) is re-entered as before.
+- New refusal codes: `RECOVERY_RECONCILIATION_REQUIRED`,
+  `RECOVERY_DIAGNOSIS_FAILED`, `RECOVERY_ACTION_AMBIGUOUS`,
+  `RECOVERY_BINDING_INVALID`. One trial per cycle and no cached documents are
+  deliberate ceilings.
+- Fixture-proven only: crash points are injected at seams over a Python host
+  fixture with synthetic credentials. This is not native qualification and not
+  E8; the ordinary repair and spec-review producers are still open.
+
 ### Fixed (2026-10-03, spec-014 E8 prerequisite 2: Claude qualification crash replay)
 
 - A managed Claude-host run that crashed between staging its private runtime

@@ -92,33 +92,43 @@ def _unique_keys(pairs):
     return value
 
 
+def _host_final_text(result: dict, raw: bytes, *, single: bool = True) -> str:
+    """The final agent message of a completed host receipt (``ValueError`` when it cannot be established).
+
+    ``result`` must carry a ``host_receipt``.  A review is tool-absent and must carry exactly one message
+    (``single``); a full-tool child (a recovery diagnosis) may narrate between tool calls, so its final
+    message is the last one.
+    """
+    host = result.get("host_receipt")
+    if host.get("status") != "complete":
+        raise ValueError("incomplete host receipt")
+    schema = host.get("schema")
+    if schema == "ffs.native-review-invocation/v1":
+        if (host.get("host") not in {"codex", "claude"}
+                or host.get("qualification_scope") != "one-completed-review"
+                or not isinstance(host.get("observation"), dict)):
+            raise ValueError("incomplete native review receipt")
+        schema = "ffs." + host["host"] + "-invocation-receipt/v1"
+    records = [json.loads(line, object_pairs_hook=_unique_keys) for line in raw.splitlines() if line.strip()]
+    if schema == "ffs.codex-invocation-receipt/v1":
+        texts = [record["item"]["text"] for record in records
+                 if record.get("type") == "item.completed"
+                 and record.get("item", {}).get("type") == "agent_message"]
+    elif schema == "ffs.claude-invocation-receipt/v1":
+        texts = [record["result"] for record in records if record.get("type") == "result"]
+    else:
+        raise ValueError("unsupported host receipt")
+    if not texts or single and len(texts) != 1:
+        raise ValueError("ambiguous review output")
+    return texts[-1]
+
+
 def _review_output(result: dict, raw: bytes) -> dict:
     try:
-        host = result.get("host_receipt")
-        if host is None:
+        if result.get("host_receipt") is None:
             value = json.loads(raw, object_pairs_hook=_unique_keys)
         else:
-            if host.get("status") != "complete":
-                raise ValueError("incomplete host receipt")
-            schema = host.get("schema")
-            if schema == "ffs.native-review-invocation/v1":
-                if (host.get("host") not in {"codex", "claude"}
-                        or host.get("qualification_scope") != "one-completed-review"
-                        or not isinstance(host.get("observation"), dict)):
-                    raise ValueError("incomplete native review receipt")
-                schema = "ffs." + host["host"] + "-invocation-receipt/v1"
-            records = [json.loads(line, object_pairs_hook=_unique_keys) for line in raw.splitlines() if line.strip()]
-            if schema == "ffs.codex-invocation-receipt/v1":
-                texts = [record["item"]["text"] for record in records
-                         if record.get("type") == "item.completed"
-                         and record.get("item", {}).get("type") == "agent_message"]
-            elif schema == "ffs.claude-invocation-receipt/v1":
-                texts = [record["result"] for record in records if record.get("type") == "result"]
-            else:
-                raise ValueError("unsupported host receipt")
-            if len(texts) != 1:
-                raise ValueError("ambiguous review output")
-            value = json.loads(texts[0], object_pairs_hook=_unique_keys)
+            value = json.loads(_host_final_text(result, raw), object_pairs_hook=_unique_keys)
         if not isinstance(value, dict):
             raise ValueError("invalid review output")
         return value

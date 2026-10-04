@@ -71,14 +71,15 @@ class HostRuntimeSeam:
     catalog_sha256: str | None = None
 
 
-def _retained_action(store, token, logical_key: str):
+def _retained_action(store, token, logical_key: str, action: str = "final_review",
+                     ambiguous_code: str = "FINAL_REVIEW_ACTION_AMBIGUOUS"):
     with store.read_transaction() as tx:
         rows = tx.execute(
-            "SELECT * FROM authority_policy_actions WHERE repository_id=? AND run_id=? AND action='final_review' "
+            "SELECT * FROM authority_policy_actions WHERE repository_id=? AND run_id=? AND action=? "
             "AND logical_key=? AND state<>'cancelled' ORDER BY created_at,id",
-            (token.repository_id, token.run_id, logical_key)).fetchall()
+            (token.repository_id, token.run_id, action, logical_key)).fetchall()
         if len(rows) > 1:
-            raise SupervisorRefused("FINAL_REVIEW_ACTION_AMBIGUOUS")
+            raise SupervisorRefused(ambiguous_code)
         action = dict(rows[0]) if rows else None
         intent = None
         if action is not None and action["intent_id"] is not None:
@@ -99,8 +100,9 @@ def _retained_reviewer(store, token, *, parent_activity_id: str, reviewer_key: s
     return activity, preparation
 
 
-def _current_reviewer(store, token, *, parent_activity_id: str, base_key: str, action):
-    """The reviewer this owner may qualify: ``(key, retained activity id, retained preparation id)``.
+def _current_reviewer(store, token, *, parent_activity_id: str, base_key: str, action,
+                      reconciliation_code: str = "REVIEW_RECONCILIATION_REQUIRED"):
+    """The reviewer (or recovery child) this owner may qualify: ``(key, retained activity id, retained preparation id)``.
 
     F51: a reviewer qualified under an earlier owner fence cannot be re-qualified
     here (its admission file, probe settlements and runtime home bind that
@@ -129,7 +131,7 @@ def _current_reviewer(store, token, *, parent_activity_id: str, base_key: str, a
         if activity is None or activity["generation"] == token.generation:
             return key, None if activity is None else activity["id"], preparation_id
         if action is not None:
-            raise SupervisorRefused("REVIEW_RECONCILIATION_REQUIRED")
+            raise SupervisorRefused(reconciliation_code)
         with store.read_transaction() as tx:
             unfinished = [row["id"] for row in tx.execute(
                 "SELECT id FROM authority_launch_intents WHERE activity_id=? "
@@ -163,13 +165,15 @@ def _current_candidate(store, token, *, parent_activity_id: str, preparation):
 
 
 def _reviewer_workspace(store, token, supervisor, *, preparation, parent_activity_id, runtime_identity,
-                        reviewer_key, candidate_hash, retained_preparation_id, retained_activity_id=None):
+                        reviewer_key, candidate_hash, retained_preparation_id, retained_activity_id=None,
+                        role: str = "reviewer"):
     """Capture the candidate once; replay reuses the retained reviewer preparation.
 
     Qualification only admits an ``inventory`` workspace and promotes it to the
-    reviewer role, so the capture is prepared as inventory.  A retained
-    preparation reads ``reviewer`` once promoted, ``inventory`` before; a ready
-    one (and its reviewer) is rebound to a resumed owner's fence (F51).
+    final role (``reviewer``, or ``recovery`` for a diagnosis or trial child), so
+    the capture is prepared as inventory.  A retained preparation reads that role
+    once promoted, ``inventory`` before; a ready one (and its child) is rebound
+    to a resumed owner's fence (F51).
     """
     if retained_preparation_id is not None:
         ready = inspect_workspace(store, retained_preparation_id)
@@ -187,7 +191,7 @@ def _reviewer_workspace(store, token, supervisor, *, preparation, parent_activit
             base_commit=preparation.base_commit, selected_input_manifest=snapshot.manifest,
             repository_path=preparation.repository_path)
         ready = prepare_workspace(store, token, pending, input_snapshot=snapshot)
-    if ready.input_digest != candidate_hash or ready.child_role not in {"inventory", "reviewer"}:
+    if ready.input_digest != candidate_hash or ready.child_role not in {"inventory", role}:
         raise SupervisorRefused("FRONTEND_REVIEW_CANDIDATE_STALE")
     return ready
 
@@ -434,16 +438,26 @@ def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
     """F51: the settled outer launch a same-key resume continues past instead of refusing.
 
     Only a succeeded launch whose completion evidence still verifies, under a
-    sealed lifecycle already at FINAL_REVIEW, qualifies.  That stage is entered
-    only after the execute producer bound the candidate (and its wave proof),
-    so the lifecycle needs the retained activity, never the outer runtime again.
+    sealed lifecycle that provably passed execution, qualifies.  FINAL_REVIEW is
+    entered only after the execute producer bound the candidate (and its wave
+    proof); RECOVER only from a handback of that point; EXECUTE only with a
+    retained recovery continuation (``CONTINUATION_SCHEMA``, bound to the state's
+    current candidate), because a bare EXECUTE stage, or any other decision,
+    proves nothing about the execution.  The lifecycle then needs the
+    retained activity, never the outer runtime again.
     """
     from .ownership import OwnershipRefused
     if launch is None or launch["state"] != "completed_succeeded":
         return False
+    from .recovery_integration import CONTINUATION_SCHEMA
     state = store.get_frontend_policy_state(repository_id=token.repository_id, run_id=token.run_id)
     retained = _retained_outer_completion(store, activity_id)
-    if state is None or state.stage != "FINAL_REVIEW" or retained is None:
+    if state is None or retained is None:
+        return False
+    decision = state.decision_json
+    continued = (state.stage == "EXECUTE" and isinstance(decision, dict)
+                 and decision.get("schema") == CONTINUATION_SCHEMA and decision.get("candidate_hash") == state.candidate_hash)
+    if state.stage not in {"FINAL_REVIEW", "RECOVER"} and not continued:
         return False
     try:
         store._verified_evidence(retained[1])
@@ -562,6 +576,7 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
     """Run the managed host: legacy single execution, or the sealed frontend lifecycle."""
     from .frontend_lifecycle import LifecycleProducers, drive_frontend_lifecycle
     from .frontend_policy import FrontendPolicyController
+    from .recovery_producer import produce_recovery
     from .supervisor import Supervisor, SupervisorRefused
     outcome = {"handle": None, "adapter": None, "material": None}
     # A frontend run is only the sealed lifecycle; the unsealed single launch
@@ -625,10 +640,10 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
                                  parent_activity_id=request.activity_id, preparation=session.ready,
                                  timeout_seconds=session.timeout_seconds)
 
-        def recover(_packet):
-            # No production diagnosis/trial producer is assembled yet; the retained
-            # handback stays durable and no recovery cycle is spent.
-            raise SupervisorRefused("RECOVERY_PRODUCER_UNAVAILABLE")
+        def recover(packet):
+            return produce_recovery(store, token, supervisor=review_supervisor, controller=controller,
+                                    seam=session.seam, parent_activity_id=request.activity_id,
+                                    preparation=session.ready, packet=packet, timeout_seconds=session.timeout_seconds)
 
         def settle():
             _settle_reviewers(store, token, parent_activity_id=request.activity_id)

@@ -69,6 +69,22 @@ def _reviewed(store, token, acceptance_hash: str, candidate_hash: str) -> bool:
             (token.repository_id, token.run_id, acceptance_hash, candidate_hash)).fetchone() is not None
 
 
+def _review_spent_unrecorded(store, token, decision) -> bool:
+    """FINAL_REVIEW follows a recovery that continued past a spent final review with no receipt.
+
+    The durable facts: the continuation a recovery winner leaves at FINAL_REVIEW names the final
+    review among its consumed attempts, and the one final-review grant is used.  That review
+    settled without a recorded receipt (a refusal before one existed), so it can never be
+    recorded and a second one can never be granted.  A review still in flight (F51) has no
+    recovery continuation and is re-entered by its producer instead.
+    """
+    from .recovery_integration import CONTINUATION_SCHEMA
+    return (isinstance(decision, dict) and decision.get("schema") == CONTINUATION_SCHEMA
+            and decision.get("saved_stage") == "FINAL_REVIEW"
+            and "final_review" in decision.get("consumed_attempts", ())
+            and bool(_used(store, token, "final_review")))
+
+
 def _failed_criteria(sealed, checks: dict) -> list[str]:
     return sorted(criterion["id"] for criterion in sealed.material["criteria"]
                   if any(checks.get(check["id"], {}).get("status") != "passed" for check in criterion["checks"]))
@@ -137,6 +153,10 @@ def drive_frontend_lifecycle(store, token, *, supervisor, controller, workspace:
                     and not checked("FINAL_REVIEW")):
                 continue
             if not _review_recorded(store, token, sealed.acceptance_hash):
+                if _review_spent_unrecorded(store, token, current.decision_json):
+                    move("FINAL_REVIEW", "NEEDS_DECISION", {"schema": BLOCKED_SCHEMA,
+                         "code": "FRONTEND_COMPLETION_REVIEW_REQUIRED", "candidate_hash": state().candidate_hash})
+                    continue
                 try:
                     producers.final_review(controller.sealed())
                 except SupervisorRefused as error:

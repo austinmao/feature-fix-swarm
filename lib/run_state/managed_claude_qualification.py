@@ -164,7 +164,7 @@ def qualify_managed_claude_runtime(
 ):
     """Stage, fence four Claude probes, promote, then commit one exact receipt."""
     if (
-        type(host_request) is not ClaudeHostRequest or role not in {"worker", "reviewer"}
+        type(host_request) is not ClaudeHostRequest or role not in {"worker", "reviewer", "recovery"}
         or not isinstance(activity_id, str) or not activity_id
         or workspace.parent_activity_id != parent_activity_id
         or workspace.child_request_key != activity_request_key or not workspace.ready
@@ -360,8 +360,8 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     """Qualification seams, worker channel and outer contract for one Claude host run."""
     import tempfile
     from .frontend_producers import (
-        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, resumable_outer_completion, retained_launch,
-        retained_outer_activity,
+        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, rebind_retained_child, resumable_outer_completion,
+        retained_launch, retained_outer_activity,
     )
     from .prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
     from .supervisor import _managed_inventory_workspace, _managed_prompt
@@ -399,6 +399,9 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
         # A real outer launch holds Claude state in its home and may have done work: never re-stage,
         # re-qualify, relaunch or replay it as a success.  Refused before any resource is allocated.
         raise SupervisorRefused(_replayed_launch_refusal(launch))
+    if resume:
+        # Checks, recovery children and the final reviewer capture from, and parent under, the retained outer.
+        ready = rebind_retained_child(store, token, outer_activity_id, ready.id)
     bridge_command = json.dumps([str(Path(sys.executable).resolve()), str(bridge)], separators=(",", ":"))
     socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
     channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
