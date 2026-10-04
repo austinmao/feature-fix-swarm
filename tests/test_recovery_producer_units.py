@@ -150,6 +150,10 @@ def test_no_other_action_widens_the_cancel_set(tmp_path, action, _stable_test_id
 
 # --- (b) resumable_outer_completion -----------------------------------------------------------------------
 
+CURRENT = "c" * 64
+CONTINUATION = {"schema": "ffs.frontend-recovery-continuation-result/v1", "candidate_hash": CURRENT}
+
+
 def _resumable(monkeypatch, stage, decision, *, launch_state="completed_succeeded", evidence_valid=True):
     import run_state.frontend_producers as producers
     from run_state.ownership import OwnershipRefused as Refused
@@ -160,7 +164,7 @@ def _resumable(monkeypatch, stage, decision, *, launch_state="completed_succeede
         if not evidence_valid:
             raise Refused("EVIDENCE_CHANGED")
 
-    state = None if stage is None else SimpleNamespace(stage=stage, decision_json=decision)
+    state = None if stage is None else SimpleNamespace(stage=stage, decision_json=decision, candidate_hash=CURRENT)
     store = SimpleNamespace(get_frontend_policy_state=lambda **_kwargs: state, _verified_evidence=verified)
     token = SimpleNamespace(repository_id="repo", run_id="run")
     return producers.resumable_outer_completion(store, token, "outer", {"state": launch_state})
@@ -169,10 +173,16 @@ def _resumable(monkeypatch, stage, decision, *, launch_state="completed_succeede
 @pytest.mark.parametrize(("stage", "decision", "expected"), [
     ("FINAL_REVIEW", None, True),                       # unchanged since F51
     ("RECOVER", {"schema": "handback"}, True),          # a retained handback: the producer finishes the cycle
-    ("EXECUTE", {"schema": "continuation"}, True),      # a recovery continuation: execution provably happened
+    ("EXECUTE", CONTINUATION, True),                    # a recovery continuation bound to the current candidate
     ("EXECUTE", None, False),                           # no continuation: still refuses, as before
+    ("EXECUTE", {"schema": "unrelated"}, False),        # any other decision proves nothing about the execution
+    ("EXECUTE", {**CONTINUATION, "candidate_hash": "d" * 64}, False),          # a continuation naming another candidate
+    ("EXECUTE", {"candidate_hash": CURRENT}, False),                            # no schema
+    ("EXECUTE", {"schema": "ffs.frontend-recovery-continuation/v1", "candidate_hash": CURRENT}, False),  # a handback packet
     ("SEALED", None, False), ("DONE", None, False), ("NEEDS_DECISION", {"code": "X"}, False), (None, None, False),
-])
+], ids=["final-review", "recover-handback", "execute-continuation", "execute-no-decision", "execute-unrelated-schema",
+        "execute-other-candidate", "execute-no-schema", "execute-handback-packet", "sealed", "done",
+        "needs-decision", "no-state"])
 def test_resumable_outer_completion_admits_exactly_final_review_recover_and_a_recovery_continuation(
         monkeypatch, stage, decision, expected):
     assert _resumable(monkeypatch, stage, decision) is expected

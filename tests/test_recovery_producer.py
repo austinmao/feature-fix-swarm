@@ -10,7 +10,9 @@ not a native diagnosis or trial, and not E8.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+from pathlib import Path
 
 import pytest
 
@@ -18,9 +20,10 @@ import run_state.managed_qualification as managed_qualification
 from run_state.frontend_completion import post_repair_review_tx
 from run_state.state import ControlStore
 from recovery_fixture import (
-    CHECK_ALWAYS_PASSES, arm, assert_recovered_once, candidate_chain, ledger, recovery_workspaces, sealed_candidate,
-    world,
+    CHECK_ALWAYS_PASSES, arm, assert_recovered_once, candidate_chain, charge_qualification, ledger, recovery_workspaces,
+    sealed_candidate, world,
 )
+from run_state.supervisor import SupervisorRefused
 from test_final_review_resume import _held_resources
 from test_managed_lifecycle_assembly import _last_envelope, requires_local_confinement
 
@@ -228,18 +231,105 @@ def test_r5_a_refused_diagnosis_qualification_leaves_the_handback_retained_and_s
     assert_recovered_once(w)
 
 
-def test_r6_an_infeasible_cycle_refuses_before_it_is_spent(tmp_path, monkeypatch, capsys):
+def _spy_release(monkeypatch) -> list:
+    """The private TMPDIRs the Codex adapter is asked to release, in order (the real release still runs)."""
+    from run_state.codex_host import CodexHostAdapter
+    real, released = CodexHostAdapter.release_launch_material, []
+
+    def release(material):
+        released.append(material.temporary_dir)
+        return real(material)
+
+    monkeypatch.setattr(CodexHostAdapter, "release_launch_material", staticmethod(release))
+    return released
+
+
+def test_r6_an_infeasible_cycle_refuses_before_it_is_spent_and_releases_the_bound_material(
+        tmp_path, monkeypatch, capsys):
     w = world(tmp_path, monkeypatch)
     _stop_at_the_handback(w, monkeypatch)
     store = ControlStore(w.authority / "control.sqlite3")
     with store.transaction() as tx:
         tx.execute("UPDATE authority_run_policy_budgets SET launch_charged=launch_limit-2")
+    released = _spy_release(monkeypatch)
     capsys.readouterr()
     assert w.run() == 78
     assert _last_envelope(capsys)["code"] == "POLICY_STAGE_INFEASIBLE"
     led = ledger(w)
     assert led.stage == "RECOVER" and led.cycles == [] and led.actions == {"execute": 1}
     assert "diagnosis" not in led.launches and "recovery_trial" not in led.launches
+    # The diagnosis material is bound before the cycle is priced, so the refusal must release it.
+    assert len(released) == 1 and not Path(released[0]).exists()
+
+
+def _bind_hook(monkeypatch, wrap) -> None:
+    """Hand ``produce_recovery`` a host seam whose ``bind`` is ``wrap(real_bind)``."""
+    import run_state.recovery_producer as recovery_producer
+    real = recovery_producer.produce_recovery
+
+    def produce(*args, **kwargs):
+        seam = kwargs["seam"]
+        return real(*args, **{**kwargs, "seam": replace(seam, bind=wrap(seam.bind))})
+
+    monkeypatch.setattr(recovery_producer, "produce_recovery", produce)
+
+
+@pytest.mark.parametrize("failure", ["bind-refuses", "bind-returns-no-material"])
+def test_a_diagnosis_bind_failure_leaves_the_handback_retained_and_spends_no_cycle(
+        tmp_path, monkeypatch, capsys, failure):
+    w = world(tmp_path, monkeypatch)
+    _stop_at_the_handback(w, monkeypatch)
+    failing = [True]
+
+    def wrap(real):
+        def bind(qualified, prompt, ready, contract_hash, launch_key):
+            if not failing:
+                return real(qualified, prompt, ready, contract_hash, launch_key)
+            if failure == "bind-refuses":
+                raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
+            request, adapter = real(qualified, prompt, ready, contract_hash, launch_key)
+            adapter.release_launch_material(request.codex_material)
+            return replace(request, codex_material=None), adapter
+        return bind
+
+    _bind_hook(monkeypatch, wrap)
+    capsys.readouterr()
+    assert w.run() == 78
+    assert _last_envelope(capsys)["code"] == "HOST_CAPABILITY_UNQUALIFIED"
+    led = ledger(w)
+    # The handback is still retained and nothing was spent: no cycle, no diagnosis action, no launch.
+    assert led.stage == "RECOVER" and led.cycles == [] and led.actions == {"execute": 1}
+    assert "diagnosis" not in led.launches
+    # A later owner whose host binds completes it.
+    failing.clear()
+    assert w.run() == 0
+    assert_recovered_once(w)
+
+
+def test_a_reused_cycle_is_repriced_before_any_requalification_probe_is_charged(tmp_path, monkeypatch, capsys):
+    """A new owner abandons the earlier child and charges four fresh probes: the spent cycle must still fit."""
+    w = world(tmp_path, monkeypatch)
+    probes = charge_qualification(monkeypatch)
+    _stop_at_the_handback(w, monkeypatch)
+    store = ControlStore(w.authority / "control.sqlite3")
+    # The cycle's launch demand once its diagnosis child is qualified: that launch, the trial's probes and
+    # launch, and the one frozen check.  Size the limit so the FIRST diagnosis qualification plus that fits exactly.
+    overhead = 1 + probes + 1 + 1
+    with store.transaction() as tx:
+        tx.execute("UPDATE authority_run_policy_budgets SET launch_limit=launch_charged+?", (probes + overhead,))
+    fired = arm(monkeypatch, "cycle-reserved")
+    w.crash()
+    assert fired == ["cycle-reserved"]
+    crashed = ledger(w)
+    assert crashed.stage == "RECOVER" and len(crashed.cycles) == 1 and "diagnosis" not in crashed.launches
+    capsys.readouterr()
+    assert w.run() == 78
+    assert _last_envelope(capsys)["code"] == "POLICY_STAGE_INFEASIBLE"
+    led = ledger(w)
+    # Refused before any probe: no launch was charged, no grant reserved, the one cycle is unchanged.
+    assert (led.charged, led.cycles, led.actions, led.launches) == (
+        crashed.charged, crashed.cycles, crashed.actions, crashed.launches)
+    assert led.stage == "RECOVER" and _held_resources(tmp_path) == {}
 
 
 def test_a_diagnosis_with_no_usable_answer_refuses_typed_after_its_cycle_is_spent(tmp_path, monkeypatch, capsys):

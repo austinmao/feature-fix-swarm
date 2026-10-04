@@ -42,7 +42,7 @@ if prompt.startswith("Recovery diagnosis request:"):
     raise SystemExit(0)
 if prompt.startswith("Recovery trial request:"):
     if MODE.get("trial"):
-        target = pathlib.Path("src/input.txt")
+        target = pathlib.Path(MODE.get("trial_file", "src/input.txt"))
         target.write_text(target.read_text() + MODE["trial"])
     _emit("trial applied")
     raise SystemExit(0)
@@ -85,6 +85,28 @@ def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id=
     return SimpleNamespace(tmp_path=tmp_path, primary=primary, authority=authority, repository_id=repository_id,
                            run_id=run_id, run=run, mode_path=mode_path, runtime=runtime, fake=fake, catalog=catalog,
                            env=env, crash=lambda: _crash(run, authority), head=lambda: git_head(primary))
+
+
+def charge_qualification(monkeypatch) -> int:
+    """Make the fixture qualify charge what the real four probes charge (one launch each); returns that cost.
+
+    The fixture qualify launches no probe, but a real recovery child's qualification does, and each new owner
+    requalifies a new child.  Charged once per child activity, as a retained qualification charges nothing.
+    """
+    from run_state.state import _QUALIFICATION_PROBE_ORDER
+    real, charged, cost = managed_qualification.qualify_managed_runtime, set(), len(_QUALIFICATION_PROBE_ORDER)
+
+    def qualify(store, token, **kwargs):
+        result = real(store, token, **kwargs)
+        if kwargs["role"] == "recovery" and kwargs["activity_id"] not in charged:
+            charged.add(kwargs["activity_id"])
+            with store.transaction() as tx:
+                tx.execute("UPDATE authority_run_policy_budgets SET launch_charged=launch_charged+? "
+                           "WHERE repository_id=? AND run_id=?", (cost, token.repository_id, token.run_id))
+        return result
+
+    monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify)
+    return cost
 
 
 def git_head(path) -> str:
