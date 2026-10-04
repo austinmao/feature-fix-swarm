@@ -15,8 +15,10 @@ all skills.
   `lib/run_state/recovery_producer.py`: one recovery cycle per handback, a
   diagnosis child and one isolated trial child, read back by the existing
   `RecoveryController`; a winner is integrated by the existing journaled path
-  and the run continues from its saved stage. This covers the three M3 shapes
-  (a refused final review) as well as a failed mapped check. No winner stops at
+  and the run continues from its saved stage. A failed mapped check or a failed
+  final-review verdict can recover to DONE; the three M3 shapes (a final review
+  refused before it recorded a receipt) now reach a typed `NEEDS_DECISION`
+  after their recovery instead of a dead end. No winner stops at
   `NEEDS_DECISION`; the shared candidate is never touched by a trial.
 - The cycle is bound to the current candidate (its live base and the digest
   the handback froze), so a candidate advanced before the handback is the one
