@@ -35,6 +35,20 @@ all skills.
   Claude session rebinds a retained outer on resume, as the Codex session
   does. The qualification role checks admit `recovery`; the unlaunched-grant
   cancel set adds `diagnosis` and `recovery_trial` (never `repair`).
+- A recovery winner is journaled onto a candidate a GSD wave already advanced
+  in place on the shared preparation (the production shape of task-swarm). The
+  journal's recovery binding compares the trial's input with the live frontend
+  candidate of that preparation, not with the preparation's first input, so
+  such a winner no longer refuses `WAVE_INTEGRATION_BINDING_INVALID`; the trial
+  input must still equal the live candidate (until its own output is bound,
+  then that output's parent), and the candidate's journals must be on that
+  preparation.
+- A final review refused before it recorded a receipt (the M3 attempt 33
+  shape) spends its one grant and can never be recorded. After the recovery
+  that follows it, the lifecycle moves `FINAL_REVIEW` to `NEEDS_DECISION`
+  (`FRONTEND_COMPLETION_REVIEW_REQUIRED`) from the durable recovery
+  continuation, instead of re-entering that review. A review still in flight
+  (no recovery continuation) is re-entered as before.
 - New refusal codes: `RECOVERY_RECONCILIATION_REQUIRED`,
   `RECOVERY_DIAGNOSIS_FAILED`, `RECOVERY_ACTION_AMBIGUOUS`,
   `RECOVERY_BINDING_INVALID`. One trial per cycle and no cached documents are

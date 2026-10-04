@@ -74,6 +74,14 @@ def _chain(store) -> dict:
             "SELECT candidate_hash,parent_candidate_hash FROM authority_frontend_policy_candidates")}
 
 
+def _live(store, token, preparation_id, activity_id, digest) -> bool:
+    """Whether the journal's recovery binding accepts ``digest`` as a trial input on this preparation."""
+    from run_state.integration_journal import _recovery_input_is_live_tx
+    with store.read_transaction() as tx:
+        workspace = tx.execute("SELECT * FROM context_workspaces WHERE preparation_id=?", (preparation_id,)).fetchone()
+        return _recovery_input_is_live_tx(tx, token, workspace, activity_id, digest)
+
+
 def test_a_recovery_winner_lands_on_a_wave_advanced_candidate_and_reaches_done(tmp_path, monkeypatch):
     primary, authority, _repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
@@ -136,6 +144,11 @@ def test_a_recovery_winner_lands_on_a_wave_advanced_candidate_and_reaches_done(t
         advanced = bound.candidate_hash
         assert advanced != first_input and inspect_workspace(store, ready.id).input_digest == first_input
         assert _chain(store) == {advanced: first_input}
+        # Before any winner: only the live candidate is a valid trial input; the sealed input the preparation
+        # recorded first, and any other digest, are refused.
+        assert _live(store, token, ready.id, parent.id, advanced) is True
+        assert _live(store, token, ready.id, parent.id, first_input) is False
+        assert _live(store, token, ready.id, parent.id, "e" * 64) is False
 
         review_supervisor = supervisor()
         calls = {"recover": 0, "review": 0}
@@ -165,6 +178,7 @@ def test_a_recovery_winner_lands_on_a_wave_advanced_candidate_and_reaches_done(t
                 store, token, parent=parent, ready=live, snapshot=snapshot, key="trial",
                 acceptance_hash=frozen.acceptance_hash, runtime=runtime)
             script = "from pathlib import Path\nPath('result-0.txt').write_text('repaired')\n"
+            retained["trial"] = (child.id, child_ready.id)
             action_id, receipt, _r, _rt, evidence = _launch(
                 store, token, review_supervisor, child=child, ready=child_ready, script=script,
                 key="trial-launch", acceptance_hash=frozen.acceptance_hash, action="recovery_trial", cycle=1)
@@ -179,6 +193,7 @@ def test_a_recovery_winner_lands_on_a_wave_advanced_candidate_and_reaches_done(t
         def final_review(current):
             calls["review"] += 1
             candidate = resolve_current_frontend_candidate(store, token)
+            retained["resolved"] = candidate.candidate_hash
             live = inspect_workspace(store, candidate.workspace_preparation_id)
             snapshot = capture_prelaunch_snapshot(store, token, live, activity_id=candidate.parent_activity_id,
                                                   runtime_identity=candidate.runtime_identity,
@@ -223,9 +238,18 @@ def test_a_recovery_winner_lands_on_a_wave_advanced_candidate_and_reaches_done(t
         chain = _chain(store)
         (winner,) = [candidate for candidate, parent_hash in chain.items() if parent_hash == advanced]
         assert chain == {advanced: first_input, winner: advanced}
+        # Once the winner's output is current, its own trial input is accepted only through its own recovery
+        # receipt: another activity, a stale input or a foreign preparation are refused.
+        trial_id, trial_workspace = retained["trial"]
+        assert _live(store, token, ready.id, trial_id, advanced) is True
+        assert _live(store, token, ready.id, parent.id, advanced) is False
+        assert _live(store, token, ready.id, trial_id, first_input) is False
+        assert _live(store, token, ready.id, trial_id, "e" * 64) is False
+        assert _live(store, token, trial_workspace, trial_id, winner) is False
         state = store.get_frontend_policy_state(repository_id=token.repository_id, run_id=token.run_id)
         assert state.stage == "DONE" and state.candidate_hash == winner
-        assert resolve_current_frontend_candidate(store, token).candidate_hash == winner
+        # The durable chain resolves to the winner while the outer is live (the review ran against it).
+        assert retained["resolved"] == winner
         assert (ready.path / "result-0.txt").read_text() == "repaired"
         assert _head(ready.path) == ready.base_commit
         with store.read_transaction() as tx:

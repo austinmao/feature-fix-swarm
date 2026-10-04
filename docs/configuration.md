@@ -260,7 +260,11 @@ qualification has run, so treat it as experimental. Known limits today:
   the retained handback: a diagnosis child, then one isolated trial child whose
   frozen checks decide a winner. A winner is integrated and the run continues
   from its saved stage (a refused final review included); no winner stops at
-  `NEEDS_DECISION` (`RECOVERY_CYCLE_WITHOUT_WINNER`). A retained handback at
+  `NEEDS_DECISION` (`RECOVERY_CYCLE_WITHOUT_WINNER`). A winner also lands on a
+  candidate a GSD wave advanced in place. A final review that was refused
+  before it recorded a receipt cannot be repeated (its one grant is spent), so
+  after its recovery the run stops at `NEEDS_DECISION`
+  (`FRONTEND_COMPLETION_REVIEW_REQUIRED`) rather than re-entering that review. A retained handback at
   `RECOVER` resumes under a new owner fence only until the diagnosis intent
   exists; from that intent on a resume refuses `INTENT_RECONCILIATION_REQUIRED`
   or `RECOVERY_RECONCILIATION_REQUIRED` and never relaunches. A host or

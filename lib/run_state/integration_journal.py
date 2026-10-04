@@ -68,6 +68,45 @@ def assert_settled_tx(tx, preparation_id, *, except_wave_key=None):
         raise OwnershipRefused("WORKSPACE_INTEGRATION_PENDING")
 
 
+def _recovery_input_is_live_tx(tx, token, workspace, trial_activity_id, input_digest) -> bool:
+    """The recovery trial ran on the frontend candidate that is live on THIS preparation.
+
+    A GSD wave (or an earlier recovery winner) advances the candidate in place on the shared
+    preparation, whose own recorded input stays the sealed one; comparing the trial's input with
+    that first input would refuse every winner after a real wave.  Instead, until the winner's own
+    output is bound, the trial input must equal the frontend state's current candidate, and that
+    candidate's journals must have landed on this preparation.  Once this winner's output is the
+    current candidate, the candidate row must name the trial's input as its parent and the
+    trial's own recovery receipt.  With no frontend lifecycle at all, or an untouched sealed
+    input, the preparation's first input is the candidate, as before.
+    """
+    from .workspace import _from_row
+    first = _from_row(workspace).input_digest
+    if tx.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='authority_frontend_policy_states'"
+                  ).fetchone() is None:
+        return first == input_digest
+    scope = (token.repository_id, token.run_id)
+    state = tx.execute("SELECT acceptance_hash,candidate_hash FROM authority_frontend_policy_states "
+                       "WHERE repository_id=? AND run_id=?", scope).fetchone()
+    if state is None:
+        return first == input_digest
+    current = tx.execute("SELECT * FROM authority_frontend_policy_candidates WHERE repository_id=? AND run_id=? "
+                         "AND acceptance_hash=? AND candidate_hash=?",
+                         (*scope, state["acceptance_hash"], state["candidate_hash"])).fetchone()
+    if current is None:
+        return state["candidate_hash"] == input_digest == first
+    receipt = tx.execute("SELECT receipt_json FROM authority_acceptance_receipts WHERE repository_id=? "
+                         "AND run_id=? AND receipt_hash=?", (*scope, current["receipt_hash"])).fetchone()
+    value = json.loads(receipt["receipt_json"])
+    if state["candidate_hash"] == input_digest:
+        landed = tx.execute("SELECT preparation_id FROM authority_workspace_integrations WHERE repository_id=? "
+                            "AND run_id=? AND issuing_intent_id=? ORDER BY event_id DESC",
+                            (*scope, value["intent_id"])).fetchone()
+        return landed is not None and landed["preparation_id"] == workspace["preparation_id"]
+    return (current["parent_candidate_hash"] == input_digest and value["role"] == "recovery"
+            and value["activity_id"] == trial_activity_id)
+
+
 def _recovery_binding_tx(store, tx, token, wave_key, preparation_id):
     """Bind a recovery winner's journal to its retained trial record.
 
@@ -104,7 +143,7 @@ def _recovery_binding_tx(store, tx, token, wave_key, preparation_id):
                 or intent["state"] != "completed_succeeded" or intent["completion_status"] != "succeeded"
                 or not intent["completion_evidence_json"] or not intent["acknowledgement_id"] or not intent["permit_id"]
                 or workspace["state"] != "ready" or workspace["base_commit"] != data["base_commit"]
-                or _from_row(workspace).input_digest != data["input_digest"]
+                or not _recovery_input_is_live_tx(tx, token, workspace, activity["id"], data["input_digest"])
                 or child["role"] != "recovery" or child["workspace_preparation_id"] != data["workspace_preparation_id"]
                 or child["workspace_preparation_id"] == preparation_id or prepared is None):
             raise ValueError
