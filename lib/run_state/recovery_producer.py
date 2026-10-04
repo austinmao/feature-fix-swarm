@@ -64,11 +64,25 @@ class _Cycle:
     parent_id: str             # the activity the current candidate (and so each child) parents under
     runtime: str               # the runtime identity the candidate was captured under
     binding: FrozenRecoveryBinding
-    overhead: int              # launches still to come once the diagnosis child is qualified
+    checks: int                # frozen checks one trial's candidate is measured against
 
     @property
     def tag(self) -> str:
         return self.binding.input_hash[:16]
+
+    @property
+    def probes(self) -> int:
+        return len(_QUALIFICATION_PROBE_ORDER)
+
+    @property
+    def trial_demand(self) -> int:
+        """Launches one trial child costs: its qualification probes, its launch and its checks."""
+        return self.probes + 1 + self.checks
+
+    @property
+    def overhead(self) -> int:
+        """Launches still to come once the diagnosis child is qualified: its launch and the trial."""
+        return 1 + self.trial_demand
 
 
 def produce_recovery(store, token, *, supervisor, controller, seam, parent_activity_id: str, preparation,
@@ -102,21 +116,24 @@ def _context(store, token, supervisor, controller, seam, parent_activity_id, pre
         candidate.base_commit, frozen.candidate_hash, frozen.candidate_hash, sealed.material["candidate_hash"],
         frozen.acceptance_hash, sealed.material["runtime"]["effective_hash"], frozen.acceptance_hash)
     checks = sum(len(criterion["checks"]) for criterion in sealed.material["criteria"])
-    # The diagnosis launch, the trial's qualification probes and launch, and the trial's checks.
-    overhead = 1 + len(_QUALIFICATION_PROBE_ORDER) + 1 + checks
     return _Cycle(store, token, supervisor, controller, seam, timeout_seconds, packet, sealed, frozen, candidate,
-                  parent_id, runtime, binding, overhead)
+                  parent_id, runtime, binding, checks)
 
 
-def _reserve_cycle(cycle: _Cycle):
-    """The one issued cycle of this binding; a replay returns the same row (and is never re-priced)."""
+def _issued_cycles(cycle: _Cycle) -> list[dict]:
     store, token = cycle.store, cycle.token
-    mode = store.get_run_policy_budget(repository_id=token.repository_id, run_id=token.run_id).recovery_mode
     with store.read_transaction() as tx:
-        issued = [dict(row) for row in tx.execute(
+        return [dict(row) for row in tx.execute(
             "SELECT recovery_cycle,input_hash FROM authority_policy_actions WHERE repository_id=? AND run_id=? "
             "AND action IN ('recovery_cycle_normal','recovery_cycle_autonomous') AND state<>'cancelled' "
             "ORDER BY recovery_cycle", (token.repository_id, token.run_id))]
+
+
+def _reserve_cycle(cycle: _Cycle):
+    """The one issued cycle of this binding; a replay returns the same row."""
+    store, token = cycle.store, cycle.token
+    mode = store.get_run_policy_budget(repository_id=token.repository_id, run_id=token.run_id).recovery_mode
+    issued = _issued_cycles(cycle)
     mine = [row for row in issued if row["input_hash"] == cycle.binding.input_hash]
     try:
         return store.reserve_policy_action(
@@ -127,8 +144,21 @@ def _reserve_cycle(cycle: _Cycle):
         raise SupervisorRefused(error.code) from error
 
 
+def _assert_fits(cycle: _Cycle, demand: int) -> None:
+    """Refuse, before any probe is charged, when the launches this child still needs no longer fit.
+
+    A reused cycle was priced when it was reserved, but a new owner abandons the earlier qualified child
+    and qualifies a fresh one (its probes are charged again), so the reservation's price is not enough.
+    """
+    budget = cycle.store.get_run_policy_budget(repository_id=cycle.token.repository_id, run_id=cycle.token.run_id)
+    if budget.launch_limit - budget.launch_charged < demand:
+        raise SupervisorRefused("POLICY_STAGE_INFEASIBLE")
+
+
 def _diagnose(cycle: _Cycle):
-    settled = _child(cycle, "diagnosis", "diagnosis", lambda: _diagnosis_prompt(cycle))
+    # Under a reused cycle the diagnosis child's own probes are charged again, on top of the cycle's price.
+    settled = _child(cycle, "diagnosis", "diagnosis", lambda: _diagnosis_prompt(cycle),
+                     cycle.probes + cycle.overhead)
     if settled is None:
         raise SupervisorRefused("RECOVERY_DIAGNOSIS_FAILED")
     text = _final_text(settled.handle).replace("\0", "").strip()
@@ -142,7 +172,8 @@ def _diagnose(cycle: _Cycle):
 
 def _trial(cycle: _Cycle, diagnosis_text: str):
     """One isolated trial; ``None`` when it produced no usable patch (its launch stays charged)."""
-    settled = _child(cycle, "trial", "recovery_trial", lambda: _trial_prompt(cycle, diagnosis_text))
+    settled = _child(cycle, "trial", "recovery_trial", lambda: _trial_prompt(cycle, diagnosis_text),
+                     cycle.trial_demand)
     if settled is None:
         return None
     from .recovery_trial_checks import run_isolated_trial_checks, trial_checks_key
@@ -170,8 +201,11 @@ def _retained_event(store, activity_id: str, key: str) -> bool:
                           (activity_id, key)).fetchone() is not None
 
 
-def _child(cycle: _Cycle, name: str, action: str, make_prompt):
-    """Run, or resume, one recovery child; ``None`` when its process did not complete usably."""
+def _child(cycle: _Cycle, name: str, action: str, make_prompt, demand: int):
+    """Run, or resume, one recovery child; ``None`` when its process did not complete usably.
+
+    ``demand`` is the launches this child and everything after it still need if it has to be qualified afresh.
+    """
     key = f"recovery:{cycle.tag}:{name}"
     launch_key = key + ":launch"
     row, intent = _retained_action(cycle.store, cycle.token, launch_key, action, "RECOVERY_ACTION_AMBIGUOUS")
@@ -183,6 +217,8 @@ def _child(cycle: _Cycle, name: str, action: str, make_prompt):
             # Its completion, receipt and workspace bind the fence that issued them: never relaunched or re-bound.
             raise SupervisorRefused("RECOVERY_RECONCILIATION_REQUIRED")
         return _settle(cycle, cycle.supervisor.resume_monitored(intent["id"]))
+    if any(item["input_hash"] == cycle.binding.input_hash for item in _issued_cycles(cycle)):
+        _assert_fits(cycle, demand)
     if row is not None:
         # Reserved, never launched.  A re-bind builds new launch material (a new private TMPDIR or session), so
         # this grant can never be reused: release it unspent (it holds no intent and no attempt).
@@ -195,15 +231,16 @@ def _child(cycle: _Cycle, name: str, action: str, make_prompt):
 
 def _launch(cycle: _Cycle, key: str, launch_key: str, action: str, make_prompt):
     qualified, ready = _qualified_child(cycle, key)
-    ordinal = _reserve_cycle(cycle).recovery_cycle
+    # Bind and validate the launch material BEFORE the cycle is reserved: a host refusal here must leave the
+    # handback retained with no cycle spent.
     request, adapter = cycle.seam.bind(qualified, make_prompt(), ready, cycle.frozen.acceptance_hash, launch_key)
     material = request.codex_material or request.claude_material
     if material is None:
-        _release(adapter, material)
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
     launched, handle = False, None
     try:
         try:
+            ordinal = _reserve_cycle(cycle).recovery_cycle
             request = cycle.controller.reserve_stage(cycle.supervisor, replace(request, monitor_result=True),
                                                      action=action, recovery_cycle=ordinal)
         except OwnershipRefused as error:

@@ -441,17 +441,23 @@ def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
     sealed lifecycle that provably passed execution, qualifies.  FINAL_REVIEW is
     entered only after the execute producer bound the candidate (and its wave
     proof); RECOVER only from a handback of that point; EXECUTE only with a
-    retained recovery continuation (``decision_json``), because a bare EXECUTE
-    stage proves nothing about the execution.  The lifecycle then needs the
+    retained recovery continuation (``CONTINUATION_SCHEMA``, bound to the state's
+    current candidate), because a bare EXECUTE stage, or any other decision,
+    proves nothing about the execution.  The lifecycle then needs the
     retained activity, never the outer runtime again.
     """
     from .ownership import OwnershipRefused
     if launch is None or launch["state"] != "completed_succeeded":
         return False
+    from .recovery_integration import CONTINUATION_SCHEMA
     state = store.get_frontend_policy_state(repository_id=token.repository_id, run_id=token.run_id)
     retained = _retained_outer_completion(store, activity_id)
-    if state is None or retained is None or not (
-            state.stage in {"FINAL_REVIEW", "RECOVER"} or state.stage == "EXECUTE" and state.decision_json is not None):
+    if state is None or retained is None:
+        return False
+    decision = state.decision_json
+    continued = (state.stage == "EXECUTE" and isinstance(decision, dict)
+                 and decision.get("schema") == CONTINUATION_SCHEMA and decision.get("candidate_hash") == state.candidate_hash)
+    if state.stage not in {"FINAL_REVIEW", "RECOVER"} and not continued:
         return False
     try:
         store._verified_evidence(retained[1])

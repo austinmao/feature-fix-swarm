@@ -20,18 +20,24 @@ all skills.
   `NEEDS_DECISION`; the shared candidate is never touched by a trial.
 - The cycle is bound to the current candidate (its live base and the digest
   the handback froze), so a candidate advanced before the handback is the one
-  recovered. The diagnosis child is captured and qualified before the cycle
-  is reserved, and the cycle is reserved with the launch demand of the whole
-  cycle, so a host, qualification or budget refusal
-  (`POLICY_STAGE_INFEASIBLE`) leaves the handback retained with no cycle spent.
+  recovered. The diagnosis child is captured, qualified and its launch
+  material bound and validated before the cycle is reserved, and the cycle is
+  reserved with the launch demand of the whole cycle, so a host, qualification,
+  bind or budget refusal (`POLICY_STAGE_INFEASIBLE`) leaves the handback
+  retained with no cycle spent; material bound for a refused reservation is
+  released.
 - Replay is keyed at every step. A retained intent is resumed only by the
   owner that issued it; under a later owner fence it refuses
   `INTENT_RECONCILIATION_REQUIRED` or the new `RECOVERY_RECONCILIATION_REQUIRED`
   and never relaunches. The controller's generation checks are unchanged.
-  An unlaunched grant of an earlier owner is released and re-reserved.
+  An unlaunched grant of an earlier owner is released and re-reserved. A new
+  owner reusing a cycle qualifies a fresh child (its probes are charged
+  again), so before any probe it checks the launch budget still covers the
+  child and everything after it, and refuses `POLICY_STAGE_INFEASIBLE` if not.
 - `resumable_outer_completion` now also admits a retained `RECOVER` stage and
-  an `EXECUTE` stage that carries a recovery continuation; a bare `EXECUTE`
-  stage and an unsealed run still refuse `REQUEST_ALREADY_COMPLETED`. The
+  an `EXECUTE` stage that carries a recovery continuation bound to the current
+  candidate; a bare `EXECUTE` stage, any other decision and an unsealed run
+  still refuse `REQUEST_ALREADY_COMPLETED`. The
   Claude session rebinds a retained outer on resume, as the Codex session
   does. The qualification role checks admit `recovery`; the unlaunched-grant
   cancel set adds `diagnosis` and `recovery_trial` (never `repair`).
