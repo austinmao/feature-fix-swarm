@@ -192,6 +192,13 @@ then one isolated trial), and no winner stops at `NEEDS_DECISION`.
 task-swarm must deliver its work through a supervised GSD wave
 (`WAVE_EXECUTION_UNPROVEN` otherwise).
 
+Opt-in spec review (fixture-proven only): add `"spec_review": "native"` to the
+acceptance draft and the draft is reviewed natively before it is sealed. It is
+sealed only once that review accepts it; a `revise` verdict stops the run
+unsealed (`SPEC_REVIEW_REJECTED`, remedy `revise_acceptance_draft`), and a
+revised draft (a higher `revision`) is reviewed again within the tier's
+allowance. Without the key nothing changes.
+
 ## Rules
 
 - **Zero planned stops (MAX-AUTH default); one with `--gated`.** Any

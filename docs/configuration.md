@@ -255,6 +255,16 @@ qualification has run, so treat it as experimental. Known limits today:
   unscoped; an unsafe value refuses `MANAGED_PROMPT_VALUE_UNSAFE`.
 - A run cannot resume after its real outer launch. A replay refuses instead
   (see the refusals below).
+- A draft with `"spec_review": "native"` is reviewed once, natively, between the
+  outer's qualification and the seal (`produce_spec_review` in
+  `lib/run_state/frontend_producers.py`, record and seal gate in
+  `lib/run_state/spec_review.py`): a tool-absent reviewer child bound to the
+  unsealed draft's hash, under a `spec_review` grant. The verdict is one keyed
+  record, `spec-review:<draft_hash>`; only an accepted record of the exact draft
+  lets it be sealed. Before any probe is charged the producer refuses a spent
+  tier allowance (`POLICY_ACTION_LIMIT_EXHAUSTED`) or a launch budget below four
+  probes plus the launch (`SPEC_REVIEW_BUDGET_INFEASIBLE`). Fixture-proven only:
+  not native qualification and not E8.
 - A failed mapped check first runs the ordinary repair producer
   (`produce_repair` in `lib/run_state/recovery_producer.py`), up to the tier's
   repair limit (2/4/6). The repair child (role `worker`, receipt role
@@ -304,7 +314,7 @@ qualification has run, so treat it as experimental. Known limits today:
 | `GSD_TOKEN_BUDGET` | `250K` | `scripts/gsd/ffs-frontend.sh:21` | Token budget (`--token-limit`; accepts `K`/`M`/`B`/`T` suffixes) |
 | `FFS_PROCESS_CAPACITY` | unset | `scripts/gsd/ffs-frontend.sh:22-24` | Worker capacity for the run |
 | `FFS_PHASE_SCOPE` | unset | `scripts/gsd/ffs-frontend.sh:25` | Phase to run. Without it the run refuses `PRELAUNCH_PHASE_SCOPE_REQUIRED` |
-| `FFS_ACCEPTANCE_DRAFT` | unset | `scripts/gsd/ffs-frontend.sh:26` | Operator-supplied acceptance draft (JSON). Its criterion ids must be the run's accepted requirement ids. Missing: `ACCEPTANCE_DRAFT_REQUIRED`. A `command` check is `{id, kind, locator}` and may add `runtime_read_roots`: a list of absolute, canonical directories its interpreter must also read (for a framework Python, its `Versions/X.Y` prefix and the site-packages holding its test deps). Each root must exist, not be a symlink, not repeat (`LOCAL_CHECK_READ_ROOT_INVALID`), and not overlap HOME, the state dir, the primary repo, its common git dir or the check's workspace (`LOCAL_CHECK_CONFINEMENT_INVALID`). A framework Python's `bin/pythonX.Y` only re-execs `Resources/Python.app/Contents/MacOS/Python`, which the check sandbox forbids, so name that binary in the locator |
+| `FFS_ACCEPTANCE_DRAFT` | unset | `scripts/gsd/ffs-frontend.sh:26` | Operator-supplied acceptance draft (JSON). Its criterion ids must be the run's accepted requirement ids. Missing: `ACCEPTANCE_DRAFT_REQUIRED`. A `command` check is `{id, kind, locator}` and may add `runtime_read_roots`: a list of absolute, canonical directories its interpreter must also read (for a framework Python, its `Versions/X.Y` prefix and the site-packages holding its test deps). Each root must exist, not be a symlink, not repeat (`LOCAL_CHECK_READ_ROOT_INVALID`), and not overlap HOME, the state dir, the primary repo, its common git dir or the check's workspace (`LOCAL_CHECK_CONFINEMENT_INVALID`). A framework Python's `bin/pythonX.Y` only re-execs `Resources/Python.app/Contents/MacOS/Python`, which the check sandbox forbids, so name that binary in the locator. The optional key `"spec_review": "native"` opts the draft into one native spec review before it is sealed (any other value refuses `ACCEPTANCE_DRAFT_INVALID`): the draft is sealed only once that review of the exact draft accepts it (`SPEC_REVIEW_REJECTED` when it returns revise, `SPEC_REVIEW_REQUIRED` when no accepted review of the draft is retained). A revision is a new draft and, within the tier's `spec_review` allowance (1, 2, 3), a new review. Without the key the draft is sealed unreviewed, as before |
 | `FFS_REVIEW_MODEL_CATALOG` | unset | `scripts/gsd/ffs-frontend.sh:27` | Model catalog for the native final review. There is no built-in production catalog yet, so the caller supplies it |
 | `FFS_HOST_KIND` | unset | `scripts/gsd/ffs-frontend.sh:28-45` | `codex` or `claude`. Needed for any run that does work: with no host the managed run refuses `HOST_CAPABILITY_UNQUALIFIED`, exit 78 (`lib/run_state/supervisor.py:3108`). Requires `FFS_HOST_TOKEN_RESERVATION` (the wrapper exits 2 without it); any other missing host field refuses `HOST_REQUEST_INCOMPLETE`, exit 2 (`lib/run_state/cli.py:345`) |
 | `FFS_HOST_TOKEN_RESERVATION` | unset | `scripts/gsd/ffs-frontend.sh:31-41` | Tokens reserved per host launch, e.g. `100K` |
@@ -356,6 +366,9 @@ managed run, the recovery action depends on the code:
 | `REQUEST_ALREADY_COMPLETED` | A launch under this request key already settled and may have done its work. It is never resumed, and a new key could repeat it | `inspect_completed_launch` |
 | `INTENT_RECONCILIATION_REQUIRED` | A launch under this request key has not settled; only owner-fence reconciliation may settle it | `reconcile_intent` |
 | `REVIEW_RECONCILIATION_REQUIRED` | The run's final review was launched, or its grant reserved, under an earlier owner fence and is not recorded. Its proof binds that fence, so this owner cannot record it, and it is never launched again | `inspect_retained_review` |
+| `SPEC_REVIEW_REJECTED` | The native spec review returned revise for the acceptance draft; its per-criterion reasons are in the retained spec-review record (event key `spec-review:<draft_hash>`) and the review's stdout evidence. Nothing was sealed or executed | `revise_acceptance_draft` |
+| `SPEC_REVIEW_REQUIRED` | The acceptance draft asks for a native spec review (`spec_review: native`) but no accepted review of that exact draft is retained, so it is not sealed | `inspect_spec_review_record` |
+| `SPEC_REVIEW_RECONCILIATION_REQUIRED` | The draft's native spec review was launched, or its grant reserved, under an earlier owner fence and is not recorded. Its proof binds that fence, so this owner cannot record it, and it is never launched again | `inspect_retained_spec_review` |
 | `RECOVERY_RECONCILIATION_REQUIRED` | A recovery diagnosis or trial was issued under an earlier owner fence. Its receipt, workspace and trial record bind that fence, so this owner cannot consume them, and it is never launched again | `inspect_retained_recovery` |
 | `REPAIR_RECONCILIATION_REQUIRED` | An ordinary repair was issued under an earlier owner fence. Its receipt, workspace and record bind that fence, so this owner cannot consume them, and it is never launched again | `inspect_retained_repair` |
 | `RETAINED_RUNTIME_NOT_REUSABLE` | The retained outer runtime cannot be resumed, and no outer launch ran under it | `resume_with_new_request_key` |
