@@ -8,6 +8,60 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-05, spec-014 E8 prerequisite 3b: repair producer)
+
+- A failed frozen check no longer hands straight back to recovery.
+  `drive_managed_session` now gives the lifecycle a repair producer,
+  `produce_repair` in `lib/run_state/recovery_producer.py`, beside the recovery
+  producer and reusing its child, launch, settle, current-candidate and keyed
+  replay plumbing. The repair child (role `worker`, receipt role `execution`)
+  runs in an isolated copy of the CURRENT candidate. Its patch is harvested
+  (`harvest_isolated_patch`, factored out of the recovery trial's check block) and
+  retained as an `ffs.frontend-repair/v1` record, then merged through the
+  journaled integration path (`integrate_retained_patch`, factored out of the
+  recovery winner's) under the new `repair:<action_id>` journal key family;
+  the role-`execution` receipt, `record_frontend_integration` and
+  `bind_frontend_candidate` (parent = the candidate repaired) follow, and the
+  lifecycle re-runs the frozen checks. An empty patch integrates nothing: the
+  child settles, the grant stays spent, and the next repair or the handback
+  follows. The new module `lib/run_state/repair_integration.py` is in the
+  installer's managed lib list.
+- The journal and the candidate chain bind a retained child record by key
+  prefix, table-driven: `recovery-trial:` (unchanged) and `repair:` (schema
+  `ffs.frontend-repair/v1`, action `repair`, child role `worker`, no check
+  results). The repair's input must equal the LIVE current candidate of the
+  shared preparation (the recovery-trial check, generalized by role), so a
+  repair lands on a candidate a GSD wave advanced in place. No recovery-trial
+  check was weakened.
+- Budget and uncharged guard. Before any qualification the producer checks the
+  remaining launch budget covers the repair (probes, launch, checks) and
+  otherwise refuses `REPAIR_BUDGET_INFEASIBLE` before anything is reserved or
+  charged; the lifecycle then takes the handback, so the run reaches recovery
+  rather than a raw refusal. `FRONTEND_REPAIR_UNCHARGED` now fires when no NEW
+  non-cancelled repair grant appeared (a set difference, not a count), so a
+  stale unlaunched grant released and reserved afresh nets one grant.
+- Replay. A repair resumes under a new owner fence only until its intent
+  exists; from the intent on it refuses `INTENT_RECONCILIATION_REQUIRED` or the
+  new `REPAIR_RECONCILIATION_REQUIRED` and never relaunches. A patch applied to
+  the shared workspace but not yet bound refuses at the first existing guard
+  that sees it (`WORKSPACE_INTEGRATION_PENDING`, then
+  `FRONTEND_CHECK_CANDIDATE_STALE`); once the repaired candidate is bound the
+  resume continues from it. A stale unlaunched
+  grant is released through the new `cancel_unlaunched_repair`; the review
+  release (`cancel_unlaunched_policy_review`) still refuses every repair.
+  `resumable_outer_completion` also admits an `EXECUTE` stage that carries an
+  issued repair (intent-bearing, not cancelled) or a failed frozen check on the
+  current candidate; a bare `EXECUTE`, any other decision and an unsealed run
+  still refuse `REQUEST_ALREADY_COMPLETED`.
+- New refusal codes: `REPAIR_BUDGET_INFEASIBLE` (consumed by the lifecycle),
+  `REPAIR_RECONCILIATION_REQUIRED`, `REPAIR_ACTION_AMBIGUOUS`,
+  `REPAIR_BINDING_INVALID`, `REPAIR_ACTION_INVALID`, `REPAIR_RECORD_INVALID`,
+  `REPAIR_EVIDENCE_INVALID`, `REPAIR_WORKSPACE_INVALID`, `REPAIR_STAGE_INVALID`,
+  `REPAIR_INPUT_INVALID`, `REPAIR_CANDIDATE_CHANGED`.
+- Fixture-proven only: crash points are injected at seams over a Python host
+  fixture with synthetic credentials. This is not native qualification and not
+  E8; the spec-review producer is still open.
+
 ### Fixed (2026-10-03, spec-014 E8 prerequisite 3a: recovery producer)
 
 - A retained handback at stage `RECOVER` is no longer a dead end. The stub
