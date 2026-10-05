@@ -73,3 +73,75 @@ def test_a_spec_review_crash_resumes_through_real_staging_to_a_typed_new_request
                           (outer["id"],)).fetchone()[0] == outer["generation"]
         assert tx.execute("SELECT count(*) FROM authority_policy_actions WHERE action='spec_review'").fetchone()[0] == 0
     assert store.get_sealed_acceptance(repository_id=repository_id, run_id="rk") is None
+
+
+# --- the base case: an owner that died after the seal and before the lifecycle state existed -------------------
+
+_SEAL_DRIVER = '''import json, os, signal, sys
+from pathlib import Path
+import pytest
+import test_final_review_resume_sigkill as harness
+from run_state import cli
+from run_state.state import ControlStore
+
+config = json.loads(Path(sys.argv[1]).read_text())
+patch = pytest.MonkeyPatch()
+harness._real_host(Path(config["tmp_path"]), patch)
+seal = ControlStore.seal_acceptance_draft
+
+
+def seal_then_die(self, *args, **kwargs):
+    result = seal(self, *args, **kwargs)
+    os.kill(os.getpid(), signal.SIGKILL)  # sealed; the lifecycle state does not exist yet
+    return result
+
+
+patch.setattr(ControlStore, "seal_acceptance_draft", seal_then_die)
+sys.exit(cli.main(config["argv"]))
+'''
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["key-less", "opted-in"])
+def test_a_crash_between_the_seal_and_the_lifecycle_state_never_falls_through_to_the_unsealed_launch(
+        tmp_path, monkeypatch, capsys, native):
+    """The ``state is None`` fall-through of ``drive_managed_session`` is behind ``prepare_outer``; production refuses first."""
+    import os
+    import signal
+    import subprocess
+    from pathlib import Path
+    from test_final_review_resume_sigkill import ROOT
+    primary, authority, repository_id, env = _setup(tmp_path)
+    monkeypatch.chdir(primary)
+    for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
+        monkeypatch.delenv(key, raising=False)
+    mode = tmp_path / "mode.json"
+    mode.write_text(json.dumps({"review": "passed", "spec_review": "accept"}))
+    fake = tmp_path / "qualified-codex"
+    fake.write_text(f"#!{sys.executable}\n" + host_script(mode))
+    fake.chmod(0o700)
+    template, fake, catalog = _real_host(tmp_path, monkeypatch)
+    argv = _argv(env, authority, template, fake, catalog, _draft(tmp_path, spec_review="native" if native else None))
+    driver, config = tmp_path / "seal-driver.py", tmp_path / "seal-driver.json"
+    driver.write_text(_SEAL_DRIVER)
+    config.write_text(json.dumps({"tmp_path": str(tmp_path), "argv": argv}))
+    child_env = {key: value for key, value in os.environ.items()
+                 if key not in {"GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME", "PYTHONPATH"}}
+    child_env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "lib"), str(ROOT / "tests")))
+    died = subprocess.run([sys.executable, str(driver), str(config)], cwd=primary, env=child_env,
+                          capture_output=True, text=True, timeout=900)
+    assert died.returncode == -signal.SIGKILL, (died.stdout[-2000:], died.stderr[-4000:])
+
+    store = ControlStore(authority / "control.sqlite3")
+    assert store.get_sealed_acceptance(repository_id=repository_id, run_id="rk") is not None
+    assert store.get_frontend_policy_state(repository_id=repository_id, run_id="rk") is None
+    capsys.readouterr()
+    assert cli.main(argv) == 78
+    envelope = _last_envelope(capsys)
+    assert (envelope["code"], envelope["recovery_action"]["action"]) == (
+        "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key")
+    # The single unsealed launch never ran, and the lifecycle state still does not exist.
+    with store.read_transaction() as tx:
+        assert tx.execute("SELECT count(*) FROM authority_launch_intents WHERE capacity_exempt=1 AND NOT EXISTS "
+                          "(SELECT 1 FROM authority_qualification_launches q WHERE q.intent_id="
+                          "authority_launch_intents.id)").fetchone()[0] == 0
+    assert store.get_frontend_policy_state(repository_id=repository_id, run_id="rk") is None

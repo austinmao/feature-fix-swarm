@@ -63,9 +63,14 @@ all skills.
   draft is refused before the reviewer is captured or qualified. The seal gate
   also verifies the finished reviewer child under the record, and
   `refence_unlaunched_outer` proves the outer, its workspace and the absence of a
-  launch before it writes either row. In production a crashed spec review
-  resumes to `RETAINED_RUNTIME_NOT_REUSABLE` (new request key) before that
-  re-fence is reached, so the crash sweep's DONE outcomes are fixture-only.
+  launch before it writes either row. In production a crashed spec review is
+  refused before that re-fence is reached, so the crash sweep's DONE outcomes
+  are fixture-only: on the Codex host `RETAINED_RUNTIME_NOT_REUSABLE` (new
+  request key) while the outer's home is staged again, on the Claude host
+  `HOST_CAPABILITY_UNQUALIFIED` (`ADMISSION_CONFLICT`: the admission descriptor
+  names the qualifying owner's generation) at `prepare_outer`. A crash between
+  the seal and the lifecycle state is refused the same way on both hosts, so the
+  unsealed single launch is not reached.
 - Opt-in and fixture-proven only: the reviewer is a Python host fixture with
   synthetic credentials and the crash points are injected at seams. This is not
   native host qualification and not E8. The outer's runtime receipt now has the
