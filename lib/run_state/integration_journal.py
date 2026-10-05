@@ -6,9 +6,11 @@ short transactions; it never opens a second database or applies a patch.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import PurePosixPath
+from typing import Callable
 
 from .ownership import OwnershipRefused, assert_owner
 
@@ -68,8 +70,35 @@ def assert_settled_tx(tx, preparation_id, *, except_wave_key=None):
         raise OwnershipRefused("WORKSPACE_INTEGRATION_PENDING")
 
 
-def _recovery_input_is_live_tx(tx, token, workspace, trial_activity_id, input_digest) -> bool:
-    """The recovery trial ran on the frontend candidate that is live on THIS preparation.
+@dataclass(frozen=True)
+class RecordFamily:
+    """A journal whose authority is a retained child record, not a GSD wave request, named by its key prefix."""
+
+    prefix: str
+    schema: str
+    record_key: Callable       # (action_id) -> the idempotency key of the child's retained record
+    id_field: str              # the record field naming the policy action
+    action: str                # the policy action the child ran under
+    role: str                  # the child binding role
+    receipt_role: str          # the role of the receipt the candidate is bound through
+    results: bool              # whether the record carries frozen-check results that must all pass
+
+
+def record_family(wave_key) -> RecordFamily | None:
+    """The family a journal key belongs to (``recovery-trial:`` or ``repair:``); ``None`` for a GSD wave."""
+    from .recovery_trial_checks import TRIAL_CHECKS_SCHEMA, trial_checks_key
+    from .repair_integration import REPAIR_SCHEMA, repair_record_key
+    families = (
+        RecordFamily("recovery-trial:", TRIAL_CHECKS_SCHEMA, trial_checks_key, "trial_action_id", "recovery_trial",
+                     "recovery", "recovery", True),
+        RecordFamily("repair:", REPAIR_SCHEMA, repair_record_key, "action_id", "repair", "worker", "execution", False),
+    )
+    return next((family for family in families if isinstance(wave_key, str) and wave_key.startswith(family.prefix)),
+                None)
+
+
+def _recovery_input_is_live_tx(tx, token, workspace, trial_activity_id, input_digest, *, role="recovery") -> bool:
+    """The recovery trial (or, as ``role="execution"``, the repair) ran on the candidate live on THIS preparation.
 
     A GSD wave (or an earlier recovery winner) advances the candidate in place on the shared
     preparation, whose own recorded input stays the sealed one; comparing the trial's input with
@@ -103,22 +132,20 @@ def _recovery_input_is_live_tx(tx, token, workspace, trial_activity_id, input_di
                             "AND run_id=? AND issuing_intent_id=? ORDER BY event_id DESC",
                             (*scope, value["intent_id"])).fetchone()
         return landed is not None and landed["preparation_id"] == workspace["preparation_id"]
-    return (current["parent_candidate_hash"] == input_digest and value["role"] == "recovery"
+    return (current["parent_candidate_hash"] == input_digest and value["role"] == role
             and value["activity_id"] == trial_activity_id)
 
 
-def _recovery_binding_tx(store, tx, token, wave_key, preparation_id):
-    """Bind a recovery winner's journal to its retained trial record.
+def _record_binding_tx(store, tx, token, wave_key, preparation_id, family):
+    """Bind a recovery winner's (or a repair's) journal to the child's retained record.
 
-    The authority is the trial child's ``recovery-trial-checks`` event, the
-    trial's settled issuing intent/ACK/permit and the shared candidate
-    preparation the retained patch lands in (never the trial workspace).
+    The authority is the child's retained event (``recovery-trial-checks`` or
+    ``repair-record``), its settled issuing intent/ACK/permit and the shared
+    candidate preparation the retained patch lands in (never the child workspace).
     """
-    from .recovery_trial_checks import TRIAL_CHECKS_SCHEMA, trial_checks_key
-    from .workspace import _from_row
     assert_owner(tx, token)
     try:
-        action_id = wave_key[len("recovery-trial:"):]
+        action_id = wave_key[len(family.prefix):]
         action = tx.execute("SELECT * FROM authority_policy_actions WHERE id=? AND repository_id=? AND run_id=?",
                             (action_id, token.repository_id, token.run_id)).fetchone()
         intent = tx.execute("SELECT i.* FROM authority_policy_action_attempts p JOIN authority_launch_intents i "
@@ -126,7 +153,7 @@ def _recovery_binding_tx(store, tx, token, wave_key, preparation_id):
         activity = store._assert_activity_binding(tx, token, intent["activity_id"])
         row = tx.execute("SELECT k.event_id,k.payload_hash,e.payload FROM authority_event_keys k JOIN control_events e "
                          "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?",
-                         (activity["id"], trial_checks_key(action_id))).fetchone()
+                         (activity["id"], family.record_key(action_id))).fetchone()
         wrapped = json.loads(row["payload"])
         data = wrapped["data"]
         workspace = tx.execute("SELECT * FROM context_workspaces WHERE preparation_id=? AND repository_id=? AND run_id=?",
@@ -136,33 +163,37 @@ def _recovery_binding_tx(store, tx, token, wave_key, preparation_id):
                               (activity["id"], wave_key + ":prepared")).fetchone()
         if (wrapped != {"run_id": token.run_id, "activity_id": activity["id"], "data": data}
                 or row["payload_hash"] != hashlib.sha256(_canonical(data).encode()).hexdigest()
-                or data["schema"] != TRIAL_CHECKS_SCHEMA or data["trial_action_id"] != action_id
+                or data["schema"] != family.schema or data[family.id_field] != action_id
                 or data["issuing_intent_id"] != intent["id"] or data["acceptance_hash"] != child["contract_hash"]
-                or action["action"] != "recovery_trial" or action["state"] not in {"dispatched", "completed_valid"}
+                or action["action"] != family.action or action["state"] not in {"dispatched", "completed_valid"}
                 or activity["state"] not in {"active", "succeeded"}
                 or intent["state"] != "completed_succeeded" or intent["completion_status"] != "succeeded"
                 or not intent["completion_evidence_json"] or not intent["acknowledgement_id"] or not intent["permit_id"]
                 or workspace["state"] != "ready" or workspace["base_commit"] != data["base_commit"]
-                or not _recovery_input_is_live_tx(tx, token, workspace, activity["id"], data["input_digest"])
-                or child["role"] != "recovery" or child["workspace_preparation_id"] != data["workspace_preparation_id"]
+                or not _recovery_input_is_live_tx(tx, token, workspace, activity["id"], data["input_digest"],
+                                                  role=family.receipt_role)
+                or child["role"] != family.role or child["workspace_preparation_id"] != data["workspace_preparation_id"]
                 or child["workspace_preparation_id"] == preparation_id or prepared is None):
             raise ValueError
-        return {"activity_id": activity["id"], "event_id": row["event_id"],
-                "intent_id": intent["id"], "issuing_generation": intent["generation"],
-                "acknowledgement_id": intent["acknowledgement_id"], "permit_id": intent["permit_id"],
-                "request_sha256": row["payload_hash"], "prepared_sha256": prepared["payload_hash"],
-                "workspace": workspace["path"], "base_commit": workspace["base_commit"],
-                "input_digest": data["input_digest"], "runtime_identity": child["runtime_identity"],
-                "contract_hash": child["contract_hash"], "trial_candidate_hash": data["trial_candidate_hash"],
-                "patch_sha256": data["patch"]["sha256"]}
+        authority = {"activity_id": activity["id"], "event_id": row["event_id"],
+                     "intent_id": intent["id"], "issuing_generation": intent["generation"],
+                     "acknowledgement_id": intent["acknowledgement_id"], "permit_id": intent["permit_id"],
+                     "request_sha256": row["payload_hash"], "prepared_sha256": prepared["payload_hash"],
+                     "workspace": workspace["path"], "base_commit": workspace["base_commit"],
+                     "input_digest": data["input_digest"], "runtime_identity": child["runtime_identity"],
+                     "contract_hash": child["contract_hash"], "patch_sha256": data["patch"]["sha256"]}
+        if family.results:
+            authority["trial_candidate_hash"] = data["trial_candidate_hash"]
+        return authority
     except (AttributeError, TypeError, ValueError, KeyError, IndexError) as error:
         raise OwnershipRefused("WAVE_INTEGRATION_BINDING_INVALID") from error
 
 
 def _binding_tx(store, tx, token, wave_key, preparation_id, *, completed=False):
     from .workspace import _from_row
-    if isinstance(wave_key, str) and wave_key.startswith("recovery-trial:"):
-        return _recovery_binding_tx(store, tx, token, wave_key, preparation_id)
+    family = record_family(wave_key)
+    if family is not None:
+        return _record_binding_tx(store, tx, token, wave_key, preparation_id, family)
     assert_owner(tx, token)
     try:
         parts = wave_key.split(":")

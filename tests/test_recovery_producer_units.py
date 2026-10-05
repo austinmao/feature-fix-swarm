@@ -159,6 +159,8 @@ def _resumable(monkeypatch, stage, decision, *, launch_state="completed_succeede
     from run_state.ownership import OwnershipRefused as Refused
     retained = (SimpleNamespace(intent_id="intent"), {"locator": "x", "sha256": "y" * 64})
     monkeypatch.setattr(producers, "_retained_outer_completion", lambda _store, _activity: retained)
+    # No repair proof exists in these cases (the repair cases are in test_repair_producer_units).
+    monkeypatch.setattr(producers, "_repair_proof", lambda *_args: False)
 
     def verified(_evidence):
         if not evidence_valid:

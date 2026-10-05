@@ -185,8 +185,9 @@ The descriptor SHA-256 is bound at start and revalidated on every resume
 (`UPSTREAM_RUNTIME_DRIFT`); the sealed draft's criterion ids must be the run's
 accepted requirement ids (`objective:<sha256(objective)>`). The lifecycle runs
 execute -> mapped checks -> one native final review -> DONE; a failed check
-hands back to one recovery cycle (a diagnosis, then one isolated trial), and no
-winner stops at `NEEDS_DECISION` (there is no ordinary repair producer yet).
+first runs the ordinary repair (an isolated child whose patch is integrated), up
+to the tier's repair limit, then hands back to one recovery cycle (a diagnosis,
+then one isolated trial), and no winner stops at `NEEDS_DECISION`.
 `FFS_ACCEPTANCE_DRAFT` is required (`ACCEPTANCE_DRAFT_REQUIRED` otherwise), and
 task-swarm must deliver its work through a supervised GSD wave
 (`WAVE_EXECUTION_UNPROVEN` otherwise).

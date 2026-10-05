@@ -383,13 +383,14 @@ def test_failed_sealed_check_without_a_repair_producer_hands_back_and_refuses_tr
     assert result == 78 and _last_code(capsys) == "FRONTEND_LIFECYCLE_NEEDS_DECISION"
     facts = _facts(authority, repository_id, "fl")
     assert facts.stage == "NEEDS_DECISION" and facts.outer == 1 and facts.native == 0 and facts.reviews == 0
-    assert facts.actions == {"execute": 1, "recovery_cycle_normal": 1, "diagnosis": 1, "recovery_trial": 1}
+    # 3b: the repair producer runs the medium tier's four repairs (each writes nothing) before the recovery cycle.
+    assert facts.actions == {"execute": 1, "repair": 4, "recovery_cycle_normal": 1, "diagnosis": 1, "recovery_trial": 1}
     replay = _managed_start(env, authority, "fl", runtime, fake, catalog, draft)
     # A terminal lifecycle replays its recorded outcome: no producer call, no new launch.
     assert replay == 78 and _last_code(capsys) == "FRONTEND_LIFECYCLE_NEEDS_DECISION"
     again = _facts(authority, repository_id, "fl")
     assert (again.stage, again.outer, again.native, again.actions) == (
-        "NEEDS_DECISION", 1, 0, {"execute": 1, "recovery_cycle_normal": 1, "diagnosis": 1, "recovery_trial": 1})
+        "NEEDS_DECISION", 1, 0, {"execute": 1, "repair": 4, "recovery_cycle_normal": 1, "diagnosis": 1, "recovery_trial": 1})
 
 
 def _spy_ffs_worker_mkdtemp(monkeypatch) -> list:

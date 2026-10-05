@@ -255,8 +255,28 @@ qualification has run, so treat it as experimental. Known limits today:
   unscoped; an unsafe value refuses `MANAGED_PROMPT_VALUE_UNSAFE`.
 - A run cannot resume after its real outer launch. A replay refuses instead
   (see the refusals below).
-- A failed mapped check has no ordinary repair producer yet. It hands back, and
-  the recovery producer (`lib/run_state/recovery_producer.py`) runs one cycle on
+- A failed mapped check first runs the ordinary repair producer
+  (`produce_repair` in `lib/run_state/recovery_producer.py`), up to the tier's
+  repair limit (2/4/6). The repair child (role `worker`, receipt role
+  `execution`) runs in an isolated copy of the CURRENT candidate; its harvested
+  patch is merged through the journaled integration path under `repair:<action_id>`
+  (the recovery winner's path), the candidate is bound with the previous one as
+  its parent, and the frozen checks run again on it. An empty patch integrates
+  nothing: the grant is spent and the next repair or the handback follows. A
+  repair the remaining launch budget cannot cover (its qualification probes, its
+  launch and the checks that follow) is refused before anything is reserved or
+  charged (`REPAIR_BUDGET_INFEASIBLE`), and the run takes the handback instead.
+  A repair resumes under a new owner fence only until its intent exists; from
+  that intent on a resume refuses `INTENT_RECONCILIATION_REQUIRED` or
+  `REPAIR_RECONCILIATION_REQUIRED` and never relaunches. A patch already
+  applied to the shared workspace but not yet bound refuses at the first guard
+  that sees it (`WORKSPACE_INTEGRATION_PENDING` while its journal is pending,
+  `FRONTEND_CHECK_CANDIDATE_STALE` once published); once the repaired candidate
+  is bound a resume continues from it and never repairs it again. An `EXECUTE` replay is
+  admitted only with an issued repair or a failed frozen check on the current
+  candidate; a bare `EXECUTE` still refuses `REQUEST_ALREADY_COMPLETED`.
+- When the repairs are spent, a failed mapped check hands back and the recovery
+  producer (`lib/run_state/recovery_producer.py`) runs one cycle on
   the retained handback: a diagnosis child, then one isolated trial child whose
   frozen checks decide a winner. A winner is integrated and the run continues
   from its saved stage (a refused final review included); no winner stops at
@@ -337,6 +357,7 @@ managed run, the recovery action depends on the code:
 | `INTENT_RECONCILIATION_REQUIRED` | A launch under this request key has not settled; only owner-fence reconciliation may settle it | `reconcile_intent` |
 | `REVIEW_RECONCILIATION_REQUIRED` | The run's final review was launched, or its grant reserved, under an earlier owner fence and is not recorded. Its proof binds that fence, so this owner cannot record it, and it is never launched again | `inspect_retained_review` |
 | `RECOVERY_RECONCILIATION_REQUIRED` | A recovery diagnosis or trial was issued under an earlier owner fence. Its receipt, workspace and trial record bind that fence, so this owner cannot consume them, and it is never launched again | `inspect_retained_recovery` |
+| `REPAIR_RECONCILIATION_REQUIRED` | An ordinary repair was issued under an earlier owner fence. Its receipt, workspace and record bind that fence, so this owner cannot consume them, and it is never launched again | `inspect_retained_repair` |
 | `RETAINED_RUNTIME_NOT_REUSABLE` | The retained outer runtime cannot be resumed, and no outer launch ran under it | `resume_with_new_request_key` |
 | `CHILD_RUNTIME_NOT_REUSABLE` | A wave child or final-reviewer runtime cannot be resumed. A new key would start a new outer run | `inspect_retained_child` |
 | `MANAGED_FRONTEND_COMMAND_UNSTAGED` | `feature-spec`/`fix`/`code-uplift` have no staged `gsd-*` command mapping yet; only `feature-implement` and `task-swarm` do | `select_a_staged_frontend` |

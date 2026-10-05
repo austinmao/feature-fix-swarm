@@ -18,11 +18,13 @@ from types import SimpleNamespace
 import run_state.frontend_policy as frontend_policy
 import run_state.frontend_producers as frontend_producers
 import run_state.managed_qualification as managed_qualification
+import run_state.recovery_producer as recovery_producer
 import run_state.supervisor as supervisor_module
 import run_state.workspace as workspace
 from run_state.recovery_controller import RecoveryController
+from run_state.run_policy import action_limit
 from run_state.state import ControlStore
-from run_state.supervisor import Supervisor
+from run_state.supervisor import Supervisor, SupervisorRefused
 from test_final_review_resume import _Killed, _crash, _held_resources, _outer_intents  # noqa: F401
 from test_managed_lifecycle_assembly import _REVIEW, _draft, _fixture_host, _frontend_start, _setup
 
@@ -39,6 +41,15 @@ def _emit(text):
     print(json.dumps({"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":2,"cache_write_input_tokens":1,"output_tokens":3,"reasoning_output_tokens":2}}), flush=True)
 if prompt.startswith("Recovery diagnosis request:"):
     _emit(MODE["diagnosis"])
+    raise SystemExit(0)
+if prompt.startswith("Repair request:"):
+    counter = pathlib.Path(MODE_PATH + ".repairs")
+    launches = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(launches))
+    if MODE.get("repair") and launches >= MODE.get("repair_from", 1):
+        target = pathlib.Path(MODE.get("repair_file", "src/input.txt"))
+        target.write_text(target.read_text() + MODE["repair"])
+    _emit("repair applied")
     raise SystemExit(0)
 if prompt.startswith("Recovery trial request:"):
     if MODE.get("trial"):
@@ -63,8 +74,19 @@ def host_script(mode_path) -> str:
     return script.replace(head, head + _PRELUDE.replace("MODE_PATH", repr(str(mode_path))))
 
 
-def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id="rs", draft_mode=None):
-    """A fresh managed repository, the fixture host and a ``run()`` that replays the identical request."""
+def _no_repair(*_args, **_kwargs):
+    """The pre-3b world: no repair is attempted, so a failed frozen check hands straight back to recovery."""
+    raise SupervisorRefused("REPAIR_BUDGET_INFEASIBLE")
+
+
+def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id="rs", draft_mode=None, repair=False):
+    """A fresh managed repository, the fixture host and a ``run()`` that replays the identical request.
+
+    ``repair=False`` keeps the recovery tests' premise (a failed check hands back at once) by refusing the repair
+    producer as infeasible before anything is reserved; ``repair=True`` runs the production repair producer.
+    """
+    if not repair:
+        monkeypatch.setattr(recovery_producer, "produce_repair", _no_repair, raising=False)
     primary, authority, repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
     for key in ("GSD_RUN_ID", "FFS_RUN_ID", "GSD_RESUME"):
@@ -72,7 +94,7 @@ def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id=
     runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
     mode_path = tmp_path / "recovery-mode.json"
     mode_path.write_text(json.dumps({"diagnosis": "the input lacks the repaired marker", "trial": "repaired\n",
-                                     "review": "passed", **(mode or {})}))
+                                     "review": "passed", "repair": "repaired\n", **(mode or {})}))
     fake.write_text(f"#!{sys.executable}\n" + host_script(mode_path))
     # The fixture host cannot open a real GSD wave.
     monkeypatch.setattr(supervisor_module, "_gsd_wave_completion_code", lambda *_a, require_wave=True: None)
@@ -90,15 +112,16 @@ def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id=
 def charge_qualification(monkeypatch) -> int:
     """Make the fixture qualify charge what the real four probes charge (one launch each); returns that cost.
 
-    The fixture qualify launches no probe, but a real recovery child's qualification does, and each new owner
-    requalifies a new child.  Charged once per child activity, as a retained qualification charges nothing.
+    The fixture qualify launches no probe, but a real recovery or repair child's qualification does, and each new
+    owner requalifies a new child.  Charged once per child activity, as a retained qualification charges nothing.
     """
     from run_state.state import _QUALIFICATION_PROBE_ORDER
     real, charged, cost = managed_qualification.qualify_managed_runtime, set(), len(_QUALIFICATION_PROBE_ORDER)
 
     def qualify(store, token, **kwargs):
         result = real(store, token, **kwargs)
-        if kwargs["role"] == "recovery" and kwargs["activity_id"] not in charged:
+        child = kwargs["role"] == "recovery" or kwargs["activity_request_key"].startswith("repair:")
+        if child and kwargs["activity_id"] not in charged:
             charged.add(kwargs["activity_id"])
             with store.transaction() as tx:
                 tx.execute("UPDATE authority_run_policy_budgets SET launch_charged=launch_charged+? "
@@ -190,6 +213,79 @@ def assert_recovered_once(w, *, held=True) -> object:
     return led
 
 
+REPAIRED_ACTIONS = {"execute": 1, "repair": 1, "final_review": 1}
+
+
+def repair_ids(w) -> set:
+    """The non-cancelled repair grants, read from a fresh connection."""
+    store = ControlStore(w.authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        return {row[0] for row in tx.execute(
+            "SELECT id FROM authority_policy_actions WHERE action='repair' AND state<>'cancelled'")}
+
+
+def repair_journals(w) -> list[tuple]:
+    """``(wave_key, state, workspace)`` of every repair journal, oldest first."""
+    store = ControlStore(w.authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        return [(row[0], row[1], json.loads(row[2])["authority"]["workspace"]) for row in tx.execute(
+            "SELECT wave_key,state,contract_json FROM authority_workspace_integrations "
+            "WHERE wave_key LIKE 'repair:%' ORDER BY event_id")]
+
+
+def policy_tier(w) -> str:
+    store = ControlStore(w.authority / "control.sqlite3")
+    return store.get_run_policy_budget(repository_id=w.repository_id, run_id=w.run_id).tier
+
+
+def assert_repaired_once(w, *, held=True) -> object:
+    """The invariants of one uninterrupted ordinary repair that reached DONE with no recovery."""
+    led = ledger(w)
+    assert led.stage == "DONE"
+    assert led.actions == REPAIRED_ACTIONS
+    assert all(count <= 1 for _action, count in led.intents)
+    assert [led.launches[name] for name in ("execute", "repair", "final_review")] == [1, 1, 1]
+    assert led.cycles == [] and (led.native, led.reviews) == (1, 1)
+    assert _outer_intents(led) == [("completed_succeeded", "succeeded")]
+    ((key, state, _workspace),) = repair_journals(w)
+    assert state == "published" and key == "repair:" + next(iter(repair_ids(w)))
+    if held:
+        assert _held_resources(w.tmp_path) == {}
+    return led
+
+
+def watch_binds(monkeypatch) -> list:
+    """After each candidate bind the chain resolver must accept the bound candidate: record what it resolved."""
+    from run_state.candidate_chain import resolve_current_frontend_candidate
+    real, resolved = ControlStore.bind_frontend_candidate, []
+
+    def bind_frontend_candidate(self, token, **kwargs):
+        state = real(self, token, **kwargs)
+        resolved.append((state.candidate_hash, resolve_current_frontend_candidate(self, token).candidate_hash))
+        return state
+
+    monkeypatch.setattr(ControlStore, "bind_frontend_candidate", bind_frontend_candidate)
+    return resolved
+
+
+def watch_repair(monkeypatch, w) -> list:
+    """Record each call of the repair producer as ``(outcome code, repair grants it added)``."""
+    real, seen = recovery_producer.produce_repair, []
+
+    def produce_repair(*args, **kwargs):
+        before = repair_ids(w)
+        try:
+            result = real(*args, **kwargs)
+        except SupervisorRefused as error:
+            seen.append((error.code, sorted(repair_ids(w) - before)))
+            raise
+        seen.append(("returned", sorted(repair_ids(w) - before)))
+        return result
+
+    monkeypatch.setattr(recovery_producer, "produce_repair", produce_repair)
+    return seen
+
+
 # --- crash points -----------------------------------------------------------------------------------------
 
 POINTS = (
@@ -198,6 +294,22 @@ POINTS = (
     "diagnosis-completed-before-receipt", "diagnosis-receipt-recorded", "trial-completed-before-checks",
     "trial-checks-retained", "winner-applied-before-integration-record", "winner-recorded-before-bind",
     "continuation-transitioned",
+)
+
+
+REPAIR_POINTS = (
+    "repair-entered", "repair-workspace-begun", "repair-qualified", "repair-action-reserved",
+    "repair-intent-committed", "repair-completed-before-harvest", "repair-harvested-before-journal",
+    "repair-applied-before-capture", "repair-applied-before-integration-record", "repair-recorded-before-bind",
+    "repair-bound-before-transition",
+)
+
+
+# Crash points at the medium tier's LAST repair ordinal, where the allowance is spent once that repair is reserved.
+LAST_REPAIR = action_limit("repair", "medium")
+LAST_REPAIR_POINTS = (
+    "repair-last-action-reserved", "repair-last-intent-committed", "repair-last-completed-before-harvest",
+    "repair-last-returned",
 )
 
 
@@ -319,6 +431,118 @@ def arm(monkeypatch, point: str) -> list:
         wrap_class(ControlStore, "record_frontend_integration", before=lambda _a, _k: once())
     elif point == "winner-recorded-before-bind":
         wrap_class(ControlStore, "bind_frontend_candidate", before=lambda _a, _k: once())
+    elif point in REPAIR_POINTS:
+        _arm_repair(monkeypatch, point, once, wrap_class)
+    elif point in LAST_REPAIR_POINTS:
+        _arm_last_repair(monkeypatch, point, once, wrap_class)
     else:
         raise AssertionError(point)
     return fired
+
+
+def _arm_repair(monkeypatch, point: str, once, wrap_class) -> None:
+    """The ordinary-repair crash points; ``once`` raises ``_Killed`` the first time it is called."""
+    import run_state.wave_execution as wave_execution
+
+    def is_repair(key) -> bool:
+        return bool(key) and key.startswith("repair:")
+
+    if point == "repair-entered":
+        produce_repair = recovery_producer.produce_repair
+
+        def entered(*args, **kwargs):
+            once()
+            return produce_repair(*args, **kwargs)
+        monkeypatch.setattr(recovery_producer, "produce_repair", entered)
+    elif point == "repair-workspace-begun":
+        create = workspace._create_registered_worktree
+
+        def create_registered_worktree(store, token, preparation, admin_fd, **kwargs):
+            if is_repair(preparation.child_request_key):
+                once()
+            return create(store, token, preparation, admin_fd, **kwargs)
+        monkeypatch.setattr(workspace, "_create_registered_worktree", create_registered_worktree)
+    elif point == "repair-qualified":
+        qualify = managed_qualification.qualify_managed_runtime
+
+        def qualify_managed_runtime(store, token, **kwargs):
+            result = qualify(store, token, **kwargs)
+            if is_repair(kwargs["activity_request_key"]):
+                once()
+            return result
+        monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify_managed_runtime)
+    elif point == "repair-action-reserved":
+        wrap_class(ControlStore, "reserve_policy_action",
+                   after=lambda _args, kwargs: kwargs["action"] == "repair" and once())
+    elif point == "repair-intent-committed":
+        armed, fault, reserve = [], Supervisor._fault, Supervisor.reserve_request_action
+
+        def reserve_request_action(self, request, *, action, **kwargs):
+            if action == "repair":
+                armed.append(request.activity_id)
+            return reserve(self, request, action=action, **kwargs)
+
+        def crash_at(self, name):
+            if armed and name == "after_intent_commit":
+                once()
+            return fault(self, name)
+        monkeypatch.setattr(Supervisor, "reserve_request_action", reserve_request_action)
+        monkeypatch.setattr(Supervisor, "_fault", crash_at)
+    elif point == "repair-completed-before-harvest":
+        wrap_class(ControlStore, "record_acceptance_receipt",
+                   after=lambda _args, kwargs: is_repair(kwargs["receipt"]["request_key"]) and once())
+    elif point == "repair-harvested-before-journal":
+        wrap_class(ControlStore, "register_integration_intent_tx", before=lambda _args, _kwargs: once())
+    elif point == "repair-applied-before-capture":
+        capture = wave_execution.capture_integration_candidate
+
+        def capture_integration_candidate(*args, **kwargs):
+            once()
+            return capture(*args, **kwargs)
+        monkeypatch.setattr(wave_execution, "capture_integration_candidate", capture_integration_candidate)
+    elif point == "repair-applied-before-integration-record":
+        wrap_class(ControlStore, "record_frontend_integration", before=lambda _args, _kwargs: once())
+    elif point == "repair-recorded-before-bind":
+        wrap_class(ControlStore, "bind_frontend_candidate", before=lambda _args, _kwargs: once())
+    else:
+        wrap_class(ControlStore, "bind_frontend_candidate", after=lambda _args, _kwargs: once())
+
+
+def _arm_last_repair(monkeypatch, point: str, once, wrap_class) -> None:
+    """Crash on the ``LAST_REPAIR``-th repair only; the earlier repairs run to completion."""
+    hits = []
+
+    def last() -> bool:
+        hits.append(1)
+        return len(hits) == LAST_REPAIR
+
+    if point == "repair-last-action-reserved":
+        wrap_class(ControlStore, "reserve_policy_action",
+                   after=lambda _args, kwargs: kwargs["action"] == "repair" and last() and once())
+    elif point == "repair-last-intent-committed":
+        armed, fault, reserve = [], Supervisor._fault, Supervisor.reserve_request_action
+
+        def reserve_request_action(self, request, *, action, **kwargs):
+            if action == "repair":
+                armed.append(request.activity_id)
+            return reserve(self, request, action=action, **kwargs)
+
+        def crash_at(self, name):
+            if len(armed) == LAST_REPAIR and name == "after_intent_commit":
+                once()
+            return fault(self, name)
+        monkeypatch.setattr(Supervisor, "reserve_request_action", reserve_request_action)
+        monkeypatch.setattr(Supervisor, "_fault", crash_at)
+    elif point == "repair-last-completed-before-harvest":
+        wrap_class(ControlStore, "record_acceptance_receipt",
+                   after=lambda _args, kwargs: kwargs["receipt"]["request_key"].startswith("repair:")
+                   and last() and once())
+    else:
+        produce_repair = recovery_producer.produce_repair
+
+        def returned(*args, **kwargs):
+            result = produce_repair(*args, **kwargs)
+            if last():
+                once()
+            return result
+        monkeypatch.setattr(recovery_producer, "produce_repair", returned)

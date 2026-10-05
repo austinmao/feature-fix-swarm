@@ -3114,12 +3114,22 @@ class ControlStore:
 
     def cancel_unlaunched_policy_review(self, token, *, action_id: str) -> None:
         """Release an unconsumed review, diagnosis or trial reservation, never an issued action or a repair."""
+        self._cancel_unlaunched(token, action_id, {"spec_review", "final_review", "diagnosis", "recovery_trial"})
+
+    def cancel_unlaunched_repair(self, token, *, action_id: str) -> None:
+        """Release a repair reservation that never reached an intent (a dead owner's stale grant), never an issued one.
+
+        A distinct method, so the review release above keeps refusing every repair.
+        """
+        self._cancel_unlaunched(token, action_id, {"repair"})
+
+    def _cancel_unlaunched(self, token, action_id: str, actions: set) -> None:
         from .ownership import OwnershipRefused, assert_owner
         with self.transaction() as tx:
             assert_owner(tx, token)
             row = tx.execute("SELECT * FROM authority_policy_actions WHERE id=? AND repository_id=? AND run_id=?",
                              (action_id, token.repository_id, token.run_id)).fetchone()
-            if (row is None or row["action"] not in {"spec_review", "final_review", "diagnosis", "recovery_trial"}
+            if (row is None or row["action"] not in actions
                     or row["transport_attempts"] != 0 or row["intent_id"] is not None
                     or row["state"] not in {"reserved", "cancelled"}
                     or tx.execute("SELECT 1 FROM authority_policy_action_attempts WHERE action_id=?", (action_id,)).fetchone() is not None):

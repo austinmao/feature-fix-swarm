@@ -123,6 +123,12 @@ _REQUEST_KEY_REFUSALS = {
         "a recovery diagnosis or trial was issued under an earlier owner fence; its receipt, workspace and "
         "trial record bind that fence, so this owner cannot consume them, and it is never launched again",
         "inspect_retained_recovery"),
+    # A repair was issued under an earlier fence: relaunching it would spend another repair grant, and its
+    # receipt, workspace and record bind that fence.
+    "REPAIR_RECONCILIATION_REQUIRED": (
+        "an ordinary repair was issued under an earlier owner fence; its receipt, workspace and record bind that "
+        "fence, so this owner cannot consume them, and it is never launched again",
+        "inspect_retained_repair"),
     # F51: a second final review would spend the run's single review grant again.
     "REVIEW_RECONCILIATION_REQUIRED": (
         "the run's final review was launched, or its grant reserved, under an earlier owner fence and is not "
