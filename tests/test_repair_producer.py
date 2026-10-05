@@ -9,10 +9,15 @@ Fixture-level proof of the production assembly only: not native host qualificati
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
+import pytest
+
+import run_state.managed_qualification as managed_qualification
 import run_state.recovery_producer as recovery_producer
+from run_state.supervisor import SupervisorRefused
 from run_state.run_policy import action_limit
 from run_state.state import ControlStore
 from recovery_fixture import (
@@ -179,3 +184,82 @@ def test_a_check_that_already_passes_never_reaches_the_repair_producer(tmp_path,
     assert w.run() == 0
     led = ledger(w)
     assert seen == [] and led.stage == "DONE" and led.actions == {"execute": 1, "final_review": 1}
+
+
+def _bind_hook(monkeypatch, wrap) -> None:
+    """Hand ``produce_repair`` a host seam whose ``bind`` is ``wrap(real_bind)``."""
+    real = recovery_producer.produce_repair
+
+    def produce_repair(*args, **kwargs):
+        seam = kwargs["seam"]
+        return real(*args, **{**kwargs, "seam": replace(seam, bind=wrap(seam.bind))})
+
+    monkeypatch.setattr(recovery_producer, "produce_repair", produce_repair)
+
+
+@pytest.mark.parametrize("failure", ["bind-refuses", "bind-returns-no-material"])
+def test_p8_a_repair_bind_failure_leaves_the_failed_check_retained_and_spends_no_grant(
+        tmp_path, monkeypatch, capsys, failure):
+    w = world(tmp_path, monkeypatch, repair=True)
+    failing = [True]
+
+    def wrap(real):
+        def bind(qualified, prompt, ready, contract_hash, launch_key):
+            if not failing:
+                return real(qualified, prompt, ready, contract_hash, launch_key)
+            if failure == "bind-refuses":
+                raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
+            request, adapter = real(qualified, prompt, ready, contract_hash, launch_key)
+            adapter.release_launch_material(request.codex_material)
+            return replace(request, codex_material=None), adapter
+        return bind
+
+    _bind_hook(monkeypatch, wrap)
+    capsys.readouterr()
+    assert w.run() == 78
+    assert _last_envelope(capsys)["code"] == "HOST_CAPABILITY_UNQUALIFIED"
+    led = ledger(w)
+    # The failed check is still retained and nothing was spent: no repair grant, no launch.
+    assert led.stage == "EXECUTE" and led.actions == {"execute": 1} and "repair" not in led.launches
+    # A later owner whose host binds repairs it: the replay is admitted by the retained failed check alone.
+    failing.clear()
+    assert w.run() == 0
+    assert_repaired_once(w)
+
+
+def test_p9_a_refused_repair_reservation_releases_the_launch_material_it_bound(tmp_path, monkeypatch, capsys):
+    w = world(tmp_path, monkeypatch, repair=True)
+    fixture_qualify = managed_qualification.qualify_managed_runtime
+
+    def qualify(store, token, **kwargs):
+        result = fixture_qualify(store, token, **kwargs)
+        if kwargs["activity_request_key"].startswith("repair:"):
+            # A qualification that burned the rest of the launch budget: the pre-check passed, the reservation cannot.
+            with store.transaction() as tx:
+                tx.execute("UPDATE authority_run_policy_budgets SET launch_charged=launch_limit")
+        return result
+
+    monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify)
+    real, bound, alive = recovery_producer.produce_repair, [], []
+
+    def produce_repair(*args, **kwargs):
+        seam = kwargs["seam"]
+
+        def bind(*arguments):
+            request, adapter = seam.bind(*arguments)
+            bound.append(request.codex_material.temporary_dir)
+            return request, adapter
+
+        try:
+            return real(*args, **{**kwargs, "seam": replace(seam, bind=bind)})
+        finally:
+            alive.extend(Path(directory).exists() for directory in bound)
+
+    monkeypatch.setattr(recovery_producer, "produce_repair", produce_repair)
+    capsys.readouterr()
+    assert w.run() == 78
+    assert _last_envelope(capsys)["code"] == "POLICY_STAGE_INFEASIBLE"
+    led = ledger(w)
+    assert led.stage == "EXECUTE" and led.actions == {"execute": 1} and "repair" not in led.launches
+    # The material is bound before the grant is reserved, so the producer must release it when the reservation refuses.
+    assert len(bound) == 1 and alive == [False]
