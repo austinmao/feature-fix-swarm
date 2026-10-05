@@ -134,6 +134,7 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     ("lib/run_state/run_policy.py", "run_state/run_policy.py"),
     ("lib/run_state/sealed_review.py", "run_state/sealed_review.py"),
     ("lib/run_state/shared_resources.py", "run_state/shared_resources.py"),
+    ("lib/run_state/spec_review.py", "run_state/spec_review.py"),
     ("lib/run_state/wave_candidate.py", "run_state/wave_candidate.py"),
     ("scripts/gsd/codex-runtime-observer.py", "scripts/gsd/codex-runtime-observer.py"),
     ("patches/gsd-1.14-ffs-supervised-dispatch.patch", "patches/gsd-1.14-ffs-supervised-dispatch.patch"),

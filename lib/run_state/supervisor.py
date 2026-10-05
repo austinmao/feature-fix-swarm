@@ -1672,8 +1672,8 @@ class Supervisor:
         return self._launch(request, managed_outer_capacity_exempt=False)
 
     def launch_native_review(self, request: DispatchRequest) -> ProcessHandle:
-        """One restricted final review under the existing action and runtime receipt."""
-        from .native_review_supervision import publish_material
+        """One restricted native review (the final review, or a draft's spec review) under the existing action and receipt."""
+        from .native_review_supervision import _review_action, publish_material
         if request.native_review_material is None:
             raise SupervisorRefused("NATIVE_REVIEW_MATERIAL_INVALID")
         with self._dispatch_lock:
@@ -1681,7 +1681,7 @@ class Supervisor:
             request = self._resolve_review_material(request, preparation)
             self._validate_child_message_size(request, self._verify_physical_workspace(preparation))
             publish_material(self, request.native_review_material)
-            request = self.reserve_request_action(request, action="final_review")
+            request = self.reserve_request_action(request, action=_review_action(request.native_review_material))
             return self._launch(request, managed_outer_capacity_exempt=False, native_review=True)
 
     def launch_sealed_check(self, request: DispatchRequest, *, acceptance_hash: str,

@@ -84,8 +84,8 @@ def test_revise_verdict_leaves_the_run_unsealed_and_refuses_typed(tmp_path, monk
 
 
 def test_a_spent_small_tier_allowance_refuses_a_revision_before_any_probe(tmp_path, monkeypatch, capsys):
-    charge_qualification(monkeypatch)
     w = world(tmp_path, monkeypatch, check=CHECK_ALWAYS_PASSES, spec_review="revise")
+    charge_qualification(monkeypatch)
     assert _refusal(w, capsys, *SMALL) == (78, "SPEC_REVIEW_REJECTED", "revise_acceptance_draft")
     led = ledger(w)
     # The one review cost its four probes and its launch.

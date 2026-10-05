@@ -37,6 +37,7 @@ EXPECTED = {
     "spec-review-intent-committed": INTENT,
     "spec-review-completed-before-record": RECONCILE,
     "spec-review-recorded-before-seal": DONE,
+    "spec-review-sealed-before-initialized": DONE,
     "sealed-before-execute": DONE,
 }
 # A kill between the intent commit and the child's acknowledgement leaves the admission it took held by the dead

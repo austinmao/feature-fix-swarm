@@ -380,7 +380,7 @@ LAST_REPAIR_POINTS = (
 SPEC_REVIEW_POINTS = (
     "spec-review-entered", "spec-reviewer-workspace-begun", "spec-reviewer-workspace-ready", "spec-review-qualified",
     "spec-review-action-reserved", "spec-review-intent-committed", "spec-review-completed-before-record",
-    "spec-review-recorded-before-seal", "sealed-before-execute",
+    "spec-review-recorded-before-seal", "spec-review-sealed-before-initialized", "sealed-before-execute",
 )
 
 
@@ -679,5 +679,7 @@ def _arm_spec_review(monkeypatch, point: str, once, wrap_class) -> None:
         monkeypatch.setattr(frontend_producers, "record_spec_review", record)
     elif point == "spec-review-recorded-before-seal":
         wrap_class(ControlStore, "seal_acceptance_draft", before=lambda _args, _kwargs: once())
-    else:
+    elif point == "spec-review-sealed-before-initialized":
         wrap_class(ControlStore, "seal_acceptance_draft", after=lambda _args, _kwargs: once())
+    else:
+        wrap_class(ControlStore, "initialize_frontend_policy", after=lambda _args, _kwargs: once())
