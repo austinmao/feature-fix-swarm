@@ -45,10 +45,21 @@ all skills.
   launch remain). A grant reserved and never launched, by any owner, is released
   and reserved afresh; an intent from an earlier owner fence refuses
   `INTENT_RECONCILIATION_REQUIRED` or the new
-  `SPEC_REVIEW_RECONCILIATION_REQUIRED` and is never relaunched. For an opted-in
-  draft a resumed owner puts the retained, unlaunched outer on its fence, and a
-  draft sealed by an owner that died before the lifecycle state existed replays
-  its seal instead of falling through to the unsealed single launch.
+  `SPEC_REVIEW_RECONCILIATION_REQUIRED` and is never relaunched.
+- A crashed spec review does not resume to `DONE` on the same request key. The
+  review runs between the outer's qualification and its launch, and a retained,
+  qualified, unlaunched outer is not resumable: the Codex host refuses
+  `RETAINED_RUNTIME_NOT_REUSABLE` while the outer's home is staged again; the
+  Claude host refuses `HOST_CAPABILITY_UNQUALIFIED` (`ADMISSION_CONFLICT`: the
+  admission descriptor names the qualifying owner's generation) when
+  `prepare_outer` replays its qualification. The remedy is a new request key,
+  which repeats the review grant. A crash between the seal and the lifecycle
+  state is refused the same way on both hosts, so the unsealed single launch
+  is not reached. Pinned by `tests/test_spec_review_production_resume.py` and
+  `tests/test_spec_review_production_resume_claude.py`; the crash sweep
+  (`tests/test_spec_review_crash_points.py`) pins the fixture host's own
+  refusal at each point and that no second review, charge or outer launch
+  follows. No re-fence of the retained outer and no seal replay exist.
 - New refusal codes: `SPEC_REVIEW_REJECTED`, `SPEC_REVIEW_REQUIRED` (mapped
   `revise_acceptance_draft` / `inspect_spec_review_record`),
   `SPEC_REVIEW_RECONCILIATION_REQUIRED` (`inspect_retained_spec_review`),
@@ -58,19 +69,9 @@ all skills.
   `SPEC_REVIEW_ACTION_AMBIGUOUS`, `SPEC_REVIEW_RECORD_INVALID`.
 - Review hardening (R1). Removing the key from a draft whose review was granted
   or recorded refuses `SPEC_REVIEW_REQUIRED` (the opt-in is not in the draft's
-  hash, so it is read back from the review's record or grant). A resumed seal
-  replays only the draft already sealed, before any review is granted. A sealed
+  hash, so it is read back from the review's record or grant). A sealed
   draft is refused before the reviewer is captured or qualified. The seal gate
-  also verifies the finished reviewer child under the record, and
-  `refence_unlaunched_outer` proves the outer, its workspace and the absence of a
-  launch before it writes either row. In production a crashed spec review is
-  refused before that re-fence is reached, so the crash sweep's DONE outcomes
-  are fixture-only: on the Codex host `RETAINED_RUNTIME_NOT_REUSABLE` (new
-  request key) while the outer's home is staged again, on the Claude host
-  `HOST_CAPABILITY_UNQUALIFIED` (`ADMISSION_CONFLICT`: the admission descriptor
-  names the qualifying owner's generation) at `prepare_outer`. A crash between
-  the seal and the lifecycle state is refused the same way on both hosts, so the
-  unsealed single launch is not reached.
+  also verifies the finished reviewer child under the record.
 - Opt-in and fixture-proven only: the reviewer is a Python host fixture with
   synthetic credentials and the crash points are injected at seams. This is not
   native host qualification and not E8. The outer's runtime receipt now has the

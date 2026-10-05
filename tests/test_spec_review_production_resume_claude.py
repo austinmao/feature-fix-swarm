@@ -68,9 +68,8 @@ def test_the_claude_session_maps_that_refusal_to_an_unqualified_host(tmp_path, m
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["opted-in", "key-less"])
-def test_the_lifecycle_driver_refuses_at_prepare_outer_before_a_re_fence_a_seal_replay_or_an_unsealed_launch(
-        monkeypatch, native):
-    """The driver's first step is ``prepare_outer``: the re-fence, the seal replay and the single launch follow it."""
+def test_the_lifecycle_driver_refuses_at_prepare_outer_before_a_seal_or_an_unsealed_launch(monkeypatch, native):
+    """The driver's first step is ``prepare_outer``: the seal and the unsealed single launch follow it."""
     reached = []
 
     class Transaction:
@@ -95,8 +94,6 @@ def test_the_lifecycle_driver_refuses_at_prepare_outer_before_a_re_fence_a_seal_
         outer_activity_id="outer", prepare_outer=refused, ready=SimpleNamespace(id="ready", input_digest="a" * 64),
         execute=lambda *_args, **_kwargs: reached.append("single launch"),
         close=lambda *_args: reached.append("closed"))
-    monkeypatch.setattr(frontend_producers, "refence_unlaunched_outer",
-                        lambda *_args, **_kwargs: reached.append("re-fence"))
     monkeypatch.setattr(frontend_producers, "seal_from_draft", lambda *_args, **_kwargs: reached.append("seal"))
     draft = {"criteria": [], "exclusions": [], "global_invariants": [], **({"spec_review": "native"} if native else {})}
     context = SimpleNamespace(activity_id="parent")

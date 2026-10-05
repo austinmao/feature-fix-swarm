@@ -263,8 +263,12 @@ qualification has run, so treat it as experimental. Known limits today:
   record, `spec-review:<draft_hash>`; only an accepted record of the exact draft
   lets it be sealed. Before any probe is charged the producer refuses a spent
   tier allowance (`POLICY_ACTION_LIMIT_EXHAUSTED`) or a launch budget below four
-  probes plus the launch (`SPEC_REVIEW_BUDGET_INFEASIBLE`). Fixture-proven only:
-  not native qualification and not E8.
+  probes plus the launch (`SPEC_REVIEW_BUDGET_INFEASIBLE`). A crash anywhere in
+  the review does not resume to `DONE` on the same request key: the outer was
+  qualified before the review and never launched, and a retained, qualified,
+  unlaunched outer is refused (`RETAINED_RUNTIME_NOT_REUSABLE` on the Codex host,
+  `HOST_CAPABILITY_UNQUALIFIED` on the Claude host). Use a new request key, which
+  repeats the review grant. Fixture-proven only: not native qualification and not E8.
 - A failed mapped check first runs the ordinary repair producer
   (`produce_repair` in `lib/run_state/recovery_producer.py`), up to the tier's
   repair limit (2/4/6). The repair child (role `worker`, receipt role

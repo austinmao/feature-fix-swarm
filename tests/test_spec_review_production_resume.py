@@ -8,7 +8,8 @@ is qualified, and the identical request is resumed under a new owner.
 
 The outer orchestrator was qualified before the review began and never launched, so its private runtime home already
 holds qualification evidence: the resume is refused ``RETAINED_RUNTIME_NOT_REUSABLE`` (new request key) while the
-home is staged again, before ``drive_managed_session`` runs.  The re-fence of an unlaunched outer is never reached.
+home is staged again, before ``drive_managed_session`` runs, so no retained outer is ever resumed past its
+qualification.
 Fixture-level proof only: no Codex CLI runs.
 """
 from __future__ import annotations
@@ -19,7 +20,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import run_state.frontend_producers as frontend_producers
 from run_state import cli
 from run_state.state import ControlStore
 from recovery_fixture import host_script
@@ -57,17 +57,12 @@ def test_a_spec_review_crash_resumes_through_real_staging_to_a_typed_new_request
     assert len(reviewers) == 1 and reviewers[0][0].startswith("spec-review:") and launched == 0
     assert store.get_sealed_acceptance(repository_id=repository_id, run_id="rk") is None
 
-    reached = []
-    real = frontend_producers.refence_unlaunched_outer
-    monkeypatch.setattr(frontend_producers, "refence_unlaunched_outer",
-                        lambda *args, **kwargs: reached.append(args) or real(*args, **kwargs))
     capsys.readouterr()
     assert cli.main(argv) == 78
     envelope = _last_envelope(capsys)
     assert (envelope["code"], envelope["recovery_action"]["action"]) == (
         "RETAINED_RUNTIME_NOT_REUSABLE", "resume_with_new_request_key")
     # Refused while the outer's home is staged again, before the lifecycle driver: nothing past it ran.
-    assert reached == []
     with store.read_transaction() as tx:
         assert tx.execute("SELECT generation FROM authority_activities WHERE id=?",
                           (outer["id"],)).fetchone()[0] == outer["generation"]

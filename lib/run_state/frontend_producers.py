@@ -33,7 +33,7 @@ from .spec_review import (
     load_draft, record_spec_review, require_spec_review_accepted, retained_spec_review, spec_review_attempted,
     spec_review_input_context, spec_review_launch_key, spec_review_output_contract,
 )
-from .supervisor import DispatchRequest, SupervisorRefused, _replayed_launch_refusal, artifact_review_inputs
+from .supervisor import DispatchRequest, SupervisorRefused, artifact_review_inputs
 from .wave_execution import capture_prelaunch_snapshot
 from .workspace import (
     WorkspaceRefused, begin_child_workspace_preparation, inspect_workspace, load_input_snapshot,
@@ -617,56 +617,6 @@ def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
     return True
 
 
-def refence_unlaunched_outer(store, token, activity_id: str, preparation_id: str) -> None:
-    """Put the retained, qualified and never launched outer (its workspace and its activity) on this owner's fence.
-
-    A review, the seal's checks and the outer's own launch all capture from, and parent under, the outer, and each
-    needs it on the current fence.  No receipt hashes the workspace row of an outer that never ran (a receipt
-    needs its launch intent), so, unlike a settled outer (``rebind_retained_child``), the row itself moves too.
-
-    Everything is proven before anything is written, and both generations then move in one fenced transaction: the
-    activity is this run's outer, bound to exactly this ready workspace, on no newer fence, with no real launch.
-    Otherwise this refuses typed and changes nothing.  An outer already on this fence is left exactly as it is.
-    """
-    from .ownership import assert_owner
-
-    def unlaunched(tx):
-        row = tx.execute(
-            "SELECT a.generation AS activity_generation,a.state AS activity_state,w.generation AS workspace_generation,"
-            "w.state AS workspace_state FROM authority_activities a JOIN authority_child_bindings b "
-            "ON b.activity_id=a.id JOIN context_workspaces w ON w.preparation_id=b.workspace_preparation_id "
-            "WHERE a.id=? AND a.repository_id=? AND a.run_id=? AND w.preparation_id=? AND w.repository_id=a.repository_id "
-            "AND w.run_id=a.run_id", (activity_id, token.repository_id, token.run_id, preparation_id)).fetchone()
-        if (row is None or row["activity_state"] not in {"pending", "active"} or row["workspace_state"] != "ready"
-                or row["activity_generation"] > token.generation or row["workspace_generation"] > token.generation):
-            raise SupervisorRefused("WORKSPACE_BINDING_MISMATCH")
-        return row
-
-    with store.read_transaction() as tx:
-        row = unlaunched(tx)
-    launch = retained_launch(store, activity_id)
-    if launch is not None:
-        raise SupervisorRefused(_replayed_launch_refusal(launch))
-    if row["activity_generation"] == token.generation and row["workspace_generation"] == token.generation:
-        return
-    try:
-        revalidate_ready_fence(store, token, preparation_id, rebind=False)     # the READY proofs; writes nothing
-    except WorkspaceRefused as error:
-        raise SupervisorRefused(error.code) from error
-    with store.fenced_operation(token):
-        with store.transaction() as tx:
-            assert_owner(tx, token)
-            unlaunched(tx)
-            now = store._now()
-            tx.execute("UPDATE context_workspaces SET generation=?,updated_at=? WHERE preparation_id=?",
-                       (token.generation, now, preparation_id))
-            tx.execute("UPDATE authority_activities SET generation=?,updated_at=? WHERE id=?",
-                       (token.generation, now, activity_id))
-            tx.execute("INSERT INTO control_events (event_type, payload) VALUES ('READY_REVALIDATED', ?)",
-                       (json.dumps({"preparation_id": preparation_id, "run_id": token.run_id},
-                                   sort_keys=True, separators=(",", ":")),))
-
-
 def rebind_retained_child(store, token, activity_id: str | None, preparation_id: str):
     """F51: put one retained child on the resumed owner's fence.
 
@@ -760,7 +710,7 @@ def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_h
     """
     from .frontend_policy import FrontendPolicyRefused
     from .managed import build_frontend_acceptance_draft, seal_frontend_policy
-    from .run_policy import RunPolicyRefused, validate_draft_material
+    from .run_policy import RunPolicyRefused
     allowed = {"draft_id", "revision", "command_mode", "criteria", "exclusions", "global_invariants", "spec_review"}
     if (not isinstance(draft, dict) or set(draft) - allowed
             or not {"criteria", "exclusions", "global_invariants"} <= set(draft)
@@ -783,15 +733,6 @@ def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_h
         if review is None and spec_review_attempted(store, token, draft_id=draft_id, revision=revision):
             # Dropping the key does not undo a review that was granted or recorded for this very draft.
             raise SupervisorRefused("SPEC_REVIEW_REQUIRED")
-        sealed = None if review is None else store.get_sealed_acceptance(
-            repository_id=token.repository_id, run_id=token.run_id)
-        if sealed is not None:
-            # A seal exists (a resume after the owner died before the lifecycle state): only that very draft is
-            # replayed, never reviewed, granted and launched for another one the store would then refuse to seal.
-            if (sealed.draft_id, sealed.draft_revision) != (draft_id, revision):
-                raise SupervisorRefused("ACCEPTANCE_SEAL_GENERATION_CONFLICT")
-            if validate_draft_material(material).material_hash != validate_draft_material(sealed.material).material_hash:
-                raise SupervisorRefused("ACCEPTANCE_DRAFT_CONFLICT")
         # The draft is persisted first (idempotently: `freeze` replays this create), so it can be reviewed unsealed.
         row = None if review is None else store.create_acceptance_draft(
             token, draft_id=draft_id, revision=revision, acceptance_contract_hash=legacy.contract_hash,
@@ -840,22 +781,13 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
         else:
             request, adapter = session.prepare_outer()
         outcome["adapter"], outcome["material"] = adapter, request.codex_material or request.claude_material
-        native = isinstance(acceptance_draft, dict) and acceptance_draft.get("spec_review") == "native"
-        if retained_outer is None and native:
-            # An opted-in run's outer waits qualified through the spec review, so a crash there leaves it for a
-            # resumed owner, whose capture, seal checks and launch need it on the new fence.
-            refence_unlaunched_outer(store, token, request.activity_id, session.ready.id)
         sealed = store.get_sealed_acceptance(repository_id=token.repository_id, run_id=token.run_id)
         # Native review and sealed checks cross a channel-less supervisor; the
         # worker channel stays with the outer orchestrator only.
         review_supervisor = Supervisor(store, token, evidence_root=session.evidence_root)
-        # An opted-in draft sealed by an owner that died before the lifecycle state existed replays its seal here
-        # (idempotent: draft, record and seal are all retained); it never falls through to the unsealed single launch.
-        reseal = native and sealed is not None and store.get_frontend_policy_state(
-            repository_id=token.repository_id, run_id=token.run_id) is None
-        if (sealed is None or reseal) and acceptance_draft is not None:
+        if sealed is None and acceptance_draft is not None:
             review = None
-            if native:
+            if isinstance(acceptance_draft, dict) and acceptance_draft.get("spec_review") == "native":
                 # The review runs between the outer's qualification and the seal, with nothing in between: the
                 # outer's runtime receipt is fresh for only a few minutes.
                 def review(draft_row):
