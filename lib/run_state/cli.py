@@ -129,6 +129,11 @@ _REQUEST_KEY_REFUSALS = {
         "an ordinary repair was issued under an earlier owner fence; its receipt, workspace and record bind that "
         "fence, so this owner cannot consume them, and it is never launched again",
         "inspect_retained_repair"),
+    # A second spec review of the draft would spend another spec_review grant, and its proof binds the fence.
+    "SPEC_REVIEW_RECONCILIATION_REQUIRED": (
+        "the draft's native spec review was launched, or its grant reserved, under an earlier owner fence and is "
+        "not recorded; its proof binds that fence, so this owner cannot record it, and it is never launched again",
+        "inspect_retained_spec_review"),
     # F51: a second final review would spend the run's single review grant again.
     "REVIEW_RECONCILIATION_REQUIRED": (
         "the run's final review was launched, or its grant reserved, under an earlier owner fence and is not "
@@ -140,6 +145,14 @@ _REQUEST_KEY_REFUSALS = {
 # nameable: the operator's remedy is to change the request, not to qualify
 # a host adapter.
 _MANAGED_PROMPT_REFUSALS = {
+    "SPEC_REVIEW_REJECTED": (
+        "the native spec review returned revise for the acceptance draft; its per-criterion reasons are in the "
+        "retained spec-review record (event key spec-review:<draft_hash>) and the review's stdout evidence",
+        "revise_acceptance_draft"),
+    "SPEC_REVIEW_REQUIRED": (
+        "the acceptance draft asks for a native spec review (spec_review: native) but no accepted review of that "
+        "exact draft is retained, so it is not sealed",
+        "inspect_spec_review_record"),
     "MANAGED_FRONTEND_COMMAND_UNSTAGED": (
         "feature-spec/fix/code-uplift have no staged gsd-* command mapping yet; "
         "only feature-implement and task-swarm do",

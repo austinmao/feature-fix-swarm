@@ -8,6 +8,86 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-05, spec-014 E8 prerequisite 3c: spec-review producer)
+
+- The acceptance draft can now be reviewed natively before it is sealed, as an
+  opt-in: a draft that carries `"spec_review": "native"` is reviewed by one
+  tool-absent native reviewer child under a `spec_review` grant (tier allowance
+  1, 2, 3) and is sealed only if that review accepts it. Any other value of the
+  key refuses `ACCEPTANCE_DRAFT_INVALID`; a draft without the key is sealed
+  exactly as before (`tests/test_spec_review_lifecycle.py` pins the unchanged
+  action counts). `produce_spec_review` in `lib/run_state/frontend_producers.py`
+  runs the review on the production final review's core, factored out as
+  `_native_review` with an identical call sequence for the final review. The new
+  module `lib/run_state/spec_review.py` (in the installer's managed lib list)
+  holds the output contract (`ffs.spec-review/v1`), the context, the record and
+  the seal gate.
+- The review kind is derived from the hash-bound output contract, never from a
+  caller flag: `native_review_supervision._review_action` returns `spec_review`
+  only for the spec-review schema, and the restricted path binds such a review
+  to the unsealed draft (its hash, candidate, reviewer child, contract and
+  context) instead of a seal. A draft that is already sealed is refused
+  `NATIVE_REVIEW_BINDING_INVALID`. `sealed_review.py` and
+  `final_review_context.py` stay final-only.
+- The verdict is one keyed authority event, `spec-review:<draft_hash>`, written
+  in the same fenced transaction that ends the reviewer child. It is not an
+  acceptance receipt (that would make the lifecycle skip the final review).
+  `seal_from_draft` seals only a draft whose retained record verifies against
+  that exact draft, its material, its candidate, its non-cancelled action and
+  its succeeded intent and says `accept` (`SPEC_REVIEW_REQUIRED` otherwise;
+  `SPEC_REVIEW_RECORD_INVALID` for a record that fails a binding). A `revise`
+  verdict is retained, spends the grant and refuses `SPEC_REVIEW_REJECTED`, on
+  replay too, without a second launch. A revision is a new draft with a new
+  review if the tier allows, but in production it cannot continue the same run
+  (see below): a revise verdict ends the run, and the revised draft starts a new
+  run.
+- Budget and replay. Before any workspace is captured or qualification probe
+  charged, the producer refuses `POLICY_ACTION_LIMIT_EXHAUSTED` (tier allowance
+  spent) or `SPEC_REVIEW_BUDGET_INFEASIBLE` (fewer than four probes plus the
+  launch remain). A grant reserved and never launched, by any owner, is released
+  and reserved afresh; an intent from an earlier owner fence refuses
+  `INTENT_RECONCILIATION_REQUIRED` or the new
+  `SPEC_REVIEW_RECONCILIATION_REQUIRED` and is never relaunched.
+- A crashed spec review does not resume to `DONE` on the same request key. The
+  review runs between the outer's qualification and its launch, and a retained,
+  qualified, unlaunched outer is not resumable: the Codex host refuses
+  `RETAINED_RUNTIME_NOT_REUSABLE` while the outer's home is staged again; the
+  Claude host refuses `HOST_CAPABILITY_UNQUALIFIED` (`ADMISSION_CONFLICT`: the
+  admission descriptor names the qualifying owner's generation) when
+  `prepare_outer` replays its qualification. The mapped remedy for the Codex
+  refusal, a new request key (`resume_with_new_request_key`), does not finish
+  this run: on the same run id the fixture answers a bare new key with
+  `RESUME_REQUIRED`, and with `--resume` it reaches
+  `FRONTEND_COMPLETION_OBLIGATIONS_REMAIN`, because the first outer (qualified,
+  never launched) stays an unsettled descendant of the run root
+  (`state.py:4875-4887`). That gap predates this change for any crash between
+  the outer's qualification and its launch; the review widens that window and a
+  revise verdict lands in it. Recovery today is a new run. A
+  crash between the seal and the lifecycle
+  state is refused the same way on both hosts, so the unsealed single launch
+  is not reached. Pinned by `tests/test_spec_review_production_resume.py` and
+  `tests/test_spec_review_production_resume_claude.py`; the crash sweep
+  (`tests/test_spec_review_crash_points.py`) pins the fixture host's own
+  refusal at each point and that no second review, charge or outer launch
+  follows. No re-fence of the retained outer and no seal replay exist.
+- New refusal codes: `SPEC_REVIEW_REJECTED`, `SPEC_REVIEW_REQUIRED` (mapped
+  `revise_acceptance_draft` / `inspect_spec_review_record`),
+  `SPEC_REVIEW_RECONCILIATION_REQUIRED` (`inspect_retained_spec_review`),
+  `SPEC_REVIEW_BUDGET_INFEASIBLE`, `SPEC_REVIEW_RESULT_REQUIRED`,
+  `SPEC_REVIEW_OUTPUT_INVALID`, `SPEC_REVIEW_BINDING_INVALID`,
+  `SPEC_REVIEW_NATIVE_PROOF_INVALID`, `SPEC_REVIEW_CONTEXT_INVALID`,
+  `SPEC_REVIEW_ACTION_AMBIGUOUS`, `SPEC_REVIEW_RECORD_INVALID`.
+- Review hardening (R1). Removing the key from a draft whose review was granted
+  or recorded refuses `SPEC_REVIEW_REQUIRED` (the opt-in is not in the draft's
+  hash, so it is read back from the review's record or grant). A sealed
+  draft is refused before the reviewer is captured or qualified. The seal gate
+  also verifies the finished reviewer child under the record.
+- Opt-in and fixture-proven only: the reviewer is a Python host fixture with
+  synthetic credentials and the crash points are injected at seams. This is not
+  native host qualification and not E8. The outer's runtime receipt now has the
+  review inside its 15 minute window; a host review slower than that strands the
+  run the same way. In production one spec review per run is usable.
+
 ### Fixed (2026-10-05, spec-014 E8 prerequisite 3b: repair producer)
 
 - A failed frozen check no longer hands straight back to recovery.

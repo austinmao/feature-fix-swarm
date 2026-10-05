@@ -20,12 +20,54 @@ from .native_review_transport import (
     read_native_review_launch, validate_native_review_launch_material,
 )
 from .ownership import OwnershipRefused
+from .spec_review import SPEC_REVIEW_SCHEMA
 from .supervisor import SupervisorRefused, _canonical, _publish
 from .workspace import _open_directory_chain_raw
 
 
 def material_locator(supervisor, material):
     return supervisor.evidence_root / "native-review-material" / (material.material_sha256() + ".json")
+
+
+def _review_action(material) -> str:
+    """The policy action this review runs under, pinned by its hash-bound output contract (never by a caller flag).
+
+    The published material's hash covers the contract JSON, so the schema it names cannot be changed after the
+    material is bound.  Anything that is not the spec-review schema is a final review, as it always was.
+    """
+    try:
+        contract = json.loads(material.artifact.output_contract_json)
+        return "spec_review" if contract["fixed_fields"]["schema"] == SPEC_REVIEW_SCHEMA else "final_review"
+    except (TypeError, KeyError, ValueError):
+        return "final_review"
+
+
+def _binding(supervisor, activity_id, material, contract_hash, candidate_hash):
+    """Re-derive and compare everything a review's material claims: the sealed acceptance, or the unsealed draft."""
+    if _review_action(material) == "spec_review":
+        return _draft_binding(supervisor, activity_id, material, contract_hash, candidate_hash)
+    return _sealed_binding(supervisor, activity_id, material, contract_hash, candidate_hash)
+
+
+def _draft_binding(supervisor, activity_id, material, draft_hash, candidate_hash):
+    from .spec_review import load_draft, spec_review_input_context, spec_review_output_contract
+    store, token = supervisor.store, supervisor.token
+    draft, sealed = load_draft(store, token, draft_hash)
+    with store.read_transaction() as tx:
+        child = tx.execute("SELECT * FROM authority_child_bindings WHERE activity_id=?", (activity_id,)).fetchone()
+    # A sealed draft is no longer reviewable: the seal froze it, and a review after it would bind nothing.
+    if (draft is None or sealed or child is None
+            or child["role"] != "reviewer" or child["contract_hash"] != draft.draft_hash
+            or child["candidate_hash"] != candidate_hash or draft.material["candidate_hash"] != candidate_hash
+            or child["workspace_binding"] != material.native.workspace
+            or child["runtime_identity"] != material.runtime_tuple_hash):
+        raise SupervisorRefused("NATIVE_REVIEW_BINDING_INVALID")
+    if material.artifact.output_contract_json != _canonical(spec_review_output_contract(draft)).decode():
+        raise SupervisorRefused("NATIVE_REVIEW_CONTRACT_INVALID")
+    context = spec_review_input_context(store, token, draft=draft, reviewer_activity_id=activity_id,
+                                        selected_artifacts=material.artifact.selected_artifacts)
+    if material.artifact.review_context_json != _canonical(context).decode():
+        raise SupervisorRefused("NATIVE_REVIEW_CONTEXT_INVALID")
 
 
 def _sealed_binding(supervisor, activity_id, material, acceptance_hash, candidate_hash):
@@ -68,8 +110,7 @@ def validate_request(supervisor, request):
             or request.runtime_receipt_sha256 != material.ordinary_runtime_sha256
             or request.managed_input_sha256 is None or request.local_check_receipt_sha256 is not None):
         raise SupervisorRefused("NATIVE_REVIEW_MATERIAL_INVALID")
-    _sealed_binding(supervisor, request.activity_id, material, request.contract_hash,
-                    request.managed_input_sha256)
+    _binding(supervisor, request.activity_id, material, request.contract_hash, request.managed_input_sha256)
     with supervisor.store.read_transaction() as tx:
         activity = supervisor.store._assert_activity_binding(tx, supervisor.token, request.activity_id)
         if activity["state"] != "active":
@@ -81,7 +122,7 @@ def validate_request(supervisor, request):
         if request.policy_action_id is not None:
             action = tx.execute("SELECT * FROM authority_policy_actions WHERE id=?",
                                 (request.policy_action_id,)).fetchone()
-            if (action is None or action["action"] != "final_review"
+            if (action is None or action["action"] != _review_action(material)
                     or action["repository_id"] != supervisor.token.repository_id
                     or action["run_id"] != supervisor.token.run_id
                     or action["logical_key"] != request.request_key
@@ -107,7 +148,7 @@ def publish_material(supervisor, material):
             raise SupervisorRefused("NATIVE_REVIEW_MATERIAL_INVALID")
 
 
-def _retained_dispatch(supervisor, handle):
+def _retained_dispatch(supervisor, handle, expected_action):
     """Join the exact original request, ACK and policy attempt; never caller input."""
     store, token = supervisor.store, supervisor.token
     with store.read_transaction() as tx:
@@ -144,7 +185,7 @@ def _retained_dispatch(supervisor, handle):
             or binding["intent_id"] != handle.intent_id
             or request != handle.replay_material
             or request["transport"] != "supervisor-monitor-v1"
-            or action["action"] != "final_review"
+            or action["action"] != expected_action
             or action["logical_key"] != row["idempotency_key"].removeprefix("dispatch-request:")
             or action["input_hash"] != hashlib.sha256(_canonical(request)).hexdigest()
             or {"host_id": intent["child_host_id"], "boot_id": intent["child_boot_id"],
@@ -161,12 +202,12 @@ def completion(supervisor, handle, result, stream):
                "material_sha256": replay.get("material_sha256"), "exit_code": result["returncode"],
                "telemetry_sha256": hashlib.sha256(stream).hexdigest()}
     try:
-        dispatch = _retained_dispatch(supervisor, handle)
+        material = read_native_review_launch(Path(replay["material_locator"]),
+                                            expected_material_sha256=replay["material_sha256"])
+        dispatch = _retained_dispatch(supervisor, handle, _review_action(material))
         request = dispatch["request"]
         if result.get("auth_revoked") is not True or type(result["returncode"]) is not int or result["returncode"] != 0:
             raise SupervisorRefused("NATIVE_REVIEW_COMPLETION_INVALID")
-        material = read_native_review_launch(Path(replay["material_locator"]),
-                                            expected_material_sha256=replay["material_sha256"])
         expected = {**material.replay_binding(), "material_locator": str(material_locator(supervisor, material)),
                     "acceptance_hash": request["contract_hash"], "candidate_hash": dispatch["managed_input_sha256"]}
         if (replay != expected or dispatch["runtime_receipt_sha256"] != material.runtime_receipt_sha256
@@ -174,8 +215,7 @@ def completion(supervisor, handle, result, stream):
                 or request["workspace"] != material.native.workspace
                 or request["command_sha256"] != hashlib.sha256(_canonical(material.native.argv)).hexdigest()):
             raise SupervisorRefused("NATIVE_REVIEW_COMPLETION_INVALID")
-        _sealed_binding(supervisor, handle.activity_id, material, request["contract_hash"],
-                        dispatch["managed_input_sha256"])
+        _binding(supervisor, handle.activity_id, material, request["contract_hash"], dispatch["managed_input_sha256"])
         observe = verify_codex_review_evidence if material.native.host == "codex" else verify_claude_review_evidence
         observation = observe(material.native, stream, exit_code=result["returncode"])
         usage = dict(observation.telemetry.token_usage)

@@ -60,9 +60,29 @@ if prompt.startswith("Recovery trial request:"):
 '''
 
 
+# The final review's reply, as the lifecycle assembly's host script builds it; a spec review (3c) replies to the same
+# artifact-review prompt with its own schema, and shares the credential-revocation wait and rollout-file protocol.
+_FINAL_REPLY = '''    check = next(iter(context["checks"].values()))["evidence"][0]
+    criteria = {cid: {"status": "passed", "evidence": [{"id": rid, **check}
+                for rid in spec["required_evidence_ids_for_pass"]]} for cid, spec in contract["criteria"].items()}
+    text = json.dumps({**contract["fixed_fields"], "criteria": criteria, "findings": []}, sort_keys=True, separators=(",", ":"))
+'''
+_SPEC_REPLY = '''    if contract["fixed_fields"]["schema"] == "ffs.spec-review/v1":
+        verdict = MODE.get("spec_review", "accept")
+        marks = {cid: {"status": "revise" if verdict == "revise" else "acceptable", "reason": "fixture " + verdict}
+                 for cid in contract["criteria"]}
+        text = "not json" if verdict == "malformed" else json.dumps(
+            {**contract["fixed_fields"], "verdict": "revise" if verdict == "revise" else "accept",
+             "criteria": marks, "notes": []}, sort_keys=True, separators=(",", ":"))
+    else:
+''' + "".join("    " + line + "\n" for line in _FINAL_REPLY.splitlines())
+
+
 def host_script(mode_path) -> str:
     """The lifecycle assembly's host script with the recovery prelude and mode-driven review verdicts."""
     script = _REVIEW
+    assert script.count(_FINAL_REPLY) == 1
+    script = script.replace(_FINAL_REPLY, _SPEC_REPLY)
     for old, new in (
         ('"status": "passed"', '"status": ("failed" if MODE.get("review") == "failed" else "passed")'),
         ('"text":text}', '"text":("not json" if MODE.get("review") == "malformed" else text)}'),
@@ -79,11 +99,14 @@ def _no_repair(*_args, **_kwargs):
     raise SupervisorRefused("REPAIR_BUDGET_INFEASIBLE")
 
 
-def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id="rs", draft_mode=None, repair=False):
+def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id="rs", draft_mode=None, repair=False,
+          spec_review=None):
     """A fresh managed repository, the fixture host and a ``run()`` that replays the identical request.
 
     ``repair=False`` keeps the recovery tests' premise (a failed check hands back at once) by refusing the repair
     producer as infeasible before anything is reserved; ``repair=True`` runs the production repair producer.
+    ``spec_review`` (``"accept"``, ``"revise"`` or ``"malformed"``) opts the draft into the native spec review
+    (3c) and scripts the reviewer's reply; ``None`` leaves the draft without the key.
     """
     if not repair:
         monkeypatch.setattr(recovery_producer, "produce_repair", _no_repair, raising=False)
@@ -94,11 +117,12 @@ def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id=
     runtime, fake, catalog = _fixture_host(tmp_path, monkeypatch)
     mode_path = tmp_path / "recovery-mode.json"
     mode_path.write_text(json.dumps({"diagnosis": "the input lacks the repaired marker", "trial": "repaired\n",
-                                     "review": "passed", "repair": "repaired\n", **(mode or {})}))
+                                     "review": "passed", "repair": "repaired\n",
+                                     **({} if spec_review is None else {"spec_review": spec_review}), **(mode or {})}))
     fake.write_text(f"#!{sys.executable}\n" + host_script(mode_path))
     # The fixture host cannot open a real GSD wave.
     monkeypatch.setattr(supervisor_module, "_gsd_wave_completion_code", lambda *_a, require_wave=True: None)
-    draft = _draft(tmp_path, check=check, mode=draft_mode)
+    draft = _draft(tmp_path, check=check, mode=draft_mode, spec_review=None if spec_review is None else "native")
 
     def run(*extra):
         return _frontend_start(env, authority, run_id, runtime, fake, catalog, draft, "task-swarm", "--scope", "1",
@@ -106,7 +130,7 @@ def world(tmp_path, monkeypatch, *, check=CHECK_NEEDS_MARKER, mode=None, run_id=
 
     return SimpleNamespace(tmp_path=tmp_path, primary=primary, authority=authority, repository_id=repository_id,
                            run_id=run_id, run=run, mode_path=mode_path, runtime=runtime, fake=fake, catalog=catalog,
-                           env=env, crash=lambda: _crash(run, authority), head=lambda: git_head(primary))
+                           env=env, crash=lambda: _crash(run, authority), head=lambda: git_head(primary), draft=draft)
 
 
 def charge_qualification(monkeypatch) -> int:
@@ -120,7 +144,7 @@ def charge_qualification(monkeypatch) -> int:
 
     def qualify(store, token, **kwargs):
         result = real(store, token, **kwargs)
-        child = kwargs["role"] == "recovery" or kwargs["activity_request_key"].startswith("repair:")
+        child = kwargs["role"] == "recovery" or kwargs["activity_request_key"].startswith(("repair:", "spec-review:"))
         if child and kwargs["activity_id"] not in charged:
             charged.add(kwargs["activity_id"])
             with store.transaction() as tx:
@@ -286,6 +310,45 @@ def watch_repair(monkeypatch, w) -> list:
     return seen
 
 
+SPEC_REVIEW_ACTIONS = {"execute": 1, "final_review": 1, "spec_review": 1}
+
+
+def spec_review_records(w) -> list[dict]:
+    """Every retained spec-review record (``ffs.frontend-spec-review/v1``), oldest first."""
+    store = ControlStore(w.authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        return [json.loads(row[0])["data"] for row in tx.execute(
+            "SELECT e.payload FROM authority_event_keys k JOIN control_events e ON e.id=k.event_id "
+            "WHERE k.idempotency_key LIKE 'spec-review:%' ORDER BY e.id")]
+
+
+def seals(w) -> list[tuple]:
+    """``(draft_id, revision, draft_hash)`` of every sealed acceptance."""
+    store = ControlStore(w.authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        return [tuple(row) for row in tx.execute(
+            "SELECT draft_id,draft_revision,draft_hash FROM authority_sealed_acceptances "
+            "WHERE repository_id=? AND run_id=?", (w.repository_id, w.run_id))]
+
+
+def drafts(w) -> list[tuple]:
+    """``(draft_id, revision, draft_hash)`` of every persisted draft, sealed or not."""
+    store = ControlStore(w.authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        return [tuple(row) for row in tx.execute(
+            "SELECT draft_id,revision,draft_hash FROM authority_acceptance_drafts "
+            "WHERE repository_id=? AND run_id=? ORDER BY revision", (w.repository_id, w.run_id))]
+
+
+def spec_reviewers(w) -> list[tuple]:
+    """``(request_key, state)`` of every spec-review reviewer child, oldest first."""
+    store = ControlStore(w.authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        return [tuple(row) for row in tx.execute(
+            "SELECT a.request_key,a.state FROM authority_activities a JOIN authority_child_bindings b "
+            "ON b.activity_id=a.id WHERE a.request_key LIKE 'spec-review:%' ORDER BY a.created_at,a.request_key")]
+
+
 # --- crash points -----------------------------------------------------------------------------------------
 
 POINTS = (
@@ -310,6 +373,14 @@ LAST_REPAIR = action_limit("repair", "medium")
 LAST_REPAIR_POINTS = (
     "repair-last-action-reserved", "repair-last-intent-committed", "repair-last-completed-before-harvest",
     "repair-last-returned",
+)
+
+
+# Crash points of the native spec review of an unsealed draft, in the order the production reaches them.
+SPEC_REVIEW_POINTS = (
+    "spec-review-entered", "spec-reviewer-workspace-begun", "spec-reviewer-workspace-ready", "spec-review-qualified",
+    "spec-review-action-reserved", "spec-review-intent-committed", "spec-review-completed-before-record",
+    "spec-review-recorded-before-seal", "spec-review-sealed-before-initialized", "sealed-before-execute",
 )
 
 
@@ -435,6 +506,8 @@ def arm(monkeypatch, point: str) -> list:
         _arm_repair(monkeypatch, point, once, wrap_class)
     elif point in LAST_REPAIR_POINTS:
         _arm_last_repair(monkeypatch, point, once, wrap_class)
+    elif point in SPEC_REVIEW_POINTS:
+        _arm_spec_review(monkeypatch, point, once, wrap_class)
     else:
         raise AssertionError(point)
     return fired
@@ -546,3 +619,67 @@ def _arm_last_repair(monkeypatch, point: str, once, wrap_class) -> None:
                 once()
             return result
         monkeypatch.setattr(recovery_producer, "produce_repair", returned)
+
+
+def _arm_spec_review(monkeypatch, point: str, once, wrap_class) -> None:
+    """The native spec review's crash points; ``once`` raises ``_Killed`` the first time it is called."""
+    def is_spec(key) -> bool:
+        return bool(key) and key.startswith("spec-review:")
+
+    if point == "spec-review-entered":
+        produce_spec_review = frontend_producers.produce_spec_review
+
+        def entered(*args, **kwargs):
+            once()
+            return produce_spec_review(*args, **kwargs)
+        monkeypatch.setattr(frontend_producers, "produce_spec_review", entered)
+    elif point == "spec-reviewer-workspace-begun":
+        create = workspace._create_registered_worktree
+
+        def create_registered_worktree(store, token, preparation, admin_fd, **kwargs):
+            if is_spec(preparation.child_request_key):
+                once()
+            return create(store, token, preparation, admin_fd, **kwargs)
+        monkeypatch.setattr(workspace, "_create_registered_worktree", create_registered_worktree)
+    elif point in {"spec-reviewer-workspace-ready", "spec-review-qualified"}:
+        qualify = managed_qualification.qualify_managed_runtime
+
+        def qualify_managed_runtime(store, token, **kwargs):
+            reviewing = is_spec(kwargs["activity_request_key"])
+            if reviewing and point == "spec-reviewer-workspace-ready":
+                once()
+            result = qualify(store, token, **kwargs)
+            if reviewing and point == "spec-review-qualified":
+                once()
+            return result
+        monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify_managed_runtime)
+    elif point == "spec-review-action-reserved":
+        wrap_class(ControlStore, "reserve_policy_action",
+                   after=lambda _args, kwargs: kwargs["action"] == "spec_review" and once())
+    elif point == "spec-review-intent-committed":
+        armed, fault, reserve = [], Supervisor._fault, Supervisor.reserve_request_action
+
+        def reserve_request_action(self, request, *, action, **kwargs):
+            if action == "spec_review":
+                armed.append(request.activity_id)
+            return reserve(self, request, action=action, **kwargs)
+
+        def crash_at(self, name):
+            if armed and name == "after_intent_commit":
+                once()
+            return fault(self, name)
+        monkeypatch.setattr(Supervisor, "reserve_request_action", reserve_request_action)
+        monkeypatch.setattr(Supervisor, "_fault", crash_at)
+    elif point == "spec-review-completed-before-record":
+        record_spec_review = frontend_producers.record_spec_review
+
+        def record(*args, **kwargs):
+            once()
+            return record_spec_review(*args, **kwargs)
+        monkeypatch.setattr(frontend_producers, "record_spec_review", record)
+    elif point == "spec-review-recorded-before-seal":
+        wrap_class(ControlStore, "seal_acceptance_draft", before=lambda _args, _kwargs: once())
+    elif point == "spec-review-sealed-before-initialized":
+        wrap_class(ControlStore, "seal_acceptance_draft", after=lambda _args, _kwargs: once())
+    else:
+        wrap_class(ControlStore, "initialize_frontend_policy", after=lambda _args, _kwargs: once())

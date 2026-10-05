@@ -9,6 +9,10 @@ criteria and verified check evidence into the artifact envelope, and drives
 on one request key.  Re-entry after a crash reconstructs the retained
 reviewer, action, published material and intent before creating anything;
 the single ``final_review`` grant is never spent twice.
+
+``produce_spec_review`` is the same native review one step earlier, for a draft that opted in (``"spec_review":
+"native"``): it reviews the UNSEALED draft under the draft hash, records its verdict, and ``seal_from_draft`` seals
+only a draft whose accepted review is retained.
 """
 from __future__ import annotations
 
@@ -25,6 +29,10 @@ from .native_review_transport import (
 )
 from .native_review_runtime import NativeReviewRequest, NativeReviewRuntimeRefused, prepare_native_review_runtime
 from .sealed_review import final_review_input_context, final_review_output_contract, record_final_review
+from .spec_review import (
+    load_draft, record_spec_review, require_spec_review_accepted, retained_spec_review, spec_review_attempted,
+    spec_review_input_context, spec_review_launch_key, spec_review_output_contract,
+)
 from .supervisor import DispatchRequest, SupervisorRefused, artifact_review_inputs
 from .wave_execution import capture_prelaunch_snapshot
 from .workspace import (
@@ -153,6 +161,11 @@ def _current_candidate(store, token, *, parent_activity_id: str, preparation):
     if current is not None:
         return (inspect_workspace(store, current.workspace_preparation_id), current.parent_activity_id,
                 current.runtime_identity)
+    return _outer_parent(store, token, parent_activity_id=parent_activity_id, preparation=preparation)
+
+
+def _outer_parent(store, token, *, parent_activity_id: str, preparation):
+    """The supplied parent and its prepared workspace as the candidate to capture; the only one an unsealed run has."""
     with store.read_transaction() as tx:
         parent = tx.execute(
             "SELECT a.runtime_tuple_hash,b.workspace_binding FROM authority_activities a "
@@ -276,20 +289,38 @@ def _release(adapter, material) -> None:
         pass
 
 
-def produce_final_review(store, token, *, supervisor, controller, seam: HostRuntimeSeam, parent_activity_id: str,
-                         preparation, request_key: str = "final-review", timeout_seconds=None):
-    """Run or resume the one native final review of the current sealed candidate."""
-    from host_capabilities import CapabilityError, build_artifact_review_material
-    if supervisor.worker_channel is not None:
-        raise SupervisorRefused("NATIVE_REVIEW_ENTRYPOINT_REQUIRED")
-    frozen = controller.sealed()
-    sealed = store.get_sealed_acceptance(repository_id=token.repository_id, run_id=token.run_id)
-    if sealed is None or sealed.acceptance_hash != frozen.acceptance_hash:
-        raise SupervisorRefused("ACCEPTANCE_SEAL_REQUIRED")
-    acceptance_hash, candidate_hash = frozen.acceptance_hash, frozen.candidate_hash
-    launch_key = request_key + ":launch"
+@dataclass(frozen=True)
+class _Review:
+    """What differs between the sealed final review and the unsealed spec review; every other step is shared.
 
-    action, intent = _retained_action(store, token, launch_key)
+    A final review runs on the CURRENT candidate under the acceptance hash, and re-enters a grant it reserved but
+    never launched.  A spec review runs on the draft's own candidate under the draft hash, and releases such a grant
+    unspent (its launch material is rebuilt from a fresh private runtime root), after ``precheck`` has refused what
+    its allowance and the launch budget cannot cover.
+    """
+
+    action: str             # the policy action the one native review is granted under
+    ambiguous: str          # typed refusal when two live grants carry the launch key
+    reconcile: str          # typed refusal for a review or reviewer issued under an earlier owner fence
+    reviewer_key: str       # the reviewer child's base logical key
+    launch_key: str
+    contract_hash: str      # what the reviewer child is bound to: the acceptance hash, or the draft hash
+    candidate_hash: str
+    candidate: Callable     # () -> (preparation, parent_activity_id, runtime_identity) of the candidate to capture
+    context: Callable       # (reviewer_activity_id, selected_artifacts) -> the review context
+    contract: Callable      # () -> the output contract
+    settle: Callable        # (supervisor, handle) -> the recorded review
+    release_stale_grant: bool = False
+    precheck: Callable | None = None   # () -> None; refuses before any workspace, probe or grant is touched
+
+
+def _native_review(store, token, supervisor, seam: HostRuntimeSeam, review: _Review):
+    """Run or resume the one native review described by ``review`` on a channel-less supervisor."""
+    from host_capabilities import CapabilityError, build_artifact_review_material
+    from .ownership import OwnershipRefused
+    contract_hash, candidate_hash, launch_key = review.contract_hash, review.candidate_hash, review.launch_key
+
+    action, intent = _retained_action(store, token, launch_key, review.action, review.ambiguous)
     if intent is not None:
         if not intent["permit_id"] or intent["child_pid"] is None:
             # Reserved but never acknowledged: only owner-fence reconciliation may settle it.
@@ -297,15 +328,22 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
         if intent["generation"] != token.generation:
             # F51: a native review's completion proof binds the owner fence that issued it, so a
             # resumed owner can neither re-verify nor record it, and never launches a second one.
-            raise SupervisorRefused("REVIEW_RECONCILIATION_REQUIRED")
-        return _settle(supervisor, supervisor.resume_monitored(intent["id"]),
-                       acceptance_hash=acceptance_hash, timeout_seconds=timeout_seconds)
+            raise SupervisorRefused(review.reconcile)
+        return review.settle(supervisor, supervisor.resume_monitored(intent["id"]))
 
+    if review.release_stale_grant and action is not None:
+        try:
+            store.cancel_unlaunched_policy_review(token, action_id=action["id"])
+        except OwnershipRefused as error:
+            raise SupervisorRefused(error.code) from error
+        action = None
+    if review.precheck is not None:
+        review.precheck()
     try:
-        preparation, parent_activity_id, runtime_identity = _current_candidate(
-            store, token, parent_activity_id=parent_activity_id, preparation=preparation)
+        preparation, parent_activity_id, runtime_identity = review.candidate()
         reviewer_key, retained_activity_id, retained_preparation_id = _current_reviewer(
-            store, token, parent_activity_id=parent_activity_id, base_key=request_key + ":reviewer", action=action)
+            store, token, parent_activity_id=parent_activity_id, base_key=review.reviewer_key, action=action,
+            reconciliation_code=review.reconcile)
         ready = _reviewer_workspace(
             store, token, supervisor, preparation=preparation, parent_activity_id=parent_activity_id,
             runtime_identity=runtime_identity, reviewer_key=reviewer_key, candidate_hash=candidate_hash,
@@ -314,20 +352,19 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
         raise SupervisorRefused(error.code) from error
     # The outer orchestrator's prepaid group has ended by now: qualify on this channel-less supervisor.
     qualified = seam.qualify(retained_activity_id or str(uuid.uuid4()), ready, reviewer_key,
-                             parent_activity_id, acceptance_hash, "reviewer", supervisor=supervisor)
+                             parent_activity_id, contract_hash, "reviewer", supervisor=supervisor)
     activity = qualified.activity
     tuple_hash = store.runtime_tuple_hash(qualified.qualified)
     selected = _selected_artifacts(store, ready)
-    context = final_review_input_context(store, token, acceptance_hash=acceptance_hash, candidate_hash=candidate_hash,
-                                        reviewer_activity_id=activity.id, selected_artifacts=selected)
-    contract = final_review_output_contract(sealed, candidate_hash=candidate_hash)
+    context = review.context(activity.id, selected)
+    contract = review.contract()
     private = _private_root(supervisor, activity.id)
     try:
         inputs = artifact_review_inputs(store, ready, selected)
         artifact = build_artifact_review_material(
             host=seam.host, model_request=dict(seam.model_request),
             config_sha256=hashlib.sha256(_canonical(qualified.qualified.to_dict())).hexdigest(),
-            policy_sha256=acceptance_hash,
+            policy_sha256=contract_hash,
             environment={"HOME": str(private), "PATH": "/usr/bin:/bin", "TMPDIR": str(private)},
             selected_artifacts=selected, selected_contents=inputs["contents"],
             provenance={"activity_id": activity.id, **inputs["provenance"]},
@@ -336,7 +373,7 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
         raise SupervisorRefused("HOST_MATERIAL_INVALID") from error
     # The ordinary launch material is the adapter's own post-qualification closure:
     # its credential is the only source the native transport may copy.
-    ordinary_request, adapter = seam.bind(qualified, artifact.prompt, ready, acceptance_hash, launch_key)
+    ordinary_request, adapter = seam.bind(qualified, artifact.prompt, ready, contract_hash, launch_key)
     ordinary = ordinary_request.codex_material if seam.host == "codex" else ordinary_request.claude_material
     if ordinary is None:
         _release(adapter, ordinary_request.codex_material or ordinary_request.claude_material)
@@ -344,7 +381,7 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
     try:
         if action is not None:
             request = _published_request(
-                supervisor, activity_id=activity.id, launch_key=launch_key, acceptance_hash=acceptance_hash,
+                supervisor, activity_id=activity.id, launch_key=launch_key, acceptance_hash=contract_hash,
                 candidate_hash=candidate_hash, expected_head=ready.base_commit,
                 token_reservation=ordinary_request.token_reservation, input_hash=action["input_hash"])
             if request is None:
@@ -363,13 +400,109 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
             request = DispatchRequest(
                 activity_id=activity.id, request_key=launch_key, command=native.argv, workspace=str(ready.path),
                 expected_head=ready.base_commit, runtime_identity=tuple_hash,
-                token_reservation=ordinary_request.token_reservation, contract_hash=acceptance_hash,
+                token_reservation=ordinary_request.token_reservation, contract_hash=contract_hash,
                 monitor_result=True, runtime_receipt_sha256=qualified.receipt.receipt_sha256,
                 managed_input_sha256=ready.input_digest, native_review_material=material)
         handle = supervisor.launch_native_review(request)
-        return _settle(supervisor, handle, acceptance_hash=acceptance_hash, timeout_seconds=timeout_seconds)
+        return review.settle(supervisor, handle)
     finally:
         _release(adapter, ordinary)
+
+
+def produce_final_review(store, token, *, supervisor, controller, seam: HostRuntimeSeam, parent_activity_id: str,
+                         preparation, request_key: str = "final-review", timeout_seconds=None):
+    """Run or resume the one native final review of the current sealed candidate."""
+    if supervisor.worker_channel is not None:
+        raise SupervisorRefused("NATIVE_REVIEW_ENTRYPOINT_REQUIRED")
+    frozen = controller.sealed()
+    sealed = store.get_sealed_acceptance(repository_id=token.repository_id, run_id=token.run_id)
+    if sealed is None or sealed.acceptance_hash != frozen.acceptance_hash:
+        raise SupervisorRefused("ACCEPTANCE_SEAL_REQUIRED")
+    acceptance_hash, candidate_hash = frozen.acceptance_hash, frozen.candidate_hash
+    return _native_review(store, token, supervisor, seam, _Review(
+        action="final_review", ambiguous="FINAL_REVIEW_ACTION_AMBIGUOUS", reconcile="REVIEW_RECONCILIATION_REQUIRED",
+        reviewer_key=request_key + ":reviewer", launch_key=request_key + ":launch", contract_hash=acceptance_hash,
+        candidate_hash=candidate_hash,
+        candidate=lambda: _current_candidate(store, token, parent_activity_id=parent_activity_id,
+                                             preparation=preparation),
+        context=lambda activity_id, selected: final_review_input_context(
+            store, token, acceptance_hash=acceptance_hash, candidate_hash=candidate_hash,
+            reviewer_activity_id=activity_id, selected_artifacts=selected),
+        contract=lambda: final_review_output_contract(sealed, candidate_hash=candidate_hash),
+        settle=lambda reviewing, handle: _settle(reviewing, handle, acceptance_hash=acceptance_hash,
+                                                 timeout_seconds=timeout_seconds)))
+
+
+def _spec_precheck(store, token, draft) -> None:
+    """Refuse, before any workspace is captured or probe charged, what cannot be reviewed or paid for.
+
+    A sealed draft is no longer reviewable (the restricted path refuses it too, but only after the reviewer was
+    captured and its probes charged).  The store would refuse the same allowance at the reservation, but only after
+    four qualification probes were charged; the budget must cover those probes and the review launch itself.
+    """
+    from .run_policy import action_limit
+    from .state import _QUALIFICATION_PROBE_ORDER
+    if load_draft(store, token, draft.draft_hash)[1]:
+        raise SupervisorRefused("NATIVE_REVIEW_BINDING_INVALID")
+    budget = store.get_run_policy_budget(repository_id=token.repository_id, run_id=token.run_id)
+    if budget is None:
+        raise SupervisorRefused("RUN_POLICY_REQUIRED")
+    with store.read_transaction() as tx:
+        used = tx.execute("SELECT count(*) FROM authority_policy_actions WHERE repository_id=? AND run_id=? "
+                          "AND action='spec_review' AND state<>'cancelled'",
+                          (token.repository_id, token.run_id)).fetchone()[0]
+    if used >= action_limit("spec_review", budget.tier):
+        raise SupervisorRefused("POLICY_ACTION_LIMIT_EXHAUSTED")
+    if budget.launch_limit - budget.launch_charged < len(_QUALIFICATION_PROBE_ORDER) + 1:
+        raise SupervisorRefused("SPEC_REVIEW_BUDGET_INFEASIBLE")
+
+
+def _settle_spec(store, token, supervisor, handle, *, draft, timeout_seconds):
+    """Finish the review and record it; a review that leaves no record ends its child ``failed``, the grant spent."""
+    result = supervisor.finish(handle, timeout=timeout_seconds)
+    try:
+        if result["returncode"] != 0 or result.get("host_receipt", {}).get("status") != "complete":
+            raise SupervisorRefused("SPEC_REVIEW_RESULT_REQUIRED")
+        return record_spec_review(supervisor, handle, draft=draft)
+    except SupervisorRefused:
+        if store.get_activity(handle.activity_id).state == "active":
+            store.transition_activity(token, handle.activity_id, expected="active", new="failed",
+                                      result=result["evidence"], reason="spec review left no record")
+        raise
+
+
+def produce_spec_review(store, token, *, supervisor, seam: HostRuntimeSeam, parent_activity_id: str, preparation,
+                        draft, timeout_seconds=None) -> dict:
+    """Run or resume the one native review of an UNSEALED acceptance draft; returns its accepted record.
+
+    Nothing here needs a seal: the reviewer child is bound to the draft hash and the draft's own candidate, the
+    grant is a ``spec_review`` action (tier-bounded), and the verdict is one keyed record (``spec-review:<hash>``).  A
+    ``revise`` verdict is retained and refuses ``SPEC_REVIEW_REJECTED``, on replay too, without a second launch.
+    The grant, the reviewer and the budget follow the final review's rules, except that a grant reserved and
+    never launched (by any owner) is released and reserved afresh, and the tier allowance and launch budget are
+    checked before any probe is charged.
+    """
+    if supervisor.worker_channel is not None:
+        raise SupervisorRefused("NATIVE_REVIEW_ENTRYPOINT_REQUIRED")
+    record = retained_spec_review(store, token, draft)
+    if record is None:
+        tag = draft.draft_hash[:16]
+        record = _native_review(store, token, supervisor, seam, _Review(
+            action="spec_review", ambiguous="SPEC_REVIEW_ACTION_AMBIGUOUS",
+            reconcile="SPEC_REVIEW_RECONCILIATION_REQUIRED", reviewer_key=f"spec-review:{tag}:reviewer",
+            launch_key=spec_review_launch_key(draft.draft_hash), contract_hash=draft.draft_hash,
+            candidate_hash=draft.material["candidate_hash"],
+            candidate=lambda: _outer_parent(store, token, parent_activity_id=parent_activity_id,
+                                            preparation=preparation),
+            context=lambda activity_id, selected: spec_review_input_context(
+                store, token, draft=draft, reviewer_activity_id=activity_id, selected_artifacts=selected),
+            contract=lambda: spec_review_output_contract(draft),
+            settle=lambda reviewing, handle: _settle_spec(store, token, reviewing, handle, draft=draft,
+                                                          timeout_seconds=timeout_seconds),
+            release_stale_grant=True, precheck=lambda: _spec_precheck(store, token, draft)))
+    if record["verdict"] != "accept":
+        raise SupervisorRefused("SPEC_REVIEW_REJECTED")
+    return record
 
 
 @dataclass(frozen=True)
@@ -565,28 +698,55 @@ def _settle_reviewers(store, token, *, parent_activity_id: str) -> None:
                                   result=result, reason="final review recorded")
 
 
-def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_hash: str, candidate_hash: str):
-    """Seal an explicit operator-authored acceptance draft after outer qualification."""
+def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_hash: str, candidate_hash: str,
+                    review: Callable | None = None):
+    """Seal an explicit operator-authored acceptance draft after outer qualification.
+
+    A draft that carries ``"spec_review": "native"`` is sealed only after ``review(draft_row)`` has produced an
+    accepted native review of that exact persisted draft: the gate is ``require_spec_review_accepted``, and a native
+    draft with no ``review`` is refused, never sealed unreviewed.  The key is not part of the draft's hash, so a
+    seal without it is also refused once a review of that same draft row was granted or recorded
+    (``spec_review_attempted``).  A draft nobody reviewed, with no key, seals as before.
+    """
     from .frontend_policy import FrontendPolicyRefused
     from .managed import build_frontend_acceptance_draft, seal_frontend_policy
     from .run_policy import RunPolicyRefused
-    allowed = {"draft_id", "revision", "command_mode", "criteria", "exclusions", "global_invariants"}
+    allowed = {"draft_id", "revision", "command_mode", "criteria", "exclusions", "global_invariants", "spec_review"}
     if (not isinstance(draft, dict) or set(draft) - allowed
-            or not {"criteria", "exclusions", "global_invariants"} <= set(draft)):
+            or not {"criteria", "exclusions", "global_invariants"} <= set(draft)
+            or draft.get("spec_review", "native") != "native"):
         raise SupervisorRefused("ACCEPTANCE_DRAFT_INVALID")
+    if draft.get("spec_review") == "native" and review is None:
+        raise SupervisorRefused("SPEC_REVIEW_REQUIRED")
     mode = draft.get("command_mode", command_mode)
     legacy = store.get_acceptance_contract(repository_id=token.repository_id, run_id=token.run_id)
     if legacy is None:
         raise SupervisorRefused("ACCEPTANCE_CONTRACT_REQUIRED")
+    invalid = (FrontendPolicyRefused, RunPolicyRefused, KeyError, TypeError, ValueError)
     try:
         material = build_frontend_acceptance_draft(
             objective_digest=legacy.material["objective_digest"], criteria=draft["criteria"],
             exclusions=draft["exclusions"], global_invariants=draft["global_invariants"],
             requested_runtime_hash=runtime_hash, effective_runtime_hash=runtime_hash,
             candidate_hash=candidate_hash, generation=legacy.generation, command_mode=mode)
-        return seal_frontend_policy(store, token, frontend=mode, draft_id=str(draft.get("draft_id", "acceptance")),
-                                    revision=int(draft.get("revision", 1)), material=material)
-    except (FrontendPolicyRefused, RunPolicyRefused, KeyError, TypeError, ValueError) as error:
+        draft_id, revision = str(draft.get("draft_id", "acceptance")), int(draft.get("revision", 1))
+        if review is None and spec_review_attempted(store, token, draft_id=draft_id, revision=revision):
+            # Dropping the key does not undo a review that was granted or recorded for this very draft.
+            raise SupervisorRefused("SPEC_REVIEW_REQUIRED")
+        # The draft is persisted first (idempotently: `freeze` replays this create), so it can be reviewed unsealed.
+        row = None if review is None else store.create_acceptance_draft(
+            token, draft_id=draft_id, revision=revision, acceptance_contract_hash=legacy.contract_hash,
+            material=material)
+    except invalid as error:
+        raise SupervisorRefused(getattr(error, "code", "ACCEPTANCE_DRAFT_INVALID")) from error
+    if review is not None:
+        # The seal below re-creates and seals exactly this row; a revised draft is another row with no record.
+        review(row)
+        require_spec_review_accepted(store, token, row)
+    try:
+        return seal_frontend_policy(store, token, frontend=mode, draft_id=draft_id, revision=revision,
+                                    material=material)
+    except invalid as error:
         raise SupervisorRefused(getattr(error, "code", "ACCEPTANCE_DRAFT_INVALID")) from error
 
 
@@ -622,9 +782,22 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
             request, adapter = session.prepare_outer()
         outcome["adapter"], outcome["material"] = adapter, request.codex_material or request.claude_material
         sealed = store.get_sealed_acceptance(repository_id=token.repository_id, run_id=token.run_id)
+        # Native review and sealed checks cross a channel-less supervisor; the
+        # worker channel stays with the outer orchestrator only.
+        review_supervisor = Supervisor(store, token, evidence_root=session.evidence_root)
         if sealed is None and acceptance_draft is not None:
+            review = None
+            if isinstance(acceptance_draft, dict) and acceptance_draft.get("spec_review") == "native":
+                # The review runs between the outer's qualification and the seal, with nothing in between: the
+                # outer's runtime receipt is fresh for only a few minutes.
+                def review(draft_row):
+                    return produce_spec_review(
+                        store, token, supervisor=review_supervisor, seam=session.seam,
+                        parent_activity_id=request.activity_id, preparation=session.ready, draft=draft_row,
+                        timeout_seconds=session.timeout_seconds)
             seal_from_draft(store, token, command_mode=str(session.invocation[0]), draft=acceptance_draft,
-                            runtime_hash=request.runtime_identity, candidate_hash=session.ready.input_digest)
+                            runtime_hash=request.runtime_identity, candidate_hash=session.ready.input_digest,
+                            review=review)
             sealed = store.get_sealed_acceptance(repository_id=token.repository_id, run_id=token.run_id)
         state = None if sealed is None else store.get_frontend_policy_state(
             repository_id=token.repository_id, run_id=token.run_id)
@@ -638,9 +811,6 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
             returncode, outcome["handle"], _result = session.execute(request, adapter)
             return returncode
         controller = FrontendPolicyController(store, token, command_mode=sealed.material["command_mode"])
-        # Native review and sealed checks cross a channel-less supervisor; the
-        # worker channel stays with the outer orchestrator only.
-        review_supervisor = Supervisor(store, token, evidence_root=session.evidence_root)
 
         def execute(_frozen):
             retained = _retained_outer_completion(store, request.activity_id)
