@@ -83,8 +83,12 @@ def test_spec_review_output_contract_names_exactly_the_draft_criteria_and_fixed_
 
 # --- the record binds the exact draft, its material, its action and its evidence ------------------------------
 
-def _world(tmp_path, *, verdict="accept", action="spec_review", edit=None, after=None):
-    """A store with one retained spec-review record for ``_draft()``; ``edit`` forges its payload, ``after`` its rows."""
+def _world(tmp_path, *, verdict="accept", action="spec_review", edit=None, after=None, child=()):
+    """A store with one retained spec-review record for ``_draft()``; ``edit`` forges its payload, ``after`` its rows.
+
+    The record sits under a succeeded ``reviewer`` child bound to the draft hash and candidate, as the producer
+    leaves it; ``child`` overrides those facts, and ``None`` leaves the event under an activity that is no reviewer.
+    """
     from run_state.ownership import assert_owner
     from run_state.run_policy import validate_draft_material
     from test_run_policy_budget import INPUT_A, _owned
@@ -94,6 +98,16 @@ def _world(tmp_path, *, verdict="accept", action="spec_review", edit=None, after
     intent = store.reserve_launch(activity.id, token, policy_action_id=reserved.id)
     with store.transaction() as tx:
         tx.execute("UPDATE authority_launch_intents SET completion_status='succeeded' WHERE id=?", (intent.id,))
+        if child is not None:
+            facts = {"role": "reviewer", "contract_hash": draft.draft_hash, "candidate_hash": CANDIDATE,
+                     "state": "succeeded", **dict(child)}
+            tx.execute(
+                "INSERT INTO authority_child_bindings (activity_id,parent_activity_id,role,candidate_hash,"
+                "contract_hash,runtime_identity,workspace_binding,workspace_preparation_id,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (activity.id, "outer", facts["role"], facts["candidate_hash"], facts["contract_hash"], "b" * 64,
+                 str(tmp_path / "reviewer-workspace"), None, "2026-10-05T00:00:00Z"))
+            tx.execute("UPDATE authority_activities SET state=? WHERE id=?", (facts["state"], activity.id))
     stdout = tmp_path / "stdout.log"
     stdout.write_bytes(b"reviewer output\n")
     criteria = {item["id"]: {"status": "acceptable" if verdict == "accept" else "revise", "reason": "fixture"}
@@ -160,6 +174,38 @@ def _rewrite_evidence(_store, _token, _reserved, _intent, stdout):
 def test_a_record_that_binds_anything_but_the_exact_draft_refuses_as_invalid(tmp_path, edit, after):
     with pytest.raises(SupervisorRefused, match=r"^SPEC_REVIEW_RECORD_INVALID$"):
         _require(_world(tmp_path, edit=edit, after=after))
+
+
+def _forge_criteria(payload):
+    payload["criteria"]["objective:one"]["status"] = "revise"
+
+
+def _extra_criterion(payload):
+    payload["criteria"]["objective:three"] = {"status": "acceptable", "reason": "fixture"}
+
+
+def _no_attempt(store, _token, reserved, _intent, _stdout):
+    with store.transaction() as tx:
+        tx.execute("DELETE FROM authority_policy_action_attempts WHERE action_id=?", (reserved.id,))
+
+
+@pytest.mark.parametrize(("child", "edit", "after"), [
+    (None, None, None),
+    ({"role": "worker"}, None, None),
+    ({"contract_hash": "f" * 64}, None, None),
+    ({"candidate_hash": "f" * 64}, None, None),
+    ({"state": "active"}, None, None),
+    ({"state": "failed"}, None, None),
+    ((), None, _no_attempt),
+    ((), _forge_criteria, None),
+    ((), _extra_criterion, None),
+], ids=["no-reviewer-binding", "not-a-reviewer", "other-draft-hash", "other-candidate", "child-still-active",
+        "child-failed", "intent-is-no-attempt-of-the-action", "verdict-contradicts-criteria",
+        "criteria-are-not-the-drafts"])
+def test_a_record_no_native_reviewer_left_refuses_as_invalid(tmp_path, child, edit, after):
+    """Review R1-4: the keyed event alone proves nothing; the activity under it must be this draft's finished reviewer."""
+    with pytest.raises(SupervisorRefused, match=r"^SPEC_REVIEW_RECORD_INVALID$"):
+        _require(_world(tmp_path, child=child, edit=edit, after=after))
 
 
 def test_a_record_of_another_review_kind_refuses_as_invalid(tmp_path):
