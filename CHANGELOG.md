@@ -53,6 +53,12 @@ all skills.
   issued repair (intent-bearing, not cancelled) or a failed frozen check on the
   current candidate; a bare `EXECUTE`, any other decision and an unsealed run
   still refuse `REQUEST_ALREADY_COMPLETED`.
+- The tier's repair allowance counts a reserved or issued repair. So once it
+  is spent, the lifecycle still gives an unfinished last repair (reserved but
+  never launched, or issued but not integrated) to the producer
+  (`repair_unfinished`). That repair is re-reserved, or refuses
+  `REPAIR_RECONCILIATION_REQUIRED`; it is never skipped into a recovery
+  handback. A finished last repair still hands back as before.
 - New refusal codes: `REPAIR_BUDGET_INFEASIBLE` (consumed by the lifecycle),
   `REPAIR_RECONCILIATION_REQUIRED`, `REPAIR_ACTION_AMBIGUOUS`,
   `REPAIR_BINDING_INVALID`, `REPAIR_ACTION_INVALID`, `REPAIR_RECORD_INVALID`,
