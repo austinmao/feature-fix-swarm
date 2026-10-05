@@ -94,6 +94,15 @@ def _run_case(tmp_path, monkeypatch, host, check, *, verdict="accept", estimate=
     seen = []
 
     def execute(store, token, context):
+        try:
+            return _execute(store, token, context)
+        except Exception:
+            # The managed ingress maps every failure to a typed refusal; keep the fixture cause visible.
+            import traceback
+            traceback.print_exc()
+            raise
+
+    def _execute(store, token, context):
         store.bind_runtime(token, context.activity_id, "b" * 64)
         queue = ManagedAdmissionQueue(tmp_path / "resource-registry", observation_provider=lambda:
             ResourceObservation(time.monotonic_ns(), 4, 4 << 30, 4 << 30, 100, 100, {host: 4}, "fixture"))
@@ -550,4 +559,75 @@ def test_a_sealed_draft_is_refused_before_any_workspace_or_probe(tmp_path, monke
         with case.store.read_transaction() as tx:
             assert tx.execute("SELECT count(*) FROM context_workspaces "
                               "WHERE child_request_key LIKE 'spec-review:%'").fetchone()[0] == 0
+    _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+# --- review R1-5: re-fencing an outer proves it is the unlaunched outer of that workspace before it writes ------
+
+def _fence_rows(case):
+    """Everything a re-fence could write: the generation columns, their timestamps and the event log."""
+    with case.store.read_transaction() as tx:
+        return ([tuple(row) for row in tx.execute(
+                    "SELECT preparation_id,generation,updated_at FROM context_workspaces ORDER BY preparation_id")],
+                [tuple(row) for row in tx.execute("SELECT id,generation,updated_at FROM authority_activities ORDER BY id")],
+                [tuple(row) for row in tx.execute("SELECT run_id,generation,updated_at FROM context_runs")],
+                tx.execute("SELECT count(*) FROM control_events").fetchone()[0])
+
+
+def _refence(case, activity_id, preparation_id):
+    from run_state.frontend_producers import refence_unlaunched_outer
+    return refence_unlaunched_outer(case.store, case.token, activity_id, preparation_id)
+
+
+def _on_an_earlier_fence(case):
+    """The retained outer as a resumed owner finds it: bound to a fence that is no longer this one."""
+    with case.store.transaction() as tx:
+        tx.execute("UPDATE authority_activities SET generation=? WHERE id=?", (case.token.generation - 1, case.worker.id))
+
+
+def test_refencing_an_activity_that_does_not_own_the_workspace_changes_nothing(tmp_path, monkeypatch):
+    def check(case):
+        with case.store.read_transaction() as tx:
+            root = tx.execute("SELECT preparation_id FROM context_runs").fetchone()[0]
+        assert root != case.ready.id
+        _on_an_earlier_fence(case)
+        before = _fence_rows(case)
+        # The run's root workspace is ready and passes its own fence proof, but it is not this outer's workspace:
+        # nothing may be rebound, in either table, before that is known.
+        with pytest.raises(SupervisorRefused, match=r"^WORKSPACE_BINDING_MISMATCH$"):
+            _refence(case, case.worker.id, root)
+        assert _fence_rows(case) == before
+    _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+@pytest.mark.parametrize(("launch", "code"), [
+    ({"state": "completed_succeeded", "completion_status": "succeeded"}, "REQUEST_ALREADY_COMPLETED"),
+    ({"state": "closed_dead", "completion_status": None}, "REQUEST_ALREADY_COMPLETED"),
+    ({"state": "released_to_execute", "completion_status": None}, "INTENT_RECONCILIATION_REQUIRED"),
+])
+def test_refencing_an_outer_that_has_launched_changes_nothing(tmp_path, monkeypatch, launch, code):
+    import run_state.frontend_producers as producers
+
+    def check(case):
+        _on_an_earlier_fence(case)
+        before = _fence_rows(case)
+        # `retained_launch` is the authority's own reading of a real (non-qualification) outer launch.
+        monkeypatch.setattr(producers, "retained_launch", lambda _store, _activity: launch)
+        with pytest.raises(SupervisorRefused, match=f"^{code}$"):
+            _refence(case, case.worker.id, case.ready.id)
+        assert _fence_rows(case) == before
+    _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+def test_refencing_the_unlaunched_outer_moves_its_activity_to_this_fence(tmp_path, monkeypatch):
+    def check(case):
+        _on_an_earlier_fence(case)
+        _refence(case, case.worker.id, case.ready.id)
+        with case.store.read_transaction() as tx:
+            assert tx.execute("SELECT generation FROM authority_activities WHERE id=?",
+                              (case.worker.id,)).fetchone()[0] == case.token.generation
+        # Already on this fence: a no-op that writes nothing.
+        before = _fence_rows(case)
+        _refence(case, case.worker.id, case.ready.id)
+        assert _fence_rows(case) == before
     _run_case(tmp_path, monkeypatch, "codex", check)
