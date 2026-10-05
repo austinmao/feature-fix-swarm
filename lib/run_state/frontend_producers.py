@@ -30,7 +30,7 @@ from .native_review_transport import (
 from .native_review_runtime import NativeReviewRequest, NativeReviewRuntimeRefused, prepare_native_review_runtime
 from .sealed_review import final_review_input_context, final_review_output_contract, record_final_review
 from .spec_review import (
-    record_spec_review, require_spec_review_accepted, retained_spec_review, spec_review_attempted,
+    load_draft, record_spec_review, require_spec_review_accepted, retained_spec_review, spec_review_attempted,
     spec_review_input_context, spec_review_launch_key, spec_review_output_contract,
 )
 from .supervisor import DispatchRequest, SupervisorRefused, artifact_review_inputs
@@ -433,14 +433,17 @@ def produce_final_review(store, token, *, supervisor, controller, seam: HostRunt
                                                  timeout_seconds=timeout_seconds)))
 
 
-def _spec_precheck(store, token) -> None:
-    """Refuse, before any workspace is captured or probe charged, what the tier and the launch budget cannot cover.
+def _spec_precheck(store, token, draft) -> None:
+    """Refuse, before any workspace is captured or probe charged, what cannot be reviewed or paid for.
 
-    The store would refuse the same allowance at the reservation, but only after four qualification probes were
-    charged; the budget must cover those probes and the review launch itself.
+    A sealed draft is no longer reviewable (the restricted path refuses it too, but only after the reviewer was
+    captured and its probes charged).  The store would refuse the same allowance at the reservation, but only after
+    four qualification probes were charged; the budget must cover those probes and the review launch itself.
     """
     from .run_policy import action_limit
     from .state import _QUALIFICATION_PROBE_ORDER
+    if load_draft(store, token, draft.draft_hash)[1]:
+        raise SupervisorRefused("NATIVE_REVIEW_BINDING_INVALID")
     budget = store.get_run_policy_budget(repository_id=token.repository_id, run_id=token.run_id)
     if budget is None:
         raise SupervisorRefused("RUN_POLICY_REQUIRED")
@@ -496,7 +499,7 @@ def produce_spec_review(store, token, *, supervisor, seam: HostRuntimeSeam, pare
             contract=lambda: spec_review_output_contract(draft),
             settle=lambda reviewing, handle: _settle_spec(store, token, reviewing, handle, draft=draft,
                                                           timeout_seconds=timeout_seconds),
-            release_stale_grant=True, precheck=lambda: _spec_precheck(store, token)))
+            release_stale_grant=True, precheck=lambda: _spec_precheck(store, token, draft)))
     if record["verdict"] != "accept":
         raise SupervisorRefused("SPEC_REVIEW_REJECTED")
     return record
