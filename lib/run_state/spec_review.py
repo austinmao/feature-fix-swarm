@@ -41,6 +41,11 @@ def spec_review_record_key(draft_hash: str) -> str:
     return "spec-review:" + draft_hash
 
 
+def spec_review_launch_key(draft_hash: str) -> str:
+    """The logical key of the draft's one review grant and launch (``produce_spec_review``)."""
+    return f"spec-review:{draft_hash[:16]}:launch"
+
+
 def material_hash_of(draft) -> str:
     from .run_policy import validate_draft_material
     return validate_draft_material(draft.material).material_hash
@@ -69,6 +74,34 @@ def spec_review_output_contract(draft) -> dict:
             "This response is subject to independent process and authority validation.",
         ],
     }
+
+
+def spec_review_attempted(store, token, *, draft_id: str, revision: int) -> bool:
+    """Whether the persisted draft row of this id and revision has a spec-review record or a live spec_review grant.
+
+    The opt-in (``"spec_review": "native"``) is not part of the draft's material or hash, so it cannot be read back
+    from the row.  This is the part of it that outlives the key: once a review of the row was granted or recorded, a
+    seal of that same row that does not ask for the review is refused (``seal_from_draft``).  A released grant was
+    never a review, and a row nobody reviewed is the operator's to seal either way.
+    """
+    with store.read_transaction() as tx:
+        tables = {row[0] for row in tx.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('authority_acceptance_drafts','authority_policy_actions')")}
+        row = None if "authority_acceptance_drafts" not in tables else tx.execute(
+            "SELECT draft_hash FROM authority_acceptance_drafts WHERE repository_id=? AND run_id=? AND draft_id=? "
+            "AND revision=?", (token.repository_id, token.run_id, draft_id, revision)).fetchone()
+        if row is None:
+            return False
+        recorded = tx.execute(
+            "SELECT 1 FROM authority_event_keys k JOIN authority_activities a ON a.id=k.activity_id "
+            "WHERE k.idempotency_key=? AND a.repository_id=? AND a.run_id=?",
+            (spec_review_record_key(row["draft_hash"]), token.repository_id, token.run_id)).fetchone()
+        granted = "authority_policy_actions" in tables and tx.execute(
+            "SELECT 1 FROM authority_policy_actions WHERE repository_id=? AND run_id=? AND action='spec_review' "
+            "AND logical_key=? AND state<>'cancelled'",
+            (token.repository_id, token.run_id, spec_review_launch_key(row["draft_hash"]))).fetchone()
+    return recorded is not None or bool(granted)
 
 
 def load_draft(store, token, draft_hash: str):

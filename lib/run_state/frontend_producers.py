@@ -30,8 +30,8 @@ from .native_review_transport import (
 from .native_review_runtime import NativeReviewRequest, NativeReviewRuntimeRefused, prepare_native_review_runtime
 from .sealed_review import final_review_input_context, final_review_output_contract, record_final_review
 from .spec_review import (
-    record_spec_review, require_spec_review_accepted, retained_spec_review, spec_review_input_context,
-    spec_review_output_contract,
+    record_spec_review, require_spec_review_accepted, retained_spec_review, spec_review_attempted,
+    spec_review_input_context, spec_review_launch_key, spec_review_output_contract,
 )
 from .supervisor import DispatchRequest, SupervisorRefused, artifact_review_inputs
 from .wave_execution import capture_prelaunch_snapshot
@@ -487,7 +487,7 @@ def produce_spec_review(store, token, *, supervisor, seam: HostRuntimeSeam, pare
         record = _native_review(store, token, supervisor, seam, _Review(
             action="spec_review", ambiguous="SPEC_REVIEW_ACTION_AMBIGUOUS",
             reconcile="SPEC_REVIEW_RECONCILIATION_REQUIRED", reviewer_key=f"spec-review:{tag}:reviewer",
-            launch_key=f"spec-review:{tag}:launch", contract_hash=draft.draft_hash,
+            launch_key=spec_review_launch_key(draft.draft_hash), contract_hash=draft.draft_hash,
             candidate_hash=draft.material["candidate_hash"],
             candidate=lambda: _outer_parent(store, token, parent_activity_id=parent_activity_id,
                                             preparation=preparation),
@@ -717,7 +717,9 @@ def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_h
 
     A draft that carries ``"spec_review": "native"`` is sealed only after ``review(draft_row)`` has produced an
     accepted native review of that exact persisted draft: the gate is ``require_spec_review_accepted``, and a native
-    draft with no ``review`` is refused, never sealed unreviewed.  Without the key nothing changes.
+    draft with no ``review`` is refused, never sealed unreviewed.  The key is not part of the draft's hash, so a
+    seal without it is also refused once a review of that same draft row was granted or recorded
+    (``spec_review_attempted``).  A draft nobody reviewed, with no key, seals as before.
     """
     from .frontend_policy import FrontendPolicyRefused
     from .managed import build_frontend_acceptance_draft, seal_frontend_policy
@@ -741,6 +743,9 @@ def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_h
             requested_runtime_hash=runtime_hash, effective_runtime_hash=runtime_hash,
             candidate_hash=candidate_hash, generation=legacy.generation, command_mode=mode)
         draft_id, revision = str(draft.get("draft_id", "acceptance")), int(draft.get("revision", 1))
+        if review is None and spec_review_attempted(store, token, draft_id=draft_id, revision=revision):
+            # Dropping the key does not undo a review that was granted or recorded for this very draft.
+            raise SupervisorRefused("SPEC_REVIEW_REQUIRED")
         # The draft is persisted first (idempotently: `freeze` replays this create), so it can be reviewed unsealed.
         row = None if review is None else store.create_acceptance_draft(
             token, draft_id=draft_id, revision=revision, acceptance_contract_hash=legacy.contract_hash,
