@@ -499,3 +499,34 @@ def test_a_draft_row_nobody_reviewed_still_seals_without_the_key(tmp_path, monke
         assert _counts(case.store, case.worker.id) == _NONE
     _run_case(tmp_path, monkeypatch, "codex", check)
 
+
+
+# --- review R1-3: a resumed seal replays only the draft that is already sealed ---------------------------------
+
+def test_a_resealed_other_revision_is_refused_before_any_review_or_probe(tmp_path, monkeypatch):
+    def check(case):
+        draft = _persist(case)
+        _produce(case, draft)
+        # The owner died after the seal and before the lifecycle state existed.
+        case.store.seal_acceptance_draft(case.token, draft_id="spec", revision=1,
+                                         acceptance_contract_hash=draft.acceptance_contract_hash)
+        assert _sealed(case) is not None and _policy_state(case) is None
+        before = _counts(case.store, case.worker.id)
+        seam, qualifications = _counting(case.seam)
+        reviewed = []
+
+        def review(row):
+            reviewed.append(row)
+            return _produce(case, row, seam=seam)
+        with pytest.raises(SupervisorRefused, match=r"^ACCEPTANCE_SEAL_GENERATION_CONFLICT$"):
+            _seal_draft(case, _operator(case, revision=2, note="a revised exclusion"), review)
+        with pytest.raises(SupervisorRefused, match=r"^ACCEPTANCE_DRAFT_CONFLICT$"):
+            _seal_draft(case, _operator(case, revision=1, note="reworded"), review)
+        # Neither revision was reviewed, qualified, granted or launched.
+        assert reviewed == [] and qualifications == []
+        assert _counts(case.store, case.worker.id) == before == _ONE
+        # The sealed draft itself replays: its retained record is found and the lifecycle state is initialized.
+        _seal_draft(case, _operator(case), review)
+        assert _policy_state(case).stage == "SEALED" and qualifications == []
+        assert _counts(case.store, case.worker.id) == _ONE
+    _run_case(tmp_path, monkeypatch, "codex", check)
