@@ -37,8 +37,10 @@ all skills.
   its succeeded intent and says `accept` (`SPEC_REVIEW_REQUIRED` otherwise;
   `SPEC_REVIEW_RECORD_INVALID` for a record that fails a binding). A `revise`
   verdict is retained, spends the grant and refuses `SPEC_REVIEW_REJECTED`, on
-  replay too, without a second launch; a revision is a new draft with a new
-  review if the tier allows.
+  replay too, without a second launch. A revision is a new draft with a new
+  review if the tier allows, but in production it cannot continue the same run
+  (see below): a revise verdict ends the run, and the revised draft starts a new
+  run.
 - Budget and replay. Before any workspace is captured or qualification probe
   charged, the producer refuses `POLICY_ACTION_LIMIT_EXHAUSTED` (tier allowance
   spent) or `SPEC_REVIEW_BUDGET_INFEASIBLE` (fewer than four probes plus the
@@ -52,10 +54,15 @@ all skills.
   `RETAINED_RUNTIME_NOT_REUSABLE` while the outer's home is staged again; the
   Claude host refuses `HOST_CAPABILITY_UNQUALIFIED` (`ADMISSION_CONFLICT`: the
   admission descriptor names the qualifying owner's generation) when
-  `prepare_outer` replays its qualification. The documented remedy is a new
-  request key (`resume_with_new_request_key`), whose attempt repeats the review
-  grant; on the same run id the fixture answers a bare new key with
-  `RESUME_REQUIRED`, so that remedy is not exercised end to end here. A
+  `prepare_outer` replays its qualification. The mapped remedy for the Codex
+  refusal, a new request key (`resume_with_new_request_key`), does not finish
+  this run: on the same run id the fixture answers a bare new key with
+  `RESUME_REQUIRED`, and with `--resume` it reaches
+  `FRONTEND_COMPLETION_OBLIGATIONS_REMAIN`, because the first outer (qualified,
+  never launched) stays an unsettled descendant of the run root
+  (`state.py:4875-4887`). That gap predates this change for any crash between
+  the outer's qualification and its launch; the review widens that window and a
+  revise verdict lands in it. Recovery today is a new run. A
   crash between the seal and the lifecycle
   state is refused the same way on both hosts, so the unsealed single launch
   is not reached. Pinned by `tests/test_spec_review_production_resume.py` and
@@ -79,7 +86,7 @@ all skills.
   synthetic credentials and the crash points are injected at seams. This is not
   native host qualification and not E8. The outer's runtime receipt now has the
   review inside its 15 minute window; a host review slower than that strands the
-  request key, whose remedy is a new request key.
+  run the same way. In production one spec review per run is usable.
 
 ### Fixed (2026-10-05, spec-014 E8 prerequisite 3b: repair producer)
 
