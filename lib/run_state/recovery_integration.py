@@ -22,6 +22,11 @@ def recovery_journal_key(trial_action_id: str) -> str:
     return "recovery-trial:" + trial_action_id
 
 
+def _shared_rows(tx, token, workspace):
+    return tx.execute("SELECT preparation_id,common_dir FROM context_workspaces WHERE repository_id=? AND run_id=? "
+                      "AND path=? AND state='ready'", (token.repository_id, token.run_id, str(workspace))).fetchall()
+
+
 def _retained(tx, activity_id, key):
     row = tx.execute("SELECT k.payload_hash,e.payload FROM authority_event_keys k JOIN control_events e "
                      "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?", (activity_id, key)).fetchone()
@@ -30,9 +35,7 @@ def _retained(tx, activity_id, key):
 
 def integrate_recovery_winner(store, token, *, supervisor, decision, workspace) -> dict:
     """Journal, apply and bind ``decision.winner``; replay returns the retained continuation."""
-    from run_context import workspace_effect_lock
     from .recovery_trial_checks import trial_checks_key
-    from .run_policy import productive_work
     from .supervisor import Supervisor, _read_evidence
 
     if (not isinstance(supervisor, Supervisor) or supervisor.store is not store or supervisor.token != token):
@@ -53,8 +56,7 @@ def integrate_recovery_winner(store, token, *, supervisor, decision, workspace) 
         raise RecoveryRefused("RECOVERY_INTEGRATION_STAGE_INVALID")
     with store.read_transaction() as tx:
         record = _retained(tx, winner["activity_id"], trial_checks_key(winner["action_id"]))
-        rows = tx.execute("SELECT preparation_id,common_dir FROM context_workspaces WHERE repository_id=? AND run_id=? "
-                          "AND path=? AND state='ready'", (token.repository_id, token.run_id, str(workspace))).fetchall()
+        rows = _shared_rows(tx, token, workspace)
     if record is None or len(rows) != 1:
         raise RecoveryRefused("RECOVERY_INTEGRATION_BINDING_INVALID")
     record, record_hash = record
@@ -63,13 +65,9 @@ def integrate_recovery_winner(store, token, *, supervisor, decision, workspace) 
             or record["trial_candidate_hash"] != winner["trial_candidate_hash"]
             or record["input_digest"] != continued.get("candidate_hash")):
         raise RecoveryRefused("RECOVERY_INTEGRATION_BINDING_INVALID")
-    results = [{"status": "complete", "patch": patch.decode("utf-8"),
-                "changed_files": list(record["patch"]["changed_files"])}]
-    with (productive_work(store, token, kind="integration"),
-          workspace_effect_lock(Path(rows[0]["common_dir"]), repository_id=token.repository_id,
-                                run_id=token.run_id, preparation_id=rows[0]["preparation_id"])):
-        output, evidence = _apply(store, token, supervisor.evidence_root, key, winner["activity_id"], workspace,
-                                  record, record_hash, results)
+    output, evidence = integrate_retained_patch(
+        store, token, evidence_root=supervisor.evidence_root, key=key, activity_id=winner["activity_id"],
+        record=record, record_hash=record_hash, workspace=workspace, patch=patch)
     store.record_frontend_integration(token, receipt_hash=winner["receipt_hash"], candidate_hash=output,
                                       integration_evidence=evidence, no_commit_evidence=None)
     store.bind_frontend_candidate(token, acceptance_hash=state.acceptance_hash, candidate_hash=output,
@@ -87,7 +85,31 @@ def integrate_recovery_winner(store, token, *, supervisor, decision, workspace) 
     return continuation
 
 
-def _apply(store, token, evidence_root, key, activity_id, workspace, record, record_hash, results):
+def integrate_retained_patch(store, token, *, evidence_root, key, activity_id, record, record_hash, workspace,
+                             patch: bytes, hash_field="trial_checks_sha256"):
+    """Journal and apply one verified, retained patch onto the shared candidate; returns ``(output, evidence)``.
+
+    The recovery winner (key ``recovery-trial:<id>``) and the ordinary repair (key ``repair:<id>``) both land
+    here; the caller has checked ``patch`` against its record and binds the returned candidate itself.
+    ``hash_field`` names the record's hash in the journal's ``:prepared`` event.
+    """
+    from run_context import workspace_effect_lock
+    from .run_policy import productive_work
+    with store.read_transaction() as tx:
+        rows = _shared_rows(tx, token, workspace)
+    if len(rows) != 1:
+        raise RecoveryRefused("RECOVERY_INTEGRATION_BINDING_INVALID")
+    results = [{"status": "complete", "patch": patch.decode("utf-8"),
+                "changed_files": list(record["patch"]["changed_files"])}]
+    with (productive_work(store, token, kind="integration"),
+          workspace_effect_lock(Path(rows[0]["common_dir"]), repository_id=token.repository_id,
+                                run_id=token.run_id, preparation_id=rows[0]["preparation_id"])):
+        return _apply(store, token, evidence_root, key, activity_id, Path(workspace), record, record_hash, results,
+                      hash_field)
+
+
+def _apply(store, token, evidence_root, key, activity_id, workspace, record, record_hash, results,
+           hash_field="trial_checks_sha256"):
     """The wave consumer's journal sequence for one retained patch; caller holds the effect lock."""
     from .integration_journal import quarantine, read_intent
     from .supervisor import _read_evidence
@@ -117,11 +139,12 @@ def _apply(store, token, evidence_root, key, activity_id, workspace, record, rec
         assert_owner(tx, token)
         store._record_event_once_tx(tx, token, activity_id, key + ":prepared", {
             "plans": [{"activity_id": activity_id, "workspace_preparation_id": record["workspace_preparation_id"]}],
-            "input_digest": record["input_digest"], "trial_checks_sha256": record_hash})
+            "input_digest": record["input_digest"], hash_field: record_hash})
         integrated = _retained(tx, activity_id, key + ":integrated")
         journal = store.register_integration_intent_tx(
             tx, token, key, str(workspace), intent["before"], intent["expected_after"],
-            {"initial_head": base, "trial_action_id": record["trial_action_id"],
+            {"initial_head": base, **{name: record[name] for name in ("trial_action_id", "action_id")
+                                      if name in record},
              "patch_sha256": record["patch"]["sha256"]})
         store.mark_workspace_integration_pending_tx(tx, token, journal, str(workspace))
     if integrated is not None:

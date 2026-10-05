@@ -40,7 +40,7 @@ def verify_candidate_chain(store, token, *, receipt_hash, candidate_hash,
     No review receipt, arbitrary file hash, or caller-selected output digest
     substitutes for the original successful execution and published chain.
     """
-    from .integration_journal import validate_completed_publication_tx
+    from .integration_journal import record_family, validate_completed_publication_tx
     from .run_policy import validate_role_receipt
     from .supervisor import _read_evidence
     from .wave_execution import _head, _inventory, _material_entries
@@ -69,7 +69,7 @@ def verify_candidate_chain(store, token, *, receipt_hash, candidate_hash,
                                         (record['journal']['event_id'],)).fetchone()
                 request = json.loads(request_row['payload'])['data']
                 bindings.append(output_binding)
-                if key.startswith('recovery-trial:'):
+                if record_family(key) is not None:
                     records.append((record, output, None, request))
                     continue
                 reply, reply_binding = _event(tx, typed.activity_id, key + ':reply')
@@ -93,13 +93,14 @@ def verify_candidate_chain(store, token, *, receipt_hash, candidate_hash,
             if _read(record['evidence']) != record['material']:
                 raise OwnershipRefused('FRONTEND_INTEGRATION_CHAIN_INVALID')
             if reply is None:
-                # Recovery winner: the journaled bytes are the trial's retained
-                # patch and its record passed every frozen check; no GSD wave
+                # Recovery winner or ordinary repair: the journaled bytes are the child's retained patch (and,
+                # for a recovery trial, its record passed every frozen check); no GSD wave
                 # manifest/result/no-commit receipt exists for it.
-                if (request.get('schema') != 'ffs.recovery-trial-checks/v1'
+                family = record_family(record['journal']['wave_key'])
+                if (request.get('schema') != family.schema
                         or record['material']['patch_sha256'] != request['patch']['sha256']
                         or record['contract']['authority']['patch_sha256'] != request['patch']['sha256']
-                        or any(item['status'] != 'passed' for item in request['results'])):
+                        or family.results and any(item['status'] != 'passed' for item in request['results'])):
                     raise OwnershipRefused('FRONTEND_INTEGRATION_CHAIN_INVALID')
                 store._verified_evidence({'locator':request['patch']['locator'], 'sha256':request['patch']['sha256']})
                 previous, last_material, last_receipt_reference = output['output_digest'], material, None

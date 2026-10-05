@@ -46,16 +46,53 @@ def _trial_rows_tx(tx, token, *, cycle_action_id, trial_action_id, trial_activit
     return cycle, trial, intent["intent_id"], child
 
 
-def run_isolated_trial_checks(store, token, *, supervisor, cycle_action_id, trial_action_id,
-                              trial_activity_id, workspace, expected_input_digest) -> dict:
-    """Produce bound check evidence for one issued trial; replay returns the retained record."""
-    from .frontend_policy import run_sealed_checks
+def harvest_isolated_patch(store, token, *, supervisor, activity_id, runtime_identity, preparation_id,
+                           expected_input_digest, code="RECOVERY_TRIAL", evidence_directory="recovery-trials"):
+    """Measure one isolated child workspace against its immutable input and harvest its exact patch.
+
+    Shared by the recovery trial and the ordinary repair, which differ only in the refusal ``code`` prefix and the
+    evidence directory.  Returns ``(ready, measured, patch)``; refuses ``<code>_INPUT_INVALID`` when the workspace
+    is not the expected input, ``<code>_PATCH_EMPTY`` when the child changed nothing and ``<code>_CANDIDATE_CHANGED``
+    when the measured candidate moved while the patch was harvested.
+    """
     from .run_policy import productive_work
-    from .supervisor import Supervisor
     from .wave_execution import (
         _head, _inventory, _material_entries, capture_prelaunch_snapshot, harvest_scoped_patch,
     )
     from .workspace import inspect_workspace, load_input_snapshot
+
+    ready = inspect_workspace(store, preparation_id)
+    if ready.input_digest != expected_input_digest:
+        raise RecoveryRefused(code + "_INPUT_INVALID")
+    input_snapshot = load_input_snapshot(store, ready)
+    if input_snapshot is None:
+        raise RecoveryRefused(code + "_INPUT_INVALID")
+    with productive_work(store, token, kind="check"):
+        measured = capture_prelaunch_snapshot(store, token, ready, activity_id=activity_id,
+                                              runtime_identity=runtime_identity,
+                                              evidence_root=supervisor.evidence_root)
+    before = {entry["path"]: entry for entry in input_snapshot.manifest["entries"]}
+    after = {entry["path"]: entry for entry in measured.manifest["entries"]}
+    changed = sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+    modified = [path for path in changed if (ready.path / path).exists()]
+    deleted = [path for path in changed if not (ready.path / path).exists()]
+    if not changed:
+        raise RecoveryRefused(code + "_PATCH_EMPTY")
+    with productive_work(store, token, kind="check"):
+        patch = harvest_scoped_patch(ready.path, ready.base_commit, modified, deleted,
+                                     supervisor.evidence_root / evidence_directory, baseline_snapshot=input_snapshot)
+    entries = tuple(sorted(measured.manifest["entries"], key=lambda item: item["path"]))
+    if (not patch.patch or _head(ready.path) != ready.base_commit
+            or _material_entries(ready.path, ready.base_commit, _inventory(ready.path, ready.base_commit)) != entries):
+        raise RecoveryRefused(code + "_CANDIDATE_CHANGED")
+    return ready, measured, patch
+
+
+def run_isolated_trial_checks(store, token, *, supervisor, cycle_action_id, trial_action_id,
+                              trial_activity_id, workspace, expected_input_digest) -> dict:
+    """Produce bound check evidence for one issued trial; replay returns the retained record."""
+    from .frontend_policy import run_sealed_checks
+    from .supervisor import Supervisor
 
     if (not isinstance(supervisor, Supervisor) or supervisor.store is not store
             or supervisor.token != token):
@@ -81,30 +118,9 @@ def run_isolated_trial_checks(store, token, *, supervisor, cycle_action_id, tria
                             trial_action_id=trial_action_id, trial_activity_id=trial_activity_id,
                             issuing_intent_id=issuing_intent_id, expected_input_digest=expected_input_digest)
         return payload
-    ready = inspect_workspace(store, child["workspace_preparation_id"])
-    if ready.input_digest != expected_input_digest:
-        raise RecoveryRefused("RECOVERY_TRIAL_INPUT_INVALID")
-    input_snapshot = load_input_snapshot(store, ready)
-    if input_snapshot is None:
-        raise RecoveryRefused("RECOVERY_TRIAL_INPUT_INVALID")
-    with productive_work(store, token, kind="check"):
-        measured = capture_prelaunch_snapshot(store, token, ready, activity_id=trial_activity_id,
-                                              runtime_identity=child["runtime_tuple_hash"],
-                                              evidence_root=supervisor.evidence_root)
-    before = {entry["path"]: entry for entry in input_snapshot.manifest["entries"]}
-    after = {entry["path"]: entry for entry in measured.manifest["entries"]}
-    changed = sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
-    modified = [path for path in changed if (ready.path / path).exists()]
-    deleted = [path for path in changed if not (ready.path / path).exists()]
-    if not changed:
-        raise RecoveryRefused("RECOVERY_TRIAL_PATCH_EMPTY")
-    with productive_work(store, token, kind="check"):
-        patch = harvest_scoped_patch(ready.path, ready.base_commit, modified, deleted,
-                                     supervisor.evidence_root / "recovery-trials", baseline_snapshot=input_snapshot)
-    entries = tuple(sorted(measured.manifest["entries"], key=lambda item: item["path"]))
-    if (not patch.patch or _head(ready.path) != ready.base_commit
-            or _material_entries(ready.path, ready.base_commit, _inventory(ready.path, ready.base_commit)) != entries):
-        raise RecoveryRefused("RECOVERY_TRIAL_CANDIDATE_CHANGED")
+    ready, measured, patch = harvest_isolated_patch(
+        store, token, supervisor=supervisor, activity_id=trial_activity_id, runtime_identity=child["runtime_tuple_hash"],
+        preparation_id=child["workspace_preparation_id"], expected_input_digest=expected_input_digest)
     checks = {check["id"]: check for criterion in sealed.material["criteria"] for check in criterion["checks"]}
     results, _output = run_sealed_checks(
         store, token, supervisor, acceptance_hash=acceptance_hash, candidate_hash=measured.input_digest,
