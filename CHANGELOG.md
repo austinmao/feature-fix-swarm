@@ -52,8 +52,11 @@ all skills.
   `RETAINED_RUNTIME_NOT_REUSABLE` while the outer's home is staged again; the
   Claude host refuses `HOST_CAPABILITY_UNQUALIFIED` (`ADMISSION_CONFLICT`: the
   admission descriptor names the qualifying owner's generation) when
-  `prepare_outer` replays its qualification. The remedy is a new request key,
-  which repeats the review grant. A crash between the seal and the lifecycle
+  `prepare_outer` replays its qualification. The documented remedy is a new
+  request key (`resume_with_new_request_key`), whose attempt repeats the review
+  grant; on the same run id the fixture answers a bare new key with
+  `RESUME_REQUIRED`, so that remedy is not exercised end to end here. A
+  crash between the seal and the lifecycle
   state is refused the same way on both hosts, so the unsealed single launch
   is not reached. Pinned by `tests/test_spec_review_production_resume.py` and
   `tests/test_spec_review_production_resume_claude.py`; the crash sweep

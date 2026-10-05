@@ -71,16 +71,18 @@ def test_revise_verdict_leaves_the_run_unsealed_and_refuses_typed(tmp_path, monk
     assert _refusal(w, capsys) == (78, "SPEC_REVIEW_REJECTED", "revise_acceptance_draft")
     again = ledger(w)
     assert (again.actions, again.launches, again.charged) == (led.actions, led.launches, led.charged)
-    # A revision is a new draft: the medium tier allows a second review, which accepts and the run reaches DONE.
+    # A revision is a new draft the medium tier would review a second time.  But the outer of the refused request was
+    # qualified and never launched, and a retained unlaunched outer is not resumable: production refuses the resume
+    # before the review (Codex RETAINED_RUNTIME_NOT_REUSABLE, Claude HOST_CAPABILITY_UNQUALIFIED; see the two
+    # production-resume files), and this fixture seam meets the stale outer at the review's workspace capture.
+    # Either way no second review is launched or granted, and nothing is sealed.
     set_mode(w, spec_review="accept")
     _revise(w, revision=2, reason="a revised exclusion")
-    assert w.run() == 0
-    done = ledger(w)
-    assert done.stage == "DONE" and done.actions == {**SPEC_REVIEW_ACTIONS, "spec_review": 2}
-    records = spec_review_records(w)
-    assert [record["verdict"] for record in records] == ["revise", "accept"]
-    assert seals(w) == [("assembly", 2, records[1]["draft_hash"])]
-    assert [state for _key, state in spec_reviewers(w)] == ["succeeded", "succeeded"]
+    assert _refusal(w, capsys) == (78, "WAVE_ADMISSION_MISMATCH", "qualify_host_adapter")
+    refused = ledger(w)
+    assert (refused.actions, refused.launches, refused.charged) == (led.actions, led.launches, led.charged)
+    assert [record["verdict"] for record in spec_review_records(w)] == ["revise"]
+    assert seals(w) == [] and len(drafts(w)) == 2 and ledger(w).stage is None
 
 
 def test_a_spent_small_tier_allowance_refuses_a_revision_before_any_probe(tmp_path, monkeypatch, capsys):
