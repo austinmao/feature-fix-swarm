@@ -447,3 +447,55 @@ def test_draft_binding_names_the_reviewed_draft_only(tmp_path, monkeypatch):
         with pytest.raises(SupervisorRefused, match=r"^NATIVE_REVIEW_BINDING_INVALID$"):
             supervision._binding(case.supervisor, reviewer_id, material, draft.draft_hash, candidate)
     _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+# --- review R1-1: the opt-in is not in the draft's hash, so the review requirement has to outlive the key ------
+
+def _seal_draft(case, operator, review):
+    from run_state.frontend_producers import seal_from_draft
+    return seal_from_draft(case.store, case.token, command_mode="feature-implement", draft=operator,
+                           runtime_hash=case.tuple_hash, candidate_hash=case.ready.input_digest, review=review)
+
+
+@pytest.mark.parametrize("verdict", ["revise", "accept"])
+def test_removing_the_key_from_a_reviewed_draft_never_seals_it(tmp_path, monkeypatch, verdict):
+    def check(case):
+        draft = _persist(case)
+        if verdict == "accept":
+            _produce(case, draft)
+        else:
+            with pytest.raises(SupervisorRefused, match=r"^SPEC_REVIEW_REJECTED$"):
+                _produce(case, draft)
+        assert _retained(case, draft)["verdict"] == verdict
+        # The same draft id and revision, with only the `spec_review` key gone (`_operator` carries none).
+        with pytest.raises(SupervisorRefused, match=r"^SPEC_REVIEW_REQUIRED$"):
+            _seal_draft(case, _operator(case), None)
+        assert _sealed(case) is None and _policy_state(case) is None
+        assert _counts(case.store, case.worker.id) == _ONE
+    _run_case(tmp_path, monkeypatch, "codex", check, verdict=verdict)
+
+
+def test_removing_the_key_from_a_draft_whose_review_was_granted_never_seals_it(tmp_path, monkeypatch):
+    def check(case):
+        draft = _persist(case)
+
+        def probe(point):
+            if point == "after_intent_commit":
+                raise RuntimeError("fixture crash before acknowledgement")
+        with pytest.raises(RuntimeError, match="before acknowledgement"):
+            _produce(case, draft, supervisor=case.new_supervisor(fault_probe=probe))
+        assert _retained(case, draft) is None and _counts(case.store, case.worker.id)["actions"] == 1
+        with pytest.raises(SupervisorRefused, match=r"^SPEC_REVIEW_REQUIRED$"):
+            _seal_draft(case, _operator(case), None)
+        assert _sealed(case) is None and _policy_state(case) is None
+    _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+def test_a_draft_row_nobody_reviewed_still_seals_without_the_key(tmp_path, monkeypatch):
+    def check(case):
+        _persist(case)
+        _seal_draft(case, _operator(case), None)
+        assert _policy_state(case).stage == "SEALED"
+        assert _counts(case.store, case.worker.id) == _NONE
+    _run_case(tmp_path, monkeypatch, "codex", check)
+
