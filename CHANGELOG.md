@@ -56,6 +56,16 @@ all skills.
   `SPEC_REVIEW_OUTPUT_INVALID`, `SPEC_REVIEW_BINDING_INVALID`,
   `SPEC_REVIEW_NATIVE_PROOF_INVALID`, `SPEC_REVIEW_CONTEXT_INVALID`,
   `SPEC_REVIEW_ACTION_AMBIGUOUS`, `SPEC_REVIEW_RECORD_INVALID`.
+- Review hardening (R1). Removing the key from a draft whose review was granted
+  or recorded refuses `SPEC_REVIEW_REQUIRED` (the opt-in is not in the draft's
+  hash, so it is read back from the review's record or grant). A resumed seal
+  replays only the draft already sealed, before any review is granted. A sealed
+  draft is refused before the reviewer is captured or qualified. The seal gate
+  also verifies the finished reviewer child under the record, and
+  `refence_unlaunched_outer` proves the outer, its workspace and the absence of a
+  launch before it writes either row. In production a crashed spec review
+  resumes to `RETAINED_RUNTIME_NOT_REUSABLE` (new request key) before that
+  re-fence is reached, so the crash sweep's DONE outcomes are fixture-only.
 - Opt-in and fixture-proven only: the reviewer is a Python host fixture with
   synthetic credentials and the crash points are injected at seams. This is not
   native host qualification and not E8. The outer's runtime receipt now has the
