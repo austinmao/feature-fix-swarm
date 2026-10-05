@@ -156,8 +156,8 @@ def produce_repair(store, token, *, supervisor, controller, seam, parent_activit
         raise SupervisorRefused(error.code) from error
 
 
-def _repair_ordinal(cycle: _Cycle) -> int:
-    """The ordinal of the repair this call runs for the current candidate: the unfinished one, else the next.
+def _repair_state(cycle: _Cycle) -> tuple[int, bool]:
+    """``(ordinal, unfinished)`` of the latest repair of the current candidate; ``(0, False)`` when it has none.
 
     A repair is unfinished while it has no launch yet, while its child is still active, or while its child ended
     with a retained record that the candidate it was repaired from has not yet absorbed (the candidate is unchanged,
@@ -173,13 +173,31 @@ def _repair_ordinal(cycle: _Cycle) -> int:
             "WHERE a.repository_id=? AND a.run_id=? AND a.action='repair' AND a.state<>'cancelled' "
             "AND a.logical_key LIKE ?", (token.repository_id, token.run_id, prefix + "%"))]
     if not rows:
-        return 1
+        return 0, False
     last = max(rows, key=lambda row: int(row["logical_key"][len(prefix):].split(":")[0]))
     ordinal = int(last["logical_key"][len(prefix):].split(":")[0])
     unfinished = (last["intent_id"] is None or last["activity_state"] not in _TERMINAL
                   or (last["activity_state"] == "succeeded"
                       and _retained_event(store, last["activity_id"], repair_record_key(last["id"]))))
+    return ordinal, unfinished
+
+
+def _repair_ordinal(cycle: _Cycle) -> int:
+    """The ordinal of the repair this call runs for the current candidate: the unfinished one, else the next."""
+    ordinal, unfinished = _repair_state(cycle)
     return ordinal if unfinished else ordinal + 1
+
+
+def repair_unfinished(store, token, *, supervisor, controller, seam, parent_activity_id: str, preparation) -> bool:
+    """Whether the current candidate has a repair ``produce_repair`` must resume or replace.
+
+    That is a grant reserved and never launched, or an issued repair not yet integrated.  The lifecycle asks this
+    once the tier's repair allowance is spent: that allowance counts such a repair, so without the producer a
+    replay would hand back to recovery past a stale grant, or past the earlier-fence refusal an issued repair owes.
+    """
+    cycle = _context(store, token, supervisor, controller, seam, parent_activity_id, preparation,
+                     {"failed_criteria": []}, None, _REPAIR)
+    return _repair_state(cycle)[1]
 
 
 def _land_repair(cycle: _Cycle, settled) -> None:

@@ -594,7 +594,7 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
     """Run the managed host: legacy single execution, or the sealed frontend lifecycle."""
     from .frontend_lifecycle import LifecycleProducers, drive_frontend_lifecycle
     from .frontend_policy import FrontendPolicyController
-    from .recovery_producer import produce_recovery, produce_repair
+    from .recovery_producer import produce_recovery, produce_repair, repair_unfinished
     from .supervisor import Supervisor, SupervisorRefused
     outcome = {"handle": None, "adapter": None, "material": None}
     # A frontend run is only the sealed lifecycle; the unsealed single launch
@@ -668,6 +668,11 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
                            parent_activity_id=request.activity_id, preparation=session.ready,
                            failed_criteria=failed, timeout_seconds=session.timeout_seconds)
 
+        def repair_open():
+            return repair_unfinished(store, token, supervisor=review_supervisor, controller=controller,
+                                     seam=session.seam, parent_activity_id=request.activity_id,
+                                     preparation=session.ready)
+
         def settle():
             _settle_reviewers(store, token, parent_activity_id=request.activity_id)
             retained = _retained_outer_completion(store, request.activity_id)
@@ -680,7 +685,7 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
             store, token, supervisor=review_supervisor, controller=controller, workspace=str(session.ready.path),
             parent_activity_id=request.activity_id,
             producers=LifecycleProducers(execute=execute, final_review=final_review, recover=recover, settle=settle,
-                                         repair=repair))
+                                         repair=repair, repair_unfinished=repair_open))
         if stage != "DONE":
             raise SupervisorRefused("FRONTEND_LIFECYCLE_" + stage)
         return 0

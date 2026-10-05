@@ -30,6 +30,7 @@ class LifecycleProducers:
     final_review: Callable       # (frozen) -> None; record_final_review, SupervisorRefused on a failed review
     recover: Callable            # (handback_packet) -> RecoveryDecision
     repair: Callable | None = None   # (frozen, failed_criteria) -> None; reserves one ``repair`` action
+    repair_unfinished: Callable | None = None   # () -> bool; an unlaunched or unintegrated repair ``repair`` resumes
     settle: Callable | None = None   # () -> None; terminal-transition owned activities before DONE
 
 
@@ -119,7 +120,11 @@ def drive_frontend_lifecycle(store, token, *, supervisor, controller, workspace:
         if not failed:
             return True
         repairs = _used(store, token, "repair")
-        if producers.repair is not None and len(repairs) < action_limit("repair", budget.tier):
+        # The allowance counts a reserved or issued repair, so once it is spent an unfinished last repair still
+        # goes to the producer, which replaces its unlaunched grant or refuses its earlier-fence intent typed.
+        if producers.repair is not None and (
+                len(repairs) < action_limit("repair", budget.tier)
+                or producers.repair_unfinished is not None and producers.repair_unfinished()):
             try:
                 producers.repair(controller.sealed(), failed)
             except SupervisorRefused as error:
