@@ -21,7 +21,7 @@ from run_state.supervisor import SupervisorRefused
 from run_state.run_policy import action_limit
 from run_state.state import ControlStore
 from recovery_fixture import (
-    FULL_ACTIONS, arm, assert_recovered_once, assert_repaired_once, candidate_chain, ledger,
+    FULL_ACTIONS, LAST_REPAIR, arm, assert_recovered_once, assert_repaired_once, candidate_chain, ledger,
     policy_tier, repair_ids, repair_journals, sealed_candidate, watch_binds, watch_repair, world,
 )
 from test_final_review_resume import _held_resources
@@ -263,3 +263,121 @@ def test_p9_a_refused_repair_reservation_releases_the_launch_material_it_bound(t
     assert led.stage == "EXECUTE" and led.actions == {"execute": 1} and "repair" not in led.launches
     # The material is bound before the grant is reserved, so the producer must release it when the reservation refuses.
     assert len(bound) == 1 and alive == [False]
+
+
+# --- a replay at the tier's repair limit gives an unfinished last repair to the producer (reviewer finding R1-1) --
+
+def _cancelled_repairs(w) -> int:
+    store = ControlStore(w.authority / "control.sqlite3")
+    with store.read_transaction() as tx:
+        return tx.execute("SELECT count(*) FROM authority_policy_actions "
+                          "WHERE action='repair' AND state='cancelled'").fetchone()[0]
+
+
+def test_r1_1a_a_reserved_unlaunched_last_repair_grant_is_replaced_and_the_run_reaches_the_uninterrupted_terminal(
+        tmp_path, tmp_path_factory, monkeypatch, capsys):
+    """Repairs 1..3 write nothing, the last one fixes it: crashing with the LAST grant reserved changes nothing."""
+    mode = {"repair_from": LAST_REPAIR}
+    with pytest.MonkeyPatch.context() as patch:
+        uninterrupted = world(tmp_path_factory.mktemp("uninterrupted"), patch, repair=True, mode=mode)
+        assert uninterrupted.run() == 0
+        baseline = ledger(uninterrupted)
+    assert baseline.stage == "DONE" and baseline.actions == {"execute": 1, "repair": LAST_REPAIR, "final_review": 1}
+    w = world(tmp_path, monkeypatch, repair=True, mode=mode)
+    fired = arm(monkeypatch, "repair-last-action-reserved")
+    w.crash()
+    assert fired == ["repair-last-action-reserved"]
+    assert policy_tier(w) == "medium"
+    crashed = ledger(w)
+    # The allowance is spent on paper: the last grant is reserved and never launched.
+    assert crashed.stage == "EXECUTE" and crashed.actions == {"execute": 1, "repair": LAST_REPAIR}
+    assert crashed.launches["repair"] == LAST_REPAIR - 1
+    capsys.readouterr()
+    assert w.run() == 0, capsys.readouterr().out[-1500:]
+    led = ledger(w)
+    # No handback: the stale grant was released and one new grant reserved, so the run nets exactly the
+    # uninterrupted run's grants, launches and charge, and never opened a recovery cycle.
+    assert (led.stage, led.charged, led.actions, led.launches) == (
+        baseline.stage, baseline.charged, baseline.actions, baseline.launches)
+    assert led.cycles == [] and _cancelled_repairs(w) == 1 and len(repair_ids(w)) == LAST_REPAIR
+    assert candidate_chain(w) == {led.candidate: sealed_candidate(w)}
+    assert _held_resources(tmp_path) == {}
+
+
+@pytest.mark.parametrize(("point", "code", "action", "held"), [
+    ("repair-last-completed-before-harvest", "REPAIR_RECONCILIATION_REQUIRED", "inspect_retained_repair", False),
+    ("repair-last-intent-committed", "INTENT_RECONCILIATION_REQUIRED", "reconcile_intent", True),
+], ids=["completed-last-repair", "intent-without-ack"])
+def test_r1_1b_an_issued_last_repair_of_an_earlier_fence_refuses_typed_with_no_handback(
+        tmp_path, monkeypatch, capsys, point, code, action, held):
+    w = world(tmp_path, monkeypatch, repair=True, mode={"repair": ""})
+    fired = arm(monkeypatch, point)
+    w.crash()
+    assert fired == [point]
+    crashed = ledger(w)
+    assert crashed.stage == "EXECUTE" and crashed.actions == {"execute": 1, "repair": LAST_REPAIR}
+    capsys.readouterr()
+    assert w.run() == 78
+    envelope = _last_envelope(capsys)
+    assert (envelope["code"], envelope["recovery_action"]["action"]) == (code, action)
+    led = ledger(w)
+    # No handback and no recovery: the lifecycle gave the unfinished last repair to the producer, which refused.
+    assert led.stage == "EXECUTE" and led.cycles == []
+    assert led.actions == {"execute": 1, "repair": LAST_REPAIR}
+    assert (led.charged, led.launches) == (crashed.charged, crashed.launches)
+    assert all(count <= 1 for _action, count in led.intents)
+    held_now = _held_resources(tmp_path)
+    assert (list(held_now) == ["admissions"]) if held else (held_now == {})
+
+
+def _watch_recovery(monkeypatch) -> list:
+    packets, produce_recovery = [], recovery_producer.produce_recovery
+
+    def recovery(*args, **kwargs):
+        packets.append(kwargs["packet"])
+        return produce_recovery(*args, **kwargs)
+
+    monkeypatch.setattr(recovery_producer, "produce_recovery", recovery)
+    return packets
+
+
+def test_r1_1c_a_last_repair_that_integrated_still_hands_back_to_recovery_at_the_limit(
+        tmp_path, monkeypatch, capsys):
+    """Every repair integrates an edit that fixes nothing: the limit is spent on four bound candidates, then recovery."""
+    w = world(tmp_path, monkeypatch, repair=True, mode={"repair": "unrelated\n"})
+    packets = _watch_recovery(monkeypatch)
+    capsys.readouterr()
+    assert w.run() == 0, capsys.readouterr().out[-1500:]
+    led = ledger(w)
+    assert led.stage == "DONE" and led.actions == {**FULL_ACTIONS, "repair": LAST_REPAIR}
+    assert len(packets) == 1 and packets[0]["saved_stage"] == "EXECUTE"
+    assert sorted(packets[0]["consumed_attempts"]) == sorted(repair_ids(w))
+    # Four repaired candidates and the recovery winner form one chain from the sealed input.
+    chain = candidate_chain(w)
+    assert len(chain) == LAST_REPAIR + 1 and led.candidate in chain
+    assert sorted(chain.values()).count(sealed_candidate(w)) == 1
+    assert len(repair_journals(w)) == LAST_REPAIR and {state for _k, state, _w in repair_journals(w)} == {"published"}
+    assert _held_resources(tmp_path) == {}
+
+
+def test_r1_1c_a_replay_after_the_last_repair_finished_still_hands_back_to_recovery(
+        tmp_path, tmp_path_factory, monkeypatch, capsys):
+    mode = {"repair": ""}
+    with pytest.MonkeyPatch.context() as patch:
+        uninterrupted = world(tmp_path_factory.mktemp("uninterrupted"), patch, repair=True, mode=mode)
+        assert uninterrupted.run() == 0
+        baseline = ledger(uninterrupted)
+    w = world(tmp_path, monkeypatch, repair=True, mode=mode)
+    fired = arm(monkeypatch, "repair-last-returned")
+    w.crash()
+    assert fired == ["repair-last-returned"]
+    crashed = ledger(w)
+    assert crashed.stage == "EXECUTE" and crashed.actions == {"execute": 1, "repair": LAST_REPAIR}
+    assert crashed.launches["repair"] == LAST_REPAIR
+    capsys.readouterr()
+    assert w.run() == 0, capsys.readouterr().out[-1500:]
+    led = ledger(w)
+    assert (led.stage, led.charged, led.actions, led.launches) == (
+        baseline.stage, baseline.charged, baseline.actions, baseline.launches)
+    assert led.actions == {**FULL_ACTIONS, "repair": LAST_REPAIR} and len(led.cycles) == 1
+    assert _held_resources(tmp_path) == {}

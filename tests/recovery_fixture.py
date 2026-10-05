@@ -22,6 +22,7 @@ import run_state.recovery_producer as recovery_producer
 import run_state.supervisor as supervisor_module
 import run_state.workspace as workspace
 from run_state.recovery_controller import RecoveryController
+from run_state.run_policy import action_limit
 from run_state.state import ControlStore
 from run_state.supervisor import Supervisor, SupervisorRefused
 from test_final_review_resume import _Killed, _crash, _held_resources, _outer_intents  # noqa: F401
@@ -42,7 +43,10 @@ if prompt.startswith("Recovery diagnosis request:"):
     _emit(MODE["diagnosis"])
     raise SystemExit(0)
 if prompt.startswith("Repair request:"):
-    if MODE.get("repair"):
+    counter = pathlib.Path(MODE_PATH + ".repairs")
+    launches = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(launches))
+    if MODE.get("repair") and launches >= MODE.get("repair_from", 1):
         target = pathlib.Path(MODE.get("repair_file", "src/input.txt"))
         target.write_text(target.read_text() + MODE["repair"])
     _emit("repair applied")
@@ -301,6 +305,14 @@ REPAIR_POINTS = (
 )
 
 
+# Crash points at the medium tier's LAST repair ordinal, where the allowance is spent once that repair is reserved.
+LAST_REPAIR = action_limit("repair", "medium")
+LAST_REPAIR_POINTS = (
+    "repair-last-action-reserved", "repair-last-intent-committed", "repair-last-completed-before-harvest",
+    "repair-last-returned",
+)
+
+
 def _is_diagnosis_key(key) -> bool:
     return bool(key) and key.startswith("recovery:") and ":diagnosis" in key
 
@@ -421,6 +433,8 @@ def arm(monkeypatch, point: str) -> list:
         wrap_class(ControlStore, "bind_frontend_candidate", before=lambda _a, _k: once())
     elif point in REPAIR_POINTS:
         _arm_repair(monkeypatch, point, once, wrap_class)
+    elif point in LAST_REPAIR_POINTS:
+        _arm_last_repair(monkeypatch, point, once, wrap_class)
     else:
         raise AssertionError(point)
     return fired
@@ -492,3 +506,43 @@ def _arm_repair(monkeypatch, point: str, once, wrap_class) -> None:
         wrap_class(ControlStore, "bind_frontend_candidate", before=lambda _args, _kwargs: once())
     else:
         wrap_class(ControlStore, "bind_frontend_candidate", after=lambda _args, _kwargs: once())
+
+
+def _arm_last_repair(monkeypatch, point: str, once, wrap_class) -> None:
+    """Crash on the ``LAST_REPAIR``-th repair only; the earlier repairs run to completion."""
+    hits = []
+
+    def last() -> bool:
+        hits.append(1)
+        return len(hits) == LAST_REPAIR
+
+    if point == "repair-last-action-reserved":
+        wrap_class(ControlStore, "reserve_policy_action",
+                   after=lambda _args, kwargs: kwargs["action"] == "repair" and last() and once())
+    elif point == "repair-last-intent-committed":
+        armed, fault, reserve = [], Supervisor._fault, Supervisor.reserve_request_action
+
+        def reserve_request_action(self, request, *, action, **kwargs):
+            if action == "repair":
+                armed.append(request.activity_id)
+            return reserve(self, request, action=action, **kwargs)
+
+        def crash_at(self, name):
+            if len(armed) == LAST_REPAIR and name == "after_intent_commit":
+                once()
+            return fault(self, name)
+        monkeypatch.setattr(Supervisor, "reserve_request_action", reserve_request_action)
+        monkeypatch.setattr(Supervisor, "_fault", crash_at)
+    elif point == "repair-last-completed-before-harvest":
+        wrap_class(ControlStore, "record_acceptance_receipt",
+                   after=lambda _args, kwargs: kwargs["receipt"]["request_key"].startswith("repair:")
+                   and last() and once())
+    else:
+        produce_repair = recovery_producer.produce_repair
+
+        def returned(*args, **kwargs):
+            result = produce_repair(*args, **kwargs)
+            if last():
+                once()
+            return result
+        monkeypatch.setattr(recovery_producer, "produce_repair", returned)
