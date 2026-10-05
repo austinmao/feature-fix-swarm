@@ -530,3 +530,24 @@ def test_a_resealed_other_revision_is_refused_before_any_review_or_probe(tmp_pat
         assert _policy_state(case).stage == "SEALED" and qualifications == []
         assert _counts(case.store, case.worker.id) == _ONE
     _run_case(tmp_path, monkeypatch, "codex", check)
+
+
+# --- review R1-6: a sealed draft is refused before the reviewer is captured or qualified -------------------------
+
+def test_a_sealed_draft_is_refused_before_any_workspace_or_probe(tmp_path, monkeypatch):
+    def check(case):
+        draft = _persist(case)
+        case.store.seal_acceptance_draft(case.token, draft_id="spec", revision=1,
+                                         acceptance_contract_hash=draft.acceptance_contract_hash)
+        seam, qualifications = _counting(case.seam)
+        before = case.store.get_run_policy_budget(repository_id=case.token.repository_id, run_id=case.token.run_id)
+        with pytest.raises(SupervisorRefused, match=r"^NATIVE_REVIEW_BINDING_INVALID$"):
+            _produce(case, draft, seam=seam)
+        after = case.store.get_run_policy_budget(repository_id=case.token.repository_id, run_id=case.token.run_id)
+        # The restricted path would refuse it too, but only after the reviewer was captured and four probes charged.
+        assert qualifications == [] and after.launch_charged == before.launch_charged
+        assert _reviewers(case) == [] and _counts(case.store, case.worker.id) == _NONE
+        with case.store.read_transaction() as tx:
+            assert tx.execute("SELECT count(*) FROM context_workspaces "
+                              "WHERE child_request_key LIKE 'spec-review:%'").fetchone()[0] == 0
+    _run_case(tmp_path, monkeypatch, "codex", check)
