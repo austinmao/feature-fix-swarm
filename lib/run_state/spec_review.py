@@ -5,7 +5,8 @@ would make the lifecycle skip the final review) and it cannot ride the sealed li
 is one keyed authority event under the reviewer child, ``spec-review:<draft_hash>``, written in the same fenced
 transaction that ends the child.  ``require_spec_review_accepted`` is the only thing that lets ``seal_from_draft``
 seal a draft that asked for the review: the record must exist, bind this exact draft, its material, its candidate,
-its non-cancelled ``spec_review`` action and its succeeded intent, and carry the ``accept`` verdict.
+its non-cancelled ``spec_review`` action and its succeeded intent (an attempt of that action), sit under this
+draft's succeeded ``reviewer`` child, carry a verdict its own criteria support, and be an ``accept``.
 
 ``draft_hash`` is a function of the draft id, revision, legacy generation, legacy contract hash and material hash, so
 a revised draft is a new hash with no record, and the same id and revision with other bytes refuses at creation.
@@ -276,6 +277,12 @@ def retained_spec_review(store, token, draft) -> dict | None:
         action = tx.execute("SELECT * FROM authority_policy_actions WHERE id=? AND repository_id=? AND run_id=?",
                             (action_id, token.repository_id, token.run_id)).fetchone()
         intent = tx.execute("SELECT * FROM authority_launch_intents WHERE id=?", (intent_id,)).fetchone()
+        # The event is only as good as the activity it sits under: that must be this draft's finished reviewer.
+        child = tx.execute("SELECT * FROM authority_child_bindings WHERE activity_id=?",
+                           (rows[0]["activity_id"],)).fetchone()
+        reviewer = tx.execute("SELECT state FROM authority_activities WHERE id=?", (rows[0]["activity_id"],)).fetchone()
+        attempt = tx.execute("SELECT 1 FROM authority_policy_action_attempts WHERE action_id=? AND intent_id=?",
+                             (action_id, intent_id)).fetchone()
     if (rows[0]["payload_hash"] != hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             or payload.get("schema") != RECORD_SCHEMA
             or payload.get("repository_id") != token.repository_id or payload.get("run_id") != token.run_id
@@ -284,11 +291,17 @@ def retained_spec_review(store, token, draft) -> dict | None:
             or payload.get("verdict") not in VERDICTS
             or action is None or action["action"] != "spec_review" or action["state"] == "cancelled"
             or intent is None or action["intent_id"] != intent["id"] or intent["activity_id"] != rows[0]["activity_id"]
-            or intent["completion_status"] != "succeeded"):
+            or intent["completion_status"] != "succeeded"
+            or attempt is None or child is None or child["role"] != "reviewer"
+            or child["contract_hash"] != draft.draft_hash or child["candidate_hash"] != draft.material["candidate_hash"]
+            or not child["workspace_binding"] or reviewer is None or reviewer["state"] != "succeeded"):
         invalid()
     try:
+        # The stored verdict must follow from the stored criteria, under the same grammar as the reply itself.
+        _checked({**spec_review_output_contract(draft)["fixed_fields"], "verdict": payload["verdict"],
+                  "criteria": payload["criteria"], "notes": payload["notes"]}, draft)
         store._verified_evidence(payload.get("output"))
-    except OwnershipRefused:
+    except (SupervisorRefused, OwnershipRefused, KeyError):
         invalid()
     return payload
 
