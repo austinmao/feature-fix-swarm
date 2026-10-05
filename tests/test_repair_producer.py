@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 import run_state.recovery_producer as recovery_producer
 from run_state.run_policy import action_limit
 from run_state.state import ControlStore

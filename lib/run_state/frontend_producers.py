@@ -434,6 +434,23 @@ def _retained_outer_completion(store, activity_id: str):
             json.loads(row["completion_evidence_json"]))
 
 
+def _repair_proof(store, token, state) -> bool:
+    """An issued repair, or a failed frozen check on the current candidate, proves execution happened and was checked.
+
+    Both exist only after the execute producer bound the candidate and ``run_mapped_checks`` ran on it, so an outer
+    that settled before its candidate was bound still has neither.  A grant that was only reserved is not an issued
+    repair, but the failed check that led to it is retained, so a crash before the repair's intent stays resumable.
+    """
+    with store.read_transaction() as tx:
+        return tx.execute(
+            "SELECT 1 FROM authority_policy_actions WHERE repository_id=? AND run_id=? AND action='repair' "
+            "AND state<>'cancelled' AND intent_id IS NOT NULL UNION ALL "
+            "SELECT 1 FROM authority_frontend_policy_checks WHERE repository_id=? AND run_id=? "
+            "AND acceptance_hash=? AND candidate_hash=? AND status='failed'",
+            (token.repository_id, token.run_id, token.repository_id, token.run_id, state.acceptance_hash,
+             state.candidate_hash)).fetchone() is not None
+
+
 def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
     """F51: the settled outer launch a same-key resume continues past instead of refusing.
 
@@ -442,9 +459,9 @@ def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
     entered only after the execute producer bound the candidate (and its wave
     proof); RECOVER only from a handback of that point; EXECUTE only with a
     retained recovery continuation (``CONTINUATION_SCHEMA``, bound to the state's
-    current candidate), because a bare EXECUTE stage, or any other decision,
-    proves nothing about the execution.  The lifecycle then needs the
-    retained activity, never the outer runtime again.
+    current candidate) or a repair proof (``_repair_proof``), because a bare
+    EXECUTE stage, or any other decision, proves nothing about the execution.
+    The lifecycle then needs the retained activity, never the outer runtime again.
     """
     from .ownership import OwnershipRefused
     if launch is None or launch["state"] != "completed_succeeded":
@@ -457,7 +474,8 @@ def resumable_outer_completion(store, token, activity_id: str, launch) -> bool:
     decision = state.decision_json
     continued = (state.stage == "EXECUTE" and isinstance(decision, dict)
                  and decision.get("schema") == CONTINUATION_SCHEMA and decision.get("candidate_hash") == state.candidate_hash)
-    if state.stage not in {"FINAL_REVIEW", "RECOVER"} and not continued:
+    if (state.stage not in {"FINAL_REVIEW", "RECOVER"} and not continued
+            and not (state.stage == "EXECUTE" and _repair_proof(store, token, state))):
         return False
     try:
         store._verified_evidence(retained[1])
@@ -576,7 +594,7 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
     """Run the managed host: legacy single execution, or the sealed frontend lifecycle."""
     from .frontend_lifecycle import LifecycleProducers, drive_frontend_lifecycle
     from .frontend_policy import FrontendPolicyController
-    from .recovery_producer import produce_recovery
+    from .recovery_producer import produce_recovery, produce_repair
     from .supervisor import Supervisor, SupervisorRefused
     outcome = {"handle": None, "adapter": None, "material": None}
     # A frontend run is only the sealed lifecycle; the unsealed single launch
@@ -645,6 +663,11 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
                                     seam=session.seam, parent_activity_id=request.activity_id,
                                     preparation=session.ready, packet=packet, timeout_seconds=session.timeout_seconds)
 
+        def repair(_frozen, failed):
+            produce_repair(store, token, supervisor=review_supervisor, controller=controller, seam=session.seam,
+                           parent_activity_id=request.activity_id, preparation=session.ready,
+                           failed_criteria=failed, timeout_seconds=session.timeout_seconds)
+
         def settle():
             _settle_reviewers(store, token, parent_activity_id=request.activity_id)
             retained = _retained_outer_completion(store, request.activity_id)
@@ -656,7 +679,8 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
         stage = drive_frontend_lifecycle(
             store, token, supervisor=review_supervisor, controller=controller, workspace=str(session.ready.path),
             parent_activity_id=request.activity_id,
-            producers=LifecycleProducers(execute=execute, final_review=final_review, recover=recover, settle=settle))
+            producers=LifecycleProducers(execute=execute, final_review=final_review, recover=recover, settle=settle,
+                                         repair=repair))
         if stage != "DONE":
             raise SupervisorRefused("FRONTEND_LIFECYCLE_" + stage)
         return 0

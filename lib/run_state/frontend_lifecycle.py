@@ -120,12 +120,19 @@ def drive_frontend_lifecycle(store, token, *, supervisor, controller, workspace:
             return True
         repairs = _used(store, token, "repair")
         if producers.repair is not None and len(repairs) < action_limit("repair", budget.tier):
-            producers.repair(controller.sealed(), failed)
-            # One issued repair consumes one grant regardless of outcome; an
-            # uncharged producer would make this loop unbounded.
-            if len(_used(store, token, "repair")) <= len(repairs):
-                raise FrontendPolicyRefused("FRONTEND_REPAIR_UNCHARGED")
-            return False
+            try:
+                producers.repair(controller.sealed(), failed)
+            except SupervisorRefused as error:
+                # A repair the remaining launch budget cannot cover is refused before anything is reserved or
+                # charged: the allowance is intact, so the run takes the handback (to recovery) instead.
+                if error.code != "REPAIR_BUDGET_INFEASIBLE" or set(_used(store, token, "repair")) - set(repairs):
+                    raise
+            else:
+                # One issued repair consumes one grant regardless of outcome; an uncharged producer would make
+                # this loop unbounded.  A stale unlaunched grant released and reserved afresh is still one new grant.
+                if not set(_used(store, token, "repair")) - set(repairs):
+                    raise FrontendPolicyRefused("FRONTEND_REPAIR_UNCHARGED")
+                return False
         controller.handback(saved_stage=stage, failed_criteria=failed, consumed_attempts=consumed(), choices=[])
         return False
 

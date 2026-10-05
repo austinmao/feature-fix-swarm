@@ -41,10 +41,26 @@ from .workspace import WorkspaceRefused, _from_row
 
 DIAGNOSIS_PREFIX = "Recovery diagnosis request:"
 TRIAL_PREFIX = "Recovery trial request:"
+REPAIR_PREFIX = "Repair request:"
 _TEXT_LIMIT = 8 * 1024      # bytes of the diagnosis carried into the trial prompt
 _TERMINAL = {"succeeded", "failed", "aborted"}
-_Settled = namedtuple("_Settled", "handle receipt action_id workspace")
+_Settled = namedtuple("_Settled", "handle receipt action_id workspace receipt_hash")
 _Diagnosis = namedtuple("_Diagnosis", "receipt text")
+
+
+@dataclass(frozen=True)
+class _Kind:
+    """What differs between a recovery child and an ordinary repair child; every other step is shared."""
+
+    family: str         # the key family and the prefix of the child's typed refusals
+    role: str           # the child's qualification and binding role
+    receipt_role: str   # the role of the receipt that child's settled process records
+    reconcile: str      # the typed refusal for an intent issued under an earlier owner fence
+    ambiguous: str
+
+
+_RECOVERY = _Kind("recovery", "recovery", "recovery", "RECOVERY_RECONCILIATION_REQUIRED", "RECOVERY_ACTION_AMBIGUOUS")
+_REPAIR = _Kind("repair", "worker", "execution", "REPAIR_RECONCILIATION_REQUIRED", "REPAIR_ACTION_AMBIGUOUS")
 
 
 @dataclass(frozen=True)
@@ -65,10 +81,21 @@ class _Cycle:
     runtime: str               # the runtime identity the candidate was captured under
     binding: FrozenRecoveryBinding
     checks: int                # frozen checks one trial's candidate is measured against
+    kind: _Kind = _RECOVERY
+    ordinal: int | None = None  # the ordinal of the repair this call runs (a repair only)
 
     @property
     def tag(self) -> str:
         return self.binding.input_hash[:16]
+
+    def key(self, name: str) -> str:
+        """The logical key of one child: ``recovery:<tag>:<name>``, or ``repair:<tag>:<ordinal>``."""
+        return f"repair:{self.tag}:{self.ordinal}" if self.kind is _REPAIR else f"recovery:{self.tag}:{name}"
+
+    @property
+    def repair_demand(self) -> int:
+        """Launches one repair costs: its qualification probes, its launch and the checks that follow it."""
+        return self.probes + 1 + self.checks
 
     @property
     def probes(self) -> int:
@@ -103,7 +130,77 @@ def produce_recovery(store, token, *, supervisor, controller, seam, parent_activ
         raise SupervisorRefused(error.code) from error
 
 
-def _context(store, token, supervisor, controller, seam, parent_activity_id, preparation, packet, timeout_seconds):
+def produce_repair(store, token, *, supervisor, controller, seam, parent_activity_id: str, preparation,
+                   failed_criteria, timeout_seconds=None) -> None:
+    """Run or resume one ordinary repair of the current candidate: the ``LifecycleProducers.repair`` callable.
+
+    The repair child (role ``worker``, receipt role ``execution``) runs in an isolated copy of the CURRENT
+    candidate.  Its harvested patch is merged through the journaled integration path under ``repair:<action_id>``
+    and the repaired candidate is bound with the candidate it was repaired from as its parent; the lifecycle then
+    re-runs the frozen checks.  An empty patch integrates nothing: the child settles, its grant stays spent, and the
+    lifecycle repairs again or hands back.  When the remaining launch budget cannot cover the repair this refuses
+    ``REPAIR_BUDGET_INFEASIBLE`` before anything is reserved or charged, and the lifecycle hands back instead.
+
+    Ordering is the contract, as for a recovery child: the child is captured, qualified and bound before the grant
+    is reserved; every step is keyed and idempotent; a repair issued under an earlier owner fence is never
+    relaunched, re-verified or recorded here (``REPAIR_RECONCILIATION_REQUIRED``).
+    """
+    try:
+        cycle = _context(store, token, supervisor, controller, seam, parent_activity_id, preparation,
+                         {"failed_criteria": sorted(set(failed_criteria))}, timeout_seconds, _REPAIR)
+        cycle = replace(cycle, ordinal=_repair_ordinal(cycle))
+        settled = _child(cycle, "repair", "repair", lambda: _repair_prompt(cycle), cycle.repair_demand)
+        if settled is not None:
+            _land_repair(cycle, settled)
+    except RecoveryRefused as error:
+        raise SupervisorRefused(error.code) from error
+
+
+def _repair_ordinal(cycle: _Cycle) -> int:
+    """The ordinal of the repair this call runs for the current candidate: the unfinished one, else the next.
+
+    A repair is unfinished while it has no launch yet, while its child is still active, or while its child ended
+    with a retained record that the candidate it was repaired from has not yet absorbed (the candidate is unchanged,
+    so its integration did not finish).  Cancelled grants are never counted.
+    """
+    from .repair_integration import repair_record_key
+    store, token, prefix = cycle.store, cycle.token, f"repair:{cycle.tag}:"
+    with store.read_transaction() as tx:
+        rows = [dict(row) for row in tx.execute(
+            "SELECT a.id,a.logical_key,a.intent_id,i.activity_id,t.state AS activity_state "
+            "FROM authority_policy_actions a LEFT JOIN authority_launch_intents i ON i.id=a.intent_id "
+            "LEFT JOIN authority_activities t ON t.id=i.activity_id "
+            "WHERE a.repository_id=? AND a.run_id=? AND a.action='repair' AND a.state<>'cancelled' "
+            "AND a.logical_key LIKE ?", (token.repository_id, token.run_id, prefix + "%"))]
+    if not rows:
+        return 1
+    last = max(rows, key=lambda row: int(row["logical_key"][len(prefix):].split(":")[0]))
+    ordinal = int(last["logical_key"][len(prefix):].split(":")[0])
+    unfinished = (last["intent_id"] is None or last["activity_state"] not in _TERMINAL
+                  or (last["activity_state"] == "succeeded"
+                      and _retained_event(store, last["activity_id"], repair_record_key(last["id"]))))
+    return ordinal if unfinished else ordinal + 1
+
+
+def _land_repair(cycle: _Cycle, settled) -> None:
+    """Harvest the settled repair's patch, end its child, then integrate and bind the repaired candidate."""
+    from .repair_integration import integrate_repair, repair_record_key, retain_repair_record
+    activity_id, evidence = settled.handle.activity_id, settled.handle.result["evidence"]
+    if cycle.store.get_activity(activity_id).state in _TERMINAL and not _retained_event(
+            cycle.store, activity_id, repair_record_key(settled.action_id)):
+        return      # a replay of a repair already excluded for an empty patch
+    retained = retain_repair_record(
+        cycle.store, cycle.token, supervisor=cycle.supervisor, action_id=settled.action_id, activity_id=activity_id,
+        workspace=settled.workspace, expected_input_digest=cycle.frozen.candidate_hash)
+    _end_child(cycle, activity_id, "succeeded", evidence)
+    if retained:
+        integrate_repair(cycle.store, cycle.token, supervisor=cycle.supervisor, action_id=settled.action_id,
+                         activity_id=activity_id, receipt_hash=settled.receipt_hash,
+                         workspace=str(cycle.candidate.path), acceptance_hash=cycle.frozen.acceptance_hash)
+
+
+def _context(store, token, supervisor, controller, seam, parent_activity_id, preparation, packet, timeout_seconds,
+             kind=_RECOVERY):
     frozen = controller.sealed()
     sealed = store.get_sealed_acceptance(repository_id=token.repository_id, run_id=token.run_id)
     if sealed is None or sealed.acceptance_hash != frozen.acceptance_hash:
@@ -117,7 +214,7 @@ def _context(store, token, supervisor, controller, seam, parent_activity_id, pre
         frozen.acceptance_hash, sealed.material["runtime"]["effective_hash"], frozen.acceptance_hash)
     checks = sum(len(criterion["checks"]) for criterion in sealed.material["criteria"])
     return _Cycle(store, token, supervisor, controller, seam, timeout_seconds, packet, sealed, frozen, candidate,
-                  parent_id, runtime, binding, checks)
+                  parent_id, runtime, binding, checks, kind)
 
 
 def _issued_cycles(cycle: _Cycle) -> list[dict]:
@@ -149,10 +246,11 @@ def _assert_fits(cycle: _Cycle, demand: int) -> None:
 
     A reused cycle was priced when it was reserved, but a new owner abandons the earlier qualified child
     and qualifies a fresh one (its probes are charged again), so the reservation's price is not enough.
+    A repair has no cycle to reserve: it is checked every time, fresh or reused, before anything is charged.
     """
     budget = cycle.store.get_run_policy_budget(repository_id=cycle.token.repository_id, run_id=cycle.token.run_id)
     if budget.launch_limit - budget.launch_charged < demand:
-        raise SupervisorRefused("POLICY_STAGE_INFEASIBLE")
+        raise SupervisorRefused("REPAIR_BUDGET_INFEASIBLE" if cycle.kind is _REPAIR else "POLICY_STAGE_INFEASIBLE")
 
 
 def _diagnose(cycle: _Cycle):
@@ -206,24 +304,26 @@ def _child(cycle: _Cycle, name: str, action: str, make_prompt, demand: int):
 
     ``demand`` is the launches this child and everything after it still need if it has to be qualified afresh.
     """
-    key = f"recovery:{cycle.tag}:{name}"
+    key = cycle.key(name)
     launch_key = key + ":launch"
-    row, intent = _retained_action(cycle.store, cycle.token, launch_key, action, "RECOVERY_ACTION_AMBIGUOUS")
+    row, intent = _retained_action(cycle.store, cycle.token, launch_key, action, cycle.kind.ambiguous)
     if intent is not None:
         if not intent["permit_id"] or intent["child_pid"] is None:
             # Reserved but never acknowledged: only owner-fence reconciliation may settle it.
             raise SupervisorRefused("INTENT_RECONCILIATION_REQUIRED")
         if intent["generation"] != cycle.token.generation:
             # Its completion, receipt and workspace bind the fence that issued them: never relaunched or re-bound.
-            raise SupervisorRefused("RECOVERY_RECONCILIATION_REQUIRED")
+            raise SupervisorRefused(cycle.kind.reconcile)
         return _settle(cycle, cycle.supervisor.resume_monitored(intent["id"]))
-    if any(item["input_hash"] == cycle.binding.input_hash for item in _issued_cycles(cycle)):
+    if cycle.kind is _REPAIR or any(item["input_hash"] == cycle.binding.input_hash for item in _issued_cycles(cycle)):
         _assert_fits(cycle, demand)
     if row is not None:
         # Reserved, never launched.  A re-bind builds new launch material (a new private TMPDIR or session), so
         # this grant can never be reused: release it unspent (it holds no intent and no attempt).
+        release = (cycle.store.cancel_unlaunched_repair if cycle.kind is _REPAIR
+                   else cycle.store.cancel_unlaunched_policy_review)
         try:
-            cycle.store.cancel_unlaunched_policy_review(cycle.token, action_id=row["id"])
+            release(cycle.token, action_id=row["id"])
         except OwnershipRefused as error:
             raise SupervisorRefused(error.code) from error
     return _launch(cycle, key, launch_key, action, make_prompt)
@@ -231,8 +331,8 @@ def _child(cycle: _Cycle, name: str, action: str, make_prompt, demand: int):
 
 def _launch(cycle: _Cycle, key: str, launch_key: str, action: str, make_prompt):
     qualified, ready = _qualified_child(cycle, key)
-    # Bind and validate the launch material BEFORE the cycle is reserved: a host refusal here must leave the
-    # handback retained with no cycle spent.
+    # Bind and validate the launch material BEFORE the cycle (or the repair grant) is reserved: a host refusal
+    # here must leave the handback (or the failed check) retained with nothing spent.
     request, adapter = cycle.seam.bind(qualified, make_prompt(), ready, cycle.frozen.acceptance_hash, launch_key)
     material = request.codex_material or request.claude_material
     if material is None:
@@ -240,7 +340,7 @@ def _launch(cycle: _Cycle, key: str, launch_key: str, action: str, make_prompt):
     launched, handle = False, None
     try:
         try:
-            ordinal = _reserve_cycle(cycle).recovery_cycle
+            ordinal = None if cycle.kind is _REPAIR else _reserve_cycle(cycle).recovery_cycle
             request = cycle.controller.reserve_stage(cycle.supervisor, replace(request, monitor_result=True),
                                                      action=action, recovery_cycle=ordinal)
         except OwnershipRefused as error:
@@ -255,21 +355,21 @@ def _launch(cycle: _Cycle, key: str, launch_key: str, action: str, make_prompt):
 
 
 def _qualified_child(cycle: _Cycle, key: str):
-    """Capture the current candidate into a fresh recovery child workspace and qualify it (replay-safe)."""
+    """Capture the current candidate into a fresh child workspace and qualify it (replay-safe)."""
     try:
         child_key, retained_activity, retained_preparation = _current_reviewer(
             cycle.store, cycle.token, parent_activity_id=cycle.parent_id, base_key=key + ":child", action=None,
-            reconciliation_code="RECOVERY_RECONCILIATION_REQUIRED")
+            reconciliation_code=cycle.kind.reconcile)
         ready = _reviewer_workspace(
             cycle.store, cycle.token, cycle.supervisor, preparation=cycle.candidate, parent_activity_id=cycle.parent_id,
             runtime_identity=cycle.runtime, reviewer_key=child_key,
             candidate_hash=cycle.frozen.candidate_hash, retained_preparation_id=retained_preparation,
-            retained_activity_id=retained_activity, role="recovery")
+            retained_activity_id=retained_activity, role=cycle.kind.role)
     except WorkspaceRefused as error:
         raise SupervisorRefused(error.code) from error
     # The outer orchestrator's prepaid group has ended by now: qualify on this channel-less supervisor.
     qualified = cycle.seam.qualify(retained_activity or str(uuid.uuid4()), ready, child_key, cycle.parent_id,
-                                   cycle.frozen.acceptance_hash, "recovery", supervisor=cycle.supervisor)
+                                   cycle.frozen.acceptance_hash, cycle.kind.role, supervisor=cycle.supervisor)
     return qualified, ready
 
 
@@ -278,12 +378,12 @@ def _settle(cycle: _Cycle, handle):
     if result["returncode"] != 0 or result.get("host_receipt", {}).get("status") != "complete":
         _end_child(cycle, handle.activity_id, "failed", result["evidence"])
         return None
-    receipt, action_id, workspace = _record_receipt(cycle, handle)
-    return _Settled(handle, receipt, action_id, workspace)
+    receipt, action_id, workspace, receipt_hash = _record_receipt(cycle, handle)
+    return _Settled(handle, receipt, action_id, workspace, receipt_hash)
 
 
 def _record_receipt(cycle: _Cycle, handle):
-    """The role-``recovery`` receipt, built from durable rows only and recorded idempotently."""
+    """The child's role receipt (``recovery``, or ``execution`` for a repair), built from durable rows only."""
     store, token, acceptance_hash = cycle.store, cycle.token, cycle.frozen.acceptance_hash
     with store.read_transaction() as tx:
         child = tx.execute("SELECT * FROM authority_child_bindings WHERE activity_id=?", (handle.activity_id,)).fetchone()
@@ -292,11 +392,11 @@ def _record_receipt(cycle: _Cycle, handle):
                             "ON p.action_id=a.id WHERE p.intent_id=?", (handle.intent_id,)).fetchone()
         preparation = None if child is None else tx.execute(
             "SELECT * FROM context_workspaces WHERE preparation_id=?", (child["workspace_preparation_id"],)).fetchone()
-    if (child is None or intent is None or action is None or preparation is None or child["role"] != "recovery"
+    if (child is None or intent is None or action is None or preparation is None or child["role"] != cycle.kind.role
             or child["contract_hash"] != acceptance_hash or intent["completion_status"] != "succeeded"):
-        raise SupervisorRefused("RECOVERY_BINDING_INVALID")
+        raise SupervisorRefused(cycle.kind.family.upper() + "_BINDING_INVALID")
     receipt = {
-        "schema": "ffs.run-policy-receipt/v1", "role": "recovery", "request_key": action["logical_key"],
+        "schema": "ffs.run-policy-receipt/v1", "role": cycle.kind.receipt_role, "request_key": action["logical_key"],
         "activity_id": handle.activity_id, "intent_id": handle.intent_id, "fence_generation": intent["generation"],
         "acceptance_hash": acceptance_hash, "candidate_hash": child["candidate_hash"],
         "runtime_hash": child["runtime_identity"],
@@ -305,8 +405,8 @@ def _record_receipt(cycle: _Cycle, handle):
         "evidence": [{"id": "process-result", **handle.result["evidence"]}], "completion_status": "succeeded",
         "process_identity": asdict(handle.identity), "review_dimensions": [],
     }
-    store.record_acceptance_receipt(token, acceptance_hash=acceptance_hash, receipt=receipt)
-    return receipt, action["id"], child["workspace_binding"]
+    recorded = store.record_acceptance_receipt(token, acceptance_hash=acceptance_hash, receipt=receipt)
+    return receipt, action["id"], child["workspace_binding"], recorded.receipt_hash
 
 
 def _final_text(handle) -> str:
@@ -322,18 +422,22 @@ def _final_text(handle) -> str:
 def _end_child(cycle: _Cycle, activity_id: str, new: str, evidence) -> None:
     if cycle.store.get_activity(activity_id).state == "active":
         cycle.store.transition_activity(cycle.token, activity_id, expected="active", new=new, result=evidence,
-                                        reason="recovery child settled")
+                                        reason=cycle.kind.family + " child settled")
 
 
-def _brief(cycle: _Cycle) -> str:
+def _failed_lines(cycle: _Cycle) -> list[str]:
     """The failed criteria with their frozen checks: what the child must make true."""
     wanted = set(cycle.packet["failed_criteria"])
-    lines = [f"Saved stage: {cycle.packet['saved_stage']}"]
+    lines = []
     for criterion in cycle.sealed.material["criteria"]:
         if criterion["id"] in wanted:
             lines.append(f"- {criterion['id']}: {criterion['objective_clause']}")
             lines.extend(f"    frozen check {check['id']}: {check['locator']}" for check in criterion["checks"])
-    return "\n".join(lines)
+    return lines
+
+
+def _brief(cycle: _Cycle) -> str:
+    return "\n".join([f"Saved stage: {cycle.packet['saved_stage']}", *_failed_lines(cycle)])
 
 
 def _diagnosis_prompt(cycle: _Cycle) -> str:
@@ -343,6 +447,15 @@ def _diagnosis_prompt(cycle: _Cycle) -> str:
         "Do not modify, create or delete any file: this workspace is a copy and only your written answer is used.",
         _brief(cycle),
         "Reply with a short plain-text diagnosis and the smallest change that would fix it.",
+    ])
+
+
+def _repair_prompt(cycle: _Cycle) -> str:
+    return "\n".join([
+        REPAIR_PREFIX,
+        "A sealed run's frozen checks did not accept its candidate.  Apply the smallest change in this workspace that",
+        "makes them pass.  Do not commit, and change nothing the fix does not need.",
+        *_failed_lines(cycle),
     ])
 
 

@@ -26,9 +26,14 @@ from test_managed_lifecycle_assembly import _last_envelope, requires_local_confi
 
 pytestmark = requires_local_confinement
 
-DONE = "DONE"
-INTENT = "INTENT_RECONCILIATION_REQUIRED"
-RECONCILE = "REPAIR_RECONCILIATION_REQUIRED"
+DONE = ("DONE", 0, None)
+INTENT = ("INTENT_RECONCILIATION_REQUIRED", 78, "reconcile_intent")
+RECONCILE = ("REPAIR_RECONCILIATION_REQUIRED", 78, "inspect_retained_repair")
+# Once the repair's patch is applied to the shared workspace and its candidate is not yet bound, the resume meets
+# the unbound change before the repair producer: the pending journal refuses at the first workspace guard, and a
+# published one leaves the shared workspace ahead of the bound candidate, which the frozen checks refuse.
+PENDING = ("WORKSPACE_INTEGRATION_PENDING", 5, "correct_request")
+STALE = ("FRONTEND_CHECK_CANDIDATE_STALE", 78, "correct_request")
 EXPECTED = {
     "repair-entered": DONE,
     "repair-workspace-begun": DONE,
@@ -37,9 +42,9 @@ EXPECTED = {
     "repair-intent-committed": INTENT,
     "repair-completed-before-harvest": RECONCILE,
     "repair-harvested-before-journal": RECONCILE,
-    "repair-applied-before-capture": RECONCILE,
-    "repair-applied-before-integration-record": RECONCILE,
-    "repair-recorded-before-bind": RECONCILE,
+    "repair-applied-before-capture": PENDING,
+    "repair-applied-before-integration-record": STALE,
+    "repair-recorded-before-bind": STALE,
     "repair-bound-before-transition": DONE,
 }
 # A kill between the intent commit and the child's acknowledgement leaves the admission it took held by the dead
@@ -78,7 +83,7 @@ def test_a_crash_at_each_repair_step_resumes_to_done_once_or_refuses_typed_witho
     capsys.readouterr()
     result = w.run()
     envelope = None if result == 0 else _last_envelope(capsys)
-    outcome = DONE if result == 0 else envelope["code"]
+    outcome = DONE if result == 0 else (envelope["code"], result, envelope["recovery_action"]["action"])
     led = ledger(w)
     assert outcome == EXPECTED[point], (point, result, led.stage)
     # At most one intent per action, whatever the point; the primary checkout's HEAD never moves.
@@ -89,7 +94,7 @@ def test_a_crash_at_each_repair_step_resumes_to_done_once_or_refuses_typed_witho
         assert list(held) == ["admissions"] and len(held["admissions"]) == 1
     else:
         assert held == {}
-    if outcome == DONE:
+    if EXPECTED[point] == DONE:
         # The resume spent exactly what the uninterrupted run spent: no double charge, one repair grant, one launch.
         assert led.stage == "DONE" and led.cycles == []
         assert (led.charged, led.actions, led.launches) == (baseline["charged"], baseline["actions"],
@@ -101,8 +106,6 @@ def test_a_crash_at_each_repair_step_resumes_to_done_once_or_refuses_typed_witho
         assert state == "published"
     else:
         # A typed refusal changes nothing: the retained stage stays put and nothing launches, reserves or charges.
-        assert result == 78 and led.stage == crashed.stage
-        assert envelope["recovery_action"]["action"] == (
-            "reconcile_intent" if outcome == INTENT else "inspect_retained_repair")
+        assert led.stage == crashed.stage
         assert (led.charged, led.actions, led.launches, led.cycles) == (
             crashed.charged, crashed.actions, crashed.launches, crashed.cycles)

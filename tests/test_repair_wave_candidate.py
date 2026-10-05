@@ -57,9 +57,15 @@ def _live(store, token, preparation_id, activity_id, digest, role) -> bool:
         return _recovery_input_is_live_tx(tx, token, workspace, activity_id, digest, role=role)
 
 
-def _drive(tmp_path, monkeypatch, after):
-    """Execute one wave, fail its frozen check, repair through ``produce_repair``, reach DONE, then call ``after``."""
+def _drive(tmp_path, monkeypatch, after, *, interrupted=None):
+    """Execute one wave, fail its frozen check, repair through ``produce_repair``, reach DONE, then call ``after``.
+
+    ``interrupted`` is a ``RuntimeError`` message: the first repair integration is interrupted by it, once, before
+    its journal exists; the same owner retries the repair producer directly (the lifecycle itself would call a
+    producer that added no new grant "uncharged") and then re-drives the lifecycle, whose stage ``after`` sees.
+    """
     from run_state.recovery_producer import produce_repair
+    from run_state.state import ControlStore
     primary, authority, _repository_id, env = _setup(tmp_path)
     monkeypatch.chdir(primary)
     seen = []
@@ -118,10 +124,13 @@ def _drive(tmp_path, monkeypatch, after):
                 ready=ready, process_evidence=result["evidence"])
         advanced = bound.candidate_hash
         assert advanced != first_input and _chain(store) == {advanced: first_input}
-        # Before any repair only the live candidate is a valid input for either role.
+        # Before any repair the live candidate is a valid input for either role.  The preparation's first input is
+        # one only for the activity whose own execution receipt produced the live candidate from it: the wave
+        # worker (role execution), never a recovery child.
         for role in ("execution", "recovery"):
             assert _live(store, token, ready.id, parent.id, advanced, role) is True
-            assert _live(store, token, ready.id, parent.id, first_input, role) is False
+            assert _live(store, token, ready.id, parent.id, first_input, role) is (role == "execution")
+            assert _live(store, token, ready.id, "another-activity", first_input, role) is False
             assert _live(store, token, ready.id, parent.id, "e" * 64, role) is False
 
         runtime_home, fake, _catalog = _fixture_host(tmp_path, monkeypatch)
@@ -189,8 +198,26 @@ def _drive(tmp_path, monkeypatch, after):
                 final_review=final_review,
                 recover=lambda _packet: pytest.fail("the repair fixes the check: no recovery"),
                 settle=settle, repair=repair)
-            stage = drive_frontend_lifecycle(store, token, supervisor=review_supervisor, controller=controller,
-                                             workspace=str(ready.path), parent_activity_id=parent.id, producers=producers)
+            if interrupted is not None:
+                register, raised = ControlStore.register_integration_intent_tx, []
+
+                def register_integration_intent_tx(self, tx, token_, wave_key, *args, **kwargs):
+                    if wave_key.startswith("repair:") and not raised:
+                        raised.append(wave_key)
+                        raise RuntimeError(interrupted)
+                    return register(self, tx, token_, wave_key, *args, **kwargs)
+
+                monkeypatch.setattr(ControlStore, "register_integration_intent_tx", register_integration_intent_tx)
+            drive = dict(supervisor=review_supervisor, controller=controller, workspace=str(ready.path),
+                         parent_activity_id=parent.id, producers=producers)
+            if interrupted is None:
+                stage = drive_frontend_lifecycle(store, token, **drive)
+            else:
+                with pytest.raises(RuntimeError, match=interrupted):
+                    drive_frontend_lifecycle(store, token, **drive)
+                retained["interrupted_calls"] = dict(calls)
+                repair(None, [criterion])
+                stage = drive_frontend_lifecycle(store, token, **drive)
             after(SimpleNamespace(
                 store=store, token=token, stage=stage, calls=calls, retained=retained, ready=ready, parent=parent,
                 advanced=advanced, first_input=first_input, criterion=criterion, controller=controller,
@@ -376,9 +403,32 @@ def test_p5_the_repair_journal_and_chain_branch_refuse_each_tampered_fact_exactl
         patch.chmod(0o600)
         patch.write_bytes(original + b"\n")
         try:
-            assert codes()[1] == "FRONTEND_INTEGRATION_EVIDENCE_CHANGED"
+            assert codes() == ("accepted", "EVIDENCE_INVALID")
         finally:
             patch.write_bytes(original)
         assert codes() == ("accepted", "accepted")
 
     _drive(tmp_path, monkeypatch, after)
+
+
+def test_p7_a_repair_interrupted_before_its_journal_resumes_on_the_same_owner_without_a_second_launch(
+        tmp_path, monkeypatch):
+    def after(ctx):
+        store = ctx.store
+        assert ctx.stage == "DONE"
+        # The producer was called twice, but the second call resumed the one retained repair.
+        assert ctx.retained["interrupted_calls"] == {"repair": 1, "review": 0} and ctx.calls == {"repair": 2, "review": 1}
+        rows = _repair_rows(store)
+        with store.read_transaction() as tx:
+            repairs = [tuple(row) for row in tx.execute(
+                "SELECT a.state,count(p.intent_id) FROM authority_policy_actions a LEFT JOIN "
+                "authority_policy_action_attempts p ON p.action_id=a.id WHERE a.action='repair' GROUP BY a.id")]
+            journals = [tuple(row) for row in tx.execute(
+                "SELECT substr(wave_key,1,instr(wave_key,':')-1),state FROM authority_workspace_integrations "
+                "ORDER BY event_id")]
+        assert repairs == [("dispatched", 1)]
+        assert journals == [("gsd-wave", "published"), ("repair", "published")]
+        assert rows.child["role"] == "worker"
+        assert (ctx.ready.path / "result-0.txt").read_text() == "donerepaired\n"
+
+    _drive(tmp_path, monkeypatch, after, interrupted="interrupted before the repair journal")
