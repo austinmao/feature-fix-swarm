@@ -212,7 +212,7 @@ def _fixture_host(tmp_path, monkeypatch):
     return runtime, fake, catalog
 
 
-def _draft(tmp_path, *, check: str = "/usr/bin/grep -q base-input src/input.txt", mode=None) -> Path:
+def _draft(tmp_path, *, check: str = "/usr/bin/grep -q base-input src/input.txt", mode=None, spec_review=None) -> Path:
     # Sealed criteria must name the run's accepted requirement ids: the ingress
     # binds exactly ``objective:<sha256(objective)>`` for its objective text.
     criterion = "objective:" + hashlib.sha256(b"assembly").hexdigest()
@@ -226,6 +226,8 @@ def _draft(tmp_path, *, check: str = "/usr/bin/grep -q base-input src/input.txt"
     }
     if mode is not None:
         draft["command_mode"] = mode
+    if spec_review is not None:
+        draft["spec_review"] = spec_review
     path = tmp_path / "acceptance-draft.json"
     path.write_text(json.dumps(draft))
     return path
