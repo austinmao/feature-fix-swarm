@@ -723,7 +723,7 @@ def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_h
     """
     from .frontend_policy import FrontendPolicyRefused
     from .managed import build_frontend_acceptance_draft, seal_frontend_policy
-    from .run_policy import RunPolicyRefused
+    from .run_policy import RunPolicyRefused, validate_draft_material
     allowed = {"draft_id", "revision", "command_mode", "criteria", "exclusions", "global_invariants", "spec_review"}
     if (not isinstance(draft, dict) or set(draft) - allowed
             or not {"criteria", "exclusions", "global_invariants"} <= set(draft)
@@ -746,6 +746,15 @@ def seal_from_draft(store, token, *, command_mode: str, draft: object, runtime_h
         if review is None and spec_review_attempted(store, token, draft_id=draft_id, revision=revision):
             # Dropping the key does not undo a review that was granted or recorded for this very draft.
             raise SupervisorRefused("SPEC_REVIEW_REQUIRED")
+        sealed = None if review is None else store.get_sealed_acceptance(
+            repository_id=token.repository_id, run_id=token.run_id)
+        if sealed is not None:
+            # A seal exists (a resume after the owner died before the lifecycle state): only that very draft is
+            # replayed, never reviewed, granted and launched for another one the store would then refuse to seal.
+            if (sealed.draft_id, sealed.draft_revision) != (draft_id, revision):
+                raise SupervisorRefused("ACCEPTANCE_SEAL_GENERATION_CONFLICT")
+            if validate_draft_material(material).material_hash != validate_draft_material(sealed.material).material_hash:
+                raise SupervisorRefused("ACCEPTANCE_DRAFT_CONFLICT")
         # The draft is persisted first (idempotently: `freeze` replays this create), so it can be reviewed unsealed.
         row = None if review is None else store.create_acceptance_draft(
             token, draft_id=draft_id, revision=revision, acceptance_contract_hash=legacy.contract_hash,
