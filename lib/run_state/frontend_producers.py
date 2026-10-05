@@ -33,7 +33,7 @@ from .spec_review import (
     load_draft, record_spec_review, require_spec_review_accepted, retained_spec_review, spec_review_attempted,
     spec_review_input_context, spec_review_launch_key, spec_review_output_contract,
 )
-from .supervisor import DispatchRequest, SupervisorRefused, artifact_review_inputs
+from .supervisor import DispatchRequest, SupervisorRefused, _replayed_launch_refusal, artifact_review_inputs
 from .wave_execution import capture_prelaunch_snapshot
 from .workspace import (
     WorkspaceRefused, begin_child_workspace_preparation, inspect_workspace, load_input_snapshot,
@@ -621,16 +621,50 @@ def refence_unlaunched_outer(store, token, activity_id: str, preparation_id: str
     """Put the retained, qualified and never launched outer (its workspace and its activity) on this owner's fence.
 
     A review, the seal's checks and the outer's own launch all capture from, and parent under, the outer, and each
-    needs it on the current fence.  No receipt hashes the workspace row of an outer that never ran, so (unlike a
-    settled outer, see ``rebind_retained_child``) the row itself moves too.  An outer already on this fence (the
-    run's first owner) is left exactly as it is.
+    needs it on the current fence.  No receipt hashes the workspace row of an outer that never ran (a receipt
+    needs its launch intent), so, unlike a settled outer (``rebind_retained_child``), the row itself moves too.
+
+    Everything is proven before anything is written, and both generations then move in one fenced transaction: the
+    activity is this run's outer, bound to exactly this ready workspace, on no newer fence, with no real launch.
+    Otherwise this refuses typed and changes nothing.  An outer already on this fence is left exactly as it is.
     """
+    from .ownership import assert_owner
+
+    def unlaunched(tx):
+        row = tx.execute(
+            "SELECT a.generation AS activity_generation,a.state AS activity_state,w.generation AS workspace_generation,"
+            "w.state AS workspace_state FROM authority_activities a JOIN authority_child_bindings b "
+            "ON b.activity_id=a.id JOIN context_workspaces w ON w.preparation_id=b.workspace_preparation_id "
+            "WHERE a.id=? AND a.repository_id=? AND a.run_id=? AND w.preparation_id=? AND w.repository_id=a.repository_id "
+            "AND w.run_id=a.run_id", (activity_id, token.repository_id, token.run_id, preparation_id)).fetchone()
+        if (row is None or row["activity_state"] not in {"pending", "active"} or row["workspace_state"] != "ready"
+                or row["activity_generation"] > token.generation or row["workspace_generation"] > token.generation):
+            raise SupervisorRefused("WORKSPACE_BINDING_MISMATCH")
+        return row
+
     with store.read_transaction() as tx:
-        generation = tx.execute("SELECT generation FROM authority_activities WHERE id=?", (activity_id,)).fetchone()
-    if generation is not None and generation["generation"] == token.generation:
+        row = unlaunched(tx)
+    launch = retained_launch(store, activity_id)
+    if launch is not None:
+        raise SupervisorRefused(_replayed_launch_refusal(launch))
+    if row["activity_generation"] == token.generation and row["workspace_generation"] == token.generation:
         return
-    rebind_retained_child(store, token, None, preparation_id)
-    rebind_retained_child(store, token, activity_id, preparation_id)
+    try:
+        revalidate_ready_fence(store, token, preparation_id, rebind=False)     # the READY proofs; writes nothing
+    except WorkspaceRefused as error:
+        raise SupervisorRefused(error.code) from error
+    with store.fenced_operation(token):
+        with store.transaction() as tx:
+            assert_owner(tx, token)
+            unlaunched(tx)
+            now = store._now()
+            tx.execute("UPDATE context_workspaces SET generation=?,updated_at=? WHERE preparation_id=?",
+                       (token.generation, now, preparation_id))
+            tx.execute("UPDATE authority_activities SET generation=?,updated_at=? WHERE id=?",
+                       (token.generation, now, activity_id))
+            tx.execute("INSERT INTO control_events (event_type, payload) VALUES ('READY_REVALIDATED', ?)",
+                       (json.dumps({"preparation_id": preparation_id, "run_id": token.run_id},
+                                   sort_keys=True, separators=(",", ":")),))
 
 
 def rebind_retained_child(store, token, activity_id: str | None, preparation_id: str):
