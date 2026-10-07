@@ -234,39 +234,27 @@ def render_tdd_red_evidence(source: bytes) -> bytes:
     if source.count(old) != 1:
         raise ValueError("upstream tdd-red-evidence transform anchor is missing or ambiguous")
     rendered = source.replace(old, new)
-    # 1.15's Surefire branch fails open twice: XML quoted inside a TAP
-    # diagnostic selects it, and an incomplete report still yields a failing
-    # case. Any TAP marker keeps the TAP branch; any incomplete testcase or
-    # testsuite element reports zero tests, which the guards refuse.
-    for anchor, replacement, label in (
-        (b"""    const isSurefireXml = output.includes('<testsuite') && output.includes('<testcase');
-""", br"""    const looksTap = /^TAP version \d+\s*$/m.test(output) || /^\s*(?:not )?ok \d+\b/m.test(output)
-        || /^# (?:tests|pass|fail) \d+\s*$/m.test(output);
-    const isSurefireXml = !looksTap && output.includes('<testsuite') && output.includes('<testcase');
-""", "Surefire selection"),
-        (b"""function parseSurefireSummary(output) {
-    let tests = 0;
-""", b"""function parseSurefireSummary(output) {
-    const incomplete = { tests: 0, pass: 0, fail: 0, failing_tests: [] };
-    if (output.lastIndexOf('</testsuite>') < output.lastIndexOf('<testcase'))
-        return incomplete;
-    let tests = 0;
-""", "Surefire report completeness"),
-        (b"""        if (tagEnd === -1)
-            break;
-""", b"""        if (tagEnd === -1)
-            return incomplete;
-""", "Surefire truncated tag"),
-        (b"""        const closeIdx = selfClosing ? -1 : output.indexOf('</testcase>', tagEnd);
-""", b"""        const closeIdx = selfClosing ? -1 : output.indexOf('</testcase>', tagEnd);
-        if (!selfClosing && closeIdx === -1)
-            return incomplete;
-""", "Surefire unclosed testcase"),
-    ):
-        if rendered.count(anchor) != 1:
-            raise ValueError(f"upstream {label} anchor is missing or ambiguous")
-        rendered = rendered.replace(anchor, replacement)
-    return rendered
+    # 1.15's Surefire XML branch scans tags with indexOf/regex and fails open
+    # on XML quoted in TAP or pytest output, on comments and CDATA, and on
+    # truncated reports. FFS never accepted Surefire (the 1.14 overlay had no
+    # such branch). Output carrying Surefire markers is therefore no evidence
+    # at all: zero tests, refused by the guards, so no XML or TAP text mixed
+    # into it can authorize GREEN. Re-enable only with a real XML parser.
+    surefire = b"""    if (isSurefireXml) {
+        const sf = parseSurefireSummary(output);
+        summary = { tests: sf.tests, pass: sf.pass, fail: sf.fail };
+        failing = sf.failing_tests;
+    }
+"""
+    refused = b"""    if (isSurefireXml) {
+        // FFS overlay: Surefire markers make the output non-evidence (see renderer).
+        summary = { tests: 0, pass: 0, fail: 0 };
+        failing = [];
+    }
+"""
+    if rendered.count(surefire) != 1:
+        raise ValueError("upstream Surefire branch anchor is missing or ambiguous")
+    return rendered.replace(surefire, refused)
 
 
 def render_executor_sequential_guard(source: bytes) -> bytes:

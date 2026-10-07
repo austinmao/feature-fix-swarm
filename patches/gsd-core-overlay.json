@@ -6,7 +6,7 @@
     {
       "target": "gsd-core/bin/lib/tdd-red-evidence.cjs",
       "base_sha256": "5797014bbbdbef0750a1baf1dca74ea8e7d4ade5401aea3940cfbc9d2243e2ac",
-      "patched_sha256": "aaeaa9c49a0c71afe4451125818dfdf6dbc13e9a4598cea5c8505312c39ee9d4"
+      "patched_sha256": "6f3b05f9c2de646f8080a190493be31d9a533705c3b0adbd6e6c6df0414f369f"
     },
     {
       "target": "agents/gsd-executor.md",
