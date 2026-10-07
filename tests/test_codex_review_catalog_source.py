@@ -206,6 +206,15 @@ def test_a_descendant_appending_after_the_leader_exits_is_part_of_the_output(tmp
     assert caught.value.code == "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
 
 
+def test_a_leader_that_closes_stdout_before_exiting_keeps_its_catalog(tmp_path):
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
+    binary.write_text(binary.read_text().replace("exit 0\n", "exec 1>&-\nsleep 1\nexit 0\n"))
+    parent, workspace = _dirs(tmp_path)
+    material = prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                             runtime_root=parent / "closed-early", workspace=workspace)
+    assert json.loads(Path(material.catalog_path).read_text())["default_model"] == "gpt-5.6-terra"
+
+
 def test_a_launcher_changed_while_its_catalog_runs_refuses(tmp_path):
     binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
     binary.write_text(binary.read_text().replace("exit 0\n", f"printf '# swapped\\n' >> '{binary}'\nexit 0\n"))

@@ -271,14 +271,27 @@ def _catalog_model(source: object, requested_model: str) -> tuple[dict[str, obje
     return catalog, _digest(_canonical(catalog))
 
 
+def _leader_exited(pid: int, deadline: float) -> bool:
+    """Wait for the leader's exit before the deadline without reaping it (its pid keeps the group id)."""
+    while True:
+        try:
+            if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                return True
+        except ChildProcessError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
 def _bundled_catalog(binary: Path, path: str, parent: Path) -> bytes:
     """The catalog shipped inside the qualified binary (``debug models --bundled``: offline, no refresh).
 
     It runs from ``/`` with only the closed review environment and a fresh empty 0700 home below the
     private parent (no credential, so nothing can authenticate), and the home is removed afterwards.
     Output is accepted only at end of file, when every writer (descendants included) has closed it,
-    within one deadline and at most _MAX_FILE bytes.  The group is killed before the leader is reaped,
-    while the leader's pid still reserves the group id.
+    and once the leader has exited, within one deadline and at most _MAX_FILE bytes.  The group is
+    killed before the leader is reaped, while the leader's pid still reserves the group id.
     """
     try:
         home = Path(tempfile.mkdtemp(prefix=".bundled-catalog-", dir=parent))
@@ -304,7 +317,7 @@ def _bundled_catalog(binary: Path, path: str, parent: Path) -> bytes:
                     continue
                 chunk = os.read(descriptor, 65536)
                 if not chunk:
-                    complete = True
+                    complete = _leader_exited(process.pid, deadline)
                     break
                 output += chunk
         except OSError as error:
