@@ -278,7 +278,7 @@ def _leader_exited(pid: int, deadline: float) -> bool:
             if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
                 return True
         except ChildProcessError:
-            return True
+            return False  # already reaped elsewhere (for example SIGCHLD ignored): status unverifiable
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.01)

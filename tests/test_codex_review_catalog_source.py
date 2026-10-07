@@ -215,6 +215,20 @@ def test_a_leader_that_closes_stdout_before_exiting_keeps_its_catalog(tmp_path):
     assert json.loads(Path(material.catalog_path).read_text())["default_model"] == "gpt-5.6-terra"
 
 
+def test_an_unverifiable_leader_exit_refuses(tmp_path):
+    import signal
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]), status=7)
+    parent, workspace = _dirs(tmp_path)
+    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        with pytest.raises(NativeReviewRuntimeRefused) as caught:
+            prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                          runtime_root=parent / "unverifiable", workspace=workspace)
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    assert caught.value.code == "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
+
+
 def test_a_launcher_changed_while_its_catalog_runs_refuses(tmp_path):
     binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
     binary.write_text(binary.read_text().replace("exit 0\n", f"printf '# swapped\\n' >> '{binary}'\nexit 0\n"))
