@@ -132,6 +132,23 @@
         "sha256"
       ]
     },
+    "review_rows": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "direction": {"enum": ["claude-codex", "codex-claude"]},
+          "outer_host": {"enum": ["claude", "codex"]},
+          "reviewer_host": {"enum": ["claude", "codex"]},
+          "artifact": {"$ref": "#/$defs/artifact"}
+        },
+        "required": ["direction", "outer_host", "reviewer_host", "artifact"],
+        "oneOf": [
+          {"properties": {"direction": {"const": "claude-codex"}, "outer_host": {"const": "claude"}, "reviewer_host": {"const": "codex"}}},
+          {"properties": {"direction": {"const": "codex-claude"}, "outer_host": {"const": "codex"}, "reviewer_host": {"const": "claude"}}}
+        ]
+      }
+    },
     "status_artifact": {
       "type": "object",
       "additionalProperties": false,
@@ -1313,7 +1330,7 @@
         "case_count": {"type": "integer", "minimum": 0},
         "row_count": {"type": "integer", "minimum": 0},
         "pairings": {"$ref": "#/$defs/ids"},
-        "review_directions": {"$ref": "#/$defs/ids"},
+        "review_directions": {"$ref": "#/$defs/review_rows"},
         "soak_seconds": {"type": "integer", "minimum": 0},
         "domains": {"$ref": "#/$defs/ids"},
         "finding_count": {"type": "integer", "minimum": 0},
@@ -1425,7 +1442,7 @@
         {"type": "object", "properties": {"hosts": {
           "type": "object", "additionalProperties": false,
           "properties": {
-            "review_directions": {"$ref": "#/$defs/ids"},
+            "review_directions": {"$ref": "#/$defs/review_rows"},
             "rows": {"type": "array", "items": {"type": "object", "additionalProperties": false,
               "properties": {"pairing": {"enum": ["claude-claude", "claude-codex", "codex-codex"]},
                 "platform": {"enum": ["darwin", "linux"]}, "overlap_seconds": {"type": "number", "minimum": 600},

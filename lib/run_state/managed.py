@@ -212,6 +212,7 @@ def prepare_managed_run(
     host_request=None,
     ceremony_estimate: dict | None = None,
     capacity_policy: dict | None = None,
+    review_host_request=None,
 ) -> int:
     """Prepare an explicit snapshot and run ``on_ready`` under its live fence.
 
@@ -278,6 +279,7 @@ def prepare_managed_run(
             "policy_tier": tier, "ceremony_estimate": ceremony_estimate,
             "upstream_runtime_sha256": upstream_runtime_sha256,
             "host_request": None if host_request is None else host_request.material(),
+            **_review_host_material(review_host_request),
         },
     )
     return _cmd_fixture_start(
@@ -291,6 +293,11 @@ def prepare_managed_run(
             capacity_policy=capacity_policy,
         ),
     )
+
+
+def _review_host_material(review_host_request) -> dict:
+    """D31: an opted-in reviewer joins the request material; absent, the material (and so its digest) is unchanged."""
+    return {} if review_host_request is None else {"review_host_request": review_host_request.material()}
 
 
 _FRONTEND_ACTIVITIES = {
@@ -314,6 +321,7 @@ def prepare_frontend_run(
     capacity_policy: dict | None = None,
     scope: str = "", model_request: dict | None = None,
     acceptance_draft: dict | None = None,
+    review_host_request=None, review_model_request: dict | None = None,
 ) -> int:
     """Admit authoring/investigation under the same writer and live owner fence.
 
@@ -394,7 +402,8 @@ def prepare_frontend_run(
                 dispatch_limit=dispatch_limit, token_limit=token_limit,
                 host_request=host_request, upstream_runtime=upstream_runtime,
                 model_request=model_request,
-                acceptance_draft=acceptance_draft,
+                acceptance_draft=acceptance_draft, review_host_request=review_host_request,
+                review_model_request=review_model_request,
             )
         except _managed_run_refusals() as error:
             return _managed_run_refusal(error, run_id=context.run_id)
@@ -415,6 +424,7 @@ def prepare_frontend_run(
             "accepted_requirement_ids": sorted(accepted_requirement_ids),
             "upstream_runtime_sha256": upstream_runtime_sha256,
             "host_request": None if host_request is None else host_request.material(),
+            **_review_host_material(review_host_request),
         },
     )
     return _cmd_fixture_start(

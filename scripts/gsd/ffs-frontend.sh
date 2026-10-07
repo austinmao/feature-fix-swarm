@@ -43,6 +43,28 @@ if [ -n "${FFS_HOST_KIND:-}" ]; then
   # Claude only: an all-or-none host request refuses a credential source on Codex.
   [ -z "${FFS_HOST_CREDENTIAL_SOURCE:-}" ] || _frontend_args+=(--host-credential-source "$FFS_HOST_CREDENTIAL_SOURCE")
 fi
+if [ -n "${FFS_REVIEW_HOST_KIND:-}" ]; then
+  # D31: an opted-in native reviewer on the opposite host family, all-or-none like
+  # the host request above (the CLI refuses a reviewer on the outer's own host).
+  if [ -z "${FFS_REVIEW_HOST_TOKEN_RESERVATION:-}" ]; then
+    echo "ffs-frontend: FFS_REVIEW_HOST_TOKEN_RESERVATION is required with FFS_REVIEW_HOST_KIND (e.g. 100K)" >&2
+    exit 2
+  fi
+  _review_model='{"kind":"tier","name":"judgment"}'
+  # A reviewer only reads; Claude's closed host request admits only workspace-write.
+  _review_sandbox=read-only
+  [ "$FFS_REVIEW_HOST_KIND" != claude ] || _review_sandbox=workspace-write
+  _frontend_args+=(--review-host "$FFS_REVIEW_HOST_KIND"
+    --review-host-runtime-home "${FFS_REVIEW_HOST_RUNTIME_HOME:-}"
+    --review-host-binary "${FFS_REVIEW_HOST_BINARY:-}"
+    --review-host-model-request "${FFS_REVIEW_HOST_MODEL_REQUEST:-$_review_model}"
+    --review-host-sandbox "${FFS_REVIEW_HOST_SANDBOX:-$_review_sandbox}"
+    --review-host-network "${FFS_REVIEW_HOST_NETWORK:-disabled}"
+    --review-host-token-reservation "$FFS_REVIEW_HOST_TOKEN_RESERVATION"
+    --review-host-timeout "${FFS_REVIEW_HOST_TIMEOUT:-600}")
+  # Claude only, as for the host request.
+  [ -z "${FFS_REVIEW_HOST_CREDENTIAL_SOURCE:-}" ] || _frontend_args+=(--review-host-credential-source "$FFS_REVIEW_HOST_CREDENTIAL_SOURCE")
+fi
 shift
 _selection_args=()
 while [ "$#" -gt 0 ]; do

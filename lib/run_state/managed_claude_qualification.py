@@ -347,67 +347,31 @@ def qualify_managed_claude_runtime(
 
 
 def run_managed_claude_command(store, token, context, command, request_key, host_request, *, upstream_runtime=None,
-                               model_request=None, acceptance_draft=None):
+                               model_request=None, acceptance_draft=None, review_host_request=None,
+                               review_model_request=None):
     """Production Claude callback; every probe and the final native run is supervised."""
     from .frontend_producers import drive_managed_session
     session = prepare_managed_claude_session(store, token, context, command, request_key, host_request,
-                                             upstream_runtime=upstream_runtime, model_request=model_request)
+                                             upstream_runtime=upstream_runtime, model_request=model_request,
+                                             review_host_request=review_host_request,
+                                             review_model_request=review_model_request)
     return drive_managed_session(store, token, context, session, acceptance_draft=acceptance_draft)
 
 
-def prepare_managed_claude_session(store, token, context, command, request_key, host_request, *,
-                                   upstream_runtime=None, model_request=None):
-    """Qualification seams, worker channel and outer contract for one Claude host run."""
-    import tempfile
-    from .frontend_producers import (
-        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, rebind_retained_child, resumable_outer_completion,
-        retained_launch, retained_outer_activity,
-    )
-    from .prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
-    from .supervisor import _managed_inventory_workspace, _managed_prompt
+def build_claude_runtime_seam(store, token, host_request, *, model_request, host_evidence: Path, upstream: dict,
+                              child_key: str, outer_supervisor):
+    """The Claude ``HostRuntimeSeam`` and the release of what it bound.
 
-    root, operation, child_key, ready = _managed_inventory_workspace(
-        store, token, context, request_key, workspace_api={
-            "_from_row": _from_row, "load_input_snapshot": load_input_snapshot,
-            "_verify_snapshot_complete": _verify_snapshot_complete,
-            "begin_child_workspace_preparation": begin_child_workspace_preparation,
-            "prepare_workspace": prepare_workspace, "inspect_workspace": inspect_workspace,
-        })
-    host_evidence = Path(context.evidence_root) / "host"
-    host_evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
-    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
-                                                 child_key=child_key) or str(uuid.uuid4()))
-    upstream = context.upstream or {}
-    try:
-        planning_root = str(rebase_planning_root(
-            upstream, root_workspace=context.workspace, preparation_path=ready.path,
-        ))
-    except PrelaunchInventoryRefused as error:
-        raise SupervisorRefused(str(error)) from error
-    invocation, prompt, role = _managed_prompt(
-        root, operation, command, staged_runtime_home=claude_runtime_home(host_evidence, outer_activity_id),
-        planning_root=planning_root, project=upstream.get("project"),
-        workstream=upstream.get("workstream"), planning_scope=token.planning_scope,
-    )
+    Workspace-bound qualification and launch binding, unchanged for a Claude outer's orchestrator and wave workers.
+    A Codex outer builds its opted-in Claude reviewer (D31) with the same pieces, from the reviewer's own request.
+    Claude launch material is released by its consumer (the outer's session close, the native review's own
+    release), so ``release()`` has nothing left to free.
+    """
+    from .frontend_producers import HostRuntimeSeam, QualifiedHostRuntime, retained_launch
     bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
     if bridge.is_symlink() or not bridge.is_file():
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
-    launch = retained_launch(store, outer_activity_id)
-    # F51: a settled succeeded outer launch under a lifecycle at FINAL_REVIEW is resumed, never relaunched.
-    resume = resumable_outer_completion(store, token, outer_activity_id, launch)
-    if launch is not None and not resume:
-        # A real outer launch holds Claude state in its home and may have done work: never re-stage,
-        # re-qualify, relaunch or replay it as a success.  Refused before any resource is allocated.
-        raise SupervisorRefused(_replayed_launch_refusal(launch))
-    if resume:
-        # Checks, recovery children and the final reviewer capture from, and parent under, the retained outer.
-        ready = rebind_retained_child(store, token, outer_activity_id, ready.id)
     bridge_command = json.dumps([str(Path(sys.executable).resolve()), str(bridge)], separators=(",", ":"))
-    socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
-    channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
-    supervisor = Supervisor(store, token, evidence_root=host_evidence, worker_channel=channel)
-
-    outer_supervisor = supervisor
 
     def qualify_runtime(activity_id: str, preparation, activity_request_key: str,
                         parent_activity_id: str, final_contract_hash: str, child_role: str, *,
@@ -453,12 +417,83 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
             managed_input_sha256=preparation.input_digest,
         ), qualified.adapter
 
+    seam = HostRuntimeSeam(
+        host="claude", qualify=qualify_runtime, bind=bind_launch, binary=host_request.binary,
+        cli_version=SUPPORTED_CLAUDE_VERSION, model=host_request.model, effort=host_request.effort,
+        model_request=dict(model_request) if model_request is not None else {"kind": "exact", "id": host_request.model},
+    )
+    return seam, lambda: None
+
+
+def prepare_managed_claude_session(store, token, context, command, request_key, host_request, *,
+                                   upstream_runtime=None, model_request=None, review_host_request=None,
+                                   review_model_request=None):
+    """Qualification seams, worker channel and outer contract for one Claude host run.
+
+    An opted-in Codex reviewer (D31) gets its own seam from the Codex host's admission, staging and qualification.
+    """
+    import tempfile
+    from .frontend_producers import (
+        ManagedHostSession, rebind_retained_child, resumable_outer_completion, retained_launch,
+        retained_outer_activity,
+    )
+    from .prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
+    from .supervisor import _managed_inventory_workspace, _managed_prompt
+
+    root, operation, child_key, ready = _managed_inventory_workspace(
+        store, token, context, request_key, workspace_api={
+            "_from_row": _from_row, "load_input_snapshot": load_input_snapshot,
+            "_verify_snapshot_complete": _verify_snapshot_complete,
+            "begin_child_workspace_preparation": begin_child_workspace_preparation,
+            "prepare_workspace": prepare_workspace, "inspect_workspace": inspect_workspace,
+        })
+    host_evidence = Path(context.evidence_root) / "host"
+    host_evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
+                                                 child_key=child_key) or str(uuid.uuid4()))
+    upstream = context.upstream or {}
+    try:
+        planning_root = str(rebase_planning_root(
+            upstream, root_workspace=context.workspace, preparation_path=ready.path,
+        ))
+    except PrelaunchInventoryRefused as error:
+        raise SupervisorRefused(str(error)) from error
+    invocation, prompt, role = _managed_prompt(
+        root, operation, command, staged_runtime_home=claude_runtime_home(host_evidence, outer_activity_id),
+        planning_root=planning_root, project=upstream.get("project"),
+        workstream=upstream.get("workstream"), planning_scope=token.planning_scope,
+    )
+    launch = retained_launch(store, outer_activity_id)
+    # F51: a settled succeeded outer launch under a lifecycle at FINAL_REVIEW is resumed, never relaunched.
+    resume = resumable_outer_completion(store, token, outer_activity_id, launch)
+    if launch is not None and not resume:
+        # A real outer launch holds Claude state in its home and may have done work: never re-stage,
+        # re-qualify, relaunch or replay it as a success.  Refused before any resource is allocated.
+        raise SupervisorRefused(_replayed_launch_refusal(launch))
+    if resume:
+        # Checks, recovery children and the final reviewer capture from, and parent under, the retained outer.
+        ready = rebind_retained_child(store, token, outer_activity_id, ready.id)
+    socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
+    channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
+    supervisor = Supervisor(store, token, evidence_root=host_evidence, worker_channel=channel)
+    seam, _release = build_claude_runtime_seam(
+        store, token, host_request, model_request=model_request, host_evidence=host_evidence,
+        upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
+    )
+    review_seam, review_release = None, None
+    if review_host_request is not None:
+        from .supervisor import build_codex_runtime_seam
+        review_seam, review_release = build_codex_runtime_seam(
+            store, token, review_host_request, model_request=review_model_request, host_evidence=host_evidence,
+            upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
+        )
+
     def prepare_runtime(activity_id: str, preparation, activity_request_key: str,
                         parent_activity_id: str, final_contract_hash: str,
                         child_role: str, child_prompt: str, launch_request_key: str):
-        qualified = qualify_runtime(activity_id, preparation, activity_request_key, parent_activity_id,
-                                    final_contract_hash, child_role)
-        return bind_launch(qualified, child_prompt, preparation, final_contract_hash, launch_request_key)
+        qualified = seam.qualify(activity_id, preparation, activity_request_key, parent_activity_id,
+                                 final_contract_hash, child_role)
+        return seam.bind(qualified, child_prompt, preparation, final_contract_hash, launch_request_key)
 
     def prepare_wave_child(wave_context):
         request, _adapter = prepare_runtime(
@@ -534,14 +569,12 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
                 adapter.release_launch_material(material)
             except ClaudeHostRefused:
                 pass
+        if review_release is not None:
+            # The Codex reviewer's bound material, through its own liveness proof (F43).
+            review_release()
 
-    seam = HostRuntimeSeam(
-        host="claude", qualify=qualify_runtime, bind=bind_launch, binary=host_request.binary,
-        cli_version=SUPPORTED_CLAUDE_VERSION, model=host_request.model, effort=host_request.effort,
-        model_request=dict(model_request) if model_request is not None else {"kind": "exact", "id": host_request.model},
-    )
     return ManagedHostSession(
         host="claude", supervisor=supervisor, evidence_root=host_evidence, ready=ready, child_key=child_key,
         outer_activity_id=outer_activity_id, invocation=invocation, timeout_seconds=host_request.timeout_seconds, seam=seam,
-        prepare_outer=prepare_outer, execute=execute, close=close,
+        prepare_outer=prepare_outer, execute=execute, close=close, review_seam=review_seam,
     )

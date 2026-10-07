@@ -345,6 +345,7 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
         return _fixture_refusal(error.code, exit_code=2)
     try:
         host_request = _host_request_from_args(args)
+        review_host_request = _review_host_request_from_args(args, host_request)
         _review_catalog_from_args(args)
         acceptance_draft = _read_json_document(getattr(args, "acceptance_draft", None), label="acceptance draft")
     except Exception as error:
@@ -368,7 +369,8 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
                 dispatch_limit=args.dispatch_limit, token_limit=args.token_limit,
                 host_request=host_request, upstream_runtime=upstream_runtime,
                 model_request=_model_request_from_args(args),
-                acceptance_draft=acceptance_draft,
+                acceptance_draft=acceptance_draft, review_host_request=review_host_request,
+                review_model_request=_model_request_from_args(args, "review_host"),
             )
         except _managed_run_refusals() as error:
             return _managed_run_refusal(error, run_id=context.run_id)
@@ -385,22 +387,19 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
         command=tuple(command), host_request=host_request,
         ceremony_estimate=getattr(args, "ceremony_estimate", None),
         capacity_policy=getattr(args, 'capacity_policy', None),
+        review_host_request=review_host_request,
     )
 
 
-def _host_request_from_args(args: argparse.Namespace):
-    """Build one all-or-none host request before managed preparation effects."""
+def _host_request_from_args(args: argparse.Namespace, prefix: str = "host"):
+    """Build one all-or-none host request (``--host*``, or ``--review-host*``) before managed preparation effects."""
     from run_state.host_request import (
         HostRequestRefused, parse_claude_host_request, parse_codex_host_request,
     )
-    host = getattr(args, "host", None)
-    fields = (
-        getattr(args, "host_runtime_home", None), getattr(args, "host_binary", None),
-        getattr(args, "host_model_request", None), getattr(args, "host_sandbox", None),
-        getattr(args, "host_network", None), getattr(args, "host_token_reservation", None),
-        getattr(args, "host_timeout", None),
-    )
-    credential_source = getattr(args, "host_credential_source", None)
+    host = getattr(args, prefix, None)
+    fields = tuple(getattr(args, f"{prefix}_{name}", None) for name in (
+        "runtime_home", "binary", "model_request", "sandbox", "network", "token_reservation", "timeout"))
+    credential_source = getattr(args, f"{prefix}_credential_source", None)
     if host is None and credential_source is None and all(value is None for value in fields):
         return None
     if host not in {"codex", "claude"} or any(value is None for value in fields):
@@ -421,6 +420,23 @@ def _host_request_from_args(args: argparse.Namespace):
         sandbox=fields[3], network_enabled=fields[4] == "enabled",
         token_reservation=fields[5], timeout_seconds=fields[6],
     )
+
+
+def _review_host_request_from_args(args: argparse.Namespace, host_request):
+    """D31: an opted-in native reviewer on the opposite host family, or None when no ``--review-host*`` is given.
+
+    The same parser and all-or-none rule as the outer request; a reviewer needs an outer to oppose, and one on the
+    outer's own host is refused.
+    """
+    from run_state.host_request import HostRequestRefused
+    review = _host_request_from_args(args, "review_host")
+    if review is None:
+        return None
+    if host_request is None:
+        raise HostRequestRefused("HOST_REQUEST_INCOMPLETE")
+    if review.material()["host"] == host_request.material()["host"]:
+        raise HostRequestRefused("REVIEW_HOST_NOT_OPPOSITE")
+    return review
 
 
 def cmd_frontend_start(args: argparse.Namespace) -> int:
@@ -445,6 +461,7 @@ def cmd_frontend_start(args: argparse.Namespace) -> int:
         return _fixture_refusal("INVALID_REQUEST", exit_code=2)
     try:
         host_request = _host_request_from_args(args)
+        review_host_request = _review_host_request_from_args(args, host_request)
         _review_catalog_from_args(args)
         acceptance_draft = _read_json_document(getattr(args, "acceptance_draft", None), label="acceptance draft")
         # Verify the controller's pin before even reading selected source bytes.
@@ -488,7 +505,8 @@ def cmd_frontend_start(args: argparse.Namespace) -> int:
         ceremony_estimate=getattr(args, "ceremony_estimate", None),
         capacity_policy=getattr(args, 'capacity_policy', None),
         scope=args.scope or "", model_request=_model_request_from_args(args),
-        acceptance_draft=acceptance_draft,
+        acceptance_draft=acceptance_draft, review_host_request=review_host_request,
+        review_model_request=_model_request_from_args(args, "review_host"),
     )
 
 
@@ -2001,8 +2019,8 @@ def _review_catalog_from_args(args: argparse.Namespace):
     return None
 
 
-def _model_request_from_args(args: argparse.Namespace):
-    value = getattr(args, "host_model_request", None)
+def _model_request_from_args(args: argparse.Namespace, prefix: str = "host"):
+    value = getattr(args, f"{prefix}_model_request", None)
     if value is None:
         return None
     try:
@@ -2032,21 +2050,24 @@ def cmd_describe_upstream_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
-def _add_host_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--review-model-catalog", default=None,
-                        help="retired: refused with REVIEW_MODEL_CATALOG_RETIRED (the native review "
-                             "catalog is the qualified Codex binary's bundled catalog)")
-    parser.add_argument("--acceptance-draft", default=None,
-                        help="explicit acceptance draft JSON to seal after outer qualification")
-    parser.add_argument("--host", choices=("codex", "claude"))
-    parser.add_argument("--host-runtime-home")
-    parser.add_argument("--host-credential-source")
-    parser.add_argument("--host-binary")
-    parser.add_argument("--host-model-request")
-    parser.add_argument("--host-sandbox", choices=("read-only", "workspace-write", "danger-full-access"))
-    parser.add_argument("--host-network", choices=("disabled", "enabled"))
-    parser.add_argument("--host-token-reservation", type=_parse_tokens)
-    parser.add_argument("--host-timeout", type=int)
+def _add_host_arguments(parser: argparse.ArgumentParser, prefix: str = "host") -> None:
+    """One host request's flags: ``--host*`` for the outer run, ``--review-host*`` for an opted-in reviewer."""
+    if prefix == "host":
+        parser.add_argument("--review-model-catalog", default=None,
+                            help="retired: refused with REVIEW_MODEL_CATALOG_RETIRED (the native review "
+                                 "catalog is the qualified Codex binary's bundled catalog)")
+        parser.add_argument("--acceptance-draft", default=None,
+                            help="explicit acceptance draft JSON to seal after outer qualification")
+    flag = "--" + prefix.replace("_", "-")
+    parser.add_argument(flag, choices=("codex", "claude"))
+    parser.add_argument(flag + "-runtime-home")
+    parser.add_argument(flag + "-credential-source")
+    parser.add_argument(flag + "-binary")
+    parser.add_argument(flag + "-model-request")
+    parser.add_argument(flag + "-sandbox", choices=("read-only", "workspace-write", "danger-full-access"))
+    parser.add_argument(flag + "-network", choices=("disabled", "enabled"))
+    parser.add_argument(flag + "-token-reservation", type=_parse_tokens)
+    parser.add_argument(flag + "-timeout", type=int)
 
 
 def main(argv=None) -> int:
@@ -2138,6 +2159,7 @@ def main(argv=None) -> int:
     s.add_argument('--capacity-policy', type=_parse_capacity_policy,
                    help='Versioned operator ceiling revision JSON; does not change cumulative allowances')
     _add_host_arguments(s)
+    _add_host_arguments(s, "review_host")
     s.set_defaults(func=cmd_frontend_start)
 
     s = sub.add_parser("managed-start")
@@ -2159,6 +2181,7 @@ def main(argv=None) -> int:
     s.add_argument('--capacity-policy', type=_parse_capacity_policy,
                    help='Versioned operator ceiling revision JSON; does not change cumulative allowances')
     _add_host_arguments(s)
+    _add_host_arguments(s, "review_host")
     s.add_argument("command", nargs=argparse.REMAINDER)
     s.set_defaults(func=cmd_managed_start)
 
