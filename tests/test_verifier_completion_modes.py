@@ -268,7 +268,8 @@ def test_published_schema_binds_review_rows_to_opposite_hosts(tmp_path: Path) ->
     value = manifest(tmp_path, "hosts", hosts_value(receipt, review_rows(transcript)))
     assert list(hosts.iter_errors(value)) == []
     for case in ("bare-strings", "hosts-disagree-with-direction", "same-host-review",
-                 "same-host-under-a-cross-direction", "missing-transcript", "extra-field", "missing-direction"):
+                 "same-host-under-a-cross-direction", "missing-transcript", "extra-field", "missing-direction",
+                 "duplicate-direction"):
         mutate, _code = _REVIEW_ROW_REFUSALS[case]
         invalid = manifest(tmp_path, "hosts", hosts_value(receipt, mutate(review_rows(transcript))))
         assert list(hosts.iter_errors(invalid)), case

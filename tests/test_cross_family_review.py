@@ -133,6 +133,8 @@ def test_an_opposite_review_host_joins_the_material_and_nothing_else_changes(tmp
     assert _start(env, authority, entry, *plain_request, *_flags(reviewer, "review-host", root, model=JUDGMENT)) == 0
     plain, opted = seen
     review = opted.pop("review_host_request")
+    # The reviewer's typed selector joins too: two selectors can resolve to one model yet differ in provenance.
+    assert opted.pop("review_model_request") == json.loads(JUDGMENT)
     assert opted == plain
     resolved = resolve_request(json.loads(JUDGMENT), host=reviewer)
     assert (review["host"], review["model"], review["effort"]) == (reviewer, resolved["model"], resolved["effort"])
@@ -202,6 +204,22 @@ def test_a_changed_reviewer_request_on_the_same_key_is_an_idempotency_conflict(t
         assert _start(env, authority, entry, *outer, *changed) == 2
         assert _last_envelope(capsys)["code"] == "IDEMPOTENCY_CONFLICT"
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_a_changed_reviewer_model_selector_on_the_same_key_is_an_idempotency_conflict(tmp_path, monkeypatch, capsys,
+                                                                                     entry):
+    """r1: Claude's ``judgment`` tier and its exact model resolve to one request, yet review with other provenance."""
+    env, authority, root = _ingress(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(supervisor_module, "run_managed_command",
+                        lambda store, token, context, **kwargs: calls.append(kwargs) or 0)
+    outer = _flags("codex", "host", root)
+    exact = json.dumps({"kind": "exact", "id": resolve_request(json.loads(JUDGMENT), host="claude")["model"]})
+    assert _start(env, authority, entry, *outer, *_flags("claude", "review-host", root, model=JUDGMENT)) == 0
+    capsys.readouterr()
+    assert _start(env, authority, entry, *outer, *_flags("claude", "review-host", root, model=exact)) == 2
+    assert _last_envelope(capsys)["code"] == "IDEMPOTENCY_CONFLICT" and len(calls) == 1
 
 
 def _request(host: str, root: Path, *, model: str = EXECUTION):
@@ -422,6 +440,74 @@ def test_a_codex_reviewer_keeps_its_admitted_version_bound_to_the_qualified_laun
     session.close(None, None, None)
 
 
+def _worker_dirs(monkeypatch) -> list[Path]:
+    """Every ``ffs-worker-*`` directory a session allocates, without diffing the shared /tmp."""
+    import tempfile
+
+    created, real_mkdtemp = [], tempfile.mkdtemp
+
+    def spy(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        if kwargs.get("prefix") == "ffs-worker-":
+            created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(tempfile, "mkdtemp", spy)
+    return created
+
+
+def test_a_claude_outer_whose_codex_reviewer_is_refused_leaves_no_worker_directory(tmp_path, monkeypatch):
+    """r1: the reviewer's admission fails after the worker channel exists; the session must not leak it."""
+    world = _claude_session(tmp_path, monkeypatch)
+    _codex_pieces(tmp_path, monkeypatch)
+
+    def refuse(_binary):
+        raise host_capabilities.CapabilityError("fixture: reviewer CLI refused")
+
+    monkeypatch.setattr(host_capabilities, "admit_cli", refuse)
+    created = _worker_dirs(monkeypatch)
+    with pytest.raises(SupervisorRefused) as refused:
+        world.prepare(review_host_request=_request("codex", tmp_path.resolve(), model=JUDGMENT),
+                      review_model_request=None)
+    assert refused.value.code == "HOST_CAPABILITY_UNQUALIFIED"
+    assert len(created) == 1 and not created[0].exists()
+
+
+def test_a_codex_outer_whose_claude_reviewer_is_refused_leaves_no_worker_directory(tmp_path, monkeypatch):
+    """r1: the same release on the real Codex session, its worker socket bound, when the Claude seam refuses."""
+    from run_state.managed import prepare_managed_run
+    from test_managed_codex_dispatch import _qualified_host
+
+    primary, authority, _repository_id, env = _setup(tmp_path)
+    outer = _qualified_host(tmp_path, monkeypatch)
+    monkeypatch.chdir(primary)
+
+    def refuse(*_args, **_kwargs):
+        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
+
+    monkeypatch.setattr(managed, "build_claude_runtime_seam", refuse)
+    created = _worker_dirs(monkeypatch)
+
+    def execute(store, token, context):
+        upstream_runtime, _digest = cli._load_upstream_runtime(SimpleNamespace(
+            upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+            upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"]))
+        with pytest.raises(SupervisorRefused) as refused:
+            supervisor_module.prepare_managed_codex_session(
+                store, token, context, ("/gsd-plan-phase", "1"), "xf-leak", outer, upstream_runtime=upstream_runtime,
+                review_host_request=_request("claude", tmp_path.resolve(), model=JUDGMENT))
+        assert refused.value.code == "HOST_CAPABILITY_UNQUALIFIED"
+        return 0
+
+    assert prepare_managed_run(
+        objective="reviewer refused", state_root=authority, selection_manifest=env["FFS_SELECTION_MANIFEST"],
+        upstream_runtime_manifest=env["FFS_UPSTREAM_RUNTIME_MANIFEST"],
+        upstream_runtime_sha256=env["FFS_UPSTREAM_RUNTIME_SHA256"], request_key="xf-leak",
+        command=("/gsd-plan-phase", "1"), dispatch_limit=3, token_limit=1000, on_ready=execute,
+        run_id="xf-leak", activity="plan", scope="1", host_request=outer) == 0
+    assert len(created) == 1 and not created[0].exists()
+
+
 # --- the lifecycle routing: only the spec and final reviews cross --------------------------------------------------
 
 
@@ -430,7 +516,7 @@ def _seam(host: str) -> HostRuntimeSeam:
                            model=host + "-model", effort=None, model_request={"kind": "exact", "id": host + "-model"})
 
 
-def _route(monkeypatch, *, outer: str, reviewer: str | None) -> dict[str, str]:
+def _route(monkeypatch, *, outer: str, reviewer: str | None, timeouts: dict | None = None) -> dict[str, str]:
     """Drive one sealed lifecycle over scripted producers; return the host seam each producer was handed."""
     routed, sealed = {}, {}
 
@@ -455,8 +541,10 @@ def _route(monkeypatch, *, outer: str, reviewer: str | None) -> dict[str, str]:
         sealed["acceptance"] = SimpleNamespace(material={"command_mode": "task-swarm"})
 
     def producer(name):
-        def produce(*_args, seam, **_kwargs):
+        def produce(*_args, seam, **kwargs):
             routed[name] = seam.host
+            if timeouts is not None and "timeout_seconds" in kwargs:
+                timeouts[name] = kwargs["timeout_seconds"]
         return produce
 
     def drive(_store, _token, *, supervisor, controller, workspace, parent_activity_id, producers):
@@ -484,6 +572,8 @@ def _route(monkeypatch, *, outer: str, reviewer: str | None) -> dict[str, str]:
                   execute=lambda *_args, **_kwargs: None, close=lambda *args: closed.append(args))
     if reviewer is not None:
         fields["review_seam"] = _seam(reviewer)
+        if timeouts is not None:
+            fields["review_timeout_seconds"] = 90
     draft = {"spec_review": "native", "criteria": [], "exclusions": [], "global_invariants": []}
     assert frontend_producers.drive_managed_session(
         Store(), SimpleNamespace(repository_id="repo", run_id="run", generation=1), SimpleNamespace(activity_id="parent"),
@@ -505,3 +595,11 @@ def test_only_the_spec_and_final_reviews_cross_to_the_reviewer_seam(monkeypatch,
     assert _route(monkeypatch, outer=outer, reviewer=reviewer) == {
         "spec_review": reviewer, "final_review": reviewer,
         "produce_recovery": outer, "produce_repair": outer, "repair_unfinished": outer}
+
+
+@DIRECTIONS
+def test_the_spec_and_final_reviews_run_under_the_reviewer_timeout(monkeypatch, outer, reviewer):
+    """r1: ``--review-host-timeout`` governs the reviews it opted in; the outer's own timeout is 30 here."""
+    timeouts = {}
+    _route(monkeypatch, outer=outer, reviewer=reviewer, timeouts=timeouts)
+    assert (timeouts["spec_review"], timeouts["final_review"]) == (90, 90)
