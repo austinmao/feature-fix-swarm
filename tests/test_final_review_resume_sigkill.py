@@ -196,7 +196,8 @@ def _real_host(tmp_path: Path, monkeypatch, *, group_dir=None) -> tuple[Path, Pa
     catalog.write_text(json.dumps({"models": [{"slug": "gpt-5.6-terra"}]}))
     monkeypatch.setattr(managed_qualification, "_observer_module", lambda: _Observer)
     monkeypatch.setattr(managed_qualification, "verify_runtime", _verify_runtime)
-    monkeypatch.setattr(host_capabilities, "admit_cli", lambda _binary: {"version": "0.154.0"})
+    monkeypatch.setattr(host_capabilities, "admit_cli", lambda binary: {
+        "version": "0.154.0", "binary": host_capabilities._binary_chain(Path(binary))})
     import run_state.shared_resources as shared_resources
     import run_state.supervisor as supervisor_module
     from run_state.managed_admission import ManagedAdmissionQueue

@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-07, spec-014 E8 prerequisite 5: CLI version bound to the launcher)
+
+- `admit_cli` now records the launcher chain it inspected (launcher, and for a `.js`
+  launcher its Node and vendor executable), and refuses if that chain changes across its own
+  `--version` and `exec --help` probes. A managed Codex session refuses
+  `HOST_CLI_VERSION_UNBOUND` when the runtime it qualified carries any other chain, or when
+  admission recorded none. Before, the version was read before qualification and nothing tied
+  it to the launcher digest qualification pinned later, so bytes swapped in between could run
+  under the admitted version's review provenance (F53 review r1, MEDIUM).
+- Fixture-proven only. Not native host qualification, not E8.
+
 ### Fixed (2026-10-07, spec-014 E8 prerequisite 4: Codex review catalog source)
 
 - The Codex native review's model catalog now comes from the qualified binary itself:

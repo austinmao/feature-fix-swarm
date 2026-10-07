@@ -759,15 +759,20 @@ def command_output(binary: str, *args: str) -> str:
 
 
 def admit_cli(binary: str) -> dict[str, object]:
+    # The version is a property of these bytes: record the launcher chain the probes ran and
+    # require it unchanged across them, so qualification can refuse any other executable.
+    chain = _binary_chain(Path(binary))
     version = version_from(command_output(binary, "--version"))
     help_text = command_output(binary, "exec", "--help")
+    if _binary_chain(Path(binary)) != chain:
+        raise CapabilityError("Codex CLI launcher changed while it was admitted")
     absent = [flag for flag in (*REQUIRED_EXEC_FLAGS, REQUIRED_HOOK_FLAG) if flag not in help_text]
     if absent:
         raise CapabilityError("Codex CLI lacks required isolated-runtime capabilities: " + ", ".join(absent))
     # Help output is only a static surface check.  Runtime admission remains
     # UNMET until verify_runtime validates a canary from this exact executable.
     return {"schema": "ffs.codex-capabilities/v1", "version": version, "tiers": CODEX_TIERS,
-            "runtime_readiness": "UNMET", "static_surface": True}
+            "runtime_readiness": "UNMET", "static_surface": True, "binary": chain}
 
 
 def _toml_string(value: str) -> str:
