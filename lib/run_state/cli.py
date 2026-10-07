@@ -388,6 +388,7 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
         ceremony_estimate=getattr(args, "ceremony_estimate", None),
         capacity_policy=getattr(args, 'capacity_policy', None),
         review_host_request=review_host_request,
+        review_model_request=_model_request_from_args(args, "review_host"),
     )
 
 

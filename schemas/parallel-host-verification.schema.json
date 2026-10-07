@@ -147,7 +147,11 @@
           {"properties": {"direction": {"const": "claude-codex"}, "outer_host": {"const": "claude"}, "reviewer_host": {"const": "codex"}}},
           {"properties": {"direction": {"const": "codex-claude"}, "outer_host": {"const": "codex"}, "reviewer_host": {"const": "claude"}}}
         ]
-      }
+      },
+      "allOf": [
+        {"contains": {"properties": {"direction": {"const": "claude-codex"}}}},
+        {"contains": {"properties": {"direction": {"const": "codex-claude"}}}}
+      ]
     },
     "status_artifact": {
       "type": "object",

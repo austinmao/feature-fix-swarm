@@ -476,17 +476,23 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
     socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
     channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
     supervisor = Supervisor(store, token, evidence_root=host_evidence, worker_channel=channel)
-    seam, _release = build_claude_runtime_seam(
-        store, token, host_request, model_request=model_request, host_evidence=host_evidence,
-        upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
-    )
-    review_seam, review_release = None, None
-    if review_host_request is not None:
-        from .supervisor import build_codex_runtime_seam
-        review_seam, review_release = build_codex_runtime_seam(
-            store, token, review_host_request, model_request=review_model_request, host_evidence=host_evidence,
+    try:
+        seam, _release = build_claude_runtime_seam(
+            store, token, host_request, model_request=model_request, host_evidence=host_evidence,
             upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
         )
+        review_seam, review_release = None, None
+        if review_host_request is not None:
+            from .supervisor import build_codex_runtime_seam
+            review_seam, review_release = build_codex_runtime_seam(
+                store, token, review_host_request, model_request=review_model_request, host_evidence=host_evidence,
+                upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
+            )
+    except BaseException:
+        # A refused seam (an opted-in Codex reviewer's admission) has bound nothing yet: free the channel.
+        from .supervisor import _close_unused_worker_channel
+        _close_unused_worker_channel(channel, socket_root)
+        raise
 
     def prepare_runtime(activity_id: str, preparation, activity_request_key: str,
                         parent_activity_id: str, final_contract_hash: str,
@@ -577,4 +583,5 @@ def prepare_managed_claude_session(store, token, context, command, request_key, 
         host="claude", supervisor=supervisor, evidence_root=host_evidence, ready=ready, child_key=child_key,
         outer_activity_id=outer_activity_id, invocation=invocation, timeout_seconds=host_request.timeout_seconds, seam=seam,
         prepare_outer=prepare_outer, execute=execute, close=close, review_seam=review_seam,
+        review_timeout_seconds=None if review_host_request is None else review_host_request.timeout_seconds,
     )

@@ -527,6 +527,7 @@ class ManagedHostSession:
     execute: Callable
     close: Callable
     review_seam: HostRuntimeSeam | None = None
+    review_timeout_seconds: int | None = None
 
 
 def retained_outer_activity(store, token, *, parent_activity_id: str, child_key: str) -> str | None:
@@ -787,6 +788,8 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
         review_supervisor = Supervisor(store, token, evidence_root=session.evidence_root)
         # D31: the spec and final reviews run on an opted-in opposite-host reviewer, else on the outer's host.
         reviewer_seam = session.review_seam or session.seam
+        reviewer_timeout = (session.timeout_seconds if session.review_timeout_seconds is None
+                            else session.review_timeout_seconds)
         if sealed is None and acceptance_draft is not None:
             review = None
             if isinstance(acceptance_draft, dict) and acceptance_draft.get("spec_review") == "native":
@@ -796,7 +799,7 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
                     return produce_spec_review(
                         store, token, supervisor=review_supervisor, seam=reviewer_seam,
                         parent_activity_id=request.activity_id, preparation=session.ready, draft=draft_row,
-                        timeout_seconds=session.timeout_seconds)
+                        timeout_seconds=reviewer_timeout)
             seal_from_draft(store, token, command_mode=str(session.invocation[0]), draft=acceptance_draft,
                             runtime_hash=request.runtime_identity, candidate_hash=session.ready.input_digest,
                             review=review)
@@ -828,7 +831,7 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
         def final_review(_frozen):
             produce_final_review(store, token, supervisor=review_supervisor, controller=controller, seam=reviewer_seam,
                                  parent_activity_id=request.activity_id, preparation=session.ready,
-                                 timeout_seconds=session.timeout_seconds)
+                                 timeout_seconds=reviewer_timeout)
 
         def recover(packet):
             return produce_recovery(store, token, supervisor=review_supervisor, controller=controller,

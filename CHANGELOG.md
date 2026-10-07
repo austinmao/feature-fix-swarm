@@ -24,16 +24,19 @@ all skills.
   binding now live in `build_codex_runtime_seam`, and the Claude qualification and binding in
   `build_claude_runtime_seam`; each outer session uses its own builder unchanged. Only the spec
   review and the final review take the reviewer seam (its model request resolved for the
-  reviewer host, never the outer's); recovery and repair stay on the outer host. Session close
-  releases the reviewer's bound material too.
-- The request material gains `review_host_request` only when it is set, so a run without it
-  keeps its request digest; a changed or dropped reviewer request on the same key refuses
-  `IDEMPOTENCY_CONFLICT`.
+  reviewer host, never the outer's) and run under the reviewer's own timeout; recovery and
+  repair stay on the outer host. Session close releases the reviewer's bound material too, and a
+  refused seam build (the reviewer's admission included) releases the worker channel and its
+  socket directory.
+- The request material gains `review_host_request` and the reviewer's typed
+  `review_model_request` only when a reviewer is set, so a run without one keeps its request
+  digest; a changed or dropped reviewer request on the same key, or a selector that resolves to
+  the same model under other provenance, refuses `IDEMPOTENCY_CONFLICT`.
 - Verifier: the hosts gate's review directions are now rows `{direction, outer_host,
   reviewer_host, artifact}` instead of bare strings. Each row must name opposite hosts that spell
   its direction, both directions are required once, and the transcript artifact is byte bound;
   the hosts result carries the rows and aggregate revalidates them. The published schema binds
-  the same rows (`$defs/review_rows`).
+  the same rows (`$defs/review_rows`), each direction exactly once.
 - Fixture-proven only. Not native host qualification, not E8.
 
 ### Fixed (2026-10-07: review gate splices only the active project's wall residuals)

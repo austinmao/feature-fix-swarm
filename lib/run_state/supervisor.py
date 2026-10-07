@@ -3766,17 +3766,22 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         store, token, evidence_root=host_evidence,
         worker_channel=channel,
     )
-    seam, release = build_codex_runtime_seam(
-        store, token, host_request, model_request=model_request, host_evidence=host_evidence,
-        upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
-    )
-    review_seam, review_release = None, None
-    if review_host_request is not None:
-        from run_state.managed_claude_qualification import build_claude_runtime_seam
-        review_seam, review_release = build_claude_runtime_seam(
-            store, token, review_host_request, model_request=review_model_request, host_evidence=host_evidence,
+    try:
+        seam, release = build_codex_runtime_seam(
+            store, token, host_request, model_request=model_request, host_evidence=host_evidence,
             upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
         )
+        review_seam, review_release = None, None
+        if review_host_request is not None:
+            from run_state.managed_claude_qualification import build_claude_runtime_seam
+            review_seam, review_release = build_claude_runtime_seam(
+                store, token, review_host_request, model_request=review_model_request, host_evidence=host_evidence,
+                upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
+            )
+    except BaseException:
+        # A refused seam (the outer's admission or an opted-in reviewer's) has bound nothing yet: free the channel.
+        _close_unused_worker_channel(channel, socket_root)
+        raise
     bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
 
     def prepare_runtime(activity_id: str, preparation, activity_request_key: str,
@@ -3913,7 +3918,17 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
         host="codex", supervisor=supervisor, evidence_root=host_evidence, ready=ready, child_key=child_key,
         outer_activity_id=outer_activity_id, invocation=invocation, timeout_seconds=host_request.timeout_seconds, seam=seam,
         prepare_outer=prepare_outer, execute=execute, close=close, review_seam=review_seam,
+        review_timeout_seconds=None if review_host_request is None else review_host_request.timeout_seconds,
     )
+
+
+def _close_unused_worker_channel(channel, socket_root: Path) -> None:
+    """Release a worker channel no launch ever used, and its private socket directory."""
+    channel.close()
+    try:
+        socket_root.rmdir()
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
