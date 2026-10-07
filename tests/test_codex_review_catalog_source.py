@@ -42,7 +42,8 @@ def _bundled(slugs) -> bytes:
                                   for slug in slugs]}, sort_keys=True).encode() + b"\n"
 
 
-def _fake(tmp_path: Path, stdout: bytes = b"", *, status: int = 0, delay: int = 0) -> tuple[Path, Path]:
+def _fake(tmp_path: Path, stdout: bytes = b"", *, status: int = 0, delay: int = 0,
+          before_exit: str = "") -> tuple[Path, Path]:
     """A scripted Codex that prints ``stdout`` for ``debug models --bundled`` and logs every call."""
     catalog = tmp_path / "bundled.json"
     catalog.write_bytes(stdout)
@@ -53,7 +54,7 @@ def _fake(tmp_path: Path, stdout: bytes = b"", *, status: int = 0, delay: int = 
         f"{{ printf 'argv=%s\\n' \"$*\"; printf 'cwd=%s\\n' \"$(pwd)\"; env; ls -A \"$HOME\" | sed 's/^/home=/'; "
         f"stat -f 'mode=%Lp' \"$HOME\" 2>/dev/null || stat -c 'mode=%a' \"$HOME\"; }} >> '{log}'\n"
         f"[ \"$*\" = 'debug models --bundled' ] || exit 64\n"
-        f"sleep {delay}\ncat '{catalog}'\nexit {status}\n")
+        f"sleep {delay}\ncat '{catalog}'\n{before_exit}exit {status}\n")
     binary.chmod(0o755)
     return binary, log
 
@@ -197,8 +198,7 @@ def test_a_descendant_holding_stdout_refuses_within_the_deadline(tmp_path, monke
 
 
 def test_a_descendant_appending_after_the_leader_exits_is_part_of_the_output(tmp_path):
-    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
-    binary.write_text(binary.read_text().replace("exit 0\n", "(sleep 1; echo trailing) &\nexit 0\n"))
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]), before_exit="(sleep 1; echo trailing) &\n")
     parent, workspace = _dirs(tmp_path)
     with pytest.raises(NativeReviewRuntimeRefused) as caught:
         prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
@@ -207,8 +207,7 @@ def test_a_descendant_appending_after_the_leader_exits_is_part_of_the_output(tmp
 
 
 def test_a_leader_that_closes_stdout_before_exiting_keeps_its_catalog(tmp_path):
-    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
-    binary.write_text(binary.read_text().replace("exit 0\n", "exec 1>&-\nsleep 1\nexit 0\n"))
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]), before_exit="exec 1>&-\nsleep 1\n")
     parent, workspace = _dirs(tmp_path)
     material = prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
                                              runtime_root=parent / "closed-early", workspace=workspace)
@@ -230,8 +229,8 @@ def test_an_unverifiable_leader_exit_refuses(tmp_path):
 
 
 def test_a_launcher_changed_while_its_catalog_runs_refuses(tmp_path):
-    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
-    binary.write_text(binary.read_text().replace("exit 0\n", f"printf '# swapped\\n' >> '{binary}'\nexit 0\n"))
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]),
+                         before_exit=f"printf '# swapped\\n' >> '{tmp_path / 'codex'}'\n")
     parent, workspace = _dirs(tmp_path)
     with pytest.raises(NativeReviewRuntimeRefused, match="changed while its catalog ran"):
         prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
