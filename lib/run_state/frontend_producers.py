@@ -509,6 +509,9 @@ class ManagedHostSession:
     ``prepare_outer()`` returns ``(DispatchRequest, adapter)`` for the outer
     orchestrator (replay-safe through retained qualification); ``execute``
     launches it and settles waves; ``close`` releases channel and material.
+    ``review_seam`` (D31) is an opted-in reviewer on the opposite host family:
+    only the spec review and the final review run on it; recovery and repair
+    stay on the outer host's ``seam``.
     """
 
     host: str
@@ -523,6 +526,8 @@ class ManagedHostSession:
     prepare_outer: Callable
     execute: Callable
     close: Callable
+    review_seam: HostRuntimeSeam | None = None
+    review_timeout_seconds: int | None = None
 
 
 def retained_outer_activity(store, token, *, parent_activity_id: str, child_key: str) -> str | None:
@@ -781,6 +786,10 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
         # Native review and sealed checks cross a channel-less supervisor; the
         # worker channel stays with the outer orchestrator only.
         review_supervisor = Supervisor(store, token, evidence_root=session.evidence_root)
+        # D31: the spec and final reviews run on an opted-in opposite-host reviewer, else on the outer's host.
+        reviewer_seam = session.review_seam or session.seam
+        reviewer_timeout = (session.timeout_seconds if session.review_timeout_seconds is None
+                            else session.review_timeout_seconds)
         if sealed is None and acceptance_draft is not None:
             review = None
             if isinstance(acceptance_draft, dict) and acceptance_draft.get("spec_review") == "native":
@@ -788,9 +797,9 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
                 # outer's runtime receipt is fresh for only a few minutes.
                 def review(draft_row):
                     return produce_spec_review(
-                        store, token, supervisor=review_supervisor, seam=session.seam,
+                        store, token, supervisor=review_supervisor, seam=reviewer_seam,
                         parent_activity_id=request.activity_id, preparation=session.ready, draft=draft_row,
-                        timeout_seconds=session.timeout_seconds)
+                        timeout_seconds=reviewer_timeout)
             seal_from_draft(store, token, command_mode=str(session.invocation[0]), draft=acceptance_draft,
                             runtime_hash=request.runtime_identity, candidate_hash=session.ready.input_digest,
                             review=review)
@@ -820,9 +829,9 @@ def drive_managed_session(store, token, context, session: ManagedHostSession, *,
                                      ready=session.ready, process_evidence=evidence)
 
         def final_review(_frozen):
-            produce_final_review(store, token, supervisor=review_supervisor, controller=controller, seam=session.seam,
+            produce_final_review(store, token, supervisor=review_supervisor, controller=controller, seam=reviewer_seam,
                                  parent_activity_id=request.activity_id, preparation=session.ready,
-                                 timeout_seconds=session.timeout_seconds)
+                                 timeout_seconds=reviewer_timeout)
 
         def recover(packet):
             return produce_recovery(store, token, supervisor=review_supervisor, controller=controller,

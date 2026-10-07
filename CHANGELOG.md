@@ -8,6 +8,37 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-07, spec-014 E8 prerequisite 4b: cross-family native review)
+
+- The production native review always ran on the outer run's own host: every producer took
+  the session's one host seam, so neither PATH-014 direction (`claude-codex`: a Claude outer
+  reviewed by Codex; `codex-claude`: a Codex outer reviewed by Claude) could be produced.
+  Operator decision D31: an explicit `--review-host*` request (shell: `FFS_REVIEW_HOST_*`;
+  model `{"kind":"tier","name":"judgment"}`, sandbox `read-only` (`workspace-write` for a
+  Claude reviewer, the only one its closed request admits) and network `disabled` by default)
+  reuses the host request parser and its all-or-none rule (`HOST_REQUEST_INCOMPLETE`); a
+  reviewer on the outer's own host refuses `REVIEW_HOST_NOT_OPPOSITE` at ingress and again in
+  the managed command.
+- The reviewer's seam is built with the other host's own pieces: the Codex admission (with the
+  `HOST_CLI_VERSION_UNBOUND` binding), F43 reaper, private staging, qualification and launch
+  binding now live in `build_codex_runtime_seam`, and the Claude qualification and binding in
+  `build_claude_runtime_seam`; each outer session uses its own builder unchanged. Only the spec
+  review and the final review take the reviewer seam (its model request resolved for the
+  reviewer host, never the outer's) and run under the reviewer's own timeout; recovery and
+  repair stay on the outer host. Session close releases the reviewer's bound material too, and a
+  refused seam build (the reviewer's admission included) releases the worker channel and its
+  socket directory.
+- The request material gains `review_host_request` and the reviewer's typed
+  `review_model_request` only when a reviewer is set, so a run without one keeps its request
+  digest; a changed or dropped reviewer request on the same key, or a selector that resolves to
+  the same model under other provenance, refuses `IDEMPOTENCY_CONFLICT`.
+- Verifier: the hosts gate's review directions are now rows `{direction, outer_host,
+  reviewer_host, artifact}` instead of bare strings. Each row must name opposite hosts that spell
+  its direction, both directions are required once, and the transcript artifact is byte bound;
+  the hosts result carries the rows and aggregate revalidates them. The published schema binds
+  the same rows (`$defs/review_rows`), each direction exactly once.
+- Fixture-proven only. Not native host qualification, not E8.
+
 ### Fixed (2026-10-07: review gate splices only the active project's wall residuals)
 
 - `scripts/gsd/review-gate-command.sh` now resolves its phases root the same way
@@ -17,6 +48,7 @@ all skills.
   and another project's residuals in the default root reached the reviewer. The reviewer
   then returned BLOCK for not resolving them, and that used up both review rounds. The
   scope-drift plan glob uses the same root.
+
 
 ### Fixed (2026-10-07, spec-014 E8 prerequisite 5: CLI version bound to the launcher)
 

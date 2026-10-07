@@ -3328,34 +3328,41 @@ def _managed_wave_prompt(plan_prompt: str) -> str:
 
 def run_managed_command(store, token, context, command, request_key,
                         dispatch_limit, token_limit, host_request=None, upstream_runtime=None, *,
-                        model_request=None, acceptance_draft=None) -> int:
+                        model_request=None, acceptance_draft=None, review_host_request=None,
+                        review_model_request=None) -> int:
     """Production context callback for explicitly selected local processes.
 
     Every native process, including qualification and nested GSD executors,
     crosses the same durable launch-intent and authorization boundary.  With a
     sealed acceptance (or an explicit draft to seal after outer qualification)
     the run is driven through the frontend lifecycle producers; otherwise the
-    outer orchestrator executes once, as before.
+    outer orchestrator executes once, as before.  An opted-in reviewer (D31)
+    runs the spec and final reviews on the opposite host family.
     """
     if host_request is None:
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
+    from run_state.host_request import ClaudeHostRequest, CodexHostRequest
+    if review_host_request is not None and (
+            type(review_host_request) not in {ClaudeHostRequest, CodexHostRequest}
+            or type(review_host_request) is type(host_request)):
+        raise SupervisorRefused("REVIEW_HOST_NOT_OPPOSITE")
     from run_state.frontend_producers import terminal_lifecycle_outcome
     terminal = terminal_lifecycle_outcome(store, token)
     if terminal is not None:
         # A terminal sealed lifecycle replays without re-preparing or relaunching anything.
         return terminal
-    from run_state.host_request import ClaudeHostRequest, CodexHostRequest
+    review = {"review_host_request": review_host_request, "review_model_request": review_model_request}
     if type(host_request) is ClaudeHostRequest:
         from run_state.managed_claude_qualification import run_managed_claude_command
         return run_managed_claude_command(store, token, context, command, request_key, host_request,
                                          upstream_runtime=upstream_runtime, model_request=model_request,
-                                         acceptance_draft=acceptance_draft)
+                                         acceptance_draft=acceptance_draft, **review)
     if type(host_request) is not CodexHostRequest:
         raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
     from run_state.frontend_producers import drive_managed_session
     session = prepare_managed_codex_session(
         store, token, context, command, request_key, host_request, upstream_runtime=upstream_runtime,
-        model_request=model_request)
+        model_request=model_request, **review)
     return drive_managed_session(store, token, context, session, acceptance_draft=acceptance_draft)
 
 
@@ -3589,28 +3596,20 @@ def _recorded_tmpdir_provably_released(store, activity_id: str, path: str, ident
     return bound and _launches_provably_dead(store, activity_id)
 
 
-def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
-                                  upstream_runtime=None, model_request=None):
-    """Qualification seams, worker channel and outer contract for one Codex host run."""
+def build_codex_runtime_seam(store, token, host_request, *, model_request, host_evidence: Path, upstream: dict,
+                             child_key: str, outer_supervisor):
+    """The Codex ``HostRuntimeSeam`` and the release of every launch material it bound.
+
+    Admission (the admitted version bound to the launcher qualification pins, prerequisite 5), the F43 reaper,
+    private staging, qualification and launch binding, unchanged for a Codex outer's orchestrator and wave workers.
+    A Claude outer builds its opted-in Codex reviewer (D31) with the same pieces, from the reviewer's own request.
+    """
     from host_capabilities import GsdSupervisorEnvironment, admit_cli
     from run_state.codex_host import CodexHostAdapter
-    from run_state.frontend_producers import (
-        HostRuntimeSeam, ManagedHostSession, QualifiedHostRuntime, rebind_retained_child,
-        resumable_outer_completion, retained_launch, retained_outer_activity,
-    )
-    from run_state.managed_qualification import (
-        ManagedQualificationRefused, qualify_managed_runtime,
-    )
-    from run_state.prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
-    from run_state.runtime_staging import (
-        STAGE_MANIFEST_NAME, RetainedRuntimeNotReusable, stage_or_reuse_private_codex_runtime,
-    )
-    from run_state.wave_consumer import WaveConsumer
-    from run_state.worker_channel import WorkerChannelServer
-    import tempfile
+    from run_state.frontend_producers import HostRuntimeSeam, QualifiedHostRuntime, retained_launch
+    from run_state.managed_qualification import ManagedQualificationRefused, qualify_managed_runtime
+    from run_state.runtime_staging import RetainedRuntimeNotReusable, stage_or_reuse_private_codex_runtime
 
-    root, operation, child_key, ready = _managed_inventory_workspace(store, token, context, request_key)
-    host_evidence = Path(context.evidence_root) / "host"
     runtime_root = host_evidence / "runtimes"
     # F43: every Codex launch records its private TMPDIR here.  A supervisor
     # killed mid-run leaves them behind; resume reaps only the provably dead.
@@ -3618,34 +3617,8 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     bound: list[tuple[str, CodexLaunchMaterial]] = []
     reap_orphan_private_tmpdirs(tmp_records, lambda activity_id, path, identity:
                                 _recorded_tmpdir_provably_released(store, activity_id, path, identity))
-    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
-                                                 child_key=child_key) or str(uuid.uuid4()))
-    outer_home = runtime_root / outer_activity_id
-    upstream = context.upstream or {}
-    try:
-        planning_root = str(rebase_planning_root(
-            upstream, root_workspace=context.workspace, preparation_path=ready.path,
-        ))
-    except PrelaunchInventoryRefused as error:
-        raise SupervisorRefused(str(error)) from error
-    # Naming the staged command is pure (no filesystem/socket/process
-    # allocation): a refusal here (unstaged frontend, missing scope, operation
-    # conflict) must never leak a /tmp worker-channel dir or a staged runtime
-    # copy (which includes an auth copy) -- so it runs before any of that.
-    invocation, prompt, role = _managed_prompt(
-        root, operation, command, staged_runtime_home=outer_home,
-        planning_root=planning_root, project=upstream.get("project"),
-        workstream=upstream.get("workstream"), planning_scope=token.planning_scope,
-    )
-
-    socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
-    channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
     runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     runtime_root.chmod(0o700)
-    supervisor = Supervisor(
-        store, token, evidence_root=host_evidence,
-        worker_channel=channel,
-    )
     try:
         cli = admit_cli(host_request.binary)
     except (CapabilityError, OSError, ValueError) as error:
@@ -3656,8 +3629,6 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
     bridge_command = json.dumps(
         [sys.executable, str(bridge)], ensure_ascii=True, separators=(",", ":"),
     )
-
-    outer_supervisor = supervisor
 
     def qualify_runtime(activity_id: str, preparation, activity_request_key: str,
                         parent_activity_id: str, final_contract_hash: str, child_role: str, *,
@@ -3725,12 +3696,100 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             managed_input_sha256=preparation.input_digest,
         ), qualified.adapter
 
+    def release():
+        # F43: every material this seam bound releases its private TMPDIR only
+        # through the one durable liveness proof.  An exited monitor is not
+        # proof: Codex outlives a killed auth guard in its process group.  A
+        # live or undecidable launch keeps its dir and record for the next
+        # session's reaper.
+        for activity_id, launch_material in bound:
+            try:
+                if (os.path.lexists(launch_material.temporary_dir)
+                        and _launches_provably_dead(store, activity_id)):
+                    CodexHostAdapter.release_launch_material(launch_material)
+            except Exception:
+                pass
+
+    seam = HostRuntimeSeam(
+        host="codex", qualify=qualify_runtime, bind=bind_launch, binary=host_request.binary,
+        cli_version=str(cli["version"]), model=host_request.model, effort=host_request.effort,
+        model_request=dict(model_request) if model_request is not None else {"kind": "exact", "id": host_request.model},
+    )
+    return seam, release
+
+
+def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
+                                  upstream_runtime=None, model_request=None, review_host_request=None,
+                                  review_model_request=None):
+    """Qualification seams, worker channel and outer contract for one Codex host run.
+
+    An opted-in Claude reviewer (D31) gets its own seam from the Claude host's staging and qualification.
+    """
+    from run_state.frontend_producers import (
+        ManagedHostSession, rebind_retained_child, resumable_outer_completion, retained_launch,
+        retained_outer_activity,
+    )
+    from run_state.prelaunch_inventory import PrelaunchInventoryRefused, rebase_planning_root
+    from run_state.runtime_staging import (
+        STAGE_MANIFEST_NAME, RetainedRuntimeNotReusable, stage_or_reuse_private_codex_runtime,
+    )
+    from run_state.wave_consumer import WaveConsumer
+    from run_state.worker_channel import WorkerChannelServer
+    import tempfile
+
+    root, operation, child_key, ready = _managed_inventory_workspace(store, token, context, request_key)
+    host_evidence = Path(context.evidence_root) / "host"
+    runtime_root = host_evidence / "runtimes"
+    outer_activity_id = (retained_outer_activity(store, token, parent_activity_id=context.activity_id,
+                                                 child_key=child_key) or str(uuid.uuid4()))
+    outer_home = runtime_root / outer_activity_id
+    upstream = context.upstream or {}
+    try:
+        planning_root = str(rebase_planning_root(
+            upstream, root_workspace=context.workspace, preparation_path=ready.path,
+        ))
+    except PrelaunchInventoryRefused as error:
+        raise SupervisorRefused(str(error)) from error
+    # Naming the staged command is pure (no filesystem/socket/process
+    # allocation): a refusal here (unstaged frontend, missing scope, operation
+    # conflict) must never leak a /tmp worker-channel dir or a staged runtime
+    # copy (which includes an auth copy) -- so it runs before any of that.
+    invocation, prompt, role = _managed_prompt(
+        root, operation, command, staged_runtime_home=outer_home,
+        planning_root=planning_root, project=upstream.get("project"),
+        workstream=upstream.get("workstream"), planning_scope=token.planning_scope,
+    )
+
+    socket_root = Path(tempfile.mkdtemp(prefix="ffs-worker-", dir="/tmp")).resolve()
+    channel = WorkerChannelServer(store, token, socket_root / "worker.sock")
+    supervisor = Supervisor(
+        store, token, evidence_root=host_evidence,
+        worker_channel=channel,
+    )
+    try:
+        seam, release = build_codex_runtime_seam(
+            store, token, host_request, model_request=model_request, host_evidence=host_evidence,
+            upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
+        )
+        review_seam, review_release = None, None
+        if review_host_request is not None:
+            from run_state.managed_claude_qualification import build_claude_runtime_seam
+            review_seam, review_release = build_claude_runtime_seam(
+                store, token, review_host_request, model_request=review_model_request, host_evidence=host_evidence,
+                upstream=upstream, child_key=child_key, outer_supervisor=supervisor,
+            )
+    except BaseException:
+        # A refused seam (the outer's admission or an opted-in reviewer's) has bound nothing yet: free the channel.
+        _close_unused_worker_channel(channel, socket_root)
+        raise
+    bridge = Path(__file__).with_name("gsd_wave_bridge.py").resolve()
+
     def prepare_runtime(activity_id: str, preparation, activity_request_key: str,
                         parent_activity_id: str, final_contract_hash: str,
                         child_role: str, child_prompt: str, launch_request_key: str):
-        qualified = qualify_runtime(activity_id, preparation, activity_request_key, parent_activity_id,
-                                    final_contract_hash, child_role)
-        return bind_launch(qualified, child_prompt, preparation, final_contract_hash, launch_request_key)
+        qualified = seam.qualify(activity_id, preparation, activity_request_key, parent_activity_id,
+                                 final_contract_hash, child_role)
+        return seam.bind(qualified, child_prompt, preparation, final_contract_hash, launch_request_key)
 
     launch = retained_launch(store, outer_activity_id)
     # F51: once the sealed lifecycle is past execution, a settled succeeded outer
@@ -3849,30 +3908,28 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             socket_root.rmdir()
         except OSError:
             pass
-        # F43: every material this session bound (the outer included, which
-        # ``material`` names, and wave workers) releases its private TMPDIR only
-        # through the one durable liveness proof.  An exited monitor is not
-        # proof: Codex outlives a killed auth guard in its process group.  A
-        # live or undecidable launch keeps its dir and record for the next
-        # session's reaper.
-        for activity_id, launch_material in bound:
-            try:
-                if (os.path.lexists(launch_material.temporary_dir)
-                        and _launches_provably_dead(store, activity_id)):
-                    CodexHostAdapter.release_launch_material(launch_material)
-            except Exception:
-                pass
+        # F43: every material the outer seam bound (the outer included, which
+        # ``material`` names, and wave workers) and the reviewer seam bound.
+        release()
+        if review_release is not None:
+            review_release()
 
-    seam = HostRuntimeSeam(
-        host="codex", qualify=qualify_runtime, bind=bind_launch, binary=host_request.binary,
-        cli_version=str(cli["version"]), model=host_request.model, effort=host_request.effort,
-        model_request=dict(model_request) if model_request is not None else {"kind": "exact", "id": host_request.model},
-    )
     return ManagedHostSession(
         host="codex", supervisor=supervisor, evidence_root=host_evidence, ready=ready, child_key=child_key,
         outer_activity_id=outer_activity_id, invocation=invocation, timeout_seconds=host_request.timeout_seconds, seam=seam,
-        prepare_outer=prepare_outer, execute=execute, close=close,
+        prepare_outer=prepare_outer, execute=execute, close=close, review_seam=review_seam,
+        review_timeout_seconds=None if review_host_request is None else review_host_request.timeout_seconds,
     )
+
+
+def _close_unused_worker_channel(channel, socket_root: Path) -> None:
+    """Release a worker channel no launch ever used, and its private socket directory."""
+    channel.close()
+    try:
+        socket_root.rmdir()
+    except OSError:
+        pass
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 3 or sys.argv[1] not in {"_child", "_child_native", "_monitor", "_monitor_native"}:

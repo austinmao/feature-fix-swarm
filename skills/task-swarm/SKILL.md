@@ -204,6 +204,14 @@ unsealed (`SPEC_REVIEW_REJECTED`, remedy `revise_acceptance_draft`), and a
 revised draft (a higher `revision`) is reviewed again within the tier's
 allowance. Without the key nothing changes.
 
+Opt-in cross-family review (fixture-proven only): set `FFS_REVIEW_HOST_KIND`
+to the host opposite `FFS_HOST_KIND` (with `FFS_REVIEW_HOST_RUNTIME_HOME`,
+`FFS_REVIEW_HOST_BINARY`, `FFS_REVIEW_HOST_TOKEN_RESERVATION`, and for Claude
+`FFS_REVIEW_HOST_CREDENTIAL_SOURCE`) and the spec and final reviews run
+natively on that host, staged and qualified as its own runs are; recovery and
+repair stay on the outer host. The outer's own host refuses
+`REVIEW_HOST_NOT_OPPOSITE`. Unset, nothing changes.
+
 ## Rules
 
 - **Zero planned stops (MAX-AUTH default); one with `--gated`.** Any

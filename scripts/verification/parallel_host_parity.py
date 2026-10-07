@@ -77,6 +77,8 @@ ASSIGNMENT = {"finding_id", "action", "owner", "path_ids", "owning_phase", "regr
 PLATFORMS = frozenset({"darwin", "linux"})
 PAIRINGS = frozenset({"claude-claude", "claude-codex", "codex-codex"})
 REVIEW_DIRECTIONS = frozenset({"claude-codex", "codex-claude"})
+# PATH-014/FR-046: one row per direction binds the outer host, the opposite reviewer and the review transcript.
+REVIEW_ROW_FIELDS = frozenset({"direction", "outer_host", "reviewer_host", "artifact"})
 REQUIRED_AGGREGATE_GATES = frozenset({
     "audit", "coverage", "hosts", "installation-lifecycle", "matrix",
     "migration", "rollout", "upgrade-comparison",
@@ -2704,6 +2706,29 @@ def _gate_artifact(value: Any, budget: Budget, name: str) -> dict[str, str]:
     return {"locator": item.locator, "sha256": item.sha256}
 
 
+def _review_rows(value: Any, budget: Budget) -> list[dict[str, Any]]:
+    """Both cross-family review directions, each naming opposite outer/reviewer hosts and its transcript artifact.
+
+    A bare direction string, hosts that do not spell the direction, a same-host review or a repeated direction
+    refuses; the rows come back in direction order with their artifacts re-read and digest-checked.
+    """
+    if not isinstance(value, list):
+        raise E("HOST_REVIEW_ROW", "review directions must be an array of review rows")
+    rows: dict[str, dict[str, Any]] = {}
+    for raw in value:
+        row = _closed(raw, set(REVIEW_ROW_FIELDS), set(REVIEW_ROW_FIELDS), "HOST_REVIEW_ROW")
+        direction = _string(row["direction"], "review.direction")
+        outer, reviewer = _string(row["outer_host"], "review.outer_host"), _string(row["reviewer_host"], "review.reviewer_host")
+        if (direction not in REVIEW_DIRECTIONS or outer == reviewer
+                or direction != f"{outer}-{reviewer}" or direction in rows):
+            raise E("HOST_REVIEW_ROW", "each review direction needs one row naming its opposite outer and reviewer hosts")
+        rows[direction] = {"direction": direction, "outer_host": outer, "reviewer_host": reviewer,
+                           "artifact": _gate_artifact(row["artifact"], budget, "review direction")}
+    if set(rows) != REVIEW_DIRECTIONS:
+        raise E("HOST_MATRIX", "host evidence is missing a review direction", "UNMET")
+    return [rows[direction] for direction in sorted(rows)]
+
+
 def _pass(manifest: dict[str, Any], gate: str, purpose: str, **details: Any) -> dict[str, Any]:
     output = envelope(gate, purpose, "PASS", manifest, vec(), [])
     output.update(details)
@@ -2753,8 +2778,7 @@ def hosts_mode(value: Any, authenticated: bool, pairings: list[str],
     manifest, _, budget = _common(value, "hosts")
     hosts = _closed(manifest["hosts"], {"rows", "review_directions", "tier_rows"},
                     {"rows", "review_directions", "tier_rows"}, "HOSTS_SCHEMA")
-    if set(_strings(hosts["review_directions"], "hosts.review_directions", True)) != REVIEW_DIRECTIONS:
-        raise E("HOST_MATRIX", "host evidence is missing a review direction", "UNMET")
+    reviews = _review_rows(hosts["review_directions"], budget)
     rows = hosts["rows"]
     if not isinstance(rows, list):
         raise E("HOST_ROWS", "host rows must be an array")
@@ -2799,7 +2823,7 @@ def hosts_mode(value: Any, authenticated: bool, pairings: list[str],
     if observed_tiers != required_tiers:
         raise E("HOST_TIERS", "all eight native tiers are required", "UNMET")
     output = _pass(manifest, "hosts", "authenticated-verification", authenticated=True,
-                   pairings=sorted(PAIRINGS), review_directions=sorted(REVIEW_DIRECTIONS),
+                   pairings=sorted(PAIRINGS), review_directions=reviews,
                    soak_seconds=soak_seconds, row_count=len(rows))
     output["host"] = "mixed"
     output["model"] = "exact-recorded"
@@ -3102,8 +3126,8 @@ def _aggregate_result(value: Any, budget: Budget) -> dict[str, Any]:
                 or not coverage["files"]):
             raise E("AGGREGATE_RESULT", "coverage result summary is malformed", "UNMET")
     elif gate == "hosts":
+        _review_rows(result["review_directions"], budget)
         if (set(_strings(result["pairings"], "result.pairings", True)) != PAIRINGS
-                or set(_strings(result["review_directions"], "result.review_directions", True)) != REVIEW_DIRECTIONS
                 or result["soak_seconds"] != 600 or result["row_count"] != 6
                 or result["authenticated"] is not True or result["host"] != "mixed"
                 or result["model"] != "exact-recorded"):
