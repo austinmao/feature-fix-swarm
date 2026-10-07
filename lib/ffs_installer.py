@@ -50,7 +50,7 @@ GSD_COMPATIBILITY_OUTPUT = {
     "agents/gsd-executor.md": "6bc58db0eb9b67537f24f1e0ef1c52b2e3fb47ecbed526265c977595a16e4907",
     "bin/install.js": "598c37d4e6bd72ea2741d6eb4a559262ebe941612ab5fde3fda24d331f86fa3a",
     "gsd-core/bin/gsd-tools.cjs": "f0fd10f567a0c055c2c5ff7f8caab5893225f34ec8113782375ff69ce9b9f5e5",
-    "gsd-core/bin/lib/tdd-red-evidence.cjs": "922b07ff7ee3185c01be2956c39e5e55e5de66e3149e6cc7535b84b2e7374572",
+    "gsd-core/bin/lib/tdd-red-evidence.cjs": "aaeaa9c49a0c71afe4451125818dfdf6dbc13e9a4598cea5c8505312c39ee9d4",
     "gsd-core/workflows/execute-phase.md": "71b253aa3454c96d0b6f965412b163c42d29566bc0665ad8fc76bc535c032882",
     "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "a99996bccddaf3e2ea37cdc79e2915aaed4466e967cc47f8a81ef6b80eb2ad7a",
     "gsd-core/bin/ffs-supervised-dispatch.cjs": "9579f3b394c6657eb6ac379a717425e3540b54ecb0fb3d4fb7cdf6aa9747c21b",

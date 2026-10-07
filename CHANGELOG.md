@@ -20,6 +20,11 @@ all skills.
   upstream's own. The safe-resume overlay carries upstream's #4748 phase-number
   split (letter suffixes such as `03A`). The executor sequential guard applies
   unchanged.
+- The overlay also closes two fail-open paths in 1.15.0's new Surefire XML
+  parser: XML quoted inside a TAP diagnostic no longer selects it (any TAP
+  marker keeps the TAP branch), and an incomplete report (an unclosed
+  `<testcase>` or `<testsuite>`, or a truncated tag) counts as zero tests and
+  is refused as RED evidence.
 - Regenerated `patches/gsd-1.14-ffs-supervised-dispatch.patch` for 1.15.0 shifts.
   Its added and removed lines are unchanged; only one context hunk (the
   `gsd-tools` usage list) moved. The file name keeps its 1.14 label so installed

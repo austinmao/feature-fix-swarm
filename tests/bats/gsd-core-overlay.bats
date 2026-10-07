@@ -140,6 +140,38 @@ NODE
   done
 }
 
+surefire_record() {
+  node - "$1" "$2" "$3" <<'NODE'
+const fs = require("fs");
+fs.writeFileSync(process.argv[2], JSON.stringify({
+  command: process.argv[3], exitCode: 1,
+  targetTest: "target", targetFile: "FixtureTest.java",
+  output: process.argv[4],
+}));
+NODE
+}
+
+@test "Surefire adapter accepts a complete report but rejects TAP-quoted XML and incomplete reports" {
+  REC="$BATS_TEST_TMPDIR/surefire-ok.json"
+  surefire_record "$REC" "mvn test" '<testsuite tests="2"><testcase name="passes" classname="Fixture"/><testcase name="target" classname="Fixture"><failure>boom</failure></testcase></testsuite>'
+  run node "$TOOLS" check tdd-red-evidence "$REC" --raw
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict": "RED_EVIDENCE_OK"'* ]]
+  for CASE in tap_quoted truncated_body truncated_tag unclosed_suite; do
+    REC="$BATS_TEST_TMPDIR/surefire-$CASE.json"
+    case "$CASE" in
+      tap_quoted) DATA=$'TAP version 13\nnot ok 1 - unrelated\n  ---\n  message: expected <testsuite><testcase name="target" classname="Fixture"><failure>example</failure></testcase></testsuite>\n  ...\n1..1\n# tests 1\n# pass 0\n# fail 1\n' ;;
+      truncated_body) DATA='<testsuite><testcase name="target" classname="Fixture"><failure>boom' ;;
+      truncated_tag) DATA='<testsuite><testcase name="target" classname="Fixture"><failure>boom</failure></testcase><testcase name="next"' ;;
+      unclosed_suite) DATA='<testsuite><testcase name="target" classname="Fixture"><failure>boom</failure></testcase>' ;;
+    esac
+    surefire_record "$REC" "node --test" "$DATA"
+    run node "$TOOLS" check tdd-red-evidence "$REC" --raw
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"verdict": "INVALID_RED"'* ]] || { echo "case $CASE: $output"; false; }
+  done
+}
+
 @test "executor overlay permits a sequential linked-worktree branch but retains the isolated-worktree gate" {
   EXECUTOR="$PKG/agents/gsd-executor.md"
   grep -F 'workflow.use_worktrees --raw' "$EXECUTOR"
