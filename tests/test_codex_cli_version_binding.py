@@ -46,6 +46,27 @@ def test_a_launcher_that_changes_while_it_is_admitted_refuses(tmp_path):
         host_capabilities.admit_cli(str(binary))
 
 
+def test_a_js_launcher_is_admitted_under_its_pinned_node_not_the_ambient_one(tmp_path, monkeypatch):
+    from test_native_review_runtime import _js_launcher, _sha, _write
+    help_text = " ".join((*REQUIRED_EXEC_FLAGS, REQUIRED_HOOK_FLAG))
+
+    def node_body(version: str) -> bytes:
+        return ("#!/bin/sh\n"
+                f"if [ \"$2\" = --version ]; then echo 'codex-cli {version}'\n"
+                f"elif [ \"$2\" = exec ]; then echo '{help_text}'\n"
+                "else echo 'darwin arm64'; fi\n").encode()
+
+    launcher, node = _js_launcher(tmp_path, node_body=node_body("0.154.0"))
+    decoy = tmp_path / "ambient" / "bin"
+    decoy.mkdir(parents=True)
+    _write(decoy / "node", node_body("0.159.0"), 0o755)
+    monkeypatch.setenv("CODEX_NODE_BINARY", str(node))
+    monkeypatch.setenv("PATH", f"{decoy}:/usr/bin:/bin")
+    admitted = host_capabilities.admit_cli(str(launcher))
+    assert admitted["version"] == "0.154.0"
+    assert admitted["binary"]["node_sha256"] == _sha(node)
+
+
 def _run(tmp_path, monkeypatch, admit):
     primary, authority, _repository_id, env = _setup(tmp_path)
     request = _qualified_host(tmp_path, monkeypatch)
