@@ -275,30 +275,48 @@ def _bundled_catalog(binary: Path, path: str, parent: Path) -> bytes:
     It runs from ``/`` with only the closed review environment and a fresh empty 0700 home below the
     private parent (no credential, so nothing can authenticate), and the home is removed afterwards.
     """
+    # Output goes to a private file beside the home, not a pipe: a descendant holding the descriptor
+    # cannot hang the read, and at most _MAX_FILE + 1 bytes are ever read back.
     try:
         home = Path(tempfile.mkdtemp(prefix=".bundled-catalog-", dir=parent))
     except OSError as error:
         raise NativeReviewCatalogUnavailable("cannot create the bundled catalog home") from error
     try:
+        descriptor, stdout_name = tempfile.mkstemp(prefix=".bundled-catalog-", suffix=".json", dir=parent)
+    except OSError as error:
+        shutil.rmtree(home, ignore_errors=True)
+        raise NativeReviewCatalogUnavailable("cannot create the bundled catalog output") from error
+    stdout_path = Path(stdout_name)
+    try:
         try:
-            process = subprocess.Popen(
-                (str(binary), "debug", "models", "--bundled"), cwd="/",
-                env=dict(_environment("codex", home, Path("/"), path)), stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+            with os.fdopen(descriptor, "wb") as stdout:
+                process = subprocess.Popen(
+                    (str(binary), "debug", "models", "--bundled"), cwd="/",
+                    env=dict(_environment("codex", home, Path("/"), path)), stdin=subprocess.DEVNULL,
+                    stdout=stdout, stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError as error:
             raise NativeReviewCatalogUnavailable("cannot start the bundled catalog") from error
         try:
-            output, _ = process.communicate(timeout=_BUNDLED_CATALOG_TIMEOUT)
+            returncode = process.wait(timeout=_BUNDLED_CATALOG_TIMEOUT)
         except subprocess.TimeoutExpired as error:
+            # The leader is not reaped yet, so its group id still names only this catalog's processes.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except OSError:
                 pass
-            process.communicate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             raise NativeReviewCatalogUnavailable("bundled catalog timed out") from error
+        with open(stdout_path, "rb") as stdout:
+            output = stdout.read(_MAX_FILE + 1)
+    except OSError as error:
+        raise NativeReviewCatalogUnavailable("bundled catalog output is unreadable") from error
     finally:
         shutil.rmtree(home, ignore_errors=True)
-    if process.returncode != 0 or not output or len(output) > _MAX_FILE:
+        stdout_path.unlink(missing_ok=True)
+    if returncode != 0 or not output or len(output) > _MAX_FILE:
         raise NativeReviewCatalogUnavailable("bundled catalog was not produced")
     return output
 
@@ -612,10 +630,16 @@ def _review_catalog(request: NativeReviewRequest, model: str, binary: Path, path
             raise NativeReviewRuntimeRefused("model catalog differs from caller-resolved identity")
     try:
         source = json.loads(source_data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-        raise (NativeReviewCatalogUnavailable if request.catalog_path is None
-               else NativeReviewRuntimeRefused)("model catalog is not valid JSON") from error
-    return (*_catalog_model(source, model), _digest(source_data))
+        return (*_catalog_model(source, model), _digest(source_data))
+    except NativeReviewModelUnavailable:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, NativeReviewRuntimeRefused) as error:
+        # A bundled catalog the binary emitted but FFS cannot use is an unavailable catalog.
+        if request.catalog_path is None:
+            raise NativeReviewCatalogUnavailable("bundled catalog is malformed") from error
+        if isinstance(error, NativeReviewRuntimeRefused):
+            raise
+        raise NativeReviewRuntimeRefused("model catalog is not valid JSON") from error
 
 
 def validate_native_review_material(value: object) -> NativeReviewMaterial:

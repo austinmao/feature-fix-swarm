@@ -168,6 +168,30 @@ def test_bundled_catalog_failure_refuses_typed(tmp_path, monkeypatch, case):
     assert list(parent.iterdir()) == []
 
 
+@pytest.mark.parametrize("stdout", [b'{"models": []}\n', b"{}\n", b"[]\n", b"x" * (2 * 1024 * 1024 + 1)],
+                         ids=["no-models", "no-models-key", "not-an-object", "oversize"])
+def test_an_unusable_bundled_catalog_refuses_catalog_unavailable(tmp_path, stdout):
+    binary, _log = _fake(tmp_path, stdout)
+    parent, workspace = _dirs(tmp_path)
+    with pytest.raises(NativeReviewRuntimeRefused) as caught:
+        prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                      runtime_root=parent / "unusable", workspace=workspace)
+    assert caught.value.code == "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
+    assert list(parent.iterdir()) == []
+
+
+def test_a_descendant_holding_stdout_cannot_hang_the_catalog(tmp_path):
+    import time
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
+    binary.write_text(binary.read_text().replace("sleep 0\n", "(sleep 20 &)\n"))
+    parent, workspace = _dirs(tmp_path)
+    started = time.monotonic()
+    material = prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                             runtime_root=parent / "held", workspace=workspace)
+    assert time.monotonic() - started < 10
+    assert json.loads(Path(material.catalog_path).read_text())["default_model"] == "gpt-5.6-terra"
+
+
 def test_a_partial_caller_catalog_refuses_without_running_the_binary(tmp_path):
     binary, log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
     parent, workspace = _dirs(tmp_path)
