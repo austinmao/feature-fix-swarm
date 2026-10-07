@@ -88,6 +88,31 @@ def aggregate_result(verifier, gate: str, candidate_sha: str) -> dict[str, objec
     return result
 
 
+def review_rows(transcript: Path) -> list[dict[str, object]]:
+    """One row per cross-family review direction: the outer host, the opposite reviewer and its transcript."""
+    return [{"direction": f"{outer}-{reviewer}", "outer_host": outer, "reviewer_host": reviewer,
+             "artifact": artifact(transcript)} for outer, reviewer in (("claude", "codex"), ("codex", "claude"))]
+
+
+def hosts_value(receipt: Path, reviews: object) -> dict[str, object]:
+    """A complete hosts section: six productive soaks, eight exact tiers and the given review rows."""
+    tiers = (("codex", "astra"), ("codex", "sol"), ("codex", "terra"), ("codex", "luna"),
+             ("claude", "fable"), ("claude", "opus"), ("claude", "sonnet"), ("claude", "haiku"))
+    return {
+        "review_directions": reviews,
+        "rows": [
+            {"pairing": pairing, "platform": platform, "overlap_seconds": 600,
+             "productive": True, "authenticated": True, "status": "PASS", "artifact": artifact(receipt)}
+            for pairing in ("claude-claude", "claude-codex", "codex-codex") for platform in ("darwin", "linux")
+        ],
+        "tier_rows": [
+            {"host": host, "tier": tier, "requested_model": host + "-" + tier, "actual_model": host + "-" + tier,
+             "status": "PASS", "artifact": artifact(receipt)}
+            for host, tier in tiers
+        ],
+    }
+
+
 def test_matrix_requires_25_complete_rows_on_both_platforms(tmp_path: Path) -> None:
     verifier = module()
     receipt = tmp_path / "matrix.json"
@@ -114,7 +139,7 @@ def test_hosts_require_six_productive_soaks_and_all_exact_tiers(tmp_path: Path) 
     tiers = (("codex", "astra"), ("codex", "sol"), ("codex", "terra"), ("codex", "luna"),
              ("claude", "fable"), ("claude", "opus"), ("claude", "sonnet"), ("claude", "haiku"))
     value = manifest(tmp_path, "hosts", {
-        "review_directions": ["claude-codex", "codex-claude"],
+        "review_directions": review_rows(receipt),
         "rows": [
             {"pairing": pairing, "platform": platform, "overlap_seconds": 600,
              "productive": True, "authenticated": True, "status": "PASS", "artifact": artifact(receipt)}
@@ -139,6 +164,120 @@ def test_hosts_require_six_productive_soaks_and_all_exact_tiers(tmp_path: Path) 
     with pytest.raises(verifier.E, match="exact host tier"):
         verifier.hosts_mode(value, True, list(pairings),
                             ["claude-codex", "codex-claude"], 600)
+
+
+def _hosts(verifier, value: dict[str, object]) -> dict[str, object]:
+    return verifier.hosts_mode(value, True, sorted(verifier.PAIRINGS), sorted(verifier.REVIEW_DIRECTIONS), 600)
+
+
+def _swap_hosts(row: dict[str, object]) -> None:
+    row["outer_host"], row["reviewer_host"] = row["reviewer_host"], row["outer_host"]
+
+
+# spec-014 E8 prerequisite 4b (PATH-014, FR-046): a review direction is a row binding who ran the outer, who
+# reviewed it and the review transcript, not a bare string that any evidence could carry.
+_REVIEW_ROW_REFUSALS = {
+    "bare-strings": (lambda rows: ["claude-codex", "codex-claude"], "HOST_REVIEW_ROW"),
+    "hosts-disagree-with-direction": (lambda rows: [dict(rows[0], outer_host="codex", reviewer_host="claude"),
+                                                    rows[1]], "HOST_REVIEW_ROW"),
+    "same-host-review": (lambda rows: [dict(rows[0], direction="claude-claude", reviewer_host="claude"), rows[1]],
+                         "HOST_REVIEW_ROW"),
+    "same-host-under-a-cross-direction": (lambda rows: [dict(rows[0], reviewer_host="claude"), rows[1]],
+                                          "HOST_REVIEW_ROW"),
+    "duplicate-direction": (lambda rows: [rows[0], rows[0]], "HOST_REVIEW_ROW"),
+    "missing-direction": (lambda rows: [rows[0]], "HOST_MATRIX"),
+    "missing-transcript": (lambda rows: [{key: value for key, value in rows[0].items() if key != "artifact"},
+                                         rows[1]], "HOST_REVIEW_ROW"),
+    "extra-field": (lambda rows: [dict(rows[0], status="PASS"), rows[1]], "HOST_REVIEW_ROW"),
+}
+
+
+def test_hosts_bind_each_review_direction_to_opposite_hosts_and_a_transcript(tmp_path: Path) -> None:
+    verifier = module()
+    receipt, transcript = tmp_path / "host.json", tmp_path / "review-transcript.jsonl"
+    receipt.write_text("{}\n")
+    transcript.write_text('{"type":"result"}\n')
+    result = _hosts(verifier, manifest(tmp_path, "hosts", hosts_value(receipt, review_rows(transcript))))
+    assert result["status"] == "PASS"
+    assert result["review_directions"] == review_rows(transcript)
+
+
+@pytest.mark.parametrize("case", sorted(_REVIEW_ROW_REFUSALS))
+def test_hosts_refuse_review_directions_that_do_not_bind_opposite_hosts(tmp_path: Path, case: str) -> None:
+    verifier = module()
+    receipt, transcript = tmp_path / "host.json", tmp_path / "review-transcript.jsonl"
+    receipt.write_text("{}\n")
+    transcript.write_text('{"type":"result"}\n')
+    mutate, code = _REVIEW_ROW_REFUSALS[case]
+    value = manifest(tmp_path, "hosts", hosts_value(receipt, mutate(review_rows(transcript))))
+    with pytest.raises(verifier.E) as refused:
+        _hosts(verifier, value)
+    assert refused.value.code == code
+
+
+def test_hosts_review_transcripts_are_byte_bound(tmp_path: Path) -> None:
+    verifier = module()
+    receipt, transcript = tmp_path / "host.json", tmp_path / "review-transcript.jsonl"
+    receipt.write_text("{}\n")
+    transcript.write_text('{"type":"result"}\n')
+    value = manifest(tmp_path, "hosts", hosts_value(receipt, review_rows(transcript)))
+    transcript.write_text('{"type":"result","forged":true}\n')
+    with pytest.raises(verifier.E) as refused:
+        _hosts(verifier, value)
+    assert refused.value.code == "DIGEST_MISMATCH"
+
+
+def test_aggregate_revalidates_the_hosts_review_rows(tmp_path: Path) -> None:
+    verifier = module()
+    receipt, transcript = tmp_path / "host.json", tmp_path / "review-transcript.jsonl"
+    receipt.write_text("{}\n")
+    transcript.write_text('{"type":"result"}\n')
+    value = manifest(tmp_path, "hosts", hosts_value(receipt, review_rows(transcript)))
+    manifest_path = tmp_path / "hosts-manifest.json"
+    manifest_path.write_text(json.dumps(value) + "\n")
+    result = _hosts(verifier, value)
+    result["verification_proof"] = {"manifest": artifact(manifest_path), "inputs": {}}
+    assert verifier._aggregate_result(result, verifier.Budget())["gate"] == "hosts"
+    bare = dict(result, review_directions=sorted(verifier.REVIEW_DIRECTIONS))
+    with pytest.raises(verifier.E) as refused:
+        verifier._aggregate_result(bare, verifier.Budget())
+    assert refused.value.code == "HOST_REVIEW_ROW"
+    swapped = json.loads(json.dumps(result))
+    _swap_hosts(swapped["review_directions"][0])
+    with pytest.raises(verifier.E) as refused:
+        verifier._aggregate_result(swapped, verifier.Budget())
+    assert refused.value.code == "HOST_REVIEW_ROW"
+    # A row naming another transcript than the revalidated manifest's does not match the gate evidence.
+    other = tmp_path / "other-transcript.jsonl"
+    other.write_text('{"type":"result","other":true}\n')
+    rebound = json.loads(json.dumps(result))
+    rebound["review_directions"][0]["artifact"] = artifact(other)
+    with pytest.raises(verifier.E, match="does not match revalidated"):
+        verifier._aggregate_result(rebound, verifier.Budget())
+
+
+def test_published_schema_binds_review_rows_to_opposite_hosts(tmp_path: Path) -> None:
+    verifier = module()
+    schema = json.loads((ROOT / "schemas/parallel-host-verification.schema.json").read_text())
+    Draft202012Validator.check_schema(schema)
+    hosts = Draft202012Validator({"$ref": "#/$defs/hosts_manifest", "$defs": schema["$defs"]})
+    results = Draft202012Validator({"$ref": "#/$defs/result_envelope", "$defs": schema["$defs"]})
+    receipt, transcript = tmp_path / "host.json", tmp_path / "review-transcript.jsonl"
+    receipt.write_text("{}\n")
+    transcript.write_text('{"type":"result"}\n')
+    value = manifest(tmp_path, "hosts", hosts_value(receipt, review_rows(transcript)))
+    assert list(hosts.iter_errors(value)) == []
+    for case in ("bare-strings", "hosts-disagree-with-direction", "same-host-review",
+                 "same-host-under-a-cross-direction", "missing-transcript", "extra-field", "missing-direction"):
+        mutate, _code = _REVIEW_ROW_REFUSALS[case]
+        invalid = manifest(tmp_path, "hosts", hosts_value(receipt, mutate(review_rows(transcript))))
+        assert list(hosts.iter_errors(invalid)), case
+    manifest_path = tmp_path / "hosts-manifest.json"
+    manifest_path.write_text(json.dumps(value) + "\n")
+    result = _hosts(verifier, value)
+    result["verification_proof"] = {"manifest": artifact(manifest_path), "inputs": {}}
+    assert list(results.iter_errors(result)) == []
+    assert list(results.iter_errors(dict(result, review_directions=sorted(verifier.REVIEW_DIRECTIONS))))
 
 
 def test_coverage_mode_uses_the_repository_production_inventory(tmp_path: Path) -> None:
