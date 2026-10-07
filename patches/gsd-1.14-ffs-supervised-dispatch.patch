@@ -1,8 +1,8 @@
 diff --git a/bin/install.js b/bin/install.js
-index c3f5473..187a9ba 100755
+index ebbb321..844071b 100755
 --- a/bin/install.js
 +++ b/bin/install.js
-@@ -10024,9 +10024,10 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
+@@ -10110,9 +10110,10 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
    // Track scripts/changeset/ and scripts/lib/ so saveLocalPatches() can detect drift
    const changesetInstallDir = path.join(configDir, 'scripts', 'changeset');
    if (fs.existsSync(changesetInstallDir)) {
@@ -721,10 +721,10 @@ index 0000000..969aca6
 +
 +main();
 diff --git a/gsd-core/bin/gsd-tools.cjs b/gsd-core/bin/gsd-tools.cjs
-index 852d40e..a02510e 100755
+index c20a45f..ef42710 100755
 --- a/gsd-core/bin/gsd-tools.cjs
 +++ b/gsd-core/bin/gsd-tools.cjs
-@@ -2056,6 +2056,56 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
+@@ -2298,6 +2298,56 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
      }
    }
  
@@ -781,7 +781,7 @@ index 852d40e..a02510e 100755
    /**
     * #3673 (ADR-1239 Phase 1) — typed, PURE-READ query exposing the negotiated
     * `dispatch.maxConcurrency` numeric sub-field. Sibling of `dispatch-isolation`
-@@ -4432,6 +4482,7 @@ const HOST_COMMAND_ROUTERS = {
+@@ -4682,6 +4732,7 @@ const HOST_COMMAND_ROUTERS = {
      'normalize-test-command': routeNormalizeTestCommand,
      'dispatch-should-flatten': routeDispatchShouldFlatten,
      'dispatch-isolation': routeDispatchIsolation,
@@ -789,22 +789,22 @@ index 852d40e..a02510e 100755
      'dispatch-capacity': routeDispatchCapacity,
      'inspect-dispatch-isolation': routeInspectDispatchIsolation,
      'record-dispatch-isolation': routeRecordDispatchIsolation,
-@@ -4693,7 +4744,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
+@@ -4991,7 +5042,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
    'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
    'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, planning, profile-questionnaire, ' +
    'profile-sample, progress, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
 -  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
 +  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-ffs-supervised, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
-   'resolve-execution, review-lane, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
+   'resolve-execution, review-lane, select-revert-commits, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
    'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
    'Global flags:\n' +
-@@ -5280,4 +5331,3 @@ module.exports = {
+@@ -5593,4 +5644,3 @@ module.exports = {
    MODEL_ID_SANITIZE_STRIP_RE,
    MODEL_ID_MAX_LENGTH,
  };
 -
 diff --git a/gsd-core/workflows/execute-phase.md b/gsd-core/workflows/execute-phase.md
-index eb9464b..e962e92 100644
+index 2988eaf..540255d 100644
 --- a/gsd-core/workflows/execute-phase.md
 +++ b/gsd-core/workflows/execute-phase.md
 @@ -13,6 +13,18 @@ Execute all plans in a phase using wave-based parallel execution. Orchestrator s
@@ -826,7 +826,7 @@ index eb9464b..e962e92 100644
  <!-- #2508 runtime-aware-dispatch -->
  
  > **Runtime-aware dispatch (#2508 Phase 4).** GSD workflows dispatch specialized subagents by role. Before dispatching on a built-in-only runtime (kimi-code — three built-ins only), resolve the role to a built-in via `gsd_run query resolve-dispatch-type --requested <role> --raw`. On named-dispatch runtimes (Claude/OpenCode/…) the role is returned unchanged; on kimi-code it maps to `coder`/`explore`/`plan` by role-suffix. The persona rides `${AGENT_SKILLS_<ROLE>}` (Phase 3) regardless. See @gsd-core/references/runtime-aware-dispatch.md.
-@@ -727,6 +739,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
+@@ -984,6 +996,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
  
     **Orchestrator-managed worktree dispatch** (`ISOLATION=orchestrator-worktree`): read and execute `execute-phase/steps/executor-isolation-dispatch.md`. GSD creates each worktree (`worktree create`) and spawns the executor into it; the orchestrator performs every git operation. Merge-back and cleanup are the existing manifest-scoped gauntlet, unchanged.
  
@@ -836,10 +836,10 @@ index eb9464b..e962e92 100644
  
     Omit `isolation="worktree"` from the Agent call. Before composing the prompt, read and execute
 diff --git a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-index 2c7eaa8..bc850f2 100644
+index bf20334..25d7587 100644
 --- a/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
 +++ b/gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md
-@@ -338,3 +338,163 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
+@@ -372,3 +372,163 @@ Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: th
  
  > **Declared-scope conformance (#2596):** ADR-1239 specifies that *both* isolation adapters route their merge through a check that each plan branch's committed diff stayed inside its declared `files_modified` scope. That check now exists, advisory-first, and is wired into **both** paths: this one passes `--files "$PLAN_FILES"` to `worktree create` above, the harness path passes it to `worktree record-agent`, and `cleanup-wave` runs the one comparison for both. A path outside the declared scope is reported in the result's `warnings` array; it does not block the merge. Promotion to a hard gate is a separate, disclosed change.
  

@@ -44,7 +44,7 @@ def _canonical(value: object) -> bytes:
 def _expected_identity(descriptor: dict) -> dict:
     canonical_descriptor = {
         "schema": "ffs.gsd-upstream-runtime/v1",
-        "version": "1.14.0",
+        "version": "1.15.0",
         "node": {
             "path": descriptor["node"]["path"],
             "sha256": descriptor["node"]["sha256"],

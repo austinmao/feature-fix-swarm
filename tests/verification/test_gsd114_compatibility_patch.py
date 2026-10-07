@@ -20,21 +20,21 @@ import pytest
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT / "lib"))
 
-PIN = "f8542fef67c1f978ffa7" + "0912cb6f2aaab76464c6"
+PIN = "b10ab3fdeb6274b37385" + "9ccd6e99b7e1cf17388e"
 PATCH = Path(__file__).parents[2] / "patches" / "gsd-1.14-ffs-supervised-dispatch.patch"
 INSTALLED = Path(__file__).parents[2] / "node_modules" / "@opengsd" / "gsd-core"
 EXPECTED = {
-    "install.js": "sha256:3669a79b6f80f2f373a78a2e0cecf58c5f8cac736f17eb08d49ee368672b197c",
-    "gsd-tools.cjs": "sha256:f0b3dde4d9bca6c81b53459c51547ea5ea5daeec965431481815cd3b94ba3328",
-    "execute-phase.md": "sha256:82ad1b4049f3660c8a979bcd41b7fa9b65bc44ad16a2e2de129ffc3cf31f2a97",
-    "executor-isolation-dispatch.md": "sha256:f204df84b2523dc28b399edbc9d7e9e4c63816e028bdce3c8c081acffe861732",
+    "install.js": "sha256:598c37d4e6bd72ea2741d6eb4a559262ebe941612ab5fde3fda24d331f86fa3a",
+    "gsd-tools.cjs": "sha256:f0fd10f567a0c055c2c5ff7f8caab5893225f34ec8113782375ff69ce9b9f5e5",
+    "execute-phase.md": "sha256:0969bb8b52e764b8f04f5c5115d488d82d7aefe9b55b2c2223db93940c2b98e4",
+    "executor-isolation-dispatch.md": "sha256:a99996bccddaf3e2ea37cdc79e2915aaed4466e967cc47f8a81ef6b80eb2ad7a",
     "ffs-supervised-dispatch.cjs": "sha256:9579f3b394c6657eb6ac379a717425e3540b54ecb0fb3d4fb7cdf6aa9747c21b",
 }
 BASELINE = {
-    "install.js": "sha256:0acbd01933783537f934b33b6cc9132ff8e11ae37f0fa88ff63bc402aa0ae861",
-    "gsd-tools.cjs": "sha256:ec066117822d0270bafa6ed3f863b4aebee8bfda243efcd828bf8a1d85732a92",
-    "execute-phase.md": "sha256:ba69804f311a5efb7ebd87b824917a82fbacbb3389cf56de06346d64d31beb4a",
-    "executor-isolation-dispatch.md": "sha256:7c791b8311ed047abcb747c2e8e7a2362c199b66daa3d9fb89bf0feb1d58ab32",
+    "install.js": "sha256:9dcb29df022936ec4f30b574eb686170079f6780a72d9f86007efaeab160ba38",
+    "gsd-tools.cjs": "sha256:57ae39ab017c4e78ca59aafef9e87166d4d276948c90c8127cac4ea6f2950c65",
+    "execute-phase.md": "sha256:4ba7f59a46a1b113ef6672b77156b4681113c11369522fde766011d48a2c917c",
+    "executor-isolation-dispatch.md": "sha256:1b7ce7f0279975d3b3c1d03784a834e759c7ccc84a5f565f80b38bc4f2292957",
 }
 
 

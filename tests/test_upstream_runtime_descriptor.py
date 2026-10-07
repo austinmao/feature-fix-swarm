@@ -37,7 +37,7 @@ def test_descriptor_binds_every_required_module_and_verifies(tmp_path, capsys):
                      "--output", str(output)]) == 0
     printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     raw = output.read_bytes()
-    assert printed["sha256"] == hashlib.sha256(raw).hexdigest() and printed["version"] == "1.14.0"
+    assert printed["sha256"] == hashlib.sha256(raw).hexdigest() and printed["version"] == "1.15.0"
     assert os.stat(output).st_mode & 0o777 == 0o600
     descriptor = json.loads(raw)
     assert set(descriptor["modules"]) == set(_REQUIRED_MODULES)

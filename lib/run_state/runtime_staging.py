@@ -20,7 +20,7 @@ from typing import Final, NoReturn
 from host_capabilities import CapabilityError, render_runtime_config
 
 
-GSD_VERSION: Final = "1.14.0"
+GSD_VERSION: Final = "1.15.0"
 STAGE_MANIFEST_NAME: Final = "runtime-stage-manifest.json"
 _GSD_SKILL = re.compile(r"^gsd-[a-z0-9][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")

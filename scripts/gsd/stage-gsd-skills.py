@@ -13,7 +13,7 @@ import sys
 from typing import NoReturn
 
 
-GSD_VERSION = "1.14.0"
+GSD_VERSION = "1.15.0"
 SKILL_NAME = re.compile(r"^gsd-[a-z0-9][a-z0-9-]*$")
 
 

@@ -234,7 +234,7 @@ class _World:
         owned.write_text("fixture")
         (candidate / "settings.json").write_text("{}")
         (candidate / "gsd-file-manifest.json").write_text(json.dumps({
-            "version": "1.14.0", "runtime": "claude",
+            "version": "1.15.0", "runtime": "claude",
             "files": {"gsd-core/bin/gsd-tools.cjs": qualification._digest(owned)}}))
         self.credential = tmp_path / "credential.json"
         self.credential.write_text(json.dumps({"claudeAiOauth": {

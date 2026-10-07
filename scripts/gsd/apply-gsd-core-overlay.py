@@ -21,7 +21,7 @@ import tempfile
 
 
 PACKAGE = "@opengsd/gsd-core"
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 MANIFEST = Path("patches/gsd-core-overlay.json")
 
 
@@ -35,232 +35,205 @@ def fail(message: str) -> int:
 
 
 def render_tdd_red_evidence(source: bytes) -> bytes:
-    old = br"""    const summary = (0, prohibition_enforcement_cjs_1.parseNodeTestSummary)(output);
-    const failing = (0, prohibition_enforcement_cjs_1.tapFailedTestNames)(output);
-    const evidence = {
-        command,
-        exit_code: exitCode,
-        target_test: targetTest,
-        tests: summary.tests,
-        pass: summary.pass,
-        fail: summary.fail,
-        failing_tests: failing,
-    };
+    # 1.15 routes Surefire XML to its own parser and keeps the TAP primitives
+    # in the else branch. FFS extends only that TAP/other branch: nested TAP
+    # and strict pytest output may supply the summary when Node's trailer is
+    # absent. The Surefire branch and every downstream guard stay upstream's.
+    old = br"""    else {
+        summary = (0, prohibition_enforcement_cjs_1.parseNodeTestSummary)(output);
+        failing = (0, prohibition_enforcement_cjs_1.tapFailedTestNames)(output);
+    }
 """
-    new = br"""    const summary = (0, prohibition_enforcement_cjs_1.parseNodeTestSummary)(output);
-    const topLevelFailing = (0, prohibition_enforcement_cjs_1.tapFailedTestNames)(output);
-    // Vitest 4 can emit valid nested TAP without Node's '# tests/# fail'
-    // trailer. Parse its brace/indent hierarchy rather than assuming one
-    // suite level: every encountered plan must own exactly its numbered
-    // assertions, every opened suite must close, and a failed child requires
-    // a real failed enclosing result. This remains fail-closed for truncated
-    // TAP, loader/import/config failures, and skipped/TODO tests.
-    const nestedTap = (() => {
-        if (!/^TAP version 13\s*$/m.test(output))
-            return null;
-        const root = { openerIndent: -1, group: null, closed: true };
-        const stack = [root];
-        const groups = [];
-        let invalid = false;
-        for (const line of output.split(/\r?\n/)) {
-            let match = line.match(/^([\t ]*)}\s*$/);
-            if (match) {
-                const scope = stack.at(-1);
-                if (scope === root || scope.openerIndent !== match[1].length)
-                    invalid = true;
-                else {
-                    scope.closed = true;
-                    stack.pop();
+    new = br"""    else {
+        const nodeSummary = (0, prohibition_enforcement_cjs_1.parseNodeTestSummary)(output);
+        const topLevelFailing = (0, prohibition_enforcement_cjs_1.tapFailedTestNames)(output);
+        // Vitest 4 can emit valid nested TAP without Node's '# tests/# fail'
+        // trailer. Parse its brace/indent hierarchy rather than assuming one
+        // suite level: every encountered plan must own exactly its numbered
+        // assertions, every opened suite must close, and a failed child requires
+        // a real failed enclosing result. This remains fail-closed for truncated
+        // TAP, loader/import/config failures, and skipped/TODO tests.
+        const nestedTap = (() => {
+            if (!/^TAP version 13\s*$/m.test(output))
+                return null;
+            const root = { openerIndent: -1, group: null, closed: true };
+            const stack = [root];
+            const groups = [];
+            let invalid = false;
+            for (const line of output.split(/\r?\n/)) {
+                let match = line.match(/^([\t ]*)}\s*$/);
+                if (match) {
+                    const scope = stack.at(-1);
+                    if (scope === root || scope.openerIndent !== match[1].length)
+                        invalid = true;
+                    else {
+                        scope.closed = true;
+                        stack.pop();
+                    }
+                    continue;
                 }
-                continue;
-            }
-            match = line.match(/^([\t ]*)1\.\.(\d+)\s*$/);
-            if (match) {
+                match = line.match(/^([\t ]*)1\.\.(\d+)\s*$/);
+                if (match) {
+                    const scope = stack.at(-1);
+                    const planned = Number(match[2]);
+                    if (scope.group || !Number.isSafeInteger(planned) || planned < 1
+                        || (scope !== root && match[1].length <= scope.openerIndent)
+                        || (scope === root && match[1].length !== 0)) {
+                        invalid = true;
+                        continue;
+                    }
+                    scope.group = { indent: match[1].length, planned, assertions: [] };
+                    groups.push(scope.group);
+                    continue;
+                }
+                match = line.match(/^([\t ]*)(not )?ok (\d+) - (.+)$/);
+                if (!match)
+                    continue;
                 const scope = stack.at(-1);
-                const planned = Number(match[2]);
-                if (scope.group || !Number.isSafeInteger(planned) || planned < 1
-                    || (scope !== root && match[1].length <= scope.openerIndent)
-                    || (scope === root && match[1].length !== 0)) {
+                const group = scope.group;
+                const number = Number(match[3]);
+                if (!group || group.indent !== match[1].length || !Number.isSafeInteger(number)) {
                     invalid = true;
                     continue;
                 }
-                scope.group = { indent: match[1].length, planned, assertions: [] };
-                groups.push(scope.group);
-                continue;
+                const assertion = { failed: Boolean(match[2]), number, rest: match[4], child: null };
+                group.assertions.push(assertion);
+                if (/\{\s*$/.test(assertion.rest)) {
+                    assertion.child = { openerIndent: match[1].length, group: null, closed: false };
+                    stack.push(assertion.child);
+                }
             }
-            match = line.match(/^([\t ]*)(not )?ok (\d+) - (.+)$/);
-            if (!match)
-                continue;
-            const scope = stack.at(-1);
-            const group = scope.group;
-            const number = Number(match[3]);
-            if (!group || group.indent !== match[1].length || !Number.isSafeInteger(number)) {
-                invalid = true;
-                continue;
-            }
-            const assertion = { failed: Boolean(match[2]), number, rest: match[4], child: null };
-            group.assertions.push(assertion);
-            if (/\{\s*$/.test(assertion.rest)) {
-                assertion.child = { openerIndent: match[1].length, group: null, closed: false };
-                stack.push(assertion.child);
-            }
-        }
-        if (invalid || stack.length !== 1 || !root.group)
-            return null;
-        for (const group of groups) {
-            if (group.assertions.length !== group.planned
-                || group.assertions.some((item) => item.number < 1 || item.number > group.planned))
+            if (invalid || stack.length !== 1 || !root.group)
                 return null;
-            const numbers = new Set(group.assertions.map((item) => item.number));
-            if (numbers.size !== group.planned)
-                return null;
-            for (let number = 1; number <= group.planned; number++) {
-                if (!numbers.has(number))
+            for (const group of groups) {
+                if (group.assertions.length !== group.planned
+                    || group.assertions.some((item) => item.number < 1 || item.number > group.planned))
+                    return null;
+                const numbers = new Set(group.assertions.map((item) => item.number));
+                if (numbers.size !== group.planned)
+                    return null;
+                for (let number = 1; number <= group.planned; number++) {
+                    if (!numbers.has(number))
+                        return null;
+                }
+                if (group.assertions.some((item) => item.child && (!item.child.closed || !item.child.group)))
                     return null;
             }
-            if (group.assertions.some((item) => item.child && (!item.child.closed || !item.child.group)))
+            const isRealFailure = (item) => item.failed && !/\s#\s*(?:SKIP|TODO)\b/i.test(item.rest);
+            const groupFailed = (group) => group.assertions.some((item) => {
+                const childFailed = item.child ? groupFailed(item.child.group) : false;
+                if (childFailed && !isRealFailure(item))
+                    invalid = true;
+                return isRealFailure(item) || childFailed;
+            });
+            if (!groupFailed(root.group) || invalid)
                 return null;
-        }
-        const isRealFailure = (item) => item.failed && !/\s#\s*(?:SKIP|TODO)\b/i.test(item.rest);
-        const groupFailed = (group) => group.assertions.some((item) => {
-            const childFailed = item.child ? groupFailed(item.child.group) : false;
-            if (childFailed && !isRealFailure(item))
-                invalid = true;
-            return isRealFailure(item) || childFailed;
-        });
-        if (!groupFailed(root.group) || invalid)
-            return null;
-        const targetBase = baseOf(input?.targetFile ?? '');
-        if (targetBase === '' || !root.group.assertions.some((item) => isRealFailure(item)
-            && baseOf(item.rest.replace(/\s+#\s.*$/, '').replace(/\s*\{\s*$/, '').trim()) === targetBase))
-            return null;
-        // Filter directives before stripping diagnostics. A TODO/SKIP line is
-        // not a failed test even if its remaining text happens to match the
-        // target name.
-        const failing = groups.flatMap((group) => group.assertions)
-            .filter(isRealFailure)
-            .map((item) => item.rest.replace(/\s+#\s.*$/, '').replace(/\s*\{\s*$/, '').trim())
-            .filter(Boolean);
-        if (failing.length === 0)
-            return null;
-        return { tests: root.group.planned, fail: failing.length, failing };
-    })();
-    // Pytest's normal terminal output is not TAP. Accept it only when its
-    // collection line, per-item named outcomes, and complete short summary
-    // agree exactly. In particular, collection/config errors, zero items,
-    // interrupted output, and progress-only `-q` output cannot authorize
-    // GREEN. A ModuleNotFoundError inside a collected, named FAILED test is a
-    // real RED result; an import error during collection is not.
-    const pytest = (() => {
-        if (!/^=+ test session starts =+$/m.test(output))
-            return null;
-        const collection = [...output.matchAll(/^(?:collecting\b[^\r\n]*?\s+)?collected (\d+) items?(?:\s*\/\s*(\d+) errors?)?\s*$/gm)];
-        if (collection.length !== 1)
-            return null;
-        const tests = Number(collection[0][1]);
-        const collectionErrors = Number(collection[0][2] ?? 0);
-        if (!Number.isSafeInteger(tests) || tests < 1 || collectionErrors !== 0
-            || /(?:^|\n)(?:ERROR collecting|ERROR:|!+ Interrupted:|=+ ERRORS =+)/m.test(output))
-            return null;
-        const summary = [...output.matchAll(/^=+\s*(.*?)\s*=+\s*$/gm)];
-        const terminal = summary.at(-1)?.[1] ?? '';
-        const failed = terminal.match(/(?:^|,\s*)(\d+) failed\b/);
-        if (!failed || /\b(?:error|errors|interrupted|no tests ran)\b/i.test(terminal)
-            || !/\bin\s+\d+(?:\.\d+)?s\b/.test(terminal))
-            return null;
-        const expectedFailures = Number(failed[1]);
-        if (!Number.isSafeInteger(expectedFailures) || expectedFailures < 1)
-            return null;
-        const normalizePath = (value) => {
-            if (typeof value !== 'string' || value.length === 0)
-                return '';
-            const parts = [];
-            for (const part of value.replace(/\\/g, '/').split('/')) {
-                if (part === '' || part === '.')
-                    continue;
-                if (part === '..') {
-                    if (parts.length === 0)
-                        return '';
-                    parts.pop();
-                    continue;
+            const targetBase = baseOf(input?.targetFile ?? '');
+            if (targetBase === '' || !root.group.assertions.some((item) => isRealFailure(item)
+                && baseOf(item.rest.replace(/\s+#\s.*$/, '').replace(/\s*\{\s*$/, '').trim()) === targetBase))
+                return null;
+            // Filter directives before stripping diagnostics. A TODO/SKIP line is
+            // not a failed test even if its remaining text happens to match the
+            // target name.
+            const failing = groups.flatMap((group) => group.assertions)
+                .filter(isRealFailure)
+                .map((item) => item.rest.replace(/\s+#\s.*$/, '').replace(/\s*\{\s*$/, '').trim())
+                .filter(Boolean);
+            if (failing.length === 0)
+                return null;
+            return { tests: root.group.planned, fail: failing.length, failing };
+        })();
+        // Pytest's normal terminal output is not TAP. Accept it only when its
+        // collection line, per-item named outcomes, and complete short summary
+        // agree exactly. In particular, collection/config errors, zero items,
+        // interrupted output, and progress-only `-q` output cannot authorize
+        // GREEN. A ModuleNotFoundError inside a collected, named FAILED test is a
+        // real RED result; an import error during collection is not.
+        const pytest = (() => {
+            if (!/^=+ test session starts =+$/m.test(output))
+                return null;
+            const collection = [...output.matchAll(/^(?:collecting\b[^\r\n]*?\s+)?collected (\d+) items?(?:\s*\/\s*(\d+) errors?)?\s*$/gm)];
+            if (collection.length !== 1)
+                return null;
+            const tests = Number(collection[0][1]);
+            const collectionErrors = Number(collection[0][2] ?? 0);
+            if (!Number.isSafeInteger(tests) || tests < 1 || collectionErrors !== 0
+                || /(?:^|\n)(?:ERROR collecting|ERROR:|!+ Interrupted:|=+ ERRORS =+)/m.test(output))
+                return null;
+            const summary = [...output.matchAll(/^=+\s*(.*?)\s*=+\s*$/gm)];
+            const terminal = summary.at(-1)?.[1] ?? '';
+            const failed = terminal.match(/(?:^|,\s*)(\d+) failed\b/);
+            if (!failed || /\b(?:error|errors|interrupted|no tests ran)\b/i.test(terminal)
+                || !/\bin\s+\d+(?:\.\d+)?s\b/.test(terminal))
+                return null;
+            const expectedFailures = Number(failed[1]);
+            if (!Number.isSafeInteger(expectedFailures) || expectedFailures < 1)
+                return null;
+            const normalizePath = (value) => {
+                if (typeof value !== 'string' || value.length === 0)
+                    return '';
+                const parts = [];
+                for (const part of value.replace(/\\/g, '/').split('/')) {
+                    if (part === '' || part === '.')
+                        continue;
+                    if (part === '..') {
+                        if (parts.length === 0)
+                            return '';
+                        parts.pop();
+                        continue;
+                    }
+                    parts.push(part);
                 }
-                parts.push(part);
+                return parts.join('/');
+            };
+            const results = [];
+            for (const line of output.split(/\r?\n/)) {
+                const match = line.match(/^(\S+)::(.+?)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS)\b/);
+                if (!match)
+                    continue;
+                const file = match[1];
+                const name = match[2].trim();
+                if (!file || !name)
+                    return null;
+                results.push({ file, name, failed: match[3] === 'FAILED' });
             }
-            return parts.join('/');
-        };
-        const results = [];
-        for (const line of output.split(/\r?\n/)) {
-            const match = line.match(/^(\S+)::(.+?)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS)\b/);
-            if (!match)
-                continue;
-            const file = match[1];
-            const name = match[2].trim();
-            if (!file || !name)
+            if (results.length !== tests || new Set(results.map((item) => `${item.file}::${item.name}`)).size !== tests)
                 return null;
-            results.push({ file, name, failed: match[3] === 'FAILED' });
-        }
-        if (results.length !== tests || new Set(results.map((item) => `${item.file}::${item.name}`)).size !== tests)
-            return null;
-        const failing = results.filter((item) => item.failed);
-        if (failing.length !== expectedFailures)
-            return null;
-        const targetName = targetTest.includes('::') ? targetTest.split('::').at(-1) : targetTest;
-        const suppliedTargetFile = typeof input?.targetFile === 'string' ? input.targetFile : '';
-        const targetPath = normalizePath(suppliedTargetFile);
-        const targetHasDirectory = /[\\/]/.test(suppliedTargetFile);
-        const matchesTarget = (item) => {
-            const filePath = normalizePath(item.file);
-            const matchesFile = targetHasDirectory
-                ? filePath === targetPath || (targetPath.includes('/') && filePath.endsWith(`/${targetPath}`))
-                : targetPath !== '' && baseOf(filePath) === targetPath;
-            return matchesFile
-            && (item.name === targetName || item.name.replace(/\[[^\]]*\]$/, '') === targetName);
-        };
-        if (!failing.some(matchesTarget))
-            return null;
-        return { tests, fail: failing.length, failing: failing.map((item) => matchesTarget(item) ? targetTest : item.name) };
-    })();
-    const failing = [...new Set([...topLevelFailing, ...(nestedTap?.failing ?? []), ...(pytest?.failing ?? [])])];
-    const hasNodeSummary = /^# tests \d+\s*$/m.test(output);
-    const evidenceSummary = hasNodeSummary ? summary : nestedTap ? {
-        tests: nestedTap.tests,
-        pass: 0,
-        fail: nestedTap.fail,
-    } : pytest ? {
-        tests: pytest.tests,
-        pass: 0,
-        fail: pytest.fail,
-    } : { tests: 0, pass: 0, fail: 0 };
-    const evidence = {
-        command,
-        exit_code: exitCode,
-        target_test: targetTest,
-        tests: evidenceSummary.tests,
-        pass: evidenceSummary.pass,
-        fail: evidenceSummary.fail,
-        failing_tests: failing,
-    };
+            const failing = results.filter((item) => item.failed);
+            if (failing.length !== expectedFailures)
+                return null;
+            const targetName = targetTest.includes('::') ? targetTest.split('::').at(-1) : targetTest;
+            const suppliedTargetFile = typeof input?.targetFile === 'string' ? input.targetFile : '';
+            const targetPath = normalizePath(suppliedTargetFile);
+            const targetHasDirectory = /[\\/]/.test(suppliedTargetFile);
+            const matchesTarget = (item) => {
+                const filePath = normalizePath(item.file);
+                const matchesFile = targetHasDirectory
+                    ? filePath === targetPath || (targetPath.includes('/') && filePath.endsWith(`/${targetPath}`))
+                    : targetPath !== '' && baseOf(filePath) === targetPath;
+                return matchesFile
+                && (item.name === targetName || item.name.replace(/\[[^\]]*\]$/, '') === targetName);
+            };
+            if (!failing.some(matchesTarget))
+                return null;
+            return { tests, fail: failing.length, failing: failing.map((item) => matchesTarget(item) ? targetTest : item.name) };
+        })();
+        failing = [...new Set([...topLevelFailing, ...(nestedTap?.failing ?? []), ...(pytest?.failing ?? [])])];
+        const hasNodeSummary = /^# tests \d+\s*$/m.test(output);
+        summary = hasNodeSummary ? nodeSummary : nestedTap ? {
+            tests: nestedTap.tests,
+            pass: 0,
+            fail: nestedTap.fail,
+        } : pytest ? {
+            tests: pytest.tests,
+            pass: 0,
+            fail: pytest.fail,
+        } : { tests: 0, pass: 0, fail: 0 };
+    }
 """
     if source.count(old) != 1:
         raise ValueError("upstream tdd-red-evidence transform anchor is missing or ambiguous")
-    rendered = source.replace(old, new)
-    old_checks = b"""if (summary.tests === 0) {
-        return { verdict: 'INVALID_RED', reason: 'zero_tests_discovered', evidence };
-    }
-    // Nonzero exit but TAP reports no failing test: harness/setup/parser crash
-    // whose failure never reached a test assertion (or unparseable output).
-    if (summary.fail === 0 || failing.length === 0) {
-"""
-    new_checks = b"""if (evidence.tests === 0) {
-        return { verdict: 'INVALID_RED', reason: 'zero_tests_discovered', evidence };
-    }
-    // Nonzero exit but TAP reports no failing test: harness/setup/parser crash
-    // whose failure never reached a test assertion (or unparseable output).
-    if (evidence.fail === 0 || failing.length === 0) {
-"""
-    if rendered.count(old_checks) != 1:
-        raise ValueError("upstream RED-evidence guard anchor is missing or ambiguous")
-    return rendered.replace(old_checks, new_checks)
+    return source.replace(old, new)
 
 
 def render_executor_sequential_guard(source: bytes) -> bytes:
@@ -509,8 +482,11 @@ PHASE_NUMBER="{phase_number}"
 # #4619: {phase_number} may be decimal (01.1) or N-segment (23.1.2) \xe2\x80\x94 $((10#...))
 # is a hard shell syntax error on a non-integer, so zero-strip only the LEADING
 # integer segment and keep the rest as an escaped-dot string for the ERE below.
-PHASE_INT=${PHASE_NUMBER%%.*}; PHASE_FRAC=${PHASE_NUMBER#"$PHASE_INT"}
-PHASE_N="$((10#$PHASE_INT))${PHASE_FRAC//./\\\\.}"
+# #4748: it may also carry a letter suffix (03A, 23A.1.2 \xe2\x80\x94 the canonical grammar
+# is digits, optional [A-Z], dotted segments), so split at the first NON-DIGIT,
+# not the first dot: the letter rides along in the rest, unescaped.
+PHASE_INT=${PHASE_NUMBER%%[!0-9]*}; PHASE_REST=${PHASE_NUMBER#"$PHASE_INT"}
+PHASE_N="$((10#$PHASE_INT))${PHASE_REST//./\\\\.}"
 PLAN_N=$((10#{plan_padded}))
 PLAN_SCOPE_RE="^[a-z]+\\((0*${PHASE_N})-(0*${PLAN_N})\\):"
 MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -533,8 +509,11 @@ PHASE_NUMBER="{{phase_number}}"
 # #4619: {{phase_number}} may be decimal (01.1) or N-segment (23.1.2) — $((10#...))
 # is a hard shell syntax error on a non-integer, so zero-strip only the LEADING
 # integer segment and keep the rest as an escaped-dot string for the ERE below.
-PHASE_INT=${{PHASE_NUMBER%%.*}}; PHASE_FRAC=${{PHASE_NUMBER#"$PHASE_INT"}}
-PHASE_N="$((10#$PHASE_INT))${{PHASE_FRAC//./\\\\.}}"
+# #4748: it may also carry a letter suffix (03A, 23A.1.2 — the canonical grammar
+# is digits, optional [A-Z], dotted segments), so split at the first NON-DIGIT,
+# not the first dot: the letter rides along in the rest, unescaped.
+PHASE_INT=${{PHASE_NUMBER%%[!0-9]*}}; PHASE_REST=${{PHASE_NUMBER#"$PHASE_INT"}}
+PHASE_N="$((10#$PHASE_INT))${{PHASE_REST//./\\\\.}}"
 PLAN_N=$((10#{{plan_padded}}))
 PLAN_SCOPE_RE="^[a-z]+\\((0*${{PHASE_N}})-(0*${{PLAN_N}})\\):"
 MILESTONE_BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "")

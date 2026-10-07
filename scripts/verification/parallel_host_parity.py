@@ -2397,8 +2397,8 @@ def _stage_install_source(candidate: Checked, fixture: Path) -> tuple[Path, Path
         installed = obj(read_checked(staged / "node_modules/@opengsd/gsd-core/package.json").data)
     except E:
         raise E("SOURCE_STAGE", "selected GSD package metadata is unavailable")
-    if package.get("devDependencies", {}).get("@opengsd/gsd-core") != "1.14.0" or installed.get("version") != "1.14.0":
-        raise E("SOURCE_STAGE", "selected GSD package metadata is not pinned to 1.14.0")
+    if package.get("devDependencies", {}).get("@opengsd/gsd-core") != "1.15.0" or installed.get("version") != "1.15.0":
+        raise E("SOURCE_STAGE", "selected GSD package metadata is not pinned to 1.15.0")
     return staged, staged / "setup.sh"
 
 

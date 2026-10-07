@@ -185,7 +185,7 @@ def _candidate(tmp_path: Path) -> tuple[Path, Path]:
     settings = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
         {"type": "command", "command": str(hook)}]}]}}
     (candidate / "settings.json").write_text(json.dumps(settings))
-    manifest = {"version": "1.14.0", "runtime": "claude", "files": {
+    manifest = {"version": "1.15.0", "runtime": "claude", "files": {
         "gsd-core/bin/gsd-tools.cjs": _sha(owned)}}
     (candidate / "gsd-file-manifest.json").write_text(json.dumps(manifest))
     credential = tmp_path / "credential.json"

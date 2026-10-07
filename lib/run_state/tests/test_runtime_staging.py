@@ -38,7 +38,7 @@ def _profile(tmp_path: Path, *, auth_mode: int = 0o600) -> tuple[Path, Path, Pat
         f'home = "{source}"\nskills = "{skills}"\n', encoding="utf-8"
     )
     (source / "gsd-core").mkdir()
-    (source / "gsd-core" / "VERSION").write_text("1.14.0\n", encoding="utf-8")
+    (source / "gsd-core" / "VERSION").write_text("1.15.0\n", encoding="utf-8")
     (source / "scripts").mkdir()
     script = source / "scripts" / "gsd-run.sh"
     script.write_text("#!/bin/sh\necho staged\n", encoding="utf-8"); script.chmod(0o755)
@@ -64,7 +64,7 @@ def _profile(tmp_path: Path, *, auth_mode: int = 0o600) -> tuple[Path, Path, Pat
         "skills/gsd-quick/SKILL.md": _digest(skills / "gsd-quick" / "SKILL.md"),
     }
     (source / "gsd-file-manifest.json").write_text(
-        json.dumps({"version": "1.14.0", "files": owned}), encoding="utf-8"
+        json.dumps({"version": "1.15.0", "files": owned}), encoding="utf-8"
     )
     return source, skills, worktree
 

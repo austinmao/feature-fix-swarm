@@ -22,13 +22,13 @@ def test_selected_setup_emits_resolved_claude_and_codex_layout(tmp_path: Path) -
     claude = json.loads((home / ".claude/gsd-file-manifest.json").read_text())
     codex = json.loads((home / ".codex/gsd-file-manifest.json").read_text())
 
-    assert install["gsd"]["version"] == "1.14.0"
-    assert install["gsd"]["commit"] == bytes.fromhex("f8542fef 67c1f978 ffa70912 cb6f2aaa b76464c6").hex()
+    assert install["gsd"]["version"] == "1.15.0"
+    assert install["gsd"]["commit"] == bytes.fromhex("b10ab3fd eb6274b3 73859ccd 6e99b7e1 cf17388e").hex()
     assert install["gsd"]["profiles"] == {"claude": "full", "codex": "full"}
     assert install["gsd"]["owner"] == "upstream-installer"
-    assert claude["version"] == codex["version"] == "1.14.0"
-    assert (home / ".claude/gsd-core/VERSION").read_text() == "1.14.0\n"
-    assert (home / ".codex/gsd-core/VERSION").read_text() == "1.14.0\n"
+    assert claude["version"] == codex["version"] == "1.15.0"
+    assert (home / ".claude/gsd-core/VERSION").read_text() == "1.15.0\n"
+    assert (home / ".codex/gsd-core/VERSION").read_text() == "1.15.0\n"
 
     # Shared managed skills are emitted to the upstream shared root, outside
     # CODEX_HOME. A config-directory-only implementation would miss them.

@@ -31,28 +31,28 @@ from typing import Any, Iterator
 INSTALL_SCHEMA = "ffs.install/v1"
 DOCTOR_SCHEMA = "ffs.doctor/v1"
 BACKUP_SCHEMA = "ffs.backup/v1"
-GSD_VERSION = "1.14.0"
-GSD_COMMIT = "f8542fef67c1f978ffa70912cb6f2aaab76464c6"
-GSD_INTEGRITY = "sha512-e05sV2c8KlcQ2hoJ4U3U1OBjqswQOon4C29Cs75fEAr+tq7qJ/XyFYrN/nwblREWUkPUUoxmVzLVj4Im2KjQxQ=="
+GSD_VERSION = "1.15.0"
+GSD_COMMIT = "b10ab3fdeb6274b373859ccd6e99b7e1cf17388e"
+GSD_INTEGRITY = "sha512-GwdlJeupozyM22g2INdxiNfkpDm5hFS7G42leRqQwHb/0BclBG3TpgyGtWIkf47shjkfGRtrK5iK+pPZ61DvMA=="
 GSD_COMPATIBILITY_PATCH = "gsd-1.14-ffs-supervised-dispatch.patch"
-GSD_COMPATIBILITY_PATCH_SHA256 = "f2f9f2ced9448d10baaa77e4f8fef7d9f98956e824ffdd48cbaee6ba35d87712"
+GSD_COMPATIBILITY_PATCH_SHA256 = "5331ffefc4de0694a4d5ca80cbda7a0041cdbf0d2c66feb0a9e28e5da6e7a46c"
 GSD_COMPATIBILITY_BASELINE = {
-    "agents/gsd-executor.md": "40431b7e765a9bf6b656788196bf947a94f8697323285f0f5e552353148deafb",
-    "bin/install.js": "0acbd01933783537f934b33b6cc9132ff8e11ae37f0fa88ff63bc402aa0ae861",
-    "gsd-core/bin/lib/tdd-red-evidence.cjs": "3889f9dccfbcc7d119254e0c01010ff71547ed95bbd03b4584bad56530a61797",
-    "gsd-core/bin/gsd-tools.cjs": "ec066117822d0270bafa6ed3f863b4aebee8bfda243efcd828bf8a1d85732a92",
-    "gsd-core/workflows/execute-phase.md": "ba69804f311a5efb7ebd87b824917a82fbacbb3389cf56de06346d64d31beb4a",
-    "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "7c791b8311ed047abcb747c2e8e7a2362c199b66daa3d9fb89bf0feb1d58ab32",
+    "agents/gsd-executor.md": "e7245f956b399b8ef7e1b91df7fc383f52f480a747c9aaca5e16b1f8c78aa509",
+    "bin/install.js": "9dcb29df022936ec4f30b574eb686170079f6780a72d9f86007efaeab160ba38",
+    "gsd-core/bin/lib/tdd-red-evidence.cjs": "5797014bbbdbef0750a1baf1dca74ea8e7d4ade5401aea3940cfbc9d2243e2ac",
+    "gsd-core/bin/gsd-tools.cjs": "57ae39ab017c4e78ca59aafef9e87166d4d276948c90c8127cac4ea6f2950c65",
+    "gsd-core/workflows/execute-phase.md": "4ba7f59a46a1b113ef6672b77156b4681113c11369522fde766011d48a2c917c",
+    "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "1b7ce7f0279975d3b3c1d03784a834e759c7ccc84a5f565f80b38bc4f2292957",
 }
 # Outputs after the exact-pin overlay (patches/gsd-core-overlay.json) and then
 # the supervised-dispatch patch are applied to the staged copy, in that order.
 GSD_COMPATIBILITY_OUTPUT = {
-    "agents/gsd-executor.md": "c26c85437e1b5082d16ae69e2c53f474601431e48b9e270fa22a7bac680a1f9f",
-    "bin/install.js": "3669a79b6f80f2f373a78a2e0cecf58c5f8cac736f17eb08d49ee368672b197c",
-    "gsd-core/bin/gsd-tools.cjs": "f0b3dde4d9bca6c81b53459c51547ea5ea5daeec965431481815cd3b94ba3328",
-    "gsd-core/bin/lib/tdd-red-evidence.cjs": "719e35a5ed6e4365cbe3edf212ee58985565ff332be79e86427bdb108045d784",
-    "gsd-core/workflows/execute-phase.md": "b233aec60d03d678fa8f93e1a7b35fb045fe615ecb5488b73735e3cfefd3907b",
-    "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "f204df84b2523dc28b399edbc9d7e9e4c63816e028bdce3c8c081acffe861732",
+    "agents/gsd-executor.md": "6bc58db0eb9b67537f24f1e0ef1c52b2e3fb47ecbed526265c977595a16e4907",
+    "bin/install.js": "598c37d4e6bd72ea2741d6eb4a559262ebe941612ab5fde3fda24d331f86fa3a",
+    "gsd-core/bin/gsd-tools.cjs": "f0fd10f567a0c055c2c5ff7f8caab5893225f34ec8113782375ff69ce9b9f5e5",
+    "gsd-core/bin/lib/tdd-red-evidence.cjs": "922b07ff7ee3185c01be2956c39e5e55e5de66e3149e6cc7535b84b2e7374572",
+    "gsd-core/workflows/execute-phase.md": "71b253aa3454c96d0b6f965412b163c42d29566bc0665ad8fc76bc535c032882",
+    "gsd-core/workflows/execute-phase/steps/executor-isolation-dispatch.md": "a99996bccddaf3e2ea37cdc79e2915aaed4466e967cc47f8a81ef6b80eb2ad7a",
     "gsd-core/bin/ffs-supervised-dispatch.cjs": "9579f3b394c6657eb6ac379a717425e3540b54ecb0fb3d4fb7cdf6aa9747c21b",
 }
 CODEX_MIN_VERSION = (0, 137, 0)

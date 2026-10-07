@@ -18,7 +18,7 @@ from typing import Any, Mapping
 
 
 _SCHEMA = "ffs.gsd-upstream-runtime/v1"
-_VERSION = "1.14.0"
+_VERSION = "1.15.0"
 _RUNTIME_IDENTITY_SCHEMA = "ffs.gsd-upstream-runtime-identity/v1"
 _EXECUTION_POLICY_SCHEMA = "ffs.gsd-upstream-execution-policy/v1"
 _BRIDGE_NAME = "upstream_bridge.cjs"

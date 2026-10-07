@@ -196,8 +196,8 @@ def _source_closure(candidate_home: Path, credential_source: Path, workspace: Pa
     if not isinstance(credential_value.get("claudeAiOauth"), dict) or not credential_value["claudeAiOauth"]:
         raise ClaudeRuntimeStagingError("subscription credential lacks Claude OAuth material")
     manifest = _json(candidate / "gsd-file-manifest.json", "GSD installer manifest")
-    if manifest.get("version") != "1.14.0" or manifest.get("runtime") != "claude":
-        raise ClaudeRuntimeStagingError("candidate is not the pinned Claude GSD 1.14.0 runtime")
+    if manifest.get("version") != "1.15.0" or manifest.get("runtime") != "claude":
+        raise ClaudeRuntimeStagingError("candidate is not the pinned Claude GSD 1.15.0 runtime")
     manifest_files = manifest.get("files")
     if not isinstance(manifest_files, dict) or not manifest_files:
         raise ClaudeRuntimeStagingError("GSD installer manifest has no file closure")

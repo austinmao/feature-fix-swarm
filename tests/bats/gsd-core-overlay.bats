@@ -504,9 +504,9 @@ PY
   printf '{"name":"@opengsd/gsd-core","version":"1.14.1"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
-  [[ "$output" == *"exact @opengsd/gsd-core@1.14.0"* ]]
+  [[ "$output" == *"exact @opengsd/gsd-core@1.15.0"* ]]
 
-  printf '{"name":"@opengsd/gsd-core","version":"1.14.0"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
+  printf '{"name":"@opengsd/gsd-core","version":"1.15.0"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   printf 'untrusted drift\n' > "$TARGET"
   run python3 "$OVERLAY" apply --repo "$FIX"
   [ "$status" -eq 78 ]

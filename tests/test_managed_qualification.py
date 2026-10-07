@@ -197,7 +197,7 @@ def _fixture(tmp_path: Path, *, uncertain_at: int | None = None):
         directory.mkdir(parents=True, exist_ok=True)
     files = {
         "agents/gsd-executor.toml": b"name = \"gsd-executor\"\n",
-        "gsd-core/VERSION": b"1.14.0\n",
+        "gsd-core/VERSION": b"1.15.0\n",
         "scripts/gsd-run.sh": b"#!/bin/sh\nexit 0\n",
         "hooks/gsd-hook.js": b"#!/usr/bin/env node\n",
         "skills/gsd-quick/SKILL.md": b"# quick\n",
@@ -217,7 +217,7 @@ def _fixture(tmp_path: Path, *, uncertain_at: int | None = None):
     }) + "\n")
     (source / "auth.json").chmod(0o600)
     owned = {relative: hashlib.sha256(data).hexdigest() for relative, data in files.items()}
-    (source / "gsd-file-manifest.json").write_text(json.dumps({"version": "1.14.0", "files": owned}))
+    (source / "gsd-file-manifest.json").write_text(json.dumps({"version": "1.15.0", "files": owned}))
     runtime = tmp_path / "runtime"
     stage_private_codex_runtime(source, runtime, workspace_path)
     binary = (tmp_path / "codex").resolve()

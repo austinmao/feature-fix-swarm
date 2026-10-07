@@ -5,7 +5,7 @@ set -euo pipefail
 # GSD114_SOURCE_ROOT is intentionally explicit: this script never guesses a
 # mutable profile or applies a patch to the production install in place.
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-PIN=f8542fef67c1f978ffa70912cb6f2aaab76464c6
+PIN=b10ab3fdeb6274b373859ccd6e99b7e1cf17388e
 SOURCE_ROOT=${GSD114_SOURCE_ROOT:-/tmp/gsd-core-ffs-source}
 PATCH_FILE=$ROOT/patches/gsd-1.14-ffs-supervised-dispatch.patch
 
