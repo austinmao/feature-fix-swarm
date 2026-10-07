@@ -19,7 +19,8 @@ all skills.
   under the admitted version's review provenance (F53 review r1, MEDIUM).
 - Admission probes run the resolved launcher with the PATH a launch uses (the chain's Node
   first), so a `.js` launcher reports the version of its pinned Node and platform package,
-  not of another `node` on the ambient PATH.
+  not of another `node` on the ambient PATH. They run in a closed environment (PATH, HOME,
+  locale), so an ambient `NODE_OPTIONS` preload cannot change what they report.
 - Fixture-proven only. Not native host qualification, not E8.
 
 ### Fixed (2026-10-07, spec-014 E8 prerequisite 4: Codex review catalog source)

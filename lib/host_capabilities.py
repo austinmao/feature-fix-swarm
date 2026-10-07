@@ -766,7 +766,10 @@ def admit_cli(binary: str) -> dict[str, object]:
     # chain's own Node (and so its platform package), never another `node` on the ambient PATH.
     launcher = Path(binary).resolve()
     path = ":".join(codex_path_entries(launcher, codex_node_binary(launcher)))
-    probe_env = {**os.environ, "PATH": path}
+    # A closed environment, as qualification and launches use: no ambient NODE_OPTIONS preload or
+    # other startup switch can change what the probes report.
+    probe_env = {"PATH": path, "HOME": os.environ.get("HOME", "/"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                 "NO_COLOR": "1"}
     version = version_from(command_output(str(launcher), "--version", env=probe_env))
     help_text = command_output(str(launcher), "exec", "--help", env=probe_env)
     if _binary_chain(Path(binary)) != chain:
