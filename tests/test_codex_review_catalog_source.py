@@ -180,16 +180,40 @@ def test_an_unusable_bundled_catalog_refuses_catalog_unavailable(tmp_path, stdou
     assert list(parent.iterdir()) == []
 
 
-def test_a_descendant_holding_stdout_cannot_hang_the_catalog(tmp_path):
+def test_a_descendant_holding_stdout_refuses_within_the_deadline(tmp_path, monkeypatch):
     import time
+    import run_state.native_review_runtime as runtime
+    monkeypatch.setattr(runtime, "_BUNDLED_CATALOG_TIMEOUT", 1)
     binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
     binary.write_text(binary.read_text().replace("sleep 0\n", "(sleep 20 &)\n"))
     parent, workspace = _dirs(tmp_path)
     started = time.monotonic()
-    material = prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
-                                             runtime_root=parent / "held", workspace=workspace)
+    with pytest.raises(NativeReviewRuntimeRefused) as caught:
+        prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                      runtime_root=parent / "held", workspace=workspace)
+    assert caught.value.code == "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
     assert time.monotonic() - started < 10
-    assert json.loads(Path(material.catalog_path).read_text())["default_model"] == "gpt-5.6-terra"
+    assert list(parent.iterdir()) == []
+
+
+def test_a_descendant_appending_after_the_leader_exits_is_part_of_the_output(tmp_path):
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
+    binary.write_text(binary.read_text().replace("exit 0\n", "(sleep 1; echo trailing) &\nexit 0\n"))
+    parent, workspace = _dirs(tmp_path)
+    with pytest.raises(NativeReviewRuntimeRefused) as caught:
+        prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                      runtime_root=parent / "appended", workspace=workspace)
+    assert caught.value.code == "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
+
+
+def test_a_launcher_changed_while_its_catalog_runs_refuses(tmp_path):
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]))
+    binary.write_text(binary.read_text().replace("exit 0\n", f"printf '# swapped\\n' >> '{binary}'\nexit 0\n"))
+    parent, workspace = _dirs(tmp_path)
+    with pytest.raises(NativeReviewRuntimeRefused, match="changed while its catalog ran"):
+        prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                      runtime_root=parent / "swapped", workspace=workspace)
+    assert not (parent / "swapped").exists()
 
 
 def test_a_partial_caller_catalog_refuses_without_running_the_binary(tmp_path):
