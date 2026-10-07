@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -225,6 +226,21 @@ def test_an_unverifiable_leader_exit_refuses(tmp_path):
                                           runtime_root=parent / "unverifiable", workspace=workspace)
     finally:
         signal.signal(signal.SIGCHLD, previous)
+    assert caught.value.code == "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
+
+
+def test_a_nonzero_exit_reaped_by_another_waiter_still_refuses(tmp_path, monkeypatch):
+    def foreign_reap(self, timeout=None):
+        os.waitpid(self.pid, 0)
+        self.returncode = 0
+        return 0
+
+    monkeypatch.setattr(subprocess.Popen, "wait", foreign_reap)
+    binary, _log = _fake(tmp_path, _bundled(["gpt-5.6-terra"]), status=7)
+    parent, workspace = _dirs(tmp_path)
+    with pytest.raises(NativeReviewRuntimeRefused) as caught:
+        prepare_native_review_runtime(_codex_request(binary, "gpt-5.6-terra", "medium"),
+                                      runtime_root=parent / "reaped", workspace=workspace)
     assert caught.value.code == "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
 
 

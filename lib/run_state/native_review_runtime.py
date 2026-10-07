@@ -271,14 +271,16 @@ def _catalog_model(source: object, requested_model: str) -> tuple[dict[str, obje
     return catalog, _digest(_canonical(catalog))
 
 
-def _leader_exited(pid: int, deadline: float) -> bool:
-    """Wait for the leader's exit before the deadline without reaping it (its pid keeps the group id)."""
+def _leader_exited_cleanly(pid: int, deadline: float) -> bool:
+    """Whether the leader exited with status 0 before the deadline, observed without reaping it
+    (its pid keeps the group id); the status is taken from this observation, never from a later reap."""
     while True:
         try:
-            if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
-                return True
+            observed = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return False  # already reaped elsewhere (for example SIGCHLD ignored): status unverifiable
+        if observed is not None:
+            return observed.si_code == os.CLD_EXITED and observed.si_status == 0
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.01)
@@ -290,7 +292,7 @@ def _bundled_catalog(binary: Path, path: str, parent: Path) -> bytes:
     It runs from ``/`` with only the closed review environment and a fresh empty 0700 home below the
     private parent (no credential, so nothing can authenticate), and the home is removed afterwards.
     Output is accepted only at end of file, when every writer (descendants included) has closed it,
-    and once the leader has exited, within one deadline and at most _MAX_FILE bytes.  The group is
+    and once the leader has exited with status 0, within one deadline and at most _MAX_FILE bytes.  The group is
     killed before the leader is reaped, while the leader's pid still reserves the group id.
     """
     try:
@@ -317,7 +319,7 @@ def _bundled_catalog(binary: Path, path: str, parent: Path) -> bytes:
                     continue
                 chunk = os.read(descriptor, 65536)
                 if not chunk:
-                    complete = _leader_exited(process.pid, deadline)
+                    complete = _leader_exited_cleanly(process.pid, deadline)
                     break
                 output += chunk
         except OSError as error:
@@ -334,7 +336,7 @@ def _bundled_catalog(binary: Path, path: str, parent: Path) -> bytes:
                 pass
     finally:
         shutil.rmtree(home, ignore_errors=True)
-    if not complete or process.returncode != 0 or not output or len(output) > _MAX_FILE:
+    if not complete or not output or len(output) > _MAX_FILE:
         raise NativeReviewCatalogUnavailable("bundled catalog was not produced")
     return bytes(output)
 
