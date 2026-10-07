@@ -345,7 +345,7 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
         return _fixture_refusal(error.code, exit_code=2)
     try:
         host_request = _host_request_from_args(args)
-        review_catalog = _review_catalog_from_args(args)
+        _review_catalog_from_args(args)
         acceptance_draft = _read_json_document(getattr(args, "acceptance_draft", None), label="acceptance draft")
     except Exception as error:
         from run_state.host_request import HostRequestRefused
@@ -367,7 +367,7 @@ def cmd_managed_start(args: argparse.Namespace) -> int:
                 store, token, context, command=command, request_key=args.request_key,
                 dispatch_limit=args.dispatch_limit, token_limit=args.token_limit,
                 host_request=host_request, upstream_runtime=upstream_runtime,
-                model_request=_model_request_from_args(args), review_catalog=review_catalog,
+                model_request=_model_request_from_args(args),
                 acceptance_draft=acceptance_draft,
             )
         except _managed_run_refusals() as error:
@@ -445,7 +445,7 @@ def cmd_frontend_start(args: argparse.Namespace) -> int:
         return _fixture_refusal("INVALID_REQUEST", exit_code=2)
     try:
         host_request = _host_request_from_args(args)
-        review_catalog = _review_catalog_from_args(args)
+        _review_catalog_from_args(args)
         acceptance_draft = _read_json_document(getattr(args, "acceptance_draft", None), label="acceptance draft")
         # Verify the controller's pin before even reading selected source bytes.
         runtime, digest = _load_upstream_runtime(args)
@@ -488,7 +488,7 @@ def cmd_frontend_start(args: argparse.Namespace) -> int:
         ceremony_estimate=getattr(args, "ceremony_estimate", None),
         capacity_policy=getattr(args, 'capacity_policy', None),
         scope=args.scope or "", model_request=_model_request_from_args(args),
-        review_catalog=review_catalog, acceptance_draft=acceptance_draft,
+        acceptance_draft=acceptance_draft,
     )
 
 
@@ -1994,15 +1994,11 @@ def _read_json_document(path: str | None, *, label: str):
 
 
 def _review_catalog_from_args(args: argparse.Namespace):
+    """The native review catalog is the qualified Codex binary's bundled one; a caller file is refused."""
     from run_state.host_request import HostRequestRefused
-    path = getattr(args, "review_model_catalog", None)
-    if path is None:
-        return None
-    try:
-        raw = Path(path).read_bytes()
-    except OSError as error:
-        raise HostRequestRefused("HOST_REQUEST_INCOMPLETE") from error
-    return str(Path(path).resolve()), hashlib.sha256(raw).hexdigest()
+    if getattr(args, "review_model_catalog", None) is not None:
+        raise HostRequestRefused("REVIEW_MODEL_CATALOG_RETIRED")
+    return None
 
 
 def _model_request_from_args(args: argparse.Namespace):
@@ -2038,7 +2034,8 @@ def cmd_describe_upstream_runtime(args: argparse.Namespace) -> int:
 
 def _add_host_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--review-model-catalog", default=None,
-                        help="Codex model catalog JSON for the native final review (caller-resolved)")
+                        help="retired: refused with REVIEW_MODEL_CATALOG_RETIRED (the native review "
+                             "catalog is the qualified Codex binary's bundled catalog)")
     parser.add_argument("--acceptance-draft", default=None,
                         help="explicit acceptance draft JSON to seal after outer qualification")
     parser.add_argument("--host", choices=("codex", "claude"))

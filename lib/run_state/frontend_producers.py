@@ -75,8 +75,6 @@ class HostRuntimeSeam:
     model: str
     effort: str | None
     model_request: dict
-    catalog_path: str | None = None
-    catalog_sha256: str | None = None
 
 
 def _retained_action(store, token, logical_key: str, action: str = "final_review",
@@ -247,18 +245,14 @@ def _published_request(supervisor, *, activity_id, launch_key, acceptance_hash, 
 
 def _native_request(seam: HostRuntimeSeam, *, runtime_identity: str, prompt: str,
                     qualified_binary=()) -> NativeReviewRequest:
-    binary = Path(seam.binary)
-    try:
-        binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
-    except OSError as error:
-        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
-    if seam.host == "codex" and (seam.catalog_path is None or seam.catalog_sha256 is None):
-        raise SupervisorRefused("NATIVE_REVIEW_CATALOG_REQUIRED")
+    # The launcher bytes the runtime was qualified with: preparation re-hashes the file against this
+    # pin before it runs the binary (Codex: its bundled catalog), so a swapped launcher never runs.
+    binary_sha256 = dict(qualified_binary).get("launcher_sha256")
+    if not isinstance(binary_sha256, str):
+        raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED")
     return NativeReviewRequest(
-        host=seam.host, requested_model=seam.model, cli_version=seam.cli_version, binary=str(binary),
+        host=seam.host, requested_model=seam.model, cli_version=seam.cli_version, binary=str(Path(seam.binary)),
         binary_sha256=binary_sha256, runtime_identity=runtime_identity, prompt=prompt, effort=seam.effort,
-        catalog_path=seam.catalog_path if seam.host == "codex" else None,
-        catalog_sha256=seam.catalog_sha256 if seam.host == "codex" else None,
         session_id=str(uuid.uuid4()) if seam.host == "claude" else None,
         # A `.js` launcher runs under the Node, and spawns the vendor executable, that its runtime
         # was qualified with (chain pins); native review binds and re-verifies both.
@@ -395,7 +389,9 @@ def _native_review(store, token, supervisor, seam: HostRuntimeSeam, review: _Rev
                     runtime_root=private / uuid.uuid4().hex, workspace=ready.path)
                 material = prepare_native_review_launch(native=native, artifact=artifact, ordinary=ordinary,
                                                         runtime_receipt_sha256=qualified.receipt.receipt_sha256)
-            except (NativeReviewRuntimeRefused, NativeReviewTransportRefused) as error:
+            except NativeReviewRuntimeRefused as error:
+                raise SupervisorRefused(error.code) from error
+            except NativeReviewTransportRefused as error:
                 raise SupervisorRefused("NATIVE_REVIEW_MATERIAL_INVALID") from error
             request = DispatchRequest(
                 activity_id=activity.id, request_key=launch_key, command=native.argv, workspace=str(ready.path),

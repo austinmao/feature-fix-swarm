@@ -8,6 +8,25 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-07, spec-014 E8 prerequisite 4: Codex review catalog source)
+
+- The Codex native review's model catalog now comes from the qualified binary itself:
+  preparation runs the reviewer's own `debug models --bundled` (offline, from `/`, in the
+  closed review environment with a fresh empty 0700 home that is removed afterwards) and
+  binds that output's SHA-256 as the review material's source catalog. Before, the caller
+  had to supply the catalog file (`--review-model-catalog`, `FFS_REVIEW_MODEL_CATALOG`).
+- The review request now carries the launcher digest the runtime was qualified with, so a
+  launcher swapped after qualification refuses before anything runs.
+- A requested model (tier or exact) absent from the catalog refuses
+  `NATIVE_REVIEW_MODEL_UNAVAILABLE` with no alternate slug; a catalog the binary does not
+  produce (failure, timeout, empty, not JSON) refuses `NATIVE_REVIEW_CATALOG_UNAVAILABLE`.
+- `--review-model-catalog` (and so `FFS_REVIEW_MODEL_CATALOG`) is retired and refuses
+  `REVIEW_MODEL_CATALOG_RETIRED`; `NATIVE_REVIEW_CATALOG_REQUIRED` no longer occurs.
+- A test locks `lib/model_requests.py` tier tables to `scripts/gsd/model-equivalents.sh`.
+- Fixture-proven only (a scripted binary). Not native host qualification, not E8. The
+  production reviewer is still the outer's own host, so cross-family review directions are
+  not wired.
+
 ### Changed (2026-10-07: GSD Core 1.15.0, before the E8 candidate seal)
 
 - Updated the exact `@opengsd/gsd-core` pin from 1.14.0 to 1.15.0 (upstream

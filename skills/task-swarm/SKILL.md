@@ -175,11 +175,16 @@ python3 -m run_state.cli describe-upstream-runtime \
   --output .planning/run-state/upstream-runtime.json          # prints sha256
 FFS_UPSTREAM_RUNTIME_MANIFEST=.planning/run-state/upstream-runtime.json \
 FFS_UPSTREAM_RUNTIME_SHA256=<sha256> FFS_PHASE_SCOPE=<N> \
-FFS_ACCEPTANCE_DRAFT=<draft.json> FFS_REVIEW_MODEL_CATALOG=<models.json> \
+FFS_ACCEPTANCE_DRAFT=<draft.json> \
 FFS_HOST_KIND=codex FFS_CODEX_RUNTIME_HOME=... CODEX_BIN=... GSD_MODEL_REQUEST='{"kind":"tier","name":"execution"}' \
 FFS_HOST_TOKEN_RESERVATION=<tokens, e.g. 100K> \
 bash scripts/gsd/ffs-frontend.sh task-swarm --select-file <path> ...
 ```
+
+The native final review's Codex model catalog is the qualified binary's own
+bundled catalog (`codex debug models --bundled`); a caller catalog is refused
+(`REVIEW_MODEL_CATALOG_RETIRED`), and a model absent from it refuses
+`NATIVE_REVIEW_MODEL_UNAVAILABLE` with no fallback.
 
 The descriptor SHA-256 is bound at start and revalidated on every resume
 (`UPSTREAM_RUNTIME_DRIFT`); the sealed draft's criterion ids must be the run's

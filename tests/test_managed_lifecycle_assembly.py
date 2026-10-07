@@ -36,6 +36,8 @@ from test_m4_upstream_context_acceptance import (
 )
 
 _REVIEW = '''import json, os, pathlib, sys, time
+if sys.argv[1:] == ["debug", "models", "--bundled"]:
+    print(json.dumps({"models": [{"slug": "gpt-5.6-terra"}]})); raise SystemExit(0)
 prompt = sys.argv[-1]
 credential = pathlib.Path(os.environ["CODEX_HOME"]) / "auth.json"
 if prompt.startswith("Artifact-only review request:"):
@@ -236,8 +238,7 @@ def _draft(tmp_path, *, check: str = "/usr/bin/grep -q base-input src/input.txt"
 def _host_args(runtime, fake, catalog, draft):
     args = ["--host", "codex", "--host-runtime-home", str(runtime), "--host-binary", str(fake),
             "--host-model-request", '{"kind":"tier","name":"execution"}', "--host-sandbox", "workspace-write",
-            "--host-network", "disabled", "--host-token-reservation", "100", "--host-timeout", "30",
-            "--review-model-catalog", str(catalog)]
+            "--host-network", "disabled", "--host-token-reservation", "100", "--host-timeout", "30"]
     if draft is not None:
         args += ["--acceptance-draft", str(draft)]
     return args

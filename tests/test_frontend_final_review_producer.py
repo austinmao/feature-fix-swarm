@@ -53,6 +53,8 @@ from test_native_review_supervisor_dispatch import (
 from test_runtime_receipt_authority import _qualified
 
 _COMMON = '''import json, os, pathlib, sys, time
+if sys.argv[1:] == ["debug", "models", "--bundled"]:
+    print(json.dumps({"models": [{"slug": "gpt-5.6-terra"}]})); raise SystemExit(0)
 prompt = sys.argv[-1]
 assert prompt.startswith("Artifact-only review request:")
 assert "FFS_FIXTURE_PARENT_SECRET" not in os.environ
@@ -189,9 +191,6 @@ def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
     home = private / "ordinary"
     home.mkdir(mode=0o700)
     credential = _write(home / ("auth.json" if host == "codex" else ".credentials.json"), b'{"fixture":"dummy"}')
-    catalog = None
-    if host == "codex":
-        catalog = _write(private / "models.json", json.dumps({"models": [{"slug": model}]}).encode())
 
     evidence = tmp_path / (host + "-qualification-evidence")
     evidence.mkdir(mode=0o700)
@@ -247,8 +246,6 @@ def _fixture_seam(tmp_path: Path, host: str, store, token) -> HostRuntimeSeam:
     return HostRuntimeSeam(
         host=host, qualify=qualify, bind=bind, binary=str(binary), cli_version=_version(host),
         model=model, effort=effort, model_request={"kind": "exact", "id": model},
-        catalog_path=None if catalog is None else str(catalog),
-        catalog_sha256=None if catalog is None else _sha(catalog.read_bytes()),
     )
 
 
