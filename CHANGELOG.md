@@ -8,6 +8,16 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-07: review gate splices only the active project's wall residuals)
+
+- `scripts/gsd/review-gate-command.sh` now resolves its phases root the same way
+  `plan-wall.sh --run` does: `.planning/$GSD_PROJECT/phases` when that directory exists,
+  else `.planning/phases`. Before, it always globbed `.planning/phases/*/WALL-RESIDUALS.md`.
+  In a repo that namespaces planning per project, a run's own residuals were never spliced,
+  and another project's residuals in the default root reached the reviewer. The reviewer
+  then returned BLOCK for not resolving them, and that used up both review rounds. The
+  scope-drift plan glob uses the same root.
+
 ### Fixed (2026-10-07, spec-014 E8 prerequisite 5: CLI version bound to the launcher)
 
 - `admit_cli` now records the launcher chain it inspected (launcher, and for a `.js`

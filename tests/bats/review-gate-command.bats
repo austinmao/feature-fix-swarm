@@ -334,3 +334,37 @@ EOF
   [[ "$output" == *'"verdict":"APPROVED"'* ]]
   [[ "$output" == *'resolve skipped'* ]]
 }
+
+@test "wall policy (c): GSD_PROJECT scopes residuals to .planning/<project>/phases, never foreign default-root manifests" {
+  cat > "$STUB_DIR/focus-codex" <<EOF
+#!/usr/bin/env bash
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/focus-codex"
+  mkdir -p "$CWD/.planning/p1/phases/01-own" "$CWD/.planning/phases/01-foreign"
+  echo "- aaaaaaaaaaaa HIGH lib/own.py — own riding residual" > "$CWD/.planning/p1/phases/01-own/WALL-RESIDUALS.md"
+  echo "- bbbbbbbbbbbb HIGH lib/other.py — foreign residual" > "$CWD/.planning/phases/01-foreign/WALL-RESIDUALS.md"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 GSD_PROJECT=p1 \
+    ADVERSARY_BIN_CODEX=focus-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  grep -F 'own riding residual' "$BATS_TEST_TMPDIR/codex.stdin"
+  ! grep -F 'foreign residual' "$BATS_TEST_TMPDIR/codex.stdin"
+}
+
+@test "wall policy (c): GSD_PROJECT without its phases dir falls back to .planning/phases" {
+  cat > "$STUB_DIR/focus-codex" <<EOF
+#!/usr/bin/env bash
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/focus-codex"
+  mkdir -p "$CWD/.planning/phases/01-x"
+  echo "- cccccccccccc HIGH lib/x.py — default-root residual" > "$CWD/.planning/phases/01-x/WALL-RESIDUALS.md"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 GSD_PROJECT=absent \
+    ADVERSARY_BIN_CODEX=focus-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  grep -F 'default-root residual' "$BATS_TEST_TMPDIR/codex.stdin"
+}

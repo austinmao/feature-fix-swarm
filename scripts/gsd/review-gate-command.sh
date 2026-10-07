@@ -13,12 +13,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DIFF="$(cat)"
 
+# Phases root honors GSD_PROJECT planning isolation, same rule as plan-wall.sh
+# --run: .planning/<project>/phases when it exists, else .planning/phases. A
+# repo running several projects must not splice another project's residuals.
+PHASES_ROOT=".planning/phases"
+if [ -n "${GSD_PROJECT:-}" ] && [ -d ".planning/${GSD_PROJECT}/phases" ]; then
+  PHASES_ROOT=".planning/${GSD_PROJECT}/phases"
+fi
+
 # Advisory scope-drift check (stderr ONLY — stdout must stay the JSON verdict;
 # advisory means it never contributes to REVISE, which stays scoped to
 # security/correctness findings). Once per ship, not per turn.
 if [ -f "$SCRIPT_DIR/scope-drift-gate.sh" ]; then
   DRIFT_PLANS=()
-  for _p in .planning/phases/*/*-PLAN.md; do
+  for _p in "$PHASES_ROOT"/*/*-PLAN.md; do
     [ -f "$_p" ] && DRIFT_PLANS+=(--plan "$_p")
   done
   if [ "${#DRIFT_PLANS[@]}" -gt 0 ]; then
@@ -96,7 +104,7 @@ fi
 RESIDUAL_FOCUS=""
 RESIDUAL_FILES=0
 RESIDUAL_SPLICED=0
-for _w in .planning/phases/*/WALL-RESIDUALS.md; do
+for _w in "$PHASES_ROOT"/*/WALL-RESIDUALS.md; do
   [ -f "$_w" ] || continue
   RESIDUAL_FILES=$((RESIDUAL_FILES + 1))
   if _w_content="$(cat "$_w" 2>/dev/null)"; then
