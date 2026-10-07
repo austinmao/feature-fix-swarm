@@ -19,6 +19,13 @@ in force. The exact terminal dispositions are recorded in the
 [acceptance ledger](../../docs/upgrades/2026-09-16-spec014-acceptance-ledger.md)
 and [row-10 input disposition](../../docs/upgrades/2026-09-17-spec014-row10-input-disposition.json).
 
+## E8 target amendment (2026-10-07)
+
+The selected qualification target is GSD **1.15.0**, commit
+`b10ab3fdeb6274b373859ccd6e99b7e1cf17388e`, superseding the 1.14.0 target below
+for the E8 candidate seal (operator decision D28). Release C evidence was
+gathered on 1.14.0 and stays labeled as such; it does not certify 1.15.0.
+
 ## Recovery target amendment (2026-09-14)
 
 The selected qualification target is GSD **1.14.0**, commit

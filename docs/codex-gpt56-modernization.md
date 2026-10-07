@@ -8,7 +8,7 @@ copy or rewrite GSD source artifacts.
 
 | Component | Supported | Notes |
 |---|---|---|
-| GSD Core | `@opengsd/gsd-core@1.14.0` | Exact pin; both Claude and Codex profiles are installed |
+| GSD Core | `@opengsd/gsd-core@1.15.0` | Exact pin; both Claude and Codex profiles are installed |
 | Codex CLI | `>=0.137.0,<0.148.0` or exact `0.154.0` / `0.155.1` / `0.156.1` / `0.157.0` / `0.158.0` / `0.159.0` / `0.160.0` | Tested on `0.146.x`, `0.147.x`, `0.154.0`, `0.155.1`, `0.156.1`, `0.158.0`, `0.159.0`, and `0.160.0`; `0.157.0` is admitted without a live probe, pending qualification; doctor and `gsd-run` refuse intervening and other later releases |
 | Node.js / npm | Node 24+ / npm 10+ | Required by the pinned GSD installer |
 | Shell | macOS zsh, Ubuntu bash | Windows is not supported by this release |
@@ -121,7 +121,7 @@ resume under the same consumed grant only while that exact binding remains
 unexpired; a completed run cannot reuse it.
 
 The temporary Codex home receives every manifest-owned GSD agent and skill,
-plus the complete hook tree from the fixed `@opengsd/gsd-core@1.14.0` package.
+plus the complete hook tree from the fixed `@opengsd/gsd-core@1.15.0` package.
 The installed canonical registrations and hook hashes must match that package.
 Only those registrations are rewritten and smoke-executed, using an absolute,
 ownership-checked Node binary and a minimal `PATH`. `auth.json` must be owned by

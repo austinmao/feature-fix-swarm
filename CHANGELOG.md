@@ -8,6 +8,28 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-10-07: GSD Core 1.15.0, before the E8 candidate seal)
+
+- Updated the exact `@opengsd/gsd-core` pin from 1.14.0 to 1.15.0 (upstream
+  commit `b10ab3fd`) across package metadata, installer and runtime constants,
+  fixtures, and documentation. 1.15.0 only adds files; no file FFS stages was
+  removed.
+- Rebased the exact-pin overlay onto the 1.15.0 sources. The RED-evidence
+  overlay now extends only upstream's TAP branch (nested TAP and strict pytest
+  summaries); upstream's new Surefire XML branch and every downstream guard are
+  upstream's own. The safe-resume overlay carries upstream's #4748 phase-number
+  split (letter suffixes such as `03A`). The executor sequential guard applies
+  unchanged.
+- The overlay refuses Surefire XML as RED evidence. 1.15.0's new Surefire
+  parser scans tags by text search and fails open on XML quoted in TAP or
+  pytest output, on comments and CDATA, and on truncated reports. FFS never
+  accepted Surefire, so output carrying `<testsuite`/`<testcase` markers now
+  counts as zero tests and is refused (`zero_tests_discovered`).
+- Regenerated `patches/gsd-1.14-ffs-supervised-dispatch.patch` for 1.15.0 shifts.
+  Its added and removed lines are unchanged; only one context hunk (the
+  `gsd-tools` usage list) moved. The file name keeps its 1.14 label so installed
+  layouts and manifests stay stable.
+
 ### Fixed (2026-10-05, spec-014 E8 prerequisite 3c: spec-review producer)
 
 - The acceptance draft can now be reviewed natively before it is sealed, as an

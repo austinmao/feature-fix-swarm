@@ -1,22 +1,22 @@
 {
   "schema": "ffs.gsd-core-overlay/v3",
   "package": "@opengsd/gsd-core",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "targets": [
     {
       "target": "gsd-core/bin/lib/tdd-red-evidence.cjs",
-      "base_sha256": "3889f9dccfbcc7d119254e0c01010ff71547ed95bbd03b4584bad56530a61797",
-      "patched_sha256": "719e35a5ed6e4365cbe3edf212ee58985565ff332be79e86427bdb108045d784"
+      "base_sha256": "5797014bbbdbef0750a1baf1dca74ea8e7d4ade5401aea3940cfbc9d2243e2ac",
+      "patched_sha256": "6f3b05f9c2de646f8080a190493be31d9a533705c3b0adbd6e6c6df0414f369f"
     },
     {
       "target": "agents/gsd-executor.md",
-      "base_sha256": "40431b7e765a9bf6b656788196bf947a94f8697323285f0f5e552353148deafb",
-      "patched_sha256": "c26c85437e1b5082d16ae69e2c53f474601431e48b9e270fa22a7bac680a1f9f"
+      "base_sha256": "e7245f956b399b8ef7e1b91df7fc383f52f480a747c9aaca5e16b1f8c78aa509",
+      "patched_sha256": "6bc58db0eb9b67537f24f1e0ef1c52b2e3fb47ecbed526265c977595a16e4907"
     },
     {
       "target": "gsd-core/workflows/execute-phase.md",
-      "base_sha256": "ba69804f311a5efb7ebd87b824917a82fbacbb3389cf56de06346d64d31beb4a",
-      "patched_sha256": "be54fdcfec4cec8fda55a2ee312a0ad63b2573d27c714adfeb325ef73c11b354"
+      "base_sha256": "4ba7f59a46a1b113ef6672b77156b4681113c11369522fde766011d48a2c917c",
+      "patched_sha256": "dc6897e92fc33e41261b21a5684167b7da23b35740082a1943033abe28687407"
     }
   ]
 }

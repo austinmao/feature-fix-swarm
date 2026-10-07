@@ -40,7 +40,7 @@ except OSError:
     print("")
 PYEOF
 )"
-GSD_VERSION="${GSD_VERSION:-1.14.0}"
+GSD_VERSION="${GSD_VERSION:-1.15.0}"
 
 # roster rows: name|kind|required|remedy
 # kinds: binary (command -v; comma = any-of), npm, pip, pin

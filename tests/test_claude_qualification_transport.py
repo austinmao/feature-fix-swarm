@@ -172,7 +172,7 @@ def test_managed_probe_material_binds_each_isolated_claude_profile(tmp_path, mon
     owned.write_text("fixture")
     (candidate / "settings.json").write_text("{}")
     (candidate / "gsd-file-manifest.json").write_text(json.dumps({
-        "version": "1.14.0", "runtime": "claude",
+        "version": "1.15.0", "runtime": "claude",
         "files": {"gsd-core/bin/gsd-tools.cjs": qualification._digest(owned)},
     }))
     credential = tmp_path / "credential.json"
@@ -294,7 +294,7 @@ def test_qualify_managed_claude_runtime_threads_scope_into_probe_environment(tmp
     owned.write_text("fixture")
     (candidate / "settings.json").write_text("{}")
     (candidate / "gsd-file-manifest.json").write_text(json.dumps({
-        "version": "1.14.0", "runtime": "claude",
+        "version": "1.15.0", "runtime": "claude",
         "files": {"gsd-core/bin/gsd-tools.cjs": qualification._digest(owned)},
     }))
     credential = tmp_path / "credential.json"

@@ -140,6 +140,37 @@ NODE
   done
 }
 
+surefire_record() {
+  node - "$1" "$2" "$3" <<'NODE'
+const fs = require("fs");
+fs.writeFileSync(process.argv[2], JSON.stringify({
+  command: process.argv[3], exitCode: 1,
+  targetTest: "target", targetFile: "FixtureTest.java",
+  output: process.argv[4],
+}));
+NODE
+}
+
+@test "Surefire XML is never RED evidence: complete, quoted, commented, CDATA, truncated, or inside pytest" {
+  for CASE in complete tap_quoted truncated_body truncated_tag unclosed_suite comment_close cdata_tap pytest_quoted; do
+    REC="$BATS_TEST_TMPDIR/surefire-$CASE.json"
+    case "$CASE" in
+      complete) DATA='<testsuite tests="2"><testcase name="passes" classname="Fixture"/><testcase name="target" classname="Fixture"><failure>boom</failure></testcase></testsuite>' ;;
+      tap_quoted) DATA=$'TAP version 13\nnot ok 1 - unrelated\n  ---\n  message: expected <testsuite><testcase name="target" classname="Fixture"><failure>example</failure></testcase></testsuite>\n  ...\n1..1\n# tests 1\n# pass 0\n# fail 1\n' ;;
+      truncated_body) DATA='<testsuite><testcase name="target" classname="Fixture"><failure>boom' ;;
+      truncated_tag) DATA='<testsuite><testcase name="target" classname="Fixture"><failure>boom</failure></testcase><testcase name="next"' ;;
+      unclosed_suite) DATA='<testsuite><testcase name="target" classname="Fixture"><failure>boom</failure></testcase>' ;;
+      comment_close) DATA='<testsuite><testcase name="target" classname="Fixture"><failure>boom</failure><!-- </testcase> --></testsuite>' ;;
+      cdata_tap) DATA=$'<testsuite><testcase name="other" classname="Fixture"><failure>x</failure><system-out><![CDATA[TAP version 13\nnot ok 1 - target\n1..1\n# tests 1\n# pass 0\n# fail 1\n]]></system-out></testcase></testsuite>' ;;
+      pytest_quoted) DATA=$'============================= test session starts ==============================\ncollected 1 item\n\ntests/test_x.py::test_other FAILED\n\nE   AssertionError: <testsuite><testcase name="target" classname="Fixture"><failure>x</failure></testcase></testsuite>\n=========================== short test summary info ============================\nFAILED tests/test_x.py::test_other\n============================== 1 failed in 0.01s ===============================\n' ;;
+    esac
+    surefire_record "$REC" "mvn test" "$DATA"
+    run node "$TOOLS" check tdd-red-evidence "$REC" --raw
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"verdict": "INVALID_RED"'* ]] || { echo "case $CASE: $output"; false; }
+  done
+}
+
 @test "executor overlay permits a sequential linked-worktree branch but retains the isolated-worktree gate" {
   EXECUTOR="$PKG/agents/gsd-executor.md"
   grep -F 'workflow.use_worktrees --raw' "$EXECUTOR"
@@ -504,9 +535,9 @@ PY
   printf '{"name":"@opengsd/gsd-core","version":"1.14.1"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   run python3 "$OVERLAY" verify --repo "$FIX"
   [ "$status" -eq 78 ]
-  [[ "$output" == *"exact @opengsd/gsd-core@1.14.0"* ]]
+  [[ "$output" == *"exact @opengsd/gsd-core@1.15.0"* ]]
 
-  printf '{"name":"@opengsd/gsd-core","version":"1.14.0"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
+  printf '{"name":"@opengsd/gsd-core","version":"1.15.0"}\n' > "$FIX/node_modules/@opengsd/gsd-core/package.json"
   printf 'untrusted drift\n' > "$TARGET"
   run python3 "$OVERLAY" apply --repo "$FIX"
   [ "$status" -eq 78 ]

@@ -820,8 +820,8 @@ def test_install_invokes_upstream_full_claude_and_codex_profiles(tmp_path: Path)
     calls = (tmp_path / "gsd-installer.log").read_text().splitlines()
     assert calls == ["--claude --global --profile=full", "--codex --global --profile=full"]
     manifest = json.loads((tmp_path / "home/.cache/feature-fix-swarm/install-manifest.json").read_text())
-    assert manifest["gsd"]["version"] == "1.14.0"
-    assert manifest["gsd"]["commit"] == bytes.fromhex("f8542fef 67c1f978 ffa70912 cb6f2aaa b76464c6").hex()
+    assert manifest["gsd"]["version"] == "1.15.0"
+    assert manifest["gsd"]["commit"] == bytes.fromhex("b10ab3fd eb6274b3 73859ccd 6e99b7e1 cf17388e").hex()
     assert manifest["gsd"]["profiles"] == {"claude": "full", "codex": "full"}
 
 
@@ -830,19 +830,19 @@ def test_gsd_package_verification_binds_qualified_lock_integrity(tmp_path: Path)
     installed = package_root / "node_modules/@opengsd/gsd-core"
     installed.mkdir(parents=True)
     (package_root / "package.json").write_text(
-        json.dumps({"devDependencies": {"@opengsd/gsd-core": "1.14.0"}})
+        json.dumps({"devDependencies": {"@opengsd/gsd-core": "1.15.0"}})
     )
     (package_root / "package-lock.json").write_text(
         json.dumps({
             "packages": {
                 "node_modules/@opengsd/gsd-core": {
-                    "version": "1.14.0",
+                    "version": "1.15.0",
                     "integrity": ffs_installer.GSD_INTEGRITY,
                 }
             }
         })
     )
-    (installed / "package.json").write_text(json.dumps({"version": "1.14.0"}))
+    (installed / "package.json").write_text(json.dumps({"version": "1.15.0"}))
 
     ffs_installer.verify_gsd_package(package_root)
 
@@ -1352,7 +1352,7 @@ def test_upgrade_rollback_restores_prior_gsd_version_manifests(tmp_path: Path) -
     installed = run_setup(tmp_path, "--scope", "user")
     assert installed.returncode == 0, installed.stderr
     backup_id = next(line.split("=", 1)[1] for line in installed.stdout.splitlines() if line.startswith("backup_id="))
-    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.14.0"
+    assert json.loads((home / ".codex/gsd-file-manifest.json").read_text())["version"] == "1.15.0"
 
     rolled_back = run_setup(tmp_path, "--rollback", backup_id)
 

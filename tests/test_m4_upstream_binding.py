@@ -60,7 +60,7 @@ def test_actual_upstream_computes_workspace_planning_root(tmp_path, project, wor
     assert result["workstream"] == workstream
     assert result["session_key"] == "run-session"
     assert result["effective_session_key"] == "gsd-session-key-run-session"
-    assert result["resolver_version"] == "1.14.0"
+    assert result["resolver_version"] == "1.15.0"
     assert len(result["runtime_digest"]) == 64
 
 

@@ -286,7 +286,7 @@ def test_selected_start_resolves_real_workspace_scope_and_preserves_primary_poin
         "session_key": "selected-session",
         "effective_session_key": "gsd-session-key-selected-session",
         "planning_root": str(workspace / ".planning" / "project-key" / "workstreams" / "backend"),
-        "resolver_version": "1.14.0",
+        "resolver_version": "1.15.0",
         "runtime_digest": payload["upstream"]["runtime_digest"],
         "runtime_manifest_sha256": runtime_sha,
     }

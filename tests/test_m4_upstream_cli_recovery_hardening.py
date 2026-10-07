@@ -328,7 +328,7 @@ def test_crash_before_binding_recovery_resolves_real_workspace_before_ready(
         "session_key": "crash-session",
         "effective_session_key": "gsd-session-key-crash-session",
         "planning_root": str(workspace / ".planning" / "project-key" / "workstreams" / "backend"),
-        "resolver_version": "1.14.0",
+        "resolver_version": "1.15.0",
         "runtime_digest": payload["upstream"]["runtime_digest"],
         "runtime_manifest_sha256": runtime_sha256,
     }

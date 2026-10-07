@@ -49,7 +49,7 @@ _Probe = namedtuple("Probe", "name argv environment timeout_seconds")
 def _template(root: Path) -> Path:
     """A real installer Codex home: the source closure that private staging copies and validates."""
     source, skills = root / ".codex", root / ".agents" / "skills" / "gsd-quick"
-    files = {"agents/gsd-executor.toml": b'name = "gsd-executor"\n', "gsd-core/VERSION": b"1.14.0\n",
+    files = {"agents/gsd-executor.toml": b'name = "gsd-executor"\n', "gsd-core/VERSION": b"1.15.0\n",
              "scripts/gsd-run.sh": b"#!/bin/sh\nexit 0\n", "hooks/gsd-hook.js": b"#!/usr/bin/env node\n"}
     for relative, data in {**files, "skills/gsd-quick/SKILL.md": b"# quick\n"}.items():
         path = (root / ".agents" if relative.startswith("skills/") else source) / relative
@@ -66,7 +66,7 @@ def _template(root: Path) -> Path:
     (source / "auth.json").chmod(0o600)
     owned = {relative: hashlib.sha256(data).hexdigest() for relative, data in files.items()}
     owned["skills/gsd-quick/SKILL.md"] = hashlib.sha256(b"# quick\n").hexdigest()
-    (source / "gsd-file-manifest.json").write_text(json.dumps({"version": "1.14.0", "files": owned}))
+    (source / "gsd-file-manifest.json").write_text(json.dumps({"version": "1.15.0", "files": owned}))
     return source
 
 

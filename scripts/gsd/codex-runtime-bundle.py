@@ -15,7 +15,7 @@ import sys
 from typing import NoReturn
 
 
-GSD_VERSION = "1.14.0"
+GSD_VERSION = "1.15.0"
 CANONICAL_HOOKS = {
     "SessionStart": "gsd-check-update.js",
     "SubagentStart": "gsd-context-monitor.js",
