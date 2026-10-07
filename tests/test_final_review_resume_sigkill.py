@@ -218,7 +218,7 @@ def _argv(env, authority, template, fake, catalog, draft) -> list[str]:
         "--select-file", "src/input.txt", "--host", "codex", "--host-runtime-home", str(template),
         "--host-binary", str(fake), "--host-model-request", '{"kind":"tier","name":"execution"}',
         "--host-sandbox", "workspace-write", "--host-network", "disabled", "--host-token-reservation", "100",
-        "--host-timeout", "30", "--review-model-catalog", str(catalog), "--acceptance-draft", str(draft),
+        "--host-timeout", "30", "--acceptance-draft", str(draft),
         "--scope", "1",
     ]
 

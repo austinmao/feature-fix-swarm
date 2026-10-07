@@ -15,7 +15,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import signal
 import stat
+import subprocess
+import tempfile
 from typing import TYPE_CHECKING, Final
 import uuid
 
@@ -87,6 +91,23 @@ _DISABLED_FEATURES = (
 
 class NativeReviewRuntimeRefused(ValueError):
     """The staged review closure is absent, unsafe, or no longer identical."""
+
+    code = "NATIVE_REVIEW_MATERIAL_INVALID"
+
+
+class NativeReviewCatalogUnavailable(NativeReviewRuntimeRefused):
+    """The qualified Codex binary did not produce its bundled model catalog."""
+
+    code = "NATIVE_REVIEW_CATALOG_UNAVAILABLE"
+
+
+class NativeReviewModelUnavailable(NativeReviewRuntimeRefused):
+    """The requested model is absent from the catalog; no other slug is substituted."""
+
+    code = "NATIVE_REVIEW_MODEL_UNAVAILABLE"
+
+
+_BUNDLED_CATALOG_TIMEOUT = 30
 
 
 def _pinned_provenance(host: str, version: str) -> dict[str, str]:
@@ -227,6 +248,8 @@ def _catalog_model(source: object, requested_model: str) -> tuple[dict[str, obje
     if not isinstance(models, list) or not models:
         raise NativeReviewRuntimeRefused("model catalog has no models")
     matches = [item for item in models if isinstance(item, dict) and item.get("slug") == requested_model]
+    if not matches:
+        raise NativeReviewModelUnavailable("requested model is absent from the catalog")
     if len(matches) != 1:
         raise NativeReviewRuntimeRefused("requested model is not uniquely present in catalog")
     # Preserve original model metadata, only removing known tool-registration
@@ -244,6 +267,40 @@ def _catalog_model(source: object, requested_model: str) -> tuple[dict[str, obje
     catalog = {key: item for key, item in source.items() if key not in {"models", "default_model"}}
     catalog.update({"models": [model], "default_model": requested_model})
     return catalog, _digest(_canonical(catalog))
+
+
+def _bundled_catalog(binary: Path, path: str, parent: Path) -> bytes:
+    """The catalog shipped inside the qualified binary (``debug models --bundled``: offline, no refresh).
+
+    It runs from ``/`` with only the closed review environment and a fresh empty 0700 home below the
+    private parent (no credential, so nothing can authenticate), and the home is removed afterwards.
+    """
+    try:
+        home = Path(tempfile.mkdtemp(prefix=".bundled-catalog-", dir=parent))
+    except OSError as error:
+        raise NativeReviewCatalogUnavailable("cannot create the bundled catalog home") from error
+    try:
+        try:
+            process = subprocess.Popen(
+                (str(binary), "debug", "models", "--bundled"), cwd="/",
+                env=dict(_environment("codex", home, Path("/"), path)), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as error:
+            raise NativeReviewCatalogUnavailable("cannot start the bundled catalog") from error
+        try:
+            output, _ = process.communicate(timeout=_BUNDLED_CATALOG_TIMEOUT)
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.communicate()
+            raise NativeReviewCatalogUnavailable("bundled catalog timed out") from error
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    if process.returncode != 0 or not output or len(output) > _MAX_FILE:
+        raise NativeReviewCatalogUnavailable("bundled catalog was not produced")
+    return output
 
 
 def _codex_overrides(catalog: Path, version: str) -> tuple[str, ...]:
@@ -437,8 +494,9 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
     """Stage one fresh private runtime and return exact future native argv.
 
     The caller must already have selected and bound prompt/artifacts in the
-    artifact envelope.  This function never reads credentials and never starts
-    a process.  ``runtime_root`` must be a new leaf below a private directory.
+    artifact envelope.  This function never reads credentials.  The processes it starts are the
+    verified Node's platform probe and, for Codex without a fixture catalog, the verified binary's
+    offline ``debug models --bundled``.  ``runtime_root`` must be a new leaf below a private directory.
     """
     if type(request) is not NativeReviewRequest:
         raise NativeReviewRuntimeRefused("review request has invalid type")
@@ -492,6 +550,9 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
     parent, _parent_identity = _private_directory(root.parent, "private runtime parent")
     if root.parent.resolve(strict=True) != parent:
         raise NativeReviewRuntimeRefused("private runtime parent changed")
+    catalog = catalog_digest = source_digest = None
+    if request.host == "codex":
+        catalog, catalog_digest, source_digest = _review_catalog(request, model, binary, path, parent)
     try:
         root.mkdir(mode=0o700)
         os.chmod(root, 0o700)
@@ -500,23 +561,9 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
     root, root_identity = _private_directory(root, "private runtime root")
     environment = _environment(request.host, root, workspace, path)
     config_path = catalog_path = mcp_path = None
-    config_digest = catalog_digest = source_digest = mcp_digest = None
+    config_digest = mcp_digest = None
     claude_config_identity = (None, None)
     if request.host == "codex":
-        if request.catalog_path is None or request.catalog_sha256 is None:
-            raise NativeReviewRuntimeRefused("Codex review requires a caller-resolved model catalog")
-        source_path = Path(request.catalog_path)
-        if not source_path.is_absolute():
-            raise NativeReviewRuntimeRefused("model catalog must be absolute")
-        source_data, _source_identity = _read_regular(source_path, "model catalog")
-        source_digest = _digest(source_data)
-        if source_digest != _sha(request.catalog_sha256, "model catalog"):
-            raise NativeReviewRuntimeRefused("model catalog differs from caller-resolved identity")
-        try:
-            source = json.loads(source_data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-            raise NativeReviewRuntimeRefused("model catalog is not valid JSON") from error
-        catalog, catalog_digest = _catalog_model(source, model)
         catalog_path = root / "review-model-catalog.json"
         written_catalog, _catalog_identity = _write_private_new(catalog_path, _canonical(catalog))
         if written_catalog != catalog_digest:
@@ -546,6 +593,29 @@ def prepare_native_review_runtime(request: NativeReviewRequest, *, runtime_root:
         str(mcp_path) if mcp_path else None, mcp_digest, argv, environment, _digest(request.prompt.encode("utf-8")),
         tuple(sorted(provenance.items())), request.effort, request.session_id, *claude_config_identity,
     )
+
+
+def _review_catalog(request: NativeReviewRequest, model: str, binary: Path, path: str,
+                    parent: Path) -> tuple[dict[str, object], str, str]:
+    """The one-model catalog, its digest and its source digest.  Production passes no catalog, so the source is
+    the qualified binary's bundled catalog; an explicit file is the unit-fixture route only."""
+    if request.catalog_path is None and request.catalog_sha256 is None:
+        source_data = _bundled_catalog(binary, path, parent)
+    elif request.catalog_path is None or request.catalog_sha256 is None:
+        raise NativeReviewRuntimeRefused("model catalog path and identity must be given together")
+    else:
+        source_path = Path(request.catalog_path)
+        if not source_path.is_absolute():
+            raise NativeReviewRuntimeRefused("model catalog must be absolute")
+        source_data, _source_identity = _read_regular(source_path, "model catalog")
+        if _digest(source_data) != _sha(request.catalog_sha256, "model catalog"):
+            raise NativeReviewRuntimeRefused("model catalog differs from caller-resolved identity")
+    try:
+        source = json.loads(source_data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise (NativeReviewCatalogUnavailable if request.catalog_path is None
+               else NativeReviewRuntimeRefused)("model catalog is not valid JSON") from error
+    return (*_catalog_model(source, model), _digest(source_data))
 
 
 def validate_native_review_material(value: object) -> NativeReviewMaterial:

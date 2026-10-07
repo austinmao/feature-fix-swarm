@@ -3328,7 +3328,7 @@ def _managed_wave_prompt(plan_prompt: str) -> str:
 
 def run_managed_command(store, token, context, command, request_key,
                         dispatch_limit, token_limit, host_request=None, upstream_runtime=None, *,
-                        model_request=None, review_catalog=None, acceptance_draft=None) -> int:
+                        model_request=None, acceptance_draft=None) -> int:
     """Production context callback for explicitly selected local processes.
 
     Every native process, including qualification and nested GSD executors,
@@ -3355,7 +3355,7 @@ def run_managed_command(store, token, context, command, request_key,
     from run_state.frontend_producers import drive_managed_session
     session = prepare_managed_codex_session(
         store, token, context, command, request_key, host_request, upstream_runtime=upstream_runtime,
-        model_request=model_request, review_catalog=review_catalog)
+        model_request=model_request)
     return drive_managed_session(store, token, context, session, acceptance_draft=acceptance_draft)
 
 
@@ -3590,7 +3590,7 @@ def _recorded_tmpdir_provably_released(store, activity_id: str, path: str, ident
 
 
 def prepare_managed_codex_session(store, token, context, command, request_key, host_request, *,
-                                  upstream_runtime=None, model_request=None, review_catalog=None):
+                                  upstream_runtime=None, model_request=None):
     """Qualification seams, worker channel and outer contract for one Codex host run."""
     from host_capabilities import GsdSupervisorEnvironment, admit_cli
     from run_state.codex_host import CodexHostAdapter
@@ -3859,14 +3859,10 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
             except Exception:
                 pass
 
-    catalog_path = catalog_sha256 = None
-    if review_catalog is not None:
-        catalog_path, catalog_sha256 = review_catalog
     seam = HostRuntimeSeam(
         host="codex", qualify=qualify_runtime, bind=bind_launch, binary=host_request.binary,
         cli_version=str(cli["version"]), model=host_request.model, effort=host_request.effort,
         model_request=dict(model_request) if model_request is not None else {"kind": "exact", "id": host_request.model},
-        catalog_path=catalog_path, catalog_sha256=catalog_sha256,
     )
     return ManagedHostSession(
         host="codex", supervisor=supervisor, evidence_root=host_evidence, ready=ready, child_key=child_key,

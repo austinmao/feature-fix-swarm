@@ -313,7 +313,7 @@ def prepare_frontend_run(
     ceremony_estimate: dict | None = None,
     capacity_policy: dict | None = None,
     scope: str = "", model_request: dict | None = None,
-    review_catalog: tuple[str, str] | None = None, acceptance_draft: dict | None = None,
+    acceptance_draft: dict | None = None,
 ) -> int:
     """Admit authoring/investigation under the same writer and live owner fence.
 
@@ -393,7 +393,7 @@ def prepare_frontend_run(
                 store, token, context, command=(frontend,), request_key=request_key,
                 dispatch_limit=dispatch_limit, token_limit=token_limit,
                 host_request=host_request, upstream_runtime=upstream_runtime,
-                model_request=model_request, review_catalog=review_catalog,
+                model_request=model_request,
                 acceptance_draft=acceptance_draft,
             )
         except _managed_run_refusals() as error:
