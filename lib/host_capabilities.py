@@ -745,11 +745,11 @@ def version_from(output: str) -> str:
     return match.group(1)
 
 
-def command_output(binary: str, *args: str) -> str:
+def command_output(binary: str, *args: str, env: dict[str, str] | None = None) -> str:
     try:
         result = subprocess.run(
             [binary, *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            check=False, timeout=CLI_INSPECTION_TIMEOUT_SECONDS,
+            check=False, timeout=CLI_INSPECTION_TIMEOUT_SECONDS, env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise CapabilityError(f"Codex CLI {' '.join(args)} timed out after {CLI_INSPECTION_TIMEOUT_SECONDS}s") from exc
@@ -759,15 +759,28 @@ def command_output(binary: str, *args: str) -> str:
 
 
 def admit_cli(binary: str) -> dict[str, object]:
-    version = version_from(command_output(binary, "--version"))
-    help_text = command_output(binary, "exec", "--help")
+    # The version is a property of these bytes: record the launcher chain the probes ran and
+    # require it unchanged across them, so qualification can refuse any other executable.
+    chain = _binary_chain(Path(binary))
+    # Probe the resolved launcher under the PATH a launch uses, so a `.js` launcher runs the
+    # chain's own Node (and so its platform package), never another `node` on the ambient PATH.
+    launcher = Path(binary).resolve()
+    path = ":".join(codex_path_entries(launcher, codex_node_binary(launcher)))
+    # A closed environment, as qualification and launches use: no ambient NODE_OPTIONS preload or
+    # other startup switch can change what the probes report.
+    probe_env = {"PATH": path, "HOME": os.environ.get("HOME", "/"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                 "NO_COLOR": "1"}
+    version = version_from(command_output(str(launcher), "--version", env=probe_env))
+    help_text = command_output(str(launcher), "exec", "--help", env=probe_env)
+    if _binary_chain(Path(binary)) != chain:
+        raise CapabilityError("Codex CLI launcher changed while it was admitted")
     absent = [flag for flag in (*REQUIRED_EXEC_FLAGS, REQUIRED_HOOK_FLAG) if flag not in help_text]
     if absent:
         raise CapabilityError("Codex CLI lacks required isolated-runtime capabilities: " + ", ".join(absent))
     # Help output is only a static surface check.  Runtime admission remains
     # UNMET until verify_runtime validates a canary from this exact executable.
     return {"schema": "ffs.codex-capabilities/v1", "version": version, "tiers": CODEX_TIERS,
-            "runtime_readiness": "UNMET", "static_surface": True}
+            "runtime_readiness": "UNMET", "static_surface": True, "binary": chain}
 
 
 def _toml_string(value: str) -> str:

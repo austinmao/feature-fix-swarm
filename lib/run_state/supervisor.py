@@ -3698,6 +3698,10 @@ def prepare_managed_codex_session(store, token, context, command, request_key, h
                 retained_launch(store, activity_id), outer=activity_request_key == child_key)) from error
         except (CapabilityError, ManagedQualificationRefused, OSError, ValueError) as error:
             raise SupervisorRefused("HOST_CAPABILITY_UNQUALIFIED") from error
+        # The admitted version names the executable admission inspected; a runtime qualified
+        # with any other launcher chain would run under that version's provenance.
+        if not isinstance(cli.get("binary"), dict) or dict(bundle.qualified_runtime.binary) != cli["binary"]:
+            raise SupervisorRefused("HOST_CLI_VERSION_UNBOUND")
         return QualifiedHostRuntime(bundle.activity, bundle.qualified_runtime, bundle.runtime_receipt,
                                     adapter, additions)
 

@@ -207,7 +207,8 @@ def _qualified_host(tmp_path, monkeypatch, *, fake_script: str | None = None, on
 
     monkeypatch.setattr(runtime_staging, "stage_or_reuse_private_codex_runtime", stage)
     monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify)
-    monkeypatch.setattr(host_capabilities, "admit_cli", lambda _binary: {"version": "0.154.0"})
+    monkeypatch.setattr(host_capabilities, "admit_cli", lambda binary: {
+        "version": "0.154.0", "binary": _binary_chain(Path(binary))})
     return parse_codex_host_request(
         runtime_home=str(runtime), binary=str(fake),
         model_request_json='{"kind":"tier","name":"execution"}',
@@ -962,7 +963,8 @@ def test_retained_outer_replay_never_re_stages_a_launched_runtime(tmp_path, monk
         raise runtime_staging.RetainedRuntimeNotReusable("retained stage contains an unowned or missing file")
 
     monkeypatch.setattr(runtime_staging, "stage_or_reuse_private_codex_runtime", stage)
-    monkeypatch.setattr(host_capabilities, "admit_cli", lambda _binary: {"version": "0.154.0"})
+    monkeypatch.setattr(host_capabilities, "admit_cli", lambda binary: {
+        "version": "0.154.0", "binary": _binary_chain(Path(binary))})
     monkeypatch.chdir(primary)
     request = parse_codex_host_request(
         runtime_home=str(runtime), binary=str(fake),

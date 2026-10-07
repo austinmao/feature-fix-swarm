@@ -204,7 +204,8 @@ def _fixture_host(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runtime_staging, "stage_or_reuse_private_codex_runtime", stage)
     monkeypatch.setattr(managed_qualification, "qualify_managed_runtime", qualify)
-    monkeypatch.setattr(host_capabilities, "admit_cli", lambda _binary: {"version": "0.154.0"})
+    monkeypatch.setattr(host_capabilities, "admit_cli", lambda binary: {
+        "version": "0.154.0", "binary": host_capabilities._binary_chain(Path(binary))})
     import run_state.shared_resources as shared_resources
     from run_state.managed_admission import ManagedAdmissionQueue
     from run_state.resource_observation import ResourceObservation
