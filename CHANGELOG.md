@@ -8,6 +8,19 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-08, spec-014 E8 coverage gate: zero-statement production module)
+
+- `lib/run_state/__init__.py` had no statements, so Coverage.py (`skip_empty`, docstrings not
+  counted) emitted no class for it while the E8 verifier's `coverage` gate requires every
+  first-party `lib/`, `scripts/` and `skills/` module in the XML inventory with a line
+  inventory. On the sealed candidate the gate refused with
+  `coverage production inventory mismatch: missing=['lib/run_state/__init__.py']`, which no
+  coverage run could satisfy. The package now carries one coverage-countable statement
+  (`__all__`), and `tests/test_coverage_contract.py` asserts, with Coverage.py's own parser,
+  that no production module is statement-free. The test helper and `tests/coverage-parallel.ini`
+  also dropped a stale `X` path exclusion that the verifier's inventory rule never had, so the
+  three agree on which modules are production.
+
 ### Fixed (2026-10-07, spec-014 E8 prerequisite 4b: cross-family native review)
 
 - The production native review always ran on the outer run's own host: every producer took

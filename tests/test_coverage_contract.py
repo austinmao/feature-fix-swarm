@@ -53,7 +53,7 @@ def _entries(parser: configparser.ConfigParser, section: str, option: str) -> se
 
 
 def _production_python_files() -> set[Path]:
-    excluded = {"tests", "vendor", ".staging", "X", "node_modules", "__pycache__"}
+    excluded = {"tests", "vendor", ".staging", "node_modules", "__pycache__"}
     return {
         path.relative_to(ROOT)
         for path in ROOT.rglob("*.py")
@@ -78,7 +78,7 @@ def test_coverage_configuration_measures_the_full_first_party_tree() -> None:
     omitted = _entries(config, "report", "omit")
     for path in (
         "tests/*", "*/tests/*", "vendor/*", "*/vendor/*",
-        ".staging/*", "*/.staging/*", "X/*", "*/X/*",
+        ".staging/*", "*/.staging/*",
     ):
         assert path in omitted
     assert not any("lib" in path or "scripts" in path or "skills" in path for path in omitted)
@@ -232,3 +232,24 @@ def test_subprocess_patch_creates_distinct_parent_and_child_data_files(tmp_path:
     recorded = CoverageData(basename=str(data_file))
     recorded.read()
     assert recorded.lines(str(ROOT / "lib/model_requests.py")), "child source lines were not recorded"
+
+
+def test_every_production_module_has_a_statement() -> None:
+    """The coverage gate needs every first-party module in the XML inventory.
+
+    Coverage.py reports no class for a file without statements (``skip_empty``,
+    and docstrings do not count), while the verifier refuses an inventory that
+    lacks a production module. Keep every lib/, scripts/ and skills/ module at
+    one coverage-countable statement or more, judged by Coverage.py's own parser.
+    """
+    from coverage.parser import PythonParser
+
+    empty = []
+    for path in sorted(_production_python_files()):
+        if path.parts[0] not in {"lib", "scripts", "skills"}:
+            continue
+        parser = PythonParser(text=(ROOT / path).read_text(), filename=str(path))
+        parser.parse_source()
+        if not parser.statements:
+            empty.append(path.as_posix())
+    assert empty == [], f"zero-statement production modules: {empty}"
