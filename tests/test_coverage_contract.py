@@ -232,3 +232,24 @@ def test_subprocess_patch_creates_distinct_parent_and_child_data_files(tmp_path:
     recorded = CoverageData(basename=str(data_file))
     recorded.read()
     assert recorded.lines(str(ROOT / "lib/model_requests.py")), "child source lines were not recorded"
+
+
+def test_every_production_module_has_a_statement() -> None:
+    """The coverage gate needs every first-party module in the XML inventory.
+
+    Coverage.py reports no class for a file without statements (``skip_empty``,
+    and docstrings do not count), while the verifier refuses an inventory that
+    lacks a production module. Keep every lib/, scripts/ and skills/ module at
+    one coverage-countable statement or more, judged by Coverage.py's own parser.
+    """
+    from coverage.parser import PythonParser
+
+    empty = []
+    for path in sorted(_production_python_files()):
+        if path.parts[0] not in {"lib", "scripts", "skills"}:
+            continue
+        parser = PythonParser(text=(ROOT / path).read_text(), filename=str(path))
+        parser.parse_source()
+        if not parser.statements:
+            empty.append(path.as_posix())
+    assert empty == [], f"zero-statement production modules: {empty}"
