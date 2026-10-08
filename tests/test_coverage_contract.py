@@ -53,7 +53,7 @@ def _entries(parser: configparser.ConfigParser, section: str, option: str) -> se
 
 
 def _production_python_files() -> set[Path]:
-    excluded = {"tests", "vendor", ".staging", "X", "node_modules", "__pycache__"}
+    excluded = {"tests", "vendor", ".staging", "node_modules", "__pycache__"}
     return {
         path.relative_to(ROOT)
         for path in ROOT.rglob("*.py")
@@ -78,7 +78,7 @@ def test_coverage_configuration_measures_the_full_first_party_tree() -> None:
     omitted = _entries(config, "report", "omit")
     for path in (
         "tests/*", "*/tests/*", "vendor/*", "*/vendor/*",
-        ".staging/*", "*/.staging/*", "X/*", "*/X/*",
+        ".staging/*", "*/.staging/*",
     ):
         assert path in omitted
     assert not any("lib" in path or "scripts" in path or "skills" in path for path in omitted)

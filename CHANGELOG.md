@@ -17,7 +17,9 @@ all skills.
   `coverage production inventory mismatch: missing=['lib/run_state/__init__.py']`, which no
   coverage run could satisfy. The package now carries one coverage-countable statement
   (`__all__`), and `tests/test_coverage_contract.py` asserts, with Coverage.py's own parser,
-  that no production module is statement-free.
+  that no production module is statement-free. The test helper and `tests/coverage-parallel.ini`
+  also dropped a stale `X` path exclusion that the verifier's inventory rule never had, so the
+  three agree on which modules are production.
 
 ### Fixed (2026-10-07, spec-014 E8 prerequisite 4b: cross-family native review)
 
