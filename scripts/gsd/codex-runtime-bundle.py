@@ -16,23 +16,17 @@ from typing import NoReturn
 
 
 GSD_VERSION = "1.15.0"
+# GSD 1.14+ deliberately stopped registering (and 1.15 stopped installing)
+# gsd-context-monitor.js for Codex: Codex hook payloads lack the metrics it
+# needs. SessionStart is the one production hook the pinned installer owns;
+# lib/host_capabilities.py REQUIRED_HOOK_EVENTS must stay in step.
 CANONICAL_HOOKS = {
     "SessionStart": "gsd-check-update.js",
-    "SubagentStart": "gsd-context-monitor.js",
-    "Stop": "gsd-context-monitor.js",
-    "PostToolUse": "gsd-context-monitor.js",
-    "PreToolUse": "gsd-context-monitor.js",
-    "PermissionRequest": "gsd-context-monitor.js",
-    "PreCompact": "gsd-context-monitor.js",
-    "PostCompact": "gsd-context-monitor.js",
-    "SubagentStop": "gsd-context-monitor.js",
-    "UserPromptSubmit": "gsd-context-monitor.js",
 }
 CODEX_HOOK_DEPENDENCIES = {
     "gsd-check-update.js",
     "gsd-check-update-worker.js",
     "managed-hooks-registry.cjs",
-    "gsd-context-monitor.js",
 }
 
 
