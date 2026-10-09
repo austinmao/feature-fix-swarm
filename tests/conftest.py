@@ -1,6 +1,16 @@
+import sys
 import time
+from pathlib import Path
 
 import pytest
+
+# The checkout's own run_state is always importable here, as in
+# lib/run_state/tests/conftest.py, so the host-observation fixture below can
+# patch the admission seam in every pytest invocation (CI runs subsets without
+# PYTHONPATH=lib) and never has to guess whether a Supervisor could be built.
+LIB_ROOT = Path(__file__).resolve().parents[1] / "lib"
+if str(LIB_ROOT) not in sys.path:
+    sys.path.insert(0, str(LIB_ROOT))
 
 
 @pytest.fixture(autouse=True)
@@ -12,15 +22,9 @@ def _fixture_host_observation():
     coordinator parks the suite on a loaded host. A test that wants a specific
     observation still passes ``observation_provider`` or patches the queue.
     """
-    try:
-        from run_state import shared_resources
-        from run_state.managed_admission import ManagedAdmissionQueue
-        from run_state.resource_observation import ResourceObservation
-    except ImportError:
-        # A run without lib/ on sys.path (CI's contract and installer subsets)
-        # cannot build a Supervisor either, so there is nothing to isolate.
-        yield
-        return
+    from run_state import shared_resources
+    from run_state.managed_admission import ManagedAdmissionQueue
+    from run_state.resource_observation import ResourceObservation
 
     def fixture_observation() -> ResourceObservation:
         return ResourceObservation(time.monotonic_ns(), 4, 4 << 30, 4 << 30, 100, 100, {}, "fixture")
