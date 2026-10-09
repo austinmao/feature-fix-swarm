@@ -8,6 +8,19 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-09, Codex runtime bundle: GSD 1.15 no longer installs the context monitor)
+
+- GSD Core 1.15.0 deliberately stopped copying `gsd-context-monitor.js` into `~/.codex/hooks`
+  (1.14 had already stopped registering it, because Codex hook payloads lack the metrics it
+  reads). `scripts/gsd/codex-runtime-bundle.py` still listed it as a required Codex hook
+  dependency and required a context-monitor registration for nine events, so every
+  Codex-hosted `gsd-run` on a 1.15.0 install refused at the bundle step with
+  `installed GSD hook dependency is missing or non-regular: gsd-context-monitor.js`. Re-running
+  the installer cannot fix that. The bundle now requires only the SessionStart
+  `gsd-check-update.js` registration and its dependencies, matching
+  `lib/host_capabilities.py` `REQUIRED_HOOK_EVENTS` and the runtime observer's `HOOKS`. The
+  `gsd-run.bats` fixture now mirrors the 1.15 Codex install (no context monitor).
+
 ### Fixed (2026-10-08, spec-014 E8 coverage gate: zero-statement production module)
 
 - `lib/run_state/__init__.py` had no statements, so Coverage.py (`skip_empty`, docstrings not

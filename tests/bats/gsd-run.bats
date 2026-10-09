@@ -49,18 +49,13 @@ setup() {
   printf '%s\n' 'name = "gsd-executor"' 'model = "sonnet"' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.toml"
   printf '%s\n' '# executor' > "$CODEX_SOURCE_ROOT/agents/gsd-executor.md"
   printf '%s\n' '1.15.0' > "$CODEX_SOURCE_ROOT/gsd-core/VERSION"
-  cat > "$CODEX_SOURCE_ROOT/hooks/gsd-context-monitor.js" <<EOF
+  cat > "$CODEX_SOURCE_ROOT/hooks/gsd-check-update.js" <<EOF
 process.stdin.resume();
 process.stdin.on('end', () => require('fs').writeFileSync('$BATS_TEST_TMPDIR/hook.smoked', 'yes\n'));
-EOF
-  cat > "$CODEX_SOURCE_ROOT/hooks/gsd-check-update.js" <<'EOF'
-process.stdin.resume();
-process.stdin.on('end', () => process.exit(0));
 EOF
   printf '%s\n' 'module.exports = true;' > "$CODEX_SOURCE_ROOT/hooks/gsd-check-update-worker.js"
   printf '%s\n' 'module.exports = true;' > "$CODEX_SOURCE_ROOT/hooks/managed-hooks-registry.cjs"
   printf '%s\n' '{"type":"commonjs"}' > "$CODEX_SOURCE_ROOT/hooks/package.json"
-  cp "$CODEX_SOURCE_ROOT/hooks/gsd-context-monitor.js" "$GSD_PACKAGE_ROOT/hooks/dist/gsd-context-monitor.js"
   cp "$CODEX_SOURCE_ROOT/hooks/gsd-check-update.js" "$GSD_PACKAGE_ROOT/hooks/dist/gsd-check-update.js"
   cp "$CODEX_SOURCE_ROOT/hooks/gsd-check-update-worker.js" "$GSD_PACKAGE_ROOT/hooks/dist/gsd-check-update-worker.js"
   cp "$CODEX_SOURCE_ROOT/hooks/managed-hooks-registry.cjs" "$GSD_PACKAGE_ROOT/hooks/dist/managed-hooks-registry.cjs"
@@ -77,14 +72,8 @@ EOF
   python3 - "$CODEX_SOURCE_ROOT/hooks.json" "$CODEX_SOURCE_ROOT/hooks" "$SAFE_NODE" <<'PY'
 import json, sys
 path, hooks, node = sys.argv[1:]
-events = {
-    "SessionStart": "gsd-check-update.js",
-    "SubagentStart": "gsd-context-monitor.js", "Stop": "gsd-context-monitor.js",
-    "PostToolUse": "gsd-context-monitor.js", "PreToolUse": "gsd-context-monitor.js",
-    "PermissionRequest": "gsd-context-monitor.js", "PreCompact": "gsd-context-monitor.js",
-    "PostCompact": "gsd-context-monitor.js", "SubagentStop": "gsd-context-monitor.js",
-    "UserPromptSubmit": "gsd-context-monitor.js",
-}
+# Mirrors GSD 1.15's Codex install: SessionStart only, no context monitor.
+events = {"SessionStart": "gsd-check-update.js"}
 data = {"hooks": {event: [{"hooks": [{"type": "command", "command": f'{node} "{hooks}/{target}"'}]}] for event, target in events.items()}}
 open(path, "w").write(json.dumps(data))
 PY
@@ -1582,20 +1571,20 @@ EOF
 import json, sys
 path = sys.argv[1]
 data = json.load(open(path))
-del data["hooks"]["PermissionRequest"]
+del data["hooks"]["SessionStart"]
 open(path, "w").write(json.dumps(data))
 PY
   FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"PermissionRequest must contain exactly one canonical"* ]]
+  [[ "$output" == *"SessionStart must contain exactly one canonical"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
 }
 
 @test "tampered installed hooks fail pinned-package verification before the drive" {
   printf '%s\n' 'require("child_process").execSync("echo pwned");' >> \
-    "$CODEX_SOURCE_ROOT/hooks/gsd-context-monitor.js"
+    "$CODEX_SOURCE_ROOT/hooks/gsd-check-update.js"
 
   FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
