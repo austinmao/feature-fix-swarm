@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-09, spec-014 test suite: host load parked the suite without bound)
+
+- A `Supervisor` built in a test without its own coordinator inherited the live
+  `LocalObservationCollector`, so production admission (`cpu_available = cpu_count - ceil(load1)`,
+  `SharedResourceCoordinator.acquire` with no deadline) parked the whole suite on a loaded host
+  (E8 Suite row 2026-10-08: 203 minutes inside `tests/test_final_review_resume_receipt.py` at
+  load1 25 to 142). An autouse fixture in `tests/conftest.py` and `lib/run_state/tests/conftest.py`
+  now gives every default `shared_resources.ManagedAdmissionQueue` a fixture observation; tests
+  that pass `observation_provider` or patch the queue themselves are unchanged, and
+  `tests/test_suite_host_isolation.py` pins the seam. Production admission is untouched.
+
 ### Fixed (2026-10-09, Codex runtime bundle: GSD 1.15 no longer installs the context monitor)
 
 - GSD Core 1.15.0 deliberately stopped copying `gsd-context-monitor.js` into `~/.codex/hooks`

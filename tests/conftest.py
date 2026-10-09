@@ -1,4 +1,31 @@
+import time
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fixture_host_observation():
+    """Default coordinators observe a fixture host, never the real one.
+
+    Production admission waits without a deadline on ``cpu_available``
+    (``cpu_count - ceil(load1)``), so a Supervisor built without its own
+    coordinator parks the suite on a loaded host. A test that wants a specific
+    observation still passes ``observation_provider`` or patches the queue.
+    """
+    from run_state import shared_resources
+    from run_state.managed_admission import ManagedAdmissionQueue
+    from run_state.resource_observation import ResourceObservation
+
+    def fixture_observation() -> ResourceObservation:
+        return ResourceObservation(time.monotonic_ns(), 4, 4 << 30, 4 << 30, 100, 100, {}, "fixture")
+
+    def queue(*args, **kwargs):
+        kwargs.setdefault("observation_provider", fixture_observation)
+        return ManagedAdmissionQueue(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(shared_resources, "ManagedAdmissionQueue", queue)
+        yield
 
 
 @pytest.fixture(autouse=True)
