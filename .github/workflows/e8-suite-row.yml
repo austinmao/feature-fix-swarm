@@ -1,0 +1,126 @@
+name: e8-suite-row
+# Spec-014 E8 Suite row on a CI-class Linux runner (D17: Linux runs the
+# deterministic suite rows through CI, no CLI credentials). This workflow lives
+# only on the harness branch; the job checks out the sealed candidate commit
+# and runs tests/coverage/run-full-suite.py there, then records the
+# ffs.coverage-execution/v1 record, the ffs.source-closure/v1 inventory of the
+# checkout it ran on, and the runtime descriptor as artifacts for the verifier.
+on:
+  push:
+    branches: ["e8/suite-row-ci"]
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: full commit sha of the sealed candidate
+        required: true
+        default: 336eff734836464b5a48f4d9b828aa0ee86a702b
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE: ${{ github.event.inputs.candidate || '336eff734836464b5a48f4d9b828aa0ee86a702b' }}
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+      - name: Candidate identity
+        run: |
+          echo "head=$(git rev-parse HEAD) tree=$(git rev-parse 'HEAD^{tree}')"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          uname -a; python3 --version; node --version || true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install exact GSD package
+        run: npm ci
+      - name: Install python dependencies and bats
+        run: |
+          python -m pip install --quiet --requirement requirements-dev.txt
+          command -v bats >/dev/null 2>&1 || bash scripts/ci/apt-install.sh bats
+          bats --version; python -c "import coverage; print('coverage', coverage.__version__)"
+      - name: Source closure and runtime descriptor of this checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/e8/inputs"
+          python3 - "$PWD" > "$RUNNER_TEMP/e8/inputs/source-closure.json" <<'PY'
+          import hashlib, json, os, stat, sys
+          from pathlib import Path
+          root = Path(sys.argv[1]).resolve(); rows = []
+          for dirpath, dirnames, filenames in os.walk(root):
+              dirnames[:] = sorted(d for d in dirnames if d not in (".git", "__pycache__"))
+              for name in sorted(filenames):
+                  path = Path(dirpath) / name; info = path.lstat(); rel = path.relative_to(root).as_posix()
+                  if stat.S_ISLNK(info.st_mode):
+                      rows.append({"path": rel, "type": "symlink", "mode": stat.S_IMODE(info.st_mode),
+                                   "sha256": hashlib.sha256(os.readlink(path).encode()).hexdigest(),
+                                   "link_target": os.readlink(path)})
+                  elif stat.S_ISREG(info.st_mode):
+                      rows.append({"path": rel, "type": "file", "mode": stat.S_IMODE(info.st_mode),
+                                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+          rows.sort(key=lambda r: r["path"])
+          sys.stdout.write(json.dumps({"schema": "ffs.source-closure/v1", "files": rows}, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+          PYTHONPATH=lib python -m run_state.cli describe-upstream-runtime \
+            --module-root node_modules/@opengsd/gsd-core/gsd-core/bin/lib \
+            --node "$(command -v node)" --output "$RUNNER_TEMP/e8/inputs/upstream-runtime.json"
+          echo "FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR=$RUNNER_TEMP/e8/inputs/upstream-runtime.json" >> "$GITHUB_ENV"
+          echo "FFS_TEST_UPSTREAM_RUNTIME_DESCRIPTOR_SHA256=$(sha256sum "$RUNNER_TEMP/e8/inputs/upstream-runtime.json" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          sha256sum "$RUNNER_TEMP/e8/inputs/"*.json
+      - name: Full suite with inherited coverage
+        id: suite
+        run: |
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          set +e
+          python3 tests/coverage/run-full-suite.py --output "$RUNNER_TEMP/e8/suite" > "$RUNNER_TEMP/e8/suite-runner.log" 2>&1
+          rc=$?
+          set -e
+          completed="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          tail -c 4000 "$RUNNER_TEMP/e8/suite-runner.log"
+          python3 - "$RUNNER_TEMP/e8" "$started" "$completed" "$rc" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          e8, started, completed, rc = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+          xml = e8 / "suite" / "coverage.xml"
+          record = {"schema": "ffs.coverage-execution/v1",
+                    "source_sha256": hashlib.sha256((e8 / "inputs" / "source-closure.json").read_bytes()).hexdigest(),
+                    "xml_sha256": hashlib.sha256(xml.read_bytes()).hexdigest() if xml.is_file() else None,
+                    "argv": ["python3", "tests/coverage/run-full-suite.py", "--output", str(e8 / "suite")],
+                    "exit_status": rc, "started_utc": started, "completed_utc": completed}
+          (e8 / "suite.coverage-execution.json").write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+          print(json.dumps(record))
+          PY
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+      - name: Collect evidence (coverage.xml, record, inputs, logs, host facts)
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/e8/out"
+          cp "$RUNNER_TEMP/e8/inputs/"*.json "$RUNNER_TEMP/e8/out/"
+          cp "$RUNNER_TEMP/e8/suite.coverage-execution.json" "$RUNNER_TEMP/e8/out/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/e8/suite-runner.log" "$RUNNER_TEMP/e8/out/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/e8/suite/coverage.xml" "$RUNNER_TEMP/e8/out/" 2>/dev/null || true
+          ls "$RUNNER_TEMP/e8/suite" > "$RUNNER_TEMP/e8/out/suite-dir-listing.txt" 2>/dev/null || true
+          { echo "candidate=$CANDIDATE"; echo "head=$(git rev-parse HEAD)"; echo "tree=$(git rev-parse 'HEAD^{tree}')"; uname -a; python --version; node --version; bats --version; nproc; free -m | head -2; } > "$RUNNER_TEMP/e8/out/host-facts.txt"
+          sha256sum "$RUNNER_TEMP/e8/out/"* > "$RUNNER_TEMP/e8/out/SHA256SUMS"
+          cat "$RUNNER_TEMP/e8/out/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e8-suite-row-${{ env.CANDIDATE }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/e8/out
+          retention-days: 90
+          if-no-files-found: error
+      - name: Suite exit status
+        if: always()
+        run: |
+          echo "suite rc=${{ steps.suite.outputs.rc }}"
+          test "${{ steps.suite.outputs.rc }}" = "0"
