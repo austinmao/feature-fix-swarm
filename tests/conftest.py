@@ -12,9 +12,15 @@ def _fixture_host_observation():
     coordinator parks the suite on a loaded host. A test that wants a specific
     observation still passes ``observation_provider`` or patches the queue.
     """
-    from run_state import shared_resources
-    from run_state.managed_admission import ManagedAdmissionQueue
-    from run_state.resource_observation import ResourceObservation
+    try:
+        from run_state import shared_resources
+        from run_state.managed_admission import ManagedAdmissionQueue
+        from run_state.resource_observation import ResourceObservation
+    except ImportError:
+        # A run without lib/ on sys.path (CI's contract and installer subsets)
+        # cannot build a Supervisor either, so there is nothing to isolate.
+        yield
+        return
 
     def fixture_observation() -> ResourceObservation:
         return ResourceObservation(time.monotonic_ns(), 4, 4 << 30, 4 << 30, 100, 100, {}, "fixture")
