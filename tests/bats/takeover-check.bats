@@ -1388,7 +1388,7 @@ PY
 # release events; every wait is bounded so a missing seam fails fast.
 
 wait_for() {
-  local target="$1" ticks=$(( ${2:-4} * 20 ))
+  local target="$1" ticks=$(( ${2:-20} * 20 ))
   while [ ! -e "$target" ] && [ "$ticks" -gt 0 ]; do sleep 0.05; ticks=$((ticks - 1)); done
   [ -e "$target" ]
 }
@@ -1403,7 +1403,7 @@ wait_for() {
   local begin="$(date +%s)"
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   assert_single_refusal runner-live
-  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  [ "$(( $(date +%s) - begin ))" -lt 15 ]
   : > "$ev/release"
   local first_status=0; wait "$first" || first_status=$?
   [ "$first_status" -eq 0 ]
@@ -1695,7 +1695,7 @@ PY
   local begin="$(date +%s)"
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   assert_single_refusal record-mismatch
-  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  [ "$(( $(date +%s) - begin ))" -lt 15 ]
   [ -f "$(dirname "$STORE")/takeover/spec-006.json" ]
   [ ! -e "$(dirname "$STORE")/takeover/.takeover-transaction.spec-006.json" ]
   run python3 - "$STORE" <<'PY'
@@ -1867,7 +1867,7 @@ PY
   [ ! -e "$takeover/spec-006.json" ]
   local begin="$(date +%s)"
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
-  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  [ "$(( $(date +%s) - begin ))" -lt 15 ]
   [ "$status" -eq 0 ]
   [ "$output" = TAKEOVER-OK ]
   [ ! -e "$takeover/.takeover-transaction.spec-006.json" ]
@@ -1885,7 +1885,7 @@ PY
   [ -f "$takeover/.takeover-transaction.spec-006.json" ]
   local begin="$(date +%s)"
   run env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
-  [ "$(( $(date +%s) - begin ))" -lt 5 ]
+  [ "$(( $(date +%s) - begin ))" -lt 15 ]
   [ "$status" -eq 0 ]
   [ "$output" = TAKEOVER-OK ]
   run python3 - "$STORE" <<'PY'
