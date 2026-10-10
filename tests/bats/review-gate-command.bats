@@ -180,7 +180,7 @@ EOF
   [ "$status" -ne 0 ]
   [ -f "$BATS_TEST_TMPDIR/hung-codex-started" ]
   [ -f "$BATS_TEST_TMPDIR/hung-claude-started" ]
-  [ "$elapsed" -lt 25 ]
+  [ "$elapsed" -lt 18 ]
   [[ "$output" == *'both review hosts unavailable'* ]]
 }
 

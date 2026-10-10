@@ -20,7 +20,8 @@ all skills.
     deadlines and still catching any regression to an unbounded wait.
   - `tests/bats/review-gate-command.bats`: the two-hung-hosts test uses a 12 s overall review
     deadline instead of 6 s, so the fallback's reserved share (a third, floor 2 s) survives
-    startup overhead, and asserts completion under 25 s, still below the 30 s hung stubs.
+    startup overhead, and asserts completion under 18 s: a correct run takes about 13 s, while a
+    regression that gave the fallback a fresh full budget would take about 21 s.
   - `tests/bats/path-reservation-gate.bats`: REQ-09 keeps its 240 ms 20-rep median budget and
     measures up to three batches; one batch must meet the budget, so a real regression still fails.
   No assertion was removed.
