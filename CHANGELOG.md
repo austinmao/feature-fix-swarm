@@ -8,6 +8,23 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-10, spec-014 E8: timing-bound bats tests fail under host load)
+
+- The darwin E8 Suite row failed its bats stage in three attempts on 336eff7 while the Python
+  stage passed every time. Each attempt failed a different set of timing-bound tests, and every
+  failed test passed when rerun alone; load from other processes rose to 18 to 54 during the
+  3 h runs. The bounds now leave room for a loaded host without losing what each test proves:
+  - `tests/bats/takeover-check.bats`: the `wait_for` harness wait defaults to 20 s instead of
+    4 s (it only changes how long a broken seam takes to fail), and the four bounded-refusal and
+    recovery checks allow 15 s instead of 5 s, still far above the 1 s and 1.5 s production lock
+    deadlines and still catching any regression to an unbounded wait.
+  - `tests/bats/review-gate-command.bats`: the two-hung-hosts test uses a 12 s overall review
+    deadline instead of 6 s, so the fallback's reserved share (a third, floor 2 s) survives
+    startup overhead, and asserts completion under 25 s, still below the 30 s hung stubs.
+  - `tests/bats/path-reservation-gate.bats`: REQ-09 keeps its 240 ms 20-rep median budget and
+    measures up to three batches; one batch must meet the budget, so a real regression still fails.
+  No assertion was removed.
+
 ### Fixed (2026-10-09, spec-014 test suite: host load parked the suite without bound)
 
 - A `Supervisor` built in a test without its own coordinator inherited the live

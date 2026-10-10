@@ -172,7 +172,7 @@ EOF
 
   start="$(date +%s)"
   run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
-    GSD_REVIEW_TIMEOUT=6 RUN_BOUNDED_KILL_AFTER=1 \
+    GSD_REVIEW_TIMEOUT=12 RUN_BOUNDED_KILL_AFTER=1 \
     ADVERSARY_BIN_CODEX=hung-codex ADVERSARY_BIN_CLAUDE=hung-claude \
     bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
   elapsed=$(( $(date +%s) - start ))
@@ -180,7 +180,7 @@ EOF
   [ "$status" -ne 0 ]
   [ -f "$BATS_TEST_TMPDIR/hung-codex-started" ]
   [ -f "$BATS_TEST_TMPDIR/hung-claude-started" ]
-  [ "$elapsed" -lt 9 ]
+  [ "$elapsed" -lt 25 ]
   [[ "$output" == *'both review hosts unavailable'* ]]
 }
 
