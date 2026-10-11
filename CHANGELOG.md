@@ -47,6 +47,17 @@ all skills.
     still never returns, so the watchdog still fails it (exit 124, not the expected 0 or 1).
   No assertion was removed.
 
+### Fixed (2026-10-11, spec-014 E8: private coverage copy warned no-ctracer in every child)
+
+- `tests/coverage/cross_interpreter.py` copies the coverage package without compiled
+  extensions on purpose, so a child interpreter without sysmon (Python 3.11 and older, such
+  as macOS `/usr/bin/python3` 3.9 or the 3.11 CI Linux row) falls back to the Python tracer.
+  Coverage printed `Couldn't import C tracer ... (no-ctracer)` on stderr for each such child,
+  which failed 147 bats and 6 pytest stderr-sensitive tests in the CI Linux Suite row.
+  `tests/coverage-parallel.ini` now sets `disable_warnings = no-ctracer`; data collection is
+  unchanged. `tests/test_coverage_cross_interpreter.py` asserts the warning is absent from the
+  per-interpreter stderr (it fails without the config line on macOS).
+
 ### Fixed (2026-10-10, spec-014 E8: timing-bound bats tests fail under host load)
 
 - The darwin E8 Suite row failed its bats stage in three attempts on 336eff7 while the Python

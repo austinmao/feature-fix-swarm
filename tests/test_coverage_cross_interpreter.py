@@ -18,6 +18,8 @@ def test_private_startup_shim_records_bash_launched_system_and_current_python(tm
     assert all(x["target_recorded"] and x["data_files"] for x in evidence["interpreters"].values())
     assert all("process_startup() got an unexpected keyword argument 'slug'" not in x["stderr"]
                for x in evidence["interpreters"].values())
+    # The private copy has no compiled tracer; a child without sysmon must fall back quietly.
+    assert all("no-ctracer" not in x["stderr"] for x in evidence["interpreters"].values())
 
 
 def test_private_coverage_source_is_not_hard_coded_to_a_system_python():
