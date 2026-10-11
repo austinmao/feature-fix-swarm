@@ -35,6 +35,18 @@ all skills.
   Claude IDs follow the new lineup. Fixtures that exercise exact pass-through of a caller-supplied
   model ID are unchanged on purpose.
 
+### Fixed (2026-10-11, spec-014 E8: remaining load-sensitive timing checks)
+
+- Follow-up to the 2026-10-10 entry (Codex P3 on #232). Two more single-batch latency checks
+  and three tight watchdogs could still fail on a loaded host:
+  - `tests/bats/path-reservation-gate.bats`: the REQ-09 off-mode (30 ms) and no-store (60 ms)
+    20-rep median checks now measure up to three batches, as the 240 ms warm-path check already
+    does; the budgets are unchanged and one batch must meet them.
+  - `tests/bats/takeover-check.bats`: the `timeout` watchdogs on the two `--list` scans (5 s) and
+    the FIFO-lock refusal (2 s) are 15 s, matching the bounded-refusal checks. A blocking read
+    still never returns, so the watchdog still fails it (exit 124, not the expected 0 or 1).
+  No assertion was removed.
+
 ### Fixed (2026-10-10, spec-014 E8: timing-bound bats tests fail under host load)
 
 - The darwin E8 Suite row failed its bats stage in three attempts on 336eff7 while the Python
