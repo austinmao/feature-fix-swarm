@@ -57,8 +57,8 @@ all skills.
   `tests/coverage-parallel.ini` now sets `disable_warnings = no-ctracer`; data collection is
   unchanged. `tests/test_coverage_cross_interpreter.py` asserts the warning is absent from the
   per-interpreter stderr, and forces `core = ctrace` on the private copy so the fallback is
-  exercised on every host: the child still records data without the warning, and a negative
-  control without the suppression shows the warning.
+  exercised on every host: the child still records executed lines of a first-party script
+  without the warning, and a negative control without the suppression shows the warning.
 
 ### Fixed (2026-10-10, spec-014 E8: timing-bound bats tests fail under host load)
 

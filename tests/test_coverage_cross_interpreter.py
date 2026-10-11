@@ -67,7 +67,7 @@ print(json.dumps({"loaded": str(loaded), "vendor": str(vendor.resolve()),
     assert evidence["data_module"].startswith("coverage.")
 
 
-def _forced_ctrace_child(tmp_path: Path, config_text: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+def _forced_ctrace_child(tmp_path: Path, config_text: str) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     """Run one child on the private copy with core=ctrace, as a pre-sysmon interpreter would."""
     sys.path.insert(0, str(ROOT / "tests" / "coverage"))
     try:
@@ -86,18 +86,43 @@ def _forced_ctrace_child(tmp_path: Path, config_text: str) -> tuple[subprocess.C
     environment = cross_interpreter._collector_environment()
     environment.update(COVERAGE_PROCESS_START=str(config), COVERAGE_FILE=str(data),
                        PYTHONPATH=os.pathsep.join((str(vendor), str(shim))))
-    result = subprocess.run([sys.executable, "-c", "print('child ok')"], cwd=ROOT, env=environment,
+    # The collector's own first-party target, so the data proves executed lines.
+    result = subprocess.run([sys.executable, str(cross_interpreter.TARGET), "resolve",
+                             '{"kind":"tier","name":"volume"}', "--host", "codex"],
+                            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30)
+    return result, data.parent, vendor, cross_interpreter.TARGET
+
+
+def _recorded_lines(vendor: Path, data: Path, target: Path) -> int:
+    """Read the raw data with the private copy in a separate process."""
+    probe = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from coverage import CoverageData\n"
+        "total = 0\n"
+        "for raw in Path(sys.argv[1]).glob('.coverage*'):\n"
+        "    item = CoverageData(basename=str(raw))\n"
+        "    item.read()\n"
+        "    total += sum(len(item.lines(name) or []) for name in item.measured_files()\n"
+        "                 if Path(name).resolve() == Path(sys.argv[2]).resolve())\n"
+        "print(total)\n"
+    )
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("COVERAGE_", "COV_CORE_", "PYTEST_COV")) and key != "PYTHONHOME"}
+    environment["PYTHONPATH"] = str(vendor)
+    result = subprocess.run([sys.executable, "-c", probe, str(data), str(target)], env=environment,
                             capture_output=True, text=True, timeout=30)
-    return result, data.parent
+    assert result.returncode == 0, result.stderr
+    return int(result.stdout.strip())
 
 
 def test_private_copy_falls_back_to_pytrace_without_the_no_ctracer_warning(tmp_path: Path):
     config_text = (ROOT / "tests/coverage-parallel.ini").read_text()
-    result, data = _forced_ctrace_child(tmp_path, config_text)
+    result, data, vendor, target = _forced_ctrace_child(tmp_path, config_text)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "child ok"
     assert "no-ctracer" not in result.stderr
     assert list(data.glob(".coverage*")), "the fallback tracer must still record data"
+    assert _recorded_lines(vendor, data, target) > 0, "the fallback tracer must record executed target lines"
 
 
 def test_forced_ctrace_child_warns_without_the_suppression(tmp_path: Path):
@@ -105,6 +130,6 @@ def test_forced_ctrace_child_warns_without_the_suppression(tmp_path: Path):
     config_text = (ROOT / "tests/coverage-parallel.ini").read_text()
     suppression = "disable_warnings =\n    no-ctracer\n"
     assert config_text.count(suppression) == 1
-    result, _ = _forced_ctrace_child(tmp_path, config_text.replace(suppression, ""))
+    result, _, _, _ = _forced_ctrace_child(tmp_path, config_text.replace(suppression, ""))
     assert result.returncode == 0, result.stderr
     assert "no-ctracer" in result.stderr
