@@ -73,13 +73,13 @@ planner_model() { python3 -c "import json;print(json.load(open('$TMP/.planning/c
 import json, sys
 p = sys.argv[1]
 cfg = json.load(open(p))
-cfg["model_overrides"]["gsd-planner"] = "claude-fable-5"
+cfg["model_overrides"]["gsd-planner"] = "claude-fable-5-1"
 json.dump(cfg, open(p, "w"))
 EOF
   echo "OAuth token rotation for the payment webhook" > "$TMP/.planning/ROADMAP.md"
   run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
-  [ "$(planner_model gsd-planner)" = "claude-opus-5" ]
+  [ "$(planner_model gsd-planner)" = "claude-opus-5-5" ]
 }
 
 @test "missing .planning -> fail-soft warn, exit 0" {

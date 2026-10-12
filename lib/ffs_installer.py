@@ -2480,7 +2480,7 @@ def add_model_routing_doctor_checks(checks: list[dict[str, str]], source: Path) 
             )
 
     # (c) per-surface catalog + resolver cross-checks (advisory, independent —
-    # a surface can be resolver-known but catalog-absent, e.g. claude-opus-5
+    # a surface can be resolver-known but catalog-absent, e.g. claude-opus-5-5
     # today, or vice versa).
     catalog_path = (
         source / "node_modules" / "@opengsd" / "gsd-core" / "gsd-core" / "bin" / "shared" / "model-catalog.json"

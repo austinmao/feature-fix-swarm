@@ -25,10 +25,10 @@ better than self-review (F1 23.8% vs 24.6%) — statistically indistinguishable
 
 | Request | Claude resolution | Codex resolution | Default effort | Runs |
 |---|---|---|---|---|
-| **frontier** | `claude-fable-5` | `gpt-6-astra` | xhigh | Planning only — the single low-volume, highest-leverage seat |
-| **judgment** | `claude-opus-5` | `gpt-6-sol` | xhigh | Checking, debugging, verification, code/security review |
-| **execution** | `claude-sonnet-5` | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research, integration, Nyquist work |
-| **volume** | `claude-haiku-4-5-20251001` | `gpt-5.6-luna` | low | Mapping, synthesis, and status collection — bounded-context inputs only |
+| **frontier** | `claude-fable-5-1` | `gpt-6-astra` | xhigh | Plan checking and explicit escalation — the single low-volume, highest-leverage seat |
+| **judgment** | `claude-opus-5-5` | `gpt-6-sol` | xhigh | Planning, debugging, verification, code/security review |
+| **execution** | `claude-sonnet-5-5` | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research and research synthesis, integration, Nyquist work |
+| **volume** | `claude-haiku-5-5` | `gpt-5.6-luna` | low | Status collection and other mechanical passes — bounded-context inputs only |
 
 Defaults are declared in `templates/model-requests.json`. A request is either
 `{"kind":"tier","name":"frontier|judgment|execution|volume"}` or
@@ -43,13 +43,14 @@ CLI is launched.
 (`dynamic_routing.tier_models` keeps exactly three rungs — light/standard/heavy
 mapped to volume/execution/judgment): escalation must never auto-select the
 most expensive tier. A role only reaches frontier through an explicit pin
-(today: `gsd-planner`).
+(today: `gsd-plan-checker`).
 
 Read the assignments as the producer/reviewer rule in action: the planner
-runs on frontier while its plan reviewer runs on judgment or a distinct model
-at the plan wall (below); executors run on execution while their verification
-and security reviewers run on judgment. Never use the same resolved model on
-both sides of a check.
+runs on judgment (Opus 5.5 — Anthropic's guidance is that most workloads start
+there) while its plan checker runs on frontier (Fable 5.1) and the plan wall
+adds a further distinct reviewer (below); executors run on execution while
+their verification and security reviewers run on judgment. Never use the same
+resolved model on both sides of a check.
 
 ### Diversity invariant
 
@@ -131,7 +132,7 @@ compatibility mapping: it never falls back and its provenance gate cannot be
 satisfied by Sol or Opus.
 
 **`GSD_LEAD_MODEL=fable` is unchanged and deliberate.** It keeps its exact
-`claude-fable-5` request semantics, including host-pinning and fail-closed
+`claude-fable-5-1` request semantics, including host-pinning and fail-closed
 guards — an operator naming fable wants Fable, and a tier conversion would
 silently substitute `gpt-6-astra@xhigh` on a Codex host. The tier system adds
 `{"kind":"tier","name":"frontier"}` as the portable spelling alongside it,
@@ -148,7 +149,7 @@ for 24h in `$GSD_FALLBACK_CACHE` (default `~/.cache/gsd-model-probe`), bounded
 by `GSD_MODEL_PROBE_TIMEOUT` (default 120s).
 
 **Substitution** — `fable → opus` (`:11`). It rewrites both the short alias
-form (`"fable"`) and the full id form (`"claude-fable-5"`), so it works
+form (`"fable"`) and the full id form (`"claude-fable-5-1"`), so it works
 whichever way your config pins models.
 
 **Marker** — every rewrite is recorded to `.planning/fable-fallback.json`
@@ -165,7 +166,7 @@ planning off fable when the spec is security-touching.
 
 - **Trigger**: security keywords in the spec (`:51`)
 - **Affects**: `gsd-planner` and `gsd-plan-checker` only (`:7, :61`)
-- **Change**: `fable → opus` (`:61`)
+- **Change**: `fable → opus` (`:61`); the full-ID spelling `claude-fable-5-1 → claude-opus-5-5` is fenced too, and the legacy `claude-fable-5 → claude-opus-5` pair still is
 - **Untouched**: executor and verifier (`:9`)
 - **Kill-switch**: `SECURITY_MODEL_FENCE=off` disables the demotion entirely
 

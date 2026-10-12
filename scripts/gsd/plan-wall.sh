@@ -454,18 +454,19 @@ fi
 
 _pw_planner_alias() {
   # Default matches the shipped gsd-config template's gsd-planner override
-  # (fable) — "opus" was a stale default from before fable became the
-  # planner tier (spec-004 fix round finding 15).
-  [ -f "$CONFIG" ] || { echo fable; return; }
-  jq -r '.model_overrides["gsd-planner"] // "fable"' "$CONFIG" 2>/dev/null || echo fable
+  # (opus) — Anthropic's guidance is that most workloads start with Opus 5.5,
+  # with Fable 5.1 the frontier escalation tier (plan-checker seat), so the
+  # planner default is opus. A config that still pins "fable" is honoured.
+  [ -f "$CONFIG" ] || { echo opus; return; }
+  jq -r '.model_overrides["gsd-planner"] // "opus"' "$CONFIG" 2>/dev/null || echo opus
 }
 
 _pw_resolve_claude_id() {
   case "$1" in
-    fable) echo claude-fable-5 ;;
-    opus) echo claude-opus-5 ;;
-    sonnet) echo claude-sonnet-5 ;;
-    haiku) echo claude-haiku-4-5-20251001 ;;
+    fable) echo claude-fable-5-1 ;;
+    opus) echo claude-opus-5-5 ;;
+    sonnet) echo claude-sonnet-5-5 ;;
+    haiku) echo claude-haiku-5-5 ;;
     *) echo "$1" ;;
   esac
 }
@@ -520,7 +521,7 @@ _pw_same_vendor_ordered_rungs() {
 "
     done
   else
-    for model in claude-fable-5 claude-opus-5 claude-sonnet-5 claude-haiku-4-5-20251001; do
+    for model in claude-fable-5-1 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5; do
       [ "$model" = "$planner" ] && continue
       out="${out}${model}|
 "
@@ -716,7 +717,7 @@ _pw_select_and_review() {
 
   opposite="$(adversary_kind_for_host "$host")"
   if [ "$opposite" = codex ]; then opp_model=gpt-6-sol; opp_effort=xhigh
-  else opp_model=claude-opus-5; opp_effort=""; fi
+  else opp_model=claude-opus-5-5; opp_effort=""; fi
 
   trail_file="$(mktemp "${TMPDIR:-/tmp}/pw-trail.XXXXXX")"
   rung_file="$(mktemp "${TMPDIR:-/tmp}/pw-rung.XXXXXX")"

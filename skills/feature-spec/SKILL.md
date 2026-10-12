@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.8.1
+version: 2.9.0
 ---
 
 # /feature-spec [NNN | "description"]

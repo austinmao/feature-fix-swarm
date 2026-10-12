@@ -45,13 +45,13 @@ The one key FFS itself reads. Maps a sub-agent role to a model tier.
 
 | Role | Default | Line |
 |---|---|---|
-| `gsd-planner` | `fable` | :8 |
-| `gsd-plan-checker` | `opus` | :9 |
+| `gsd-planner` | `opus` | :8 |
+| `gsd-plan-checker` | `fable` | :9 |
 | `gsd-executor` | `sonnet` | :10 |
 | `gsd-debugger` | `opus` | :11 |
 | `gsd-phase-researcher` | `sonnet` | :12 |
 | `gsd-project-researcher` | `sonnet` | :13 |
-| `gsd-research-synthesizer` | `haiku` | :14 |
+| `gsd-research-synthesizer` | `sonnet` | :14 |
 | `gsd-codebase-mapper` | `haiku` | :15 |
 | `gsd-verifier` | `opus` | :16 |
 | `gsd-code-reviewer` | `opus` | :17 |
@@ -59,7 +59,12 @@ The one key FFS itself reads. Maps a sub-agent role to a model tier.
 | `gsd-nyquist-auditor` | `sonnet` | :19 |
 
 Values accept either the short alias (`"opus"`) or the full model id
-(`"claude-opus-5"`). Both forms work everywhere.
+(`"claude-opus-5-5"`). Both forms work everywhere.
+
+The template also ships an `effort.agent_overrides` block (read by gsd-core,
+not FFS) that sets effort for the Fable-seated plan checker (`high`) and for
+the synthesizer and codebase-mapper seats (`medium`), in line with the "effort,
+not model swaps, for routine work" note in [Model tiers](model-tiers.md).
 
 Read by:
 - `scripts/hooks/delegation-enforcer.sh:67,73` — auto-pins `model` on spawns that omit it

@@ -670,7 +670,7 @@ EOF
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
-  grep -Fx 'claude-sonnet-5' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-sonnet-5-5' "$BATS_TEST_TMPDIR/claude.args"
   grep -F '/gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/claude.args"
   grep -Fx -- '--permission-mode' "$BATS_TEST_TMPDIR/claude.args"
   grep -Fx -- 'acceptEdits' "$BATS_TEST_TMPDIR/claude.args"
@@ -1758,7 +1758,7 @@ PY
   grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
-@test "frontier tier resolves claude-fable-5 on the Claude host" {
+@test "frontier tier resolves claude-fable-5-1 on the Claude host" {
   FFS_HOST=claude GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1767,10 +1767,10 @@ PY
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
-  grep -Fx 'claude-fable-5' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5-1' "$BATS_TEST_TMPDIR/claude.args"
 }
 
-@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5 semantics and requires network_mode=enabled" {
+@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5-1 semantics and requires network_mode=enabled" {
   FFS_HOST=claude GSD_LEAD_MODEL=fable GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1789,7 +1789,7 @@ PY
   [ "$status" -eq 0 ]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
-  grep -Fx 'claude-fable-5' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5-1' "$BATS_TEST_TMPDIR/claude.args"
 }
 
 @test "GSD_LEAD_MODEL=fable is incompatible with danger-full-access sandbox" {

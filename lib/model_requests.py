@@ -27,10 +27,10 @@ CODEX_TIERS = {
     "volume": ("gpt-5.6-luna", "low"),
 }
 CLAUDE_TIERS = {
-    "frontier": ("claude-fable-5", None),
-    "judgment": ("claude-opus-5", None),
-    "execution": ("claude-sonnet-5", None),
-    "volume": ("claude-haiku-4-5-20251001", None),
+    "frontier": ("claude-fable-5-1", None),
+    "judgment": ("claude-opus-5-5", None),
+    "execution": ("claude-sonnet-5-5", None),
+    "volume": ("claude-haiku-5-5", None),
 }
 TIERS = CODEX_TIERS
 

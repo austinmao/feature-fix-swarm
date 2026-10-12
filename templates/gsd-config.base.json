@@ -8,19 +8,26 @@
   },
   "resolve_model_ids": false,
   "model_overrides": {
-    "gsd-planner": "fable",
-    "gsd-plan-checker": "opus",
+    "gsd-planner": "opus",
+    "gsd-plan-checker": "fable",
     "gsd-executor": "sonnet",
     "gsd-debugger": "opus",
     "gsd-phase-researcher": "sonnet",
     "gsd-project-researcher": "sonnet",
-    "gsd-research-synthesizer": "haiku",
+    "gsd-research-synthesizer": "sonnet",
     "gsd-codebase-mapper": "sonnet",
     "gsd-verifier": "opus",
     "gsd-code-reviewer": "opus",
     "gsd-security-auditor": "opus",
     "gsd-integration-checker": "sonnet",
     "gsd-nyquist-auditor": "sonnet"
+  },
+  "effort": {
+    "agent_overrides": {
+      "gsd-plan-checker": "high",
+      "gsd-research-synthesizer": "medium",
+      "gsd-codebase-mapper": "medium"
+    }
   },
   "dynamic_routing": {
     "enabled": true,

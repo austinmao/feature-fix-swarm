@@ -1,7 +1,7 @@
 {
   "orchestrator": {"kind": "tier", "name": "execution"},
-  "gsd-planner": {"kind": "tier", "name": "frontier"},
-  "gsd-plan-checker": {"kind": "tier", "name": "judgment"},
+  "gsd-planner": {"kind": "tier", "name": "judgment"},
+  "gsd-plan-checker": {"kind": "tier", "name": "frontier"},
   "gsd-debugger": {"kind": "tier", "name": "judgment"},
   "gsd-verifier": {"kind": "tier", "name": "judgment"},
   "gsd-code-reviewer": {"kind": "tier", "name": "judgment"},
@@ -12,6 +12,6 @@
   "gsd-integration-checker": {"kind": "tier", "name": "execution"},
   "gsd-nyquist-auditor": {"kind": "tier", "name": "execution"},
   "gsd-codebase-mapper": {"kind": "tier", "name": "execution"},
-  "gsd-research-synthesizer": {"kind": "tier", "name": "volume"},
+  "gsd-research-synthesizer": {"kind": "tier", "name": "execution"},
   "spec-status": {"kind": "tier", "name": "volume"}
 }

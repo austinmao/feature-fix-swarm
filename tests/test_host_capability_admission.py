@@ -86,7 +86,7 @@ def test_artifact_review_material_is_closed_and_uses_the_typed_model_resolver(tm
         selected_contents={"input.json": "input\\n"},
         provenance={"selected_input_sha256": "d" * 64},
     )
-    assert material.replay_binding()["effective_model"] == "claude-opus-5"
+    assert material.replay_binding()["effective_model"] == "claude-opus-5-5"
     assert material.replay_binding()["effective_effort"] is None
     assert "input.json" not in material.replay_binding().values()
     prompt = json.loads(material.prompt.split("\n", 1)[1])

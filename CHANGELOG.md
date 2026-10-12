@@ -8,6 +8,33 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-10-12, model routing → Claude 5.5 / Fable 5.1)
+
+- The Claude tiers resolve to the new lineup (`lib/model_requests.py` `CLAUDE_TIERS`): `frontier` →
+  `claude-fable-5-1`, `judgment` → `claude-opus-5-5`, `execution` → `claude-sonnet-5-5`, `volume` →
+  `claude-haiku-5-5`. Full IDs, not aliases, because the Claude host compares `init.model` exactly.
+  The Codex tiers and the `model-equivalents.sh` case arms are unchanged.
+- **Planner and plan-checker seats swapped.** Anthropic's guidance is that most workloads start with
+  Opus 5.5 and that Fable 5.1 is the frontier escalation tier, so `gsd-planner` is now `judgment`/`opus`
+  and `gsd-plan-checker` is `frontier`/`fable` (`templates/model-requests.json`,
+  `templates/gsd-config.base.json`). `gsd-research-synthesizer` moves `volume`/`haiku` →
+  `execution`/`sonnet`. The config template gains `effort.agent_overrides` (plan-checker `high`,
+  research-synthesizer and codebase-mapper `medium`).
+- `gsd-run.sh` (`GSD_LEAD_MODEL=fable` exact request and the alias→ID fallback), `plan-wall.sh`
+  (planner default `opus`, alias→ID map, reviewer ladder, opposite-vendor Claude rung),
+  `model-fallback.sh` (`FABLE`/`OPUS` constants and the full-ID grep), `fallback-rehearsal.sh`,
+  `adversary-host.sh` (same-vendor fallback rungs) and `spec-panel.sh` (Claude author/refuter) now name
+  the new IDs.
+- `security-model-fence.sh` adds `claude-fable-5-1` → `claude-opus-5-5` and keeps the legacy
+  `claude-fable-5` → `claude-opus-5` pair, so security-touching planning stays fenced to Opus
+  (Fable/Opus 5.5 cyber-flagged turns fall back to Opus 4.8).
+- Docs (`docs/model-tiers.md`, `docs/configuration.md`, `docs/fable-pilotfish-alignment.md`) and the
+  affected comments were updated; `feature-spec` 2.9.0 and `feature-implement` 2.16.0 carry the new
+  routing (version bump only).
+- Tests: the tier tuples, one planner-tier assertion, and the bats expectations that pin resolved
+  Claude IDs follow the new lineup. Fixtures that exercise exact pass-through of a caller-supplied
+  model ID are unchanged on purpose.
+
 ### Fixed (2026-10-10, spec-014 E8: timing-bound bats tests fail under host load)
 
 - The darwin E8 Suite row failed its bats stage in three attempts on 336eff7 while the Python
