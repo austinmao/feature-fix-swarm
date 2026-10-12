@@ -24,7 +24,7 @@ set -euo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/run-bounded.sh"
 
-OPUS="claude-opus-5"
+OPUS="claude-opus-5-5"
 CODEX_SOL="gpt-6-sol"
 CACHE_DIR="${GSD_FALLBACK_CACHE:-$HOME/.cache/gsd-model-probe}"
 REHEARSAL_FILE="$CACHE_DIR/rehearsal.json"

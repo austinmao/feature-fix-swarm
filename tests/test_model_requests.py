@@ -38,10 +38,10 @@ def test_exact_request_preserves_vendor_id_and_never_falls_back() -> None:
 @pytest.mark.parametrize(
     ("name", "model"),
     [
-        ("frontier", "claude-fable-5"),
-        ("judgment", "claude-opus-5"),
-        ("execution", "claude-sonnet-5"),
-        ("volume", "claude-haiku-4-5-20251001"),
+        ("frontier", "claude-fable-5-1"),
+        ("judgment", "claude-opus-5-5"),
+        ("execution", "claude-sonnet-5-5"),
+        ("volume", "claude-haiku-5-5"),
     ],
 )
 def test_tier_requests_resolve_for_claude_host(name: str, model: str) -> None:
@@ -105,7 +105,7 @@ def test_shipped_role_defaults_use_typed_requests() -> None:
     validate_document(path)
     data = json.loads(path.read_text())
     assert data["orchestrator"] == {"kind": "tier", "name": "execution"}
-    assert data["gsd-planner"] == {"kind": "tier", "name": "frontier"}
+    assert data["gsd-planner"] == {"kind": "tier", "name": "judgment"}
     assert data["gsd-executor"] == {"kind": "tier", "name": "execution"}
     assert data["gsd-codebase-mapper"] == {"kind": "tier", "name": "execution"}
 

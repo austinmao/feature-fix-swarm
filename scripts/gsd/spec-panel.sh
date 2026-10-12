@@ -132,7 +132,7 @@ _sp_bin_available "${ADVERSARY_BIN_CODEX:-codex}" && CODEX_OK=1
 
 if [ "$CLAUDE_OK" -eq 1 ] && [ "$CODEX_OK" -eq 1 ]; then
   prompt="$(_sp_build_draft_prompt)"
-  draft_anthropic="$(adversary_invoke claude "$SP_TIMEOUT" claude-opus-5 "" "$prompt")"
+  draft_anthropic="$(adversary_invoke claude "$SP_TIMEOUT" claude-opus-5-5 "" "$prompt")"
   rc_a=$?
   draft_openai="$(adversary_invoke codex "$SP_TIMEOUT" gpt-6-sol xhigh "$prompt")"
   rc_b=$?
@@ -150,8 +150,8 @@ if [ "$CLAUDE_OK" -eq 1 ] && [ "$CODEX_OK" -eq 1 ]; then
 fi
 
 if [ "$CLAUDE_OK" -eq 1 ]; then
-  vendor=anthropic; kind=claude; author_model=claude-opus-5; author_effort=""
-  refuter_model=claude-fable-5; refuter_effort=""
+  vendor=anthropic; kind=claude; author_model=claude-opus-5-5; author_effort=""
+  refuter_model=claude-fable-5-1; refuter_effort=""
 elif [ "$CODEX_OK" -eq 1 ]; then
   vendor=openai; kind=codex; author_model=gpt-6-sol; author_effort=xhigh
   # refuter is the frontier tier (matches the Claude branch's opus+fable

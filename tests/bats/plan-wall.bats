@@ -103,7 +103,7 @@ write_native_import() {
     --arg sha "$sha" --arg soc "$soc" --argjson findings "$findings" \
     '{schema:"ffs.native-plan-wall-import/v1",run_id:$run,phase:$phase,
       reviewer:{model:"gpt-5.6-sol",transport:"native-test"},
-      plans:[{path:".planning/phases/1-foo/PLAN.md",sha256:$sha,producer_model:"claude-fable-5",findings:$findings}],
+      plans:[{path:".planning/phases/1-foo/PLAN.md",sha256:$sha,producer_model:"claude-fable-5-1",findings:$findings}],
       socratic:{path:"specs/001-native/socratic.md",sha256:$soc}}' \
     > native-review.json
 }
@@ -203,7 +203,7 @@ write_native_import() {
   GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
   rm -rf .planning/run-state; write_native_import '[]' native-import-extra
-  jq '.plans += [{"path":"extra.md","sha256":"x","producer_model":"claude-fable-5","findings":[]}]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
+  jq '.plans += [{"path":"extra.md","sha256":"x","producer_model":"claude-fable-5-1","findings":[]}]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
   GSD_RUN_ID=native-import-extra PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
 }
@@ -214,7 +214,7 @@ write_native_import() {
   second_sha="$(shasum -a 256 .planning/phases/1-foo/02-PLAN.md | awk '{print $1}')"
   jq --arg sha "$second_sha" '
     .plans[0].findings = [{"severity":"HIGH","file":"one.py","claim":"one","line":1,"repro":null,"vendor":null,"confidence":0.9}]
-    | .plans += [{"findings":[{"severity":"MEDIUM","file":"two.py","claim":"two","line":1,"repro":null,"vendor":null,"confidence":0.9}],"producer_model":"claude-fable-5","sha256":$sha,"path":".planning/phases/1-foo/02-PLAN.md"}]
+    | .plans += [{"findings":[{"severity":"MEDIUM","file":"two.py","claim":"two","line":1,"repro":null,"vendor":null,"confidence":0.9}],"producer_model":"claude-fable-5-1","sha256":$sha,"path":".planning/phases/1-foo/02-PLAN.md"}]
     | .plans[0] = {"findings":.plans[0].findings,"producer_model":.plans[0].producer_model,"sha256":.plans[0].sha256,"path":.plans[0].path}
   ' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
   MARKER="$BATS_TEST_TMPDIR/native-cli-ran"
@@ -314,8 +314,8 @@ EOF
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
   [ "$(jq -r '.relation' "$record")" = "same-vendor" ]
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-opus-5" ]
-  [ "$(jq -r '.planner_model' "$record")" = "claude-fable-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-opus-5-5" ]
+  [ "$(jq -r '.planner_model' "$record")" = "claude-fable-5-1" ]
 }
 
 # ── PATH-014: fence case (planner opus) -> fable reviews; fable refusal -> sonnet ──
@@ -326,7 +326,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-fable-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-fable-5-1" ]
   [ "$(jq -r '.relation' "$record")" = "same-vendor" ]
 }
 
@@ -350,7 +350,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5-5" ]
   trail="$(jq -r '.rung_trail | join(";")' "$record")"
   [[ "$trail" == *"rule2"* ]]
 }
@@ -583,7 +583,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.planner_model' "$record")" = "claude-sonnet-5" ]
+  [ "$(jq -r '.planner_model' "$record")" = "claude-sonnet-5-5" ]
 }
 
 # ── fence marker + escalation/cross-vendor-fallback stamps ─────────────────
@@ -680,7 +680,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5-5" ]
 }
 
 @test "EDGE-003: schema-invalid (non-array) rung output is a rung failure" {
@@ -703,7 +703,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5-5" ]
 }
 
 @test "EDGE-003: wrong-typed field (line as a string) is a rung failure, not a laundered finding" {
@@ -726,7 +726,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5-5" ]
 }
 
 @test "EDGE-003: out-of-range confidence (>1) is a rung failure" {
@@ -749,7 +749,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5-5" ]
 }
 
 # ── PATH-013: reopen on a changed plan re-reporting the same finding ────────
@@ -936,7 +936,7 @@ EOF
 
 @test "PR A: a rule-1 tier descent is recorded on the wall record, not just stderr" {
   # host=codex -> rule 1 opposite vendor is claude (stub-friendly). The
-  # preferred rung claude-opus-5 refuses; the ladder descends to sonnet.
+  # preferred rung claude-opus-5-5 refuses; the ladder descends to sonnet.
   cat > bin/stub-claude <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -955,12 +955,12 @@ EOF
   FFS_HOST=codex ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-sonnet-5-5" ]
   # the wall must SAY the request was answered below the rung it asked for
   [ "$(jq -r '.tier_descent' "$record")" = "true" ]
   trail="$(jq -r '.rung_trail | join(";")' "$record")"
-  [[ "$trail" == *"tier-descent:requested=claude-opus-5"* ]]
-  [[ "$trail" == *"answered=claude-sonnet-5"* ]]
+  [[ "$trail" == *"tier-descent:requested=claude-opus-5-5"* ]]
+  [[ "$trail" == *"answered=claude-sonnet-5-5"* ]]
 }
 
 @test "PR A: a first-rung success records tier_descent false" {
@@ -968,7 +968,7 @@ EOF
   FFS_HOST=codex ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-opus-5" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-opus-5-5" ]
   [ "$(jq -r '.tier_descent' "$record")" = "false" ]
   trail="$(jq -r '.rung_trail | join(";")' "$record")"
   [[ "$trail" != *"tier-descent:"* ]]

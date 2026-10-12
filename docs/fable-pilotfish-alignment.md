@@ -18,7 +18,7 @@ deltas shipped in v4.1.0, and what was deliberately deferred.
 
 | Playbook item | Where it already lives |
 |---|---|
-| Fable-orchestrator / Sonnet-worker topology (96%@46%) | `templates/gsd-config.base.json` — planner/plan-checker=`fable`, executor=`sonnet`, verifier/reviewer=`opus`. The default, not an option. |
+| Fable-orchestrator / Sonnet-worker topology (96%@46%) | `templates/gsd-config.base.json` — planner=`opus`, plan-checker=`fable`, executor=`sonnet`, verifier/reviewer=`opus` (planner/checker seats swapped 2026-10-12, see the last addendum). The default, not an option. |
 | Fresh-context verification beats self-critique | `/review-gate` — opposite-CLI 3-pass + refute-or-promote + verify-the-reviewer; honest-verifier/goal-backward pass (v1.3.0); gsd-verifier goal-backward at `phase.complete`. |
 | No "echo/explain your reasoning" phrasing (`reasoning_extraction` refusal trap) | Zero occurrences package-wide; return contracts enforce the opposite ("Conclusion FIRST, no exploratory narration", `lib/dispatch.py`). |
 | Graceful degradation / fallback chain | `scripts/gsd/model-fallback.sh` — fable→opus when unavailable, 24h probe cache, invoked at seed + run wall. |
@@ -36,6 +36,9 @@ deltas shipped in v4.1.0, and what was deliberately deferred.
    (auth/RLS/payments/crypto) and stall the run silently. The fence greps the
    seeded planning docs (+ spec/plan files) for security keywords and forces
    `gsd-planner`/`gsd-plan-checker` fable→opus (alias and full-ID spellings).
+   Since 2026-10-12 only `gsd-plan-checker` ships pinned to Fable (the planner
+   is Opus), so the fence's live effect is the checker seat; both roles stay
+   covered for configs that still pin the planner to Fable.
    Executor/verifier already never run on Fable. Fail-soft, never silent.
    Wired after `model-fallback.sh` in `/spec-decompose` Step 2 and
    `/feature-implement` Step 2.
@@ -69,7 +72,9 @@ jnuyens/gsd-plugin's `sdk/shared/model-catalog.json` (33 agents → heavy/standa
 light tiers). Shipped:
 
 - `gsd-plan-checker` fable→opus (checker must not share the planner's model —
-  fresh-context-verifier principle), `gsd-debugger` sonnet→opus,
+  fresh-context-verifier principle; superseded 2026-10-12: the planner is now
+  Opus and the checker Fable, same principle with the seats swapped),
+  `gsd-debugger` sonnet→opus,
   `gsd-integration-checker`/`gsd-nyquist-auditor` opus→sonnet,
   `gsd-research-synthesizer`/`gsd-codebase-mapper` sonnet→haiku.
 - `scripts/gsd/plan-adversary.sh` at gsd's `workflow.plan_bounce_script` seam:
@@ -134,3 +139,27 @@ codex-orchestrated FFS run would have codex reviewing its own plans.
 (advisory) + `testing-policy` skill + `code-uplift` skill — see CHANGELOG v4.4.0.
 Supersedes "browser QA absent from finish tail" (the tail is now
 canary-gate → qa-coverage → review-gate → ship → /canary).
+
+## Addendum 2026-10-12 — model routing to the Claude 5.5 / Fable 5.1 lineup
+
+The Claude tiers now resolve to `claude-fable-5-1` (frontier), `claude-opus-5-5`
+(judgment), `claude-sonnet-5-5` (execution), and `claude-haiku-5-5` (volume);
+`docs/model-tiers.md` is the canonical table. Two seat changes follow from
+Anthropic's guidance for the new lineup ("Most workloads start with Claude Opus
+5.5"; Fable 5.1 is the frontier escalation tier, not the default):
+
+- **Planner = Opus 5.5 (`judgment`), plan-checker = Fable 5.1 (`frontier`).**
+  The seats are swapped relative to the 2026-07 topology. Opus is the
+  default planning model; Fable is spent where a stronger, fresh-context model
+  adds most — checking the plan — and the producer/reviewer rule still holds
+  because the two seats never share a model. `gsd-research-synthesizer` moved
+  from `volume`/`haiku` to `execution`/`sonnet`; the template also gains
+  `effort.agent_overrides` (plan-checker `high`, synthesizer and codebase-mapper
+  `medium`).
+- **Security stays fenced to Opus.** Cyber-flagged turns on Fable 5.1 and
+  Opus 5.5 fall back to Opus 4.8, so a security-touching run lands on Opus
+  either way. `security-model-fence.sh` keeps that explicit rather than
+  relying on a mid-run fallback: it forces the planner and plan-checker pins to
+  Opus (it now also maps `claude-fable-5-1` to `claude-opus-5-5`, and keeps the
+  legacy `claude-fable-5` pair), and adversarial security review stays
+  cross-model.

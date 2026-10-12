@@ -51,9 +51,9 @@ else:
 text = json.dumps(reply, sort_keys=True, separators=(",", ":"))
 session = sys.argv[sys.argv.index("--session-id") + 1]
 assert (pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".credentials.json").is_file()
-print(json.dumps({"type":"system","subtype":"init","session_id":session,"cwd":os.getcwd(),"model":"claude-opus-5","claude_code_version":VERSION,"tools":[],"mcp_servers":[],"slash_commands":[],"skills":[],"plugins":[]}), flush=True)
-print(json.dumps({"type":"assistant","session_id":session,"parent_tool_use_id":None,"message":{"role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"fixture"}]}}), flush=True)
-print(json.dumps({"type":"result","subtype":"success","is_error":False,"session_id":session,"num_turns":1,"stop_reason":"end_turn","permission_denials":[],"usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":4,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"output_tokens_details":{"thinking_tokens":0}},"modelUsage":{"claude-opus-5":{"canonicalModel":"claude-opus-5","webSearchRequests":0}},"result":text}), flush=True)
+print(json.dumps({"type":"system","subtype":"init","session_id":session,"cwd":os.getcwd(),"model":"claude-opus-5-5","claude_code_version":VERSION,"tools":[],"mcp_servers":[],"slash_commands":[],"skills":[],"plugins":[]}), flush=True)
+print(json.dumps({"type":"assistant","session_id":session,"parent_tool_use_id":None,"message":{"role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"fixture"}]}}), flush=True)
+print(json.dumps({"type":"result","subtype":"success","is_error":False,"session_id":session,"num_turns":1,"stop_reason":"end_turn","permission_denials":[],"usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":4,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"output_tokens_details":{"thinking_tokens":0}},"modelUsage":{"claude-opus-5-5":{"canonicalModel":"claude-opus-5-5","webSearchRequests":0}},"result":text}), flush=True)
 '''
 
 
@@ -186,7 +186,7 @@ def test_a_codex_outer_is_spec_reviewed_and_final_reviewed_natively_on_claude(tm
     assert [(role, host) for role, _key, host in hosts if role != "reviewer"] == [("worker", "codex")]
     assert _reviewer_runtime_schemas(led.store) == [QUALIFIED_CLAUDE_RUNTIME_SCHEMA] * 2
     assert [role for role, _key, _request in reviewer.calls] == ["reviewer", "reviewer"]
-    assert _reviewer_requests(reviewer) == {(str(reviewer.binary), str(reviewer.credential), "claude-opus-5", 100)}
+    assert _reviewer_requests(reviewer) == {(str(reviewer.binary), str(reviewer.credential), "claude-opus-5-5", 100)}
     assert "reviewer" not in reviewer.codex_roles
     assert _held_resources(tmp_path) == {}
     # The identical request replays to the same facts without a new launch, grant or qualification.
@@ -225,7 +225,7 @@ def test_a_crash_after_the_claude_reviewer_qualified_resumes_on_claude(tmp_path,
     facts = _assert_done_once(w.authority, w.repository_id)
     assert [(role, key) for role, key, _request in reviewer.calls] == [
         ("reviewer", "final-review:reviewer"), ("reviewer", "final-review:reviewer:2")]
-    assert _reviewer_requests(reviewer) == {(str(reviewer.binary), str(reviewer.credential), "claude-opus-5", 100)}
+    assert _reviewer_requests(reviewer) == {(str(reviewer.binary), str(reviewer.credential), "claude-opus-5-5", 100)}
     assert "reviewer" not in reviewer.codex_roles
     with facts.store.read_transaction() as tx:
         states = [tuple(row) for row in tx.execute(

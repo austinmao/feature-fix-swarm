@@ -1062,7 +1062,7 @@ def test_doctor_rejects_zero_padded_codex_version_spellings(tmp_path: Path, vers
 def test_doctor_reports_ac009_model_routing_advisory_checks(tmp_path: Path) -> None:
     """spec-004 AC-009: stale-bake surface + per-surface catalog/resolver
     warnings are advisory (never fail doctor) and the catalog check fires
-    for claude-opus-5 today (gsd-core's own catalog only knows
+    for claude-opus-5-5 today (gsd-core's own catalog only knows
     claude-opus-4-8)."""
     assert run_setup(tmp_path, "--scope", "user").returncode == 0
 
@@ -1096,7 +1096,7 @@ def test_doctor_warns_on_unreachable_canonical_tier_model(tmp_path: Path) -> Non
     )
     fake_codex.chmod(0o755)
     fail_probe = tmp_path / "fail-on-opus.sh"
-    fail_probe.write_text('#!/usr/bin/env bash\n[ "$1" = claude-opus-5 ] && exit 1\nexit 0\n')
+    fail_probe.write_text('#!/usr/bin/env bash\n[ "$1" = claude-opus-5-5 ] && exit 1\nexit 0\n')
     fail_probe.chmod(0o755)
 
     result = run_setup(

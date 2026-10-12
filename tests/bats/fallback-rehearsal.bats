@@ -21,7 +21,7 @@ setup() {
   [ "$status" -eq 0 ]
   [ -f "$REHEARSAL_FILE" ]
   grep -q '"tested_on"' "$REHEARSAL_FILE"
-  grep -q '"claude-opus-5": *"ok"' "$REHEARSAL_FILE"
+  grep -q '"claude-opus-5-5": *"ok"' "$REHEARSAL_FILE"
   grep -q '"gpt-6-sol": *"ok"' "$REHEARSAL_FILE"
 }
 
@@ -39,7 +39,7 @@ setup() {
     bash "$REHEARSAL" --dry-run
   [ "$status" -eq 0 ]
   [ ! -f "$REHEARSAL_FILE" ]
-  [[ "$output" == *"claude-opus-5"* ]]
+  [[ "$output" == *"claude-opus-5-5"* ]]
   [[ "$output" == *"gpt-6-sol"* ]]
 }
 
@@ -62,7 +62,7 @@ engage_fallback() {
 }
 
 @test "engaging fallback with fresh rehearsal record: no rehearsal WARN" {
-  printf '{"tested_on":"2026-07-31","results":{"claude-opus-5":"ok","gpt-6-sol":"ok"}}\n' \
+  printf '{"tested_on":"2026-07-31","results":{"claude-opus-5-5":"ok","gpt-6-sol":"ok"}}\n' \
     > "$REHEARSAL_FILE"
   engage_fallback
   [ "$status" -eq 0 ]
@@ -70,7 +70,7 @@ engage_fallback() {
 }
 
 @test "engaging fallback with >30d-old rehearsal record warns: stale" {
-  printf '{"tested_on":"2026-01-01","results":{"claude-opus-5":"ok","gpt-6-sol":"ok"}}\n' \
+  printf '{"tested_on":"2026-01-01","results":{"claude-opus-5-5":"ok","gpt-6-sol":"ok"}}\n' \
     > "$REHEARSAL_FILE"
   touch -t 202601010000 "$REHEARSAL_FILE"
   engage_fallback

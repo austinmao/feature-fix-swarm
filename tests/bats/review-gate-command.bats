@@ -53,7 +53,7 @@ EOF
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
-  grep -Fx 'claude-opus-5' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-opus-5-5' "$BATS_TEST_TMPDIR/claude.args"
 }
 
 @test "opposite reviewer unavailable falls back once to active host with explicit degradation" {

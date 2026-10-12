@@ -130,7 +130,7 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"DEGRADED"* ]]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (claude claude-opus-5, degraded fallback)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5-5, degraded fallback)$' "$HIGH"
 }
 
 @test "high-blast plan gets findings appended, frontmatter intact" {
@@ -215,7 +215,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"DEGRADED"* ]]
-  grep -q '^## Adversarial plan review (claude claude-opus-5, degraded fallback)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5-5, degraded fallback)$' "$HIGH"
 }
 
 @test "model admission probe skips unavailable Sol and fully reviews with Terra" {
@@ -277,14 +277,14 @@ EOF
   PLAN_ADVERSARY_KIND=claude PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (claude claude-opus-5)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5-5)$' "$HIGH"
   grep -q '^HIGH: plan assumes withTenantRls' "$HIGH"
 }
 
 @test "host-aware: explicit Codex host auto-flips to claude adversary" {
   FFS_HOST=codex PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
-  grep -q '^## Adversarial plan review (claude claude-opus-5)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5-5)$' "$HIGH"
 }
 
 @test "no host env detected emits stderr note, stdout stays clean, defaults to claude host" {
@@ -390,7 +390,7 @@ EOF
   PATH="$NO_TIMEOUT_DIR" PLAN_ADVERSARY_KIND=claude PLAN_ADVERSARY_BIN=fake-claude run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (claude claude-opus-5)$' "$HIGH"
+  grep -q '^## Adversarial plan review (claude claude-opus-5-5)$' "$HIGH"
 }
 
 @test "legacy raw model overrides fail closed with typed-request remediation" {

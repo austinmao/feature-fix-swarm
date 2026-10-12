@@ -3,7 +3,7 @@
 # models in .planning/config.json, WITH recovery.
 #
 # gsd-core's model_overrides are returned verbatim (model-resolver.cjs step 1) —
-# no availability check. When claude-fable-5 drops off the OAuth subscription,
+# no availability check. When claude-fable-5-1 drops off the OAuth subscription,
 # every spawn of that agent errors. This lever probes availability once
 # (cached 24h) and rewrites model_overrides + dynamic_routing.tier_models
 # BEFORE a run starts — then RESTORES them once fable comes back.
@@ -16,7 +16,7 @@
 #
 # Both value forms are matched and the substitution PRESERVES form — gsd-core
 # aliases ("fable" -> "opus", the form templates/gsd-config.base.json and real
-# consumer configs pin) and full IDs ("claude-fable-5" -> "claude-opus-5").
+# consumer configs pin) and full IDs ("claude-fable-5-1" -> "claude-opus-5-5").
 #
 # Recovery: once fable is available again, restore ONLY the JSON paths this
 # lever itself rewrote — the marker (.planning/fable-fallback.json) records
@@ -98,14 +98,14 @@ CONFIG="$PLANNING_DIR/config.json"
 . "$(dirname "${BASH_SOURCE[0]}")/model-probe-lib.sh"
 
 MARKER="$PLANNING_DIR/fable-fallback.json"
-FABLE="claude-fable-5"
-OPUS="claude-opus-5"
+FABLE="claude-fable-5-1"
+OPUS="claude-opus-5-5"
 CODEX_SOL="gpt-6-sol"
 
-# Match BOTH value forms: gsd-core alias "fable" and full ID "claude-fable-5"
+# Match BOTH value forms: gsd-core alias "fable" and full ID "claude-fable-5-1"
 # (the alias grep is exact-quoted, so it does NOT match inside the full ID).
 HAS_FABLE_LITERAL=false
-if grep -qE '"(fable|claude-fable-5)"' "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
+if grep -qE '"(fable|claude-fable-5-1)"' "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
 
 if [ ! -f "$MARKER" ] && [ "$HAS_FABLE_LITERAL" = false ]; then
   echo "[model-fallback] $FABLE not present in config — no-op"
