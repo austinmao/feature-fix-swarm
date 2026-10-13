@@ -12,8 +12,9 @@ import pytest
 from host_capabilities import _binary_chain, closed_environment_hash
 from run_state.claude_host import (
     ClaudeHostAdapter, ClaudeHostRefused, ClaudeTelemetryRefused,
-    QualifiedClaudeRuntime, claude_closed_environment, claude_environment_policy,
-    claude_environment_policy_hash, parse_claude_host_request, parse_claude_telemetry,
+    QualifiedClaudeRuntime, SUPPORTED_CLAUDE_VERSION, claude_closed_environment,
+    claude_environment_policy, claude_environment_policy_hash, parse_claude_host_request,
+    parse_claude_telemetry,
 )
 from run_state.claude_runtime_staging import STAGE_MANIFEST_NAME, stage_private_claude_runtime
 
@@ -244,7 +245,7 @@ def test_private_stage_refuses_drift_and_unsafe_credentials(tmp_path: Path) -> N
 
 def _stream(model: str, session: str, *, hook: bool = False, nested: bool = False) -> bytes:
     values = [{"type": "system", "subtype": "init", "session_id": session, "model": model,
-               "claude_code_version": "2.1.274"}]
+               "claude_code_version": SUPPORTED_CLAUDE_VERSION}]
     if hook:
         values.append({"type": "system", "subtype": "hook_started", "hook_name": "PreToolUse"})
     if nested:
@@ -306,7 +307,7 @@ def test_launch_material_has_closed_cli_and_private_auth_guard(tmp_path: Path) -
                       "network_enabled": False, "roots": [str(workspace)], "tools": "fixture"}.items())),
         (("environment_sha256", claude_environment_policy_hash(environment)),),
     )
-    material = ClaudeHostAdapter(qualified, binary, "2.1.274").build_launch_material(
+    material = ClaudeHostAdapter(qualified, binary, SUPPORTED_CLAUDE_VERSION).build_launch_material(
         "do the work", attempt=1, session_id=str(uuid.uuid4()))
     try:
         assert material.argv[1:3] == ("-p", "do the work")
@@ -329,5 +330,5 @@ def test_launch_material_has_closed_cli_and_private_auth_guard(tmp_path: Path) -
     credential.chmod(0o600)
     os.link(credential, runtime / "linked-auth")
     with pytest.raises(ClaudeHostRefused, match="RUNTIME_CREDENTIAL_UNSAFE"):
-        ClaudeHostAdapter(qualified, binary, "2.1.274").build_launch_material(
+        ClaudeHostAdapter(qualified, binary, SUPPORTED_CLAUDE_VERSION).build_launch_material(
             "do the work", attempt=2, session_id=str(uuid.uuid4()))

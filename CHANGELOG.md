@@ -8,6 +8,22 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-12, 5.5 migration follow-up: legacy Fable pin and Claude Code CLI qualification)
+
+- `scripts/gsd/model-fallback.sh` detected only `"fable"` and `"claude-fable-5-1"`, so a consumer
+  config still pinning the legacy full ID `"claude-fable-5"` read as "not present — no-op" and was
+  never rewritten. Both the literal grep and the substitution table now also cover it
+  (`claude-fable-5` → `claude-opus-5`, the same legacy pairing `security-model-fence.sh` keeps);
+  `claude-fable-5-1` still becomes `claude-opus-5-5` and `fable` still becomes `opus`. Matching is
+  by exact quoted value, because `claude-fable-5` is a prefix of `claude-fable-5-1`.
+  `tests/bats/model-fallback.bats` gains FALLBACK-031 to 033 (legacy detect, rewrite and restore;
+  exact mixed-form result; the `-1` ID not shadowed by the legacy one).
+- `lib/run_state/claude_host.py` `SUPPORTED_CLAUDE_VERSION` moves `2.1.274` → `2.1.296`, the Claude
+  Code CLI installed on both machines. Managed-host qualification compares the version exactly
+  (`claude_qualification.py`, `managed_claude_qualification.py`), so a 2.1.296 CLI failed
+  qualification against the stale constant. The test fixtures that hard-coded `2.1.274` as the
+  supported version now import `SUPPORTED_CLAUDE_VERSION` (or `CLAUDE_CLI_VERSION`) and track it.
+
 ### Changed (2026-10-12, model routing → Claude 5.5 / Fable 5.1)
 
 - The Claude tiers resolve to the new lineup (`lib/model_requests.py` `CLAUDE_TIERS`): `frontier` →

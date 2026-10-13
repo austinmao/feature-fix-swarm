@@ -23,7 +23,7 @@ from model_requests import ModelRequestError, resolve_request
 
 CLAUDE_TELEMETRY_SCHEMA: Final = "ffs.claude-runtime-telemetry/v1"
 QUALIFIED_CLAUDE_RUNTIME_SCHEMA: Final = "ffs.qualified-claude-runtime/v1"
-SUPPORTED_CLAUDE_VERSION: Final = "2.1.274"
+SUPPORTED_CLAUDE_VERSION: Final = "2.1.296"
 _MAX_STREAM: Final = 4 * 1024 * 1024
 _TOKEN_FIELDS: Final = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 _BASE_ENVIRONMENT: Final = frozenset({

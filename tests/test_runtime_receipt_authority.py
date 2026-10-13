@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
 from host_capabilities import QualifiedCodexRuntime, TELEMETRY_SCHEMA  # noqa: E402
-from run_state.claude_host import QualifiedClaudeRuntime  # noqa: E402
+from run_state.claude_host import QualifiedClaudeRuntime, SUPPORTED_CLAUDE_VERSION  # noqa: E402
 from process_identity import ProcessIdentity  # noqa: E402
 from run_state.ownership import OwnershipRefused, StartRequest, reserve_resources  # noqa: E402
 from run_state.state import ControlStore, qualified_runtime_tuple_hash  # noqa: E402
@@ -72,7 +72,7 @@ def _qualified_claude(workspace, *, boot_id: str | None = None):
             ("sandbox_write_boundary", True), ("schema", "ffs.claude-runtime-qualification/v1"),
             ("stream_sha256", {name: char * 64 for name, char in (
                 ("session-model", "5"), ("sandbox-hooks", "6"), ("nested-auth", "7"),
-            )}), ("version", "2.1.274"),
+            )}), ("version", SUPPORTED_CLAUDE_VERSION),
         ),
     )
 

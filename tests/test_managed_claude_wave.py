@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from run_state import managed_claude_qualification as managed
-from run_state.claude_host import ClaudeHostRequest
+from run_state.claude_host import ClaudeHostRequest, SUPPORTED_CLAUDE_VERSION
 
 
 def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path, monkeypatch):
@@ -115,7 +115,7 @@ def test_managed_claude_wave_child_gets_fresh_qualification_and_receipt(tmp_path
             "parent": parent_activity_id, "workspace": workspace, "role": role,
             "contract": final_contract_hash,
         })
-        qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
+        qualified = SimpleNamespace(observation=(("version", SUPPORTED_CLAUDE_VERSION),), marker=activity_id)
         return (
             SimpleNamespace(id=activity_id, state="active"), qualified,
             SimpleNamespace(receipt_sha256="receipt:" + activity_id), tmp_path / activity_id,
@@ -244,7 +244,7 @@ def test_managed_claude_outer_qualify_receives_scoped_project(tmp_path, monkeypa
                 supervisor, bridge_command, project=None, workstream=None):
         del host_request, evidence_root, supervisor, bridge_command
         captured_scope.append((project, workstream))
-        qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
+        qualified = SimpleNamespace(observation=(("version", SUPPORTED_CLAUDE_VERSION),), marker=activity_id)
         return (
             SimpleNamespace(id=activity_id, state="active"), qualified,
             SimpleNamespace(receipt_sha256="receipt:" + activity_id), tmp_path / activity_id,
@@ -390,7 +390,7 @@ def test_managed_claude_success_requires_wave_reply_when_gsd_waves_were_requeste
             assert finish_timeout == 60
 
     def qualify(_store, _token, *, activity_id, **_kwargs):
-        qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
+        qualified = SimpleNamespace(observation=(("version", SUPPORTED_CLAUDE_VERSION),), marker=activity_id)
         return (
             SimpleNamespace(id=activity_id, state="active"), qualified,
             SimpleNamespace(receipt_sha256="receipt:" + activity_id), tmp_path / activity_id,
@@ -517,7 +517,7 @@ def test_managed_claude_outer_prompt_for_task_swarm_names_staged_command_under_t
                 supervisor, bridge_command, project=None, workstream=None):
         del host_request, supervisor, bridge_command, project, workstream
         staged_homes.append(managed.claude_runtime_home(evidence_root, activity_id))
-        qualified = SimpleNamespace(observation=(("version", "2.1.274"),), marker=activity_id)
+        qualified = SimpleNamespace(observation=(("version", SUPPORTED_CLAUDE_VERSION),), marker=activity_id)
         return (
             SimpleNamespace(id=activity_id, state="active"), qualified,
             SimpleNamespace(receipt_sha256="receipt:" + activity_id), tmp_path / activity_id,

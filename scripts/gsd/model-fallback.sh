@@ -17,6 +17,10 @@
 # Both value forms are matched and the substitution PRESERVES form — gsd-core
 # aliases ("fable" -> "opus", the form templates/gsd-config.base.json and real
 # consumer configs pin) and full IDs ("claude-fable-5-1" -> "claude-opus-5-5").
+# The pre-5.1 legacy full ID is matched too ("claude-fable-5" -> "claude-opus-5", the same
+# pairing security-model-fence.sh keeps) so a consumer config that never moved off it is not
+# left on a dead pin. Matching is by exact quoted value, never by prefix: "claude-fable-5" is
+# a prefix of "claude-fable-5-1" and must not shadow it.
 #
 # Recovery: once fable is available again, restore ONLY the JSON paths this
 # lever itself rewrote — the marker (.planning/fable-fallback.json) records
@@ -102,10 +106,12 @@ FABLE="claude-fable-5-1"
 OPUS="claude-opus-5-5"
 CODEX_SOL="gpt-6-sol"
 
-# Match BOTH value forms: gsd-core alias "fable" and full ID "claude-fable-5-1"
-# (the alias grep is exact-quoted, so it does NOT match inside the full ID).
+# Match ALL value forms: gsd-core alias "fable", full ID "claude-fable-5-1", and the legacy
+# full ID "claude-fable-5". Each alternative is anchored by the closing quote (exact-quoted),
+# so the alias does NOT match inside a full ID and "claude-fable-5" does NOT match the prefix
+# of "claude-fable-5-1".
 HAS_FABLE_LITERAL=false
-if grep -qE '"(fable|claude-fable-5-1)"' "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
+if grep -qE '"(fable|claude-fable-5-1|claude-fable-5)"' "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
 
 if [ ! -f "$MARKER" ] && [ "$HAS_FABLE_LITERAL" = false ]; then
   echo "[model-fallback] $FABLE not present in config — no-op"
@@ -309,8 +315,10 @@ except (OSError, ValueError) as exc:
     print(f"FATAL: {config_path} is unreadable or not valid JSON "
           f"({type(exc).__name__}: {exc}) — fix it and re-run.", file=sys.stderr)
     sys.exit(1)
-# Form-preserving substitution: alias stays alias, full ID stays full ID.
-forms = {"fable": "opus", fable: opus}
+# Form-preserving substitution: alias stays alias, full ID stays full ID. The legacy
+# pre-5.1 full ID rides along (same pairing as security-model-fence.sh). Dict lookup is by
+# exact string equality, so "claude-fable-5" can never match inside "claude-fable-5-1".
+forms = {"fable": "opus", fable: opus, "claude-fable-5": "claude-opus-5"}
 paths = {}
 installed = {}
 ambiguous = []

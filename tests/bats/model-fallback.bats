@@ -594,3 +594,50 @@ JSON
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['group.a']['nested']['model'])")" = "claude-fable-5-1" ]
   [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/fable-fallback.json'))['paths']))")" = "['model_overrides.gsd-planner']" ]
 }
+
+@test "FALLBACK-031: a LEGACY 'claude-fable-5' pin is detected and rewritten to 'claude-opus-5', recovery restores it" {
+  # The 5.5 migration narrowed detection to "fable" + "claude-fable-5-1", so a consumer config
+  # still pinning the pre-5.1 full ID was reported as "not present — no-op" and left on a dead
+  # pin. security-model-fence.sh keeps the same legacy pairing (claude-fable-5 -> claude-opus-5).
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "gsd-planner": "claude-fable-5", "gsd-verifier": "claude-opus-5" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"not present in config"* ]]
+  [[ "$output" == *"(1 override(s) rewritten)"* ]]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-5" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['paths']['model_overrides.gsd-planner'])")" = "claude-fable-5" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/fable-fallback.json'))['installed']['model_overrides.gsd-planner'])")" = "claude-opus-5" ]
+
+  # recovery: exact legacy form back, the intentional opus pin untouched, marker deleted
+  rm -f "$GSD_FALLBACK_CACHE/claude-fable-5-1.status"
+  GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/.planning/fable-fallback.json" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-fable-5" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-verifier'])")" = "claude-opus-5" ]
+}
+
+@test "FALLBACK-032: 'claude-fable-5-1' still becomes exactly 'claude-opus-5-5' — the legacy ID does not shadow it" {
+  # 'claude-fable-5' is a PREFIX of 'claude-fable-5-1'. A pattern or substitution that matches the
+  # prefix would yield a mangled ID (e.g. 'claude-opus-5-1'); the match must be exact, not partial.
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "a": "claude-fable-5-1", "b": "claude-fable-5", "c": "fable", "d": "claude-opus-5-5" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(3 override(s) rewritten)"* ]]
+  [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/config.json'))['model_overrides'].items()))")" = "[('a', 'claude-opus-5-5'), ('b', 'claude-opus-5'), ('c', 'opus'), ('d', 'claude-opus-5-5')]" ]
+  [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/fable-fallback.json'))['paths'].items()))")" = "[('model_overrides.a', 'claude-fable-5-1'), ('model_overrides.b', 'claude-fable-5'), ('model_overrides.c', 'fable')]" ]
+}
+
+@test "FALLBACK-033: a config pinning ONLY 'claude-fable-5-1' is still detected (exact-quote anchor, not prefix)" {
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "gsd-planner": "claude-fable-5-1" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-fail.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UNAVAILABLE -> claude-opus-5-5 (1 override(s) rewritten)"* ]]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-5-5" ]
+}

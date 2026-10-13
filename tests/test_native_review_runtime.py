@@ -136,7 +136,7 @@ def test_claude_argv_disables_tools_without_dropping_subscription_auth(tmp_path:
     request = NativeReviewRequest(
         host="claude", requested_model="claude-sonnet-4-5", cli_version=CLAUDE_CLI_VERSION,
         binary=str(binary), binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
-        runtime_identity="claude-2.1.274", prompt="Review bound artifacts only.",
+        runtime_identity=f"claude-{CLAUDE_CLI_VERSION}", prompt="Review bound artifacts only.",
         session_id="643b3a28-33d2-4000-b983-a18c5da41bbd",
     )
     material = prepare_native_review_runtime(request, runtime_root=parent / "claude", workspace=workspace)

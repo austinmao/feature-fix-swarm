@@ -11,11 +11,11 @@ import pytest
 
 from run_state import claude_qualification as qualification
 from run_state import managed_claude_qualification as managed
-from run_state.claude_host import ClaudeHostRequest
+from run_state.claude_host import ClaudeHostRequest, SUPPORTED_CLAUDE_VERSION
 from run_state.claude_runtime_staging import STAGE_MANIFEST_NAME, STAGE_SCHEMA
 
 
-def _fixture(tmp_path: Path, *, version="2.1.274"):
+def _fixture(tmp_path: Path, *, version=SUPPORTED_CLAUDE_VERSION):
     runtime, workspace = tmp_path / "runtime", tmp_path / "work"
     runtime.mkdir(mode=0o700)
     workspace.mkdir()
@@ -50,7 +50,7 @@ def test_native_review_cli_can_qualify_ordinary_runtime(tmp_path):
 
 def _stream(plan, probe, *, hook=False, nested=False):
     records = [{"type": "system", "subtype": "init", "session_id": probe.session_id,
-                "model": plan.model, "claude_code_version": "2.1.274"}]
+                "model": plan.model, "claude_code_version": SUPPORTED_CLAUDE_VERSION}]
     if hook:
         records.append({"type": "system", "subtype": "hook_started", "hook_event": "PreToolUse:Bash"})
         records.append({"type": "assistant", "message": {"content": [{

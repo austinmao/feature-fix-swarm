@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 
+from run_state.claude_host import SUPPORTED_CLAUDE_VERSION
 from run_state.native_review_runtime import (
     NativeReviewRequest, prepare_native_review_runtime, verify_claude_review_evidence,
 )
@@ -25,8 +26,9 @@ def test_claude_credential_is_absent_during_tool_then_restored_for_next_turn(tmp
 import json, pathlib, sys, time
 credential = pathlib.Path(sys.argv[1])
 session = sys.argv[2]
+version = sys.argv[3]
 print(json.dumps({"type":"system","subtype":"init","session_id":session,
-                  "model":"claude-opus-5","claude_code_version":"2.1.274"}), flush=True)
+                  "model":"claude-opus-5","claude_code_version":version}), flush=True)
 if not credential.exists():
     raise SystemExit(21)
 print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}), flush=True)
@@ -56,11 +58,12 @@ raise SystemExit(0)
         "inode": info.st_ino,
         "session_id": session,
         "model": "claude-opus-5",
-        "version": "2.1.274",
+        "version": SUPPORTED_CLAUDE_VERSION,
     }
     environment = {"HOME": str(home.parent), "CLAUDE_CONFIG_DIR": str(home)}
     assert _guarded_claude_exec(
-        [sys.executable, "-c", script, str(credential), session], environment, guard,
+        [sys.executable, "-c", script, str(credential), session, SUPPORTED_CLAUDE_VERSION],
+        environment, guard,
     ) == 0
     assert not credential.exists()
     records = [json.loads(line) for line in capfd.readouterr().out.splitlines()]
