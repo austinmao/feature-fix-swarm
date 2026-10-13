@@ -1241,7 +1241,7 @@ def test_retained_repository_record_is_checked_against_the_canonical_object_stor
     # The honest capture keeps credit after the post-capture upgrade commit.
     assert credit("honest", lambda r: None)[:2] == (BASELINE_IDS[0], BASELINE_IDS[1])
     forgeries = {
-        "origin": lambda r: r.update(origin_main="0123456789abcdef0123456789abcdef01234567"),
+        "origin": lambda r: r.update(origin_main="0123456789abcdef" * 2 + "01234567"),
         "inventory": lambda r: r.update(source_inventory=r["source_inventory"][:1]),
         "common-dir": lambda r: r.update(common_dir=str(tmp_path / "no-such-common-dir")),
     }
