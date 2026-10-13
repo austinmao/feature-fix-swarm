@@ -227,7 +227,83 @@ def test_fixture_ledger_failed_first_canary_cannot_precede_second_profile(tmp_pa
     assert rejected.value.code == "LEDGER" and rejected.value.status == "UNMET"
 
 
-def _changed_comparison_fixture(tmp_path: Path, *, suite_executable: Path | None = None) -> tuple[object, dict, Path, bytes]:
+def _m0_inventory(module, tmp_path: Path, manifest: dict, candidate_bytes: bytes,
+                  extra_sources: dict[str, bytes] | None = None) -> Path:
+    """Turn complete_full_inventory into a full M0 capture: canonical source and every pinned backup surface.
+
+    The candidate becomes a committed file of the observed repository so the canonical-source proof
+    can bind its generation; every inventory wrapper is re-sealed to the new provenance.
+    """
+    from test_m0_source_evidence import doctor, git
+
+    repo = Path(manifest["repository"])
+    candidate = repo / "candidate-closure.json"; candidate.write_bytes(candidate_bytes)
+    (repo / "skills/demo").mkdir(parents=True)
+    (repo / "skills/demo/SKILL.md").write_text("canonical skill bytes\n")
+    for relative, data in (extra_sources or {}).items():
+        (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+        (repo / relative).write_bytes(data)
+    # The whole first-party corpus is committed, so the retained inventory is derivable from the generation.
+    subprocess.run(["git", "-C", str(repo), "add", candidate.name, "skills/demo/SKILL.md", "lib/inventory.py",
+                    *(extra_sources or {})], check=True, timeout=30)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@invalid",
+                    "commit", "-qm", "m0 generation"], check=True, timeout=10)
+    head = git(repo, "rev-parse", "HEAD")
+    staged = repo / ".agents/skills/demo/SKILL.md"
+    staged.parent.mkdir(parents=True); staged.write_bytes((repo / "skills/demo/SKILL.md").read_bytes())
+    (repo / ".feature-fix-swarm").mkdir()
+    install = write_json(repo / ".feature-fix-swarm/install-manifest.json", {
+        "schema": "ffs.install/v1", "version": "fixture", "scope": "project", "installed_at": "2026-10-11T00:00:00Z",
+        "source": ".", "paths": {".agents/skills/demo/SKILL.md": {"fingerprint": "file:" + _digest(staged)}},
+        "gsd": {"owner": "upstream-installer", "version": "fixture", "profiles": {"claude": "full", "codex": "full"}},
+    })
+    manifest["candidate"] = _descriptor(candidate)
+    manifest["provenance"]["source_sha256"] = _digest(candidate)
+    manifest["baseline_profile"] = module.M0_PROFILE
+    backups = []
+    for name in sorted(module.M0_BACKUP_SURFACES):
+        original, restored = tmp_path / "preserved" / name, tmp_path / "recovery" / name
+        original.parent.mkdir(exist_ok=True); restored.parent.mkdir(exist_ok=True)
+        original.write_bytes(f"{name} preserved bytes\n".encode()); restored.write_bytes(original.read_bytes())
+        (tmp_path / "verification").mkdir(exist_ok=True)
+        verification = write_json(tmp_path / "verification" / f"{name}.json", {
+            "name": name, "status": "PASS", "expected_sha256": _digest(original),
+            "backup_sha256": _digest(original), "restored_sha256": _digest(restored)})
+        backups.append({"name": name, "expected_sha256": _digest(original), "backup_artifact": _descriptor(original),
+                        "restored_artifact": _descriptor(restored), "verification_artifact": _descriptor(verification)})
+    canonical = {"manifests": [{
+        "scope": "project", "install_manifest": _descriptor(install), "project_root": str(repo),
+        "resolved_source_root": str(repo.resolve()),
+        "repository": {"root": str(repo.resolve()),
+                       "common_dir": str((repo / git(repo, "rev-parse", "--git-common-dir")).resolve()),
+                       "head": head, "generation": head},
+        "doctor_artifact": _descriptor(doctor(tmp_path)),
+        "mappings": [{"managed_path": ".agents/skills/demo/SKILL.md", "type": "file",
+                      "source_artifact": _descriptor(repo / "skills/demo/SKILL.md"),
+                      "staged_artifact": _descriptor(staged)}],
+    }], "upstream_mappings": [], "current_dirty_inventory": []}
+    for category, record in manifest["full_inventory"].items():
+        path = Path(record["artifacts"][0]["locator"])
+        wrapper = json.loads(path.read_text())
+        wrapper["provenance"] = manifest["provenance"]
+        if category == "backups_recovery":
+            wrapper["schema"] = "ffs.full-inventory-evidence/v2"
+            wrapper["observations"] = {"required_surface_ids": sorted(module.M0_BACKUP_SURFACES), "entries": backups}
+        elif category == "source_runtime":
+            wrapper["schema"] = "ffs.full-inventory-evidence/v2"
+            for entry in wrapper["observations"]["entries"]:
+                if entry["role"] == "source":
+                    entry["artifact"] = _descriptor(candidate)
+            wrapper["observations"]["canonical_source"] = canonical
+        write_json(path, wrapper)
+        record["artifacts"] = [_descriptor(path)]
+    return candidate
+
+
+def _changed_comparison_fixture(tmp_path: Path, *, suite_executable: Path | None = None,
+                                m0_candidate: bytes | None = None,
+                                baseline_ids: tuple[list[str], list[str]] | None = None,
+                                extra_sources: dict[str, bytes] | None = None) -> tuple[object, dict, Path, bytes]:
     module = subject()
     candidate = tmp_path / "candidate.py"; candidate.write_text("print('candidate')\n")
     executable = suite_executable or Path(sys.executable)
@@ -235,6 +311,10 @@ def _changed_comparison_fixture(tmp_path: Path, *, suite_executable: Path | None
     baseline_manifest = candidate_manifest(candidate, "baseline")
     baseline_manifest["baseline"] = {"suite_artifacts": [before_suite]}
     baseline_manifest["full_inventory"] = complete_full_inventory(tmp_path, baseline_manifest)
+    if m0_candidate is not None:
+        candidate = _m0_inventory(module, tmp_path, baseline_manifest, m0_candidate, extra_sources)
+    if baseline_ids is not None:
+        baseline_manifest["ac_ids"], baseline_manifest["path_ids"] = baseline_ids
 
     environment_metadata, dependency_metadata = _suite_environment(executable)
     environment_path = tmp_path / "inventory-environment.json"
@@ -258,7 +338,18 @@ def _changed_comparison_fixture(tmp_path: Path, *, suite_executable: Path | None
     write_json(before_suite_path, before_suite_record)
     before_suite.update(_descriptor(before_suite_path))
     baseline = module.baseline_mode(baseline_manifest)
+    if m0_candidate is not None:
+        # The CLI attaches this proof; a retained M0 capture is revalidated from it.
+        proof = write_json(tmp_path / "baseline-manifest.json", baseline_manifest)
+        baseline["verification_proof"] = {"manifest": _descriptor(proof), "inputs": {}}
     baseline_path = write_json(tmp_path / "immutable-baseline.json", baseline)
+    if m0_candidate is not None:
+        # A real upgrade commit moves HEAD after the capture; the retained capture stays historical evidence.
+        repo = Path(baseline_manifest["repository"])
+        (repo / "upgrade-step.txt").write_text("upgraded\n")
+        subprocess.run(["git", "-C", str(repo), "add", "upgrade-step.txt"], check=True, timeout=10)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@invalid",
+                        "commit", "-qm", "upgrade after capture"], check=True, timeout=10)
 
     current = _suite_with_executable(tmp_path, "current-suite", {"stable-π": "PASS"}, executable)
     current["id"] = before_suite["id"]

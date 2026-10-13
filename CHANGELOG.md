@@ -76,6 +76,63 @@ all skills.
   exercised on every host: the child still records executed lines of a first-party script
   without the warning, and a negative control without the suppression shows the warning.
 
+### Fixed (2026-10-11, spec-014 E8: an honest aggregate PASS was unreachable)
+
+- `aggregate` accepted results from eight gates only, yet required the union of their ids to cover
+  AC-001 to AC-060 and PATH-001 to PATH-024. Eleven ACs and four PATHs had no gate that proves them
+  (baseline capture, review completion, the upstream experiment, documentation and authorization),
+  so a PASS needed some manifest to claim ids it does not prove. The aggregate now also requires an
+  imported `review-completion:upgraded` result (no authorized repair, no blocked path) and three new
+  evidence gates, `experiment` (AC-047, PATH-020), `docs` (AC-056 to AC-058) and `authorization`
+  (AC-059, AC-060, PATH-024), which also gives the aggregate the authorization evidence its contract
+  names. Baseline ids are credited only through the upgrade comparison's revalidated baseline input
+  and only for a complete M0 capture with a verified canonical source.
+- The aggregate unioned whatever ids each manifest claimed, so one docs result could claim every AC
+  and PATH. Each gate is now credited only for the claimed ids in its owned set (`GATE_OWNED_IDS`,
+  derived from the spec's PATH and evidence-obligation tables); AC-001 to AC-004 and PATH-001 come
+  only from baseline credit.
+- Baseline credit trusted the retained capture's asserted completeness flags. A capture claiming a
+  complete M0 baseline is now re-derived from its own verification proof with `baseline`, so the
+  full-inventory, backup and canonical-source checks run again and an edited capture is refused.
+- `docs` accepted `{}` topic and dependency artifacts, any exit status and an unbound stdout digest;
+  `authorization` ignored the commits and pushes in each history and let one artifact stand for all
+  three evidence-index categories; `experiment` never compared the issue status with its report and
+  accepted `{}` supported paths. Each now parses closed records (published as schema `$defs`): topic,
+  observation (with its stdout artifact and the documented exit status), shared-dependency, guidance
+  (naming repo `CLAUDE.md` and `AGENTS.md`), authorization, history rows (an authorization id or a
+  fixture marker), distinct index records, and supported paths with PATH implications. Example argv
+  may now repeat an argument.
+- Baseline revalidation reran the live repository inventory, so any commit after the M0 capture
+  removed baseline credit. It now revalidates the retained capture offline against its own
+  repository observation, byte-bound artifacts and Git objects at the retained generation.
+- Authorization grants are now matched to the row: a commit needs a `commit` grant scoped to its
+  repository and a push a `push` grant scoped to its exact ref; `fixture: true` rows need a declared
+  fixture root outside the canonical repository. Experiment execution paths must be absolute and
+  implications must name PATH-001 to PATH-024. Docs topic documents and repo guidance files are
+  byte-bound artifacts, and a guidance artifact must be the file it names.
+- `upgrade-comparison` no longer owns AC-005 to AC-008: its ledger does not prove the changelog
+  review, reader preflight, live-session preservation or profile progression, so the aggregate
+  reports exactly those four as unmet. Follow-up FU-upgrade-ledger-obligations adds those checks.
+- Offline baseline revalidation trusted the retained repository record. It now checks the record
+  against the live common dir, requires head and origin/main to be commits with origin/main an
+  ancestor, and rederives the source inventory from the committed tree. Fixture containment now
+  requires normalized absolute paths and compares physical resolved paths.
+- The retained source-inventory check read blobs through the canonical-source cache and its 2 MiB
+  leaf limit, so a corpus the capture accepted (289 files, or one file over 2 MiB) lost credit. It
+  now stream-hashes each blob under the capture's own inventory limits.
+- Follow-up FU-matrix-case-criterion-mapping: `matrix` still credits its owned ids from the
+  manifest's chosen case ids without a case-to-criterion mapping (pre-existing, unchanged here).
+- `audit` let the manifest choose its own `required_domains`; it now refuses any set missing the
+  FR-036 to FR-038 domains.
+- `upgrade` and the aggregate read the retained baseline at the 2 MiB evidence file limit, but a
+  real full baseline (every test row repeated in its full inventory evidence) is about 2.9 MB, so a
+  correct comparison was refused `UNSAFE_INPUT`. Both baseline reads now use the 64 MiB inventory
+  file limit and still count against the 16 MiB total evidence budget.
+- `installation --mode private` refused every link in the fixture, but setup.sh project scope creates
+  relative `.agents/skills` links by design, so a correct project install always failed
+  `FIXTURE_LINK`. The scan now records a relative link that resolves inside the fixture as a `link`
+  entry and still refuses absolute, escaping, dangling and looping links.
+
 ### Fixed (2026-10-10, spec-014 E8: timing-bound bats tests fail under host load)
 
 - The darwin E8 Suite row failed its bats stage in three attempts on 336eff7 while the Python

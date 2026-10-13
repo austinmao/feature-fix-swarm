@@ -33,6 +33,15 @@
       "$ref": "#/$defs/rollout_manifest"
     },
     {
+      "$ref": "#/$defs/experiment_manifest"
+    },
+    {
+      "$ref": "#/$defs/docs_manifest"
+    },
+    {
+      "$ref": "#/$defs/authorization_manifest"
+    },
+    {
       "$ref": "#/$defs/review_result"
     },
     {
@@ -1077,7 +1086,7 @@
       "additionalProperties": false,
       "properties": {
         "path": {"$ref": "#/$defs/nonempty"},
-        "type": {"enum": ["directory", "file", "runtime-link"]},
+        "type": {"enum": ["directory", "file", "link", "runtime-link"]},
         "sha256": {
           "oneOf": [
             {"$ref": "#/$defs/digest"},
@@ -1351,11 +1360,18 @@
         "gates": {"$ref": "#/$defs/ids"},
         "candidate_sha256": {"$ref": "#/$defs/digest"},
         "m7_complete": {"type": "boolean"},
+        "issue": {"const": "4588"},
+        "issue_status": {"$ref": "#/$defs/nonempty"},
+        "outcome": {"enum": ["parallel", "sequential-fallback"]},
+        "observed_utc": {"$ref": "#/$defs/nonempty"},
+        "topic_count": {"type": "integer", "minimum": 0},
+        "example_count": {"type": "integer", "minimum": 0},
+        "history_count": {"type": "integer", "minimum": 0},
         "verification_proof": {"$ref": "#/$defs/verification_proof"}
       },
       "allOf": [
         {
-          "if": {"properties": {"gate": {"enum": ["audit", "coverage", "hosts", "installation-lifecycle", "matrix", "migration", "rollout", "upgrade-comparison"]}, "status": {"const": "PASS"}}, "required": ["gate", "status"]},
+          "if": {"properties": {"gate": {"enum": ["audit", "authorization", "coverage", "docs", "experiment", "hosts", "installation-lifecycle", "matrix", "migration", "review-completion:upgraded", "rollout", "upgrade-comparison"]}, "status": {"const": "PASS"}}, "required": ["gate", "status"]},
           "then": {"required": ["verification_proof"]}
         },
         {
@@ -1363,7 +1379,7 @@
           "then": {"properties": {"verification_proof": {"properties": {"inputs": {"required": ["baseline"]}}}}}
         },
         {
-          "if": {"properties": {"gate": {"enum": ["audit", "coverage", "hosts", "installation-lifecycle", "matrix", "migration", "rollout"]}, "status": {"const": "PASS"}}, "required": ["gate", "status"]},
+          "if": {"properties": {"gate": {"enum": ["audit", "authorization", "coverage", "docs", "experiment", "hosts", "installation-lifecycle", "matrix", "migration", "review-completion:upgraded", "rollout"]}, "status": {"const": "PASS"}}, "required": ["gate", "status"]},
           "then": {"properties": {"verification_proof": {"properties": {"inputs": {"maxProperties": 0}}}}}
         },
         {"if": {"properties": {"gate": {"const": "audit"}}}, "then": {"required": ["domains", "finding_count", "reviewer"]}},
@@ -1373,6 +1389,9 @@
         {"if": {"properties": {"gate": {"const": "matrix"}}}, "then": {"required": ["repetitions", "platforms", "case_count", "row_count"]}},
         {"if": {"properties": {"gate": {"const": "migration"}}}, "then": {"required": ["source_count", "record_counts", "run_count"]}},
         {"if": {"properties": {"gate": {"const": "rollout"}}}, "then": {"required": ["consumer", "surface_count", "fork_count", "canary_count"]}},
+        {"if": {"properties": {"gate": {"const": "experiment"}}}, "then": {"required": ["issue", "issue_status", "outcome", "observed_utc"]}},
+        {"if": {"properties": {"gate": {"const": "docs"}}}, "then": {"required": ["topic_count", "example_count"]}},
+        {"if": {"properties": {"gate": {"const": "authorization"}}}, "then": {"required": ["history_count"]}},
         {"if": {"properties": {"gate": {"const": "upgrade-comparison"}}}, "then": {"required": ["new_failures", "missing_tests", "remaining_failures", "suite_passed", "comparison_passed", "baseline_sha256", "ledger_sha256", "ledger_entries", "suite_ids", "missing_suites", "new_suites", "suite_observations", "provenance_drift", "before_provenance", "after_provenance", "comparison_binding_sha256"]}}
       ],
       "additionalProperties": false
@@ -1468,7 +1487,7 @@
         {"$ref": "#/$defs/completion_common_manifest"},
         {"type": "object", "properties": {"audit": {
           "type": "object", "additionalProperties": false,
-          "properties": {"required_domains": {"$ref": "#/$defs/ids"},
+          "properties": {"required_domains": {"allOf": [{"$ref": "#/$defs/ids"}, {"contains": {"const": "findings"}}, {"contains": {"const": "regression"}}, {"contains": {"const": "fix"}}, {"contains": {"const": "refactor-path"}}, {"contains": {"const": "refactor-ownership"}}, {"contains": {"const": "refactor-host"}}, {"contains": {"const": "refactor-dependency"}}, {"contains": {"const": "refactor-model"}}, {"contains": {"const": "independent-verification"}}, {"contains": {"const": "pin"}}]},
             "domains": {"type": "array", "items": {"type": "object", "additionalProperties": false,
               "properties": {"id": {"$ref": "#/$defs/nonempty"}, "status": {"const": "PASS"}, "artifact": {"$ref": "#/$defs/artifact"}},
               "required": ["id", "status", "artifact"]}},
@@ -1541,6 +1560,126 @@
         }}, "required": ["rollout"]}
       ],
       "unevaluatedProperties": false
+    },
+    "experiment_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"experiment": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"issue": {"const": "4588"}, "issue_status": {"$ref": "#/$defs/nonempty"},
+            "observed_utc": {"type": "string", "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?(?:Z|\\+00:00)$"}, "outcome": {"enum": ["parallel", "sequential-fallback"]},
+            "report": {"$ref": "#/$defs/artifact"}, "supported_paths": {"$ref": "#/$defs/artifact"}},
+          "required": ["issue", "issue_status", "observed_utc", "outcome", "report", "supported_paths"]
+        }}, "required": ["experiment"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "docs_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"docs": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"topics": {"type": "array", "minItems": 12, "maxItems": 12, "allOf": [{"contains": {"properties": {"id": {"const": "automatic-isolation"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "commands"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "dependencies"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "evidence"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "examples"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "host-support"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "migration"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "resume-takeover"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "rollout-rollback"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "setup"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "tiers"}}, "required": ["id"]}}, {"contains": {"properties": {"id": {"const": "troubleshooting"}}, "required": ["id"]}}], "items": {"type": "object", "additionalProperties": false,
+              "properties": {"id": {"enum": ["automatic-isolation", "commands", "dependencies", "evidence", "examples", "host-support", "migration", "resume-takeover", "rollout-rollback", "setup", "tiers", "troubleshooting"]}, "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["id", "artifact"]}},
+            "examples": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
+              "properties": {"argv": {"$ref": "#/$defs/argv"}, "expected_exit_status": {"type": "integer"}, "observed": {"$ref": "#/$defs/artifact"}},
+              "required": ["argv", "expected_exit_status", "observed"]}},
+            "shared_dependencies": {"$ref": "#/$defs/artifact"}, "guidance": {"$ref": "#/$defs/artifact"},
+            "user_global_unchanged": {"const": true}, "consumer_skills_unchanged": {"const": true}},
+          "required": ["topics", "examples", "shared_dependencies", "guidance", "user_global_unchanged", "consumer_skills_unchanged"]
+        }}, "required": ["docs"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "authorization_manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/completion_common_manifest"},
+        {"type": "object", "properties": {"authorization": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"record": {"$ref": "#/$defs/artifact"},
+            "histories": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
+              "properties": {"repository": {"type": "string", "pattern": "^(?:/(?!\\.\\.?(?:/|$))[^/]+)+$"}, "artifact": {"$ref": "#/$defs/artifact"}},
+              "required": ["repository", "artifact"]}},
+            "unauthorized_actions": {"type": "array", "maxItems": 0}, "discarded_changes": {"type": "array", "maxItems": 0},
+            "evidence_index": {"type": "object", "additionalProperties": false,
+              "properties": {"results": {"$ref": "#/$defs/artifact"}, "unmet": {"$ref": "#/$defs/artifact"}, "hypotheses": {"$ref": "#/$defs/artifact"}},
+              "required": ["results", "unmet", "hypotheses"]}},
+          "required": ["record", "histories", "unauthorized_actions", "discarded_changes", "evidence_index"]
+        }}, "required": ["authorization"]}
+      ],
+      "unevaluatedProperties": false
+    },
+    "upstream_experiment_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.upstream-experiment/v1"}, "issue": {"const": "4588"}, "issue_status": {"$ref": "#/$defs/nonempty"},
+        "outcome": {"enum": ["parallel", "sequential-fallback"]}, "observed_utc": {"$ref": "#/$defs/nonempty"}, "upstream_version": {"$ref": "#/$defs/nonempty"},
+        "runs": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
+          "properties": {"workstreams": {"type": "integer", "minimum": 2}, "overlap_seconds": {"type": "number", "minimum": 0}},
+          "required": ["workstreams", "overlap_seconds"]}}},
+      "required": ["schema", "issue", "issue_status", "outcome", "observed_utc", "upstream_version", "runs"]
+    },
+    "supported_paths_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.supported-paths/v1"}, "execution_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^/"}},
+        "path_implications": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
+          "properties": {"path_id": {"type": "string", "pattern": "^PATH-0(?:0[1-9]|1[0-9]|2[0-4])$"}, "implication": {"$ref": "#/$defs/nonempty"}},
+          "required": ["path_id", "implication"]}}},
+      "required": ["schema", "execution_paths", "path_implications"]
+    },
+    "doc_topic_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.doc-topic/v1"}, "topic": {"$ref": "#/$defs/nonempty"},
+        "documents": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}, "statement": {"$ref": "#/$defs/nonempty"}},
+      "required": ["schema", "topic", "documents", "statement"]
+    },
+    "command_observation_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.command-observation/v1"}, "argv": {"$ref": "#/$defs/argv"}, "exit_status": {"type": "integer"},
+        "stdout_sha256": {"$ref": "#/$defs/digest"}, "stdout": {"$ref": "#/$defs/artifact"}},
+      "required": ["schema", "argv", "exit_status", "stdout_sha256", "stdout"]
+    },
+    "shared_dependencies_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.shared-dependencies/v1"}, "dependencies": {"allOf": [{"$ref": "#/$defs/ids"}, {"minItems": 1}]},
+        "self_contained": {"type": "boolean"}, "isolation_limit": {"$ref": "#/$defs/nonempty"}},
+      "required": ["schema", "dependencies", "self_contained", "isolation_limit"]
+    },
+    "guidance_comparison_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.guidance-comparison/v1"},
+        "repo_guidance": {"type": "array", "minItems": 2, "items": {"type": "object", "additionalProperties": false,
+          "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!(?:.*/)?\\.\\.(?:/|$)).+$"}, "artifact": {"$ref": "#/$defs/artifact"}}, "required": ["path", "artifact"]},
+          "allOf": [{"contains": {"properties": {"path": {"pattern": "(^|/)CLAUDE\\.md$"}}}}, {"contains": {"properties": {"path": {"pattern": "(^|/)AGENTS\\.md$"}}}}]},
+        "user_global": {"$ref": "#/$defs/guidance_pair"}, "consumer_skills": {"$ref": "#/$defs/guidance_pair"}},
+      "required": ["schema", "repo_guidance", "user_global", "consumer_skills"]
+    },
+    "guidance_pair": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"before": {"$ref": "#/$defs/digest"}, "after": {"$ref": "#/$defs/digest"}}, "required": ["before", "after"]
+    },
+    "authorization_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.authorization-record/v1"}, "canonical_repository": {"type": "string", "pattern": "^(?:/(?!\\.\\.?(?:/|$))[^/]+)+$"}, "authorizations": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+        "properties": {"id": {"$ref": "#/$defs/nonempty"}, "action": {"$ref": "#/$defs/nonempty"}, "scope": {"$ref": "#/$defs/nonempty"}},
+        "required": ["id", "action", "scope"]}}},
+      "required": ["schema", "canonical_repository", "authorizations"]
+    },
+    "repository_history_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.repository-history/v1"}, "repository": {"type": "string", "pattern": "^(?:/(?!\\.\\.?(?:/|$))[^/]+)+$"}, "fixture_root": {"type": "string", "pattern": "^(?:/(?!\\.\\.?(?:/|$))[^/]+)+$"}, "head": {"$ref": "#/$defs/git_object_id"},
+        "commits": {"type": "array", "items": {"oneOf": [
+          {"type": "object", "additionalProperties": false, "properties": {"commit": {"$ref": "#/$defs/nonempty"}, "authorization": {"$ref": "#/$defs/nonempty"}}, "required": ["commit", "authorization"]},
+          {"type": "object", "additionalProperties": false, "properties": {"commit": {"$ref": "#/$defs/nonempty"}, "fixture": {"const": true}}, "required": ["commit", "fixture"]}]}},
+        "pushes": {"type": "array", "items": {"oneOf": [
+          {"type": "object", "additionalProperties": false, "properties": {"ref": {"$ref": "#/$defs/nonempty"}, "authorization": {"$ref": "#/$defs/nonempty"}}, "required": ["ref", "authorization"]},
+          {"type": "object", "additionalProperties": false, "properties": {"ref": {"$ref": "#/$defs/nonempty"}, "fixture": {"const": true}}, "required": ["ref", "fixture"]}]}}},
+      "required": ["schema", "repository", "head", "commits", "pushes"]
+    },
+    "evidence_index_record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"schema": {"const": "ffs.evidence-index/v1"}, "category": {"enum": ["results", "unmet", "hypotheses"]}, "entries": {"type": "array"}},
+      "required": ["schema", "category", "entries"]
     },
     "baseline_manifest": {
       "type": "object",
