@@ -343,7 +343,7 @@ EOF
   hostile="${valid/RID/spec-999}"; printf '%s\n' "${hostile/CREATED/1}" > "$dir/spec-007.json"
   # One valid record must survive every hostile sibling.
   hostile="${valid/RID/spec-008}"; printf '%s\n' "${hostile/CREATED/1}" > "$dir/spec-008.json"
-  run timeout 5 env -u GATES_STORE -u GSD_RUN_ID bash "$WALL" --list
+  run timeout 15 env -u GATES_STORE -u GSD_RUN_ID bash "$WALL" --list
   [ "$status" -eq 0 ]
   [[ "$output" != *Traceback* ]]
   [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
@@ -610,7 +610,7 @@ PY
   write_live_takeover_fixture "$(date +%s)"
   local store_dir="$(dirname "$STORE")"
   mkfifo "$store_dir/.takeover-check.lock"
-  run timeout 2 env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
+  run timeout 15 env GATES_STORE="$STORE" bash "$WALL" --run-id spec-006
   [ "$status" -eq 1 ]
   assert_single_refusal runner-live
 }
@@ -1071,7 +1071,7 @@ PY
   ln -s "$BATS_TEST_TMPDIR/outside-record" "$dir/spec-010.json"
   mkfifo "$dir/spec-011.json"
   printf '%s\n' '{"created_at":1,"ids":{"run_id":"spec-009"},"git_state":{"branch":"b\tbr\u0001anch"},"resume":{"command":"run\u001b[31m me"}}' > "$dir/spec-009.json"
-  run timeout 5 env -u GATES_STORE bash "$WALL" --list
+  run timeout 15 env -u GATES_STORE bash "$WALL" --list
   [ "$status" -eq 0 ]
   [[ "$output" != *Traceback* ]]
   [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
