@@ -255,7 +255,20 @@ _PIN_0160 = {
     "config_schema_sha256": _hex("sha256:7ce31bde1ed6ef15c53a96ba460bb1d0fb7b99fd9ab719b567c94c474f62b023"),
     "model_protocol_sha256": _hex("sha256:961f3051af96a988f37151b9a3c1e92103d6d76a81a01a1a2fb8a30328e4282d"),
 }
+_PIN_01621 = {
+    "codex_release": "rust-v0.162.1",
+    "codex_commit": "092d3acd6bec3e3a14bd" "c7e7a2810ab628ab759d",
+    "tool_registration_sha256": _hex("sha256:db040c0c07160af64bebd5a7a5071658cb7ff58db341edd70e2795958b1d07f3"),
+    "config_schema_sha256": _hex("sha256:7933a70506e753a6e98c16800d2a76770b2af2b7295491f8f0b8e713e952027e"),
+    "model_protocol_sha256": _hex("sha256:88d0f8df840078761b5a480ac21011ea097a55ffad6b0b8ad3742af215417d2d"),
+}
 _ASYNC_OFF = "features.send_message_to_user_async=false"
+_01621_TOOL_FEATURES = (
+    "code_mode_only_strict_3p_tools",
+    "code_mode_tool_search",
+    "model_catalog_in_context",
+    "stable_environment_tools",
+)
 
 
 def _provenance(pin: dict[str, str]) -> tuple[tuple[str, str], ...]:
@@ -352,6 +365,80 @@ def test_codex_0160_config_without_the_async_gate_fails_validation(tmp_path: Pat
             fresh, argv=tuple(item for item in fresh.argv if item != _ASYNC_OFF)))
 
 
+def test_codex_01621_material_carries_its_own_audited_provenance(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+
+    material = prepare_native_review_runtime(_request(binary, catalog, version="0.162.1"),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    assert material.cli_version == "0.162.1"
+    assert material.provenance == _provenance(_PIN_01621)
+    assert material.replay_binding()["provenance"] == {**_PIN_01621, "preparation_only": _PREPARATION_ONLY}
+    assert validate_native_review_material(material) is material
+
+
+def test_codex_01621_disables_new_tool_registration_features_under_strict_config(tmp_path: Path) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    current = prepare_native_review_runtime(_request(binary, catalog, version="0.162.1"),
+                                            runtime_root=parent / "current", workspace=workspace)
+    prior = prepare_native_review_runtime(_request(binary, catalog, version="0.160.0"),
+                                          runtime_root=parent / "prior", workspace=workspace)
+
+    current_features = [item for item in _overrides(current) if item.startswith("features.")]
+    prior_features = [item for item in _overrides(prior) if item.startswith("features.")]
+    expected = [f"features.{feature}=false" for feature in _01621_TOOL_FEATURES]
+    assert current_features == [*prior_features, *expected]
+    for override in expected:
+        assert override in _overrides(current)
+        assert f"{override.removeprefix('features.').replace('=', ' = ')}" in Path(current.config_path).read_text()
+
+
+@pytest.mark.parametrize("feature", ("send_message_to_user_async", *_01621_TOOL_FEATURES))
+def test_codex_01621_config_without_a_version_specific_tool_gate_fails_validation(
+    tmp_path: Path, feature: str
+) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version="0.162.1"),
+                                             runtime_root=parent / "one", workspace=workspace)
+    fresh = prepare_native_review_runtime(_request(binary, catalog, version="0.162.1"),
+                                          runtime_root=parent / "two", workspace=workspace)
+    stripped = "".join(line for line in Path(material.config_path).read_text().splitlines(keepends=True)
+                       if feature not in line).encode()
+    Path(material.config_path).write_bytes(stripped)
+    Path(material.config_path).chmod(0o600)
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="tool restriction proof"):
+        validate_native_review_material(replace(material, config_sha256=hashlib.sha256(stripped).hexdigest()))
+    with pytest.raises(NativeReviewRuntimeRefused, match="native review argv was retargeted"):
+        validate_native_review_material(replace(
+            fresh,
+            argv=tuple(item for item in fresh.argv if item != f"features.{feature}=false"),
+        ))
+
+
+@pytest.mark.parametrize(
+    "prepared,claimed",
+    [
+        ("0.162.1", "0.154.0"),
+        ("0.162.1", "0.159.0"),
+        ("0.162.1", "0.160.0"),
+        ("0.162.1", "0.162.0"),
+        ("0.162.1", "0.162.2"),
+        ("0.160.0", "0.162.1"),
+        ("0.154.0", "0.162.1"),
+    ],
+)
+def test_stored_01621_material_cannot_change_codex_version(
+    tmp_path: Path, prepared: str, claimed: str
+) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version=prepared),
+                                             runtime_root=parent / "one", workspace=workspace)
+
+    with pytest.raises(NativeReviewRuntimeRefused):
+        validate_native_review_material(replace(material, cli_version=claimed))
+
+
 def test_codex_0154_keeps_its_original_provenance(tmp_path: Path) -> None:
     parent, workspace, binary, catalog = _inputs(tmp_path)
 
@@ -364,7 +451,8 @@ def test_codex_0154_keeps_its_original_provenance(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("version", ["0.155.1", "0.156.1", "0.157.0", "0.158.0", "0.159.1", "0.159.0-dev",
-                                     "0.160.1", "0.160.0-dev", "0.154.1"])
+                                     "0.160.1", "0.160.0-dev", "0.162.0", "0.162.2", "0.162.1-dev",
+                                     "0.162.1-alpha.1", "0.154.1"])
 def test_every_other_codex_version_still_refuses(tmp_path: Path, version: str) -> None:
     parent, workspace, binary, catalog = _inputs(tmp_path)
     with pytest.raises(NativeReviewRuntimeRefused, match="pinned native review version"):
@@ -412,7 +500,12 @@ def test_stored_material_cannot_change_codex_version_across_0160(tmp_path: Path,
         validate_native_review_material(replace(material, cli_version=claimed))
 
 
-_PINS_BY_VERSION = {"0.154.0": _PIN_0154, "0.159.0": _PIN_0159, "0.160.0": _PIN_0160}
+_PINS_BY_VERSION = {
+    "0.154.0": _PIN_0154,
+    "0.159.0": _PIN_0159,
+    "0.160.0": _PIN_0160,
+    "0.162.1": _PIN_01621,
+}
 
 
 @pytest.mark.parametrize("prepared,other", [("0.160.0", "0.154.0"), ("0.160.0", "0.159.0"),
@@ -428,6 +521,24 @@ def test_stored_material_cannot_carry_0160_provenance_of_another_version(tmp_pat
         validate_native_review_material(replace(material, provenance=_provenance(foreign)))
     # 0.159.0 and 0.160.0 share the tool-registration digest, so only differing fields can drift.
     for field in (name for name in own if own[name] != foreign[name]):
+        mixed = {**own, field: foreign[field]}
+        with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
+            validate_native_review_material(replace(material, provenance=_provenance(mixed)))
+
+
+@pytest.mark.parametrize("prepared,other", [("0.162.1", "0.154.0"), ("0.162.1", "0.160.0"),
+                                            ("0.160.0", "0.162.1")])
+def test_stored_material_cannot_carry_01621_provenance_of_another_version(
+    tmp_path: Path, prepared: str, other: str
+) -> None:
+    parent, workspace, binary, catalog = _inputs(tmp_path)
+    material = prepare_native_review_runtime(_request(binary, catalog, version=prepared),
+                                             runtime_root=parent / "one", workspace=workspace)
+    own, foreign = _PINS_BY_VERSION[prepared], _PINS_BY_VERSION[other]
+
+    with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
+        validate_native_review_material(replace(material, provenance=_provenance(foreign)))
+    for field in own:
         mixed = {**own, field: foreign[field]}
         with pytest.raises(NativeReviewRuntimeRefused, match="provenance drifted"):
             validate_native_review_material(replace(material, provenance=_provenance(mixed)))
@@ -472,7 +583,8 @@ def _js_launcher(tmp_path: Path, reported: tuple[str, str] = DEFAULT_PAIR,
     return launcher, node
 
 
-# codex-cli/bin/codex.js (rust-v0.154.0, v0.159.0 and v0.160.0) PLATFORM_PACKAGE_BY_TARGET, restated as an oracle.
+# codex-cli/bin/codex.js (rust-v0.154.0, v0.159.0, v0.160.0 and v0.162.1)
+# PLATFORM_PACKAGE_BY_TARGET, restated as an oracle.
 _TARGETS = {
     ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
     ("linux", "arm64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),

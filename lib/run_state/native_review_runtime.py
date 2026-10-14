@@ -65,12 +65,25 @@ _CODEX_PINS: Final = {
         "config_schema_sha256": "7ce31bde1ed6ef15c53a96ba460bb1d0fb7b99fd9ab719b567c94c474f62b023",
         "model_protocol_sha256": "961f3051af96a988f37151b9a3c1e92103d6d76a81a01a1a2fb8a30328e4282d",
     },
+    "0.162.1": {
+        "codex_release": "rust-v0.162.1", "codex_commit": "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d",
+        "tool_registration_sha256": "db040c0c07160af64bebd5a7a5071658cb7ff58db341edd70e2795958b1d07f3",
+        "config_schema_sha256": "7933a70506e753a6e98c16800d2a76770b2af2b7295491f8f0b8e713e952027e",
+        "model_protocol_sha256": "88d0f8df840078761b5a480ac21011ea097a55ffad6b0b8ad3742af215417d2d",
+    },
 }
 # Features whose key exists only in some audited schemas.  --strict-config rejects an unknown
 # feature key, so these are passed for exactly the listed versions.  From 0.156.1 spec_plan.rs
 # registers send_message_to_user_async when that (default-off) feature is enabled.
 _CODEX_EXTRA_DISABLED: Final = {"0.159.0": ("send_message_to_user_async",),
-                                "0.160.0": ("send_message_to_user_async",)}
+                                "0.160.0": ("send_message_to_user_async",),
+                                "0.162.1": (
+                                    "send_message_to_user_async",
+                                    "code_mode_only_strict_3p_tools",
+                                    "code_mode_tool_search",
+                                    "model_catalog_in_context",
+                                    "stable_environment_tools",
+                                )}
 # Provenance rows naming the executables a `.js` Codex launcher runs: the Node it is started
 # under and the vendor native executable it spawns (F53).  (path row, digest row, label)
 _BOUND_BINARIES: Final = (("node_binary", "node_sha256", "Node binary"),

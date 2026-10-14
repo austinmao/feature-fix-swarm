@@ -277,7 +277,8 @@ def codex_node_binary(binary: Path, required: bool = False) -> Path | None:
     return node
 
 
-# codex-cli/bin/codex.js, byte-identical at rust-v0.154.0, v0.159.0 and v0.160.0: PLATFORM_PACKAGE_BY_TARGET
+# codex-cli/bin/codex.js, byte-identical at rust-v0.154.0, v0.159.0, v0.160.0 and v0.162.1:
+# PLATFORM_PACKAGE_BY_TARGET
 # for the platforms FFS runs on.  Other platform/arch pairs are unknown shapes and refuse.
 _CODEX_TARGETS = {
     ("linux", "x64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
@@ -1278,6 +1279,11 @@ def _thread_id(transcript: Path) -> str | None:
     return _native_thread(records) if records is not None else None
 
 
+def _session_program_matches(actual: object, expected: str) -> bool:
+    """Match the complete JS program, allowing Codex's single final-LF wire form."""
+    return type(actual) is str and (actual == expected or actual == expected + "\n")
+
+
 def _session_proof(runtime: Path, thread_id: str, worktree: Path, model: str, effort: str,
                    program: str, expected_machine: dict[str, object], expected_status: str,
                    expected_error: str = "") -> tuple[bool, dict[str, str]]:
@@ -1334,7 +1340,8 @@ def _session_proof(runtime: Path, thread_id: str, worktree: Path, model: str, ef
         if payload.get("type") in {"custom_tool_call", "function_call"}:
             tool_calls.append(payload)
         if (payload.get("type") == "custom_tool_call" and payload.get("name") == "exec"
-                and payload.get("namespace") in (None, "functions") and payload.get("input") == program):
+                and payload.get("namespace") in (None, "functions")
+                and _session_program_matches(payload.get("input"), program)):
             calls.append(payload)
         elif payload.get("type") == "custom_tool_call_output":
             outputs.append(payload)
