@@ -148,3 +148,83 @@ EOF
   grep -F 'last plan that genuinely completes it' "$ROOT/skills/spec-decompose/SKILL.md"
   grep -F 'requirements: []' "$ROOT/skills/spec-decompose/SKILL.md"
 }
+
+# GSD_PROJECT planning isolation: a repo can hold several gsd projects
+# (.planning/<project>/) next to a root one. The gate must check the project
+# gsd-core will execute, never silently fall back to the root tree.
+write_project() { # $1 = project id; phase 2 owns FR-101 in exactly one plan
+  local dir="$REPO/.planning/$1/phases/02-scoped"
+  mkdir -p "$dir"
+  cat > "$REPO/.planning/$1/ROADMAP.md" <<'ROADMAP'
+# Roadmap
+
+### Phase 2: Scoped
+**Requirements**: FR-101
+ROADMAP
+  cat > "$dir/02-01-PLAN.md" <<'PLAN'
+---
+phase: 02-scoped
+plan: "01"
+requirements: [FR-101]
+---
+PLAN
+}
+
+@test "GSD_PROJECT checks .planning/<project>/ and ignores the root project" {
+  # The root project's phase 2 is broken (double ownership); the scoped one is clean.
+  write_roadmap
+  write_plan 01 '[FR-001, FR-002]'
+  write_plan 02 '[FR-001, FR-003]'
+  write_project 431
+
+  run bash -c "cd $(printf '%q' "$REPO") && GSD_PROJECT=431 bash $(printf '%q' "$SCRIPT") 2"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS phase=02 roadmap=1 plans=1"* ]]
+}
+
+@test "unset GSD_PROJECT still checks the root project" {
+  write_roadmap
+  write_plan 01 '[FR-001, FR-002]'
+  write_plan 02 '[FR-001, FR-003]'
+  write_project 431
+
+  run bash -c "cd $(printf '%q' "$REPO") && unset GSD_PROJECT && bash $(printf '%q' "$SCRIPT") 2"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"FR-001 is owned by multiple plans"* ]]
+}
+
+@test "GSD_PROJECT without .planning/<project>/ROADMAP.md fails closed" {
+  write_roadmap
+  write_plan 01 '[FR-001, FR-002, FR-003]'
+
+  run bash -c "cd $(printf '%q' "$REPO") && GSD_PROJECT=999 bash $(printf '%q' "$SCRIPT") 2"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GSD_PROJECT=999 but .planning/999/ROADMAP.md is missing"* ]]
+}
+
+@test "GSD_PROJECT with a path separator or traversal is refused" {
+  write_roadmap
+  write_plan 01 '[FR-001, FR-002, FR-003]'
+
+  run bash -c "cd $(printf '%q' "$REPO") && GSD_PROJECT=../x bash $(printf '%q' "$SCRIPT") 2"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GSD_PROJECT must be one path segment"* ]]
+}
+
+@test "a scoped project with no matching phase directory names the scoped path" {
+  write_project 431
+  cat >> "$REPO/.planning/431/ROADMAP.md" <<'ROADMAP'
+
+### Phase 3: Unplanned
+**Requirements**: FR-201
+ROADMAP
+
+  run bash -c "cd $(printf '%q' "$REPO") && GSD_PROJECT=431 bash $(printf '%q' "$SCRIPT") 3"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no .planning/431/phases/03-* directory"* ]]
+}

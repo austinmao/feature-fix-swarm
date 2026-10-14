@@ -8,6 +8,41 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-14, feature-implement and the runner follow GSD_PROJECT planning isolation)
+
+- A repo can hold several gsd projects: the root one (`.planning/ROADMAP.md`) and per-spec ones
+  (`.planning/<project>/ROADMAP.md`) that gsd-core selects through `GSD_PROJECT`. `feature-implement`
+  read only the root ROADMAP, phases and config, so a spec that plans under its own project ran
+  another project's open phase. In one consumer every spec worktree's root `.planning/` belonged to
+  an unrelated project with an unchecked phase.
+- New `scripts/gsd/planning-scope.sh <spec-id>` prints `<project|-> <planning-root> <mode>`. Mode
+  `session` means `GSD_PROJECT` is set and valid; `derived` means the spec has `.planning/<NNN>/` (or
+  `.planning/<NNN-slug>/`) but the session was not started with `GSD_PROJECT`; `root` means no
+  per-spec project. Exit 2 when `GSD_PROJECT` is not one path segment, has no ROADMAP, or contradicts
+  the spec's own project. It never falls back to the root project.
+- `feature-implement` 2.18.0 adds Step 1.2, which resolves the scope before any gate reads
+  `.planning`. Model fallback, the security-model fence, the ROADMAP and config checks, the
+  ceremony tier, the phase-directory lookup, `verify-done` keys and the scope-drift plan glob all
+  use `$PLANNING`. The headless command passes `GSD_PROJECT`. Interactive execution in `derived`
+  mode is a STOP: `/gsd-execute-phase` and its executors call gsd-tools in fresh shells that inherit
+  only the session environment, so the operator relaunches with `GSD_PROJECT=<project>` or runs
+  `--autonomous`.
+- `gsd-run.sh` validates `GSD_PROJECT` once after `cd "$REPO_ROOT"` (exit 2 when unsafe; exit 78 for
+  `gsd-execute-phase` or `gsd-plan-phase` when `.planning/<project>/ROADMAP.md` is missing). The wall
+  phase resolver, the scope-drift plan glob, `resolve_phase_slug` and the planning divergence guard
+  now use the project's phases root. Before, the guard compared `.planning/phases/<slug>` copies
+  while gsd-core ran under `.planning/<project>/phases/`, so it found no divergence to refuse.
+- `requirement-ownership-gate.sh` checks the project's ROADMAP and phases when `GSD_PROJECT` is set
+  and fails closed (exit 2) when that project does not exist or the value is not one path segment.
+- `security-model-fence.sh` writes its run marker to the root `.planning/run-state/` when given a
+  per-project planning dir, because `plan-wall.sh` reads it there. `plan-adversary.sh` reads the
+  Fable fallback marker beside the project config that `model-fallback.sh` rewrote.
+- Tests: `tests/bats/planning-scope.bats` (derived, slugged, exact-slug preference, root fallback,
+  session, contradiction, missing ROADMAP, foreign valid project, unsafe values);
+  `requirement-ownership-gate.bats`, `gsd-run.bats`, `security-model-fence.bats` and
+  `plan-adversary.bats` cover the project paths; `int-plan-wall-skill.bats` pins Step 1.2 before
+  every gate and the scoped Step 4 commands; `setup-install.bats` pins install.
+
 ### Added (2026-10-14, deterministic plan-probe gate before execution)
 
 - New `scripts/gsd/plan-probe-gate.sh <phase>` re-runs gsd-core's deterministic plan probes

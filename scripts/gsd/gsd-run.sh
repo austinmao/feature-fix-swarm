@@ -39,6 +39,35 @@ GIT_BIN_FIXED=/usr/bin/git
 REPO_ROOT="$($GIT_BIN_FIXED rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT" || exit 1
 
+# GSD_PROJECT planning isolation: gsd-core plans and executes under
+# .planning/<project>/ when GSD_PROJECT is set (and the child host inherits
+# it), so every phase directory this runner resolves, walls, or syncs must
+# come from the same tree. A set-but-missing project is refused rather than
+# falling back to the root project: the gates would then check one project
+# while gsd-core runs another.
+PLANNING_PHASES_REL=".planning/phases"
+GSD_PROJECT="${GSD_PROJECT:-}"
+GSD_PROJECT="${GSD_PROJECT#"${GSD_PROJECT%%[![:space:]]*}"}"
+GSD_PROJECT="${GSD_PROJECT%"${GSD_PROJECT##*[![:space:]]}"}"
+if [ -n "$GSD_PROJECT" ]; then
+  if ! [[ "$GSD_PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$GSD_PROJECT" == *..* ]]; then
+    echo "gsd-run: GSD_PROJECT must be one path segment ([A-Za-z0-9._-], no '..')" >&2
+    exit 2
+  fi
+  case "${GSD_SKILL_NAME:-}" in
+    gsd-execute-phase|gsd-plan-phase)
+      if [ ! -f "$REPO_ROOT/.planning/$GSD_PROJECT/ROADMAP.md" ]; then
+        echo "gsd-run: GSD_PROJECT=$GSD_PROJECT but .planning/$GSD_PROJECT/ROADMAP.md is missing — refusing to fall back to the root .planning project" >&2
+        exit 78
+      fi
+      ;;
+  esac
+  PLANNING_PHASES_REL=".planning/$GSD_PROJECT/phases"
+  export GSD_PROJECT
+else
+  unset GSD_PROJECT
+fi
+
 REAL_USER_HOME="$(/usr/bin/python3 - <<'PY'
 import os, pwd
 print(pwd.getpwuid(os.getuid()).pw_dir)
@@ -219,11 +248,11 @@ if [ "$GSD_SKILL_NAME" = "gsd-execute-phase" ]; then
     echo "gsd-run: plan wall lever missing: $PLAN_WALL_LEVER" >&2
     exit 78
   fi
-  WALL_PHASE_DIR="$(python3 - "$REPO_ROOT" "$2" <<'PY'
+  WALL_PHASE_DIR="$(python3 - "$REPO_ROOT" "$2" "$PLANNING_PHASES_REL" <<'PY'
 import re, sys
 from pathlib import Path
 root, phase_number = sys.argv[1], int(sys.argv[2], 10)
-phases_root = Path(root) / ".planning" / "phases"
+phases_root = Path(root) / sys.argv[3]
 dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^0*{phase_number}-", p.name))
 print(dirs[0] if dirs else "", end="")
 PY
@@ -240,7 +269,7 @@ PY
     exit 78
   fi
   if [ -z "$WALL_PHASE_DIR" ]; then
-    echo "gsd-run: FATAL: no phase directory found for phase $2 under .planning/phases (ownership gate proved one exists) — refusing to start unwalled" >&2
+    echo "gsd-run: FATAL: no phase directory found for phase $2 under $PLANNING_PHASES_REL (ownership gate proved one exists) — refusing to start unwalled" >&2
     exit 78
   fi
   GSD_PHASE_ID="$(basename "$WALL_PHASE_DIR")"
@@ -251,7 +280,7 @@ PY
   DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"
   if [ -f "$DRIFT_GATE" ]; then
     DRIFT_PLANS=()
-    for _p in "$REPO_ROOT"/.planning/phases/*/*-PLAN.md; do
+    for _p in "$REPO_ROOT/$PLANNING_PHASES_REL"/*/*-PLAN.md; do
       [ -f "$_p" ] && DRIFT_PLANS+=(--plan "$_p")
     done
     if [ "${#DRIFT_PLANS[@]}" -gt 0 ]; then
@@ -1063,11 +1092,11 @@ PLANNING_SYNC_REPO_CHANGED=0
 # Phase-directory basename owning phase number $2 under root $1 (empty when
 # none). Mirrors the ^0*{N}- regex the ownership gate and plan wall use.
 resolve_phase_slug() {
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "$PLANNING_PHASES_REL" <<'PY'
 import re, sys
 from pathlib import Path
 root, phase_number = sys.argv[1], int(sys.argv[2], 10)
-phases_root = Path(root) / ".planning" / "phases"
+phases_root = Path(root) / sys.argv[3]
 dirs = sorted(p for p in phases_root.glob("*-*") if p.is_dir() and re.match(rf"^0*{phase_number}-", p.name))
 print(dirs[0].name if dirs else "", end="")
 PY
@@ -1138,8 +1167,8 @@ check_planning_divergence() {
     echo "gsd-run: PLANNING-GUARD refused: invalid phase slug" >&2
     return 78
   fi
-  repo_dir="$REPO_ROOT/.planning/phases/$slug"
-  wt_dir="$RUN_WORKTREE_ROOT/.planning/phases/$slug"
+  repo_dir="$REPO_ROOT/$PLANNING_PHASES_REL/$slug"
+  wt_dir="$RUN_WORKTREE_ROOT/$PLANNING_PHASES_REL/$slug"
   for guarded in "$repo_dir" "$wt_dir"; do
     [ ! -L "$guarded" ] || {
       echo "gsd-run: PLANNING-GUARD refused: symlinked planning path: $guarded" >&2

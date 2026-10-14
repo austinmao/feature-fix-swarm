@@ -130,3 +130,18 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"kill-switch"* ]]
 }
+
+@test "a per-project PLANNING_DIR fences that project's config and stamps the root run-state" {
+  # GSD_PROJECT isolation: config lives in .planning/<project>/, but
+  # plan-wall.sh reads the fence marker from the root .planning/run-state/.
+  mkdir -p "$TMP/.planning/431"
+  cp "$TMP/.planning/config.json" "$TMP/.planning/431/config.json"
+  echo "Phase 1: harden RLS policies and JWT verification" > "$TMP/.planning/431/ROADMAP.md"
+  GSD_RUN_ID=spec-431-test run bash "$LEVER" "$TMP/.planning/431"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/.planning/run-state/security-fence-spec-431-test.json" ]
+  [ ! -d "$TMP/.planning/431/run-state" ]
+  [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/431/config.json'))['model_overrides']['gsd-planner'])")" = "opus" ]
+  # The root project's config is not this run's; it stays untouched.
+  [ "$(planner_model gsd-planner)" = "fable" ]
+}

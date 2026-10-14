@@ -61,7 +61,13 @@ KEYWORDS="${PLAN_ADVERSARY_KEYWORDS:-auth|rls|row[ _-]?level|payment|stripe|cryp
 # marker mode=codex-sol), every plan is bounce-worthy — the xhigh sol pass IS the
 # compensation for the missing fable planning-tier review, so low-blast plans can't
 # skip it here.
-FABLE_MARKER="${PLAN_ADVERSARY_FABLE_MARKER:-.planning/fable-fallback.json}"
+# model-fallback.sh keeps its marker beside the config it rewrote, so under
+# GSD_PROJECT planning isolation that is .planning/<project>/.
+_fable_marker_default=".planning/fable-fallback.json"
+if [ -n "${GSD_PROJECT:-}" ] && [ -d ".planning/${GSD_PROJECT}" ]; then
+  _fable_marker_default=".planning/${GSD_PROJECT}/fable-fallback.json"
+fi
+FABLE_MARKER="${PLAN_ADVERSARY_FABLE_MARKER:-$_fable_marker_default}"
 LOW_BLAST_SKIP_DISABLED=false
 if [ -f "$FABLE_MARKER" ] && grep -q '"mode"[[:space:]]*:[[:space:]]*"codex-sol"' "$FABLE_MARKER"; then
   LOW_BLAST_SKIP_DISABLED=true

@@ -234,7 +234,8 @@ content in an error — see the table row above.
 | `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:1943,1949` | CLI executable overrides |
 | `GSD_CODEX_CONFIG_ROOT` | `${CODEX_HOME:-$HOME/.codex}` | `scripts/gsd/codex-model-sync.sh:12` | Where generated Codex agent TOMLs land |
 | `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:1532` | Where the Claude-side SKILL.md surface lives |
-| `GSD_PLANNING_SYNC` | unset | `scripts/gsd/gsd-run.sh:check_planning_divergence` | Which side wins when `.planning/phases/<slug>` has diverged between the repo and the run worktree. `repo` copies repo→worktree, `worktree` copies worktree→repo (and re-runs the plan wall, since it retires the reviewed repo copy). Unset fails closed with exit 78; any other value fails closed |
+| `GSD_PROJECT` | unset (root `.planning/`) | `scripts/gsd/planning-scope.sh`, `scripts/gsd/gsd-run.sh`, `scripts/gsd/requirement-ownership-gate.sh`, `scripts/gsd/plan-probe-gate.sh` | Selects the gsd project under `.planning/<project>/`. Must be one path segment. A value whose `ROADMAP.md` is missing fails closed and never falls back to the root project. `feature-implement` derives it from `.planning/<NNN>/` when unset |
+| `GSD_PLANNING_SYNC` | unset | `scripts/gsd/gsd-run.sh:check_planning_divergence` | Which side wins when `.planning/phases/<slug>` (`.planning/<project>/phases/<slug>` under `GSD_PROJECT`) has diverged between the repo and the run worktree. `repo` copies repo→worktree, `worktree` copies worktree→repo (and re-runs the plan wall, since it retires the reviewed repo copy). Unset fails closed with exit 78; any other value fails closed |
 
 ### Managed run-state (opt-in, spec-014 Release B)
 

@@ -3375,3 +3375,84 @@ STUB
   [ "$(guard_wall_calls)" -eq 2 ]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
+
+# GSD_PROJECT planning isolation. gsd-core runs under .planning/<project>/
+# when GSD_PROJECT is set (the child host inherits it), so the runner's
+# ownership gate, wall, drift and divergence guard must use that tree too.
+scoped_repo() { # $1 = repo path, $2 = project — phase 3 under the project, a decoy root project
+  local repo="$1" project="$2"
+  mkdir -p "$repo/.planning/phases/03-root-decoy" "$repo/.planning/$project/phases/03-guard"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  printf '%s\n' '# Roadmap' '' '## Phase 3: Root decoy' '**Requirements:** ROOT-001' \
+    > "$repo/.planning/ROADMAP.md"
+  # The root decoy fails the ownership gate (no plan owns ROOT-001), so any
+  # fallback to the root project is visible as a failure.
+  printf '%s\n' '---' 'phase: 03-root-decoy' 'plan: "01"' 'requirements: []' '---' \
+    > "$repo/.planning/phases/03-root-decoy/03-01-PLAN.md"
+  printf '%s\n' '# Roadmap' '' '## Phase 3: Guard' '**Requirements:** FR-001' \
+    > "$repo/.planning/$project/ROADMAP.md"
+  printf '%s\n' '---' 'phase: 03-guard' 'plan: "01"' 'requirements: [FR-001]' '---' 'seed' \
+    > "$repo/.planning/$project/phases/03-guard/03-01-PLAN.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm seed
+}
+
+@test "GSD_PROJECT with no .planning/<project>/ROADMAP.md is refused before any gate" {
+  REPO="$BATS_TEST_TMPDIR/scoped-missing"
+  scoped_repo "$REPO" 431
+
+  GSD_PROJECT=999 FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"GSD_PROJECT=999 but .planning/999/ROADMAP.md is missing"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "GSD_PROJECT that is not one path segment is refused" {
+  REPO="$BATS_TEST_TMPDIR/scoped-unsafe"
+  scoped_repo "$REPO" 431
+
+  GSD_PROJECT=../431 FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GSD_PROJECT must be one path segment"* ]]
+}
+
+@test "GSD_PROJECT walls the project's phase directory, not the root project's" {
+  guard_wall_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/scoped-wall"
+  scoped_repo "$REPO" 431
+
+  GSD_PROJECT=431 FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [[ "$output" != *"ROOT-001"* ]]
+  [ "$(guard_wall_calls)" -ge 1 ]
+  [[ "$(head -1 "$BATS_TEST_TMPDIR/wall.calls")" == *"/.planning/431/phases/03-guard" ]]
+}
+
+@test "GSD_PROJECT divergence guard compares the project's phase copies" {
+  guard_wall_stub
+  guard_exec_skill
+  REPO="$BATS_TEST_TMPDIR/scoped-diverge"
+  scoped_repo "$REPO" 431
+  RID=scoped-diverge-1
+  WT="$(guard_worktree "$REPO" "$RID")"
+  plan=".planning/431/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' worktree-side-line >> "$WT/$plan"
+  touch -t 202001010000 "$WT/$plan"
+  printf '%s\n' repo-side-line >> "$REPO/$plan"
+  touch -t 202506010000 "$REPO/$plan"
+
+  GSD_PROJECT=431 GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
+
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-DIVERGENCE phase=03-guard newer=repo"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
