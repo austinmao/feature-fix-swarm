@@ -200,6 +200,15 @@ if [ "$GSD_SKILL_NAME" = "gsd-execute-phase" ]; then
     exit 78
   fi
   bash "$OWNERSHIP_GATE" "$2" || exit $?
+  # gsd-core's deterministic plan probes (verify-command-paths +
+  # verify-failure-directions) run inside gsd-plan-phase only; a phase planned
+  # or revised outside it would otherwise reach the executor unprobed.
+  PLAN_PROBE_GATE="$SCRIPT_DIR/plan-probe-gate.sh"
+  if [ ! -f "$PLAN_PROBE_GATE" ]; then
+    echo "gsd-run: plan probe gate missing: $PLAN_PROBE_GATE" >&2
+    exit 78
+  fi
+  bash "$PLAN_PROBE_GATE" "$2" || exit $?
   # spec-004 AC-005/INT-001: blocking per-phase plan review wall — every
   # plan under this phase must clear before the executor spawns. PHASE_DIR
   # resolution mirrors requirement-ownership-gate.sh's regex (^0*{N}-) so

@@ -26,6 +26,24 @@ setup() {
   cp -R "$ROOT/scripts/gsd" "$HARNESS_ROOT/scripts/gsd"
   cp -R "$ROOT/lib" "$HARNESS_ROOT/lib"
   SCRIPT="$HARNESS_ROOT/scripts/gsd/gsd-run.sh"
+  # plan-probe-gate.sh resolves gsd-tools from the runner layout's
+  # node_modules. This stub answers both deterministic probes clean, so cases
+  # that reach the execute-phase seam keep testing what they were written
+  # for; PROBE_GATE_STUB_BLOCK=1 makes verify-failure-directions report one
+  # blocker instead.
+  mkdir -p "$HARNESS_ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin"
+  cat > "$HARNESS_ROOT/node_modules/@opengsd/gsd-core/gsd-core/bin/gsd-tools.cjs" <<'JS'
+#!/usr/bin/env node
+const [, , verb, probe] = process.argv;
+if (verb !== 'check' || !['verify-command-paths', 'verify-failure-directions'].includes(probe)) {
+  process.exit(1);
+}
+const block = process.env.PROBE_GATE_STUB_BLOCK === '1' && probe === 'verify-failure-directions';
+process.stdout.write(JSON.stringify(block
+  ? { status: 'blocked', counts: { blocker: 1, warning: 0, total: 1 }, readError: null,
+      commands: [{ command: 'npm test', status: 'missing', severity: 'blocker', plan: '02-01-PLAN.md', task: 'Task 1' }] }
+  : { status: 'ok', commands: [], counts: { blocker: 0, warning: 0, total: 0 }, readError: null }));
+JS
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
   CODEX_SOURCE_ROOT="$BATS_TEST_TMPDIR/codex-root"
   PROJECT_AGENTS_ROOT="$BATS_TEST_TMPDIR/.agents"
@@ -967,6 +985,47 @@ EOF
   [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "plan probe blocker stops execute-phase before any host probe" {
+  REPO="$BATS_TEST_TMPDIR/unprobed-plan"
+  PHASE_DIR="$REPO/.planning/phases/02-example"
+  mkdir -p "$PHASE_DIR"
+  git -C "$REPO" init -q
+  cat > "$REPO/.planning/ROADMAP.md" <<'EOF'
+# Roadmap
+
+## Phase 2: Example
+**Requirements:** FR-001
+EOF
+  cat > "$PHASE_DIR/02-01-PLAN.md" <<'EOF'
+---
+phase: 02-example
+plan: "01"
+requirements: [FR-001]
+---
+EOF
+
+  PROBE_GATE_STUB_BLOCK=1 FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 2"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"plan-probe-gate: BLOCKER: verify-failure-directions: 02-01-PLAN.md / Task 1: missing: npm test"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.probed" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "gsd-run.sh runs the plan probe gate after the ownership gate and before the wall" {
+  gate_line="$(grep -n 'bash "$OWNERSHIP_GATE" "$2"' "$SCRIPT" | cut -d: -f1)"
+  probe_line="$(grep -n 'bash "$PLAN_PROBE_GATE" "$2"' "$SCRIPT" | cut -d: -f1)"
+  wall_line="$(grep -n 'PLAN_WALL_LEVER="$SCRIPT_DIR/plan-wall.sh"' "$SCRIPT" | cut -d: -f1)"
+  [ -n "$gate_line" ]
+  [ -n "$probe_line" ]
+  [ -n "$wall_line" ]
+  [ "$probe_line" -gt "$gate_line" ]
+  [ "$probe_line" -lt "$wall_line" ]
 }
 
 @test "gsd-run.sh wires plan-wall.sh beside the ownership gate (spec-004 INT-001 grep-pin)" {

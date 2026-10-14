@@ -8,6 +8,29 @@ all skills.
 
 ## Unreleased
 
+### Added (2026-10-14, deterministic plan-probe gate before execution)
+
+- New `scripts/gsd/plan-probe-gate.sh <phase>` re-runs gsd-core's deterministic plan probes
+  (`check verify-command-paths` and `check verify-failure-directions`) at the execution boundary.
+  gsd-plan-phase runs them before its checker, but phases planned or revised outside that workflow
+  (hand-orchestrated checker loops, hand-amended plans) reached the executor unprobed. In one
+  multi-spec program, phases that had passed checker review still carried 15 to 38 `<automated>`
+  commands with no `<fails_when>`, so executors would have improvised what "failed" means
+  (gsd-core #3172). Exit 1 lists each blocking command; exit 78 means no gsd-tools answered both
+  probes (gsd-core 1.15+). The gate honors `GSD_PROJECT` and resolves gsd-tools from the consumer's
+  `node_modules`, the FFS runner layout, then `~/.claude` and `~/.codex` installs, using the first
+  that answers both probes.
+- `feature-implement` 2.17.0 runs the gate in Step 4 between the requirement-ownership gate and the
+  plan wall, and `gsd-run.sh` repeats it at the same execute-phase seam, so a direct runner call
+  cannot bypass it. `setup.sh` installs and reconciles the script.
+- Behavior change: an unexecuted phase whose plans lack `<fails_when>` now stops at execution entry
+  until the plans are fixed. The fix is a plan edit (one `<fails_when>` per runnable command); there
+  is no waiver lever.
+- Tests: `tests/bats/plan-probe-gate.bats` (pass, blockers, unresolvable phase, unknown status,
+  fallback past a gsd-tools without the probes, no gsd-tools, usage); `gsd-run.bats` pins the
+  wiring and blocks execute-phase on a probe blocker; `int-plan-wall-skill.bats` pins the skill
+  order; `setup-install.bats` pins install and reconcile.
+
 ### Fixed (2026-10-12, 5.5 migration follow-up: legacy Fable pin and Claude Code CLI qualification)
 
 - `scripts/gsd/model-fallback.sh` detected only `"fable"` and `"claude-fable-5-1"`, so a consumer

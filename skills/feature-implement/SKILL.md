@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.16.0"
+version: "2.17.0"
 allowed-tools:
   - Read
   - Edit
@@ -271,7 +271,23 @@ an earlier invariant belongs in `must_haves`, not repeated requirement ownership
 The headless runner repeats this wall before its model probe so direct runner
 calls cannot bypass it.
 
-Immediately after the ownership gate clears, run the per-phase blocking plan
+Then run gsd-core's deterministic plan probes for phase N:
+
+```bash
+bash scripts/gsd/plan-probe-gate.sh "$N"
+```
+
+STOP on nonzero. gsd-plan-phase runs `check verify-command-paths` and
+`check verify-failure-directions` before its checker, but a phase planned or
+revised outside that workflow (hand-run checker loops, hand-amended plans)
+reaches here unprobed. Exit 1 lists each blocking command: give every runnable
+`<automated>` its own `<fails_when>` naming the observable failure signal, and
+make every command target resolve. This is a plan edit, not a waiver. Exit 78
+means no gsd-tools with both probes was found (gsd-core 1.15+). The gate
+honors `GSD_PROJECT`, and the headless runner repeats it after the ownership
+gate.
+
+Immediately after the probe gate clears, run the per-phase blocking plan
 review wall (spec-004 AC-005 — every `*-PLAN.md` / bare `PLAN.md` under phase
 N must clear a fresh adversarial review before execution starts):
 
