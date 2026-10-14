@@ -21,6 +21,17 @@ setup() {
   [ "$wall_line" -lt "$dry_run_line" ]
 }
 
+@test "feature-implement Step 4 runs the plan probe gate between the ownership gate and the wall" {
+  ownership_line="$(grep -n 'bash scripts/gsd/requirement-ownership-gate.sh "$N"' skills/feature-implement/SKILL.md | cut -d: -f1)"
+  probe_line="$(grep -n 'bash scripts/gsd/plan-probe-gate.sh "$N"' skills/feature-implement/SKILL.md | cut -d: -f1)"
+  wall_line="$(grep -n 'bash scripts/gsd/plan-wall.sh "$PHASE_DIR"' skills/feature-implement/SKILL.md | cut -d: -f1)"
+  [ -n "$ownership_line" ]
+  [ -n "$probe_line" ]
+  [ -n "$wall_line" ]
+  [ "$probe_line" -gt "$ownership_line" ]
+  [ "$probe_line" -lt "$wall_line" ]
+}
+
 @test "feature-implement plan-wall step is NOT at the run-start bootstrap block" {
   bootstrap_line="$(grep -n 'model-fallback.sh .planning' skills/feature-implement/SKILL.md | cut -d: -f1)"
   wall_line="$(grep -n 'bash scripts/gsd/plan-wall.sh "$PHASE_DIR"' skills/feature-implement/SKILL.md | cut -d: -f1)"

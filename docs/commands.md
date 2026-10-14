@@ -145,6 +145,12 @@ the phase's PLAN frontmatter to own every ROADMAP requirement exactly once.
 Preparatory plans use `requirements: []`; an ID goes only on the final plan that
 genuinely completes it. Headless execution enforces this before any model probe.
 
+Next, `scripts/gsd/plan-probe-gate.sh N` re-runs gsd-core's deterministic plan
+probes (`check verify-command-paths`, `check verify-failure-directions`). Every
+runnable `<automated>` needs its own `<fails_when>` naming the observable failure
+signal, and every command target must resolve. It honors `GSD_PROJECT`, and
+headless execution enforces it too.
+
 Also before execution — after the ownership gate, before any task starts —
 `scripts/gsd/plan-wall.sh` reviews the phase's plan(s) with a model distinct
 from the one that wrote it (producer≠reviewer, always on; see
