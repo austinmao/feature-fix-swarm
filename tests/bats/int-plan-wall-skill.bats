@@ -33,9 +33,27 @@ setup() {
 }
 
 @test "feature-implement plan-wall step is NOT at the run-start bootstrap block" {
-  bootstrap_line="$(grep -n 'model-fallback.sh .planning' skills/feature-implement/SKILL.md | cut -d: -f1)"
+  bootstrap_line="$(grep -n 'model-fallback.sh "$PLANNING"' skills/feature-implement/SKILL.md | cut -d: -f1)"
   wall_line="$(grep -n 'bash scripts/gsd/plan-wall.sh "$PHASE_DIR"' skills/feature-implement/SKILL.md | cut -d: -f1)"
   [ -n "$bootstrap_line" ]
   [ -n "$wall_line" ]
   [ "$wall_line" -gt "$bootstrap_line" ]
+}
+
+@test "feature-implement resolves the planning scope before any gate reads .planning" {
+  scope_line="$(grep -n 'bash scripts/gsd/planning-scope.sh "$SPEC_ID"' skills/feature-implement/SKILL.md | cut -d: -f1)"
+  bootstrap_line="$(grep -n 'model-fallback.sh "$PLANNING"' skills/feature-implement/SKILL.md | cut -d: -f1)"
+  ownership_line="$(grep -n 'bash scripts/gsd/requirement-ownership-gate.sh "$N"' skills/feature-implement/SKILL.md | cut -d: -f1)"
+  [ -n "$scope_line" ]
+  [ -n "$bootstrap_line" ]
+  [ -n "$ownership_line" ]
+  [ "$scope_line" -lt "$bootstrap_line" ]
+  [ "$scope_line" -lt "$ownership_line" ]
+}
+
+@test "feature-implement Step 4 resolves the phase dir and headless run under the planning scope" {
+  grep -qF 'PHASE_DIR="$(ls -d "$PLANNING"/phases/*-*' skills/feature-implement/SKILL.md
+  ! grep -qF 'ls -d .planning/phases/' skills/feature-implement/SKILL.md
+  grep -qF 'GSD_PROJECT="$SCOPE_PROJECT" TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N' skills/feature-implement/SKILL.md
+  grep -qF 'Interactive execution in `derived` scope is a STOP' skills/feature-implement/SKILL.md
 }

@@ -140,6 +140,15 @@ Use `node node_modules/.bin/gsd-tools` — bare `npx gsd` resolves to the WRONG 
 | Resume after context reset | `/gsd-resume-work` (STATE.md is the resume point) |
 | Verifier found gaps | `/gsd-plan-phase N --gaps` → `/gsd-execute-phase N --gaps-only` |
 
+First, `scripts/gsd/planning-scope.sh NNN` picks the gsd project the spec plans
+under. A spec with its own `.planning/<NNN>/ROADMAP.md` uses that project, and
+every later step reads its ROADMAP, config and phases instead of the root
+`.planning/`. Start an interactive session for such a spec with the project set
+(`GSD_PROJECT=<NNN> claude` or `GSD_PROJECT=<NNN> codex`); without it,
+`/feature-implement` stops before execution because the gsd-tools calls it
+spawns would read the root project. `--autonomous` passes `GSD_PROJECT` to the
+headless runner itself.
+
 Before phase execution, `scripts/gsd/requirement-ownership-gate.sh N` requires
 the phase's PLAN frontmatter to own every ROADMAP requirement exactly once.
 Preparatory plans use `requirements: []`; an ID goes only on the final plan that

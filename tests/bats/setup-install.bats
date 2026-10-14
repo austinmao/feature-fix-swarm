@@ -104,7 +104,9 @@ setup() {
   cmp -s scripts/gsd/plan-wall.sh "$target/scripts/gsd/plan-wall.sh"
   cmp -s scripts/gsd/model-probe-lib.sh "$target/scripts/gsd/model-probe-lib.sh"
   cmp -s scripts/gsd/plan-probe-gate.sh "$target/scripts/gsd/plan-probe-gate.sh"
+  cmp -s scripts/gsd/planning-scope.sh "$target/scripts/gsd/planning-scope.sh"
   [ -x "$target/scripts/gsd/plan-wall.sh" ]
   [ -x "$target/scripts/gsd/model-probe-lib.sh" ]
   [ -x "$target/scripts/gsd/plan-probe-gate.sh" ]
+  [ -x "$target/scripts/gsd/planning-scope.sh" ]
 }

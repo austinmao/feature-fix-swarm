@@ -472,3 +472,15 @@ EOF
   [[ "$output" == *"exact model vendor is unsupported"* ]]
   [ "$(grep -c '^## Adversarial plan review' "$HIGH")" -eq 0 ]
 }
+
+@test "GSD_PROJECT reads the fable-fallback marker beside that project's config" {
+  ROOT="$(pwd)"
+  mkdir -p "$BATS_TEST_TMPDIR/.planning/431"
+  cat > "$BATS_TEST_TMPDIR/.planning/431/fable-fallback.json" <<'JSON'
+{"mode":"codex-sol","original":"claude-fable-5","substitute":"claude-opus-5","paths":["model_overrides.gsd-planner"]}
+JSON
+  cd "$BATS_TEST_TMPDIR"
+  GSD_PROJECT=431 PLAN_ADVERSARY_BIN=fake-codex run bash "$ROOT/$SCRIPT" "$LOW"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fable-fallback marker — low-blast skip disabled"* ]]
+}

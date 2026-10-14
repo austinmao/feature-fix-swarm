@@ -57,7 +57,13 @@ if [ -z "$RUN_ID" ]; then
 fi
 [ -n "$RUN_ID" ] || RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 SAFE_RUN_ID="$(printf '%s' "$RUN_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_' | cut -c1-128)"
-RUN_STATE_DIR="$PLANNING_DIR/run-state"
+# Run state is shared by every gsd project in the repo: plan-wall.sh reads the
+# marker from the root .planning/run-state/, so a per-project PLANNING_DIR
+# (.planning/<project>, GSD_PROJECT isolation) stamps the root one too.
+case "$PLANNING_DIR" in
+  .planning/*|*/.planning/*) RUN_STATE_DIR="${PLANNING_DIR%%.planning/*}.planning/run-state" ;;
+  *) RUN_STATE_DIR="$PLANNING_DIR/run-state" ;;
+esac
 FENCE_MARKER="$RUN_STATE_DIR/security-fence-${SAFE_RUN_ID}.json"
 
 # shellcheck source=scripts/gsd/security-surface.sh

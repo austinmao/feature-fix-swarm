@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.17.0"
+version: "2.18.0"
 allowed-tools:
   - Read
   - Edit
@@ -96,6 +96,41 @@ done
 [ -z "$GATES_PY" ] && { echo "ERROR: gates.py not found — run setup.sh"; exit 1; }
 ```
 
+### Step 1.2: Planning scope (GSD_PROJECT)
+
+A repo can hold several gsd projects: the root one (`.planning/ROADMAP.md`) and
+per-spec ones (`.planning/<project>/ROADMAP.md`), which gsd-core selects through
+`GSD_PROJECT`. Reading the root ROADMAP for a spec that plans under its own
+project executes another project's phases, so resolve the scope once. Every
+`$PLANNING` path below comes from it.
+
+```bash
+if [ $ADHOC -eq 0 ]; then
+  SCOPE="$(bash scripts/gsd/planning-scope.sh "$SPEC_ID")" || exit 1
+  read -r SCOPE_PROJECT PLANNING SCOPE_MODE <<<"$SCOPE"
+  [ "$SCOPE_PROJECT" = "-" ] && SCOPE_PROJECT=""
+else
+  SCOPE_PROJECT=""; PLANNING=".planning"; SCOPE_MODE=root
+fi
+echo "[feature-implement] planning scope: ${SCOPE_PROJECT:-root} ($PLANNING, $SCOPE_MODE)"
+```
+
+- `root`: no per-spec project; `$PLANNING` is `.planning` and nothing else changes.
+- `session` or `derived`: export `GSD_PROJECT="$SCOPE_PROJECT"` in every later
+  command of this skill. Bash calls share no state, so re-export it at the top of
+  each block, as with `$N` and `$GATES_PY`. The FFS gates (ownership, plan probe,
+  plan wall, review gate) and `gsd-run.sh` read it from the environment, and
+  `gsd-run.sh` passes it to the child host.
+- `derived` with interactive execution: STOP before Step 4 runs anything
+  stateful. `/gsd-execute-phase` and the executor agents it spawns call
+  gsd-tools in fresh shells that inherit only this session's environment, which
+  this skill cannot change. Tell the operator to relaunch the session with the
+  project set (`GSD_PROJECT=<project> claude` or `GSD_PROJECT=<project> codex`)
+  or to run `--autonomous`. `--dry-run` may continue.
+- A nonzero exit from `planning-scope.sh` (a `GSD_PROJECT` with no ROADMAP, or
+  one that contradicts the spec's own project) is a STOP. Never fall back to the
+  root `.planning`.
+
 ### Step 1.5: Cross-session claim (spec-009 — claim-or-stop)
 
 Exactly one session may implement a run id. Autonomous/headless runs SKIP the
@@ -153,9 +188,9 @@ if [ "$AUTONOMOUS" = "1" ]; then
 fi
 # Legacy Claude config wall: rewrite unavailable non-exact Fable pins to Opus.
 # Typed exact requests fail closed and never use this compatibility fallback.
-[ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh .planning || true
+[ -f scripts/gsd/model-fallback.sh ] && bash scripts/gsd/model-fallback.sh "$PLANNING" || true
 # Legacy Claude security fence: security-touching configs use Opus judgment.
-[ -f scripts/gsd/security-model-fence.sh ] && bash scripts/gsd/security-model-fence.sh .planning specs/"$SPEC_ID"*/spec.md specs/"$SPEC_ID"*/plan.md || true
+[ -f scripts/gsd/security-model-fence.sh ] && bash scripts/gsd/security-model-fence.sh "$PLANNING" specs/"$SPEC_ID"*/spec.md specs/"$SPEC_ID"*/plan.md || true
 # Ledger key for gsd seams: review-gate-command.sh reads GSD_RUN_ID (no
 # hardcoded default) — export it so ship grants key to THIS run.
 export GSD_RUN_ID="$RUN_ID"
@@ -214,15 +249,17 @@ executes, and verifies the single task itself. If `.planning/config.json` exists
 gate seams apply as below; if not, gsd-quick runs on gsd defaults (the test-command
 gate in Step 5 still holds).
 
-Spec mode: if `.planning/ROADMAP.md` is missing, the spec was never seeded — run
+Spec mode: if `$PLANNING/ROADMAP.md` is missing, the spec was never seeded — run
 `/feature-spec NNN` (or `/spec-decompose NNN`) first; ERROR out, do not improvise
 a project.
 
 Config contract (seeded by `/feature-spec` from `templates/gsd-config.base.json`):
 `workflow.test_command = bash scripts/gsd/gates-test-command.sh`,
 `workflow.code_review_command = bash scripts/gsd/review-gate-command.sh`.
-Verify both keys are present in `.planning/config.json` before executing; ERROR if not —
-without them gsd runs ungated.
+Verify both keys are present in `$PLANNING/config.json` before executing; ERROR if not —
+without them gsd runs ungated. A per-spec project may wrap the test command
+(for example `GSD_TEST_CMD='bash .planning/<project>/gsd-test-command' bash scripts/gsd/gates-test-command.sh`);
+it must still end in `scripts/gsd/gates-test-command.sh`.
 
 ### Step 4: Execute
 
@@ -241,14 +278,15 @@ or timeout is returned with a resume command for that host; FFS never mines task
 output for phrases such as “API error” and never replays a partially-started
 drive across vendors.
 
-**Spec mode:** read `.planning/ROADMAP.md` for the first unchecked phase N.
+**Spec mode:** read `$PLANNING/ROADMAP.md` for the first unchecked phase N.
 
 Once, immediately before entering the phase loop (NOT at run-start
-bootstrap): if `.planning/ceremony-tier` exists and starts with `light`,
-run the run-level wall over every already-planned phase in one invocation:
+bootstrap): if `$PLANNING/ceremony-tier` exists and starts with `light`,
+run the run-level wall over every already-planned phase in one invocation
+(with `GSD_PROJECT` exported, `plan-wall.sh --run` walks `$PLANNING/phases`):
 
 ```bash
-[ -f .planning/ceremony-tier ] && grep -q '^light' .planning/ceremony-tier && bash scripts/gsd/plan-wall.sh --run
+[ -f "$PLANNING/ceremony-tier" ] && grep -q '^light' "$PLANNING/ceremony-tier" && bash scripts/gsd/plan-wall.sh --run
 ```
 
 STOP on nonzero. This pays ONE global `wall:run` round for the whole run;
@@ -292,7 +330,7 @@ review wall (spec-004 AC-005 — every `*-PLAN.md` / bare `PLAN.md` under phase
 N must clear a fresh adversarial review before execution starts):
 
 ```bash
-PHASE_DIR="$(ls -d .planning/phases/*-* 2>/dev/null | grep -E "^\.planning/phases/0*${N}-" | head -1)"
+PHASE_DIR="$(ls -d "$PLANNING"/phases/*-* 2>/dev/null | grep -E "/phases/0*${N}-[^/]*$" | head -1)"
 [ -n "$PHASE_DIR" ] && export GSD_PHASE_ID="$(basename "$PHASE_DIR")" && bash scripts/gsd/plan-wall.sh "$PHASE_DIR"
 ```
 
@@ -380,7 +418,10 @@ turn cannot outlast a pending wall, it MUST checkpoint a
 - `--dry-run`: print phase N, its plans, the two config gate commands, wall status; exit 0.
 - Interactive Claude session: invoke `/gsd-execute-phase N` directly.
 - Interactive Codex session: invoke `$gsd-execute-phase N` directly.
-- `--autonomous` / headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface).
+- Interactive execution in `derived` scope is a STOP (Step 1.2): the session
+  was not started with `GSD_PROJECT`, so the gsd-tools calls it spawns would
+  read the root project.
+- `--autonomous` / headless on either host: `GSD_PROJECT="$SCOPE_PROJECT" TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` (omit `GSD_PROJECT` in `root` scope; the runner prefers the invoking host, may select the alternate before launch, and never replays after launch; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface).
 
 The same pre-launch-only selection applies in spec mode. Cross-vendor replay
 after the stateful boundary is forbidden because a phase may already have
@@ -495,7 +536,7 @@ promotion protocol; the completion authority below enforces rules 7, 8, and 12 o
 
 gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
 - `GATES_STRICT=1 python3 "$GATES_PY" verify-done "<phase-dir basename>"` must succeed (rc 0)
-  — the key is the `.planning/phases/` directory basename (e.g.
+  — the key is the `$PLANNING/phases/` directory basename (e.g.
   `01-self-compare-guard`), the same key `gates-test-command.sh` records
   evidence under and plan-wall.sh writes records under. The literal key
   `gsd-phase` is not a real record key and always returns NOT-DONE.
@@ -509,7 +550,7 @@ gate did not run is NOT done.
 
 **Scope-drift gate (advisory, once per phase wall — NEVER per turn):** alongside
 verify-done, run
-`bash scripts/gsd/scope-drift-gate.sh --judge --plan <this phase's .planning/phases/<phase>/*-PLAN.md files>`
+`bash scripts/gsd/scope-drift-gate.sh --judge --plan <this phase's $PLANNING/phases/<phase>/*-PLAN.md files>`
 — deterministic diff-vs-`files_modified` classification + `PHASE GOAL:` re-anchor,
 plus ONE bounded cross-vendor judge verdict (`DRIFT-VERDICT: ON-TRACK|DRIFT`).
 A DRIFT warning is advisory: re-read the spec/plan success criteria before

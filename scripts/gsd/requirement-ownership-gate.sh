@@ -25,6 +25,7 @@ python3 - "$REPO_ROOT" "$1" <<'PY'
 from __future__ import annotations
 
 import collections
+import os
 import re
 import sys
 from pathlib import Path
@@ -34,6 +35,22 @@ root = Path(sys.argv[1])
 phase_number = int(sys.argv[2], 10)
 phase_id = f"{phase_number:02d}"
 planning = root / ".planning"
+# GSD_PROJECT planning isolation: gsd-core plans under .planning/<project>/,
+# so the ROADMAP and phases this gate checks must come from the same tree.
+# A set-but-missing project fails closed instead of checking the root project.
+project = os.environ.get("GSD_PROJECT", "").strip()
+if project:
+    if "/" in project or "\\" in project or ".." in project:
+        print("requirement-ownership-gate: ERROR: GSD_PROJECT must be one path segment", file=sys.stderr)
+        raise SystemExit(2)
+    if not (planning / project / "ROADMAP.md").is_file():
+        print(
+            f"requirement-ownership-gate: ERROR: GSD_PROJECT={project} but "
+            f".planning/{project}/ROADMAP.md is missing",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    planning = planning / project
 roadmap_path = planning / "ROADMAP.md"
 # Lowercase allowed in the id TAIL: spec-007 mints REQ-202a-style
 # sub-requirements; the uppercase-only tail truncated it to REQ-202 and
@@ -164,7 +181,7 @@ phase_dirs = sorted(
     if path.is_dir() and re.match(rf"^0*{phase_number}-", path.name)
 )
 if not phase_dirs:
-    stop(f"no .planning/phases/{phase_id}-* directory")
+    stop(f"no {phases_root.relative_to(root)}/{phase_id}-* directory")
 if len(phase_dirs) > 1:
     stop(
         f"multiple Phase {phase_number} directories: "
