@@ -114,9 +114,12 @@ def test_shell_denial_requires_exact_machine_program_and_matching_session(tmp_pa
     record = observer.derive(runtime, binary, nonce, transcript, hooks, "TOKEN",
         allowed=allowed, blocked=blocked, sandbox="workspace-write", worktree=worktree,
         model="gpt-5.6-terra", effort="medium", shell_program=program)
-    accepted = (None, "native-default-namespace", "trailing-lf")
-    assert record["observed"]["shell_denied"] is (defect in accepted)
-    assert record["observed"]["write_boundary"] is (defect in accepted)
-    if defect in accepted:
+    # The transport mutation is already materialized in the transcript; reuse
+    # the established accepted-case assertions without weakening their predicate.
+    if defect == "trailing-lf":
+        defect = None
+    assert record["observed"]["shell_denied"] is (defect in (None, "native-default-namespace"))
+    assert record["observed"]["write_boundary"] is (defect in (None, "native-default-namespace"))
+    if defect in (None, "native-default-namespace"):
         assert record["observed"]["shell_denial_source"] == "persisted-session-paired"
         assert record["artifacts"].get("shell_session_sha256")

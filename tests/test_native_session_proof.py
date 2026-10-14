@@ -121,7 +121,10 @@ def test_native_denial_requires_bound_machine_call_and_exact_probe(tmp_path: Pat
         *transcripts, runtime=runtime, nonce=nonce, worktree=worktree,
         model="gpt-5.6-terra", effort="medium",
     )
-    accepted = (None, "native-default-namespace", "trailing-lf")
-    assert proved is (defect in accepted)
-    if defect in accepted:
+    # The transport mutation is already materialized in the transcript; reuse
+    # the established accepted-case assertion without weakening its predicate.
+    if defect == "trailing-lf":
+        defect = None
+    assert proved is (defect in (None, "native-default-namespace"))
+    if defect in (None, "native-default-namespace"):
         assert artifacts, "Accepted machine proof must retain its source artifacts"
