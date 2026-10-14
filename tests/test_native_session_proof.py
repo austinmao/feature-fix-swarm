@@ -19,7 +19,33 @@ def write_rows(path: Path, rows: list[dict]) -> None:
     path.chmod(0o600)
 
 
-@pytest.mark.parametrize("defect", [None, "native-default-namespace", "agent-only", "wrong-call", "wrong-turn", "wrong-thread",
+@pytest.mark.parametrize(
+    "transported,accepted",
+    [
+        ("text({probe:true})", True),
+        ("text({probe:true})\n", True),
+        (" text({probe:true})", False),
+        ("\ntext({probe:true})", False),
+        ("text({probe:true})\r\n", False),
+        ("text({probe:true})\n\n", False),
+        ("text({probe:true}) ", False),
+        ("text({probe:true})\t", False),
+        ("text({probe:true})\n// comment", False),
+        ("text({probe:true});other()\n", False),
+        ("text({probe:false})\n", False),
+        ("text({probe:true})\x00\n", False),
+        ("text({probe:true})\u2028", False),
+        (None, False),
+        (123, False),
+    ],
+)
+def test_session_program_transport_allows_only_one_terminal_lf(
+    transported: object, accepted: bool
+) -> None:
+    assert observer._session_program_matches(transported, "text({probe:true})") is accepted
+
+
+@pytest.mark.parametrize("defect", [None, "native-default-namespace", "trailing-lf", "agent-only", "wrong-call", "wrong-turn", "wrong-thread",
                                     "wrong-model", "wrong-effort", "wrong-workspace", "replayed-nonce",
                                     "spoofed-program", "wrong-tool", "wrong-namespace", "duplicate-output", "symlink-rollout", "truncated", "extra-tool"])
 def test_native_denial_requires_bound_machine_call_and_exact_probe(tmp_path: Path, defect: str | None) -> None:
@@ -60,6 +86,8 @@ def test_native_denial_requires_bound_machine_call_and_exact_probe(tmp_path: Pat
                                                     "output": output, "internal_chat_message_metadata_passthrough": {"turn_id": turn_id}}},
             {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn_id}},
         ]
+        if defect == "trailing-lf":
+            rows[2]["payload"]["input"] += "\n"
         if mode == "negative":
             if defect == "agent-only":
                 rows[3] = {"type": "response_item", "payload": {"type": "message", "role": "assistant",
@@ -93,6 +121,7 @@ def test_native_denial_requires_bound_machine_call_and_exact_probe(tmp_path: Pat
         *transcripts, runtime=runtime, nonce=nonce, worktree=worktree,
         model="gpt-5.6-terra", effort="medium",
     )
-    assert proved is (defect in (None, "native-default-namespace"))
-    if defect in (None, "native-default-namespace"):
+    accepted = (None, "native-default-namespace", "trailing-lf")
+    assert proved is (defect in accepted)
+    if defect in accepted:
         assert artifacts, "Accepted machine proof must retain its source artifacts"

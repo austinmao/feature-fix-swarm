@@ -175,6 +175,7 @@ def _host_capabilities_module():
 _shared = _host_capabilities_module()
 _private_jsonl = _shared._private_jsonl
 _thread_id = _shared._thread_id
+_session_program_matches = _shared._session_program_matches
 _session_proof = _shared._session_proof
 _native_proof = _shared._native_proof
 _native_multi_agent_proof = _shared._native_multi_agent_proof
@@ -216,7 +217,8 @@ def _shell_session_proof(runtime: Path, transcript: Path, worktree: Path, model:
         if payload.get("type") in {"custom_tool_call", "function_call"}:
             tool_calls.append(payload)
         if (payload.get("type") == "custom_tool_call" and payload.get("name") == "exec"
-                and payload.get("namespace") in (None, "functions") and payload.get("input") == program):
+                and payload.get("namespace") in (None, "functions")
+                and _session_program_matches(payload.get("input"), program)):
             calls.append(payload)
         elif payload.get("type") == "custom_tool_call_output":
             outputs.append(payload)

@@ -22,7 +22,7 @@ def write_rows(path: Path, rows: list[dict]) -> None:
     path.chmod(0o600)
 
 
-@pytest.mark.parametrize("defect", [None, "native-default-namespace", "agent-only", "wrong-call", "wrong-turn", "wrong-thread",
+@pytest.mark.parametrize("defect", [None, "native-default-namespace", "trailing-lf", "agent-only", "wrong-call", "wrong-turn", "wrong-thread",
     "wrong-model", "wrong-effort", "wrong-workspace", "replayed-nonce", "spoofed-program",
     "wrong-command", "success-exit", "no-denial", "duplicate-output", "wrong-tool", "wrong-namespace",
     "extra-pre-tool", "extra-post-tool"])
@@ -79,6 +79,8 @@ def test_shell_denial_requires_exact_machine_program_and_matching_session(tmp_pa
         {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": call,
             "output": [], "internal_chat_message_metadata_passthrough": {"turn_id": turn}}},
     ]
+    if defect == "trailing-lf":
+        rows[2]["payload"]["input"] += "\n"
     if defect == "wrong-call": rows[3]["payload"]["call_id"] = "another-call"
     elif defect == "wrong-turn": rows[3]["payload"]["internal_chat_message_metadata_passthrough"]["turn_id"] = "another-turn"
     elif defect == "wrong-thread": rows[0]["payload"]["id"] = "another-thread"
@@ -112,8 +114,9 @@ def test_shell_denial_requires_exact_machine_program_and_matching_session(tmp_pa
     record = observer.derive(runtime, binary, nonce, transcript, hooks, "TOKEN",
         allowed=allowed, blocked=blocked, sandbox="workspace-write", worktree=worktree,
         model="gpt-5.6-terra", effort="medium", shell_program=program)
-    assert record["observed"]["shell_denied"] is (defect in (None, "native-default-namespace"))
-    assert record["observed"]["write_boundary"] is (defect in (None, "native-default-namespace"))
-    if defect in (None, "native-default-namespace"):
+    accepted = (None, "native-default-namespace", "trailing-lf")
+    assert record["observed"]["shell_denied"] is (defect in accepted)
+    assert record["observed"]["write_boundary"] is (defect in accepted)
+    if defect in accepted:
         assert record["observed"]["shell_denial_source"] == "persisted-session-paired"
         assert record["artifacts"].get("shell_session_sha256")

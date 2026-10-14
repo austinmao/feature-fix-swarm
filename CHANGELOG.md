@@ -8,6 +8,26 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-10-14, Codex CLI 0.162.1 exact compatibility pin)
+
+- Codex CLI `0.162.1` is admitted as an eighth exact compatibility pin in the installer,
+  doctor and `gsd-run`. The adjacent `0.162.0` and `0.162.2` releases, prerelease/dev forms,
+  shortened forms and zero-padded spellings remain refused.
+- Native final-review preparation binds `rust-v0.162.1` at commit
+  `092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`, with audited source digests
+  `db040c0c...` (`spec_plan.rs`), `7933a705...` (`config.schema.json`) and
+  `88d0f8df...` (`openai_models.rs`). The launcher digest remains byte-identical to the
+  previously audited launcher.
+- The audited tool-registration changes can advertise environment tools without a selected
+  environment and add code-mode search, strict third-party, and model-catalog branches. For
+  `0.162.1` only, strict config explicitly disables `stable_environment_tools`,
+  `code_mode_tool_search`, `code_mode_only_strict_3p_tools`, and `model_catalog_in_context`,
+  in addition to the existing closed tool set and async-message gate. Removing any required
+  config or argv gate, changing the claimed CLI version, or mixing provenance rows is refused.
+- Automated compatibility coverage exercises the exact pin and rejection boundary in Python
+  and Bats. Native outer readiness remains controlled by the managed canary qualification and
+  retained-evidence verifier; preparing material alone does not qualify a review run.
+
 ### Fixed (2026-10-14, feature-implement and the runner follow GSD_PROJECT planning isolation)
 
 - A repo can hold several gsd projects: the root one (`.planning/ROADMAP.md`) and per-spec ones
