@@ -128,6 +128,27 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "decimal sibling phase headings are not read as the integer phase" {
+  cat > "$REPO/.planning/ROADMAP.md" <<'EOF'
+# Roadmap
+
+### Phase 2: Example
+**Requirements**: FR-001
+
+### Phase 2.1: Inserted
+**Requirements**: FR-101
+
+### Phase 02.2: Inserted again
+**Requirements**: FR-201
+EOF
+  write_plan 01 '[FR-001]'
+
+  run bash -c "cd $(printf '%q' "$REPO") && bash $(printf '%q' "$SCRIPT") 2"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS phase=02 roadmap=1 plans=1"* ]]
+}
+
 @test "missing phase requirements fail closed without waiting" {
   cat > "$REPO/.planning/ROADMAP.md" <<'EOF'
 # Roadmap
