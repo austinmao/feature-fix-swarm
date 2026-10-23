@@ -67,7 +67,8 @@ def extract_roadmap_requirements() -> list[str]:
     if not roadmap_path.is_file():
         stop(f"missing {roadmap_path.relative_to(root)}")
     lines = roadmap_path.read_text(encoding="utf-8").splitlines()
-    heading_re = re.compile(rf"^(#{{2,6}})\s+Phase\s+0*{phase_number}(?:\b|\s*:)", re.I)
+    # (?!\.\d): a decimal sibling such as "Phase 07.1" is its own phase, not Phase 7 (\b matches before the dot)
+    heading_re = re.compile(rf"^(#{{2,6}})\s+Phase\s+0*{phase_number}(?!\.\d)(?:\b|\s*:)", re.I)
     headings: list[tuple[int, int]] = []
     for index, line in enumerate(lines):
         match = heading_re.match(line)
