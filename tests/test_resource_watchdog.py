@@ -18,6 +18,7 @@ class Registry:
         self.targets = targets
         self.persisted = []
         self.started = threading.Event()
+        self.persisted_ready = threading.Event()
 
     def resource_watchdog_targets(self):
         self.started.set()
@@ -25,6 +26,7 @@ class Registry:
 
     def persist_resource_watchdog_status(self, status):
         self.persisted.append(status)
+        self.persisted_ready.set()
 
 
 def observation(now, **values):
@@ -42,13 +44,17 @@ def policy(**changes):
     return ResourceWatchdogPolicy(**values)
 
 
-def test_background_checks_while_caller_is_blocked():
+def test_background_checks_while_caller_is_blocked(request):
     now = 10
     registry = Registry([WatchdogTarget("waiting", ResourceDemand(cpu=1), 3)])
     watchdog = ResourceWatchdog(lambda: observation(now, cpu=0), registry,
                                 policy=policy(), clock_ns=lambda: now)
+    # Always reap the non-daemon worker, including assertion failure paths.
+    request.addfinalizer(lambda: watchdog.stop(1))
     watchdog.start()
     assert registry.started.wait(1)
+    # Target enumeration starts before status persistence finishes.
+    assert registry.persisted_ready.wait(1)
     assert registry.persisted and registry.persisted[0].code == RESOURCE_WAIT
     assert watchdog.stop(1)
     assert not watchdog.running
