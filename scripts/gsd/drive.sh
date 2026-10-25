@@ -47,6 +47,11 @@ STATE_DIR="$ROOT/.planning/run-state"
 LIFE="$SCRIPT_DIR/lifecycle.sh"
 GSD_RUN="${FFS_DRIVE_GSD_RUN:-$SCRIPT_DIR/gsd-run.sh}"
 PRESSURE="$SCRIPT_DIR/host-pressure.sh"
+# Explicit, non-secret invocation settings only: launchd does not inherit the
+# original caller's environment. Never serialize arbitrary environment keys.
+RESUME_ENV_KEYS=(FFS_HOST FFS_CROSS_VENDOR_FALLBACK GSD_MODEL_CONFIG GSD_MODEL_REQUEST
+  GSD_LEAD_MODEL GSD_NETWORK_MODE GSD_NETWORK_PURPOSE GSD_HOST_PROBE_TIMEOUT TIMEOUT
+  GSD_CLAUDE_PERMISSION_MODE)
 
 STEP_ATTEMPTS="${FFS_STEP_ATTEMPTS:-5}"
 ENV_DEATH_MAX="${FFS_ENV_DEATH_MAX:-8}"
@@ -347,14 +352,15 @@ cmd_start() {
   RUN="$run"; STATE_FILE="$(state_file "$RUN")"
   [ ! -f "$STATE_FILE" ] || fail "exists run=$RUN ($STATE_FILE) -- use resume"
   mkdir -p "$STATE_DIR"
-  python3 - "$STATE_FILE" "$RUN" "$verb" "$project" "$after_step" "$on_blocked" "$first" "$last" <<'PY'
-import json, sys, time
-path, run, verb, project, after_step, on_blocked, first, last = sys.argv[1:]
+  python3 - "$STATE_FILE" "$RUN" "$verb" "$project" "$after_step" "$on_blocked" "$first" "$last" "${RESUME_ENV_KEYS[@]}" <<'PY'
+import json, os, sys, time
+path, run, verb, project, after_step, on_blocked, first, last = sys.argv[1:9]
+runtime_env = {key: os.environ[key] for key in sys.argv[9:] if key in os.environ}
 steps = [{"phase": n, "run_id": f"{run}-p{n}", "state": "pending", "attempts": 0, "env_deaths": 0,
           "launches": 0, "no_progress": 0, "wall_waits": 0, "fingerprint": "", "head": "",
           "started_at": None, "last_rc": None, "reason": ""} for n in range(int(first), int(last) + 1)]
 state = {"run_id": run, "verb": verb, "project": project or None, "after_step": after_step or None,
-         "on_blocked": on_blocked, "steps": steps, "index": 0, "state": "running", "pid": None,
+         "runtime_env": runtime_env, "on_blocked": on_blocked, "steps": steps, "index": 0, "state": "running", "pid": None,
          "created_at": int(time.time()), "heartbeat": int(time.time())}
 with open(path, "w") as fh:
     json.dump(state, fh, indent=2, sort_keys=True); fh.write("\n")
@@ -388,7 +394,7 @@ cmd_resume() {
   safe_id "$run" || fail "usage --run required"
   RUN="$run"; STATE_FILE="$(state_file "$RUN")"
   [ -f "$STATE_FILE" ] || fail "missing-state run=$RUN"
-  local prev state project
+  local prev state project key value
   prev="$(q '.pid // empty')"; state="$(q .state)"
   if [ "$state" = "done" ]; then say "already-done run=$RUN"; return 0; fi
   if [ -n "$prev" ] && [ "$prev" != "$$" ] && kill -0 "$prev" 2>/dev/null; then fail "already-running run=$RUN pid=$prev"; fi
@@ -396,6 +402,16 @@ cmd_resume() {
   local lout
   if ! lout="$(life launch "$RUN" "$argv" "{\"respawns\":0,\"env_deaths\":$ENV_DEATH_MAX}" "$$" 2>&1)"; then
     case "$lout" in *LIFECYCLE:terminal*) fail "terminal run=$RUN ($lout)" ;; esac
+  fi
+  if jq -e 'has("runtime_env")' "$STATE_FILE" >/dev/null; then
+    for key in "${RESUME_ENV_KEYS[@]}"; do
+      if jq -e --arg key "$key" '.runtime_env | has($key)' "$STATE_FILE" >/dev/null; then
+        value="$(jq -r --arg key "$key" '.runtime_env[$key]' "$STATE_FILE")"
+        export "$key=$value"
+      else
+        unset "$key"
+      fi
+    done
   fi
   project="$(q '.project // empty')"
   if [ -n "$project" ]; then export GSD_PROJECT="$project"; else unset GSD_PROJECT; fi

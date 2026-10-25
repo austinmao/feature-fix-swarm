@@ -12,6 +12,7 @@ setup() {
 #!/usr/bin/env bash
 phase="$2"; f="$STUB_ROOT/plan-$phase"
 printf "%s\n" "${GSD_PROJECT-unset}" >> "$STUB_ROOT/projects"
+printf "%s %s %s %s\n" "${FFS_HOST-unset}" "${TIMEOUT-unset}" "${GSD_NETWORK_MODE-unset}" "${GSD_MODEL_REQUEST-unset}" >> "$STUB_ROOT/runtime"
 rc=0; if [ -f "$f" ] && [ -s "$f" ]; then rc="$(head -1 "$f")"; tail -n +2 "$f" > "$f.n" && mv "$f.n" "$f"; fi
 printf '%s resume=%s respawn=%s lifecycle=%s rc=%s\n' "$GSD_RUN_ID" "${GSD_RESUME-unset}" "${FFS_RESPAWN_MAX-unset}" "${FFS_LIFECYCLE_LAUNCH-unset}" "$rc" >> "$STUB_ROOT/launches"
 if [ "$rc" = sleep ]; then touch "$STUB_ROOT/sleeping-$phase"; sleep 30; rc=$?; fi
@@ -201,4 +202,15 @@ step() { jq -r ".steps[$1].$2" .planning/run-state/drive-$3.json; }
   [ "$status" -eq 0 ]
   [ "$(jq -r '.steps[0].state' .planning/run-state/drive-gated.json)" = done ]
   [ "$(jq -r '.steps[0].attempts' .planning/run-state/drive-gated.json)" = 0 ]
+}
+
+@test "resume restores explicit runtime settings without persisting unrelated environment values" {
+  printf '78\n' > "$STUB_ROOT/plan-1"
+  run env FFS_HOST=codex TIMEOUT=5400 GSD_NETWORK_MODE=enabled GSD_MODEL_REQUEST='{"kind":"tier","name":"judgment"}' UNRELATED_TOKEN=private-test-value bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run runtime
+  [ "$status" -eq 0 ]
+  run env -u FFS_HOST -u TIMEOUT -u GSD_NETWORK_MODE -u GSD_MODEL_REQUEST bash scripts/gsd/drive.sh resume --run runtime
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$STUB_ROOT/runtime" | tr -d ' ')" = 2 ]
+  [ "$(sort -u "$STUB_ROOT/runtime")" = 'codex 5400 enabled {"kind":"tier","name":"judgment"}' ]
+  ! grep -q 'private-test-value\|UNRELATED_TOKEN' .planning/run-state/drive-runtime.json
 }

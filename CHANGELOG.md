@@ -56,7 +56,8 @@ all skills.
   `run_in_background` child; never-stop rule; `drive.sh status` liveness; the gap-round
   "STOP and report" becomes pending + continue), `spec-decompose` 2.9.0 (headless multi-phase
   planning via `drive.sh`), `ffs-init` 1.2.0 (reconcile-agent offer).
-- Review fixes: restore the selected project on resume, retain stale-recovery intent
+- Review fixes: restore the selected project and explicit non-secret host/model/network/timeout
+  settings on resume, retain stale-recovery intent
   across repeated memory-pressure deferrals, run phase gates in the owned runner
   worktree, preserve failed gate exit codes, and wait
   for detached-child identity without racing its state writes.
