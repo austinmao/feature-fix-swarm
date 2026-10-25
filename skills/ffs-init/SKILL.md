@@ -1,7 +1,7 @@
 ---
 name: ffs-init
 description: "Umbrella FFS initialization: install repo-scoped dependencies (Phase 0), then build or refresh the environment registry (config/environments.yaml) — propose rows from repo evidence, review them in one batched session, apply atomically, validate, update in place. Never leaks a secret VALUE (names only) and never re-asks a declined proposal."
-version: "1.1.0"
+version: "1.2.0"
 ---
 
 # /ffs-init [--detect-only|--answers <file>|--yes|--update|--check|--force|--reset-declines|--skip-deps]
@@ -128,6 +128,19 @@ rm -f "$ANSWERS"
 writes `config/environments.yaml` and `.ffs-init.json` all-or-nothing under
 a lock. Finish by running `bash "$REPO_ROOT/scripts/gsd/env-registry.sh"
 check` and reporting its result to the operator.
+
+## Reconcile scheduler (opt-in, v1.2.0)
+
+`scripts/gsd/reconcile.sh` heals dead or waiting runs but is a one-shot pass;
+FFS installs a scheduler for it ONLY through this explicit opt-in. In the
+interactive pass, after dependencies, run `bash scripts/gsd/reconcile-agent.sh
+status` and, when it reports `not-installed`, OFFER `bash scripts/gsd/reconcile-agent.sh
+install` (macOS: per-user launchd agent `org.featurefixswarm.reconcile.<sha8>`
+running every 300s from this repo, outside every Claude process tree; Linux:
+prints the cron line, never edits crontab). Declining is recorded like any
+other decline. `/feature-implement --autonomous` asks again once at plan
+approval and otherwise falls back to a session `CronCreate`. Uninstall with
+`bash scripts/gsd/reconcile-agent.sh uninstall`.
 
 ## Exit-code taxonomy (per verb, pinned in 02-01)
 

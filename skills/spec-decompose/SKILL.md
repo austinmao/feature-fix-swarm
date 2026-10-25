@@ -1,7 +1,7 @@
 ---
 name: spec-decompose
 description: "Decompose an approved feature spec into an executable gsd-core phase plan: seed .planning/{PROJECT,REQUIREMENTS,ROADMAP}.md from specs/NNN/{spec,plan}.md, then drive /gsd-plan-phase (research → wave-parallel plans → plan-checker). Replaces the ruflo specialist-swarm tasks.md decomposition (v2.0.0, spec 002)."
-version: "2.8.0"
+version: "2.9.0"
 allowed-tools:
   - Read
   - Write
@@ -143,7 +143,7 @@ on its own terms — never silently dropped.
 
 - Interactive: invoke `/gsd-plan-phase <N>` (first unchecked ROADMAP phase).
 - Interactive Claude: `/gsd-plan-phase <N>`; interactive Codex: `$gsd-plan-phase <N>`.
-- Headless on either host: `TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-plan-phase <N>` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch).
+- Headless on either host, several phases: `TIMEOUT=3600 bash scripts/gsd/drive.sh start --verb plan-phase --phases <N>-<M> --project <NNN> --detach` — the FFS-owned detached supervisor (v2.9.0) replaces hand-written driver loops. It runs `gsd-run.sh /gsd-plan-phase N` per phase in its own process group (survives the Claude Code memory reap and session end), owns the per-step budgets (5 step attempts, 8 signal deaths, no-progress and launch-ceiling guards), reuses one run id per phase so retries resume, records blocked/quarantined phases in `.planning/run-state/drive-<id>.pending.md` and continues with the next phase. Watch it with `bash scripts/gsd/drive.sh status`; `reconcile.sh` relaunches it if it dies. Never run the planner as a `run_in_background` child of the session. A single phase: `GSD_RUN_ID=<id> TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-plan-phase <N>` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch).
 
 gsd runs research → writes `NN-*-PLAN.md` files (wave/`depends_on` annotations are the
 parallelism contract `/gsd-execute-phase` executes) → plan-checker verifies. The seeded

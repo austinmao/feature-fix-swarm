@@ -8,6 +8,63 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-10-25, never-stop continuation after driver death)
+
+- An autonomous run (spec-443) ended with "STOP — step 3 used two attempts. Driver attempt 2
+  killed by Claude Code memory reap. Harness forbids auto-restart." Neither rule was FFS code:
+  the two-attempt limit was operator prose in the run's handoff and the driver was a hand-written
+  loop that died as a child of the Claude session. FFS now owns both.
+- **Three failure classes, counted apart.** Step failures (`FFS_STEP_ATTEMPTS=5` per step in
+  `drive.sh`; `FFS_RESPAWN_MAX` default raised 1→2 inside one `gsd-run`), environment deaths
+  (rc 129/137/143 — signal, OOM, memory reap; `FFS_ENV_DEATH_MAX=8` with 60s→900s backoff;
+  never a step failure, never a stop) and user-input blocks (rc 78; zero retries, typed
+  `pending`). Runaway guards: `FFS_NO_PROGRESS_MAX=3` identical no-commit failures quarantine
+  the step; `FFS_STEP_LAUNCH_CEILING=12`; bounded plan-wall waits.
+- **`lifecycle.sh`**: new `env_deaths` budget (defaults to `FFS_ENV_DEATH_MAX` on new and
+  legacy records, so pre-existing records keep validating and stale recoveries are not refused),
+  new verbs `launch <run> <argv-json> <budgets-json> <pid>` (idempotent launch-time running
+  record; terminal records answer rc 3) and `defer <run> <wake-at> <reason>` (budget-neutral
+  `waiting(time)`), and `relaunch --charge <respawns|env_deaths>`.
+- **`gsd-run.sh`**: writes a `running` lifecycle record at launch when `GSD_RUN_ID` is explicit
+  (`FFS_LIFECYCLE_LAUNCH=off` suppresses it under a supervisor), settles it on exit (rc 0 →
+  `done`, step failure → `failed rc-N`, signal/78/coord-abort → left `running` for reconcile,
+  session-wake checkpoint untouched), and relaunches a signal-killed child drive in-process
+  (`GSD-RUN:ENV-DEATH n=k/M rc=`) after backoff and `host-pressure.sh wait` without spending a
+  respawn attempt.
+- **`reconcile.sh`**: a stale-running record is relaunched as a resume (`GSD_RESUME=1`) and
+  charges `env_deaths` instead of `--no-charge`; every relaunch is detached into its own
+  session via python `os.setsid` (macOS has no `setsid`), so a pass run from a Claude Code Bash
+  call cannot take the relaunched run down with it; under host memory pressure the record is
+  `defer`red (`RECONCILE:deferred-pressure`) instead of relaunched into the reap.
+- **New `scripts/gsd/drive.sh`** — FFS-owned detached supervisor for multi-step drives
+  (`start --verb plan-phase|execute-phase --phases A-B [--project NNN] [--after-step CMD]
+  [--on-blocked next|park] --detach`, `resume`, `status`, `stop`). Owns the budgets above,
+  reuses one gsd run id per step so retries resume from `.planning` state, writes its own
+  lifecycle record so `reconcile.sh` relaunches it, charges a supervisor death to the
+  interrupted step's `env_deaths`, and on a blocked/quarantined step appends
+  `drive-<id>.pending.md` then continues to the next phase or parks as `waiting(manual)`.
+  Replaces hand-written driver loops such as spec-443's `plan-phases-driver.sh`.
+- **New `scripts/gsd/host-pressure.sh`** — memory-aware admission (`check` rc 75 when swap ≥85%
+  AND free <10%, or free <5%; `wait` with backoff, capped, then launch anyway). Observes only.
+- **New `scripts/gsd/reconcile-agent.sh install|uninstall|status`** — opt-in per-user launchd
+  agent running `reconcile.sh` every 300s outside every Claude process tree (Linux: prints the
+  cron line). `docs/healing.md` stance changes from "FFS never installs a scheduler" to
+  "installs only on explicit opt-in"; `/ffs-init` offers it; `/feature-implement --autonomous`
+  requires it or falls back to a session `CronCreate`.
+- **Skills**: `feature-implement` 2.19.0 (folds the previously uncommitted 2.18.1 wall-renewal
+  text; headless execute-phase goes through `drive.sh start --detach`, never a
+  `run_in_background` child; never-stop rule; `drive.sh status` liveness; the gap-round
+  "STOP and report" becomes pending + continue), `spec-decompose` 2.9.0 (headless multi-phase
+  planning via `drive.sh`), `ffs-init` 1.2.0 (reconcile-agent offer).
+- Review fixes: restore the selected project and explicit non-secret host/model/network/timeout
+  settings on resume, retain stale-recovery intent
+  across repeated memory-pressure deferrals, run phase gates in the owned runner
+  worktree, preserve failed gate exit codes, and wait
+  for detached-child identity without racing its state writes.
+- Tests: `tests/bats/{drive,host-pressure,reconcile-agent}.bats` new; `lifecycle`, `reconcile`
+  and `gsd-run` suites cover the new verbs, env-death accounting, launch records and the
+  raised respawn default (existing "exactly once" cases pin `FFS_RESPAWN_MAX=1`).
+
 ### Changed (2026-10-14, Codex CLI 0.162.1 exact compatibility pin)
 
 - Codex CLI `0.162.1` is admitted as an eighth exact compatibility pin in the installer,

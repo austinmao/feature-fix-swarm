@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.18.0"
+version: "2.19.0"
 allowed-tools:
   - Read
   - Edit
@@ -34,6 +34,17 @@ autonomous runs relay the warnings once and continue. Advisory only — never
 a block, never an exit-code change.
 
 At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass; never block on its result.
+
+**Scheduler for `--autonomous` (v2.19.0, never-stop continuation).** A one-shot
+reconcile pass only heals runs while some FFS entrypoint is being invoked;
+overnight that is never. Before an `--autonomous` drive starts, run
+`bash scripts/gsd/reconcile-agent.sh status`. If it is not installed, ask the
+operator ONCE at plan approval to run `bash scripts/gsd/reconcile-agent.sh install`
+(a per-user launchd agent that runs `reconcile.sh` every 300s outside every
+Claude process tree; Linux prints the cron line). If the operator declines or
+is absent, fall back to a session `CronCreate` every 5 minutes that runs
+`bash scripts/gsd/reconcile.sh` — weaker (it dies with the session) but never
+nothing. Record which one is active in the run's handoff.
 
 ## When to invoke
 
@@ -269,7 +280,7 @@ change (GREEN) — the gsd executor's commit trail must show both.
 
 - Interactive Claude session: invoke `/gsd-quick "<task>"` directly.
 - Interactive Codex session: invoke `$gsd-quick "<task>"` directly.
-- `--autonomous` / headless on either host: `TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<task>"` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch).
+- `--autonomous` / headless on either host: `TIMEOUT=1800 bash scripts/gsd/gsd-run.sh /gsd-quick "<task>"` (the runner prefers the invoking host, may select the alternate before launch, and never replays after launch). Set an explicit `GSD_RUN_ID` so the runner's launch-time lifecycle record lets `reconcile.sh` relaunch it after a signal death.
 
 The headless runner performs a fixed read-only CLI/model/quota probe before it
 starts the stateful drive. It prefers the invoking host and may select the other
@@ -351,9 +362,13 @@ TERMINAL for the phase, not a retryable BLOCKED — do NOT start another fix
 round. Quarantine the phase (record the open findings + the printed unblock
 commands in the run report / pendings) and move to other runnable work; the
 cap exists because uncounted wall→fix→wall loops have burned 19 rounds/2
-days and 38+ turns/a week of vendor quota. Only an operator-reviewed
-findings resolution (or a deliberate `PLAN_WALL_MAX_ROUNDS` raise) reopens
-it.
+days and 38+ turns/a week of vendor quota. The sealed review allowance
+reopens only through a `wall-reset:<phase-slug>` grant: `plan-wall.sh`
+itself renews it by exactly one fresh review per phase per run (sealed
+`review:renew:<N>` budget, max 1), and only while every plan in the phase
+has zero unresolved CRITICAL wall findings. A hard block on the renewed
+review is terminal (exit 3). Without the grant nothing reopens it — not a
+counter reset, not a larger `PLAN_WALL_MAX_ROUNDS`.
 
 ### Fix-round mutation contract
 
@@ -387,7 +402,9 @@ interactive prose recipe to govern). On exit 3, before quarantine:
    ${PLAN_WALL_AUTO_RESET_MAX:-1}`) is not capped → proceed; either check
    failing → quarantine (unchanged).
 3. `gates.py loop-round "$RUN_ID" wall:<phase-slug> --reset --max 1`, then
-   re-run the wall on the phase exactly once.
+   re-run the wall on the phase exactly once. The reset clears only the
+   compatibility counter; the re-run's fresh review is admitted by the
+   wall's own grant-gated renewal of the sealed allowance (see above).
 4. ANY nonzero exit from that re-run — a second rc 3 OR a plain rc 1
    BLOCKED — is quarantine terminal. Post-reset the wall restarts at round
    1 of its one-round policy: a pass (including `PASS-RESIDUAL`) clears; a
@@ -421,7 +438,7 @@ turn cannot outlast a pending wall, it MUST checkpoint a
 - Interactive execution in `derived` scope is a STOP (Step 1.2): the session
   was not started with `GSD_PROJECT`, so the gsd-tools calls it spawns would
   read the root project.
-- `--autonomous` / headless on either host: `GSD_PROJECT="$SCOPE_PROJECT" TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` (omit `GSD_PROJECT` in `root` scope; the runner prefers the invoking host, may select the alternate before launch, and never replays after launch; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface).
+- `--autonomous` / headless on either host: `GSD_PROJECT="$SCOPE_PROJECT" TIMEOUT=3600 bash scripts/gsd/drive.sh start --verb execute-phase --phases N-M --project <NNN> --detach` (omit `GSD_PROJECT` in `root` scope). `drive.sh` is the FFS-owned detached supervisor: it runs `gsd-run.sh /gsd-execute-phase N` per phase in its own session/process group, owns the per-step budgets (`FFS_STEP_ATTEMPTS=5` step failures, `FFS_ENV_DEATH_MAX=8` signal deaths with backoff, `FFS_NO_PROGRESS_MAX=3` identical no-commit failures, `FFS_STEP_LAUNCH_CEILING=12`), reuses one run id per phase so retries resume via `GSD_RESUME=1`, and is itself relaunched by `reconcile.sh` if killed. NEVER launch the runner as a `run_in_background` child of this session — that child dies in the Claude Code memory reap that killed spec-443's driver. A single phase without the supervisor stays `GSD_PROJECT="$SCOPE_PROJECT" TIMEOUT=3600 bash scripts/gsd/gsd-run.sh /gsd-execute-phase N` with an explicit `GSD_RUN_ID` so its launch-time lifecycle record is relaunchable. (The runner prefers the invoking host, may select the alternate before launch, and never replays after launch; Claude gets trimmed MCP/auth scrubbing, Codex gets its native skill/model surface.)
 
 The same pre-launch-only selection applies in spec mode. Cross-vendor replay
 after the stateful boundary is forbidden because a phase may already have
@@ -438,6 +455,29 @@ stateful work and can strand disposable resources. The runner also publishes
 `kill -0 $(head -1 .planning/run-state/gsd-run.pid)` is the fallback liveness
 probe if the tool session itself is lost. A second runner refuses to launch
 while that pid is live, so single-flight is mechanical rather than prompt-only.
+Under `drive.sh`, `bash scripts/gsd/drive.sh status` is the primary liveness
+probe (`DRIVE:alive|dead|done|parked` plus step/attempt/env-death counters);
+`DRIVE:dead` is not a stop — `reconcile.sh` (agent or session cron) relaunches
+the supervisor, and `drive.sh resume --run <id>` does it by hand.
+
+**Never-stop rule (v2.19.0).** Three failure classes, counted apart:
+- *Step failure* — nonzero exit other than the classes below, or rc 124
+  timeout. Budget `FFS_STEP_ATTEMPTS=5` per step (was an operator-prose "2").
+- *Environment death* — rc 129/137/143 (signal, OOM, Claude Code memory
+  reap, host reboot) of the runner, its drive, or the supervisor. NEVER a
+  step failure and NEVER a stop condition; it charges only `env_deaths`
+  (`FFS_ENV_DEATH_MAX=8`, backoff 60s→900s) and relaunches the same argv as a
+  resume. `gsd-run.sh` logs `GSD-RUN:ENV-DEATH`; `drive.sh` logs `DRIVE:env-death`.
+- *User-input block* — rc 78 (tuple drift, missing grant/secret, refused
+  launch). Zero retries: record a typed `pending` and move on.
+A quarantined or blocked step appends to `drive-<id>.pending.md` and the
+drive continues with the next independent step (`--on-blocked next`, default
+for plan-phase) or parks as `waiting(manual)` (`--on-blocked park`, default
+for execute-phase). Parked is a state the morning report lists, not an exit.
+The orchestrating session ends its turn only after `drive.sh status` reports
+`DRIVE:alive` (or `done`/`parked`) AND a scheduler is confirmed; then it
+watches the `DRIVE:` lines with `ScheduleWakeup`/`Monitor` instead of
+holding the driver as a child.
 
 **Anti-early-stop (autonomous orchestrator loop).** Legacy Claude Fable can stop long runs
 with text-only intent; hold this line every turn of the drive loop:
@@ -485,7 +525,11 @@ runs against unchanged code return disjoint blocker sets (spec-006: 4 runs,
 4 different sets), so a re-run is noise, not signal. Re-verify only AFTER
 fixes land, max 1 re-verify per phase; then `/gsd-plan-phase N --gaps` +
 `/gsd-execute-phase N --gaps-only` (same runner), max 2 gap rounds, then
-STOP and report.
+record a typed `pending` for the phase (what is still open, the exact
+blocker set, the log path) and CONTINUE: under `drive.sh` the step is
+quarantined into `drive-<id>.pending.md` and the next independent phase
+runs (or the drive parks as `waiting(manual)` when nothing independent is
+left). Report the pending set in the handoff; never end the drive on it.
 
 ### Package-legitimacy pre-install gate (v2.10.0)
 
