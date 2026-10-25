@@ -305,6 +305,57 @@ RUN_RECLAIM_DIR="$RUN_STATE_DIR/gsd-run.reclaim"
 RUN_TUPLE_FILE="$RUN_STATE_DIR/gsd-run.tuple"
 RUN_HEARTBEAT_PID=""
 RUN_STATE_OWNED=0
+# Never-stop continuation (2026-10-25): a launch-time lifecycle record lets
+# reconcile.sh relaunch this run after a death that skips every trap (SIGKILL,
+# Claude Code memory reap of the whole process group). LIFECYCLE_LAUNCHED is
+# set only when that record was actually written, so cleanup never touches a
+# record it does not own.
+LIFECYCLE_LAUNCHED=0
+SESSION_WAKE_CHECKPOINTED=0
+ENV_DEATH_MAX="${FFS_ENV_DEATH_MAX:-8}"
+ENV_BACKOFF_BASE_SECS="${FFS_ENV_BACKOFF_BASE_SECS:-60}"
+ENV_BACKOFF_CAP_SECS="${FFS_ENV_BACKOFF_CAP_SECS:-900}"
+for _v in ENV_DEATH_MAX ENV_BACKOFF_BASE_SECS ENV_BACKOFF_CAP_SECS; do
+  [[ "${!_v}" =~ ^[0-9]+$ ]] || { echo "gsd-run: $_v must be a non-negative integer" >&2; exit 2; }
+done
+unset _v
+
+# rc of a drive (or of this runner) that died by signal: 129 HUP, 137 KILL,
+# 143 TERM. An environment death, never a step failure (see docs/healing.md).
+# Note: run_bounded folds a child's 137 into 124 (its own --kill-after
+# escalation is indistinguishable from an external SIGKILL), so inside this
+# runner a SIGKILLed drive takes the rc-124 respawn path; 137 here matters
+# for the supervisor reading THIS runner's exit.
+is_env_death_rc() { case "${1:-}" in 129|137|143) return 0 ;; *) return 1 ;; esac; }
+
+# lifecycle.sh resolves its record dir from its CWD's git toplevel, so the
+# record lives under the run worktree (executor checkpoints) or this repo
+# root (orchestration-side / launch records) -- never under RUN_STATE_DIR.
+find_lifecycle_root() {
+  local root
+  for root in "${RUN_WORKTREE_ROOT:-}" "$REPO_ROOT"; do
+    [ -n "$root" ] && [ -f "$root/.planning/run-state/lifecycle-$RUN_ID.json" ] && { printf '%s\n' "$root"; return 0; }
+  done
+  return 1
+}
+
+# Settle the launch-time record on exit. Signal deaths and operator-input
+# refusals deliberately leave it `running`: reconcile's dead-pid check is what
+# turns that into a relaunch. A session-wake checkpoint already moved it to
+# waiting(time) and must not be clobbered.
+lifecycle_finish() {
+  local rc="$1" root
+  [ "$LIFECYCLE_LAUNCHED" -eq 1 ] || return 0
+  [ "$SESSION_WAKE_CHECKPOINTED" -eq 0 ] || return 0
+  root="$(find_lifecycle_root)" || return 0
+  if [ "$rc" -eq 0 ]; then
+    (cd "$root" && bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" "done" completed) >/dev/null 2>&1 || true
+  elif is_env_death_rc "$rc" || [ "$rc" -eq 78 ] || [ -f "$RUN_STATE_DIR/gsd-run.coord-abort" ]; then
+    :
+  else
+    (cd "$root" && bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" failed "rc-$rc") >/dev/null 2>&1 || true
+  fi
+}
 RUN_MACHINE_ID="${GSD_MACHINE_ID:-$(hostname 2>/dev/null || uname -n 2>/dev/null || printf unknown)}"
 RUN_MACHINE_ID="$(printf '%s' "$RUN_MACHINE_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.:-' '_' | cut -c1-128)"
 [ -n "$RUN_MACHINE_ID" ] || RUN_MACHINE_ID=unknown
@@ -1335,6 +1386,7 @@ cleanup_runner() {
   fi
   if [ "$RUN_STATE_OWNED" -eq 1 ]; then
     write_run_status "$([ "$rc" -eq 0 ] && echo completed || echo failed)" "$rc"
+    lifecycle_finish "$rc"
     # Additive, after the write above (which atomically REPLACES the status
     # file) -- a coord-abort token written from the heartbeat subshell would
     # otherwise be clobbered by that replace. One-token sidecar, not a
@@ -2155,12 +2207,26 @@ fi
 # so phase durations are measurable after the fact — untimed logs made every
 # "why is this phase slow" question unanswerable.
 write_run_status running
+# Launch-time lifecycle record (explicit GSD_RUN_ID only -- an anonymous run
+# has no durable identity to resume under). FFS_LIFECYCLE_LAUNCH=off lets a
+# supervising driver (drive.sh) own the one record for its whole tree.
+if [ -n "${GSD_RUN_ID:-}" ] && [ "${FFS_LIFECYCLE_LAUNCH:-on}" != off ] && [ -f "$SCRIPT_DIR/lifecycle.sh" ]; then
+  _launch_argv="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${GSD_ORIG_ARGV[@]}")"
+  _launch_budgets="{\"respawns\":${FFS_RESPAWN_MAX:-2},\"env_deaths\":$ENV_DEATH_MAX}"
+  if _launch_out="$(cd "$REPO_ROOT" && bash "$SCRIPT_DIR/lifecycle.sh" launch "$RUN_ID" "$_launch_argv" "$_launch_budgets" "$$" 2>&1)"; then
+    case "$_launch_out" in LIFECYCLE:launched*) LIFECYCLE_LAUNCHED=1 ;; esac
+  else
+    echo "gsd-run: lifecycle launch record not written (${_launch_out%%$'\n'*}); continuing without one" >&2
+  fi
+  unset _launch_argv _launch_budgets _launch_out
+fi
 cd "$RUN_WORKTREE_ROOT" || exit 1
-RESPAWN_MAX="${FFS_RESPAWN_MAX:-1}"
+RESPAWN_MAX="${FFS_RESPAWN_MAX:-2}"
 RESPAWN_MIN_SECS="${FFS_RESPAWN_MIN_SECS:-600}"
 RESPAWN_BASE_SHA="$(git -C "$RUN_WORKTREE_ROOT" rev-parse HEAD 2>/dev/null || true)"
 RESPAWN_STARTED="$SECONDS"
 attempt=1
+env_deaths=0
 attempt_timeout="$TIMEOUT_SECS"
 : > "$LOG_FILE"
 while :; do
@@ -2180,18 +2246,50 @@ while :; do
       printf '%s\n' "$wake_out" >> "$LOG_FILE"
       echo "GSD-RUN:SESSION-WAKE checkpointed run=$RUN_ID rc=$rc — resume deferred to reconcile" >&2
       printf 'GSD-RUN:SESSION-WAKE checkpointed run=%s rc=%s\n' "$RUN_ID" "$rc" >> "$LOG_FILE"
+      SESSION_WAKE_CHECKPOINTED=1
       rm -f "$DRIVE_CAPTURE"
       break
     fi
   fi
   rm -f "$DRIVE_CAPTURE"
   [ "$rc" -eq 0 ] && break
-  [ "$attempt" -le "$RESPAWN_MAX" ] || break
   grep -qx 'state=quarantined' "$RUN_STATUS_FILE" 2>/dev/null && break
   # A coord claim abort (CLAIM-SUPERSEDED / CLAIM-STALE) is a deliberate
   # kill — another session owns the run now. Respawning would race the new
   # owner; propagate the abort rc instead.
   [ ! -f "$RUN_STATE_DIR/gsd-run.coord-abort" ] || break
+  # Environment death of the CHILD drive (signal kill) while this runner
+  # survived: never a step failure. Charge env_deaths (durable record when
+  # one exists, else the in-process counter), back off, wait out host memory
+  # pressure, relaunch the byte-identical argv. Does NOT advance $attempt.
+  if is_env_death_rc "$rc"; then
+    env_deaths=$((env_deaths + 1))
+    if [ "$env_deaths" -gt "$ENV_DEATH_MAX" ]; then
+      echo "GSD-RUN:ENV-DEATH budget-exhausted run=$RUN_ID n=$env_deaths max=$ENV_DEATH_MAX rc=$rc" >&2
+      printf 'GSD-RUN:ENV-DEATH budget-exhausted n=%s max=%s rc=%s\n' "$env_deaths" "$ENV_DEATH_MAX" "$rc" >> "$LOG_FILE"
+      break
+    fi
+    if lifecycle_root="$(find_lifecycle_root)"; then
+      if ! _dec_err="$(cd "$lifecycle_root" && bash "$SCRIPT_DIR/lifecycle.sh" decrement "$RUN_ID" env_deaths 2>&1 >/dev/null)"; then
+        if [[ "$_dec_err" == *budget-exhausted* ]]; then
+          (cd "$lifecycle_root" && bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" failed env-death-budget-exhausted >/dev/null 2>&1) || true
+          echo "GSD-RUN:ENV-DEATH budget-exhausted run=$RUN_ID rc=$rc" >&2
+        else
+          echo "GSD-RUN:ENV-DEATH lifecycle-error run=$RUN_ID" >&2
+        fi
+        break
+      fi
+    fi
+    echo "GSD-RUN:ENV-DEATH n=$env_deaths/$ENV_DEATH_MAX rc=$rc — relaunching same argv after backoff" >&2
+    printf 'GSD-RUN:ENV-DEATH n=%s/%s rc=%s\n' "$env_deaths" "$ENV_DEATH_MAX" "$rc" >> "$LOG_FILE"
+    backoff=$(( ENV_BACKOFF_BASE_SECS * (1 << (env_deaths - 1 < 10 ? env_deaths - 1 : 10)) ))
+    [ "$backoff" -le "$ENV_BACKOFF_CAP_SECS" ] || backoff="$ENV_BACKOFF_CAP_SECS"
+    [ "$backoff" -eq 0 ] || sleep "$backoff"
+    [ ! -f "$SCRIPT_DIR/host-pressure.sh" ] || bash "$SCRIPT_DIR/host-pressure.sh" wait >&2 || true
+    attempt_timeout="$TIMEOUT_SECS"
+    continue
+  fi
+  [ "$attempt" -le "$RESPAWN_MAX" ] || break
   should_respawn=0
   if [ "$rc" -eq 124 ]; then
     should_respawn=1

@@ -249,3 +249,86 @@ STUB
   [[ "$output" != *'still-waiting run=cifail'* ]]
   [ ! -e "$RECONCILE_MARK" ]
 }
+
+@test "stale running relaunch charges env_deaths (not respawns), passes GSD_RESUME=1, and detaches into a new session" {
+  cat > "$REPO/scripts/gsd/resume-stub.sh" <<'EOF2'
+#!/usr/bin/env bash
+printf '%s resume=%s pgid=%s\n' "$*" "${GSD_RESUME-unset}" "$(ps -o pgid= -p $$ | tr -d ' ')" >> "${RECONCILE_MARK:?}"
+EOF2
+  bash scripts/gsd/lifecycle.sh checkpoint st running start manual '{}' '["scripts/gsd/resume-stub.sh","st"]' '{"respawns":2,"env_deaths":3}'
+  jq '.child_pid=99999999 | .launched_at=1' .planning/run-state/lifecycle-st.json > record && mv record .planning/run-state/lifecycle-st.json
+  run env FFS_RECONCILE_STALE_SECS=1 bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=st'* ]]
+  for attempt in $(seq 1 250); do [ -s "$RECONCILE_MARK" ] && break; sleep 0.02; done
+  line="$(cat "$RECONCILE_MARK")"
+  [[ "$line" == 'st resume=1 pgid='* ]]
+  [ "${line##*pgid=}" != "$(ps -o pgid= -p $$ | tr -d ' ')" ]
+  [ "$(jq -r .budgets.env_deaths .planning/run-state/lifecycle-st.json)" = 2 ]
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-st.json)" = 2 ]
+}
+
+@test "a satisfied time wake (not stale) relaunches without GSD_RESUME and charges respawns" {
+  cat > "$REPO/scripts/gsd/resume-stub.sh" <<'EOF2'
+#!/usr/bin/env bash
+printf '%s resume=%s\n' "$*" "${GSD_RESUME-unset}" >> "${RECONCILE_MARK:?}"
+EOF2
+  now=$(date +%s); bash scripts/gsd/lifecycle.sh checkpoint tw waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","tw"]' '{"respawns":2}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-tw.json > record && mv record .planning/run-state/lifecycle-tw.json
+  run bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=tw'* ]]
+  wait_for_marker 'tw resume=unset'
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-tw.json)" = 1 ]
+  [ "$(jq -r .budgets.env_deaths .planning/run-state/lifecycle-tw.json)" = 8 ]
+}
+
+@test "env_deaths at zero makes a stale running record terminal without a launch" {
+  bash scripts/gsd/lifecycle.sh checkpoint z0 running start manual '{}' '["scripts/gsd/resume-stub.sh","z0"]' '{"respawns":2,"env_deaths":0}'
+  jq '.child_pid=99999999 | .launched_at=1' .planning/run-state/lifecycle-z0.json > record && mv record .planning/run-state/lifecycle-z0.json
+  run env FFS_RECONCILE_STALE_SECS=1 bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:budget-exhausted run=z0'* ]]
+  [ "$(jq -r .state .planning/run-state/lifecycle-z0.json)" = failed ]
+  [ "$(jq -r .reason .planning/run-state/lifecycle-z0.json)" = env-death-budget-exhausted ]
+  sleep 0.1; [ ! -e "$RECONCILE_MARK" ]
+}
+
+@test "host memory pressure defers the record budget-neutrally instead of relaunching" {
+  cp "$ROOT/scripts/gsd/host-pressure.sh" "$REPO/scripts/gsd/"
+  bash scripts/gsd/lifecycle.sh checkpoint hp running start manual '{}' '["scripts/gsd/resume-stub.sh","hp"]' '{"respawns":2,"env_deaths":3}'
+  jq '.child_pid=99999999 | .launched_at=1' .planning/run-state/lifecycle-hp.json > record && mv record .planning/run-state/lifecycle-hp.json
+  before=$(date +%s)
+  run env FFS_RECONCILE_STALE_SECS=1 FFS_HOST_PRESSURE_FIXTURE=high FFS_PRESSURE_DEFER_SECS=120 bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:deferred-pressure run=hp high swap_pct=95'* ]]
+  record=.planning/run-state/lifecycle-hp.json
+  [ "$(jq -r .state "$record")" = waiting ]; [ "$(jq -r .reason "$record")" = memory-pressure ]
+  [ "$(jq -r .wake_at "$record")" -ge $((before + 120)) ]
+  [ "$(jq -r .budgets.env_deaths "$record")" = 3 ]; [ "$(jq -r .budgets.respawns "$record")" = 2 ]
+  sleep 0.1; [ ! -e "$RECONCILE_MARK" ]
+  # pressure clears: the deferred record is still relaunchable once due
+  jq '.wake_at=1 | .wake_condition.params.wake_at=1' "$record" > r && mv r "$record"
+  run env FFS_HOST_PRESSURE_FIXTURE=ok bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *'RECONCILE:relaunched run=hp'* ]]
+  wait_for_marker hp
+}
+
+@test "pressure deferral preserves stale recovery with zero respawns and resume intent" {
+  cp "$ROOT/scripts/gsd/host-pressure.sh" "$REPO/scripts/gsd/"
+  cat > "$REPO/scripts/gsd/resume-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s resume=%s\n' "$*" "${GSD_RESUME-unset}" >> "${RECONCILE_MARK:?}"
+STUB
+  bash scripts/gsd/lifecycle.sh launch pressure '["scripts/gsd/resume-stub.sh","pressure"]' '{"respawns":0,"env_deaths":3}' 99999999
+  record=.planning/run-state/lifecycle-pressure.json
+  jq '.launched_at=1' "$record" > r && mv r "$record"
+  run env FFS_RECONCILE_STALE_SECS=1 FFS_HOST_PRESSURE_FIXTURE=high bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *RECONCILE:deferred-pressure* ]]
+  # A second pressure deferral must retain the original recovery context.
+  jq '.wake_at=1 | .wake_condition.params.wake_at=1' "$record" > r && mv r "$record"
+  run env FFS_HOST_PRESSURE_FIXTURE=high bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *RECONCILE:deferred-pressure* ]]
+  jq '.wake_at=1 | .wake_condition.params.wake_at=1' "$record" > r && mv r "$record"
+  run env FFS_HOST_PRESSURE_FIXTURE=ok bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]; [[ "$output" == *RECONCILE:relaunched* ]]
+  wait_for_marker 'pressure resume=1'
+  [ "$(jq -r .budgets.env_deaths "$record")" = 2 ]
+  [ "$(jq -r .budgets.respawns "$record")" = 0 ]
+}

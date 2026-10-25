@@ -113,13 +113,31 @@ for record in "${records[@]}"; do
   if [ "$rc" -eq 3 ]; then echo "RECONCILE:claim-held run=$run"; continue; fi
   if [ "$rc" -ne 0 ]; then echo "RECONCILE:coord-error run=$run"; continue; fi
   generation="$(printf '%s\n' "$result" | sed -n 's/^CLAIM-OK generation=//p' | head -1)"
-  # A stale running record has already spent its previous budget.  Reset it to
-  # waiting then relaunch without a second charge: the dead child made no
-  # progress and the stale-liveness guard is the double-launch protection.
+  # A stale running record is an environment death (the launcher or its
+  # child died without reaching a terminal state: SIGKILL, memory reap, host
+  # reboot). Charge the env_deaths budget -- never respawns, which counts
+  # step failures -- then relaunch as a RESUME of the same run id.
   relaunch_args=("$run" reconcile)
+  resume_env=()
+  recovery_reason="$(jq -r '.deferred_reason // .reason // empty' "$record")"
   if [ "$state" = running ]; then
     life transition "$run" waiting stale-launcher >/dev/null || { echo "RECONCILE:invalid-record run=$run"; claim_release "$claim" "$generation"; continue; }
-    relaunch_args+=(--no-charge)
+    relaunch_args+=(--charge env_deaths)
+    resume_env=(GSD_RESUME=1)
+  elif [ "$recovery_reason" = stale-launcher ]; then
+    relaunch_args+=(--charge env_deaths)
+    resume_env=(GSD_RESUME=1)
+  elif [ "$recovery_reason" = session-limit ]; then
+    resume_env=(GSD_RESUME=1)
+  fi
+  # Memory-aware admission: relaunching into a host that is already being
+  # reaped just spends the budget. Defer (budget-neutral) and re-evaluate at
+  # the next pass instead. Fail-open when the lever is absent or unreadable.
+  if [ -f "$ROOT/scripts/gsd/host-pressure.sh" ] && ! pressure="$(bash "$ROOT/scripts/gsd/host-pressure.sh" check 2>/dev/null)"; then
+    defer_secs="${FFS_PRESSURE_DEFER_SECS:-300}"
+    life defer "$run" "$(( $(date +%s) + defer_secs ))" memory-pressure >/dev/null 2>&1 || true
+    echo "RECONCILE:deferred-pressure run=$run ${pressure#HOST-PRESSURE:}"
+    claim_release "$claim" "$generation"; continue
   fi
   relaunch_err="$(mktemp "${TMPDIR:-/tmp}/ffs-reconcile-err.XXXXXX")"
   argv="$(life relaunch "${relaunch_args[@]}" 2>"$relaunch_err")"; rc=$?
@@ -134,8 +152,12 @@ for record in "${records[@]}"; do
   executable="$(realpath "${command[0]}" 2>/dev/null || true)"
   case "$executable" in "$ROOT/scripts/gsd/"*) ;; *) echo "RECONCILE:invalid-argv run=$run"; claim_release "$claim" "$generation"; continue;; esac
   log="$STATE_DIR/reconcile-$run.log"
-  # the record's run id must reach the relaunched runner — argv carries no env
-  GSD_RUN_ID="$run" nohup "${command[@]}" >"$log" 2>&1 < /dev/null & child=$!
+  # the record's run id must reach the relaunched runner — argv carries no env.
+  # setsid (via python: macOS ships no setsid binary) puts the child in its
+  # own session + process group, so a reap or kill of the reconciler's own
+  # process tree (Claude Code background-task reap, session end) cannot take
+  # the relaunched run down with it. execvp keeps the pid we record below.
+  nohup env GSD_RUN_ID="$run" ${resume_env[@]+"${resume_env[@]}"} python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "${command[@]}" >"$log" 2>&1 < /dev/null & child=$!
   disown "$child" 2>/dev/null || true
   life set-pid "$run" "$child" >/dev/null || { life transition "$run" failed launch-failed >/dev/null 2>&1 || true; echo "RECONCILE:launch-failed run=$run"; claim_release "$claim" "$generation"; continue; }
   echo "RECONCILE:relaunched run=$run pid=$child"

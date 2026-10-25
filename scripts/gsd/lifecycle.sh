@@ -7,7 +7,9 @@ usage() {
 Usage:
   lifecycle.sh checkpoint <run> <state> <reason> <wake-type> <wake-params-json> <resume-argv-json> <budgets-json>
   lifecycle.sh transition <run> <state> <reason>
-  lifecycle.sh decrement <run> <respawns|wakes|ci_reruns>
+  lifecycle.sh decrement <run> <respawns|wakes|ci_reruns|env_deaths>
+  lifecycle.sh launch <run> <resume-argv-json> <budgets-json> <pid>
+  lifecycle.sh defer <run> <wake-at> <reason>
   lifecycle.sh wake-checkpoint <run> <wake-at> <resume-argv-json> <max-attempts>
   lifecycle.sh ci-reserve <run> <attempt> <max-reruns>
   lifecycle.sh ci-complete-rerun <run>
@@ -18,7 +20,7 @@ Usage:
   lifecycle.sh ci-failed <run> <reason>
   lifecycle.sh show <run>
   lifecycle.sh validate <run>
-  lifecycle.sh relaunch <run> <reason> [--no-charge]
+  lifecycle.sh relaunch <run> <reason> [--no-charge|--charge <respawns|env_deaths>]
   lifecycle.sh set-pid <run> <pid>
 USAGE
 }
@@ -34,7 +36,7 @@ VERB="${1:-}"
 [ -n "$VERB" ] || { usage; fail 'usage'; }
 shift
 case "$VERB" in
-  checkpoint|transition|decrement|wake-checkpoint|ci-reserve|ci-complete-rerun|ci-refund-rerun|ci-gh-error|ci-probe-success|ci-ready|ci-failed|show|validate|relaunch|set-pid) ;;
+  checkpoint|transition|decrement|wake-checkpoint|launch|defer|ci-reserve|ci-complete-rerun|ci-refund-rerun|ci-gh-error|ci-probe-success|ci-ready|ci-failed|show|validate|relaunch|set-pid) ;;
   *) usage; fail 'usage' ;;
 esac
 
@@ -43,7 +45,7 @@ esac
 # (EDGE-009: off must never strand an existing waiting record).
 if [ "${FFS_LIFECYCLE:-on}" = off ]; then
   case "$VERB" in
-    checkpoint|wake-checkpoint) printf 'LIFECYCLE:disabled\n'; exit 0 ;;
+    checkpoint|wake-checkpoint|launch) printf 'LIFECYCLE:disabled\n'; exit 0 ;;
   esac
 fi
 
@@ -82,7 +84,19 @@ TRANSITIONS = {
     "runnable": {"running", "failed", "quarantined"},
     "done": set(), "failed": set(), "quarantined": set(),
 }
-BUDGETS = ("respawns", "wakes", "ci_reruns")
+# env_deaths: signal/OOM kills of the driver or its child (rc 129/137/143).
+# They are environment failures, never step failures, so they draw on their
+# own budget and never consume respawns (never-stop continuation, 2026-10-25).
+BUDGETS = ("respawns", "wakes", "ci_reruns", "env_deaths")
+# Records written before env_deaths existed omit it, and most checkpoint
+# callers never think to request it. Both get the default allowance rather
+# than 0 -- a 0 would turn every stale-running recovery into a terminal
+# failure, which is the exact stop this budget exists to prevent.
+OPTIONAL_BUDGETS = ("env_deaths",)
+def _env_death_default() -> int:
+    raw = os.environ.get("FFS_ENV_DEATH_MAX", "8")
+    return int(raw) if raw.isdigit() else 8
+BUDGET_DEFAULTS = {"env_deaths": _env_death_default()}
 
 
 def fail(message: str) -> None:
@@ -156,7 +170,11 @@ def validate(record: dict) -> None:
     if not executable.is_relative_to(scripts):
         fail("invalid-resume-argv")
     budgets = record["budgets"]
-    if not isinstance(budgets, dict) or any(not isinstance(budgets.get(key), int) or budgets[key] < 0 for key in BUDGETS):
+    if not isinstance(budgets, dict):
+        fail("invalid-budgets")
+    for key in OPTIONAL_BUDGETS:
+        budgets.setdefault(key, BUDGET_DEFAULTS.get(key, 0))
+    if any(not isinstance(budgets.get(key), int) or budgets[key] < 0 for key in BUDGETS):
         fail("invalid-budgets")
 
 
@@ -202,7 +220,7 @@ if verb == "checkpoint":
                         fail("budget-increase-refused")
                     record["budgets"][key] = requested[key]
         else:
-            budgets = {key: requested.get(key, 0) for key in BUDGETS}
+            budgets = {key: requested.get(key, BUDGET_DEFAULTS.get(key, 0)) for key in BUDGETS}
             record = {"run_id": safe_run_id(run_id), "state": state, "reason": reason,
                       "wake_condition": {"type": wake_type, "params": wake_params},
                       "resume_argv": resume_argv, "budgets": budgets,
@@ -256,7 +274,7 @@ elif verb == "wake-checkpoint":
         else:
             record = {"run_id": safe_run_id(run_id), "state": "waiting", "reason": "session-limit",
                       "wake_condition": {"type": "time", "params": {}}, "resume_argv": resume_argv,
-                      "budgets": {"respawns": 0, "wakes": maximum, "ci_reruns": 0},
+                      "budgets": {"respawns": 0, "wakes": maximum, "ci_reruns": 0, "env_deaths": BUDGET_DEFAULTS["env_deaths"]},
                       "waiting_since": now(), "wake_at": None, "updated_at": now()}
         if record["budgets"].get("wakes", 0) <= 0:
             record["state"] = "failed"
@@ -274,6 +292,85 @@ elif verb == "wake-checkpoint":
         record["updated_at"] = now()
         save_validated(path, record)
     print(f"LIFECYCLE:wake-reserved run={run_id}")
+elif verb == "launch":
+    # Idempotent launch record: the runner (or a detached driver) declares
+    # itself running so a death that skips every trap -- SIGKILL, memory reap
+    # of the whole process group -- still leaves reconcile.sh a stale-running
+    # record with a resume argv to relaunch.
+    if len(args) != 4 or not args[3].isdigit():
+        fail("usage")
+    run_id, resume_raw, budgets_raw, pid_raw = args
+    try:
+        resume_argv = json.loads(resume_raw)
+        requested = json.loads(budgets_raw)
+    except json.JSONDecodeError:
+        fail("invalid-json")
+    if not isinstance(requested, dict):
+        fail("invalid-budgets")
+    path = path_for(run_id)
+    launched = int(dt.datetime.now().timestamp())
+    with FileLock(f"{path}.lock"):
+        if path.exists():
+            record = load(path)
+            validate(record)
+            state = record["state"]
+            if state in {"done", "failed", "quarantined"}:
+                print(f"LIFECYCLE:terminal run={run_id} state={state}")
+                raise SystemExit(3)
+            if state == "waiting":
+                transition(record, "runnable", "launch")
+            if record["state"] == "runnable":
+                transition(record, "running", "launch")
+            # an already-running record (reconcile pre-wrote it) just adopts
+            # the new pid; budgets are never raised here
+            record["reason"] = "launch"
+        else:
+            budgets = {key: requested.get(key, BUDGET_DEFAULTS.get(key, 0)) for key in BUDGETS}
+            record = {"run_id": safe_run_id(run_id), "state": "running", "reason": "launch",
+                      "wake_condition": {"type": "manual", "params": {}},
+                      "resume_argv": resume_argv, "budgets": budgets,
+                      "waiting_since": None, "wake_at": None, "updated_at": now()}
+        record["child_pid"] = int(pid_raw)
+        record["launched_at"] = launched
+        record["updated_at"] = now()
+        save_validated(path, record)
+    print(f"LIFECYCLE:launched run={run_id} pid={pid_raw}")
+elif verb == "defer":
+    # Budget-neutral pause: host memory pressure (or any wait the caller
+    # does not want charged) parks the record as waiting(time) so reconcile
+    # re-evaluates it at wake_at instead of relaunching into a reap.
+    if len(args) != 3:
+        fail("usage")
+    run_id, wake_at_raw, reason = args
+    try:
+        wake_at = int(wake_at_raw)
+    except ValueError:
+        fail("invalid-wake")
+    if wake_at < 0:
+        fail("invalid-wake")
+    path = path_for(run_id)
+    with FileLock(f"{path}.lock"):
+        if not path.exists():
+            fail("missing-record")
+        record = load(path)
+        validate(record)
+        source = record["state"]
+        # Preserve the original launch intent across repeated pressure waits.
+        if "deferred_reason" not in record:
+            record["deferred_reason"] = record["reason"]
+        if source == "runnable":
+            # runnable has no legal edge back to waiting; re-arm via running
+            transition(record, "running", reason)
+        if record["state"] == "running":
+            transition(record, "waiting", reason)
+        elif record["state"] != "waiting":
+            fail(f"illegal-transition {source}>waiting")
+        record["reason"] = reason
+        record["wake_condition"] = {"type": "time", "params": {"wake_at": wake_at}}
+        record["wake_at"] = wake_at
+        record["updated_at"] = now()
+        save_validated(path, record)
+    print(f"LIFECYCLE:deferred run={run_id} wake_at={wake_at} reason={reason}")
 elif verb == "ci-reserve":
     if len(args) != 3:
         fail("usage")
@@ -359,22 +456,29 @@ elif verb == "validate":
         fail("usage")
     validate(load(path_for(args[0])))
 elif verb == "relaunch":
-    if len(args) not in {2, 3} or (len(args) == 3 and args[2] != "--no-charge"):
+    run_id, reason = args[:2] if len(args) >= 2 else fail("usage")
+    extra = args[2:]
+    charge_key = "respawns"
+    if extra == ["--no-charge"]:
+        charge_key = None
+    elif len(extra) == 2 and extra[0] == "--charge" and extra[1] in {"respawns", "env_deaths"}:
+        charge_key = extra[1]
+    elif extra:
         fail("usage")
-    run_id, reason = args[:2]
-    charge = len(args) == 2
     path = path_for(run_id)
     with FileLock(f"{path}.lock"):
         record = load(path)
         validate(record)
         if record["state"] not in {"waiting", "runnable"}:
             fail("not-relaunchable")
-        if charge and record["budgets"]["respawns"] <= 0:
-            record["state"] = "failed"; record["reason"] = "respawn-budget-exhausted"; record["updated_at"] = now()
+        if charge_key and record["budgets"].get(charge_key, 0) <= 0:
+            exhausted = "respawn-budget-exhausted" if charge_key == "respawns" else "env-death-budget-exhausted"
+            record["state"] = "failed"; record["reason"] = exhausted; record["updated_at"] = now()
             save_validated(path, record)
             fail("budget-exhausted")
-        if charge:
-            record["budgets"]["respawns"] -= 1
+        if charge_key:
+            record["budgets"][charge_key] -= 1
+        record.pop("deferred_reason", None)
         record["state"] = "running"; record["reason"] = reason; record["launched_at"] = int(dt.datetime.now().timestamp()); record["launcher_pid"] = os.getpid(); record["updated_at"] = now()
         save_validated(path, record)
         print(json.dumps(record["resume_argv"]))

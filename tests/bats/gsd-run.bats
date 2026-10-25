@@ -2605,7 +2605,7 @@ fi
 EOF
   chmod +x "$STUB_DIR/respawn-rc124"
 
-  FFS_HOST=codex CODEX_BIN=respawn-rc124 CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+  FFS_HOST=codex CODEX_BIN=respawn-rc124 CLAUDE_BIN=fake-claude FFS_RESPAWN_MAX=1 FFS_RESPAWN_MIN_SECS=1 \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 124 ]
@@ -2626,7 +2626,7 @@ fi
 EOF
   chmod +x "$STUB_DIR/respawn-zero-commits"
 
-  FFS_HOST=codex CODEX_BIN=respawn-zero-commits CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+  FFS_HOST=codex CODEX_BIN=respawn-zero-commits CLAUDE_BIN=fake-claude FFS_RESPAWN_MAX=1 FFS_RESPAWN_MIN_SECS=1 \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 1 ]
@@ -2748,7 +2748,7 @@ fi
 EOF
   chmod +x "$STUB_DIR/respawn-log-survival"
 
-  FFS_HOST=codex CODEX_BIN=respawn-log-survival CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+  FFS_HOST=codex CODEX_BIN=respawn-log-survival CLAUDE_BIN=fake-claude FFS_RESPAWN_MAX=1 FFS_RESPAWN_MIN_SECS=1 \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 124 ]
@@ -2777,7 +2777,7 @@ fi
 EOF
   chmod +x "$STUB_DIR/respawn-argv-identical"
 
-  FFS_HOST=codex CODEX_BIN=respawn-argv-identical CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+  FFS_HOST=codex CODEX_BIN=respawn-argv-identical CLAUDE_BIN=fake-claude FFS_RESPAWN_MAX=1 FFS_RESPAWN_MIN_SECS=1 \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 124 ]
@@ -2806,7 +2806,7 @@ EOF
   chmod +x "$STUB_DIR/respawn-then-success"
 
   FFS_HOST=codex CODEX_BIN=respawn-then-success CLAUDE_BIN=fake-claude \
-    GSD_RUN_STATE_DIR="$RUN_STATE" FFS_RESPAWN_MIN_SECS=1 \
+    GSD_RUN_STATE_DIR="$RUN_STATE" FFS_RESPAWN_MAX=1 FFS_RESPAWN_MIN_SECS=1 \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
   [ "$status" -eq 0 ]
@@ -2814,6 +2814,156 @@ EOF
   respawn_lines="$(printf '%s\n' "$output" | grep -c 'GSD-RUN:RESPAWN attempt=2/2 rc=124')"
   [ "$respawn_lines" -eq 1 ]
   grep -qx 'state=completed' "$RUN_STATE/gsd-run.status"
+}
+
+@test "respawn: default FFS_RESPAWN_MAX is 2 (three launches of a zero-commit failure)" {
+  cat > "$STUB_DIR/respawn-default" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/respawn-default.count"
+  exit 1
+fi
+EOF
+  chmod +x "$STUB_DIR/respawn-default"
+
+  FFS_HOST=codex CODEX_BIN=respawn-default CLAUDE_BIN=fake-claude FFS_RESPAWN_MIN_SECS=1 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 1 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/respawn-default.count")" -eq 3 ]
+  [[ "$output" == *'GSD-RUN:RESPAWN attempt=2/3 rc=1'* ]]
+  [[ "$output" == *'GSD-RUN:RESPAWN attempt=3/3 rc=1'* ]]
+}
+
+@test "env-death: child rc 143 charges env_deaths, not respawn attempts, and relaunches the same argv" {
+  # Drive dies by signal twice (rc 143 = SIGTERM, the Claude Code memory-reap
+  # signature), then succeeds. Zero GSD-RUN:RESPAWN lines: a signal death is
+  # an environment failure and never consumes the step-failure budget.
+  cat > "$STUB_DIR/env-death-143" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  n=0
+  [ -f "$BATS_TEST_TMPDIR/env-death-143.count" ] && n=\$(wc -l < "$BATS_TEST_TMPDIR/env-death-143.count")
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/env-death-143.count"
+  # argv is multi-line (the prompt), so record one checksum per launch
+  printf '%s\0' "\$@" | cksum >> "$BATS_TEST_TMPDIR/env-death-143.argv"
+  [ "\$n" -ge 2 ] || exit 143
+  echo DRIVE_OK
+fi
+EOF
+  chmod +x "$STUB_DIR/env-death-143"
+
+  FFS_HOST=codex CODEX_BIN=env-death-143 CLAUDE_BIN=fake-claude FFS_RESPAWN_MAX=0 \
+    FFS_ENV_BACKOFF_BASE_SECS=0 FFS_HOST_PRESSURE_FIXTURE=ok \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/env-death-143.count")" -eq 3 ]
+  [ "$(sort -u "$BATS_TEST_TMPDIR/env-death-143.argv" | wc -l | tr -d ' ')" -eq 1 ]
+  [[ "$output" == *'GSD-RUN:ENV-DEATH n=1/8 rc=143'* ]]
+  [[ "$output" == *'GSD-RUN:ENV-DEATH n=2/8 rc=143'* ]]
+  [[ "$output" != *'GSD-RUN:RESPAWN'* ]]
+}
+
+@test "env-death: FFS_ENV_DEATH_MAX bounds signal relaunches" {
+  # rc 143 (SIGTERM). A child rc 137 is folded into 124 by run-bounded.sh
+  # (its own --kill-after escalation), so inside the runner SIGKILL reads as
+  # a timeout and takes the respawn path; the supervisor (drive.sh) sees a
+  # SIGKILLed runner as 137 directly.
+  cat > "$STUB_DIR/env-death-forever" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  printf 'x\n' >> "$BATS_TEST_TMPDIR/env-death-forever.count"
+  exit 143
+fi
+EOF
+  chmod +x "$STUB_DIR/env-death-forever"
+
+  FFS_HOST=codex CODEX_BIN=env-death-forever CLAUDE_BIN=fake-claude FFS_RESPAWN_MAX=0 \
+    FFS_ENV_DEATH_MAX=2 FFS_ENV_BACKOFF_BASE_SECS=0 FFS_HOST_PRESSURE_FIXTURE=ok \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 143 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/env-death-forever.count")" -eq 3 ]
+  [[ "$output" == *'GSD-RUN:ENV-DEATH budget-exhausted'* ]]
+}
+
+@test "lifecycle launch record: explicit GSD_RUN_ID writes running at launch and done on rc 0" {
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=launch-rec \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+
+  [ "$status" -eq 0 ]
+  record="$BATS_TEST_TMPDIR/.planning/run-state/lifecycle-launch-rec.json"
+  [ -f "$record" ]
+  [ "$(jq -r .state "$record")" = done ]
+  [ "$(jq -r '.resume_argv | join(" ")' "$record")" = "scripts/gsd/gsd-run.sh /gsd-quick test" ]
+  [ "$(jq -r .budgets.env_deaths "$record")" = 8 ]
+}
+
+@test "lifecycle launch record: step failure marks failed; no record without GSD_RUN_ID or with FFS_LIFECYCLE_LAUNCH=off" {
+  cat > "$STUB_DIR/launch-fail" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else exit 7
+fi
+EOF
+  chmod +x "$STUB_DIR/launch-fail"
+
+  FFS_HOST=codex CODEX_BIN=launch-fail CLAUDE_BIN=fake-claude GSD_RUN_ID=launch-fail FFS_RESPAWN_MAX=0 \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 7 ]
+  record="$BATS_TEST_TMPDIR/.planning/run-state/lifecycle-launch-fail.json"
+  [ "$(jq -r .state "$record")" = failed ]
+  [ "$(jq -r .reason "$record")" = rc-7 ]
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  [ -z "$(ls "$BATS_TEST_TMPDIR/.planning/run-state/" 2>/dev/null | grep -v '^lifecycle-launch-fail' | grep '^lifecycle-')" ]
+
+  FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude GSD_RUN_ID=launch-off FFS_LIFECYCLE_LAUNCH=off \
+    run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  [ ! -f "$BATS_TEST_TMPDIR/.planning/run-state/lifecycle-launch-off.json" ]
+}
+
+@test "lifecycle launch record: runner killed by SIGTERM leaves the record running for reconcile" {
+  cat > "$STUB_DIR/term-victim" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'
+elif [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY
+else
+  touch "$BATS_TEST_TMPDIR/term-victim-started"
+  sleep 30
+fi
+EOF
+  chmod +x "$STUB_DIR/term-victim"
+
+  run bash -c '
+      cd "$1"
+      FFS_HOST=codex CODEX_BIN=term-victim CLAUDE_BIN=fake-claude GSD_RUN_ID=term-rec FFS_RESPAWN_MAX=0 \
+        bash "$2" /gsd-quick test > "$1/term.log" 2>&1 &
+      runner=$!
+      i=0
+      while [ ! -f "$1/term-victim-started" ] && [ "$i" -lt 1500 ]; do sleep 0.02; i=$((i + 1)); done
+      [ -f "$1/term-victim-started" ] || { echo "drive did not start" >&2; cat "$1/term.log" >&2; exit 30; }
+      kill -TERM "$runner"
+      wait "$runner"
+      exit $?
+    ' _ "$BATS_TEST_TMPDIR" "$SCRIPT"
+
+  [ "$status" -eq 143 ]
+  record="$BATS_TEST_TMPDIR/.planning/run-state/lifecycle-term-rec.json"
+  [ -f "$record" ]
+  [ "$(jq -r .state "$record")" = running ]
+  [ "$(jq -r .budgets.env_deaths "$record")" = 8 ]
 }
 
 @test "respawn: durable lifecycle respawn budget at zero blocks respawn" {

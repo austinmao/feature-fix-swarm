@@ -98,3 +98,63 @@ setup() {
   [ "$status" -eq 1 ]
   [ "$(cat "$record")" = "$before" ]
 }
+
+@test "launch creates a running record, adopts a new pid idempotently, re-arms waiting, and refuses terminal with rc 3" {
+  run bash "$LIFECYCLE" launch l1 '["scripts/gsd/drive.sh","resume","--run","l1"]' '{"respawns":1,"env_deaths":3}' 4242
+  [ "$status" -eq 0 ]; [ "$output" = 'LIFECYCLE:launched run=l1 pid=4242' ]
+  record="$REPO/.planning/run-state/lifecycle-l1.json"
+  run jq -e '.state=="running" and .child_pid==4242 and .budgets.env_deaths==3 and .budgets.respawns==1 and (.launched_at|type)=="number" and .wake_condition.type=="manual"' "$record"
+  [ "$status" -eq 0 ]
+  run bash "$LIFECYCLE" launch l1 '["scripts/gsd/drive.sh"]' '{"env_deaths":99}' 4343
+  [ "$status" -eq 0 ]
+  run jq -e '.child_pid==4343 and .budgets.env_deaths==3' "$record"
+  [ "$status" -eq 0 ]
+  bash "$LIFECYCLE" transition l1 waiting parked
+  run bash "$LIFECYCLE" launch l1 '["scripts/gsd/drive.sh"]' '{}' 4444
+  [ "$status" -eq 0 ]; [ "$(jq -r .state "$record")" = running ]
+  bash "$LIFECYCLE" transition l1 done ok
+  run bash "$LIFECYCLE" launch l1 '["scripts/gsd/drive.sh"]' '{}' 1
+  [ "$status" -eq 3 ]; [ "$output" = 'LIFECYCLE:terminal run=l1 state=done' ]
+  run env FFS_LIFECYCLE=off bash "$LIFECYCLE" launch l2 '["scripts/gsd/drive.sh"]' '{}' 1
+  [ "$status" -eq 0 ]; [ "$output" = LIFECYCLE:disabled ]; [ ! -f "$REPO/.planning/run-state/lifecycle-l2.json" ]
+}
+
+@test "env_deaths defaults to FFS_ENV_DEATH_MAX on new records and on legacy records missing it" {
+  bash "$LIFECYCLE" checkpoint nd waiting w time '{}' '["scripts/gsd/plan-wall.sh"]' '{"respawns":2}'
+  [ "$(jq -r .budgets.env_deaths "$REPO/.planning/run-state/lifecycle-nd.json")" = 8 ]
+  run env FFS_ENV_DEATH_MAX=3 bash "$LIFECYCLE" checkpoint nd3 waiting w time '{}' '["scripts/gsd/plan-wall.sh"]' '{"respawns":2}'
+  [ "$(jq -r .budgets.env_deaths "$REPO/.planning/run-state/lifecycle-nd3.json")" = 3 ]
+  legacy="$REPO/.planning/run-state/lifecycle-legacy.json"
+  jq -n '{run_id:"legacy",state:"waiting",reason:"x",wake_condition:{type:"time",params:{}},resume_argv:["scripts/gsd/plan-wall.sh"],budgets:{respawns:1,wakes:1,ci_reruns:1},waiting_since:null,wake_at:null,updated_at:"now"}' > "$legacy"
+  run bash "$LIFECYCLE" validate legacy
+  [ "$status" -eq 0 ]
+  run bash "$LIFECYCLE" relaunch legacy reconcile --charge env_deaths
+  [ "$status" -eq 0 ]; [ "$(jq -r .budgets.env_deaths "$legacy")" = 7 ]; [ "$(jq -r .budgets.respawns "$legacy")" = 1 ]
+}
+
+@test "relaunch --charge env_deaths exhausts to failed env-death-budget-exhausted; decrement accepts env_deaths" {
+  bash "$LIFECYCLE" checkpoint ex waiting w time '{}' '["scripts/gsd/plan-wall.sh"]' '{"respawns":5,"env_deaths":1}'
+  record="$REPO/.planning/run-state/lifecycle-ex.json"
+  run bash "$LIFECYCLE" decrement ex env_deaths
+  [ "$status" -eq 0 ]; [ "$(jq -r .budgets.env_deaths "$record")" = 0 ]
+  run bash "$LIFECYCLE" relaunch ex reconcile --charge env_deaths
+  [ "$status" -eq 1 ]; [[ "$output" == *budget-exhausted* ]]
+  [ "$(jq -r .state "$record")" = failed ]; [ "$(jq -r .reason "$record")" = env-death-budget-exhausted ]
+  [ "$(jq -r .budgets.respawns "$record")" = 5 ]
+  run bash "$LIFECYCLE" relaunch ex reconcile --charge bogus
+  [ "$status" -eq 1 ]; [[ "$output" == LIFECYCLE:usage ]]
+}
+
+@test "defer parks running or waiting as waiting(time) without charging any budget" {
+  bash "$LIFECYCLE" launch df '["scripts/gsd/drive.sh"]' '{"respawns":2,"env_deaths":4}' 1
+  record="$REPO/.planning/run-state/lifecycle-df.json"
+  run bash "$LIFECYCLE" defer df 1700000000 memory-pressure
+  [ "$status" -eq 0 ]; [ "$output" = 'LIFECYCLE:deferred run=df wake_at=1700000000 reason=memory-pressure' ]
+  run jq -e '.state=="waiting" and .wake_at==1700000000 and .wake_condition.type=="time" and .wake_condition.params.wake_at==1700000000 and .budgets.respawns==2 and .budgets.env_deaths==4' "$record"
+  [ "$status" -eq 0 ]
+  run bash "$LIFECYCLE" defer df 1700000500 again
+  [ "$status" -eq 0 ]; [ "$(jq -r .wake_at "$record")" = 1700000500 ]
+  bash "$LIFECYCLE" transition df failed x
+  run bash "$LIFECYCLE" defer df 1 nope
+  [ "$status" -eq 1 ]; [[ "$output" == LIFECYCLE:illegal-transition* ]]
+}
