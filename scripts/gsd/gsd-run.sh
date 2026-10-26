@@ -969,9 +969,50 @@ ensure_run_worktree() {
       echo "gsd-run: run worktree belongs to a different Git common directory" >&2
       return 78
     fi
+    # A worktree created by older code is detached, and gsd-executor refuses
+    # to commit on a detached HEAD. Attach it to ffs/runs/<id> at its current
+    # commit; if that branch already exists somewhere else, fail closed.
+    if ! "$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+      local reuse_branch="ffs/runs/$RUN_ID" reuse_head reuse_tip reuse_err
+      reuse_head="$("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" rev-parse -q --verify HEAD 2>/dev/null)" || {
+        echo "gsd-run: cannot resolve HEAD of reused run worktree: $RUN_WORKTREE_ROOT" >&2
+        return 78
+      }
+      if reuse_tip="$("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" rev-parse -q --verify "refs/heads/$reuse_branch" 2>/dev/null)"; then
+        if [ "$reuse_tip" != "$reuse_head" ]; then
+          echo "gsd-run: branch $reuse_branch exists but does not match the detached run worktree HEAD; inspect it, then delete the branch or choose a new GSD_RUN_ID" >&2
+          return 78
+        fi
+        reuse_err="$("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" switch -q "$reuse_branch" 2>&1)" || {
+          echo "gsd-run: cannot attach branch $reuse_branch to the reused run worktree ($reuse_err)" >&2
+          return 78
+        }
+      else
+        reuse_err="$("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" switch -q -c "$reuse_branch" 2>&1)" || {
+          echo "gsd-run: cannot attach branch $reuse_branch to the reused run worktree ($reuse_err)" >&2
+          return 78
+        }
+      fi
+    fi
     return 0
   fi
-  "$GIT_BIN_FIXED" -C "$REPO_ROOT" worktree add --detach "$RUN_WORKTREE_ROOT" HEAD >/dev/null || {
+  # The run worktree is created ON A BRANCH, never detached: gsd-executor
+  # asserts `git symbolic-ref --quiet HEAD` before every commit and refuses
+  # ("FATAL: refusing to commit -- HEAD is detached"), so a detached run
+  # worktree makes every execute-phase run die at its first commit. The branch
+  # name embeds the (unique) run id and is outside the protected-branch set
+  # (main|master|develop|trunk|release/*). Nothing in gsd-run removes
+  # the branch: it outlives its worktree until someone deletes it explicitly
+  # (git worktree prune; git branch -D ffs/runs/<id>).
+  # A pre-existing ffs/runs/<id> branch with no registered worktree is a stale
+  # leftover of a crashed run; reusing its old tip could silently execute on
+  # outdated code, so fail closed instead of guessing.
+  local run_branch="ffs/runs/$RUN_ID"
+  if "$GIT_BIN_FIXED" -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$run_branch"; then
+    echo "gsd-run: stale branch $run_branch exists without a run worktree; run git worktree prune, then delete it (git branch -D $run_branch) or choose a new GSD_RUN_ID" >&2
+    return 78
+  fi
+  "$GIT_BIN_FIXED" -C "$REPO_ROOT" worktree add -b "$run_branch" "$RUN_WORKTREE_ROOT" HEAD >/dev/null || {
     echo "gsd-run: failed to create run worktree at $RUN_WORKTREE_ROOT" >&2
     return 1
   }
@@ -1153,6 +1194,43 @@ print(dirs[0].name if dirs else "", end="")
 PY
 }
 
+# Run outputs an executed run commits into the worktree phase dir that the repo
+# copy legitimately lacks. Anything else extra (e.g. a *-PLAN.md) forces the copy.
+WORKTREE_RUN_OUTPUT_PATTERNS=(
+  '*-SUMMARY.md' '*-BASELINE.md' '*-VERIFICATION.md' '*-evidence.json' '*-UAT.md'
+  '*-REVIEW.md' '*-CONTEXT.md' '*-RESEARCH.md' '.continue-here.md' 'WALL-RESIDUALS.md'
+)
+
+# True only when ALL hold (fail closed; any doubt returns non-zero and the
+# caller keeps the normal copy):
+#  (a) the worktree phase dir has no uncommitted edits/deletions/untracked files;
+#  (b) every repo file is byte-identical to the worktree HEAD blob;
+#  (c) every HEAD file absent from the repo dir is an allowlisted run output.
+worktree_committed_superset() {
+  local repo_dir="$1" slug="$2" rel_root file rel head_blob cur_blob pat ok
+  rel_root="$PLANNING_PHASES_REL/$slug"
+  [ -n "$("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" ls-tree -r HEAD -- "$rel_root" 2>/dev/null | head -1)" ] || return 1
+  [ -z "$("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" status --porcelain -- "$rel_root" 2>/dev/null)" ] || return 1
+  while IFS= read -r -d '' file; do
+    rel="${file#"$repo_dir"/}"
+    head_blob="$("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" rev-parse -q --verify "HEAD:$rel_root/$rel" 2>/dev/null)" || return 1
+    cur_blob="$("$GIT_BIN_FIXED" hash-object --no-filters -- "$file" 2>/dev/null)" || return 1
+    [ "$head_blob" = "$cur_blob" ] || return 1
+  done < <(find "$repo_dir" -type f -print0)
+  [ -z "$(find "$repo_dir" ! -type f ! -type d -print -quit)" ] || return 1
+  while IFS= read -r -d '' file; do
+    rel="${file#"$rel_root"/}"
+    [ -f "$repo_dir/$rel" ] && continue
+    ok=1
+    for pat in "${WORKTREE_RUN_OUTPUT_PATTERNS[@]}"; do
+      # shellcheck disable=SC2254
+      case "${rel##*/}" in $pat) ok=0; break ;; esac
+    done
+    [ "$ok" -eq 0 ] || return 1
+  done < <("$GIT_BIN_FIXED" -C "$RUN_WORKTREE_ROOT" ls-tree -r -z --name-only HEAD -- "$rel_root")
+  return 0
+}
+
 # Copy $1 onto $2 without ever destroying $2 first: stage a sibling temp,
 # stash the live destination, promote, and only then drop the stash. Any
 # failure restores the stash and emits a typed line. $3=direction $4=slug.
@@ -1303,6 +1381,10 @@ PY
         echo "gsd-run: cannot sync .planning direction=repo phase=$slug: source missing" >&2
         return 1
       }
+      if [ "$wt_exists" -eq 1 ] && worktree_committed_superset "$repo_dir" "$slug"; then
+        echo "GSD-RUN:PLANNING-SYNC direction=repo phase=$slug skipped=worktree-superset" >&2
+        return 0
+      fi
       planning_sync_copy "$repo_dir" "$wt_dir" repo "$slug" || return 1
       echo "GSD-RUN:PLANNING-SYNC direction=repo phase=$slug" >&2
       return 0
@@ -2134,7 +2216,9 @@ check_planning_divergence "$@" || exit $?
 # no wall has seen, which would launch the executor against unreviewed plans.
 # Re-run the same lever against the synced directory. The repo direction needs
 # no re-run: the repo copy is the one the wall already cleared, and
-# gsd-plan-phase has no wall to retire.
+# gsd-plan-phase has no wall to retire. A worktree-superset skip is wall-safe
+# too: every repo file (the plans) is byte-identical to the worktree HEAD, and
+# the only extras are allowlisted run outputs, never plan input.
 if [ "$PLANNING_SYNC_REPO_CHANGED" -eq 1 ] && [ "$GSD_SKILL_NAME" = gsd-execute-phase ]; then
   _gsd_run_wall_gate "$WALL_PHASE_DIR"
   _resync_wall_rc=$?

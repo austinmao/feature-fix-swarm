@@ -51,7 +51,7 @@ PRESSURE="$SCRIPT_DIR/host-pressure.sh"
 # original caller's environment. Never serialize arbitrary environment keys.
 RESUME_ENV_KEYS=(FFS_HOST FFS_CROSS_VENDOR_FALLBACK GSD_MODEL_CONFIG GSD_MODEL_REQUEST
   GSD_LEAD_MODEL GSD_NETWORK_MODE GSD_NETWORK_PURPOSE GSD_HOST_PROBE_TIMEOUT TIMEOUT
-  GSD_CLAUDE_PERMISSION_MODE)
+  GSD_CLAUDE_PERMISSION_MODE GSD_PLANNING_SYNC TMPDIR GSD_EXTRA_WRITABLE_WORKTREE)
 
 STEP_ATTEMPTS="${FFS_STEP_ATTEMPTS:-5}"
 ENV_DEATH_MAX="${FFS_ENV_DEATH_MAX:-8}"
@@ -355,7 +355,8 @@ cmd_start() {
   python3 - "$STATE_FILE" "$RUN" "$verb" "$project" "$after_step" "$on_blocked" "$first" "$last" "${RESUME_ENV_KEYS[@]}" <<'PY'
 import json, os, sys, time
 path, run, verb, project, after_step, on_blocked, first, last = sys.argv[1:9]
-runtime_env = {key: os.environ[key] for key in sys.argv[9:] if key in os.environ}
+# JSON null records "unset at start" so resume can tell it from an older state file lacking the key.
+runtime_env = {key: os.environ.get(key) for key in sys.argv[9:]}
 steps = [{"phase": n, "run_id": f"{run}-p{n}", "state": "pending", "attempts": 0, "env_deaths": 0,
           "launches": 0, "no_progress": 0, "wall_waits": 0, "fingerprint": "", "head": "",
           "started_at": None, "last_rc": None, "reason": ""} for n in range(int(first), int(last) + 1)]
@@ -405,12 +406,21 @@ cmd_resume() {
   fi
   if jq -e 'has("runtime_env")' "$STATE_FILE" >/dev/null; then
     for key in "${RESUME_ENV_KEYS[@]}"; do
-      if jq -e --arg key "$key" '.runtime_env | has($key)' "$STATE_FILE" >/dev/null; then
-        value="$(jq -r --arg key "$key" '.runtime_env[$key]' "$STATE_FILE")"
-        export "$key=$value"
-      else
+      if jq -e --arg key "$key" '.runtime_env | has($key) and (.[$key] == null)' "$STATE_FILE" >/dev/null; then
         unset "$key"
+      elif jq -e --arg key "$key" '.runtime_env | has($key)' "$STATE_FILE" >/dev/null; then
+        value="$(jq -r --arg key "$key" '.runtime_env[$key]' "$STATE_FILE")"
+        if [ "$key" = TMPDIR ] && [ ! -d "$value" ]; then
+          # A saved temp root that has since vanished would make every
+          # gsd-run mktemp fail; fall back to the default instead.
+          say "tmpdir-missing run=$RUN saved=$value; unsetting TMPDIR"
+          unset TMPDIR
+        else
+          export "$key=$value"
+        fi
       fi
+      # A key absent from the state file (state written by an older drive.sh;
+      # a key unset at start is saved as null) leaves the caller's environment untouched.
     done
   fi
   project="$(q '.project // empty')"

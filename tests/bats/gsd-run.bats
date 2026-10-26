@@ -1216,15 +1216,16 @@ EOF
     *) ACTUAL_COMMON="$(cd "$(cat "$BATS_TEST_TMPDIR/codex.cwd")/$ACTUAL_COMMON" && pwd -P)" ;;
   esac
   [ "$ACTUAL_COMMON" = "$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)" ]
-  # A detached runner worktree needs only its exact Git admin directory plus
-  # shared objects; attached branch-ref grants are covered below.
+  # The runner worktree is on branch ffs/runs/<id>: its exact Git admin
+  # directory plus shared objects (4) and the branch ref/log files and their
+  # .lock siblings (4); attached branch-ref grants are covered below.
   [ "$(python3 - "$BATS_TEST_TMPDIR/codex.config" <<'PY'
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
 print(len(roots))
 PY
-)" -eq 4 ]
+)" -eq 8 ]
   [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
 }
 
@@ -2573,7 +2574,7 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "the sandboxed Codex drive grants only detached-worktree metadata and the shared coord store" {
+@test "the sandboxed Codex drive grants only run-branch worktree metadata and the shared coord store" {
   FFS_HOST=codex GSD_NETWORK_MODE=none CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
@@ -2582,7 +2583,8 @@ EOF
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
-assert len(roots) == 4, roots
+assert len(roots) == 8, roots
+assert sum('/refs/heads/ffs/runs/' in r for r in roots) == 4, roots
 assert any(r.endswith('/.feature-fix-swarm') for r in roots), roots
 assert any('/.claude/worktrees/' in r for r in roots), roots
 assert any(r.endswith('/objects') for r in roots), roots
@@ -3039,7 +3041,7 @@ EOF
 # repo (a subdirectory of the outer $BATS_TEST_TMPDIR repo would resolve
 # `git rev-parse --show-toplevel` to the OUTER repo — see the "plan wall
 # blocks execute-phase" test above for why). A commit is required because
-# ensure_run_worktree does `git worktree add --detach ... HEAD`, which needs
+# ensure_run_worktree does `git worktree add -b ffs/runs/<id> ... HEAD`, which needs
 # a resolvable HEAD.
 
 @test "diverged .planning/phases/<slug> across repo and worktree refuses with the typed line and exits 78, drive never launches" {
@@ -3193,6 +3195,190 @@ EOF
   [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
   [[ "$output" != *"PLANNING-SYNC"* ]]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "the run worktree is created on branch ffs/runs/<id>, not detached, so gsd-executor's HEAD assertion passes" {
+  REPO="$BATS_TEST_TMPDIR/branch-fixture"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/seed"
+  git -C "$REPO" add seed
+  git -C "$REPO" commit -qm seed
+
+  RID=branch-fixture-1
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+
+  WT="$REPO/.claude/worktrees/$RID"
+  [ -e "$WT/.git" ]
+  run git -C "$WT" symbolic-ref -q HEAD
+  [ "$status" -eq 0 ]
+  [ "$output" = "refs/heads/ffs/runs/$RID" ]
+}
+
+@test "a stale ffs/runs/<id> branch with no worktree fails closed with a typed message" {
+  REPO="$BATS_TEST_TMPDIR/stale-branch-fixture"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/seed"
+  git -C "$REPO" add seed
+  git -C "$REPO" commit -qm seed
+  RID=stale-branch-1
+  git -C "$REPO" branch "ffs/runs/$RID"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: stale branch ffs/runs/$RID exists without a run worktree"* ]]
+}
+
+reuse_fixture() { # $1 = repo path, $2 = run id; leaves a DETACHED registered worktree (old-code shape)
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" config user.email test@example.com
+  git -C "$1" config user.name Test
+  printf '%s\n' seed > "$1/seed"
+  git -C "$1" add seed
+  git -C "$1" commit -qm seed
+  mkdir -p "$1/.claude/worktrees"
+  git -C "$1" worktree add -q --detach "$1/.claude/worktrees/$2" HEAD
+}
+
+@test "reusing a detached run worktree from the old code attaches branch ffs/runs/<id>" {
+  REPO="$BATS_TEST_TMPDIR/reuse-attach"; RID=reuse-attach-1
+  reuse_fixture "$REPO" "$RID"
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  run git -C "$REPO/.claude/worktrees/$RID" symbolic-ref -q HEAD
+  [ "$output" = "refs/heads/ffs/runs/$RID" ]
+}
+
+@test "reusing a detached run worktree fails closed when ffs/runs/<id> points elsewhere" {
+  REPO="$BATS_TEST_TMPDIR/reuse-elsewhere"; RID=reuse-elsewhere-1
+  reuse_fixture "$REPO" "$RID"
+  printf '%s\n' more > "$REPO/more"
+  git -C "$REPO" add more
+  git -C "$REPO" commit -qm more
+  git -C "$REPO" branch "ffs/runs/$RID" HEAD
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: branch ffs/runs/$RID exists but does not match the detached run worktree"* ]]
+}
+
+@test "GSD_PLANNING_SYNC=repo skips the copy when the worktree is a committed superset (resume keeps SUMMARY files)" {
+  REPO="$BATS_TEST_TMPDIR/superset-fixture"; RID=superset-1
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q -b "ffs/runs/$RID" "$WT" HEAD
+  printf '%s\n' done > "$WT/.planning/phases/03-guard/03-01-SUMMARY.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm "executed plan"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=repo phase=03-guard skipped=worktree-superset"* ]]
+  [ -f "$WT/.planning/phases/03-guard/03-01-SUMMARY.md" ]
+  [ -z "$(git -C "$WT" status --porcelain)" ]
+}
+
+superset_fixture() { # builds REPO, RID, WT: worktree HEAD = repo phase dir + committed 03-01-SUMMARY.md
+  REPO="$BATS_TEST_TMPDIR/superset-neg"; RID=superset-neg-1
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q -b "ffs/runs/$RID" "$WT" HEAD
+  printf '%s\n' done > "$WT/.planning/phases/03-guard/03-01-SUMMARY.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm "executed plan"
+}
+
+superset_run() {
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=repo phase=03-guard"* ]]
+}
+
+@test "superset skip is refused (copy happens) when a repo file differs from the worktree HEAD" {
+  superset_fixture
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+  grep -Fq repo-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "superset skip is refused (copy happens) when the repo has a file the worktree HEAD lacks" {
+  superset_fixture
+  printf '%s\n' new > "$REPO/.planning/phases/03-guard/03-02-PLAN.md"
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+  [ -f "$WT/.planning/phases/03-guard/03-02-PLAN.md" ]
+}
+
+@test "superset skip is refused (copy happens) when the worktree phase dir has uncommitted deletions" {
+  superset_fixture
+  printf '%s\n' done2 > "$WT/.planning/phases/03-guard/03-02-SUMMARY.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm "second summary"
+  # Deleting a committed SUMMARY leaves the dir diverged from the repo (the
+  # other SUMMARY remains); the damaged state must force the copy, not the skip.
+  rm "$WT/.planning/phases/03-guard/03-01-SUMMARY.md"
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+}
+
+@test "superset skip is refused (copy happens) when the worktree commits an extra non-output file such as a PLAN" {
+  superset_fixture
+  printf '%s\n' rogue > "$WT/.planning/phases/03-guard/03-09-PLAN.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm rogue
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+  [ ! -f "$WT/.planning/phases/03-guard/03-09-PLAN.md" ]
+}
+
+@test "reusing a detached run worktree switches to ffs/runs/<id> when it already exists at the same commit" {
+  REPO="$BATS_TEST_TMPDIR/reuse-same"; RID=reuse-same-1
+  reuse_fixture "$REPO" "$RID"
+  git -C "$REPO" branch "ffs/runs/$RID" HEAD
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  run git -C "$REPO/.claude/worktrees/$RID" symbolic-ref -q HEAD
+  [ "$output" = "refs/heads/ffs/runs/$RID" ]
+}
+
+@test "reusing a detached run worktree reports a typed error when the branch is checked out elsewhere" {
+  REPO="$BATS_TEST_TMPDIR/reuse-busy"; RID=reuse-busy-1
+  reuse_fixture "$REPO" "$RID"
+  git -C "$REPO" worktree add -q -b "ffs/runs/$RID" "$BATS_TEST_TMPDIR/other-wt" HEAD
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: cannot attach branch ffs/runs/$RID to the reused run worktree ("* ]]
 }
 
 # ── split-brain .planning guard: hardening round ───────────────────────────
