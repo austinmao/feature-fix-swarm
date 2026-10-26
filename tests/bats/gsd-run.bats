@@ -1216,15 +1216,16 @@ EOF
     *) ACTUAL_COMMON="$(cd "$(cat "$BATS_TEST_TMPDIR/codex.cwd")/$ACTUAL_COMMON" && pwd -P)" ;;
   esac
   [ "$ACTUAL_COMMON" = "$(git -C "$BATS_TEST_TMPDIR" rev-parse --absolute-git-dir)" ]
-  # A detached runner worktree needs only its exact Git admin directory plus
-  # shared objects; attached branch-ref grants are covered below.
+  # The runner worktree is on branch ffs/runs/<id>: its exact Git admin
+  # directory plus shared objects (4) and the branch ref/log files and their
+  # .lock siblings (4); attached branch-ref grants are covered below.
   [ "$(python3 - "$BATS_TEST_TMPDIR/codex.config" <<'PY'
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
 print(len(roots))
 PY
-)" -eq 4 ]
+)" -eq 8 ]
   [ "$(cat "$BATS_TEST_TMPDIR/codex.api-key")" = unset ]
 }
 
@@ -2573,7 +2574,7 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "the sandboxed Codex drive grants only detached-worktree metadata and the shared coord store" {
+@test "the sandboxed Codex drive grants only run-branch worktree metadata and the shared coord store" {
   FFS_HOST=codex GSD_NETWORK_MODE=none CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
 
@@ -2582,7 +2583,8 @@ EOF
 import ast, re, sys
 text = open(sys.argv[1]).read()
 roots = ast.literal_eval(re.search(r'^writable_roots = (.+)$', text, re.M).group(1))
-assert len(roots) == 4, roots
+assert len(roots) == 8, roots
+assert sum('/refs/heads/ffs/runs/' in r for r in roots) == 4, roots
 assert any(r.endswith('/.feature-fix-swarm') for r in roots), roots
 assert any('/.claude/worktrees/' in r for r in roots), roots
 assert any(r.endswith('/objects') for r in roots), roots
@@ -3193,6 +3195,46 @@ EOF
   [[ "$output" != *"PLANNING-DIVERGENCE"* ]]
   [[ "$output" != *"PLANNING-SYNC"* ]]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "the run worktree is created on branch ffs/runs/<id>, not detached, so gsd-executor's HEAD assertion passes" {
+  REPO="$BATS_TEST_TMPDIR/branch-fixture"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/seed"
+  git -C "$REPO" add seed
+  git -C "$REPO" commit -qm seed
+
+  RID=branch-fixture-1
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+
+  WT="$REPO/.claude/worktrees/$RID"
+  [ -e "$WT/.git" ]
+  run git -C "$WT" symbolic-ref -q HEAD
+  [ "$status" -eq 0 ]
+  [ "$output" = "refs/heads/ffs/runs/$RID" ]
+}
+
+@test "a stale ffs/runs/<id> branch with no worktree fails closed with a typed message" {
+  REPO="$BATS_TEST_TMPDIR/stale-branch-fixture"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/seed"
+  git -C "$REPO" add seed
+  git -C "$REPO" commit -qm seed
+  RID=stale-branch-1
+  git -C "$REPO" branch "ffs/runs/$RID"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: stale branch ffs/runs/$RID exists without a run worktree"* ]]
 }
 
 # ── split-brain .planning guard: hardening round ───────────────────────────

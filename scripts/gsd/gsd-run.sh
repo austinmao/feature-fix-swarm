@@ -971,7 +971,22 @@ ensure_run_worktree() {
     fi
     return 0
   fi
-  "$GIT_BIN_FIXED" -C "$REPO_ROOT" worktree add --detach "$RUN_WORKTREE_ROOT" HEAD >/dev/null || {
+  # The run worktree is created ON A BRANCH, never detached: gsd-executor
+  # asserts `git symbolic-ref --quiet HEAD` before every commit and refuses
+  # ("FATAL: refusing to commit -- HEAD is detached"), so a detached run
+  # worktree makes every execute-phase run die at its first commit. The branch
+  # name embeds the (unique) run id and is outside the protected-branch set
+  # (main|master|develop|trunk|release/*). Branches are retained with the
+  # worktree by design (no cleanup here); run-finalizer owns removal.
+  # A pre-existing ffs/runs/<id> branch with no registered worktree is a stale
+  # leftover of a crashed run; reusing its old tip could silently execute on
+  # outdated code, so fail closed instead of guessing.
+  local run_branch="ffs/runs/$RUN_ID"
+  if "$GIT_BIN_FIXED" -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$run_branch"; then
+    echo "gsd-run: stale branch $run_branch exists without a run worktree; delete it (git branch -D $run_branch) or choose a new GSD_RUN_ID" >&2
+    return 78
+  fi
+  "$GIT_BIN_FIXED" -C "$REPO_ROOT" worktree add -b "$run_branch" "$RUN_WORKTREE_ROOT" HEAD >/dev/null || {
     echo "gsd-run: failed to create run worktree at $RUN_WORKTREE_ROOT" >&2
     return 1
   }
