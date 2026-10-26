@@ -18,13 +18,17 @@ all skills.
   that branch at its current commit (if the branch exists at a different commit, rc 78).
 - `drive.sh resume` dropped `GSD_PLANNING_SYNC`, `TMPDIR` and `GSD_EXTRA_WRITABLE_WORKTREE`
   (reconcile relaunches then tripped the planning-divergence guard and moved the sandbox temp
-  root). They now join `RESUME_ENV_KEYS`; a key absent from the state file leaves the caller's
-  environment untouched, and a saved `TMPDIR` that no longer exists is dropped with a
+  root). They now join `RESUME_ENV_KEYS`; a key unset at `start` is saved as JSON `null` and unset on resume, while a
+  key absent from an older state file leaves the caller's environment untouched, and a saved `TMPDIR` that no longer exists is dropped with a
   `DRIVE:tmpdir-missing` line; `GSD_PROJECT` was already restored from the state file.
 - `GSD_PLANNING_SYNC=repo` overwrote the run worktree's phase dir on every launch, including a
   `GSD_RESUME=1` relaunch, turning committed `*-SUMMARY.md` files into working-tree deletions that
   the safe-resume gate then refused. When the worktree HEAD already contains every repo file
-  byte-identical (a committed superset), the copy is skipped and
+  byte-identical (a committed superset), the worktree phase dir has no uncommitted changes, and
+  every extra committed file is an allowlisted run output (`*-SUMMARY.md`, `*-BASELINE.md`,
+  `*-VERIFICATION.md`, `*-evidence.json`, `*-UAT.md`, `*-REVIEW.md`, `*-CONTEXT.md`,
+  `*-RESEARCH.md`, `.continue-here.md`, `WALL-RESIDUALS.md`), worktree-only run outputs are kept
+  and the copy is skipped; anything else (e.g. an extra `*-PLAN.md`) forces the copy. On a skip
   `GSD-RUN:PLANNING-SYNC direction=repo phase=<slug> skipped=worktree-superset` is printed.
 
 ### Changed (2026-10-25, never-stop continuation after driver death)

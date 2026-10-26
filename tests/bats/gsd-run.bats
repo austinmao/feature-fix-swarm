@@ -3297,6 +3297,90 @@ reuse_fixture() { # $1 = repo path, $2 = run id; leaves a DETACHED registered wo
   [ -z "$(git -C "$WT" status --porcelain)" ]
 }
 
+superset_fixture() { # builds REPO, RID, WT: worktree HEAD = repo phase dir + committed 03-01-SUMMARY.md
+  REPO="$BATS_TEST_TMPDIR/superset-neg"; RID=superset-neg-1
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q -b "ffs/runs/$RID" "$WT" HEAD
+  printf '%s\n' done > "$WT/.planning/phases/03-guard/03-01-SUMMARY.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm "executed plan"
+}
+
+superset_run() {
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=repo phase=03-guard"* ]]
+}
+
+@test "superset skip is refused (copy happens) when a repo file differs from the worktree HEAD" {
+  superset_fixture
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+  grep -Fq repo-side-line "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+}
+
+@test "superset skip is refused (copy happens) when the repo has a file the worktree HEAD lacks" {
+  superset_fixture
+  printf '%s\n' new > "$REPO/.planning/phases/03-guard/03-02-PLAN.md"
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+  [ -f "$WT/.planning/phases/03-guard/03-02-PLAN.md" ]
+}
+
+@test "superset skip is refused (copy happens) when the worktree phase dir has uncommitted deletions" {
+  superset_fixture
+  printf '%s\n' done2 > "$WT/.planning/phases/03-guard/03-02-SUMMARY.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm "second summary"
+  # Deleting a committed SUMMARY leaves the dir diverged from the repo (the
+  # other SUMMARY remains); the damaged state must force the copy, not the skip.
+  rm "$WT/.planning/phases/03-guard/03-01-SUMMARY.md"
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+}
+
+@test "superset skip is refused (copy happens) when the worktree commits an extra non-output file such as a PLAN" {
+  superset_fixture
+  printf '%s\n' rogue > "$WT/.planning/phases/03-guard/03-09-PLAN.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm rogue
+  superset_run
+  [[ "$output" != *"skipped=worktree-superset"* ]]
+  [ ! -f "$WT/.planning/phases/03-guard/03-09-PLAN.md" ]
+}
+
+@test "reusing a detached run worktree switches to ffs/runs/<id> when it already exists at the same commit" {
+  REPO="$BATS_TEST_TMPDIR/reuse-same"; RID=reuse-same-1
+  reuse_fixture "$REPO" "$RID"
+  git -C "$REPO" branch "ffs/runs/$RID" HEAD
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  run git -C "$REPO/.claude/worktrees/$RID" symbolic-ref -q HEAD
+  [ "$output" = "refs/heads/ffs/runs/$RID" ]
+}
+
+@test "reusing a detached run worktree reports a typed error when the branch is checked out elsewhere" {
+  REPO="$BATS_TEST_TMPDIR/reuse-busy"; RID=reuse-busy-1
+  reuse_fixture "$REPO" "$RID"
+  git -C "$REPO" worktree add -q -b "ffs/runs/$RID" "$BATS_TEST_TMPDIR/other-wt" HEAD
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: cannot attach branch ffs/runs/$RID to the reused run worktree ("* ]]
+}
+
 # ── split-brain .planning guard: hardening round ───────────────────────────
 # Shared fixture builders. Every case still gets its OWN nested, independently
 # git-init'd repo (see the note above the Part 2b block for why a subdirectory
