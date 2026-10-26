@@ -195,10 +195,12 @@ step() { jq -r ".steps[$1].$2" .planning/run-state/drive-$3.json; }
   [ "$(tail -1 "$STUB_ROOT/runtime2")" = "repo $BATS_TEST_TMPDIR/resume-tmp /resume/wt" ]
 }
 
-@test "resume keeps a caller-provided GSD_PLANNING_SYNC when the state file lacks the key" {
+@test "resume keeps a caller-provided GSD_PLANNING_SYNC when an older state file lacks the key" {
   printf '78\n' > "$STUB_ROOT/plan-1"
   run env -u GSD_PLANNING_SYNC bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run legacyenv
   [ "$status" -eq 0 ]
+  jq 'del(.runtime_env.GSD_PLANNING_SYNC)' .planning/run-state/drive-legacyenv.json > "$BATS_TEST_TMPDIR/legacy.json"
+  mv "$BATS_TEST_TMPDIR/legacy.json" .planning/run-state/drive-legacyenv.json
   run env GSD_PLANNING_SYNC=repo bash scripts/gsd/drive.sh resume --run legacyenv
   [ "$status" -eq 0 ]
   [ "$(tail -1 "$STUB_ROOT/runtime2" | cut -d' ' -f1)" = repo ]
@@ -214,6 +216,16 @@ step() { jq -r ".steps[$1].$2" .planning/run-state/drive-$3.json; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRIVE:tmpdir-missing run=gonetmp"* ]]
   [ "$(tail -1 "$STUB_ROOT/runtime2" | cut -d' ' -f2)" = unset ]
+}
+
+@test "resume unsets a key that was saved as null even when the caller passes a value" {
+  printf '78\n' > "$STUB_ROOT/plan-1"
+  run env -u GSD_PLANNING_SYNC bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run nullkey
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.runtime_env.GSD_PLANNING_SYNC' .planning/run-state/drive-nullkey.json)" = null ]
+  run env GSD_PLANNING_SYNC=repo bash scripts/gsd/drive.sh resume --run nullkey
+  [ "$status" -eq 0 ]
+  [ "$(tail -1 "$STUB_ROOT/runtime2" | cut -d' ' -f1)" = unset ]
 }
 
 @test "project selection is restored from drive state when resumed without the caller environment" {
