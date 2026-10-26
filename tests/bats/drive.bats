@@ -12,6 +12,7 @@ setup() {
 #!/usr/bin/env bash
 phase="$2"; f="$STUB_ROOT/plan-$phase"
 printf "%s\n" "${GSD_PROJECT-unset}" >> "$STUB_ROOT/projects"
+printf "%s %s %s\n" "${GSD_PLANNING_SYNC-unset}" "${TMPDIR-unset}" "${GSD_EXTRA_WRITABLE_WORKTREE-unset}" >> "$STUB_ROOT/runtime2"
 printf "%s %s %s %s\n" "${FFS_HOST-unset}" "${TIMEOUT-unset}" "${GSD_NETWORK_MODE-unset}" "${GSD_MODEL_REQUEST-unset}" >> "$STUB_ROOT/runtime"
 rc=0; if [ -f "$f" ] && [ -s "$f" ]; then rc="$(head -1 "$f")"; tail -n +2 "$f" > "$f.n" && mv "$f.n" "$f"; fi
 printf '%s resume=%s respawn=%s lifecycle=%s rc=%s\n' "$GSD_RUN_ID" "${GSD_RESUME-unset}" "${FFS_RESPAWN_MAX-unset}" "${FFS_LIFECYCLE_LAUNCH-unset}" "$rc" >> "$STUB_ROOT/launches"
@@ -181,6 +182,16 @@ step() { jq -r ".steps[$1].$2" .planning/run-state/drive-$3.json; }
   [ "$status" -eq 1 ]
   run bash scripts/gsd/drive.sh status --run nothere
   [ "$status" -eq 1 ]; [[ "$output" == 'DRIVE:unknown run=nothere' ]]
+}
+
+@test "resume restores GSD_PLANNING_SYNC, TMPDIR and GSD_EXTRA_WRITABLE_WORKTREE from drive state" {
+  printf '78\n' > "$STUB_ROOT/plan-1"
+  run env GSD_PLANNING_SYNC=repo TMPDIR=/resume/tmp GSD_EXTRA_WRITABLE_WORKTREE=/resume/wt bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run envkeys
+  [ "$status" -eq 0 ]
+  run env -u GSD_PLANNING_SYNC -u GSD_EXTRA_WRITABLE_WORKTREE TMPDIR=/other bash scripts/gsd/drive.sh resume --run envkeys
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.runtime_env.GSD_PLANNING_SYNC' .planning/run-state/drive-envkeys.json)" = repo ]
+  [ "$(tail -1 "$STUB_ROOT/runtime2")" = 'repo /resume/tmp /resume/wt' ]
 }
 
 @test "project selection is restored from drive state when resumed without the caller environment" {

@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-10-26, run worktrees and drive resume env)
+
+- `gsd-run.sh` created the run worktree with `git worktree add --detach`, so every
+  `execute-phase` run died at gsd-executor's mandatory pre-commit assertion ("FATAL: refusing to
+  commit -- HEAD is detached"). The run worktree is now created on a dedicated branch
+  `ffs/runs/<run-id>`; a leftover branch of that name with no worktree fails closed (rc 78).
+  An already-registered worktree is still reused unchanged.
+- `drive.sh resume` dropped `GSD_PLANNING_SYNC`, `TMPDIR` and `GSD_EXTRA_WRITABLE_WORKTREE`
+  (reconcile relaunches then tripped the planning-divergence guard and moved the sandbox temp
+  root). They now join `RESUME_ENV_KEYS`; `GSD_PROJECT` was already restored from the state file.
+
 ### Changed (2026-10-25, never-stop continuation after driver death)
 
 - An autonomous run (spec-443) ended with "STOP — step 3 used two attempts. Driver attempt 2
