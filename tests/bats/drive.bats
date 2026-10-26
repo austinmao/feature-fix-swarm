@@ -186,12 +186,34 @@ step() { jq -r ".steps[$1].$2" .planning/run-state/drive-$3.json; }
 
 @test "resume restores GSD_PLANNING_SYNC, TMPDIR and GSD_EXTRA_WRITABLE_WORKTREE from drive state" {
   printf '78\n' > "$STUB_ROOT/plan-1"
-  run env GSD_PLANNING_SYNC=repo TMPDIR=/resume/tmp GSD_EXTRA_WRITABLE_WORKTREE=/resume/wt bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run envkeys
+  mkdir -p "$BATS_TEST_TMPDIR/resume-tmp"
+  run env GSD_PLANNING_SYNC=repo TMPDIR="$BATS_TEST_TMPDIR/resume-tmp" GSD_EXTRA_WRITABLE_WORKTREE=/resume/wt bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run envkeys
   [ "$status" -eq 0 ]
   run env -u GSD_PLANNING_SYNC -u GSD_EXTRA_WRITABLE_WORKTREE TMPDIR=/other bash scripts/gsd/drive.sh resume --run envkeys
   [ "$status" -eq 0 ]
   [ "$(jq -r '.runtime_env.GSD_PLANNING_SYNC' .planning/run-state/drive-envkeys.json)" = repo ]
-  [ "$(tail -1 "$STUB_ROOT/runtime2")" = 'repo /resume/tmp /resume/wt' ]
+  [ "$(tail -1 "$STUB_ROOT/runtime2")" = "repo $BATS_TEST_TMPDIR/resume-tmp /resume/wt" ]
+}
+
+@test "resume keeps a caller-provided GSD_PLANNING_SYNC when the state file lacks the key" {
+  printf '78\n' > "$STUB_ROOT/plan-1"
+  run env -u GSD_PLANNING_SYNC bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run legacyenv
+  [ "$status" -eq 0 ]
+  run env GSD_PLANNING_SYNC=repo bash scripts/gsd/drive.sh resume --run legacyenv
+  [ "$status" -eq 0 ]
+  [ "$(tail -1 "$STUB_ROOT/runtime2" | cut -d' ' -f1)" = repo ]
+}
+
+@test "resume drops a saved TMPDIR that no longer exists and says so" {
+  printf '78\n' > "$STUB_ROOT/plan-1"
+  mkdir "$BATS_TEST_TMPDIR/gone-tmp"
+  run env TMPDIR="$BATS_TEST_TMPDIR/gone-tmp" bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run gonetmp
+  [ "$status" -eq 0 ]
+  rmdir "$BATS_TEST_TMPDIR/gone-tmp"
+  run env -u TMPDIR bash scripts/gsd/drive.sh resume --run gonetmp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRIVE:tmpdir-missing run=gonetmp"* ]]
+  [ "$(tail -1 "$STUB_ROOT/runtime2" | cut -d' ' -f2)" = unset ]
 }
 
 @test "project selection is restored from drive state when resumed without the caller environment" {

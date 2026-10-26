@@ -407,10 +407,17 @@ cmd_resume() {
     for key in "${RESUME_ENV_KEYS[@]}"; do
       if jq -e --arg key "$key" '.runtime_env | has($key)' "$STATE_FILE" >/dev/null; then
         value="$(jq -r --arg key "$key" '.runtime_env[$key]' "$STATE_FILE")"
-        export "$key=$value"
-      else
-        unset "$key"
+        if [ "$key" = TMPDIR ] && [ ! -d "$value" ]; then
+          # A saved temp root that has since vanished would make every
+          # gsd-run mktemp fail; fall back to the default instead.
+          say "tmpdir-missing run=$RUN saved=$value; unsetting TMPDIR"
+          unset TMPDIR
+        else
+          export "$key=$value"
+        fi
       fi
+      # A key absent from the state file (state written by an older drive.sh,
+      # or never set at start) leaves the caller's environment untouched.
     done
   fi
   project="$(q '.project // empty')"
