@@ -3041,7 +3041,7 @@ EOF
 # repo (a subdirectory of the outer $BATS_TEST_TMPDIR repo would resolve
 # `git rev-parse --show-toplevel` to the OUTER repo — see the "plan wall
 # blocks execute-phase" test above for why). A commit is required because
-# ensure_run_worktree does `git worktree add --detach ... HEAD`, which needs
+# ensure_run_worktree does `git worktree add -b ffs/runs/<id> ... HEAD`, which needs
 # a resolvable HEAD.
 
 @test "diverged .planning/phases/<slug> across repo and worktree refuses with the typed line and exits 78, drive never launches" {
@@ -3235,6 +3235,66 @@ EOF
     run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
   [ "$status" -eq 78 ]
   [[ "$output" == *"gsd-run: stale branch ffs/runs/$RID exists without a run worktree"* ]]
+}
+
+reuse_fixture() { # $1 = repo path, $2 = run id; leaves a DETACHED registered worktree (old-code shape)
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" config user.email test@example.com
+  git -C "$1" config user.name Test
+  printf '%s\n' seed > "$1/seed"
+  git -C "$1" add seed
+  git -C "$1" commit -qm seed
+  mkdir -p "$1/.claude/worktrees"
+  git -C "$1" worktree add -q --detach "$1/.claude/worktrees/$2" HEAD
+}
+
+@test "reusing a detached run worktree from the old code attaches branch ffs/runs/<id>" {
+  REPO="$BATS_TEST_TMPDIR/reuse-attach"; RID=reuse-attach-1
+  reuse_fixture "$REPO" "$RID"
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  run git -C "$REPO/.claude/worktrees/$RID" symbolic-ref -q HEAD
+  [ "$output" = "refs/heads/ffs/runs/$RID" ]
+}
+
+@test "reusing a detached run worktree fails closed when ffs/runs/<id> points elsewhere" {
+  REPO="$BATS_TEST_TMPDIR/reuse-elsewhere"; RID=reuse-elsewhere-1
+  reuse_fixture "$REPO" "$RID"
+  printf '%s\n' more > "$REPO/more"
+  git -C "$REPO" add more
+  git -C "$REPO" commit -qm more
+  git -C "$REPO" branch "ffs/runs/$RID" HEAD
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: branch ffs/runs/$RID exists but does not match the detached run worktree"* ]]
+}
+
+@test "GSD_PLANNING_SYNC=repo skips the copy when the worktree is a committed superset (resume keeps SUMMARY files)" {
+  REPO="$BATS_TEST_TMPDIR/superset-fixture"; RID=superset-1
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q -b "ffs/runs/$RID" "$WT" HEAD
+  printf '%s\n' done > "$WT/.planning/phases/03-guard/03-01-SUMMARY.md"
+  git -C "$WT" add -A
+  git -C "$WT" commit -qm "executed plan"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_PLANNING_SYNC=repo \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=repo phase=03-guard skipped=worktree-superset"* ]]
+  [ -f "$WT/.planning/phases/03-guard/03-01-SUMMARY.md" ]
+  [ -z "$(git -C "$WT" status --porcelain)" ]
 }
 
 # ── split-brain .planning guard: hardening round ───────────────────────────

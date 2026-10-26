@@ -14,10 +14,18 @@ all skills.
   `execute-phase` run died at gsd-executor's mandatory pre-commit assertion ("FATAL: refusing to
   commit -- HEAD is detached"). The run worktree is now created on a dedicated branch
   `ffs/runs/<run-id>`; a leftover branch of that name with no worktree fails closed (rc 78).
-  An already-registered worktree is still reused unchanged.
+  An already-registered worktree is reused, and a detached one left by older code is attached to
+  that branch at its current commit (if the branch exists at a different commit, rc 78).
 - `drive.sh resume` dropped `GSD_PLANNING_SYNC`, `TMPDIR` and `GSD_EXTRA_WRITABLE_WORKTREE`
   (reconcile relaunches then tripped the planning-divergence guard and moved the sandbox temp
-  root). They now join `RESUME_ENV_KEYS`; `GSD_PROJECT` was already restored from the state file.
+  root). They now join `RESUME_ENV_KEYS`; a key absent from the state file leaves the caller's
+  environment untouched, and a saved `TMPDIR` that no longer exists is dropped with a
+  `DRIVE:tmpdir-missing` line; `GSD_PROJECT` was already restored from the state file.
+- `GSD_PLANNING_SYNC=repo` overwrote the run worktree's phase dir on every launch, including a
+  `GSD_RESUME=1` relaunch, turning committed `*-SUMMARY.md` files into working-tree deletions that
+  the safe-resume gate then refused. When the worktree HEAD already contains every repo file
+  byte-identical (a committed superset), the copy is skipped and
+  `GSD-RUN:PLANNING-SYNC direction=repo phase=<slug> skipped=worktree-superset` is printed.
 
 ### Changed (2026-10-25, never-stop continuation after driver death)
 
