@@ -263,6 +263,32 @@ def test_upgrade_cli_consumes_named_baseline(tmp_path: Path) -> None:
     assert payload["suite_passed"] is False
 
 
+def test_upgrade_accepts_a_full_size_baseline_above_the_evidence_file_limit(tmp_path: Path) -> None:
+    """A real full baseline (about 2.9 MB) exceeds the 2 MiB evidence limit; the total budget still binds."""
+    candidate, before = actual_baseline(tmp_path, {"retained": "FAIL", "changed": "PASS"}, "large-baseline.json")
+    text = before.read_text().rstrip("\n")
+    # Insignificant JSON whitespace grows the file without changing what it records.
+    before.write_text(text[:-1] + " " * (3 * 1024 * 1024) + "}\n")
+    current, observation = actual_suite_artifact(tmp_path, "upgraded-suite", {"retained": "FAIL", "changed": "FAIL"})
+    ledger = write_json(tmp_path / "ledger.json", {"entries": []})
+    manifest = common(candidate, "upgrade")
+    manifest["current"] = {"suite_artifacts": [observation]}
+    manifest["ledger_artifact"] = {"locator": str(ledger), "sha256": sha(ledger)}
+    source = write_json(tmp_path / "large-upgrade-manifest.json", manifest)
+
+    run, payload = invoke(tmp_path, "upgrade", "--baseline", str(before), "--manifest", str(source))
+
+    assert payload["status"] == "FAIL", payload["errors"]
+    assert payload["baseline_sha256"] == sha(before)
+    assert payload["new_failures"] == ["changed"]
+
+    before.write_text(text[:-1] + " " * (17 * 1024 * 1024) + "}\n")
+    run, payload = invoke(tmp_path, "upgrade", "--baseline", str(before), "--manifest", str(source),
+                          output_name="oversized-upgrade.json")
+    assert run.returncode != 0
+    assert payload["status"] != "PASS" and payload["errors"]
+
+
 def test_fresh_review_executes_configured_adapter_and_completion_cannot_admit(tmp_path: Path) -> None:
     candidate = tmp_path / "candidate.py"
     candidate.write_text("print('candidate')\n")
