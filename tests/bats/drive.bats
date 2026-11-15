@@ -89,7 +89,7 @@ step() { jq -r ".steps[$1].$2" .planning/run-state/drive-$3.json; }
 }
 
 @test "step attempts exhaust at FFS_STEP_ATTEMPTS when failures differ" {
-  printf '2\n3\n4\n5\n6\n7\n' > "$STUB_ROOT/plan-8"
+  printf '2\n4\n5\n6\n7\n8\n' > "$STUB_ROOT/plan-8"
   run env FFS_STEP_ATTEMPTS=4 bash scripts/gsd/drive.sh start --verb plan-phase --phases 8-8 --run sa
   [ "$status" -eq 0 ]
   [ "$(step 0 state sa)" = quarantined ]; [ "$(step 0 attempts sa)" = 4 ]
@@ -107,6 +107,38 @@ step() { jq -r ".steps[$1].$2" .planning/run-state/drive-$3.json; }
   [ "$(jq -r .state .planning/run-state/lifecycle-blk.json)" = waiting ]
   run bash scripts/gsd/drive.sh status --run blk
   [ "$status" -eq 0 ]; [[ "$output" == 'DRIVE:parked run=blk '*'pending=1'* ]]
+}
+
+@test "rc 3 (wall budget exhausted) is terminal: step quarantined with attempts=1, no second launch" {
+  printf '3\n0\n' > "$STUB_ROOT/plan-6"
+  run bash scripts/gsd/drive.sh start --verb plan-phase --phases 6-6 --run wall3
+  [[ "$output" == *'DRIVE:quarantined phase=6'* ]]
+  [[ "$output" != *'DRIVE:step-failed'* ]]
+  [ "$(launches '^wall3-p6 ')" -eq 1 ]
+  [ "$(step 0 state wall3)" = quarantined ]
+  [ "$(step 0 attempts wall3)" = 1 ]
+  grep -q 'phase 6: quarantined' .planning/run-state/drive-wall3.pending.md
+}
+
+@test "drive records the spec identity at start and exports FFS_SPEC_ID to every step" {
+  cat > "$REPO/scripts/gsd/stub-gsd-run.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${FFS_SPEC_ID-unset}" >> "$STUB_ROOT/spec-ids"
+exit 0
+STUB
+  chmod +x "$REPO/scripts/gsd/stub-gsd-run.sh"
+  run bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --project 123 --run specid
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .spec .planning/run-state/drive-specid.json)" = spec-123 ]
+  [ "$(sort -u "$STUB_ROOT/spec-ids")" = spec-123 ]
+  [ "$(wc -l < "$STUB_ROOT/spec-ids" | tr -d ' ')" -eq 2 ]
+}
+
+@test "without --project the drive records the spec from the launching branch NNN" {
+  git checkout -q -b 123-x
+  run bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-1 --run branchspec
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .spec .planning/run-state/drive-branchspec.json)" = spec-123 ]
 }
 
 @test "launch ceiling bounds a step across every class" {

@@ -122,7 +122,7 @@ PROMPT="You are a brutally honest principal engineer reviewing an execution PLAN
 $PLAN_CONTENT
 --- PLAN END ---
 
-Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, unstated assumptions, missing or unfalsifiable acceptance criteria, sequencing hazards (a later task invalidating an earlier one), and security holes in the approach itself. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
+Hunt for: claims about the codebase or its APIs that could be wrong, logical gaps, sequencing hazards (a later task invalidating an earlier one), security holes in the approach itself, and scope beyond the goal (steps, files or abstractions the goal does not need). Each finding names its smallest remedy; deleting a step is a valid remedy. Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:. End your response with exactly one line: VERDICT: APPROVE or VERDICT: REVISE."
 
 ADVERSARY_SEAM=plan-adversary; export ADVERSARY_SEAM
 OUTPUT="$(cd "$PLAN_ROOT" && adversary_invoke_typed_request \

@@ -184,24 +184,6 @@ EOF
   [[ "$output" == *'both review hosts unavailable'* ]]
 }
 
-@test "scope-drift advisory stays on stderr — stdout remains pure JSON verdict" {
-  mkdir -p "$CWD/.planning/phases/01-x"
-  cat > "$CWD/.planning/phases/01-x/01-01-PLAN.md" <<'EOF'
----
-files_modified:
-  - a
-goal: stdout purity
----
-EOF
-  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
-    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
-    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>/dev/null"
-  [ "$status" -eq 0 ]
-  # stdout alone must be exactly the JSON verdict — parseable, no drift lines
-  echo "$output" | python3 -m json.tool >/dev/null
-  [[ "$output" == *'"verdict":"APPROVED"'* ]]
-}
-
 @test "wall policy (c): WALL-RESIDUALS.md feeds the reviewer prompt as review focus" {
   # the prompt travels via STDIN to the reviewer CLI — capture it
   cat > "$STUB_DIR/focus-codex" <<EOF
@@ -287,6 +269,34 @@ EOF
   [[ "$ALL" == *'"disposition": "fix"'* || "$ALL" == *'"disposition":"fix"'* ]]
 }
 
+@test "wall policy (c): needs-requirement residual stays unresolved and is named on stderr" {
+  export HOME="$BATS_TEST_TMPDIR"
+  mkdir -p "$HOME/.claude/lib/feature-fix-swarm"
+  cp "$ROOT/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  export GATES_STORE="$BATS_TEST_TMPDIR/store.json"
+  python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
+    --action ship:gsd --reason test >/dev/null
+  ADD_OUT="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue add \
+    lib/foo.py "idempotency key missing" --needs-requirement --severity HIGH --source wall \
+    --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  SIG12="${SIG:0:12}"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<EOF
+# Wall residuals — 01-degradation
+- $SIG12 HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)
+EOF
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *"needs-requirement"* ]]
+  UNRES="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue list \
+    --unresolved --source wall 2>/dev/null)"
+  [[ "$UNRES" == *"$SIG"* ]]
+}
+
 @test "wall policy (c): empty diff early-exit does NOT auto-resolve riding residuals" {
   export HOME="$BATS_TEST_TMPDIR"
   mkdir -p "$HOME/.claude/lib/feature-fix-swarm"
@@ -367,4 +377,21 @@ EOF
     bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
   [ "$status" -eq 0 ]
   grep -F 'default-root residual' "$BATS_TEST_TMPDIR/codex.stdin"
+}
+
+@test "F3 P7: ship reviewer prompt asks for the smallest fix per finding" {
+  cat > "$STUB_DIR/fake-codex" <<EOS
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+echo 'VERDICT: PASS'
+EOS
+  chmod +x "$STUB_DIR/fake-codex"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  cat "$BATS_TEST_TMPDIR/codex.args" "$BATS_TEST_TMPDIR/codex.stdin" > "$BATS_TEST_TMPDIR/sent.txt"
+  grep -qF 'Report ONLY CRITICAL or HIGH' "$BATS_TEST_TMPDIR/sent.txt"
+  grep -qF 'Name the smallest fix for each; removing added code is a valid fix.' "$BATS_TEST_TMPDIR/sent.txt"
 }

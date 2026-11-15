@@ -205,8 +205,42 @@ Completion authority for autonomous runs — evidence, not agent self-report.
 | `gates.py proof RUN T040 T041 … [--defer "name: reason"]… [--strict] [--out path]` | Emit the per-run proof artifact (`proof-<run>.json`): one claim per task with evidence cmd, real exit, sha256 of stored log material, live-vs-structural kind; named deferrals; go/no-go verdict. Exit 1 on no-go (v3.15.0) |
 | `gates.py scan-tamper < diff` | Flag reward-hacking moves: deleted asserts, added skips, `exit 0`, CI edits. Exit 1 on findings |
 | `gates.py analyze spec.md tasks.md` | Spec↔tasks coherence gate (spec-kit analyze analog); `/feature-implement` refuses to start on findings |
-| `gates.py findings-queue add ... [--severity S] [--source wall\|review-gate] [--plan PATH]` | Record a review finding (plan-wall, review-gate, or manual); re-adding a RESOLVED signature reopens it |
-| `gates.py findings-queue resolve ... --disposition refute\|fix\|waive --reason "…"` | Resolve a finding; disposition and reason are required and kept in history |
+| `gates.py findings-queue add ... [--severity S] [--source wall\|review-gate] [--plan PATH] [--spec ID] [--security] [--needs-requirement]` | Record a review finding (plan-wall, review-gate, or manual); re-adding a RESOLVED signature reopens it. `--spec` binds it to a spec; `--security` marks it security-class; `--needs-requirement` marks a finding whose fix needs a new requirement (both flags are sticky) |
+| `gates.py findings-queue resolve ... --disposition refute\|fix\|waive\|issue\|descope --reason "…"` | Resolve a finding; disposition and reason are required and kept in history. `issue` and `descope` are operator choices, refused for security HIGH/CRITICAL findings. `fix` is refused on a non-security needs-requirement finding |
+| `gates.py findings-queue retag <sig> --in-spec` | Operator-only, after amending the spec: clears the needs-requirement flag so the finding can close as `fix` |
 | `gates.py findings-queue list [--unresolved] [--severity ...] [--source ...] [--plan ...]` | Filtered finding listing; the plan wall's blocking check is `list --unresolved --source wall --severity HIGH,CRITICAL --plan <plan>` |
+| `gates.py spec-id` | Prints the spec identity (`spec-NNN`). Order: `FFS_SPEC_ID` env, then branch `NNN` prefix, then `GSD_RUN_ID` (stderr `SPEC-ID:unbound`). `FFS_SPEC_ID` disagreeing with the branch `NNN` exits non-zero (`SPEC-ID:mismatch`) |
+| `gates.py loop-round <id> <loop> --durable --max N --site skill\|seam [--token T]` | Durable review meter (one `review:spec` per spec, max 2). `--site` without `--token` derives the token from the production-classified candidate (merge-base `${FFS_BASE:-<default branch>}` to working tree; tests, docs, specs, `.planning` excluded). A token spent at one site is free once at the other |
+| `gates.py intent-check --spec specs/NNN-*/spec.md --stage plan\|finish [--repin]` | Checks the spec's Intent block. `plan` validates the block and pins its hash on first run; a later change fails `INTENT-FAIL`. `finish` measures the candidate's production line delta (merge-base of `${FFS_BASE:-<default branch>}` to the working tree; tests, docs, `specs/` and `.planning/` excluded) against the block. Exit 0 ok or `INTENT:absent` (warning), 1 `INTENT-FAIL`, 2 usage. `--repin` is operator-only and plan-stage only: it pins an edited block as a new revision only when the edit narrows the intent (sign no looser, budget no higher), and never changes review budgets |
 
-Gate ladder (cheap→expensive, fail-fast): compile → typecheck → lint → unit → integration → e2e → LLM review. Truth score is computed by `phase-score` at every phase gate; < 0.95 after max retries → rollback to phase checkpoint. No-progress is enforced by `note-failure` in the retry loop. LLM review rounds capped at 2/phase. `record-gate` still exists for humans but warns at runtime and is rejected under strict mode. Optional PreToolUse hook `hooks/tdd-gate.sh` blocks source writes with no matching test file.
+### Budget exhaustion
+
+Review budgets are never renewed. `review:spec` and the plan wall's `review:wall:<phase>` are keyed on the spec, so a new drive or run id gets no fresh allowance. When a `review:*` budget is spent, gates.py prints the contract below and records it under `_exhausted[spec-NNN]`:
+
+```text
+BUDGET-EXHAUSTED <loop> spec-NNN: stopped. Operator picks one: merge-with-issues | descope | stop. Recommended: <amend spec | follow-up spec> — run /prompt-master (Codex: $prompt-master) with the prompt below.
+```
+
+The line is followed by a ready prompt. The run's only automatic action is stop. An exhausted spec never reaches APPROVED at the seam. `merge-with-issues` means the operator resolves each open finding as `issue` and merges by hand.
+
+Gate ladder (cheap→expensive, fail-fast): compile → typecheck → lint → unit → integration → e2e → LLM review. Truth score is computed by `phase-score` at every phase gate; < 0.95 after max retries → rollback to phase checkpoint. No-progress is enforced by `note-failure` in the retry loop. LLM review rounds capped at 2 per spec (`review:spec`). `record-gate` still exists for humans but warns at runtime and is rejected under strict mode. Optional PreToolUse hook `hooks/tdd-gate.sh` blocks source writes with no matching test file.
+
+### Intent block
+
+`/feature-spec` (Codex: `$feature-spec`) and the `plan-decompose` synthetic spec write an Intent block in `spec.md`:
+
+```
+## Intent
+<!-- ffs:intent -->
+prod_delta: negative
+prod_budget_lines: 0
+delete_targets: scripts/old-tool.sh
+inherit: specs/100-parent/spec.md
+```
+
+- `prod_delta`: expected sign of the production line delta: `negative`, `neutral` or `positive`. Skill and prompt text count as production.
+- `prod_budget_lines`: `negative` needs net < 0; `neutral` needs |net| <= budget; `positive` needs net <= budget.
+- `delete_targets`: for a `negative` spec, each path must be gone or net-negative at finish.
+- `inherit`: a member spec may not loosen the parent's sign or raise its budget.
+
+The plan wall checks and pins the block at admission. `/review-gate` (Codex: `$review-gate`) and the ship seam check it at finish before any review round is spent. A breach is `INTENT-FAIL`: delete more, or stop. A spec without the block passes with `INTENT:absent` (a warning).

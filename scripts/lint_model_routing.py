@@ -13,7 +13,6 @@ RUNTIME_CONTRACTS = {
     "plan-adversary.sh": "PLAN_ADVERSARY_MODEL_REQUEST",
     "qa-coverage-adversary.sh": "QA_COVERAGE_MODEL_REQUEST",
     "review-gate-command.sh": "GSD_REVIEW_MODEL_REQUEST",
-    "scope-drift-gate.sh": "GSD_DRIFT_MODEL_REQUEST",
 }
 
 # One source of truth (spec-004 §One source of truth): canonical tiers + the
@@ -33,8 +32,7 @@ HARDCODED_CONSUMERS = {
 LEGACY_EXPANSION = re.compile(
     r"\$\{(?:PLAN_ADVERSARY_(?:MODEL|EFFORT|CLAUDE_MODEL)|"
     r"QA_COVERAGE_(?:MODEL|EFFORT|CLAUDE_MODEL)|"
-    r"GSD_REVIEW_(?:MODEL|EFFORT|CLAUDE_MODEL)|"
-    r"GSD_DRIFT_(?:MODEL|EFFORT|CLAUDE_MODEL))(?:[:}?])"
+    r"GSD_REVIEW_(?:MODEL|EFFORT|CLAUDE_MODEL))(?:[:}?])"
 )
 RAW_SKILL_ASSIGNMENT = re.compile(
     r"\b[A-Z][A-Z0-9_]*MODEL\s*=\s*[\"'](?:gpt-|claude-|opus[\"']|sonnet[\"']|haiku[\"']|fable[\"'])",

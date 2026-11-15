@@ -116,9 +116,9 @@ def test_adversary_runtime_surfaces_expose_only_typed_model_overrides() -> None:
         "plan-adversary.sh": "PLAN_ADVERSARY_MODEL_REQUEST",
         "qa-coverage-adversary.sh": "QA_COVERAGE_MODEL_REQUEST",
         "review-gate-command.sh": "GSD_REVIEW_MODEL_REQUEST",
-        "scope-drift-gate.sh": "GSD_DRIFT_MODEL_REQUEST",
     }
     for name, typed_variable in expectations.items():
         source = (scripts / name).read_text()
         assert typed_variable in source
         assert "adversary_invoke_typed_request" in source
+    assert not (scripts / "scope-drift-gate.sh").exists()

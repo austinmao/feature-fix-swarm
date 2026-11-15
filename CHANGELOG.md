@@ -8,6 +8,25 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-14, an Intent block replaces the scope-drift gate)
+
+- Specs carry an Intent block (`prod_delta`, `prod_budget_lines`, `delete_targets`, optional `inherit`). `/feature-spec` and the `plan-decompose` synthetic spec write it.
+- New `gates.py intent-check --stage plan|finish`. The plan wall pins the block at admission. `/review-gate` and `review-gate-command.sh` check the candidate's production line delta before any `review:spec` round is spent; a breach is `INTENT-FAIL`.
+- Removed the advisory `scripts/gsd/scope-drift-gate.sh`, its three call sites and `GSD_DRIFT_MODEL_REQUEST`.
+- A finding whose fix needs a new requirement (`SCOPE: needs-new-requirement` in `/review-gate`, `[needs-requirement]` at the plan wall) is recorded with `--needs-requirement` and cannot close as `fix` until the operator amends the spec and runs `findings-queue retag <sig> --in-spec`. Security findings keep `fix`. The review-gate failure text no longer says "fix all CRITICAL and HIGH".
+- Hardening: a malformed `FFS_SPEC_ID` fails closed; the rollout-skew tolerance matches only `unknown command: intent-check`; `intent-check --repin` may only narrow a pinned intent; the finish base resolves like `base-branch.sh` and refuses an `FFS_BASE` outside the default branch; an exhausted spec gets no free seam pass; a descoped finding reopens when re-reported as security HIGH/CRITICAL.
+
+### Changed (2026-11-14, exhausted review budgets end the work)
+
+- **Removed: review budget renewal.** The `--autonomous` rc-3 wall auto-continue (`_gsd_run_wall_gate`, `PLAN_WALL_AUTO_RESET_MAX`, `wall-reset:<phase-slug>` grants), the `dispatch-budget` grant, the `review:renew` prose, the plan-decompose fresh-budget recipe, and the run-finalizer `loop-round --reset-all` step are gone. Their tests `tests/bats/wall-auto-continue.bats` and `tests/bats/int-dispatch-budget.bats` were deleted with the features.
+- **One review meter per spec.** `review:spec` (max 2) replaces the ship seam's `review:diff` counter. It is spent by `/review-gate` (`--site skill`) and by `scripts/gsd/review-gate-command.sh` (`--site seam`). The same production candidate reviewed at both sites costs one round.
+- **Candidate token.** `gates.py loop-round <id> <loop> --durable --max N --site skill|seam [--token T]` derives the token from the production-classified candidate when `--token` is omitted (merge-base `${FFS_BASE:-<default branch>}` to working tree; tests, docs, specs, and `.planning` excluded). A token spent at one site is free once at the other.
+- **Spec identity.** `gates.py spec-id` prints the spec identity from `FFS_SPEC_ID`, then the branch `NNN` prefix, then `GSD_RUN_ID` (stderr `SPEC-ID:unbound`). A disagreement between `FFS_SPEC_ID` and the branch prefix exits non-zero (`SPEC-ID:mismatch`). `gsd-run.sh` and `drive.sh` export `FFS_SPEC_ID`, and `drive.sh` records `spec` in its state file. The plan wall's `review:wall:<phase>` allowance is keyed on it, so a new drive or run id gets no fresh allowance.
+- **Exhaustion contract.** A spent `review:*` budget prints `BUDGET-EXHAUSTED <loop> spec-NNN: stopped. ...` with a ready prompt and records it under `_exhausted[spec-NNN]`. The run's only automatic action is stop; an exhausted spec never reaches APPROVED at the seam. `LOOP-CAP:` messages no longer suggest `--max` or `--reset`.
+- **`drive.sh`.** rc 3 (wall budget exhausted) is terminal: the step is quarantined after one attempt, with no retry.
+- **Findings.** `findings-queue add` gains `--security` and `--spec <id>`. `findings-queue resolve --disposition` gains `issue` and `descope` (operator choices, refused for security HIGH/CRITICAL findings). The ship seam persists its BLOCK findings (`FINDING: <SEV> <file>: <issue>` lines) with `--spec`.
+- **`/spec-status`.** The collector prints a `RUNS:` section: runs and launches per spec, `review:spec` and `review:wall:*` used/max, and the exhausted count.
+
 ### Changed (2026-10-25, never-stop continuation after driver death)
 
 - An autonomous run (spec-443) ended with "STOP — step 3 used two attempts. Driver attempt 2

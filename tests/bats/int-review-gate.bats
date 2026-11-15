@@ -81,7 +81,7 @@ setup() {
 }
 
 @test "INT-001: review-gate retains the 1.9 contract after host-neutral bump" {
-  grep -F 'version: "1.12.0"' skills/review-gate/SKILL.md
+  grep -F 'version: "1.17.0"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {
@@ -147,4 +147,38 @@ setup() {
   [ -n "$output_line" ]
   [ "$merge_line" -lt "$add_line" ]
   [ "$add_line" -lt "$output_line" ]
+}
+
+# --- F3: reviewer prompts ask for the smallest change (grep snapshots) ---
+
+@test "F3 P4: Pass 1 asks for the smallest fix with a SCOPE field and drops doc-gap bullets" {
+  grep -qF -- '- Unhandled exceptions on paths the diff adds' skills/review-gate/SKILL.md
+  grep -qF -- '- Added code the goal does not need; existing code this diff makes deletable' skills/review-gate/SKILL.md
+  grep -qF 'smallest fix at the root cause' skills/review-gate/SKILL.md
+  grep -qF 'SCOPE: <in-spec | needs-new-requirement>' skills/review-gate/SKILL.md
+  [ "$(grep -c 'Documentation gaps' skills/review-gate/SKILL.md)" -eq 0 ]
+}
+
+@test "F3 P5: adversarial prompt asks for the smallest fix" {
+  grep -qF 'FIX (the smallest fix)' skills/review-gate/SKILL.md
+}
+
+@test "F3 P6: Pass 3 drops the missing-test bullets" {
+  [ "$(grep -c 'Missing integration tests for new API endpoints' skills/review-gate/SKILL.md)" -eq 0 ]
+  [ "$(grep -c 'Missing E2E tests for new user-facing flows' skills/review-gate/SKILL.md)" -eq 0 ]
+  [ "$(grep -c 'Edge cases not tested' skills/review-gate/SKILL.md)" -eq 0 ]
+}
+
+@test "F3 P8: HV_PROMPT bounds the diff by the spec Intent block" {
+  grep -qF "does not exceed the spec's Intent block" skills/review-gate/SKILL.md
+}
+
+@test "F2: findings-add maps SCOPE needs-new-requirement to --needs-requirement" {
+  grep -qF '${FINDING_NEEDS_REQ:+--needs-requirement}' skills/review-gate/SKILL.md
+}
+
+@test "F2: fail text replaces the unconditional fix rule" {
+  [ "$(grep -c 'Fix all CRITICAL and HIGH' skills/review-gate/SKILL.md)" -eq 0 ]
+  grep -qF 'CRITICAL and security findings: fix.' skills/review-gate/SKILL.md
+  grep -qF 'findings-queue retag <sig> --in-spec' skills/review-gate/SKILL.md
 }

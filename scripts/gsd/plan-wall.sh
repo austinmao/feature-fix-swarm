@@ -145,6 +145,40 @@ if [ -z "$RUN_ID" ]; then
   echo "plan-wall: RUN-ID-REQUIRED — resolve a durable run before review; resume cannot mint another allowance" >&2
   exit 78
 fi
+# Loop counters are keyed by spec identity so a renamed run mints no allowance.
+_pw_sid_err="$(mktemp)"
+SPEC_KEY="$(python3 "$GATES_PY" spec-id 2>"$_pw_sid_err")"; _pw_sid_rc=$?
+_pw_sid_msg="$(cat "$_pw_sid_err")"; rm -f "$_pw_sid_err"
+if [ "$_pw_sid_rc" -ne 0 ]; then
+  if [[ "$_pw_sid_msg" == *SPEC-ID:mismatch* ]]; then
+    echo "plan-wall: SPEC-ID:mismatch between FFS_SPEC_ID and the branch spec number — admission refused" >&2
+    exit 78
+  fi
+  if [ "$_pw_sid_rc" -eq 2 ]; then
+    echo "plan-wall: spec identity invalid (malformed FFS_SPEC_ID) — admission refused" >&2
+    exit 78
+  fi
+  SPEC_KEY="$RUN_ID"
+fi
+
+# Intent wall (plan): pin the spec's Intent block at admission, before any
+# round is spent or reviewer dispatched.
+if [[ "$SPEC_KEY" =~ ^spec-[0-9]{3}$ ]]; then
+  for _pw_spec in "$REPO_ROOT"/specs/"${SPEC_KEY#spec-}"-*/spec.md; do
+    [ -f "$_pw_spec" ] || continue
+    _pw_int_out="$(python3 "$GATES_PY" intent-check --spec "$_pw_spec" --stage plan 2>&1)"
+    _pw_int_rc=$?
+    if [ "$_pw_int_rc" -eq 0 ]; then
+      printf '%s\n' "$_pw_int_out" >&2
+    elif [ "$_pw_int_rc" -eq 2 ] && printf '%s\n' "$_pw_int_out" | grep -qxF 'unknown command: intent-check'; then
+      echo "plan-wall: WARN gates.py lacks intent-check (rollout skew); intent pin skipped" >&2
+    else
+      printf '%s\n' "$_pw_int_out"
+      exit 78
+    fi
+    break
+  done
+fi
 
 # ── run mode: wall every planned phase under one global round counter ─────
 # Each phase dir is delegated to a fresh self-invocation (full per-phase
@@ -186,7 +220,7 @@ if [ "$PW_RUN_MODE" -eq 1 ]; then
   [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
   PW_ROUND=""
   if [ "${PLAN_WALL:-on}" != off ]; then
-    _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" \
+    _pw_lr_out="$(python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:run" \
         --max "$PW_MAX_ROUNDS" 2>&1)"
     _pw_lr_rc=$?
     printf '%s\n' "$_pw_lr_out" >&2
@@ -226,7 +260,7 @@ if [ "$PW_RUN_MODE" -eq 1 ]; then
     fi
   fi
   if [ "$RUN_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
-    python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" --reset >/dev/null 2>&1 \
+    python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:run" --reset >/dev/null 2>&1 \
       || echo "plan-wall: WARN: passing run-round counter reset failed (non-fatal)" >&2
   fi
   exit "$RUN_RC"
@@ -538,6 +572,8 @@ Output ONLY a JSON object (no prose, no markdown code fences) with a single "fin
 Every key shown above must be present on every element; use null for ones you have no value for.
 
 CRITICAL is reserved for a defect whose execution as planned causes irreversible loss, destructive or unrecoverable state, or a security breach, and the finding must cite the exact plan step where it occurs; every other defect is at most HIGH.
+
+Also flag plan steps the goal does not need. Every claim names its smallest remedy; "delete the step" is a valid remedy. Prefix the claim with [needs-requirement] when its remedy needs a new requirement or acceptance criterion. Scope findings are at most HIGH.
 
 {"findings":[]} means you found nothing — that is a clean, successful review, not a failure.
 
@@ -972,7 +1008,7 @@ _pw_admit_review_round() {
     phase=unscoped
   fi
   key="review:wall:$phase"
-  out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "$key" --durable --max 2 2>&1)"
+  out="$(python3 "$GATES_PY" loop-round "$SPEC_KEY" "$key" --durable --max 2 2>&1)"
   rc=$?
   printf '%s\n' "$out" >&2
   if [ "$rc" -ne 0 ]; then
@@ -1255,7 +1291,11 @@ _pw_dispatch_path() {
       fi
       issue="$claim"
       [ -n "$line" ] && issue="$issue (line $line)"
-      add_out="$(python3 "$GATES_PY" findings-queue add "$fpath" "$issue" \
+      _pw_nr=()
+      if [[ "$issue" == "[needs-requirement]"* ]]; then
+        issue="${issue#\[needs-requirement\]}"; issue="${issue# }"; _pw_nr=(--needs-requirement)
+      fi
+      add_out="$(python3 "$GATES_PY" findings-queue add "$fpath" "$issue" ${_pw_nr[@]+"${_pw_nr[@]}"} \
         --severity "$sev" --run-id "$RUN_ID" --source wall --plan "$source_plan" 2>&1)"
       add_rc=$?
       if [ "$add_rc" -ne 0 ]; then
@@ -1327,7 +1367,7 @@ case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=2 ;; esac
 [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
 PW_ROUND=""
 if [ "${PLAN_WALL:-on}" != off ] && [ "${PLAN_WALL_RUN_CHILD:-0}" != 1 ]; then
-  _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
+  _pw_lr_out="$(python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:$PHASE_SLUG" \
       --max "$PW_MAX_ROUNDS" 2>&1)"
   _pw_lr_rc=$?
   printf '%s\n' "$_pw_lr_out" >&2
@@ -1450,7 +1490,7 @@ fi
 # the sealed review:wall allowance, which is never reset here.
 # Reset failure is a WARN, never a verdict change.
 if [ "$OVERALL_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
-  python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" --reset >/dev/null 2>&1 \
+  python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:$PHASE_SLUG" --reset >/dev/null 2>&1 \
     || echo "plan-wall: WARN: passing-round counter reset failed (non-fatal)" >&2
 fi
 

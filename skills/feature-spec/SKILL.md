@@ -1,7 +1,7 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.9.0
+version: 2.11.0
 ---
 
 # /feature-spec [NNN | "description"]
@@ -199,7 +199,23 @@ slices:
 - slice 1: <name> — CONSUMED (this spec)
 - slice 2: <name> — DEFERRED
 - slice N: <name> — DEFERRED
+
+## Intent
+<!-- ffs:intent -->
+prod_delta: <negative | neutral | positive>
+prod_budget_lines: <max net production lines this spec may add; 0 for a slimming spec>
+delete_targets: <comma-separated paths this spec deletes or shrinks; omit the line if none>
+inherit: <specs/NNN-parent/spec.md for a member spec; omit the line otherwise>
 ```
+
+**Intent rules:** always write the Intent block. `prod_delta` is the expected
+sign of the production line delta (tests, docs, specs and `.planning/` are
+excluded; skill and prompt text counts). A slimming, delete or consolidate
+spec is `negative` and names its `delete_targets`. The plan wall pins the
+block on its first review; after that only the operator changes it, in the
+operator's own shell. Finish fails with `INTENT-FAIL` when the candidate
+breaks it, before any review round is spent. A member spec with `inherit`
+may not loosen the parent's sign or raise its budget.
 
 **Scope ledger rules (D7, 2026-08-27):** when the spec is seeded from a
 design doc (an office-hours/GStack design doc, an RFC, any multi-slice
@@ -753,14 +769,9 @@ stalling. Build the ledger NOW — by default with zero stops:
 1. Walk tasks.md + plan.md and enumerate EVERY operator-gated action the run will
    perform, in typed `type:target` form (`push:origin/main`, `merge:pr`,
    `deploy:vercel-web`, `flip:FLAG`, `restart:svc`, `secret-use:NAME`,
-   `migrate:desc`). Walk the artifacts — never enumerate from memory. ALSO
-   walk `.planning/phases/*-*` (seeded by Step 4) and add
-   `wall-reset:<phase-slug>` for EVERY phase directory — one entry per phase,
-   exact basename, no wildcards — so `/feature-implement --autonomous` can
-   clear the bounded rc-3 auto-continue (see feature-implement "Autonomous
-   rc-3 bounded auto-continue") without stopping. A phase added or renamed
-   after grant time has no grant and correctly quarantines — same floor as
-   every other gate type. ALWAYS include `ship:gsd` in the enumerated grant
+   `migrate:desc`). Walk the artifacts — never enumerate from memory. There
+   is no grant that reopens a review budget; never enumerate one. ALWAYS
+   include `ship:gsd` in the enumerated grant
    list — `scripts/gsd/review-gate-command.sh` requires it on every run and
    it never appears in plan.md or tasks.md, so walking artifacts alone misses
    it (spec-012 needed a manual mid-run grant to unblock ship).
