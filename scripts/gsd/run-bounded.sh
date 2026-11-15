@@ -11,6 +11,9 @@
 # Resolution ladder (first hit wins):
 #   1. timeout   (GNU coreutils / Linux)
 #   2. gtimeout  (brew coreutils on macOS)
+#   Only GNU builds count: GNU timeout signals the child's whole process group;
+#   uutils (Ubuntu 26.04) and BusyBox kill the direct child only, so a
+#   TERM-ignoring grandchild would outlive the bound. Those fall to rung 3.
 #   3. python3   subprocess.run(timeout=) — kills the child, exits 124
 #   4. REFUSE    rc 124 without running the command at all
 # Never runs the command unbounded. rc 124 is the same code the callers'
@@ -27,20 +30,27 @@
 # stdin/stdout/stderr pass through — keep `</dev/null` at call sites (stdin-wait
 # is a separate hang class from wall-clock).
 
+_rb_gnu_timeout() {
+  local _v
+  command -v "$1" >/dev/null 2>&1 || return 1
+  _v="$("$1" --version 2>/dev/null)" || return 1
+  [[ "$_v" == *"GNU coreutils"* ]]
+}
+
 run_bounded() {
   local _t="$1"; shift
   local _kill_after="${RUN_BOUNDED_KILL_AFTER:-2}" _rc
   case "$_kill_after" in
     ''|*[!0-9.]*|0) _kill_after=2 ;;
   esac
-  if command -v timeout >/dev/null 2>&1; then
+  if _rb_gnu_timeout timeout; then
     # GNU timeout sends TERM at the wall but, without --kill-after, can wait
     # forever for a child that traps/ignores TERM. Always arm the KILL phase.
     timeout --signal=TERM --kill-after="$_kill_after" "$_t" "$@"
     _rc=$?
     [ "$_rc" -eq 137 ] && return 124
     return "$_rc"
-  elif command -v gtimeout >/dev/null 2>&1; then
+  elif _rb_gnu_timeout gtimeout; then
     gtimeout --signal=TERM --kill-after="$_kill_after" "$_t" "$@"
     _rc=$?
     [ "$_rc" -eq 137 ] && return 124

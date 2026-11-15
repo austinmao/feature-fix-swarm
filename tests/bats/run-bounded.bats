@@ -60,6 +60,25 @@ make_shim_path() {
   [[ "$output" == *"refusing unbounded"* ]]
 }
 
+@test "RB-005b: a non-GNU timeout (uutils, busybox) is skipped for the python3 rung" {
+  # uutils timeout 0.10.0 (Ubuntu 26.04) kills only the direct child, so a
+  # TERM-ignoring grandchild outlives the bound. Only GNU timeout kills the group.
+  make_shim_path "$TMP/shim" python3 sleep
+  cat > "$TMP/shim/timeout" <<SH
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+  echo 'timeout (uutils coreutils) 0.10.0'
+else
+  : > "$TMP/stub-used"
+  exit 99
+fi
+SH
+  chmod +x "$TMP/shim/timeout"
+  run env PATH="$TMP/shim" /bin/bash -c ". '$LIB'; run_bounded 1 sleep 30"
+  [ "$status" -eq 124 ]
+  [ ! -e "$TMP/stub-used" ]
+}
+
 @test "RB-006: adversary_invoke stays bounded on a coreutils-less host" {
   # regression for the old "run unwrapped rather than hard-fail" branch:
   # no timeout/gtimeout on PATH, hanging fake codex -> rc 124 at ~1s, not a block
