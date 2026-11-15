@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-15, Ubuntu 26.04 uutils coreutils)
+
+- `run_bounded` uses `timeout`/`gtimeout` only when `--version` reports GNU coreutils.
+  Ubuntu 26.04 ships uutils `timeout`, which kills only the direct child, so a
+  TERM-ignoring grandchild outlived the bound and the bats job hung at
+  `run-bounded.bats` RB-009 until the 30-minute CI limit. Other builds now take the
+  python3 rung, which kills the whole process group. New test RB-005b.
+- `retro.bats` check-consent purity test reads mtime with GNU `stat -c '%Y'` first.
+  uutils `stat -f '%m'` prints volatile filesystem stats before failing, which made the
+  BSD-first form flaky on busy runners.
+
 ### Changed (2026-11-14, an Intent block replaces the scope-drift gate)
 
 - Specs carry an Intent block (`prod_delta`, `prod_budget_lines`, `delete_targets`, optional `inherit`). `/feature-spec` and the `plan-decompose` synthetic spec write it.

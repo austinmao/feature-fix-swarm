@@ -517,13 +517,15 @@ assert d.get('granted') is not True, d
   retro_seed_consent "$FIXTURES/consent-granted.json"
   CONSENT="$RETRO_STATE/consent.json"
   BEFORE_BYTES="$(cksum "$CONSENT")"
-  BEFORE_MTIME="$(stat -f '%m' "$CONSENT" 2>/dev/null || stat -c '%Y' "$CONSENT")"
+  # GNU form first: uutils `stat -f '%m'` prints filesystem stats (free blocks
+  # change between calls) before failing, so the BSD-first form is not stable.
+  BEFORE_MTIME="$(stat -c '%Y' "$CONSENT" 2>/dev/null || stat -f '%m' "$CONSENT")"
   run bash "$REPO/scripts/gsd/retro.sh" check-consent
   [ "$status" -eq 0 ]
   run bash "$REPO/scripts/gsd/retro.sh" check-consent
   [ "$status" -eq 0 ]
   [ "$(cksum "$CONSENT")" = "$BEFORE_BYTES" ]
-  [ "$(stat -f '%m' "$CONSENT" 2>/dev/null || stat -c '%Y' "$CONSENT")" = "$BEFORE_MTIME" ]
+  [ "$(stat -c '%Y' "$CONSENT" 2>/dev/null || stat -f '%m' "$CONSENT")" = "$BEFORE_MTIME" ]
 }
 
 @test "check-consent distinguishes granted-current / revoked / absent / major-mismatch, rc 0 in every case" {
