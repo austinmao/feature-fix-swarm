@@ -82,6 +82,24 @@ EOF
   [ "$(planner_model gsd-planner)" = "claude-opus-5-5" ]
 }
 
+@test "current Fable 5.2 full ID is fenced on both planning roles" {
+  python3 - "$TMP/.planning/config.json" <<'EOF'
+import json, sys
+p = sys.argv[1]
+cfg = json.load(open(p))
+cfg["model_overrides"]["gsd-planner"] = "claude-fable-5-2"
+cfg["model_overrides"]["gsd-plan-checker"] = "claude-fable-5-2"
+json.dump(cfg, open(p, "w"))
+EOF
+  echo "OAuth token rotation for the payment webhook" > "$TMP/.planning/ROADMAP.md"
+  run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"2 planning role(s) fable -> opus"* ]]
+  [ "$(planner_model gsd-planner)" = "claude-opus-5-5" ]
+  [ "$(planner_model gsd-plan-checker)" = "claude-opus-5-5" ]
+  [ "$(planner_model gsd-executor)" = "sonnet" ]
+}
+
 @test "missing .planning -> fail-soft warn, exit 0" {
   run bash "$LEVER" "$TMP/nonexistent"
   [ "$status" -eq 0 ]
