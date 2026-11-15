@@ -19,6 +19,16 @@ all skills.
   uutils `stat -f '%m'` prints volatile filesystem stats before failing, which made the
   BSD-first form flaky on busy runners.
 
+### Fixed (2026-11-15, security fence covers the current Fable ID)
+
+- `security-model-fence.sh` now also fences `claude-fable-5-2` → `claude-opus-5-5`. Before, a
+  consumer override that pinned the current Fable ID on `gsd-planner` or `gsd-plan-checker`
+  slipped past the fence on a security-touching spec. The `fable`, `claude-fable-5-1` and legacy
+  `claude-fable-5` entries are unchanged.
+- Tests: `security-model-fence.bats` gains a case that pins both planning roles to
+  `claude-fable-5-2` and asserts both become `claude-opus-5-5` while the executor stays `sonnet`.
+- Docs: `docs/model-tiers.md` lists the new fenced ID.
+
 ### Changed (2026-11-14, an Intent block replaces the scope-drift gate)
 
 - Specs carry an Intent block (`prod_delta`, `prod_budget_lines`, `delete_targets`, optional `inherit`). `/feature-spec` and the `plan-decompose` synthetic spec write it.

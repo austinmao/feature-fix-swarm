@@ -166,7 +166,7 @@ planning off fable when the spec is security-touching.
 
 - **Trigger**: security keywords in the spec (`:51`)
 - **Affects**: `gsd-planner` and `gsd-plan-checker` only (`:7, :61`)
-- **Change**: `fable → opus` (`:61`); the full-ID spelling `claude-fable-5-1 → claude-opus-5-5` is fenced too, and the legacy `claude-fable-5 → claude-opus-5` pair still is
+- **Change**: `fable → opus` (`:61`); the full-ID spellings `claude-fable-5-2 → claude-opus-5-5` and `claude-fable-5-1 → claude-opus-5-5` are fenced too, and the legacy `claude-fable-5 → claude-opus-5` pair still is
 - **Untouched**: executor and verifier (`:9`)
 - **Kill-switch**: `SECURITY_MODEL_FENCE=off` disables the demotion entirely
 
