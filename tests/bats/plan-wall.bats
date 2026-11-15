@@ -46,6 +46,7 @@ setup() {
   export FFS_ADVERSARY_MODEL_PROBE=off
   export GATES_PY="$REPO/packages/feature-fix-swarm/lib/gates.py"
   export GSD_RUN_ID="fixture-plan-wall"
+  export GATES_STORE="$BATS_TEST_TMPDIR/gates.json"
   # Default the OTHER vendor's binary to a name that resolves nowhere, so a
   # claude-only test's rule-1 opposite-vendor ladder fails FAST (rc=127)
   # instead of shelling out to a REAL codex/claude CLI that may be installed
@@ -164,7 +165,8 @@ write_native_import() {
   rm -rf .planning/run-state
   write_native_import '[]' native-import-soc
   printf 'changed evidence\n' >> specs/001-native/socratic.md
-  GSD_RUN_ID=native-import-soc PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  # allowances are keyed on the spec, not the run id: a fresh store is the sanctioned way to get another
+  GATES_STORE="$BATS_TEST_TMPDIR/gates-soc.json" GSD_RUN_ID=native-import-soc PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]; [[ "$output" == *"Socratic provenance is missing or stale"* ]]
 }
 
@@ -204,7 +206,8 @@ write_native_import() {
   [ "$status" -eq 1 ]
   rm -rf .planning/run-state; write_native_import '[]' native-import-extra
   jq '.plans += [{"path":"extra.md","sha256":"x","producer_model":"claude-fable-5-1","findings":[]}]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
-  GSD_RUN_ID=native-import-extra PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  # allowances are keyed on the spec, not the run id: a fresh store is the sanctioned way to get another
+  GATES_STORE="$BATS_TEST_TMPDIR/gates-extra.json" GSD_RUN_ID=native-import-extra PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
 }
 
@@ -256,6 +259,15 @@ EOF
   [[ "$output" == *"ADJUDICATED-PASS"* ]]
   [ ! -f "$MARKER" ]
   [ "$(jq -r '.verdict' "$record")" = "adjudicated-pass" ]
+}
+
+@test "F2: [needs-requirement] claim prefix is stripped and stored as the sticky flag" {
+  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"[needs-requirement] add a retry policy","line":3}]'
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  rec="$(queue_list --source wall | jq -c '.[0]')"
+  [ "$(printf '%s' "$rec" | jq -r '.needs_requirement')" = "true" ]
+  [[ "$(printf '%s' "$rec" | jq -r '.issue')" != *"[needs-requirement]"* ]]
+  [[ "$(printf '%s' "$rec" | jq -r '.issue')" == "add a retry policy"* ]]
 }
 
 # ── PATH-002: MEDIUM/LOW-only findings advisory, exit 0 ─────────────────────

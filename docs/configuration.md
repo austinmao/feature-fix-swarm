@@ -149,7 +149,6 @@ references to either.
 | `PLAN_ADVERSARY_TIMEOUT` | `480` | `scripts/gsd/plan-adversary.sh` | Wall-clock cap |
 | `QA_COVERAGE` | on | `scripts/gsd/qa-coverage-adversary.sh:39` | `off` skips the advisory QA-coverage critique |
 | `QA_COVERAGE_MODEL_REQUEST` / `_TIMEOUT` | `{"kind":"tier","name":"execution"}` / `300` | `scripts/gsd/qa-coverage-adversary.sh` | Typed QA-coverage adversary request and budget |
-| `GSD_DRIFT_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/scope-drift-gate.sh` | Typed optional drift-judge request |
 | `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:176` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
 | `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:231` | `0`/`off` disables the one-shot cross-vendor fallback. Also read by the plan wall's diversity-invariant reviewer selection — its state is stamped into the wall record |
 | `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:372` | `off` skips the cheap pre-review availability probe |
@@ -158,22 +157,23 @@ references to either.
 | `ADVERSARY_LAST_TIER_DESCENT` | `0` | `scripts/gsd/adversary-host.sh` | Read-only signal, not an input. Set to `1` when the reviewer that answered sat on a LOWER rung than the one requested (e.g. a judgment-tier ask answered by `gpt-5.6-terra` medium). Such a review is recorded as **degraded** and prints `adversary-host: TIER-DESCENT kind=… requested=… answered=…` to stderr; in-process callers that source this lib can gate on the variable |
 | `PLAN_WALL` | on | `scripts/gsd/plan-wall.sh` | `off` skips the per-phase plan wall — only with a durable, recorded waiver; a skip that cannot record its waiver fails closed |
 | `PLAN_WALL_TIMEOUT` | `180` | `scripts/gsd/plan-wall.sh` | Per-plan reviewer dispatch budget (seconds) |
-| `PLAN_WALL_MAX_ROUNDS` | `2` | `scripts/gsd/plan-wall.sh` | Round cap per phase (2026-08-27 one-round policy: round 1 = review, round 2 exists only to repair a CRITICAL; HIGH-only passes round 1 as PASS-RESIDUAL). A hard block on the final allowed round exits 3 with the distinct verdict `WALL-ROUND-CAP` (not `BLOCKED`, which would invite another fix round) and prints the one-command unblock: resolve the open findings, then `gates.py loop-round <RUN_ID> wall:<PHASE> --reset --max 1`. `plan-wall.sh --run` applies the same cap to the global `wall:run` counter |
-| `PLAN_GATE_MAX_REPAIRS` | `1` | `skills/plan-decompose/SKILL.md` | Plan-gate repair rounds after the round-1 review. The budget is DURABLE (`gates.py loop-round "spec-<NNN>" plangate:plan`, max `1+PLAN_GATE_MAX_REPAIRS`) — re-invoking after a terminal block re-emits the block with zero dispatch; fresh budget only via `gates.py loop-round "spec-<NNN>" plangate:plan --reset --max 1` |
+| `PLAN_WALL_MAX_ROUNDS` | `2` | `scripts/gsd/plan-wall.sh` | Round cap per phase (2026-08-27 one-round policy: round 1 = review, round 2 exists only to repair a CRITICAL; HIGH-only passes round 1 as PASS-RESIDUAL). A hard block on the final allowed round exits 3 with the distinct verdict `WALL-ROUND-CAP` (not `BLOCKED`, which would invite another fix round) and `drive.sh` quarantines the phase (`wall-budget-exhausted`) with no retry; nothing reopens the allowance. `plan-wall.sh --run` applies the same cap to the global `wall:run` counter |
+| `PLAN_GATE_MAX_REPAIRS` | `1` | `skills/plan-decompose/SKILL.md` | Plan-gate repair rounds after the round-1 review. The budget is DURABLE (`gates.py loop-round "spec-<NNN>" plangate:plan`, max `1+PLAN_GATE_MAX_REPAIRS`) — re-invoking after a terminal block re-emits the block with zero dispatch; exhaustion writes the `BUDGET-EXHAUSTED` contract to `plan-decompose-blocked.md`. A plan-gate PASS resets the counter (convergence) |
 | `FFS_CEREMONY_TIER` | unset | `scripts/gsd/seed-ceremony-tier.sh` | Hard override (`full`\|`light`\|`adhoc`) of the seed-time ceremony classifier; unset lets the classifier decide (security keywords -> full; >20 files or >1500 est-LOC -> full; <5 files and <200 LOC -> adhoc; else light) |
 | `FFS_PLAN_LENGTH_ENFORCE` | `0` | `scripts/gsd/plan-length-gate.sh` | `1` restores the blocking plan-length gate; default is advisory `PLAN-LENGTH:WARN` and non-blocking (rc 0) |
 | `PLAN_WALL_REASON` | operator waiver text | `scripts/gsd/plan-wall.sh` | Waiver reason recorded when `PLAN_WALL=off`; must be non-empty |
 | `PLAN_WALL_AWAIT_MAX` | `6` | `scripts/gsd/plan-wall.sh` | Caps how many `--await` calls may end pending per phase; resets on any decided outcome |
 | `PLAN_WALL_AWAIT_POLL` | `15` | `scripts/gsd/plan-wall.sh` | Poll interval (seconds) while backgrounded awaiting a decided wall outcome |
 | `PLAN_WALL_AWAIT_COUNT` | on | `scripts/gsd/plan-wall.sh` | `off` makes an `--await` probe budget-neutral (for evaluators) — does not consume `PLAN_WALL_AWAIT_MAX` |
-| `PLAN_WALL_AUTO_RESET_MAX` | `1` | `scripts/gsd/gsd-run.sh` (`_gsd_run_wall_gate`) | Per-phase-per-run budget for the `--autonomous` rc-3 bounded auto-continue; consumed via the durable `wall-autoreset:<phase-slug>` loop-round counter, spent regardless of the re-run's outcome, never replenished mid-run. Requires an operator `wall-reset:<phase-slug>` grant |
 | `SPEC_PANEL` | off | spec-authoring panel (last spec-decompose phase) | `on` enables the dual-vendor blind-draft panel at spec authoring; default off pending an EVAL-D fixture pass |
+| `FFS_SPEC_ID` | unset | `lib/gates.py` (`spec_identity`) | Spec identity (`spec-NNN`) for the run, read ahead of the branch `NNN` prefix and `GSD_RUN_ID`. Disagreeing with the branch prefix fails closed (`SPEC-ID:mismatch`). `gsd-run.sh` and `drive.sh` export it |
+| `FFS_BASE` | default branch (`origin/HEAD`, else `main`/`master`) | `lib/gates.py` | Base ref for the production-candidate diff (merge-base to working tree) used by `intent-check` and the review token. An override must resolve to a point on the default branch, else `INTENT-FAIL` |
 | `FFS_ENV_REGISTRY` | unset | `lib/gates.py:3724` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
 | `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:3679` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
 
 `findings-queue` (`lib/gates.py`) resolutions now require a disposition:
-`gates.py findings-queue resolve --disposition refute|fix|waive --reason "…"`.
-`refute` and `fix` clear the finding; `waive` records it accepted-as-is. Adding
+`gates.py findings-queue resolve --disposition refute|fix|waive|issue|descope --reason "…"`.
+`refute` and `fix` clear the finding; `waive` records it accepted-as-is. `issue` and `descope` are operator choices, refused for security HIGH/CRITICAL findings. Adding
 a finding whose signature matches a RESOLVED one reopens it (prior disposition
 kept in history) — a refuted-then-recurring finding blocks again rather than
 staying silently cleared. The plan wall's HIGH/CRITICAL blocking check reads

@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.19.0"
+version: "2.22.0"
 allowed-tools:
   - Read
   - Edit
@@ -358,17 +358,12 @@ unresolved CRITICAL blocks (rc 1) and buys exactly one repair round.
 
 Exit 3 = `WALL-ROUND-CAP` (durable per-phase round cap, default
 `PLAN_WALL_MAX_ROUNDS=2` — review + one CRITICAL-repair round): this is
-TERMINAL for the phase, not a retryable BLOCKED — do NOT start another fix
-round. Quarantine the phase (record the open findings + the printed unblock
-commands in the run report / pendings) and move to other runnable work; the
-cap exists because uncounted wall→fix→wall loops have burned 19 rounds/2
-days and 38+ turns/a week of vendor quota. The sealed review allowance
-reopens only through a `wall-reset:<phase-slug>` grant: `plan-wall.sh`
-itself renews it by exactly one fresh review per phase per run (sealed
-`review:renew:<N>` budget, max 1), and only while every plan in the phase
-has zero unresolved CRITICAL wall findings. A hard block on the renewed
-review is terminal (exit 3). Without the grant nothing reopens it — not a
-counter reset, not a larger `PLAN_WALL_MAX_ROUNDS`.
+TERMINAL for the phase. Do NOT start another fix round. The wall exits 3 with
+`WALL-ROUND-CAP` and the run quarantines the phase and reports it with the
+`BUDGET-EXHAUSTED` contract (see "Budget exhaustion" below); move to other
+runnable work. Nothing reopens the
+allowance: it is keyed on the spec, so a new drive or run id does not
+refresh it either.
 
 ### Fix-round mutation contract
 
@@ -383,40 +378,23 @@ one repair round before `WALL-ROUND-CAP`. The fix IS the edit to the plan;
 `findings-queue resolve` records the adjudication, it does not substitute
 for one.
 
-### Autonomous rc-3 bounded auto-continue
+### Budget exhaustion
 
-`--autonomous` runs get exactly ONE bounded, grant-gated retry before a
-quarantine becomes terminal — `gsd-run.sh` enforces this in code
-(`_gsd_run_wall_gate`; it is the runner behind every `--autonomous`
-invocation, and no agent turn exists between its two wall calls for an
-interactive prose recipe to govern). On exit 3, before quarantine:
+Every review budget (`review:wall:<phase>`, `review:spec`) is
+keyed on the spec (`gates.py spec-id`) and sealed. `plangate:plan` is keyed on
+the spec too, but a plan-gate PASS resets it. When one is spent, the run
+prints this contract and stops that work:
 
-1. Every plan under the phase must have zero unresolved CRITICAL wall
-   findings (`findings-queue list --unresolved --source wall --severity
-   CRITICAL --plan <plan>`). Residual HIGHs do NOT count — under the
-   one-round wall they are open on every pass-residual phase by design.
-   Any unresolved CRITICAL anywhere in the phase → quarantine (unchanged).
-2. Zero unresolved AND `gates.py check-grant "$RUN_ID" --action
-   wall-reset:<phase-slug>` passes AND the durable per-phase budget
-   (`gates.py loop-round "$RUN_ID" wall-autoreset:<phase-slug> --max
-   ${PLAN_WALL_AUTO_RESET_MAX:-1}`) is not capped → proceed; either check
-   failing → quarantine (unchanged).
-3. `gates.py loop-round "$RUN_ID" wall:<phase-slug> --reset --max 1`, then
-   re-run the wall on the phase exactly once. The reset clears only the
-   compatibility counter; the re-run's fresh review is admitted by the
-   wall's own grant-gated renewal of the sealed allowance (see above).
-4. ANY nonzero exit from that re-run — a second rc 3 OR a plain rc 1
-   BLOCKED — is quarantine terminal. Post-reset the wall restarts at round
-   1 of its one-round policy: a pass (including `PASS-RESIDUAL`) clears; a
-   fresh CRITICAL is terminal. The `wall-autoreset:<phase-slug>` budget is spent regardless of which
-   exit code comes back — at the default `PLAN_WALL_AUTO_RESET_MAX=1` this
-   recipe never runs twice for the same phase in the same run; raising the
-   knob is a deliberate, visible escape mirroring `PLAN_WALL_MAX_ROUNDS`,
-   never a silent off-switch.
+`BUDGET-EXHAUSTED <loop> spec-NNN: stopped. Operator picks one: merge-with-issues | descope | stop. Recommended: <amend spec | follow-up spec> — run /prompt-master (Codex: $prompt-master) with the prompt below.`
 
-Interactive sessions never mint a `wall-reset` grant, so the gate falls
-through to the unchanged terminal quarantine there — exit 3 stays the stop
-described above.
+The run's only automatic action is `stop`; gates.py records the exhaustion
+and `/spec-status` (Codex: `$spec-status`) shows it. The run never drafts a
+renewal, never picks merge-with-issues or descope, and never resolves a
+finding as `issue` or `descope`: those are the operator's, run in the
+operator's own shell. For merge-with-issues the operator resolves each open
+finding `issue`, files it, and merges by hand; an exhausted spec never
+reaches APPROVED at the seam. Security HIGH/CRITICAL findings cannot be
+`issue` or `descope`.
 
 ## Wall await rule
 
@@ -502,18 +480,9 @@ serialize:
 Claude Fable's instruction-following is strong enough that these two short guards
 replace enumerated behavior lists — do not grow them into checklists.
 
-**Dispatch-budget refresh is a typed grant, never plan surgery (D10,
-2026-08-27).** Wherever a per-round dispatch/executor budget applies (a
-consumer repo's run policy, a gsd segment cap), an EXHAUSTED budget is
-refreshed only by a typed grant in the run's autonomy ledger:
-`gates.py grant "$RUN_ID" --action "dispatch-budget:<spec>:<phase>"
---rollback "<how to unwind>"`, checked beside the budget with
-`gates.py check-grant "$RUN_ID" --action "dispatch-budget:<spec>:<phase>"`,
-mirroring `wall-reset:<slug>`. The grant's justification names the NEW root
-cause that earned more dispatches. NEVER amend a plan to reset a budget:
-spec-381 burned two full rounds on plan surgery whose only purpose was
-minting fresh budget, and the amendment triggered implicit re-review on top.
-Budgets are defect-scoped, not round-scoped.
+**Budgets are never refreshed (D10, superseded).** An exhausted dispatch or
+review budget ends that work (see "Budget exhaustion"). Never amend a plan
+to mint fresh budget.
 
 (Orchestrator-level mitigation: per-turn work inside gsd-core sub-agents is
 gsd-core's to guard — deeper coverage needs a gsd-core change, out of scope.)
@@ -592,14 +561,9 @@ gsd's verifier gates `phase.complete`, but the checkbox authority is gates.py:
 verify step runs: gates.py evidence, not self-report. A quick task whose test
 gate did not run is NOT done.
 
-**Scope-drift gate (advisory, once per phase wall — NEVER per turn):** alongside
-verify-done, run
-`bash scripts/gsd/scope-drift-gate.sh --judge --plan <this phase's $PLANNING/phases/<phase>/*-PLAN.md files>`
-— deterministic diff-vs-`files_modified` classification + `PHASE GOAL:` re-anchor,
-plus ONE bounded cross-vendor judge verdict (`DRIFT-VERDICT: ON-TRACK|DRIFT`).
-A DRIFT warning is advisory: re-read the spec/plan success criteria before
-starting the next phase, and record the correction in the phase SUMMARY.
-Kill-switch `GSD_DRIFT_GATE=off`; judge seam `GSD_DRIFT_JUDGE_CMD`.
+**Intent contract:** the spec's Intent block (see feature-spec) is checked by
+the plan wall at admission and by `/review-gate` and the ship seam before any
+review round is spent. A breach is `INTENT-FAIL`: delete more, or stop.
 
 ### Step 6: Finish tail (default; `--no-finish` opts out)
 
@@ -645,7 +609,7 @@ exit 0
 ```
 <!-- openwiki-wiring:ship-stage:end -->
 
-4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke). After
+4. `/review-gate` → ship (grant-walled) → `/canary` (post-ship smoke). Spec runs pass `FFS_SPEC_ID=spec-$SPEC_ID` to both so the skill and the seam spend one `review:spec` budget. After
    ship, run `bash scripts/gsd/promote-emit.sh "$RUN_ID"` — it EMITS (never
    executes) the staging→prod `gates.py promote` command for the operator/CI
    deploy workflow when this run consumed a `deploy:staging-*` grant; silent

@@ -171,6 +171,34 @@ else
   echo "gates.py or GSD_RUN_ID unavailable"
 fi
 
+STORE_PATH="${GATES_STORE:-}"
+[ -n "$STORE_PATH" ] || [ -z "$GP" ] || STORE_PATH="$(python3 "$GP" store-path 2>/dev/null)"
+python3 - "$EXPECTED_RUN_ID" "$STORE_PATH" <<'PY'
+import glob, json, sys
+spec, store = sys.argv[1:3]
+runs = {}
+for f in sorted(glob.glob(".planning/run-state/drive-*.json")):
+    try:
+        d = json.load(open(f))
+    except (OSError, ValueError):
+        continue
+    if isinstance(d, dict) and d.get("spec") == spec:
+        runs[d.get("run_id") or f] = sum(s.get("launches", 0) for s in d.get("steps", []))
+try:
+    data = json.load(open(store))
+except (OSError, ValueError):
+    data = {}
+loops = (data.get("_loops") or {}).get(spec) or {}
+print("RUNS:")
+print(f"runs {len(runs)}")
+for rid, n in runs.items():
+    print(f"  {rid} launches {n}")
+for k in sorted(loops):
+    if k.endswith("#cap") and (k.startswith("review:spec") or k.startswith("review:wall:")):
+        print(f"  {k[:-4]} {loops[k].get('used')}/{loops[k].get('max')}")
+print(f"exhausted {len((data.get('_exhausted') or {}).get(spec, []))}")
+PY
+
 echo "== EVIDENCE =="
 # shellcheck disable=SC2012 # Human status wants newest-first metadata, not only paths.
 [ -n "$SPEC_DIR" ] && ls -lt "$SPEC_DIR/evidence/" 2>/dev/null | head -15 || echo "no spec dir for $SPEC"

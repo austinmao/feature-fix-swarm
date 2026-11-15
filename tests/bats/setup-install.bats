@@ -26,7 +26,6 @@ setup() {
   cmp -s scripts/gsd/consume-danger-grant.py "$target/scripts/gsd/consume-danger-grant.py"
   cmp -s scripts/gsd/plan-adversary.sh "$target/scripts/gsd/plan-adversary.sh"
   cmp -s scripts/gsd/qa-coverage-adversary.sh "$target/scripts/gsd/qa-coverage-adversary.sh"
-  cmp -s scripts/gsd/scope-drift-gate.sh "$target/scripts/gsd/scope-drift-gate.sh"
   cmp -s scripts/gsd/sync-drift-check.sh "$target/scripts/gsd/sync-drift-check.sh"
   cmp -s lib/model_requests.py "$target/lib/model_requests.py"
   cmp -s lib/host_capabilities.py "$target/lib/host_capabilities.py"

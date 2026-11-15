@@ -484,3 +484,10 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"fable-fallback marker — low-blast skip disabled"* ]]
 }
+
+@test "F3 P2: hunt list targets scope beyond the goal and asks for the smallest remedy" {
+  grep -qF 'scope beyond the goal' "$SCRIPT"
+  grep -qF 'smallest remedy' "$SCRIPT"
+  refute_bre 'unstated assumptions' "$SCRIPT"
+  refute_bre 'missing or unfalsifiable acceptance criteria' "$SCRIPT"
+}

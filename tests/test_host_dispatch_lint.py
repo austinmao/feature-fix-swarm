@@ -87,21 +87,34 @@ def test_every_shipped_skill_passes_host_dispatch_lint() -> None:
     assert failures == []
 
 
-def test_feature_implement_declares_autonomous_rc3_auto_continue() -> None:
+def test_feature_implement_has_no_rc3_auto_continue_or_renewal() -> None:
     text = (ROOT / "skills" / "feature-implement" / "SKILL.md").read_text()
-    assert "### Autonomous rc-3 bounded auto-continue" in text
-    assert "wall-autoreset:" in text
-    assert "PLAN_WALL_AUTO_RESET_MAX" in text
+    assert "### Autonomous rc-3 bounded auto-continue" not in text
+    assert "wall-autoreset:" not in text
+    assert "PLAN_WALL_AUTO_RESET_MAX" not in text
+    assert "review:renew" not in text
+    assert "BUDGET-EXHAUSTED" in text
 
 
-def test_autonomy_grant_declares_wall_reset_type() -> None:
+def test_autonomy_grant_has_no_wall_reset_type() -> None:
     text = (ROOT / "skills" / "autonomy-grant" / "SKILL.md").read_text()
-    assert "`wall-reset`" in text
+    assert "`wall-reset`" not in text
 
 
-def test_feature_spec_max_auth_enumerates_wall_reset_per_phase() -> None:
+def test_feature_spec_max_auth_has_no_wall_reset_grants() -> None:
     text = (ROOT / "skills" / "feature-spec" / "SKILL.md").read_text()
-    assert "wall-reset:<phase-slug>" in text
+    assert "wall-reset:<phase-slug>" not in text
+
+
+def test_review_gate_skill_states_budget_contract_and_skill_site() -> None:
+    text = (ROOT / "skills" / "review-gate" / "SKILL.md").read_text()
+    assert "BUDGET-EXHAUSTED" in text
+    assert "--site skill" in text
+
+
+def test_run_finalizer_has_no_reset_all() -> None:
+    text = (ROOT / "scripts" / "gsd" / "run-finalizer.sh").read_text()
+    assert "--reset-all" not in text
 
 
 def test_fix_round_mutation_contract_present_in_wall_skills() -> None:
@@ -112,15 +125,13 @@ def test_fix_round_mutation_contract_present_in_wall_skills() -> None:
 
 def test_configuration_docs_cover_plan_wall_knobs() -> None:
     text = (ROOT / "docs" / "configuration.md").read_text()
-    for var in ("PLAN_WALL_AUTO_RESET_MAX", "PLAN_WALL_MAX_ROUNDS",
-                "PLAN_WALL_TIMEOUT", "PLAN_WALL_AWAIT_MAX"):
+    for var in ("PLAN_WALL_MAX_ROUNDS", "PLAN_WALL_TIMEOUT", "PLAN_WALL_AWAIT_MAX"):
         assert var in text, var
+    assert "PLAN_WALL_AUTO_RESET_MAX" not in text
 
 
-def test_gsd_run_wraps_wall_calls_in_auto_continue_gate() -> None:
+def test_gsd_run_has_no_wall_auto_continue_gate_and_pins_spec_id() -> None:
     text = (ROOT / "scripts" / "gsd" / "gsd-run.sh").read_text()
-    assert "_gsd_run_wall_gate" in text
-    assert "wall-autoreset:" in text
-    # both wall call sites must route through the gate, none may bypass it
-    assert 'bash "$PLAN_WALL_LEVER"' not in text.replace(
-        '  bash "$PLAN_WALL_LEVER" "$phase_dir"', "")
+    assert "_gsd_run_wall_gate" not in text
+    assert "wall-autoreset:" not in text
+    assert "export FFS_SPEC_ID" in text

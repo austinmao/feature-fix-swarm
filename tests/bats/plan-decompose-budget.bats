@@ -58,10 +58,11 @@ setup() {
   grep -q "deliberately SURVIVES budget" "$SKILL"
 }
 
-@test "SKILL pins pass-reset and the explicit fresh-budget recipe" {
-  grep -q 'plangate:plan --reset' "$SKILL"
-  grep -qE 'On a final PASS verdict.*' "$SKILL"
-  grep -q 'plangate:plan --reset --max 1' "$SKILL"
+@test "SKILL carries no --reset recipe and states the BUDGET-EXHAUSTED contract" {
+  # the convergence reset on PASS stays; only the fresh-budget recipe (--reset --max) is gone
+  ! grep -q 'plangate:plan --reset --max' "$SKILL"
+  ! grep -q -- '--reset --max' "$SKILL"
+  grep -q 'BUDGET-EXHAUSTED' "$SKILL"
 }
 
 @test "SKILL pins the one-round pass rule (no strictly-fewer comparison) and default 1 repair" {
@@ -69,4 +70,11 @@ setup() {
   grep -q 'There is NO round-count comparison' "$SKILL"
   grep -q 'PLAN_GATE_MAX_REPAIRS:-1' "$SKILL"
   ! grep -q 'STRICTLY FEWER' "$SKILL"
+}
+
+@test "F3 P3: plan review prompt hunts scope beyond the goal and asks for the smallest remedy" {
+  grep -qF 'scope beyond the goal' "$SKILL"
+  grep -qF 'smallest remedy' "$SKILL"
+  [ "$(grep -c 'unstated assumptions, missing error handling' "$SKILL")" -eq 0 ]
+  [ "$(grep -c 'missing edge cases' "$SKILL")" -eq 0 ]
 }
