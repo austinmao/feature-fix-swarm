@@ -8,6 +8,21 @@ all skills.
 
 ## Unreleased
 
+### Added (2026-11-17, operator-only guard hook, #253)
+
+- `scripts/hooks/operator-only-guard.sh`: a PreToolUse `Bash` hook that blocks
+  agent tool calls running `findings-queue resolve --disposition issue|descope`,
+  `findings-queue retag --in-spec` or `intent-check --repin`. These were
+  operator-only by skill prose alone. Anti-accident only; gates.py is unchanged.
+- `setup.sh` (user and project scope) merges one FFS-owned entry into the Claude
+  and Codex hook files, records it in the manifest, and removes only that entry
+  on uninstall. Headless Claude and Codex staging register it. A live `codex exec`
+  run blocked a deny command from a `CODEX_HOME/hooks.json` entry, with the headless
+  `--dangerously-bypass-hook-trust` flag. Not yet proven: interactive Codex hook trust
+  review, and Codex stdin without a trailing newline (the hook reads one line).
+- The intent-drift half of #253 is not built: #252 already removed the step it
+  would have replaced, so it would be a net new gate.
+
 ### Fixed (2026-11-15, Ubuntu 26.04 uutils coreutils)
 
 - `run_bounded` uses `timeout`/`gtimeout` only when `--version` reports GNU coreutils.

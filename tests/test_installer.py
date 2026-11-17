@@ -2468,3 +2468,192 @@ def test_installer_override_refuses_the_stock_unpatched_gsd_installer(tmp_path, 
     with pytest.raises(ffs_installer.ActionableError, match="stock gsd-core installer"):
         ffs_installer.install_gsd_profiles(source, tmp_path / "staging")
     assert ran == []
+
+
+# --- operator-only guard hook registration (#253) ---
+
+GUARD = "operator-only-guard.sh"
+GUARD_DENY = {"tool_name": "Bash", "tool_input": {"command": "python3 lib/gates.py intent-check --spec s.md --repin"}}
+GUARD_ALLOW = {"tool_name": "Bash", "tool_input": {"command": "python3 lib/gates.py intent-check --spec s.md"}}
+FOREIGN_ENTRY = {"matcher": "Edit", "hooks": [{"type": "command", "command": "echo foreign"}]}
+FOREIGN_BASH_ENTRY = {"matcher": "Bash", "hooks": [{"type": "command", "command": "bash ./team-guard.sh"}]}
+
+
+def guard_entries(path: Path) -> list[dict]:
+    document = json.loads(path.read_text())
+    return [
+        entry for entry in document.get("hooks", {}).get("PreToolUse", [])
+        if any(GUARD in hook.get("command", "") for hook in entry.get("hooks", []))
+    ]
+
+
+def run_guard(command: str, payload: dict, *, cwd: Path, env: dict[str, str] | None = None) -> int:
+    return subprocess.run(
+        command, shell=True, cwd=cwd, input=json.dumps(payload) + "\n", text=True,
+        env={"PATH": "/usr/bin:/bin", **(env or {})},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    ).returncode
+
+
+def seed_hook_files(home: Path) -> tuple[Path, Path]:
+    settings, codex_hooks = home / ".claude/settings.json", home / ".codex/hooks.json"
+    settings.parent.mkdir(parents=True)
+    codex_hooks.parent.mkdir(parents=True)
+    # Deliberately unsorted keys: the merge must not reorder what it does not own.
+    settings.write_text(json.dumps({
+        "theme": "dark",
+        "hooks": {"PreToolUse": [FOREIGN_ENTRY, FOREIGN_BASH_ENTRY], "PostToolUse": [FOREIGN_ENTRY]},
+        "env": {"A": "1"},
+    }))
+    codex_hooks.write_text(json.dumps({"hooks": {"PreToolUse": [FOREIGN_ENTRY], "SessionStart": []}}))
+    settings.chmod(0o644)
+    return settings, codex_hooks
+
+
+def test_user_install_places_the_guard_for_both_runtimes(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    home = tmp_path / "home"
+    source = (ROOT / "scripts/hooks" / GUARD).read_bytes()
+    assert (home / ".claude/lib/feature-fix-swarm" / GUARD).read_bytes() == source
+    assert (home / ".codex/hooks" / GUARD).read_bytes() == source
+
+
+def test_user_install_merges_one_guard_entry_into_existing_hook_files(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = seed_hook_files(home)
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.returncode == 0, result.stderr
+    guard_command = ffs_installer.guard_hook_module().guard_command
+    claude_cmd = guard_command(home / ".claude/lib/feature-fix-swarm" / GUARD)
+    codex_cmd = guard_command(home / ".codex/hooks" / GUARD)
+    for path, command in ((settings, claude_cmd), (codex_hooks, codex_cmd)):
+        (entry,) = guard_entries(path)
+        assert entry == {"matcher": "Bash", "hooks": [{"type": "command", "command": command, "timeout": 10}]}
+    document = json.loads(settings.read_text())
+    assert list(document) == ["theme", "hooks", "env"]
+    assert document["hooks"]["PreToolUse"][:2] == [FOREIGN_ENTRY, FOREIGN_BASH_ENTRY]
+    assert document["hooks"]["PostToolUse"] == [FOREIGN_ENTRY] and document["env"] == {"A": "1"}
+    assert stat.S_IMODE(settings.stat().st_mode) == 0o644
+    assert json.loads(codex_hooks.read_text())["hooks"]["PreToolUse"][0] == FOREIGN_ENTRY
+    assert json.loads(codex_hooks.read_text())["hooks"]["SessionStart"] == []
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    assert manifest["hooks"] == sorted(
+        [{"file": str(settings), "command": claude_cmd}, {"file": str(codex_hooks), "command": codex_cmd}],
+        key=lambda record: record["file"],
+    )
+    assert str(settings) not in manifest["paths"] and str(codex_hooks) not in manifest["paths"]
+
+
+def test_user_install_creates_missing_hook_files(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    home = tmp_path / "home"
+    for path in (home / ".claude/settings.json", home / ".codex/hooks.json"):
+        assert len(guard_entries(path)) == 1
+        assert list(json.loads(path.read_text())) == ["hooks"]
+
+
+def test_reinstall_keeps_exactly_one_guard_entry_and_uninstall_removes_only_it(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = seed_hook_files(home)
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    first = (settings.read_bytes(), codex_hooks.read_bytes())
+
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    assert (settings.read_bytes(), codex_hooks.read_bytes()) == first
+    assert len(guard_entries(settings)) == len(guard_entries(codex_hooks)) == 1
+
+    removed = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert removed.returncode == 0, removed.stderr
+    document = json.loads(settings.read_text())
+    assert document["hooks"]["PreToolUse"] == [FOREIGN_ENTRY, FOREIGN_BASH_ENTRY]
+    assert document["hooks"]["PostToolUse"] == [FOREIGN_ENTRY] and document["theme"] == "dark"
+    assert json.loads(codex_hooks.read_text())["hooks"]["PreToolUse"] == [FOREIGN_ENTRY]
+    assert not (home / ".codex/hooks" / GUARD).exists()
+    assert not (home / ".claude/lib/feature-fix-swarm" / GUARD).exists()
+
+
+def test_user_install_rollback_restores_the_prior_hook_files(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = seed_hook_files(home)
+    before = (settings.read_bytes(), codex_hooks.read_bytes())
+    installed = run_setup(tmp_path, "--scope", "user")
+    backup_id = next(line.split("=", 1)[1] for line in installed.stdout.splitlines() if line.startswith("backup_id="))
+    assert (settings.read_bytes(), codex_hooks.read_bytes()) != before
+
+    rolled_back = run_setup(tmp_path, "--rollback", backup_id)
+
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    assert (settings.read_bytes(), codex_hooks.read_bytes()) == before
+
+
+@pytest.mark.parametrize("kind", ["unparseable", "empty", "not-object", "symlink"])
+def test_user_install_skips_an_odd_hook_file_with_a_warning(tmp_path: Path, kind: str) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = home / ".claude/settings.json", home / ".codex/hooks.json"
+    settings.parent.mkdir(parents=True)
+    real = settings
+    if kind == "symlink":
+        real = tmp_path / "dotfiles-settings.json"
+        real.write_text("{}")
+        settings.symlink_to(real)
+    else:
+        settings.write_text({"unparseable": "{not json", "empty": "", "not-object": "[]"}[kind])
+    before = real.read_bytes()
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.returncode == 0, result.stderr
+    (warning,) = [line for line in result.stderr.splitlines() if "WARN" in line and str(settings) in line]
+    assert "operator-only guard" in warning
+    assert real.read_bytes() == before and settings.is_symlink() == (kind == "symlink")
+    assert len(guard_entries(codex_hooks)) == 1
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    assert [record["file"] for record in manifest["hooks"]] == [str(codex_hooks)]
+    removed = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert removed.returncode == 0, removed.stderr
+    assert real.read_bytes() == before
+
+
+def test_guard_command_with_a_missing_script_is_a_no_op(tmp_path: Path) -> None:
+    command = ffs_installer.guard_hook_module().guard_command(tmp_path / "gone" / "with space" / GUARD)
+    assert run_guard(command, GUARD_DENY, cwd=tmp_path) == 0
+
+
+def test_project_install_registers_the_vendored_guard_and_uninstall_removes_only_it(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    claude, codex = project / ".claude/settings.json", project / ".codex/hooks.json"
+    claude.parent.mkdir()
+    codex.parent.mkdir()
+    claude.write_text(json.dumps({"permissions": {"allow": ["Read"]}, "hooks": {"PreToolUse": [FOREIGN_ENTRY]}}))
+    args = ("--scope", "project", "--project-dir", str(project))
+
+    for _ in range(2):
+        result = run_setup(tmp_path, *args)
+        assert result.returncode == 0, result.stderr
+
+    vendored = project / ".feature-fix-swarm/vendor/hooks" / GUARD
+    assert vendored.read_bytes() == (ROOT / "scripts/hooks" / GUARD).read_bytes()
+    (claude_entry,), (codex_entry,) = guard_entries(claude), guard_entries(codex)
+    claude_cmd = claude_entry["hooks"][0]["command"]
+    codex_cmd = codex_entry["hooks"][0]["command"]
+    assert claude_cmd.endswith(" \"$CLAUDE_PROJECT_DIR\"/.feature-fix-swarm/vendor/hooks/" + GUARD)
+    assert codex_cmd.endswith(" \"$(git rev-parse --show-toplevel)\"/.feature-fix-swarm/vendor/hooks/" + GUARD)
+    assert json.loads(claude.read_text())["permissions"] == {"allow": ["Read"]}
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    # Claude resolves the project via env from any cwd; Codex via git from inside the project.
+    assert run_guard(claude_cmd, GUARD_DENY, cwd=other, env={"CLAUDE_PROJECT_DIR": str(project)}) == 2
+    assert run_guard(claude_cmd, GUARD_ALLOW, cwd=other, env={"CLAUDE_PROJECT_DIR": str(project)}) == 0
+    assert run_guard(codex_cmd, {"tool_input": {"cmd": GUARD_DENY["tool_input"]["command"]}}, cwd=project) == 2
+    manifest = json.loads((project / ".feature-fix-swarm/install-manifest.json").read_text())
+    assert [record["file"] for record in manifest["hooks"]] == [".claude/settings.json", ".codex/hooks.json"]
+    assert ".feature-fix-swarm/vendor/hooks/" + GUARD in manifest["paths"]
+
+    removed = run_setup(tmp_path, "--uninstall", *args)
+    assert removed.returncode == 0, removed.stderr
+    assert json.loads(claude.read_text())["hooks"]["PreToolUse"] == [FOREIGN_ENTRY]
+    assert json.loads(codex.read_text())["hooks"]["PreToolUse"] == []
+    assert not vendored.exists()

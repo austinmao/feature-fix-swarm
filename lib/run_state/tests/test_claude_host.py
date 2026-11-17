@@ -17,6 +17,9 @@ from run_state.claude_host import (
     parse_claude_telemetry,
 )
 from run_state.claude_runtime_staging import STAGE_MANIFEST_NAME, stage_private_claude_runtime
+from run_state.tests.installed_home_fixture import (
+    GUARD, GUARD_ALLOW, GUARD_DENY, guard_command_of, install_user_home, run_guard_command,
+)
 
 
 def _gsd_environment(tmp_path: Path, name: str = "admission.json") -> dict[str, str]:
@@ -332,3 +335,28 @@ def test_launch_material_has_closed_cli_and_private_auth_guard(tmp_path: Path) -
     with pytest.raises(ClaudeHostRefused, match="RUNTIME_CREDENTIAL_UNSAFE"):
         ClaudeHostAdapter(qualified, binary, SUPPORTED_CLAUDE_VERSION).build_launch_material(
             "do the work", attempt=2, session_id=str(uuid.uuid4()))
+
+
+def test_installer_built_guard_hook_is_staged_inside_the_private_claude_runtime_and_denies(tmp_path: Path) -> None:
+    home = install_user_home(tmp_path)
+    candidate = home / ".claude"
+    # The stub GSD installer leaves an unpinned manifest; complete only that GSD closure.
+    version = candidate / "gsd-core" / "VERSION"
+    (candidate / "gsd-file-manifest.json").write_text(json.dumps({
+        "version": "1.15.0", "runtime": "claude", "files": {"gsd-core/VERSION": _sha(version)}}))
+    credential = tmp_path / "credential.json"
+    credential.write_text(json.dumps({"claudeAiOauth": {"accessToken": "fixture-access"}}))
+    credential.chmod(0o600)
+    workspace, parent = tmp_path / "work", tmp_path / "stages"
+    workspace.mkdir()
+    parent.mkdir(mode=0o700)
+
+    stage_private_claude_runtime(candidate, credential, parent / "runtime", workspace)
+
+    runtime = parent / "runtime"
+    command = guard_command_of(runtime / "settings.json")
+    assert str(runtime) in command and str(candidate) not in command
+    assert (runtime / "lib/feature-fix-swarm" / GUARD).read_bytes() == (candidate / "lib/feature-fix-swarm" / GUARD).read_bytes()
+    denied = run_guard_command(command, {"command": GUARD_DENY}, workspace)
+    assert (denied.returncode, "operator-only" in denied.stderr) == (2, True)
+    assert run_guard_command(command, {"command": GUARD_ALLOW}, workspace).returncode == 0
