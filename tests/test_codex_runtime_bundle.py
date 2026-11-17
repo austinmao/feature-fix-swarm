@@ -25,11 +25,26 @@ bundle = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bundle)
 
 
+def _trusted_node(tmp_path: Path) -> Path:
+    """The PATH node, or a private 0755 copy when the toolcache copy is group/other-writable (CI)."""
+    node = Path(os.path.realpath(shutil.which("node") or "node"))
+    metadata = node.stat()
+    if metadata.st_uid in {0, os.getuid()} and not metadata.st_mode & 0o022:
+        return node
+    copy = tmp_path / "trusted-node" / "bin" / "node"
+    copy.parent.mkdir(parents=True)
+    if (node.parent.parent / "lib").is_dir():  # keep @loader_path/../lib dylibs resolvable
+        (copy.parent.parent / "lib").symlink_to(node.parent.parent / "lib")
+    shutil.copyfile(node, copy)
+    copy.chmod(0o755)
+    return copy
+
+
 def _installed_codex_home(tmp_path: Path, *, keep_guard: bool = True) -> tuple[Path, Path]:
     """Installer-built ~/.codex, completed only with the verified GSD hook subset and registration."""
     home = install_user_home(tmp_path)
     source = home / ".codex"
-    node = Path(os.path.realpath(shutil.which("node") or "node"))
+    node = _trusted_node(tmp_path)
     for name in bundle.CODEX_HOOK_DEPENDENCIES:
         (source / "hooks" / name).write_bytes(bundle.expected_codex_hook(PACKAGE / "hooks", name))
     (source / "agents").mkdir()
