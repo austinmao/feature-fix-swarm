@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.22.0"
+version: "2.22.1"
 allowed-tools:
   - Read
   - Edit
@@ -391,7 +391,8 @@ The run's only automatic action is `stop`; gates.py records the exhaustion
 and `/spec-status` (Codex: `$spec-status`) shows it. The run never drafts a
 renewal, never picks merge-with-issues or descope, and never resolves a
 finding as `issue` or `descope`: those are the operator's, run in the
-operator's own shell. For merge-with-issues the operator resolves each open
+operator's own shell (agent tool calls are blocked by the `operator-only-guard`
+hook). For merge-with-issues the operator resolves each open
 finding `issue`, files it, and merges by hand; an exhausted spec never
 reaches APPROVED at the seam. Security HIGH/CRITICAL findings cannot be
 `issue` or `descope`.

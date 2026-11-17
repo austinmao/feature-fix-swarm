@@ -17,6 +17,9 @@ from run_state.runtime_staging import (
     stage_or_reuse_private_codex_runtime,
     validate_staged_private_codex_runtime,
 )
+from run_state.tests.installed_home_fixture import (
+    GUARD, GUARD_ALLOW, GUARD_DENY, guard_command_of, install_user_home, run_guard_command,
+)
 
 
 def _digest(path: Path) -> str:
@@ -359,3 +362,42 @@ def test_stage_or_reuse_does_not_trust_a_tampered_manifest_to_bless_changed_byte
         stage_or_reuse_private_codex_runtime(source, target, worktree)
 
     assert script.read_text(encoding="utf-8") == "#!/bin/sh\necho forged\n"
+
+
+def _installer_built_codex_profile(tmp_path: Path) -> tuple[Path, Path]:
+    """The installer's own ~/.codex plus only the upstream-GSD closure its stub cannot write."""
+    home = install_user_home(tmp_path)
+    source, skills, worktree = home / ".codex", home / ".agents" / "skills", tmp_path / "worktree"
+    worktree.mkdir()
+    for directory, name in (("agents", "gsd-executor.toml"), ("scripts", "gsd-run.sh")):
+        (source / directory).mkdir(exist_ok=True)
+        (source / directory / name).write_text("fixture\n", encoding="utf-8")
+    (skills / "gsd-quick").mkdir()
+    (skills / "gsd-quick" / "SKILL.md").write_text("# GSD quick\n", encoding="utf-8")
+    (source / "auth.json").write_text(json.dumps({
+        "auth_mode": "chatgpt", "OPENAI_API_KEY": None,
+        "tokens": {"id_token": "i", "access_token": "a", "refresh_token": "r", "account_id": "x"},
+    }), encoding="utf-8")
+    (source / "auth.json").chmod(0o600)
+    owned = ("agents/gsd-executor.toml", "gsd-core/VERSION", "scripts/gsd-run.sh")
+    files = {name: _digest(source / name) for name in owned}
+    files["skills/gsd-quick/SKILL.md"] = _digest(skills / "gsd-quick" / "SKILL.md")
+    (source / "gsd-file-manifest.json").write_text(json.dumps({"version": "1.15.0", "files": files}), encoding="utf-8")
+    return source, worktree
+
+
+def test_installer_built_guard_is_staged_into_the_private_codex_runtime_and_denies(tmp_path: Path) -> None:
+    source, worktree = _installer_built_codex_profile(tmp_path)
+    target = tmp_path / "private-runtime"
+
+    stage_private_codex_runtime(source, target, worktree)
+
+    staged = target / "hooks" / GUARD
+    assert staged.read_bytes() == (source / "hooks" / GUARD).read_bytes()
+    command = guard_command_of(target / "hooks.json")
+    assert command.endswith(f" {staged}") and "exec bash" in command and str(source) not in command
+    denied = run_guard_command(command, {"cmd": GUARD_DENY}, worktree)
+    assert (denied.returncode, "operator-only" in denied.stderr) == (2, True)
+    assert run_guard_command(command, {"cmd": GUARD_ALLOW}, worktree).returncode == 0
+    # The retained-stage proof must accept the extra hooks/ file instead of calling it drift.
+    stage_or_reuse_private_codex_runtime(source, target, worktree)

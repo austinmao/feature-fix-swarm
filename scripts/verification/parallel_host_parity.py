@@ -2376,11 +2376,11 @@ def _stage_install_source(candidate: Checked, fixture: Path) -> tuple[Path, Path
     staged.mkdir(mode=0o700)
     # This deliberately small source closure covers setup's local imports and
     # its optional shell helpers without copying a checkout or node runtime.
-    for relative in ("setup.sh", "lib", "scripts/gsd", "skills", "patches", "data/installer", "package.json",
+    for relative in ("setup.sh", "lib", "scripts/gsd", "scripts/hooks", "skills", "patches", "data/installer", "package.json",
                      "package-lock.json", "node_modules/@opengsd/gsd-core/package.json"):
         origin, destination = source_root / relative, staged / relative
         if not origin.exists():
-            if relative in {"skills", "scripts/gsd"}:
+            if relative in {"skills", "scripts/gsd", "scripts/hooks"}:
                 continue
             raise E("SOURCE_STAGE", f"selected source input is missing: {relative}")
         if origin.is_symlink():

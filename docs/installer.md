@@ -62,6 +62,29 @@ For one transition release, `bash setup.sh` still means `--scope user` and
 prints a deprecation warning. Scripts and documentation should use the
 explicit form now.
 
+## Operator-only guard hook
+
+Both scopes register `scripts/hooks/operator-only-guard.sh` as a PreToolUse
+`Bash` hook. It blocks agent tool calls that run the three operator-only
+commands: `findings-queue resolve --disposition issue|descope`,
+`findings-queue retag --in-spec` and `intent-check --repin`. The operator runs
+them in their own shell, where hooks do not fire. The hook is anti-accident
+only: a script file or a Python import gets past it.
+
+- User scope: the entry goes into `~/.claude/settings.json` (command runs the
+  managed-lib copy) and `~/.codex/hooks.json` (command runs a copy in
+  `~/.codex/hooks/`). Headless Claude and Codex staging register it too. When
+  `~/.claude` is a symlink, the Claude stage runs the live-home copy rather than
+  the staged one.
+- Project scope: the script is vendored to
+  `.feature-fix-swarm/vendor/hooks/`, and the entry goes into the project's
+  `.claude/settings.json` and `.codex/hooks.json`. Codex loads project hooks
+  only for trusted projects.
+- Install adds exactly one FFS-owned entry, leaves every other entry and key
+  alone, and records it in the manifest under `hooks`. Uninstall removes only
+  that entry. A symlinked, unparseable, empty or non-object hook file is
+  skipped with a warning and the rest of the install continues.
+
 Resolution is project first, then user. Having the same release in both
 scopes is a degraded doctor warning but remains compatible. Different release
 versions are an actionable incompatibility.

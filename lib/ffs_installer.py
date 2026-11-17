@@ -151,6 +151,9 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     # socratic-slice.sh hard-sources this sibling at startup; without it the
     # staged copy is dead on arrival
     ("scripts/gsd/fence-data.sh", "scripts/gsd/fence-data.sh"),
+    # PreToolUse Bash guard registered in ~/.claude/settings.json (headless Claude
+    # stages lib/feature-fix-swarm wholesale, so the staged hook finds its copy).
+    ("scripts/hooks/operator-only-guard.sh", "operator-only-guard.sh"),
 )
 
 
@@ -390,12 +393,12 @@ def read_json(path: Path) -> dict[str, Any] | None:
     return value
 
 
-def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
+def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o600, *, sort_keys: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as handle:
-            json.dump(value, handle, indent=2, sort_keys=True)
+            json.dump(value, handle, indent=2, sort_keys=sort_keys)
             handle.write("\n")
         os.chmod(temporary, mode)
         os.replace(temporary, path)
@@ -404,7 +407,7 @@ def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
             os.unlink(temporary)
 
 
-def write_json_file(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
+def write_json_file(path: Path, value: dict[str, Any], mode: int = 0o600, *, sort_keys: bool = True) -> None:
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -413,7 +416,7 @@ def write_json_file(path: Path, value: dict[str, Any], mode: int = 0o600) -> Non
     )
     fd = os.open(path, flags, mode)
     with os.fdopen(fd, "w") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
+        json.dump(value, handle, indent=2, sort_keys=sort_keys)
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -1348,7 +1351,11 @@ def replace_file(source: Path, destination: Path, backup: Backup) -> None:
         # and invisible to the content fingerprint)
         shutil.copymode(source, destination)
         return
-    backup.before(destination)
+    # An ancestor already snapshotted this transaction (GSD's ~/.codex/hooks)
+    # restores this file with it; a nested entry would make --rollback report
+    # the ancestor as changed once the child is restored first.
+    if not any(str(parent) in backup.seen for parent in destination.absolute().parents):
+        backup.before(destination)
     if lexists(destination):
         remove_path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1772,6 +1779,108 @@ def stage_gsd_compatibility_package(source: Path, staging: Path) -> Path:
     return target
 
 
+def guard_hook_module() -> Any:
+    """Shared PreToolUse registration definition (lib/operator_guard_hook.py)."""
+    return _load_sibling_module(Path(__file__).with_name("operator_guard_hook.py"), "operator_guard_hook")
+
+
+def guard_hook_plan(scope: str, project: Path | None) -> tuple[Path, list[tuple[Path, str]]]:
+    """Where the operator-only guard copy lives and the (hook file, command) per runtime.
+
+    User scope: Claude runs the managed-lib copy (headless Claude stages
+    lib/feature-fix-swarm wholesale); Codex runs a copy under its own home/hooks,
+    the one place headless Codex staging carries and path-rewrites. Project scope
+    vendors one copy under .feature-fix-swarm/vendor/ (project install has no
+    other scripts dir): Claude resolves it through $CLAUDE_PROJECT_DIR, Codex
+    through the git toplevel (ASSUMPTION: Codex exports no project-dir variable).
+    """
+    guard = guard_hook_module()
+    name = guard.GUARD_NAME
+    if scope == "project":
+        assert project is not None
+        relative = f".feature-fix-swarm/vendor/hooks/{name}"
+        return safe_project_destination(project, relative), [
+            (safe_project_file(project, ".claude/settings.json"), guard.guard_shell_command(f'"$CLAUDE_PROJECT_DIR"/{relative}')),
+            (safe_project_file(project, ".codex/hooks.json"), guard.guard_shell_command(f'"$(git rev-parse --show-toplevel)"/{relative}')),
+        ]
+    roots = gsd_config_roots()
+    copy = roots["codex"] / "hooks" / name
+    return copy, [
+        (roots["claude"] / "settings.json", guard.guard_command(managed_lib_root() / name)),
+        (roots["codex"] / "hooks.json", guard.guard_command(copy)),
+    ]
+
+
+def manifest_hook_records(manifest: dict[str, Any] | None) -> list[dict[str, str]]:
+    records = manifest.get("hooks") if manifest else None
+    return [
+        record for record in (records if isinstance(records, list) else [])
+        if isinstance(record, dict) and isinstance(record.get("file"), str) and isinstance(record.get("command"), str)
+    ]
+
+
+class HookFileSkipped(ActionableError):
+    """A hook file FFS will not edit (symlink, unparseable, not a JSON object)."""
+
+
+def edit_hook_file(
+    path: Path, edit: Any, scope: str, project: Path | None, backup: Backup
+) -> None:
+    """Apply ``edit`` to one runtime hook file inside the transaction; write only on change.
+
+    A foreign file is never reformatted beyond JSON itself (key order and mode are
+    kept); a symlinked, unparseable or non-object one raises HookFileSkipped.
+    """
+    if path.is_symlink():
+        raise HookFileSkipped(f"hook registration file is a symlink; edit it by hand instead: {path}")
+    try:
+        current = json.loads(path.read_text(encoding="utf-8")) if lexists(path) else {}
+        if not isinstance(current, dict):
+            raise ValueError("expected a JSON object")
+        updated = edit(current)
+    except (OSError, ValueError) as exc:
+        raise HookFileSkipped(f"cannot update hook registration file {path}: {exc}") from exc
+    if updated == current:
+        return
+    mode = stat.S_IMODE(path.stat().st_mode) if lexists(path) else 0o600
+    if scope == "project":
+        assert project is not None
+        replace_project_entry(
+            path,
+            backup,
+            project,
+            fingerprint(path),
+            lambda temporary, _parent_fd: write_json_file(temporary, updated, mode, sort_keys=False),
+        )
+    else:
+        backup.before(path)
+        atomic_json(path, updated, mode, sort_keys=False)
+
+
+def install_guard_hooks(
+    scope: str, project: Path | None, backup: Backup, previous: dict[str, Any] | None
+) -> list[dict[str, str]]:
+    """Merge the one FFS-owned guard entry into each runtime's hook file; return manifest records."""
+    guard = guard_hook_module()
+    recorded = {record["file"]: record["command"] for record in manifest_hook_records(previous)}
+    records: list[dict[str, str]] = []
+    for path, command in guard_hook_plan(scope, project)[1]:
+        key = manifest_key(path, scope, project)
+        try:
+            edit_hook_file(
+                path,
+                lambda document, command=command, old=recorded.get(key): guard.merge_guard(document, command, old),
+                scope,
+                project,
+                backup,
+            )
+        except HookFileSkipped as exc:
+            print(f"WARN: operator-only guard not registered in {path}: {exc}", file=sys.stderr)
+            continue
+        records.append({"file": key, "command": command})
+    return sorted(records, key=lambda record: record["file"])
+
+
 def install_gsd_profiles(source: Path, staging: Path | None = None) -> None:
     """Delegate complete host surfaces to the pinned upstream installer."""
     verify_gsd_package(source)
@@ -1909,11 +2018,15 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
     previous = read_json(destination_manifest)
     destination_manifest_before = fingerprint(destination_manifest)
     managed = managed_fingerprints(previous, scope, project)
+    guard_source = source / next(src for src, dest in MANAGED_LIB_FILES if dest == guard_hook_module().GUARD_NAME)
+    if not guard_source.is_file():
+        raise ActionableError(f"operator-only guard source missing from install tree: {guard_source}")
+    guard_copy, _ = guard_hook_plan(scope, project)
     backup = Backup("install", scope, project)
     prompt_master = stage_prompt_master(source, backup)
     socratic = stage_socratic(source, backup)
 
-    planned: list[tuple[Path, str, bool]] = []
+    planned: list[tuple[Path, str, bool]] = [(guard_copy, fingerprint(guard_source), False)]
     if scope == "project":
         assert project is not None
         vendor = project / ".feature-fix-swarm" / "vendor" / "skills"
@@ -2044,6 +2157,13 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
                     project=project,
                     expected_before=preflight_fingerprints[str(socratic_claude_link.absolute())],
                 )
+            replace_tree(
+                guard_source,
+                guard_copy,
+                backup,
+                project=project,
+                expected_before=preflight_fingerprints[str(guard_copy.absolute())],
+            )
             legacy_roots = [legacy_root]
         else:
             for name, source_dir in skills.items():
@@ -2057,6 +2177,7 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
                     replace_tree(socratic, host / "skills" / "socratic", backup)
             for source_rel, dest_rel in MANAGED_LIB_FILES:
                 replace_file(source / source_rel, managed_lib_root() / dest_rel, backup)
+            replace_file(guard_source, guard_copy, backup)
             codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
             legacy_roots = [codex_home / "skills"]
 
@@ -2066,6 +2187,7 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
             backup,
             project=project if scope == "project" else None,
         )
+        hook_records = install_guard_hooks(scope, project, backup, previous)
         paths: dict[str, dict[str, str]] = {}
         for path, _, _ in planned:
             paths[manifest_key(path, scope, project)] = {"fingerprint": fingerprint(path)}
@@ -2086,6 +2208,7 @@ def install(source: Path, scope: str, project: Path | None, *, adopt_collisions:
             "installed_at": installed_at,
             "source": rendered_source,
             "paths": paths,
+            "hooks": hook_records,
             "gsd": {
                 "owner": "upstream-installer",
                 "version": GSD_VERSION,
@@ -2152,6 +2275,18 @@ def uninstall(scope: str, project: Path | None) -> int:
         raise ActionableError(f"no managed {scope} installation found at {path}")
     backup = Backup("uninstall", scope, project)
     preserved: list[Path] = []
+    guard = guard_hook_module()
+    for record in manifest_hook_records(manifest):
+        try:
+            edit_hook_file(
+                manifest_destination(record["file"], scope, project),
+                lambda document, command=record["command"]: guard.remove_guard(document, command),
+                scope,
+                project,
+                backup,
+            )
+        except ActionableError:
+            preserved.append(Path(record["file"]))
     for key, metadata in manifest.get("paths", {}).items():
         destination = manifest_destination(key, scope, project)
         expected = metadata.get("fingerprint") if isinstance(metadata, dict) else None
@@ -2736,6 +2871,8 @@ def reconcile_consumer(source: Path, target: Path) -> int:
     relative_files += [
         "scripts/hooks/cli-hang-guard.sh",
         "scripts/hooks/credential-output-guard.sh",
+        "scripts/hooks/operator-only-guard.sh",
+        "lib/operator_guard_hook.py",
         "lib/model_requests.py",
         "lib/host_capabilities.py",
         "lib/process_identity.py",

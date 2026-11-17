@@ -187,6 +187,23 @@ def canonical_registration(
     return [{"hooks": [{"type": "command", "command": f"{shlex.quote(str(safe_node))} {shlex.quote(str(observer))}"}]}]
 
 
+def stage_operator_guard(installed_hooks: Path, staged_hooks: Path) -> list[dict]:
+    """Copy the installed operator-only guard into the stage and register that copy.
+
+    Returns no registration (stage without the guard) when the installed home has
+    no guard script, e.g. an install that predates it. Rollout skew must not fail
+    staging, and PreToolUse is deliberately not a REQUIRED_HOOK_EVENTS admission gate.
+    """
+    script = installed_hooks / "operator-only-guard.sh"
+    if not script.is_file() or script.is_symlink():
+        return []
+    staged = staged_hooks / script.name
+    shutil.copy2(script, staged)
+    os.chmod(staged, 0o700)
+    command = f"bash {shlex.quote(str(staged))}"
+    return [{"matcher": "Bash", "hooks": [{"type": "command", "command": command, "timeout": 10}]}]
+
+
 def stage_hooks(
     source: Path,
     target: Path,
@@ -228,6 +245,9 @@ def stage_hooks(
         )
         for event, expected in CANONICAL_HOOKS.items()
     }
+    guard_registration = stage_operator_guard(installed_hooks, staged_hooks)
+    if guard_registration:
+        canonical["PreToolUse"] = guard_registration
     (target / "hooks.json").write_text(
         json.dumps({"hooks": canonical}, indent=2) + "\n", encoding="utf-8"
     )
