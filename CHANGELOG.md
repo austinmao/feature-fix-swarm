@@ -8,6 +8,10 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-19, reconcile relaunch on macOS bash 3.2)
+
+- The launchd reconcile job could not relaunch runs on stock macOS bash 3.2 (`mapfile` is missing there, so the relaunch failed after the budget was charged). It now relaunches stale runs as designed, a behavior change for anyone with the agent installed.
+
 ### Added (2026-11-17, operator-only guard hook, #253)
 
 - `scripts/hooks/operator-only-guard.sh`: a PreToolUse `Bash` hook that blocks
