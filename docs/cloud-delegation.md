@@ -164,7 +164,7 @@ Steps:
 
 For Claude, `doctor` scans the full ancestry of your base commit with the
 outbound rules, because Claude's transport may bundle the checked-out
-branch. Two consequences in this release:
+branch. In this release:
 
 - Any binary file in history is a `binary-blob` finding. Allow it in
   `config.scan.allow` with `{"blob": "<oid>", "class": "binary-blob"}`. The
@@ -176,8 +176,31 @@ branch. Two consequences in this release:
   to one finding class at one path. Setting `limits.claude` to `0` skips the
   check and leaves Codex only.
 
-Each scan cache entry carries the signature of `config.scan.allow`. If you
-change the allowlist, the next scan rescans the full history once.
+- The `pem-block` class flags private-key armor only: a block whose label
+  contains `PRIVATE KEY` (`RSA`, `EC`, `DSA`, `OPENSSH`, `ENCRYPTED`, bare, or
+  `PGP PRIVATE KEY BLOCK`). Signature blocks (`PGP SIGNATURE`,
+  `SSH SIGNATURE`), public keys and certificates are not findings. Signed
+  commits and tags carry a signature block in their `gpgsig` header, so the
+  scan reads commit messages and headers without flagging the signature. A
+  private key pasted into a commit message is still found, signed or not.
+- A finding inside a commit or tag object (`commit:<oid>:L<line>`) has no
+  blob id and no path, so `scan.allow` cannot allow it. Rewrite the history,
+  or set `limits.claude` to `0`.
+
+`scan.allow` is read from `.ffs/cloud/config.json` **in the base commit**
+(`HEAD`), not from the working tree. An allowlist you have not committed has
+no effect, and `doctor` says so. Commit the file, then rerun `doctor`.
+
+The `doctor` line for `HISTORY_SECRET` shows the first 20 findings and a
+count (`N findings, showing first 20; use doctor --json for all`).
+`doctor --json` carries every finding in `checks[].data.findings` for the
+`HISTORY_SECRET` check: `class`, `kind` (`blob`, `commit`, `tag`, `tree` or
+`path`), `oid`, `path`, `line` and, where one can allow it, the ready-made
+`allow_entry`. It never carries the matched value.
+
+Each scan cache entry carries the signature of `config.scan.allow` and the
+scanner version. If you change the allowlist, or a release changes a pattern
+class, the next scan rescans the full history once.
 
 ## Task annotations and routing
 
@@ -697,7 +720,7 @@ is `CLOUD:doctor green` or `CLOUD:doctor not-green`. Green means no `FAIL`.
 | `SECRETS_DECLARED` | FAIL | Only when tasks are given (`plan --with-doctor`, `start`): a `needs-secret` name is not in any `exposure` list. |
 | `RULESET` | FAIL or WARN | No active ruleset covers `ffs/cloud/**`. FAIL when any secret name is exposed, WARN otherwise. |
 | `RULESET_BYPASS` | FAIL | A covering ruleset has a bypass actor other than the repository admin role, or the list cannot be read. |
-| `HISTORY_SECRET` | FAIL | Only when Claude is usable: secret-shaped content, binary blobs or secret-named files in the base history. |
+| `HISTORY_SECRET` | FAIL | Only when Claude is usable: secret-shaped content, binary blobs or secret-named files in the base history. The line shows a count and the first 20 findings; `doctor --json` lists all of them. See [Doctor and history findings](#doctor-and-history-findings). |
 
 ### Config file
 
@@ -719,7 +742,7 @@ commit it started on. Missing keys take the defaults below.
 | `secrets.install` | `""` | Install command for the secrets CLI (`command` mode). |
 | `secrets.exposure.claude`, `.codex` | `[]` | Every secret name reachable from that provider's environment. Not only the ones tasks use. |
 | `secrets.network_secret_hosts` | `[]` | Present in the template for documentation. No code reads it. |
-| `scan.allow` | `[]` | Allowed history findings: `{"blob": "<oid>", "class": "<class>"}` for findings that carry a blob id, or `{"path": "<repo path>", "class": "<class>"}` for a `secret-filename` finding. |
+| `scan.allow` | `[]` | Allowed history findings: `{"blob": "<oid>", "class": "<class>"}` for findings that carry a blob id, or `{"path": "<repo path>", "class": "<class>"}` for a `secret-filename` finding. Read from the base commit, so commit it. |
 | `codex.env_id_var` | `"FFS_CODEX_CLOUD_ENV"` | Name of the environment variable that holds the Codex environment id. |
 | `deadline_hours` | `12` | Whole hours a launched session may run. Also bounds the worker's time budget. |
 

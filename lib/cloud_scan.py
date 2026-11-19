@@ -32,6 +32,7 @@ __all__ = [
     "url_has_userinfo",
     "scan_git_objects",
     "scan_git_ancestry",
+    "describe_finding",
     "redact",
     "self_test",
     "canary",
@@ -40,7 +41,8 @@ __all__ = [
     "is_binary",
 ]
 
-SCANNER_VERSION = 2
+# 3: ``pem-block`` flags private-key armor only (signature and public blocks are clean).
+SCANNER_VERSION = 3
 GIT_TIMEOUT_S = 120
 CAT_FILE_LIFETIME_S = 600
 MAX_SCAN_BLOB_BYTES = 64 * 1024 * 1024
@@ -123,8 +125,14 @@ _Validator = Optional[Callable[["re.Match[bytes]"], bool]]
 # Order matters: specific classes come first so they claim an overlapping span.
 _PATTERN_SPECS: Tuple[Tuple[str, bytes, _Validator], ...] = (
     (
+        # Private-key armor only: the label must contain ``PRIVATE KEY`` (RSA/EC/DSA/OPENSSH/
+        # ENCRYPTED/PGP ... PRIVATE KEY [BLOCK]). Signature, public-key and certificate
+        # blocks are not secrets: signed commits and tags carry a PGP/SSH SIGNATURE block
+        # in a ``gpgsig`` header. The lookahead stays inside one label run, so a scan is
+        # linear; an unterminated private block still runs to the end of the input.
         "pem-block",
-        rb"-----BEGIN [A-Z0-9][A-Z0-9 ]*-----(?s:.*?)(?:-----END [A-Z0-9][A-Z0-9 ]*-----|\Z)",
+        rb"-----BEGIN (?=[A-Z0-9 ]*PRIVATE KEY)[A-Z0-9][A-Z0-9 ]*-----"
+        rb"(?s:.*?)(?:-----END [A-Z0-9][A-Z0-9 ]*-----|\Z)",
         None,
     ),
     ("sk-ant", rb"\bsk-ant-[A-Za-z0-9_-]{8,}", None),
@@ -781,6 +789,45 @@ def _apply_allow(findings: List[Finding], allow: Sequence[Dict[str, str]]) -> Li
         if (_blob_oid(f.location), f.cls) not in by_blob
         and ((_location_path(f.location) or None), f.cls) not in by_path
     ]
+
+
+_LOCATION_RE = re.compile(
+    r"^(?P<kind>blob|commit|tag|tree|path):(?P<oid>[0-9a-f]{40,64}|unparsed)(?::(?P<rest>.*))?$", re.S
+)
+_LINE_SUFFIX_RE = re.compile(r"^(?P<head>.*?)(?::?L(?P<line>\d+))?$", re.S)
+
+
+def describe_finding(finding: Finding) -> Dict[str, Any]:
+    """A structured, value-free record of one finding.
+
+    ``kind`` is the object kind (``blob``, ``commit``, ``tag``, ``tree``) or
+    ``path`` for a finding about a pathname; ``oid`` is that object's id,
+    ``path`` the repository path (or ``None``) and ``line`` the 1-based line
+    (or ``None``). ``allow_entry`` is the ``scan.allow`` entry that would
+    allow the finding, or ``None`` when no entry can (commit and tag objects).
+    The matched value is never part of a finding, so it is never here.
+    """
+    record: Dict[str, Any] = {
+        "class": finding.cls, "location": finding.location,
+        "kind": None, "oid": None, "path": None, "line": None, "allow_entry": None,
+    }
+    match = _LOCATION_RE.match(finding.location)
+    if match is None:
+        return record
+    rest = match.group("rest") or ""
+    suffix = _LINE_SUFFIX_RE.match(rest)
+    head = suffix.group("head") if suffix else rest
+    if suffix and suffix.group("line") is not None:
+        record["line"] = int(suffix.group("line"))
+    kind = match.group("kind")
+    record["kind"] = kind
+    record["oid"] = match.group("oid") if match.group("oid") != "unparsed" else None
+    record["path"] = head or None
+    if kind == "blob":
+        record["allow_entry"] = {"blob": record["oid"], "class": finding.cls}
+    elif record["path"]:
+        record["allow_entry"] = {"path": record["path"], "class": finding.cls}
+    return record
 
 
 @_guard

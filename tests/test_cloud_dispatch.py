@@ -27,6 +27,7 @@ sys.path.insert(0, str(LIB))
 import cloud_collect  # noqa: E402
 import cloud_dispatch as cd  # noqa: E402
 import cloud_ledger as L  # noqa: E402
+import cloud_scan  # noqa: E402
 import cloud_sandbox  # noqa: E402
 import operator_guard_hook  # noqa: E402
 
@@ -777,6 +778,70 @@ def test_doctor_json_reports_checks(world: World) -> None:
     assert rc == (0 if data["green"] else 3)
     rc2, out2 = world.cli("doctor", "--root", str(world.root))
     assert rc2 == rc and "CLOUD:doctor" in out2
+
+
+def _seed_history_secrets(world: World, count: int) -> List[str]:
+    """Commit ``count`` files that each hold a distinct secret-shaped value; returns the values."""
+    values = []
+    for index in range(count):
+        value = cloud_scan.canary("github-token").decode() + "%02d" % index
+        values.append(value)
+        (world.root / "leak").mkdir(exist_ok=True)
+        (world.root / "leak" / ("f%02d.txt" % index)).write_text("k=" + value + "\n")
+    run_git(world.root, "add", "leak")
+    run_git(world.root, "commit", "-q", "-m", "history")
+    return values
+
+
+def _history_check(world: World) -> Tuple[Dict[str, Any], str]:
+    rc, out = world.cli("doctor", "--json", "--root", str(world.root))
+    check = next(c for c in json.loads(out)["checks"] if c["code"] == "HISTORY_SECRET")
+    return check, out
+
+
+def test_doctor_json_carries_every_history_finding_and_never_a_value(world: World) -> None:
+    values = _seed_history_secrets(world, cd.MAX_LISTED + 5)
+    check, out = _history_check(world)
+    assert check["level"] == "FAIL"
+    data = check["data"]
+    assert data["findings_total"] == len(data["findings"]) == cd.MAX_LISTED + 5
+    assert data["base_sha"] == run_git(world.root, "rev-parse", "HEAD")
+    assert {f["class"] for f in data["findings"]} == {"github-token"}
+    for finding in data["findings"]:
+        assert finding["kind"] == "blob" and len(finding["oid"]) == 40
+        assert finding["path"].startswith("leak/f") and finding["line"] == 1
+        assert finding["allow_entry"] == {"blob": finding["oid"], "class": "github-token"}
+    assert not any(value in out for value in values)
+    human_rc, human = world.cli("doctor", "--root", str(world.root))
+    line = next(l for l in human.splitlines() if "HISTORY_SECRET" in l)
+    assert "%d findings, showing first %d; use doctor --json for all" % (cd.MAX_LISTED + 5, cd.MAX_LISTED) in line
+    assert "commit the allowlist" in line and not any(value in line for value in values)
+
+
+def test_doctor_history_allowlist_comes_from_the_committed_config_only(world: World) -> None:
+    _seed_history_secrets(world, 3)
+    check, _ = _history_check(world)
+    entries = [f["allow_entry"] for f in check["data"]["findings"]]
+    config_path = world.root / ".ffs" / "cloud" / "config.json"
+    config = json.loads(config_path.read_text())
+    config["scan"]["allow"] = entries
+    config_path.write_text(json.dumps(config, indent=2))
+    check, _ = _history_check(world)  # allowlist only in the working tree: ignored, and the message says so
+    assert check["level"] == "FAIL" and check["data"]["findings_total"] == 3 and check["data"]["allow_entries"] == 0
+    assert "working-tree scan.allow differs and is ignored" in check["detail"]
+    run_git(world.root, "add", ".ffs")
+    run_git(world.root, "commit", "-q", "-m", "allowlist")
+    check, _ = _history_check(world)  # committed: honoured
+    assert check["level"] == "OK" and "data" not in check
+
+
+def test_doctor_history_finding_in_a_commit_message_has_a_commit_oid_and_no_allow_entry(world: World) -> None:
+    run_git(world.root, "commit", "-q", "--allow-empty", "-m", "oops\n\n" + cloud_scan.canary("pem-block").decode())
+    check, out = _history_check(world)
+    (finding,) = check["data"]["findings"]
+    assert finding["class"] == "pem-block" and finding["kind"] == "commit"
+    assert finding["oid"] == run_git(world.root, "rev-parse", "HEAD") and finding["line"] == 8  # raw object: tree, parent, author, committer, blank, subject, blank, key
+    assert finding["path"] is None and finding["allow_entry"] is None
 
 
 def test_env_init_copies_templates_keeps_existing_and_never_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

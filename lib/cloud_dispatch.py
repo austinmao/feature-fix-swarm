@@ -663,13 +663,17 @@ OK, WARN, FAIL = "OK", "WARN", "FAIL"
 
 
 class Check:
-    def __init__(self, code: str, level: str, detail: str = "") -> None:
+    def __init__(self, code: str, level: str, detail: str = "", data: Optional[Dict[str, Any]] = None) -> None:
         self.code = code
         self.level = level
         self.detail = detail
+        self.data = data  # structured, value-free extras for ``doctor --json``
 
-    def as_dict(self) -> Dict[str, str]:
-        return {"code": self.code, "level": self.level, "detail": self.detail}
+    def as_dict(self) -> Dict[str, Any]:
+        record: Dict[str, Any] = {"code": self.code, "level": self.level, "detail": self.detail}
+        if self.data is not None:
+            record["data"] = self.data
+        return record
 
 
 def parse_github(url: str) -> Optional[Tuple[str, str]]:
@@ -951,9 +955,36 @@ def _history_check(svc: Services, root: Path, base_sha: str, config: Dict[str, A
         if not write_cache:
             shutil.rmtree(str(cache.parent), ignore_errors=True)
     if findings:
-        listing = "; ".join("%s@%s" % (f.cls, f.location) for f in findings[:MAX_LISTED])
-        return Check("HISTORY_SECRET", FAIL, "secret-shaped content in the base history: %s" % listing)
+        return _history_findings_check(svc, root, base_sha, allow, findings)
     return Check("HISTORY_SECRET", OK, "base history scan clean")
+
+
+def _history_findings_check(svc: Services, root: Path, base_sha: str, allow: Sequence[Dict[str, Any]],
+                            findings: Sequence[Any]) -> Check:
+    """FAIL for findings in the base history; the JSON form carries every finding, the line a prefix."""
+    shown = findings[:MAX_LISTED]
+    count = "%d finding%s" % (len(findings), "" if len(findings) == 1 else "s")
+    if len(shown) < len(findings):
+        count += ", showing first %d; use doctor --json for all" % len(shown)
+    listing = "; ".join("%s@%s" % (f.cls, f.location) for f in shown)
+    hint = ("scan.allow is read from the committed .ffs/cloud/config.json at %s, not the working tree: "
+            "commit the allowlist, then rerun doctor" % base_sha[:12])
+    try:
+        working = config_section(load_config(svc, root), "scan").get("allow", [])
+    except StoreError:
+        working = []
+    working = [a for a in working if isinstance(a, dict)] if isinstance(working, list) else []
+    if working and working != list(allow):
+        hint += " (the working-tree scan.allow differs and is ignored)"
+    detail = "secret-shaped content in the base history (%s); %s: %s" % (count, hint, listing)
+    data = {
+        "base_sha": base_sha,
+        "allow_source": "committed .ffs/cloud/config.json at base_sha",
+        "allow_entries": len(allow),
+        "findings_total": len(findings),
+        "findings": [cloud_scan.describe_finding(f) for f in findings],
+    }
+    return Check("HISTORY_SECRET", FAIL, detail, data)
 
 
 def doctor_green(checks: Sequence[Check]) -> bool:

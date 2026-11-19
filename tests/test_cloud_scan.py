@@ -262,6 +262,18 @@ def test_ancestry_version_1_cache_entries_are_ignored(repo, tmp_path):
     assert cs.SCANNER_VERSION > 1
 
 
+def test_ancestry_version_2_cache_entries_are_ignored(repo, tmp_path):
+    """The pem-block class changed in version 3: a verdict cached by version 2 is rescanned."""
+    tip = commit(repo, {"a.txt": b"k=" + cs.canary("github-token")})
+    cache = tmp_path / "c.json"
+    assert cs.scan_git_ancestry(str(repo), tip, str(cache))
+    forged = {oid: {"clean": True, "findings": 0, "v": 2, "allow": cs._allow_signature([])} for oid in
+              [tip] + list(json.loads(cache.read_text()))}
+    cache.write_text(json.dumps(forged))
+    assert cs.scan_git_ancestry(str(repo), tip, str(cache))
+    assert cs.SCANNER_VERSION >= 3
+
+
 def test_ancestry_cache_hit_skips_rescanning(repo, tmp_path, monkeypatch):
     tip = commit(repo, {"a.txt": "one\n"})
     cache = tmp_path / "c.json"
@@ -352,6 +364,9 @@ def adversarial_inputs(size: int):
     token = b"ghp_" + b"A" * 20 + b" "
     return {
         "pem-block": b"-----BEGIN A-----\n" * (size // 18),
+        "pem-label-run": b"-----BEGIN " + b"A " * (size // 2),  # one long label, no PRIVATE KEY, no dashes
+        "pem-label-private-run": b"-----BEGIN " + b"PRIVATE KEY " * (size // 12),
+        "pem-label-lines": b"-----BEGIN A B C D E F G H I J K L M N O P Q R S T\n" * (size // 52),
         "pem-unterminated": b"-----BEGIN RSA PRIVATE KEY-----\n" + b"A" * size,
         "sk-ant": b"sk-ant-AAAAAAAA " * (size // 16),
         "sk-proj": b"sk-proj-AAAAAAAA " * (size // 17),
@@ -456,6 +471,133 @@ def test_redact_two_pem_blocks_and_inner_secret_not_double_marked():
 def test_pem_scan_reports_one_finding_per_block_at_its_begin_line():
     found = cs.scan_bytes(b"a\nb\n" + pem(), label="k")
     assert [(f.cls, f.location) for f in found] == [("pem-block", "k:L3")]
+
+
+# ------------------------------------- C2b: signatures and public material are not secrets
+
+
+def block(label: str, body: str = "AAAAAAAAAAAAAAAA\nBBBBBBBBBBBBBBBB\n") -> str:
+    """A PEM-armored block; the armor is assembled at runtime (never a literal)."""
+    return "-----BEGIN " + label + "-----\n" + body + "-----END " + label + "-----\n"
+
+
+NOT_SECRET_LABELS = [
+    "PGP SIGNATURE",
+    "SSH SIGNATURE",
+    "SIGNED MESSAGE",
+    "PUBLIC KEY",
+    "RSA PUBLIC KEY",
+    "PGP PUBLIC KEY BLOCK",
+    "CERTIFICATE",
+    "CERTIFICATE REQUEST",
+    "OPENSSH PUBLIC KEY",
+]
+PRIVATE_LABELS = [
+    "RSA PRIVATE KEY",
+    "DSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+    "PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+    "PGP PRIVATE KEY BLOCK",
+]
+
+
+@pytest.mark.parametrize("label", NOT_SECRET_LABELS)
+def test_signature_and_public_blocks_are_not_pem_findings(label):
+    data = ("tree x\n" + block(label) + "after\n").encode()
+    assert cs.scan_bytes(data, label="k") == []
+    assert cs.redact(data) == data
+
+
+@pytest.mark.parametrize("label", PRIVATE_LABELS)
+def test_every_private_key_label_is_still_a_pem_finding(label):
+    data = b"a\n" + block(label).encode() + b"z\n"
+    assert [(f.cls, f.location) for f in cs.scan_bytes(data, label="k")] == [("pem-block", "k:L2")]
+    assert cs.redact(data) == b"a\n[REDACTED:pem-block]\nz\n"
+
+
+def test_an_unterminated_signature_block_does_not_hide_a_later_private_key():
+    data = ("-----BEGIN " + "PGP SIGNATURE-----\nAAAA\n").encode() + block("RSA PRIVATE KEY").encode()
+    assert [f.cls for f in cs.scan_bytes(data, label="k")] == ["pem-block"]
+
+
+def test_private_key_after_a_complete_signature_block_is_found():
+    data = block("PGP SIGNATURE").encode() + b"\nmsg\n" + block("OPENSSH PRIVATE KEY").encode()
+    assert [(f.cls, f.location) for f in cs.scan_bytes(data, label="k")] == [("pem-block", "k:L7")]
+
+
+def raw_object(repo: Path, kind: str, body: str) -> str:
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-t", kind, "-w", "--stdin"],
+        input=body.encode(), capture_output=True, env=env, check=True,
+    )
+    return proc.stdout.decode().strip()
+
+
+def signed_commit(repo: Path, header: str, armor: str, message: str = "signed\n") -> str:
+    """A commit object whose ``header`` (gpgsig, gpgsig-sha256) carries a signature block."""
+    tree = raw_object(repo, "tree", "")
+    sig = "-----BEGIN " + armor + "-----\n\nwsFcBAABCAAQBQJq+h4v\nnepFc6u19VdKun4G99xA\n-----END " + armor + "-----"
+    body = "\n".join(" " + line if line else " " for line in sig.split("\n")[1:])
+    folded = header + " -----BEGIN " + armor + "-----\n" + body + "\n"
+    text = (
+        "tree " + tree + "\nauthor t <t@example.invalid> 1700000000 +0000\n"
+        "committer t <t@example.invalid> 1700000000 +0000\n" + folded + "\n" + message
+    )
+    oid = raw_object(repo, "commit", text)
+    git(repo, "update-ref", "refs/heads/main", oid)
+    return oid
+
+
+SIGNED_HEADERS = [
+    ("gpgsig", "PGP SIGNATURE"),
+    ("gpgsig", "SSH SIGNATURE"),
+    ("gpgsig-sha256", "PGP SIGNATURE"),
+    ("gpgsig-sha256", "SSH SIGNATURE"),
+]
+
+
+@pytest.mark.parametrize("header,armor", SIGNED_HEADERS)
+def test_signed_commit_object_is_clean(repo, tmp_path, header, armor):
+    tip = signed_commit(repo, header, armor)
+    raw = git(repo, "cat-file", "commit", tip)
+    assert "-----BEGIN " + armor in raw and raw.splitlines()[3].startswith(header)  # the signature is on the object
+    assert cs.scan_git_objects(str(repo), None, tip) == []
+    assert cs.scan_git_ancestry(str(repo), tip, str(tmp_path / "c.json")) == []
+
+
+@pytest.mark.parametrize("header,armor", SIGNED_HEADERS)
+def test_private_key_in_the_message_of_a_signed_commit_is_found(repo, tmp_path, header, armor):
+    tip = signed_commit(repo, header, armor, message="oops\n\n" + block("RSA PRIVATE KEY"))
+    for found in (
+        cs.scan_git_objects(str(repo), None, tip),
+        cs.scan_git_ancestry(str(repo), tip, str(tmp_path / "c.json")),
+    ):
+        assert [f.cls for f in found] == ["pem-block"]
+        assert found[0].location.startswith("commit:" + tip + ":L")
+        lines = git(repo, "cat-file", "commit", tip).splitlines()
+        key_line = 1 + next(i for i, line in enumerate(lines) if "PRIVATE KEY-----" in line)
+        assert found[0].location == "commit:%s:L%d" % (tip, key_line)  # the key, not the signature on line 4
+    assert cs.canary("pem-block").decode() not in repr(found)
+
+
+def test_signed_tag_object_is_clean_and_its_message_is_still_scanned(repo):
+    tip = commit(repo, {"a.txt": "one\n"})
+    sig = block("PGP SIGNATURE")
+    clean = "object " + tip + "\ntype commit\ntag v1\ntagger t <t@example.invalid> 1700000000 +0000\n\nrelease\n" + sig
+    tag = raw_object(repo, "tag", clean)
+    assert cs.scan_git_objects(str(repo), None, tag) == []
+    leaky = "object " + tip + "\ntype commit\ntag v2\ntagger t <t@example.invalid> 1700000000 +0000\n\n" + block("EC PRIVATE KEY") + sig
+    tag = raw_object(repo, "tag", leaky)
+    assert [f.cls for f in cs.scan_git_objects(str(repo), None, tag)] == ["pem-block"]
+
+
+def test_pem_block_pattern_never_runs_into_a_signature_label():
+    rx = dict((c, r) for c, r, _ in cs._PATTERNS)["pem-block"]
+    assert rx.search(("-----BEGIN " + "PGP SIGNATURE-----\nA\n-----END " + "PGP SIGNATURE-----").encode()) is None
 
 
 # ------------------------------------------------------ C3: decoded JSON, prompts
