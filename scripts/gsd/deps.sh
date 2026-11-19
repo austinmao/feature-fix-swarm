@@ -68,6 +68,8 @@ npx|binary|optional|ships with npm — JS/TS QA lane (vitest)
 playwright|binary|optional|npm install -g playwright — browser-proof QA lane
 canary|binary|optional|npm install -g @usecanary/cli — browser QA recordings
 slopcheck|binary|optional|optional package-legitimacy verdict; absent degrades to [ASSUMED]
+crapper|binary|optional|review-gate complexity advisory; on PATH or under FFS_UB_TOOLS_DIR
+dryer|binary|optional|review-gate duplication advisory; on PATH or under FFS_UB_TOOLS_DIR
 gbrain|binary|optional|optional workspace memory; absent is fail-soft everywhere'
 
 probe_binary() { # any-of comma list
