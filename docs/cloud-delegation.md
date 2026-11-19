@@ -14,6 +14,13 @@ live, and its output parsers are still unverified. See
 [Live verification](#live-verification) for what was and was not checked, and
 [Not in this release](#not-in-this-release).
 
+How-to guides:
+
+- [How to run your first cloud delegation](howto-cloud-first-run.md)
+- [How to give cloud sessions secrets with Doppler](howto-cloud-secrets-doppler.md)
+- [How to give cloud sessions secrets without Doppler](howto-cloud-secrets-other.md)
+  (modes `none`, `provider-env` and `command`)
+
 ## What it is and what it is not
 
 `--cloud` is an opt-in flag on `/swarm` only. Both of these turn it on:
@@ -884,7 +891,7 @@ commit it started on. Missing keys take the defaults below.
 | `verify.timeout_s` | `900` | Wall limit for one test run. |
 | `verify.deps` | `["node_modules", ".venv"]` | Directories of your main worktree linked read-only into the test tree, if they exist. |
 | `verify.read_roots` | `[]` | Extra absolute directories the sandbox may read. Not in the template. |
-| `secrets.provider` | `"none"` | `none`, `provider-env`, `doppler` or `command`. See [Secrets](#secrets). Other values are not rejected and behave like a non-`none` mode. |
+| `secrets.provider` | `"none"` | The code names `none`, `doppler` and `command`. `provider-env` is a documentation label, not a named value. Any other value is not rejected and behaves like a non-`none` mode with no install step. See [Secrets](#secrets). |
 | `secrets.wrapper` | `""` | Command prefix that workers use for test and runtime commands. |
 | `secrets.install` | `""` | Install command for the secrets CLI (`command` mode). |
 | `secrets.exposure.claude`, `.codex` | `[]` | Every secret name reachable from that provider's environment. Not only the ones tasks use. |
@@ -894,7 +901,8 @@ commit it started on. Missing keys take the defaults below.
 | `deadline_hours` | `12` | Whole hours a launched session may run. Also bounds the worker's time budget. |
 
 Secret names should be `UPPER_SNAKE` starting with a letter, 64 characters
-or fewer. The manifest validator rejects other names in `env_report`.
+or fewer. The result manifest validator rejects other names in `env_report`;
+`[needs-secret:]` annotations and `secrets.exposure` entries are checked more loosely.
 
 ### Environment variables
 
@@ -1221,6 +1229,9 @@ Codex backend was not run live); the parsers accept JSON with `id` and `status` 
 FFS never reads, stores or sends a secret value. Values live in the provider
 environment, put there by you. FFS handles names only.
 
+Step-by-step guides: [Doppler mode](howto-cloud-secrets-doppler.md) and
+[modes `none`, `provider-env` and `command`](howto-cloud-secrets-other.md).
+
 Two rules apply in every mode:
 
 - Exposure is the whole environment. Every worker session sees everything
@@ -1234,8 +1245,8 @@ Two rules apply in every mode:
 
 | Mode | What FFS does |
 |---|---|
-| `none` | Default. No secret handling. |
-| `provider-env` | Workers read the values as environment variables of the session. No wrapper. |
+| `none` | Default. The worker packet carries no secrets text. |
+| `provider-env` | Not a value the code names. A documentation label for "values are environment variables of the provider session". It behaves like any other value except `none`, `doppler` and `command`: the packet carries your `secrets.wrapper` if set (otherwise it says no wrapper is needed) and the allowed secret names, and `setup.sh` runs no install step. |
 | `doppler` | `setup.sh` installs the Doppler CLI. The worker prompt carries your `secrets.wrapper` if you set one. |
 | `command` | `setup.sh` runs `secrets.install` through `bash -c`. The worker prompt carries your `secrets.wrapper`. |
 
@@ -1245,6 +1256,9 @@ The default. Leave `exposure` empty. Workers get no secrets. Mark any task
 that needs one `[local]`, or use a mode below.
 
 ### Mode provider-env
+
+`provider-env` is a label, not a value the code names; any value other than
+`none`, `doppler` or `command` behaves the same.
 
 1. Set `"provider": "provider-env"` and list every name in
    `exposure.claude` and/or `exposure.codex`.

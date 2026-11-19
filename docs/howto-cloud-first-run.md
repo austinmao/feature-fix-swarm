@@ -1,0 +1,336 @@
+# How to run your first cloud delegation
+
+This guide takes you from a repository that has never used `/swarm --cloud`
+to a first dry run, then a first real run, and then to a merged result.
+
+Cloud delegation is experimental. It is tested only with fake provider CLIs.
+No live cloud run has been made yet, so treat any provider behavior described
+here as unverified until you have seen it work. For the full reference, see
+[Cloud delegation](cloud-delegation.md). For secrets, see
+[How to give cloud sessions secrets with Doppler](howto-cloud-secrets-doppler.md)
+and [How to give cloud sessions secrets without Doppler](howto-cloud-secrets-other.md).
+
+## Before you begin
+
+You need all of these:
+
+- macOS. Result tests run under `sandbox-exec`, and `doctor` fails without it.
+- Claude Code and/or Codex CLI, logged in with OAuth. `ANTHROPIC_API_KEY` and
+  `OPENAI_API_KEY` must be unset. API-key backends are refused with
+  `API_KEY_BACKEND`.
+- A GitHub `origin` remote whose URL carries no credentials. Use SSH or a
+  credential helper.
+- Your current commit pushed to a remote branch, and no modified tracked
+  files. Untracked files are allowed.
+- The `gh` CLI, authenticated. `doctor` uses it to read repository rulesets.
+- To run from the main worktree. A linked worktree is refused with
+  `NOT_MAIN_WORKTREE`.
+
+The commands below use the path `scripts/gsd/cloud-dispatch.sh`, as the
+`/swarm` skill does. A user-scope install also keeps a copy under
+`~/.claude/lib/feature-fix-swarm/scripts/gsd/cloud-dispatch.sh`.
+
+Every verb takes `--root ABS`, the absolute path of the main worktree. The
+default comes from the current directory. For `env init`, put `--root` after
+`init`.
+
+## Steps
+
+### 1. See what is missing
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh doctor
+```
+
+Exit 0 means no `FAIL`. Exit 3 means at least one check failed. On a fresh
+repository the first run is expected to be not green. `CLOUD_FILES` fails
+because `.ffs/cloud/` is not in your base commit yet. `BASE_PUSHED` fails if
+your commit is not on a remote. Do not fix anything yet. Go to step 2 and run
+`doctor` again at step 5.
+
+### 2. Write the consumer files and commit them
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh env init --register-hook
+```
+
+This writes `.ffs/cloud/config.json`, `setup.sh`, `env-check.sh` and
+`session-start.sh`. `--register-hook` also merges a `SessionStart` entry into
+`.claude/settings.json`. Existing files are kept unless you pass `--force`.
+Nothing is committed for you. The command prints a `git add` line with the
+files it wrote.
+
+Edit `.ffs/cloud/config.json` and set `verify.cmd` to your test command. A task
+with no verify command always runs locally.
+
+Then commit and push `.ffs/cloud/*` and, if you used `--register-hook`,
+`.claude/settings.json`. `doctor` reads these files from the commit, not the
+working tree.
+
+### 3. Create the provider environment
+
+FFS cannot create or check a provider environment. `env-spec` prints the
+one-time steps for each provider you use:
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh env-spec --provider claude
+bash scripts/gsd/cloud-dispatch.sh env-spec --provider codex
+```
+
+Do those steps in the provider's UI. Use a private environment. If you expose
+any secret name, list every reachable name in
+`.ffs/cloud/config.json` under `secrets.exposure.<provider>`. Start with none:
+the default secrets mode is `none`.
+
+`env-spec` also asks for a GitHub ruleset on `ffs/cloud/**` that blocks updates
+and deletions for non-admins. `doctor` makes this a `FAIL` when any secret name
+is exposed, and a `WARN` otherwise.
+
+For Codex, export the environment id in the shell that runs the dispatcher.
+The variable name is `codex.env_id_var` in the config:
+
+```bash
+export FFS_CODEX_CLOUD_ENV=<environment id>
+```
+
+Without it, Codex is not usable.
+
+### 4. Preview the routing
+
+Run a dry run. Annotate tasks so the router can place them:
+
+```text
+/swarm --dry-run --cloud \
+  "Add retry with backoff to the HTTP client [owns: src/client/**] [est: 45m] [verify: npm test -- client]" \
+  "Reword the README intro [owns: README.md] [est: 5m] [verify: true]"
+```
+
+The dry run runs `doctor` and `plan`, prints groups, routes, providers,
+reasons and missing grants, and stops. It starts nothing.
+
+If nothing routes to the cloud, read the reason codes in the plan:
+
+- `VERIFY_CMD_MISSING`: the task has no `[verify: ...]` and `verify.cmd` in the
+  config is empty.
+- `BELOW_THRESHOLD`: no task in the group has an estimate at or above the
+  threshold. The threshold is 20 minutes for `auto` (the default), 5 minutes
+  for `prefer`, and 0 for `required`. Add `[est: ...]`, or use
+  `--cloud=prefer`.
+- `OWNS_MISSING`: the task has no `[owns: ...]`.
+- `GROUP_HAS_INELIGIBLE_TASK`: one task in a connected group cannot go to the
+  cloud, so the whole group stays local.
+
+You can also run the planner without `/swarm`. The tasks file is a JSON list
+of annotated strings:
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh plan --tasks tasks.json --policy auto --with-doctor
+```
+
+### 5. Check again
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh doctor
+```
+
+Fix every `FAIL`. `WARN` lines are advisory.
+
+### 6. Grants
+
+A run needs these grants before it can start:
+
+- `cloud-dispatch:<provider>` for each provider it uses, for example
+  `cloud-dispatch:claude`.
+- `push:origin/ffs/cloud/<run>`.
+- `secret-use:<NAME>` for each exposed secret name. None, in `none` mode.
+
+In an interactive `/swarm` session, drop `--dry-run`. `/swarm` shows the task
+list, providers and every exposed secret name, and asks one question. On yes it
+records the grants for you. Autonomous and headless runs never grant for
+themselves. They need grants that already exist, and `start` refuses when one
+is missing.
+
+To grant by hand, use the same command `/swarm` runs. Use the run id that
+`/swarm` reports, or pick one yourself that matches
+`^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$`. Run it from an FFS checkout, or use
+`gates.py` in the managed lib directory:
+
+```bash
+python3 lib/gates.py grant <run> \
+  --action cloud-dispatch:claude \
+  --action push:origin/ffs/cloud/<run> \
+  --ttl-hours 24 --reason "first cloud run"
+```
+
+Grants expire. An expired grant stops the next admit or submit.
+
+### 7. Run it for real
+
+Run the same `/swarm ... --cloud` command without `--dry-run`. Starting a run
+prints lines such as `CLOUD:started run=<run> tasks=N` and
+`CLOUD:orchestrator-started pid=N`. A detached orchestrator then launches,
+polls and collects results. Use `--cloud=required` only if you want the run to
+stop when a group cannot go to the cloud.
+
+### 8. Read the status
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh status --run <run>
+```
+
+The output has one `CLOUD:status` line, one `CLOUD:task` line per task, and a
+`CLOUD:decision` line for each decision a worker or gate left for you. Add
+`--json` for one JSON document. Exit 0 means no task needs you. Exit 4 means at
+least one task is `needs-operator` or `uncertain`.
+
+### 9. Handle `needs-operator`
+
+`needs-operator` means FFS stopped on a task and will not guess. Each task
+shows a `blocker`. The orchestrator parks the run when every remaining task
+needs you, and prints `CLOUD-PARKED run=<run> items=N`.
+
+There are three operator verbs. Run them in your own terminal. The
+operator-only guard hook denies them in agent shells, and the `/swarm` skill
+never runs them:
+
+```bash
+# Bind a result FFS could not find on its own.
+bash scripts/gsd/cloud-dispatch.sh adopt --run <run> --task <task> --oid <oid>          # Claude
+bash scripts/gsd/cloud-dispatch.sh adopt --run <run> --task <task> --remote-id <id>     # Codex
+
+# Give up on a task, or start a new generation of it.
+bash scripts/gsd/cloud-dispatch.sh abandon --run <run> --task <task> [--retry]
+
+# Clear a blocker after you fixed its cause.
+bash scripts/gsd/cloud-dispatch.sh resolve --run <run> --task <task> --action retest|accept-deps|reject
+```
+
+Use `adopt` for `uncertain` tasks and for the blockers `uncertain-launch`,
+`poll-errors` and `ambiguous-candidates`. `--oid` is for Claude and
+`--remote-id` is for Codex. Use `resolve` for blockers such as `grant-missing`
+(grant it, then `resolve --action retest`), `dependency-change` (`accept-deps`
+or `reject`) and `review-unavailable`. Use `abandon --retry` for `rejected` or
+`failed` tasks. `abandon` does not stop the provider session. Stop it in the
+provider UI. The full blocker table and the recovery runbooks are in
+[Cloud delegation](cloud-delegation.md#blockers).
+
+### 10. Merge the result yourself
+
+The result is a local branch, `ffs/cloud/<run>/integration`. FFS never merges
+it into your branch and never touches your working tree. Review it, then merge:
+
+```bash
+git log --oneline ffs/cloud/<run>/integration
+git merge --no-ff ffs/cloud/<run>/integration
+```
+
+### 11. Clean up
+
+When the run is `done` and you have merged the integration branch:
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh cleanup --run <run> [--remote]
+```
+
+`cleanup` deletes the local `ffs/cloud/<run>/*` refs and the run state.
+`--remote` also deletes the pushed `ffs/cloud/<run>/*` branches on `origin`, and
+needs the push grant. `--discard-unmerged` skips the unmerged-work check. Use
+it only when you want to throw the result away.
+
+## Verification
+
+You have a working setup when:
+
+1. `doctor` prints `CLOUD:doctor green` and exits 0.
+2. The dry run prints a plan, shows at least one group routed to the cloud,
+   and starts nothing.
+3. After a real run, `status` shows each cloud task as `integrated` and the run
+   as `done`. Check:
+
+   ```bash
+   bash scripts/gsd/cloud-dispatch.sh status --run <run> --json
+   ```
+
+4. `git log --oneline ffs/cloud/<run>/integration` lists the published
+   commits.
+5. After `cleanup`, this prints nothing:
+
+   ```bash
+   git for-each-ref "refs/heads/ffs/cloud/<run>/"
+   ```
+
+## Troubleshooting
+
+`CLOUD-REFUSED: <CODE> <detail>` is printed on stdout and exits 3. A usage
+error prints `<prog>: error: ...` or `CLOUD-ERROR:` on stderr and exits 2 or
+78 (see the code lists below). `STORE_IO` is printed as `CLOUD-REFUSED:` but
+exits 78.
+
+Refusals (`CLOUD-REFUSED`, exit 3):
+
+| Code | Meaning and fix |
+|---|---|
+| `NOT_A_REPO` | There is no git worktree at the root. Run from your repository. |
+| `NOT_MAIN_WORKTREE` | You are in a linked worktree, or `--root` is not the top level. Use the main worktree. |
+| `NO_ORIGIN` | The repository has no `origin` remote. Add one. |
+| `ORIGIN_HAS_CREDENTIALS` | The `origin` URL embeds a user and password or token. Use a credential helper or SSH. |
+| `ORIGIN_URL_INVALID` | The `origin` URL is not usable. |
+| `ORIGIN_CHANGED` | `origin` no longer matches the URL pinned at start. |
+| `DOCTOR_NOT_GREEN` | `doctor` has a `FAIL`. The detail lists them. See the checks in [Cloud delegation](cloud-delegation.md#doctor-checks). |
+| `LIFECYCLE_DISABLED` | `FFS_LIFECYCLE=off`. Unset it. |
+| `MANAGED_INGRESS` | `FFS_MANAGED_INGRESS` is set and not `0`. The run stays local. |
+| `TOKEN_BUDGET` | `GSD_TOKEN_BUDGET` is set. The run stays local. |
+| `DIRTY_BASE` | Tracked files are modified. Commit or stash them. |
+| `NO_BASE` | The repository has no commit at HEAD. |
+| `RUN_EXISTS` | The run id already has a ledger. Pick a new id. |
+| `NO_CLOUD_TASKS` | Nothing routes to the cloud. Read the reason codes in step 4. |
+| `CLOUD_REQUIRED_NOT_ELIGIBLE` | Policy is `required` and a group cannot go to the cloud. Fix the task, or use `auto` or `prefer`. |
+| `GRANT_MISSING` | A `cloud-dispatch:<provider>` or `push:origin/ffs/cloud/<run>` grant is missing. Grant it (step 6). |
+| `EXPOSURE_NOT_GRANTED` | A `secret-use:<NAME>` grant is missing. Grant it, or empty `secrets.exposure`. |
+| `GRANT_STORE_ERROR` | `gates.py check-grant` failed in an unexpected way. |
+| `SECRET_IN_PROMPT`, `SECRET_IN_PACKET` | The task text or worker packet matched the secret scanner. Remove the secret-shaped text. |
+| `PACKET_INVALID` | The worker packet could not be built, for example an invalid `secrets.wrapper`. |
+| `RUN_NOT_DONE` | `cleanup` only removes `done` runs. |
+| `INTEGRATION_UNMERGED` | `cleanup` found work on the integration branch that no other branch has. Merge it, or pass `--discard-unmerged`. |
+| `INTEGRATION_IN_PROGRESS` | The task is `integrating`. Retry after the orchestrator's next tick. |
+| `RUN_DONE` | The run is `done`. `adopt`, `resolve` and a plain `abandon` are refused. |
+| `STALE_APPROVAL` | The generation, bound result or dependency report changed after the grants were checked. Run the verb again. |
+| `DEPENDENCY_REPORT_MISSING`, `DEPENDENCY_REPORT_INVALID` | `accept-deps` cannot use the dependency report. Use `abandon --retry`. |
+| `ADOPT_UNSUPPORTED_PROVIDER` | `--oid` was used for Codex, or `--remote-id` for Claude. |
+| `REMOTE_UNREACHABLE` | `ls-remote` failed while listing remote branches. Check your network and credentials. |
+| `STORE_IO` | A filesystem failure. Printed as `CLOUD-REFUSED:` with exit 78. |
+
+Usage errors (`CLOUD-ERROR` or argparse text on stderr, exit 2):
+`BAD_RUN_ID`, `BAD_TASKS_FILE` (the tasks file must be a non-empty JSON list),
+`BAD_POLICY`, `BAD_PROVIDER`, `BAD_ADOPT` (pass exactly one of `--oid` and
+`--remote-id`), `BAD_OID`, `BAD_REMOTE_ID`, `BAD_ROOT`.
+
+Store and internal errors (`CLOUD-ERROR`, exit 78) include `TEMPLATES_MISSING`
+(no templates next to the library; reinstall), `SETTINGS_INVALID` (`.claude/settings.json`
+is not a JSON object) and `HOOK_API_MISSING`.
+
+Doctor findings you are likely to see on a first run:
+
+| Code | Level | Fix |
+|---|---|---|
+| `CLOUD_FILES` | FAIL | Commit and push `.ffs/cloud/*` (step 2). |
+| `BASE_PUSHED` | FAIL | Push your current commit. |
+| `BASE_CLEAN` | FAIL | Commit or stash tracked changes. |
+| `API_KEY_BACKEND` | FAIL | Unset `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. |
+| `NO_PROVIDER` | FAIL | Install and log in to a provider CLI. For Codex, also set the environment id variable. |
+| `SANDBOX` | FAIL | `sandbox-exec` is missing or its self-check failed. Cloud stays off on this machine. |
+| `RULESET` | FAIL or WARN | Add a GitHub ruleset on `ffs/cloud/**`. FAIL when a secret name is exposed. |
+| `HISTORY_SECRET` | FAIL | A secret-shaped finding, binary blob or secret-named file is in your base history. See [Doctor and history findings](cloud-delegation.md#doctor-and-history-findings). |
+| `VERIFY_CMD` | WARN | Set `verify.cmd` in the config. |
+| `SESSION_HOOK` | WARN | Run `env init --register-hook`, then commit `.claude/settings.json`. |
+| `LOGIN_UNVERIFIED` | WARN | FFS could not check the login. Confirm it yourself. |
+
+If the orchestrator dies, `status` shows `alive=false`. Restart it from a shell
+that has your exports:
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh orchestrate --run <run> --resume --detach
+```
+
+For stuck launches, ambiguous candidates, failed tests and a secret leak, see
+the [recovery runbooks](cloud-delegation.md#recovery-runbooks).

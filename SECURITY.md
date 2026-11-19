@@ -54,5 +54,13 @@ vulnerability.
   unsandboxed execution for that run. Review the plan and grant ledger first.
 - FFS never needs credential values in bug reports, logs, or committed files.
 
+Opt-in cloud delegation (`/swarm --cloud`, experimental) adds a trust
+boundary. Output from a cloud session is untrusted input. FFS checks it with
+an outbound secret scan, a local review by the opposite model family and
+sandboxed tests before it reaches a local integration branch, and it never
+merges that branch for you. A session you start still runs with whatever its
+environment exposes. The residual risks are listed in
+[Known limits and residual risks](docs/cloud-delegation.md#known-limits-and-residual-risks).
+
 See the [public-launch security review](docs/security-audit-2026-08-01.md) for
 the latest documented audit scope and remaining repository-setting actions.

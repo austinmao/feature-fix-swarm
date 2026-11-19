@@ -82,8 +82,16 @@ python3 scripts/verify-skill-blocks.py
 python3 scripts/lint_host_dispatch.py skills/*/SKILL.md
 python3 scripts/lint_model_routing.py
 python3 lib/model_requests.py lint templates/model-requests.json
-shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh tests/fixtures/socratic-installer-stub.sh
+shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh scripts/coord/*.sh scripts/ci/*.sh tests/fixtures/socratic-installer-stub.sh
 bats --print-output-on-failure $(find . -name '*.bats' -not -path './.git/*')
+```
+
+CI also runs these checks, so run them before you push:
+
+```bash
+bandit -r lib scripts -x lib/tests,lib/run_state/tests -lll -q
+bash scripts/gsd/env-registry.sh check
+bash tests/live-gsd-package.sh
 ```
 
 On macOS, also keep the zsh parser contract green:

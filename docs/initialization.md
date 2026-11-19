@@ -20,9 +20,9 @@ The roster is declared once, in `deps.sh` itself, as rows of
 - **npm** — `@opengsd/gsd-core` at the exact pinned version plus FFS's
   byte-pinned RED-evidence overlay, resolved and verified from `node_modules/`
   (the same comparison `setup.sh` makes before installing profiles).
-- **pip** — `filelock`, verified by the same symbol-presence floor probe
-  `scripts/coord/coord.py` uses (`SoftFileLease`), never a version-string
-  parse.
+- **pip** — `filelock`, verified by a symbol-presence floor probe
+  (`SoftFileLease`, the same symbol `scripts/coord/coord.py` requires), never a
+  version-string parse.
 - **pin** — the staged external skills (`prompt-master`, `socratic`),
   installed by `setup.sh`.
 
@@ -33,7 +33,7 @@ bash scripts/gsd/deps.sh check            # probe everything; exit 1 if a REQUIR
 bash scripts/gsd/deps.sh check --json     # same, as a JSON array
 bash scripts/gsd/deps.sh install          # repo-scoped installs only (npm ci + pip -r requirements-dev.txt)
 bash scripts/gsd/deps.sh install --yes    # skip the npm-ci confirmation
-bash scripts/gsd/deps.sh install --optional  # also install the contributor set (pytest, bandit, pytest-cov)
+bash scripts/gsd/deps.sh install --optional  # also install the full requirements-dev.txt contributor set
 ```
 
 Exit codes: `0` ok · `1` required missing / usage · `2` install failure.
@@ -59,8 +59,8 @@ missing from `docs/dependencies.md`.
 `deps.sh install` when the repo-scoped rows are missing → an explicit-confirm
 offer of `setup.sh` when no install manifest exists → a report of missing
 system tools → then the environment-registry interview documented in
-`skills/ffs-init/SKILL.md` (and in the environment-registry guide once PR #105
-lands). `--skip-deps` skips Phase 0;
+`skills/ffs-init/SKILL.md` and the [Environment registry](environment-registry.md)
+guide. `--skip-deps` skips Phase 0;
 `--detect-only` and `--check` never run it (those modes stay read-only and
 hermetic).
 
@@ -95,8 +95,10 @@ Two semantics worth knowing:
 
 ## Consumer repositories
 
-`setup.sh --reconcile-consumer <dir>` copies every `scripts/gsd/*.sh` into a
-consumer repo (honoring `scripts/gsd/fork-allowlist.txt`), so `deps.sh` and
-`init-guard.sh` are available there too. The npm/pip rows describe the FFS
+`setup.sh --reconcile-consumer <dir>` copies every `scripts/gsd/*.sh` and
+`*.py` file, a few `scripts/hooks/` guards, the `lib/` modules those scripts
+need (including `lib/gates.py`) and the review-finding schema into a consumer repo, so `deps.sh` and
+`init-guard.sh` are available there too. A script named in the consumer's own
+`scripts/gsd/fork-allowlist.txt` is left alone when it already exists there. The npm/pip rows describe the FFS
 checkout itself; in a consumer repo their absence simply means FFS's own
 checkout is where the install happens.

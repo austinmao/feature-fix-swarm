@@ -44,12 +44,24 @@ User installs are hash-managed copies in both `~/.agents/skills` and
 `~/.cache/feature-fix-swarm/install-manifest.json`.
 
 User installs also stage the managed lib runtime at
-`~/.claude/lib/feature-fix-swarm/` — `gates.py`, `runtime_proof.py`, and
-`scripts/gsd/socratic-slice.sh` — the paths the shipped scripts resolve when
-no repo-local copy shadows them. These are manifest-tracked like skills, so
+`~/.claude/lib/feature-fix-swarm/`: the Python modules the shipped scripts
+import (`gates.py`, `runtime_proof.py`, `model_requests.py`,
+`host_capabilities.py`, `process_identity.py`, `run_context.py`, the
+`run_state/` package and the cloud-delegation modules), a few scripts
+(`scripts/gsd/socratic-slice.sh`, `fence-data.sh`, `cloud-dispatch.sh`,
+`cloud-review.sh`, `adversary-host.sh`, `run-bounded.sh` and
+`codex-runtime-observer.py`), `operator-only-guard.sh`, the supervised-dispatch
+patch and `cloud-templates/`. `MANAGED_LIB_FILES` in `lib/ffs_installer.py` is
+the exact list. These are the paths the shipped scripts resolve when no
+repo-local copy shadows them. They are manifest-tracked like skills, so
 `--doctor` flags a drifted/stale copy and `--uninstall` removes them.
-`--reconcile-consumer` likewise ships `lib/gates.py` and
-`lib/runtime_proof.py` so vendored consumers stop running stale gate logic.
+`--reconcile-consumer` copies every `scripts/gsd/*.sh` and `*.py` into the
+consumer, plus the hook scripts, the `lib/` modules listed in
+`reconcile_consumer` and `schemas/review-finding.schema.json`, so vendored
+consumers stop running stale gate logic. A file named in the consumer's
+`scripts/gsd/fork-allowlist.txt` (first token of each non-comment line) is
+skipped when it already exists there. To check a consumer afterwards, see
+[`sync-drift-check.sh`](#sync-drift-checksh).
 review-gate runs these helpers from a copy of the merge-base with `origin/main` (else `main`), never
 from the reviewed working tree, so commit the reconciled runtime to `main`.
 
@@ -64,14 +76,63 @@ For one transition release, `bash setup.sh` still means `--scope user` and
 prints a deprecation warning. Scripts and documentation should use the
 explicit form now.
 
+## Options and environment
+
+`bash setup.sh` runs `lib/ffs_installer.py`. With no action flag it installs.
+
+| Option | Meaning |
+| --- | --- |
+| `--scope project\|user` | Installation scope. |
+| `--project-dir PATH` | Repository for project scope. |
+| `--doctor`, `--json` | Check an installation; `--json` prints the `ffs.doctor/v1` report. |
+| `--rollback ID` | Restore a backup. Accepts only a backup id. |
+| `--uninstall` | Remove manifest-owned paths. |
+| `--reconcile-consumer PATH` | Copy the packaged levers into a vendoring consumer repo. |
+| `--adopt-collisions` | Back up and replace colliding paths instead of blocking. Install only. |
+| `--yes`, `-y` | Compatibility no-op. Installs are non-interactive and the installer never reads this flag. |
+
+Choose at most one of `--doctor`, `--rollback`, `--uninstall` and
+`--reconcile-consumer`. An invalid invocation exits 2 and prints
+`ERROR: <reason>` on stderr.
+
+`FFS_VERSION` overrides the release version the installer stamps into the
+manifest. When unset, the version is the first `## v<version>` heading in
+`CHANGELOG.md`, and `0.0.0-dev` if there is none
+(`source_version` in `lib/ffs_installer.py`). Doctor compares these versions
+across project and user scope.
+
 ## Operator-only guard hook
 
 Both scopes register `scripts/hooks/operator-only-guard.sh` as a PreToolUse
-`Bash` hook. It blocks agent tool calls that run the three operator-only
-commands: `findings-queue resolve --disposition issue|descope`,
-`findings-queue retag --in-spec` and `intent-check --repin`. The operator runs
-them in their own shell, where hooks do not fire. The hook is anti-accident
-only: a script file or a Python import gets past it.
+`Bash` hook. It blocks agent tool calls that run these operator-only
+commands:
+
+- `findings-queue resolve --disposition issue|descope`
+- `findings-queue retag --in-spec`
+- `intent-check --repin`
+- `claude` with `--cloud` or `--cloud=<value>`
+- `codex cloud exec`, `codex cloud apply` and `codex cloud diff`
+- `cloud-dispatch.sh` (or `cloud_dispatch.py`) with `adopt`, `abandon` or
+  `resolve`
+
+The operator runs them in their own shell, where hooks do not fire. A denied
+call exits 2 and prints `operator-only-guard: <gate> is operator-only` on
+stderr. The three `findings-queue` / `intent-check` gates match by token
+membership, so a segment that only contains those words (an `echo`, heredoc
+text) is also denied. The three cloud gates match by executable position
+(first command of a shell segment, after `VAR=value` assignments, wrappers
+such as `env`, `sudo` and `rtk`, and `bash -c` or `python3` launchers),
+compared by base name, so `git grep -e codex -e cloud -e diff` is allowed.
+There is no kill-switch.
+
+The hook is an anti-accident control, not a security boundary. A script file
+or a Python import gets past it. It fails open: empty input, a missing
+`python3`, or any internal exception (malformed JSON included) exits 0 and
+allows the call. A shell quoting error is not one of those cases; the guard
+falls back to scanning the raw text. The registered command runs the script only if the file
+exists, so a removed or half-uninstalled copy is a silent no-op, and the hook
+has a 10 second timeout. See
+[Guard patterns](cloud-delegation.md#guard-patterns) for the cloud gates.
 
 - User scope: the entry goes into `~/.claude/settings.json` (command runs the
   managed-lib copy) and `~/.codex/hooks.json` (command runs a copy in
@@ -90,6 +151,29 @@ only: a script file or a Python import gets past it.
 Resolution is project first, then user. Having the same release in both
 scopes is a degraded doctor warning but remains compatible. Different release
 versions are an actionable incompatibility.
+
+## Cloud delegation SessionStart hook
+
+`setup.sh` does not register a `SessionStart` hook. It only ships the pieces
+the opt-in `/swarm --cloud` path needs: the cloud runtime modules,
+`operator_guard_hook.py` and `cloud-templates/` (see
+[Cloud delegation: Installer](cloud-delegation.md#installer)). The operator
+registers the hook per repository, from the main worktree:
+
+```bash
+bash scripts/gsd/cloud-dispatch.sh env init --register-hook
+```
+
+This writes `.ffs/cloud/config.json`, `setup.sh`, `env-check.sh` and
+`session-start.sh` (existing files are kept unless you pass `--force`), and
+merges one `SessionStart` entry into the repository's `.claude/settings.json`:
+`bash "$CLAUDE_PROJECT_DIR/.ffs/cloud/session-start.sh"` with a 300 second
+timeout. The merge keeps every other entry and key. Nothing is committed.
+
+The installer manifest records only the guard entry under `hooks`, so
+`--uninstall` does not remove this one. Delete it from `.claude/settings.json`
+by hand if you stop using cloud delegation. The full procedure is in
+[Cloud delegation](cloud-delegation.md#quick-start).
 
 ## Doctor
 
@@ -181,3 +265,33 @@ overlay described in [Dependencies](dependencies.md#why-gsd-is-a-dependency-inst
 setup applies and verifies it against both the pristine and rendered digests
 before dispatch. Upstream manifests remain the source of ownership truth for
 global profiles.
+
+## sync-drift-check.sh
+
+A consumer repo that vendors the levers (for example through
+`--reconcile-consumer`) carries live copies that can drift. Run
+`scripts/gsd/sync-drift-check.sh` from the consumer side after every vendor
+sync, or from consumer CI. It compares each `*.sh` and `*.py` file in the
+packaged `scripts/gsd` directory with the same filename in the consumer
+directory.
+
+```bash
+bash scripts/gsd/sync-drift-check.sh <consumer-scripts-dir> [--allowlist FILE]
+```
+
+The allowlist has one line per deliberate fork: `<filename> <free-text reason>`.
+`GSD_SYNC_SRC` overrides the packaged directory (default: the directory that
+holds the script itself).
+
+| Line | Meaning |
+| --- | --- |
+| `IN-SYNC: <file>` | Identical. |
+| `MISSING: <file>` | No consumer copy. Warning only; partial installs are legal. |
+| `FORKED: <file> (<reason>)` | Differs and is allowlisted. |
+| `DRIFT: <file> ...` | Differs and is not allowlisted. Counts toward exit 1. |
+| `STALE-ALLOWLIST: <file> ...` | Allowlisted but identical. Prune the entry. |
+
+Exit codes: `0` when no unlisted drift exists (the last line is
+`[sync-drift-check] OK`); `1` when any file shows `DRIFT`; `2` when the
+consumer directory is missing, or when the source and consumer are the same
+directory (a self-compare would report every file as `IN-SYNC`).
