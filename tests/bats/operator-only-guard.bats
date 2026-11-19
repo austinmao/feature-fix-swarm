@@ -120,3 +120,116 @@ assert_allowed() {
 @test "pinned false positive: echo of the words is denied" {
   assert_denied 'echo "intent-check --repin"'
 }
+
+# --- cloud delegation gates (token membership; same tokenizer as above) ---
+@test "deny: claude --cloud" {
+  assert_denied 'claude --cloud "do the thing"'
+}
+@test "deny: claude --cloud=value" {
+  assert_denied 'claude -p x --cloud=env_123'
+}
+@test "deny: rtk-prefixed claude --cloud" {
+  assert_denied 'rtk claude --cloud x'
+}
+@test "deny: codex cloud exec" {
+  assert_denied 'codex cloud exec --env E "task"'
+}
+@test "deny: codex cloud apply" {
+  assert_denied 'codex cloud apply TASK_1'
+}
+@test "deny: codex cloud diff" {
+  assert_denied 'codex cloud diff TASK_1'
+}
+@test "deny: cloud-dispatch.sh adopt" {
+  assert_denied 'bash scripts/gsd/cloud-dispatch.sh adopt R1 T1'
+}
+@test "deny: cloud-dispatch.sh abandon (path form)" {
+  assert_denied '/x/scripts/gsd/cloud-dispatch.sh abandon R1'
+}
+@test "deny: cloud_dispatch.py resolve" {
+  assert_denied 'python3 lib/cloud_dispatch.py resolve R1 T1'
+}
+@test "deny: label names the verb" {
+  run -2 bash "$HOOK" <<<"$(claude_json 'codex cloud apply T')"
+  [[ "$output" == "operator-only-guard: codex cloud apply is operator-only;"* ]]
+}
+@test "deny: label claude --cloud" {
+  run -2 bash "$HOOK" <<<"$(claude_json 'claude --cloud x')"
+  [[ "$output" == "operator-only-guard: claude --cloud is operator-only;"* ]]
+}
+@test "deny: label cloud-dispatch verb" {
+  run -2 bash "$HOOK" <<<"$(claude_json 'bash cloud-dispatch.sh abandon R')"
+  [[ "$output" == "operator-only-guard: cloud-dispatch abandon is operator-only;"* ]]
+}
+
+@test "allow: claude --help" {
+  assert_allowed 'claude --help'
+}
+@test "allow: codex cloud list" {
+  assert_allowed 'codex cloud list'
+}
+@test "allow: codex cloud status X" {
+  assert_allowed 'codex cloud status X'
+}
+@test "allow: cloud-dispatch.sh read-only verbs" {
+  local v
+  for v in status plan doctor start orchestrate env-spec; do
+    assert_allowed "bash scripts/gsd/cloud-dispatch.sh $v R1"
+  done
+}
+@test "allow: git status" {
+  assert_allowed 'git status'
+}
+@test "allow: cloud words split across segments" {
+  assert_allowed 'codex cloud list; echo apply'
+}
+@test "allow: cloud-dispatch.sh adopt in a different segment" {
+  assert_allowed 'bash cloud-dispatch.sh status R; echo adopt'
+}
+@test "allow: codex exec without cloud" {
+  assert_allowed 'codex exec "task"'
+}
+@test "allow: quoted echo of the cloud words is not an executable (position match)" {
+  assert_allowed 'echo "claude --cloud"'
+  assert_allowed 'echo "codex cloud apply"'
+}
+@test "allow: git grep -e codex -e cloud -e diff (the words as arguments)" {
+  assert_allowed 'git grep -e codex -e cloud -e diff'
+  assert_allowed 'grep -rn "claude --cloud" docs'
+  assert_allowed 'rg codex cloud exec skills'
+  assert_allowed 'man codex cloud exec'
+}
+@test "deny: absolute-path executables are matched by basename" {
+  assert_denied '/opt/homebrew/bin/claude --cloud "x"'
+  assert_denied '/usr/local/bin/codex cloud exec --env E "x"'
+  assert_denied './bin/codex cloud apply T1'
+}
+@test "deny: leading env assignments and wrappers are stripped" {
+  assert_denied 'FFS_X=1 claude --cloud x'
+  assert_denied 'env -i FOO=1 /opt/bin/claude --cloud x'
+  assert_denied 'command claude --cloud x'
+  assert_denied 'exec codex cloud diff T1'
+  assert_denied 'sudo -n codex cloud apply T1'
+  assert_denied 'nohup claude --cloud x &'
+  assert_denied 'time codex cloud exec x'
+  assert_denied 'rtk proxy claude --cloud x'
+}
+@test "deny: sh -c and bash -c bodies" {
+  assert_denied 'bash -c "claude --cloud x"'
+  assert_denied "sh -lc 'codex cloud apply T1'"
+  assert_denied 'bash -c "cd /x && /opt/homebrew/bin/claude --cloud y"'
+}
+@test "deny: python3 and bash launchers for the dispatcher, by basename" {
+  assert_denied 'python3 /a/b/lib/cloud_dispatch.py abandon R1 T1'
+  assert_denied 'python3 -u lib/cloud_dispatch.py adopt R1 T1 --oid x'
+  assert_denied '/usr/bin/env bash /a/scripts/gsd/cloud-dispatch.sh resolve R1 T1'
+}
+@test "allow: claude with cloud as an ordinary value, codex exec cloud, other python scripts" {
+  assert_allowed 'claude -p "cloud" --model x'
+  assert_allowed 'codex exec cloud apply'
+  assert_allowed 'python3 lib/other.py --cloud'
+}
+@test "allow: malformed cloud input fails open (not json)" {
+  run -0 bash "$HOOK" <<<'claude --cloud'
+  [ -z "$output" ]
+}

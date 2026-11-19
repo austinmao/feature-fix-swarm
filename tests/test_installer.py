@@ -2657,3 +2657,171 @@ def test_project_install_registers_the_vendored_guard_and_uninstall_removes_only
     assert json.loads(claude.read_text())["hooks"]["PreToolUse"] == [FOREIGN_ENTRY]
     assert json.loads(codex.read_text())["hooks"]["PreToolUse"] == []
     assert not vendored.exists()
+
+
+# --- /swarm --cloud runtime shipping (PR 1a, contract 14.10) ---------------------------------
+
+CLOUD_LIB_MODULES = (
+    "cloud_dispatch.py", "cloud_ledger.py", "cloud_host.py", "cloud_scan.py",
+    "cloud_sandbox.py", "cloud_collect.py", "delegation_router.py", "handoff_packet.py",
+)
+CLOUD_SCRIPTS = ("cloud-dispatch.sh", "cloud-review.sh")
+CLOUD_TEMPLATES = ("config.json", "env-check.sh", "session-start.sh", "setup.sh")
+
+
+def test_managed_lib_files_list_the_cloud_runtime() -> None:
+    mapping = dict(ffs_installer.MANAGED_LIB_FILES)
+    for name in CLOUD_LIB_MODULES + ("operator_guard_hook.py",):
+        assert mapping[f"lib/{name}"] == name
+    for name in CLOUD_SCRIPTS:
+        assert mapping[f"scripts/gsd/{name}"] == f"scripts/gsd/{name}"
+    for name in CLOUD_TEMPLATES:
+        assert mapping[f"templates/cloud/{name}"] == f"cloud-templates/{name}"
+    assert sorted(dict(ffs_installer.CLOUD_TEMPLATE_FILES)) == sorted(f"templates/cloud/{n}" for n in CLOUD_TEMPLATES)
+    # every template that exists in the repo is shipped
+    assert sorted(p.name for p in (ROOT / "templates/cloud").iterdir()) == sorted(CLOUD_TEMPLATES)
+
+
+def test_cloud_review_closure_is_shipped_in_the_user_scope_layout() -> None:
+    """I1: cloud-review.sh sources adversary-host.sh + fence-data.sh from its own dir, and
+    adversary-host.sh resolves <script dir>/../../lib/{gates,model_requests}.py."""
+    dests = {dest for _src, dest in ffs_installer.MANAGED_LIB_FILES}
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        assert relative in dests, relative
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        source = next(src for src, dest in ffs_installer.MANAGED_LIB_FILES if dest == relative)
+        assert (ROOT / source).is_file(), source
+
+
+def test_cloud_review_available_reports_missing_closure_members(tmp_path: Path) -> None:
+    assert ffs_installer.cloud_review_available(tmp_path) is False
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+    assert ffs_installer.cloud_review_available(tmp_path) is True
+    (tmp_path / "lib/gates.py").unlink()
+    assert ffs_installer.cloud_review_available(str(tmp_path)) is False
+
+
+def test_installed_cloud_review_finds_its_closure_from_the_staged_script(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    root = tmp_path / "home/.claude/lib/feature-fix-swarm"
+    assert ffs_installer.cloud_review_available(root)
+    script_dir = root / "scripts/gsd"
+    # the same relative lookups adversary-host.sh performs
+    assert (script_dir / "../../lib/gates.py").resolve().is_file()
+    assert (script_dir / "../../lib/model_requests.py").resolve().is_file()
+    assert (script_dir / "run-bounded.sh").is_file() and (script_dir / "fence-data.sh").is_file()
+
+
+def test_reconcile_explicit_lib_list_carries_the_cloud_modules() -> None:
+    body = function_source((ROOT / "lib/ffs_installer.py").read_text(), "reconcile_consumer")
+    for name in CLOUD_LIB_MODULES:
+        assert f'"lib/{name}"' in body, name
+    assert "CLOUD_TEMPLATE_FILES" in body
+
+
+def test_no_new_cloud_module_imports_an_unshipped_lib_module() -> None:
+    import ast
+
+    shipped = {source[len("lib/"):-3] for source, _ in ffs_installer.MANAGED_LIB_FILES
+               if source.startswith("lib/") and source.endswith(".py") and "/" not in source[len("lib/"):]}
+    for name in CLOUD_LIB_MODULES:
+        path = ROOT / "lib" / name
+        if not path.is_file():
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else (
+                [node.module] if isinstance(node, ast.ImportFrom) and node.module and node.level == 0 else [])
+            for module in names:
+                top = module.split(".")[0]
+                if (ROOT / "lib" / f"{top}.py").is_file():
+                    assert top in shipped, f"{name} imports unshipped lib/{top}.py"
+
+
+def test_user_install_ships_cloud_runtime_with_templates_beside_the_dispatcher(tmp_path: Path) -> None:
+    result = run_setup(tmp_path, "--scope", "user")
+    assert result.returncode == 0, result.stderr
+    home = tmp_path / "home"
+    root = home / ".claude/lib/feature-fix-swarm"
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    for name in CLOUD_LIB_MODULES:
+        assert (root / name).read_bytes() == (ROOT / "lib" / name).read_bytes(), name
+        assert str(root / name) in manifest["paths"], name
+    for name in CLOUD_SCRIPTS:
+        staged = root / "scripts/gsd" / name
+        assert staged.read_bytes() == (ROOT / "scripts/gsd" / name).read_bytes(), name
+        assert staged.stat().st_mode & 0o100, name
+    # cloud_dispatch.py looks in <its directory>/cloud-templates/
+    templates = root / "cloud-templates"
+    for name in CLOUD_TEMPLATES:
+        staged = templates / name
+        source = ROOT / "templates/cloud" / name
+        assert staged.read_bytes() == source.read_bytes(), name
+        assert (staged.stat().st_mode & 0o111) == (source.stat().st_mode & 0o111), name
+        assert str(staged) in manifest["paths"], name
+    assert not (templates / "config.json").stat().st_mode & 0o111
+    assert (templates / "setup.sh").stat().st_mode & 0o100
+    # the installer never registers the SessionStart hook (only `env init --register-hook` does)
+    for hook_file in (home / ".claude/settings.json", home / ".codex/hooks.json"):
+        assert "session-start.sh" not in hook_file.read_text()
+        assert "SessionStart" not in json.loads(hook_file.read_text()).get("hooks", {})
+
+
+def test_uninstall_removes_the_cloud_runtime_it_installed(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    root = tmp_path / "home/.claude/lib/feature-fix-swarm"
+    assert (root / "cloud-templates/setup.sh").is_file()
+    result = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert result.returncode == 0, result.stderr
+    for relative in (
+        *CLOUD_LIB_MODULES, *(f"scripts/gsd/{n}" for n in CLOUD_SCRIPTS),
+        *(f"cloud-templates/{n}" for n in CLOUD_TEMPLATES),
+    ):
+        assert not (root / relative).exists(), relative
+    manifest_path = tmp_path / "home/.cache/feature-fix-swarm/install-manifest.json"
+    assert not manifest_path.exists() or "cloud" not in manifest_path.read_text()
+
+
+def test_reconcile_consumer_ships_cloud_runtime_and_templates(tmp_path: Path) -> None:
+    target = tmp_path / "consumer"
+    target.mkdir()
+    result = run_setup(tmp_path, "--reconcile-consumer", str(target))
+    assert result.returncode == 0, result.stderr
+    for name in CLOUD_LIB_MODULES:
+        assert (target / "lib" / name).read_bytes() == (ROOT / "lib" / name).read_bytes(), name
+    for name in CLOUD_SCRIPTS:
+        staged = target / "scripts/gsd" / name
+        assert staged.is_file() and staged.stat().st_mode & 0o100, name
+    for name in CLOUD_TEMPLATES:
+        staged = target / "lib/cloud-templates" / name
+        source = ROOT / "templates/cloud" / name
+        assert staged.read_bytes() == source.read_bytes(), name
+        assert (staged.stat().st_mode & 0o111) == (source.stat().st_mode & 0o111), name
+    # wrapper lookup in this layout: <script>/../../lib is the consumer lib dir
+    assert (target / "scripts/gsd/../../lib/cloud_dispatch.py").is_file()
+    assert not (target / ".claude/settings.json").exists()
+
+
+def test_installed_operator_only_guard_denies_the_cloud_commands(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    guard = tmp_path / "home/.claude/lib/feature-fix-swarm" / GUARD
+
+    def run_guard(command: str) -> subprocess.CompletedProcess[str]:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        return subprocess.run(
+            ["bash", str(guard)], input=payload + "\n", text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
+        )
+
+    for denied in (
+        "claude --cloud x",
+        "codex cloud exec --env e q",
+        "bash scripts/gsd/cloud-dispatch.sh adopt --run r --task t --oid o",
+    ):
+        outcome = run_guard(denied)
+        assert outcome.returncode == 2, (denied, outcome.stderr)
+        assert "operator-only" in outcome.stderr
+    allowed = run_guard("git status")
+    assert allowed.returncode == 0, allowed.stderr

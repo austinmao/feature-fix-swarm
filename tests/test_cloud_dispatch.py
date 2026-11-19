@@ -1,0 +1,1421 @@
+"""Tests for lib/cloud_dispatch.py: CLI verbs and the orchestrator, against real git repos,
+the real ledger/gates/lifecycle scripts and the fake provider CLIs in tests/fixtures/cloud/.
+
+The provider CLIs are reached through small generated wrappers (the backends strip the child
+environment, so state must be baked in) that delegate to the fixture fakes; the Claude wrapper also
+plays the cloud worker (writes the manifest with the real nonce and pushes the result branch).
+"""
+
+from __future__ import annotations
+
+import functools
+import io
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import pytest
+
+LIB = Path(__file__).resolve().parents[1] / "lib"
+REPO = LIB.parent
+sys.path.insert(0, str(LIB))
+
+import cloud_collect  # noqa: E402
+import cloud_dispatch as cd  # noqa: E402
+import cloud_ledger as L  # noqa: E402
+import cloud_sandbox  # noqa: E402
+import operator_guard_hook  # noqa: E402
+
+FAKE_CLAUDE = REPO / "tests" / "fixtures" / "cloud" / "fake-claude"
+FAKE_CODEX = REPO / "tests" / "fixtures" / "cloud" / "fake-codex"
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+}
+CANARY_KEY = "sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"  # secret-shaped canary, never a real key
+
+CLAUDE_WRAPPER = """#!__PY__
+import json, os, re, subprocess, sys
+STATE, FAKE = "__STATE__", "__FAKE__"
+if sys.argv[1:2] != ["--cloud"]:  # doctor probes (`auth --help`, `auth status`) are not launches
+    sys.exit(1)
+with open(os.path.join(STATE, "claude.count"), "a") as fh:
+    fh.write("x\\n")
+env = dict(os.environ, FAKE_CLOUD_STATE=STATE, FAKE_CLOUD_MODE="ok-with-url")
+proc = subprocess.run([FAKE] + sys.argv[1:], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+sys.stdout.buffer.write(proc.stdout)
+path = os.path.join(STATE, "claude.behavior.json")
+behavior = json.load(open(path)) if os.path.exists(path) else {}
+prompt = sys.argv[2]
+run, task, gen = re.search(r"run (\\S+), task (\\S+) \\(generation (\\d+)\\)", prompt).groups()
+spec = behavior.get(task, {})
+if spec.get("push", True) is False:
+    sys.exit(0)
+skeleton = json.loads(re.search(r"\\n(\\{\\n  \\"schema\\".*?\\n\\})\\n", prompt, re.S).group(1))
+skeleton["summary"] = "worker done"
+if spec.get("status"):
+    skeleton["status"] = spec["status"]
+    skeleton["blockers"] = ["needs a human"]
+os.makedirs(".ffs-result", exist_ok=True)
+with open(".ffs-result/%s.json" % task, "w") as fh:
+    json.dump(skeleton, fh)
+target = spec.get("path", "src/a/%s.txt" % task)
+os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+with open(target, "w") as fh:
+    fh.write(spec.get("content", "result of %s\\n" % task))
+ident = ["-c", "user.name=fake", "-c", "user.email=fake@example.invalid", "-c", "commit.gpgsign=false"]
+subprocess.run(["git", "add", "-A"], check=True)
+subprocess.run(["git"] + ident + ["commit", "-q", "-m", "worker result"], check=True)
+nonce8 = skeleton["nonce"][:8]
+branch = spec.get("branch") or "claude/ffs-%s-%s-%s" % (run, task, nonce8)
+subprocess.run(["git", "push", "-q", "origin", "HEAD:refs/heads/" + branch], check=True)
+"""
+
+CODEX_WRAPPER = """#!__PY__
+import os, sys
+STATE, FAKE = "__STATE__", "__FAKE__"
+sub = sys.argv[2] if len(sys.argv) > 2 else ""
+mode = "ok"
+if os.path.exists(os.path.join(STATE, "codex.mode")):
+    mode = open(os.path.join(STATE, "codex.mode")).read().strip() or "ok"
+if sub == "exec":
+    with open(os.path.join(STATE, "codex.count"), "a") as fh:
+        fh.write("x\\n")
+env = dict(os.environ, FAKE_CLOUD_STATE=STATE, FAKE_CLOUD_MODE=mode)
+if os.path.exists(os.path.join(STATE, "codex.diff")):
+    env["FAKE_CODEX_DIFF"] = os.path.join(STATE, "codex.diff")
+os.execve(FAKE, [FAKE] + sys.argv[1:], env)
+"""
+
+CODEX_DIFF = """diff --git a/src/b/two.txt b/src/b/two.txt
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/src/b/two.txt
+@@ -0,0 +1 @@
++hello from codex
+"""
+
+REVIEW_SCRIPT = """#!/bin/bash
+V="$(cat "__STATE__/review.verdict" 2>/dev/null || echo APPROVE)"
+echo "reviewer notes"
+echo "CLOUD-REVIEW: $V"
+case "$V" in APPROVE) exit 0;; REVISE) exit 1;; cap) exit 4;; *) exit 3;; esac
+"""
+
+
+def run_git(cwd: Path, *args: str, check: bool = True) -> str:
+    proc = subprocess.run(["git", "-C", str(cwd)] + list(args), capture_output=True, text=True,
+                          env=dict(os.environ, **GIT_ENV))
+    if check and proc.returncode != 0:
+        raise AssertionError("git %s failed: %s" % (" ".join(args), proc.stderr))
+    return proc.stdout.strip()
+
+
+def task(tid: str, owns: str, **extra: Any) -> Dict[str, Any]:
+    spec: Dict[str, Any] = {
+        "id": tid, "title": "task " + tid, "prompt": "Implement %s under %s" % (tid, owns), "tier": "execution",
+        "model_request": {"kind": "tier", "name": "execution"}, "owns": [owns], "owns_source": "annotated",
+        "est_minutes": 45, "needs_secrets": [], "local_only": False, "local_reason": "", "depends_on": [],
+        "kind": "build", "verify_cmd": "true"}
+    spec.update(extra)
+    return spec
+
+
+T1 = task("t1", "src/a/**")
+T2 = task("t2", "src/b/**")
+
+
+class StopTicks(Exception):
+    pass
+
+
+class World:
+    """A tmp origin + root repo with the consumer files committed and every seam wired."""
+
+    def __init__(self, tmp: Path, mp: pytest.MonkeyPatch, *, config: Optional[Dict[str, Any]] = None,
+                 claude_only: bool = False, real_verify: bool = False) -> None:
+        self.tmp, self.mp = tmp, mp
+        self.origin, self.root, self.state = tmp / "origin.git", tmp / "root", tmp / "fakestate"
+        self.state.mkdir()
+        (self.state / "codex.mode").write_text("complete")
+        (self.state / "codex.diff").write_text(CODEX_DIFF)
+        self.ticks, self.max_ticks = 0, 12
+        self.spawned: List[List[str]] = []
+        self.verify_calls: List[str] = []
+        self.svc = cd.Services()
+        self.svc.stdout = io.StringIO()
+        self.svc.sleep = self._sleep
+        self.svc.spawn = self._spawn
+        self.svc.gh_runner = lambda argv: (1, "")
+        self.svc.review_script = self._script("review.sh", REVIEW_SCRIPT)
+        if not real_verify:
+            self.svc.verify_fn = self._verify
+            self.svc.sandbox_available = lambda: True
+        self._env(mp)
+        self._repos(config or {}, claude_only)
+
+    # -- setup -------------------------------------------------------------
+
+    def _script(self, name: str, template: str) -> str:
+        path = self.tmp / name
+        path.write_text(template.replace("__PY__", sys.executable).replace("__STATE__", str(self.state))
+                        .replace("__FAKE__", str(FAKE_CLAUDE if "claude" in name else FAKE_CODEX)))
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return str(path)
+
+    def _env(self, mp: pytest.MonkeyPatch) -> None:
+        for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GSD_TOKEN_BUDGET", "FFS_MANAGED_INGRESS", "FFS_LIFECYCLE",
+                     "FFS_RECONCILE", "DIGEST_NOTIFY_CMD"):
+            mp.delenv(name, raising=False)
+        for key, value in GIT_ENV.items():
+            mp.setenv(key, value)
+        mp.setenv("GATES_STORE", str(self.tmp / "gates.json"))
+        mp.setenv("FFS_CLOUD_ALLOW_NON_GITHUB_ORIGIN", "1")
+        mp.setenv("FFS_HOST_PRESSURE_FIXTURE", "ok")
+        mp.setenv("FFS_CODEX_CLOUD_ENV", "env_test")
+        mp.setenv("FFS_CLOUD_BIN_CLAUDE", self._script("claude-wrapper", CLAUDE_WRAPPER))
+        mp.setenv("FFS_CLOUD_BIN_CODEX", self._script("codex-wrapper", CODEX_WRAPPER))
+
+    def _repos(self, config: Dict[str, Any], claude_only: bool) -> None:
+        run_git(self.tmp, "init", "-q", "--bare", "-b", "main", str(self.origin))
+        run_git(self.tmp, "init", "-q", "-b", "main", str(self.root))
+        run_git(self.root, "remote", "add", "origin", "file://" + str(self.origin))
+        for rel in ("README.md", "src/a/base.txt", "src/b/base.txt"):
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text("base\n")
+        (self.root / "scripts" / "gsd").mkdir(parents=True)
+        (self.root / "scripts" / "gsd" / "lifecycle.sh").write_bytes((REPO / "scripts" / "gsd" / "lifecycle.sh").read_bytes())
+        assert self.cli("env", "init", "--root", str(self.root))[0] == 0
+        base = {"schema": 1, "limits": {"claude": 3, "codex": 0 if claude_only else 3, "total": 6, "max_local_verifiers": 1},
+                "verify": {"cmd": "true", "timeout_s": 60, "deps": []},
+                "secrets": {"provider": "none", "wrapper": "", "install": "", "exposure": {"claude": [], "codex": []},
+                            "network_secret_hosts": []},
+                "scan": {"allow": []}, "codex": {"env_id_var": "FFS_CODEX_CLOUD_ENV"}, "deadline_hours": 12}
+        base.update(config)
+        (self.root / ".ffs" / "cloud" / "config.json").write_text(json.dumps(base, indent=2))
+        run_git(self.root, "add", "README.md", "src", "scripts", ".ffs")
+        run_git(self.root, "commit", "-q", "-m", "base")
+        run_git(self.root, "push", "-q", "origin", "main")
+        self.base = run_git(self.root, "rev-parse", "HEAD")
+
+    # -- seams ---------------------------------------------------------------
+
+    def _sleep(self, seconds: float) -> None:
+        self.ticks += 1
+        if self.ticks >= self.max_ticks:
+            raise StopTicks()
+
+    def _spawn(self, argv: Any, log: Path, cwd: Path) -> int:
+        self.spawned.append(list(argv))
+        return 4242
+
+    def _verify(self, tree_oid: str, cmd: str, **kwargs: Any) -> int:
+        self.verify_calls.append(tree_oid)
+        return int((self.state / "verify.rc").read_text()) if (self.state / "verify.rc").exists() else 0
+
+    # -- helpers ---------------------------------------------------------------
+
+    def cli(self, *argv: str) -> Tuple[int, str]:
+        self.svc.stdout = io.StringIO()
+        rc = cd.main(list(argv), self.svc)
+        return rc, self.svc.stdout.getvalue()
+
+    def grant(self, run: str, *actions: str) -> None:
+        cmd = [sys.executable, str(LIB / "gates.py"), "grant", run, "--ttl-hours", "24", "--reason", "test"]
+        for action in actions:
+            cmd += ["--action", action]
+        assert subprocess.run(cmd, capture_output=True, env=dict(os.environ)).returncode == 0
+
+    def revoke(self, run: str, action: str) -> None:
+        store = self.tmp / "gates.json"
+        data = json.loads(store.read_text())
+        del data["_autonomy"][run]["grants"][action]
+        store.write_text(json.dumps(data))
+
+    def tasks_file(self, tasks: List[Dict[str, Any]], name: str = "tasks.json") -> str:
+        path = self.tmp / name
+        path.write_text(json.dumps(tasks))
+        return str(path)
+
+    def start(self, run: str = "r1", tasks: Optional[List[Dict[str, Any]]] = None, policy: str = "auto",
+              grant: bool = True, extra: Tuple[str, ...] = ()) -> Tuple[int, str]:
+        if grant:
+            self.grant(run, "cloud-dispatch:claude", "cloud-dispatch:codex", "push:origin/ffs/cloud/" + run)
+        return self.cli("start", "--run", run, "--tasks", self.tasks_file(tasks or [T1, T2]), "--policy", policy,
+                        "--root", str(self.root), *extra)
+
+    def orchestrator(self, run: str = "r1", once: bool = False) -> cd.Orchestrator:
+        return cd.Orchestrator(self.svc, self.root, run, once=once)
+
+    def drive(self, run: str = "r1", max_ticks: int = 12, once: bool = False) -> Optional[int]:
+        self.ticks, self.max_ticks = 0, max_ticks
+        try:
+            return self.orchestrator(run, once).run()
+        except StopTicks:
+            return None
+
+    def doc(self, run: str = "r1") -> Dict[str, Any]:
+        return L.read(L.run_ledger_path(self.root, run))
+
+    def states(self, run: str = "r1") -> Dict[str, str]:
+        return {name: entry["state"] for name, entry in self.doc(run)["tasks"].items()}
+
+    def count(self, kind: str) -> int:
+        path = self.state / (kind + ".count")
+        return len(path.read_text().split()) if path.exists() else 0
+
+    def behavior(self, **per_task: Dict[str, Any]) -> None:
+        (self.state / "claude.behavior.json").write_text(json.dumps(per_task))
+
+    def lifecycle(self, run: str = "r1", epoch: int = 1) -> Dict[str, Any]:
+        path = self.root / ".planning" / "run-state" / ("lifecycle-cloud-%s-e%d.json" % (run, epoch))
+        return json.loads(path.read_text())
+
+    def slots(self) -> List[str]:
+        return L.slot_keys(L.slots_path(self.root))
+
+
+@pytest.fixture()
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+    return World(tmp_path, monkeypatch)
+
+
+# --------------------------------------------------------------------------
+# End to end
+# --------------------------------------------------------------------------
+
+
+def integration_files(world: World, run: str = "r1") -> List[str]:
+    out = run_git(world.root, "ls-tree", "-r", "--name-only", L.integration_ref(run))
+    return out.splitlines()
+
+
+def test_two_task_run_start_to_integrated(world: World) -> None:
+    rc, out = world.start()
+    assert rc == 0, out
+    assert "CLOUD:started run=r1 tasks=2" in out
+    assert world.spawned and world.spawned[0][2:5] == ["orchestrate", "--run", "r1"]
+    providers = {n: e["provider"] for n, e in world.doc()["tasks"].items()}
+    assert providers == {"t1": "claude", "t2": "codex"}
+    assert world.drive() == 0
+    doc = world.doc()
+    assert doc["state"] == "done"
+    assert world.states() == {"t1": "integrated", "t2": "integrated"}
+    files = integration_files(world)
+    assert "src/a/t1.txt" in files and "src/b/two.txt" in files
+    assert ".ffs-result/t1.json" not in files
+    assert doc["integration"]["tip"] == run_git(world.root, "rev-parse", L.integration_ref("r1"))
+    assert [h["task"] for h in doc["integration"]["history"]] == ["t2", "t1"]
+    assert world.count("claude") == 1 and world.count("codex") == 1
+    assert world.slots() == []
+    assert world.lifecycle()["state"] == "done"
+    status_rc, status_out = world.cli("status", "--run", "r1", "--root", str(world.root))
+    assert status_rc == 0 and "state=done" in status_out
+
+
+def test_end_to_end_with_the_real_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not cloud_sandbox.sandbox_available():
+        pytest.skip("sandbox-exec is unavailable on this host; the sandboxed test run cannot be exercised")
+    world = World(tmp_path, monkeypatch, real_verify=True)
+    # the verify command is only green when the sandbox really checked out the integrated candidate tree
+    checked = [task("t1", "src/a/**", verify_cmd="test -f src/a/t1.txt && test -f src/a/base.txt"),
+               task("t2", "src/b/**", verify_cmd="test -f src/b/two.txt")]
+    assert world.start(tasks=checked)[0] == 0
+    assert world.drive() == 0
+    assert world.states() == {"t1": "integrated", "t2": "integrated"}
+    assert (world.root / ".feature-fix-swarm" / "cloud" / "runs" / "r1" / "verify-t1-g1.log").exists()
+
+
+def test_the_real_sandbox_fails_a_verify_that_the_candidate_does_not_satisfy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not cloud_sandbox.sandbox_available():
+        pytest.skip("sandbox-exec is unavailable on this host; the sandboxed test run cannot be exercised")
+    world = World(tmp_path, monkeypatch, real_verify=True)
+    assert world.start(tasks=[task("t1", "src/a/**", verify_cmd="test -f src/a/never-created.txt")])[0] == 0
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("rejected", "tests-failed")
+
+
+# --------------------------------------------------------------------------
+# Crash and resume (fault injection)
+# --------------------------------------------------------------------------
+
+
+def crash_at(world: World, point: str) -> None:
+    fired = {"done": False}
+
+    def fault(name: str) -> None:
+        if name == point and not fired["done"]:
+            fired["done"] = True
+            raise cd.SimulatedCrash(point)
+
+    world.svc.fault = fault
+
+
+@pytest.mark.parametrize("point", [
+    "after-admit-journal", "after-admit-push", "after-reserve-journal", "after-bind", "after-collect",
+    "after-integrate-journal", "after-update-ref"])
+def test_crash_then_resume_completes_without_a_second_launch(world: World, point: str) -> None:
+    assert world.start()[0] == 0
+    crash_at(world, point)
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    world.svc.fault = lambda name: None
+    assert world.drive(max_ticks=20) == 0
+    assert world.states() == {"t1": "integrated", "t2": "integrated"}
+    assert world.count("claude") == 1 and world.count("codex") == 1
+    assert world.doc()["state"] == "done"
+    assert world.slots() == []
+    history = [h["task"] for h in world.doc()["integration"]["history"]]
+    assert sorted(history) == ["t1", "t2"]
+
+
+def test_crash_after_submitting_never_relaunches(world: World) -> None:
+    assert world.start()[0] == 0
+    crash_at(world, "after-submitting")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    before = {"claude": world.count("claude"), "codex": world.count("codex")}
+    assert before["claude"] + before["codex"] == 0  # the crash is before any provider CLI ran
+    crashed = [n for n, e in world.doc()["tasks"].items() if e["state"] == "submitting"]
+    assert len(crashed) == 1, world.states()
+    provider = world.doc()["tasks"][crashed[0]]["provider"]
+    world.svc.fault = lambda name: None
+    world.drive(max_ticks=6)
+    states = world.states()
+    # the crashed task is reconciled through uncertain / operator, and its provider CLI never ran for it again
+    assert states[crashed[0]] in ("needs-operator", "uncertain", "launched", "running"), states
+    assert world.count(provider) == 0  # t1/t2 use different providers: the crashed task's CLI never ran at all
+    assert world.doc()["tasks"][crashed[0]]["generation"] == 1
+
+
+def test_a_leftover_submitting_task_is_made_uncertain_on_the_next_tick(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    crash_at(world, "after-submitting")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    assert world.states() == {"t1": "submitting"}
+    world.svc.fault = lambda name: None
+    orch = world.orchestrator()  # a live orchestrator that persisted a failure mid-submit: no restart, no startup
+    orch.load_inputs(orch.doc())
+    orch.tick()
+    assert world.states() != {"t1": "submitting"}
+    assert world.count("claude") == 0  # never relaunched
+
+
+def test_crash_after_launch_exec_recovers_through_uncertain(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    crash_at(world, "after-launch-exec")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    assert world.states() == {"t1": "submitting"}
+    world.svc.fault = lambda name: None
+    assert world.drive(max_ticks=20) == 0
+    assert world.count("claude") == 1
+    assert world.states() == {"t1": "integrated"}
+
+
+@pytest.mark.parametrize("point", ["before-park", "after-park-state"])
+def test_crash_around_park_resumes_cleanly(world: World, point: str) -> None:
+    world.behavior(t1={"status": "blocked"})
+    assert world.start(tasks=[T1])[0] == 0
+    crash_at(world, point)
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    world.svc.fault = lambda name: None
+    world.drive(max_ticks=6)
+    assert world.doc()["state"] == "parked"
+    assert world.states() == {"t1": "needs-operator"}
+    assert world.count("claude") == 1
+
+
+# --------------------------------------------------------------------------
+# Park, operator verbs, resume
+# --------------------------------------------------------------------------
+
+
+def test_blocked_worker_parks_notifies_and_status_exits_4(world: World) -> None:
+    world.behavior(t1={"status": "blocked"})
+    marker = world.tmp / "notified.txt"
+    world.mp.setenv("DIGEST_NOTIFY_CMD", "cat > %s" % marker)
+    assert world.start(tasks=[T1])[0] == 0
+    assert world.drive() == 0
+    doc = world.doc()
+    assert doc["state"] == "parked"
+    assert doc["tasks"]["t1"]["blocker"] == "manifest-blocked"
+    assert "needs a human" in " ".join(doc["tasks"]["t1"]["decisions_needed"])
+    assert "CLOUD-PARKED run=r1 items=1" in marker.read_text()
+    rc, out = world.cli("status", "--run", "r1", "--root", str(world.root))
+    assert rc == 4 and "blocker=manifest-blocked" in out
+    rc, out = world.cli("status", "--run", "r1", "--root", str(world.root), "--json")
+    assert rc == 4 and json.loads(out)["operator_items"] == 1
+
+
+def test_abandon_retry_wakes_a_parked_run_and_bumps_the_epoch(world: World) -> None:
+    world.behavior(t1={"status": "blocked"})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert world.doc()["state"] == "parked"
+    assert world.lifecycle()["state"] == "done"
+    world.behavior()  # the retry succeeds
+    rc, out = world.cli("abandon", "--run", "r1", "--task", "t1", "--retry", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:abandoned" in out and "orchestrator-started" in out
+    assert world.spawned[-1][2:5] == ["orchestrate", "--run", "r1"] and "--resume" in world.spawned[-1]
+    assert world.drive(max_ticks=20) == 0
+    doc = world.doc()
+    assert doc["epoch"] == 2 and doc["state"] == "done"
+    assert doc["tasks"]["t1"]["state"] == "integrated" and doc["tasks"]["t1"]["generation"] == 2
+    assert world.lifecycle(epoch=2)["state"] == "done"
+    assert world.count("claude") == 2
+
+
+def test_resolve_refuses_where_the_ledger_table_refuses(world: World) -> None:
+    world.behavior(t1={"status": "blocked"})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    rc, out = world.cli("resolve", "--run", "r1", "--task", "t1", "--action", "retest", "--root", str(world.root))
+    assert rc == 3 and out.startswith("CLOUD-REFUSED:")
+
+
+def test_adopt_for_codex_is_refused_and_bad_oid_is_usage(world: World) -> None:
+    assert world.start()[0] == 0
+    rc, out = world.cli("adopt", "--run", "r1", "--task", "t2", "--oid", "a" * 40, "--root", str(world.root))
+    assert rc == 3 and "ADOPT_UNSUPPORTED_PROVIDER" in out
+    assert world.cli("adopt", "--run", "r1", "--task", "t2", "--oid", "xyz", "--root", str(world.root))[0] == 2
+
+
+# --------------------------------------------------------------------------
+# Collect-stage blockers end to end
+# --------------------------------------------------------------------------
+
+
+def test_secret_in_result_is_rejected_and_never_integrated(world: World) -> None:
+    world.behavior(t1={"content": "token = %s\n" % CANARY_KEY})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] == "rejected" and entry["blocker"] == "secret-leak"
+    assert world.doc()["state"] in ("parked", "done")
+    assert "src/a/t1.txt" not in integration_files(world)
+    log = (world.root / ".feature-fix-swarm" / "cloud" / "runs" / "r1" / "orchestrate.log").read_text()
+    assert CANARY_KEY not in log
+    rc, out = world.cli("status", "--run", "r1", "--root", str(world.root))
+    assert "runbook t1" in out
+
+
+def test_path_outside_owns_needs_operator(world: World) -> None:
+    world.behavior(t1={"path": "src/b/stray.txt"})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] == "needs-operator" and entry["blocker"] == "path-outside-owns"
+    assert world.doc()["state"] == "parked"
+
+
+def test_review_revise_rejects_and_unavailable_needs_operator(world: World) -> None:
+    (world.state / "review.verdict").write_text("REVISE")
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert (world.doc()["tasks"]["t1"]["state"], world.doc()["tasks"]["t1"]["blocker"]) == ("rejected", "review-revise")
+    assert world.verify_calls == []
+
+
+def test_review_unavailable_and_cap_need_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for verdict, blocker in (("UNAVAILABLE", "review-unavailable"), ("cap", "review-cap")):
+        world = World(tmp_path / verdict, monkeypatch) if (tmp_path / verdict).mkdir() is None else None
+        assert world is not None
+        (world.state / "review.verdict").write_text(verdict)
+        assert world.start(tasks=[T1])[0] == 0
+        world.drive()
+        entry = world.doc()["tasks"]["t1"]
+        assert (entry["state"], entry["blocker"]) == ("needs-operator", blocker)
+
+
+def test_failing_tests_reject_and_integrate_nothing(world: World) -> None:
+    (world.state / "verify.rc").write_text("1")
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("rejected", "tests-failed")
+    assert integration_files(world) == [".ffs/cloud/config.json", ".ffs/cloud/env-check.sh", ".ffs/cloud/session-start.sh",
+                                        ".ffs/cloud/setup.sh", "README.md", "scripts/gsd/lifecycle.sh", "src/a/base.txt",
+                                        "src/b/base.txt"]
+
+
+def test_unsandboxed_host_parks_with_sandbox_unavailable(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    world.svc.verify_fn = None
+    world.svc.sandbox_available = lambda: False
+    world.mp.setattr(cloud_sandbox, "sandbox_available", lambda: False)
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] == "needs-operator" and entry["blocker"] == "sandbox-unavailable"
+
+
+def test_two_candidates_are_ambiguous(world: World) -> None:
+    world.behavior(t1={"push": False})  # the worker never pushes its own branch
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=3)
+    assert world.states()["t1"] in ("launched", "running")
+    tree = run_git(world.root, "rev-parse", world.base + "^{tree}")
+    for index in (1, 2):
+        commit = run_git(world.root, "commit-tree", "-p", world.base, "-m", "x%d" % index, tree)
+        run_git(world.root, "push", "-q", "origin", "%s:refs/heads/claude/other-%d" % (commit, index))
+    world.drive(max_ticks=6)
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "ambiguous-candidates")
+
+
+# --------------------------------------------------------------------------
+# Codex launch uncertainty, deadline, polling errors
+# --------------------------------------------------------------------------
+
+
+def test_codex_without_task_id_is_uncertain_never_relaunched(world: World) -> None:
+    (world.state / "codex.mode").write_text("no-id")
+    assert world.start()[0] == 0
+    world.drive(max_ticks=6)
+    entry = world.doc()["tasks"]["t2"]
+    assert entry["state"] in ("uncertain", "needs-operator")
+    assert world.count("codex") == 1
+    rc, out = world.cli("status", "--run", "r1", "--root", str(world.root))
+    assert rc == 4
+
+
+def test_deadline_exceeded_stops_polling(world: World) -> None:
+    world.behavior(t1={"push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    clock = {"t": 1_800_000_000.0}
+    world.svc.now = lambda: clock["t"]
+
+    def sleep(seconds: float) -> None:
+        world.ticks += 1
+        clock["t"] += 13 * 3600
+        if world.ticks > 8:
+            raise StopTicks()
+
+    world.svc.sleep = sleep
+    world.drive(max_ticks=100)
+    assert world.states()["t1"] == "failed"
+    assert world.count("claude") == 1
+
+
+# --------------------------------------------------------------------------
+# Grants, scanning, pushes
+# --------------------------------------------------------------------------
+
+
+def test_start_without_grants_is_refused(world: World) -> None:
+    rc, out = world.start(grant=False)
+    assert rc == 3 and "CLOUD-REFUSED: GRANT_MISSING" in out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_push_grant_revoked_before_admit_refuses_the_push(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    world.revoke("r1", "push:origin/ffs/cloud/r1")
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "grant-missing")
+    assert "missing grant push:origin/ffs/cloud/r1" in " ".join(entry["decisions_needed"])
+    assert run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/*") == ""
+    assert world.count("claude") == 0
+
+
+def test_exposed_secret_without_grant_is_refused_at_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(tmp_path, monkeypatch, config={"secrets": {"provider": "provider-env", "wrapper": "", "install": "",
+                                                              "exposure": {"claude": ["API_TOKEN"], "codex": []},
+                                                              "network_secret_hosts": []}})
+    rc, out = world.start(tasks=[T1])
+    assert rc == 3 and out.startswith("CLOUD-REFUSED:")
+
+
+def test_secret_shaped_task_text_is_refused_before_any_ledger(world: World) -> None:
+    bad = task("t1", "src/a/**", prompt="use key %s please" % CANARY_KEY)
+    rc, out = world.start(tasks=[bad])
+    assert rc == 3 and "SECRET_IN_PROMPT" in out
+    assert CANARY_KEY not in out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_origin_change_is_refused_on_orchestrate(world: World) -> None:
+    assert world.start()[0] == 0
+    run_git(world.root, "remote", "set-url", "origin", "file://" + str(world.tmp / "elsewhere.git"))
+    with pytest.raises(cd.Refused) as info:
+        world.orchestrator().run()
+    assert info.value.code == "ORIGIN_CHANGED"
+
+
+def test_push_ref_validator() -> None:
+    ok = "refs/heads/ffs/cloud/r1/t1-g1"
+    assert cd.push_ref_valid("r1", ok)
+    assert cd.push_ref_valid("r1", "refs/heads/ffs/cloud/r1/integration")
+    for bad in ("+" + ok, "refs/heads/main", "refs/heads/ffs/cloud/r2/t1-g1", ok + "/../x", "refs/heads/ffs/cloud/r1/t1",
+                "refs/heads/ffs/cloud/r1/t1-g1:refs/heads/main", "refs/heads/ffs/cloud/r1/T1-g1", ""):
+        assert not cd.push_ref_valid("r1", bad), bad
+
+
+EXPOSED = {"secrets": {"provider": "provider-env", "wrapper": "", "install": "",
+                       "exposure": {"claude": ["API_TOKEN"], "codex": []}, "network_secret_hosts": []}}
+
+
+def test_ruleset_unverified_blocks_exposed_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(tmp_path, monkeypatch, config=EXPOSED)
+    monkeypatch.setattr(cd, "ruleset_checks", lambda svc, url, exposed: [cd.Check("RULESET", cd.OK, "stubbed ok")])
+    monkeypatch.setattr(cd, "branch_rules_verified", lambda svc, url, branch: (False, "no active rules returned"))
+    world.grant("r1", "cloud-dispatch:claude", "push:origin/ffs/cloud/r1", "secret-use:API_TOKEN")
+    rc, out = world.start(tasks=[T1], grant=False)
+    assert rc == 0, out
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "ruleset-unverified")
+    assert "ruleset evidence" in " ".join(entry["decisions_needed"])
+    assert world.count("claude") == 0
+
+
+def test_branch_rule_evidence_needs_update_and_deletion_rules(world: World) -> None:
+    url = "https://github.com/octo/repo.git"
+    seen: List[Any] = []
+
+    def runner(rules: Any, rc: int = 0) -> Any:
+        def run(argv: Any) -> Tuple[int, str]:
+            seen.append(list(argv))
+            return rc, json.dumps(rules)
+        return run
+
+    world.svc.gh_runner = runner([{"type": "update"}, {"type": "deletion"}])
+    assert cd.branch_rules_verified(world.svc, url, "ffs/cloud/r1/t1-g1")[0] is True
+    assert seen[0][0] == "api" and "octo/repo" in seen[0][1]
+    world.svc.gh_runner = runner([{"type": "update"}])
+    ok, detail = cd.branch_rules_verified(world.svc, url, "ffs/cloud/r1/t1-g1")
+    assert not ok and "deletion" in detail
+    world.svc.gh_runner = runner([], rc=0)
+    assert cd.branch_rules_verified(world.svc, url, "b")[0] is False
+    world.svc.gh_runner = runner([{"type": "update"}, {"type": "deletion"}], rc=1)
+    assert cd.branch_rules_verified(world.svc, url, "b")[0] is False
+    world.svc.gh_runner = lambda argv: (0, "not json")
+    assert cd.branch_rules_verified(world.svc, url, "b")[0] is False
+    assert cd.branch_rules_verified(world.svc, "file:///x/y.git", "b")[0] is False
+
+
+def test_ruleset_checks_require_active_ruleset_without_foreign_bypass(world: World) -> None:
+    url = "https://github.com/octo/repo.git"
+    ruleset = {"id": 7, "enforcement": "active", "conditions": {"ref_name": {"include": ["refs/heads/ffs/cloud/**"]}},
+               "bypass_actors": []}
+
+    def gh(argv: Any) -> Tuple[int, str]:
+        return 0, json.dumps([{"id": 7}] if argv[1].endswith("/rulesets") else ruleset)
+
+    world.svc.gh_runner = gh
+    assert all(c.level == cd.OK for c in cd.ruleset_checks(world.svc, url, True))
+    ruleset["bypass_actors"] = [{"actor_type": "Team", "actor_id": 9}]
+    assert any(c.code == "RULESET_BYPASS" and c.level == cd.FAIL for c in cd.ruleset_checks(world.svc, url, True))
+    world.svc.gh_runner = lambda argv: (1, "")
+    assert cd.ruleset_checks(world.svc, url, True)[0].level == cd.FAIL
+    assert cd.ruleset_checks(world.svc, url, False)[0].level == cd.WARN
+
+
+# --------------------------------------------------------------------------
+# CLI surface
+# --------------------------------------------------------------------------
+
+
+def test_plan_is_pure_and_prints_json(world: World) -> None:
+    rc, out = world.cli("plan", "--tasks", world.tasks_file([T1, T2]), "--policy", "auto", "--root", str(world.root))
+    assert rc == 0
+    plan = json.loads(out)
+    assert set(plan["tasks"]) == {"t1", "t2"}
+    assert not L.run_ledger_path(world.root, "r1").exists()
+    assert not (world.root / ".feature-fix-swarm" / "cloud" / "runs").exists()
+
+
+def test_plan_with_run_reports_missing_grants(world: World) -> None:
+    rc, out = world.cli("plan", "--tasks", world.tasks_file([T1]), "--policy", "auto", "--run", "r1", "--root", str(world.root))
+    assert rc == 0 and "cloud-dispatch:claude" in json.loads(out)["preconditions"]["grants_missing"]
+
+
+@pytest.mark.parametrize("run", ["", "../x", "a b", "x" * 41, "-x", "a/b", ".hidden"])
+def test_bad_run_ids_are_usage_errors(world: World, run: str) -> None:
+    rc, _ = world.cli("status", "--run", run, "--root", str(world.root))
+    assert rc == 2
+
+
+def test_status_of_unknown_run_is_an_error(world: World) -> None:
+    rc, _ = world.cli("status", "--run", "nope", "--root", str(world.root))
+    assert rc in (3, 78)
+
+
+def test_start_twice_is_refused(world: World) -> None:
+    assert world.start()[0] == 0
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1]), "--policy", "auto", "--root", str(world.root))
+    assert rc == 3 and "RUN_EXISTS" in out
+
+
+def test_local_only_tasks_leave_nothing_to_start(world: World) -> None:
+    local = task("t1", "src/a/**", local_only=True, local_reason="touches secrets")
+    rc, out = world.start(tasks=[local])
+    assert rc == 3 and "NO_CLOUD_TASKS" in out
+
+
+def test_usage_errors_exit_2(world: World) -> None:
+    assert world.cli()[0] == 2
+    assert world.cli("start", "--run", "r1")[0] == 2
+    assert world.cli("plan", "--tasks", "x", "--policy", "bogus")[0] == 2
+    assert world.cli("env")[0] == 2
+
+
+def test_doctor_json_reports_checks(world: World) -> None:
+    rc, out = world.cli("doctor", "--json", "--root", str(world.root))
+    data = json.loads(out)
+    assert data["checks"] and isinstance(data["green"], bool)
+    assert rc == (0 if data["green"] else 3)
+    rc2, out2 = world.cli("doctor", "--root", str(world.root))
+    assert rc2 == rc and "CLOUD:doctor" in out2
+
+
+def test_env_init_copies_templates_keeps_existing_and_never_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "fresh"
+    run_git(tmp_path, "init", "-q", str(root))
+    svc = cd.Services()
+    svc.stdout = io.StringIO()
+    assert cd.main(["env", "init", "--root", str(root)], svc) == 0
+    for name in cd.CLOUD_FILES:
+        assert (root / ".ffs" / "cloud" / name).is_file()
+    assert os.access(str(root / ".ffs" / "cloud" / "setup.sh"), os.X_OK)
+    assert "git add" in svc.stdout.getvalue()
+    (root / ".ffs" / "cloud" / "config.json").write_text("{}")
+    svc.stdout = io.StringIO()
+    assert cd.main(["env", "init", "--root", str(root)], svc) == 0
+    assert (root / ".ffs" / "cloud" / "config.json").read_text() == "{}"
+    assert "kept existing" in svc.stdout.getvalue()
+    assert run_git(root, "status", "--porcelain").startswith("??")
+    assert run_git(root, "log", "--oneline", check=False) == ""
+
+
+def test_env_init_register_hook_uses_the_injected_merge(tmp_path: Path) -> None:
+    root = tmp_path / "fresh"
+    run_git(tmp_path, "init", "-q", str(root))
+    calls: List[Any] = []
+
+    def merge(document: Dict[str, Any], event: str, entry: Dict[str, Any], previous: Any = None) -> Dict[str, Any]:
+        calls.append((event, entry, previous))
+        return dict(document, hooks={event: [entry]})
+
+    svc = cd.Services()
+    svc.stdout = io.StringIO()
+    svc.merge_hook_entry = merge
+    assert cd.main(["env", "init", "--register-hook", "--root", str(root)], svc) == 0
+    assert calls and calls[0][0] == "SessionStart" and calls[0][2] is None
+    settings = json.loads((root / ".claude" / "settings.json").read_text())
+    assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == cd.SESSION_HOOK_COMMAND
+
+
+def test_env_spec_lists_requirements_per_provider(world: World) -> None:
+    for provider in ("claude", "codex"):
+        rc, out = world.cli("env-spec", "--provider", provider, "--root", str(world.root))
+        assert rc == 0 and out.strip()
+
+
+def test_orchestrate_detach_respawns_without_detach(world: World) -> None:
+    assert world.start()[0] == 0
+    world.spawned.clear()
+    rc, out = world.cli("orchestrate", "--run", "r1", "--detach", "--root", str(world.root))
+    assert rc == 0 and "detached pid=4242" in out
+    assert "--detach" not in world.spawned[0] and world.spawned[0][2:5] == ["orchestrate", "--run", "r1"]
+
+
+def test_second_orchestrator_exits_cleanly_while_the_lock_is_held(world: World) -> None:
+    assert world.start()[0] == 0
+    first = world.orchestrator()
+    assert first.acquire_lock()
+    try:
+        rc, out = world.cli("orchestrate", "--run", "r1", "--once", "--root", str(world.root))
+        assert rc == 0 and "orchestrator-running" in out
+        assert not cd.probe_lock_free(world.root, "r1")
+    finally:
+        first.release_lock()
+    assert cd.probe_lock_free(world.root, "r1")
+
+
+def test_once_runs_a_single_tick(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    assert world.drive(once=True) == 0
+    assert world.ticks == 0
+    assert world.states()["t1"] in ("admitted", "reserved", "launched", "waiting")
+
+
+def test_cleanup_removes_a_finished_run(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    rc, out = world.cli("cleanup", "--run", "r1", "--root", str(world.root))
+    assert rc == 3 and "INTEGRATION_UNMERGED" in out
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup run=r1" in out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+    assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
+
+
+def test_cleanup_does_not_count_a_remote_tracking_copy_of_the_run_as_a_safe_copy(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    tip = run_git(world.root, "rev-parse", L.integration_ref("r1")).strip()
+    run_git(world.root, "update-ref", "refs/remotes/origin/ffs/cloud/r1/t1-g1", tip)
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--root", str(world.root))
+    assert rc == 3 and "INTEGRATION_UNMERGED" in out
+    assert L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_cleanup_remote_deletes_task_branches_with_the_grant(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    assert run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/r1/*") != ""
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "remote-branches-deleted=2" in out
+    assert run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/r1/*") == ""
+
+
+def test_cleanup_holds_the_ledger_lock_so_a_reopen_cannot_race_it(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    import time
+    assert world.start()[0] == 0
+    world.drive()
+    outcome: List[Any] = []
+
+    def reopen() -> None:
+        def fn(doc: Dict[str, Any]) -> Dict[str, Any]:
+            doc["state"] = L.RUN_ACTIVE  # what a concurrent `abandon --retry` of a failed task does
+            return doc
+        try:
+            L.locked_update(L.run_ledger_path(world.root, "r1"), fn)
+            outcome.append("reopened")
+        except L.LedgerError as exc:
+            outcome.append(exc.code)
+
+    real, thread = cd._list_refs, threading.Thread(target=reopen)
+
+    def racing(*a: Any, **k: Any) -> List[str]:  # runs after cleanup has decided the run is done
+        if not thread.is_alive() and not outcome:
+            thread.start()
+            time.sleep(0.3)
+        return real(*a, **k)
+
+    monkeypatch.setattr(cd, "_list_refs", racing)
+    rc, _ = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    thread.join(10)
+    assert rc == 0 and outcome == [L.E_MISSING]  # the reopen waited for cleanup and found no run
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_cleanup_removes_a_run_stranded_before_its_inputs_were_published(world: World) -> None:
+    assert world.start()[0] == 0
+    L.tasks_path(world.root, "r1").unlink()  # the start process died between the ledger create and tasks.json
+    rc, out = world.cli("orchestrate", "--run", "r1", "--once", "--root", str(world.root))
+    assert rc != 0  # resume cannot load the inputs
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup run=r1" in out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+@pytest.mark.parametrize("started", ["state", "journal"])
+def test_cleanup_refuses_an_active_run_whose_inputs_file_vanished(world: World, started: str) -> None:
+    assert world.start()[0] == 0
+    first = next(iter(world.doc()["tasks"]))
+
+    def progress(doc: Dict[str, Any]) -> Dict[str, Any]:
+        if started == "state":
+            doc["tasks"][first]["state"] = L.RESULT_READY
+        else:
+            doc["journal"].append({"seq": 1, "op": "submit", "task": first, "generation": 1, "done": True})
+        return doc
+
+    L.locked_update(L.run_ledger_path(world.root, "r1"), progress)
+    quarantine = L.run_dir(world.root, "r1") / "quarantine" / (first + "-g1")
+    quarantine.mkdir(parents=True)
+    L.tasks_path(world.root, "r1").unlink()  # moved or deleted while the run is live
+    rc, out = world.cli("cleanup", "--run", "r1", "--root", str(world.root))
+    assert rc == 3 and "RUN_NOT_DONE" in out
+    assert L.run_ledger_path(world.root, "r1").exists() and quarantine.is_dir()
+
+
+def test_cleanup_refuses_a_run_that_is_not_done(world: World) -> None:
+    assert world.start()[0] == 0
+    rc, out = world.cli("cleanup", "--run", "r1", "--root", str(world.root))
+    assert rc == 3 and "RUN_NOT_DONE" in out
+
+
+# --------------------------------------------------------------------------
+# Mapping table, lifecycle, grants, helpers
+# --------------------------------------------------------------------------
+
+
+def test_every_collect_blocker_constant_is_mapped_to_a_ledger_legal_move() -> None:
+    constants = {getattr(cloud_collect, n) for n in dir(cloud_collect) if n.startswith("B_")}
+    assert constants <= set(cd.BLOCKER_MAP), constants - set(cd.BLOCKER_MAP)
+    for stage in (cd.STAGE_COLLECT, cd.STAGE_REVIEW, cd.STAGE_VERIFY, cd.STAGE_RETEST, cd.STAGE_INTEGRATE):
+        source = cd.STAGE_SOURCE_STATE[stage]
+        for name in sorted(constants) + [None, "not-a-real-blocker"]:
+            event, blocker = cd.map_blocker(stage, name)
+            if event == cd.EV_REPLAN:
+                continue
+            row = L.TRANSITIONS.get((source, event))
+            assert row is not None and blocker in row[1], (stage, name, event, blocker)
+
+
+def test_a_secret_leak_found_at_review_is_rejected_with_the_leak_blocker() -> None:
+    assert cd.map_blocker(cd.STAGE_REVIEW, cloud_collect.B_SECRET_LEAK) == (cd.EV_REJECT, "secret-leak")
+    assert cd.map_blocker(cd.STAGE_COLLECT, cloud_collect.B_SECRET_LEAK) == (cd.EV_REJECT, "secret-leak")
+
+
+def test_lifecycle_disabled_refuses_orchestration(world: World) -> None:
+    assert world.start()[0] == 0
+    world.mp.setenv("FFS_LIFECYCLE", "off")
+    with pytest.raises(cd.Refused) as info:
+        world.orchestrator().run()
+    assert info.value.code == "LIFECYCLE_DISABLED"
+
+
+def test_lifecycle_record_registers_the_resume_argv(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(once=True)
+    record = world.lifecycle()
+    argv = record.get("resume_argv") or json.loads(json.dumps(record.get("argv", [])))
+    assert argv[0] == "scripts/gsd/cloud-dispatch.sh"
+    assert "--detach" not in argv and "bash" not in argv[:1]
+
+
+def test_unreadable_grants_store_refuses_rather_than_assuming(world: World) -> None:
+    (world.tmp / "gates.json").write_text("{not json")
+    with pytest.raises(cd.Refused):
+        cd.gates_check(world.svc, "r1", "cloud-dispatch:claude")
+
+
+def test_host_pressure_high_is_reported(world: World) -> None:
+    assert cd.host_pressure_high(world.svc, world.root) is False  # the fixture says ok
+    world.mp.setenv("FFS_HOST_PRESSURE_FIXTURE", "high")
+    assert cd.host_pressure_high(world.svc, world.root) is True
+
+
+def test_redact_text_hides_secret_shapes() -> None:
+    assert CANARY_KEY not in cd.redact_text("x %s y" % CANARY_KEY)
+
+
+def test_clip_list_bounds_entries() -> None:
+    clipped = cd.clip_list(["a" * 10000] * 100)
+    assert len(clipped) <= L.MANIFEST_LIST_MAX and all(len(c) <= cd.DECISION_TEXT_MAX for c in clipped)
+
+
+# --------------------------------------------------------------------------
+# Review fixes (L1-L17)
+# --------------------------------------------------------------------------
+
+
+def parked_world(world: World, **behavior: Dict[str, Any]) -> None:
+    world.behavior(t1=behavior or {"status": "blocked"})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert world.doc()["state"] == "parked"
+
+
+def test_abandon_while_integrating_is_refused_and_the_ledger_agrees_with_the_ref(world: World) -> None:
+    """L1: abandon --retry between the integrate journal and the ref update used to leave ref and ledger apart."""
+    assert world.start(tasks=[T1])[0] == 0
+    crash_at(world, "after-integrate-journal")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    world.svc.fault = lambda name: None
+    world.spawned.clear()
+    for flag in ([], ["--retry"]):
+        rc, out = world.cli("abandon", "--run", "r1", "--task", "t1", *flag, "--root", str(world.root))
+        assert rc == 3 and "INTEGRATION_IN_PROGRESS" in out
+    assert world.spawned, "an orchestrator must be kicked so the integration settles"
+    assert world.doc()["tasks"]["t1"]["generation"] == 1
+    assert world.drive(max_ticks=20) == 0
+    doc = world.doc()
+    assert doc["tasks"]["t1"]["state"] == "integrated"
+    assert doc["integration"]["tip"] == run_git(world.root, "rev-parse", L.integration_ref("r1"))
+
+
+def test_a_foreign_descendant_on_the_integration_ref_is_never_adopted(world: World) -> None:
+    """L2: replay accepted any descendant of the journaled publish commit."""
+    assert world.start(tasks=[T1])[0] == 0
+    crash_at(world, "after-update-ref")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    ref = L.integration_ref("r1")
+    published = run_git(world.root, "rev-parse", ref)
+    tree = run_git(world.root, "rev-parse", published + "^{tree}")
+    foreign = run_git(world.root, "commit-tree", "-p", published, "-m", "not ours", tree)
+    run_git(world.root, "update-ref", ref, foreign)
+    world.svc.fault = lambda name: None
+    world.drive(max_ticks=6)
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "integration-ref-foreign")
+    assert world.doc()["integration"]["tip"] != foreign
+    assert run_git(world.root, "rev-parse", ref) == foreign  # never rewound or rewritten
+
+
+def test_a_ref_at_the_exact_published_commit_completes_without_a_second_update(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    crash_at(world, "after-update-ref")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    published = run_git(world.root, "rev-parse", L.integration_ref("r1"))
+    world.svc.fault = lambda name: None
+    assert world.drive(max_ticks=10) == 0
+    assert world.doc()["integration"]["tip"] == published == run_git(world.root, "rev-parse", L.integration_ref("r1"))
+
+
+def test_a_parked_run_releases_an_operator_slot_at_its_deadline_exactly_once(world: World) -> None:
+    """L3: a parked task kept its slot forever."""
+    (world.state / "codex.mode").write_text("no-id")
+    assert world.start()[0] == 0
+    world.drive(max_ticks=8)
+    assert world.doc()["state"] == "parked" and world.states()["t2"] == "needs-operator"
+    key = "r1/t2/g1"
+    assert key in world.slots()  # an uncertain launch may be running remotely: it keeps its slot
+    clock = {"t": float(world.doc()["created_at"]) + 13 * 3600}
+    world.svc.now = lambda: clock["t"]
+    world.drive(once=True)
+    assert key not in world.slots()
+    assert world.doc()["tasks"]["t2"]["slot_released"] is True
+
+    def releases() -> int:
+        return len([e for e in world.doc()["journal"] if e["op"] == L.OP_RELEASE and e["task"] == "t2"])
+
+    first = releases()
+    world.drive(once=True)
+    assert first == 1 and releases() == 1
+
+
+def test_uncertain_codex_launch_gets_one_recovery_poll_then_the_operator(world: World) -> None:
+    """L4: a restart used to reset the in-memory 'seen once' set."""
+    (world.state / "codex.mode").write_text("no-id")
+    assert world.start()[0] == 0
+    world.drive(max_ticks=8)
+    entry = world.doc()["tasks"]["t2"]
+    assert entry["state"] == "needs-operator" and entry["blocker"] == "uncertain-launch"
+    assert world.count("codex") == 1
+
+
+def test_adopt_remote_id_rebinds_a_codex_session_and_adopt_oid_stays_claude_only(world: World) -> None:
+    (world.state / "codex.mode").write_text("no-id")
+    assert world.start()[0] == 0
+    world.drive(max_ticks=8)
+    assert world.states()["t2"] == "needs-operator"
+    run = ["--run", "r1", "--task", "t2", "--root", str(world.root)]
+    assert world.cli("adopt", *run)[0] == 2  # neither --oid nor --remote-id
+    assert world.cli("adopt", *run, "--oid", "a" * 40, "--remote-id", "task_e_1")[0] == 2  # both
+    assert world.cli("adopt", *run, "--remote-id", "bad id")[0] == 2
+    rc, out = world.cli("adopt", *run, "--remote-id", "task_e_123")
+    assert rc == 0 and "remote-id=task_e_123" in out
+    entry = world.doc()["tasks"]["t2"]
+    assert entry["state"] == "launched" and entry["remote_id"] == "task_e_123"
+    claude = ["--run", "r1", "--task", "t1", "--root", str(world.root)]
+    rc, out = world.cli("adopt", *claude, "--remote-id", "task_e_1")
+    assert rc == 3 and "ADOPT_UNSUPPORTED_PROVIDER" in out
+
+
+def test_retrying_the_last_task_of_a_done_run_reopens_it(world: World) -> None:
+    """L5: reject -> abandon --retry on the only task left a done run with a waiting task."""
+    (world.state / "review.verdict").write_text("REVISE")
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert world.doc()["state"] == "done" and world.states() == {"t1": "rejected"}
+    (world.state / "review.verdict").write_text("APPROVE")
+    rc, out = world.cli("abandon", "--run", "r1", "--task", "t1", "--retry", "--root", str(world.root))
+    assert rc == 0, out
+    assert world.doc()["state"] == "active" and world.doc()["tasks"]["t1"]["generation"] == 2
+    assert world.drive(max_ticks=20) == 0
+    assert world.states() == {"t1": "integrated"} and world.doc()["state"] == "done"
+    assert world.doc()["epoch"] >= 2 and world.lifecycle(epoch=world.doc()["epoch"])["state"] == "done"
+
+
+def test_kick_spawns_a_lock_waiting_orchestrator_when_the_lock_is_held(world: World) -> None:
+    """L6: a verb used to give up after a fixed wait while the holder was still parking."""
+    parked_world(world)
+    holder = world.orchestrator()
+    assert holder.acquire_lock()
+    try:
+        world.spawned.clear()
+        world.behavior()
+        rc, out = world.cli("abandon", "--run", "r1", "--task", "t1", "--retry", "--root", str(world.root))
+        assert rc == 0 and "orchestrator-waiting" in out
+        argv = world.spawned[-1]
+        assert "--wait-lock" in argv and argv[argv.index("--wait-lock") + 1] == str(cd.WAIT_LOCK_S) and "--resume" in argv
+    finally:
+        holder.release_lock()
+
+
+def test_wait_lock_times_out_with_exit_75_and_takes_over_when_the_lock_frees(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    holder = world.orchestrator()
+    assert holder.acquire_lock()
+    clock = {"t": 1_800_000_000.0}
+    waits: List[float] = []
+
+    def wait(seconds: float) -> None:
+        waits.append(seconds)
+        clock["t"] += 100
+
+    world.svc.now = lambda: clock["t"]
+    world.svc.wait_sleep = wait
+    rc, out = world.cli("orchestrate", "--run", "r1", "--once", "--wait-lock", "250", "--root", str(world.root))
+    assert rc == 75 and "orchestrator-lock-timeout" in out and len(waits) >= 2
+    # the lock frees while the waiter is waiting: it takes over and runs
+    freed = {"n": 0}
+
+    def wait_then_free(seconds: float) -> None:
+        freed["n"] += 1
+        if freed["n"] == 2:
+            holder.release_lock()
+
+    world.svc.wait_sleep = wait_then_free
+    world.svc.now = lambda: 1_800_000_000.0
+    rc, out = world.cli("orchestrate", "--run", "r1", "--once", "--wait-lock", "250", "--root", str(world.root))
+    assert rc == 0 and "lock-timeout" not in out and freed["n"] >= 2
+
+
+def test_a_waking_verb_during_the_park_decision_unparks_instead_of_stranding(world: World) -> None:
+    """L6/14.4: wake_seq moved after the park decision; the holder re-checks before it exits."""
+    world.behavior(t1={"status": "blocked"})
+    assert world.start(tasks=[T1])[0] == 0
+    fired = {"done": False}
+
+    def fault(name: str) -> None:
+        if name == "before-exit-recheck" and not fired["done"]:
+            fired["done"] = True
+            world.behavior()
+            assert world.cli("abandon", "--run", "r1", "--task", "t1", "--retry", "--root", str(world.root))[0] == 0
+
+    world.svc.fault = fault
+    assert world.drive(max_ticks=30) == 0
+    doc = world.doc()
+    assert fired["done"] and doc["state"] == "done" and doc["tasks"]["t1"]["state"] == "integrated"
+    assert doc["epoch"] >= 2
+
+
+def test_concurrent_start_reserves_the_run_id_before_writing_tasks(world: World) -> None:
+    """L7: the loser must neither overwrite tasks.json nor clean up the winner's ledger."""
+    assert world.start(tasks=[T1])[0] == 0
+    tasks_path = L.tasks_path(world.root, "r1")
+    before = tasks_path.read_bytes()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T2], "other.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    assert rc == 3 and "RUN_EXISTS" in out
+    assert tasks_path.read_bytes() == before and L.run_ledger_path(world.root, "r1").exists()
+    assert world.doc()["tasks_sha256"] == L.tasks_sha256(json.loads(tasks_path.read_text()))
+
+
+def test_a_tasks_file_write_failure_releases_the_run_id(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(path: Any, records: Any) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(L, "write_tasks_file", boom)
+    rc, out = world.start(tasks=[T1])
+    assert rc == 78 and "STORE_IO" in out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_startup_closes_the_lifecycle_record_of_a_done_run(world: World) -> None:
+    """L8: a crash after the done write left the record running; reconcile would relaunch a finished run."""
+    assert world.start(tasks=[T1])[0] == 0
+    assert world.drive() == 0
+    record = L.lifecycle_id("r1", 1)
+    path = world.root / ".planning" / "run-state" / ("lifecycle-cloud-r1-e1.json")
+    data = json.loads(path.read_text())
+    data["state"] = "running"
+    path.write_text(json.dumps(data))
+    assert world.drive() == 0
+    assert world.lifecycle()["state"] == "done" and record
+
+
+@pytest.mark.parametrize("url", ["https://user" + ":pw@github.com/o/r.git", "https://tok@github.com/o/r.git"])
+def test_origin_credentials_are_refused_before_any_use(world: World, url: str) -> None:
+    """L9."""
+    run_git(world.root, "remote", "set-url", "origin", url)
+    rc, out = world.start(tasks=[T1])
+    assert rc == 3 and "ORIGIN_HAS_CREDENTIALS" in out
+    assert "pw" not in out and "tok@" not in out
+    rc, out = world.cli("doctor", "--json", "--root", str(world.root))
+    assert rc == 3 and "ORIGIN_HAS_CREDENTIALS" in out and "pw@" not in out and "tok@" not in out
+
+
+@pytest.mark.parametrize("url,bad", [("git@github.com:o/r.git", False), ("ssh://git@github.com/o/r.git", False),
+                                      ("https://github.com/o/r.git", False), ("https://u" + ":p@github.com/o/r.git", True),
+                                      ("https://token@github.com/o/r.git", True)])
+def test_origin_has_credentials(url: str, bad: bool) -> None:
+    assert cd.origin_has_credentials(url) is bad
+
+
+def dependency_world(world: World, path: str, content: str) -> None:
+    world.behavior(t1={"path": path, "content": content})
+
+
+@pytest.mark.parametrize("path,content", [("package-lock.json", '{"lockfileVersion": 3}\n'),
+                                          ("package.json", '{"scripts": {"postinstall": "echo hi"}}\n')])
+def test_accept_deps_for_an_unattributed_change_needs_the_unattributed_grant(world: World, path: str, content: str) -> None:
+    """L10: an empty package list used to need no grant at all."""
+    owner = task("t1", "web/**")
+    dependency_world(world, "web/" + path, content)
+    assert world.start(tasks=[owner])[0] == 0
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    if entry["blocker"] != "dependency-change":
+        pytest.skip("collector classified this change as %s" % entry["blocker"])
+    run = ["--run", "r1", "--task", "t1", "--root", str(world.root)]
+    rc, out = world.cli("resolve", *run, "--action", "accept-deps")
+    assert rc == 3 and "GRANT_MISSING" in out and "install:unattributed:" in out
+
+
+def test_accept_deps_is_stale_when_the_report_changed_under_the_lock(world: World) -> None:
+    owner = task("t1", "web/**")
+    dependency_world(world, "web/package-lock.json", '{"lockfileVersion": 3}\n')
+    assert world.start(tasks=[owner])[0] == 0
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    if entry["blocker"] != "dependency-change":
+        pytest.skip("collector classified this change as %s" % entry["blocker"])
+    report = json.loads((L.run_dir(world.root, "r1") / "dependency-t1-g1.json").read_text())
+    world.grant("r1", *cd.required_install_grants(
+        {"packages": report["packages"], "unattributed": report["unattributed"], "digest": report["report_digest"]}))
+    orig = cd.mutate
+
+    def mutate_after_change(svc: Any, root: Path, run: str, fn: Any) -> None:
+        L.locked_update(L.run_ledger_path(root, run), lambda d: d["tasks"]["t1"].update(deps_digest="f" * 64) or d)
+        orig(svc, root, run, fn)
+
+    world.mp.setattr(cd, "mutate", mutate_after_change)
+    rc, out = world.cli("resolve", "--run", "r1", "--task", "t1", "--action", "accept-deps", "--root", str(world.root))
+    assert rc == 3 and "STALE_APPROVAL" in out
+    assert world.doc()["tasks"]["t1"]["state"] == "needs-operator"
+
+
+def test_a_foreign_candidate_is_unbound_and_polling_continues(world: World) -> None:
+    """L11: a single candidate without a manifest is not this task's result."""
+    world.behavior(t1={"push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=3)
+    tree = run_git(world.root, "rev-parse", world.base + "^{tree}")
+    commit = run_git(world.root, "commit-tree", "-p", world.base, "-m", "foreign", tree)
+    run_git(world.root, "push", "-q", "origin", "%s:refs/heads/claude/someone-else" % commit)
+    world.drive(max_ticks=8)
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] in ("launched", "running"), (entry["state"], entry["blocker"])
+    assert ["refs/heads/claude/someone-else", commit] in entry["rejected_candidates"]
+    assert entry["bound_oid"] is None and world.count("claude") == 1
+
+
+def test_a_sibling_tasks_branch_is_not_this_tasks_candidate(world: World) -> None:
+    world.behavior(t1={"push": False, "branch": "x"}, t2={"push": False})
+    assert world.start(tasks=[T1, task("t3", "src/c/**")])[0] == 0
+    orch = world.orchestrator()
+    orch.tasks = {"t1": {}, "t3": {}}
+    entry = {"nonce": "a" * 32}
+    other = "refs/heads/claude/ffs-r1-t3-bbbbbbbb"
+    own = "refs/heads/claude/ffs-r1-t1-aaaaaaaa"
+    pool = [(other, "1" * 40)]
+    assert orch.choose_candidates("t1", dict(entry, rejected_candidates=[]), pool) == []
+    assert orch.choose_candidates("t1", dict(entry, rejected_candidates=[]), pool + [(own, "2" * 40)]) == [(own, "2" * 40)]
+    assert orch.choose_candidates("t1", dict(entry, rejected_candidates=[[own, "2" * 40]]), [(own, "2" * 40)]) == []
+
+
+def test_one_tasks_step_failure_is_isolated_and_escalates_to_internal_error(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L13."""
+    assert world.start()[0] == 0
+
+    def broken(self: cd.Orchestrator, name: str) -> None:
+        if name == "t1":
+            raise RuntimeError("boom %s" % CANARY_KEY)
+
+    monkeypatch.setattr(cd.Orchestrator, "poll_task", broken)
+    world.drive(max_ticks=14)
+    states = world.states()
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "internal-error")
+    assert CANARY_KEY not in " ".join(entry["decisions_needed"])
+    assert states["t2"] in ("integrated", "launched", "running", "result-ready", "collected", "reviewed", "verified")
+
+
+def test_an_illegal_ledger_transition_is_not_swallowed_as_stale() -> None:
+    assert L.E_ILLEGAL not in cd.STALE_CODES and L.E_STALE in cd.STALE_CODES
+
+
+def test_repeated_push_failures_end_in_push_failed(world: World) -> None:
+    """L14: a refused push used to retry silently forever."""
+    assert world.start(tasks=[T1])[0] == 0
+    run_git(world.origin, "config", "receive.denyDeletes", "true")
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    world.drive(max_ticks=30)
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "push-failed")
+    assert entry["push_failures"] >= L.PUSH_FAILURE_LIMIT
+    assert world.count("claude") == 0
+
+
+def test_review_attempt_counter_is_passed_to_the_reviewer(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L15: the 7th cloud-review.sh argument."""
+    seen: List[Any] = []
+    real = cloud_collect.review
+
+    @functools.wraps(real)
+    def spy(**kwargs: Any) -> Any:
+        seen.append(kwargs.get("attempt"))
+        return real(**kwargs)
+
+    monkeypatch.setattr(cloud_collect, "review", spy)
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert seen == [0]  # first round: attempt 0, always passed
+
+
+def test_unknown_collect_blockers_map_to_internal_error_instead_of_raising() -> None:
+    for stage in (cd.STAGE_COLLECT, cd.STAGE_REVIEW, cd.STAGE_VERIFY, cd.STAGE_RETEST, cd.STAGE_INTEGRATE):
+        assert cd.map_blocker(stage, "a-blocker-from-the-future") == (cd.EV_NEEDS, "internal-error")
+    assert cd.SESSION_HOOK_COMMAND == operator_guard_hook.SESSION_START_COMMAND
+    assert cd.BLOCKER_MAP["binary-change"] == (cd.EV_NEEDS, "binary-change")
+    assert "case-collision" not in cd.BLOCKER_MAP
+
+
+def test_env_init_on_a_read_only_target_is_an_io_refusal(tmp_path: Path) -> None:
+    root = tmp_path / "ro"
+    run_git(tmp_path, "init", "-q", str(root))
+    (root / ".ffs").write_text("a file where the directory should be")
+    svc = cd.Services()
+    svc.stdout = io.StringIO()
+    rc = cd.main(["env", "init", "--root", str(root)], svc)
+    assert rc == 78 and "STORE_IO" in svc.stdout.getvalue()
+
+
+def test_doctor_reports_missing_review_scripts_and_login_state(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L12."""
+    rc, out = world.cli("doctor", "--json", "--root", str(world.root))
+    codes = {c["code"]: c["level"] for c in json.loads(out)["checks"]}
+    assert codes.get("REVIEW_SCRIPTS") == "OK"
+    assert any(code.startswith("LOGIN") for code in codes), codes
+    assert not world.count("claude")  # probing a login is never a launch
+    monkeypatch.setattr(cd, "find_script", lambda root, name: None)
+    world.svc.review_script = None
+    rc, out = world.cli("doctor", "--json", "--root", str(world.root))
+    data = json.loads(out)
+    assert rc == 3 and data["green"] is False
+    assert {"code": "REVIEW_UNAVAILABLE"}.items() <= next(c for c in data["checks"] if c["code"] == "REVIEW_UNAVAILABLE").items()
+
+
+def test_script_lookup_never_resolves_from_the_target_repo(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    (root / "scripts" / "gsd").mkdir(parents=True)
+    (root / "scripts" / "gsd" / "cloud-review.sh").write_text("#!/bin/sh\necho CLOUD-REVIEW: APPROVE\n")
+    found = cd.find_script(root, "cloud-review.sh")  # a merged result must not control later reviews
+    assert found is not None and root not in found.parents
+    found_all = [str(p) for p in cd.script_candidates(root, "x.sh")]
+    assert str(root / "scripts" / "gsd" / "x.sh") not in found_all
+    assert str(cd.LIB_DIR / "scripts" / "gsd" / "x.sh") in found_all
+    assert str(cd.LIB_DIR.parent / "scripts" / "gsd" / "x.sh") in found_all

@@ -78,6 +78,34 @@ CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1 / 0.156.1 
 # (see plan-wall.sh / gsd-run.sh / qa-swarm.sh resolution ladders). Before
 # these were staged here, no install path delivered gates.py at all — the
 # managed copy went silently stale while doctor reported PASS.
+# `env init` templates: shipped next to cloud_dispatch.py as cloud-templates/*
+# in both layouts (user-scope managed lib, consumer lib/). Modes travel with the
+# source files (the three scripts are 0755, config.json is 0644).
+CLOUD_TEMPLATE_DIR = "cloud-templates"
+CLOUD_TEMPLATE_FILES: tuple[tuple[str, str], ...] = tuple(
+    (f"templates/cloud/{name}", f"{CLOUD_TEMPLATE_DIR}/{name}")
+    for name in ("config.json", "env-check.sh", "session-start.sh", "setup.sh")
+)
+
+# Files cloud-review.sh needs at run time, relative to a lib root (the managed user-scope
+# root or a consumer checkout). `cloud_review_available` is the doctor-readable marker: when it
+# is False, `/swarm --cloud` results can only end in review-unavailable.
+CLOUD_REVIEW_CLOSURE: tuple[str, ...] = (
+    "scripts/gsd/cloud-review.sh",
+    "scripts/gsd/adversary-host.sh",
+    "scripts/gsd/run-bounded.sh",
+    "scripts/gsd/fence-data.sh",
+    "lib/gates.py",
+    "lib/model_requests.py",
+)
+
+
+def cloud_review_available(lib_root: Path | str) -> bool:
+    """True when every file of ``CLOUD_REVIEW_CLOSURE`` is a regular file under ``lib_root``."""
+    root = Path(lib_root)
+    return all((root / relative).is_file() for relative in CLOUD_REVIEW_CLOSURE)
+
+
 MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     ("lib/gates.py", "gates.py"),
     ("lib/runtime_proof.py", "runtime_proof.py"),
@@ -154,6 +182,31 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     # PreToolUse Bash guard registered in ~/.claude/settings.json (headless Claude
     # stages lib/feature-fix-swarm wholesale, so the staged hook finds its copy).
     ("scripts/hooks/operator-only-guard.sh", "operator-only-guard.sh"),
+    # `/swarm --cloud` runtime (cloud-dispatch.sh resolves $FFS_LIB_DIR, then
+    # <script>/../../lib, then this root). operator_guard_hook.py is imported by
+    # path for `env init --register-hook`'s merge_hook_entry.
+    ("lib/operator_guard_hook.py", "operator_guard_hook.py"),
+    ("lib/cloud_dispatch.py", "cloud_dispatch.py"),
+    ("lib/cloud_ledger.py", "cloud_ledger.py"),
+    ("lib/cloud_host.py", "cloud_host.py"),
+    ("lib/cloud_scan.py", "cloud_scan.py"),
+    ("lib/cloud_sandbox.py", "cloud_sandbox.py"),
+    ("lib/cloud_collect.py", "cloud_collect.py"),
+    ("lib/delegation_router.py", "delegation_router.py"),
+    ("lib/handoff_packet.py", "handoff_packet.py"),
+    ("scripts/gsd/cloud-dispatch.sh", "scripts/gsd/cloud-dispatch.sh"),
+    ("scripts/gsd/cloud-review.sh", "scripts/gsd/cloud-review.sh"),
+    # Closure of cloud-review.sh in the user-scope layout (CLOUD_REVIEW_CLOSURE):
+    # it sources adversary-host.sh (which sources run-bounded.sh) and fence-data.sh from
+    # its own directory, and adversary-host.sh resolves <script dir>/../../lib/gates.py and
+    # <script dir>/../../lib/model_requests.py, i.e. <managed root>/lib/*. The managed root
+    # keeps those two modules flat for everything else, so they ship a second time under lib/.
+    ("scripts/gsd/adversary-host.sh", "scripts/gsd/adversary-host.sh"),
+    ("scripts/gsd/run-bounded.sh", "scripts/gsd/run-bounded.sh"),
+    ("lib/gates.py", "lib/gates.py"),
+    ("lib/model_requests.py", "lib/model_requests.py"),
+    # `env init` copies these from <cloud_dispatch.py dir>/cloud-templates/.
+    *CLOUD_TEMPLATE_FILES,
 )
 
 
@@ -2878,6 +2931,16 @@ def reconcile_consumer(source: Path, target: Path) -> int:
         "lib/process_identity.py",
         "lib/gates.py",
         "lib/runtime_proof.py",
+        # `/swarm --cloud` runtime: scripts/gsd/cloud-*.sh arrive through the
+        # glob above and find these at <script>/../../lib.
+        "lib/cloud_dispatch.py",
+        "lib/cloud_ledger.py",
+        "lib/cloud_host.py",
+        "lib/cloud_scan.py",
+        "lib/cloud_sandbox.py",
+        "lib/cloud_collect.py",
+        "lib/delegation_router.py",
+        "lib/handoff_packet.py",
     ]
     # spec-004 INT-003: plan-wall.sh (already covered by the scripts/gsd/*.sh
     # glob above) resolves its schema at $REPO_ROOT/schemas/*.json — a
@@ -2891,6 +2954,17 @@ def reconcile_consumer(source: Path, target: Path) -> int:
             raise ActionableError(f"consumer destination must not be a symlink: {target_file}")
         if source_file.resolve() != target_file.resolve():
             atomic_copy_inside(target, relative, source_file, executable=relative not in data_files)
+    # templates/cloud/* ships as lib/cloud-templates/* (next to cloud_dispatch.py).
+    # executable=False means "do not force +x": atom_copy keeps the SOURCE file's own mode
+    # bits, so the 0755 scripts stay 0755 and config.json stays 0644.
+    for template_source, template_dest in CLOUD_TEMPLATE_FILES:
+        source_file = source / template_source
+        relative = f"lib/{template_dest}"
+        target_file = safe_project_destination(target, relative)
+        if target_file.is_symlink():
+            raise ActionableError(f"consumer destination must not be a symlink: {target_file}")
+        if source_file.resolve() != target_file.resolve():
+            atomic_copy_inside(target, relative, source_file, executable=False)
     print("consumer_runtime=reconciled")
     return 0
 

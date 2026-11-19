@@ -29,6 +29,68 @@ all skills.
 - Skills whose "GPT-5.6 tiers" phrase became "GPT-6 tiers" each got a patch
   version bump.
 
+### Added (2026-11-19, opt-in cloud delegation for /swarm)
+
+- `/swarm --cloud[=auto|prefer|required]` offloads eligible, well-scoped tasks to
+  Claude Code on the web or Codex cloud sessions. Routing is per connected task
+  group, by `[owns]`, `[est]`, `[verify]` and `[needs-secret]` annotations. Review,
+  verify, exact-model, frontier-tier and `[local]` tasks always stay local. See
+  `docs/cloud-delegation.md`.
+- `scripts/gsd/cloud-dispatch.sh` (`lib/cloud_dispatch.py`): a deterministic,
+  LLM-free orchestrator with verbs `plan`, `start`, `orchestrate`, `status`,
+  `doctor`, `env init`, `env-spec`, `cleanup`, `adopt`, `abandon` and `resolve`.
+  It registers with the lifecycle layer, parks when only you can unblock a run,
+  and resumes after a restart.
+- Gates on every cloud result before it reaches the local integration branch
+  `ffs/cloud/<run>/integration`: quarantine fetch and secret scan, structure and
+  manifest checks, `owns` and denylist paths, a dependency-change gate, review by
+  the opposite model family (`scripts/gsd/cloud-review.sh`), and tests under
+  macOS `sandbox-exec` with no network. FFS never merges into your branch.
+- `templates/cloud/*` (`config.json`, `setup.sh`, `env-check.sh`,
+  `session-start.sh`) and `cloud-dispatch.sh env init [--register-hook]`, which
+  writes them to `.ffs/cloud/` and can register an optional `SessionStart` hook
+  that acts only in cloud sessions on `ffs/cloud/*` branches.
+- Secrets providers `none` (default), `provider-env`, `doppler` and `command`.
+  FFS handles names only, and the whole provider environment counts as exposed.
+- New grant keys: `cloud-dispatch:<provider>`, `push:origin/ffs/cloud/<run>`,
+  `secret-use:<NAME>`, `install:<pkg>` and `install:unattributed:<digest12>`
+  (for dependency changes that cannot be attributed to named packages).
+- `scripts/hooks/operator-only-guard.sh` also blocks agent calls to
+  `claude --cloud`, `codex cloud exec|apply|diff` and
+  `cloud-dispatch.sh adopt|abandon|resolve`. Anti-accident only.
+- The installer ships the cloud modules, scripts and templates (as
+  `cloud-templates/*`) to the managed and consumer lib directories.
+- Without the flag, `/swarm` behaves as before. The exceptions are the new guard
+  deny patterns, the files the installer ships, and the `network: true`
+  permission on the swarm skill. The `/spec-status` facts output gains a
+  read-only `== CLOUD ==` section only when a cloud run ledger exists, so a
+  repository that never used `--cloud` sees no change there.
+- Gate details. A changed path with a Unicode format or control character is
+  refused as `denylist`. Case-colliding paths are `denylist` at collect and
+  `merge-conflict` at integration. Binary changes always stop at
+  `binary-change`; there is no allowlist. The dependency gate treats a changed
+  repeated declaration, a removal-only change and more manifest types (for
+  example `pom.xml`, `build.gradle`, `Package.swift`, `mix.exs`) as
+  unattributed, and a change that touches no dependency declaration (for
+  example only `version`) passes. A secret leak found at review ends as
+  `rejected` with `secret-leak`. Review scripts and lifecycle scripts come only
+  from the dispatcher's own install location, never from the target repository.
+- Sandbox and recovery details. The process sweep kills only the launched
+  process, its observed descendants and their group or session, and re-checks
+  pid and start time before each signal. `/dev/tty*` is not readable. Integrate
+  replay accepts only the open intent's OID or an OID the ledger recorded as
+  published (else `integration-ref-foreign`). A task left in `submitting`
+  becomes `uncertain` on the next tick. A recovered live task always holds a
+  slot. `cleanup` holds the run ledger lock for its whole duration. A scan cache
+  entry carries the allowlist signature.
+- Known limits. A double-fork child not observed while its parent chain was alive
+  is not swept. One Mach service (`com.apple.system.opendirectoryd.libinfo`)
+  stays allowed, and whether it can carry DNS lookups is not tested. A JWT
+  directly after `-` is not matched by the scanner. A lone parked run keeps an
+  expired slot until an orchestrator resumes or `cleanup` runs. `cleanup` during
+  a concurrent `start` of the same run id can delete that run.
+- Experimental: validated with mock CLIs only. No live cloud run has been made yet.
+
 ### Added (2026-11-17, operator-only guard hook, #253)
 
 - `scripts/hooks/operator-only-guard.sh`: a PreToolUse `Bash` hook that blocks

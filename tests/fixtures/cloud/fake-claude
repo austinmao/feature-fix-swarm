@@ -1,0 +1,86 @@
+#!/bin/bash
+# Fake `claude` CLI for cloud_host tests. bash 3.2 safe.
+#
+# Env (set by the test wrapper, because the backend strips the child env):
+#   FAKE_CLOUD_STATE        dir for recorded facts (required)
+#   FAKE_CLOUD_MODE         ok-with-url | ok-no-output | fail | hang   (default ok-with-url)
+#   FAKE_CLOUD_EXTRA_BYTES  emit N extra 'x' bytes on stdout
+#   FAKE_CLOUD_EXTRA_TEXT   emit this text on stdout
+#   FAKE_CLOUD_ORIGIN       bare repo to push a simulated result to
+#   FAKE_CLOUD_PUSH_BRANCH  branch name to push (e.g. claude/ffs-r-t1-abcd1234)
+#   FAKE_CLOUD_MANIFEST     manifest JSON text for .ffs-result/fake.json
+#   FAKE_CLOUD_PUSH_MODE    "deferred": the worker finishes LATER than launch. The commit is parked
+#                           under refs/fake-pending/ on the origin and recorded in
+#                           $FAKE_CLOUD_STATE/pending.*; `fake-claude --flush` then makes every
+#                           parked result visible as refs/heads/<branch> (what a slow worker's push
+#                           looks like to a poller). Default: push during launch.
+set -u
+STATE="${FAKE_CLOUD_STATE:-}"
+if [ -z "$STATE" ] || [ ! -d "$STATE" ]; then
+  echo "fake-claude: FAKE_CLOUD_STATE must be an existing directory" >&2
+  exit 97
+fi
+MODE="${FAKE_CLOUD_MODE:-ok-with-url}"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "--version" ]; then
+  echo "fake-claude 0.0.0 (--cloud --model --effort)"
+  exit 0
+fi
+
+if [ "${1:-}" = "--flush" ]; then
+  for pending in "$STATE"/pending.*; do
+    [ -f "$pending" ] || continue
+    read -r branch oid < "$pending"
+    git --git-dir="$FAKE_CLOUD_ORIGIN" update-ref "refs/heads/$branch" "$oid"
+    rm -f "$pending"
+  done
+  exit 0
+fi
+
+printf '%s\0' "$@" > "$STATE/claude.argv"
+pwd -P > "$STATE/claude.cwd"
+env > "$STATE/claude.env"
+git for-each-ref --format='%(refname)' > "$STATE/claude.refs" 2>/dev/null
+git rev-parse HEAD > "$STATE/claude.head" 2>/dev/null
+echo "$$" > "$STATE/claude.pid"
+
+case "$MODE" in
+  hang)
+    sleep 600
+    exit 0
+    ;;
+  fail)
+    echo "fake claude failure" >&2
+    exit 2
+    ;;
+esac
+
+if [ -n "${FAKE_CLOUD_PUSH_BRANCH:-}" ] && [ -n "${FAKE_CLOUD_ORIGIN:-}" ]; then
+  mkdir -p .ffs-result
+  MANIFEST="${FAKE_CLOUD_MANIFEST:-}"
+  if [ -z "$MANIFEST" ]; then MANIFEST='{"schema":1}'; fi
+  printf '%s' "$MANIFEST" > .ffs-result/fake.json
+  git add .ffs-result/fake.json
+  git -c user.name=fake -c user.email=fake@example.invalid -c commit.gpgsign=false \
+    commit -q -m "fake result" >/dev/null
+  if [ "${FAKE_CLOUD_PUSH_MODE:-}" = "deferred" ]; then
+    git push -q "$FAKE_CLOUD_ORIGIN" "HEAD:refs/fake-pending/$FAKE_CLOUD_PUSH_BRANCH" >/dev/null 2>&1
+    printf '%s %s\n' "$FAKE_CLOUD_PUSH_BRANCH" "$(git rev-parse HEAD)" \
+      > "$STATE/pending.$(printf '%s' "$FAKE_CLOUD_PUSH_BRANCH" | tr '/' '_')"
+  else
+    git push -q "$FAKE_CLOUD_ORIGIN" "HEAD:refs/heads/$FAKE_CLOUD_PUSH_BRANCH" >/dev/null 2>&1
+  fi
+fi
+
+if [ "$MODE" = "ok-with-url" ]; then
+  echo "Created cloud session session_01FAKEabcdef12345"
+  echo "https://claude.ai/code/session_01FAKEabcdef12345"
+fi
+if [ -n "${FAKE_CLOUD_EXTRA_TEXT:-}" ]; then
+  printf '%s\n' "$FAKE_CLOUD_EXTRA_TEXT"
+fi
+if [ -n "${FAKE_CLOUD_EXTRA_BYTES:-}" ]; then
+  head -c "$FAKE_CLOUD_EXTRA_BYTES" /dev/zero | tr '\0' 'x'
+  echo
+fi
+exit 0
