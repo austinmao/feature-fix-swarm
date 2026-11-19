@@ -1,7 +1,7 @@
 ---
 name: git-branch-consolidate
 description: "Audit every git worktree and branch for spec/plan/test completeness, then plan the consolidation down to one origin/main. Use for 'audit all worktrees', 'what's unmerged', 'consolidate branches', 'get everything to main', 'branch estate'."
-version: "1.0.0"
+version: "1.0.1"
 user-invocable: true
 ---
 
@@ -9,7 +9,7 @@ user-invocable: true
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

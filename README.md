@@ -193,10 +193,10 @@ FFS requests workload intent rather than scattering vendor IDs through skills:
 
 | Tier | Claude default | Codex default | Effort | Typical work |
 | --- | --- | --- | ---: | --- |
-| `frontier` | Claude Fable | GPT-6 Astra | xhigh | Planning — the low-volume, highest-leverage seat |
-| `judgment` | Claude Opus | GPT-6 Sol | xhigh | Checking, debugging, verification, code/security review |
-| `execution` | Claude Sonnet | GPT-5.6 Terra | medium | Implementation, research, integration, orchestration |
-| `volume` | Claude Haiku | GPT-5.6 Luna | low | Mapping, synthesis, status collection (bounded-context inputs only) |
+| `frontier` | Claude Fable | GPT-6.2 Astra | xhigh | Planning — the low-volume, highest-leverage seat |
+| `judgment` | Claude Opus | GPT-6.2 Sol | xhigh | Checking, debugging, verification, code/security review |
+| `execution` | Claude Sonnet | GPT-6.1 Terra | medium | Implementation, research, integration, orchestration |
+| `volume` | Claude Haiku | GPT-6 Luna | low | Mapping, synthesis, status collection (bounded-context inputs only) |
 
 The producer and reviewer must resolve to different models — enforced end to
 end, including a per-phase plan wall that reviews every plan before its phase

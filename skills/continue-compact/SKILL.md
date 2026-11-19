@@ -1,6 +1,6 @@
 ---
 name: continue-compact
-version: 1.0.1
+version: 1.0.2
 description: Prepare a durable handoff and a host-native resume command before the built-in compact operation. Use when context is low or the user asks to continue after compaction.
 ---
 
@@ -8,7 +8,7 @@ description: Prepare a durable handoff and a host-native resume command before t
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.

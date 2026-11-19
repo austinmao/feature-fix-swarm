@@ -243,9 +243,9 @@ adversary_model_ladder() {
   local kind="$1" preferred="$2" preferred_effort="$3"
   printf '%s|%s\n' "$preferred" "$preferred_effort"
   if [ "$kind" = "codex" ]; then
-    case "$preferred" in *sol*) ;; *) printf '%s|%s\n' gpt-6-sol xhigh ;; esac
-    case "$preferred" in *terra*) ;; *) printf '%s|%s\n' gpt-5.6-terra medium ;; esac
-    case "$preferred" in *luna*) ;; *) printf '%s|%s\n' gpt-5.6-luna low ;; esac
+    case "$preferred" in *sol*) ;; *) printf '%s|%s\n' gpt-6.2-sol xhigh ;; esac
+    case "$preferred" in *terra*) ;; *) printf '%s|%s\n' gpt-6.1-terra medium ;; esac
+    case "$preferred" in *luna*) ;; *) printf '%s|%s\n' gpt-6-luna low ;; esac
   else
     case "$preferred" in *opus*) ;; *) printf '%s|\n' claude-opus-5-5 ;; esac
     case "$preferred" in *sonnet*) ;; *) printf '%s|\n' claude-sonnet-5-5 ;; esac

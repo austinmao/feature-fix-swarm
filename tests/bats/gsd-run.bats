@@ -156,7 +156,7 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
     bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
     fail) echo 'native quota exhausted API_TOKEN=super-secret-value-123456789 api_key=xYz bearer tiny' >&2; exit 69 ;;
     sol_unavailable)
-      if [[ "\$*" == *gpt-6-sol* ]]; then
+      if [[ "\$*" == *gpt-6.2-sol* ]]; then
         echo 'requested Codex model unavailable' >&2
         exit 69
       fi
@@ -437,7 +437,7 @@ PY
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
   grep -Fx 'exec' "$BATS_TEST_TMPDIR/codex.args"
-  grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.1-terra"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="medium"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '$gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'fully read the exact verified staged workflow' "$BATS_TEST_TMPDIR/codex.args"
@@ -463,10 +463,10 @@ PY
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'stay native'"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"selected gpt-5.6-terra"* ]]
+  [[ "$output" == *"selected gpt-6.1-terra"* ]]
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.1-terra"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
 @test "Codex execution prompt forbids retrying a still-live yielded session" {
@@ -1812,7 +1812,7 @@ PY
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
-@test "frontier tier resolves gpt-6-astra at xhigh on the Codex host" {
+@test "frontier tier resolves gpt-6.2-astra at xhigh on the Codex host" {
   FFS_HOST=codex GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1820,11 +1820,11 @@ PY
   [ "$status" -eq 0 ]
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  grep -F 'model="gpt-6-astra"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.2-astra"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
-@test "frontier tier resolves claude-fable-5-1 on the Claude host" {
+@test "frontier tier resolves claude-fable-5-2 on the Claude host" {
   FFS_HOST=claude GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1833,10 +1833,10 @@ PY
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
-  grep -Fx 'claude-fable-5-1' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5-2' "$BATS_TEST_TMPDIR/claude.args"
 }
 
-@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5-1 semantics and requires network_mode=enabled" {
+@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5-2 semantics and requires network_mode=enabled" {
   FFS_HOST=claude GSD_LEAD_MODEL=fable GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1855,7 +1855,7 @@ PY
   [ "$status" -eq 0 ]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
-  grep -Fx 'claude-fable-5-1' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5-2' "$BATS_TEST_TMPDIR/claude.args"
 }
 
 @test "GSD_LEAD_MODEL=fable is incompatible with danger-full-access sandbox" {
@@ -1902,7 +1902,7 @@ PY
   DB="$BATS_TEST_TMPDIR/fresh-role-pin.sqlite"
   CONFIG_ONE="$BATS_TEST_TMPDIR/model-one.json"
   CONFIG_TWO="$BATS_TEST_TMPDIR/model-two.json"
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-terra"}}' > "$CONFIG_ONE"
+  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-6.1-terra"}}' > "$CONFIG_ONE"
   printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-sol"}}' > "$CONFIG_TWO"
 
   FFS_HOST=codex GSD_RUN_ID=spec-008 FAKE_CODEX_DRIVE_RC=42 \
@@ -1953,7 +1953,7 @@ PY
   RUN_STATE="$BATS_TEST_TMPDIR/fresh-role-pin-refusal-state"
   CONFIG_ONE="$BATS_TEST_TMPDIR/refusal-model-one.json"
   CONFIG_TWO="$BATS_TEST_TMPDIR/refusal-model-two.json"
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-terra"}}' > "$CONFIG_ONE"
+  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-6.1-terra"}}' > "$CONFIG_ONE"
   printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-sol"}}' > "$CONFIG_TWO"
 
   FFS_HOST=codex GSD_RESUME=0 GSD_FRESH_START_REASON=role-pin-compat-sync \
@@ -2083,7 +2083,7 @@ PY
   RUN_STATE="$BATS_TEST_TMPDIR/fresh-bundle-refusal-state"
   CONFIG_ONE="$BATS_TEST_TMPDIR/bundle-model-one.json"
   CONFIG_TWO="$BATS_TEST_TMPDIR/bundle-model-two.json"
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-terra"}}' > "$CONFIG_ONE"
+  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-6.1-terra"}}' > "$CONFIG_ONE"
   printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-sol"}}' > "$CONFIG_TWO"
 
   FFS_HOST=codex GSD_RUN_ID=spec-008 FAKE_CODEX_DRIVE_RC=42 GSD_RUN_STATE_DIR="$RUN_STATE" GSD_MODEL_CONFIG="$CONFIG_ONE" \

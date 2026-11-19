@@ -81,7 +81,7 @@ setup() {
 }
 
 @test "INT-001: review-gate retains the 1.9 contract after host-neutral bump" {
-  grep -F 'version: "1.17.0"' skills/review-gate/SKILL.md
+  grep -F 'version: "1.17.1"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

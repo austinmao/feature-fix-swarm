@@ -1,14 +1,14 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.17.0"
+version: "1.17.1"
 ---
 
 # /review-gate
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

@@ -3,12 +3,12 @@
 # models in .planning/config.json, WITH recovery.
 #
 # gsd-core's model_overrides are returned verbatim (model-resolver.cjs step 1) —
-# no availability check. When claude-fable-5-1 drops off the OAuth subscription,
+# no availability check. When claude-fable-5-2 drops off the OAuth subscription,
 # every spawn of that agent errors. This lever probes availability once
 # (cached 24h) and rewrites model_overrides + dynamic_routing.tier_models
 # BEFORE a run starts — then RESTORES them once fable comes back.
 #
-# Chain: fable -> [probe gpt-6-sol cross-vendor compensation, for
+# Chain: fable -> [probe gpt-6.2-sol cross-vendor compensation, for
 # marker-mode only] -> opus. Codex models can NEVER be Claude subagent pins,
 # so the actual config rewrite is always fable->opus; the codex-sol probe
 # only decides whether we record mode=codex-sol (cross-vendor xhigh
@@ -16,11 +16,12 @@
 #
 # Both value forms are matched and the substitution PRESERVES form — gsd-core
 # aliases ("fable" -> "opus", the form templates/gsd-config.base.json and real
-# consumer configs pin) and full IDs ("claude-fable-5-1" -> "claude-opus-5-5").
-# The pre-5.1 legacy full ID is matched too ("claude-fable-5" -> "claude-opus-5", the same
+# consumer configs pin) and full IDs ("claude-fable-5-2" -> "claude-opus-5-5").
+# The legacy full IDs "claude-fable-5-1" -> "claude-opus-5-5" and bare "claude-fable-5" -> "claude-opus-5"
+# are matched too (the same
 # pairing security-model-fence.sh keeps) so a consumer config that never moved off it is not
 # left on a dead pin. Matching is by exact quoted value, never by prefix: "claude-fable-5" is
-# a prefix of "claude-fable-5-1" and must not shadow it.
+# a prefix of "claude-fable-5-2" and must not shadow it.
 #
 # Recovery: once fable is available again, restore ONLY the JSON paths this
 # lever itself rewrote — the marker (.planning/fable-fallback.json) records
@@ -102,16 +103,16 @@ CONFIG="$PLANNING_DIR/config.json"
 . "$(dirname "${BASH_SOURCE[0]}")/model-probe-lib.sh"
 
 MARKER="$PLANNING_DIR/fable-fallback.json"
-FABLE="claude-fable-5-1"
+FABLE="claude-fable-5-2"
 OPUS="claude-opus-5-5"
-CODEX_SOL="gpt-6-sol"
+CODEX_SOL="gpt-6.2-sol"
 
-# Match ALL value forms: gsd-core alias "fable", full ID "claude-fable-5-1", and the legacy
-# full ID "claude-fable-5". Each alternative is anchored by the closing quote (exact-quoted),
+# Match ALL value forms: gsd-core alias "fable", full ID "claude-fable-5-2", and the legacy
+# full IDs "claude-fable-5-1" and "claude-fable-5". Each alternative is anchored by the closing quote (exact-quoted),
 # so the alias does NOT match inside a full ID and "claude-fable-5" does NOT match the prefix
-# of "claude-fable-5-1".
+# of "claude-fable-5-2".
 HAS_FABLE_LITERAL=false
-if grep -qE '"(fable|claude-fable-5-1|claude-fable-5)"' "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
+if grep -qE '"(fable|claude-fable-5-2|claude-fable-5-1|claude-fable-5)"' "$CONFIG"; then HAS_FABLE_LITERAL=true; fi
 
 if [ ! -f "$MARKER" ] && [ "$HAS_FABLE_LITERAL" = false ]; then
   echo "[model-fallback] $FABLE not present in config — no-op"
@@ -279,13 +280,22 @@ if [ "$HAS_FABLE_LITERAL" = false ]; then
   exit 0
 fi
 
+# Availability is probed per pinned id: the probe above covers claude-fable-5-2
+# (and the "fable" alias / bare id that follow it). A config still pinned to the
+# legacy claude-fable-5-1 is only demoted when 5-1 ITSELF is unavailable — a live
+# 5-1 pin is served as pinned and left alone even while 5-2 is down.
+KEEP_LEGACY_51=false
+if grep -qE '"claude-fable-5-1"' "$CONFIG" && probe_claude_model "claude-fable-5-1"; then
+  KEEP_LEGACY_51=true
+fi
+
 if probe_codex_model "$CODEX_SOL"; then
   MODE="codex-sol"
 else
   MODE="opus-only"
 fi
 
-RESULT=$(FABLE="$FABLE" OPUS="$OPUS" CONFIG="$CONFIG" MARKER="$MARKER" MODE="$MODE" python3 - <<'EOF'
+RESULT=$(KEEP_LEGACY_51="$KEEP_LEGACY_51" FABLE="$FABLE" OPUS="$OPUS" CONFIG="$CONFIG" MARKER="$MARKER" MODE="$MODE" python3 - <<'EOF'
 import json, os, sys
 config_path = os.environ["CONFIG"]; fable = os.environ["FABLE"]; opus = os.environ["OPUS"]
 marker_path = os.environ["MARKER"]; mode = os.environ["MODE"]
@@ -317,8 +327,13 @@ except (OSError, ValueError) as exc:
     sys.exit(1)
 # Form-preserving substitution: alias stays alias, full ID stays full ID. The legacy
 # pre-5.1 full ID rides along (same pairing as security-model-fence.sh). Dict lookup is by
-# exact string equality, so "claude-fable-5" can never match inside "claude-fable-5-1".
-forms = {"fable": "opus", fable: opus, "claude-fable-5": "claude-opus-5"}
+# exact string equality, so "claude-fable-5" can never match inside "claude-fable-5-2".
+forms = {"fable": "opus", fable: opus, "claude-fable-5-1": "claude-opus-5-5", "claude-fable-5": "claude-opus-5"}
+# The legacy 5-1 id was probed separately by the caller: when it is live, its pins are
+# left exactly as pinned.
+keep_legacy_51 = os.environ.get("KEEP_LEGACY_51") == "true"
+if keep_legacy_51:
+    forms.pop("claude-fable-5-1", None)
 paths = {}
 installed = {}
 ambiguous = []
@@ -346,8 +361,9 @@ def sub(container, prefix=""):
             container[k] = forms[v]
 sub(cfg)
 rewritten = len(paths)
-warn = (f" WARN: {len(ambiguous)} path(s) NOT rewritten — key contains '.', which is "
-        f"ambiguous for recovery: {', '.join(ambiguous)}") if ambiguous else ""
+kept = " (claude-fable-5-1 is available — its pin(s) left as pinned)" if keep_legacy_51 else ""
+warn = kept + ((f" WARN: {len(ambiguous)} path(s) NOT rewritten — key contains '.', which is "
+        f"ambiguous for recovery: {', '.join(ambiguous)}") if ambiguous else "")
 
 if not rewritten:
     # "fable" can match the literal grep as a dict KEY rather than a pinned value.

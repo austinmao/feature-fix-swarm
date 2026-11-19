@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Lightweight autonomous feature pipeline: self-healing plan-decompose → preflight → autonomy-grant → feature-implement --autonomous. DRY sequencing only; child skills own all machinery."
-version: "3.3.0"
+version: "3.3.1"
 allowed-tools:
   - Read
   - Write
@@ -15,7 +15,7 @@ allowed-tools:
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

@@ -163,3 +163,12 @@ Anthropic's guidance for the new lineup ("Most workloads start with Claude Opus
   Opus (it now also maps `claude-fable-5-1` to `claude-opus-5-5`, and keeps the
   legacy `claude-fable-5` pair), and adversarial security review stays
   cross-model.
+
+## Addendum 2026-11-19 — model tier refresh to the GPT-6.2 / 6.1 / 6 lineup
+
+The tier table moved to the GPT-6 family releases: frontier `gpt-6.2-astra` and
+Claude `claude-fable-5-2`, judgment `gpt-6.2-sol`, execution `gpt-6.1-terra`,
+volume `gpt-6-luna`; `docs/model-tiers.md` stays the canonical table. Earlier
+native Codex ids and `claude-fable-5-1` remain valid and are served as pinned,
+never rewritten. Frontier and judgment still resolve to distinct models on
+both vendors, so the producer/reviewer rule above is unchanged.

@@ -11,10 +11,10 @@ from lib.model_requests import ModelRequestError, resolve_request, validate_docu
 @pytest.mark.parametrize(
     ("name", "model", "effort"),
     [
-        ("frontier", "gpt-6-astra", "xhigh"),
-        ("judgment", "gpt-6-sol", "xhigh"),
-        ("execution", "gpt-5.6-terra", "medium"),
-        ("volume", "gpt-5.6-luna", "low"),
+        ("frontier", "gpt-6.2-astra", "xhigh"),
+        ("judgment", "gpt-6.2-sol", "xhigh"),
+        ("execution", "gpt-6.1-terra", "medium"),
+        ("volume", "gpt-6-luna", "low"),
     ],
 )
 def test_tier_requests_resolve_to_role_defaults(name: str, model: str, effort: str) -> None:
@@ -38,7 +38,7 @@ def test_exact_request_preserves_vendor_id_and_never_falls_back() -> None:
 @pytest.mark.parametrize(
     ("name", "model"),
     [
-        ("frontier", "claude-fable-5-1"),
+        ("frontier", "claude-fable-5-2"),
         ("judgment", "claude-opus-5-5"),
         ("execution", "claude-sonnet-5-5"),
         ("volume", "claude-haiku-5-5"),
