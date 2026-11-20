@@ -43,6 +43,10 @@ all skills.
   integration ref refuses a symbolic ref (`git-error`) and uses `--no-deref`;
   cleanup deletes refs with `--no-deref`, so a symbolic ref can no longer move
   or delete another branch such as `main`.
+- Dependency-file detection (`_dep_kind`) folds case on file names and
+  patterns: `Package.json`, `PACKAGE.JSON` or `Requirements-Dev.TXT` in a new
+  directory is a dependency file (a case-insensitive checkout opens it as the
+  real manifest, install scripts included) and stops at `dependency-change`.
 
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 

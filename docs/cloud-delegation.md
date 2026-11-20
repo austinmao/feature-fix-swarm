@@ -558,7 +558,9 @@ outcome.
 6. Dependency gate: a change to a dependency or lock file stops the result
    at `dependency-change` until you decide. A change to a parsed manifest that
    touches no dependency declaration and no install-time key (for example only
-   `version` in `package.json`) passes without a stop. See the
+   `version` in `package.json`) passes without a stop. File names are matched
+   case-insensitively (`Package.json` is a manifest): a case-insensitive
+   checkout opens it as `package.json`. See the
    [runbook](#runbook-dependency-change).
 7. Candidate: FFS builds one new commit from the validated tree minus
    `.ffs-result/<task>.json`. Its only parent is the task base commit, and it
