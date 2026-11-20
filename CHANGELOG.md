@@ -8,6 +8,52 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-20, cloud delegation: round 6)
+
+- A retried `start` for an existing run id ends `RUN_EXISTS ... batch=same`,
+  `batch=other` or `batch=unknown`, and no longer offers `local=<ids>`: the
+  local tasks the first attempt claimed are reported as `local-claimed=<ids>`,
+  because that caller may already have started them. `/swarm` skill 2.2.4 must
+  not start a claimed local task again without the operator's confirmation, and
+  runs none of the local groups that contain one until the operator says which.
+- The batch digest covers the ordered input, `depends_on` included. A changed
+  order, a changed dependency or `--sequential` is `batch=other`.
+- An identical retry that finds an active run with no orchestrator starts one
+  and adds `orchestrator=restarted` to the refusal. `/swarm` runs `reconcile.sh`
+  only when that token is absent and the orchestrator is dead.
+- `start` holds the orchestrator lock while it reserves the run, creates the
+  integration ref and commits an initialization record. A start that loses a
+  race gets `RUN_EXISTS`. `orchestrate` on a run with no initialization record
+  (also one made by an earlier build) refuses with `RUN_NOT_INITIALIZED`; an
+  identical retry of `start` finishes a run this build left uninitialized.
+- `start` scans every task id, local ones included, before it stores or prints
+  one. A match is `SECRET_IN_PROMPT` and names the scanner class, never the id.
+  Route errors that quote a flagged task id or dependency name also print the
+  class instead.
+- `cleanup` deletes only refs the run ledger accounts for, each at its recorded
+  OID (a compare-and-delete). A ref with no recorded OID is kept and printed as
+  `CLOUD:cleanup-kept ref=... (reason)`. A ref that moved gives
+  `CLEANUP_INCOMPLETE` and keeps the ledger. `--remote` deletes task branches
+  with a lease on the recorded OID and never deletes a remote `integration`
+  branch. A ref name the scanner flags prints as `[withheld sha256:<12 hex>]`.
+- The fixed launch clone is built in a private staging directory
+  (`.ffs-cloud-new-*`) and published by a no-replace rename. It is retired by a
+  rename into `.ffs-cloud-old-*` and a device and inode check before it is
+  deleted. The marker is written atomically and exclusively. A launch killed
+  part-way is recovered without operator action: only empty own staging
+  directories, an empty own marker and own marker temporary files are removed.
+  A non-empty `.ffs-cloud-new-*` directory left by a killed clone is kept and
+  needs manual removal. New refusal reasons: `MARKER_UNRECOGNIZED`,
+  `MARKER_EXISTS`, `MOVED_AWAY`. A libc without `renameat2` falls back to a
+  check followed by a plain rename.
+- Replay parks the task (`merge-conflict`) when an older process already moved
+  the integration ref and the approval has no reviewer-model evidence, instead
+  of recording the move. Reset the ref to the ledger tip, then
+  `resolve --action retest`.
+- The candidate import fetches objects only (no destination ref), then installs
+  the ref with `update-ref --no-deref` as a compare-and-swap. A symbolic ref or
+  a moved ref ends `candidate-ref-conflict` and is never written through.
+
 ### Fixed (2026-11-20, cloud delegation: round 5b review)
 
 - A failed stale re-review (even a transient reviewer outage) no longer ends
@@ -24,13 +70,13 @@ all skills.
   whole batch matches the first attempt: `start` now stores the first attempt's
   full task id set (cloud and local) and a content digest in the run ledger
   (`batch`). A superset, subset or edited batch is `batch=other`, so extra
-  cloud-eligible tasks can no longer land under `local=` and run locally (even
-  under `--policy required`). A ledger written before this field gives
-  `batch=unknown`. `/swarm` skill 2.2.3 describes the exact-match rule.
+  cloud-eligible tasks can no longer be sent to run locally (even under
+  `--policy required`). A ledger written before this field gives
+  `batch=unknown`. `/swarm` skill 2.2.4 describes the exact-match rule.
 - A `git clone` killed at its transfer timeout no longer wedges every later
   fixed-clone launch with `CLONE_PATH_INVALID`. The dispatcher now creates the
-  clone directory itself (`mkdir`, exclusive) and writes an ownership marker
-  beside it, `<parent>/ffs-cloud-launch-claude.ffs-owned`, naming the directory's
+  clone directory itself (a plain exclusive `mkdir`; the round 6 entry above
+  replaces it with a staged claim) and writes an ownership marker beside it, `<parent>/ffs-cloud-launch-claude.ffs-owned`, naming the directory's
   device and inode, before it clones. Stale-clone cleanup and the exit-path
   delete accept a directory only with that proof; an unmarked directory still
   ends `CLONE_PATH_INVALID` and is never deleted. **Operator action:** the
@@ -47,7 +93,7 @@ all skills.
   through review) no longer spends one of the operator's two review retests. It
   counts in its own `review_stale` field and runs on its own bounded review
   meters (attempt 3 to 5).
-- The candidate import refuses (`candidate-conflict`) when the candidate ref in
+- The candidate import refuses (`candidate-ref-conflict`) when the candidate ref in
   your repository is a symbolic ref, so `fetch` can no longer create the branch
   a dangling symref points at.
 - A secret-scanner failure while listing `claude/*` refs no longer flags every
@@ -101,11 +147,11 @@ all skills.
   and never calls the reviewer, so a review can no longer approve a diff the
   reviewer did not receive.
 - `start` on an existing run id ends `RUN_EXISTS ... batch=same [local=<ids>]`,
-  `batch=other` or `batch=unknown`. (Superseded by the round 5b entry above: the
-  match is now against the whole first batch, so a superset is `batch=other`.)
-  `/swarm --cloud` (skill 2.2.2) reconciles
-  a `batch=same` run, runs only the `local=` groups, and on any other answer
-  stops and never starts those cloud tasks again under a new run id.
+  `batch=other` or `batch=unknown`. (Superseded: the round 5b entry above makes
+  the match cover the whole first batch, so a superset is `batch=other`, and the
+  round 6 entry above replaces `local=` with `local-claimed=`.)
+  `/swarm --cloud` (skill 2.2.2) reconciles a `batch=same` run and, on any other
+  answer, stops and never starts those cloud tasks again under a new run id.
 - `/swarm --cloud` (skill 2.2.1) no longer treats `CLOUD-REFUSED: RUN_EXISTS` as
   "run every task locally". A retried `start` whose first acknowledgement was
   lost now reads `status --run <run>`, reports the existing run, runs
