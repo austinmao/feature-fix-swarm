@@ -108,6 +108,10 @@ B_DENYLIST = "denylist"
 B_DEPENDENCY_CHANGE = "dependency-change"
 B_REVIEW_UNAVAILABLE = "review-unavailable"
 B_REVIEW_CAP = "review-cap"
+B_REVIEW_MODEL_DOWNGRADED = "review-model-downgraded"  # ext: the reviewer that answered was not the requested judgment-tier model
+B_REVIEW_MODEL_UNKNOWN = "review-model-unknown"  # ext: the answering reviewer model could not be determined
+B_MANIFEST_INVALID = "manifest-invalid"  # ext: the task's own result carries a manifest the validator rejected
+B_VERIFY_CMD_MISSING = "verify-cmd-missing"  # ext: the effective verify command is empty or whitespace-only
 B_SANDBOX_UNAVAILABLE = "sandbox-unavailable"
 B_MERGE_CONFLICT = "merge-conflict"
 B_PATCH_ID_MISMATCH = "patch-id-mismatch"
@@ -129,7 +133,8 @@ DEPENDENCY_BLOCKERS = frozenset("dependency-" + s for s in (REJECTED, FAILED, AB
 
 ALL_BLOCKERS = frozenset(
     [B_UNCERTAIN_LAUNCH, B_POLL_ERRORS, B_AMBIGUOUS, B_CANDIDATE_MOVED, B_MANIFEST_BLOCKED, B_PATH_OUTSIDE_OWNS,
-     B_DENYLIST, B_DEPENDENCY_CHANGE, B_REVIEW_UNAVAILABLE, B_REVIEW_CAP, B_SANDBOX_UNAVAILABLE, B_MERGE_CONFLICT,
+     B_DENYLIST, B_DEPENDENCY_CHANGE, B_REVIEW_UNAVAILABLE, B_REVIEW_CAP, B_REVIEW_MODEL_DOWNGRADED,
+     B_REVIEW_MODEL_UNKNOWN, B_VERIFY_CMD_MISSING, B_MANIFEST_INVALID, B_SANDBOX_UNAVAILABLE, B_MERGE_CONFLICT,
      B_PATCH_ID_MISMATCH, B_EXPOSURE_NOT_GRANTED, B_RULESET_UNVERIFIED, B_GRANT_MISSING, B_SECRET_LEAK,
      B_TESTS_FAILED, B_REVIEW_REVISE, B_QUARANTINE_REFUSED, B_BRANCH_CONFLICT, B_DEADLINE, B_SCAN_REFUSED,
      B_PUSH_FAILED, B_INTERNAL_ERROR, B_INTEGRATION_FOREIGN, B_BINARY_CHANGE]
@@ -145,20 +150,20 @@ ACTION_REJECT = "reject"
 ADOPT_BLOCKERS = frozenset([B_UNCERTAIN_LAUNCH, B_POLL_ERRORS, B_AMBIGUOUS, B_CANDIDATE_MOVED])
 RESOLVE_ACTIONS: Dict[str, FrozenSet[str]] = {
     ACTION_RETEST: frozenset(
-        [B_REVIEW_UNAVAILABLE, B_REVIEW_CAP, B_SANDBOX_UNAVAILABLE, B_MERGE_CONFLICT, B_PATCH_ID_MISMATCH,
-         B_EXPOSURE_NOT_GRANTED, B_RULESET_UNVERIFIED, B_GRANT_MISSING, B_BRANCH_CONFLICT, B_SCAN_REFUSED,
+        [B_REVIEW_UNAVAILABLE, B_REVIEW_CAP, B_REVIEW_MODEL_DOWNGRADED, B_REVIEW_MODEL_UNKNOWN, B_SANDBOX_UNAVAILABLE,
+         B_MERGE_CONFLICT, B_PATCH_ID_MISMATCH, B_EXPOSURE_NOT_GRANTED, B_RULESET_UNVERIFIED, B_GRANT_MISSING, B_BRANCH_CONFLICT, B_SCAN_REFUSED,
          B_PUSH_FAILED, B_INTERNAL_ERROR]
     ),
     ACTION_ACCEPT_DEPS: frozenset([B_DEPENDENCY_CHANGE]),
     ACTION_REJECT: frozenset(
         [B_PATH_OUTSIDE_OWNS, B_DENYLIST, B_DEPENDENCY_CHANGE, B_REVIEW_UNAVAILABLE, B_REVIEW_CAP,
-         B_SANDBOX_UNAVAILABLE, B_MERGE_CONFLICT, B_PATCH_ID_MISMATCH, B_BINARY_CHANGE, B_INTEGRATION_FOREIGN]
+         B_REVIEW_MODEL_DOWNGRADED, B_REVIEW_MODEL_UNKNOWN, B_VERIFY_CMD_MISSING, B_SANDBOX_UNAVAILABLE, B_MERGE_CONFLICT, B_PATCH_ID_MISMATCH, B_BINARY_CHANGE, B_INTEGRATION_FOREIGN]
     ),
 }
 # Blockers that need an operator but cannot be cleared by any resolve action
 # (they clear with adopt or abandon only).
-ABANDON_ONLY_BLOCKERS = frozenset([B_MANIFEST_BLOCKED])
-REVIEW_BLOCKERS = frozenset([B_REVIEW_UNAVAILABLE, B_REVIEW_CAP])
+ABANDON_ONLY_BLOCKERS = frozenset([B_MANIFEST_BLOCKED, B_MANIFEST_INVALID])
+REVIEW_BLOCKERS = frozenset([B_REVIEW_UNAVAILABLE, B_REVIEW_CAP, B_REVIEW_MODEL_DOWNGRADED, B_REVIEW_MODEL_UNKNOWN])
 
 # events
 EV_DEPS_MET = "deps-met"
@@ -1009,16 +1014,18 @@ _row(RESULT_READY, EV_UNBIND, RUNNING)  # the bound candidate was somebody else'
 _row(RESULT_READY, EV_COLLECT_OK, COLLECTED)
 _row(RESULT_READY, EV_REJECT, REJECTED, [B_SECRET_LEAK, B_QUARANTINE_REFUSED])
 _row(RESULT_READY, EV_NEEDS_OPERATOR, NEEDS_OPERATOR,
-     [B_MANIFEST_BLOCKED, B_PATH_OUTSIDE_OWNS, B_DENYLIST, B_DEPENDENCY_CHANGE])
+     [B_MANIFEST_BLOCKED, B_MANIFEST_INVALID, B_PATH_OUTSIDE_OWNS, B_DENYLIST, B_DEPENDENCY_CHANGE])
 _row(COLLECTED, EV_REVIEW_APPROVE, REVIEWED)
 _row(COLLECTED, EV_REJECT, REJECTED, [B_REVIEW_REVISE, B_SECRET_LEAK])  # the review scan found a credential
-_row(COLLECTED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR, [B_REVIEW_UNAVAILABLE, B_REVIEW_CAP])
+_row(COLLECTED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR,
+     [B_REVIEW_UNAVAILABLE, B_REVIEW_CAP, B_REVIEW_MODEL_DOWNGRADED, B_REVIEW_MODEL_UNKNOWN])
 _row(REVIEWED, EV_TESTS_PASS, VERIFIED)
 _row(REVIEWED, EV_REJECT, REJECTED, [B_TESTS_FAILED])
-_row(REVIEWED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR, [B_SANDBOX_UNAVAILABLE])
+_row(REVIEWED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR, [B_SANDBOX_UNAVAILABLE, B_VERIFY_CMD_MISSING])
 _row(VERIFIED, EV_MERGE_PLANNED, INTEGRATING)
 _row(VERIFIED, EV_REJECT, REJECTED, [B_TESTS_FAILED])  # merged-tree test run failed
-_row(VERIFIED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR, [B_MERGE_CONFLICT, B_PATCH_ID_MISMATCH, B_SANDBOX_UNAVAILABLE])
+_row(VERIFIED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR,
+     [B_MERGE_CONFLICT, B_PATCH_ID_MISMATCH, B_SANDBOX_UNAVAILABLE, B_VERIFY_CMD_MISSING])
 # collect/review/merge may refuse for content the reviewer cannot read (binary)
 _row([RESULT_READY, COLLECTED, REVIEWED, VERIFIED], EV_NEEDS_OPERATOR, NEEDS_OPERATOR, [B_BINARY_CHANGE])
 _row(INTEGRATING, EV_INTEGRATED, INTEGRATED)
@@ -1073,6 +1080,8 @@ OPERATOR_BLOCKER_RULES: Dict[str, FrozenSet[str]] = {
     EV_OPERATOR_REJECT: RESOLVE_ACTIONS[ACTION_REJECT],
 }
 _REVIEW_KEYS = frozenset(["family", "verdict", "diff_sha", "patch_id", "tree"])
+#: Recorded since the reviewer-model check; absent from older records, which stay valid.
+_REVIEW_OPTIONAL_KEYS = frozenset(["model", "requested_model"])
 _VERIFY_KEYS = frozenset(["test_rc", "test_log_sha"])
 
 
@@ -1104,8 +1113,9 @@ def _check_digest(value: Any) -> Optional[str]:
     return value
 
 
-def _check_str_dict(value: Any, keys: FrozenSet[str], label: str) -> Dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != keys:
+def _check_str_dict(value: Any, keys: FrozenSet[str], label: str,
+                    optional: FrozenSet[str] = frozenset()) -> Dict[str, Any]:
+    if not isinstance(value, dict) or not keys <= set(value) <= (keys | optional):
         raise LedgerError(E_BAD_FIELD, label)
     for item in value.values():
         if not (isinstance(item, str) and len(item) <= 200) and not _is_int(item):
@@ -1137,7 +1147,7 @@ _FIELD_CHECKS: Dict[str, Callable[[Any], Any]] = {
     "url": sanitize_url,
     "launch_note": lambda v: _check_launch_note(v),
     "nonce": validate_nonce,
-    "review": lambda v: _check_str_dict(v, _REVIEW_KEYS, "review"),
+    "review": lambda v: _check_str_dict(v, _REVIEW_KEYS, "review", _REVIEW_OPTIONAL_KEYS),
     "verify": lambda v: _check_str_dict(v, _VERIFY_KEYS, "verify"),
     "decisions_needed": _check_decisions,
     "env_report": _check_env_report,

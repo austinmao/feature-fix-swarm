@@ -36,6 +36,11 @@ def git(repo: Path, *args: str, stdin: str = "", check: bool = True) -> str:
     return proc.stdout.strip()
 
 
+def real_validate_manifest(raw, **kwargs):
+    import cloud_ledger
+    return cloud_ledger.validate_manifest(raw, **kwargs)
+
+
 def stub_validate(raw, *, run, task, generation, nonce, base_sha, require_nonce=True):
     data = json.loads(raw)
     for key, want in (("run", run), ("task", task), ("generation", generation), ("base_sha", base_sha)):
@@ -326,6 +331,28 @@ def test_base_missing_in_quarantine_is_not_descended(world):
 def test_manifest_mismatch_rejected(world, over):
     oid = world.result(ok_changes(), manifest=manifest_text(world.base, **over))
     assert_fail(cc.collect(world.ctx(oid)), "rejected", cc.B_MANIFEST_INVALID)
+
+
+@pytest.mark.parametrize("over,code,nonce_matches", [
+    ({"nonce": "b" * 32}, "MANIFEST_NONCE", False),
+    ({"generation": 2}, "MANIFEST_MISMATCH", True),
+    ({"base_sha": "3" * 40}, "MANIFEST_MISMATCH", True),
+    ({"task": "t9"}, "MANIFEST_MISMATCH", True),
+])
+def test_manifest_rejection_carries_the_validator_code_and_the_nonce_verdict(world, over, code, nonce_matches):
+    oid = world.result(ok_changes(), manifest=manifest_text(world.base, **over))
+    res = cc.collect(world.ctx(oid, validate_manifest=real_validate_manifest))
+    assert_fail(res, "rejected", cc.B_MANIFEST_INVALID)
+    assert res.data["validator_code"] == code and res.data["nonce_matches"] is nonce_matches
+
+
+def test_unparseable_manifest_reports_a_generic_code_and_no_nonce_match(world):
+    oid = world.result(ok_changes(), manifest="{not json")
+    res = cc.collect(world.ctx(oid, validate_manifest=real_validate_manifest))
+    assert res.data["validator_code"] == "MANIFEST_BAD_JSON" and res.data["nonce_matches"] is False
+    # a validator that raises something untyped (or a stub) reports the generic code, never its message
+    plain = cc.collect(world.ctx(oid))
+    assert plain.data["validator_code"] == "MANIFEST_UNPARSEABLE"
 
 
 def test_manifest_missing_rejected_for_claude(world):
@@ -680,6 +707,9 @@ def test_non_dependency_json_is_not_gated(world):
 # ------------------------------------------------------------------- review
 
 
+MODEL_OK = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=0\n"
+
+
 def candidate_for(world: World):
     oid = world.result(ok_changes())
     res = cc.collect(world.ctx(oid))
@@ -693,7 +723,7 @@ def test_review_approve_records_hashes(world):
 
     def runner(argv, env, timeout):
         calls.append((list(argv), env))
-        return 0, "reviewer text\nCLOUD-REVIEW: APPROVE\n"
+        return 0, "reviewer text\n" + MODEL_OK + "CLOUD-REVIEW: APPROVE\n"
 
     res = cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="claude",
                     base_oid=world.base, candidate_oid=data["candidate_oid"], manifest=data["manifest"],
@@ -739,8 +769,55 @@ def test_review_text_is_redacted(world):
     leak = cloud_scan.canary("github-token").decode()
     res = cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="claude",
                     base_oid=world.base, candidate_oid=data["candidate_oid"], manifest=data["manifest"],
-                    runner=lambda *_a: (0, "found %s\nCLOUD-REVIEW: APPROVE\n" % leak))
+                    runner=lambda *_a: (0, "found %s\n" % leak + MODEL_OK + "CLOUD-REVIEW: APPROVE\n"))
     assert leak not in res.data["review_text"] and "[REDACTED:github-token]" in res.data["review_text"]
+
+
+def _review_with(world, out, rc=0, producer="claude"):
+    data = candidate_for(world)
+    return cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer=producer,
+                     base_oid=world.base, candidate_oid=data["candidate_oid"], manifest=data["manifest"],
+                     runner=lambda *_a: (rc, out))
+
+
+def test_approved_with_the_requested_model_is_reviewed_and_records_the_model(world):
+    res = _review_with(world, "fine\n" + MODEL_OK + "CLOUD-REVIEW: APPROVE\n")
+    assert res.ok and res.state == "reviewed"
+    assert res.data["model"] == "gpt-6.2-sol" and res.data["requested_model"] == "gpt-6.2-sol"
+    assert "CLOUD-REVIEW-MODEL" not in res.data["review_text"]
+
+
+def test_approved_by_a_downgraded_model_needs_the_operator(world):
+    res = _review_with(world, "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.1-terra descent=1\n"
+                              "CLOUD-REVIEW: APPROVE\n")
+    assert_fail(res, "needs-operator", cc.B_REVIEW_MODEL_DOWNGRADED)
+    assert res.data["model"] == "gpt-6.1-terra" and res.data["requested_model"] == "gpt-6.2-sol"
+    assert "gpt-6.1-terra" in res.detail and "gpt-6.2-sol" in res.detail
+
+
+def test_a_descent_flag_blocks_even_when_the_names_match(world):
+    res = _review_with(world, "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=1\n"
+                              "CLOUD-REVIEW: APPROVE\n")
+    assert_fail(res, "needs-operator", cc.B_REVIEW_MODEL_DOWNGRADED)
+
+
+@pytest.mark.parametrize("out", [
+    "fine\nCLOUD-REVIEW: APPROVE\n",  # an older script, or no model line at all
+    "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=- descent=0\nCLOUD-REVIEW: APPROVE\n",
+    "CLOUD-REVIEW-MODEL: requested=- answered=- descent=0\nCLOUD-REVIEW: APPROVE\n",
+    "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=2\nCLOUD-REVIEW: APPROVE\n",
+    # reviewer text cannot stand in for it: the model line must sit directly before the verdict
+    MODEL_OK + "reviewer closing remark\nCLOUD-REVIEW: APPROVE\n",
+])
+def test_approved_with_an_unknown_model_needs_the_operator(world, out):
+    res = _review_with(world, out)
+    assert_fail(res, "needs-operator", cc.B_REVIEW_MODEL_UNKNOWN)
+
+
+def test_revise_still_rejects_and_keeps_the_model_line_out_of_the_text(world):
+    res = _review_with(world, "HIGH: bad\n" + MODEL_OK + "CLOUD-REVIEW: REVISE\n", rc=1)
+    assert_fail(res, "rejected", cc.B_REVIEW_REVISE)
+    assert "CLOUD-REVIEW-MODEL" not in res.detail and res.data["model"] == "gpt-6.2-sol"
 
 
 def test_review_script_end_to_end_with_stub(world, tmp_path):
@@ -821,7 +898,7 @@ def test_deleted_base_secret_is_redacted_in_the_outbound_diff(world):
 
     def runner(argv, env, timeout):
         seen["diff"] = Path(argv[5]).read_text()
-        return 0, "CLOUD-REVIEW: APPROVE\n"
+        return 0, MODEL_OK + "CLOUD-REVIEW: APPROVE\n"
 
     res = cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="claude", base_oid=base2,
                     candidate_oid=data["candidate_oid"], manifest=data["manifest"], runner=runner)
@@ -839,7 +916,7 @@ def test_reviewer_runs_with_an_allowlisted_environment(world, monkeypatch):
     seen = {}
     cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="claude", base_oid=world.base,
               candidate_oid=data["candidate_oid"], manifest=data["manifest"],
-              runner=lambda argv, env, timeout: seen.update(env=env) or (0, "CLOUD-REVIEW: APPROVE\n"))
+              runner=lambda argv, env, timeout: seen.update(env=env) or (0, MODEL_OK + "CLOUD-REVIEW: APPROVE\n"))
     env = seen["env"]
     assert set(env) <= set(cc.REVIEW_ENV_ALLOW)
     for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DOPPLER_TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY",
@@ -902,6 +979,20 @@ def test_verify_sandbox_unavailable_and_error(world, tmp_path):
                                 deps=[], timeout_s=5, log_path=str(tmp_path / "v.log"))
     assert_fail(cc.verify(run_verify_fn=unavailable, **args), "needs-operator", cc.B_SANDBOX)
     assert_fail(cc.verify(run_verify_fn=broken, **args), "needs-operator", cc.B_SANDBOX)
+
+
+@pytest.mark.parametrize("blank", ["", " ", "   \n\t ", None])
+def test_verify_refuses_a_blank_command_without_running_anything(world, tmp_path, blank):
+    calls = []
+
+    def runner(*args, **kw):
+        calls.append(args)
+        return 0  # what `bash -c ''` would report: a pass with no test run
+
+    res = cc.verify(tree_oid="a" * 40, cmd=blank, repo=str(world.main), main_worktree=str(world.main), deps=[],
+                    timeout_s=5, log_path=str(tmp_path / "v.log"), run_verify_fn=runner)
+    assert_fail(res, "needs-operator", cc.B_VERIFY_CMD_BLANK)
+    assert not res.ok and res.state != "verified" and calls == []
 
 
 @pytest.mark.skipif(not cloud_sandbox.sandbox_available(), reason="sandbox-exec unavailable")

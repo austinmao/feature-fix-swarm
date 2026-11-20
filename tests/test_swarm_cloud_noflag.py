@@ -1,8 +1,8 @@
 """No-flag guarantee for /swarm --cloud (contract sections 11 and 14.10).
 
 Outside the cloud block the only permitted differences from the base file are
-the version line, `permissions.network`, and the one invocation line naming the
-flag. feature-implement and task-swarm are not touched in PR 1a.
+the version line, `permissions.network`, and the one invocation line naming flag. feature-implement and task-swarm differ from the base only by the
+version line and the marked `ffs:cloud-deferred` refusal block.
 """
 from __future__ import annotations
 
@@ -102,6 +102,40 @@ def test_cloud_block_sits_after_the_init_guard_and_before_the_reconcile_line() -
     assert text.index(BEGIN) > text.index("Advisory only")
 
 
-@pytest.mark.parametrize("path", ["skills/feature-implement/SKILL.md", "skills/task-swarm/SKILL.md"])
-def test_deferred_skills_are_byte_identical_to_the_base(base: str, path: str) -> None:
-    assert (ROOT / path).read_bytes() == _base_text(base, path).encode("utf-8")
+DEFERRED = ["feature-implement", "task-swarm"]
+D_BEGIN, D_END = "<!-- ffs:cloud-deferred:begin -->", "<!-- ffs:cloud-deferred:end -->"
+
+
+def _strip_deferred_block(text: str) -> str:
+    start, end = text.index(D_BEGIN), text.index(D_END) + len(D_END)
+    rest = text[end:]
+    return text[:start] + (rest[1:] if rest.startswith("\n") else rest).lstrip("\n")
+
+
+def _drop_version(text: str) -> str:
+    return "".join(line for line in text.splitlines(keepends=True) if not re.match(r"^version:\s", line))
+
+
+@pytest.mark.parametrize("name", DEFERRED)
+def test_deferred_skills_are_identical_to_the_base_outside_the_guard_block(base: str, name: str) -> None:
+    path = f"skills/{name}/SKILL.md"
+    current = (ROOT / path).read_text(encoding="utf-8")
+    original = _base_text(base, path)
+    assert D_BEGIN not in original
+    assert _drop_version(_strip_deferred_block(current)) == _drop_version(original)
+
+
+@pytest.mark.parametrize("name", DEFERRED)
+def test_deferred_skills_carry_the_cloud_refusal_block(name: str) -> None:
+    text = (ROOT / f"skills/{name}/SKILL.md").read_text(encoding="utf-8")
+    assert text.count(D_BEGIN) == 1 and text.count(D_END) == 1
+    assert text.index(D_BEGIN) < text.index(D_END)
+    block = text[text.index(D_BEGIN): text.index(D_END)]
+    message = f"Cloud delegation for /{name} arrives in a later release; /swarm --cloud is available now."
+    assert message in block
+    for token in ("--cloud", "--cloud=auto", "--cloud=prefer", "--cloud=required", "FFS_CLOUD"):
+        assert token in block, token
+    assert "stop" in block
+    # the guard runs before the init gate and every other step
+    assert text.index(D_END) < text.index("## Init gate")
+    assert "Check this before every other step" in block

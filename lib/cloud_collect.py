@@ -24,6 +24,7 @@ from __future__ import annotations
 import fcntl
 import fnmatch
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -64,9 +65,12 @@ B_GIT = "git-error"  # new
 B_CANDIDATE_CONFLICT = "candidate-ref-conflict"  # new
 B_REVIEW_UNAVAILABLE = "review-unavailable"
 B_REVIEW_CAP = "review-cap"
+B_REVIEW_MODEL_DOWNGRADED = "review-model-downgraded"  # new: approved, but not by the requested judgment-tier model
+B_REVIEW_MODEL_UNKNOWN = "review-model-unknown"  # new: approved, but the answering model is not reported
 B_REVIEW_REVISE = "review-revise"  # new (state rejected)
 B_TESTS_FAILED = "tests-failed"
 B_SANDBOX = "sandbox-unavailable"
+B_VERIFY_CMD_BLANK = "verify-cmd-missing"  # new: an empty command must never count as a passing test run
 B_MERGE_CONFLICT = "merge-conflict"
 B_PATCH_ID = "patch-id-mismatch"
 B_TIP_MOVED = "tip-moved"  # new: compare-and-swap lost, re-plan
@@ -487,6 +491,28 @@ def _manifest_dict(result: Any, raw: bytes) -> Dict[str, Any]:
     return parsed
 
 
+_VALIDATOR_CODE_RE = re.compile(r"^MANIFEST_[A-Z0-9_]{1,40}$")
+
+
+def _validator_code(exc: BaseException) -> str:
+    """The validator's typed error code, never its free-text detail (which can echo worker-chosen text)."""
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, str) and _VALIDATOR_CODE_RE.match(code) else "MANIFEST_UNPARSEABLE"
+
+
+def _raw_nonce_matches(raw: bytes, nonce: str) -> bool:
+    """Whether the manifest bytes carry exactly this task generation's nonce (best effort, never raises).
+
+    The nonce is a 128-bit secret only this task's worker was given, so a match proves whose result
+    this is even when another field of the manifest is wrong."""
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+        found = doc.get("nonce") if isinstance(doc, dict) else None
+        return isinstance(found, str) and bool(nonce) and hmac.compare_digest(found.encode("utf-8"), str(nonce).encode("utf-8"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 @_guarded
 def step_manifest(ctx: CollectCtx) -> StepResult:
     """Validate the worker manifest; ``blocked`` parks the task."""
@@ -503,7 +529,8 @@ def step_manifest(ctx: CollectCtx) -> StepResult:
             nonce=ctx.nonce, base_sha=ctx.base_sha, require_nonce=True)
         manifest = _manifest_dict(result, raw)
     except Exception as exc:  # noqa: BLE001 - any validator failure rejects
-        return _fail(ST_REJECTED, B_MANIFEST_INVALID, "manifest invalid: %s" % _safe_text(str(exc)))
+        return _fail(ST_REJECTED, B_MANIFEST_INVALID, "manifest invalid: %s" % _safe_text(str(exc)),
+                     validator_code=_validator_code(exc), nonce_matches=_raw_nonce_matches(raw, ctx.nonce))
     manifest = dict(manifest)
     manifest.setdefault("manifest_source", "worker")
     ctx.cache["manifest"] = manifest
@@ -953,14 +980,42 @@ def _write_private(path: str, data: bytes) -> None:
         handle.write(data)
 
 
+#: ``cloud-review.sh`` prints exactly one of these immediately before the verdict line when the
+#: reviewer ran. It is taken from adversary-host.sh's out-of-band answer provenance, and only the line
+#: in that position is read, so reviewer text (which precedes it) cannot author it.
+_MODEL_RE = re.compile(
+    r"^CLOUD-REVIEW-MODEL: requested=([A-Za-z0-9._:-]{1,64}) answered=([A-Za-z0-9._:-]{1,64}) descent=([01])\s*$")
+
+
+def _split_model_line(lines: List[str]) -> Tuple[List[str], Optional["re.Match[str]"]]:
+    """``(lines without the model line, its match)``; the model line is the one just before the verdict."""
+    if len(lines) >= 2:
+        found = _MODEL_RE.match(lines[-2])
+        if found:
+            return lines[:-2] + lines[-1:], found
+    return lines, None
+
+
 def _classify_review(rc: int, out: str) -> Tuple[str, str]:
     """(verdict, reviewer text) from rc and the final ``CLOUD-REVIEW:`` line."""
+    return _classify_review_full(rc, out)[:2]
+
+
+def _classify_review_full(rc: int, out: str) -> Tuple[str, str, Dict[str, str]]:
+    """(verdict, reviewer text, model facts); model facts are ``{}`` when the model line is absent.
+
+    ``{"requested", "answered", "descent"}`` where ``-`` means the script could not name the model."""
     lines = out.rstrip("\n").split("\n")
     found = _VERDICT_RE.match(lines[-1]) if lines else None
+    model: Dict[str, str] = {}
+    if found:
+        lines, model_match = _split_model_line(lines)
+        if model_match:
+            model = {"requested": model_match.group(1), "answered": model_match.group(2), "descent": model_match.group(3)}
     text = "\n".join(lines[:-1]) if found else out
     word = found.group(1) if found else "UNAVAILABLE"
     agreed = {(0, "APPROVE"): "APPROVE", (1, "REVISE"): "REVISE", (4, "cap"): "cap"}
-    return agreed.get((rc, word), "UNAVAILABLE"), text
+    return agreed.get((rc, word), "UNAVAILABLE"), text, model
 
 
 #: Environment the reviewer child receives (K3): no API keys, no cloud tokens.
@@ -1076,11 +1131,31 @@ def review(
     return _review_result(rc, out, meta)
 
 
+def review_model_problem(model: Dict[str, str]) -> Optional[Tuple[str, str]]:
+    """``(blocker, detail)`` when the reviewer model is not provably the requested one, else ``None``.
+
+    An approval only counts when the script named both models, they are the same model, and
+    adversary-host.sh reported no tier descent. Anything else (no line, ``-``) is "unknown"."""
+    requested, answered = model.get("requested", "-"), model.get("answered", "-")
+    if not model or "-" in (requested, answered) or model.get("descent") not in ("0", "1"):
+        return B_REVIEW_MODEL_UNKNOWN, "the review did not report which model answered (requested=%s)" % requested
+    if answered != requested or model.get("descent") == "1":
+        return B_REVIEW_MODEL_DOWNGRADED, "review answered by %s, not the requested judgment-tier model %s" % (answered, requested)
+    return None
+
+
 def _review_result(rc: int, out: str, meta: Dict[str, str]) -> StepResult:
-    verdict, text = _classify_review(rc, out)
+    verdict, text, model = _classify_review_full(rc, out)
     meta = dict(meta, verdict=verdict)
+    if model.get("answered", "-") != "-":
+        meta["model"] = model["answered"]
+    if model.get("requested", "-") != "-":
+        meta["requested_model"] = model["requested"]
     excerpt = _safe_text(text, MAX_REVIEW_TEXT)
     if verdict == "APPROVE":
+        problem = review_model_problem(model)
+        if problem is not None:
+            return StepResult(False, ST_NEEDS_OPERATOR, problem[0], problem[1], meta)
         return StepResult(True, "reviewed", None, "approved", dict(meta, review_text=excerpt))
     if verdict == "REVISE":
         return StepResult(False, ST_REJECTED, B_REVIEW_REVISE, excerpt[:MAX_DETAIL], meta)
@@ -1127,7 +1202,12 @@ def verify(
     other_worktrees: Sequence[str] = (),
     run_verify_fn: Optional[Callable[..., int]] = None,
 ) -> StepResult:
-    """Run the verify command in the sandbox against ``tree_oid`` (8.2)."""
+    """Run the verify command in the sandbox against ``tree_oid`` (8.2).
+
+    A blank command (empty or whitespace-only, ``bash -c ''`` exits 0) is refused before any sandbox
+    work: it would otherwise mark the tree ``verified`` without running a test."""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return _fail(ST_NEEDS_OPERATOR, B_VERIFY_CMD_BLANK, "the effective verify command is empty; no tests were run")
     import cloud_sandbox
 
     runner = run_verify_fn or cloud_sandbox.run_verify

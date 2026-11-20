@@ -8,6 +8,38 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-20, cloud delegation: four verified gaps)
+
+- `/feature-implement` and `/task-swarm` now refuse `--cloud` (any form:
+  `--cloud`, `--cloud=auto|prefer|required`) and `FFS_CLOUD`. A marked
+  `ffs:cloud-deferred` block ahead of the init gate prints one line saying cloud
+  delegation for that skill arrives in a later release and that `/swarm --cloud`
+  is available now, then stops. Nothing else in either skill changes
+  (versions 2.22.3 and 3.3.2). The no-flag test now compares both files with the
+  base outside that block and the version line.
+- The cloud review no longer passes a downgraded reviewer silently.
+  `adversary-host.sh` records which model answered
+  (`ADVERSARY_LAST_REQUESTED_MODEL`, `ADVERSARY_LAST_ANSWERED_MODEL`);
+  `cloud-review.sh` prints it on a `CLOUD-REVIEW-MODEL:` line and the ledger
+  `review` record carries `model` and `requested_model` (older records without
+  them stay valid). An `APPROVE` from a model other than the requested
+  judgment-tier model ends in `needs-operator` with `review-model-downgraded`;
+  an unreported model ends with `review-model-unknown`. Both clear with
+  `resolve --action retest` or `reject`. The opposite-vendor rule and
+  `FFS_CROSS_VENDOR_FALLBACK=off` are unchanged.
+- A blank (empty or whitespace-only) verify command can no longer reach
+  `verified`. The router refuses the task (`VERIFY_CMD_MISSING`: a typed refusal
+  under `required`, stays local under `auto` and `prefer`) unless a non-blank
+  `config.verify.cmd` exists, and `cloud_collect.verify` refuses a blank command
+  with `needs-operator` / `verify-cmd-missing` instead of running `bash -c ''`.
+- A candidate on the task's own result branch
+  (`claude/ffs-<run>-<task>-<nonce8>`, or a manifest carrying the task's nonce)
+  whose manifest is present but invalid now ends in `needs-operator` with
+  `manifest-invalid` and the validator's error code in the detail, instead of
+  being polled until the 12 hour deadline. Only `abandon` clears it. A foreign
+  `claude/*` ref that merely is new, and a branch with no manifest, still go back
+  to polling.
+
 ### Changed (2026-11-20, cloud delegation: first live runs of the Claude backend)
 
 - Live runs with Claude Code 2.1.329, one trivial docs task, Claude backend only.
@@ -26,9 +58,8 @@ all skills.
 - The worker contract states the `tests_run` item shape,
   `{"cmd": ..., "rc": ...}`. A live worker wrote strings and failed the
   manifest check.
-- Known gap: a candidate branch with the right name and nonce but an invalid
-  manifest is logged and polled again until the deadline instead of being raised
-  as `needs-operator`.
+- A candidate branch with the right name and nonce but an invalid manifest was
+  logged and polled again until the deadline. That gap is closed above.
 - Not verified live: the Codex backend, whether `--model` and `--effort` take
   effect under `--cloud`, more than one task, dependencies between tasks, the
   installed `/swarm --cloud` skill path, secrets modes, restart driven by

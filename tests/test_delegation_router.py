@@ -771,3 +771,47 @@ def test_end_to_end_from_lines():
     result = plan(tasks)
     assert [g["route"] for g in result["groups"]] == ["cloud", "local"]
     assert result["tasks"]["t3"]["implicit_deps"] == ["t1"]
+
+
+# ── blank verify command ─────────────────────────────────────────────────────
+
+
+def _blank_verify_config(cmd):
+    config = copy.deepcopy(CONFIG)
+    config["verify"]["cmd"] = cmd
+    return config
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n ", " \n"])
+@pytest.mark.parametrize("config_cmd", ["", "  ", "\n"])
+def test_blank_verify_cmd_without_a_non_blank_fallback_stays_local(blank, config_cmd):
+    config = _blank_verify_config(config_cmd)
+    # routed without normalization too: plan_routes must not trust its caller to have stripped
+    raw = dict(ELIGIBLE, verify_cmd=blank, kind="build", tier="execution", model_request={"kind": "tier", "name": "execution"},
+               needs_secrets=[], local_only=False, local_reason="", depends_on=[], owns_source="annotated", title="t",
+               prompt="p")
+    for tasks in (build([dict(ELIGIBLE, verify_cmd=blank)]), [raw]):
+        entry = plan(tasks, config=config)["tasks"]["t1"]
+        assert entry["route"] == "local" and dr.VERIFY_CMD_MISSING in entry["reasons"]
+        assert entry["provider"] is None
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n "])
+def test_blank_verify_cmd_is_a_typed_refusal_under_required(blank):
+    config = _blank_verify_config("   ")
+    with pytest.raises(RouteError) as info:
+        plan(build([dict(ELIGIBLE, verify_cmd=blank)]), policy="required", config=config)
+    assert info.value.code == dr.CLOUD_REQUIRED_NOT_ELIGIBLE
+    assert info.value.refused[0]["task"] == "t1" and dr.VERIFY_CMD_MISSING in info.value.refused[0]["reasons"]
+
+
+def test_blank_task_verify_cmd_falls_back_to_a_non_blank_config_cmd():
+    entry = one(dict(ELIGIBLE, verify_cmd="   "), config=_blank_verify_config("make test"))
+    assert entry["route"] == "cloud"
+    assert build([dict(ELIGIBLE, verify_cmd="  make  ")])[0]["verify_cmd"] == "make"
+    assert build([dict(ELIGIBLE, verify_cmd="   ")])[0]["verify_cmd"] == ""
+
+
+def test_whitespace_only_verify_annotation_is_blank():
+    task = build(["- [ ] Do it [owns: src/a/**] [est: 10m] [verify:    ]"])[0]
+    assert task["verify_cmd"] == ""

@@ -565,7 +565,8 @@ def _normalize_one(raw: object, position: int) -> Dict[str, Any]:
         "local_reason": _text_field(fields, "local_reason"),
         "depends_on": _string_list(fields.get("depends_on"), "depends_on"),
         "kind": kind,
-        "verify_cmd": _text_field(fields, "verify_cmd"),
+        # Whitespace-only is blank, never a command: it must not satisfy the verify requirement.
+        "verify_cmd": _text_field(fields, "verify_cmd").strip(),
     }
 
 
@@ -628,7 +629,7 @@ def _exposure(config: Mapping[str, Any]) -> Dict[str, List[str]]:
 
 def _config_verify_cmd(config: Mapping[str, Any]) -> str:
     value = _section(config, "verify").get("cmd", "")
-    return value if isinstance(value, str) else ""
+    return value.strip() if isinstance(value, str) else ""
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────
@@ -785,7 +786,11 @@ def _task_verdict(
     if task.get("owns_source") == "missing" or not owns:
         reasons.append(OWNS_MISSING)
     reasons.extend(_owns_reasons(owns))
-    if not (task.get("verify_cmd") or config_verify):
+    # A blank (empty or whitespace-only) command is no command: `bash -c ''` exits 0, so it would
+    # "verify" a result without running a single test. Both the task's own and the config fallback
+    # are stripped before the truthiness test.
+    task_verify = task.get("verify_cmd")
+    if not ((task_verify.strip() if isinstance(task_verify, str) else "") or (config_verify or "").strip()):
         reasons.append(VERIFY_CMD_MISSING)
     candidates: List[str] = []
     if MODEL_EXACT not in reasons and TIER_FRONTIER not in reasons:

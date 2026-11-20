@@ -65,6 +65,8 @@ skeleton["summary"] = "worker done"
 if spec.get("status"):
     skeleton["status"] = spec["status"]
     skeleton["blockers"] = ["needs a human"]
+expected_nonce8 = skeleton["nonce"][:8]
+skeleton.update(spec.get("manifest", {}))  # a worker that writes a manifest the validator rejects
 os.makedirs(".ffs-result", exist_ok=True)
 with open(".ffs-result/%s.json" % task, "w") as fh:
     json.dump(skeleton, fh)
@@ -75,7 +77,7 @@ with open(target, "w") as fh:
 ident = ["-c", "user.name=fake", "-c", "user.email=fake@example.invalid", "-c", "commit.gpgsign=false"]
 subprocess.run(["git", "add", "-A"], check=True)
 subprocess.run(["git"] + ident + ["commit", "-q", "-m", "worker result"], check=True)
-nonce8 = skeleton["nonce"][:8]
+nonce8 = expected_nonce8
 branch = spec.get("branch") or "claude/ffs-%s-%s-%s" % (run, task, nonce8)
 subprocess.run(["git", "push", "-q", "origin", "HEAD:refs/heads/" + branch], check=True)
 """
@@ -107,7 +109,9 @@ index 0000000..e69de29
 
 REVIEW_SCRIPT = """#!/bin/bash
 V="$(cat "__STATE__/review.verdict" 2>/dev/null || echo APPROVE)"
+M="$(cat "__STATE__/review.model" 2>/dev/null || echo "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=0")"
 echo "reviewer notes"
+[ "$M" = NONE ] || echo "$M"
 echo "CLOUD-REVIEW: $V"
 case "$V" in APPROVE) exit 0;; REVISE) exit 1;; cap) exit 4;; *) exit 3;; esac
 """
@@ -152,6 +156,7 @@ class World:
         self.ticks, self.max_ticks = 0, 12
         self.spawned: List[List[str]] = []
         self.verify_calls: List[str] = []
+        self.verify_cmds: List[str] = []
         self.svc = cd.Services()
         self.svc.stdout = io.StringIO()
         self.svc.sleep = self._sleep
@@ -221,6 +226,7 @@ class World:
 
     def _verify(self, tree_oid: str, cmd: str, **kwargs: Any) -> int:
         self.verify_calls.append(tree_oid)
+        self.verify_cmds.append(cmd)
         return int((self.state / "verify.rc").read_text()) if (self.state / "verify.rc").exists() else 0
 
     # -- helpers ---------------------------------------------------------------
@@ -611,6 +617,65 @@ def test_review_unavailable_and_cap_need_the_operator(tmp_path: Path, monkeypatc
         world.drive()
         entry = world.doc()["tasks"]["t1"]
         assert (entry["state"], entry["blocker"]) == ("needs-operator", blocker)
+
+
+def test_approved_review_records_the_model_that_answered(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    review = world.doc()["tasks"]["t1"]["review"]
+    assert review["model"] == "gpt-6.2-sol" and review["requested_model"] == "gpt-6.2-sol"
+    assert review["verdict"] == "APPROVE"
+
+
+@pytest.mark.parametrize("model_line,blocker", [
+    ("CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.1-terra descent=1", "review-model-downgraded"),
+    ("NONE", "review-model-unknown"),
+    ("CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=- descent=0", "review-model-unknown"),
+])
+def test_approval_from_a_downgraded_or_unknown_model_goes_to_the_operator(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_line: str, blocker: str) -> None:
+    (tmp_path / "w").mkdir()
+    world = World(tmp_path / "w", monkeypatch)
+    (world.state / "review.model").write_text(model_line)
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", blocker)
+    assert entry["resume_state"] == "collected" and not entry.get("review")
+    assert world.verify_calls == []  # never reached verification, let alone integration
+
+
+BLANK_VERIFY_CONFIG = {"verify": {"cmd": "   ", "timeout_s": 60, "deps": []}}
+
+
+@pytest.mark.parametrize("policy", ["auto", "required"])
+def test_blank_verify_command_never_routes_to_the_cloud(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    world = World(tmp_path, monkeypatch, config=BLANK_VERIFY_CONFIG)
+    rc, out = world.start(tasks=[task("t1", "src/a/**", verify_cmd="  \t")], policy=policy)
+    assert rc == 3 and "CLOUD-REFUSED" in out and "VERIFY_CMD_MISSING" in out
+    assert world.verify_calls == [] and not world.spawned
+
+
+def test_blank_task_verify_command_uses_the_non_blank_config_fallback(world: World) -> None:
+    assert world.start(tasks=[task("t1", "src/a/**", verify_cmd="   ")])[0] == 0
+    assert world.doc()["tasks"]["t1"]["verify_cmd"] == "true"
+    world.drive()
+    assert world.verify_cmds and set(world.verify_cmds) == {"true"}
+
+
+def test_blank_effective_verify_command_in_the_ledger_goes_to_the_operator_not_to_verified(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(tmp_path, monkeypatch, config=BLANK_VERIFY_CONFIG)
+    assert world.start(tasks=[task("t1", "src/a/**", verify_cmd="true")])[0] == 0
+    # a hand-edited or legacy ledger: the router can no longer have refused this
+    L.locked_update(L.run_ledger_path(world.root, "r1"),
+                    lambda d: d["tasks"]["t1"].__setitem__("verify_cmd", "   ") or d)
+    world.drive()
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "verify-cmd-missing")
+    assert entry["resume_state"] == "reviewed"
+    assert world.verify_calls == [] and entry["state"] != "verified"
 
 
 def test_failing_tests_reject_and_integrate_nothing(world: World) -> None:
@@ -1487,6 +1552,70 @@ def test_a_foreign_candidate_is_unbound_and_polling_continues(world: World) -> N
     assert entry["state"] in ("launched", "running"), (entry["state"], entry["blocker"])
     assert ["refs/heads/claude/someone-else", commit] in entry["rejected_candidates"]
     assert entry["bound_oid"] is None and world.count("claude") == 1
+
+
+FOREIGN_NONCE = "f" * 32
+LIVE_REJECTED_MANIFEST = json.loads((REPO / "tests" / "fixtures" / "cloud" / "live" /
+                                     "claude-manifest-strings-tests-run.json").read_text())
+
+
+def _drive_to_result(world: World, **spec: Any) -> Dict[str, Any]:
+    world.behavior(t1=spec)
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=14)
+    return world.doc()["tasks"]["t1"]
+
+
+@pytest.mark.parametrize("manifest,code", [
+    ({"tests_run": LIVE_REJECTED_MANIFEST["tests_run"]}, "MANIFEST_TESTS_RUN"),  # the real rejected manifest
+    ({"generation": 9}, "MANIFEST_MISMATCH"),
+    ({"zzz-worker-authored-key": 1}, "MANIFEST_KEYS"),
+])
+def test_an_invalid_manifest_on_the_tasks_own_branch_goes_to_the_operator(world: World, manifest: Dict[str, Any], code: str) -> None:
+    entry = _drive_to_result(world, manifest=manifest)
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "manifest-invalid")
+    assert entry["resume_state"] == "result-ready" and entry["rejected_candidates"] == []
+    text = " ".join(entry["decisions_needed"])
+    assert code in text
+    assert "zzz-worker-authored-key" not in text  # the validator's code, never worker-authored detail
+    assert world.slots() == [] and world.count("claude") == 1  # slot released, polling stopped
+    assert world.doc()["integration"]["tip"] == world.base
+
+
+def test_an_invalid_manifest_on_the_own_branch_is_parked_not_polled_again(world: World) -> None:
+    entry = _drive_to_result(world, manifest={"tests_run": LIVE_REJECTED_MANIFEST["tests_run"]})
+    assert entry["state"] == "needs-operator"
+    world.drive(max_ticks=6)  # more ticks change nothing: no re-poll, no unbind
+    again = world.doc()["tasks"]["t1"]
+    assert (again["state"], again["blocker"]) == ("needs-operator", "manifest-invalid")
+    assert again["bound_oid"] == entry["bound_oid"] and again["rejected_candidates"] == []
+
+
+def test_a_foreign_new_ref_with_an_invalid_manifest_is_still_not_this_tasks_result(world: World) -> None:
+    entry = _drive_to_result(world, branch="claude/someone-else", manifest={"nonce": FOREIGN_NONCE})
+    assert entry["state"] in ("launched", "running"), (entry["state"], entry["blocker"])
+    assert entry["blocker"] is None and entry["bound_oid"] is None
+    assert [ref for ref, _ in entry["rejected_candidates"]] == ["refs/heads/claude/someone-else"]
+
+
+def test_a_foreign_named_ref_carrying_this_tasks_nonce_with_another_bad_field_goes_to_the_operator(world: World) -> None:
+    entry = _drive_to_result(world, branch="claude/auto-named-by-the-provider", manifest={"base_sha": "0" * 40})
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "manifest-invalid")
+    assert "MANIFEST_MISMATCH" in " ".join(entry["decisions_needed"])
+
+
+def test_a_missing_manifest_on_the_own_branch_keeps_polling(world: World) -> None:
+    """Only a PRESENT but invalid manifest parks; a missing one may still be pushed later."""
+    world.behavior(t1={"push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=3)
+    entry = world.doc()["tasks"]["t1"]
+    tree = run_git(world.root, "rev-parse", world.base + "^{tree}")
+    commit = run_git(world.root, "commit-tree", "-p", world.base, "-m", "own branch, no manifest", tree)
+    run_git(world.root, "push", "-q", "origin", "%s:refs/heads/claude/ffs-r1-t1-%s" % (commit, entry["nonce"][:8]))
+    world.drive(max_ticks=8)
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] in ("launched", "running") and entry["blocker"] is None
 
 
 def test_a_sibling_tasks_branch_is_not_this_tasks_candidate(world: World) -> None:

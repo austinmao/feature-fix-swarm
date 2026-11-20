@@ -13,7 +13,10 @@
 # producer's own family. The diff and the worker summary are untrusted data and
 # travel inside fence-data.sh fences.
 #
-# Output: the reviewer text on stdout, then exactly one final line
+# Output: the reviewer text on stdout, then (only when the reviewer ran) one line
+#   CLOUD-REVIEW-MODEL: requested=<model|-> answered=<model|-> descent=<0|1>
+# taken from adversary-host.sh's out-of-band answer provenance, then exactly one
+# final line
 #   CLOUD-REVIEW: APPROVE|REVISE|UNAVAILABLE|cap
 # Exit: 0 APPROVE, 1 REVISE, 3 UNAVAILABLE, 4 round cap reached, 2 usage.
 # Verdict rule: ONLY the last non-empty line of the reviewer output counts, and it
@@ -36,9 +39,21 @@ usage() {
   exit 2
 }
 
+# MODEL_LINE is set once the reviewer ran; it is printed immediately before the
+# verdict line, after all reviewer text, so the reviewer cannot author it.
+MODEL_LINE=""
+
 finish() { # finish <word> <exit-code>
+  [ -z "$MODEL_LINE" ] || printf '%s\n' "$MODEL_LINE"
   printf 'CLOUD-REVIEW: %s\n' "$1"
   exit "$2"
+}
+
+# model_token <value>: a short, charset-limited token, or "-" when empty.
+model_token() {
+  local v
+  v="$(printf '%s' "$1" | tr -cd 'A-Za-z0-9._:-' | cut -c1-64)"
+  printf '%s' "${v:--}"
 }
 
 { [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } || usage
@@ -103,9 +118,19 @@ PROMPT="$(cat "$WORK/prompt.txt")"
 
 REQUEST='{"kind":"tier","name":"judgment"}'
 cd "$WORK" || finish UNAVAILABLE 3
-OUTPUT="$(adversary_invoke_typed_request "$KIND" "$KIND" "$REVIEW_TIMEOUT_S" "$REQUEST" "$PROMPT" 2>"$WORK/review.err")"
+# Not inside $(...): adversary-host.sh reports the model that actually answered
+# (and any tier descent) through shell variables, which a subshell would lose.
+ADVERSARY_LAST_TIER_DESCENT=0 ADVERSARY_LAST_REQUESTED_MODEL="" ADVERSARY_LAST_ANSWERED_MODEL=""
+adversary_invoke_typed_request "$KIND" "$KIND" "$REVIEW_TIMEOUT_S" "$REQUEST" "$PROMPT" \
+  >"$WORK/review.out" 2>"$WORK/review.err"
 invoke_rc=$?
+OUTPUT="$(cat "$WORK/review.out")"
 cat "$WORK/review.err" >&2
+if [ "$invoke_rc" -eq 0 ]; then
+  descent=0
+  [ "${ADVERSARY_LAST_TIER_DESCENT:-0}" = "1" ] && descent=1
+  MODEL_LINE="CLOUD-REVIEW-MODEL: requested=$(model_token "${ADVERSARY_LAST_REQUESTED_MODEL:-}") answered=$(model_token "${ADVERSARY_LAST_ANSWERED_MODEL:-}") descent=$descent"
+fi
 
 [ -n "$OUTPUT" ] && printf '%s\n' "$OUTPUT"
 [ "$invoke_rc" -eq 0 ] || finish UNAVAILABLE 3

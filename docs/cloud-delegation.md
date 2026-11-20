@@ -37,9 +37,11 @@ What it is not:
 
 - It does not use API keys. Both CLIs must be logged in with OAuth, and
   `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` must be unset.
-- It is not available on `/feature-implement` or `/task-swarm` yet. Those
-  skills are unchanged, and `--cloud` on them is undefined, as any unknown
-  flag is.
+- It is not available on `/feature-implement` or `/task-swarm` yet. Given
+  `--cloud` (any form) or `FFS_CLOUD`, those skills print one line saying
+  cloud delegation for them arrives in a later release and that
+  `/swarm --cloud` is available now, then stop. Nothing else about them
+  changes.
 - It is not a way to run untrusted code safely. Cloud results are treated as
   untrusted input and gated, but a session you start still runs with
   whatever its environment exposes.
@@ -294,7 +296,7 @@ in `plan` output under `tasks.<id>.reasons`.
 | `OWNS_MISSING` | It has no `owns`. |
 | `OWNS_INVALID` | An `owns` glob is absolute, contains `..`, or is empty. |
 | `OWNS_DENYLIST` | An `owns` glob could name a denylisted path. See [Denylist](#denylist). |
-| `VERIFY_CMD_MISSING` | It has no `[verify]` and `config.verify.cmd` is empty. |
+| `VERIFY_CMD_MISSING` | It has no `[verify]` and `config.verify.cmd` is empty. A whitespace-only command counts as empty: `bash -c '   '` exits 0 and would pass with no test run. |
 | `NO_PROVIDER_AVAILABLE` | No provider is usable: binary missing, API-key variable set, Codex environment id missing, or the provider limit is 0. |
 | `NO_PROVIDER_FOR_TIER` | No usable provider takes its tier. Claude takes execution, volume and judgment. Codex takes execution and volume. |
 | `SECRET_NOT_EXPOSED` | A usable provider for its tier does not list all its `needs-secret` names in `secrets.exposure.<provider>`. |
@@ -481,11 +483,17 @@ two consecutive polls. The first bind wins, and later candidates are
 ignored. If a ref bound from polling has a missing or invalid manifest, FFS
 treats it as another session's result: it records the ref as rejected,
 clears the bind and returns the task to polling. A result you bound with
-`adopt` is not treated that way. Known gap: this covers a branch with the
-right name and nonce too. If its manifest is invalid, FFS only writes a line
-to `orchestrate.log` and polls again until the deadline. It does not raise
-`needs-operator`. A live run hit this once, when the worker wrote `tests_run`
-items as strings.
+`adopt` is not treated that way. There is one exception: a ref that is
+provably this task generation's own result. That is a ref named exactly
+`claude/ffs-<run>-<task>-<nonce8>`, or a manifest carrying this generation's
+nonce, whose manifest is present but fails validation. FFS moves that task
+to `needs-operator` with blocker `manifest-invalid` and stops polling. The
+recorded detail names the validator's error code (for example
+`MANIFEST_TESTS_RUN`), never text the worker wrote. A live run hit this once,
+when the worker wrote `tests_run` items as strings. Only `abandon` clears the
+blocker; `abandon --retry` starts a new generation. A foreign `claude/*` ref
+that merely is new, and a branch with no manifest at all, still go back to
+polling.
 
 Codex: there is no branch. FFS polls `codex cloud status <id>` and, when the
 task is ready, downloads `codex cloud diff <id>`, applies it to the task base
@@ -559,10 +567,20 @@ bytes. There is no allowlist for binary files. (The `review.binary_allow`
 config key was removed.)
 
 The verdict is the last non-empty line of the reviewer output, exactly
-`VERDICT: APPROVE` or `VERDICT: REVISE`. The script ends with one line
+`VERDICT: APPROVE` or `VERDICT: REVISE`. When the reviewer ran, the script
+first prints one `CLOUD-REVIEW-MODEL: requested=<model> answered=<model>
+descent=<0|1>` line, taken from `adversary-host.sh`'s own record of which
+model answered (not from the reviewer's output). It ends with one line
 `CLOUD-REVIEW: APPROVE|REVISE|UNAVAILABLE|cap` and exits 0, 1, 3 or 4. Any
 other verdict, a nonzero reviewer exit, or a diff over 2,000,000 bytes is
-`review-unavailable`. `REVISE` rejects the result. Each run of the script
+`review-unavailable`. An `APPROVE` only counts when the model that answered
+is the requested judgment-tier model. `adversary-host.sh` can descend to a
+weaker model of the same vendor and still return `APPROVE`. That approval ends
+in `needs-operator` with `review-model-downgraded`, and an approval whose model
+is not reported ends with `review-model-unknown`. The opposite-vendor rule and
+`FFS_CROSS_VENDOR_FALLBACK=off` are unchanged. The ledger `review` record
+carries `model` and `requested_model` (records written before this are still
+valid). `REVISE` rejects the result. Each run of the script
 spends one of two review rounds from a durable round meter for that task
 generation, whatever the outcome. `resolve --action retest` on a review
 blocker starts a fresh two-round meter (the optional `attempt` argument). It
@@ -922,6 +940,10 @@ that ends terminal but not `integrated` becomes `failed` with blocker
 | `denylist` | `needs-operator` | A changed path matches the denylist, holds a Unicode format or control character (Cf or Cc), or collides in case with another path (detail `case-colliding paths`). | `resolve --action reject`, or `abandon --retry` |
 | `dependency-change` | `needs-operator` | A dependency or lock file changed. | `resolve --action accept-deps` (needs the `install:<pkg>` grants, and `install:unattributed:<digest12>` when the change cannot be attributed to named packages), or `reject` |
 | `review-unavailable` | `needs-operator` | Review failed to produce a verdict, the diff was too large, the review script is missing, or the outbound scan of the review text refused. | `resolve --action retest` (refused after two retests of this task generation) or `reject` |
+| `review-model-downgraded` | `needs-operator` | The review approved, but a weaker model than the requested judgment-tier model answered. The detail names both models. | `resolve --action retest` (counts against the same two-retest limit as the other review blockers) or `reject` |
+| `review-model-unknown` | `needs-operator` | The review approved, but the answering model could not be determined. | `resolve --action retest` (same limit) or `reject` |
+| `verify-cmd-missing` | `needs-operator` | The effective verify command was empty or whitespace-only when verification ran. The router refuses such a task, so this is a defensive stop for a hand-edited or older ledger. No tests ran. | `resolve --action reject` or `abandon --retry` |
+| `manifest-invalid` | `needs-operator` | The task's own result branch (or a manifest carrying its nonce) has a manifest the validator rejected. The detail names the validator error code. | `abandon [--retry]` |
 | `binary-change` | `needs-operator` | The result changes binary content. This always blocks; there is no allowlist. The reviewer cannot read the bytes. | `resolve --action reject` or `abandon --retry` |
 | `review-cap` | `needs-operator` | The two review rounds of the current meter are spent. | `resolve --action retest` (fresh meter; refused after two retests of this task generation), `resolve --action reject` or `abandon --retry` |
 | `sandbox-unavailable` | `needs-operator` | The sandbox cannot run, or the tree cannot be materialized. | `resolve --action retest` after the fix, or `reject` |
@@ -1491,7 +1513,10 @@ leak first.
   on the same repository can then be bound to the wrong task. FFS never binds
   a ref named for another task of the same run. If the bound ref has a
   missing or invalid manifest (which includes a wrong nonce), FFS records it
-  as rejected and goes back to polling.
+  as rejected and goes back to polling. The exception is a ref that is
+  provably the task's own (its exact expected branch name, or the task's
+  nonce in the manifest) with a present but invalid manifest: that goes to
+  `needs-operator` with `manifest-invalid`.
 - A task in `needs-operator` or `uncertain` keeps its provider slot until its
   launch deadline. The orchestrator then releases the slot once. Until then
   the capacity for other tasks is smaller. A slot of a missing or `done` run
@@ -1558,8 +1583,8 @@ What was seen:
 - The first attempt failed at the manifest check. The worker wrote `tests_run`
   items as strings, and the validator requires objects `{"cmd": ..., "rc":
   ...}`. The packet had not stated that shape. The worker contract now states
-  it. A result that fails this way is logged and polled again; see the gap
-  under [Binding](#binding).
+  it. A result that fails this way on the task's own branch now ends in
+  `needs-operator` with `manifest-invalid`; see [Binding](#binding).
 - The next run passed every gate: nonce binding, isolation, path and secret
   checks, review by the opposite family (verdict `APPROVE`, recorded with the
   diff sha and the patch id), the sandboxed verify command (rc 0), and
@@ -1663,8 +1688,10 @@ contract, this page documents the code. Differences found:
 - An `uncertain` Claude launch gets 3 recovery polls and an `uncertain` Codex
   launch gets 1, where the contract allows one re-parse or one tick.
 - A Claude candidate with a missing or invalid manifest is unbound and the
-  task goes back to polling, with no `needs-operator` blocker, even when its
-  branch name and nonce are right. The contract does not describe this.
+  task goes back to polling, unless the candidate is provably this task's own
+  result (exact expected branch name, or this generation's nonce) and the
+  manifest is present but invalid. That case is `needs-operator` with
+  `manifest-invalid`.
 - Operator verbs start `orchestrate --resume --wait-lock 300` when the lock is
   held, not a 30 second wait.
 - The sandbox profile is stricter than the contract's section 14.7. It denies

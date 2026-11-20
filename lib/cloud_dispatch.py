@@ -206,9 +206,12 @@ BLOCKER_MAP: Dict[str, Tuple[str, Optional[str]]] = {
     cloud_collect.B_CANDIDATE_CONFLICT: (EV_REJECT, ledger.B_QUARANTINE_REFUSED),
     cloud_collect.B_REVIEW_UNAVAILABLE: (EV_NEEDS, ledger.B_REVIEW_UNAVAILABLE),
     cloud_collect.B_REVIEW_CAP: (EV_NEEDS, ledger.B_REVIEW_CAP),
+    cloud_collect.B_REVIEW_MODEL_DOWNGRADED: (EV_NEEDS, ledger.B_REVIEW_MODEL_DOWNGRADED),
+    cloud_collect.B_REVIEW_MODEL_UNKNOWN: (EV_NEEDS, ledger.B_REVIEW_MODEL_UNKNOWN),
     cloud_collect.B_REVIEW_REVISE: (EV_REJECT, ledger.B_REVIEW_REVISE),
     cloud_collect.B_TESTS_FAILED: (EV_REJECT, ledger.B_TESTS_FAILED),
     cloud_collect.B_SANDBOX: (EV_NEEDS, ledger.B_SANDBOX_UNAVAILABLE),
+    cloud_collect.B_VERIFY_CMD_BLANK: (EV_NEEDS, ledger.B_VERIFY_CMD_MISSING),
     cloud_collect.B_MERGE_CONFLICT: (EV_NEEDS, ledger.B_MERGE_CONFLICT),
     cloud_collect.B_PATCH_ID: (EV_NEEDS, ledger.B_PATCH_ID_MISMATCH),
     cloud_collect.B_TIP_MOVED: (EV_REPLAN, None),
@@ -566,6 +569,18 @@ def config_section(config: Dict[str, Any], key: str) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def effective_verify_cmd(task_cmd: Any, config: Dict[str, Any]) -> str:
+    """The task's own verify command, else ``config.verify.cmd``; both stripped, ``""`` when neither is non-blank.
+
+    A whitespace-only task command is blank, so it falls back to the config command instead of
+    shadowing it (``bash -c '   '`` exits 0 and would pass with no test run)."""
+    own = task_cmd.strip() if isinstance(task_cmd, str) else ""
+    if own:
+        return own
+    fallback = config_section(config, "verify").get("cmd")
+    return fallback.strip() if isinstance(fallback, str) else ""
+
+
 def limits_from(config: Dict[str, Any]) -> Dict[str, int]:
     limits = dict(delegation_router.DEFAULT_LIMITS)
     for key, value in config_section(config, "limits").items():
@@ -908,7 +923,7 @@ def _consumer_checks(svc: Services, root: Path, base_sha: Optional[str], config:
     hooked = settings.ok and ".ffs/cloud/session-start.sh" in settings.text()
     checks.append(Check("SESSION_HOOK", OK if hooked else WARN,
                         "SessionStart entry committed" if hooked else "no SessionStart entry in the committed settings"))
-    verify_cmd = str(config_section(config, "verify").get("cmd") or "")
+    verify_cmd = str(config_section(config, "verify").get("cmd") or "").strip()
     checks.append(Check("VERIFY_CMD", OK if verify_cmd else WARN,
                         "config.verify.cmd set" if verify_cmd else "config.verify.cmd is empty (tasks need their own verify)"))
     return checks
@@ -1205,7 +1220,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     _scan_start_inputs(records, run=run, base_sha=base_sha, config=config)
     sha = ledger.tasks_sha256(records)
     specs = [{"id": r["id"], "provider": r["provider"], "depends_on": r["depends_on"], "owns": r.get("owns") or [],
-              "verify_cmd": r.get("verify_cmd") or str(config_section(config, "verify").get("cmd") or "")}
+              "verify_cmd": effective_verify_cmd(r.get("verify_cmd"), config)}
              for r in records]
     reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha, now=int(svc.now()))
     if not git(svc, root, ["update-ref", ledger.integration_ref(run), base_sha]).ok:
@@ -2422,7 +2437,9 @@ class Orchestrator:
         result = cloud_collect.collect(ctx)
         self.write_collect_log(name, gen, result)
         if not result.ok:
-            if self.is_wrong_candidate(entry, result):
+            if self.is_own_invalid_manifest(entry, name, result):
+                self.park_invalid_manifest(name, gen, entry, result)
+            elif self.is_wrong_candidate(entry, result):
                 self.unbind(name, gen, self.bound_ref(doc, name, entry), oid, result)
             else:
                 self.apply_blocker(name, gen, STAGE_COLLECT, result, ref_oid=(self.bound_ref(doc, name, entry), oid))
@@ -2445,6 +2462,29 @@ class Orchestrator:
         result (no poll ref) is the operator's explicit choice and stays terminal."""
         names = set(getattr(cloud_collect, n, None) for n in WRONG_CANDIDATE_CONSTANTS) | set(WRONG_CANDIDATE_NAMES)
         return entry["provider"] == "claude" and bool(entry.get("bound_ref")) and result.blocker in names
+
+    def is_own_invalid_manifest(self, entry: Dict[str, Any], name: str, result: cloud_collect.StepResult) -> bool:
+        """The bound candidate is provably THIS task generation's result but its manifest fails validation.
+
+        True for a poll-bound Claude candidate whose ref is exactly this generation's expected result branch
+        (``claude/ffs-<run>-<task>-<nonce8>``), or whose manifest carries this generation's nonce, with a
+        manifest that is present and rejected by the validator.  A foreign ``claude/*`` ref that merely is new
+        matches neither, so it stays "not this task's result" and polling continues; a missing manifest is
+        not covered here either (the worker may still push it)."""
+        if entry["provider"] != "claude" or not entry.get("bound_ref") or result.blocker != cloud_collect.B_MANIFEST_INVALID:
+            return False
+        expected = "refs/heads/" + ledger.claude_result_branch(self.run_id, name, entry["nonce"])
+        return entry["bound_ref"] == expected or bool(result.data.get("nonce_matches"))
+
+    def park_invalid_manifest(self, name: str, gen: int, entry: Dict[str, Any], result: cloud_collect.StepResult) -> None:
+        """``needs-operator`` / ``manifest-invalid``; the detail names the validator's error code only."""
+        code = str(result.data.get("validator_code") or "MANIFEST_UNPARSEABLE")
+        self.log("%s g%d: this task's own result has an invalid manifest (%s): needs-operator" % (name, gen, code))
+        parked = cloud_collect.StepResult(
+            False, "needs-operator", cloud_collect.B_MANIFEST_INVALID,
+            "the task's own result branch carries a manifest the validator rejected: %s" % code)
+        self.apply_blocker(name, gen, STAGE_COLLECT, parked,
+                           override=(EV_NEEDS, ledger.B_MANIFEST_INVALID))
 
     def unbind(self, name: str, gen: int, ref: str, oid: str, result: cloud_collect.StepResult) -> None:
         self.log("%s g%d: candidate %s is not this task's result (%s): back to polling" % (
@@ -2484,8 +2524,9 @@ class Orchestrator:
         write_private(self.run_file("collect", name, gen), redact_text(line, 20000).encode("utf-8"))
 
     def apply_blocker(self, name: str, gen: int, stage: str, result: cloud_collect.StepResult,
-                      ref_oid: Optional[Tuple[str, str]] = None) -> bool:
-        event, blocker = map_blocker(stage, result.blocker)
+                      ref_oid: Optional[Tuple[str, str]] = None,
+                      override: Optional[Tuple[str, Optional[str]]] = None) -> bool:
+        event, blocker = override or map_blocker(stage, result.blocker)
         reasons = ["%s: %s" % (result.blocker, result.detail)]
         manifest = result.data.get("manifest") if isinstance(result.data, dict) else None
         if isinstance(manifest, dict) and result.blocker == cloud_collect.B_MANIFEST_BLOCKED:
@@ -2532,13 +2573,14 @@ class Orchestrator:
             self.apply_blocker(name, gen, STAGE_REVIEW, result)
             return False
         review = {key: result.data[key] for key in ("family", "verdict", "diff_sha", "patch_id", "tree")}
+        review.update({key: result.data[key] for key in ("model", "requested_model") if result.data.get(key)})
         return self.apply(name, gen, lambda d: ledger.transition(d, name, ledger.EV_REVIEW_APPROVE, generation=gen, review=review), "review")
 
     def verify_settings(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         verify = config_section(self.config, "verify")
         timeout = verify.get("timeout_s")
         return {
-            "cmd": entry.get("verify_cmd") or str(verify.get("cmd") or ""),
+            "cmd": effective_verify_cmd(entry.get("verify_cmd"), self.config),
             "deps": [str(d) for d in verify.get("deps", [])] if isinstance(verify.get("deps"), list) else [],
             "read_roots": [str(d) for d in verify.get("read_roots", [])] if isinstance(verify.get("read_roots"), list) else [],
             "timeout_s": float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0

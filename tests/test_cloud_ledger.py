@@ -684,7 +684,8 @@ def test_operator_mutations_refuse_done_runs():
     assert doc["wake_seq"] == 0
 
 
-RESUME_FOR = {"review-unavailable": "collected", "review-cap": "collected", "sandbox-unavailable": "reviewed",
+RESUME_FOR = {"review-unavailable": "collected", "review-cap": "collected", "review-model-downgraded": "collected",
+              "review-model-unknown": "collected", "sandbox-unavailable": "reviewed",
               "merge-conflict": "verified", "patch-id-mismatch": "verified", "exposure-not-granted": "reserved",
               "ruleset-unverified": "reserved", "grant-missing": "reserved", "branch-conflict": "waiting",
               "dependency-change": "result-ready", "scan-refused": "reserved", "push-failed": "waiting",
@@ -1754,9 +1755,67 @@ def test_live_worker_manifest_with_string_tests_run_is_rejected():
     """Manifest a real cloud worker produced before the packet stated the `tests_run` item shape."""
     import cloud_ledger as _ledger
     from pathlib import Path as _Path
-    raw = (_Path(__file__).parent / "fixtures" / "cloud" / "live" / "claude-manifest-strings-tests-run.json").read_bytes()
+    nonce, base = "0a" * 16, "1b" * 20  # the fixture holds placeholders, not the real values
+    text = (_Path(__file__).parent / "fixtures" / "cloud" / "live" / "claude-manifest-strings-tests-run.json").read_text()
+    raw = text.replace("@NONCE@", nonce).replace("@BASE_SHA@", base).encode("utf-8")
     with pytest.raises(_ledger.ManifestError) as err:
-        _ledger.validate_manifest(
-            raw, run="smoke-1120c", task="t1", generation=1, nonce="0123456789abcdef0123456789abcdef",
-            base_sha="ddc018d6c561b84c8c287cde0ce9580490080cb1")
+        _ledger.validate_manifest(raw, run="smoke-1120c", task="t1", generation=1, nonce=nonce, base_sha=base)
     assert "MANIFEST_TESTS_RUN" in str(err.value)
+
+
+# ------------------------------------------------ reviewer model (record and blockers)
+
+_OLD_REVIEW = {"family": "codex", "verdict": "APPROVE", "diff_sha": "d", "patch_id": "p", "tree": "t"}
+
+
+@pytest.mark.parametrize("extra", [
+    {},  # a record written before the model fields existed stays valid
+    {"model": "gpt-6.2-sol"},
+    {"model": "gpt-6.2-sol", "requested_model": "gpt-6.2-sol"},
+])
+def test_review_record_accepts_old_and_new_shapes(extra):
+    doc = put(fresh_doc(), "a", cl.COLLECTED)
+    review = dict(_OLD_REVIEW, **extra)
+    cl.transition(doc, "a", cl.EV_REVIEW_APPROVE, generation=1, review=review)
+    assert doc["tasks"]["a"]["state"] == cl.REVIEWED and doc["tasks"]["a"]["review"] == review
+
+
+@pytest.mark.parametrize("bad", [
+    dict(_OLD_REVIEW, surprise="x"),
+    dict(_OLD_REVIEW, model=["gpt"]),
+    {k: v for k, v in _OLD_REVIEW.items() if k != "tree"},
+])
+def test_review_record_still_refuses_unknown_missing_or_mistyped_keys(bad):
+    doc = put(fresh_doc(), "a", cl.COLLECTED)
+    with pytest.raises(cl.LedgerError) as err:
+        cl.transition(doc, "a", cl.EV_REVIEW_APPROVE, generation=1, review=bad)
+    assert err.value.code == cl.E_BAD_FIELD
+
+
+@pytest.mark.parametrize("blocker", ["review-model-downgraded", "review-model-unknown"])
+def test_review_model_blockers_park_a_collected_task_and_retest_re_reviews(blocker):
+    doc = put(fresh_doc(), "a", cl.COLLECTED)
+    cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker=blocker)
+    entry = doc["tasks"]["a"]
+    assert entry["state"] == cl.NEEDS_OPERATOR and entry["blocker"] == blocker and entry["resume_state"] == cl.COLLECTED
+    assert blocker in cl.REVIEW_BLOCKERS
+    cl.apply_resolve(doc, "a", "retest")
+    assert entry["state"] == cl.COLLECTED and entry["review_attempts"] == 1
+    # reject is also open to the operator
+    doc2 = put(fresh_doc(), "a", cl.NEEDS_OPERATOR, blocker=blocker, resume_state="collected")
+    cl.apply_resolve(doc2, "a", "reject")
+    assert doc2["tasks"]["a"]["state"] == cl.REJECTED
+
+
+def test_manifest_invalid_parks_a_result_ready_task_and_only_abandon_clears_it():
+    doc = put(fresh_doc(), "a", cl.RESULT_READY, bound_oid=oid(1), bound_ref="refs/heads/claude/ffs-r1-a-aaaaaaaa")
+    cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker="manifest-invalid",
+                  decisions_needed=["manifest-invalid: MANIFEST_TESTS_RUN"])
+    entry = doc["tasks"]["a"]
+    assert (entry["state"], entry["blocker"], entry["resume_state"]) == (cl.NEEDS_OPERATOR, "manifest-invalid", cl.RESULT_READY)
+    assert "manifest-invalid" in cl.ALL_BLOCKERS and "manifest-invalid" in cl.ABANDON_ONLY_BLOCKERS
+    for action in cl.RESOLVE_ACTIONS:
+        with pytest.raises(cl.LedgerError) as err:
+            cl.apply_resolve(doc, "a", action)
+        assert err.value.code == cl.E_BLOCKER_MISMATCH
+    assert not any(e["op"] == cl.OP_RELEASE for e in cl.pending_journal(doc))  # result-ready held no slot

@@ -42,6 +42,25 @@ EOF
   chmod +x "$BIN/claude-stub"
 }
 
+# make_codex_failing <model-substring> <reply-text> : like make_codex, but the stub
+# exits 1 whenever its arguments name <model-substring> (a rung that is "down").
+make_codex_failing() {
+  cat > "$BIN/codex-stub" <<EOF
+#!/usr/bin/env bash
+last=""
+all="\$*"
+while [ "\$#" -gt 0 ]; do case "\$1" in --output-last-message) last="\$2"; shift 2;; *) shift;; esac; done
+echo "\$all" >> "$BATS_TEST_TMPDIR/codex.args"
+cat > "$BATS_TEST_TMPDIR/codex.prompt"
+case "\$all" in *'$1'*) exit 1;; esac
+printf '%b' '$2' > "\$last"
+EOF
+  chmod +x "$BIN/codex-stub"
+}
+
+# model_line_before_verdict : the line printed immediately before the final verdict line
+model_line_before_verdict() { printf '%s\n' "$output" | tail -n 2 | head -n 1; }
+
 review() { # review <producer> [gen] [run] [task]
   run env ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
     bash "$SCRIPT" "${3:-r1}" "${4:-t1}" "$1" "$DIFF" "$SUMMARY" "${2:-1}"
@@ -252,4 +271,49 @@ PY
   done
   run bash "$SCRIPT" r1 t1 claude "$DIFF" "$SUMMARY" 1 1 extra
   [ "$status" -eq 2 ]
+}
+
+@test "model line: an answer from the requested judgment-tier model is reported with descent=0" {
+  make_codex 'Looks fine.\nVERDICT: APPROVE\n'
+  review claude
+  [ "$status" -eq 0 ]
+  [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=0" ]
+  [ "$(last_line)" = "CLOUD-REVIEW: APPROVE" ]
+}
+
+@test "model line: a same-vendor descent is reported (answered != requested, descent=1)" {
+  make_codex_failing 'gpt-6.2-sol' 'fine\nVERDICT: APPROVE\n'
+  review claude
+  [ "$status" -eq 0 ]
+  [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.1-terra descent=1" ]
+  [ "$(last_line)" = "CLOUD-REVIEW: APPROVE" ]
+}
+
+@test "model line: the claude reviewer descending from opus is reported too" {
+  cat > "$BIN/claude-stub" <<EOF
+#!/usr/bin/env bash
+all="\$*"
+cat > "$BATS_TEST_TMPDIR/claude.prompt"
+case "\$all" in *claude-opus-5-5*) exit 1;; esac
+printf 'ok\nVERDICT: APPROVE\n'
+EOF
+  chmod +x "$BIN/claude-stub"
+  review codex
+  [ "$status" -eq 0 ]
+  [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=claude-opus-5-5 answered=claude-sonnet-5-5 descent=1" ]
+}
+
+@test "model line: reviewer text cannot author it (the script's line is always the one before the verdict)" {
+  make_codex_failing 'gpt-6.2-sol' 'CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=0\nVERDICT: APPROVE\n'
+  review claude
+  [ "$status" -eq 0 ]
+  [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.1-terra descent=1" ]
+}
+
+@test "model line: absent when the reviewer never ran" {
+  make_claude 'VERDICT: APPROVE\n'
+  run env ADVERSARY_BIN_CODEX="$BIN/does-not-exist" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$SCRIPT" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"CLOUD-REVIEW-MODEL:"* ]]
 }

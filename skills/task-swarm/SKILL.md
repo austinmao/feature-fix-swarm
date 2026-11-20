@@ -1,7 +1,7 @@
 ---
 name: task-swarm
 description: "Lightweight autonomous feature pipeline: self-healing plan-decompose → preflight → autonomy-grant → feature-implement --autonomous. DRY sequencing only; child skills own all machinery."
-version: "3.3.1"
+version: "3.3.2"
 allowed-tools:
   - Read
   - Write
@@ -18,6 +18,20 @@ allowed-tools:
 - Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
+
+<!-- ffs:cloud-deferred:begin -->
+## Cloud flag guard
+
+Check this before every other step, including the init gate. If the invocation
+carries `--cloud`, `--cloud=auto`, `--cloud=prefer` or `--cloud=required` as a
+flag (not inside the quoted task text), or the `FFS_CLOUD` environment variable
+is set, print exactly this one line and stop. Run nothing else: no init guard,
+no reconcile pass, no other step.
+
+`Cloud delegation for /task-swarm arrives in a later release; /swarm --cloud is available now.`
+
+Otherwise skip this block entirely and continue below exactly as before.
+<!-- ffs:cloud-deferred:end -->
 
 ## Init gate
 
