@@ -1901,6 +1901,43 @@ def test_cleanup_remote_delete_is_leased_to_the_recorded_oid(world: World) -> No
     assert run_git(world.origin, "rev-parse", remote_ref) == moved
 
 
+LEAKY_ID = "sk-" + "a1b2c3d4e5f6g7h8i9j0"  # a valid task id (lowercase, 23 chars) that the secret scanner flags
+
+
+def plan_out(world: World, tasks: List[Dict[str, Any]], capsys: pytest.CaptureFixture) -> Tuple[int, str]:
+    capsys.readouterr()
+    rc, out = world.cli("plan", "--tasks", world.tasks_file(tasks), "--policy", "auto", "--root", str(world.root))
+    return rc, out + capsys.readouterr().err  # usage errors go to stderr, refusals to stdout
+
+
+@pytest.mark.parametrize("tasks, code", [
+    ([task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")], "TASK_ID_DUPLICATE"),
+    ([task("t1", "src/a/**", depends_on=[LEAKY_ID])], "DEP_UNKNOWN"),
+    ([task(LEAKY_ID, "src/a/**", depends_on=["nope"])], "DEP_UNKNOWN"),
+    ([task(CANARY_KEY, "src/a/**")], "TASK_ID_INVALID"),
+])
+def test_route_errors_never_echo_an_id_the_secret_scanner_flags(
+        world: World, capsys: pytest.CaptureFixture, tasks: List[Dict[str, Any]], code: str) -> None:
+    rc, out = plan_out(world, tasks, capsys)
+    assert rc != 0 and code in out and "secret scanner" in out, out
+    assert LEAKY_ID not in out and CANARY_KEY not in out, out
+    capsys.readouterr()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file(tasks), "--policy", "auto", "--root", str(world.root))
+    out += capsys.readouterr().err
+    assert rc != 0 and "secret scanner" in out, out  # start's own id scan may refuse first (SECRET_IN_PROMPT)
+    assert LEAKY_ID not in out and CANARY_KEY not in out, out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_route_errors_for_clean_ids_are_unchanged(world: World, capsys: pytest.CaptureFixture) -> None:
+    rc, out = plan_out(world, [task("t1", "src/a/**"), task("t1", "src/b/**")], capsys)
+    assert rc != 0 and "duplicate task id 't1'" in out and "secret scanner" not in out, out
+    rc, out = plan_out(world, [task("t1", "src/a/**", depends_on=["nope"])], capsys)
+    assert rc != 0 and "task t1 depends on unknown task nope" in out and "secret scanner" not in out, out
+    rc, out = plan_out(world, [task("Bad Id", "src/a/**")], capsys)
+    assert rc != 0 and "task id 'Bad Id' must match" in out and "secret scanner" not in out, out
+
+
 def test_kick_spawns_a_lock_waiting_orchestrator_when_the_lock_is_held(world: World) -> None:
     """L6: a verb used to give up after a fixed wait while the holder was still parking."""
     parked_world(world)

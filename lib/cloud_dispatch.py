@@ -1033,11 +1033,15 @@ ROUTE_STORE = frozenset([delegation_router.CONFIG_INVALID])
 
 
 def route_error(exc: delegation_router.RouteError) -> DispatchError:
+    text = str(exc)
+    found = scan_text(text, "route-error")
+    if found:  # the router quotes caller-supplied task ids and dependency names, and this prints before any id scan: name the class, never the value
+        text = "an id or name in the task list matched the secret scanner: %s" % ", ".join(found)
     if exc.code in ROUTE_REFUSED:
-        return Refused(exc.code, str(exc))
+        return Refused(exc.code, text)
     if exc.code in ROUTE_STORE:
-        return StoreError(exc.code, str(exc))
-    return UsageError(exc.code, str(exc))
+        return StoreError(exc.code, text)
+    return UsageError(exc.code, text)
 
 
 def read_tasks_input(path: str) -> List[Any]:
