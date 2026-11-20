@@ -1,0 +1,447 @@
+{
+  "schema": 1,
+  "limits": {
+    "claude": 3,
+    "codex": 3,
+    "total": 6,
+    "max_local_verifiers": 1
+  },
+  "verify": {
+    "cmd": "",
+    "timeout_s": 900,
+    "deps": [
+      "node_modules",
+      ".venv"
+    ]
+  },
+  "secrets": {
+    "provider": "none",
+    "wrapper": "",
+    "install": "",
+    "exposure": {
+      "claude": [],
+      "codex": []
+    },
+    "network_secret_hosts": []
+  },
+  "scan": {
+    "allow": [
+      {
+        "blob": "086e71819b69922e993d94e9ac34133a84a60de7",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "096b033ff8e4e4cf8273c404544fe37a45b7bc7c",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "0c78785388c6178e9009629f213aed8e4f72f41b",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "0c8eb5913601aa0a75645c6483b2d689a02ac91c",
+        "class": "credential-url"
+      },
+      {
+        "blob": "0c8f358b8faa642b01f9dab631cd0345da7f1554",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "0db8885c59e2dd006adc28c0481c7d083c8e50e6",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "1182613d7f41ea60922a28e0213fb2a696ee6f5a",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "128588b683472512594520de9833584d8d8565ee",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "14dda499b96b9527bc2c5d4de5e59840fa77edb0",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "174334f5eac26be6fb126da97422c6a1931f0600",
+        "class": "credential-url"
+      },
+      {
+        "blob": "175a3b33ed922b28a00c4f2c9a420cf03c488e6c",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "17bde5768ecd077b26d8405f8680b14a4ee10f8e",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "19fc2dec25d07a691a7f85f4a6f4a8e722dd3dc3",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "1cb7ba02f1bb920b89178649e4dde315b28d5817",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "221006e6f35f31032087fb0fd20b655b23fa8e42",
+        "class": "github-token"
+      },
+      {
+        "blob": "22d26a7e7ddb2de335b3a511369489b40af862c7",
+        "class": "credential-url"
+      },
+      {
+        "blob": "22e6a6a9fda7b64c030b5eeb3c6aae7c42dceedf",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "2c3a7bb292039a232fc01ba68a473560703eeeca",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "2d5cb0a2fdcb42c1b9b057f7904f3885d46a2d39",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "2e3cf9405daf2af8540f34c6d0561a9a4ed85763",
+        "class": "pem-block"
+      },
+      {
+        "blob": "320232f0852620a82027dff7315ce83ca8cdcffd",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "3eab916b525a104e263e446b01db24613146125d",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "3f851d05f666b15b6e79f13cb0c3aabdb86f18aa",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "43643f008ebf79a55729f76bf7c01c9c6ab687b4",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "43b61ab4d5be3550741b4698022856b5831e928b",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "446e9b4a25f559bcb698c1996ab8eabaccd205b7",
+        "class": "sk-key"
+      },
+      {
+        "blob": "45c099c77367067cea17fe88c80a666c6527206e",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "462b52c834f4c88b5ce299eb2a2eb6f035cbd7de",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "4a1669903625f44e80b32f249ec8d481b077804c",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "4b2ecd268136a0656ba69a798e35b894410c5ff7",
+        "class": "github-token"
+      },
+      {
+        "blob": "4c5cfba902e867ea8991ea14f16fa912cf90e53a",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "50ca1a91ba8c2e36a0b5a3d979ef21a2900f9eb9",
+        "class": "jwt"
+      },
+      {
+        "blob": "512a27b8455351d838d451dd8da5bf75697fd801",
+        "class": "jwt"
+      },
+      {
+        "blob": "51b483177fd83f97bf6a8e2152dcc12aa560a765",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "53f2b2e6d53f9f9c599823f02b6e3ea3ef27394e",
+        "class": "github-token"
+      },
+      {
+        "blob": "59ef793104f99c9eea976ee4154108de2145c88d",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "5ab92e1683a3e472685393c373a94b6c0c0a2a5c",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "6646bacafcc62980969237487b711172f976de48",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "67dc6262b4c26aa0b36d2300263036aa5c0d2c2c",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "6834d67d498ae92fbdbe295855c6a81120339cab",
+        "class": "github-token"
+      },
+      {
+        "blob": "68904640aff3f40a8bee9f1a4a38bb07c3557547",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "6b67e5f64acc08baaa80e05b129254c29d1ba543",
+        "class": "aws-access-key"
+      },
+      {
+        "blob": "6cc03b51065a8693ad95eed271a7e48f796af3e9",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "6dcf74810ad25ee4cab85cbf7a2dc91493e1e85b",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "7127f9f2ae4e9a00885a6f709dc2f1a9c367c566",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "72c8c9e44b8d268169e61d9993cf339775e6b7e8",
+        "class": "sk-key"
+      },
+      {
+        "blob": "75447e639bed38e4521cbd8752e65736d8daa16e",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "77a574a28e5044c00d2ec2e41d2cc4ce932c9100",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "797feb2887edf03d8fda3ab9ee9074e4fe8e3279",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "7a83145e4cc544d381fdd146e87f7a685323b1aa",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "7fc33309dcbb02e7aaf1bf0068c1da75f84c2846",
+        "class": "aws-access-key"
+      },
+      {
+        "blob": "808ca0dcd09f1f5a2cb4a2a8d2dd7a30ee004704",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "80fa4cb57d3c0052d5e7c7338eb68902b8828947",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "81d7d1d1191d881884edfb18c40facf11baa1785",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "825e7fcaf08f19ee377285e269e677f52fa64cc6",
+        "class": "github-token"
+      },
+      {
+        "blob": "84d2de178f7f66adc10a490c77392f6875fab242",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "84df748024ffeae29b458a9831070099590399fd",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "84fcc9e9fc1161250f9e5ce9ee2e07c52ab02ba5",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "88cf2e23044db8addbe79df7506fb345ee9e7705",
+        "class": "credential-url"
+      },
+      {
+        "blob": "88ebe4d8e767215b98af2ce372356959a39ae0ed",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "898d11e640a951930b66d8f02cb425eaf1e2fb92",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "8c30796a0513507686a0e166d446f97764e7ae47",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "8d0516afc6d863467ebd091d99a9406a3a2d57f1",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "8d7287a1d5cb031e2a2d2386dfa2807b8f8a2eae",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "902368294c9cda9e9891d0e0db941afcd43ba3fc",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "904b4653b0b3935e06f5474eb7163cbf12d000c8",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "90596f42b12e47b9f1ca29ec4bd975bd3f2c7786",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "92c45572313a4de7d771288b1ff233249f618ce0",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "972d445b1b923ab63d58ead343549515e22e373d",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "9e0d4e449f25cd5f8a325e885cc152884aa2100d",
+        "class": "github-token"
+      },
+      {
+        "blob": "a1c7205db3f30f9bba06e48592d21913bb6b5b60",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "a2e955ed4f54c065962f23956f3084ff927e9476",
+        "class": "sk-key"
+      },
+      {
+        "blob": "a3210e4909ebed43330a43fc210e6ba3966f9c9f",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "a3a1388e98ee667fd169cb4279657a0900fcdbe3",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "a6b0cc5e15c5f620cafd896158323fa10107bfb2",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "ab160a64d916ca7f110944a4a56adfa8d3f1e449",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "ac65fdd8aaae8ae47e243b9593153fffb9788fb8",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "af6640bc93d3930e033848361c0cc22fcbe04047",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "b1e9044946bd33db5e54c166e779791a82f13134",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "b21e84658421be8e01a4c6d7e157addb54e83108",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "b2ecd61706bf406294441d2737ac1756da12017c",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "b33c36c558a6e74e38505872ddf320446e0c8898",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "b7da704da7879043d208ef25983ed31ef24e49ec",
+        "class": "github-token"
+      },
+      {
+        "blob": "c1798e4d6c499c8ee2cd2b4c63f8debacbb4c178",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "c64334c1fcb1946e20b0d825fca372a1befcace6",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "c7e05bd7daa6ddca77bb457d308289c59caece28",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "ce8bc3f8b87304bb7b1a7171f4b8370dedb90343",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "d52dbb3aac8fbf6433afa1624d2874c4f7cb83cd",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "d7f1e382c4e8266b43deaa5bc0bc3c01dc12efa7",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "dbbeffb8f9042fb141f819f623031804093b9430",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "dc2454bc49986c8ddf2c38d041e345049eac2806",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "dcdf2460de7fe0e7ada94480babc5e68b8b4be1f",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "e0eec4f563d10ecb8032d327a8414786069bde80",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "e491ddf21bc27889acbdc105fe2b3948d1f13814",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "e8722da8a4baa8b7c138b961111ad1ea730c3ce1",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "e9dc9903fc500776e7ccbf836d907bc6b949b1ad",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "f0cdeab7bea3e620f8fcd82affc5c671cbf5f0ed",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "f1174b76ff42f751df54353e62d59d26367341c1",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "f24869805104f1485a8b31fa3f8f4b0b63d4d426",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "fa6f8a3ee684537492f15392b1b592f2469ababc",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "fde5cb9c79ee70aea5829d0ea704166ef7dcfc06",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "fdf0b82fa41638c50611d7f182b84c8e8f3dcab6",
+        "class": "secret-assignment"
+      },
+      {
+        "blob": "ffeba3cd58b93f7bd9f1e54a095f3fc8fe7f65ec",
+        "class": "github-token"
+      }
+    ]
+  },
+  "codex": {
+    "env_id_var": "FFS_CODEX_CLOUD_ENV"
+  },
+  "deadline_hours": 12
+}
