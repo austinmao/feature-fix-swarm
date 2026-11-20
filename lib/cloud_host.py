@@ -1178,10 +1178,9 @@ def _clone_marker_path(clone: Path) -> Path:
 CLONE_MARKER_RE = re.compile(rb"([0-9]{1,20}):([0-9]{1,20})\n")
 
 
-def _read_marker(path: Path) -> Optional[Tuple[int, int]]:
-    """The ``(device, inode)`` a dispatcher marker names, or ``None`` for anything else at that name: it must be a
-    regular file with one link, owned by this user, holding exactly ``dev:ino``. Never follows a symlink or blocks on
-    a FIFO."""
+def _read_own_file(path: Path) -> Optional[bytes]:
+    """The content (at most 64 bytes) of a regular, single-link file owned by this user, else ``None``. Never follows a
+    symlink or blocks on a FIFO."""
     try:
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
@@ -1192,25 +1191,45 @@ def _read_marker(path: Path) -> Optional[Tuple[int, int]]:
             return None
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             return None
-        found = CLONE_MARKER_RE.fullmatch(os.read(fd, 65))
+        return os.read(fd, 65)
     except OSError:
         return None
     finally:
         os.close(fd)
+
+
+def _read_marker(path: Path) -> Optional[Tuple[int, int]]:
+    """The ``(device, inode)`` a dispatcher marker names, or ``None`` for anything else at that name: it must be a
+    regular file with one link, owned by this user, holding exactly ``dev:ino``."""
+    content = _read_own_file(path)
+    found = CLONE_MARKER_RE.fullmatch(content) if content is not None else None
     return (int(found.group(1)), int(found.group(2))) if found else None
 
 
+def _is_own_empty_file(path: Path) -> bool:
+    """An empty, single-link, user-owned regular file: what a killed or failed marker write can leave behind."""
+    return _read_own_file(path) == b""
+
+
 def _create_marker(path: Path, device: int, inode: int) -> None:
-    """Create the marker exclusively (0600, no symlink followed): an existing name is never truncated or reused."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(path), flags, 0o600)
+    """Write the marker atomically: an exclusive 0600 temp file (the staging prefix, same parent) is filled and synced,
+    then renamed to the marker name without replacing anything, so the name never holds a partial marker."""
+    fd, temp = tempfile.mkstemp(prefix=STAGE_NEW_PREFIX, dir=str(path.parent))
     try:
-        data = memoryview(("%d:%d\n" % (device, inode)).encode("ascii"))
-        while data:
-            data = data[os.write(fd, data):]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        try:
+            data = memoryview(("%d:%d\n" % (device, inode)).encode("ascii"))
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _rename_noreplace(temp, str(path))
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
     _fsync_dir(path.parent)
 
 
@@ -1274,13 +1293,13 @@ def _drop_marker(clone: Path) -> str:
     marker = _clone_marker_path(clone)
     if not os.path.lexists(str(marker)):
         return ""
-    if _read_marker(marker) is None:
+    if _read_marker(marker) is None and not _is_own_empty_file(marker):
         return "CLONE_PATH_INVALID MARKER_UNRECOGNIZED"
     aside = _move_aside(marker, "marker", STAGE_OLD_PREFIX)
     if aside is None:
         return ""
     staging, moved = aside
-    if _read_marker(Path(moved)) is None:
+    if _read_marker(Path(moved)) is None and not _is_own_empty_file(Path(moved)):
         _put_back(moved, marker, staging)
         return "CLONE_PATH_INVALID MARKER_UNRECOGNIZED"
     shutil.rmtree(staging, ignore_errors=True)
@@ -1369,6 +1388,10 @@ def _recover_staging(parent: Path) -> None:
             continue
         try:
             info = os.lstat(str(path))
+            if fresh and stat.S_ISREG(info.st_mode):
+                if _read_marker(path) is not None or _is_own_empty_file(path):
+                    os.unlink(str(path))  # a marker temp file a killed write left (never published, so never named)
+                continue
             if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
                 continue
             if hasattr(os, "getuid") and info.st_uid != os.getuid():

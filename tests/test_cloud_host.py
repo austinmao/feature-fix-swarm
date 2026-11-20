@@ -2040,3 +2040,41 @@ def test_staging_leftovers_that_are_not_provably_the_dispatchers_are_never_delet
     assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
     assert (loose / "new" / "keep").read_text() == "a" and (foreign / "retired" / "keep").read_text() == "b"
     assert (elsewhere / "keep").read_text() == "c"
+
+
+# ── The ownership marker is written atomically; an empty leftover never wedges the fixed path ──
+
+
+def test_a_failed_marker_write_leaves_neither_a_marker_nor_a_temp_file(tmp_path, monkeypatch):
+    clone = tmp_path / "c"
+
+    def full_disk(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "write", full_disk)
+    with pytest.raises(OSError):
+        ch._create_marker(ch._clone_marker_path(clone), 1, 2)
+    monkeypatch.undo()
+    assert not ch._clone_marker_path(clone).exists() and _staging_dirs(tmp_path) == []
+
+
+def test_an_empty_marker_left_by_a_killed_write_is_recovered_by_the_next_launch(
+        install_fake, origin, state, tmp_path, clone_parent):
+    marker = ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude")
+    marker.write_bytes(b"")
+    marker.chmod(0o600)
+    fd, name = tempfile.mkstemp(prefix=ch.STAGE_NEW_PREFIX, dir=str(clone_parent))  # killed before the rename
+    os.close(fd)
+    leftover = Path(name)
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert not marker.exists() and not leftover.exists()
+
+
+def test_a_non_empty_unrecognized_marker_is_refused_and_left_untouched(
+        install_fake, origin, state, tmp_path, clone_parent):
+    marker = ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude")
+    marker.write_text("operator notes\n")
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome != "launched"
+    assert marker.read_text() == "operator notes\n"
