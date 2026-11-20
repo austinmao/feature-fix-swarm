@@ -12,8 +12,9 @@ all skills.
 
 - gsd executors now load `testing-policy` through `agent_skills.gsd-executor` in
   `templates/gsd-config.base.json` (gsd-core self-load; user- and project-scope paths,
-  resolves on Claude and Codex). Projects get it when spec-decompose next seeds
-  `.planning/config.json`.
+  resolves on Claude and Codex). Only newly seeded projects get it: spec-decompose
+  skips seeding when `.planning/PROJECT.md` exists, so an existing
+  `.planning/config.json` needs the `agent_skills` entry added by hand (#286).
   New `testing-policy` §7 gives the executor five rules before it writes: one decision
   in one place, subtract before adding, check data where it enters, fix the cause,
   and keep new functions under cyclomatic complexity 10. The "mock-call counts"
