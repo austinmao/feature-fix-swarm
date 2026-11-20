@@ -19,6 +19,27 @@ all skills.
 - `scripts/gsd/deps.sh` lists both tools as optional; `docs/dependencies.md`
   documents where FFS finds them (`PATH`, `FFS_UB_TOOLS_DIR`, `~/.local/share/ub-mode`).
 
+### Changed (2026-11-19, write-time clean-code rules)
+
+- gsd executors now load `testing-policy` through `agent_skills.gsd-executor` in
+  `templates/gsd-config.base.json` (gsd-core self-load; user- and project-scope paths,
+  resolves on Claude and Codex). Only newly seeded projects get it: spec-decompose
+  skips seeding when `.planning/PROJECT.md` exists, so an existing
+  `.planning/config.json` needs the `agent_skills` entry added by hand (#286).
+  New `testing-policy` §7 gives the executor five rules before it writes: one decision
+  in one place, subtract before adding, check data where it enters, fix the cause,
+  and keep new functions under cyclomatic complexity 10. The "mock-call counts"
+  anti-pattern now reads "would still pass if the code returned nothing".
+- `/feature-implement --adhoc` appends the §7 rules to the `/gsd-quick` task string,
+  because adhoc runs have no seeded config.
+- The plan wall also flags steps that add a new path beside an old one without
+  naming the old path they retire.
+- Removed duplicated helpers found by a duplication scan: authority table checks and
+  decision enumeration (`run_state/state.py`), the duplicate-key JSON hook
+  (`gsd_wave_bridge.py`), review-output parsing (`spec_review.py`), the retained-event
+  lookup (`repair_integration.py`) and the test-seam hold (`gates.py`). Behavior is
+  pinned by `tests/test_dedupe_characterization.py`.
+
 ### Added (2026-11-17, operator-only guard hook, #253)
 
 - `scripts/hooks/operator-only-guard.sh`: a PreToolUse `Bash` hook that blocks

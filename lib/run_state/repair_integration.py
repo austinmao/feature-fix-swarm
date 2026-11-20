@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .ownership import assert_owner
 from .recovery_controller import RecoveryRefused
+from .recovery_integration import _retained
 
 REPAIR_SCHEMA = "ffs.frontend-repair/v1"
 _CODE = "REPAIR"
@@ -92,15 +93,9 @@ def retain_repair_record(store, token, *, supervisor, action_id, activity_id, wo
     return True
 
 
-def _retained_record(tx, activity_id, key):
-    row = tx.execute("SELECT k.payload_hash,e.payload FROM authority_event_keys k JOIN control_events e "
-                     "ON e.id=k.event_id WHERE k.activity_id=? AND k.idempotency_key=?", (activity_id, key)).fetchone()
-    return None if row is None else (json.loads(row["payload"])["data"], row["payload_hash"])
-
-
 def _verify_record(store, token, activity_id, action_id, issuing_intent_id, acceptance_hash, expected_input_digest):
     with store.read_transaction() as tx:
-        retained = _retained_record(tx, activity_id, repair_record_key(action_id))
+        retained = _retained(tx, activity_id, repair_record_key(action_id))
     payload = None if retained is None else retained[0]
     if (not isinstance(payload, dict) or payload.get("schema") != REPAIR_SCHEMA or payload.get("action_id") != action_id
             or payload.get("issuing_intent_id") != issuing_intent_id or payload.get("acceptance_hash") != acceptance_hash
@@ -122,7 +117,7 @@ def integrate_repair(store, token, *, supervisor, action_id, activity_id, receip
     from .recovery_integration import integrate_retained_patch
     from .supervisor import _read_evidence
     with store.read_transaction() as tx:
-        retained = _retained_record(tx, activity_id, repair_record_key(action_id))
+        retained = _retained(tx, activity_id, repair_record_key(action_id))
     if retained is None:
         raise RecoveryRefused("REPAIR_RECORD_INVALID")
     record, record_hash = retained
