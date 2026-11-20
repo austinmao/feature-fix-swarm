@@ -10,6 +10,11 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: external review findings)
 
+- A secret-scanner failure while listing `claude/*` refs no longer flags every
+  ref name as secret-shaped. The launch ends `SNAPSHOT_FAILED` and starts
+  nothing (so a hash-only snapshot cannot turn old refs into candidates later);
+  a poll returns `unknown` (`REF_SCAN_REFUSED`) and retries without parking the
+  task.
 - The fixed launch clone is deleted on exit only when it still carries the
   disposable-clone marker; a directory that appears at the path before
   `git clone` runs is left alone.

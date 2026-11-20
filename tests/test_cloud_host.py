@@ -1715,3 +1715,34 @@ def test_a_dir_that_appears_before_the_clone_is_not_deleted_without_the_marker(
     result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
     assert result.outcome == "failed"
     assert (clone_parent / "ffs-cloud-launch-claude" / "dirty.txt").read_text() == "uncommitted work"
+
+
+def _scanner_down(monkeypatch):
+    import cloud_scan
+
+    def refuse(*_a, **_k):
+        raise cloud_scan.ScanRefused("SCAN_INTERNAL")
+
+    monkeypatch.setattr(cloud_scan, "scan_bytes", refuse)
+
+
+def test_a_scanner_failure_fails_the_launch_snapshot_instead_of_hashing_every_ref(
+        install_fake, origin, state, tmp_path, monkeypatch):
+    """WR-02: a refused scan is not 'every ref name is secret': nothing is launched and no snapshot is written."""
+    install_fake("claude")
+    _scanner_down(monkeypatch)
+    ctx = launch_ctx(origin, tmp_path)
+    result = ch.ClaudeBackend().launch(ctx)
+    assert (result.outcome, result.detail) == ("failed", "SNAPSHOT_FAILED")
+    assert not Path(ctx.refs_snapshot_path).exists() and not (state / "claude.argv").exists()
+
+
+def test_a_scanner_failure_in_poll_is_unknown_not_a_secret_ref_name(install_fake, origin, state, tmp_path, monkeypatch):
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    with monkeypatch.context() as patch:
+        _scanner_down(patch)
+        result = ch.ClaudeBackend().poll(poll_ctx(origin, tmp_path))
+    assert (result.state, result.candidates) == ("unknown", []) and "REF_SCAN_REFUSED" in result.detail
+    assert ch.REF_NAME_SECRET_NOTE not in result.detail
+    assert ch.ClaudeBackend().poll(poll_ctx(origin, tmp_path)).state == "running"  # the next tick recovers

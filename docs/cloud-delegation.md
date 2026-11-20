@@ -505,7 +505,10 @@ snapshot keeps only a hash of it). A new one, or one that carries the nonce,
 parks the task (unless its own exact or nonce-named result is already among
 the clean candidates) as `needs-operator` / `ambiguous-candidates` with the fixed
 reason "a remote claude/* ref name matched the secret scanner; name
-withheld". Find the ref on origin yourself and use `adopt --oid` or `abandon`. If a ref bound from polling has a missing or invalid manifest, FFS
+withheld". Find the ref on origin yourself and use `adopt --oid` or `abandon`.
+A scanner fault is not a verdict on any ref name: at launch it ends
+`SNAPSHOT_FAILED` (nothing is started), and a poll that hits it reports
+`unknown` (`REF_SCAN_REFUSED`) and tries again on the next tick. If a ref bound from polling has a missing or invalid manifest, FFS
 treats it as another session's result: it records the ref as rejected,
 clears the bind and returns the task to polling. A result you bound with
 `adopt` is not treated that way. There is one exception: a ref that is

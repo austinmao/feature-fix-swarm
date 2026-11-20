@@ -753,16 +753,13 @@ def _all_claude_refs(text: str) -> Dict[str, str]:
 
 
 def _secret_ref_names(refs: Iterable[str]) -> "set[str]":
-    """Ref names the secret scanner flags. A scanner failure flags every name (fail closed)."""
+    """Ref names the secret scanner flags. A scanner failure raises ``ScanRefused``: it is not a verdict on any name."""
     names = sorted(refs)
     if not names:
         return set()
-    try:
-        if not cloud_scan.scan_bytes("\n".join(names).encode("utf-8", "replace"), label="ref"):
-            return set()
-        return {n for n in names if cloud_scan.scan_bytes(n.encode("utf-8", "replace"), label="ref")}
-    except cloud_scan.ScanRefused:
-        return set(names)
+    if not cloud_scan.scan_bytes("\n".join(names).encode("utf-8", "replace"), label="ref"):
+        return set()
+    return {n for n in names if cloud_scan.scan_bytes(n.encode("utf-8", "replace"), label="ref")}
 
 
 def redacted_ref_key(ref: str) -> str:
@@ -771,7 +768,9 @@ def redacted_ref_key(ref: str) -> str:
 
 
 def split_ls_remote(text: str) -> Tuple[Dict[str, str], Dict[str, Tuple[str, str]]]:
-    """``(clean refs, flagged)``: ``flagged`` maps ``redacted_ref_key`` to ``(ref, oid)`` and is for in-memory use only."""
+    """``(clean refs, flagged)``: ``flagged`` maps ``redacted_ref_key`` to ``(ref, oid)`` and is for in-memory use only.
+
+    Raises ``cloud_scan.ScanRefused`` when the scanner fails: callers treat that as "unknown", never as a flag."""
     refs = _all_claude_refs(text)
     bad = _secret_ref_names(refs)
     clean = {r: o for r, o in refs.items() if r not in bad}
@@ -1304,6 +1303,8 @@ class ClaudeBackend:
             clean, flagged = split_ls_remote(listing.text())
             clean.update({key: oid for key, (_, oid) in flagged.items()})  # a flagged name is stored as a hash only
             write_snapshot(Path(ctx.refs_snapshot_path), clean)  # type: ignore[arg-type]
+        except cloud_scan.ScanRefused:
+            return "SNAPSHOT_FAILED"  # nothing was started; a hash-only snapshot would make old refs look new
         except OSError:
             return "SNAPSHOT_WRITE_FAILED"
         return ""
@@ -1365,7 +1366,10 @@ class ClaudeBackend:
         if not listing.ok:
             return PollResult("unknown", [], "LS_REMOTE_FAILED")
         snapshot = load_refs_snapshot(ctx.refs_snapshot_path)
-        clean, flagged = split_ls_remote(listing.text())
+        try:
+            clean, flagged = split_ls_remote(listing.text())
+        except cloud_scan.ScanRefused:
+            return PollResult("unknown", [], "REF_SCAN_REFUSED")  # a scanner fault: retry next tick, park nothing
         candidates, capped = select_candidates(clean, snapshot, ctx.nonce, ctx.rejected, run=ctx.run, task=ctx.task)
         notes = ["candidates=%d" % len(candidates)]
         prefix = ctx.nonce[:NONCE_PREFIX_LEN] if len(ctx.nonce) >= NONCE_PREFIX_LEN else ""
