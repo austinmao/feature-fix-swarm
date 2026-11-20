@@ -145,7 +145,19 @@ accept it once yourself, in a folder FFS then reuses:
    bash scripts/gsd/cloud-dispatch.sh probe-claude --dir <parent>/ffs-cloud-launch-claude
    ```
 
-FFS deletes that clone and makes a fresh one at the same path for every launch.
+5. After you accept the trust dialog, remove the clone:
+
+   ```bash
+   rm -rf <parent>/ffs-cloud-launch-claude
+   ```
+
+   Your clone has no ownership marker, so FFS refuses it with
+   `CLONE_PATH_INVALID` and never deletes it. Each launch then creates the
+   directory in a private `.ffs-cloud-new-*` staging directory, writes the marker
+   `<parent>/ffs-cloud-launch-claude.ffs-owned`, publishes the directory with a
+   no-replace rename, and removes it after the launch. See
+   [Cloud delegation](cloud-delegation.md#quick-start) for the details.
+
 Without `FFS_CLOUD_CLONE_PARENT` the clone is a new temporary directory each
 time, which always shows the dialog, and the launch ends `failed` (see
 [Launch problems](#launch-problems)). `FFS_CLOUD_PTY_GRACE_S` (0 to 120, default
@@ -303,11 +315,16 @@ When the run is `done` and you have merged the integration branch:
 bash scripts/gsd/cloud-dispatch.sh cleanup --run <run> [--remote]
 ```
 
-`cleanup` deletes the local `ffs/cloud/<run>/*` refs and the run state.
-`--remote` also deletes the pushed `ffs/cloud/<run>/*` branches on `origin`, and
-needs the push grant. It never deletes the `claude/ffs-*` branch that the Claude
-worker created. Delete it yourself with `git push origin --delete <branch>`.
-`cleanup` also refuses a run that is not `done` (`RUN_NOT_DONE`). A run whose
+`cleanup` deletes only the `ffs/cloud/<run>/*` refs the ledger accounts for, each
+only at its recorded OID, then the run state. A ref with no recorded OID is kept
+and printed `CLOUD:cleanup-kept ref=... (reason)`. A ref that moved ends
+`CLEANUP_INCOMPLETE` and keeps the ledger so a rerun can finish. `--remote`
+deletes the pushed task branches with a lease on the recorded OID, never a
+remote `integration` branch, and needs the push grant. It never deletes the
+`claude/ffs-*` branch that the Claude worker created. Delete it yourself with
+`git push origin --delete <branch>`.
+`cleanup` also refuses a run that is not `done` (`RUN_NOT_DONE`), except a run
+whose `start` crashed before any task began. A run whose
 task never bound a result stays `active` until you `abandon` that task. `--discard-unmerged` skips the unmerged-work check. Use
 it only when you want to throw the result away.
 
@@ -356,7 +373,8 @@ Refusals (`CLOUD-REFUSED`, exit 3):
 | `TOKEN_BUDGET` | `GSD_TOKEN_BUDGET` is set. The run stays local. |
 | `DIRTY_BASE` | Tracked files are modified. Commit or stash them. |
 | `NO_BASE` | The repository has no commit at HEAD. |
-| `RUN_EXISTS` | The run id already has a ledger. Pick a new id. |
+| `RUN_EXISTS` | The run id already has a ledger, usually a retry after a lost acknowledgement. The tasks may already be running. Read `status --run <run>`; do not start them under a new id. The line ends `batch=same` (optionally `local-claimed=<ids>`), `batch=other` or `batch=unknown`, and may add `orchestrator=restarted`. |
+| `RUN_NOT_INITIALIZED` | `orchestrate` found a run with no initialization record. Retry the identical `start`; a run from an earlier build cannot be finished. |
 | `NO_CLOUD_TASKS` | Nothing routes to the cloud. Read the reason codes in step 4. |
 | `CLOUD_REQUIRED_NOT_ELIGIBLE` | Policy is `required` and a group cannot go to the cloud. Fix the task, or use `auto` or `prefer`. |
 | `GRANT_MISSING` | A `cloud-dispatch:<provider>` or `push:origin/ffs/cloud/<run>` grant is missing. Grant it (step 6). |
@@ -365,6 +383,7 @@ Refusals (`CLOUD-REFUSED`, exit 3):
 | `SECRET_IN_PROMPT`, `SECRET_IN_PACKET` | The task text or worker packet matched the secret scanner. Remove the secret-shaped text. |
 | `PACKET_INVALID` | The worker packet could not be built, for example an invalid `secrets.wrapper`. |
 | `RUN_NOT_DONE` | `cleanup` only removes `done` runs. |
+| `CLEANUP_INCOMPLETE` | Some refs moved off their recorded OID or could not be deleted. The ledger is kept. Fix the cause (delete a foreign remote ref by hand) and rerun `cleanup`. |
 | `INTEGRATION_UNMERGED` | `cleanup` found work on the integration branch that no other branch has. Merge it, or pass `--discard-unmerged`. |
 | `INTEGRATION_IN_PROGRESS` | The task is `integrating`. Retry after the orchestrator's next tick. |
 | `RUN_DONE` | The run is `done`. `adopt`, `resolve` and a plain `abandon` are refused. |
@@ -398,7 +417,7 @@ A launch that fails leaves the task in `failed`. The orchestrator log
 | `PROMPT_AMBIGUOUS` | The task prompt would itself look like a session id or URL, the not-a-terminal text or a dialog. The client echoes its prompt, so FFS refuses before anything starts. Reword the task text. |
 | `CLONE_PARENT_INVALID <reason>` | `FFS_CLOUD_CLONE_PARENT` is unusable. The reason is `NOT_ABSOLUTE`, `MISSING`, `SYMLINK`, `NOT_A_DIRECTORY`, `NOT_OWNED` or `INSIDE_REPO`. There is no fallback to a temporary directory. |
 | `CLONE_LOCK_BUSY` | Another launch held the lock on `<parent>/.ffs-cloud-launch-claude.lock` for the whole wait. Rerun after it ends. |
-| `CLONE_PATH_INVALID` | `<parent>/ffs-cloud-launch-claude` exists as a symlink or a plain file. FFS never deletes it. Remove it yourself. |
+| `CLONE_PATH_INVALID` | `<parent>/ffs-cloud-launch-claude` exists and is not a dispatcher-marked directory (a hand-made clone, a clone from an earlier release, a symlink or a plain file), or the path overlaps your checkout. An optional reason such as `MARKER_UNRECOGNIZED`, `MARKER_EXISTS` or `MOVED_AWAY` may follow. FFS never deletes it. Remove it yourself. |
 
 Two outcomes are not failures. When the client is still running at the launch
 timeout, or exits with no session id, URL or known error, the task is
