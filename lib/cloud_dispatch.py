@@ -1884,22 +1884,35 @@ def _integration_unmerged(svc: Services, root: Path, run: str, base_sha: str, ur
 
 
 def _owned_refs(doc: Dict[str, Any], run: str) -> Dict[str, Optional[frozenset]]:
-    """The local refs the dispatcher creates for this run, derived from the ledger, each with the OIDs it may
-    legitimately hold (``None``: nothing recorded, e.g. an earlier generation's ref).  Any other ref under the run
-    prefix is somebody else's."""
+    """The refs the dispatcher creates for this run, derived from the ledger, each with the OIDs it may
+    legitimately hold (``None``: the ledger recorded none, so the ref is kept, never deleted).  Any other ref under
+    the run prefix is somebody else's.  An earlier generation's OIDs come from its journaled admit (the task branch
+    is created at that ``base_oid``) and integrate (candidate and publish OIDs); the per-task fields are reset on retry."""
     published: Dict[Tuple[str, int], set] = {}  # (task, generation) -> every publish OID the ledger knows of
+    branches: Dict[Tuple[str, int], set] = {}  # ... every task-branch OID
+    candidates: Dict[Tuple[str, int], set] = {}  # ... every candidate OID
     for h in doc["integration"]["history"]:
         published.setdefault((h["task"], h["generation"]), set()).add(h["publish_oid"])
+        if OID_RE.match(str(h.get("candidate_oid") or "")):
+            candidates.setdefault((h["task"], h["generation"]), set()).add(h["candidate_oid"])
     for j in doc.get("journal", []):
-        if j.get("op") == ledger.OP_INTEGRATE and (j.get("data") or {}).get("publish_oid"):
-            published.setdefault((j["task"], j["generation"]), set()).add(j["data"]["publish_oid"])
+        data, key = j.get("data") or {}, (j.get("task"), j.get("generation"))
+        if j.get("op") == ledger.OP_INTEGRATE and data.get("publish_oid"):
+            published.setdefault(key, set()).add(data["publish_oid"])
+            if OID_RE.match(str(data.get("candidate_oid") or "")):
+                candidates.setdefault(key, set()).add(data["candidate_oid"])
+        elif j.get("op") == ledger.OP_ADMIT and OID_RE.match(str(data.get("base_oid") or "")):
+            branches.setdefault(key, set()).add(data["base_oid"])
     owned: Dict[str, Optional[frozenset]] = {ledger.integration_ref(run): frozenset([doc["integration"]["tip"]])}
     for name, entry in doc["tasks"].items():
         for gen in range(1, entry["generation"] + 1):
-            def recorded(oid: Any) -> Optional[frozenset]:
-                return frozenset([oid]) if gen == entry["generation"] and oid else None  # older generations: none kept
-            owned[ledger.task_branch_ref(run, name, gen)] = recorded(entry.get("task_branch_oid"))
-            owned[ledger.candidate_ref(run, name, gen)] = recorded(entry.get("candidate_oid"))
+            def recorded(oid: Any, journaled: Dict[Tuple[str, int], set]) -> Optional[frozenset]:
+                known = set(journaled.get((name, gen), ()))
+                if gen == entry["generation"] and oid:
+                    known.add(oid)
+                return frozenset(known) if known else None
+            owned[ledger.task_branch_ref(run, name, gen)] = recorded(entry.get("task_branch_oid"), branches)
+            owned[ledger.candidate_ref(run, name, gen)] = recorded(entry.get("candidate_oid"), candidates)
             owned[ledger.publication_ref(run, name, gen)] = frozenset(published[(name, gen)]) if (name, gen) in published else None
     return owned
 
@@ -1911,10 +1924,20 @@ def _ref_oid(svc: Services, root: Path, ref: str) -> Optional[str]:
     return parts[0] if len(parts) == 1 and OID_RE.match(parts[0]) else None
 
 
+def _listable(ref: str) -> str:
+    """A ref name that is safe to print.  Names the dispatcher did not create can carry anything, so one that the
+    secret scanner flags (or that has control characters) is replaced by a digest the operator can recompute."""
+    if scan_text(ref, "ref") or redact_text(ref, max(len(ref), 1)) != ref:
+        return "[withheld sha256:%s]" % hashlib.sha256(ref.encode("utf-8", "replace")).hexdigest()[:12]
+    return ref
+
+
 def _delete_remote_branches(svc: Services, root: Path, run: str, url: str,
-                            owned: Sequence[str] = ()) -> Tuple[int, List[str]]:
-    """``(deleted, refs whose delete failed)``.  Only task branches the ledger accounts for: the integration ref
-    is published locally, never to the remote, so a remote one is somebody else's."""
+                            owned: Optional[Dict[str, Optional[frozenset]]] = None) -> Tuple[int, List[str]]:
+    """``(deleted, refs left)``.  Only task branches the ledger accounts for, and only at an OID it recorded: the
+    delete is leased to that OID, so a branch that moved is kept and reported.  A branch with no recorded OID is
+    kept too.  The integration ref is published locally, never to the remote, so a remote one is somebody else's."""
+    owned = owned or {}
     if not gates_check(svc, run, "push:origin/ffs/cloud/%s" % run):
         raise Refused("GRANT_MISSING", "missing grants: push:origin/ffs/cloud/%s" % run)
     ok, refs = ls_remote(svc, url, "refs/heads/ffs/cloud/%s/*" % run)
@@ -1924,14 +1947,22 @@ def _delete_remote_branches(svc: Services, root: Path, run: str, url: str,
     failed: List[str] = []
     for ref in sorted(refs):
         if not push_ref_valid(run, ref) or ref not in owned:  # not a name the dispatcher creates: report, never delete
+            failed.append("remote:" + _listable(ref))
+            continue
+        if owned[ref] is None:
+            svc.emit("%scleanup-kept ref=remote:%s (no OID recorded in the ledger)" % (PREFIX, ref))
+            continue
+        if refs[ref] not in owned[ref]:
+            svc.emit("%scleanup-kept ref=remote:%s (moved off the recorded OID)" % (PREFIX, ref))
             failed.append("remote:" + ref)
             continue
-        result = svc.run(["git", "-C", str(root), "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no", url,
-                          "--delete", ref],
+        result = svc.run(["git", "-C", str(root), "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no",
+                          "--force-with-lease=%s:%s" % (ref, refs[ref]), url, "--delete", ref],
                          timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
         if result.ok:
             deleted += 1
-        else:
+        else:  # includes a lease rejection: the branch moved between the listing and the delete
+            svc.emit("%scleanup-kept ref=remote:%s (delete refused: moved or unreachable)" % (PREFIX, ref))
             failed.append("remote:" + ref)
     return deleted, failed
 
@@ -1966,7 +1997,9 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
             for ref in listed:
                 oid = _ref_oid(svc, root, ref)
                 if ref not in owned:
-                    svc.emit("%scleanup-kept ref=%s (not created by the dispatcher)" % (PREFIX, ref))
+                    svc.emit("%scleanup-kept ref=%s (not created by the dispatcher)" % (PREFIX, _listable(ref)))
+                elif owned[ref] is None:  # the ledger recorded no OID for it: it may hold anything now
+                    svc.emit("%scleanup-kept ref=%s (no OID recorded in the ledger)" % (PREFIX, ref))
                 elif oid is None or (owned[ref] is not None and oid not in owned[ref]):
                     left.append(ref)  # moved off the recorded OID (or symbolic): somebody else's work may be on it
                 else:
@@ -1974,7 +2007,8 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
         if left:
             raise incomplete(left, 0)
         if args.remote:
-            deleted, failed = _delete_remote_branches(svc, root, run, doc["origin_url"], [r for r in owned if r.startswith("refs/heads/") and not r.endswith("/integration")])
+            deleted, failed = _delete_remote_branches(svc, root, run, doc["origin_url"], {
+                r: o for r, o in owned.items() if r.startswith("refs/heads/") and not r.endswith("/integration")})
             svc.emit("%scleanup remote-branches-deleted=%d" % (PREFIX, deleted))
             if failed:  # before any local deletion, so the rerun's unmerged guard still has its integration ref
                 raise incomplete(failed, 0)

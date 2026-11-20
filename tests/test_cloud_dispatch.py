@@ -1807,8 +1807,8 @@ def test_retrying_the_last_task_of_a_done_run_reopens_it(world: World) -> None:
     assert world.doc()["epoch"] >= 2 and world.lifecycle(epoch=world.doc()["epoch"])["state"] == "done"
 
 
-def test_cleanup_of_a_retried_generation_still_removes_the_refs_of_both_generations(world: World) -> None:
-    """The ledger keeps OIDs only for the current generation: the older generation's refs are still the dispatcher's."""
+def test_cleanup_of_a_retried_generation_removes_the_refs_the_ledger_has_an_oid_for(world: World) -> None:
+    """An earlier generation's task branch is deleted at its journaled admit OID; a ref with no recorded OID is kept."""
     (world.state / "review.verdict").write_text("REVISE")
     assert world.start(tasks=[T1])[0] == 0
     world.drive()
@@ -1818,7 +1818,87 @@ def test_cleanup_of_a_retried_generation_still_removes_the_refs_of_both_generati
     assert "ffs/cloud/r1/t1-g1" in run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/")
     rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
     assert rc == 0 and "CLOUD:cleanup run=r1" in out, out
-    assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/", "refs/ffs/cloud/r1/") == ""
+    assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
+    for kept in run_git(world.root, "for-each-ref", "--format=%(refname)", "refs/ffs/cloud/r1/").split():
+        assert kept == L.candidate_ref("r1", "t1", 1) and "CLOUD:cleanup-kept ref=" + kept in out, out
+
+
+def retried_world(world: World) -> None:
+    """t1 rejected in g1, retried, integrated in g2: both generations' refs exist and the run is done."""
+    (world.state / "review.verdict").write_text("REVISE")
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    (world.state / "review.verdict").write_text("APPROVE")
+    assert world.cli("abandon", "--run", "r1", "--task", "t1", "--retry", "--root", str(world.root))[0] == 0
+    assert world.drive(max_ticks=20) == 0 and world.states() == {"t1": "integrated"}
+
+
+def foreign_commit(world: World, ref: str) -> str:
+    base = run_git(world.root, "rev-parse", ref)
+    return run_git(world.root, "commit-tree", "-p", base, "-m", "operator work", run_git(world.root, "rev-parse", base + "^{tree}"))
+
+
+def test_cleanup_never_deletes_an_earlier_generation_ref_that_moved_off_its_recorded_oid(world: World) -> None:
+    retried_world(world)
+    ref = L.task_branch_ref("r1", "t1", 1)
+    moved = foreign_commit(world, ref)
+    run_git(world.root, "update-ref", ref, moved)  # the operator commits a fix onto the old generation's branch
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 3 and "CLEANUP_INCOMPLETE" in out and ref in out, out
+    assert run_git(world.root, "rev-parse", ref) == moved and L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_cleanup_keeps_and_reports_an_earlier_generation_ref_the_ledger_has_no_oid_for(world: World) -> None:
+    retried_world(world)
+    ref = L.candidate_ref("r1", "t1", 1)
+    run_git(world.root, "update-ref", ref, foreign_commit(world, L.task_branch_ref("r1", "t1", 1)))  # no recorded OID
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup-kept ref=" + ref in out, out
+    assert run_git(world.root, "for-each-ref", "--format=%(refname)", "refs/heads/ffs/cloud/r1/", "refs/ffs/cloud/r1/") == ref
+
+
+def test_cleanup_kept_lines_never_print_a_secret_shaped_ref_name(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    tip = run_git(world.root, "rev-parse", L.integration_ref("r1"))
+    run_git(world.root, "update-ref", "refs/heads/ffs/cloud/r1/" + CANARY_KEY, tip)  # somebody else's branch
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup-kept" in out and CANARY_KEY not in out, out
+    assert run_git(world.root, "rev-parse", "refs/heads/ffs/cloud/r1/" + CANARY_KEY) == tip
+
+
+def test_cleanup_remote_keeps_a_task_branch_that_moved_on_the_server(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    remote_ref = L.task_branch_ref("r1", "t1", 1)
+    moved = foreign_commit(world, remote_ref)
+    run_git(world.root, "push", "-q", "--force", "origin", moved + ":" + remote_ref)  # a colleague pushed a fix
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 3 and "CLEANUP_INCOMPLETE" in out and "CLOUD:cleanup-kept ref=remote:" + remote_ref in out, out
+    assert run_git(world.origin, "rev-parse", remote_ref) == moved
+    assert run_git(world.root, "rev-parse", remote_ref)  # nothing local was deleted either
+    assert L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_cleanup_remote_delete_is_leased_to_the_recorded_oid(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    remote_ref = L.task_branch_ref("r1", "t1", 1)
+    recorded = run_git(world.root, "rev-parse", remote_ref)
+    moved = foreign_commit(world, remote_ref)
+    real_run, pushes = world.svc.run, []
+
+    def racing(argv: Any, **kwargs: Any) -> Any:
+        if "--delete" in argv and argv[-1] == remote_ref:  # the branch moves between the check and the delete
+            pushes.append(list(argv))
+            run_git(world.root, "push", "-q", "--force", "origin", moved + ":" + remote_ref)
+        return real_run(argv, **kwargs)
+
+    world.svc.run = racing  # type: ignore[assignment]
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert pushes and "--force-with-lease=%s:%s" % (remote_ref, recorded) in pushes[0], pushes
+    assert rc == 3 and "CLEANUP_INCOMPLETE" in out and "remote:" + remote_ref in out, out
+    assert run_git(world.origin, "rev-parse", remote_ref) == moved
 
 
 def test_kick_spawns_a_lock_waiting_orchestrator_when_the_lock_is_held(world: World) -> None:
