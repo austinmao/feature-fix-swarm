@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "run": "smoke-1120c",
+  "task": "t1",
+  "generation": 1,
+  "nonce": "60bf1b370cb83d9d4155ecddb553ca27",
+  "base_sha": "ddc018d6c561b84c8c287cde0ce9580490080cb1",
+  "status": "complete",
+  "summary": "Created docs/cloud-smoke-note.md with the single line 'Cloud delegation smoke run.' No other files changed.",
+  "decisions_needed": [],
+  "blockers": [],
+  "env_report": {"tools":{"git":"2.43.0","node":"22.23.5","npm":"10.9.9","python3":"3.13.18","jq":"1.7"},"present":[],"missing":[]},
+  "tests_run": ["test -f docs/cloud-smoke-note.md: pass"]
+}
