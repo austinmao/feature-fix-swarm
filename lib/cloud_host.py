@@ -1355,8 +1355,8 @@ def _release_clone(clone: Path) -> str:
 
 def _recover_staging(parent: Path) -> None:
     """Rule: only what is provably the dispatcher's own is removed, without operator action: a mkdtemp staging directory
-    with its prefix (0700, owned by this user) holds a directory it made, and the retired directory in an old-staging
-    directory only when the marker names it. Anything else is left where it is."""
+    with its prefix (0700, owned by this user) only when empty (or holding only an empty ``new``), and the retired
+    directory in an old-staging directory only when the marker names it. Anything else is left where it is."""
     named = _read_marker(_clone_marker_path(parent / CLONE_DIR_NAME))
     try:
         entries = sorted(os.listdir(str(parent)))
@@ -1374,7 +1374,11 @@ def _recover_staging(parent: Path) -> None:
             if hasattr(os, "getuid") and info.st_uid != os.getuid():
                 continue
             if fresh:
-                shutil.rmtree(str(path), ignore_errors=True)
+                # The dispatcher only ever leaves an empty ``new`` here (the clone is made after publication), so
+                # only empty directories are removed; rmdir fails on anything else, which is then left in place.
+                if os.path.lexists(os.path.join(str(path), "new")):
+                    os.rmdir(os.path.join(str(path), "new"))
+                os.rmdir(str(path))
                 continue
             for child in os.listdir(str(path)):
                 inner = os.path.join(str(path), child)

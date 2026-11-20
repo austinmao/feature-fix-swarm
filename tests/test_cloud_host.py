@@ -1978,12 +1978,27 @@ def test_a_killed_claim_before_publication_is_recovered_by_the_next_launch(
         install_fake, origin, state, tmp_path, clone_parent):
     staging = _leftover(clone_parent, ch.STAGE_NEW_PREFIX)
     (staging / "new").mkdir()
-    (staging / "new" / "partial").write_text("x")
     info = os.lstat(str(staging / "new"))
     ch._create_marker(ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude"), info.st_dev, info.st_ino)
     install_fake("claude")
     assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
     assert _staging_dirs(clone_parent) == [] and not (clone_parent / "ffs-cloud-launch-claude.ffs-owned").exists()
+
+
+def test_a_staging_directory_that_holds_anything_is_left_alone_and_the_launch_continues(
+        install_fake, origin, state, tmp_path, clone_parent):
+    staging = _leftover(clone_parent, ch.STAGE_NEW_PREFIX)  # right prefix, mode and owner, but not empty
+    (staging / "new").mkdir()
+    (staging / "new" / "keep").write_text("a")
+    (clone_parent / (staging.name + "x")).mkdir(mode=0o700)  # an empty one beside it is still removed
+    other = _leftover(clone_parent, ch.STAGE_NEW_PREFIX)
+    (other / "stray").write_text("b")
+    info = os.lstat(str(staging / "new"))
+    ch._create_marker(ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude"), info.st_dev, info.st_ino)
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert (staging / "new" / "keep").read_text() == "a" and (other / "stray").read_text() == "b"
+    assert not (clone_parent / (staging.name + "x")).exists()
 
 
 def test_a_kill_after_retiring_the_clone_is_recovered_when_the_marker_names_it(
