@@ -2323,8 +2323,11 @@ class Orchestrator:
         action = ledger.replay_integrate(entry, ref_oid, publish_is_ancestor=ancestor,
                                          known=ledger.known_publish_oids(doc))
         tip = publish
-        if action == "update-ref" and not ledger.review_has_model_evidence(doc["tasks"][name].get("review")):
-            action = "replan"  # never apply the move on an approval without reviewer-model evidence
+        if action in ("update-ref", "complete", "complete-known") and not ledger.review_has_model_evidence(
+                doc["tasks"][name].get("review")):
+            # never apply the move on an approval without reviewer-model evidence, and never record a move an older
+            # process already made on one: that would release the dependents
+            action = "replan" if action == "update-ref" else "unreviewed"
         if action == "update-ref":
             result = cloud_collect.apply_integration(repo=str(self.root), ref=ref, publish_oid=publish,
                                                      expected_tip=data["expected_tip"])
@@ -2336,6 +2339,12 @@ class Orchestrator:
             # the journaled evidence is for the published tree (the merged-tree retest); an older entry has none
             self.complete_integration(name, gen, entry["seq"], data, int(data.get("test_rc", verify.get("test_rc", 0))),
                                       str(data.get("test_log_sha", verify.get("test_log_sha", ""))), tip)
+        elif action == "unreviewed":
+            self.to_operator(name, gen, ledger.B_MERGE_CONFLICT,
+                             ["the integration ref already holds the published result but its approval has no "
+                              "reviewer-model evidence; reset the ref to the ledger tip (%s) so the task is reviewed "
+                              "and verified again, then `resolve --action retest`" % doc["integration"]["tip"][:12]],
+                             entry["seq"])
         elif action == "foreign":
             self.log("integration ref %s holds commits FFS did not publish (tip %s)" % (ref, str(ref_oid)[:12]))
             self.to_operator(name, gen, ledger.B_INTEGRATION_FOREIGN,

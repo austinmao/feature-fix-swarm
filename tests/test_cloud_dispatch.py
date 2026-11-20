@@ -1655,6 +1655,34 @@ def test_a_foreign_descendant_on_the_integration_ref_is_never_adopted(world: Wor
     assert run_git(world.root, "rev-parse", ref) == foreign  # never rewound or rewritten
 
 
+def test_replay_of_a_ref_already_moved_without_model_evidence_parks_instead_of_completing(world: World) -> None:
+    """An older process moved the ref and crashed before recording it; completing would release dependents on an
+    approval that carries no reviewer-model evidence."""
+    dependent = task("t2", "src/b/**", depends_on=["t1"])
+    assert world.start(tasks=[T1, dependent])[0] == 0
+    crash_at(world, "after-update-ref")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    ref = L.integration_ref("r1")
+    published = run_git(world.root, "rev-parse", ref)
+    assert published != world.base and world.states()["t1"] == "integrating"
+
+    def legacy(doc: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("model", "requested_model"):
+            doc["tasks"]["t1"]["review"].pop(key)
+        return doc
+
+    L.locked_update(L.run_ledger_path(world.root, "r1"), legacy)
+    world.svc.fault = lambda name: None
+    world.drive(max_ticks=8)
+    doc = world.doc()
+    entry = doc["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "merge-conflict"), entry
+    assert doc["integration"]["history"] == [] and doc["integration"]["tip"] == world.base
+    assert doc["tasks"]["t2"]["state"] == "waiting"
+    assert run_git(world.root, "rev-parse", ref) == published  # never rewound by the fixer
+
+
 def test_a_ref_at_the_exact_published_commit_completes_without_a_second_update(world: World) -> None:
     assert world.start(tasks=[T1])[0] == 0
     crash_at(world, "after-update-ref")
