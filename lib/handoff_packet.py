@@ -166,6 +166,8 @@ def _contract_lines(provider: str, task_id: str, nonce: str, budget: int) -> Lis
         "Use at most %d nested subagents." % MAX_NESTED_SUBAGENTS,
         "Stop at the time budget (%d minutes) and write `status: blocked` with reasons." % budget,
         "Write the manifest to `%s` with the nonce below, exactly as in the skeleton." % manifest_path(task_id),
+        'Each `tests_run` item is an object with exactly two keys: `{"cmd": "<command you ran>", "rc": <exit code>}`. '
+        "`decisions_needed` and `blockers` are lists of plain strings. Add no other keys.",
     ]
     if provider == "claude":
         lines.insert(4, "Commit your work before you finish.")

@@ -241,3 +241,9 @@ def test_env_check_with_a_setup_key_would_be_refused():
     with pytest.raises(cloud_ledger.ManifestError):
         cloud_ledger.validate_manifest(
             json.dumps(manifest).encode(), run="run1", task="t1", generation=2, nonce=NONCE, base_sha=BASE)
+
+
+def test_contract_states_the_tests_run_item_shape():
+    """A real worker wrote `tests_run` as strings because the skeleton showed only an empty list."""
+    lines = "\n".join(hp._contract_lines("claude", "t1", "0" * 32, 5))
+    assert '{"cmd": "<command you ran>", "rc": <exit code>}' in lines

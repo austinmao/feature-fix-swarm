@@ -1748,3 +1748,15 @@ def test_tasks_sha256_matches_the_file_written_later(tmp_path):
     path = tmp_path / "runs" / "R1" / "tasks.json"
     assert cl.tasks_sha256(tasks) == cl.write_tasks_file(path, tasks)
     assert cl.load_tasks_file(path, cl.tasks_sha256(tasks)) == tasks
+
+
+def test_live_worker_manifest_with_string_tests_run_is_rejected():
+    """Manifest a real cloud worker produced before the packet stated the `tests_run` item shape."""
+    import cloud_ledger as _ledger
+    from pathlib import Path as _Path
+    raw = (_Path(__file__).parent / "fixtures" / "cloud" / "live" / "claude-manifest-strings-tests-run.json").read_bytes()
+    with pytest.raises(_ledger.ManifestError) as err:
+        _ledger.validate_manifest(
+            raw, run="smoke-1120c", task="t1", generation=1, nonce="0123456789abcdef0123456789abcdef",
+            base_sha="ddc018d6c561b84c8c287cde0ce9580490080cb1")
+    assert "MANIFEST_TESTS_RUN" in str(err.value)

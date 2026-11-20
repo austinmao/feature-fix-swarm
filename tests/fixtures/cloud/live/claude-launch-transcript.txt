@@ -1,0 +1,3 @@
+Created cloud session: Cloud smoke note file
+View: https://claude.ai/code/session_01LiveFixture0000000000AA?from=cli&m=0
+Resume with: claude --teleport session_01LiveFixture0000000000AA

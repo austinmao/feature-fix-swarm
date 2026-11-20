@@ -1533,3 +1533,11 @@ def test_setup_link_is_not_a_session_url():
     text = "Could not create a cloud environment. Set one up at https://claude.ai/code/onboarding?magic=env-setup\n"
     assert ch.CLAUDE_CODE_URL_RE.search(text) is None
     assert ch.CLAUDE_CODE_URL_RE.search("https://claude.ai/code/session_01AbCdEfGh2345") is not None
+
+
+def test_live_launch_transcript_parses():
+    """Scrubbed transcript of a real `claude --cloud` launch on a pty (Claude Code 2.1.329)."""
+    text = (Path(__file__).parent / "fixtures" / "cloud" / "live" / "claude-launch-transcript.txt").read_text()
+    remote_id, url = ch.parse_claude_pty_output(text)
+    assert remote_id == "session_01LiveFixture0000000000AA"
+    assert url is not None and url.startswith("https://claude.ai/code/session_01LiveFixture0000000000AA")
