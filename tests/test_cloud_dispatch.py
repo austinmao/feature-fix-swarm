@@ -699,6 +699,24 @@ def test_unsandboxed_host_parks_with_sandbox_unavailable(world: World) -> None:
     assert entry["state"] == "needs-operator" and entry["blocker"] == "sandbox-unavailable"
 
 
+def test_a_stray_secret_shaped_ref_does_not_park_a_task_whose_own_result_is_present(world: World) -> None:
+    world.behavior(t1={"push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=3)
+    assert world.states()["t1"] in ("launched", "running")
+    orchestrator = world.orchestrator()
+    orchestrator.load_inputs(world.doc())
+    entry = world.doc()["tasks"]["t1"]
+    own = "refs/heads/" + L.claude_result_branch("r1", "t1", entry["nonce"])
+    noted = cloud_host.PollResult("running", [(own, "a" * 40)], "candidates=1 " + cloud_host.REF_NAME_SECRET_NOTE)
+    orchestrator.bind_claude("t1", entry["generation"], entry, noted)
+    after = world.doc()["tasks"]["t1"]
+    assert after["state"] in ("launched", "running") and after["seen_oid"] == "a" * 40  # polled normally
+    stray_only = cloud_host.PollResult("running", [], "candidates=0 " + cloud_host.REF_NAME_SECRET_NOTE)
+    orchestrator.bind_claude("t1", entry["generation"], after, stray_only)
+    assert world.doc()["tasks"]["t1"]["blocker"] == "ambiguous-candidates"
+
+
 def test_start_does_not_follow_a_symbolic_integration_ref(world: World) -> None:
     base = run_git(world.root, "rev-parse", "HEAD")
     run_git(world.root, "branch", "victim", base)

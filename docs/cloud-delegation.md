@@ -502,7 +502,8 @@ two consecutive polls. The first bind wins, and later candidates are
 ignored. Every ref name is run through the secret scanner first. A ref whose
 name matches is never snapshotted, bound or recorded by name (the launch
 snapshot keeps only a hash of it). A new one, or one that carries the nonce,
-parks the task as `needs-operator` / `ambiguous-candidates` with the fixed
+parks the task (unless its own exact or nonce-named result is already among
+the clean candidates) as `needs-operator` / `ambiguous-candidates` with the fixed
 reason "a remote claude/* ref name matched the secret scanner; name
 withheld". Find the ref on origin yourself and use `adopt --oid` or `abandon`. If a ref bound from polling has a missing or invalid manifest, FFS
 treats it as another session's result: it records the ref as rejected,
@@ -965,7 +966,7 @@ that ends terminal but not `integrated` becomes `failed` with blocker
 |---|---|---|---|
 | `uncertain-launch` | `needs-operator` | An `uncertain` task found no session after its recovery polls: 3 for Claude, 1 for Codex. | `adopt --oid` (Claude) or `adopt --remote-id` (Codex), or `abandon [--retry]` |
 | `poll-errors` | `needs-operator` | More than 6 consecutive failed polls. For Codex a provider `failed` status counts as a failed poll. | `adopt --oid` (Claude) or `adopt --remote-id` (Codex), or `abandon [--retry]` |
-| `ambiguous-candidates` | `needs-operator` | Several Claude refs qualify and none carries the nonce. | `adopt --oid`, or `abandon [--retry]` |
+| `ambiguous-candidates` | `needs-operator` | Several Claude refs qualify and none carries the nonce, or a new `claude/*` ref name matched the secret scanner and the task's own result is not among the candidates (the decision text says so; the name is never shown). | `adopt --oid`, or `abandon [--retry]` |
 | `candidate-moved` | `needs-operator` | Defined; the dispatcher never sets it in this release. | `adopt`, or `abandon [--retry]` |
 | `manifest-blocked` | `needs-operator` | The worker wrote `status: blocked`. Its blockers and decisions are listed. | `abandon [--retry]` |
 | `path-outside-owns` | `needs-operator` | A changed path does not match `owns`. | `resolve --action reject`, or `abandon --retry` |
@@ -979,7 +980,7 @@ that ends terminal but not `integrated` becomes `failed` with blocker
 | `binary-change` | `needs-operator` | The result changes binary content. This always blocks; there is no allowlist. The reviewer cannot read the bytes. | `resolve --action reject` or `abandon --retry` |
 | `review-cap` | `needs-operator` | The two review rounds of the current meter are spent. | `resolve --action retest` (fresh meter; refused after two retests of this task generation), `resolve --action reject` or `abandon --retry` |
 | `sandbox-unavailable` | `needs-operator` | The sandbox cannot run, or the tree cannot be materialized. | `resolve --action retest` after the fix, or `reject` |
-| `merge-conflict` | `needs-operator` | The tip and the candidate changed overlapping paths (FFS merges only disjoint paths), the merged tree was not the exact expected tree, the integration ref moved outside FFS, a case collision between two results in the merged tree (detail `case-colliding paths`), or a git error while integrating. | `resolve --action retest` after the fix, or `reject` |
+| `merge-conflict` | `needs-operator` | The tip and the candidate changed overlapping paths (FFS merges only disjoint paths), the merged tree was not the exact expected tree, the integration ref moved outside FFS, a case collision between two results in the merged tree (detail `case-colliding paths`), a git error while integrating, or the integration ref is a symbolic ref (FFS never moves it). | `resolve --action retest` after the fix, or `reject` |
 | `patch-id-mismatch` | `needs-operator` | The merged change differs from the reviewed change. | `resolve --action retest`, or `reject` |
 | `exposure-not-granted` | `needs-operator` | A `secret-use:<NAME>` grant is missing at submit. | Grant it, then `resolve --action retest` |
 | `ruleset-unverified` | `needs-operator` | Active `update` and `deletion` rules for the task branch could not be confirmed (secrets exposed). | Fix the ruleset, then `resolve --action retest` |

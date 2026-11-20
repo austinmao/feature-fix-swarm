@@ -2302,12 +2302,17 @@ class Orchestrator:
         pool = [c for c in usable if c[0] == exact_ref] or [c for c in usable if prefix in c[0]] or list(usable)
         return sorted(set((str(r), str(o)) for r, o in pool))
 
+    def has_own_result(self, name: str, entry: Dict[str, Any], pool: Sequence[Tuple[str, str]]) -> bool:
+        """The clean pool already holds this generation's exact or nonce-named result ref."""
+        exact = "refs/heads/" + ledger.claude_result_branch(self.run_id, name, entry["nonce"])
+        return any(ref == exact or entry["nonce"][:8] in ref for ref, _ in pool)
+
     def bind_claude(self, name: str, gen: int, entry: Dict[str, Any], result: cloud_host.PollResult) -> None:
-        if cloud_host.REF_NAME_SECRET_NOTE in (result.detail or "").split():
+        pool = self.choose_candidates(name, entry, result.candidates)
+        if cloud_host.REF_NAME_SECRET_NOTE in (result.detail or "").split() and not self.has_own_result(name, entry, pool):
             # a new result ref whose NAME matched the scanner: it is never snapshotted, bound or recorded by name
             self.to_operator(name, gen, ledger.B_AMBIGUOUS, ["a remote claude/* ref name matched the secret scanner; name withheld"])
             return
-        pool = self.choose_candidates(name, entry, result.candidates)
         if len(pool) > 1:
             self.to_operator(name, gen, ledger.B_AMBIGUOUS, ["several candidate refs: " + ", ".join(r for r, _ in pool[:MAX_LISTED])])
             return
