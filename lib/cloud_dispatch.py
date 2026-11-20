@@ -1251,6 +1251,12 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
              for r in records]
     reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha, now=int(svc.now()))
     if not git(svc, root, ["update-ref", "--no-deref", ledger.integration_ref(run), base_sha, ""]).ok:
+        ledger_file = ledger.run_ledger_path(root, run)  # no orchestrator will start: release the id for a real retry
+        for leftover in (ledger_file, ledger.lock_path_for(ledger_file), ledger.tasks_path(root, run)):
+            try:
+                os.unlink(str(leftover))
+            except OSError:
+                pass
         raise StoreError("INTEGRATION_REF", "could not create %s" % ledger.integration_ref(run))
     svc.emit("%sstarted run=%s tasks=%d" % (PREFIX, run, len(records)))
     local = [t["id"] for t in tasks if plan["tasks"][str(t["id"])]["route"] != "cloud"]

@@ -10,6 +10,9 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: external review findings)
 
+- `start` removes the run ledger it reserved when it cannot create the
+  integration ref (for example a symbolic ref sits there), so a retry is a fresh
+  start and no longer reports a run that never got an orchestrator as started.
 - `review-stale` (an old approval without reviewer-model evidence goes back
   through review) no longer spends one of the operator's two review retests. It
   counts in its own `review_stale` field and runs on its own bounded review
