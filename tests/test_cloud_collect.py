@@ -206,6 +206,72 @@ def test_candidate_import_never_writes_through_a_symbolic_ref(world):
                           capture_output=True).returncode != 0
 
 
+def _race_at(monkeypatch, world, verb, mutate):
+    """Run ``mutate`` once, just before the first ``git <verb>`` that targets the operator repo."""
+    real, fired, calls = cc._git, [], []
+
+    def wrapper(repo, args, **kw):
+        if str(repo) == str(world.main):
+            calls.append(list(args))
+            if verb in args and not fired:
+                fired.append(True)
+                mutate()
+        return real(repo, args, **kw)
+
+    monkeypatch.setattr(cc, "_git", wrapper)
+    return calls
+
+
+def _ref_exists(repo, ref):
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+                          capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize("verb", ["fetch", "update-ref"])
+def test_candidate_import_symref_swapped_after_the_check_is_never_written_through(world, monkeypatch, verb):
+    """A symref raced in after the symbolic-ref check must not redirect the import into another branch."""
+    oid = world.result(ok_changes())
+    ctx = world.ctx(oid)
+    git(world.main, "branch", "victim", world.base)
+    _race_at(monkeypatch, world, verb, lambda: git(world.main, "symbolic-ref", ctx.cand_ref, "refs/heads/victim"))
+    res = cc.collect(ctx)
+    assert git(world.main, "rev-parse", "refs/heads/victim") == world.base  # never moved
+    if verb == "fetch":
+        assert_fail(res, "needs-operator", cc.B_CANDIDATE_CONFLICT)
+        assert git(world.main, "symbolic-ref", ctx.cand_ref) == "refs/heads/victim"  # operator's symref untouched
+    else:
+        assert not res.ok and res.blocker == cc.B_CANDIDATE_CONFLICT
+
+
+@pytest.mark.parametrize("verb", ["fetch", "update-ref"])
+def test_candidate_import_dangling_symref_swapped_after_the_check_creates_no_branch(world, monkeypatch, verb):
+    oid = world.result(ok_changes())
+    ctx = world.ctx(oid)
+    _race_at(monkeypatch, world, verb, lambda: git(world.main, "symbolic-ref", ctx.cand_ref, "refs/heads/evil"))
+    cc.collect(ctx)
+    assert not _ref_exists(world.main, "refs/heads/evil")
+
+
+@pytest.mark.parametrize("verb", ["fetch", "update-ref"])
+def test_candidate_import_ref_moved_after_the_check_is_not_overwritten(world, monkeypatch, verb):
+    oid = world.result(ok_changes())
+    ctx = world.ctx(oid)
+    _race_at(monkeypatch, world, verb, lambda: git(world.main, "update-ref", ctx.cand_ref, world.base))
+    assert_fail(cc.collect(ctx), "needs-operator", cc.B_CANDIDATE_CONFLICT)
+    assert git(world.main, "rev-parse", ctx.cand_ref) == world.base
+
+
+def test_candidate_import_fetch_has_no_destination_ref(world, monkeypatch):
+    oid = world.result(ok_changes())
+    ctx = world.ctx(oid)
+    calls = _race_at(monkeypatch, world, "never", lambda: None)
+    assert cc.collect(ctx).ok
+    fetches = [c for c in calls if "fetch" in c]
+    assert fetches and all(ctx.cand_ref not in c and not any(":" in a for a in c[c.index("fetch") + 1:])
+                           for c in fetches)
+    assert any(c[0] == "update-ref" and "--no-deref" in c and ctx.cand_ref in c for c in calls)
+
+
 def test_secret_in_early_commit_later_removed(world):
     world.commit(world.origin, {"src/a/leak.txt": b"k=" + cloud_scan.canary("github-token")}, "leak")
     world.commit(world.origin, {"src/a/leak.txt": None}, "remove")

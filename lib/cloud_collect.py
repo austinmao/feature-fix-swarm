@@ -858,8 +858,16 @@ def _build_candidate(ctx: CollectCtx) -> str:
 
 
 def _import_candidate(ctx: CollectCtx, candidate: str) -> None:
+    """Install ``candidate`` at the candidate ref without ever writing through another ref.
+
+    The fetch names no destination ref: it only brings the objects in (and is not
+    trusted for anything else). The ref itself is then installed with
+    ``update-ref --no-deref`` as a compare-and-swap, so a symref or a moved ref
+    raced in after the checks below can neither redirect the write into another
+    branch nor be overwritten.
+    """
     ref = ctx.cand_ref
-    if _git_ok(ctx.repo, ["symbolic-ref", "-q", ref]):  # fetch would write through a (possibly dangling) symref
+    if _git_ok(ctx.repo, ["symbolic-ref", "-q", ref]):  # refuse a (possibly dangling) symref outright
         raise ValueError(B_CANDIDATE_CONFLICT)
     existing = _rev(ctx.repo, ref + "^{commit}") if _git_ok(ctx.repo, ["rev-parse", "--verify", "--quiet", ref]) else ""
     if existing and existing != candidate:
@@ -867,10 +875,27 @@ def _import_candidate(ctx: CollectCtx, candidate: str) -> None:
     _git(ctx.quarantine, ["update-ref", "refs/ffs/candidate", candidate])
     _git(ctx.repo, [
         "-c", "protocol.file.allow=always", "-c", "transfer.fsckObjects=true",
-        "fetch", "--no-tags", "--no-write-fetch-head", ctx.quarantine,
-        "refs/ffs/candidate:" + ref,
+        "fetch", "--no-tags", "--no-write-fetch-head", ctx.quarantine, candidate,
     ])
-    if _rev(ctx.repo, ref + "^{commit}") != candidate:
+    if _rev(ctx.repo, candidate + "^{commit}") != candidate:  # pinned OID, not FETCH_HEAD
+        raise GitError("candidate import did not land")
+    if _git_ok(ctx.repo, ["symbolic-ref", "-q", ref]):  # raced in since the first check
+        raise ValueError(B_CANDIDATE_CONFLICT)
+    expected_old = existing or "0" * len(candidate)  # all-zero OID: the ref must not exist yet
+    try:
+        _git(ctx.repo, ["update-ref", "--no-deref", ref, candidate, expected_old])
+    except GitError:
+        # The compare-and-swap lost a race (or git failed). Only a ref that now holds the
+        # candidate is success; anything else is the typed conflict, never a write-through.
+        if _git_ok(ctx.repo, ["symbolic-ref", "-q", ref]):
+            raise ValueError(B_CANDIDATE_CONFLICT) from None
+        try:
+            now = _rev(ctx.repo, ref + "^{commit}")
+        except GitError:
+            raise GitError("candidate import did not land") from None
+        if now != candidate:
+            raise ValueError(B_CANDIDATE_CONFLICT) from None
+    if _git_ok(ctx.repo, ["symbolic-ref", "-q", ref]) or _rev(ctx.repo, ref + "^{commit}") != candidate:
         raise GitError("candidate import did not land")
 
 
