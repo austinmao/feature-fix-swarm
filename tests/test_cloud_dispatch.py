@@ -999,6 +999,23 @@ def test_run_exists_reports_whether_the_retried_batch_is_the_started_one(world: 
     assert list(world.doc()["tasks"]) == ["t1"]
 
 
+def test_batch_same_notices_a_changed_dependency_input_order_or_sequential_flag(world: World) -> None:
+    """A retry that only adds a local-to-cloud dependency, reorders the input or asks for ``--sequential`` is another batch."""
+    local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
+    assert world.start(tasks=[T1, local])[0] == 0
+
+    def retry(batch: List[Dict[str, Any]], name: str, *extra: str) -> str:
+        rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file(batch, name), "--policy", "auto",
+                            "--root", str(world.root), *extra)
+        assert rc == 3 and "RUN_EXISTS" in out
+        return out
+
+    assert "batch=same" in retry([T1, local], "same.json")
+    for batch, extra in (([T1, dict(local, depends_on=["t1"])], ()), ([local, T1], ()), ([T1, local], ("--sequential",))):
+        out = retry(batch, "other.json", *extra)
+        assert "batch=other" in out and "batch=same" not in out, out
+
+
 def test_run_exists_on_a_ledger_without_the_batch_record_is_unknown(world: World) -> None:
     assert world.start(tasks=[T1])[0] == 0
     path = L.run_ledger_path(world.root, "r1")

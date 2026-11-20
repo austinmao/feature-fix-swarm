@@ -1189,14 +1189,17 @@ def refuse_start_grants(missing: List[str]) -> None:
     raise Refused("GRANT_MISSING", "missing grants: %s" % ", ".join(missing))
 
 
-_ROUTING_KEYS = ("provider", "model", "effort", "provenance", "depends_on")
+_ROUTING_KEYS = ("provider", "model", "effort", "provenance")
 
 
 def _batch_record(tasks: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """Every id of the batch (cloud and local) and a digest of its content without the routing keys."""
-    core = {str(t["id"]): {k: v for k, v in t.items() if k not in _ROUTING_KEYS} for t in tasks}
+    """Every id of the batch (cloud and local) and a digest of its ordered content.
+
+    The digest covers the normalized input in input order, ``depends_on`` included (so ``--sequential`` and a new
+    local-to-cloud dependency change it); only the routing outcome keys are left out."""
+    core = [{k: v for k, v in t.items() if k not in _ROUTING_KEYS} for t in tasks]
     body = json.dumps(core, sort_keys=True, default=str, separators=(",", ":"))
-    return {"ids": sorted(core), "digest": hashlib.sha256(body.encode("utf-8")).hexdigest()}
+    return {"ids": sorted(str(t["id"]) for t in tasks), "digest": hashlib.sha256(body.encode("utf-8")).hexdigest()}
 
 
 def _run_exists_batch(svc: Services, root: Path, run: str, raw: List[Any], sequential: bool) -> str:
