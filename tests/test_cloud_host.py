@@ -1697,3 +1697,21 @@ def test_poll_reports_a_new_secret_shaped_ref_with_a_fixed_note_and_no_name(inst
     result = ch.ClaudeBackend().poll(poll_ctx(origin, tmp_path))
     assert ch.REF_NAME_SECRET_NOTE in result.detail.split()
     assert result.candidates == [] and fresh not in repr(result) and existing not in repr(result)
+
+
+def test_a_dir_that_appears_before_the_clone_is_not_deleted_without_the_marker(
+        install_fake, origin, state, tmp_path, clone_parent, monkeypatch):
+    """WR-01: the exit-path delete checks the disposable marker too; an unmarked directory is never removed."""
+    install_fake("claude")
+    real = ch._clear_stale_clone
+
+    def racing(clone):
+        problem = real(clone)  # absent here ...
+        clone.mkdir()  # ... and then a directory appears before `git clone` creates it
+        (clone / "dirty.txt").write_text("uncommitted work")
+        return problem
+
+    monkeypatch.setattr(ch, "_clear_stale_clone", racing)
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert result.outcome == "failed"
+    assert (clone_parent / "ffs-cloud-launch-claude" / "dirty.txt").read_text() == "uncommitted work"

@@ -1268,7 +1268,7 @@ class ClaudeBackend:
             owned = True
             return self._launch_from_clone(ctx, clone)
         finally:
-            if owned:  # every exit path, including an exception; a path we refused to touch is never removed
+            if owned and _has_disposable_marker(clone):  # every exit path, including an exception; never an unmarked dir
                 shutil.rmtree(str(clone), ignore_errors=True)
             os.close(lock_fd)  # releases the lock
 

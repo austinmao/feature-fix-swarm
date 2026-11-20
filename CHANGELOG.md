@@ -10,6 +10,9 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: external review findings)
 
+- The fixed launch clone is deleted on exit only when it still carries the
+  disposable-clone marker; a directory that appears at the path before
+  `git clone` runs is left alone.
 - The fixed launch clone (`FFS_CLOUD_CLONE_PARENT`) can no longer delete the
   operator's checkout. The resolved child `<parent>/ffs-cloud-launch-claude`
   is compared, real path and case-folded, against the repository root and every
