@@ -1016,6 +1016,16 @@ def test_batch_same_notices_a_changed_dependency_input_order_or_sequential_flag(
         assert "batch=other" in out and "batch=same" not in out, out
 
 
+def test_a_scanner_positive_local_task_id_is_refused_before_it_is_stored_or_printed(world: World) -> None:
+    """Start scanned only the cloud records, then stored and printed every local id verbatim."""
+    leaky = cloud_scan.canary("slack-token").decode()  # a syntactically valid task id the secret scanner flags
+    local = task(leaky, "src/b/**", local_only=True, local_reason="touches secrets")
+    for tasks in ([T1, local], [local]):  # the second batch would print the id in the NO_CLOUD_TASKS reasons
+        rc, out = world.start(tasks=tasks)
+        assert rc == 3 and "SECRET_IN_PROMPT" in out and leaky not in out, out
+        assert not L.run_ledger_path(world.root, "r1").exists() and not L.tasks_path(world.root, "r1").exists()
+
+
 def test_run_exists_on_a_ledger_without_the_batch_record_is_unknown(world: World) -> None:
     assert world.start(tasks=[T1])[0] == 0
     path = L.run_ledger_path(world.root, "r1")

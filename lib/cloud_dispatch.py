@@ -1242,6 +1242,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
         raise Refused("NO_BASE", "the repository has no commit at HEAD")
     config = load_config(svc, root, base_sha)
     tasks = normalize(raw, args.sequential)
+    _scan_task_ids(tasks)  # every id (local ones too) is stored in the ledger and printed
     checks = doctor_checks(svc, root, tasks=tasks, base_sha=base_sha)
     if not doctor_green(checks):
         raise Refused("DOCTOR_NOT_GREEN", failing(checks))
@@ -1325,6 +1326,13 @@ def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List
 
 def _local_reasons(plan: Dict[str, Any]) -> str:
     return "; ".join("%s: %s" % (tid, ",".join(entry["reasons"])) for tid, entry in plan["tasks"].items())
+
+
+def _scan_task_ids(tasks: Sequence[Dict[str, Any]]) -> None:
+    for task in tasks:
+        found = scan_text(str(task["id"]), "task-id")
+        if found:  # name the class, never the id
+            raise Refused("SECRET_IN_PROMPT", "a task id matched the secret scanner: %s" % ", ".join(found))
 
 
 def _scan_start_inputs(records: Sequence[Dict[str, Any]], *, run: str, base_sha: str, config: Dict[str, Any]) -> None:
