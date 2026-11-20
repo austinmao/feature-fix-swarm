@@ -1317,6 +1317,86 @@ def test_abandon_while_integrating_is_refused_and_the_ledger_agrees_with_the_ref
     assert doc["integration"]["tip"] == run_git(world.root, "rev-parse", L.integration_ref("r1"))
 
 
+def count_reviews(world: World, *, strip_first: bool = False) -> List[str]:
+    """Wrap ``cloud_collect.review``; log the integration ref at each call. ``strip_first`` makes the first approval look
+    like one recorded before the reviewer-model evidence existed (no ``model``/``requested_model``)."""
+    real = cloud_collect.review
+    seen: List[str] = []
+
+    def wrapper(**kwargs: Any) -> Any:
+        seen.append(run_git(world.root, "rev-parse", L.integration_ref("r1")))
+        result = real(**kwargs)
+        if strip_first and len(seen) == 1 and result.ok:
+            result.data.pop("model", None)
+            result.data.pop("requested_model", None)
+        return result
+
+    world.mp.setattr(cloud_collect, "review", wrapper)
+    return seen
+
+
+def test_an_approval_without_model_evidence_is_reviewed_again_before_verify_and_integration(world: World) -> None:
+    seen = count_reviews(world, strip_first=True)
+    assert world.start(tasks=[T1])[0] == 0
+    assert world.drive(max_ticks=20) == 0
+    entry = world.doc()["tasks"]["t1"]
+    assert len(seen) == 2 and entry["state"] == "integrated"
+    assert entry["review"]["model"] == entry["review"]["requested_model"] == "gpt-6.2-sol"
+    assert world.verify_calls and seen[0] == seen[1] == world.base  # nothing was integrated between the two reviews
+
+
+def test_replay_of_an_unfinished_integration_requires_model_evidence_first(world: World) -> None:
+    """A task approved by an older release, caught between the integrate journal and the ref move."""
+    seen = count_reviews(world)
+    assert world.start(tasks=[T1])[0] == 0
+    crash_at(world, "after-integrate-journal")
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    assert len(seen) == 1 and world.states()["t1"] == "integrating"
+
+    def legacy(doc: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("model", "requested_model"):
+            doc["tasks"]["t1"]["review"].pop(key)
+        return doc
+
+    L.locked_update(L.run_ledger_path(world.root, "r1"), legacy)
+    world.svc.fault = lambda name: None
+    assert world.drive(max_ticks=30) == 0
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] == "integrated" and len(seen) == 2
+    assert seen[1] == world.base, "the ref must not move before the fresh review"
+    assert entry["review"]["model"] == entry["review"]["requested_model"]
+
+
+def test_replay_records_the_merged_tree_retest_not_the_candidates_log(world: World) -> None:
+    """A crash after the integrate journal lost the merged-tree retest digest; replay recorded the candidate's log."""
+    import hashlib
+
+    def verify(tree_oid: str, cmd: str, **kwargs: Any) -> int:
+        Path(kwargs["log_path"]).write_text("tested " + tree_oid)
+        return 0
+
+    world.svc.verify_fn = verify
+    assert world.start()[0] == 0
+    seen = {"n": 0}
+
+    def fault(name: str) -> None:
+        if name == "after-integrate-journal":
+            seen["n"] += 1
+            if seen["n"] == 2:  # the second task merges onto the first and is retested
+                raise cd.SimulatedCrash(name)
+
+    world.svc.fault = fault
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    world.svc.fault = lambda name: None
+    assert world.drive(max_ticks=30) == 0
+    history = world.doc()["integration"]["history"]
+    merged = [h for h in history if h["publish_oid"] != h["candidate_oid"]]
+    assert len(merged) == 1  # a real merge commit, so the tree is not the candidate's own
+    assert merged[0]["test_log_sha"] == hashlib.sha256(("tested " + merged[0]["tree"]).encode()).hexdigest()
+
+
 def test_a_foreign_descendant_on_the_integration_ref_is_never_adopted(world: World) -> None:
     """L2: replay accepted any descendant of the journaled publish commit."""
     assert world.start(tasks=[T1])[0] == 0

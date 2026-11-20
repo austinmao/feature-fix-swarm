@@ -184,6 +184,7 @@ EV_LAUNCH_FOUND = "launch-found"
 EV_UNCERTAIN_TIMEOUT = "uncertain-timeout"
 EV_COLLECT_OK = "collect-ok"
 EV_REVIEW_APPROVE = "review-approve"
+EV_REVIEW_STALE = "review-stale"  # an approval without reviewer-model evidence goes back through review
 EV_TESTS_PASS = "tests-pass"
 EV_MERGE_PLANNED = "merge-planned"
 EV_INTEGRATED = "update-ref-done"
@@ -880,6 +881,10 @@ def _check_journal_data(op: str, task: Optional[str], generation: Optional[int],
                 _check_pos(data["deadline_at"])
         for name in _OID_DATA_KEYS.get(op, ()):
             validate_oid(data.get(name), name)
+        if op == OP_INTEGRATE and ("test_rc" in data or "test_log_sha" in data):
+            if not _is_int(data.get("test_rc")) or not isinstance(data.get("test_log_sha"), str) \
+                    or len(data["test_log_sha"]) > 128:
+                raise LedgerError(E_JOURNAL, "integrate data: test evidence")
     except LedgerError as exc:
         if exc.code == E_JOURNAL:
             raise
@@ -1019,6 +1024,7 @@ _row(COLLECTED, EV_REVIEW_APPROVE, REVIEWED)
 _row(COLLECTED, EV_REJECT, REJECTED, [B_REVIEW_REVISE, B_SECRET_LEAK])  # the review scan found a credential
 _row(COLLECTED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR,
      [B_REVIEW_UNAVAILABLE, B_REVIEW_CAP, B_REVIEW_MODEL_DOWNGRADED, B_REVIEW_MODEL_UNKNOWN])
+_row([REVIEWED, VERIFIED], EV_REVIEW_STALE, COLLECTED)  # legacy approval: review and verify again
 _row(REVIEWED, EV_TESTS_PASS, VERIFIED)
 _row(REVIEWED, EV_REJECT, REJECTED, [B_TESTS_FAILED])
 _row(REVIEWED, EV_NEEDS_OPERATOR, NEEDS_OPERATOR, [B_SANDBOX_UNAVAILABLE, B_VERIFY_CMD_MISSING])
@@ -1079,6 +1085,17 @@ OPERATOR_BLOCKER_RULES: Dict[str, FrozenSet[str]] = {
     EV_ACCEPT_DEPS: RESOLVE_ACTIONS[ACTION_ACCEPT_DEPS],
     EV_OPERATOR_REJECT: RESOLVE_ACTIONS[ACTION_REJECT],
 }
+def review_has_model_evidence(review: Any) -> bool:
+    """True when an approval names the requested and the answering reviewer model and they are the same one.
+
+    ``review_model_problem`` only lets an approval through in that case, so every approval recorded since the
+    reviewer-model check carries both fields. An older record has neither and must be reviewed again."""
+    if not isinstance(review, dict):
+        return False
+    requested, answered = review.get("requested_model"), review.get("model")
+    return bool(requested) and isinstance(requested, str) and requested == answered
+
+
 _REVIEW_KEYS = frozenset(["family", "verdict", "diff_sha", "patch_id", "tree"])
 #: Recorded since the reviewer-model check; absent from older records, which stay valid.
 _REVIEW_OPTIONAL_KEYS = frozenset(["model", "requested_model"])
@@ -1259,6 +1276,9 @@ def _commit(doc: Dict[str, Any], name: str, entry: Dict[str, Any], event: str, p
     if event == EV_UNBIND:
         entry["bound_oid"] = entry["bound_ref"] = entry["seen_oid"] = None
         entry["seen_count"] = 0
+    if event == EV_REVIEW_STALE:  # the old approval and its test evidence no longer count; a fresh round meter
+        entry["review"] = entry["verify"] = None
+        entry["review_attempts"] = int(entry.get("review_attempts") or 0) + 1
     if event == EV_RETEST:
         entry["push_failures"] = 0
         if entry.get("blocker") in REVIEW_BLOCKERS:
@@ -1394,16 +1414,26 @@ def reject_candidate(doc: Dict[str, Any], task: str, *, generation: int, ref: st
 
 
 def begin_integration(doc: Dict[str, Any], task: str, *, generation: int, expected_tip: str, candidate_oid: str,
-                      publish_oid: str, tree: str) -> int:
-    """``verified -> integrating`` plus the ``integrate`` journal entry, in one mutation."""
+                      publish_oid: str, tree: str, test_rc: Optional[int] = None,
+                      test_log_sha: Optional[str] = None) -> int:
+    """``verified -> integrating`` plus the ``integrate`` journal entry, in one mutation.
+
+    ``test_rc``/``test_log_sha`` are the evidence for the tree being published (the merged-tree retest when the
+    plan merged); they are journaled so a replay after a crash records them, not the candidate's own log."""
     for label, value in (("expected_tip", expected_tip), ("candidate_oid", candidate_oid),
                          ("publish_oid", publish_oid), ("tree", tree)):
         validate_oid(value, label)
+    evidence: Dict[str, Any] = {}
+    if test_rc is not None or test_log_sha is not None:
+        if not _is_int(test_rc) or not isinstance(test_log_sha, str) or len(test_log_sha) > 128:
+            raise LedgerError(E_BAD_FIELD, "test evidence")
+        evidence = {"test_rc": test_rc, "test_log_sha": test_log_sha}
     entry = _task(doc, task)
     _fence(entry, generation)
     _plan(doc, entry, EV_MERGE_PLANNED, {}, None)  # legality check before any mutation
-    seq = journal_begin(doc, OP_INTEGRATE, task, generation, {
-        "expected_tip": expected_tip, "candidate_oid": candidate_oid, "publish_oid": publish_oid, "tree": tree})
+    seq = journal_begin(doc, OP_INTEGRATE, task, generation, dict({
+        "expected_tip": expected_tip, "candidate_oid": candidate_oid, "publish_oid": publish_oid, "tree": tree},
+        **evidence))
     transition(doc, task, EV_MERGE_PLANNED, generation=generation)
     return seq
 

@@ -57,6 +57,17 @@ all skills.
   lost now reads `status --run <run>`, reports the existing run, runs
   `reconcile.sh` once if the orchestrator is dead, and runs no task of that run
   locally; a run id that belongs to other work stops and asks the operator.
+- Resume no longer trusts an approval recorded before the reviewer-model check.
+  A task found in `reviewed` or `verified` whose `review` record lacks matching
+  `model` and `requested_model` goes back to `collected` (new ledger event
+  `review-stale`, a fresh round meter, `review` and `verify` cleared) and is
+  reviewed and verified again; an unfinished `integrate` journal entry for such
+  a task is re-planned instead of applying the ref move. An integration that
+  already moved the ref is only recorded, never undone.
+- The merged-tree retest result (`test_rc`, `test_log_sha`) is persisted in the
+  `integrate` journal entry. Crash recovery records it in the integration
+  history instead of the candidate's own verify log (older journal entries
+  without it keep the old fallback).
 
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 

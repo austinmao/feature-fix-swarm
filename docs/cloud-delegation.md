@@ -605,8 +605,11 @@ weaker model of the same vendor and still return `APPROVE`. That approval ends
 in `needs-operator` with `review-model-downgraded`, and an approval whose model
 is not reported ends with `review-model-unknown`. The opposite-vendor rule and
 `FFS_CROSS_VENDOR_FALLBACK=off` are unchanged. The ledger `review` record
-carries `model` and `requested_model` (records written before this are still
-valid). `REVISE` rejects the result. Each run of the script
+carries `model` and `requested_model` (records written before this still load).
+An approval that lacks both is not trusted when a run resumes: a task found in
+`reviewed` or `verified` goes back to `collected` (a fresh review round meter)
+and is reviewed and verified again, and an unfinished integration of such a
+task is re-planned instead of applied, so the ref never moves on it. `REVISE` rejects the result. Each run of the script
 spends one of two review rounds from a durable round meter for that task
 generation, whatever the outcome. `resolve --action retest` on a review
 blocker starts a fresh two-round meter (the optional `attempt` argument). It
@@ -723,7 +726,10 @@ case is folded in the merged tree, the task also stops at `merge-conflict`,
 with the detail `case-colliding paths`. The merged change must also have the
 same `git patch-id` as the reviewed change (`patch-id-mismatch` otherwise).
 The hash is computed with `--verbatim`, or with `--stable` on a git that lacks
-that flag. Tests run again on the merged tree. A merge does not get a second
+that flag. Tests run again on the merged tree, and the digest of that retest log
+is written into the integration journal with the intent, so a replay after a
+crash records the merged tree's evidence, not the candidate's own log. A merge
+does not get a second
 review, because the merged change is identical to the reviewed one.
 
 Then `git update-ref` moves the ref with a compare-and-swap on the old tip.

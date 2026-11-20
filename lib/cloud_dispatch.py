@@ -2175,6 +2175,8 @@ class Orchestrator:
         action = ledger.replay_integrate(entry, ref_oid, publish_is_ancestor=ancestor,
                                          known=ledger.known_publish_oids(doc))
         tip = publish
+        if action == "update-ref" and not ledger.review_has_model_evidence(doc["tasks"][name].get("review")):
+            action = "replan"  # never apply the move on an approval without reviewer-model evidence
         if action == "update-ref":
             result = cloud_collect.apply_integration(repo=str(self.root), ref=ref, publish_oid=publish,
                                                      expected_tip=data["expected_tip"])
@@ -2183,8 +2185,9 @@ class Orchestrator:
             action, tip = "complete", str(ref_oid)
         if action == "complete":
             verify = doc["tasks"][name].get("verify") or {}
-            self.complete_integration(name, gen, entry["seq"], data, int(verify.get("test_rc", 0)),
-                                      str(verify.get("test_log_sha", "")), tip)
+            # the journaled evidence is for the published tree (the merged-tree retest); an older entry has none
+            self.complete_integration(name, gen, entry["seq"], data, int(data.get("test_rc", verify.get("test_rc", 0))),
+                                      str(data.get("test_log_sha", verify.get("test_log_sha", ""))), tip)
         elif action == "foreign":
             self.log("integration ref %s holds commits FFS did not publish (tip %s)" % (ref, str(ref_oid)[:12]))
             self.to_operator(name, gen, ledger.B_INTEGRATION_FOREIGN,
@@ -2420,8 +2423,20 @@ class Orchestrator:
             return
         if self.doc()["tasks"][name]["state"] == ST.COLLECTED and not self.stage_review(name):
             return
-        if self.doc()["tasks"][name]["state"] == ST.REVIEWED:
+        if self.doc()["tasks"][name]["state"] == ST.REVIEWED and self.review_evidence_current(name):
             self.stage_verify(name)
+
+    def review_evidence_current(self, name: str) -> bool:
+        """True when the task's approval names the reviewer model that answered (see
+        ``ledger.review_has_model_evidence``). An approval recorded before that check carries no such evidence:
+        it is not trusted, and the task goes back through review and verify."""
+        entry = self.doc()["tasks"][name]
+        if ledger.review_has_model_evidence(entry.get("review")):
+            return True
+        gen = entry["generation"]
+        self.log("%s g%d: approval has no reviewer-model evidence; back to review" % (name, gen))
+        self.apply(name, gen, lambda d: ledger.transition(d, name, ledger.EV_REVIEW_STALE, generation=gen), "review-stale")
+        return False
 
     def bound_ref(self, doc: Dict[str, Any], name: str, entry: Dict[str, Any]) -> str:
         """The ref the poll bound (stored in the ledger); an operator-adopted result has none: use the exact name."""
@@ -2638,6 +2653,8 @@ class Orchestrator:
         doc = self.doc()
         entry = doc["tasks"][name]
         gen, tip = entry["generation"], doc["integration"]["tip"]
+        if not self.review_evidence_current(name):
+            return
         ref = ledger.integration_ref(self.run_id)
         if rev_parse(self.svc, self.root, ref) != tip:
             self.to_operator(name, gen, ledger.B_MERGE_CONFLICT, ["the integration ref moved outside FFS; reconcile it, then `resolve --action retest`"])
@@ -2668,7 +2685,8 @@ class Orchestrator:
         def begin(doc: Dict[str, Any]) -> Dict[str, Any]:
             seq_box["seq"] = ledger.begin_integration(
                 doc, name, generation=gen, expected_tip=data["expected_tip"], candidate_oid=entry["candidate_oid"],
-                publish_oid=data["publish_oid"], tree=data["tree"])
+                publish_oid=data["publish_oid"], tree=data["tree"], test_rc=int(evidence.get("test_rc", 0)),
+                test_log_sha=str(evidence.get("test_log_sha", "")))
             return doc
 
         if not self.apply(name, gen, begin, "begin-integration"):

@@ -918,6 +918,46 @@ def test_complete_integration_validates_before_mutating():
         cl.complete_integration(doc, "a", **ok)
 
 
+def test_begin_integration_journals_the_retest_evidence_and_validates_it():
+    doc = put(fresh_doc(), "a", cl.VERIFIED)
+    before = copy.deepcopy(doc)
+    for bad in ({"test_rc": "0", "test_log_sha": "x"}, {"test_rc": 0, "test_log_sha": "x" * 129}, {"test_rc": 0},
+                {"test_log_sha": "x"}):
+        with pytest.raises(cl.LedgerError):
+            cl.begin_integration(doc, "a", generation=1, expected_tip=BASE, candidate_oid=oid(1), publish_oid=oid(2),
+                                 tree=oid(3), **bad)
+        assert doc == before
+    seq = cl.begin_integration(doc, "a", generation=1, expected_tip=BASE, candidate_oid=oid(1), publish_oid=oid(2),
+                               tree=oid(3), test_rc=0, test_log_sha="retest-digest")
+    data = cl._journal_entry(doc, seq)["data"]
+    assert (data["test_rc"], data["test_log_sha"]) == (0, "retest-digest")
+
+
+def test_review_has_model_evidence_needs_requested_and_answering_model_to_match():
+    ok = {"requested_model": "m-1", "model": "m-1"}
+    assert cl.review_has_model_evidence(ok) is True
+    for review in (None, {}, {"model": "m-1"}, {"requested_model": "m-1"}, {"requested_model": "m-1", "model": "m-2"},
+                   {"requested_model": "", "model": ""}, {"requested_model": 1, "model": 1}, "m-1"):
+        assert cl.review_has_model_evidence(review) is False, review
+
+
+@pytest.mark.parametrize("state", [cl.REVIEWED, cl.VERIFIED])
+def test_review_stale_sends_an_approval_back_through_review_and_verify(state):
+    doc = put(fresh_doc(), "a", state)
+    entry = doc["tasks"]["a"]
+    entry["review"] = {"family": "codex", "verdict": "APPROVE", "diff_sha": "d", "patch_id": "p", "tree": oid(3)}
+    entry["verify"] = {"test_rc": 0, "test_log_sha": "x"}
+    cl.transition(doc, "a", cl.EV_REVIEW_STALE, generation=1)
+    assert entry["state"] == cl.COLLECTED and entry["review"] is None and entry["verify"] is None
+    assert entry["review_attempts"] == 1 and entry["blocker"] is None
+
+
+def test_review_stale_is_illegal_from_other_states():
+    for state in (cl.COLLECTED, cl.INTEGRATING, cl.INTEGRATED, cl.RUNNING):
+        with pytest.raises(cl.LedgerError):
+            cl.transition(put(fresh_doc(), "a", state), "a", cl.EV_REVIEW_STALE, generation=1)
+
+
 def test_begin_integration_requires_verified():
     doc = put(fresh_doc(), "a", cl.REVIEWED)
     before = copy.deepcopy(doc)
