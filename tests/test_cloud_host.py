@@ -2078,3 +2078,17 @@ def test_a_non_empty_unrecognized_marker_is_refused_and_left_untouched(
     install_fake("claude")
     assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome != "launched"
     assert marker.read_text() == "operator notes\n"
+
+
+def test_a_libc_without_renameat2_falls_back_to_a_check_and_a_rename(tmp_path, monkeypatch):
+    import ctypes
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace())  # no renameat2 (glibc < 2.28)
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(sysname="Linux"))
+    src, taken = tmp_path / "src", tmp_path / "taken"
+    src.mkdir()
+    taken.mkdir()
+    with pytest.raises(FileExistsError):
+        ch._rename_noreplace(str(src), str(taken))
+    ch._rename_noreplace(str(src), str(tmp_path / "free"))
+    assert not src.exists() and (tmp_path / "free").is_dir()

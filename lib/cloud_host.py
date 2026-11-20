@@ -1243,9 +1243,13 @@ def _rename_noreplace(src: str, dst: str) -> None:
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         if os.uname().sysname == "Darwin":
-            call = lambda a, b: libc.renamex_np(a, b, 0x4)  # RENAME_EXCL
+            fn = libc.renamex_np  # bound here: a missing symbol must reach the fallback below
+            fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            call = lambda a, b: fn(a, b, 0x4)  # RENAME_EXCL
         else:
-            call = lambda a, b: libc.renameat2(-100, a, -100, b, 0x1)  # AT_FDCWD, RENAME_NOREPLACE
+            fn = libc.renameat2  # absent before glibc 2.28
+            fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            call = lambda a, b: fn(-100, a, -100, b, 0x1)  # AT_FDCWD, RENAME_NOREPLACE
     except (OSError, AttributeError):
         call = None
     if call is not None:
