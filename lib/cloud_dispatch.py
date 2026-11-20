@@ -1192,25 +1192,31 @@ def refuse_start_grants(missing: List[str]) -> None:
 _ROUTING_KEYS = ("provider", "model", "effort", "provenance", "depends_on")
 
 
-def _run_exists_batch(svc: Services, root: Path, run: str, raw: List[Any], sequential: bool) -> str:
-    """``batch=same [local=ids]`` when the retried batch is the one run ``run`` holds, else ``batch=other|unknown``.
+def _batch_record(tasks: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Every id of the batch (cloud and local) and a digest of its content without the routing keys."""
+    core = {str(t["id"]): {k: v for k, v in t.items() if k not in _ROUTING_KEYS} for t in tasks}
+    body = json.dumps(core, sort_keys=True, default=str, separators=(",", ":"))
+    return {"ids": sorted(core), "digest": hashlib.sha256(body.encode("utf-8")).hexdigest()}
 
-    The ledger holds only the cloud-routed tasks, so the batch matches when every stored task is in it with the
-    same content; the batch's other tasks were never offloaded and are the ones left to run locally.  Anything
-    unreadable is ``unknown``: the caller must not start the tasks again."""
+
+def _run_exists_batch(svc: Services, root: Path, run: str, raw: List[Any], sequential: bool) -> str:
+    """``batch=same [local=ids]`` only when the retried batch is exactly the one run ``run`` started, else
+    ``batch=other|unknown``.
+
+    The ledger holds the cloud-routed tasks; the first attempt's full id set and content digest sit beside them,
+    so a superset or an edited batch is ``other`` and can never send cloud-eligible tasks to ``local=``.  A ledger
+    without that record, or anything unreadable, is ``unknown``: the caller must not start the tasks again."""
     try:
-        batch = {str(t["id"]): t for t in normalize(raw, sequential)}
+        tasks = normalize(raw, sequential)
         doc = ledger.read(ledger.run_ledger_path(root, run))
-        stored = {str(r["id"]): r for r in ledger.load_tasks_file(ledger.tasks_path(root, run), doc["tasks_sha256"])}
+        ledger.load_tasks_file(ledger.tasks_path(root, run), doc["tasks_sha256"])
+        started = doc["batch"]
+        same = started == _batch_record(tasks)
+        local = [str(t["id"]) for t in tasks if str(t["id"]) not in doc["tasks"]]
     except (DispatchError, ledger.LedgerError, OSError, ValueError, KeyError, TypeError):
         return "batch=unknown"
-
-    def core(record: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: v for k, v in record.items() if k not in _ROUTING_KEYS}
-
-    if not stored or any(i not in batch or core(stored[i]) != core(batch[i]) for i in stored):
+    if not same:
         return "batch=other"
-    local = [i for i in batch if i not in stored]
     return "batch=same" + (" local=%s" % ",".join(local) if local else "")
 
 
@@ -1249,7 +1255,8 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     specs = [{"id": r["id"], "provider": r["provider"], "depends_on": r["depends_on"], "owns": r.get("owns") or [],
               "verify_cmd": effective_verify_cmd(r.get("verify_cmd"), config)}
              for r in records]
-    reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha, now=int(svc.now()))
+    reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha, now=int(svc.now()),
+                batch=_batch_record(tasks))
     if not git(svc, root, ["update-ref", "--no-deref", ledger.integration_ref(run), base_sha, ""]).ok:
         ledger_file = ledger.run_ledger_path(root, run)  # no orchestrator will start: release the id for a real retry
         for leftover in (ledger_file, ledger.lock_path_for(ledger_file), ledger.tasks_path(root, run)):
@@ -1270,7 +1277,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
 
 
 def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List[Dict[str, Any]], *, url: str,
-                policy: str, base_sha: str, sha: str, now: int) -> None:
+                policy: str, base_sha: str, sha: str, now: int, batch: Dict[str, Any]) -> None:
     """Reserve the run id by creating its ledger exclusively, and only then write ``tasks.json``.
 
     Two concurrent ``start`` calls for one run id used to overwrite each other's ``tasks.json`` before the
@@ -1281,6 +1288,7 @@ def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List
     try:
         doc = ledger.new_run(run, base_sha=base_sha, origin=ORIGIN_NAME, origin_url=url, policy=policy,
                              tasks=specs, tasks_sha256=sha, created_at=now)
+        doc["batch"] = batch  # the first attempt's whole batch: a retried start is compared with it
         ledger.create_run_ledger(path, doc)
     except ledger.LedgerError as exc:
         if exc.code == ledger.E_EXISTS:

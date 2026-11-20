@@ -10,6 +10,13 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: round 5b review)
 
+- A retried `start` for an existing run id reports `batch=same` only when the
+  whole batch matches the first attempt: `start` now stores the first attempt's
+  full task id set (cloud and local) and a content digest in the run ledger
+  (`batch`). A superset, subset or edited batch is `batch=other`, so extra
+  cloud-eligible tasks can no longer land under `local=` and run locally (even
+  under `--policy required`). A ledger written before this field gives
+  `batch=unknown`. `/swarm` skill 2.2.3 describes the exact-match rule.
 - A `git clone` killed at its transfer timeout no longer wedges every later
   fixed-clone launch with `CLONE_PATH_INVALID`. The dispatcher now creates the
   clone directory itself (`mkdir`, exclusive) and writes an ownership marker

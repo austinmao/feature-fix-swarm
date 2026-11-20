@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.2"
+version: "2.2.3"
 permissions:
   filesystem: write
   network: true
@@ -76,8 +76,11 @@ Otherwise skip it entirely and continue below exactly as before.
    acknowledgement, or a reused run id) and its tasks may be running in the
    cloud. Never run those tasks locally and never call `start` again for that
    run. The refusal line ends with `batch=same`, `batch=same local=<ids>`,
-   `batch=other` or `batch=unknown`: `start` itself compared this batch with
-   the run's stored cloud-routed tasks (the ledger holds only those).
+   `batch=other` or `batch=unknown`: `start` itself compared this batch (every
+   task id, cloud and local, and its content) with the whole batch the first
+   attempt started. `batch=same` means an exact match; a superset, a subset or
+   an edited batch is `batch=other`, and a run started by an older release
+   (no stored batch) is `batch=unknown`.
    Run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
    the run as started only on `batch=same`: report it as in step 8, and if
    `orchestrator.alive` is false run `bash scripts/gsd/reconcile.sh` once so a

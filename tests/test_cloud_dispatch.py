@@ -955,25 +955,36 @@ def test_start_twice_is_refused(world: World) -> None:
 
 
 def test_run_exists_reports_whether_the_retried_batch_is_the_started_one(world: World) -> None:
-    """CR-01: the ledger holds only cloud-routed tasks, so a mixed batch must still match its own run."""
+    """CR-01 + WR-B: ``batch=same`` only for the whole first batch, cloud and local tasks alike."""
     local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
     local2 = task("t3", "src/c/**", local_only=True, local_reason="touches secrets")
     assert world.start(tasks=[T1, local])[0] == 0
     ids = world.doc()["tasks"]
     assert list(ids) == ["t1"]
-    retry = lambda batch, name: world.cli("start", "--run", "r1", "--tasks", world.tasks_file(batch, name),  # noqa: E731
-                                          "--policy", "auto", "--root", str(world.root))
+    assert world.doc()["batch"]["ids"] == ["t1", "t2"]
+    retry = lambda batch, name, policy="auto": world.cli(  # noqa: E731
+        "start", "--run", "r1", "--tasks", world.tasks_file(batch, name), "--policy", policy, "--root", str(world.root))
     rc, out = retry([T1, local], "same.json")
     assert rc == 3 and "RUN_EXISTS" in out and "batch=same" in out and "local=t2" in out
-    rc, out = retry([T1, local, local2], "more.json")
-    assert "batch=same" in out and "local=t2,t3" in out
-    rc, out = retry([T1], "bare.json")
-    assert "batch=same" in out and "local=" not in out
+    for batch, name in (([T1, local, local2], "more.json"), ([T1], "bare.json"), ([T1, local, task("t4", "src/d/**")], "cloudy.json")):
+        rc, out = retry(batch, name, "required")
+        assert rc == 3 and "batch=other" in out and "batch=same" not in out and "local=" not in out, out
     rc, out = retry([T2, local2], "other.json")
     assert rc == 3 and "batch=other" in out and "batch=same" not in out
     rc, out = retry([task("t1", "src/z/**"), local], "edited.json")
     assert "batch=other" in out
     assert list(world.doc()["tasks"]) == ["t1"]
+
+
+def test_run_exists_on_a_ledger_without_the_batch_record_is_unknown(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    path = L.run_ledger_path(world.root, "r1")
+    doc = json.loads(path.read_text())
+    del doc["batch"]  # a ledger written before the batch record existed
+    path.write_text(json.dumps(doc))
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    assert rc == 3 and "batch=unknown" in out and "batch=same" not in out
 
 
 def test_local_only_tasks_leave_nothing_to_start(world: World) -> None:
