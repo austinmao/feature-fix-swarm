@@ -1802,3 +1802,64 @@ def test_an_unmarked_clone_dir_is_refused_and_never_deleted(install_fake, origin
     result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
     assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
     assert (clone / "dirty.txt").exists()
+
+
+# ── Marker file: never truncated, never unlinked unless it is the dispatcher's own ──
+
+
+def _launch_refused(origin, tmp_path):
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert result.outcome == "failed" and result.detail.startswith("CLONE_PATH_INVALID ")
+    assert "MARKER" in result.detail  # the refusal carries a reason
+    return result
+
+
+def test_an_unrelated_file_at_the_marker_name_is_refused_and_kept(install_fake, origin, state, tmp_path, clone_parent):
+    install_fake("claude")
+    marker = ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude")
+    marker.write_text("operator notes\n")
+    _launch_refused(origin, tmp_path)
+    assert marker.read_text() == "operator notes\n"
+    assert not (clone_parent / "ffs-cloud-launch-claude").exists()
+
+
+def test_a_hard_link_at_the_marker_name_is_refused_and_its_target_is_untouched(
+        install_fake, origin, state, tmp_path, clone_parent):
+    install_fake("claude")
+    keep = tmp_path / "operator-file"
+    keep.write_text("precious\n")
+    marker = ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude")
+    os.link(str(keep), str(marker))
+    _launch_refused(origin, tmp_path)
+    assert keep.read_text() == "precious\n" and marker.exists() and os.stat(str(keep)).st_nlink == 2
+
+
+def test_a_symlink_or_fifo_at_the_marker_name_is_refused_and_kept(install_fake, origin, state, tmp_path, clone_parent):
+    install_fake("claude")
+    marker = ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude")
+    target = tmp_path / "elsewhere"
+    target.write_text("keep\n")
+    marker.symlink_to(target)
+    _launch_refused(origin, tmp_path)
+    assert marker.is_symlink() and target.read_text() == "keep\n"
+    marker.unlink()
+    os.mkfifo(str(marker))  # must not hang the launch while it holds the flock
+    _launch_refused(origin, tmp_path)
+    assert stat.S_ISFIFO(os.lstat(str(marker)).st_mode)
+
+
+def test_claiming_never_truncates_a_file_that_appears_at_the_marker_name(tmp_path):
+    clone = tmp_path / "c"
+    keep = tmp_path / "operator-file"
+    keep.write_text("precious\n")
+    os.link(str(keep), str(ch._clone_marker_path(clone)))
+    assert ch._claim_clone(clone) != ""
+    assert keep.read_text() == "precious\n" and not clone.exists()
+
+
+def test_a_valid_orphan_marker_with_no_clone_is_dropped(install_fake, origin, state, tmp_path, clone_parent):
+    install_fake("claude")
+    marker = ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude")
+    marker.write_text("1:1\n")  # a dispatcher marker whose directory is gone
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert not marker.exists()

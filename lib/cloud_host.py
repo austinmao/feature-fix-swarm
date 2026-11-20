@@ -1171,21 +1171,67 @@ def _clone_marker_path(clone: Path) -> Path:
     return clone.with_name(clone.name + CLONE_MARKER_SUFFIX)
 
 
+CLONE_MARKER_RE = re.compile(rb"([0-9]{1,20}):([0-9]{1,20})\n")
+
+
+def _read_marker(path: Path) -> Optional[Tuple[int, int]]:
+    """The ``(device, inode)`` a dispatcher marker names, or ``None`` for anything else at that name: it must be a
+    regular file with one link, owned by this user, holding exactly ``dev:ino``. Never follows a symlink or blocks on
+    a FIFO."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64:
+            return None
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            return None
+        found = CLONE_MARKER_RE.fullmatch(os.read(fd, 65))
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return (int(found.group(1)), int(found.group(2))) if found else None
+
+
+def _create_marker(path: Path, device: int, inode: int) -> None:
+    """Create the marker exclusively (0600, no symlink followed): an existing name is never truncated or reused."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        data = memoryview(("%d:%d\n" % (device, inode)).encode("ascii"))
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_dir(path.parent)
+
+
+def _drop_marker(clone: Path) -> str:
+    """Remove the marker of a directory that is gone; ``""`` or ``CLONE_PATH_INVALID MARKER_UNRECOGNIZED``. Only a file
+    that verifies as a dispatcher marker is unlinked; anything else at that name is left alone and refused."""
+    marker = _clone_marker_path(clone)
+    if not os.path.lexists(str(marker)):
+        return ""
+    if _read_marker(marker) is None:
+        return "CLONE_PATH_INVALID MARKER_UNRECOGNIZED"
+    try:
+        os.unlink(str(marker))
+    except OSError:
+        pass
+    return ""
+
+
 def _owns_clone(clone: Path) -> bool:
     """True only for a plain directory the dispatcher created: the sibling marker records its device and inode."""
     try:
         info = os.lstat(str(clone))
-        marker = os.lstat(str(_clone_marker_path(clone)))
-        if not stat.S_ISDIR(info.st_mode) or not stat.S_ISREG(marker.st_mode):
-            return False
-        fd = os.open(str(_clone_marker_path(clone)), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            recorded = os.read(fd, 64)
-        finally:
-            os.close(fd)
     except OSError:
         return False
-    return recorded == ("%d:%d\n" % (info.st_dev, info.st_ino)).encode("ascii")
+    return stat.S_ISDIR(info.st_mode) and _read_marker(_clone_marker_path(clone)) == (info.st_dev, info.st_ino)
 
 
 def _claim_clone(clone: Path) -> str:
@@ -1197,13 +1243,13 @@ def _claim_clone(clone: Path) -> str:
         return "CLONE_PATH_INVALID"
     try:
         info = os.lstat(str(clone))
-        write_private_file(_clone_marker_path(clone), ("%d:%d\n" % (info.st_dev, info.st_ino)).encode("ascii"))
-    except OSError:
+        _create_marker(_clone_marker_path(clone), info.st_dev, info.st_ino)
+    except OSError as exc:
         try:
             os.rmdir(str(clone))  # empty and just created by this call
         except OSError:
             pass
-        return "CLONE_DIR_FAILED"
+        return "CLONE_PATH_INVALID MARKER_EXISTS" if isinstance(exc, FileExistsError) else "CLONE_DIR_FAILED"
     return ""
 
 
@@ -1212,10 +1258,7 @@ def _release_clone(clone: Path) -> None:
     if _owns_clone(clone):
         shutil.rmtree(str(clone), ignore_errors=True)
     if not os.path.lexists(str(clone)):
-        try:
-            os.unlink(str(_clone_marker_path(clone)))
-        except OSError:
-            pass
+        _drop_marker(clone)
 
 
 def _clear_stale_clone(clone: Path) -> str:
@@ -1224,8 +1267,7 @@ def _clear_stale_clone(clone: Path) -> str:
     try:
         info = os.lstat(str(clone))
     except FileNotFoundError:
-        _release_clone(clone)  # drops a marker whose directory is gone
-        return ""
+        return _drop_marker(clone)  # a marker whose directory is gone; an unrecognized file there is refused
     except OSError:
         return "CLONE_PATH_INVALID"
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or not _owns_clone(clone):
