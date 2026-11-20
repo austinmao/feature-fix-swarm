@@ -8,10 +8,12 @@ the backend strips everything outside the child-environment allowlist.
 import json
 import os
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1961,3 +1963,65 @@ def test_a_launch_leaves_no_staging_directory_behind(install_fake, origin, state
     install_fake("claude")
     assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
     assert _staging_dirs(clone_parent) == []
+
+
+# ── Leftovers of a killed launch are recovered only when provably the dispatcher's own ──
+
+
+def _leftover(parent, prefix, mode=0o700):
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+    os.chmod(str(path), mode)
+    return path
+
+
+def test_a_killed_claim_before_publication_is_recovered_by_the_next_launch(
+        install_fake, origin, state, tmp_path, clone_parent):
+    staging = _leftover(clone_parent, ch.STAGE_NEW_PREFIX)
+    (staging / "new").mkdir()
+    (staging / "new" / "partial").write_text("x")
+    info = os.lstat(str(staging / "new"))
+    ch._create_marker(ch._clone_marker_path(clone_parent / "ffs-cloud-launch-claude"), info.st_dev, info.st_ino)
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert _staging_dirs(clone_parent) == [] and not (clone_parent / "ffs-cloud-launch-claude.ffs-owned").exists()
+
+
+def test_a_kill_after_retiring_the_clone_is_recovered_when_the_marker_names_it(
+        install_fake, origin, state, tmp_path, clone_parent):
+    clone = clone_parent / "ffs-cloud-launch-claude"
+    assert ch._claim_clone(clone) == ""
+    (clone / "partial").write_text("x")
+    staging = _leftover(clone_parent, ch.STAGE_OLD_PREFIX)
+    os.rename(str(clone), str(staging / "retired"))  # killed mid-delete: the marker is still there
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert _staging_dirs(clone_parent) == [] and not ch._clone_marker_path(clone).exists()
+
+
+def test_a_kill_after_retiring_the_marker_is_recovered(install_fake, origin, state, tmp_path, clone_parent):
+    clone = clone_parent / "ffs-cloud-launch-claude"
+    assert ch._claim_clone(clone) == ""
+    shutil.rmtree(str(clone))
+    staging = _leftover(clone_parent, ch.STAGE_OLD_PREFIX)
+    os.rename(str(ch._clone_marker_path(clone)), str(staging / "marker"))
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert _staging_dirs(clone_parent) == []
+
+
+def test_staging_leftovers_that_are_not_provably_the_dispatchers_are_never_deleted(
+        install_fake, origin, state, tmp_path, clone_parent):
+    loose = _leftover(clone_parent, ch.STAGE_NEW_PREFIX, 0o755)  # right prefix, wrong mode
+    (loose / "new").mkdir()
+    (loose / "new" / "keep").write_text("a")
+    foreign = _leftover(clone_parent, ch.STAGE_OLD_PREFIX)  # a retired directory no marker names
+    (foreign / "retired").mkdir()
+    (foreign / "retired" / "keep").write_text("b")
+    elsewhere = tmp_path / "operator-dir"
+    elsewhere.mkdir()
+    (elsewhere / "keep").write_text("c")
+    (clone_parent / (ch.STAGE_NEW_PREFIX + "link")).symlink_to(elsewhere)
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert (loose / "new" / "keep").read_text() == "a" and (foreign / "retired" / "keep").read_text() == "b"
+    assert (elsewhere / "keep").read_text() == "c"

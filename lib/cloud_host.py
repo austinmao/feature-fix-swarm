@@ -1353,9 +1353,46 @@ def _release_clone(clone: Path) -> str:
     return "" if os.path.lexists(str(clone)) else _drop_marker(clone)
 
 
+def _recover_staging(parent: Path) -> None:
+    """Rule: only what is provably the dispatcher's own is removed, without operator action: a mkdtemp staging directory
+    with its prefix (0700, owned by this user) holds a directory it made, and the retired directory in an old-staging
+    directory only when the marker names it. Anything else is left where it is."""
+    named = _read_marker(_clone_marker_path(parent / CLONE_DIR_NAME))
+    try:
+        entries = sorted(os.listdir(str(parent)))
+    except OSError:
+        return
+    for entry in entries:
+        path = parent / entry
+        fresh = entry.startswith(STAGE_NEW_PREFIX)
+        if not (fresh or entry.startswith(STAGE_OLD_PREFIX)):
+            continue
+        try:
+            info = os.lstat(str(path))
+            if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+                continue
+            if hasattr(os, "getuid") and info.st_uid != os.getuid():
+                continue
+            if fresh:
+                shutil.rmtree(str(path), ignore_errors=True)
+                continue
+            for child in os.listdir(str(path)):
+                inner = os.path.join(str(path), child)
+                if child == "marker" and _read_marker(Path(inner)) is not None:
+                    os.unlink(inner)
+                elif child == "retired":
+                    found = os.lstat(inner)
+                    if stat.S_ISDIR(found.st_mode) and named == (found.st_dev, found.st_ino):
+                        shutil.rmtree(inner, ignore_errors=True)
+            os.rmdir(str(path))  # only succeeds when empty
+        except OSError:
+            continue
+
+
 def _clear_stale_clone(clone: Path) -> str:
     """Remove a clone left at the fixed path by a killed launch. Refuses anything that is not a plain directory the
     dispatcher created (its sibling marker names this directory): an operator's checkout is never deleted."""
+    _recover_staging(clone.parent)
     try:
         info = os.lstat(str(clone))
     except FileNotFoundError:
