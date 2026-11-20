@@ -18,7 +18,7 @@ import hashlib
 import json
 
 from .ownership import OwnershipRefused, assert_owner
-from .sealed_review import _host_final_text, _unique_keys
+from .sealed_review import _review_output
 from .supervisor import SupervisorRefused, _canonical, _read_evidence
 from .workspace import WorkspaceRefused, _from_row
 
@@ -173,16 +173,7 @@ def _text(value) -> bool:
 
 
 def _output(result: dict, raw: bytes) -> dict:
-    try:
-        if result.get("host_receipt") is None:
-            value = json.loads(raw, object_pairs_hook=_unique_keys)
-        else:
-            value = json.loads(_host_final_text(result, raw), object_pairs_hook=_unique_keys)
-        if not isinstance(value, dict):
-            raise ValueError("invalid review output")
-        return value
-    except (KeyError, TypeError, ValueError, UnicodeError) as error:
-        raise SupervisorRefused("SPEC_REVIEW_OUTPUT_INVALID") from error
+    return _review_output(result, raw, "SPEC_REVIEW_OUTPUT_INVALID")
 
 
 def _checked(output: dict, draft) -> None:

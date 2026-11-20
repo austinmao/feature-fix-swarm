@@ -1,7 +1,7 @@
 ---
 name: testing-policy
 description: "Canonical FFS testing doctrine — mock-minimization ladder, real-browser verification, console/network tripwires, independent test authorship, BDD-as-executable-input, coverage floor, smoke design. Other skills reference this instead of restating it."
-version: "1.1.0"
+version: "1.2.0"
 allowed-tools:
   - Read
   - Bash
@@ -88,11 +88,21 @@ Fix the implementation, not the test — unless the test asserts a stale contrac
 which case say so out loud in the commit body. Flake protocol: run alone, re-run the
 group, clean tree, then name it flake or regression with the reason.
 
+## 7. Writing the change (executor)
+
+gsd executors load this skill through `agent_skills` in `templates/gsd-config.base.json` (user- and project-scope paths; a missing one only warns).
+
+- One decision lives in one place: before adding logic, find the code that already decides it and call it.
+- Subtract before you add: delete what the change makes dead, in the same commit.
+- Check data where it enters, trust it inside, and keep the deciding logic in a pure function.
+- Fix the cause; a guard that only hides the crash is not a fix.
+- Keep each new function at cyclomatic complexity under 10: split it, or test every branch.
+
 ## Anti-patterns (reject in review)
 
 - First-party module mocks (`vi.mock`/`jest.mock`/`monkeypatch` on own code) where a
   boundary intercept works.
 - UI assertions in jsdom claiming browser truth.
-- Tests asserting mock-call counts instead of observable behavior.
+- Tests that would still pass if the code under test returned nothing (mock-call counts included).
 - Coverage runs scoped to the changed files only, presented as suite coverage.
 - Sleeping/timeout-based e2e waits where a deterministic wait exists.
