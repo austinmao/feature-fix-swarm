@@ -220,7 +220,7 @@ None of these is a front door. Each has one job; the full flags are in
 |-------|-------------------|
 | `/plan-decompose "description"` | You have a description or a plan and want `tasks.md` without the speckit interview. `/task-swarm` runs it for you |
 | `/spec-decompose NNN` | `specs/NNN/plan.md` exists and you want it turned into a seeded `.planning/` project and gsd phase plans (it writes no `tasks.md`). `/feature-spec` runs it for you |
-| `/swarm "task" ...` | You have several independent tasks to run in parallel waves, with no spec and no ship tail. For a feature, use `/feature-implement`. `--cloud` is experimental and opt-in; see [Cloud delegation](cloud-delegation.md) |
+| `/swarm "task" ...` | You have several independent tasks to run in parallel waves, with no spec and no ship tail. For a feature, use `/feature-implement`. `--cloud` is experimental, opt-in and available here only (`/feature-implement` and `/task-swarm` print a "later release" line and stop when given it); see [Cloud delegation](cloud-delegation.md) |
 | `/review-gate` | The diff is staged and you want the cross-model review before `/ship`. The finish tail of `/feature-implement` already runs it. It prints `GATE: PASS` or `GATE: FAIL` |
 | `/verify-review` | A review verdict arrived and you are about to act on it. Spot-check its load-bearing claims against current HEAD first |
 | `/code-uplift <path>` | Code already exists and needs review, refactor and tests, not a new feature or a single bug fix |

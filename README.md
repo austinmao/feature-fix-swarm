@@ -222,9 +222,13 @@ skill hash, or Codex CLI version drift is an actionable failure.
 
 Every guide in `docs/`, grouped by what you need.
 
-Opt-in cloud delegation is experimental and tested only with fake provider
-CLIs; live provider behavior is not yet verified. `/swarm --cloud` offloads
-long, well-scoped tasks to Claude Code on the web or Codex cloud. Cloud results
+Opt-in cloud delegation is experimental. The Claude backend has run live once,
+on one trivial task; the Codex backend, multi-task runs and the secrets modes
+have not run live. `/swarm --cloud` offloads long, well-scoped tasks to Claude
+Code on the web or Codex cloud. It is available on `/swarm` only:
+`/feature-implement` and `/task-swarm` print a "later release" message and stop
+when given `--cloud`. For Claude you set `FFS_CLOUD_CLONE_PARENT` and accept the
+client's folder trust dialog once yourself; FFS never answers it. Cloud results
 are treated as untrusted: each must pass local review and sandboxed tests
 before it lands on a local integration branch, and FFS does not merge it.
 Start with [Cloud delegation](docs/cloud-delegation.md) and

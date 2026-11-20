@@ -20,8 +20,8 @@ personal projects usually need only `none` or the `provider-env` setup. This
 page covers every mode except `doppler`, which has its own guide:
 [How to give cloud sessions secrets with Doppler](howto-cloud-secrets-doppler.md).
 
-Cloud delegation is experimental. It is tested with fake provider CLIs. Live
-behavior is not yet verified. Statements about what a provider's UI offers
+Cloud delegation is experimental. The Claude backend ran live once, on one
+trivial task. The secrets modes have not run live. Statements about what a provider's UI offers
 come from FFS's `env-spec` output and are marked where you must confirm them.
 
 ## Rules that apply in every mode
@@ -45,7 +45,8 @@ come from FFS's `env-spec` output and are marked where you must confirm them.
   `ffs/cloud/**` that blocks updates and deletions for non-admins.
 
 The first-run steps are in [How to run your first cloud delegation](howto-cloud-first-run.md).
-The full reference is in [Secrets](cloud-delegation.md#secrets).
+For Claude they include accepting the folder trust dialog once
+(`FFS_CLOUD_CLONE_PARENT`). The full reference is in [Secrets](cloud-delegation.md#secrets).
 
 ## Mode `none`
 
@@ -189,4 +190,4 @@ See [Runbook: secret leak](cloud-delegation.md#runbook-secret-leak).
 - That Codex Secrets are setup-only. `env-spec` states it per the provider's
   documentation. The operator must confirm it.
 - The network levels and secret features that the Claude and Codex UIs offer.
-- Live behavior of all modes in a real provider session.
+- Live behavior of any secrets mode in a real provider session. None has run live.

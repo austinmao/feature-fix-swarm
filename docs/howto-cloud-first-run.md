@@ -3,9 +3,13 @@
 This guide takes you from a repository that has never used `/swarm --cloud`
 to a first dry run, then a first real run, and then to a merged result.
 
-Cloud delegation is experimental. It is tested only with fake provider CLIs.
-No live cloud run has been made yet, so treat any provider behavior described
-here as unverified until you have seen it work. For the full reference, see
+Cloud delegation is experimental. The Claude backend ran live once, on one
+trivial docs task (Claude Code 2.1.329, 2026-11-20). The Codex backend,
+`--model` and `--effort` under `--cloud`, runs with more than one task, the
+secrets modes and the installed `/swarm --cloud` skill path have not been
+verified live. Treat any provider behavior described here that is not listed
+under [What was verified live](#what-was-verified-live) as unverified until you
+have seen it work. For the full reference, see
 [Cloud delegation](cloud-delegation.md). For secrets, see
 [How to give cloud sessions secrets with Doppler](howto-cloud-secrets-doppler.md)
 and [How to give cloud sessions secrets without Doppler](howto-cloud-secrets-other.md).
@@ -25,6 +29,14 @@ You need all of these:
 - The `gh` CLI, authenticated. `doctor` uses it to read repository rulesets.
 - To run from the main worktree. A linked worktree is refused with
   `NOT_MAIN_WORKTREE`.
+- For Claude: a directory outside your repository, owned by you, where you can
+  clone the repository and run `claude` once in a real terminal. Step 3 explains
+  why.
+
+`--cloud` works on `/swarm` only. `/feature-implement` and `/task-swarm` print
+one line saying cloud delegation for them arrives in a later release, and stop,
+when given `--cloud` (any form) or when `FFS_CLOUD` is set. Unset `FFS_CLOUD`
+before you use those two skills.
 
 The commands below use the path `scripts/gsd/cloud-dispatch.sh`, as the
 `/swarm` skill does. A user-scope install also keeps a copy under
@@ -95,6 +107,52 @@ export FFS_CODEX_CLOUD_ENV=<environment id>
 
 Without it, Codex is not usable.
 
+#### Claude only: accept the folder trust dialog once
+
+The real `claude --cloud` refuses to run unless it has a terminal, so FFS starts
+it on a pseudo-terminal that it only reads from. This is undocumented provider
+behavior and can break when the client updates. The client shows a folder trust
+dialog for the folder it starts in. Trust is per git root, so a trusted parent
+directory does not cover a new clone. FFS never answers the dialog, so you
+accept it once yourself, in a folder FFS then reuses:
+
+1. Choose a directory outside the repository that you own and that is not a
+   symlink. Export it in the shell that runs the dispatcher, before `start`.
+   FFS then clones to `<parent>/ffs-cloud-launch-claude`:
+
+   ```bash
+   mkdir -p <parent>
+   export FFS_CLOUD_CLONE_PARENT=<parent>
+   ```
+
+2. Clone your repository to that exact path:
+
+   ```bash
+   git clone <origin url> <parent>/ffs-cloud-launch-claude
+   ```
+
+3. In a real terminal, run the interactive client in that directory, accept the
+   trust dialog, then quit:
+
+   ```bash
+   cd <parent>/ffs-cloud-launch-claude && claude
+   ```
+
+4. Optional check. This shows the client's first screen and creates no session.
+   `dialog` should be `false`:
+
+   ```bash
+   bash scripts/gsd/cloud-dispatch.sh probe-claude --dir <parent>/ffs-cloud-launch-claude
+   ```
+
+FFS deletes that clone and makes a fresh one at the same path for every launch.
+Without `FFS_CLOUD_CLONE_PARENT` the clone is a new temporary directory each
+time, which always shows the dialog, and the launch ends `failed` (see
+[Launch problems](#launch-problems)). `FFS_CLOUD_PTY_GRACE_S` (0 to 120, default
+20) sets how many seconds FFS keeps reading after the session URL appears.
+`--model` and `--effort` are passed to the client, but whether `--cloud` honors
+them is not verified.
+
 ### 4. Preview the routing
 
 Run a dry run. Annotate tasks so the router can place them:
@@ -111,7 +169,8 @@ reasons and missing grants, and stops. It starts nothing.
 If nothing routes to the cloud, read the reason codes in the plan:
 
 - `VERIFY_CMD_MISSING`: the task has no `[verify: ...]` and `verify.cmd` in the
-  config is empty.
+  config is empty. A whitespace-only command counts as empty, so a blank
+  command never reaches `verified`.
 - `BELOW_THRESHOLD`: no task in the group has an estimate at or above the
   threshold. The threshold is 20 minutes for `auto` (the default), 5 minutes
   for `prefer`, and 0 for `required`. Add `[est: ...]`, or use
@@ -211,7 +270,19 @@ Use `adopt` for `uncertain` tasks and for the blockers `uncertain-launch`,
 (grant it, then `resolve --action retest`), `dependency-change` (`accept-deps`
 or `reject`) and `review-unavailable`. Use `abandon --retry` for `rejected` or
 `failed` tasks. `abandon` does not stop the provider session. Stop it in the
-provider UI. The full blocker table and the recovery runbooks are in
+provider UI.
+
+Four blockers are newer and have narrower exits:
+
+| Blocker | What happened | Exit |
+|---|---|---|
+| `review-model-downgraded` | The review approved, but a weaker model than the requested judgment-tier model answered. | `resolve --action retest` or `reject` |
+| `review-model-unknown` | The review approved, but the answering model could not be determined. | `resolve --action retest` or `reject` |
+| `verify-cmd-missing` | The verify command was blank when verification ran. No tests ran. The router already refuses such a task, so this is a defensive stop. | `resolve --action reject` or `abandon --retry` |
+| `manifest-invalid` | The result manifest on the task's own branch failed validation. The detail names the validator code only. | `abandon [--retry]`. A corrected manifest pushed later is not picked up. |
+
+The two review blockers share the two-retest limit of the other review
+blockers. The full blocker table and the recovery runbooks are in
 [Cloud delegation](cloud-delegation.md#blockers).
 
 ### 10. Merge the result yourself
@@ -234,7 +305,10 @@ bash scripts/gsd/cloud-dispatch.sh cleanup --run <run> [--remote]
 
 `cleanup` deletes the local `ffs/cloud/<run>/*` refs and the run state.
 `--remote` also deletes the pushed `ffs/cloud/<run>/*` branches on `origin`, and
-needs the push grant. `--discard-unmerged` skips the unmerged-work check. Use
+needs the push grant. It never deletes the `claude/ffs-*` branch that the Claude
+worker created. Delete it yourself with `git push origin --delete <branch>`.
+`cleanup` also refuses a run that is not `done` (`RUN_NOT_DONE`). A run whose
+task never bound a result stays `active` until you `abandon` that task. `--discard-unmerged` skips the unmerged-work check. Use
 it only when you want to throw the result away.
 
 ## Verification
@@ -309,6 +383,29 @@ Store and internal errors (`CLOUD-ERROR`, exit 78) include `TEMPLATES_MISSING`
 (no templates next to the library; reinstall), `SETTINGS_INVALID` (`.claude/settings.json`
 is not a JSON object) and `HOOK_API_MISSING`.
 
+### Launch problems
+
+A launch that fails leaves the task in `failed`. The orchestrator log
+`.feature-fix-swarm/cloud/runs/<run>/orchestrate.log` has a line
+`launch <task> g<N>: failed <detail>`, and the redacted client transcript is in
+`launch-<task>-g<N>.log` next to it. Fix the cause, then
+`abandon --run <run> --task <task> --retry`. Claude launch details:
+
+| Detail | Meaning and fix |
+|---|---|
+| `CLI_EXIT BLOCKED_DIALOG` | The client stopped at a first-run dialog, usually the folder trust dialog. No session was created. Set `FFS_CLOUD_CLONE_PARENT` and accept trust once in `<parent>/ffs-cloud-launch-claude` (step 3). Check with `probe-claude --dir`. |
+| `CLI_EXIT NOT_A_TTY` | The client exited with its "requires an interactive terminal" text. The pseudo-terminal launch may not work with this client version (it relies on undocumented client behavior). Run `probe-claude --dir <path>` and see [How Claude is launched](cloud-delegation.md#how-claude-is-launched). |
+| `PROMPT_AMBIGUOUS` | The task prompt would itself look like a session id or URL, the not-a-terminal text or a dialog. The client echoes its prompt, so FFS refuses before anything starts. Reword the task text. |
+| `CLONE_PARENT_INVALID <reason>` | `FFS_CLOUD_CLONE_PARENT` is unusable. The reason is `NOT_ABSOLUTE`, `MISSING`, `SYMLINK`, `NOT_A_DIRECTORY`, `NOT_OWNED` or `INSIDE_REPO`. There is no fallback to a temporary directory. |
+| `CLONE_LOCK_BUSY` | Another launch held the lock on `<parent>/.ffs-cloud-launch-claude.lock` for the whole wait. Rerun after it ends. |
+| `CLONE_PATH_INVALID` | `<parent>/ffs-cloud-launch-claude` exists as a symlink or a plain file. FFS never deletes it. Remove it yourself. |
+
+Two outcomes are not failures. When the client is still running at the launch
+timeout, or exits with no session id, URL or known error, the task is
+`launched` with `launch_note` `no-session-url` or `exit-no-session-url`. The
+orchestrator keeps polling `claude/*` for a result that carries the task's
+nonce until the deadline. It needs no `adopt`.
+
 Doctor findings you are likely to see on a first run:
 
 | Code | Level | Fix |
@@ -334,3 +431,26 @@ bash scripts/gsd/cloud-dispatch.sh orchestrate --run <run> --resume --detach
 
 For stuck launches, ambiguous candidates, failed tests and a secret leak, see
 the [recovery runbooks](cloud-delegation.md#recovery-runbooks).
+
+## What was verified live
+
+Claude Code 2.1.329, 2026-11-20, one trivial docs task, driven through
+`cloud-dispatch.sh` directly:
+
+- The launch on a pseudo-terminal took about 8 seconds once trust was accepted.
+  FFS parsed the session id and URL from the client's output.
+- The cloud worker pushed its result branch about 2.5 minutes after launch.
+- Killing the orchestrator while it polled, then one `orchestrate --resume`,
+  produced no second launch.
+- A first attempt failed because the worker wrote `tests_run` items as strings.
+  Each item must be an object `{"cmd": "<command>", "rc": <exit code>}`. The
+  worker packet now says so.
+- A second run passed every gate (binding, isolation, path and secret checks,
+  review by the opposite model family, sandboxed tests) and reached
+  `ffs/cloud/<run>/integration` in under 3 minutes.
+
+Not verified live: the Codex backend, whether `--model` and `--effort` take
+effect, more than one task or dependencies between tasks, the installed
+`/swarm --cloud` skill path, the secrets modes, restart driven by `reconcile`,
+and a client stuck on a screen other than the trust dialog. See
+[Live verification](cloud-delegation.md#live-verification).

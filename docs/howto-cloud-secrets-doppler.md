@@ -6,10 +6,11 @@ Doppler is one optional provider for the `doppler` secrets mode. Nothing else
 in FFS depends on it. If you do not use Doppler, see
 [How to give cloud sessions secrets without Doppler](howto-cloud-secrets-other.md).
 
-Cloud delegation is experimental. It is tested with fake provider CLIs. Live
-behavior is not yet verified. The Doppler commands below come from the FFS
-`env-spec` output and runbook. Anything else about Doppler's own CLI is marked
-as unverified at the end of this page.
+Cloud delegation is experimental. The Claude backend ran live once, on one
+trivial task. The secrets modes, `doppler` included, have not run live. The
+Doppler commands below come from the FFS `env-spec` output and runbook.
+Anything else about Doppler's own CLI is marked as unverified at the end of this
+page.
 
 ## How it works
 
@@ -27,7 +28,9 @@ and a token that is read-only and expires.
 ## Before you begin
 
 - You finished [How to run your first cloud delegation](howto-cloud-first-run.md)
-  up to a green `doctor` with the default `none` secrets mode.
+  up to a green `doctor` with the default `none` secrets mode. For Claude that
+  includes accepting the folder trust dialog once (`FFS_CLOUD_CLONE_PARENT`); a
+  launch that meets the dialog ends `failed` with `CLI_EXIT BLOCKED_DIALOG`.
 - The Doppler CLI is installed and logged in on your machine, with permission
   to create configs and tokens.
 - A private cloud environment exists for each provider you use. Do not share it
@@ -250,4 +253,4 @@ See [Token hygiene](cloud-delegation.md#token-hygiene) for the short list.
   Check each with `--help` or the Doppler documentation.
 - The hosts the Doppler CLI download redirects to, and the network levels the
   provider UIs offer. These belong to the providers and are not read by FFS.
-- Live behavior of the `doppler` mode in a real provider session.
+- Live behavior of the `doppler` mode in a real provider session. No secrets mode has run live.

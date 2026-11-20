@@ -816,4 +816,5 @@ for Claude); the dispatcher selects that host directly and never falls back.
 - [Getting started](getting-started.md) — a first run end to end
 - [Run healing](healing.md) — reconcile, drive, pressure and CI-watch controls
 - [Installer](installer.md) — setup options, the guard hook and `FFS_VERSION`
-- [Cloud delegation](cloud-delegation.md#environment-variables) — `/swarm --cloud` variables
+- [Cloud delegation](cloud-delegation.md#environment-variables) — `/swarm --cloud` variables, including `FFS_CLOUD`, `FFS_CODEX_CLOUD_ENV`, `FFS_CLOUD_CLONE_PARENT` and `FFS_CLOUD_PTY_GRACE_S`
+- [How to run your first cloud delegation](howto-cloud-first-run.md) — setting these up step by step
