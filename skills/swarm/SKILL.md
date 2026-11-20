@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.3"
+version: "2.2.4"
 permissions:
   filesystem: write
   network: true
@@ -75,18 +75,24 @@ Otherwise skip it entirely and continue below exactly as before.
    refusal to offload. The run was already started (a retry after a lost
    acknowledgement, or a reused run id) and its tasks may be running in the
    cloud. Never run those tasks locally and never call `start` again for that
-   run. The refusal line ends with `batch=same`, `batch=same local=<ids>`,
-   `batch=other` or `batch=unknown`: `start` itself compared this batch (every
-   task id, cloud and local, and its content) with the whole batch the first
-   attempt started. `batch=same` means an exact match; a superset, a subset or
-   an edited batch is `batch=other`, and a run started by an older release
-   (no stored batch) is `batch=unknown`.
+   run. The refusal line ends with `batch=same`, `batch=same local-claimed=<ids>`,
+   `batch=other` or `batch=unknown`, optionally followed by
+   `orchestrator=restarted`: `start` itself compared this batch (every task id,
+   cloud and local, its content, its dependencies and its order) with the whole
+   batch the first attempt started. `batch=same` means an exact match; a
+   superset, a subset or an edited batch is `batch=other`, and a run started by
+   an older release (no stored batch) or whose inputs are incomplete is
+   `batch=unknown`. On `batch=same`, `orchestrator=restarted` means `start`
+   found no orchestrator for the run and started one.
    Run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
    the run as started only on `batch=same`: report it as in step 8, and if
-   `orchestrator.alive` is false run `bash scripts/gsd/reconcile.sh` once so a
-   dead orchestrator is restarted. Then run only the local groups, exactly as
-   in step 5, and only the tasks named in `local=` (the lost-ack attempt never
-   ran them); never run a task the ledger holds. On `batch=other` or
+   `orchestrator.alive` is false and the line did not say
+   `orchestrator=restarted`, run `bash scripts/gsd/reconcile.sh` once so a dead
+   orchestrator is restarted. `local-claimed=<ids>` names the local tasks the
+   first attempt claimed and may already have started: do not start a claimed
+   local task again without the operator's confirmation, and run none of the
+   local groups that contain one until the operator has said which to run.
+   Never run a task the ledger holds. On `batch=other` or
    `batch=unknown`, stop and tell the operator the run id is taken: never
    start these cloud tasks again under a new run id until `status` shows the
    run's tasks terminal, and ask the operator how to proceed. In every case,

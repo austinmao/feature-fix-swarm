@@ -1053,7 +1053,8 @@ def test_run_exists_reports_whether_the_retried_batch_is_the_started_one(world: 
     retry = lambda batch, name, policy="auto": world.cli(  # noqa: E731
         "start", "--run", "r1", "--tasks", world.tasks_file(batch, name), "--policy", policy, "--root", str(world.root))
     rc, out = retry([T1, local], "same.json")
-    assert rc == 3 and "RUN_EXISTS" in out and "batch=same" in out and "local=t2" in out
+    assert rc == 3 and "RUN_EXISTS" in out and "batch=same" in out and "local-claimed=t2" in out
+    assert " local=" not in out, "a retry never offers the local tasks again: the first caller may have started them"
     for batch, name in (([T1, local, local2], "more.json"), ([T1], "bare.json"), ([T1, local, task("t4", "src/d/**")], "cloudy.json")):
         rc, out = retry(batch, name, "required")
         assert rc == 3 and "batch=other" in out and "batch=same" not in out and "local=" not in out, out
@@ -1110,6 +1111,25 @@ def test_an_identical_retry_restarts_an_orchestrator_that_never_started(world: W
     finally:
         os.close(holder)
     assert world.spawned == []
+
+
+def test_the_local_claim_is_persisted_before_the_local_ids_are_first_emitted(world: World) -> None:
+    """A retry used to hand the original local list back, so a local task the first caller had already started ran twice."""
+    local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
+    real_emit, claimed_when_emitted = world.svc.emit, []
+
+    def emit(line: str) -> None:
+        if line.startswith("CLOUD:local tasks="):
+            claimed_when_emitted.append(world.doc().get("local_claimed"))
+        real_emit(line)
+
+    world.svc.emit = emit
+    rc, out = world.start(tasks=[T1, local])
+    assert rc == 0 and "CLOUD:local tasks=t2" in out
+    assert claimed_when_emitted == [["t2"]]
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1, local], "again.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    assert rc == 3 and "batch=same local-claimed=t2" in out and " local=" not in out, out
 
 
 def test_batch_same_notices_a_changed_dependency_input_order_or_sequential_flag(world: World) -> None:

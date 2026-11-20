@@ -1204,24 +1204,25 @@ def _batch_record(tasks: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _run_exists_batch(svc: Services, root: Path, run: str, raw: List[Any], sequential: bool) -> str:
-    """``batch=same [local=ids]`` only when the retried batch is exactly the one run ``run`` started, else
+    """``batch=same [local-claimed=ids]`` only when the retried batch is exactly the one run ``run`` started, else
     ``batch=other|unknown``.
 
     The ledger holds the cloud-routed tasks; the first attempt's full id set and content digest sit beside them,
-    so a superset or an edited batch is ``other`` and can never send cloud-eligible tasks to ``local=``.  A ledger
-    without that record, or anything unreadable, is ``unknown``: the caller must not start the tasks again."""
+    so a superset or an edited batch is ``other``.  ``local-claimed`` lists the local tasks the first attempt
+    claimed before it printed them: a retry never offers them as ``local=`` again, because that caller may already
+    have started them.  A ledger without those records, or anything unreadable, is ``unknown``: the caller must
+    not start the tasks again."""
     try:
         tasks = normalize(raw, sequential)
         doc = ledger.read(ledger.run_ledger_path(root, run))
         ledger.load_tasks_file(ledger.tasks_path(root, run), doc["tasks_sha256"])
-        started = doc["batch"]
-        same = started == _batch_record(tasks)
-        local = [str(t["id"]) for t in tasks if str(t["id"]) not in doc["tasks"]]
+        same = doc["batch"] == _batch_record(tasks)
+        claimed = [str(i) for i in doc["local_claimed"]]
     except (DispatchError, ledger.LedgerError, OSError, ValueError, KeyError, TypeError):
         return "batch=unknown"
     if not same:
         return "batch=other"
-    return "batch=same" + (" local=%s" % ",".join(local) if local else "")
+    return "batch=same" + (" local-claimed=%s" % ",".join(claimed) if claimed else "")
 
 
 def cmd_start(svc: Services, args: argparse.Namespace) -> int:
@@ -1254,6 +1255,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     if not records:
         raise Refused("NO_CLOUD_TASKS", "nothing routes to the cloud: %s" % _local_reasons(plan))
     _scan_start_inputs(records, run=run, base_sha=base_sha, config=config)
+    local = [str(t["id"]) for t in tasks if plan["tasks"][str(t["id"])]["route"] != "cloud"]
     sha = ledger.tasks_sha256(records)
     specs = [{"id": r["id"], "provider": r["provider"], "depends_on": r["depends_on"], "owns": r.get("owns") or [],
               "verify_cmd": effective_verify_cmd(r.get("verify_cmd"), config)}
@@ -1261,14 +1263,13 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     try:
         with _orch_lock_held(root, run):  # no resume can act on the run until its initialization record is committed
             reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha,
-                        now=int(svc.now()), batch=_batch_record(tasks))
+                        now=int(svc.now()), batch=_batch_record(tasks), local_claimed=local)
             _initialize_run(svc, root, run, base_sha, fresh=True)
     except Refused as exc:
         if exc.code != "RUN_EXISTS":
             raise
         raise _run_exists(svc, root, run, raw, args.sequential)  # lost the race: another start holds or made the run
     svc.emit("%sstarted run=%s tasks=%d" % (PREFIX, run, len(records)))
-    local = [t["id"] for t in tasks if plan["tasks"][str(t["id"])]["route"] != "cloud"]
     if local:
         svc.emit("%slocal tasks=%s" % (PREFIX, ",".join(local)))
     if args.foreground:
@@ -1377,7 +1378,8 @@ def _release_reservation(root: Path, run: str, *, tasks_written: bool) -> None:
 
 
 def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List[Dict[str, Any]], *, url: str,
-                policy: str, base_sha: str, sha: str, now: int, batch: Dict[str, Any]) -> None:
+                policy: str, base_sha: str, sha: str, now: int, batch: Dict[str, Any],
+                local_claimed: Sequence[str] = ()) -> None:
     """Reserve the run id by creating its ledger exclusively, and only then write ``tasks.json``.
 
     Two concurrent ``start`` calls for one run id used to overwrite each other's ``tasks.json`` before the
@@ -1389,6 +1391,7 @@ def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List
         doc = ledger.new_run(run, base_sha=base_sha, origin=ORIGIN_NAME, origin_url=url, policy=policy,
                              tasks=specs, tasks_sha256=sha, created_at=now)
         doc["batch"] = batch  # the first attempt's whole batch: a retried start is compared with it
+        doc["local_claimed"] = list(local_claimed)  # claimed before any caller is told to run them locally
         ledger.create_run_ledger(path, doc)
     except ledger.LedgerError as exc:
         if exc.code == ledger.E_EXISTS:

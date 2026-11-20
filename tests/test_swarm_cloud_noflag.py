@@ -150,6 +150,8 @@ def test_swarm_run_exists_is_reconciled_and_never_runs_cloud_tasks_locally():
     assert "Never run those tasks locally" in step and "never call `start` again" in step
     assert step.index("RUN_EXISTS") > step.index("continue with every task locally")
     # CR-01: the match is made by `start` against the cloud-routed tasks; local tasks run, a new run id never starts
-    for token in ("batch=same", "batch=other", "batch=unknown", "local groups", "`local=`", "under a new run id"):
+    for token in ("batch=same", "batch=other", "batch=unknown", "local groups", "`local-claimed=<ids>`",
+                  "orchestrator=restarted", "under a new run id"):
         assert token in step, token
+    assert "without the operator's confirmation" in step and "`local=`" not in step
     assert "compare its task ids with this batch" not in step
