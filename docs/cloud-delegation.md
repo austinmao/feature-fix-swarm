@@ -669,7 +669,8 @@ the current directory; a linked worktree is refused).
 | `doctor` | `[--json]` | Runs the checks in [Doctor checks](#doctor-checks). |
 | `env init` | `[--register-hook] [--force]` | Writes the four `.ffs/cloud/` files from the templates. Never commits. |
 | `env-spec` | `--provider claude\|codex` | Prints the one-time provider steps. |
-| `cleanup` | `--run R [--remote] [--discard-unmerged]` | Only for `done` runs, and for a run that is not `done` and has no task inputs file and no task that ever started (a `start` that crashed early). Holds the run ledger lock for its whole duration: a concurrent operator verb waits, then reports `LEDGER_MISSING`. Deletes local refs, run state and slot entries. `--remote` also deletes pushed `ffs/cloud/<run>/*` branches and needs the push grant. Refuses with `INTEGRATION_UNMERGED` while the integration ref holds commits that no other branch contains, unless `--discard-unmerged`. A remote-tracking ref (`refs/remotes/*`) is a local cache and counts as a branch that contains them only when `ls-remote` shows the same branch at the same OID on `origin`. If any ref deletion fails, a ref listing fails, or a remote ref under the run prefix is not a name the dispatcher creates, `cleanup` keeps the run ledger, prints `CLOUD:cleanup-partial` and `CLOUD-REFUSED: CLEANUP_INCOMPLETE` naming the refs left behind and exits 3; fix the cause (delete a foreign remote ref by hand) and rerun. A failed remote delete stops before any local ref is deleted. |
+| `cleanup` | `--run R [--remote] [--discard-unmerged]` | Only for `done` runs, and for a run that is not `done` and has no task inputs file and no task that ever started (a `start` that crashed early). Holds the run ledger lock for its whole duration: a concurrent operator verb waits, then reports `LEDGER_MISSING`. Deletes local refs, run state and slot entries. `--remote` also deletes pushed `ffs/cloud/<run>/*` branches and needs the push grant. Refuses with `INTEGRATION_UNMERGED` while the integration ref holds commits that no other branch contains, unless `--discard-unmerged`. It also refuses with `INTEGRATION_UNMERGED` when git fails while reading the integration ref (a ref that is simply absent is fine), because an unreadable ref cannot be shown to be merged. A remote-tracking ref (`refs/remotes/*`) is a local cache and counts as a branch that contains them only when `ls-remote` shows the same branch at the same OID on `origin`. If any ref deletion fails, a ref listing fails, or a remote ref under the run prefix is not a name the dispatcher creates, `cleanup` keeps the run ledger, prints `CLOUD:cleanup-partial` and `CLOUD-REFUSED: CLEANUP_INCOMPLETE` naming the refs left behind and exits 3; fix the cause (delete a foreign remote ref by hand) and rerun. A failed remote delete stops before any local ref is deleted. |
+| `probe-claude` | `--dir DIR [--seconds N]` | Operator check. Starts the plain `claude` binary (no `--cloud`, no prompt) on a pseudo-terminal in `DIR`, prints the first screen as JSON (`dialog`, `markers`, `screen`) and hangs up. `--seconds` is clamped to 1 to 60 (`nan` falls back to the default, so the probe always has a deadline). Sends no keystroke and creates no cloud session. Use it to see whether a trust or login dialog appears before a real launch. |
 | `adopt` | `--run R --task T (--oid OID \| --remote-id ID)` | Operator-only. Pass exactly one of the two. `--oid` binds a Claude result commit to an `uncertain` task or one blocked by `uncertain-launch`, `poll-errors`, `ambiguous-candidates` or `candidate-moved`. The task re-enters at `result-ready`. `--oid` is refused for Codex tasks, which have no OID before FFS applies the diff. `--remote-id` binds the Codex task id you found in the provider UI to a Codex task in the same states. The task goes back to `launched` with a new deadline of `deadline_hours` from now, and the normal poll and fetch follow. `--remote-id` is refused for Claude tasks. |
 | `abandon` | `--run R --task T [--retry]` | Operator-only. Bumps the generation and issues a new nonce. The task becomes `abandoned`, or `waiting` with `--retry`, which also works from `rejected` and `failed` and reopens dependents that failed only because of it. With `--retry` on a `rejected` or `failed` task of a `done` run, the run becomes `active` again. Refused with `INTEGRATION_IN_PROGRESS` (exit 3) while the task is `integrating`, because the integration ref may already have moved. Retry after the orchestrator's next tick. It does not stop the provider session. |
 | `resolve` | `--run R --task T --action retest\|accept-deps\|reject` | Operator-only. Clears a `needs-operator` blocker. Refused unless the task's blocker belongs to the action. `accept-deps` is an action of `resolve`, not a separate verb. See [Blockers](#blockers) and [Runbook: dependency change](#runbook-dependency-change). |
@@ -766,6 +767,8 @@ or fewer. The manifest validator rejects other names in `env_report`.
 | `DIGEST_NOTIFY_CMD` | orchestrator | Command that receives the `CLOUD-PARKED` line on stdin. |
 | `FFS_LIB_DIR` | `cloud-dispatch.sh` | Library directory override. |
 | `FFS_CLOUD_LAUNCH_TIMEOUT_S` | backends | Launch timeout in seconds, 180 at most. |
+| `FFS_CLOUD_CLONE_PARENT` | Claude backend | Unset (default): the launch clone is a fresh directory under the system temp dir, which always shows the client's trust dialog. Set: the clone goes to the fixed path `<parent>/ffs-cloud-launch-claude`. Claude Code trusts a folder per git root, so run the interactive client once in that exact directory and accept the trust dialog yourself; FFS never answers it. The parent must be an absolute path to an existing directory that is not a symlink, is owned by you, and is not inside the repository. Anything else fails the launch with `CLONE_PARENT_INVALID <reason>` (there is no fallback to the temp dir). Use of the fixed path is serialized with an `flock` on `<parent>/.ffs-cloud-launch-claude.lock` held for the whole launch (a second launch waits, then fails with `CLONE_LOCK_BUSY`). A stale clone at that path is removed before cloning, and the clone is removed after every launch, including one that raises. A path that exists as a symlink or a plain file is refused (`CLONE_PATH_INVALID`) and never deleted. |
+| `FFS_CLOUD_PTY_GRACE_S` | Claude backend | Seconds to keep reading after the session URL appears, before the terminal is hung up. 0 to 120, default 20. |
 | `FFS_CLOUD_BIN_CLAUDE`, `FFS_CLOUD_BIN_CODEX` | backends | Path to a provider binary instead of `PATH`. Used by tests. |
 | `FFS_CLOUD_ALLOW_NON_GITHUB_ORIGIN` | `doctor` | `1` downgrades the GitHub check to WARN. A test seam; real providers clone only from GitHub. |
 | `CLAUDE_CODE_REMOTE`, `FFS_CLOUD_PROVISION`, `FFS_CLOUD_SETUP_TIMEOUT` | `session-start.sh` | See [Claude environment](#claude-environment). |
@@ -838,7 +841,7 @@ that ends terminal but not `integrated` becomes `failed` with blocker
 | `admitted` | Dependencies integrated, branch pushed; waiting for capacity. | No |
 | `reserved` | Slot taken; grants and branch checked before submit. | Yes |
 | `submitting` | Launch in progress. The ledger is written before the provider command runs. | Yes |
-| `launched` | The provider accepted the task. | Yes |
+| `launched` | The provider accepted the task. For Claude this can also mean the client was still running with no session URL at the launch timeout (`launch_note: "no-session-url"`), or had already exited with no session id or URL and no known error (`launch_note: "exit-no-session-url"`); polling by nonce continues. | Yes |
 | `running` | Poll says running. | Yes |
 | `uncertain` | The launch outcome is unknown. Never relaunched automatically. | Yes |
 | `result-ready` | A result OID is bound. | No |
@@ -1169,6 +1172,58 @@ one.
 Start every runbook with `status --run <run>`. Commands below assume the
 main worktree.
 
+### How Claude is launched
+
+The real client (Claude Code 2.1.329) prints `Error: --cloud requires an
+interactive terminal.` and exits non-zero when stdout is not a terminal, and
+there is no documented headless way to create a cloud session. So the
+dispatcher drives the interactive client through a pseudo-terminal (40 rows,
+120 columns, `TERM` kept from the allowlist or set to `xterm-256color`). This
+is undocumented provider behaviour and may break on a CLI update. Model and
+effort are passed as `--model` and `--effort` and remain unverified.
+
+The launcher only reads. It never writes a keystroke, so a first-run dialog
+(for example "trust this folder") is never answered. Claude Code trusts a
+folder per git root, so a fresh temporary clone always shows that dialog, even
+under an already trusted parent directory. Set `FFS_CLOUD_CLONE_PARENT` (see
+the settings table) to launch from the fixed clone path
+`<parent>/ffs-cloud-launch-claude`, and run the interactive client once in that
+exact directory to accept the trust dialog yourself. Whether `--cloud` shows the
+dialog is unconfirmed. Before anything is started, a prompt that would itself
+match the session id/URL detector, the not-a-terminal text or the dialog
+detector is refused (`PROMPT_AMBIGUOUS`): the client echoes its prompt, and the
+echo cannot be told apart from the client's own output. It reads until:
+
+1. A `https://claude.ai/code/...` URL or a `session_...` / `cse_...` id appears
+   (an id must contain a digit). Output is
+   still captured for a grace period (`FFS_CLOUD_PTY_GRACE_S`, default 20 s) so
+   the client can finish creating the session. The final decision also uses an
+   id or URL found anywhere in the saved transcript, not only the live scan.
+2. The client exits. If it printed the known error text (`CLI_EXIT NOT_A_TTY`)
+   the task is `failed`. An exit with no session id/URL and no known error text,
+   including exit 0, is NOT a failure: the client may have created the session
+   before it ended. The task is `launched` with
+   `launch_note: "exit-no-session-url"` (detail `CLI_EXIT NO_SESSION_URL`) and
+   the orchestrator polls `claude/*` for a nonce-bound result until the normal
+   deadline. (`uncertain` is not used for this: it gets only 3 recovery polls
+   and then parks the task as `needs-operator`, long before a cloud session
+   could push a result.)
+3. The launch timeout passes with the client alive and no URL. The task is
+   `launched` with `launch_note: "no-session-url"` and the orchestrator keeps
+   polling `claude/*` for a nonce-bound result until the normal deadline. It
+   needs no `adopt` and is never re-submitted. The exception is a recognised
+   blocking dialog on screen (`CLI_EXIT BLOCKED_DIALOG`, state `failed`),
+   because the client cannot get past it without a keystroke.
+
+The client is then ended gently: the pseudo-terminal is closed (hang-up), FFS
+waits up to 10 s, sends SIGTERM, and only then SIGKILL to the whole process
+group. If the orchestrator itself is killed, the closed terminal hangs the
+client up. The transcript, with escape sequences stripped and run through the
+launch-log redaction, is written (capped, fsync'd) to the launch log on every
+path, including a timeout. Both the in-memory capture and the 64 KB log keep the
+start and the end of the transcript (16 KB of start, the rest the end, with a
+marker between), so a late URL or error line survives a long redraw.
+
 ### Runbook: stuck or uncertain launch
 
 Symptoms: state `uncertain`, or `needs-operator` with `uncertain-launch`.
@@ -1350,7 +1405,8 @@ leak first.
   the damage.
 - The guard hook is fail-open and anti-accident only.
 - Model and effort are unverified in the cloud. Claude gets `--model` and
-  `--effort` and may still run something else. Codex gets neither.
+  `--effort`, but whether the client applies them to `--cloud` at all is
+  unconfirmed, and it may still run something else. Codex gets neither.
 - Verification evidence from the worker (`env_report`) is self-reported. The
   ledger marks it `env_report_source: worker`. FFS has no independent channel
   into the cloud machine.
@@ -1362,7 +1418,9 @@ leak first.
   control is server side, below. A result built on a tampered branch is
   rejected by the denylist, but that does not undo the session having run.
 - For Claude, FFS starts `claude --cloud` from a fresh single-branch clone of
-  the task branch, so the provider's upload path sees only that branch.
+  the task branch, so the provider's upload path sees only that branch. The
+  launch is not a plain non-interactive exec: see
+  [How Claude is launched](#how-claude-is-launched).
 - The orchestrator sleeps with the host. Local review and tests remain local
   load. Mixed groups do not offload. FFS cannot choose the Claude cloud
   environment. Sandboxed tests cannot reach the network.
@@ -1431,7 +1489,8 @@ unattended.
 - The operator-only guard fails open. It is an anti-accident control, and
   indirection through script files or imports bypasses it.
 - Model and effort are unverified in the cloud. Claude gets `--model` and
-  `--effort` and may run something else. Codex gets neither.
+  `--effort`, but whether `--cloud` honours them is unconfirmed. Codex gets
+  neither.
 - On Linux, `env -i` is the only secret isolation in `setup.sh`, and a
   dependency installer can read `/proc/<pid>/environ` of its ancestors. See
   [Secret isolation on Linux](#secret-isolation-on-linux).

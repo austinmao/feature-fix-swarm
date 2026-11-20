@@ -8,8 +8,10 @@ the backend strips everything outside the child-environment allowlist.
 import json
 import os
 import shlex
+import signal
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -408,18 +410,85 @@ def test_claude_launch_accepts_refs_heads_prefix(install_fake, origin, state, tm
     assert ch.ClaudeBackend().launch(ctx).outcome == "launched"
 
 
-def test_claude_launch_without_id_is_still_launched(install_fake, origin, tmp_path):
+def test_claude_launch_exit_zero_with_no_url_is_launched_and_polled_by_nonce(install_fake, origin, tmp_path):
+    """The client ended on its own and printed nothing we recognise: a session may exist, so it is NOT failed."""
     install_fake("claude", FAKE_CLOUD_MODE="ok-no-output")
     result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
     assert (result.outcome, result.rc, result.remote_id, result.url) == ("launched", 0, None, None)
+    assert result.note == ch.LAUNCH_NOTE_EXIT_NO_URL == "exit-no-session-url"
+    assert result.detail.startswith("CLI_EXIT NO_SESSION_URL")
 
 
-def test_claude_launch_nonzero_rc_is_failed(install_fake, origin, tmp_path):
+def test_claude_launch_nonzero_exit_without_a_known_error_is_launched_with_the_note(install_fake, origin, tmp_path):
     install_fake("claude", FAKE_CLOUD_MODE="fail")
     ctx = launch_ctx(origin, tmp_path)
     result = ch.ClaudeBackend().launch(ctx)
-    assert (result.outcome, result.rc) == ("failed", 2)
+    assert (result.outcome, result.rc, result.note) == ("launched", 2, ch.LAUNCH_NOTE_EXIT_NO_URL)
     assert b"fake claude failure" in ctx.log_path.read_bytes()
+
+
+def test_claude_launch_cse_id_is_recognised(install_fake, origin, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="ok-no-output", FAKE_CLOUD_EXTRA_TEXT="Created cse_01FAKEabcdef12345")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert (result.outcome, result.remote_id, result.note) == ("launched", "cse_01FAKEabcdef12345", "")
+
+
+def test_cse_id_needs_a_digit_too():
+    assert ch.parse_claude_pty_output("cse_01ABCdef2345 and cse_abcdefghij") == ("cse_01ABCdef2345", None)
+    assert ch.parse_claude_pty_output("cse_abcdefghij cse_short1") == (None, None)
+
+
+def test_final_decision_uses_an_id_found_by_the_full_transcript_parse():
+    """The live scan said no match, but the transcript has the id (it arrived during the final drain)."""
+    result = ch.ClaudeBackend._finish_pty_launch(
+        b"done\nhttps://claude.ai/code/session_01ABCdef2345\n", ch.PtyResult(0, matched=False, exited_early=True), "")
+    assert (result.outcome, result.remote_id, result.url) == (
+        "launched", "session_01ABCdef2345", "https://claude.ai/code/session_01ABCdef2345")
+    assert result.note == ""
+
+
+def test_not_a_tty_text_only_counts_once_the_client_has_exited():
+    text = b"Error: --cloud requires an interactive terminal.\n"
+    alive = ch.ClaudeBackend._finish_pty_launch(text, ch.PtyResult(None, timed_out=True), "")
+    assert (alive.outcome, alive.note) == ("launched", ch.LAUNCH_NOTE_NO_URL)
+    gone = ch.ClaudeBackend._finish_pty_launch(text, ch.PtyResult(1, exited_early=True), "")
+    assert (gone.outcome, gone.detail.split()[:2]) == ("failed", ["CLI_EXIT", "NOT_A_TTY"])
+
+
+def test_live_client_that_prints_the_not_a_tty_phrase_is_not_failed(install_fake, origin, state, tmp_path):
+    wrapper = install_fake("claude")
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        "echo 'note: this requires an interactive terminal'\n"
+        "sleep 600\n"
+    )
+    result = ch.ClaudeBackend(launch_timeout_s=1.0).launch(launch_ctx(origin, tmp_path))
+    assert (result.outcome, result.note) == ("launched", ch.LAUNCH_NOTE_NO_URL)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Claude-Session: https://claude.ai/code/session_01Eo5hRepnKYHpZRc2ZhMcmr",
+        "owns: src/session_v2handler/**",
+        "see cse_01Eo5hRepnKYHpZRc2Zh for context",
+        "Task: print that this requires an interactive terminal",
+        "Task: handle the Quick safety check dialog; never press Yes, proceed",
+    ],
+)
+def test_prompt_that_would_trip_a_classifier_when_echoed_is_refused(install_fake, origin, state, tmp_path, prompt):
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, prompt=prompt))
+    assert (result.outcome, result.detail, result.rc) == ("failed", "PROMPT_AMBIGUOUS", ch.NOT_RUN_RC)
+    assert not (state / "claude.argv").exists(), "nothing may be started"
+
+
+def test_an_echoed_benign_prompt_is_not_a_session(install_fake, origin, state, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="hang", FAKE_CLOUD_ECHO_ARGS="1")
+    ctx = launch_ctx(origin, tmp_path, prompt="Implement the /ping endpoint under src/a/**")
+    result = ch.ClaudeBackend(launch_timeout_s=1.0).launch(ctx)
+    assert "Implement the /ping endpoint" in ctx.log_path.read_text()
+    assert (result.outcome, result.remote_id, result.url, result.note) == ("launched", None, None, ch.LAUNCH_NOTE_NO_URL)
 
 
 def test_claude_launch_omits_empty_model_and_effort(install_fake, origin, state, tmp_path):
@@ -469,6 +538,7 @@ def test_claude_launch_missing_branch_fails(install_fake, origin, state, tmp_pat
         ({"effort": "-high"}, "EFFORT_INVALID"),
         ({"prompt": ""}, "PROMPT_INVALID"),
         ({"prompt": "a\x00b"}, "PROMPT_INVALID"),
+        ({"prompt": "see session_01Eo5hRepnKYHpZRc2ZhMcmr"}, "PROMPT_AMBIGUOUS"),
     ],
 )
 def test_claude_launch_rejects_bad_inputs(install_fake, origin, state, tmp_path, overrides, code):
@@ -491,24 +561,410 @@ def test_claude_launch_binary_missing(origin, tmp_path):
     assert (result.outcome, result.detail) == ("failed", "BIN_NOT_FOUND")
 
 
-def test_claude_launch_timeout_is_uncertain_and_cleans_up(install_fake, origin, state, tmp_path):
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def assert_group_gone(state, wait_s=5.0):
+    pgid = int((state / "claude.pid").read_text())
+    deadline = time.monotonic() + wait_s
+    while group_alive(pgid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not group_alive(pgid), "the provider process group must be gone"
+
+
+def test_claude_launch_timeout_alive_without_url_keeps_polling_and_reaps(install_fake, origin, state, tmp_path):
     install_fake("claude", FAKE_CLOUD_MODE="hang")
     started = time.monotonic()
     result = ch.ClaudeBackend(launch_timeout_s=1.0).launch(launch_ctx(origin, tmp_path))
     assert time.monotonic() - started < 30
-    assert (result.outcome, result.rc) == ("uncertain", ch.TIMEOUT_RC)
+    # Claude binds by nonce on claude/*: a live client with no URL is "launched" (never re-submitted), with a note.
+    assert (result.outcome, result.rc, result.note) == ("launched", ch.TIMEOUT_RC, ch.LAUNCH_NOTE_NO_URL)
     assert "LAUNCH_TIMEOUT" in result.detail
+    assert (result.remote_id, result.url) == (None, None)
     assert not Path((state / "claude.cwd").read_text().strip()).exists()
-    pid = int((state / "claude.pid").read_text())
-    deadline = time.monotonic() + 5
-    alive = True
-    while alive and time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
+    assert_group_gone(state)
+
+
+def test_claude_launch_runs_on_a_real_terminal(install_fake, origin, state, tmp_path):
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert (state / "claude.stdout-is-tty").exists() and (state / "claude.stdin-is-tty").exists()
+    env_dump = (state / "claude.env").read_text()
+    assert "\nTERM=" in "\n" + env_dump
+
+
+def test_non_tty_shim_failure_is_a_typed_failure(origin, state, tmp_path):
+    """The shim mirrors the real CLI: piped stdout + --cloud prints the known error and exits 1."""
+    shim = FIXTURES / "fake-claude"
+    env = dict(os.environ, FAKE_CLOUD_STATE=str(state))
+    proc = subprocess.run([str(shim), "--cloud", "x"], env=env, capture_output=True, text=True)
+    assert proc.returncode == 1
+    assert proc.stderr.splitlines() == [
+        "Error: --cloud requires an interactive terminal.",
+        "Non-interactive runs (piped stdout, --init-only, --sdk-url) run locally and would silently ignore --cloud."
+        " Drop --cloud, or run in an interactive terminal.",
+    ]
+
+
+def test_not_a_tty_text_before_url_is_failed(install_fake, origin, tmp_path):
+    # force the non-TTY branch of the shim by making it print the real error on the pty and exit 1
+    wrapper = install_fake("claude")
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        "echo 'Error: --cloud requires an interactive terminal.' >&2\n"
+        "echo 'Non-interactive runs run locally.' >&2\n"
+        "exit 1\n"
+    )
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert (result.outcome, result.rc) == ("failed", 1)
+    assert result.detail.startswith("CLI_EXIT NOT_A_TTY")
+
+
+def test_wait_for_input_times_out_without_a_keystroke_and_reaps(install_fake, origin, state, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="wait-input")
+    result = ch.ClaudeBackend(launch_timeout_s=1.0).launch(launch_ctx(origin, tmp_path))
+    assert result.note == ch.LAUNCH_NOTE_NO_URL
+    assert (state / "claude.stdin").exists() and (state / "claude.stdin").read_bytes() == b""
+    assert_group_gone(state)
+
+
+def test_without_a_clone_parent_the_clone_is_a_fresh_temp_dir(install_fake, origin, state, tmp_path, monkeypatch):
+    monkeypatch.delenv(ch.CLONE_PARENT_ENV, raising=False)
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    cwd = Path((state / "claude.cwd").read_text().strip())
+    assert ch.CLONE_DIR_NAME not in cwd.parts and "ffs-cloud-clone-" in str(cwd)
+    assert not cwd.exists()
+
+
+@pytest.fixture
+def clone_parent(tmp_path, monkeypatch):
+    parent = tmp_path / "trusted-parent"
+    parent.mkdir()
+    monkeypatch.setenv(ch.CLONE_PARENT_ENV, str(parent))
+    return parent
+
+
+def test_clone_parent_puts_the_clone_at_the_fixed_path_and_removes_it(install_fake, origin, state, tmp_path, clone_parent):
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    cwd = Path((state / "claude.cwd").read_text().strip())
+    assert cwd == clone_parent.resolve() / "ffs-cloud-launch-claude"
+    assert not cwd.exists(), "the clone is removed after the launch"
+    assert (clone_parent / ".ffs-cloud-launch-claude.lock").is_file()
+    assert (state / "claude.head").read_text().strip() == origin.oid
+
+
+def test_clone_parent_removes_a_stale_clone_first(install_fake, origin, state, tmp_path, clone_parent):
+    stale = clone_parent / "ffs-cloud-launch-claude"
+    (stale / "sub").mkdir(parents=True)
+    (stale / "sub" / "left-over.txt").write_text("from a killed launch")
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"  # git clone needs an empty target
+    assert not stale.exists()
+
+
+def test_clone_parent_clone_is_removed_when_the_launch_raises_and_the_lock_is_released(
+        install_fake, origin, state, tmp_path, clone_parent, monkeypatch):
+    import fcntl
+
+    install_fake("claude", FAKE_CLOUD_MODE="url-linger")
+
+    def exploding_done(_text):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(ch, "_session_seen", exploding_done)
+    with pytest.raises(RuntimeError):
+        ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert not (clone_parent / "ffs-cloud-launch-claude").exists()
+    fd = os.open(str(clone_parent / ".ffs-cloud-launch-claude.lock"), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # would raise if the launch still held the lock
+    finally:
+        os.close(fd)
+    assert_group_gone(state)
+
+
+def test_clone_parent_clone_is_removed_after_a_failed_launch(install_fake, origin, state, tmp_path, clone_parent):
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, task_branch_oid="f" * 40))
+    assert result.detail == "BRANCH_OID_MISMATCH"
+    assert not (clone_parent / "ffs-cloud-launch-claude").exists()
+
+
+@pytest.mark.parametrize("kind, reason", [
+    ("relative", "NOT_ABSOLUTE"), ("missing", "MISSING"), ("symlink", "SYMLINK"), ("file", "NOT_A_DIRECTORY"),
+    ("inside-repo", "INSIDE_REPO"),
+])
+def test_invalid_clone_parent_is_a_typed_failure_never_a_silent_fallback(
+        install_fake, origin, state, tmp_path, monkeypatch, kind, reason):
+    real = tmp_path / "real-dir"
+    real.mkdir()
+    value = {
+        "relative": "relative/dir", "missing": str(tmp_path / "missing"), "symlink": str(tmp_path / "link"),
+        "file": str(tmp_path / "plain-file"), "inside-repo": str(origin.work / "inside"),
+    }[kind]
+    (tmp_path / "link").symlink_to(real)
+    (tmp_path / "plain-file").write_text("x")
+    (origin.work / "inside").mkdir()
+    monkeypatch.setenv(ch.CLONE_PARENT_ENV, value)
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, repo_root=origin.work))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PARENT_INVALID " + reason)
+    assert not (state / "claude.argv").exists(), "no launch in the system temp dir"
+    assert list(real.iterdir()) == [] and not (origin.work / "inside" / "ffs-cloud-launch-claude").exists()
+
+
+def test_clone_parent_must_be_owned_by_the_current_user(tmp_path, monkeypatch):
+    assert ch._validated_clone_parent(str(tmp_path), tmp_path / "elsewhere")[1] == ""
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(str(tmp_path)).st_uid + 1)
+    assert ch._validated_clone_parent(str(tmp_path), tmp_path / "elsewhere") == (None, "NOT_OWNED")
+
+
+def test_clone_path_that_is_a_symlink_is_refused_and_left_alone(install_fake, origin, state, tmp_path, clone_parent):
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "keep.txt").write_text("do not delete")
+    (clone_parent / "ffs-cloud-launch-claude").symlink_to(precious)
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
+    assert (precious / "keep.txt").read_text() == "do not delete"
+    assert (clone_parent / "ffs-cloud-launch-claude").is_symlink()
+    assert not (state / "claude.argv").exists()
+
+
+def test_clone_path_that_is_a_file_is_refused_and_left_alone(install_fake, origin, state, tmp_path, clone_parent):
+    (clone_parent / "ffs-cloud-launch-claude").write_text("not a directory")
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
+    assert (clone_parent / "ffs-cloud-launch-claude").read_text() == "not a directory"
+
+
+def test_a_second_launch_waits_for_the_lock_and_then_gives_up_with_a_typed_failure(
+        install_fake, origin, state, tmp_path, clone_parent, monkeypatch):
+    import fcntl
+
+    install_fake("claude")
+    monkeypatch.setattr(ch, "CLONE_LOCK_WAIT_S", 0.5)
+    holder = os.open(str(clone_parent / ".ffs-cloud-launch-claude.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+        assert (result.outcome, result.detail) == ("failed", "CLONE_LOCK_BUSY")
+        assert not (state / "claude.argv").exists()
+    finally:
+        os.close(holder)
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+
+
+def test_blocking_first_run_dialog_is_failed_not_polled(install_fake, origin, state, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="dialog")
+    result = ch.ClaudeBackend(launch_timeout_s=1.0).launch(launch_ctx(origin, tmp_path))
+    assert result.outcome == "failed" and result.detail.startswith("CLI_EXIT BLOCKED_DIALOG")
+    assert (state / "claude.stdin").read_bytes() == b""
+    assert_group_gone(state)
+
+
+def test_url_then_client_lingers_is_launched_then_hung_up(install_fake, origin, state, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="url-linger")
+    started = time.monotonic()
+    result = ch.ClaudeBackend(launch_timeout_s=30.0, pty_grace_s=0.5).launch(launch_ctx(origin, tmp_path))
+    assert time.monotonic() - started < 25
+    assert result.outcome == "launched" and result.note == ""
+    assert result.remote_id == "session_01FAKEabcdef12345"
+    assert result.url == "https://claude.ai/code/session_01FAKEabcdef12345"
+    assert_group_gone(state)
+
+
+def test_grace_period_keeps_capturing_output_after_the_url(install_fake, origin, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="ok-with-url", FAKE_CLOUD_EXTRA_TEXT="trailing line after url")
+    ctx = launch_ctx(origin, tmp_path)
+    assert ch.ClaudeBackend(pty_grace_s=5.0).launch(ctx).outcome == "launched"
+    assert b"trailing line after url" in ctx.log_path.read_bytes()
+
+
+def test_transcript_has_no_ansi_and_no_secret_shaped_content(install_fake, origin, tmp_path):
+    secret = "sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+    install_fake("claude", FAKE_CLOUD_ANSI="1", FAKE_CLOUD_EXTRA_TEXT="token " + secret)
+    ctx = launch_ctx(origin, tmp_path, sanitize=lambda raw: raw.replace(secret.encode(), b"[REDACTED]"))
+    result = ch.ClaudeBackend().launch(ctx)
+    logged = ctx.log_path.read_bytes()
+    assert result.outcome == "launched"
+    assert b"\x1b" not in logged and b"\r" not in logged
+    assert secret.encode() not in logged and b"[REDACTED]" in logged
+    assert stat.S_IMODE(ctx.log_path.stat().st_mode) == 0o600
+
+
+def test_transcript_is_written_even_when_the_launch_raises(install_fake, origin, state, tmp_path, monkeypatch):
+    install_fake("claude", FAKE_CLOUD_MODE="url-linger")
+
+    def exploding_done(_text):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(ch, "_session_seen", exploding_done)
+    ctx = launch_ctx(origin, tmp_path)
+    with pytest.raises(RuntimeError):
+        ch.ClaudeBackend().launch(ctx)
+    assert b"claude.ai/code" in ctx.log_path.read_bytes()
+    assert_group_gone(state)
+
+
+def test_killing_the_launching_process_hangs_the_client_up(install_fake, origin, state, tmp_path):
+    """SIGKILL of the orchestrator closes the pty master; the kernel hangs the client up (no orphan)."""
+    wrapper = install_fake("claude", FAKE_CLOUD_MODE="hang")
+    script = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import cloud_host as ch\n"
+        "ch.run_pty([%r, '--cloud', 'x'], cwd=None, env=ch.child_env(), timeout=300, sink=bytearray())\n"
+        % (str(Path(ch.__file__).resolve().parent), str(wrapper))
+    )
+    # like an orchestrator started under nohup: SIGHUP is ignored and inherited by every child unless reset
+    launcher = subprocess.Popen(
+        [sys.executable, "-c", script], preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+    deadline = time.monotonic() + 10
+    while not (state / "claude.pid").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    pgid = int((state / "claude.pid").read_text())
+    assert group_alive(pgid)
+    launcher.kill()
+    launcher.wait()
+    try:
+        gone_by = time.monotonic() + 10
+        while group_alive(pgid) and time.monotonic() < gone_by:
             time.sleep(0.05)
-        except ProcessLookupError:
-            alive = False
-    assert not alive, "hung provider must be killed"
+        members = subprocess.run(["ps", "-axo", "pid,ppid,pgid,stat,command"], capture_output=True, text=True).stdout
+        rows = [r for r in members.splitlines() if str(pgid) in r.split()[:3]]
+        assert not group_alive(pgid), "the hang-up must end the client without the launcher: %r" % rows
+    finally:
+        if group_alive(pgid):
+            os.killpg(pgid, 9)
+
+
+def test_scan_window_keeps_working_after_the_transcript_cap(tmp_path):
+    script = tmp_path / "noisy"
+    script.write_text("#!/bin/bash\nhead -c 6000 /dev/zero | tr '\\0' 'x'\necho\necho https://claude.ai/code/session_01LATEcap99\nsleep 30\n")
+    script.chmod(0o755)
+    sink = bytearray()
+    result = ch.run_pty([str(script)], cwd=None, env=ch.child_env(), timeout=20, sink=sink, cap=100, done=ch._session_seen)
+    assert result.matched and result.truncated and len(sink) == 100
+
+
+def test_osc8_hyperlink_target_is_kept_for_the_scan():
+    raw = b"\x1b]8;;https://claude.ai/code/session_01OSCtarget1\x07open it\x1b]8;;\x07"
+    assert ch.parse_claude_pty_output(ch.strip_terminal(raw).decode()) == (
+        "session_01OSCtarget1", "https://claude.ai/code/session_01OSCtarget1")
+
+
+def test_pty_session_id_needs_a_digit():
+    assert ch.parse_claude_pty_output("tokens: session_duration and session_started") == (None, None)
+
+
+def test_a_real_handoff_packet_never_looks_like_a_session_or_a_dialog():
+    import handoff_packet as hp
+
+    task = {"id": "t1", "title": "Add endpoint", "prompt": "Implement the /ping endpoint.",
+            "owns": ["src/a/**"], "est_minutes": 45, "needs_secrets": [], "verify_cmd": "npm test"}
+    config = {"schema": 1, "verify": {"cmd": "make test"}, "deadline_hours": 12,
+              "secrets": {"provider": "none", "wrapper": "", "exposure": {"claude": [], "codex": []}}}
+    prompt = hp.build_packet(task, run="run1", generation=1, nonce=NONCE, base_sha="a" * 40, provider="claude",
+                             config=config, result_branch="claude/ffs-run1-t1-abcd1234")
+    assert not ch._session_seen(prompt)
+    assert not ch._blocking_dialog(prompt)
+    assert not ch._blocking_dialog("one stray phrase: yes, proceed")
+    assert ch._blocking_dialog("Quick safety check: ... Yes, I trust this folder")
+
+
+def test_strip_terminal_removes_escapes_and_controls():
+    raw = b"\x1b]0;title\x07\x1b[1;32mgreen\x1b[0m\x1b(B\r\nline\x00\x08two\x1bPdcs\x1b\\"
+    assert ch.strip_terminal(raw) == b"green\nlinetwo"
+
+
+def test_strip_terminal_turns_column_moves_into_spaces():
+    assert ch.strip_terminal(b"\x1b[2GQuick\x1b[8Gsafety\x1b[15Gcheck:\r\r\nnext") == b" Quick safety check:\nnext"
+
+
+def test_strip_terminal_separates_redrawn_frames_so_an_id_is_not_glued_to_the_next_line():
+    raw = b"https://claude.ai/code/session_01ABCdef2345\x1b[1A\x1b[2KNext frame"
+    assert ch.parse_claude_pty_output(ch.strip_terminal(raw).decode()) == (
+        "session_01ABCdef2345", "https://claude.ai/code/session_01ABCdef2345")
+    for seq in (b"\x1b[1A", b"\x1b[2F", b"\x1b[2K", b"\x1b[K", b"\x1b[2J", b"\x1b[3;1H", b"\x1b[5d"):
+        assert ch.strip_terminal(b"session_01ABCdef2345" + seq + b"Next") == b"session_01ABCdef2345\nNext", seq
+
+
+def test_cap_head_tail_keeps_both_ends_within_the_cap():
+    data = b"HEAD" + b"." * 500 + b"TAIL"
+    out = ch.cap_head_tail(data, cap=200, head=20)
+    assert len(out) == 200 and out.startswith(b"HEAD") and out.endswith(b"TAIL")
+    assert b"bytes of terminal output omitted" in out
+    assert ch.cap_head_tail(b"short", cap=200, head=20) == b"short"
+
+
+def test_join_head_tail_marks_a_gap_and_does_not_duplicate_an_overlap():
+    tail = ch.TailWindow(b"cdefgh")
+    tail.total = 8
+    assert ch.join_head_tail(b"abcd", tail) == b"abcdefgh"  # overlap: nothing lost
+    tail.total = 30
+    out = ch.join_head_tail(b"abcd", tail)
+    assert out.startswith(b"abcd") and out.endswith(b"cdefgh") and b"000000000020 bytes" in out
+
+
+def test_a_late_url_survives_the_64kb_log_cap(install_fake, origin, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="ok-with-url", FAKE_CLOUD_PRE_BYTES=str(300 * 1024))
+    ctx = launch_ctx(origin, tmp_path)
+    result = ch.ClaudeBackend().launch(ctx)
+    logged = ctx.log_path.read_bytes()
+    assert result.outcome == "launched" and result.remote_id == "session_01FAKEabcdef12345"
+    assert len(logged) == ch.LOG_CAP_BYTES
+    assert b"session_01FAKEabcdef12345" in logged and b"bytes of terminal output omitted" in logged
+    assert logged.startswith(b"xxxx")
+
+
+def test_a_late_url_survives_the_in_memory_capture_cap(install_fake, origin, tmp_path, monkeypatch):
+    monkeypatch.setattr(ch, "CAPTURE_CAP_BYTES", 2000)
+    monkeypatch.setattr(ch, "PTY_SCAN_WINDOW_BYTES", 4000)
+    install_fake("claude", FAKE_CLOUD_MODE="ok-with-url", FAKE_CLOUD_PRE_BYTES="40000")
+    ctx = launch_ctx(origin, tmp_path)
+    result = ch.ClaudeBackend().launch(ctx)
+    assert (result.outcome, result.remote_id, result.url) == (
+        "launched", "session_01FAKEabcdef12345", "https://claude.ai/code/session_01FAKEabcdef12345")
+    assert b"bytes of terminal output omitted" in ctx.log_path.read_bytes()
+
+
+def test_pty_url_parser_ignores_other_claude_links():
+    assert ch.parse_claude_pty_output("see https://claude.ai/login for help") == (None, None)
+    rid, url = ch.parse_claude_pty_output("open https://claude.ai/code/session_01ABCdef2345 now")
+    assert (rid, url) == ("session_01ABCdef2345", "https://claude.ai/code/session_01ABCdef2345")
+
+
+def test_probe_reports_a_dialog_without_sending_keys(install_fake, state, tmp_path):
+    install_fake("claude", FAKE_CLOUD_MODE="dialog")
+    report = ch.probe_claude_first_screen(tmp_path, timeout=1.5)
+    assert report["started"] and report["dialog"]
+    assert "do you trust" in report["markers"] and "yes, proceed" in report["markers"]
+    assert b"--cloud" not in (state / "claude.argv").read_bytes()
+    assert recorded_argv(state, "claude.argv") == [""]  # no arguments at all: no prompt, no --cloud
+    assert (state / "claude.stdin").read_bytes() == b""
+    assert Path((state / "claude.cwd").read_text().strip()) == tmp_path.resolve()
+    assert_group_gone(state)
+
+
+def test_probe_without_binary(tmp_path):
+    assert ch.probe_claude_first_screen(tmp_path, timeout=1.0) == {"started": False, "error": "BIN_NOT_FOUND: claude"}
 
 
 def test_child_env_is_an_allowlist(install_fake, origin, state, tmp_path, monkeypatch):
@@ -1070,3 +1526,10 @@ def test_write_private_file_replaces_symlink_target_safely(tmp_path):
     with pytest.raises(OSError):
         ch.write_private_file(link, b"x")
     assert target.read_text() == "keep"
+
+
+def test_setup_link_is_not_a_session_url():
+    """The client prints its environment setup link when it could not create a session; that is not a launch."""
+    text = "Could not create a cloud environment. Set one up at https://claude.ai/code/onboarding?magic=env-setup\n"
+    assert ch.CLAUDE_CODE_URL_RE.search(text) is None
+    assert ch.CLAUDE_CODE_URL_RE.search("https://claude.ai/code/session_01AbCdEfGh2345") is not None

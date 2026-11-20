@@ -28,6 +28,7 @@ import copy
 import fcntl
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -1294,6 +1295,28 @@ def cmd_doctor(svc: Services, args: argparse.Namespace) -> int:
     return EXIT_OK if green else EXIT_REFUSED
 
 
+def _probe_seconds(value: Any) -> float:
+    """Clamp to 1..60 s; ``nan`` and ``inf`` must never remove the deadline."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return cloud_host.PROBE_TIMEOUT_S
+    if math.isnan(seconds):
+        return cloud_host.PROBE_TIMEOUT_S
+    return min(max(seconds, 1.0), 60.0)  # +-inf clamp to the bounds
+
+
+def cmd_probe_claude(svc: Services, args: argparse.Namespace) -> int:
+    """Operator probe: start the plain ``claude`` binary (no ``--cloud``, no prompt) on a pty and report the first
+    screen. Creates no cloud session and sends no keystroke."""
+    target = Path(args.dir).resolve()
+    if not target.is_dir():
+        raise Refused("PROBE_DIR_MISSING", "--dir is not a directory")
+    report = cloud_host.probe_claude_first_screen(target, timeout=_probe_seconds(args.seconds), sanitize=cloud_scan.redact)
+    svc.emit(json.dumps(report, sort_keys=True))
+    return EXIT_OK if report.get("started") else EXIT_REFUSED
+
+
 def template_dir() -> Path:
     for candidate in (LIB_DIR / "cloud-templates", LIB_DIR.parent / "templates" / "cloud"):
         if candidate.is_dir():
@@ -1674,8 +1697,14 @@ def _server_confirms(svc: Services, url: str, ref: str, oid: str) -> bool:
 
 
 def _integration_unmerged(svc: Services, root: Path, run: str, base_sha: str, url: str = "") -> bool:
-    tip = rev_parse(svc, root, ledger.integration_ref(run))
-    if tip is None or tip == base_sha:
+    read = git(svc, root, ["rev-parse", "--verify", "--quiet", ledger.integration_ref(run)])
+    if not read.ok and read.rc == 1 and not read.text().strip():
+        return False  # the ref is absent: nothing to lose
+    tip = read.text().strip() if read.ok else ""
+    if not OID_RE.match(tip):  # git failed (or said something unreadable): fail closed, never "nothing unmerged"
+        raise Refused("INTEGRATION_UNMERGED", "could not read refs/heads/ffs/cloud/%s/integration (git failed), so it "
+                      "cannot be shown to be merged; fix the repository and rerun, or pass --discard-unmerged" % run)
+    if tip == base_sha:
         return False
     own = ("refs/heads/ffs/cloud/%s/" % run, "refs/ffs/cloud/%s/" % run,
            "refs/remotes/%s/ffs/cloud/%s/" % (ORIGIN_NAME, run))
@@ -2813,7 +2842,7 @@ class Orchestrator:
             clone_url=doc["origin_url"], model=record.get("model") if provider == "claude" else None,
             effort=record.get("effort") if provider == "claude" else None, log_path=self.run_file("launch", name, gen),
             env_id=codex_env_id(self.config), task_branch_oid=str(entry.get("task_branch_oid") or ""),
-            refs_snapshot_path=self.run_file("claude_refs", name, gen, "json"), sanitize=cloud_scan.redact)
+            refs_snapshot_path=self.run_file("claude_refs", name, gen, "json"), sanitize=cloud_scan.redact, repo_root=self.root)
         try:
             result = self.svc.backend(provider).launch(ctx)
         except Exception as exc:  # noqa: BLE001 - a launch that raised may still have started a session
@@ -2829,6 +2858,8 @@ class Orchestrator:
             fields = {"launched_at": now, "deadline_at": now + deadline_seconds(self.config),
                       "remote_id": self.clean_field(result.remote_id, ledger.safe_remote_id),
                       "url": self.clean_field(result.url, ledger.safe_url)}
+            if result.note:
+                fields["launch_note"] = result.note
             self.apply(name, gen, lambda d: ledger.transition(d, name, ledger.EV_LAUNCH_OK, generation=gen, **fields), "launch-ok")
         elif result.outcome == "uncertain":
             self.apply(name, gen, lambda d: ledger.transition(d, name, ledger.EV_CRASH_FOUND, generation=gen), "launch-uncertain")
@@ -2986,6 +3017,9 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--run", required=True)
     cleanup.add_argument("--remote", action="store_true")
     cleanup.add_argument("--discard-unmerged", action="store_true")
+    probe = add("probe-claude", root=False)
+    probe.add_argument("--dir", required=True, help="directory to start the plain claude binary in")
+    probe.add_argument("--seconds", type=float, default=cloud_host.PROBE_TIMEOUT_S)
     adopt = add("adopt")
     adopt.add_argument("--run", required=True)
     adopt.add_argument("--task", required=True)
@@ -3008,7 +3042,7 @@ def dispatch(svc: Services, args: argparse.Namespace) -> int:
     handlers = {
         "plan": cmd_plan, "start": cmd_start, "orchestrate": cmd_orchestrate, "status": cmd_status,
         "doctor": cmd_doctor, "env-spec": cmd_env_spec, "cleanup": cmd_cleanup, "adopt": cmd_adopt,
-        "abandon": cmd_abandon, "resolve": cmd_resolve,
+        "abandon": cmd_abandon, "resolve": cmd_resolve, "probe-claude": cmd_probe_claude,
     }
     return handlers[args.verb](svc, args)
 

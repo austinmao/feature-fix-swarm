@@ -392,6 +392,17 @@ def sanitize_remote_id(value: Any) -> Optional[str]:
     return value
 
 
+LAUNCH_NOTES = frozenset(["no-session-url", "exit-no-session-url"])
+
+
+def _check_launch_note(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if value not in LAUNCH_NOTES:
+        raise LedgerError(E_BAD_FIELD, "launch_note")
+    return str(value)
+
+
 def sanitize_url(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -622,6 +633,7 @@ _RUNTIME_RESET: Dict[str, Callable[[], Any]] = {
     "base_oid": lambda: None,
     "remote_id": lambda: None,
     "url": lambda: None,
+    "launch_note": lambda: None,
     "launched_at": lambda: None,
     "deadline_at": lambda: None,
     "poll_errors": lambda: 0,
@@ -1027,7 +1039,7 @@ _row(FAILED, EV_DEP_REOPEN, WAITING)  # only for ``dependency-*`` failures (chec
 
 EVENT_FIELDS: Dict[str, Tuple[str, ...]] = {
     EV_DEPS_MET: ("base_oid", "task_branch_oid"),
-    EV_LAUNCH_OK: ("launched_at", "deadline_at", "remote_id", "url"),
+    EV_LAUNCH_OK: ("launched_at", "deadline_at", "remote_id", "url", "launch_note"),
     EV_POLL_RUNNING: ("remote_id", "url"),
     EV_LAUNCH_FOUND: ("remote_id", "url"),
     EV_BIND: ("bound_oid", "bound_ref"),
@@ -1123,6 +1135,7 @@ _FIELD_CHECKS: Dict[str, Callable[[Any], Any]] = {
     "deadline_at": _check_pos,
     "remote_id": sanitize_remote_id,
     "url": sanitize_url,
+    "launch_note": lambda v: _check_launch_note(v),
     "nonce": validate_nonce,
     "review": lambda v: _check_str_dict(v, _REVIEW_KEYS, "review"),
     "verify": lambda v: _check_str_dict(v, _VERIFY_KEYS, "verify"),

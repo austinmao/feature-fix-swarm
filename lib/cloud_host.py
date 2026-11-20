@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -38,6 +39,7 @@ GIT_QUICK_TIMEOUT_S = 60.0
 GIT_TRANSFER_TIMEOUT_S = 300.0
 STATUS_TIMEOUT_S = 60.0
 LAUNCH_TIMEOUT_ENV = "FFS_CLOUD_LAUNCH_TIMEOUT_S"
+CLONE_PARENT_ENV = "FFS_CLOUD_CLONE_PARENT"
 
 LOG_CAP_BYTES = 64 * 1024
 CAPTURE_CAP_BYTES = 1024 * 1024
@@ -98,6 +100,12 @@ IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 CLAUDE_SESSION_RE = re.compile(r"\bsession_[A-Za-z0-9]{8,64}\b")
 CLAUDE_URL_RE = re.compile(r"https://claude\.ai/[A-Za-z0-9_./-]{1,160}")
+#: Only a session link counts: the client also prints other ``claude.ai/code/...`` links (for example its
+#: environment setup page) when it could NOT create a session.
+CLAUDE_CODE_URL_RE = re.compile(r"https://claude\.ai/code/(?:session|cse)_(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8,64}\b")
+#: Real ids carry digits (``session_01...``); requiring one keeps words like ``session_duration`` from matching.
+#: The client also prints the ``cse_`` form of the same id, so both prefixes count.
+CLAUDE_PTY_SESSION_RE = re.compile(r"\b(?:session|cse)_(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8,64}\b")
 CODEX_TASK_RE = re.compile(r"\btask_[A-Za-z0-9_]{4,100}\b")
 CODEX_URL_RE = re.compile(r"https://chatgpt\.com/codex/[A-Za-z0-9_./-]{1,160}")
 STATUS_LINE_RE = re.compile(r"(?im)^\s*(?:task\s+)?status\s*[:=]\s*([A-Za-z_ -]{1,40}?)\s*$")
@@ -135,6 +143,7 @@ class LaunchCtx:
     task_branch_oid: str = ""
     refs_snapshot_path: Optional[Path] = None
     sanitize: Callable[[bytes], bytes] = _identity
+    repo_root: Optional[Path] = None  # the operator's checkout: the fixed launch clone must not live inside it
 
 
 @dataclass
@@ -144,6 +153,7 @@ class LaunchResult:
     url: Optional[str]
     outcome: str  # "launched" | "uncertain" | "failed"
     detail: str = ""
+    note: str = ""  # fixed code recorded on the ledger entry (``launch_note``); "" for none
 
 
 @dataclass
@@ -322,6 +332,265 @@ def resolve_binary(name: str) -> Optional[str]:
     return shutil.which(name)
 
 
+# ── Pseudo-terminal launcher (Claude backend only) ───────────────────────────
+#
+# UNDOCUMENTED PROVIDER BEHAVIOUR: ``claude --cloud`` refuses to run unless
+# stdout is a terminal (Claude Code 2.1.329: "--cloud requires an interactive
+# terminal"), and there is no documented headless creation path. The launcher
+# therefore drives the interactive client through a pseudo-terminal. A CLI
+# update can break this. The parent NEVER writes to the pty (no keystrokes, no
+# auto-answered dialogs); it only reads, then hangs the terminal up.
+
+PTY_ROWS = 40
+PTY_COLS = 120
+PTY_TERM = "xterm-256color"
+PTY_GRACE_S = 20.0
+PTY_GRACE_MAX_S = 120.0
+PTY_GRACE_ENV = "FFS_CLOUD_PTY_GRACE_S"
+PTY_HANGUP_WAIT_S = 10.0
+PTY_TERM_WAIT_S = 5.0
+PTY_POLL_S = 0.1
+PTY_SCAN_WINDOW_BYTES = 128 * 1024
+PROBE_TIMEOUT_S = 8.0
+PROBE_SCREEN_CAP_CHARS = 4000
+PTY_DRAIN_S = 1.0
+#: fixed width, so a capped log is exactly the cap
+TRUNCATION_MARKER = b"\n[... %012d bytes of terminal output omitted ...]\n"
+
+NOT_A_TTY_TEXT = "requires an interactive terminal"
+LAUNCH_NOTE_NO_URL = "no-session-url"
+#: The client exited on its own with no session id/URL and no known error: a session may exist, so it is polled by nonce.
+LAUNCH_NOTE_EXIT_NO_URL = "exit-no-session-url"
+LOG_HEAD_BYTES = 16 * 1024  # of the 64 KB launch log: the start of the transcript; the rest is its end
+CLONE_LOCK_WAIT_S = 600.0
+CLONE_DIR_NAME = "ffs-cloud-launch-claude"
+CLONE_LOCK_NAME = ".ffs-cloud-launch-claude.lock"
+#: A first-run dialog that waits for a keystroke we never send: the client can never create a session behind it.
+BLOCKING_DIALOG_MIN_MARKERS = 2
+BLOCKING_DIALOG_MARKERS = ("do you trust", "quick safety check", "trust this folder", "yes, proceed")
+DIALOG_MARKERS = (
+    "do you trust",
+    "quick safety check",
+    "is this a project you created",
+    "i trust this folder",
+    "trust this folder",
+    "trust the files",
+    "yes, proceed",
+    "welcome",
+    "log in",
+    "login",
+    "sign in",
+    "choose the text style",
+)
+
+_OSC8_RE = re.compile(rb"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)")  # hyperlink target
+_OSC_RE = re.compile(rb"\x1b\](?:[^\x07\x1b]*)(?:\x07|\x1b\\|$)")
+_STRING_RE = re.compile(rb"\x1b[PX^_](?:[^\x1b]*)(?:\x1b\\|$)")
+_CSI_RE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
+_CURSOR_RIGHT_RE = re.compile(rb"\x1b\[(\d*)C")  # Ink-style UIs draw spaces as cursor moves
+_CURSOR_COLUMN_RE = re.compile(rb"\x1b\[\d*G")  # absolute column: word placement, so it becomes a space
+_CURSOR_LINE_RE = re.compile(rb"\x1b\[[0-9;]*[ABEFHdf]")  # moves to another row: keep the words apart
+_ERASE_RE = re.compile(rb"\x1b\[[0-9]*[JK]")  # erase in line / display: a redrawn frame starts here
+_ESC_RE = re.compile(rb"\x1b[ -/]*[0-~]?")
+_CONTROL_RE = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def strip_terminal(data: bytes) -> bytes:
+    """Remove ANSI/OSC/DCS escape sequences and control bytes; CR becomes LF."""
+    data = _OSC8_RE.sub(lambda m: b" " + m.group(1) + b" " if m.group(1) else b"", data)  # keep the target text
+    for pattern in (_OSC_RE, _STRING_RE):
+        data = pattern.sub(b"", data)
+    data = _CURSOR_RIGHT_RE.sub(lambda m: b" " * min(int(m.group(1) or 1), PTY_COLS), data)
+    data = _CURSOR_COLUMN_RE.sub(b" ", data)
+    data = _CURSOR_LINE_RE.sub(b"\n", data)
+    data = _ERASE_RE.sub(b"\n", data)
+    for pattern in (_CSI_RE, _ESC_RE):
+        data = pattern.sub(b"", data)
+    data = re.sub(rb"\r+\n", b"\n", data).replace(b"\r", b"\n")
+    return _CONTROL_RE.sub(b"", data)
+
+
+@dataclass
+class PtyResult:
+    rc: Optional[int]
+    matched: bool = False
+    exited_early: bool = False  # the child ended on its own before we hung the terminal up
+    timed_out: bool = False
+    spawn_failed: bool = False
+    truncated: bool = False
+
+
+class TailWindow(bytearray):
+    """The last ``PTY_SCAN_WINDOW_BYTES`` bytes read, plus a count of every byte read (``total``)."""
+
+    total = 0
+
+
+def _set_winsize(fd: int) -> None:
+    import fcntl
+    import struct
+    import termios
+
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", PTY_ROWS, PTY_COLS, 0, 0))
+    except OSError:
+        pass
+
+
+def _become_controlling_tty() -> None:  # runs in the child after setsid
+    import fcntl
+    import termios
+
+    # An orchestrator started under nohup passes SIGHUP=ignored down to its children; the terminal hang-up is the
+    # gentle way to end the client (and what ends it if we are killed), so restore the default disposition.
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    try:
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    except OSError:
+        pass
+
+
+def _signal_group(proc: "subprocess.Popen[bytes]", sig: int) -> bool:
+    """Signal the child's process group; False when the group no longer exists."""
+    try:
+        os.killpg(proc.pid, sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _end_pty_child(proc: "subprocess.Popen[bytes]", master: int) -> None:
+    """Hang up, then SIGTERM, then SIGKILL the group; never leaves a process behind."""
+    try:
+        os.close(master)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=PTY_HANGUP_WAIT_S)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc, signal.SIGTERM)
+        try:
+            proc.wait(timeout=PTY_TERM_WAIT_S)
+        except subprocess.TimeoutExpired:
+            pass
+    _signal_group(proc, signal.SIGKILL)  # stragglers in the group; no-op when it is already empty
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=KILL_WAIT_S)
+
+
+def _read_master(master: int, sink: bytearray, tail: TailWindow, cap: int) -> Tuple[int, bool, bool]:
+    """One non-blocking read. Returns ``(bytes_read, eof, truncated)``.
+
+    ``sink`` is the capped head of the transcript; ``tail`` is the last ``PTY_SCAN_WINDOW_BYTES`` bytes whatever the
+    cap, so a redrawing screen can still be scanned, and its end kept, after the head is full."""
+    try:
+        data = os.read(master, READ_CHUNK_BYTES)
+    except BlockingIOError:
+        return 0, False, False
+    except OSError:  # EIO on Linux once every slave fd is closed
+        return 0, True, False
+    if not data:
+        return 0, True, False
+    room = cap - len(sink)
+    if room > 0:
+        sink.extend(data[:room])
+    tail.extend(data)
+    tail.total += len(data)
+    del tail[:-PTY_SCAN_WINDOW_BYTES]
+    return len(data), False, len(data) > room
+
+
+def join_head_tail(head: bytes, tail: TailWindow) -> bytes:
+    """The transcript with both ends: the capped head, then the tail, with a marker where bytes were dropped."""
+    total = tail.total
+    if total <= len(head):
+        return bytes(head)
+    tail_start = total - len(tail)
+    if tail_start <= len(head):  # the two overlap or touch: nothing was lost
+        return bytes(head) + bytes(tail)[len(head) - tail_start:]
+    return bytes(head) + TRUNCATION_MARKER % (tail_start - len(head)) + bytes(tail)
+
+
+def _scan(done: Callable[[str], bool], tail: TailWindow) -> bool:
+    return bool(done(strip_terminal(bytes(tail)).decode("utf-8", errors="replace")))
+
+
+def run_pty(
+    argv: Sequence[str],
+    *,
+    cwd: Optional[Path],
+    env: Dict[str, str],
+    timeout: float,
+    sink: bytearray,
+    grace_s: float = 0.0,
+    done: Optional[Callable[[str], bool]] = None,
+    cap: int = CAPTURE_CAP_BYTES,
+    tail: Optional[TailWindow] = None,
+) -> PtyResult:
+    """Run argv on a pseudo-terminal, reading only, until ``done``/exit/timeout.
+
+    ``sink`` receives the head of the raw transcript incrementally (capped at ``cap``) and ``tail`` its end, so the
+    caller can persist both even when this raises (see ``join_head_tail``).
+    After ``done(stripped_text)`` first returns True the read continues for ``grace_s`` seconds. The child is
+    then ended gently (hang-up, SIGTERM, SIGKILL of its process group). Nothing is ever written to the pty.
+    """
+    import pty
+    import select
+    import time
+
+    master, slave = pty.openpty()
+    _set_winsize(slave)
+    child_environment = dict(env)
+    child_environment.setdefault("TERM", PTY_TERM)
+    try:
+        proc = subprocess.Popen(
+            list(argv), cwd=str(cwd) if cwd is not None else None, env=child_environment,
+            stdin=slave, stdout=slave, stderr=slave, start_new_session=True, close_fds=True, shell=False,
+            preexec_fn=_become_controlling_tty,
+        )
+    except (OSError, ValueError):
+        os.close(master)
+        os.close(slave)
+        return PtyResult(None, spawn_failed=True)
+    os.close(slave)
+    os.set_blocking(master, False)
+    result = PtyResult(None)
+    tail = TailWindow() if tail is None else tail
+    deadline = time.monotonic() + timeout
+    grace_end: Optional[float] = None
+    try:
+        while True:
+            now = time.monotonic()
+            if grace_end is not None and now >= grace_end:
+                break
+            if grace_end is None and now >= deadline:
+                result.timed_out = True
+                break
+            ready, _w, _x = select.select([master], [], [], PTY_POLL_S)
+            got, eof, cut = _read_master(master, sink, tail, cap) if ready else (0, False, False)
+            result.truncated = result.truncated or cut
+            if got and not result.matched and done is not None and _scan(done, tail):
+                result.matched = True
+                grace_end = time.monotonic() + max(0.0, grace_s)
+            if eof or proc.poll() is not None:
+                # whatever the child wrote just before it ended is still in the pty: read it out (bounded), then scan
+                drain_end = time.monotonic() + PTY_DRAIN_S
+                while time.monotonic() < drain_end:
+                    more, _eof, cut = _read_master(master, sink, tail, cap)
+                    result.truncated = result.truncated or cut
+                    if not more:
+                        break
+                if not result.matched and done is not None and _scan(done, tail):
+                    result.matched = True
+                result.exited_early = True
+                break
+    finally:
+        _end_pty_child(proc, master)
+    result.rc = proc.returncode
+    return result
+
+
 def run_git(
     args: Sequence[str],
     *,
@@ -378,6 +647,23 @@ def parse_claude_launch(text: str) -> Tuple[Optional[str], Optional[str]]:
     url = _valid_id(url_match.group(0).rstrip(".")) if url_match else None
     id_match = CLAUDE_SESSION_RE.search(text)
     return (_valid_id(id_match.group(0)) if id_match else None), url
+
+
+def parse_claude_pty_output(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(remote_id, url)`` from the pty transcript: only a ``claude.ai/code/`` URL or a ``session_`` id counts.
+
+    Stricter than ``parse_claude_launch`` because an interactive first screen also prints other claude.ai links
+    (login, docs) that must never be mistaken for a created session.
+    """
+    url_match = CLAUDE_CODE_URL_RE.search(text)
+    url = _valid_id(url_match.group(0)) if url_match else None
+    id_match = CLAUDE_PTY_SESSION_RE.search(text)
+    return (_valid_id(id_match.group(0)) if id_match else None), url
+
+
+def _session_seen(text: str) -> bool:
+    remote_id, url = parse_claude_pty_output(text)
+    return bool(remote_id or url)
 
 
 def parse_codex_launch(text: str) -> Tuple[Optional[str], Optional[str]]:
@@ -560,26 +846,45 @@ def load_refs_snapshot(path: Optional[Path]) -> Optional[Dict[str, str]]:
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
 
-def sanitize_and_log(ctx: LaunchCtx, raw: bytes) -> Tuple[bytes, str]:
-    """Sanitize, cap to 64 KB, write 0600 to ``ctx.log_path``.
-
-    Returns ``(sanitized_capped_bytes, detail)``. ``detail`` is "" on success.
-    Sanitization happens before truncation, and nothing unsanitized is written.
-    """
-    detail = ""
+def _sanitize_bytes(ctx: LaunchCtx, raw: bytes) -> Tuple[bytes, str]:
+    """Run the sanitize hook once; a failing hook yields the fixed notice and ``SANITIZER_FAILED``."""
     try:
         clean = ctx.sanitize(raw)
         if not isinstance(clean, bytes):
             raise TypeError("sanitize must return bytes")
     except Exception:  # noqa: BLE001 - any hook failure must withhold the output
-        clean = SANITIZER_FAILED_NOTICE
-        detail = "SANITIZER_FAILED"
-    capped = clean[:LOG_CAP_BYTES]
+        return SANITIZER_FAILED_NOTICE, "SANITIZER_FAILED"
+    return clean, ""
+
+
+def cap_head_tail(data: bytes, cap: int = LOG_CAP_BYTES, head: int = LOG_HEAD_BYTES) -> bytes:
+    """At most ``cap`` bytes holding the start and the END of ``data`` with a marker between, so a late line (the
+    session URL, an error) survives next to the startup frames. Shorter data is returned unchanged."""
+    if len(data) <= cap:
+        return data
+    keep_tail = cap - head - len(TRUNCATION_MARKER % 0)
+    if keep_tail <= 0:
+        return data[:cap]
+    return data[:head] + TRUNCATION_MARKER % (len(data) - head - keep_tail) + data[-keep_tail:]
+
+
+def _write_launch_log(ctx: LaunchCtx, clean: bytes, detail: str) -> Tuple[bytes, str]:
+    capped = cap_head_tail(clean)
     try:
         write_private_file(Path(ctx.log_path), capped)
     except OSError:
         detail = (detail + " LOG_WRITE_FAILED").strip()
     return capped, detail
+
+
+def sanitize_and_log(ctx: LaunchCtx, raw: bytes) -> Tuple[bytes, str]:
+    """Sanitize, cap to 64 KB (start and end are both kept), write 0600 to ``ctx.log_path``.
+
+    Returns ``(sanitized_capped_bytes, detail)``. ``detail`` is "" on success.
+    Sanitization happens before truncation, and nothing unsanitized is written.
+    """
+    clean, detail = _sanitize_bytes(ctx, raw)
+    return _write_launch_log(ctx, clean, detail)
 
 
 # ── Shared validation ────────────────────────────────────────────────────────
@@ -619,6 +924,30 @@ def _timeout_from_env(default: float) -> float:
     except ValueError:
         return default
     return value if 0 < value <= default else default
+
+
+def _blocking_dialog(text: str) -> bool:
+    """At least two distinct first-run dialog phrases: one echoed word (for example in the prompt) is not enough."""
+    squashed = " ".join(text.lower().split())
+    return sum(1 for marker in BLOCKING_DIALOG_MARKERS if marker in squashed) >= BLOCKING_DIALOG_MIN_MARKERS
+
+
+def _prompt_ambiguous(prompt: str) -> bool:
+    """True when the prompt, echoed back by the interactive client, would itself look like a session id/URL, the
+    not-a-terminal error, or a first-run dialog. The echo cannot be told from the client's own output, so such a
+    prompt is refused before anything is started."""
+    remote_id, url = parse_claude_pty_output(prompt)
+    squashed = " ".join(prompt.lower().split())
+    return bool(remote_id or url) or NOT_A_TTY_TEXT in squashed or _blocking_dialog(prompt)
+
+
+def _grace_from_env() -> float:
+    raw = os.environ.get(PTY_GRACE_ENV, "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return PTY_GRACE_S
+    return value if 0 <= value <= PTY_GRACE_MAX_S else PTY_GRACE_S
 
 
 def _quarantine_check(repo: Path, timeout: float) -> None:
@@ -676,14 +1005,122 @@ def _launch_outcome_for(exec_result: ExecResult) -> Optional[LaunchResult]:
     return None
 
 
+def probe_claude_first_screen(
+    directory: Path,
+    *,
+    timeout: float = PROBE_TIMEOUT_S,
+    sanitize: Callable[[bytes], bytes] = _identity,
+) -> Dict[str, object]:
+    """Start the plain ``claude`` binary (no ``--cloud``, no prompt) on a pty in ``directory`` and report the
+    first screen. No keystroke is sent and no session is created. ``dialog`` is a text heuristic only."""
+    binary = resolve_binary("claude")
+    if binary is None:
+        return {"started": False, "error": "BIN_NOT_FOUND: claude"}
+    sink = bytearray()
+    outcome = run_pty([binary], cwd=Path(directory), env=child_env(), timeout=timeout, sink=sink)
+    if outcome.spawn_failed:
+        return {"started": False, "error": "SPAWN_FAILED"}
+    text = strip_terminal(bytes(sink)).decode("utf-8", errors="replace")
+    lowered = " ".join(text.lower().split())
+    try:
+        shown = sanitize(text.encode("utf-8")).decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - a failing hook withholds the screen
+        shown = SANITIZER_FAILED_NOTICE.decode("ascii").strip()
+    markers = [m for m in DIALOG_MARKERS if m in lowered]
+    return {
+        "started": True, "exited_early": outcome.exited_early, "rc": outcome.rc, "dialog": bool(markers),
+        "markers": markers, "bytes": len(sink), "screen": shown[:PROBE_SCREEN_CAP_CHARS],
+    }
+
+
+def _repo_root_of_cwd() -> Optional[str]:
+    probe = run_git(["rev-parse", "--show-toplevel"], cwd=Path.cwd(), timeout=GIT_QUICK_TIMEOUT_S, stdout_only=True)
+    return probe.text().strip() if probe.ok and probe.text().strip() else None
+
+
+def _validated_clone_parent(raw: str, repo_root: Optional[Path]) -> Tuple[Optional[Path], str]:
+    """``(real parent path, "")`` or ``(None, reason)``: absolute, an existing directory, not a symlink, owned by the
+    current user, and not inside the operator's checkout."""
+    if not os.path.isabs(raw):
+        return None, "NOT_ABSOLUTE"
+    try:
+        info = os.lstat(raw)
+    except OSError:
+        return None, "MISSING"
+    if stat.S_ISLNK(info.st_mode):
+        return None, "SYMLINK"
+    if not stat.S_ISDIR(info.st_mode):
+        return None, "NOT_A_DIRECTORY"
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        return None, "NOT_OWNED"
+    real = os.path.realpath(raw)
+    root = os.path.realpath(str(repo_root)) if repo_root is not None else _repo_root_of_cwd()
+    if root is not None:
+        root = os.path.realpath(root)
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return None, "INSIDE_REPO"
+    return Path(real), ""
+
+
+def _lock_clone_parent(parent: Path) -> Tuple[Optional[int], str]:
+    """Take the exclusive flock that serializes use of the fixed clone path; ``(fd, "")`` or ``(None, code)``."""
+    import errno
+    import fcntl
+    import time
+
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(str(parent / CLONE_LOCK_NAME), flags, 0o600)
+    except OSError:
+        return None, "CLONE_LOCK_FAILED"
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            raise OSError(errno.EPERM, "unexpected lock file")
+    except OSError:
+        os.close(fd)
+        return None, "CLONE_LOCK_FAILED"
+    deadline = time.monotonic() + CLONE_LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd, ""
+        except OSError as exc:
+            if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                os.close(fd)
+                return None, "CLONE_LOCK_FAILED"
+        if time.monotonic() >= deadline:
+            os.close(fd)
+            return None, "CLONE_LOCK_BUSY"
+        time.sleep(0.2)
+
+
+def _clear_stale_clone(clone: Path) -> str:
+    """Remove a clone left at the fixed path by a killed launch; refuse when the path is not a plain directory."""
+    try:
+        info = os.lstat(str(clone))
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return "CLONE_PATH_INVALID"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return "CLONE_PATH_INVALID"
+    shutil.rmtree(str(clone), ignore_errors=True)
+    return "CLONE_PATH_STALE" if os.path.lexists(str(clone)) else ""
+
+
 # ── Claude ───────────────────────────────────────────────────────────────────
 
 
 class ClaudeBackend:
     name = "claude"
 
-    def __init__(self, launch_timeout_s: Optional[float] = None, git_timeout_s: Optional[float] = None) -> None:
+    def __init__(
+        self, launch_timeout_s: Optional[float] = None, git_timeout_s: Optional[float] = None,
+        pty_grace_s: Optional[float] = None,
+    ) -> None:
         self.launch_timeout_s = _timeout_from_env(LAUNCH_TIMEOUT_S) if launch_timeout_s is None else launch_timeout_s
+        self.pty_grace_s = _grace_from_env() if pty_grace_s is None else pty_grace_s
         self._git_quick = GIT_QUICK_TIMEOUT_S if git_timeout_s is None else git_timeout_s
         self._git_transfer = GIT_TRANSFER_TIMEOUT_S if git_timeout_s is None else git_timeout_s
 
@@ -706,6 +1143,7 @@ class ClaudeBackend:
             (bool(ctx.model) and not SAFE_ARG_RE.match(ctx.model or ""), "MODEL_INVALID"),
             (bool(ctx.effort) and not SAFE_ARG_RE.match(ctx.effort or ""), "EFFORT_INVALID"),
             (_safe_prompt(ctx.prompt) is None, "PROMPT_INVALID"),
+            (_prompt_ambiguous(ctx.prompt or ""), "PROMPT_AMBIGUOUS"),
         )
         for failed, code in checks:
             if failed:
@@ -718,11 +1156,40 @@ class ClaudeBackend:
         problem = self._precheck(ctx)
         if problem:
             return _failed(problem)
-        workdir = tempfile.mkdtemp(prefix="ffs-cloud-clone-")
+        raw_parent = os.environ.get(CLONE_PARENT_ENV, "").strip()
+        if raw_parent:
+            return self._launch_in_fixed_clone(ctx, raw_parent)
+        try:
+            workdir = tempfile.mkdtemp(prefix="ffs-cloud-clone-")
+        except OSError:
+            return _failed("CLONE_DIR_FAILED")  # nothing was started
         try:
             return self._launch_from_clone(ctx, Path(workdir) / "clone")
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+
+    def _launch_in_fixed_clone(self, ctx: LaunchCtx, raw_parent: str) -> LaunchResult:
+        """The client trusts a folder per git root, so a fresh temp clone always shows the trust dialog. With
+        ``FFS_CLOUD_CLONE_PARENT`` the clone goes to ``<parent>/ffs-cloud-launch-claude``, a path the operator can
+        trust once by running the client there. Never falls back to the system temp dir."""
+        parent, problem = _validated_clone_parent(raw_parent, ctx.repo_root)
+        if parent is None:
+            return _failed("CLONE_PARENT_INVALID " + problem)
+        lock_fd, problem = _lock_clone_parent(parent)
+        if lock_fd is None:
+            return _failed(problem)
+        clone = parent / CLONE_DIR_NAME
+        owned = False
+        try:
+            problem = _clear_stale_clone(clone)
+            if problem:
+                return _failed(problem)
+            owned = True
+            return self._launch_from_clone(ctx, clone)
+        finally:
+            if owned:  # every exit path, including an exception; a path we refused to touch is never removed
+                shutil.rmtree(str(clone), ignore_errors=True)
+            os.close(lock_fd)  # releases the lock
 
     def _prepare_clone(self, ctx: LaunchCtx, clone: Path) -> str:
         branch = normalize_branch(ctx.task_branch)
@@ -757,21 +1224,43 @@ class ClaudeBackend:
             argv += ["--model", ctx.model]
         if ctx.effort:
             argv += ["--effort", ctx.effort]
-        result = run_capture(argv, cwd=clone, env=child_env(), timeout=self.launch_timeout_s)
-        return self._finish_launch(ctx, result)
+        return self._launch_on_pty(ctx, argv, clone)
 
-    def _finish_launch(self, ctx: LaunchCtx, result: ExecResult) -> LaunchResult:
-        text_bytes, log_detail = sanitize_and_log(ctx, result.output)
-        remote_id, url = parse_claude_launch(text_bytes.decode("utf-8", errors="replace"))
-        early = _launch_outcome_for(result)
-        if early is not None:
-            early.remote_id, early.url = remote_id, url
-            early.detail = (early.detail + " " + log_detail).strip()
-            return early
-        if result.rc != 0:
-            return LaunchResult(result.rc, None, None, "failed", ("CLI_EXIT " + log_detail).strip())
-        # Claude binds by nonce, so a missing id/url is still "launched".
-        return LaunchResult(0, remote_id, url, "launched", log_detail)
+    def _launch_on_pty(self, ctx: LaunchCtx, argv: List[str], clone: Path) -> LaunchResult:
+        sink, tail = bytearray(), TailWindow()
+        clean, log_detail = SANITIZER_FAILED_NOTICE, "SANITIZER_FAILED"
+        try:
+            pty_result = run_pty(
+                argv, cwd=clone, env=child_env(), timeout=self.launch_timeout_s, sink=sink,
+                grace_s=self.pty_grace_s, done=_session_seen, cap=CAPTURE_CAP_BYTES, tail=tail)
+        finally:  # the transcript (its start AND its end) is persisted on every path, including an exception or a timeout
+            clean, log_detail = _sanitize_bytes(ctx, strip_terminal(join_head_tail(bytes(sink), tail)))
+            _, log_detail = _write_launch_log(ctx, clean, log_detail)
+        if pty_result.spawn_failed:
+            return _failed("SPAWN_FAILED", SPAWN_FAILED_RC)
+        return self._finish_pty_launch(clean, pty_result, log_detail)
+
+    @staticmethod
+    def _finish_pty_launch(clean: bytes, pty_result: PtyResult, log_detail: str) -> LaunchResult:
+        # ids and urls are parsed from the sanitized transcript only, never from raw output
+        text = clean.decode("utf-8", errors="replace")
+        remote_id, url = parse_claude_pty_output(text)
+        exited = pty_result.exited_early
+        if pty_result.matched or remote_id or url:  # an id/url in the full transcript counts even if the live scan missed it
+            return LaunchResult(0, remote_id, url, "launched", log_detail)
+        if exited and NOT_A_TTY_TEXT in " ".join(text.lower().split()):  # only an exited client has said its last word
+            return LaunchResult(pty_result.rc or 1, None, None, "failed", ("CLI_EXIT NOT_A_TTY " + log_detail).strip())
+        if _blocking_dialog(text):
+            rc = (pty_result.rc or 1) if exited else TIMEOUT_RC
+            return LaunchResult(rc, None, None, "failed", ("CLI_EXIT BLOCKED_DIALOG " + log_detail).strip())
+        if exited:
+            # The client ended on its own, printed no id/url we recognise and no known pre-creation error. It may still
+            # have created the session, and Claude binds by nonce on claude/*: keep polling, never fail or resubmit.
+            return LaunchResult(
+                pty_result.rc or 0, None, None, "launched", ("CLI_EXIT NO_SESSION_URL " + log_detail).strip(),
+                note=LAUNCH_NOTE_EXIT_NO_URL)
+        # Still running at the launch timeout with no URL: same reasoning. The note records why the URL is missing.
+        return LaunchResult(TIMEOUT_RC, None, None, "launched", ("LAUNCH_TIMEOUT " + log_detail).strip(), note=LAUNCH_NOTE_NO_URL)
 
     # poll ---------------------------------------------------------------
 

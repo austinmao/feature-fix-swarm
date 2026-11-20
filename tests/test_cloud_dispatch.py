@@ -14,6 +14,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,14 +49,15 @@ if sys.argv[1:2] != ["--cloud"]:  # doctor probes (`auth --help`, `auth status`)
     sys.exit(1)
 with open(os.path.join(STATE, "claude.count"), "a") as fh:
     fh.write("x\\n")
-env = dict(os.environ, FAKE_CLOUD_STATE=STATE, FAKE_CLOUD_MODE="ok-with-url")
-proc = subprocess.run([FAKE] + sys.argv[1:], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-sys.stdout.buffer.write(proc.stdout)
 path = os.path.join(STATE, "claude.behavior.json")
 behavior = json.load(open(path)) if os.path.exists(path) else {}
 prompt = sys.argv[2]
 run, task, gen = re.search(r"run (\\S+), task (\\S+) \\(generation (\\d+)\\)", prompt).groups()
 spec = behavior.get(task, {})
+env = dict(os.environ, FAKE_CLOUD_STATE=STATE, FAKE_CLOUD_MODE=spec.get("mode", "ok-with-url"))
+fake = subprocess.run([FAKE] + sys.argv[1:], env=env)  # inherit the (pty) stdio: the fake insists on a terminal
+if fake.returncode:
+    sys.exit(fake.returncode)
 if spec.get("push", True) is False:
     sys.exit(0)
 skeleton = json.loads(re.search(r"\\n(\\{\\n  \\"schema\\".*?\\n\\})\\n", prompt, re.S).group(1))
@@ -409,6 +411,78 @@ def test_a_leftover_submitting_task_is_made_uncertain_on_the_next_tick(world: Wo
     orch.tick()
     assert world.states() != {"t1": "submitting"}
     assert world.count("claude") == 0  # never relaunched
+
+
+def test_live_client_without_a_url_is_polled_not_adopted_and_never_resubmitted(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(cloud_host.LAUNCH_TIMEOUT_ENV, "1")
+    world.behavior(t1={"mode": "hang", "push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=6)
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] in ("launched", "running"), world.states()  # no `adopt` needed to keep polling
+    assert entry["launch_note"] == "no-session-url" and entry["url"] is None
+    assert world.count("claude") == 1
+    assert entry["generation"] == 1
+
+
+def test_client_exit_zero_with_no_url_keeps_the_task_polled_and_never_resubmits(world: World) -> None:
+    """The client printed nothing and exited 0, yet the cloud session wrote its result branch: the nonce poll must
+    find it. A terminal `failed` here would hide the session and invite `abandon --retry` (a second session)."""
+    world.behavior(t1={"mode": "ok-no-output"})  # the worker pushes its result branch; the client prints no URL
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=4)
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] not in ("failed", "needs-operator", "uncertain"), world.states()
+    assert entry["launch_note"] == "exit-no-session-url" and entry["url"] is None and entry["remote_id"] is None
+    world.drive(max_ticks=12)
+    assert world.states() == {"t1": "integrated"}
+    assert world.count("claude") == 1
+    assert world.doc()["tasks"]["t1"]["generation"] == 1
+
+
+def test_client_exit_zero_with_no_url_and_no_result_yet_stays_launched_and_polled(world: World) -> None:
+    world.behavior(t1={"mode": "ok-no-output", "push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=8)
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] in ("launched", "running"), world.states()  # not failed; not parked after a few polls
+    assert entry["launch_note"] == "exit-no-session-url"
+    assert world.count("claude") == 1 and entry["generation"] == 1
+
+
+def test_orchestrator_killed_mid_pty_launch_never_submits_twice(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    world.behavior(t1={"mode": "url-linger", "push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    seen = {"n": 0}
+
+    def die_while_the_client_runs(_text: str) -> bool:
+        seen["n"] += 1
+        raise cd.SimulatedCrash("mid-launch")
+
+    original = cloud_host._session_seen
+    monkeypatch.setattr(cloud_host, "_session_seen", die_while_the_client_runs)
+    with pytest.raises(cd.SimulatedCrash):
+        world.drive()
+    monkeypatch.setattr(cloud_host, "_session_seen", original)
+    assert seen["n"] == 1 and world.count("claude") == 1
+    assert world.states() == {"t1": "submitting"}
+    shim_pid = int((world.state / "claude.pid").read_text())
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            os.kill(shim_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(shim_pid, 0)  # the client was hung up and reaped, not orphaned
+    world.behavior(t1={"mode": "url-linger", "push": False})
+    world.drive(max_ticks=6)
+    assert world.count("claude") == 1, "a resumed run must never submit the task again"
+    assert world.doc()["tasks"]["t1"]["generation"] == 1
+    assert world.states() != {"t1": "submitting"}
 
 
 def test_crash_after_launch_exec_recovers_through_uncertain(world: World) -> None:
@@ -925,6 +999,44 @@ def test_cleanup_removes_a_finished_run(world: World) -> None:
     assert rc == 0 and "CLOUD:cleanup run=r1" in out
     assert not L.run_ledger_path(world.root, "r1").exists()
     assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
+
+
+def test_cleanup_fails_closed_when_git_cannot_read_the_integration_ref(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    real_run = world.svc.run
+    ref = L.integration_ref("r1")
+
+    def broken_git(argv: Any, **kwargs: Any) -> Any:
+        if "rev-parse" in argv and ref in argv:
+            return cd.CmdResult(128, b"", b"fatal: unable to read refs")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(world.svc, "run", broken_git)
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--root", str(world.root))
+    assert rc == 3 and "INTEGRATION_UNMERGED" in out
+    assert L.run_ledger_path(world.root, "r1").exists()
+    assert run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/r1/*") != ""  # nothing was deleted
+    monkeypatch.undo()
+    rc, _ = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0
+
+
+def test_cleanup_of_a_run_whose_integration_ref_is_absent_still_proceeds(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    run_git(world.root, "update-ref", "-d", L.integration_ref("r1"))
+    rc, _ = world.cli("cleanup", "--run", "r1", "--root", str(world.root))
+    assert rc == 0
+
+
+@pytest.mark.parametrize("given, expected", [
+    (float("nan"), cloud_host.PROBE_TIMEOUT_S), (float("inf"), 60.0), (float("-inf"), 1.0),
+    (0.0, 1.0), (5.0, 5.0), (900.0, 60.0),
+])
+def test_probe_seconds_is_always_a_finite_clamped_deadline(given: float, expected: float) -> None:
+    assert cd._probe_seconds(given) == expected
 
 
 def test_cleanup_does_not_count_a_remote_tracking_copy_of_the_run_as_a_safe_copy(world: World) -> None:
