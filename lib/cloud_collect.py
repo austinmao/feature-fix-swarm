@@ -859,6 +859,8 @@ def _build_candidate(ctx: CollectCtx) -> str:
 
 def _import_candidate(ctx: CollectCtx, candidate: str) -> None:
     ref = ctx.cand_ref
+    if _git_ok(ctx.repo, ["symbolic-ref", "-q", ref]):  # fetch would write through a (possibly dangling) symref
+        raise ValueError(B_CANDIDATE_CONFLICT)
     existing = _rev(ctx.repo, ref + "^{commit}") if _git_ok(ctx.repo, ["rev-parse", "--verify", "--quiet", ref]) else ""
     if existing and existing != candidate:
         raise ValueError(B_CANDIDATE_CONFLICT)

@@ -10,6 +10,9 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: external review findings)
 
+- The candidate import refuses (`candidate-conflict`) when the candidate ref in
+  your repository is a symbolic ref, so `fetch` can no longer create the branch
+  a dangling symref points at.
 - A secret-scanner failure while listing `claude/*` refs no longer flags every
   ref name as secret-shaped. The launch ends `SNAPSHOT_FAILED` and starts
   nothing (so a hash-only snapshot cannot turn old refs into candidates later);

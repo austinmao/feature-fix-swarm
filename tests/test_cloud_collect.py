@@ -196,6 +196,16 @@ def test_candidate_ref_conflict(world):
     assert_fail(cc.collect(ctx), "needs-operator", cc.B_CANDIDATE_CONFLICT)
 
 
+def test_candidate_import_never_writes_through_a_symbolic_ref(world):
+    """WR-03: a dangling symref at the candidate ref must not make fetch create the branch it points at."""
+    oid = world.result(ok_changes())
+    ctx = world.ctx(oid)
+    git(world.main, "symbolic-ref", ctx.cand_ref, "refs/heads/evil")
+    assert_fail(cc.collect(ctx), "needs-operator", cc.B_CANDIDATE_CONFLICT)
+    assert subprocess.run(["git", "-C", str(world.main), "rev-parse", "--verify", "--quiet", "refs/heads/evil"],
+                          capture_output=True).returncode != 0
+
+
 def test_secret_in_early_commit_later_removed(world):
     world.commit(world.origin, {"src/a/leak.txt": b"k=" + cloud_scan.canary("github-token")}, "leak")
     world.commit(world.origin, {"src/a/leak.txt": None}, "remove")
