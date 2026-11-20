@@ -365,6 +365,10 @@ LOG_HEAD_BYTES = 16 * 1024  # of the 64 KB launch log: the start of the transcri
 CLONE_LOCK_WAIT_S = 600.0
 CLONE_DIR_NAME = "ffs-cloud-launch-claude"
 CLONE_LOCK_NAME = ".ffs-cloud-launch-claude.lock"
+#: Written inside ``<clone>/.git`` once the dispatcher has made the clone; only a directory that carries it is ever deleted.
+CLONE_MARKER_NAME = "ffs-disposable-clone"
+#: Checkout of the launch clone: no hooks, and no user or system git config (so no filter driver is defined).
+NEUTRAL_CHECKOUT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 #: A first-run dialog that waits for a keystroke we never send: the client can never create a session behind it.
 BLOCKING_DIALOG_MIN_MARKERS = 2
 BLOCKING_DIALOG_MARKERS = ("do you trust", "quick safety check", "trust this folder", "yes, proceed")
@@ -1038,6 +1042,20 @@ def _repo_root_of_cwd() -> Optional[str]:
     return probe.text().strip() if probe.ok and probe.text().strip() else None
 
 
+def _fold_path(path: str) -> str:
+    """Real path, case-folded: a case-insensitive volume must not let ``Repo`` and ``repo`` look different."""
+    return os.path.normcase(os.path.realpath(path)).casefold().rstrip(os.sep) or os.sep
+
+
+def _overlaps_any(candidate: str, folded: Iterable[str]) -> bool:
+    """True when ``candidate`` equals, lies inside, or contains any folded path (both directions)."""
+    for other in folded:
+        if candidate == other or candidate.startswith(other.rstrip(os.sep) + os.sep) \
+                or other.startswith(candidate.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 def _validated_clone_parent(raw: str, repo_root: Optional[Path]) -> Tuple[Optional[Path], str]:
     """``(real parent path, "")`` or ``(None, reason)``: absolute, an existing directory, not a symlink, owned by the
     current user, and not inside the operator's checkout."""
@@ -1056,10 +1074,28 @@ def _validated_clone_parent(raw: str, repo_root: Optional[Path]) -> Tuple[Option
     real = os.path.realpath(raw)
     root = os.path.realpath(str(repo_root)) if repo_root is not None else _repo_root_of_cwd()
     if root is not None:
-        root = os.path.realpath(root)
-        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+        folded_root, folded = _fold_path(root), _fold_path(real)
+        if folded == folded_root or folded.startswith(folded_root + os.sep):
             return None, "INSIDE_REPO"
     return Path(real), ""
+
+
+def _clone_child_conflict(child: Path, repo_root: Optional[Path]) -> str:
+    """``""`` or ``CLONE_PATH_INVALID``: the clone child must neither lie inside nor contain the operator's checkout or
+    any of its linked worktrees. An unknown checkout or an unreadable worktree list fails closed."""
+    root = str(repo_root) if repo_root is not None else _repo_root_of_cwd()
+    if not root:
+        return "CLONE_PATH_INVALID"
+    listing = run_git(["worktree", "list", "--porcelain"], cwd=Path(root), timeout=GIT_QUICK_TIMEOUT_S, stdout_only=True)
+    if not listing.ok:
+        return "CLONE_PATH_INVALID"
+    roots = [root]
+    for line in listing.text().splitlines():
+        if line.startswith("worktree "):
+            roots.append(line[len("worktree "):])
+    if _overlaps_any(_fold_path(str(child)), [_fold_path(r) for r in roots]):
+        return "CLONE_PATH_INVALID"
+    return ""
 
 
 def _lock_clone_parent(parent: Path) -> Tuple[Optional[int], str]:
@@ -1095,15 +1131,25 @@ def _lock_clone_parent(parent: Path) -> Tuple[Optional[int], str]:
         time.sleep(0.2)
 
 
+def _has_disposable_marker(clone: Path) -> bool:
+    try:
+        git_dir = os.lstat(str(clone / ".git"))
+        marker = os.lstat(str(clone / ".git" / CLONE_MARKER_NAME))
+    except OSError:
+        return False
+    return stat.S_ISDIR(git_dir.st_mode) and stat.S_ISREG(marker.st_mode)
+
+
 def _clear_stale_clone(clone: Path) -> str:
-    """Remove a clone left at the fixed path by a killed launch; refuse when the path is not a plain directory."""
+    """Remove a clone left at the fixed path by a killed launch. Refuses anything that is not a plain directory that
+    carries the dispatcher's disposable-clone marker: an operator's checkout is never deleted."""
     try:
         info = os.lstat(str(clone))
     except FileNotFoundError:
         return ""
     except OSError:
         return "CLONE_PATH_INVALID"
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or not _has_disposable_marker(clone):
         return "CLONE_PATH_INVALID"
     shutil.rmtree(str(clone), ignore_errors=True)
     return "CLONE_PATH_STALE" if os.path.lexists(str(clone)) else ""
@@ -1181,7 +1227,7 @@ class ClaudeBackend:
         clone = parent / CLONE_DIR_NAME
         owned = False
         try:
-            problem = _clear_stale_clone(clone)
+            problem = _clone_child_conflict(clone, ctx.repo_root) or _clear_stale_clone(clone)
             if problem:
                 return _failed(problem)
             owned = True
@@ -1193,16 +1239,27 @@ class ClaudeBackend:
 
     def _prepare_clone(self, ctx: LaunchCtx, clone: Path) -> str:
         branch = normalize_branch(ctx.task_branch)
+        no_hooks = ["-c", "core.hooksPath=" + os.devnull]
         cloned = run_git(
-            ["clone", "--single-branch", "--branch", branch, "--no-tags", ctx.clone_url, str(clone)],
+            no_hooks + ["clone", "--no-checkout", "--single-branch", "--branch", branch, "--no-tags", ctx.clone_url,
+                        str(clone)],
             timeout=self._git_transfer,
         )
         if not cloned.ok:
             return "CLONE_FAILED"
+        try:
+            write_private_file(clone / ".git" / CLONE_MARKER_NAME, b"disposable launch clone\n")
+        except OSError:
+            return "CLONE_FAILED"
         head = run_git(["-C", str(clone), "rev-parse", "HEAD"], timeout=self._git_quick)
         if not head.ok or head.text().strip().lower() != ctx.task_branch_oid.lower():
-            return "BRANCH_OID_MISMATCH"
-        return ""
+            return "BRANCH_OID_MISMATCH"  # nothing was checked out: the replacement tree was never materialised
+        oid = ctx.task_branch_oid.lower()
+        checkout = run_git(
+            no_hooks + ["-C", str(clone), "checkout", "--quiet", "--force", "-B", branch, oid],
+            timeout=self._git_quick, extra_env=NEUTRAL_CHECKOUT_ENV,
+        )
+        return "" if checkout.ok else "CLONE_FAILED"
 
     def _write_launch_snapshot(self, ctx: LaunchCtx) -> str:
         listing = run_git(["ls-remote", ctx.clone_url, CLAUDE_REF_GLOB], timeout=self._git_quick)

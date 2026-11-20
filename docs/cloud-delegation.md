@@ -157,6 +157,17 @@ Steps:
    FFS deletes this clone and makes a fresh one at the same path for each
    launch. The live run launched without a dialog after these steps.
 
+   FFS deletes an existing clone at that path only if it carries the marker
+   file `.git/ffs-disposable-clone`, which FFS writes when it makes the clone.
+   Your hand-made clone has no marker, so the first launch ends
+   `CLONE_PATH_INVALID` and touches nothing. Remove your clone once
+   (`rm -rf <parent>/ffs-cloud-launch-claude`) after you have accepted the
+   trust dialog; the next launch recreates it with the marker. The path must
+   also not equal, contain or lie inside your checkout or any of its linked
+   worktrees (compared case-insensitively); otherwise the launch ends
+   `CLONE_PATH_INVALID`. If a launch is killed while `git clone` is running, the
+   partial directory has no marker: remove it by hand.
+
 6. Run the checks:
 
    ```bash

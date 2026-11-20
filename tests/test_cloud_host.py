@@ -672,6 +672,8 @@ def test_clone_parent_removes_a_stale_clone_first(install_fake, origin, state, t
     stale = clone_parent / "ffs-cloud-launch-claude"
     (stale / "sub").mkdir(parents=True)
     (stale / "sub" / "left-over.txt").write_text("from a killed launch")
+    (stale / ".git").mkdir()
+    (stale / ".git" / ch.CLONE_MARKER_NAME).write_text("disposable\n")
     install_fake("claude")
     assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"  # git clone needs an empty target
     assert not stale.exists()
@@ -1541,3 +1543,114 @@ def test_live_launch_transcript_parses():
     remote_id, url = ch.parse_claude_pty_output(text)
     assert remote_id == "session_01LiveFixture0000000000AA"
     assert url is not None and url.startswith("https://claude.ai/code/session_01LiveFixture0000000000AA")
+
+
+# ── Fixed-clone safety: the child path, the disposable-clone marker, checkout hardening ──────────────────
+
+
+def _make_checkout(origin, where):
+    git("clone", "-q", origin.url, where)
+    (where / "dirty.txt").write_text("uncommitted work")
+    return where
+
+
+def test_unmarked_existing_clone_is_refused_and_left_alone(install_fake, origin, state, tmp_path, clone_parent):
+    existing = _make_checkout(origin, clone_parent / "ffs-cloud-launch-claude")
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, repo_root=origin.work))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
+    assert (existing / "dirty.txt").read_text() == "uncommitted work" and (existing / ".git").is_dir()
+    assert not (state / "claude.argv").exists()
+
+
+def test_clone_child_that_is_the_operators_checkout_is_never_deleted(install_fake, origin, state, tmp_path, clone_parent):
+    checkout = _make_checkout(origin, clone_parent / "ffs-cloud-launch-claude")
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, repo_root=checkout))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
+    assert (checkout / "dirty.txt").exists() and (checkout / ".git").is_dir()
+
+
+def test_clone_child_that_is_a_linked_worktree_is_never_deleted(install_fake, origin, state, tmp_path, clone_parent):
+    child = clone_parent / "ffs-cloud-launch-claude"
+    git("worktree", "add", "-q", "-b", "wt-branch", child, "main", cwd=origin.work)
+    (child / "dirty.txt").write_text("uncommitted work")
+    (child / ".git").unlink()  # the worst case: even the marker location is not a directory
+    (child / ".git").write_text("gitdir: %s\n" % (origin.work / ".git" / "worktrees" / "ffs-cloud-launch-claude"))
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, repo_root=origin.work))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
+    assert (child / "dirty.txt").exists()
+
+
+def test_worktree_inside_the_clone_child_is_refused(install_fake, origin, state, tmp_path, clone_parent):
+    child = clone_parent / "ffs-cloud-launch-claude"
+    child.mkdir()
+    (child / ".git").mkdir()
+    (child / ".git" / ch.CLONE_MARKER_NAME).write_text("disposable\n")  # even a marked child may not hold a worktree
+    inner = child / "nested-checkout"
+    git("worktree", "add", "-q", "-b", "wt-inner", inner, "main", cwd=origin.work)
+    (inner / "dirty.txt").write_text("uncommitted work")
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, repo_root=origin.work))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
+    assert (inner / "dirty.txt").exists()
+
+
+def test_path_overlap_is_case_insensitive_in_both_directions():
+    folded = [ch._fold_path("/Work/Repo")]
+    assert ch._overlaps_any(ch._fold_path("/work/repo/ffs-cloud-launch-claude"), folded)  # child inside a worktree
+    assert ch._overlaps_any(ch._fold_path("/WORK"), folded)  # a worktree inside the child
+    assert ch._overlaps_any(ch._fold_path("/WORK/REPO"), folded)
+    assert not ch._overlaps_any(ch._fold_path("/work/repository"), folded)
+
+
+def test_parent_inside_the_repo_is_refused_case_insensitively(tmp_path):
+    parent = tmp_path / "Inner"
+    parent.mkdir()
+    assert ch._validated_clone_parent(str(parent), Path(str(tmp_path).upper()))[1] == "INSIDE_REPO"
+
+
+def test_launch_clone_gets_a_disposable_marker(install_fake, origin, tmp_path):
+    clone = tmp_path / "c"
+    assert ch.ClaudeBackend()._prepare_clone(launch_ctx(origin, tmp_path), clone) == ""
+    marker = clone / ".git" / ch.CLONE_MARKER_NAME
+    assert marker.is_file() and not marker.is_symlink()
+    assert ch._clear_stale_clone(clone) == "" and not clone.exists()
+
+
+def _hostile_home(tmp_path, monkeypatch):
+    """A global git config with a checkout hook and a smudge filter: neither may ever run in the launch clone."""
+    home = tmp_path / "home"
+    hooks = tmp_path / "hooks"
+    hooks.mkdir(parents=True)
+    home.mkdir()
+    ran = tmp_path / "ran.txt"
+    hook = hooks / "post-checkout"
+    hook.write_text("#!/bin/sh\necho hook >> %s\n" % shlex.quote(str(ran)))
+    hook.chmod(0o755)
+    (home / ".gitconfig").write_text(
+        "[core]\n\thooksPath = %s\n[filter \"tracker\"]\n\tsmudge = sh -c 'echo filter >> %s; cat'\n"
+        % (hooks, shlex.quote(str(ran)).strip("'")))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    return ran
+
+
+def test_launch_clone_never_runs_hooks_or_filters_and_checks_the_oid_before_any_checkout(
+        install_fake, origin, state, tmp_path, monkeypatch):
+    git("checkout", "-q", "-B", origin.branch, origin.oid, cwd=origin.work)
+    (origin.work / ".gitattributes").write_text("*.txt filter=tracker\n")
+    git("add", ".gitattributes", cwd=origin.work)
+    git("commit", "-m", "attrs", cwd=origin.work)
+    moved = git("rev-parse", "HEAD", cwd=origin.work)
+    git("push", "origin", "HEAD:refs/heads/" + origin.branch, cwd=origin.work)
+    ran = _hostile_home(tmp_path, monkeypatch)
+    install_fake("claude")
+    # the pinned OID is the old tip: the branch moved after preflight, so nothing may be checked out
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, task_branch_oid=origin.oid))
+    assert result.detail == "BRANCH_OID_MISMATCH" and not ran.exists()
+    # the pinned OID is the new tip: it is checked out, still without running the hook or the filter
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, task_branch_oid=moved))
+    assert result.outcome == "launched" and not ran.exists()
+    assert (state / "claude.head").read_text().strip() == moved

@@ -8,6 +8,24 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-20, cloud delegation: external review findings)
+
+- The fixed launch clone (`FFS_CLOUD_CLONE_PARENT`) can no longer delete the
+  operator's checkout. The resolved child `<parent>/ffs-cloud-launch-claude`
+  is compared, real path and case-folded, against the repository root and every
+  `git worktree list` entry in both directions; an overlap, an unknown root or
+  an unreadable worktree list ends `CLONE_PATH_INVALID`. An existing child is
+  deleted only when it holds the disposable-clone marker
+  `.git/ffs-disposable-clone` that the dispatcher writes right after it makes
+  the clone; any other existing directory also ends `CLONE_PATH_INVALID`.
+  The `INSIDE_REPO` parent check is case-folded as well. **Operator action:**
+  an existing unmarked clone at that path (made by hand for the trust dialog,
+  or by an earlier release) must be removed once by the operator.
+- The launch clone is made with `--no-checkout`. The pinned branch OID is
+  verified first (`BRANCH_OID_MISMATCH` leaves nothing checked out), then that
+  commit is checked out with `core.hooksPath` disabled and with user and system
+  git config disabled, so no hook or filter driver runs.
+
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 
 - `/feature-implement` and `/task-swarm` now refuse `--cloud` (any form:
