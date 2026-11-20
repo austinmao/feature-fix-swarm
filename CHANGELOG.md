@@ -47,6 +47,11 @@ all skills.
   patterns: `Package.json`, `PACKAGE.JSON` or `Requirements-Dev.TXT` in a new
   directory is a dependency file (a case-insensitive checkout opens it as the
   real manifest, install scripts included) and stops at `dependency-change`.
+- `fence-data.sh` propagates read, transform and write failures: `fence_neutralize`
+  returns 1 and `fence_data` returns non-zero without the closing delimiter.
+  `cloud-review.sh` treats any prompt-assembly failure as `UNAVAILABLE` (exit 3)
+  and never calls the reviewer, so a review can no longer approve a diff the
+  reviewer did not receive.
 
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 

@@ -30,29 +30,32 @@ fence_neutralize() {
   local _fn_tag="$1" _fn_in _fn_out
   _fn_in="$(mktemp)" || return 1
   _fn_out="$(mktemp)" || { rm -f "$_fn_in"; return 1; }
-  cat > "$_fn_in"
+  # Every read, transform and write must succeed: a failure returns 1 so no
+  # caller can treat a truncated or empty body as the whole payload.
+  cat > "$_fn_in" || { rm -f "$_fn_in" "$_fn_out"; return 1; }
   sed -e "s/${_fn_tag}_DATA_START/${_fn_tag}_DATA_ESCAPED/g" \
       -e "s/${_fn_tag}_DATA_END/${_fn_tag}_DATA_ESCAPED/g" \
-      "$_fn_in" > "$_fn_out"
+      "$_fn_in" > "$_fn_out" || { rm -f "$_fn_in" "$_fn_out"; return 1; }
   if [ -s "$_fn_in" ] && [ -n "$(tail -c 1 "$_fn_in")" ] \
       && [ -s "$_fn_out" ] && [ -z "$(tail -c 1 "$_fn_out")" ]; then
     # sed added a final newline the input did not have — drop it
-    head -c "$(($(wc -c < "$_fn_out") - 1))" "$_fn_out"
+    head -c "$(($(wc -c < "$_fn_out") - 1))" "$_fn_out" || { rm -f "$_fn_in" "$_fn_out"; return 1; }
   else
-    cat "$_fn_out"
+    cat "$_fn_out" || { rm -f "$_fn_in" "$_fn_out"; return 1; }
   fi
   rm -f "$_fn_in" "$_fn_out"
 }
 
 # fence_data <TAG> [body] — emit the full fenced block through the
 # neutralizer. Body arg is emitted as a line; stdin is embedded verbatim.
+# Returns non-zero, WITHOUT the closing delimiter, when the neutralizer fails.
 fence_data() {
   local _fd_tag="$1"
-  printf '%s_DATA_START\n' "$_fd_tag"
+  printf '%s_DATA_START\n' "$_fd_tag" || return 1
   if [ "$#" -ge 2 ]; then
-    printf '%s\n' "$2" | fence_neutralize "$_fd_tag"
+    printf '%s\n' "$2" | fence_neutralize "$_fd_tag" || return 1
   else
-    fence_neutralize "$_fd_tag"
+    fence_neutralize "$_fd_tag" || return 1
   fi
   printf '%s_DATA_END\n' "$_fd_tag"
 }

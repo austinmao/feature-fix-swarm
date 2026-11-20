@@ -108,13 +108,15 @@ neutralize_verdict() {
 neutralize_verdict "$DIFF_FILE" >"$WORK/diff.neutral" || finish UNAVAILABLE 3
 neutralize_verdict "$SUMMARY_FILE" >"$WORK/summary.neutral" || finish UNAVAILABLE 3
 
+# A failure anywhere in prompt assembly is UNAVAILABLE: the reviewer must never
+# see (and approve) a prompt that lacks the diff or the summary.
 {
-  printf '%s\n\n' "$PROMPT_HEAD"
-  fence_data CLOUD_DIFF <"$WORK/diff.neutral"
-  printf '\n'
-  fence_data CLOUD_SUMMARY <"$WORK/summary.neutral"
-} >"$WORK/prompt.txt"
-PROMPT="$(cat "$WORK/prompt.txt")"
+  printf '%s\n\n' "$PROMPT_HEAD" &&
+    fence_data CLOUD_DIFF <"$WORK/diff.neutral" &&
+    printf '\n' &&
+    fence_data CLOUD_SUMMARY <"$WORK/summary.neutral"
+} >"$WORK/prompt.txt" || finish UNAVAILABLE 3
+PROMPT="$(cat "$WORK/prompt.txt")" || finish UNAVAILABLE 3
 
 REQUEST='{"kind":"tier","name":"judgment"}'
 cd "$WORK" || finish UNAVAILABLE 3

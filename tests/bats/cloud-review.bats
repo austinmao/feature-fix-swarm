@@ -216,6 +216,22 @@ EOF
   grep -q 'CLOUD_DIFF_DATA_ESCAPED' "$prompt"
 }
 
+@test "a prompt-assembly failure is UNAVAILABLE and the reviewer never runs" {
+  make_codex 'VERDICT: APPROVE\n'
+  # the fence helper's own mktemp (no arguments) fails; the script's mktemp -d is delegated to the real one
+  cat > "$BIN/mktemp" <<'STUB'
+#!/usr/bin/env bash
+[ "$#" -gt 0 ] || exit 1
+exec /usr/bin/mktemp "$@"
+STUB
+  chmod +x "$BIN/mktemp"
+  run env PATH="$BIN:$PATH" ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$SCRIPT" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 3 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: UNAVAILABLE" ]
+  [ ! -e "$CODEX_CALLS" ]
+}
+
 @test "the script forces the cross-vendor fallback off" {
   make_claude 'VERDICT: APPROVE\n'
   cat > "$BIN/codex-stub" <<EOF
