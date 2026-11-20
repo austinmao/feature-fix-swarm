@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.1"
+version: "2.2.2"
 permissions:
   filesystem: write
   network: true
@@ -75,12 +75,19 @@ Otherwise skip it entirely and continue below exactly as before.
    refusal to offload. The run was already started (a retry after a lost
    acknowledgement, or a reused run id) and its tasks may be running in the
    cloud. Never run those tasks locally and never call `start` again for that
-   run. Run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and
-   compare its task ids with this batch. If they match, treat the run as
-   started: report it as in step 8, and if `orchestrator.alive` is false run
-   `bash scripts/gsd/reconcile.sh` once so a dead orchestrator is restarted.
-   If they do not match, the run id belongs to other work: stop and ask the
-   operator for a new run id. In every case, run no cloud task locally.
+   run. The refusal line ends with `batch=same`, `batch=same local=<ids>`,
+   `batch=other` or `batch=unknown`: `start` itself compared this batch with
+   the run's stored cloud-routed tasks (the ledger holds only those).
+   Run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
+   the run as started only on `batch=same`: report it as in step 8, and if
+   `orchestrator.alive` is false run `bash scripts/gsd/reconcile.sh` once so a
+   dead orchestrator is restarted. Then run only the local groups, exactly as
+   in step 5, and only the tasks named in `local=` (the lost-ack attempt never
+   ran them); never run a task the ledger holds. On `batch=other` or
+   `batch=unknown`, stop and tell the operator the run id is taken: never
+   start these cloud tasks again under a new run id until `status` shows the
+   run's tasks terminal, and ask the operator how to proceed. In every case,
+   run no cloud task locally.
 7. **Hard limits.** Never call `claude --cloud` or `codex cloud` directly. Never
    run `cloud-dispatch.sh adopt`, `abandon` or `resolve`: they are
    operator-only. When a task needs one, print the exact suggested command for

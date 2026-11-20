@@ -1189,6 +1189,31 @@ def refuse_start_grants(missing: List[str]) -> None:
     raise Refused("GRANT_MISSING", "missing grants: %s" % ", ".join(missing))
 
 
+_ROUTING_KEYS = ("provider", "model", "effort", "provenance", "depends_on")
+
+
+def _run_exists_batch(svc: Services, root: Path, run: str, raw: List[Any], sequential: bool) -> str:
+    """``batch=same [local=ids]`` when the retried batch is the one run ``run`` holds, else ``batch=other|unknown``.
+
+    The ledger holds only the cloud-routed tasks, so the batch matches when every stored task is in it with the
+    same content; the batch's other tasks were never offloaded and are the ones left to run locally.  Anything
+    unreadable is ``unknown``: the caller must not start the tasks again."""
+    try:
+        batch = {str(t["id"]): t for t in normalize(raw, sequential)}
+        doc = ledger.read(ledger.run_ledger_path(root, run))
+        stored = {str(r["id"]): r for r in ledger.load_tasks_file(ledger.tasks_path(root, run), doc["tasks_sha256"])}
+    except (DispatchError, ledger.LedgerError, OSError, ValueError, KeyError, TypeError):
+        return "batch=unknown"
+
+    def core(record: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: v for k, v in record.items() if k not in _ROUTING_KEYS}
+
+    if not stored or any(i not in batch or core(stored[i]) != core(batch[i]) for i in stored):
+        return "batch=other"
+    local = [i for i in batch if i not in stored]
+    return "batch=same" + (" local=%s" % ",".join(local) if local else "")
+
+
 def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     run = validate_run_id(args.run)
     root = resolve_root(svc, args.root)
@@ -1197,7 +1222,8 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     raw = read_tasks_input(args.tasks)
     if ledger.run_ledger_path(root, run).exists():
         raise Refused("RUN_EXISTS", "run %s already has a ledger: read it with `status --run %s`; "
-                                    "never run its tasks locally" % (run, run))
+                                    "never run its tasks locally; %s"
+                      % (run, run, _run_exists_batch(svc, root, run, raw, args.sequential)))
     url = origin_url(svc, root)  # credentials in the URL are refused before any subprocess receives it
     refusals = run_refusals(svc, root)
     if refusals:

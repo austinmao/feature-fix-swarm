@@ -949,6 +949,28 @@ def test_start_twice_is_refused(world: World) -> None:
     assert rc == 3 and "RUN_EXISTS" in out
 
 
+def test_run_exists_reports_whether_the_retried_batch_is_the_started_one(world: World) -> None:
+    """CR-01: the ledger holds only cloud-routed tasks, so a mixed batch must still match its own run."""
+    local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
+    local2 = task("t3", "src/c/**", local_only=True, local_reason="touches secrets")
+    assert world.start(tasks=[T1, local])[0] == 0
+    ids = world.doc()["tasks"]
+    assert list(ids) == ["t1"]
+    retry = lambda batch, name: world.cli("start", "--run", "r1", "--tasks", world.tasks_file(batch, name),  # noqa: E731
+                                          "--policy", "auto", "--root", str(world.root))
+    rc, out = retry([T1, local], "same.json")
+    assert rc == 3 and "RUN_EXISTS" in out and "batch=same" in out and "local=t2" in out
+    rc, out = retry([T1, local, local2], "more.json")
+    assert "batch=same" in out and "local=t2,t3" in out
+    rc, out = retry([T1], "bare.json")
+    assert "batch=same" in out and "local=" not in out
+    rc, out = retry([T2, local2], "other.json")
+    assert rc == 3 and "batch=other" in out and "batch=same" not in out
+    rc, out = retry([task("t1", "src/z/**"), local], "edited.json")
+    assert "batch=other" in out
+    assert list(world.doc()["tasks"]) == ["t1"]
+
+
 def test_local_only_tasks_leave_nothing_to_start(world: World) -> None:
     local = task("t1", "src/a/**", local_only=True, local_reason="touches secrets")
     rc, out = world.start(tasks=[local])

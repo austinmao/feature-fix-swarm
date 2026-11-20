@@ -52,6 +52,12 @@ all skills.
   `cloud-review.sh` treats any prompt-assembly failure as `UNAVAILABLE` (exit 3)
   and never calls the reviewer, so a review can no longer approve a diff the
   reviewer did not receive.
+- `start` on an existing run id ends `RUN_EXISTS ... batch=same [local=<ids>]`,
+  `batch=other` or `batch=unknown`. The ledger holds only cloud-routed tasks, so
+  the match compares them (id and content) with the retried batch; the batch's
+  other tasks are listed as `local=`. `/swarm --cloud` (skill 2.2.2) reconciles
+  a `batch=same` run, runs only the `local=` groups, and on any other answer
+  stops and never starts those cloud tasks again under a new run id.
 - `/swarm --cloud` (skill 2.2.1) no longer treats `CLOUD-REFUSED: RUN_EXISTS` as
   "run every task locally". A retried `start` whose first acknowledgement was
   lost now reads `status --run <run>`, reports the existing run, runs
