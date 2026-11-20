@@ -1064,6 +1064,29 @@ def test_run_exists_reports_whether_the_retried_batch_is_the_started_one(world: 
     assert list(world.doc()["tasks"]) == ["t1"]
 
 
+@pytest.mark.parametrize("inputs_written, token", [(True, "batch=same"), (False, "batch=unknown")])
+def test_the_start_that_loses_the_reservation_race_carries_a_batch_token(
+        world: World, monkeypatch: pytest.MonkeyPatch, inputs_written: bool, token: str) -> None:
+    """Two starts pass the existence check together; the loser used to print a bare RUN_EXISTS."""
+    winner = copy.copy(world.svc)
+    winner.stdout = io.StringIO()
+    real_origin_url, raced = cd.origin_url, []
+
+    def origin_url_then_lose(svc: Any, root: Path) -> str:
+        url = real_origin_url(svc, root)
+        if not raced:  # the winner reserves the run between this start's existence check and its own reservation
+            raced.append(None)
+            raced[0] = cd.main(["start", "--run", "r1", "--tasks", world.tasks_file([T1], "win.json"), "--policy", "auto",
+                                "--root", str(world.root)], winner)
+            if not inputs_written:
+                L.tasks_path(world.root, "r1").unlink()
+        return url
+
+    monkeypatch.setattr(cd, "origin_url", origin_url_then_lose)
+    rc, out = world.start(tasks=[T1])
+    assert raced == [0] and rc == 3 and "RUN_EXISTS" in out and token in out, out
+
+
 def test_batch_same_notices_a_changed_dependency_input_order_or_sequential_flag(world: World) -> None:
     """A retry that only adds a local-to-cloud dependency, reorders the input or asks for ``--sequential`` is another batch."""
     local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
