@@ -24,6 +24,7 @@ exits 0, contract section 4), 78 store or config error.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import fcntl
 import hashlib
@@ -1230,9 +1231,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
         raise UsageError("BAD_POLICY", "policy must be one of %s" % ", ".join(POLICIES))
     raw = read_tasks_input(args.tasks)
     if ledger.run_ledger_path(root, run).exists():
-        raise Refused("RUN_EXISTS", "run %s already has a ledger: read it with `status --run %s`; "
-                                    "never run its tasks locally; %s"
-                      % (run, run, _run_exists_batch(svc, root, run, raw, args.sequential)))
+        raise _run_exists(svc, root, run, raw, args.sequential)
     url = origin_url(svc, root)  # credentials in the URL are refused before any subprocess receives it
     refusals = run_refusals(svc, root)
     if refusals:
@@ -1259,11 +1258,15 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     specs = [{"id": r["id"], "provider": r["provider"], "depends_on": r["depends_on"], "owns": r.get("owns") or [],
               "verify_cmd": effective_verify_cmd(r.get("verify_cmd"), config)}
              for r in records]
-    reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha, now=int(svc.now()),
-                batch=_batch_record(tasks))
-    if not git(svc, root, ["update-ref", "--no-deref", ledger.integration_ref(run), base_sha, ""]).ok:
-        _release_reservation(root, run, tasks_written=True)  # no orchestrator will start: free the id for a real retry
-        raise StoreError("INTEGRATION_REF", "could not create %s" % ledger.integration_ref(run))
+    try:
+        with _orch_lock_held(root, run):  # no resume can act on the run until its initialization record is committed
+            reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha,
+                        now=int(svc.now()), batch=_batch_record(tasks))
+            _initialize_run(svc, root, run, base_sha, fresh=True)
+    except Refused as exc:
+        if exc.code != "RUN_EXISTS":
+            raise
+        raise _run_exists(svc, root, run, raw, args.sequential)  # lost the race: another start holds or made the run
     svc.emit("%sstarted run=%s tasks=%d" % (PREFIX, run, len(records)))
     local = [t["id"] for t in tasks if plan["tasks"][str(t["id"])]["route"] != "cloud"]
     if local:
@@ -1273,6 +1276,71 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     pid = svc.spawn(orchestrator_argv(root, run, resume=False), ledger.run_dir(root, run) / "orchestrate.log", root)
     svc.emit("%sorchestrator-started pid=%d" % (PREFIX, pid))
     return EXIT_OK
+
+
+@contextlib.contextmanager
+def _orch_lock_held(root: Path, run: str) -> Any:
+    """Hold the run's orchestrator lock (non-blocking) for the body.  Busy means another start is initializing the
+    run or an orchestrator owns it: ``RUN_EXISTS``.  The caller releases it (by leaving the body) before an
+    orchestrator is spawned, or that orchestrator would find the lock held and exit."""
+    path = ledger.orch_lock_path(root, run)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        raise IoRefused("STORE_IO", "cannot open the orchestrator lock: %s" % exc.strerror)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Refused("RUN_EXISTS", "run %s is being started or is running" % run)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _mark_initialized(doc: Dict[str, Any]) -> Dict[str, Any]:
+    doc["initialized"] = True
+    return doc
+
+
+def _initialize_run(svc: Services, root: Path, run: str, tip: str, *, fresh: bool) -> None:
+    """Create the integration ref and commit the initialization record (``initialized``), under the orchestrator lock.
+
+    ``fresh`` is a start that just reserved the run: the ref must not exist yet.  A retry finishing a start that
+    died earlier also accepts a plain ref already at ``tip``.  A ref that cannot be created or accepted rolls the
+    reservation back (nothing else has acted on an uninitialized run, and the lock is ours), freeing the run id."""
+    ref = ledger.integration_ref(run)
+    created = git(svc, root, ["update-ref", "--no-deref", ref, tip, ""]).ok
+    if not created and (fresh or rev_parse(svc, root, ref) != tip or git(svc, root, ["symbolic-ref", "-q", ref]).ok):
+        _release_reservation(root, run, tasks_written=True)
+        raise StoreError("INTEGRATION_REF", "could not create %s" % ref)
+    try:
+        ledger.locked_update(ledger.run_ledger_path(root, run), _mark_initialized)
+    except ledger.LedgerError as exc:
+        raise classify_ledger_error(exc)
+
+
+def _finish_start(svc: Services, root: Path, run: str) -> None:
+    """A start that died after reserving the run but before its initialization record: finish it under the lock."""
+    with _orch_lock_held(root, run):
+        doc = ledger.read(ledger.run_ledger_path(root, run))
+        if not doc.get("initialized"):
+            ledger.load_tasks_file(ledger.tasks_path(root, run), doc["tasks_sha256"])
+            _initialize_run(svc, root, run, doc["integration"]["tip"], fresh=False)
+
+
+def _run_exists(svc: Services, root: Path, run: str, raw: List[Any], sequential: bool) -> Refused:
+    """The ``RUN_EXISTS`` refusal with its ``batch=`` classification; an identical retry of a start that died before
+    its initialization record finishes that start first."""
+    tokens = _run_exists_batch(svc, root, run, raw, sequential)
+    if tokens.startswith("batch=same"):
+        try:
+            _finish_start(svc, root, run)
+        except (Refused, ledger.LedgerError, OSError):
+            pass  # busy (an in-flight start or a live orchestrator) or unreadable: the classification stands
+    return Refused("RUN_EXISTS", "run %s already has a ledger: read it with `status --run %s`; never run its tasks "
+                                 "locally; %s" % (run, run, tokens))
 
 
 def _release_reservation(root: Path, run: str, *, tasks_written: bool) -> None:
@@ -2080,6 +2148,8 @@ class Orchestrator:
 
     def startup(self) -> bool:
         doc = self.doc()
+        if not doc.get("initialized"):  # its start has not committed: only an identical retry of `start` finishes it
+            raise Refused("RUN_NOT_INITIALIZED", "run %s has no committed start record; retry the identical `start`" % self.run_id)
         if doc["state"] == ledger.RUN_DONE:
             self.close_lifecycle(doc, "complete")
             self.say("%srun-done run=%s" % (PREFIX, self.run_id))

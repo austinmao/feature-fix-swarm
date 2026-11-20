@@ -8,6 +8,8 @@ plays the cloud worker (writes the manifest with the real nonce and pushes the r
 
 from __future__ import annotations
 
+import copy
+import fcntl
 import functools
 import io
 import json
@@ -123,6 +125,20 @@ def run_git(cwd: Path, *args: str, check: bool = True) -> str:
     if check and proc.returncode != 0:
         raise AssertionError("git %s failed: %s" % (" ".join(args), proc.stderr))
     return proc.stdout.strip()
+
+
+def lock_is_held(path: Path) -> bool:
+    """True when another open file description holds the flock on ``path`` (a fresh descriptor cannot take it)."""
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def task(tid: str, owns: str, **extra: Any) -> Dict[str, Any]:
@@ -740,10 +756,14 @@ def test_a_failed_start_rolls_back_tasks_first_and_the_ledger_last_and_keeps_the
     lock_file = L.lock_path_for(ledger_file)
     real_unlink = os.unlink
     seen: List[str] = []
+    held: List[Tuple[bool, bool]] = []
+    orch_lock = L.orch_lock_path(world.root, "r1")
 
     def spy(path: Any, *args: Any, **kwargs: Any) -> None:
         real_unlink(path, *args, **kwargs)
         seen.append(Path(str(path)).name)
+        if Path(str(path)) in (ledger_file, tasks_file):  # the rollback itself, under both locks
+            held.append((lock_is_held(orch_lock), lock_is_held(lock_file)))
         if str(path) == str(ledger_file):  # the id is free now: a concurrent start reserves it and writes its file
             tasks_file.write_text("rival")
 
@@ -752,6 +772,51 @@ def test_a_failed_start_rolls_back_tasks_first_and_the_ledger_last_and_keeps_the
     monkeypatch.setattr(os, "unlink", real_unlink)
     assert tasks_file.read_text() == "rival" and lock_file.exists()
     assert seen[-1] == ledger_file.name and lock_file.name not in seen
+    assert held and all(pair == (True, True) for pair in held), held  # fails if either lock call is removed
+
+
+def test_a_resume_during_start_initialization_cannot_take_the_run_or_create_its_ref(world: World) -> None:
+    """Once tasks.json exists a concurrent resume used to create the integration ref and push, and the original start
+    then lost its ref creation and deleted the ledger that accounted for those effects."""
+    real_run, seen = world.svc.run, []
+
+    def wrapped(argv: Any, **kwargs: Any) -> Any:
+        if "update-ref" in argv and L.integration_ref("r1") in argv and not seen:
+            seen.append(cd.Orchestrator(world.svc, world.root, "r1", once=True).run())  # the concurrent resume
+            seen.append(run_git(world.root, "for-each-ref", L.integration_ref("r1")))
+            seen.append(run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/r1/*"))
+        return real_run(argv, **kwargs)
+
+    world.svc.run = wrapped
+    rc, out = world.start(tasks=[T1])
+    assert seen == [0, "", ""], seen  # it found the lock held and did nothing
+    assert rc == 0 and world.doc()["initialized"] is True and world.states() == {"t1": "waiting"}
+
+
+def test_resume_refuses_a_run_whose_start_never_committed_its_initialization(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d)[1])
+    rc, out = world.cli("orchestrate", "--run", "r1", "--once", "--root", str(world.root))
+    assert rc != 0 and "RUN_NOT_INITIALIZED" in out
+    assert world.states() == {"t1": "waiting"} and run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/r1/*") == ""
+
+
+@pytest.mark.parametrize("ref_made", [False, True])
+def test_an_identical_retry_finishes_a_start_that_died_before_its_initialization_record(world: World, ref_made: bool) -> None:
+    """Without this exit the run id would be wedged: resume refuses the run, cleanup refuses it and start says RUN_EXISTS."""
+    assert world.start(tasks=[T1])[0] == 0
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d)[1])
+    if not ref_made:
+        run_git(world.root, "update-ref", "-d", L.integration_ref("r1"))
+    other = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1, T2], "more.json"), "--policy", "auto",
+                      "--root", str(world.root))
+    assert other[0] == 3 and "batch=other" in other[1] and "initialized" not in world.doc()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    assert rc == 3 and "RUN_EXISTS" in out and "batch=same" in out, out
+    assert world.doc()["initialized"] is True
+    assert run_git(world.root, "rev-parse", L.integration_ref("r1")) == world.base
+    assert world.cli("orchestrate", "--run", "r1", "--once", "--root", str(world.root))[0] == 0
 
 
 def test_start_over_a_dangling_symbolic_ref_creates_no_branch_behind_it(world: World) -> None:
