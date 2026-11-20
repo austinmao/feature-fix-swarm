@@ -10,6 +10,11 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: round 5b review)
 
+- A failed stale re-review (even a transient reviewer outage) no longer ends
+  `resolve --action retest` when both operator retests were already spent
+  before it. The first `review-stale` records the retests used so far
+  (`review_stale_base`) and the limit of two counts from there, still on the
+  bounded stale meters (attempt 3 to 5). Older ledgers default the base to 0.
 - The rollback of a failed `start` (no integration ref, or a failed `tasks.json`
   write) frees the run id last. Under the run lock it removes only what that
   invocation created, `tasks.json` first and the ledger last, and it keeps the

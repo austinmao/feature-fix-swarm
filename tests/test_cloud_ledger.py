@@ -964,6 +964,8 @@ def test_review_stale_keeps_its_own_meter_and_leaves_the_operators_retest_budget
     cl.apply_resolve(doc, "a", "retest")  # the second retest is still the operator's to spend
     assert entry["review_attempts"] == 2
     cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker="review-cap")
+    cl.apply_resolve(doc, "a", "retest")  # WR-C: retests count from the stale review, two of them, then the limit
+    cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker="review-cap")
     with pytest.raises(cl.LedgerError):
         cl.apply_resolve(doc, "a", "retest")
     ranges = {0: set(), 1: set()}
@@ -971,6 +973,28 @@ def test_review_stale_keeps_its_own_meter_and_leaves_the_operators_retest_budget
         for attempts in range(0, cl.REVIEW_RETEST_LIMIT + 3):
             ranges[min(stale, 1)].add(cl.review_round_attempt({"review_stale": stale, "review_attempts": attempts}))
     assert ranges[0] == {0, 1, 2} and ranges[1] == {3, 4, 5}  # separate meters, both bounded
+
+
+@pytest.mark.parametrize("blocker", ["review-cap", "review-unavailable", "review-model-unknown", "review-model-downgraded"])
+def test_a_failed_stale_re_review_after_both_retests_still_leaves_the_operator_a_retest(blocker):
+    """WR-C: the approval was recorded on the last operator retest; one outage of the stale re-review must not end retest."""
+    doc = put(fresh_doc(), "a", cl.NEEDS_OPERATOR, blocker="review-cap", resume_state="collected")
+    entry = doc["tasks"]["a"]
+    for _ in range(cl.REVIEW_RETEST_LIMIT):
+        cl.apply_resolve(doc, "a", "retest")
+        cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker="review-cap")
+    entry.update(state=cl.REVIEWED, review={"verdict": "APPROVE"}, blocker=None)  # the legacy approval, no model evidence
+    cl.transition(doc, "a", cl.EV_REVIEW_STALE, generation=1)
+    assert cl.review_round_attempt(entry) == 3
+    seen = []
+    for _ in range(cl.REVIEW_RETEST_LIMIT):
+        cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker=blocker)
+        cl.apply_resolve(doc, "a", "retest")
+        seen.append(cl.review_round_attempt(entry))
+    assert seen == [4, 5]  # the stale meters, still bounded
+    cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker=blocker)
+    with pytest.raises(cl.LedgerError):
+        cl.apply_resolve(doc, "a", "retest")
 
 
 def test_review_stale_is_illegal_from_other_states():

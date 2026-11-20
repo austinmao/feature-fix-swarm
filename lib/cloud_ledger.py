@@ -661,6 +661,7 @@ _RUNTIME_RESET: Dict[str, Callable[[], Any]] = {
     "push_failures": lambda: 0,
     "review_attempts": lambda: 0,
     "review_stale": lambda: 0,
+    "review_stale_base": lambda: 0,  # operator retests already spent when the first stale re-review began
 }
 
 
@@ -1279,6 +1280,8 @@ def _commit(doc: Dict[str, Any], name: str, entry: Dict[str, Any], event: str, p
         entry["seen_count"] = 0
     if event == EV_REVIEW_STALE:  # the old approval and its test evidence no longer count; a fresh round meter
         entry["review"] = entry["verify"] = None
+        if not entry.get("review_stale"):  # the retests spent so far stay spent; the stale re-review gets its own
+            entry["review_stale_base"] = int(entry.get("review_attempts") or 0)
         entry["review_stale"] = int(entry.get("review_stale") or 0) + 1  # its own meter: not the operator's retests
     if event == EV_RETEST:
         entry["push_failures"] = 0
@@ -1673,10 +1676,15 @@ def apply_abandon(doc: Dict[str, Any], task: str, retry: bool = False, *, nonce:
     return doc
 
 
+def _review_retests(entry: Dict[str, Any]) -> int:
+    """Operator retests spent since the stale re-review began (all of them when there was none)."""
+    spent = int(entry.get("review_attempts") or 0)
+    return max(spent - int(entry.get("review_stale_base") or 0), 0) if entry.get("review_stale") else spent
+
+
 def review_round_attempt(entry: Dict[str, Any]) -> int:
     """The ``cloud-review.sh`` attempt argument: operator retests use 0..LIMIT, a stale re-review its own range above."""
-    own = min(int(entry.get("review_attempts") or 0), REVIEW_RETEST_LIMIT)
-    return own + (REVIEW_RETEST_LIMIT + 1) * min(int(entry.get("review_stale") or 0), 1)
+    return min(_review_retests(entry), REVIEW_RETEST_LIMIT) + (REVIEW_RETEST_LIMIT + 1) * min(int(entry.get("review_stale") or 0), 1)
 
 
 def apply_resolve(doc: Dict[str, Any], task: str, action: str) -> Dict[str, Any]:
@@ -1689,7 +1697,7 @@ def apply_resolve(doc: Dict[str, Any], task: str, action: str) -> Dict[str, Any]
     if entry["state"] != NEEDS_OPERATOR:
         raise LedgerError(E_BLOCKER_MISMATCH, "task is not needs-operator")
     if (event == EV_RETEST and entry.get("blocker") in REVIEW_BLOCKERS
-            and int(entry.get("review_attempts") or 0) >= REVIEW_RETEST_LIMIT):
+            and _review_retests(entry) >= REVIEW_RETEST_LIMIT):
         raise LedgerError(E_BLOCKER_MISMATCH, "review retest limit (%d) reached; use --action reject or abandon" % REVIEW_RETEST_LIMIT)
     transition(doc, task, event, generation=entry["generation"])
     _bump_wake(doc)
