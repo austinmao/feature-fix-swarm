@@ -157,13 +157,21 @@ Steps:
    FFS deletes this clone and makes a fresh one at the same path for each
    launch. The live run launched without a dialog after these steps.
 
-   FFS creates the clone directory itself (`mkdir`, which fails if the path
-   exists) and records it in an ownership marker file beside it,
+   FFS creates the clone directory itself, in a private staging directory
+   inside `<parent>` (names starting `.ffs-cloud-new-`, mode 0700). It records
+   the directory in an ownership marker file beside the final path,
    `<parent>/ffs-cloud-launch-claude.ffs-owned`, holding the directory's device
-   and inode. It then clones into that directory. It deletes the directory (on
+   and inode (created exclusively; an existing file there is never overwritten),
+   then publishes it at `<parent>/ffs-cloud-launch-claude` with a rename that
+   fails if the path exists. It then clones into that directory. To delete it (on
    exit, and when it finds one left by a killed launch) only when the marker
    names that very directory, so a clone killed at the transfer timeout is
-   cleaned up by the next launch. Your hand-made clone has no marker, so the
+   cleaned up by the next launch. FFS first renames the directory into a private
+   staging directory (`.ffs-cloud-old-…`) and compares its device and inode with
+   the marker there; a mismatch is put back or left in staging, never deleted.
+   A launch killed part-way leaves only such staging directories, which the next
+   launch removes when they are provably its own (its prefix, mode 0700, owned by
+   you, and a retired clone only if the marker names it); anything else is left. Your hand-made clone has no marker, so the
    first launch ends `CLONE_PATH_INVALID` and touches nothing. **One-time
    operator action:** remove your clone
    (`rm -rf <parent>/ffs-cloud-launch-claude`) after you have accepted the
@@ -173,7 +181,10 @@ Steps:
    contain or lie inside your checkout or any of its linked worktrees
    (compared case-insensitively); otherwise the launch ends
    `CLONE_PATH_INVALID`. A directory that appears at the path while a launch
-   runs is never deleted.
+   runs is never deleted or marked. A file at the marker path that is not a
+   marker FFS wrote (other content, a second link, a symlink, a FIFO) ends the
+   launch `CLONE_PATH_INVALID MARKER_UNRECOGNIZED` or `MARKER_EXISTS` and is
+   never removed or truncated.
 
 6. Run the checks:
 
@@ -881,7 +892,7 @@ or fewer. The manifest validator rejects other names in `env_report`.
 | `DIGEST_NOTIFY_CMD` | orchestrator | Command that receives the `CLOUD-PARKED` line on stdin. |
 | `FFS_LIB_DIR` | `cloud-dispatch.sh` | Library directory override. |
 | `FFS_CLOUD_LAUNCH_TIMEOUT_S` | backends | Launch timeout in seconds, 180 at most. |
-| `FFS_CLOUD_CLONE_PARENT` | Claude backend | Unset (default): the launch clone is a fresh directory under the system temp dir, which always shows the client's trust dialog. Set: the clone goes to the fixed path `<parent>/ffs-cloud-launch-claude`. Claude Code trusts a folder per git root, so clone the repository to that exact path, run the interactive client once in that directory and accept the trust dialog yourself; FFS never answers it (see [Quick start](#quick-start), step 5). The parent must be an absolute path to an existing directory that is not a symlink, is owned by you, and is not inside the repository. Anything else fails the launch with `CLONE_PARENT_INVALID <reason>` (there is no fallback to the temp dir). Use of the fixed path is serialized with an `flock` on `<parent>/.ffs-cloud-launch-claude.lock` held for the whole launch (a second launch waits, then fails with `CLONE_LOCK_BUSY`). The dispatcher creates the clone directory exclusively and writes an ownership marker beside it (`<parent>/ffs-cloud-launch-claude.ffs-owned`, naming the directory's device and inode). A stale clone at that path is removed before cloning only if the marker names it, and the clone is removed after every launch, including one that raises or is killed at the transfer timeout. Any other existing path (a directory without the marker, a symlink, a plain file) is refused (`CLONE_PATH_INVALID`) and never deleted; remove an operator-made clone once by hand. |
+| `FFS_CLOUD_CLONE_PARENT` | Claude backend | Unset (default): the launch clone is a fresh directory under the system temp dir, which always shows the client's trust dialog. Set: the clone goes to the fixed path `<parent>/ffs-cloud-launch-claude`. Claude Code trusts a folder per git root, so clone the repository to that exact path, run the interactive client once in that directory and accept the trust dialog yourself; FFS never answers it (see [Quick start](#quick-start), step 5). The parent must be an absolute path to an existing directory that is not a symlink, is owned by you, and is not inside the repository. Anything else fails the launch with `CLONE_PARENT_INVALID <reason>` (there is no fallback to the temp dir). Use of the fixed path is serialized with an `flock` on `<parent>/.ffs-cloud-launch-claude.lock` held for the whole launch (a second launch waits, then fails with `CLONE_LOCK_BUSY`). The dispatcher creates the clone directory in a private staging directory inside the parent (`.ffs-cloud-new-*` / `.ffs-cloud-old-*`, mode 0700), writes an ownership marker beside the final path (`<parent>/ffs-cloud-launch-claude.ffs-owned`, naming the directory's device and inode, created exclusively) and publishes the directory with a rename that fails if the path exists. A stale clone at that path is removed before cloning only if the marker names it, verified after the clone is renamed into staging, and the clone is removed after every launch, including one that raises or is killed at the transfer timeout; a launch killed part-way is recovered by the next launch (its own staging directories only). Any other existing path (a directory without the marker, a symlink, a plain file) is refused (`CLONE_PATH_INVALID`, with a reason such as `MARKER_UNRECOGNIZED` or `MOVED_AWAY` where one applies) and never deleted; a file at the marker path that is not a dispatcher marker is never removed or truncated. Remove an operator-made clone once by hand. |
 | `FFS_CLOUD_PTY_GRACE_S` | Claude backend | Seconds to keep reading after the session URL appears, before the terminal is hung up. 0 to 120, default 20. |
 | `FFS_CLOUD_BIN_CLAUDE`, `FFS_CLOUD_BIN_CODEX` | backends | Path to a provider binary instead of `PATH`. Used by tests. |
 | `FFS_CLOUD_ALLOW_NON_GITHUB_ORIGIN` | `doctor` | `1` downgrades the GitHub check to WARN. A test seam; real providers clone only from GitHub. |

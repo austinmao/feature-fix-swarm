@@ -370,7 +370,7 @@ CLONE_LOCK_WAIT_S = 600.0
 REF_NAME_SECRET_NOTE = "REF_NAME_SECRET"
 CLONE_DIR_NAME = "ffs-cloud-launch-claude"
 CLONE_LOCK_NAME = ".ffs-cloud-launch-claude.lock"
-#: Sibling of the clone directory, written right after the dispatcher creates that directory (so it survives a killed
+#: Sibling of the clone directory, created exclusively before the directory is published (so it survives a killed
 #: ``git clone``); it names the directory's device and inode. Only a directory it names is ever deleted.
 CLONE_MARKER_SUFFIX = ".ffs-owned"
 #: Prefixes of the private staging directories (mkdtemp, 0700) the dispatcher makes in the clone parent: "new" ones hold
