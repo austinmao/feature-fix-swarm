@@ -1223,7 +1223,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
               "verify_cmd": effective_verify_cmd(r.get("verify_cmd"), config)}
              for r in records]
     reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha, now=int(svc.now()))
-    if not git(svc, root, ["update-ref", ledger.integration_ref(run), base_sha]).ok:
+    if not git(svc, root, ["update-ref", "--no-deref", ledger.integration_ref(run), base_sha, ""]).ok:
         raise StoreError("INTEGRATION_REF", "could not create %s" % ledger.integration_ref(run))
     svc.emit("%sstarted run=%s tasks=%d" % (PREFIX, run, len(records)))
     local = [t["id"] for t in tasks if plan["tasks"][str(t["id"])]["route"] != "cloud"]
@@ -1791,7 +1791,7 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
                 left.append("unlisted:" + prefix)
                 continue
             for ref in listed:
-                if git(svc, root, ["update-ref", "-d", ref]).ok:
+                if git(svc, root, ["update-ref", "--no-deref", "-d", ref]).ok:
                     removed += 1
                 else:
                     left.append(ref)
@@ -2061,7 +2061,8 @@ class Orchestrator:
     def ensure_integration_ref(self, doc: Dict[str, Any]) -> None:
         ref = ledger.integration_ref(self.run_id)
         if rev_parse(self.svc, self.root, ref) is None:
-            git(self.svc, self.root, ["update-ref", ref, doc["integration"]["tip"]])
+            if not git(self.svc, self.root, ["update-ref", "--no-deref", ref, doc["integration"]["tip"], ""]).ok:
+                raise StoreError("INTEGRATION_REF", "could not create %s" % ref)
 
     def register_lifecycle(self) -> None:
         for attempt in (0, 1):
@@ -2739,7 +2740,7 @@ class Orchestrator:
         if existing not in (None, base_oid):
             self.to_operator(name, gen, ledger.B_BRANCH_CONFLICT, ["local task branch exists at another OID"], seq)
             return
-        if existing is None and not git(self.svc, self.root, ["update-ref", ref, base_oid]).ok:
+        if existing is None and not git(self.svc, self.root, ["update-ref", "--no-deref", ref, base_oid, ""]).ok:
             raise StoreError("TASK_BRANCH", "cannot create %s" % ref)
         findings = self.outbound_findings(doc, entry["provider"], base_oid)
         if findings:

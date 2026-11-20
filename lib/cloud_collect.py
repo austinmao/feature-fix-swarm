@@ -1356,7 +1356,7 @@ def _plan(repo: str, tip: str, candidate: str, reviewed: str, pub_ref: str, task
     if mode != "noop" and actual != reviewed:
         return _fail(ST_NEEDS_OPERATOR, B_PATCH_ID, "merged change differs from the reviewed change",
                      patch_id=actual, reviewed_patch_id=reviewed, publish_oid=publish)
-    _git(repo, ["update-ref", pub_ref, publish])
+    _git(repo, ["update-ref", "--no-deref", pub_ref, publish])
     data = {"mode": mode, "publish_oid": publish, "tree": _rev(repo, publish + "^{tree}"),
             "expected_tip": tip, "needs_retest": mode == "merge", "patch_id": actual, "pub_ref": pub_ref}
     return StepResult(True, "integrating", None, "%s -> %s" % (mode, publish), data)
@@ -1369,9 +1369,11 @@ def apply_integration(*, repo: str, ref: str, publish_oid: str, expected_tip: st
     if not (OID_RE.match(publish_oid) and OID_RE.match(expected_tip)):
         return _fail(ST_NEEDS_OPERATOR, B_GIT, "bad oid")
     try:
+        if _git(repo, ["symbolic-ref", "--quiet", ref], ok_codes=(0, 1)).strip():
+            return _fail(ST_NEEDS_OPERATOR, B_GIT, "the integration ref is symbolic; refusing to move it")
         if not _is_ancestor(repo, expected_tip, publish_oid):
             return _fail(ST_NEEDS_OPERATOR, B_TIP_MOVED, "publish commit does not descend from the expected tip")
-        _git(repo, ["update-ref", "-m", "ffs cloud integrate", ref, publish_oid, expected_tip])
+        _git(repo, ["update-ref", "--no-deref", "-m", "ffs cloud integrate", ref, publish_oid, expected_tip])
     except GitError:
         return _fail("verified", B_TIP_MOVED, "integration ref moved or missing; re-plan", ref=ref)
     return StepResult(True, "integrated", None, "ref %s at %s" % (ref, publish_oid), {"tip": publish_oid})

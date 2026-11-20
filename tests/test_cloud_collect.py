@@ -1230,6 +1230,17 @@ def test_apply_refuses_foreign_refs_and_non_descendants(world):
     assert git(world.main, "rev-parse", INTEGRATION_REF) == world.base
 
 
+def test_apply_refuses_a_symbolic_integration_ref_and_moves_nothing(world):
+    data = make_candidate(world, ok_changes())
+    git(world.main, "branch", "victim", world.base)
+    git(world.main, "symbolic-ref", INTEGRATION_REF, "refs/heads/victim")  # at the expected tip, so a CAS would pass
+    res = cc.apply_integration(repo=str(world.main), ref=INTEGRATION_REF, publish_oid=data["candidate_oid"],
+                               expected_tip=world.base)
+    assert_fail(res, "needs-operator", cc.B_GIT)
+    assert git(world.main, "rev-parse", "victim") == world.base
+    assert git(world.main, "symbolic-ref", INTEGRATION_REF) == "refs/heads/victim"
+
+
 def test_apply_missing_ref_reports_tip_moved(world):
     data = make_candidate(world, ok_changes())
     res = cc.apply_integration(repo=str(world.main), ref=INTEGRATION_REF, publish_oid=data["candidate_oid"],

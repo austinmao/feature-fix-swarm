@@ -699,6 +699,21 @@ def test_unsandboxed_host_parks_with_sandbox_unavailable(world: World) -> None:
     assert entry["state"] == "needs-operator" and entry["blocker"] == "sandbox-unavailable"
 
 
+def test_start_does_not_follow_a_symbolic_integration_ref(world: World) -> None:
+    base = run_git(world.root, "rev-parse", "HEAD")
+    run_git(world.root, "branch", "victim", base)
+    run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration", "refs/heads/victim")
+    assert world.start(tasks=[T1])[0] != 0  # creation compares against an absent ref: a symbolic ref is not absent
+    assert run_git(world.root, "rev-parse", "victim") == base
+    assert run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration") == "refs/heads/victim"
+
+
+def test_start_over_a_dangling_symbolic_ref_creates_no_branch_behind_it(world: World) -> None:
+    run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration", "refs/heads/victim")  # dangling
+    world.start(tasks=[T1])
+    assert run_git(world.root, "for-each-ref", "refs/heads/victim") == ""
+
+
 def test_two_candidates_are_ambiguous(world: World) -> None:
     world.behavior(t1={"push": False})  # the worker never pushes its own branch
     assert world.start(tasks=[T1])[0] == 0

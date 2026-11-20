@@ -37,6 +37,12 @@ all skills.
   candidate pool and stored in the snapshot as a hash only; a new matching
   result ref parks the task as `needs-operator` / `ambiguous-candidates` with a
   fixed reason that never carries the name.
+- Dispatcher-owned refs are never written through a symbolic ref. Creating the
+  integration ref or a task branch uses `update-ref --no-deref` against an
+  absent ref (an existing symbolic ref makes `start` fail); moving the
+  integration ref refuses a symbolic ref (`git-error`) and uses `--no-deref`;
+  cleanup deletes refs with `--no-deref`, so a symbolic ref can no longer move
+  or delete another branch such as `main`.
 
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 
