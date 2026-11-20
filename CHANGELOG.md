@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Added (2026-11-19, clean-code metrics advisory)
+
+- `lib/clean_code_metrics.py`: review-gate Pass 3 now gets an advisory block when
+  the optional `crapper` and `dryer` tools are installed. It reports functions whose
+  cyclomatic complexity is new or grew to 10 or more, and duplicate blocks
+  (similarity at least 0.8) that touch the diff. Tool output goes to a temporary
+  directory, and one 90-second budget bounds the whole run. Findings are at most
+  MEDIUM and never block. Absent tools print nothing.
+- `scripts/gsd/deps.sh` lists both tools as optional; `docs/dependencies.md`
+  documents where FFS finds them (`PATH`, `FFS_UB_TOOLS_DIR`, `~/.local/share/ub-mode`).
+
 ### Changed (2026-11-19, write-time clean-code rules)
 
 - gsd executors now load `testing-policy` through `agent_skills.gsd-executor` in

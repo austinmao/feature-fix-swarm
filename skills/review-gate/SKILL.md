@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.17.0"
+version: "1.18.0"
 ---
 
 # /review-gate
@@ -427,12 +427,30 @@ printf '%s\n' "$PASS2_OUTPUT"
 
 ### Pass 3 — Test-coverage gap
 
-Run a sub-agent with the diff:
+Optional advisory first (crapper/dryer, `docs/dependencies.md`; absent tools or an old
+`GATES_PY` print nothing):
+
+```bash
+_mb_base=HEAD
+case "$DIFF_TARGET" in
+  --staged) _mb_diff="$(git diff -U0 --staged -- . "${BOOKKEEPING_EXCLUDES[@]}")"
+            [ -z "$_mb_diff" ] && _mb_diff="$(git diff -U0 HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")" ;;
+  file) _mb_diff="$(git diff -U0 HEAD -- "$FILE_PATH")" ;;
+  *) _mb_base="$(git merge-base "$DIFF_TARGET" HEAD)"
+     _mb_diff="$(git diff -U0 "$DIFF_TARGET"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")" ;;
+esac
+METRICS_BLOCK=""
+[ -n "$GATES_PY" ] && METRICS_BLOCK="$(printf '%s\n' "$_mb_diff" | (cd "$REPO_ROOT" && python3 "$(dirname "$GATES_PY")/clean_code_metrics.py" --base "$_mb_base") 2>/dev/null)"
+```
+
+Run a sub-agent with the diff and, when non-empty, `$METRICS_BLOCK` appended as data:
 
 ```
 You are a test coverage analyst. Review this diff for testing gaps:
 - New functions/methods with no corresponding test
 - Branches (if/else, switch, try/catch) not covered by existing tests
+- Each CLEAN-CODE METRICS line (if present) is at most MEDIUM: COMPLEXITY = split the
+  function or test every branch; DUPLICATION = call the existing code instead
 
 Then act as a TEST-GATE CRITIC on the tests this diff ADDS or CHANGES
 (review the ruler, not just the coverage):
