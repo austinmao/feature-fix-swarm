@@ -139,3 +139,13 @@ def test_deferred_skills_carry_the_cloud_refusal_block(name: str) -> None:
     # the guard runs before the init gate and every other step
     assert text.index(D_END) < text.index("## Init gate")
     assert "Check this before every other step" in block
+
+
+def test_swarm_run_exists_is_reconciled_and_never_runs_cloud_tasks_locally():
+    """RUN_EXISTS (a retried start after a lost acknowledgement) must read status, not fall back to local execution."""
+    text = (ROOT / SWARM).read_text(encoding="utf-8")
+    block = text[text.index(BEGIN):text.index(END)]
+    step = block[block.index("6. **Refusals.**"):block.index("7. **Hard limits.**")]
+    assert "RUN_EXISTS" in step and "status --run" in step and "reconcile.sh" in step
+    assert "Never run those tasks locally" in step and "never call `start` again" in step
+    assert step.index("RUN_EXISTS") > step.index("continue with every task locally")

@@ -1196,7 +1196,8 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
         raise UsageError("BAD_POLICY", "policy must be one of %s" % ", ".join(POLICIES))
     raw = read_tasks_input(args.tasks)
     if ledger.run_ledger_path(root, run).exists():
-        raise Refused("RUN_EXISTS", "run %s already has a ledger" % run)
+        raise Refused("RUN_EXISTS", "run %s already has a ledger: read it with `status --run %s`; "
+                                    "never run its tasks locally" % (run, run))
     url = origin_url(svc, root)  # credentials in the URL are refused before any subprocess receives it
     refusals = run_refusals(svc, root)
     if refusals:

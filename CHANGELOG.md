@@ -52,6 +52,11 @@ all skills.
   `cloud-review.sh` treats any prompt-assembly failure as `UNAVAILABLE` (exit 3)
   and never calls the reviewer, so a review can no longer approve a diff the
   reviewer did not receive.
+- `/swarm --cloud` (skill 2.2.1) no longer treats `CLOUD-REFUSED: RUN_EXISTS` as
+  "run every task locally". A retried `start` whose first acknowledgement was
+  lost now reads `status --run <run>`, reports the existing run, runs
+  `reconcile.sh` once if the orchestrator is dead, and runs no task of that run
+  locally; a run id that belongs to other work stops and asks the operator.
 
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 
