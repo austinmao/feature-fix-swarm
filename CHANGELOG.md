@@ -8,6 +8,36 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-20, cloud delegation: first live runs of the Claude backend)
+
+- Live runs with Claude Code 2.1.329, one trivial docs task, Claude backend only.
+  A result passed every gate and reached `ffs/cloud/<run>/integration` in under
+  3 minutes. `docs/cloud-delegation.md` has a "Live verification" section with
+  what was and was not checked.
+- `claude --cloud` refuses to run without an interactive terminal, so the Claude
+  backend starts it on a pseudo-terminal. This is undocumented provider
+  behaviour and can break on a client update.
+- The client shows its folder trust dialog for the launch clone. FFS never
+  answers it; a launch that meets it ends `failed` (`CLI_EXIT BLOCKED_DIALOG`).
+  Set `FFS_CLOUD_CLONE_PARENT`, clone the repository to
+  `<parent>/ffs-cloud-launch-claude` and accept trust once in a real terminal.
+  `cloud-dispatch.sh probe-claude --dir <path>` shows the first screen without
+  creating a session. The quick start now lists these steps in order.
+- The worker contract states the `tests_run` item shape,
+  `{"cmd": ..., "rc": ...}`. A live worker wrote strings and failed the
+  manifest check.
+- Known gap: a candidate branch with the right name and nonce but an invalid
+  manifest is logged and polled again until the deadline instead of being raised
+  as `needs-operator`.
+- Not verified live: the Codex backend, whether `--model` and `--effort` take
+  effect under `--cloud`, more than one task, dependencies between tasks, the
+  installed `/swarm --cloud` skill path, secrets modes, restart driven by
+  `reconcile`, and a client stuck on a screen other than the trust dialog.
+- `cleanup --remote` does not delete the provider-created `claude/ffs-*` branch;
+  delete it by hand. A run whose task never binds stays `active` and `cleanup`
+  refuses it until the task is abandoned. The review output is not kept in the
+  run directory; only the verdict record is in the ledger.
+
 ### Changed (2026-11-19, model tier refresh)
 
 - Tier table moved to the GPT-6 family releases (6.2 frontier and judgment, 6.1
@@ -89,7 +119,9 @@ all skills.
   directly after `-` is not matched by the scanner. A lone parked run keeps an
   expired slot until an orchestrator resumes or `cleanup` runs. `cleanup` during
   a concurrent `start` of the same run id can delete that run.
-- Experimental: validated with mock CLIs only. No live cloud run has been made yet.
+- Experimental. Tested with mock CLIs. The Claude backend also had live runs on
+  2026-11-20; see the entry above and `docs/cloud-delegation.md`, "Live
+  verification". The Codex backend has not run live.
 
 ### Added (2026-11-17, operator-only guard hook, #253)
 

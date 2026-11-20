@@ -97,7 +97,7 @@ Reservation is journaled: run journal `reserve` (done false) → slots ledger ad
  "tests_run":[{"cmd":"…","rc":0}]}
 ```
 
-Validator: exact key set, types, lengths (every string ≤ 4000, lists ≤ 50), `env_report` values are names and version strings only. Every string is scanned (§8) and is untrusted data. Codex results have no worker manifest; the dispatcher synthesizes one with `status: complete` and no nonce check.
+Validator: exact key set, types, lengths (every string ≤ 4000, lists ≤ 50), `env_report` values are names and version strings only. Every string is scanned (§8) and is untrusted data. Each `tests_run` item is an object with exactly the keys `cmd` (string) and `rc` (integer). The worker packet states this shape (`lib/handoff_packet.py`); a live worker wrote strings before the packet did. Codex results have no worker manifest; the dispatcher synthesizes one with `status: complete` and no nonce check.
 
 ### 2.6 `.ffs/cloud/config.json` (committed in the consumer repo; names only)
 
@@ -170,12 +170,12 @@ class Backend(Protocol):
 
 Claude:
 - Launch from a **fresh single-ref clone**: `git clone --single-branch --branch ffs/cloud/<R>/<T>-g<G> --no-tags <origin url> <tmp>`. The clone holds only the scanned task branch, so the documented bundle fallback cannot upload other local refs. Then `cd <tmp> && claude --cloud "<prompt>" --model M --effort E`. Amendment (live finding, Claude Code 2.1.329): the real client refuses `--cloud` unless stdout is a terminal, so this command runs on a pseudo-terminal that is only read, never written (undocumented provider behaviour). A session URL or id (`session_…` or `cse_…`, with a digit) means `launched`. An exit with the known not-a-terminal text is `failed` (`CLI_EXIT NOT_A_TTY`). An exit with no id/URL and no known error, including exit 0, is `launched` with `launch_note: "exit-no-session-url"`, and a timeout with the client alive and no URL is `launched` with `launch_note: "no-session-url"`; in both cases polling continues by nonce (`uncertain` is not used: Claude gets only 3 recovery polls there). A prompt that would itself match the id/URL detector, the not-a-terminal text or the first-run dialog detector is refused before launch (`PROMPT_AMBIGUOUS`). With `FFS_CLOUD_CLONE_PARENT` set, the clone is the fixed path `<parent>/ffs-cloud-launch-claude` under an `flock`, validated and removed after every launch (see docs/cloud-delegation.md). See docs/cloud-delegation.md, "How Claude is launched".
-- Launch stdout is undocumented. `remote_id`/`url` are parsed if a session id or `https://claude.ai/…` URL is present; their absence is **not** `uncertain` and **not** `failed` for Claude, because binding uses the nonce; it records a `launch_note` (`LaunchResult.note`, validated against a fixed set: `no-session-url`, `exit-no-session-url`). Only the known not-a-terminal text after exit, a recognised blocking dialog, or a failure before the client starts (clone, snapshot, spawn) is `failed`.
+- Launch stdout is undocumented. Live, after the trust dialog was accepted (Claude Code 2.1.329), the client printed `Created cloud session: <title>`, a `View: https://claude.ai/code/session_...` line and a `Resume with: claude --teleport session_...` line, then exited on its own after about 8 seconds, and both the id and the URL were parsed. `remote_id`/`url` are parsed if a session id or `https://claude.ai/…` URL is present; their absence is **not** `uncertain` and **not** `failed` for Claude, because binding uses the nonce; it records a `launch_note` (`LaunchResult.note`, validated against a fixed set: `no-session-url`, `exit-no-session-url`). Only the known not-a-terminal text after exit, a recognised blocking dialog, or a failure before the client starts (clone, snapshot, spawn) is `failed`.
 - Poll: `git ls-remote <origin> 'refs/heads/claude/*'`. Candidates: refs whose name contains `<nonce8>`, then refs absent from or changed since the launch snapshot (`claude_refs_at_launch` in the log dir). Pairs in `rejected_candidates` are skipped. At most 20 candidates are examined per tick.
 
 Codex:
 - `codex cloud exec --env "$FFS_CODEX_CLOUD_ENV" --branch ffs/cloud/<R>/<T>-g<G> "<prompt>"`. No remote id in stdout → `uncertain`.
-- Poll: `codex cloud status <id>` (and `list --json`). Fetch: `codex cloud diff <id>` → `git apply --index` at `base_oid` in the quarantine repo → dispatcher commit. Output shapes are captured as fixtures from the live smoke; until then parsers accept JSON with `id`/`status` keys or the text forms and return `unknown` otherwise.
+- Poll: `codex cloud status <id>` (and `list --json`). Fetch: `codex cloud diff <id>` → `git apply --index` at `base_oid` in the quarantine repo → dispatcher commit. Output shapes are to be captured as fixtures from a live smoke. The Codex backend has not run live (no environment id was supplied), so until then parsers accept JSON with `id`/`status` keys or the text forms and return `unknown` otherwise.
 
 ## 6. Journal and recovery
 
@@ -439,7 +439,7 @@ Source of truth: `lib/cloud_*.py`, `lib/delegation_router.py`, `lib/handoff_pack
 - After an operator verb mutates the ledger: run `done` → print `CLOUD:orchestrator-not-needed`; lock free → spawn `orchestrate --resume`; lock held → spawn `orchestrate --resume --wait-lock 300`. This replaces the 30 second wait of 14.4. The holder re-checks `wake_seq` just before it exits and un-parks if it moved.
 - Origin URLs that embed credentials are refused with `ORIGIN_HAS_CREDENTIALS`: by `start` (before any subprocess receives the URL), at orchestrator startup (before the `ORIGIN_CHANGED` comparison), and by `doctor`, which then returns only that one check.
 - `orchestrate` tick order: heartbeat, replay journal, expire slots, poll, collect, integrate, admit, launch (reap slots, reclaim lost slots, reserve, submit), finish. A step about one task that fails 3 consecutive times moves that task to `needs-operator` with `internal-error`. A step with no task (heartbeat, slot handling, finish) that fails 5 consecutive ticks ends the orchestrator with `STEP_FAILING` (exit 78).
-- A Claude candidate that was bound from polling and then fails collect with a missing or invalid manifest is not a verdict on the task. It is recorded in `rejected_candidates`, the bind is cleared, and the task returns to `running`. Refs named for another task of the same run are never candidates. An operator-adopted result is not unbound.
+- A Claude candidate that was bound from polling and then fails collect with a missing or invalid manifest is not a verdict on the task. It is recorded in `rejected_candidates`, the bind is cleared, and the task returns to `running`. This also applies to a branch with the right name and nonce: the event is only logged in `orchestrate.log`, never raised as `needs-operator`, so the task is polled again until its deadline. Refs named for another task of the same run are never candidates. An operator-adopted result is not unbound.
 - Slots: a `needs-operator` or `uncertain` task that may hold a slot releases it exactly once when `now > deadline_at` (journaled `release`). The reaper additionally drops slots of missing or `done` runs, slots of `parked` runs past their deadline, and any slot more than 3600 s past its deadline. The reaper runs only in an orchestrator tick and in `cleanup`.
 - A recovered live task always holds a slot. When replay of a `reserve` entry finds the task in `launched` or `running` (after an unbind, or after `adopt --remote-id`), the slot is added even above the provider or total limit (`force`). New admissions wait until it ends. Any other `reserve` that no longer fits is dropped and the task stays `admitted`.
 - A task found in `submitting` becomes `uncertain` in the heartbeat step of the next tick (14.3 said startup), and is never relaunched automatically.
@@ -522,4 +522,27 @@ The three differences without the flag of section 11 are unchanged. `skills/spec
 - A lone `parked` run keeps an expired slot until any orchestrator resumes or `cleanup` runs (slots are reaped only in an orchestrator tick and in `cleanup`). Workaround: `cloud-dispatch.sh orchestrate --run <id> --resume`.
 - `cleanup` during a concurrent `start` of the same run id can delete that run.
 - The JWT scanner gap of 15.6.
-- No live cloud run has been made yet. Everything is mock-tested.
+- Live coverage is limited to the Claude backend on one trivial task. See 15.10.
+
+### 15.10 Live verification (2026-11-20, Claude Code 2.1.329; Claude backend only)
+
+One trivial docs task, driven through `cloud-dispatch.sh` directly. The operator view is in `docs/cloud-delegation.md`, "Live verification".
+
+Seen live:
+
+- `claude --cloud "<prompt>"` refuses to run without an interactive terminal, so the backend starts it on a pseudo-terminal. This is undocumented provider behaviour and can break on a client update.
+- The client shows its folder trust dialog for the launch clone. Trust is per git root, so a trusted parent directory does not cover a new clone. FFS never answers the dialog. A launch that meets it ends `failed` (`CLI_EXIT BLOCKED_DIALOG`) and creates no session. The operator sets `FFS_CLOUD_CLONE_PARENT`, which fixes the clone path at `<parent>/ffs-cloud-launch-claude`, clones the repository there, and accepts trust once by running the interactive client in that directory in a real terminal. `probe-claude --dir <path>` shows the first screen without creating a session.
+- After trust: the launch took about 8 seconds, the client printed the session lines of section 5, exited by itself, and the session id and URL were parsed.
+- The cloud worker pushed `claude/ffs-<R>-<T>-<nonce8>` about 2.5 minutes after launch. The committed `SessionStart` provisioning ran: the manifest `env_report` listed tool versions.
+- Killing the orchestrator while the task was polled, then one `orchestrate --resume`, produced no second launch (launch count 1, generation 1).
+- The first bound attempt failed: the worker wrote `tests_run` as strings, and the packet had not stated the item shape. The contract text now states it (2.5).
+- The next run passed every gate: nonce binding, isolation, path and secret checks, review by the opposite family (verdict `APPROVE`, recorded with the diff sha and patch id), the sandboxed verify command (rc 0) and integration to `ffs/cloud/<R>/integration`. Launch to `integrated` took under 3 minutes.
+
+Not verified live: the Codex backend; whether `--model` and `--effort` take effect under `--cloud` (still `requested-unverified`); more than one task; dependencies between tasks; the installed `/swarm --cloud` skill path; secrets modes; restart driven by `reconcile`; a client stuck on a screen other than the trust dialog.
+
+Findings that stay open:
+
+- A candidate branch with the right name and nonce but an invalid manifest is logged and polled again until the deadline instead of being raised as `needs-operator` (see 15.1).
+- `cleanup --remote` does not delete the provider-created `claude/ffs-*` branch. The operator deletes it by hand.
+- A run whose task never binds stays `active`, and `cleanup` refuses it (`RUN_NOT_DONE`) until the operator abandons the task.
+- The review output itself is not kept in the run directory. Only the verdict record is in the ledger.
