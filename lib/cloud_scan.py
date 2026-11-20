@@ -43,7 +43,8 @@ __all__ = [
 ]
 
 # 3: ``pem-block`` flags private-key armor only (signature and public blocks are clean).
-SCANNER_VERSION = 3
+# 4: ``pem-block`` also flags ``SECRET KEY`` armor (PGP SECRET KEY BLOCK); a v3 clean verdict is not trusted.
+SCANNER_VERSION = 4
 GIT_TIMEOUT_S = 120
 CAT_FILE_LIFETIME_S = 600
 MAX_SCAN_BLOB_BYTES = 64 * 1024 * 1024
@@ -875,6 +876,9 @@ def scan_git_ancestry(
     scanned once; an entry with another or no signature is ignored.
     """
     _check_oid(tip)
+    if _git(repo, ["rev-parse", "--is-shallow-repository"]).strip() != b"false":
+        # a local walk cannot see past the shallow boundary, but a fresh clone from origin can: no verdict, no cache
+        raise ScanRefused("shallow-repository")
     commits = _git(repo, ["rev-list", tip]).decode("ascii").split()
     cache = _load_cache(cache_path)
     allow_sig = _allow_signature(allow)

@@ -25,6 +25,13 @@ all skills.
   verified first (`BRANCH_OID_MISMATCH` leaves nothing checked out), then that
   commit is checked out with `core.hooksPath` disabled and with user and system
   git config disabled, so no hook or filter driver runs.
+- `SCANNER_VERSION` is now 4 (the `SECRET KEY` armor rule landed without a
+  bump): history verdicts cached as clean by version 3 are rescanned, so an
+  ancestor cached before `PGP SECRET KEY BLOCK` was recognised can no longer
+  reach the launch clone.
+- The ancestry scan refuses a shallow repository (`shallow-repository`) before
+  it accepts or writes any cache verdict: it could not see history that the
+  fresh clone from origin contains.
 
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 

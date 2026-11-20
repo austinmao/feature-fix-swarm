@@ -274,6 +274,34 @@ def test_ancestry_version_2_cache_entries_are_ignored(repo, tmp_path):
     assert cs.SCANNER_VERSION >= 3
 
 
+def test_ancestry_version_3_cache_does_not_hide_a_pgp_secret_key_block(repo, tmp_path):
+    """Version 3 did not flag SECRET KEY armor: a populated v3 cache must be rescanned, not trusted."""
+    armor = "-----BEGIN " + "PGP SECRET" + " KEY BLOCK-----\nAAAAAAAAAAAAAAAAAAAA\n-----END " + "PGP SECRET" + " KEY BLOCK-----\n"
+    first = commit(repo, {"k.txt": armor})
+    tip = commit(repo, {"b.txt": "clean\n"})
+    cache = tmp_path / "c.json"
+    old = {oid: {"clean": True, "findings": 0, "v": 3, "allow": cs._allow_signature([])} for oid in (first, tip)}
+    cache.write_text(json.dumps(old))
+    found = cs.scan_git_ancestry(str(repo), tip, str(cache))
+    assert [f.cls for f in found] == ["pem-block"]
+    assert cs.SCANNER_VERSION >= 4
+
+
+def test_ancestry_scan_of_a_shallow_repository_is_refused_and_not_cached(repo, tmp_path):
+    commit(repo, {"a.txt": "one\n"})
+    tip = commit(repo, {"b.txt": "two\n"})
+    shallow = tmp_path / "shallow"
+    git(tmp_path, "clone", "-q", "--depth", "1", "file://" + str(repo), str(shallow))
+    cache = tmp_path / "c.json"
+    with pytest.raises(cs.ScanRefused) as info:
+        cs.scan_git_ancestry(str(shallow), tip, str(cache))
+    assert info.value.reason == "shallow-repository" and not cache.exists()
+    cache.write_text(json.dumps({tip: {"clean": True, "findings": 0, "v": cs.SCANNER_VERSION,
+                                       "allow": cs._allow_signature([])}}))
+    with pytest.raises(cs.ScanRefused):  # an existing clean verdict is not accepted either
+        cs.scan_git_ancestry(str(shallow), tip, str(cache))
+
+
 def test_ancestry_cache_hit_skips_rescanning(repo, tmp_path, monkeypatch):
     tip = commit(repo, {"a.txt": "one\n"})
     cache = tmp_path / "c.json"

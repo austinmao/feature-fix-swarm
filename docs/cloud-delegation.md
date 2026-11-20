@@ -262,7 +262,15 @@ path too long to show in full.
 
 Each scan cache entry carries the signature of `config.scan.allow` and the
 scanner version. If you change the allowlist, or a release changes a pattern
-class, the next scan rescans the full history once.
+class, the next scan rescans the full history once. The scanner version is now
+4: `pem-block` also flags `SECRET KEY` armor (`PGP SECRET KEY BLOCK`), so
+verdicts cached by version 3 are rescanned.
+
+A shallow checkout cannot be scanned: a local walk stops at the shallow
+boundary, while the launch clone from origin includes the older history. The
+history scan refuses with `shallow-repository` (`HISTORY_SECRET` fails in
+`doctor`; start and publish stop) and writes no cache entry. Run
+`git fetch --unshallow` first.
 
 ## Task annotations and routing
 
