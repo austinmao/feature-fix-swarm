@@ -78,6 +78,7 @@ GIT_HARDENING_ENV = {
     "GCM_INTERACTIVE": "never",
     "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
     "GIT_ALLOW_PROTOCOL": "file:git:http:https:ssh",
+    "GIT_NO_REPLACE_OBJECTS": "1",
 }
 
 BIN_ENV = {"claude": "FFS_CLOUD_BIN_CLAUDE", "codex": "FFS_CLOUD_BIN_CODEX"}

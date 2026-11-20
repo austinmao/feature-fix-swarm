@@ -38,6 +38,7 @@ __all__ = [
     "canary",
     "pattern_classes",
     "git_env",
+    "scrub_git_env",
     "is_binary",
 ]
 
@@ -125,13 +126,13 @@ _Validator = Optional[Callable[["re.Match[bytes]"], bool]]
 # Order matters: specific classes come first so they claim an overlapping span.
 _PATTERN_SPECS: Tuple[Tuple[str, bytes, _Validator], ...] = (
     (
-        # Private-key armor only: the label must contain ``PRIVATE KEY`` (RSA/EC/DSA/OPENSSH/
-        # ENCRYPTED/PGP ... PRIVATE KEY [BLOCK]). Signature, public-key and certificate
+        # Private-key armor only: the label must contain ``PRIVATE KEY`` or ``SECRET KEY`` (RSA/EC/DSA/
+        # OPENSSH/ENCRYPTED/PGP ... PRIVATE KEY [BLOCK], PGP SECRET KEY BLOCK). Signature, public-key and certificate
         # blocks are not secrets: signed commits and tags carry a PGP/SSH SIGNATURE block
         # in a ``gpgsig`` header. The lookahead stays inside one label run, so a scan is
         # linear; an unterminated private block still runs to the end of the input.
         "pem-block",
-        rb"-----BEGIN (?=[A-Z0-9 ]*PRIVATE KEY)[A-Z0-9][A-Z0-9 ]*-----"
+        rb"-----BEGIN (?=[A-Z0-9 ]*(?:PRIVATE|SECRET) KEY)[A-Z0-9][A-Z0-9 ]*-----"
         rb"(?s:.*?)(?:-----END [A-Z0-9][A-Z0-9 ]*-----|\Z)",
         None,
     ),
@@ -505,8 +506,32 @@ def redact(data: bytes) -> bytes:
 # --------------------------------------------------------------------------
 
 
+# Variables that select a repository or change git's behaviour; no cloud git subprocess may inherit them from the
+# operator's shell (an absolute GIT_DIR would redirect a quarantine ``git init``/``fetch`` into the main checkout).
+GIT_STRIP_ENV = frozenset((
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH", "GIT_EXTERNAL_DIFF",
+    "GIT_PREFIX", "GIT_QUARANTINE_PATH", "GIT_REPLACE_REF_BASE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
+    "GIT_ATTR_SOURCE", "GIT_PROXY_COMMAND", "GIT_TEMPLATE_DIR", "GIT_DEFAULT_HASH", "GIT_DEFAULT_REF_FORMAT",
+    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+))
+GIT_STRIP_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+
+
+def scrub_git_env(env: Dict[str, str]) -> Dict[str, str]:
+    """``env`` without the repository-selecting and behaviour-changing git variables (the one shared helper).
+
+    ``GIT_NO_REPLACE_OBJECTS=1`` is forced: a ``refs/replace`` ref must never change which bytes the scanner or
+    the collector read (``cat-file`` honours replace refs, ``pack-objects`` does not). Config-file overrides
+    (``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM``) are kept: ``HOME`` is inherited anyway."""
+    out = {k: v for k, v in env.items() if k not in GIT_STRIP_ENV and not k.startswith(GIT_STRIP_PREFIXES)}
+    out["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return out
+
+
 def git_env() -> Dict[str, str]:
-    env = dict(os.environ)
+    env = scrub_git_env(dict(os.environ))
     env.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
@@ -815,17 +840,20 @@ def describe_finding(finding: Finding) -> Dict[str, Any]:
     if match is None:
         return record
     rest = match.group("rest") or ""
-    suffix = _LINE_SUFFIX_RE.match(rest)
-    head = suffix.group("head") if suffix else rest
-    if suffix and suffix.group("line") is not None:
-        record["line"] = int(suffix.group("line"))
     kind = match.group("kind")
+    head = rest
+    if kind in ("blob", "commit", "tag"):  # only these carry ``:L<n>``; a path finding's name is the whole rest
+        suffix = _LINE_SUFFIX_RE.match(rest)
+        head = suffix.group("head") if suffix else rest
+        if suffix and suffix.group("line") is not None:
+            record["line"] = int(suffix.group("line"))
     record["kind"] = kind
     record["oid"] = match.group("oid") if match.group("oid") != "unparsed" else None
     record["path"] = head or None
     if kind == "blob":
         record["allow_entry"] = {"blob": record["oid"], "class": finding.cls}
-    elif record["path"]:
+    elif record["path"] and record["path"] != _UNSAFE_LOCATION and len(record["path"]) < MAX_LOCATION_CHARS:
+        # never a catch-all (``<unsafe-path>``) or a truncated path: neither names the real file
         record["allow_entry"] = {"path": record["path"], "class": finding.cls}
     return record
 

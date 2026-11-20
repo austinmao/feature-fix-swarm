@@ -319,7 +319,7 @@ class Services:
     # -- environment -------------------------------------------------------
 
     def environ(self) -> Dict[str, str]:
-        env = dict(os.environ)
+        env = cloud_scan.scrub_git_env(dict(os.environ))  # repository-selecting git variables never reach a child
         env["GIT_TERMINAL_PROMPT"] = "0"
         return env
 
@@ -770,9 +770,11 @@ def _foreign_bypass(rulesets: Sequence[Dict[str, Any]]) -> List[str]:
 
 
 def doctor_checks(svc: Services, root: Path, *, tasks: Optional[Sequence[Dict[str, Any]]] = None,
-                  write_cache: bool = True) -> List[Check]:
-    """Section 10 checks; green means no ``FAIL``."""
-    base_sha = rev_parse(svc, root, "HEAD")
+                  write_cache: bool = True, base_sha: Optional[str] = None) -> List[Check]:
+    """Section 10 checks; green means no ``FAIL``. ``start`` passes the sha it pinned so the commit doctor
+    validates is the commit admission pushes; standalone doctor reads HEAD."""
+    if base_sha is None:
+        base_sha = rev_parse(svc, root, "HEAD")
     config = load_config(svc, root, base_sha) if base_sha else {}
     url = git_text(svc, root, ["remote", "get-url", ORIGIN_NAME]) or ""
     if origin_has_credentials(url):
@@ -971,7 +973,7 @@ def _history_findings_check(svc: Services, root: Path, base_sha: str, allow: Seq
             "commit the allowlist, then rerun doctor" % base_sha[:12])
     try:
         working = config_section(load_config(svc, root), "scan").get("allow", [])
-    except StoreError:
+    except (StoreError, OSError):  # an unreadable working-tree config must not hide the finding
         working = []
     working = [a for a in working if isinstance(a, dict)] if isinstance(working, list) else []
     if working and working != list(allow):
@@ -1188,7 +1190,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
         raise Refused("NO_BASE", "the repository has no commit at HEAD")
     config = load_config(svc, root, base_sha)
     tasks = normalize(raw, args.sequential)
-    checks = doctor_checks(svc, root, tasks=tasks)
+    checks = doctor_checks(svc, root, tasks=tasks, base_sha=base_sha)
     if not doctor_green(checks):
         raise Refused("DOCTOR_NOT_GREEN", failing(checks))
     plan = route(svc, root, tasks, policy=args.policy, run=run, config=config, doctor="green",
@@ -1655,35 +1657,62 @@ def cmd_resolve(svc: Services, args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
-def _list_refs(svc: Services, root: Path, prefix: str) -> List[str]:
-    text = git_text(svc, root, ["for-each-ref", "--format=%(refname)", prefix]) or ""
-    return [line for line in text.splitlines() if line]
+def _list_refs(svc: Services, root: Path, prefix: str) -> Optional[List[str]]:
+    """The refs under ``prefix``; ``None`` when git could not list them (never an empty list that means "none")."""
+    text = git_text(svc, root, ["for-each-ref", "--format=%(refname)", prefix])
+    return None if text is None else [line for line in text.splitlines() if line]
 
 
-def _integration_unmerged(svc: Services, root: Path, run: str, base_sha: str) -> bool:
+def _server_confirms(svc: Services, url: str, ref: str, oid: str) -> bool:
+    """A remote-tracking ref is a local cache; it is a safe copy only when the server still has that branch at that OID."""
+    prefix = "refs/remotes/%s/" % ORIGIN_NAME
+    if not ref.startswith(prefix) or not url:
+        return False
+    remote_ref = "refs/heads/" + ref[len(prefix):]
+    ok, refs = ls_remote(svc, url, remote_ref)
+    return ok and refs.get(remote_ref) == oid
+
+
+def _integration_unmerged(svc: Services, root: Path, run: str, base_sha: str, url: str = "") -> bool:
     tip = rev_parse(svc, root, ledger.integration_ref(run))
     if tip is None or tip == base_sha:
         return False
     own = ("refs/heads/ffs/cloud/%s/" % run, "refs/ffs/cloud/%s/" % run,
            "refs/remotes/%s/ffs/cloud/%s/" % (ORIGIN_NAME, run))
-    containing = git_text(svc, root, ["for-each-ref", "--contains", tip, "--format=%(refname)"]) or ""
-    return not [r for r in containing.splitlines() if r and not r.startswith(own)]
+    containing = git_text(svc, root, ["for-each-ref", "--contains", tip, "--format=%(refname) %(objectname)"]) or ""
+    for line in containing.splitlines():
+        ref, _, oid = line.partition(" ")
+        if not ref or ref.startswith(own):
+            continue
+        if ref.startswith("refs/remotes/"):
+            if _server_confirms(svc, url, ref, oid):
+                return False
+            continue
+        return False
+    return True
 
 
-def _delete_remote_branches(svc: Services, root: Path, run: str, url: str) -> int:
+def _delete_remote_branches(svc: Services, root: Path, run: str, url: str) -> Tuple[int, List[str]]:
+    """``(deleted, refs whose delete failed)``."""
     if not gates_check(svc, run, "push:origin/ffs/cloud/%s" % run):
         raise Refused("GRANT_MISSING", "missing grants: push:origin/ffs/cloud/%s" % run)
     ok, refs = ls_remote(svc, url, "refs/heads/ffs/cloud/%s/*" % run)
     if not ok:
         raise Refused("REMOTE_UNREACHABLE", "ls-remote failed")
     deleted = 0
+    failed: List[str] = []
     for ref in sorted(refs):
-        if not push_ref_valid(run, ref):
+        if not push_ref_valid(run, ref):  # not a name the dispatcher creates: report it, never silently keep it
+            failed.append("remote:" + ref)
             continue
-        result = svc.run(["git", "-C", str(root), "push", "--no-verify", url, "--delete", ref],
+        result = svc.run(["git", "-C", str(root), "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no", url,
+                          "--delete", ref],
                          timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
-        deleted += 1 if result.ok else 0
-    return deleted
+        if result.ok:
+            deleted += 1
+        else:
+            failed.append("remote:" + ref)
+    return deleted, failed
 
 
 def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
@@ -1696,15 +1725,34 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
             "remote_id") or t.get("task_branch_oid") for t in doc["tasks"].values())
         if doc["state"] != ledger.RUN_DONE and (ledger.tasks_path(root, run).exists() or began):
             raise Refused("RUN_NOT_DONE", "run %s is %s; cleanup only removes done runs" % (run, doc["state"]))
-        if not args.discard_unmerged and _integration_unmerged(svc, root, run, doc["base_sha"]):
+        if not args.discard_unmerged and _integration_unmerged(svc, root, run, doc["base_sha"], doc["origin_url"]):
             raise Refused("INTEGRATION_UNMERGED", "refs/heads/ffs/cloud/%s/integration holds work that no other "
                           "branch contains; merge it or pass --discard-unmerged" % run)
+        def incomplete(left: List[str], removed: int) -> Refused:
+            # keep the ledger (origin url, grants, run state) so a rerun can finish the job
+            svc.emit("%scleanup-partial run=%s refs-removed=%d" % (PREFIX, run, removed))
+            return Refused("CLEANUP_INCOMPLETE", "refs left behind, ledger kept; fix the cause (a remote ref the dispatcher "
+                           "did not create must be deleted by hand) and rerun cleanup: %s" % ", ".join(left))
+
         if args.remote:
-            svc.emit("%scleanup remote-branches-deleted=%d" % (PREFIX, _delete_remote_branches(svc, root, run, doc["origin_url"])))
+            deleted, failed = _delete_remote_branches(svc, root, run, doc["origin_url"])
+            svc.emit("%scleanup remote-branches-deleted=%d" % (PREFIX, deleted))
+            if failed:  # before any local deletion, so the rerun's unmerged guard still has its integration ref
+                raise incomplete(failed, 0)
         removed = 0
+        left: List[str] = []
         for prefix in ("refs/heads/ffs/cloud/%s/" % run, "refs/ffs/cloud/%s/" % run):
-            for ref in _list_refs(svc, root, prefix):
-                removed += 1 if git(svc, root, ["update-ref", "-d", ref]).ok else 0
+            listed = _list_refs(svc, root, prefix)
+            if listed is None:
+                left.append("unlisted:" + prefix)
+                continue
+            for ref in listed:
+                if git(svc, root, ["update-ref", "-d", ref]).ok:
+                    removed += 1
+                else:
+                    left.append(ref)
+        if left:
+            raise incomplete(left, removed)
         ledger.reap_slots(ledger.slots_path(root), int(svc.now()), lambda candidate: None if candidate == run else ledger.RUN_ACTIVE)
         shutil.rmtree(str(ledger.run_dir(root, run)), ignore_errors=True)
         for path in (ledger.run_ledger_path(root, run), ledger.lock_path_for(ledger.run_ledger_path(root, run)),
@@ -2626,7 +2674,8 @@ class Orchestrator:
         if not push_ref_valid(self.run_id, ref) or not self.grant_ok(key):
             self.to_operator(name, gen, ledger.B_GRANT_MISSING, ["missing grant %s" % key], seq)
             return
-        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--no-force", "--no-verify", doc["origin_url"],
+        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--no-force", "--no-verify", "--no-follow-tags",
+                               "--recurse-submodules=no", doc["origin_url"],
                                "%s:%s" % (base_oid, ref)], timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
         if not pushed.ok:
             self.push_failed(name, gen, ref, pushed.rc, seq)

@@ -500,6 +500,8 @@ PRIVATE_LABELS = [
     "PRIVATE KEY",
     "ENCRYPTED PRIVATE KEY",
     "PGP PRIVATE KEY BLOCK",
+    "PGP SECRET KEY BLOCK",
+    "SECRET KEY",
 ]
 
 
@@ -783,3 +785,52 @@ def test_no_matched_value_reaches_findings_exceptions_or_redacted_output(repo, m
         assert needle not in joined, cls
         if cls == "secret-assignment":  # the value, not the key name, is the secret
             assert "A1b2C3d4E5f6G7" not in joined
+
+
+# ------------------------------------------------------------ git environment and finding descriptions
+
+
+def test_git_env_keeps_config_overrides_but_forces_no_replace_objects(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/operator/gitconfig")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig-system")
+    monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "0")
+    for name in ("GIT_TEMPLATE_DIR", "GIT_DEFAULT_HASH", "GIT_DEFAULT_REF_FORMAT", "GIT_LITERAL_PATHSPECS",
+                 "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_CONFIG_PARAMETERS",
+                 "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+        monkeypatch.setenv(name, "x")
+    env = cs.git_env()
+    assert env["GIT_CONFIG_GLOBAL"] == "/operator/gitconfig" and env["GIT_CONFIG_SYSTEM"] == "/operator/gitconfig-system"
+    assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert [k for k in env if k.startswith("GIT_") and env[k] == "x"] == []
+
+
+def test_a_replace_ref_cannot_hide_a_secret_blob_from_the_scanner(repo, tmp_path):
+    base = commit(repo, {"f.txt": "clean\n"})
+    tip = commit(repo, {"s.txt": "token = " + cs.canary("github-token").decode() + "\n"})
+    git(repo, "replace", git(repo, "rev-parse", tip + ":s.txt"), git(repo, "rev-parse", base + ":f.txt"))
+    assert [f.cls for f in cs.scan_git_objects(str(repo), base, tip, outbound=True)] == ["github-token"]
+    found = cs.scan_git_ancestry(str(repo), tip, str(tmp_path / "cache.json"), [])
+    assert "github-token" in [f.cls for f in found]
+
+
+@pytest.mark.parametrize("location", [
+    "path:" + "a" * 40 + ":" + cs._UNSAFE_LOCATION,  # a catch-all would allow every dirty-named file
+    "path:" + "a" * 40 + ":" + "d" * cs.MAX_LOCATION_CHARS,  # truncated: not the real path
+])
+def test_describe_finding_never_suggests_a_catch_all_or_truncated_allow_entry(location):
+    assert cs.describe_finding(cs.Finding("secret-filename", location))["allow_entry"] is None
+
+
+@pytest.mark.parametrize("name", ["conf/.envL2", "keys/id_rsa_L10", "conf/.env:L3"])
+def test_a_path_finding_has_no_line_suffix_and_allows_exactly_its_own_path(name):
+    record = cs.describe_finding(cs.Finding("secret-filename", "path:%s:%s" % ("a" * 40, name)))
+    assert record["path"] == name and record["line"] is None
+    assert record["allow_entry"] == {"path": name, "class": "secret-filename"}
+
+
+def test_describe_finding_keeps_the_line_of_a_blob_finding():
+    oid = "a" * 40
+    blob = cs.describe_finding(cs.Finding("github-token", "blob:%s:src/a.py:L12" % oid))
+    assert blob["line"] == 12 and blob["path"] == "src/a.py" and blob["allow_entry"] == {"blob": oid, "class": "github-token"}
+    commit_record = cs.describe_finding(cs.Finding("github-token", "commit:%s:L3" % oid))
+    assert commit_record["line"] == 3 and commit_record["path"] is None and commit_record["allow_entry"] is None

@@ -26,6 +26,7 @@ sys.path.insert(0, str(LIB))
 
 import cloud_collect  # noqa: E402
 import cloud_dispatch as cd  # noqa: E402
+import cloud_host  # noqa: E402
 import cloud_ledger as L  # noqa: E402
 import cloud_scan  # noqa: E402
 import cloud_sandbox  # noqa: E402
@@ -1484,3 +1485,245 @@ def test_script_lookup_never_resolves_from_the_target_repo(tmp_path: Path) -> No
     assert str(root / "scripts" / "gsd" / "x.sh") not in found_all
     assert str(cd.LIB_DIR / "scripts" / "gsd" / "x.sh") in found_all
     assert str(cd.LIB_DIR.parent / "scripts" / "gsd" / "x.sh") in found_all
+
+
+# --------------------------------------------------------------------------
+# Opposite-family review fixes: git environment, push hardening, pinned base, cleanup safety
+# --------------------------------------------------------------------------
+
+GIT_SELECTOR_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS", "GIT_EXEC_PATH",
+    "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_TEMPLATE_DIR", "GIT_DEFAULT_HASH", "GIT_DEFAULT_REF_FORMAT",
+    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+
+
+def test_every_cloud_git_environment_drops_repository_selecting_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in GIT_SELECTOR_ENV:
+        monkeypatch.setenv(name, "/operator/decoy")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "kept")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/operator/gitconfig")  # a config-file override is kept
+    monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "0")
+    for label, env in (("services", cd.Services().environ()), ("scan", cloud_scan.git_env()),
+                       ("host", cloud_host.child_env())):
+        leaked = [n for n in GIT_SELECTOR_ENV if env.get(n) == "/operator/decoy"]
+        assert leaked == [], (label, leaked)
+        assert env["GIT_NO_REPLACE_OBJECTS"] == "1", label  # a replace ref can never hide content
+    assert cd.Services().environ()["GIT_AUTHOR_NAME"] == "kept"  # identity is not a selector
+    assert cd.Services().environ()["GIT_CONFIG_GLOBAL"] == "/operator/gitconfig"
+
+
+def _decoy_snapshot(decoy: Path) -> List[str]:
+    return [run_git(decoy, "for-each-ref", "--format=%(refname) %(objectname)"), run_git(decoy, "rev-parse", "HEAD"),
+            (decoy / ".git" / "HEAD").read_text(), run_git(decoy, "count-objects")]
+
+
+def test_a_decoy_git_dir_in_the_environment_is_never_touched_by_a_cloud_run(world: World, monkeypatch: pytest.MonkeyPatch,
+                                                                          tmp_path: Path) -> None:
+    decoy = tmp_path / "decoy"
+    run_git(tmp_path, "init", "-q", "-b", "main", str(decoy))
+    run_git(decoy, "commit", "-q", "--allow-empty", "-m", "decoy")
+    before = _decoy_snapshot(decoy)
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    rc, out = world.start()
+    assert rc == 0, out
+    assert world.drive() == 0
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_WORK_TREE")
+    assert _decoy_snapshot(decoy) == before
+    assert world.states() == {"t1": "integrated", "t2": "integrated"}  # the codex quarantine path ran
+
+
+def _record_pushes(world: World) -> List[List[str]]:
+    pushes: List[List[str]] = []
+    real = world.svc.run
+
+    def spy(argv: Any, **kwargs: Any) -> Any:
+        if "push" in list(argv):
+            pushes.append(list(argv))
+        return real(argv, **kwargs)
+
+    world.svc.run = spy  # type: ignore[method-assign]
+    return pushes
+
+
+def test_admission_push_never_publishes_a_follow_tag(world: World) -> None:
+    run_git(world.root, "config", "push.followTags", "true")
+    # the base is an interior commit of origin/main (not its tip), so push.followTags would add its tag
+    (world.root / "later.txt").write_text("later\n")
+    run_git(world.root, "add", "later.txt")
+    run_git(world.root, "commit", "-q", "-m", "later")
+    run_git(world.root, "push", "-q", "origin", "main")
+    run_git(world.root, "tag", "-a", "v-secret", "-m", "local release note", world.base)  # annotated, on the base commit
+    run_git(world.root, "reset", "-q", "--hard", world.base)
+    pushes = _record_pushes(world)
+    rc, out = world.start(tasks=[T1])
+    assert rc == 0, out
+    world.drive()
+    assert pushes and all("--no-follow-tags" in argv and "--recurse-submodules=no" in argv for argv in pushes), pushes
+    assert run_git(world.origin, "for-each-ref", "refs/tags") == ""
+    assert "refs/heads/ffs/cloud/r1/t1-g1" in run_git(world.origin, "for-each-ref", "refs/heads/ffs/")
+
+
+def test_cleanup_remote_delete_never_follows_tags(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    pushes = _record_pushes(world)
+    rc, _ = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and pushes and all("--no-follow-tags" in argv and "--recurse-submodules=no" in argv for argv in pushes), pushes
+
+
+def test_doctor_checks_validate_the_explicit_base_sha_not_the_current_head(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: List[Optional[str]] = []
+    real = cd._base_checks
+    monkeypatch.setattr(cd, "_base_checks", lambda svc, root, base_sha, url: (seen.append(base_sha), real(svc, root, base_sha, url))[1])
+    (world.root / "later.txt").write_text("later\n")
+    run_git(world.root, "add", "later.txt")
+    run_git(world.root, "commit", "-q", "-m", "later")
+    head = run_git(world.root, "rev-parse", "HEAD")
+    assert head != world.base
+    cd.doctor_checks(world.svc, world.root, base_sha=world.base)
+    assert seen == [world.base]
+    seen.clear()
+    cd.doctor_checks(world.svc, world.root)  # standalone doctor keeps reading HEAD
+    assert seen == [head]
+
+
+def test_start_passes_the_pinned_base_sha_to_doctor(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: List[Optional[str]] = []
+    real = cd.doctor_checks
+
+    def spy(svc: Any, root: Path, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("base_sha"))
+        return real(svc, root, **kwargs)
+
+    monkeypatch.setattr(cd, "doctor_checks", spy)
+    assert world.start()[0] == 0
+    assert seen == [world.base] and world.doc()["base_sha"] == world.base
+
+
+def _finished_run_tip(world: World) -> str:
+    assert world.start()[0] == 0
+    world.drive()
+    return run_git(world.root, "rev-parse", L.integration_ref("r1"))
+
+
+def test_cleanup_does_not_count_a_stale_remote_tracking_ref_as_a_safe_copy(world: World) -> None:
+    tip = _finished_run_tip(world)
+    run_git(world.root, "update-ref", "refs/remotes/origin/other", tip)  # a local cache; the server has no such branch
+    rc, out = world.cli("cleanup", "--run", "r1", "--root", str(world.root))
+    assert rc == 3 and "INTEGRATION_UNMERGED" in out
+    assert L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_cleanup_counts_a_remote_tracking_ref_the_server_confirms(world: World) -> None:
+    tip = _finished_run_tip(world)
+    run_git(world.root, "push", "-q", "origin", tip + ":refs/heads/other")
+    run_git(world.root, "fetch", "-q", "origin")
+    rc, out = world.cli("cleanup", "--run", "r1", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup run=r1" in out
+
+
+def test_cleanup_keeps_the_ledger_and_names_refs_when_a_remote_delete_fails(world: World) -> None:
+    _finished_run_tip(world)
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == cd.EXIT_REFUSED and "CLEANUP_INCOMPLETE" in out and "CLOUD:cleanup run=" not in out
+    assert "refs/heads/ffs/cloud/r1/" in out
+    assert L.run_ledger_path(world.root, "r1").exists()
+    assert run_git(world.root, "rev-parse", "--verify", L.integration_ref("r1"))  # the guard still has its subject
+    hook.unlink()  # the operator fixes the cause and reruns
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0, out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+    assert run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/r1/*") == ""
+
+
+def test_cleanup_keeps_the_ledger_when_a_local_ref_delete_fails(world: World) -> None:
+    _finished_run_tip(world)
+    real = world.svc.run
+    stuck = "refs/heads/ffs/cloud/r1/t1-g1"
+
+    def failing(argv: Any, **kwargs: Any) -> Any:
+        if "update-ref" in list(argv) and "-d" in list(argv) and stuck in list(argv):
+            return cd.CmdResult(1, b"", b"locked")
+        return real(argv, **kwargs)
+
+    world.svc.run = failing  # type: ignore[method-assign]
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == cd.EXIT_REFUSED and "CLEANUP_INCOMPLETE" in out and stuck in out and "CLOUD:cleanup run=" not in out
+    assert L.run_ledger_path(world.root, "r1").exists()
+    world.svc.run = real  # type: ignore[method-assign]
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_admission_push_never_recurses_into_a_submodule(world: World, tmp_path: Path) -> None:
+    subremote, subwork = tmp_path / "subremote.git", tmp_path / "subwork"
+    run_git(tmp_path, "init", "-q", "--bare", "-b", "main", str(subremote))
+    run_git(tmp_path, "init", "-q", "-b", "main", str(subwork))
+    (subwork / "s.txt").write_text("1\n")
+    run_git(subwork, "add", "s.txt")
+    run_git(subwork, "commit", "-q", "-m", "s1")
+    run_git(subwork, "remote", "add", "origin", str(subremote))
+    run_git(subwork, "push", "-q", "origin", "main")
+    published = run_git(subremote, "rev-parse", "main")
+    run_git(world.root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(subremote), "vendor/sub")
+    run_git(world.root, "commit", "-q", "-m", "add submodule")
+    sub = world.root / "vendor" / "sub"
+    (sub / "wip.txt").write_text("local work in progress\n")
+    run_git(sub, "add", "wip.txt")
+    run_git(sub, "commit", "-q", "-m", "unpublished submodule work")
+    run_git(world.root, "add", "vendor/sub")
+    run_git(world.root, "commit", "-q", "-m", "bump submodule")
+    run_git(world.root, "push", "-q", "--no-recurse-submodules", "origin", "main")
+    run_git(world.root, "config", "push.recurseSubmodules", "on-demand")
+    rc, out = world.start(tasks=[T1])
+    assert rc == 0, out
+    world.drive()
+    assert "refs/heads/ffs/cloud/r1/t1-g1" in run_git(world.origin, "for-each-ref", "refs/heads/ffs/")
+    assert run_git(subremote, "rev-parse", "main") == published  # the submodule's remote was never pushed to
+
+
+def test_cleanup_keeps_the_ledger_when_local_refs_cannot_be_listed(world: World) -> None:
+    _finished_run_tip(world)
+    real = world.svc.run
+
+    def failing(argv: Any, **kwargs: Any) -> Any:
+        if "for-each-ref" in list(argv) and "refs/heads/ffs/cloud/r1/" in list(argv):
+            return cd.CmdResult(128, b"", b"broken")
+        return real(argv, **kwargs)
+
+    world.svc.run = failing  # type: ignore[method-assign]
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == cd.EXIT_REFUSED and "CLEANUP_INCOMPLETE" in out and "CLOUD:cleanup run=" not in out
+    assert L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_cleanup_reports_a_remote_ref_it_will_not_delete(world: World) -> None:
+    tip = _finished_run_tip(world)
+    stray = "refs/heads/ffs/cloud/r1/Stray_Name"  # under the run prefix but not a name the dispatcher creates
+    run_git(world.root, "push", "-q", "origin", tip + ":" + stray)
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == cd.EXIT_REFUSED and "CLEANUP_INCOMPLETE" in out and stray in out
+    assert L.run_ledger_path(world.root, "r1").exists()
+    run_git(world.root, "push", "-q", "origin", "--delete", stray)  # the operator removes it by hand
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_doctor_with_an_unreadable_working_tree_config_still_reports_the_history_failure(world: World) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads any file")
+    _seed_history_secrets(world, 1)
+    config_path = world.root / ".ffs" / "cloud" / "config.json"
+    config_path.chmod(0)
+    try:
+        check, _ = _history_check(world)
+    finally:
+        config_path.chmod(0o644)
+    assert check["level"] == "FAIL" and check["data"]["findings_total"] == 1

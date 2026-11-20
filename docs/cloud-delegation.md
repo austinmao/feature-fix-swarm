@@ -177,8 +177,8 @@ branch. In this release:
   check and leaves Codex only.
 
 - The `pem-block` class flags private-key armor only: a block whose label
-  contains `PRIVATE KEY` (`RSA`, `EC`, `DSA`, `OPENSSH`, `ENCRYPTED`, bare, or
-  `PGP PRIVATE KEY BLOCK`). Signature blocks (`PGP SIGNATURE`,
+  contains `PRIVATE KEY` or `SECRET KEY` (`RSA`, `EC`, `DSA`, `OPENSSH`,
+  `ENCRYPTED`, bare, `PGP PRIVATE KEY BLOCK` or `PGP SECRET KEY BLOCK`). Signature blocks (`PGP SIGNATURE`,
   `SSH SIGNATURE`), public keys and certificates are not findings. Signed
   commits and tags carry a signature block in their `gpgsig` header, so the
   scan reads commit messages and headers without flagging the signature. A
@@ -196,7 +196,10 @@ count (`N findings, showing first 20; use doctor --json for all`).
 `doctor --json` carries every finding in `checks[].data.findings` for the
 `HISTORY_SECRET` check: `class`, `kind` (`blob`, `commit`, `tag`, `tree` or
 `path`), `oid`, `path`, `line` and, where one can allow it, the ready-made
-`allow_entry`. It never carries the matched value.
+`allow_entry`. It never carries the matched value. `allow_entry` is `null`
+when no entry can name the real finding: commit and tag objects, a path that
+contains unprintable or secret-shaped bytes (shown as `<unsafe-path>`), and a
+path too long to show in full.
 
 Each scan cache entry carries the signature of `config.scan.allow` and the
 scanner version. If you change the allowlist, or a release changes a pattern
@@ -666,7 +669,7 @@ the current directory; a linked worktree is refused).
 | `doctor` | `[--json]` | Runs the checks in [Doctor checks](#doctor-checks). |
 | `env init` | `[--register-hook] [--force]` | Writes the four `.ffs/cloud/` files from the templates. Never commits. |
 | `env-spec` | `--provider claude\|codex` | Prints the one-time provider steps. |
-| `cleanup` | `--run R [--remote] [--discard-unmerged]` | Only for `done` runs, and for a run that is not `done` and has no task inputs file and no task that ever started (a `start` that crashed early). Holds the run ledger lock for its whole duration: a concurrent operator verb waits, then reports `LEDGER_MISSING`. Deletes local refs, run state and slot entries. `--remote` also deletes pushed `ffs/cloud/<run>/*` branches and needs the push grant. Refuses with `INTEGRATION_UNMERGED` while the integration ref holds commits that no other branch contains, unless `--discard-unmerged`. |
+| `cleanup` | `--run R [--remote] [--discard-unmerged]` | Only for `done` runs, and for a run that is not `done` and has no task inputs file and no task that ever started (a `start` that crashed early). Holds the run ledger lock for its whole duration: a concurrent operator verb waits, then reports `LEDGER_MISSING`. Deletes local refs, run state and slot entries. `--remote` also deletes pushed `ffs/cloud/<run>/*` branches and needs the push grant. Refuses with `INTEGRATION_UNMERGED` while the integration ref holds commits that no other branch contains, unless `--discard-unmerged`. A remote-tracking ref (`refs/remotes/*`) is a local cache and counts as a branch that contains them only when `ls-remote` shows the same branch at the same OID on `origin`. If any ref deletion fails, a ref listing fails, or a remote ref under the run prefix is not a name the dispatcher creates, `cleanup` keeps the run ledger, prints `CLOUD:cleanup-partial` and `CLOUD-REFUSED: CLEANUP_INCOMPLETE` naming the refs left behind and exits 3; fix the cause (delete a foreign remote ref by hand) and rerun. A failed remote delete stops before any local ref is deleted. |
 | `adopt` | `--run R --task T (--oid OID \| --remote-id ID)` | Operator-only. Pass exactly one of the two. `--oid` binds a Claude result commit to an `uncertain` task or one blocked by `uncertain-launch`, `poll-errors`, `ambiguous-candidates` or `candidate-moved`. The task re-enters at `result-ready`. `--oid` is refused for Codex tasks, which have no OID before FFS applies the diff. `--remote-id` binds the Codex task id you found in the provider UI to a Codex task in the same states. The task goes back to `launched` with a new deadline of `deadline_hours` from now, and the normal poll and fetch follow. `--remote-id` is refused for Claude tasks. |
 | `abandon` | `--run R --task T [--retry]` | Operator-only. Bumps the generation and issues a new nonce. The task becomes `abandoned`, or `waiting` with `--retry`, which also works from `rejected` and `failed` and reopens dependents that failed only because of it. With `--retry` on a `rejected` or `failed` task of a `done` run, the run becomes `active` again. Refused with `INTEGRATION_IN_PROGRESS` (exit 3) while the task is `integrating`, because the integration ref may already have moved. Retry after the orchestrator's next tick. It does not stop the provider session. |
 | `resolve` | `--run R --task T --action retest\|accept-deps\|reject` | Operator-only. Clears a `needs-operator` blocker. Refused unless the task's blocker belongs to the action. `accept-deps` is an action of `resolve`, not a separate verb. See [Blockers](#blockers) and [Runbook: dependency change](#runbook-dependency-change). |
@@ -769,7 +772,24 @@ or fewer. The manifest validator rejects other names in `env_report`.
 
 Provider CLIs and `git` run with an allowlisted environment: `PATH`, `HOME`,
 `LANG`, `LC_ALL`, `TERM`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
-`XDG_CONFIG_HOME` and `SSH_AUTH_SOCK`. Nothing else is inherited.
+`XDG_CONFIG_HOME` and `SSH_AUTH_SOCK`. Nothing else is inherited. The
+dispatcher's local `git` helpers (quarantine `init`/`fetch`/`checkout`, ref
+updates, the scanner and collector) inherit the rest of your environment
+except the variables that select a repository or change how git behaves
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`,
+`GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, `GIT_CONFIG`,
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*`,
+`GIT_CONFIG_PARAMETERS`, `GIT_EXEC_PATH`, `GIT_SSH_COMMAND`,
+`GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR` and similar), which are removed.
+`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are kept, as `HOME` is. Every
+dispatcher git process runs with `GIT_NO_REPLACE_OBJECTS=1`, so a
+`refs/replace/*` ref cannot change what the scanner or collector reads. A
+`GIT_DIR` exported in your shell cannot redirect a cloud run into your
+checkout. Every dispatcher push passes `--no-follow-tags` and
+`--recurse-submodules=no`, so a local annotated tag or unpublished submodule
+work is never published, whatever `push.followTags`, `push.recurseSubmodules`
+or `submodule.recurse` say.
 
 ### State directory
 
