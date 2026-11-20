@@ -1338,6 +1338,47 @@ def test_cleanup_removes_a_finished_run(world: World) -> None:
     assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
 
 
+def test_cleanup_removes_every_ref_the_ledger_accounts_for_and_nothing_else(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    tip = run_git(world.root, "rev-parse", L.integration_ref("r1"))
+    run_git(world.root, "update-ref", "refs/heads/ffs/cloud/r1/recovery", tip)  # an operator's own branch under the prefix
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup run=r1" in out and "refs/heads/ffs/cloud/r1/recovery" in out  # kept, and reported
+    assert run_git(world.root, "for-each-ref", "--format=%(refname)", "refs/heads/ffs/cloud/r1/", "refs/ffs/cloud/r1/") \
+        == "refs/heads/ffs/cloud/r1/recovery"
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_cleanup_never_deletes_a_ref_that_moved_off_its_recorded_oid(world: World) -> None:
+    assert world.start()[0] == 0
+    world.drive()
+    ref = L.integration_ref("r1")
+    published = run_git(world.root, "rev-parse", ref)
+    foreign = run_git(world.root, "commit-tree", "-p", published, "-m", "operator work",
+                      run_git(world.root, "rev-parse", published + "^{tree}"))
+    run_git(world.root, "update-ref", ref, foreign)
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 3 and "CLEANUP_INCOMPLETE" in out and ref in out, out
+    assert run_git(world.root, "rev-parse", ref) == foreign and L.run_ledger_path(world.root, "r1").exists()
+    assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/t1-g1", "refs/ffs/cloud/r1/") != "", \
+        "nothing is deleted while any ref is unaccounted for"
+    run_git(world.root, "update-ref", ref, published)  # the operator puts it back: a rerun finishes
+    assert world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))[0] == 0
+
+
+def test_cleanup_remote_never_deletes_a_remote_integration_branch(world: World) -> None:
+    """The dispatcher publishes the integration ref only locally: a remote one is not its own."""
+    assert world.start()[0] == 0
+    world.drive()
+    tip = run_git(world.root, "rev-parse", L.integration_ref("r1"))
+    run_git(world.root, "push", "-q", "origin", tip + ":refs/heads/ffs/cloud/r1/integration")
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 3 and "CLEANUP_INCOMPLETE" in out and "remote:refs/heads/ffs/cloud/r1/integration" in out, out
+    assert run_git(world.root, "ls-remote", "origin", "refs/heads/ffs/cloud/r1/integration") != ""
+    assert run_git(world.root, "rev-parse", L.integration_ref("r1")) == tip  # no local ref was touched either
+
+
 def test_cleanup_fails_closed_when_git_cannot_read_the_integration_ref(
         world: World, monkeypatch: pytest.MonkeyPatch) -> None:
     assert world.start()[0] == 0
@@ -1757,6 +1798,20 @@ def test_retrying_the_last_task_of_a_done_run_reopens_it(world: World) -> None:
     assert world.drive(max_ticks=20) == 0
     assert world.states() == {"t1": "integrated"} and world.doc()["state"] == "done"
     assert world.doc()["epoch"] >= 2 and world.lifecycle(epoch=world.doc()["epoch"])["state"] == "done"
+
+
+def test_cleanup_of_a_retried_generation_still_removes_the_refs_of_both_generations(world: World) -> None:
+    """The ledger keeps OIDs only for the current generation: the older generation's refs are still the dispatcher's."""
+    (world.state / "review.verdict").write_text("REVISE")
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    (world.state / "review.verdict").write_text("APPROVE")
+    assert world.cli("abandon", "--run", "r1", "--task", "t1", "--retry", "--root", str(world.root))[0] == 0
+    assert world.drive(max_ticks=20) == 0 and world.states() == {"t1": "integrated"}
+    assert "ffs/cloud/r1/t1-g1" in run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/")
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup run=r1" in out, out
+    assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/", "refs/ffs/cloud/r1/") == ""
 
 
 def test_kick_spawns_a_lock_waiting_orchestrator_when_the_lock_is_held(world: World) -> None:

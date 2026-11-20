@@ -1883,8 +1883,38 @@ def _integration_unmerged(svc: Services, root: Path, run: str, base_sha: str, ur
     return True
 
 
-def _delete_remote_branches(svc: Services, root: Path, run: str, url: str) -> Tuple[int, List[str]]:
-    """``(deleted, refs whose delete failed)``."""
+def _owned_refs(doc: Dict[str, Any], run: str) -> Dict[str, Optional[frozenset]]:
+    """The local refs the dispatcher creates for this run, derived from the ledger, each with the OIDs it may
+    legitimately hold (``None``: nothing recorded, e.g. an earlier generation's ref).  Any other ref under the run
+    prefix is somebody else's."""
+    published: Dict[Tuple[str, int], set] = {}  # (task, generation) -> every publish OID the ledger knows of
+    for h in doc["integration"]["history"]:
+        published.setdefault((h["task"], h["generation"]), set()).add(h["publish_oid"])
+    for j in doc.get("journal", []):
+        if j.get("op") == ledger.OP_INTEGRATE and (j.get("data") or {}).get("publish_oid"):
+            published.setdefault((j["task"], j["generation"]), set()).add(j["data"]["publish_oid"])
+    owned: Dict[str, Optional[frozenset]] = {ledger.integration_ref(run): frozenset([doc["integration"]["tip"]])}
+    for name, entry in doc["tasks"].items():
+        for gen in range(1, entry["generation"] + 1):
+            def recorded(oid: Any) -> Optional[frozenset]:
+                return frozenset([oid]) if gen == entry["generation"] and oid else None  # older generations: none kept
+            owned[ledger.task_branch_ref(run, name, gen)] = recorded(entry.get("task_branch_oid"))
+            owned[ledger.candidate_ref(run, name, gen)] = recorded(entry.get("candidate_oid"))
+            owned[ledger.publication_ref(run, name, gen)] = frozenset(published[(name, gen)]) if (name, gen) in published else None
+    return owned
+
+
+def _ref_oid(svc: Services, root: Path, ref: str) -> Optional[str]:
+    """The OID a plain (non-symbolic) ref holds; ``None`` for a missing ref, a symbolic one or a git failure."""
+    text = git_text(svc, root, ["for-each-ref", "--format=%(objectname) %(symref)", ref])
+    parts = (text or "").split()
+    return parts[0] if len(parts) == 1 and OID_RE.match(parts[0]) else None
+
+
+def _delete_remote_branches(svc: Services, root: Path, run: str, url: str,
+                            owned: Sequence[str] = ()) -> Tuple[int, List[str]]:
+    """``(deleted, refs whose delete failed)``.  Only task branches the ledger accounts for: the integration ref
+    is published locally, never to the remote, so a remote one is somebody else's."""
     if not gates_check(svc, run, "push:origin/ffs/cloud/%s" % run):
         raise Refused("GRANT_MISSING", "missing grants: push:origin/ffs/cloud/%s" % run)
     ok, refs = ls_remote(svc, url, "refs/heads/ffs/cloud/%s/*" % run)
@@ -1893,7 +1923,7 @@ def _delete_remote_branches(svc: Services, root: Path, run: str, url: str) -> Tu
     deleted = 0
     failed: List[str] = []
     for ref in sorted(refs):
-        if not push_ref_valid(run, ref):  # not a name the dispatcher creates: report it, never silently keep it
+        if not push_ref_valid(run, ref) or ref not in owned:  # not a name the dispatcher creates: report, never delete
             failed.append("remote:" + ref)
             continue
         result = svc.run(["git", "-C", str(root), "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no", url,
@@ -1925,12 +1955,8 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
             return Refused("CLEANUP_INCOMPLETE", "refs left behind, ledger kept; fix the cause (a remote ref the dispatcher "
                            "did not create must be deleted by hand) and rerun cleanup: %s" % ", ".join(left))
 
-        if args.remote:
-            deleted, failed = _delete_remote_branches(svc, root, run, doc["origin_url"])
-            svc.emit("%scleanup remote-branches-deleted=%d" % (PREFIX, deleted))
-            if failed:  # before any local deletion, so the rerun's unmerged guard still has its integration ref
-                raise incomplete(failed, 0)
-        removed = 0
+        owned = _owned_refs(doc, run)
+        doomed: List[Tuple[str, str]] = []  # (ref, observed oid): everything is classified before anything is deleted
         left: List[str] = []
         for prefix in ("refs/heads/ffs/cloud/%s/" % run, "refs/ffs/cloud/%s/" % run):
             listed = _list_refs(svc, root, prefix)
@@ -1938,10 +1964,26 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
                 left.append("unlisted:" + prefix)
                 continue
             for ref in listed:
-                if git(svc, root, ["update-ref", "--no-deref", "-d", ref]).ok:
-                    removed += 1
+                oid = _ref_oid(svc, root, ref)
+                if ref not in owned:
+                    svc.emit("%scleanup-kept ref=%s (not created by the dispatcher)" % (PREFIX, ref))
+                elif oid is None or (owned[ref] is not None and oid not in owned[ref]):
+                    left.append(ref)  # moved off the recorded OID (or symbolic): somebody else's work may be on it
                 else:
-                    left.append(ref)
+                    doomed.append((ref, oid))
+        if left:
+            raise incomplete(left, 0)
+        if args.remote:
+            deleted, failed = _delete_remote_branches(svc, root, run, doc["origin_url"], [r for r in owned if r.startswith("refs/heads/") and not r.endswith("/integration")])
+            svc.emit("%scleanup remote-branches-deleted=%d" % (PREFIX, deleted))
+            if failed:  # before any local deletion, so the rerun's unmerged guard still has its integration ref
+                raise incomplete(failed, 0)
+        removed = 0
+        for ref, oid in doomed:
+            if git(svc, root, ["update-ref", "--no-deref", "-d", ref, oid]).ok:  # compare-and-delete
+                removed += 1
+            else:
+                left.append(ref)
         if left:
             raise incomplete(left, removed)
         ledger.reap_slots(ledger.slots_path(root), int(svc.now()), lambda candidate: None if candidate == run else ledger.RUN_ACTIVE)
