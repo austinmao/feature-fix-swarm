@@ -1087,6 +1087,31 @@ def test_the_start_that_loses_the_reservation_race_carries_a_batch_token(
     assert raced == [0] and rc == 3 and "RUN_EXISTS" in out and token in out, out
 
 
+def test_an_identical_retry_restarts_an_orchestrator_that_never_started(world: World) -> None:
+    """A start killed between the initialization record and the spawn leaves no lifecycle record for reconcile to find."""
+    assert world.start(tasks=[T1])[0] == 0
+    retry = lambda batch, name: world.cli(  # noqa: E731
+        "start", "--run", "r1", "--tasks", world.tasks_file(batch, name), "--policy", "auto", "--root", str(world.root))
+    world.spawned.clear()
+    rc, out = retry([T1], "same.json")
+    assert rc == 3 and "RUN_EXISTS" in out and "batch=same" in out and "orchestrator=restarted" in out, out
+    assert world.spawned == [cd.orchestrator_argv(world.root, "r1", resume=True)]
+    # nothing is spawned for another batch, for a parked run, or while a live process holds the orchestrator lock
+    world.spawned.clear()
+    assert "orchestrator=restarted" not in retry([T1, T2], "other.json")[1]
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.update(state=L.RUN_PARKED), d)[1])
+    assert "orchestrator=restarted" not in retry([T1], "same.json")[1]
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.update(state=L.RUN_ACTIVE), d)[1])
+    holder = os.open(str(L.orch_lock_path(world.root, "r1")), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        rc, out = retry([T1], "same.json")
+        assert rc == 3 and "batch=same" in out and "orchestrator=restarted" not in out
+    finally:
+        os.close(holder)
+    assert world.spawned == []
+
+
 def test_batch_same_notices_a_changed_dependency_input_order_or_sequential_flag(world: World) -> None:
     """A retry that only adds a local-to-cloud dependency, reorders the input or asks for ``--sequential`` is another batch."""
     local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
