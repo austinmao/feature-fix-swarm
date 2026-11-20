@@ -660,6 +660,7 @@ _RUNTIME_RESET: Dict[str, Callable[[], Any]] = {
     "slot_released": lambda: False,
     "push_failures": lambda: 0,
     "review_attempts": lambda: 0,
+    "review_stale": lambda: 0,
 }
 
 
@@ -1278,7 +1279,7 @@ def _commit(doc: Dict[str, Any], name: str, entry: Dict[str, Any], event: str, p
         entry["seen_count"] = 0
     if event == EV_REVIEW_STALE:  # the old approval and its test evidence no longer count; a fresh round meter
         entry["review"] = entry["verify"] = None
-        entry["review_attempts"] = int(entry.get("review_attempts") or 0) + 1
+        entry["review_stale"] = int(entry.get("review_stale") or 0) + 1  # its own meter: not the operator's retests
     if event == EV_RETEST:
         entry["push_failures"] = 0
         if entry.get("blocker") in REVIEW_BLOCKERS:
@@ -1670,6 +1671,12 @@ def apply_abandon(doc: Dict[str, Any], task: str, retry: bool = False, *, nonce:
         doc["state"] = RUN_ACTIVE  # the next orchestrate opens a new epoch (its lifecycle record is terminal)
     _bump_wake(doc)
     return doc
+
+
+def review_round_attempt(entry: Dict[str, Any]) -> int:
+    """The ``cloud-review.sh`` attempt argument: operator retests use 0..LIMIT, a stale re-review its own range above."""
+    own = min(int(entry.get("review_attempts") or 0), REVIEW_RETEST_LIMIT)
+    return own + (REVIEW_RETEST_LIMIT + 1) * min(int(entry.get("review_stale") or 0), 1)
 
 
 def apply_resolve(doc: Dict[str, Any], task: str, action: str) -> Dict[str, Any]:

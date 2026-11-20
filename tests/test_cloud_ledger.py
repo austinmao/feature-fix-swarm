@@ -949,7 +949,28 @@ def test_review_stale_sends_an_approval_back_through_review_and_verify(state):
     entry["verify"] = {"test_rc": 0, "test_log_sha": "x"}
     cl.transition(doc, "a", cl.EV_REVIEW_STALE, generation=1)
     assert entry["state"] == cl.COLLECTED and entry["review"] is None and entry["verify"] is None
-    assert entry["review_attempts"] == 1 and entry["blocker"] is None
+    assert entry["review_attempts"] == 0 and entry["review_stale"] == 1 and entry["blocker"] is None
+
+
+def test_review_stale_keeps_its_own_meter_and_leaves_the_operators_retest_budget_alone():
+    """WR-04: a stale re-review must not use up an operator retest."""
+    doc = put(fresh_doc(), "a", cl.NEEDS_OPERATOR, blocker="review-cap", resume_state="collected")
+    cl.apply_resolve(doc, "a", "retest")  # the operator's first retest
+    entry = doc["tasks"]["a"]
+    entry.update(state=cl.REVIEWED, review={"verdict": "APPROVE"}, blocker=None)
+    cl.transition(doc, "a", cl.EV_REVIEW_STALE, generation=1)
+    assert entry["review_attempts"] == 1 and entry["review_stale"] == 1
+    cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker="review-cap")  # the stale re-review capped
+    cl.apply_resolve(doc, "a", "retest")  # the second retest is still the operator's to spend
+    assert entry["review_attempts"] == 2
+    cl.transition(doc, "a", cl.EV_NEEDS_OPERATOR, generation=1, blocker="review-cap")
+    with pytest.raises(cl.LedgerError):
+        cl.apply_resolve(doc, "a", "retest")
+    ranges = {0: set(), 1: set()}
+    for stale in (0, 1, 5):
+        for attempts in range(0, cl.REVIEW_RETEST_LIMIT + 3):
+            ranges[min(stale, 1)].add(cl.review_round_attempt({"review_stale": stale, "review_attempts": attempts}))
+    assert ranges[0] == {0, 1, 2} and ranges[1] == {3, 4, 5}  # separate meters, both bounded
 
 
 def test_review_stale_is_illegal_from_other_states():

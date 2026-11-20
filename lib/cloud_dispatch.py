@@ -2619,7 +2619,7 @@ class Orchestrator:
             repo=str(self.root), run=self.run_id, task=name, generation=gen, producer=entry["provider"],
             base_oid=entry.get("base_oid") or self.doc()["base_sha"], candidate_oid=entry["candidate_oid"],
             manifest=manifest if isinstance(manifest, dict) else {}, script=self.review_script(),
-            attempt=min(int(entry.get("review_attempts") or 0), ledger.REVIEW_RETEST_LIMIT))  # 7th cloud-review.sh argument
+            attempt=ledger.review_round_attempt(entry))  # 7th cloud-review.sh argument
         result = cloud_collect.review(**kwargs)
         if not result.ok:
             self.apply_blocker(name, gen, STAGE_REVIEW, result)

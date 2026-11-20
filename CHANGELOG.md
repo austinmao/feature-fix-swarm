@@ -10,6 +10,10 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: external review findings)
 
+- `review-stale` (an old approval without reviewer-model evidence goes back
+  through review) no longer spends one of the operator's two review retests. It
+  counts in its own `review_stale` field and runs on its own bounded review
+  meters (attempt 3 to 5).
 - The candidate import refuses (`candidate-conflict`) when the candidate ref in
   your repository is a symbolic ref, so `fetch` can no longer create the branch
   a dangling symref points at.
