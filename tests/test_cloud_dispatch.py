@@ -1722,6 +1722,13 @@ def test_replay_of_a_ref_already_moved_without_model_evidence_parks_instead_of_c
     assert doc["integration"]["history"] == [] and doc["integration"]["tip"] == world.base
     assert doc["tasks"]["t2"]["state"] == "waiting"
     assert run_git(world.root, "rev-parse", ref) == published  # never rewound by the fixer
+    # the recovery the decision text names: reset the ref to the ledger tip, retest; the task is reviewed again
+    run_git(world.root, "update-ref", ref, world.base)
+    rc, out = world.cli("resolve", "--run", "r1", "--task", "t1", "--action", "retest", "--root", str(world.root))
+    assert rc == 0, out
+    assert world.drive(max_ticks=40) == 0
+    entry = world.doc()["tasks"]["t1"]
+    assert entry["state"] == "integrated" and entry["review"]["model"] == entry["review"]["requested_model"]
 
 
 def test_a_ref_at_the_exact_published_commit_completes_without_a_second_update(world: World) -> None:
