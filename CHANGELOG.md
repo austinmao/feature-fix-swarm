@@ -8,6 +8,19 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-20, cloud delegation: round 5b review)
+
+- A `git clone` killed at its transfer timeout no longer wedges every later
+  fixed-clone launch with `CLONE_PATH_INVALID`. The dispatcher now creates the
+  clone directory itself (`mkdir`, exclusive) and writes an ownership marker
+  beside it, `<parent>/ffs-cloud-launch-claude.ffs-owned`, naming the directory's
+  device and inode, before it clones. Stale-clone cleanup and the exit-path
+  delete accept a directory only with that proof; an unmarked directory still
+  ends `CLONE_PATH_INVALID` and is never deleted. **Operator action:** the
+  marker moved out of `.git/`, so an existing clone at that path (hand-made, or
+  from an earlier release) must be removed once with
+  `rm -rf <parent>/ffs-cloud-launch-claude`.
+
 ### Fixed (2026-11-20, cloud delegation: external review findings)
 
 - `start` removes the run ledger it reserved when it cannot create the
@@ -25,17 +38,17 @@ all skills.
   nothing (so a hash-only snapshot cannot turn old refs into candidates later);
   a poll returns `unknown` (`REF_SCAN_REFUSED`) and retries without parking the
   task.
-- The fixed launch clone is deleted on exit only when it still carries the
-  disposable-clone marker; a directory that appears at the path before
-  `git clone` runs is left alone.
+- The fixed launch clone is deleted on exit only with the ownership proof
+  described below; a directory that appears at the path before `git clone`
+  runs is left alone.
 - The fixed launch clone (`FFS_CLOUD_CLONE_PARENT`) can no longer delete the
   operator's checkout. The resolved child `<parent>/ffs-cloud-launch-claude`
   is compared, real path and case-folded, against the repository root and every
   `git worktree list` entry in both directions; an overlap, an unknown root or
   an unreadable worktree list ends `CLONE_PATH_INVALID`. An existing child is
-  deleted only when it holds the disposable-clone marker
-  `.git/ffs-disposable-clone` that the dispatcher writes right after it makes
-  the clone; any other existing directory also ends `CLONE_PATH_INVALID`.
+  deleted only when the ownership marker beside it names it (see the
+  killed-clone entry below); any other existing directory also ends
+  `CLONE_PATH_INVALID`.
   The `INSIDE_REPO` parent check is case-folded as well. **Operator action:**
   an existing unmarked clone at that path (made by hand for the trust dialog,
   or by an earlier release) must be removed once by the operator.

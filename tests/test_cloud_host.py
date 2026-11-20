@@ -673,7 +673,7 @@ def test_clone_parent_removes_a_stale_clone_first(install_fake, origin, state, t
     (stale / "sub").mkdir(parents=True)
     (stale / "sub" / "left-over.txt").write_text("from a killed launch")
     (stale / ".git").mkdir()
-    (stale / ".git" / ch.CLONE_MARKER_NAME).write_text("disposable\n")
+    _mark_owned(stale)
     install_fake("claude")
     assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"  # git clone needs an empty target
     assert not stale.exists()
@@ -1587,7 +1587,7 @@ def test_worktree_inside_the_clone_child_is_refused(install_fake, origin, state,
     child = clone_parent / "ffs-cloud-launch-claude"
     child.mkdir()
     (child / ".git").mkdir()
-    (child / ".git" / ch.CLONE_MARKER_NAME).write_text("disposable\n")  # even a marked child may not hold a worktree
+    _mark_owned(child)  # even a marked child may not hold a worktree
     inner = child / "nested-checkout"
     git("worktree", "add", "-q", "-b", "wt-inner", inner, "main", cwd=origin.work)
     (inner / "dirty.txt").write_text("uncommitted work")
@@ -1611,12 +1611,27 @@ def test_parent_inside_the_repo_is_refused_case_insensitively(tmp_path):
     assert ch._validated_clone_parent(str(parent), Path(str(tmp_path).upper()))[1] == "INSIDE_REPO"
 
 
-def test_launch_clone_gets_a_disposable_marker(install_fake, origin, tmp_path):
+def test_launch_claims_the_clone_dir_with_an_ownership_marker_beside_it(tmp_path):
     clone = tmp_path / "c"
-    assert ch.ClaudeBackend()._prepare_clone(launch_ctx(origin, tmp_path), clone) == ""
-    marker = clone / ".git" / ch.CLONE_MARKER_NAME
-    assert marker.is_file() and not marker.is_symlink()
-    assert ch._clear_stale_clone(clone) == "" and not clone.exists()
+    assert ch._claim_clone(clone) == "" and clone.is_dir()
+    marker = ch._clone_marker_path(clone)
+    assert marker.parent == clone.parent and marker.is_file() and not marker.is_symlink()
+    assert ch._claim_clone(clone) == "CLONE_PATH_INVALID", "an existing directory is never claimed"
+    assert ch._clear_stale_clone(clone) == "" and not clone.exists() and not marker.exists()
+
+
+def test_a_marker_that_names_another_directory_does_not_prove_ownership(tmp_path):
+    clone = tmp_path / "c"
+    clone.mkdir()
+    (clone / "dirty.txt").write_text("operator work")
+    ch._clone_marker_path(clone).write_text("1:1\n")  # a stale marker from a directory that is gone
+    assert ch._clear_stale_clone(clone) == "CLONE_PATH_INVALID"
+    assert (clone / "dirty.txt").exists()
+
+
+def _mark_owned(clone):
+    info = os.lstat(str(clone))
+    ch._clone_marker_path(clone).write_text("%d:%d\n" % (info.st_dev, info.st_ino))
 
 
 def _hostile_home(tmp_path, monkeypatch):
@@ -1746,3 +1761,44 @@ def test_a_scanner_failure_in_poll_is_unknown_not_a_secret_ref_name(install_fake
     assert (result.state, result.candidates) == ("unknown", []) and "REF_SCAN_REFUSED" in result.detail
     assert ch.REF_NAME_SECRET_NOTE not in result.detail
     assert ch.ClaudeBackend().poll(poll_ctx(origin, tmp_path)).state == "running"  # the next tick recovers
+
+
+def test_a_clone_killed_at_the_timeout_does_not_wedge_the_next_fixed_clone_launch(
+        install_fake, origin, state, tmp_path, clone_parent, monkeypatch):
+    """WR-A: SIGKILL leaves a partial clone; the dispatcher made the directory, so it can remove it."""
+    install_fake("claude")
+    real = ch.run_git
+    calls = []
+
+    def killed_clone(args, **kwargs):
+        if "clone" in args:
+            calls.append(1)
+            (Path(args[-1]) / ".git" / "objects").mkdir(parents=True)  # what a killed git leaves behind
+            return real(["not-a-git-command"], timeout=5)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(ch, "run_git", killed_clone)
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).detail == "CLONE_FAILED"
+    monkeypatch.setattr(ch, "run_git", real)
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched" and calls
+
+
+def test_a_clone_dir_left_by_a_killed_dispatcher_is_removed_by_the_next_launch(
+        install_fake, origin, state, tmp_path, clone_parent):
+    clone = clone_parent / "ffs-cloud-launch-claude"
+    assert ch._claim_clone(clone) == ""
+    (clone / ".git" / "objects").mkdir(parents=True)  # the dispatcher died mid-clone: no exit path ran
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert not clone.exists() and not ch._clone_marker_path(clone).exists()
+
+
+def test_an_unmarked_clone_dir_is_refused_and_never_deleted(install_fake, origin, state, tmp_path, clone_parent):
+    clone = clone_parent / "ffs-cloud-launch-claude"
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / "ffs-disposable-clone").write_text("the old in-tree marker no longer proves anything\n")
+    (clone / "dirty.txt").write_text("operator work")
+    install_fake("claude")
+    result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path))
+    assert (result.outcome, result.detail) == ("failed", "CLONE_PATH_INVALID")
+    assert (clone / "dirty.txt").exists()

@@ -370,8 +370,9 @@ CLONE_LOCK_WAIT_S = 600.0
 REF_NAME_SECRET_NOTE = "REF_NAME_SECRET"
 CLONE_DIR_NAME = "ffs-cloud-launch-claude"
 CLONE_LOCK_NAME = ".ffs-cloud-launch-claude.lock"
-#: Written inside ``<clone>/.git`` once the dispatcher has made the clone; only a directory that carries it is ever deleted.
-CLONE_MARKER_NAME = "ffs-disposable-clone"
+#: Sibling of the clone directory, written right after the dispatcher creates that directory (so it survives a killed
+#: ``git clone``); it names the directory's device and inode. Only a directory it names is ever deleted.
+CLONE_MARKER_SUFFIX = ".ffs-owned"
 #: Checkout of the launch clone: no hooks, and no user or system git config (so no filter driver is defined).
 NEUTRAL_CHECKOUT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 #: A first-run dialog that waits for a keystroke we never send: the client can never create a session behind it.
@@ -1165,27 +1166,71 @@ def _lock_clone_parent(parent: Path) -> Tuple[Optional[int], str]:
         time.sleep(0.2)
 
 
-def _has_disposable_marker(clone: Path) -> bool:
+def _clone_marker_path(clone: Path) -> Path:
+    """The ownership marker sits beside the clone (in the validated parent), so it exists before ``git clone`` does."""
+    return clone.with_name(clone.name + CLONE_MARKER_SUFFIX)
+
+
+def _owns_clone(clone: Path) -> bool:
+    """True only for a plain directory the dispatcher created: the sibling marker records its device and inode."""
     try:
-        git_dir = os.lstat(str(clone / ".git"))
-        marker = os.lstat(str(clone / ".git" / CLONE_MARKER_NAME))
+        info = os.lstat(str(clone))
+        marker = os.lstat(str(_clone_marker_path(clone)))
+        if not stat.S_ISDIR(info.st_mode) or not stat.S_ISREG(marker.st_mode):
+            return False
+        fd = os.open(str(_clone_marker_path(clone)), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            recorded = os.read(fd, 64)
+        finally:
+            os.close(fd)
     except OSError:
         return False
-    return stat.S_ISDIR(git_dir.st_mode) and stat.S_ISREG(marker.st_mode)
+    return recorded == ("%d:%d\n" % (info.st_dev, info.st_ino)).encode("ascii")
+
+
+def _claim_clone(clone: Path) -> str:
+    """Create the clone directory exclusively and record it; ``""`` or an error code. A directory that already
+    exists is never claimed."""
+    try:
+        os.mkdir(str(clone), 0o700)
+    except OSError:
+        return "CLONE_PATH_INVALID"
+    try:
+        info = os.lstat(str(clone))
+        write_private_file(_clone_marker_path(clone), ("%d:%d\n" % (info.st_dev, info.st_ino)).encode("ascii"))
+    except OSError:
+        try:
+            os.rmdir(str(clone))  # empty and just created by this call
+        except OSError:
+            pass
+        return "CLONE_DIR_FAILED"
+    return ""
+
+
+def _release_clone(clone: Path) -> None:
+    """Delete the clone only with ownership proof, then the marker once the directory is gone."""
+    if _owns_clone(clone):
+        shutil.rmtree(str(clone), ignore_errors=True)
+    if not os.path.lexists(str(clone)):
+        try:
+            os.unlink(str(_clone_marker_path(clone)))
+        except OSError:
+            pass
 
 
 def _clear_stale_clone(clone: Path) -> str:
-    """Remove a clone left at the fixed path by a killed launch. Refuses anything that is not a plain directory that
-    carries the dispatcher's disposable-clone marker: an operator's checkout is never deleted."""
+    """Remove a clone left at the fixed path by a killed launch. Refuses anything that is not a plain directory the
+    dispatcher created (its sibling marker names this directory): an operator's checkout is never deleted."""
     try:
         info = os.lstat(str(clone))
     except FileNotFoundError:
+        _release_clone(clone)  # drops a marker whose directory is gone
         return ""
     except OSError:
         return "CLONE_PATH_INVALID"
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or not _has_disposable_marker(clone):
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or not _owns_clone(clone):
         return "CLONE_PATH_INVALID"
-    shutil.rmtree(str(clone), ignore_errors=True)
+    _release_clone(clone)
     return "CLONE_PATH_STALE" if os.path.lexists(str(clone)) else ""
 
 
@@ -1264,11 +1309,14 @@ class ClaudeBackend:
             problem = _clone_child_conflict(clone, ctx.repo_root) or _clear_stale_clone(clone)
             if problem:
                 return _failed(problem)
+            problem = _claim_clone(clone)  # exclusive mkdir + marker, before git runs
+            if problem:
+                return _failed(problem)
             owned = True
             return self._launch_from_clone(ctx, clone)
         finally:
-            if owned and _has_disposable_marker(clone):  # every exit path, including an exception; never an unmarked dir
-                shutil.rmtree(str(clone), ignore_errors=True)
+            if owned:
+                _release_clone(clone)  # every exit path, including an exception; never a directory it did not create
             os.close(lock_fd)  # releases the lock
 
     def _prepare_clone(self, ctx: LaunchCtx, clone: Path) -> str:
@@ -1280,10 +1328,6 @@ class ClaudeBackend:
             timeout=self._git_transfer,
         )
         if not cloned.ok:
-            return "CLONE_FAILED"
-        try:
-            write_private_file(clone / ".git" / CLONE_MARKER_NAME, b"disposable launch clone\n")
-        except OSError:
             return "CLONE_FAILED"
         head = run_git(["-C", str(clone), "rev-parse", "HEAD"], timeout=self._git_quick)
         if not head.ok or head.text().strip().lower() != ctx.task_branch_oid.lower():
