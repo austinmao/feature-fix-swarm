@@ -1863,3 +1863,101 @@ def test_a_valid_orphan_marker_with_no_clone_is_dropped(install_fake, origin, st
     marker.write_text("1:1\n")  # a dispatcher marker whose directory is gone
     assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
     assert not marker.exists()
+
+
+# ── Race-free creation and retirement of the fixed clone ────────────────────
+
+
+def _plant_foreign_dir(path, text="operator work"):
+    """What a rename between the dispatcher's check and its use looks like: a foreign directory takes the name."""
+    if os.path.lexists(str(path)):
+        os.rename(str(path), str(path) + "-moved-aside")
+    os.mkdir(str(path))
+    (path / "dirty.txt").write_text(text)
+
+
+def _staging_dirs(parent):
+    return [p.name for p in parent.iterdir() if p.name.startswith(".ffs-cloud-") and not p.name.endswith(".lock")]
+
+
+def test_a_directory_swapped_in_after_the_ownership_check_is_not_deleted(tmp_path, monkeypatch):
+    clone = tmp_path / "c"
+    assert ch._claim_clone(clone) == ""
+    real = ch._owns_clone
+
+    def swapped(path):
+        verdict = real(path)
+        if verdict:
+            _plant_foreign_dir(path)  # between the check and the delete
+        return verdict
+
+    monkeypatch.setattr(ch, "_owns_clone", swapped)
+    ch._release_clone(clone)
+    assert (clone / "dirty.txt").read_text() == "operator work", "the foreign directory is put back untouched"
+    assert _staging_dirs(tmp_path) == []
+    assert (tmp_path / "c-moved-aside").is_dir(), "the directory the dispatcher made is not the one that was removed"
+
+
+def test_a_mismatched_retired_directory_is_left_in_staging_when_its_name_is_taken(tmp_path, monkeypatch):
+    clone = tmp_path / "c"
+    assert ch._claim_clone(clone) == ""
+    real_owns, real_lstat = ch._owns_clone, os.lstat
+
+    def swapped(path):
+        verdict = real_owns(path)
+        if verdict:
+            _plant_foreign_dir(path, "first")
+        return verdict
+
+    def lstat(path, *args, **kwargs):
+        if os.sep + "retired" in str(path) and not os.path.lexists(str(clone)):
+            os.mkdir(str(clone))  # the name is taken again before the retired directory can be put back
+            (clone / "second.txt").write_text("second")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(ch, "_owns_clone", swapped)
+    monkeypatch.setattr(os, "lstat", lstat)
+    reason = ch._release_clone(clone)
+    monkeypatch.undo()
+    assert reason.startswith("CLONE_PATH_INVALID ")
+    assert (clone / "second.txt").read_text() == "second"
+    kept = [p for p in tmp_path.glob(".ffs-cloud-*/retired/dirty.txt")]
+    assert len(kept) == 1 and kept[0].read_text() == "first", "never deleted, left in private staging"
+
+
+def test_a_directory_that_takes_the_name_before_publication_is_not_marked_or_replaced(tmp_path, monkeypatch):
+    clone = tmp_path / "c"
+    real_lstat, planted = os.lstat, []
+
+    def lstat(path, *args, **kwargs):
+        if not planted:
+            planted.append(1)
+            if os.path.lexists(str(clone)):
+                os.rename(str(clone), str(clone) + "-moved-aside")
+            os.mkdir(str(clone))  # an EMPTY foreign directory: a plain rename would replace it
+            (tmp_path / "unrelated").write_text("x")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    reason = ch._claim_clone(clone)
+    monkeypatch.undo()
+    assert reason.startswith("CLONE_PATH_INVALID") and clone.is_dir()
+    assert not ch._owns_clone(clone) and not ch._clone_marker_path(clone).exists()
+    assert _staging_dirs(tmp_path) == []
+
+
+def test_rename_noreplace_never_replaces_an_existing_target_even_an_empty_directory(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    with pytest.raises(FileExistsError):
+        ch._rename_noreplace(str(src), str(dst))
+    assert src.is_dir() and dst.is_dir()
+    ch._rename_noreplace(str(src), str(tmp_path / "free"))
+    assert not src.exists() and (tmp_path / "free").is_dir()
+
+
+def test_a_launch_leaves_no_staging_directory_behind(install_fake, origin, state, tmp_path, clone_parent):
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert _staging_dirs(clone_parent) == []

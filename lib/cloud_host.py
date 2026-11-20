@@ -373,6 +373,10 @@ CLONE_LOCK_NAME = ".ffs-cloud-launch-claude.lock"
 #: Sibling of the clone directory, written right after the dispatcher creates that directory (so it survives a killed
 #: ``git clone``); it names the directory's device and inode. Only a directory it names is ever deleted.
 CLONE_MARKER_SUFFIX = ".ffs-owned"
+#: Prefixes of the private staging directories (mkdtemp, 0700) the dispatcher makes in the clone parent: "new" ones hold
+#: a clone not yet published, "old" ones a directory or marker retired for an identity check before deletion.
+STAGE_NEW_PREFIX = ".ffs-cloud-new-"
+STAGE_OLD_PREFIX = ".ffs-cloud-old-"
 #: Checkout of the launch clone: no hooks, and no user or system git config (so no filter driver is defined).
 NEUTRAL_CHECKOUT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 #: A first-run dialog that waits for a keystroke we never send: the client can never create a session behind it.
@@ -1210,18 +1214,76 @@ def _create_marker(path: Path, device: int, inode: int) -> None:
     _fsync_dir(path.parent)
 
 
+def _rename_noreplace(src: str, dst: str) -> None:
+    """``rename(2)`` that fails with ``FileExistsError`` when ``dst`` exists (a plain rename silently replaces an empty
+    directory): the kernel's no-replace rename where there is one, else a check and a rename."""
+    import ctypes
+    import errno
+
+    call = None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if os.uname().sysname == "Darwin":
+            call = lambda a, b: libc.renamex_np(a, b, 0x4)  # RENAME_EXCL
+        else:
+            call = lambda a, b: libc.renameat2(-100, a, -100, b, 0x1)  # AT_FDCWD, RENAME_NOREPLACE
+    except (OSError, AttributeError):
+        call = None
+    if call is not None:
+        ctypes.set_errno(0)
+        if call(os.fsencode(src), os.fsencode(dst)) == 0:
+            return
+        code = ctypes.get_errno()
+        if code not in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
+            raise OSError(code, os.strerror(code), dst)
+    if os.path.lexists(dst):
+        raise FileExistsError(errno.EEXIST, "target exists", dst)
+    os.rename(src, dst)
+
+
+def _move_aside(path: Path, name: str, prefix: str) -> Optional[Tuple[str, str]]:
+    """Rename ``path`` into a fresh private (mkdtemp, 0700) staging directory beside it; ``(staging, moved)``, or
+    ``None`` when the name is absent or cannot be moved. Whatever is then inspected or deleted is the thing that was
+    moved, never a name another process can re-point."""
+    try:
+        staging = tempfile.mkdtemp(prefix=prefix, dir=str(path.parent))
+    except OSError:
+        return None
+    moved = os.path.join(staging, name)
+    try:
+        os.rename(str(path), moved)
+    except OSError:
+        os.rmdir(staging)
+        return None
+    return staging, moved
+
+
+def _put_back(moved: str, path: Path, staging: str) -> None:
+    """Restore a moved-aside name if it is still free; otherwise leave it in staging (nothing is ever deleted)."""
+    try:
+        _rename_noreplace(moved, str(path))
+        os.rmdir(staging)
+    except OSError:
+        pass
+
+
 def _drop_marker(clone: Path) -> str:
     """Remove the marker of a directory that is gone; ``""`` or ``CLONE_PATH_INVALID MARKER_UNRECOGNIZED``. Only a file
-    that verifies as a dispatcher marker is unlinked; anything else at that name is left alone and refused."""
+    that verifies as a dispatcher marker is removed, and it is verified after being moved into staging; anything else
+    at that name is put back (or left in staging) and refused."""
     marker = _clone_marker_path(clone)
     if not os.path.lexists(str(marker)):
         return ""
     if _read_marker(marker) is None:
         return "CLONE_PATH_INVALID MARKER_UNRECOGNIZED"
-    try:
-        os.unlink(str(marker))
-    except OSError:
-        pass
+    aside = _move_aside(marker, "marker", STAGE_OLD_PREFIX)
+    if aside is None:
+        return ""
+    staging, moved = aside
+    if _read_marker(Path(moved)) is None:
+        _put_back(moved, marker, staging)
+        return "CLONE_PATH_INVALID MARKER_UNRECOGNIZED"
+    shutil.rmtree(staging, ignore_errors=True)
     return ""
 
 
@@ -1235,30 +1297,60 @@ def _owns_clone(clone: Path) -> bool:
 
 
 def _claim_clone(clone: Path) -> str:
-    """Create the clone directory exclusively and record it; ``""`` or an error code. A directory that already
-    exists is never claimed."""
+    """Create the clone directory in private staging, pin its identity in the marker, then publish it at the fixed path
+    with a rename that fails if the name exists; ``""`` or an error code. A name that already exists is never claimed,
+    marked or replaced."""
+    if os.path.lexists(str(clone)):
+        return "CLONE_PATH_INVALID"  # the rename below is the authoritative check; this one moves nothing
     try:
-        os.mkdir(str(clone), 0o700)
+        staging = tempfile.mkdtemp(prefix=STAGE_NEW_PREFIX, dir=str(clone.parent))
     except OSError:
-        return "CLONE_PATH_INVALID"
+        return "CLONE_DIR_FAILED"
+    marked, reason = False, "CLONE_DIR_FAILED"
     try:
-        info = os.lstat(str(clone))
-        _create_marker(_clone_marker_path(clone), info.st_dev, info.st_ino)
+        fresh = os.path.join(staging, "new")
+        os.mkdir(fresh, 0o700)
+        info = os.lstat(fresh)
+        reason = "CLONE_PATH_INVALID MARKER_EXISTS"
+        _create_marker(_clone_marker_path(clone), info.st_dev, info.st_ino)  # before publishing: a kill never wedges
+        marked, reason = True, "CLONE_PATH_INVALID"
+        _rename_noreplace(fresh, str(clone))
     except OSError as exc:
-        try:
-            os.rmdir(str(clone))  # empty and just created by this call
-        except OSError:
-            pass
-        return "CLONE_PATH_INVALID MARKER_EXISTS" if isinstance(exc, FileExistsError) else "CLONE_DIR_FAILED"
+        if not isinstance(exc, FileExistsError) and reason == "CLONE_PATH_INVALID MARKER_EXISTS":
+            reason = "CLONE_DIR_FAILED"
+        if marked:
+            _drop_marker(clone)  # the marker this call just created
+        shutil.rmtree(staging, ignore_errors=True)  # holds only the directory this call just made
+        return reason
+    os.rmdir(staging)
     return ""
 
 
-def _release_clone(clone: Path) -> None:
-    """Delete the clone only with ownership proof, then the marker once the directory is gone."""
-    if _owns_clone(clone):
-        shutil.rmtree(str(clone), ignore_errors=True)
-    if not os.path.lexists(str(clone)):
-        _drop_marker(clone)
+def _release_clone(clone: Path) -> str:
+    """Delete the clone only with ownership proof; ``""`` or a ``CLONE_PATH_INVALID`` reason. The directory is renamed
+    into private staging and its device and inode compared with the marker there; only a match is deleted. A mismatch
+    is put back if its name is free, else left in staging, never deleted. The marker goes last."""
+    marker = _clone_marker_path(clone)
+    named = _read_marker(marker)
+    if os.path.lexists(str(clone)):
+        if named is None or not _owns_clone(clone):  # cheap pre-check: moves nothing that already fails
+            return "CLONE_PATH_INVALID"
+        aside = _move_aside(clone, "retired", STAGE_OLD_PREFIX)
+        if aside is None:
+            return "CLONE_PATH_INVALID MOVE_FAILED"
+        staging, moved = aside
+        try:
+            info = os.lstat(moved)
+            match = stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == named
+        except OSError:
+            match = False
+        if not match:
+            _put_back(moved, clone, staging)
+            return "CLONE_PATH_INVALID MOVED_AWAY"
+        shutil.rmtree(staging, ignore_errors=True)
+        if os.path.lexists(staging):
+            return "CLONE_PATH_STALE"  # the marker stays: it still names the remains in staging
+    return "" if os.path.lexists(str(clone)) else _drop_marker(clone)
 
 
 def _clear_stale_clone(clone: Path) -> str:
@@ -1272,8 +1364,7 @@ def _clear_stale_clone(clone: Path) -> str:
         return "CLONE_PATH_INVALID"
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or not _owns_clone(clone):
         return "CLONE_PATH_INVALID"
-    _release_clone(clone)
-    return "CLONE_PATH_STALE" if os.path.lexists(str(clone)) else ""
+    return _release_clone(clone) or ("CLONE_PATH_STALE" if os.path.lexists(str(clone)) else "")
 
 
 # ── Claude ───────────────────────────────────────────────────────────────────
@@ -1351,7 +1442,7 @@ class ClaudeBackend:
             problem = _clone_child_conflict(clone, ctx.repo_root) or _clear_stale_clone(clone)
             if problem:
                 return _failed(problem)
-            problem = _claim_clone(clone)  # exclusive mkdir + marker, before git runs
+            problem = _claim_clone(clone)  # private mkdir, marker, then a no-replace rename, before git runs
             if problem:
                 return _failed(problem)
             owned = True
