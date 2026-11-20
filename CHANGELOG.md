@@ -32,6 +32,11 @@ all skills.
 - The ancestry scan refuses a shallow repository (`shallow-repository`) before
   it accepts or writes any cache verdict: it could not see history that the
   fresh clone from origin contains.
+- Incoming `claude/*` ref names go through the secret scanner before the launch
+  snapshot, a bind or any ledger write. A matching name is dropped from the
+  candidate pool and stored in the snapshot as a hash only; a new matching
+  result ref parks the task as `needs-operator` / `ambiguous-candidates` with a
+  fixed reason that never carries the name.
 
 ### Fixed (2026-11-20, cloud delegation: four verified gaps)
 

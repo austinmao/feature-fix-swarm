@@ -19,6 +19,7 @@ Design points:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -31,6 +32,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
+
+import cloud_scan
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -363,6 +366,8 @@ LAUNCH_NOTE_NO_URL = "no-session-url"
 LAUNCH_NOTE_EXIT_NO_URL = "exit-no-session-url"
 LOG_HEAD_BYTES = 16 * 1024  # of the 64 KB launch log: the start of the transcript; the rest is its end
 CLONE_LOCK_WAIT_S = 600.0
+#: Poll note: a new ``claude/*`` ref name matched the secret scanner. The name is never stored, logged or shown.
+REF_NAME_SECRET_NOTE = "REF_NAME_SECRET"
 CLONE_DIR_NAME = "ffs-cloud-launch-claude"
 CLONE_LOCK_NAME = ".ffs-cloud-launch-claude.lock"
 #: Written inside ``<clone>/.git`` once the dispatcher has made the clone; only a directory that carries it is ever deleted.
@@ -738,14 +743,44 @@ def parse_codex_status(text: str, expected_id: Optional[str] = None) -> Tuple[st
     return "unknown", "NO_STATUS"
 
 
-def parse_ls_remote(text: str) -> Dict[str, str]:
-    """``git ls-remote`` output to ``{ref: oid}``, keeping only well-formed claude/* refs."""
+def _all_claude_refs(text: str) -> Dict[str, str]:
     refs: Dict[str, str] = {}
     for line in text.splitlines():
         oid, _, ref = line.partition("\t")
         if OID_RE.match(oid) and CLAUDE_REF_RE.match(ref) and ".." not in ref:
             refs[ref] = oid
     return refs
+
+
+def _secret_ref_names(refs: Iterable[str]) -> "set[str]":
+    """Ref names the secret scanner flags. A scanner failure flags every name (fail closed)."""
+    names = sorted(refs)
+    if not names:
+        return set()
+    try:
+        if not cloud_scan.scan_bytes("\n".join(names).encode("utf-8", "replace"), label="ref"):
+            return set()
+        return {n for n in names if cloud_scan.scan_bytes(n.encode("utf-8", "replace"), label="ref")}
+    except cloud_scan.ScanRefused:
+        return set(names)
+
+
+def redacted_ref_key(ref: str) -> str:
+    """A stable stand-in for a ref whose name matched the scanner: the name itself is never stored or shown."""
+    return "redacted:" + hashlib.sha256(ref.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def split_ls_remote(text: str) -> Tuple[Dict[str, str], Dict[str, Tuple[str, str]]]:
+    """``(clean refs, flagged)``: ``flagged`` maps ``redacted_ref_key`` to ``(ref, oid)`` and is for in-memory use only."""
+    refs = _all_claude_refs(text)
+    bad = _secret_ref_names(refs)
+    clean = {r: o for r, o in refs.items() if r not in bad}
+    return clean, {redacted_ref_key(r): (r, refs[r]) for r in bad}
+
+
+def parse_ls_remote(text: str) -> Dict[str, str]:
+    """``git ls-remote`` output to ``{ref: oid}``, keeping only well-formed claude/* refs whose name is clean."""
+    return split_ls_remote(text)[0]
 
 
 def normalize_rejected(rejected: Sequence[Sequence[str]]) -> "set[Tuple[str, str]]":
@@ -1266,7 +1301,9 @@ class ClaudeBackend:
         if not listing.ok:
             return "SNAPSHOT_FAILED"
         try:
-            write_snapshot(Path(ctx.refs_snapshot_path), parse_ls_remote(listing.text()))  # type: ignore[arg-type]
+            clean, flagged = split_ls_remote(listing.text())
+            clean.update({key: oid for key, (_, oid) in flagged.items()})  # a flagged name is stored as a hash only
+            write_snapshot(Path(ctx.refs_snapshot_path), clean)  # type: ignore[arg-type]
         except OSError:
             return "SNAPSHOT_WRITE_FAILED"
         return ""
@@ -1328,9 +1365,13 @@ class ClaudeBackend:
         if not listing.ok:
             return PollResult("unknown", [], "LS_REMOTE_FAILED")
         snapshot = load_refs_snapshot(ctx.refs_snapshot_path)
-        candidates, capped = select_candidates(
-            parse_ls_remote(listing.text()), snapshot, ctx.nonce, ctx.rejected, run=ctx.run, task=ctx.task)
+        clean, flagged = split_ls_remote(listing.text())
+        candidates, capped = select_candidates(clean, snapshot, ctx.nonce, ctx.rejected, run=ctx.run, task=ctx.task)
         notes = ["candidates=%d" % len(candidates)]
+        prefix = ctx.nonce[:NONCE_PREFIX_LEN] if len(ctx.nonce) >= NONCE_PREFIX_LEN else ""
+        if any((prefix and prefix in ref) or (snapshot is not None and snapshot.get(key) != oid)
+               for key, (ref, oid) in flagged.items()):
+            notes.append(REF_NAME_SECRET_NOTE)  # a new ref whose name matched the scanner: never a candidate
         if snapshot is None:
             notes.append("NO_SNAPSHOT")
         if capped:

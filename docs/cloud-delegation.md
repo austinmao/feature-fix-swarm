@@ -499,7 +499,12 @@ already rejected for this task, and refs named for another task of the same
 run, are never in the pool. More than one distinct candidate in the pool
 means `ambiguous-candidates`. A result binds when the same OID is seen on
 two consecutive polls. The first bind wins, and later candidates are
-ignored. If a ref bound from polling has a missing or invalid manifest, FFS
+ignored. Every ref name is run through the secret scanner first. A ref whose
+name matches is never snapshotted, bound or recorded by name (the launch
+snapshot keeps only a hash of it). A new one, or one that carries the nonce,
+parks the task as `needs-operator` / `ambiguous-candidates` with the fixed
+reason "a remote claude/* ref name matched the secret scanner; name
+withheld". Find the ref on origin yourself and use `adopt --oid` or `abandon`. If a ref bound from polling has a missing or invalid manifest, FFS
 treats it as another session's result: it records the ref as rejected,
 clears the bind and returns the task to polling. A result you bound with
 `adopt` is not treated that way. There is one exception: a ref that is

@@ -1654,3 +1654,46 @@ def test_launch_clone_never_runs_hooks_or_filters_and_checks_the_oid_before_any_
     result = ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path, task_branch_oid=moved))
     assert result.outcome == "launched" and not ran.exists()
     assert (state / "claude.head").read_text().strip() == moved
+
+
+# ── Remote ref names that match the secret scanner ──────────────────────────
+
+
+def _secret_ref(origin):
+    import cloud_scan
+    name = "claude/" + cloud_scan.canary("github-token").decode("ascii")
+    return name, origin.push_ref(name)
+
+
+def test_secret_shaped_ref_names_are_dropped_from_the_parse(origin):
+    name, oid = _secret_ref(origin)
+    listing = subprocess.run(["git", "ls-remote", origin.url, "refs/heads/claude/*"], capture_output=True, text=True,
+                             check=True).stdout
+    assert name in listing
+    clean, flagged = ch.split_ls_remote(listing)
+    assert "refs/heads/" + name not in clean and "refs/heads/claude/old-1" in clean
+    assert list(flagged) == [ch.redacted_ref_key("refs/heads/" + name)]
+    assert name not in json.dumps(list(flagged)) and ch.parse_ls_remote(listing) == clean
+
+
+def test_launch_snapshot_stores_a_secret_shaped_ref_by_hash_only(install_fake, origin, state, tmp_path):
+    name, oid = _secret_ref(origin)
+    install_fake("claude")
+    ctx = launch_ctx(origin, tmp_path)
+    assert ch.ClaudeBackend().launch(ctx).outcome == "launched"
+    text = Path(ctx.refs_snapshot_path).read_text()
+    assert name not in text and ch.redacted_ref_key("refs/heads/" + name) in text
+
+
+def test_poll_reports_a_new_secret_shaped_ref_with_a_fixed_note_and_no_name(install_fake, origin, state, tmp_path):
+    install_fake("claude")
+    existing, _ = _secret_ref(origin)  # present at launch: not new, not reported
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    quiet = ch.ClaudeBackend().poll(poll_ctx(origin, tmp_path))
+    assert ch.REF_NAME_SECRET_NOTE not in quiet.detail
+    import cloud_scan
+    fresh = "claude/x-" + cloud_scan.canary("github-token").decode("ascii")
+    origin.push_ref(fresh)
+    result = ch.ClaudeBackend().poll(poll_ctx(origin, tmp_path))
+    assert ch.REF_NAME_SECRET_NOTE in result.detail.split()
+    assert result.candidates == [] and fresh not in repr(result) and existing not in repr(result)

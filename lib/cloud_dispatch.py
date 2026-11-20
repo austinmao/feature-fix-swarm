@@ -2298,6 +2298,10 @@ class Orchestrator:
         return sorted(set((str(r), str(o)) for r, o in pool))
 
     def bind_claude(self, name: str, gen: int, entry: Dict[str, Any], result: cloud_host.PollResult) -> None:
+        if cloud_host.REF_NAME_SECRET_NOTE in (result.detail or "").split():
+            # a new result ref whose NAME matched the scanner: it is never snapshotted, bound or recorded by name
+            self.to_operator(name, gen, ledger.B_AMBIGUOUS, ["a remote claude/* ref name matched the secret scanner; name withheld"])
+            return
         pool = self.choose_candidates(name, entry, result.candidates)
         if len(pool) > 1:
             self.to_operator(name, gen, ledger.B_AMBIGUOUS, ["several candidate refs: " + ", ".join(r for r, _ in pool[:MAX_LISTED])])

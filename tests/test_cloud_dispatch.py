@@ -713,6 +713,24 @@ def test_two_candidates_are_ambiguous(world: World) -> None:
     assert (entry["state"], entry["blocker"]) == ("needs-operator", "ambiguous-candidates")
 
 
+def test_secret_shaped_result_ref_name_never_reaches_the_ledger(world: World) -> None:
+    world.behavior(t1={"push": False})
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive(max_ticks=3)
+    assert world.states()["t1"] in ("launched", "running")
+    name = "claude/" + cloud_scan.canary("github-token").decode("ascii")
+    tree = run_git(world.root, "rev-parse", world.base + "^{tree}")
+    commit = run_git(world.root, "commit-tree", "-p", world.base, "-m", "x", tree)
+    run_git(world.root, "push", "-q", "origin", "%s:refs/heads/%s" % (commit, name))
+    world.drive(max_ticks=6)
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", "ambiguous-candidates")
+    assert entry["bound_ref"] is None and "secret scanner" in " ".join(entry["decisions_needed"])
+    leaked = [str(p) for p in world.tmp.rglob("*") if p.is_file() and ".git" not in p.parts and "origin.git" not in p.parts
+              and name.encode() in p.read_bytes()]
+    assert leaked == []
+
+
 # --------------------------------------------------------------------------
 # Codex launch uncertainty, deadline, polling errors
 # --------------------------------------------------------------------------
