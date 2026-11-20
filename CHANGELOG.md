@@ -10,6 +10,11 @@ all skills.
 
 ### Fixed (2026-11-20, cloud delegation: round 5b review)
 
+- The rollback of a failed `start` (no integration ref, or a failed `tasks.json`
+  write) frees the run id last. Under the run lock it removes only what that
+  invocation created, `tasks.json` first and the ledger last, and it keeps the
+  lock file, so a concurrent start of the same run id can no longer lose its
+  `tasks.json` or lock.
 - A retried `start` for an existing run id reports `batch=same` only when the
   whole batch matches the first attempt: `start` now stores the first attempt's
   full task id set (cloud and local) and a content digest in the run ledger

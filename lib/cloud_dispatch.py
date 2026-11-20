@@ -1258,12 +1258,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     reserve_run(root, run, specs, records, url=url, policy=args.policy, base_sha=base_sha, sha=sha, now=int(svc.now()),
                 batch=_batch_record(tasks))
     if not git(svc, root, ["update-ref", "--no-deref", ledger.integration_ref(run), base_sha, ""]).ok:
-        ledger_file = ledger.run_ledger_path(root, run)  # no orchestrator will start: release the id for a real retry
-        for leftover in (ledger_file, ledger.lock_path_for(ledger_file), ledger.tasks_path(root, run)):
-            try:
-                os.unlink(str(leftover))
-            except OSError:
-                pass
+        _release_reservation(root, run, tasks_written=True)  # no orchestrator will start: free the id for a real retry
         raise StoreError("INTEGRATION_REF", "could not create %s" % ledger.integration_ref(run))
     svc.emit("%sstarted run=%s tasks=%d" % (PREFIX, run, len(records)))
     local = [t["id"] for t in tasks if plan["tasks"][str(t["id"])]["route"] != "cloud"]
@@ -1276,6 +1271,26 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _release_reservation(root: Path, run: str, *, tasks_written: bool) -> None:
+    """Undo this invocation's reservation under the run lock: its ``tasks.json`` (only if it wrote one) first and the
+    ledger last, because the ledger is what holds the run id.  The lock file stays: a concurrent start may hold or
+    wait on it, and it is that start's files that a different order or an unlinked lock would hit."""
+    path = ledger.run_ledger_path(root, run)
+    try:
+        fd = os.open(str(ledger.lock_path_for(path)), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        return  # fails closed: the run id stays reserved rather than risk another start's files
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        for leftover in ([ledger.tasks_path(root, run)] if tasks_written else []) + [path]:
+            try:
+                os.unlink(str(leftover))
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
+
+
 def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List[Dict[str, Any]], *, url: str,
                 policy: str, base_sha: str, sha: str, now: int, batch: Dict[str, Any]) -> None:
     """Reserve the run id by creating its ledger exclusively, and only then write ``tasks.json``.
@@ -1283,7 +1298,7 @@ def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List
     Two concurrent ``start`` calls for one run id used to overwrite each other's ``tasks.json`` before the
     ledger picked a winner.  Now the loser's exclusive create fails (``RUN_EXISTS``, exit 3) before it writes
     anything; the winner's ledger already carries the hash of the file it writes next.  A failure writing
-    the file removes the ledger again so the id is not left reserved by a run that cannot start."""
+    the file releases the reservation again so the id is not left reserved by a run that cannot start."""
     path = ledger.run_ledger_path(root, run)
     try:
         doc = ledger.new_run(run, base_sha=base_sha, origin=ORIGIN_NAME, origin_url=url, policy=policy,
@@ -1299,11 +1314,7 @@ def reserve_run(root: Path, run: str, specs: List[Dict[str, Any]], records: List
     try:
         ledger.write_tasks_file(ledger.tasks_path(root, run), records)
     except (OSError, ledger.LedgerError) as exc:
-        for leftover in (path, ledger.lock_path_for(path)):
-            try:
-                os.unlink(str(leftover))
-            except OSError:
-                pass
+        _release_reservation(root, run, tasks_written=False)
         if isinstance(exc, ledger.LedgerError):
             raise classify_ledger_error(exc)
         raise IoRefused("STORE_IO", "cannot write tasks.json: %s" % exc.strerror)

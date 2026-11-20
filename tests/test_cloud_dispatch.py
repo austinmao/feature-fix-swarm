@@ -731,6 +731,29 @@ def test_start_does_not_follow_a_symbolic_integration_ref(world: World) -> None:
     assert rc == 0 and "RUN_EXISTS" not in out
 
 
+def test_a_failed_start_rolls_back_tasks_first_and_the_ledger_last_and_keeps_the_lock(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """WR-D: freeing the run id is the last step, so a concurrent start's tasks.json and lock survive."""
+    run_git(world.root, "branch", "victim", run_git(world.root, "rev-parse", "HEAD"))
+    run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration", "refs/heads/victim")
+    ledger_file, tasks_file = L.run_ledger_path(world.root, "r1"), L.tasks_path(world.root, "r1")
+    lock_file = L.lock_path_for(ledger_file)
+    real_unlink = os.unlink
+    seen: List[str] = []
+
+    def spy(path: Any, *args: Any, **kwargs: Any) -> None:
+        real_unlink(path, *args, **kwargs)
+        seen.append(Path(str(path)).name)
+        if str(path) == str(ledger_file):  # the id is free now: a concurrent start reserves it and writes its file
+            tasks_file.write_text("rival")
+
+    monkeypatch.setattr(os, "unlink", spy)
+    assert world.start(tasks=[T1])[0] != 0
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    assert tasks_file.read_text() == "rival" and lock_file.exists()
+    assert seen[-1] == ledger_file.name and lock_file.name not in seen
+
+
 def test_start_over_a_dangling_symbolic_ref_creates_no_branch_behind_it(world: World) -> None:
     run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration", "refs/heads/victim")  # dangling
     world.start(tasks=[T1])
