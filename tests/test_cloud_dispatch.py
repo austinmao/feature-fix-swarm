@@ -2748,3 +2748,13 @@ def test_doctor_with_an_unreadable_working_tree_config_still_reports_the_history
     finally:
         config_path.chmod(0o644)
     assert check["level"] == "FAIL" and check["data"]["findings_total"] == 1
+
+
+def test_undeclared_secret_entries_are_located_never_echoed() -> None:
+    pasted = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2"  # a value pasted where a name belongs, built at runtime
+    config = {"secrets": {"exposure": {"claude": ["API_TOKEN"], "codex": []}}}
+    tasks = [{"id": "t1", "needs_secrets": ["API_TOKEN"]}, {"id": "t2", "needs_secrets": ["API_TOKEN", pasted, "OTHER"]}]
+    check = cd._secret_declared_check(config, tasks)
+    assert check.level == cd.FAIL and pasted not in check.detail and "OTHER" not in check.detail, check.detail
+    assert "2 needs-secret entries" in check.detail and "task 2 entry 2" in check.detail and "task 2 entry 3" in check.detail
+    assert cd._secret_declared_check(config, tasks[:1]).level == cd.OK

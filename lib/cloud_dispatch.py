@@ -964,13 +964,25 @@ def _reconcile_agent_check(svc: Services, root: Path) -> Check:
 
 
 def _secret_declared_check(config: Dict[str, Any], tasks: Sequence[Dict[str, Any]]) -> Check:
+    """Every needs-secret name must be declared in an exposure list.
+
+    A needs-secret entry is free text from the tasks file, and the doctor runs before the start-time scan, so a
+    pasted value could sit where a name belongs. The line therefore reports WHERE each undeclared entry is (task
+    and entry position) and never the entry itself."""
     declared = set()
     for provider in PROVIDERS:
         declared.update(exposure_names(config, provider))
-    needed = sorted(set(n for t in tasks for n in (t.get("needs_secrets") or [])))
-    missing = [n for n in needed if n not in declared]
-    return Check("SECRETS_DECLARED", FAIL if missing else OK,
-                 "not declared in config.secrets.exposure: %s" % ", ".join(missing) if missing else "all needed names declared")
+    undeclared: List[str] = []
+    for task_pos, task in enumerate(tasks, 1):
+        for entry_pos, name in enumerate(task.get("needs_secrets") or [], 1):
+            if name not in declared:
+                undeclared.append("task %d entry %d" % (task_pos, entry_pos))
+    if not undeclared:
+        return Check("SECRETS_DECLARED", OK, "all needed names declared")
+    shown = "; ".join(undeclared[:10]) + ("; ..." if len(undeclared) > 10 else "")
+    return Check("SECRETS_DECLARED", FAIL,
+                 "%d needs-secret entr%s not declared in config.secrets.exposure (names withheld; %s)"
+                 % (len(undeclared), "y" if len(undeclared) == 1 else "ies", shown))
 
 
 def _history_check(svc: Services, root: Path, base_sha: str, config: Dict[str, Any], write_cache: bool) -> Check:

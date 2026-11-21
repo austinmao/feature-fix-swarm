@@ -864,7 +864,7 @@ is `CLOUD:doctor green` or `CLOUD:doctor not-green`. Green means no `FAIL`.
 | `VERIFY_CMD` | WARN | `config.verify.cmd` is empty. |
 | `RECONCILE_SCRIPT`, `RECONCILE_MAPFILE` | OK or WARN | `reconcile.sh` missing, or it uses `mapfile`. |
 | `RECONCILE_AGENT` | WARN | The reconcile scheduler is not installed. |
-| `SECRETS_DECLARED` | FAIL | Only when tasks are given (`plan --with-doctor`, `start`): a `needs-secret` name is not in any `exposure` list. |
+| `SECRETS_DECLARED` | FAIL | Only when tasks are given (`plan --with-doctor`, `start`): a `needs-secret` name is not in any `exposure` list. The line gives the task and entry position and withholds the entry itself, because a pasted value can sit where a name belongs. |
 | `RULESET` | FAIL or WARN | No active ruleset covers `ffs/cloud/**`. FAIL when any secret name is exposed, WARN otherwise. |
 | `RULESET_BYPASS` | FAIL | A covering ruleset has a bypass actor other than the repository admin role, or the list cannot be read. |
 | `HISTORY_SECRET` | FAIL | Only when Claude is usable: secret-shaped content, binary blobs or secret-named files in the base history. The line shows a count and the first 20 findings; `doctor --json` lists all of them. See [Doctor and history findings](#doctor-and-history-findings). |
