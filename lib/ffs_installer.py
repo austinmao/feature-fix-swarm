@@ -2878,6 +2878,7 @@ def reconcile_consumer(source: Path, target: Path) -> int:
         "lib/host_capabilities.py",
         "lib/process_identity.py",
         "lib/gates.py",
+        "lib/clean_code_metrics.py",
         "lib/runtime_proof.py",
     ]
     # spec-004 INT-003: plan-wall.sh (already covered by the scripts/gsd/*.sh

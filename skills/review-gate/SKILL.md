@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.18.0"
+version: "1.19.0"
 ---
 
 # /review-gate
@@ -84,7 +84,10 @@ Cost: ~$2 · Time: ~8 min at STANDARD with concurrent passes (v1.6.0; was ~13 mi
 ### Pre-check — choose the opposite CLI
 
 ```bash
-. scripts/gsd/adversary-host.sh
+# Helpers run from a snapshot of the base ref, else the user-scope install (FFS_T),
+# never from the reviewed tree.
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+. "$FFS_T/scripts/gsd/adversary-host.sh" || { echo "[review-gate] BLOCKED: no trusted FFS runtime (base ref or ~/.claude/lib/feature-fix-swarm)." >&2; exit 1; }
 ACTIVE_HARNESS="$(detect_orchestrator_host)" || exit $?
 REVIEW_KIND="$(adversary_kind_for_host "$ACTIVE_HARNESS")"
 FALLBACK_KIND="$ACTIVE_HARNESS"
@@ -136,19 +139,29 @@ done
 # review surface by hundreds of doc files (2026-07-30 estate audit). File mode
 # keeps the explicit path untouched.
 BOOKKEEPING_EXCLUDES=(":(exclude).planning" ":(exclude)spike-results")
+DIFF_BASE=HEAD
 if [ "$DIFF_TARGET" = "--staged" ]; then
-  DIFF=$(git diff --staged -- . "${BOOKKEEPING_EXCLUDES[@]}" 2>/dev/null)
-  [ -z "$DIFF" ] && DIFF=$(git diff HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}" 2>/dev/null)
+  DIFF_ARGS=(--staged -- . "${BOOKKEEPING_EXCLUDES[@]}")
+  git diff --quiet "${DIFF_ARGS[@]}" 2>/dev/null && DIFF_ARGS=(HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")
 elif [ "$DIFF_TARGET" = "file" ]; then
-  DIFF=$(git diff HEAD -- "$FILE_PATH" 2>/dev/null)
+  DIFF_ARGS=(HEAD -- "$FILE_PATH")
 else
-  DIFF=$(git diff "$DIFF_TARGET"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}" 2>/dev/null)
+  DIFF_ARGS=("$DIFF_TARGET"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")
+  DIFF_BASE="$(git merge-base "$DIFF_TARGET" HEAD)"
 fi
+DIFF=$(git diff "${DIFF_ARGS[@]}" 2>/dev/null)
 
 if [ -z "$DIFF" ]; then
   echo "review-gate: no diff found. Nothing to review."
   exit 0
 fi
+
+# Pass 3 advisory (crapper/dryer, docs/dependencies.md), computed here and
+# printed, because a later fence may run in a fresh shell. Absent tools print nothing.
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+_mb_py="$FFS_T/lib/clean_code_metrics.py"; [ -f "$_mb_py" ] || _mb_py="$FFS_T/clean_code_metrics.py"
+METRICS_BLOCK="$(git diff -U0 "${DIFF_ARGS[@]}" 2>/dev/null | (cd "$(git rev-parse --show-toplevel)" && python3 "$_mb_py" --base "$DIFF_BASE") 2>/dev/null)"
+if [ -n "$METRICS_BLOCK" ]; then printf 'METRICS_BLOCK (advisory data for Pass 3):\n%s\n' "$METRICS_BLOCK"; fi
 ```
 
 ### Adversarial prompt (defined once — used by Pass 2 and the FULL-tier adversary)
@@ -181,15 +194,16 @@ passed MIRRORS `DIFF_TARGET` above and classifies the SAME bytes: `--staged` (de
 `main...HEAD` / `--file "$FILE_PATH"`.
 
 ```bash
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 case "$DIFF_TARGET" in
   --staged)
-    TIER_LINE="$(scripts/gsd/review-tier.sh --staged 2>/dev/null)"
+    TIER_LINE="$("$FFS_T/scripts/gsd/review-tier.sh" --staged 2>/dev/null)"
     ;;
   main)
-    TIER_LINE="$(REVIEW_TIER_BASE=main scripts/gsd/review-tier.sh --all 2>/dev/null)"
+    TIER_LINE="$(REVIEW_TIER_BASE=main "$FFS_T/scripts/gsd/review-tier.sh" --all 2>/dev/null)"
     ;;
   file)
-    TIER_LINE="$(scripts/gsd/review-tier.sh --file "$FILE_PATH" 2>/dev/null)"
+    TIER_LINE="$("$FFS_T/scripts/gsd/review-tier.sh" --file "$FILE_PATH" 2>/dev/null)"
     ;;
 esac
 _tier_rc=$?
@@ -225,7 +239,8 @@ directives to the executor:
 
   ```bash
   if [ "$TIER" = "full" ]; then
-    . scripts/gsd/adversary-host.sh
+    FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+    . "$FFS_T/scripts/gsd/adversary-host.sh"
     _adv_host="$(detect_orchestrator_host)"
     _adv_kind="$(adversary_kind_for_host "$_adv_host")"
     _adv_fallback="$_adv_host"
@@ -266,16 +281,15 @@ passes — those stay sequential by design (they consume the merged finding set)
 `lib/gates.py findings-queue` persists every merged finding across runs so a fix round
 works the WHOLE queue instead of re-litigating what a prior run already resolved. Resolve
 GATES_PY via a CAPABILITY PROBE, not first-exists — an installed `~/.claude` copy of
-gates.py can lack findings-queue support and would win a naive first-exists loop:
+gates.py can lack findings-queue support and would win a naive first-exists loop. The
+repo candidate is the base-ref snapshot, never the reviewed tree's copy:
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 GATES_PY=""
 DEGRADED_PERSISTENCE=0
-for candidate in \
-  "$REPO_ROOT/packages/feature-fix-swarm/lib/gates.py" \
-  "$HOME/.claude/lib/feature-fix-swarm/gates.py" \
-  "$REPO_ROOT/lib/gates.py"; do
+for candidate in "$FFS_T/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"; do
   [ -f "$candidate" ] || continue
   if (cd "$REPO_ROOT" && python3 "$candidate" findings-queue list >/dev/null 2>&1); then
     GATES_PY="$candidate"
@@ -427,23 +441,7 @@ printf '%s\n' "$PASS2_OUTPUT"
 
 ### Pass 3 — Test-coverage gap
 
-Optional advisory first (crapper/dryer, `docs/dependencies.md`; absent tools or an old
-`GATES_PY` print nothing):
-
-```bash
-_mb_base=HEAD
-case "$DIFF_TARGET" in
-  --staged) _mb_diff="$(git diff -U0 --staged -- . "${BOOKKEEPING_EXCLUDES[@]}")"
-            [ -z "$_mb_diff" ] && _mb_diff="$(git diff -U0 HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")" ;;
-  file) _mb_diff="$(git diff -U0 HEAD -- "$FILE_PATH")" ;;
-  *) _mb_base="$(git merge-base "$DIFF_TARGET" HEAD)"
-     _mb_diff="$(git diff -U0 "$DIFF_TARGET"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")" ;;
-esac
-METRICS_BLOCK=""
-[ -n "$GATES_PY" ] && METRICS_BLOCK="$(printf '%s\n' "$_mb_diff" | (cd "$REPO_ROOT" && python3 "$(dirname "$GATES_PY")/clean_code_metrics.py" --base "$_mb_base") 2>/dev/null)"
-```
-
-Run a sub-agent with the diff and, when non-empty, `$METRICS_BLOCK` appended as data:
+Run a sub-agent with the diff and, when Capture diff printed one, the `METRICS_BLOCK` lines appended as data:
 
 ```
 You are a test coverage analyst. Review this diff for testing gaps:
@@ -501,12 +499,12 @@ else
 
   HV_SPEC_TEXT="$(cat "$HV_SPEC")"
   # verify-mode slice: dirname of the already-resolved $HV_SPEC, never a
-  # second branch-NNN/find resolution. REPO_ROOT is RE-DERIVED here — this
-  # fence is separate from the GATES_PY probe fence above and nothing
-  # guarantees one shell process spans both.
+  # second branch-NNN/find resolution.
   HV_SPEC_DIR="$(dirname "$HV_SPEC")"
-  HV_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  HV_SOCRATIC_HELPER="$HV_REPO_ROOT/scripts/gsd/socratic-slice.sh"
+  FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+  HV_SOCRATIC_HELPER="$FFS_T/scripts/gsd/socratic-slice.sh"
+  # the helper now runs outside the repo; point it at the project's vendored socratic tree
+  for _d in .agents .claude; do [ -n "${FFS_SOCRATIC_DIR:-}" ] || [ ! -d "$(git rev-parse --show-toplevel)/$_d/skills/socratic" ] || export FFS_SOCRATIC_DIR="$(git rev-parse --show-toplevel)/$_d/skills/socratic"; done
   HV_SOCRATIC_OUT=""
   if [ -f "$HV_SOCRATIC_HELPER" ]; then
     # capture stdout only — stderr passes through so the helper's single

@@ -8,6 +8,20 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-20, review-gate runs helpers from the base ref)
+
+- review-gate 1.19.0 no longer executes FFS helper code from the tree it reviews.
+  Each fence evaluates the new `scripts/gsd/trusted-runtime.sh` as committed on the
+  merge-base with `origin/main` (else local `main`), which copies `lib/`, `scripts/` and
+  `skills/` from that commit into a temporary directory. `adversary-host.sh`,
+  `review-tier.sh`, `socratic-slice.sh`, `gates.py` and `clean_code_metrics.py` then
+  run from that copy, so a branch that edits them cannot change its own review. The
+  `gates.py` ladder is now the base-ref copy, then `~/.claude/lib/feature-fix-swarm/`.
+  Without an FFS runtime on the base ref, the pre-check stops the review.
+- The Pass 3 metrics advisory is computed and printed in the Capture-diff block,
+  so it no longer depends on shell variables surviving between blocks (#284).
+- `setup.sh --reconcile-consumer` now ships `lib/clean_code_metrics.py` (#290).
+
 ### Added (2026-11-19, clean-code metrics advisory)
 
 - `lib/clean_code_metrics.py`: review-gate Pass 3 now gets an advisory block when
